@@ -535,6 +535,9 @@ const boundJobOf = (job, binding) => ({
   request: { ...job.request, entities: 'all', agentAddress: job.request.agentAddress, recoveryBinding: binding },
 });
 
+/** The product's classification as far as these fakes need it: a request holding a recovery binding is 'bound'. */
+const classifyQueuedSharePreparation = (job) => (job.request.recoveryBinding ? 'bound' : 'eligible');
+
 test('the supervisor gets the real queue behind a timing proxy and a fake agent whose preparation returns the bound job', async () => {
   const calls = [];
   const claimed = claimedJob('j1', 't-s12');
@@ -560,6 +563,7 @@ test('the supervisor gets the real queue behind a timing proxy and a fake agent 
         calls.push({ kind: 'deleteByPattern', args: [spec, options] }),
     },
     pub: {
+      classifyQueuedSharePreparation,
       TripleStoreAsyncPromoteQueue: {
         ownershipReader: (store) => {
           assert.equal(store, w.store);
@@ -655,7 +659,7 @@ function workerRig(failWith) {
   const w = world({}, { queue, store });
   const deps = {
     storage: { deleteByPatternWithoutCount: async () => {} },
-    pub: { TripleStoreAsyncPromoteQueue: { ownershipReader: () => async () => {} } },
+    pub: { classifyQueuedSharePreparation, TripleStoreAsyncPromoteQueue: { ownershipReader: () => async () => {} } },
     binding: { validatePromoteRecoveryBinding: (b) => b },
     intent: { createPromoteOperationIntent: (x) => x, createShareOperationId: () => 'op-1' },
     worker: { createPromoteWorkerSupervisor: (cfg) => ({ cfg }) },
@@ -700,6 +704,22 @@ test('the worker counts agent errors that are not store rejections and stops cou
   log('Worker w0 crashed processing j1: boom');
   log('Worker w1 stopped bookkeeping for j2 after shutdown timeout');
   assert.equal(crashes.log.crashes, 1, 'only the supervisor line for a job that crashed counts');
+});
+
+test('a job that already holds its recovery binding is returned unchanged: no preparation reads, no second bind', async () => {
+  const rig = workerRig({ bindError: new Error('the queue forbids binding a bound job again') });
+  const bound = boundJobOf(rig.job, { sealDigest: `0x${'ab'.repeat(32)}` });
+  const prepared = await rig.agent.assertion.prepareQueuedShare(bound, rig.authority);
+  assert.deepEqual(Object.keys(prepared), ['job']);
+  assert.equal(prepared.job, bound, 'the supervisor continues from the very job it was handed');
+  assert.deepEqual(rig.calls, [], 'neither a draft or seal read nor bindRecovery');
+  assert.deepEqual([rig.stats.dataOps, rig.stats.agentErrors], [0, 0]);
+
+  // an unbound job is still prepared and bound
+  const unbound = await rig.agent.assertion.prepareQueuedShare(rig.job, rig.authority).catch((e) => e);
+  assert.equal(unbound.message, 'the queue forbids binding a bound job again');
+  assert.equal(rig.calls.filter((c) => c.kind === 'bindRecovery').length, 1);
+  assert.equal(rig.stats.dataOps, 7);
 });
 
 test('the worker does not count queue uncertainty from a typed storage failure, and does not hide it', async () => {

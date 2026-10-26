@@ -406,6 +406,56 @@ test('depthSeries and shareBacklog sample interval depth every second', () => {
   assert.deepEqual([b.mean, b.max, b.first, b.last, b.slopePerMin, b.jobs, b.openAtEnd], [1.5, 2, 1, 1, 0, 2, 1]);
 });
 
+test('shareBacklog counts an indeterminate admission that reconciliation found persisted, in any window', () => {
+  const requests = [
+    { key: 'a', windowTag: 'measure', rawOutcome: 'success', outcome: 'success', jobId: 'j1', ended: 0 },
+    // the client could not tell whether the write landed; the queue's own rows say it did, so it is a job to finish
+    { key: 'b', windowTag: 'warmup', rawOutcome: 'indeterminate', outcome: 'indeterminate', ended: 1000 },
+    { key: 'c', windowTag: 'measure', rawOutcome: 'typed_reject_not_admitted', outcome: 'typed_reject_not_admitted', ended: 500 },
+  ];
+  const persisted = new Map([
+    ['a', [{ jobId: 'j1' }]],
+    ['b', [{ jobId: 'j2' }]],
+  ]);
+  assert.equal(groundTruth(requests, persisted).uncertainButAdmitted, 0, 'the persisted job id is stamped outside the measure window too');
+  const b = shareBacklog({ requests, completions: [{ jobId: 'j1', t: 2500 }], from: 0, to: 4000 });
+  assert.deepEqual([b.mean, b.max, b.first, b.last, b.jobs, b.openAtEnd], [1.5, 2, 1, 1, 2, 1]);
+  // the reconciled job finishing ends its interval like an acknowledged one
+  const done = shareBacklog({
+    requests,
+    completions: [
+      { jobId: 'j1', t: 2500 },
+      { jobId: 'j2', t: 2800 },
+    ],
+    from: 0,
+    to: 4000,
+  });
+  assert.deepEqual([done.max, done.last, done.jobs, done.openAtEnd], [2, 0, 2, 0]);
+  // without reconciliation evidence only the acknowledged job is known
+  const unreconciled = shareBacklog({
+    requests: requests.map(({ gtJobId, ...r }) => r),
+    completions: [],
+    from: 0,
+    to: 4000,
+  });
+  assert.deepEqual([unreconciled.max, unreconciled.jobs], [1, 1]);
+
+  // under admission contention the indeterminate ones are the backlog: the P8c indicator must see them
+  const many = Array.from({ length: 5000 }, (_, i) => ({
+    key: `k${i}`,
+    windowTag: 'measure',
+    rawOutcome: 'success',
+    outcome: 'success',
+    jobId: `s${i}`,
+    ended: 0,
+  }));
+  many.push({ key: 'x', windowTag: 'measure', rawOutcome: 'indeterminate', outcome: 'indeterminate', ended: 0 });
+  groundTruth(many, new Map([['x', [{ jobId: 'sx' }]]]));
+  const backlog = shareBacklog({ requests: many, completions: [], from: 0, to: 1000 });
+  assert.equal(backlog.max, 5001);
+  assert.equal(p8cTrigger({ claimNext: [], backlogMax: backlog.max, runMs: 1000 }).backlogTrip, true);
+});
+
 test('p8cTrigger: claimNext P95 doubling between the first and last 5 minutes, or a 5,000-job backlog', () => {
   const runMs = 900_000;
   const series = (firstMs, lastMs) => [

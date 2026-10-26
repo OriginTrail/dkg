@@ -37,29 +37,44 @@ async function until(condition, what, ms = 15_000) {
 /**
  * The benchmark's worker over a seeded Oxigraph store and the real queue. `sources` lists, in order, the replay's
  * store operations (the ones carrying a bench.dp source label). `bindRecovery` can wrap the queue's answer to stand in
- * for a preparation that returns a different job than the one the queue bound.
+ * for a preparation that returns a different job than the one the queue bound. `failOnce` = { source, error() } makes the
+ * first store operation with that source label throw (a transient storage rejection), and `queueConfig` is the queue's
+ * own configuration (a short retry backoff).
  */
-async function rig({ bindRecovery = (job) => job } = {}) {
+async function rig({ bindRecovery = (job) => job, failOnce, queueConfig } = {}) {
   const inner = new deps.storage.OxigraphStore();
   await seedMainNamespace(inner, deps.core);
   const sources = [];
+  let pending = failOnce;
   const store = new Proxy(inner, {
     get(target, prop) {
       const value = Reflect.get(target, prop, target);
       if (typeof value !== 'function') return value;
       return (...args) => {
         const source = args.at(-1)?.source;
-        if (typeof source === 'string' && source.startsWith('bench.dp.')) sources.push(source);
+        if (typeof source === 'string' && source.startsWith('bench.dp.')) {
+          sources.push(source);
+          if (pending?.source === source) {
+            const { error } = pending;
+            pending = undefined;
+            throw error();
+          }
+        }
         return value.apply(target, args);
       };
     },
   });
-  const real = new deps.pub.TripleStoreAsyncPromoteQueue(store);
+  const real = new deps.pub.TripleStoreAsyncPromoteQueue(store, queueConfig);
+  const binds = [];
   const queue = new Proxy(real, {
     get(target, prop) {
       const value = Reflect.get(target, prop, target);
       if (typeof value !== 'function') return value;
-      if (prop === 'bindRecovery') return async (...args) => bindRecovery(await value.apply(target, args));
+      if (prop === 'bindRecovery')
+        return async (...args) => {
+          binds.push(args[0]);
+          return bindRecovery(await value.apply(target, args));
+        };
       return value.bind(target);
     },
   });
@@ -83,7 +98,7 @@ async function rig({ bindRecovery = (job) => job } = {}) {
     worker.freeze();
     await worker.supervisor.stop();
   };
-  return { world, worker, sources, enqueue, stop, queue: real };
+  return { world, worker, sources, binds, enqueue, stop, queue: real };
 }
 
 /** The worker side of the run's validity gate, for the counters of a finished rig. */
@@ -150,6 +165,44 @@ test('the real supervisor runs a share from the bound job its preparation return
   assert.ok(deps.binding.isPromoteRecoveryBinding(job.request.recoveryBinding));
   assert.equal(job.commitMarker.promoteStarted, true);
   assert.deepEqual([r.world.completions.length, r.world.completions[0].jobId], [1, jobId]);
+});
+
+test('a share that bound and then hit a transient storage rejection is retried from its binding and completes', async () => {
+  const busy = () => new deps.storage.StoreSchedulerBusyError('queue_full', 'background', 'aqc-test');
+  const r = await rig({ failOnce: { source: 'bench.dp.scope', error: busy }, queueConfig: { backoff: () => 1 } });
+  let jobId;
+  try {
+    jobId = await r.enqueue(0);
+    await until(
+      () =>
+        r.worker.supervisor.getCounters().succeeded > 0 ||
+        r.worker.supervisor.getCounters().failedTerminal > 0 ||
+        r.worker.log.crashes > 0 ||
+        r.worker.stats.agentErrors > 0,
+      'the share to finish or break',
+    );
+  } finally {
+    await r.stop();
+  }
+  const { counters, checks } = workerChecks(r);
+  const evidence = JSON.stringify([r.worker.stats.firstAgentError, r.worker.log.lines]);
+  assert.deepEqual(
+    [counters.succeeded, counters.failedTerminal, counters.failedRetrying, counters.attempted],
+    [1, 0, 1, 2],
+    evidence,
+  );
+  assert.deepEqual([r.worker.stats.agentErrors, r.worker.log.crashes], [0, 0], evidence);
+  assert.deepEqual(r.binds, [jobId], 'the retry kept the binding it had: the queue binds a job once');
+  assert.equal(
+    r.sources.filter((source) => source === 'bench.dp.draft.lifecycle').length,
+    1,
+    'the retry did not prepare the share again',
+  );
+  assert.equal(r.sources.filter((source) => source === 'bench.dp.shareCompleteInsert').length, 1);
+  assert.deepEqual([checks.workerContractOk, checks.dataPlaneReplayed, checks.ok], [true, true, true]);
+  const job = await r.queue.getStatus(jobId);
+  assert.deepEqual([job.state, job.attempt.count], ['succeeded', 2]);
+  assert.ok(deps.binding.isPromoteRecoveryBinding(job.request.recoveryBinding));
 });
 
 const DROPS = {

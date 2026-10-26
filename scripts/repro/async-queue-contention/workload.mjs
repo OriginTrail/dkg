@@ -471,6 +471,10 @@ export function createWorker(world, deps) {
     promoteQueue: timed,
     assertion: {
       prepareQueuedShare: watched(async (job, authority) => {
+        // the product's contract (durable-assertion-share.ts): only an eligible unbound job is prepared and bound; a job
+        // that already holds its binding (a retry after a transient failure) is returned unchanged, because the queue
+        // forbids binding it again
+        if (deps.pub.classifyQueuedSharePreparation(job) !== 'eligible') return { job };
         const c = shareOf(job.request.assertionName);
         const r = job.request;
         await run(ops.draft, c);

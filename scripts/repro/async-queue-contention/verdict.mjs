@@ -99,10 +99,15 @@ export function admissionSummary(requests) {
   };
 }
 
-/** jobsByName: request key -> persisted jobs. Invariants: no success without a persisted job, no key admitted twice. */
+/**
+ * jobsByName: request key -> persisted jobs. Invariants: no success without a persisted job, no key admitted twice. Also
+ * stamps r.gtJobId (the persisted job's id, every window) on each request the queue holds a job for: the admission
+ * evidence shareBacklog counts, whatever the client was told.
+ */
 export function groundTruth(requests, jobsByName) {
   const m = requests.filter((r) => r.windowTag === 'measure');
   const jobsOf = (r) => jobsByName.get(r.key) ?? [];
+  for (const r of requests) r.gtJobId = jobsOf(r)[0]?.jobId;
   let uncertainButAdmitted = 0;
   let nonSuccess = 0;
   let successWithoutPersistedJob = 0;
@@ -152,14 +157,16 @@ export function depthSeries(intervals, from, to, stepMs = 1000) {
 }
 
 /**
- * Active share backlog from client data only: from each admitted request's response to its completion (or Infinity).
- * Times are run-relative ms.
+ * Active share backlog: from each admitted request's response to its completion (or Infinity). A request is admitted
+ * when the client was acknowledged (its job id) or when reconciliation found a persisted job for it (groundTruth's
+ * gtJobId, run first): an indeterminate admission that landed is still an unfinished job. Times are run-relative ms.
  */
 export function shareBacklog({ requests, completions, from, to }) {
   const doneAt = new Map(completions.map((c) => [c.jobId, c.t]));
+  const jobIdOf = (r) => ((r.rawOutcome ?? r.outcome) === 'success' ? r.jobId : r.gtJobId);
   const intervals = requests
-    .filter((r) => (r.rawOutcome ?? r.outcome) === 'success' && r.jobId !== undefined && r.ended !== undefined)
-    .map((r) => [r.ended, Math.max(r.ended, doneAt.get(r.jobId) ?? Infinity)]);
+    .filter((r) => jobIdOf(r) !== undefined && r.ended !== undefined)
+    .map((r) => [r.ended, Math.max(r.ended, doneAt.get(jobIdOf(r)) ?? Infinity)]);
   return {
     ...depthSeries(intervals, from, to),
     jobs: intervals.length,
