@@ -163,7 +163,7 @@ export class AsyncLiftJournalCompletion {
       await released;
       const seq = await this.allocateSequence(captured.lineageKey);
       const entry = { ...captured, seq, at: this.now() };
-      await this.store.insert(serializeJournalEntry(entry, DEFAULT_JOURNAL_GRAPH_URI));
+      await this.store.insert(serializeJournalEntry(entry, DEFAULT_JOURNAL_GRAPH_URI), { source: 'publisher.asyncLift.appendJournalEntry' });
     });
   }
 
