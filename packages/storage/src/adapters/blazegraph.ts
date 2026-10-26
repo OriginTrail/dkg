@@ -4,7 +4,7 @@ import { refuseWithheldGraphQuery } from '../withheld-graph-query.js';
 import { executeReceiptConfirmedPublication } from '../receipt-confirmed-execution.js';
 import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
-import { prepareAtomicGraphReplace, prepareAtomicGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
+import { prepareAtomicGraphReplace, prepareBlazegraphGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
 import { performance } from 'node:perf_hooks';
 import { QueryReadAdmission } from '../query-read-admission.js';
 import type {
@@ -518,8 +518,8 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
     metadataQuads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    const plan = prepareAtomicGraphAndSubjectReplace(
-      'blazegraph', graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
+    const plan = prepareBlazegraphGraphAndSubjectReplace(
+      graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
     );
     try {
       await this.sparqlUpdate(
@@ -528,7 +528,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         'replaceGraphAndSubject',
       );
     } catch (error) {
-      await this.sparqlUpdate(
+      if (plan.cleanup) await this.sparqlUpdate(
         plan.cleanup,
         { ...options, source: 'blazegraph.replaceGraphAndSubject.cleanup' },
         'replaceGraphAndSubject',

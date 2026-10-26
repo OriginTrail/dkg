@@ -36,6 +36,13 @@ export function preflightAtomicAssetGroupLiterals(assets: readonly AtomicAssetRe
   }
 }
 export function buildAtomicAssetGroupUpdate(assets: readonly AtomicAssetReplacement[]) {
+  const plan = tryBuildAtomicAssetGroupUpdate(assets);
+  if (!plan) throw new RangeError('Atomic asset group byte allowance exceeded');
+  return plan;
+}
+
+/** A strategy probe before dispatch; malformed payloads still throw. */
+export function tryBuildAtomicAssetGroupUpdate(assets: readonly AtomicAssetReplacement[]) {
   validateAtomicAssetGroup(assets);
   preflightAtomicAssetGroupLiterals(assets);
   // Every caller promises whole-update atomicity; no staging is needed here.
@@ -49,6 +56,6 @@ export function buildAtomicAssetGroupUpdate(assets: readonly AtomicAssetReplacem
   ]);
   if (blocks.length) operations.push(`INSERT DATA {\n${blocks.join('\n')}\n}`);
   const update = operations.join(';\n');
-  if (Buffer.byteLength(update) > ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES) throw new RangeError('Atomic asset group byte allowance exceeded');
+  if (Buffer.byteLength(update) > ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES) return null;
   return { update, graphs: [...new Set(assets.flatMap(a => [a.graphUri, a.metaGraphUri]))] };
 }

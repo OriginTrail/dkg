@@ -5,6 +5,7 @@ import {
   buildAtomicSubjectReplaceUpdate,
 } from '../atomic-graph-replace.js';
 import { buildAtomicSubjectAndInsertUpdate } from '../atomic-subject-insert.js';
+import { tryBuildAtomicAssetGroupUpdate } from '../atomic-asset-group.js';
 import type { Quad } from '../triple-store.js';
 import { sparqlStatements } from './sparql-statements.js';
 
@@ -37,6 +38,25 @@ export function prepareAtomicGraphAndSubjectReplace(
     graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
   );
   return plan;
+}
+
+/** Blazegraph executes the whole update transactionally, including CLEAR and
+ * the metadata replacement. Avoid staging/MOVE for a bounded single asset.
+ * Larger or overlapping legacy inputs keep their previous strategy. */
+export function prepareBlazegraphGraphAndSubjectReplace(
+  graphUri: string, graphQuads: Quad[], metaGraphUri: string,
+  metadataSubject: string, metadataQuads: Quad[],
+) {
+  validateLiterals('blazegraph', 'replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
+  sparqlStatements('blazegraph').checkIris.replaceGraphAndSubject(
+    graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
+  );
+  const direct = graphUri === metaGraphUri ? null : tryBuildAtomicAssetGroupUpdate([
+    { graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads },
+  ]);
+  return direct ? { update: direct.update, cleanup: '' }
+    : prepareAtomicGraphAndSubjectReplace('blazegraph', graphUri, graphQuads,
+      metaGraphUri, metadataSubject, metadataQuads);
 }
 
 export function prepareAtomicSubjectReplace(
