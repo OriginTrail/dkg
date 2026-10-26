@@ -515,6 +515,22 @@ describe('startAsyncAdmissionUsageLog', () => {
     expect(signals[0]!.aborted).toBe(false);
   });
 
+  it('republishes the wallet gauge on every line, before the depth read can hang it', async () => {
+    vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
+    const republish = vi.spyOn(asyncAdmissionUsage, 'republishLiftWallets');
+    const log = startAsyncAdmissionUsageLog({
+      emit: () => {},
+      capture,
+      readDepth: () => new Promise<AsyncQueueDepthReading>(() => {}), // never answers
+    });
+
+    await flush();
+    expect(republish).toHaveBeenCalledTimes(1); // the first line is still waiting on its depth read
+    await vi.advanceTimersByTimeAsync(ASYNC_ADMISSION_USAGE_LOG_INTERVAL_MS);
+    expect(republish).toHaveBeenCalledTimes(2);
+    log.stop();
+  });
+
   it('leaves "-" and counts an error for a queue that cannot be read, and for a read that throws', async () => {
     vi.useFakeTimers({ toFake: ['setInterval', 'clearInterval', 'setTimeout', 'clearTimeout'] });
     const lines: string[] = [];

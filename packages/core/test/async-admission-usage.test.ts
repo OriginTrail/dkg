@@ -302,6 +302,20 @@ describe('AsyncAdmissionUsage publisher queue', () => {
     ]);
   });
 
+  it('publishes the retained wallet count to instruments built after the runner started', async () => {
+    const usage = new AsyncAdmissionUsage();
+    usage.setLiftWallets(['a', 'b']); // telemetry is off, so this record reached no instrument
+
+    // Telemetry is enabled while the runner is active: the wallets do not change again.
+    const enabled = await captureMetrics(() => usage.republishLiftWallets());
+    expect(enabled).toEqual([{ metric: 'dkg.async_lift.configured_wallets', value: 2, attributes: {} }]);
+
+    // After the runner stops, the sampling path publishes zero rather than the last count.
+    usage.setLiftWallets([]);
+    const stopped = await captureMetrics(() => usage.republishLiftWallets());
+    expect(stopped).toEqual([{ metric: 'dkg.async_lift.configured_wallets', value: 0, attributes: {} }]);
+  });
+
   it('publishes queue depth and journal entries to the gauges', async () => {
     const usage = new AsyncAdmissionUsage();
     const recorded = await captureMetrics(() => {

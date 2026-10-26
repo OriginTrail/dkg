@@ -148,6 +148,9 @@ describe('publisher queue figures', () => {
     await publisher.update(a, 'validated', { validation: KA_VM_VALIDATION });
     now = 11_000;
     await publisher.update(a, 'finalized', { finalization: { mode: 'local' } });
+    // Job D is ready at 11500: after A's release, before any further claim could re-read the lock.
+    now = 11_500;
+    const d = await publisher.enqueueKnowledgeAssetVmPublish(vmPublish(4));
     now = 12_000;
     expect((await publisher.claimNext('wallet-1'))?.jobId).toBe(c);
 
@@ -164,6 +167,22 @@ describe('publisher queue figures', () => {
     expect(usage.liftClaimToFinish.n).toBe(1);
     expect(usage.liftClaimToFinish.maxMs).toBe(6_000);
     expect(usage.liftFailed).toBe(0);
+
+    // D is claimed after C finishes. Only the release hook told the tracker that wallet-1 was free at
+    // 11500 (a later lock read closes the interval at its own time), so D joins the worker-free sample.
+    now = 12_500;
+    await publisher.update(c, 'validated', { validation: KA_VM_VALIDATION });
+    now = 13_000;
+    await publisher.update(c, 'finalized', { finalization: { mode: 'local' } });
+    now = 14_000;
+    expect((await publisher.claimNext('wallet-1'))?.jobId).toBe(d);
+
+    const next = asyncAdmissionUsage.take();
+    expect(next.liftPickup.n).toBe(1);
+    expect(next.liftPickup.maxMs).toBe(2_500);
+    expect(next.liftPickupWorkerFree.n).toBe(1);
+    expect(next.liftPickupWorkerFree.maxMs).toBe(2_500);
+    expect(next.liftPickupUnclassified).toBe(0);
   });
 
   it('counts a job that became ready before the tracker knew the wallets as unclassified', async () => {

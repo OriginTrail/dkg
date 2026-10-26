@@ -225,8 +225,17 @@ export class AsyncAdmissionUsage {
   setLiftWallets(walletIds: readonly string[]): void {
     safely(() => {
       this.wallets.setConfigured(walletIds);
-      getMetrics().asyncLiftConfiguredWallets.record(this.wallets.configuredCount);
+      this.republishLiftWallets();
     });
+  }
+
+  /**
+   * Publishes the retained wallet count to the OTel gauge again. The count is otherwise recorded
+   * only when the configured wallets change, so an instrument built later (telemetry enabled
+   * while the runner is active) would never see it; the periodic line calls this every interval.
+   */
+  republishLiftWallets(): void {
+    safely(() => getMetrics().asyncLiftConfiguredWallets.record(this.wallets.configuredCount));
   }
 
   liftWalletBusy(walletId: string, atMs: number): void {

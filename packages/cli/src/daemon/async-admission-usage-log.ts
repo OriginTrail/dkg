@@ -262,6 +262,7 @@ export function startAsyncAdmissionUsageLog(options: AsyncAdmissionUsageLogOptio
       const intervalSeconds = (at - lastLineAt) / 1000;
       lastLineAt = at;
       const captured = capture();
+      asyncAdmissionUsage.republishLiftWallets(); // before the depth read, which may hang
       const depth = await readDepth();
       if (depth.share) asyncAdmissionUsage.recordQueueDepth('share', depth.share);
       if (depth.lift) asyncAdmissionUsage.recordQueueDepth('lift', depth.lift);
