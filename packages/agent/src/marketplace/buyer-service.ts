@@ -152,13 +152,16 @@ export interface MarketplaceBuyerDeps {
    */
   ensureOfferSubscription?: () => void;
   /**
-   * Fire-and-forget backfill nudge, invoked when discovery finds NO offers:
-   * the periodic sync reconciler treats recently-synced peers as fresh, so a
-   * node whose first marketplace sync raced the CG's authority bootstrap
-   * would otherwise stay empty until the staleness window expires. The
-   * implementation throttles itself and contains its own failures.
+   * Fire-and-forget refresh nudge, invoked after EVERY discovery with whether
+   * it found no offers: the node reconciles the marketplace CG from the chain
+   * now (so a confirmed offer update reaches the next discovery), and an
+   * empty discovery also backfills from peers — the periodic sync reconciler
+   * treats recently-synced peers as fresh, so a node whose first marketplace
+   * sync raced the CG's authority bootstrap would otherwise stay empty until
+   * the staleness window expires. The implementation throttles itself and
+   * contains its own failures.
    */
-  requestOfferBackfill?: () => void;
+  requestOfferBackfill?: (empty: boolean) => void;
   log: MarketplaceLogger;
   /**
    * Where the session key persists (JSON, mode 0o600). Omitted → an
@@ -307,7 +310,7 @@ export class MarketplaceBuyerService {
   async discoverOffers(): Promise<MarketplaceOffer[]> {
     this.#deps.ensureOfferSubscription?.();
     const offers = await this.#deps.offerSource.discoverOffers();
-    if (offers.length === 0) this.#deps.requestOfferBackfill?.();
+    this.#deps.requestOfferBackfill?.(offers.length === 0);
     return offers;
   }
 

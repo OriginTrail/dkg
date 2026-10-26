@@ -1,9 +1,12 @@
 /**
  * OT-RFC-27 marketplace offer publication/discovery and executor metering —
  * the agent-side pieces that do not need a p2p pair: offer-KA quad building,
- * CG-backed publish (fake ports), SPARQL-row parsing back into typed offers,
- * and the executors' deterministic unit schedules with their fail-closed
- * `maxUnits` behaviour.
+ * the publish loop over the offer-asset port (fake ports: anchor first, one
+ * KA per offering, unchanged offers left alone, a reprice published as the
+ * next version of the SAME asset with a larger revision), SPARQL-row parsing
+ * back into typed offers (KA-author authority, newest revision per seller
+ * and offering), and the executors' deterministic unit schedules with their
+ * fail-closed `maxUnits` behaviour.
  */
 import { describe, expect, it } from 'vitest';
 import { MARKETPLACE_CONTEXT_GRAPH } from '@origintrail-official/dkg-core';
@@ -13,9 +16,11 @@ import {
   MKT_NAMESPACE,
   buildMarketplaceOfferQuads,
   createContextGraphOfferSource,
+  marketplaceOfferAssetName,
   marketplaceOfferSubject,
   parseMarketplaceOfferBindings,
   publishMarketplaceOfferings,
+  type MarketplaceOfferAssetPort,
 } from '../src/marketplace/offer-publisher.js';
 import {
   MarketplaceExecutionError,
@@ -29,6 +34,7 @@ const SELLER = {
   sellerPeerId: '12D3KooWSellerSellerSellerSellerSellerSellerSell',
   sellerAddress: '0x1111111111111111111111111111111111111111',
 };
+const OTHER_AUTHOR = '0x2222222222222222222222222222222222222222';
 
 function offering(overrides: Partial<MarketplaceSellerOffering> = {}): MarketplaceSellerOffering {
   return {
@@ -42,94 +48,149 @@ function offering(overrides: Partial<MarketplaceSellerOffering> = {}): Marketpla
   };
 }
 
+const knowledgeOffering = () => offering({
+  offeringLocalId: 'devnet-knowledge',
+  offeringId: offeringIdFor('devnet-knowledge'),
+  serviceType: 'query',
+  unit: 'query-unit',
+  askPerUnitWei: 15_000_000_000_000n,
+});
+
+/** An in-memory offer-asset port: each publish replaces the asset's confirmed content. */
+function fakeAssetPort() {
+  const confirmed = new Map<string, Quad[]>();
+  const calls: string[] = [];
+  const port: MarketplaceOfferAssetPort = {
+    async readPublishedOffer(assetName, subject) {
+      expect(subject).toMatch(/^urn:dkg:marketplace:offer:/);
+      calls.push(`read:${assetName}`);
+      return confirmed.get(assetName) ?? null;
+    },
+    async publishOfferAsset(assetName, quads) {
+      calls.push(`publish:${assetName}`);
+      confirmed.set(assetName, quads);
+      return { ual: `did:dkg:test/${SELLER.sellerAddress}/${assetName}` };
+    },
+  };
+  return { port, confirmed, calls };
+}
+
+function objectOf(quads: readonly Quad[], predicate: string): string | undefined {
+  return quads.find((quad) => quad.predicate === predicate)?.object;
+}
+
+const kaGraph = (layer: '_verifiable_memory' | '_shared_memory', author: string, number = 1) =>
+  `did:dkg:context-graph:${MARKETPLACE_CONTEXT_GRAPH}/${layer}/${author.toLowerCase()}/${number}`;
+
 describe('marketplace offer publication', () => {
-  it('builds the mkt: vocabulary offer KA, creating the marketplace CG when missing', async () => {
-    const created: string[] = [];
-    const shared: Array<{ contextGraphId: string; quads: Quad[] }> = [];
-    let exists = false;
-    const port = {
-      contextGraphExists: async () => exists,
-      createContextGraph: async (opts: { id: string; name: string; description?: string }) => {
-        created.push(opts.id);
-        exists = true;
-      },
-      share: async (contextGraphId: string, quads: Quad[]) => {
-        shared.push({ contextGraphId, quads });
-        return { shareOperationId: `op-${shared.length}` };
-      },
-    };
+  it('publishes one mkt: vocabulary offer KA per offering, anchoring the CG first', async () => {
+    const { port, confirmed, calls } = fakeAssetPort();
+    const result = await publishMarketplaceOfferings(port, [offering(), knowledgeOffering()], SELLER, {
+      ensureAnchor: async () => { calls.push('anchor'); },
+      nowMs: () => 1_700_000_000_000,
+    });
 
-    const result = await publishMarketplaceOfferings(
-      port,
-      [offering(), offering({ offeringLocalId: 'devnet-knowledge', offeringId: offeringIdFor('devnet-knowledge'), serviceType: 'query', unit: 'query-unit', askPerUnitWei: 15_000_000_000_000n })],
-      SELLER,
-    );
-
-    expect(created).toEqual([MARKETPLACE_CONTEXT_GRAPH]);
-    expect(shared).toHaveLength(2);
-    expect(shared[0].contextGraphId).toBe(MARKETPLACE_CONTEXT_GRAPH);
+    const llmAsset = marketplaceOfferAssetName(offering());
+    const knowledgeAsset = marketplaceOfferAssetName(knowledgeOffering());
+    expect(llmAsset).toBe('marketplace-offer-devnet-llm');
+    expect(calls).toEqual([
+      'anchor',
+      `read:${llmAsset}`, `publish:${llmAsset}`,
+      `read:${knowledgeAsset}`, `publish:${knowledgeAsset}`,
+    ]);
     expect(result.published).toEqual([
       marketplaceOfferSubject(SELLER.sellerPeerId, 'devnet-llm'),
       marketplaceOfferSubject(SELLER.sellerPeerId, 'devnet-knowledge'),
     ]);
+    expect(result.assets.map((asset) => [asset.assetName, asset.outcome, asset.revision])).toEqual([
+      [llmAsset, 'published', '1700000000000'],
+      [knowledgeAsset, 'published', '1700000000000'],
+    ]);
 
-    const quads = shared[0].quads;
+    const quads = confirmed.get(llmAsset)!;
     const subject = marketplaceOfferSubject(SELLER.sellerPeerId, 'devnet-llm');
     expect(quads.every((q) => q.subject === subject && q.graph === '')).toBe(true);
-    const byPredicate = new Map(quads.map((q) => [q.predicate, q.object]));
-    expect(byPredicate.get('http://www.w3.org/1999/02/22-rdf-syntax-ns#type')).toBe(`${MKT_NAMESPACE}Offer`);
-    expect(byPredicate.get(`${MKT_NAMESPACE}offeringId`)).toBe(`"${offeringIdFor('devnet-llm')}"`);
-    expect(byPredicate.get(`${MKT_NAMESPACE}askPerUnitWei`)).toBe('"500000000000"');
-    expect(byPredicate.get(`${MKT_NAMESPACE}sellerIdentityId`)).toBe('"7"');
-    expect(byPredicate.get(`${MKT_NAMESPACE}sellerAddress`)).toBe(`"${SELLER.sellerAddress}"`);
-
-    // Already-existing CG: no second create.
-    await publishMarketplaceOfferings(port, [offering()], SELLER);
-    expect(created).toEqual([MARKETPLACE_CONTEXT_GRAPH]);
+    expect(objectOf(quads, 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type')).toBe(`${MKT_NAMESPACE}Offer`);
+    expect(objectOf(quads, `${MKT_NAMESPACE}offeringId`)).toBe(`"${offeringIdFor('devnet-llm')}"`);
+    expect(objectOf(quads, `${MKT_NAMESPACE}askPerUnitWei`)).toBe('"500000000000"');
+    expect(objectOf(quads, `${MKT_NAMESPACE}sellerIdentityId`)).toBe('"7"');
+    expect(objectOf(quads, `${MKT_NAMESPACE}sellerAddress`)).toBe(`"${SELLER.sellerAddress}"`);
+    expect(objectOf(quads, `${MKT_NAMESPACE}revision`)).toBe('"1700000000000"');
   });
 
-  it('runs the ensureRegistered anchor after the CG exists and before any share', async () => {
-    const calls: string[] = [];
-    let exists = false;
-    const port = {
-      contextGraphExists: async () => exists,
-      createContextGraph: async () => {
-        calls.push('create');
-        exists = true;
-      },
-      share: async () => {
-        calls.push('share');
-        return { shareOperationId: `op-${calls.length}` };
-      },
-    };
-    await publishMarketplaceOfferings(port, [offering()], SELLER, {
-      ensureRegistered: async (contextGraphId) => {
-        expect(contextGraphId).toBe(MARKETPLACE_CONTEXT_GRAPH);
-        calls.push('register');
-      },
-    });
-    expect(calls).toEqual(['create', 'register', 'share']);
+  it('an anchor failure aborts before any offer asset is touched', async () => {
+    const { port, calls } = fakeAssetPort();
+    await expect(publishMarketplaceOfferings(port, [offering()], SELLER, {
+      ensureAnchor: async () => { throw new Error('anchored at slot 3 but not bound yet'); },
+    })).rejects.toThrow(/not bound yet/);
+    expect(calls).toEqual([]);
+  });
+
+  it('leaves an unchanged offer alone and publishes a reprice as the next version of the SAME asset', async () => {
+    const { port, confirmed, calls } = fakeAssetPort();
+    let now = 1_000;
+    const nowMs = () => now;
+    await publishMarketplaceOfferings(port, [offering(), knowledgeOffering()], SELLER, { nowMs });
+    calls.length = 0;
+
+    // Same content, later clock: nothing is republished (no chain transaction).
+    now = 5_000;
+    const unchanged = await publishMarketplaceOfferings(port, [offering(), knowledgeOffering()], SELLER, { nowMs });
+    expect(calls.filter((call) => call.startsWith('publish:'))).toEqual([]);
+    expect(unchanged.assets.map((asset) => [asset.outcome, asset.revision])).toEqual([
+      ['unchanged', '1000'],
+      ['unchanged', '1000'],
+    ]);
+
+    // Reprice ONE offering: only its asset is published, under the same name,
+    // with a strictly larger revision — even when the clock went backwards.
+    now = 500;
+    const repriced = await publishMarketplaceOfferings(
+      port,
+      [offering({ askPerUnitWei: 450_000_000_000n }), knowledgeOffering()],
+      SELLER,
+      { nowMs },
+    );
+    const llmAsset = marketplaceOfferAssetName(offering());
+    expect(calls.filter((call) => call.startsWith('publish:'))).toEqual([`publish:${llmAsset}`]);
+    expect(repriced.assets.map((asset) => [asset.assetName, asset.outcome, asset.revision])).toEqual([
+      [llmAsset, 'published', '1001'],
+      [marketplaceOfferAssetName(knowledgeOffering()), 'unchanged', '1000'],
+    ]);
+    expect(objectOf(confirmed.get(llmAsset)!, `${MKT_NAMESPACE}askPerUnitWei`)).toBe('"450000000000"');
+    expect(objectOf(confirmed.get(llmAsset)!, `${MKT_NAMESPACE}revision`)).toBe('"1001"');
+  });
+
+  it('names an offering asset by its offering id when the local id is not a safe asset name', () => {
+    const unsafe = offering({ offeringLocalId: 'has space/and slash', offeringId: offeringIdFor('has space/and slash') });
+    expect(marketplaceOfferAssetName(unsafe)).toBe(`marketplace-offer-${offeringIdFor('has space/and slash')}`);
+  });
+});
+
+describe('marketplace offer discovery', () => {
+  const goodRow = (overrides: Record<string, string> = {}) => ({
+    g: kaGraph('_verifiable_memory', SELLER.sellerAddress),
+    offer: marketplaceOfferSubject(SELLER.sellerPeerId, 'devnet-llm'),
+    offeringId: `"${offeringIdFor('devnet-llm')}"`,
+    serviceType: '"inference"',
+    unit: '"token"',
+    ask: '"500000000000"',
+    sellerIdentityId: '"7"',
+    sellerPeerId: `"${SELLER.sellerPeerId}"`,
+    sellerAddress: `"${SELLER.sellerAddress}"`,
+    revision: '"10"',
+    modelId: '"devnet-echo"',
+    capacity: '"120000"',
+    expiresAt: '"1900000600"',
+    ...overrides,
   });
 
   it('round-trips offers through SPARQL bindings and skips malformed rows', async () => {
-    const goodRow = {
-      offer: marketplaceOfferSubject(SELLER.sellerPeerId, 'devnet-llm'),
-      offeringId: `"${offeringIdFor('devnet-llm')}"`,
-      serviceType: '"inference"',
-      unit: '"token"',
-      ask: '"500000000000"',
-      sellerIdentityId: '"7"',
-      sellerPeerId: `"${SELLER.sellerPeerId}"`,
-      sellerAddress: `"${SELLER.sellerAddress}"`,
-      modelId: '"devnet-echo"',
-      capacity: '"120000"',
-      expiresAt: '"1900000600"',
-    };
     const rows = [
-      goodRow,
-      { ...goodRow, ask: '"not-a-number"' }, // malformed ask → skipped
-      { ...goodRow, serviceType: '"teleportation"' }, // unknown enum → skipped
-      { ...goodRow, sellerIdentityId: '"0"' }, // identity 0 → skipped
+      goodRow(),
+      goodRow({ offer: 'urn:x:1', offeringId: '"0x01"', ask: '"not-a-number"' }), // malformed ask
+      goodRow({ offer: 'urn:x:2', offeringId: '"0x02"', serviceType: '"teleportation"' }), // unknown enum
+      goodRow({ offer: 'urn:x:3', offeringId: '"0x03"', sellerIdentityId: '"0"' }), // identity 0
     ];
 
     const seen: Array<{ sparql: string; options: unknown }> = [];
@@ -144,6 +205,7 @@ describe('marketplace offer publication', () => {
     expect(seen).toHaveLength(1);
     expect(seen[0].options).toEqual({ contextGraphId: MARKETPLACE_CONTEXT_GRAPH, includeSharedMemory: true });
     expect(seen[0].sparql).toContain(MKT_NAMESPACE);
+    expect(seen[0].sparql).toContain('GRAPH ?g');
     expect(offers).toHaveLength(1);
     expect(offers[0]).toEqual({
       offerId: marketplaceOfferSubject(SELLER.sellerPeerId, 'devnet-llm'),
@@ -160,9 +222,56 @@ describe('marketplace offer publication', () => {
     });
   });
 
+  it('accepts an offer only from a Knowledge Asset authored by its sellerAddress', () => {
+    const offers = parseMarketplaceOfferBindings([
+      // A different author advertising this seller's offer (forged or shadowing).
+      goodRow({ g: kaGraph('_verifiable_memory', OTHER_AUTHOR), ask: '"1"', revision: '"99"' }),
+      // Legacy root-scoped shared-memory bucket: no author to check.
+      goodRow({ g: `did:dkg:context-graph:${MARKETPLACE_CONTEXT_GRAPH}/_shared_memory`, ask: '"2"', revision: '"98"' }),
+      // Another graph entirely.
+      goodRow({ g: `did:dkg:context-graph:elsewhere/_verifiable_memory/${SELLER.sellerAddress}/1`, ask: '"3"' }),
+      // No sellerAddress: nothing to bind the author to.
+      goodRow({ sellerAddress: '', ask: '"4"' }),
+      goodRow({ g: kaGraph('_verifiable_memory', SELLER.sellerAddress.toUpperCase().replace('0X', '0x')) }),
+    ]);
+    expect(offers).toHaveLength(1);
+    expect(offers[0].askPerUnitWei).toBe(500_000_000_000n);
+  });
+
+  it('keeps only the newest revision per (seller, offering) — no stale ask while an update is in flight', () => {
+    const updated = parseMarketplaceOfferBindings([
+      // Old version still in Verifiable Memory, new version already shared.
+      goodRow({ ask: '"800000000000"', revision: '"10"' }),
+      goodRow({ g: kaGraph('_shared_memory', SELLER.sellerAddress), ask: '"450000000000"', revision: '"11"' }),
+    ]);
+    expect(updated.map((offer) => offer.askPerUnitWei)).toEqual([450_000_000_000n]);
+
+    // Byte-identical twin in both layers: one offer, Verifiable Memory wins the tie.
+    const twin = parseMarketplaceOfferBindings([
+      goodRow({ g: kaGraph('_shared_memory', SELLER.sellerAddress), ask: '"450000000000"', modelId: '"swm"' }),
+      goodRow({ ask: '"450000000000"', modelId: '"vm"' }),
+    ]);
+    expect(twin).toHaveLength(1);
+    expect(twin[0].modelId).toBe('vm');
+
+    // Different sellers and different offerings stay separate.
+    const many = parseMarketplaceOfferBindings([
+      goodRow(),
+      goodRow({ offeringId: '"0xabc"', offer: 'urn:x:knowledge' }),
+      goodRow({
+        g: kaGraph('_verifiable_memory', OTHER_AUTHOR),
+        sellerAddress: `"${OTHER_AUTHOR}"`,
+        sellerIdentityId: '"8"',
+        sellerPeerId: '"12D3KooWOther"',
+        offer: 'urn:x:other',
+      }),
+    ]);
+    expect(many).toHaveLength(3);
+  });
+
   it('parses the quads it publishes (publish → bindings → offer round trip)', () => {
-    const quads = buildMarketplaceOfferQuads(offering(), SELLER);
-    const row: Record<string, string> = { offer: quads[0].subject };
+    const quads = buildMarketplaceOfferQuads(offering(), SELLER, 42n);
+    const row: Record<string, string> = { g: kaGraph('_verifiable_memory', SELLER.sellerAddress), offer: quads[0].subject };
     const keyByPredicate: Record<string, string> = {
       [`${MKT_NAMESPACE}offeringId`]: 'offeringId',
       [`${MKT_NAMESPACE}serviceType`]: 'serviceType',
@@ -171,6 +280,7 @@ describe('marketplace offer publication', () => {
       [`${MKT_NAMESPACE}sellerIdentityId`]: 'sellerIdentityId',
       [`${MKT_NAMESPACE}sellerPeerId`]: 'sellerPeerId',
       [`${MKT_NAMESPACE}sellerAddress`]: 'sellerAddress',
+      [`${MKT_NAMESPACE}revision`]: 'revision',
     };
     for (const quad of quads) {
       const key = keyByPredicate[quad.predicate];

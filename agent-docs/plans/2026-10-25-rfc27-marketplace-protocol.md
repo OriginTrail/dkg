@@ -491,6 +491,41 @@ authority for details.
   subscribe with always-on sync, and empty discovery triggers a throttled
   (≥30s) SWM backfill from connected peers. First-publish → buyer discovery
   convergence can take up to ~3 minutes (sync catchup backoff 30/60/120/240s).
+- **Multi-seller offers are Knowledge Assets in Verifiable Memory; a reprice
+  updates the same KA.** Browser QA found that a seller's reprice never
+  reached other nodes and that sellers A and B never saw each other's offers.
+  Two root causes. (1) Split anchor: seller B published one second after A
+  registered the CG, created its own local `marketplace` CG and registered it
+  again — the local status and the finalized-chain authority read both lag a
+  fresh registration, and `registerContextGraph` skips chain reconciliation
+  for a locally-created graph — so the chain held two slots under one name
+  hash (ContextGraphStorage does not enforce uniqueness). Nodes bound
+  different slots, their RFC-64 policy digests differed
+  (`catalog-transport-policy-denied` between the halves), and the name's
+  reverse lookup became ambiguous (fail closed). (2) Wrong write lane: offers
+  were written with the generic legacy `share()` (manifest-scoped SWM,
+  content-scope v0). Receivers never apply that live — a catalog-mode CG
+  declines root-scope legacy apply ("legacy SWM apply is not authoritative for
+  root scope"), and the graph-scoped validator rejects v0 as
+  `LEGACY_KA_READ_ONLY` — so offers only crossed via the slow, union-only
+  legacy SWM sync pull, which can never replace an old ask. Graph-scoped
+  SWM-only KAs cannot be repriced either: an unpublished KA's next draft is
+  sealed at the same assertion version, and peers and the RFC-64 catalog
+  refuse a same-version share with new content. Fix
+  (`packages/agent/src/marketplace/offer-assets.ts`, `offer-publisher.ts`):
+  a seller first resolves the marketplace name on-chain with an uncached
+  current-state lookup and ADOPTS an existing anchor (binds that slot, never
+  creates or registers its own); only a proven absence registers (public,
+  open publish policy, so every seller is an authorized publisher of its own
+  KAs). Each (seller, offering) is one KA named `marketplace-offer-<id>`,
+  authored by the receipt-signing agent, published to VM through the KA
+  lifecycle; a changed offering is an on-chain update of that KA (version
+  confirmed + 1) that every node applies by replacing the old content during
+  chain reconciliation, and an unchanged one sends no transaction. Offers
+  carry `mkt:revision`; discovery queries per KA graph (`GRAPH ?g`), accepts an
+  offer only from a KA authored by its `sellerAddress`, and keeps the newest
+  revision per (seller, offering), so no stale ask shows while an update is in
+  flight. Every discovery nudges a throttled (≥30s) VM reconcile of the CG.
 - **Authorization expiry derives from CHAIN time**, not the buyer's wall
   clock, fixing repeated-run `AuthorizationExpired` drift on time-warped
   devnets where `block.timestamp` runs ahead of real time.
