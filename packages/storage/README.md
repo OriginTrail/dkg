@@ -154,7 +154,7 @@ OTel is opt-in, so the scheduler also keeps its rejection and wait figures
 in-process. The `dkg.store.scheduler_rejections_total` counter carries
 `priority`, `reason` and `operation_family` (the first two dot-separated
 segments of the caller's `source`, such as `publisher.asyncLift`; at most 64
-families per process, then `other`). `takeStoreSchedulerStatsReports()` returns,
+families per scheduler, then `other`). `takeStoreSchedulerStatsReports()` returns,
 for each registered scheduler, the longest queue wait of each lane since the
 previous call (a wait ends when work starts, times out in the queue or is
 cancelled there) and the cumulative rejections by lane, family and reason. Each
