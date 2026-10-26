@@ -491,6 +491,9 @@ function createManifestSettlementCheckpointer(options: {
     // The prefix helper includes every adjacent zero-public descriptor. Wait
     // until all of those descriptors have settled before binding this offset.
     if (!prefix || prefix.descriptorCount !== descriptorIndex) return undefined;
+    // Only a completed phase checkpoints the manifest's end, as terminal: no
+    // graph starts there for a non-terminal checkpoint to resume from.
+    if (safeOffset === manifest.manifestRowCount) return undefined;
     if (
       safeOffset === persistedOffset
       && descriptorIndex === persistedDescriptorCount

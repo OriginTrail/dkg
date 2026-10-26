@@ -45,7 +45,12 @@ import type { NetworkInterfaceInfo } from 'node:os';
 import { formatAuthorityIndexStartupLine } from './authority-index-startup-line.js';
 import { resolveDaemonEvmSigning, type DaemonEvmSigning } from './evm-signing.js';
 import { checkCoreRelayPrereqs } from './core-prereq-check.js';
-import { rotateDaemonLogIfNeeded } from './log-rotation.js';
+import {
+  describeDaemonLogRotation,
+  rotateDaemonLogIfNeeded,
+  startDaemonLogRotationChecks,
+} from './log-rotation.js';
+import { startResourceUsageLog } from './resource-usage-log.js';
 import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
@@ -160,6 +165,7 @@ import {
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
 import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
+import { refuseBrotliOnDaemonFetch } from './outbound-brotli-refusal.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
   exitAfterFatalLogDrain,
@@ -371,6 +377,7 @@ import {
 import { runPreAgentStoreBootSteps } from './pre-agent-store-boot.js';
 import { startManagedOxigraph } from './oxigraph-managed.js';
 import { buildAgentRuntimeStoreConfig } from './agent-runtime-store-config.js';
+import { resolveLanAddressesEnabled, resolvePublicAddressesOnly } from '../lan-addresses.js';
 import type { OxigraphServerHandle } from './oxigraph-server.js';
 import { resetNatStatus, startNatStatusWatcher } from './nat-status.js';
 import {
@@ -1212,6 +1219,7 @@ async function runDaemonInnerWithStartupOwnership(
     config.networkPeerIsolationEnabled,
     process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED,
   );
+  const lanAddressesEnabled = resolveLanAddressesEnabled(config.lanAddressesEnabled);
   // Resolve the local collector toggle before constructing daemon resources.
   // This is independent from OTLP metrics export configuration.
   const metricsCollectorConfig = resolveMetricsCollectorConfig(config);
@@ -1289,6 +1297,7 @@ async function runDaemonInnerWithStartupOwnership(
   if (!assertNodeRuntimeSupported(log)) {
     throw new Error('Node runtime preflight failed; see the preceding fatal message.');
   }
+  refuseBrotliOnDaemonFetch(log);
   const backpressureMonitor = new BackpressureMonitor({
     emit: (level, message) => log(`[${level}] ${message}`),
   });
@@ -1298,12 +1307,9 @@ async function runDaemonInnerWithStartupOwnership(
     warn: log,
   });
 
-  if (startupLogRotation?.rotated) {
-    log(
-      `Rotated daemon.log during startup ` +
-      `(was ${(startupLogRotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
-    );
-  }
+  const startupLogRotationMessage = startupLogRotation
+    && describeDaemonLogRotation(startupLogRotation, 'during startup');
+  if (startupLogRotationMessage) log(startupLogRotationMessage);
 
   startupUncaughtExceptionHandler = (err) => {
     const msg = err?.message ?? String(err);
@@ -1729,6 +1735,14 @@ async function runDaemonInnerWithStartupOwnership(
       'No relay or bootstrap peers configured. Set "relay" or "bootstrapPeers" in ~/.dkg/config.json or run from repo so network/testnet.json is found.',
     );
   }
+  // An Edge with public relays is on a public network, where LAN and VPN
+  // addresses, its own and its peers', reach nobody.
+  const publicAddressesOnly = resolvePublicAddressesOnly({ lanAddressesEnabled, role, relayPeers });
+  if (publicAddressesOnly) {
+    log(
+      `Addresses: ${config.announceAddresses?.length ? '' : 'announcing public and relay addresses only; '}a peer that announces no public address is reached over its open relay circuit (set lanAddressesEnabled for a LAN or VPN deployment)`,
+    );
+  }
 
   const mockIdentityId = chainBase?.type === 'mock' && chainBase.mockIdentityId != null
     ? BigInt(chainBase.mockIdentityId)
@@ -1834,6 +1848,7 @@ async function runDaemonInnerWithStartupOwnership(
     networkPeerIsolation: networkPeerIsolationEnabled,
     preferredACKPeerIds: preferredACKPeerIds.length > 0 ? preferredACKPeerIds : undefined,
     announceAddresses: config.announceAddresses,
+    publicAddressesOnly,
     nodeRole: role,
     authorityIndex,
     relayServerCapacity: config.relayServerCapacity,
@@ -2641,17 +2656,15 @@ async function runDaemonInnerWithStartupOwnership(
       }
       return countContextGraphsFromGraphUris(graphUris, knownContextGraphIds, shadowContextGraphIds);
     },
-    // The count getters below each issue a data-proportional full-scan COUNT,
-    // but the only caller is the 30 s metrics tick (metricsSource is consumed
-    // solely by MetricsCollector — no on-demand /api/status path), so each tick
-    // already re-reads the store fresh and there is nothing concurrent to
-    // coalesce. They are intentionally left uncached so a snapshot never serves
-    // a stale count and can't mask a store outage. The context-graph count
+    // These getters share one exact, low-frequency reconciled snapshot. Active
+    // dashboards therefore do not launch five data-proportional COUNT scans;
+    // a cheap ASK liveness probe prevents a cached snapshot from masking a
+    // store outage, and failed reconciliation nulls the affected metric fields.
+    // The context-graph count
     // avoids the composite context-graph listing enrichment path. It uses the
     // cached store graph inventory plus backed subscription/declaration evidence,
     // then dedupes local layer graphs. It intentionally includes private CG graphs
     // that are backed by local subscription/declaration state.
-    // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     // Unscoped reads: after a core-cache snapshot job they count the content
     // outside the core-cache-marked graphs.
     ...createStoreCountMetrics((sparql, options) => agent.query(sparql, options)),
@@ -2873,12 +2886,6 @@ async function runDaemonInnerWithStartupOwnership(
   const pruneRuntimeState = async (): Promise<void> => {
     try {
       dashDb.prune();
-      const rotation = await daemonLogFileWriter.rotate();
-      if (rotation.rotated) {
-        log(
-          `Rotated daemon.log (was ${(rotation.previousBytes / 1024 / 1024).toFixed(1)} MB)`,
-        );
-      }
     } catch {
       /* never crash the daemon */
     }
@@ -2887,6 +2894,14 @@ async function runDaemonInnerWithStartupOwnership(
     void pruneRuntimeState();
   }, PRUNE_INTERVAL_MS);
   pruneTimer.unref();
+  // daemon.log rotates to numbered files and keeps 72 hours within a size cap
+  // (log-rotation.ts), checked every 10 minutes between the writer's appends.
+  const daemonLogRotationChecks = startDaemonLogRotationChecks({
+    rotate: daemonLogFileWriter.rotate,
+    log,
+  });
+  // Memory, store lanes and sync slots, one `resource_usage` line every 5 minutes.
+  const resourceUsageLog = startResourceUsageLog();
 
   // A time window cannot bound a same-day compatibility-log storm. This
   // independent maintenance helper enforces only the published count cap;
@@ -3690,6 +3705,8 @@ async function runDaemonInnerWithStartupOwnership(
         autoUpdate.stop();
         clearInterval(pingTimer);
         clearInterval(pruneTimer);
+        daemonLogRotationChecks.stop();
+        resourceUsageLog.stop();
         await runChainDiscoveryScan.close().catch((err: unknown) => {
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });

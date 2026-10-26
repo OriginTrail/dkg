@@ -10,6 +10,7 @@ export const ALL_CHECK_IDS = [
   'served-ui-mismatch',
   'plugin-root',
   'node-runtime',
+  'node-security',
 ] as const;
 
 export type CheckId = (typeof ALL_CHECK_IDS)[number];

@@ -34,4 +34,18 @@ describe('planned execution preserves legacy route precedence', () => {
       }
     } finally { await store.close(); }
   });
+
+  it.each([[false, false], [true, false], [false, true], [true, true]])
+    ('combines ASK results from data=%s and shared-memory=%s', async (data, shared) => {
+      const store = new OxigraphStore();
+      try {
+        const graph = 'did:dkg:context-graph:combined';
+        for (const target of [...(data ? [graph] : []), ...(shared ? [`${graph}/_shared_memory`] : [])]) {
+          await store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: 'urn:o', graph: target }]);
+        }
+        const engine = new DKGQueryEngine(store);
+        expect(await engine.query('ASK { <urn:s> <urn:p> <urn:o> }', { contextGraphId: 'combined', includeSharedMemory: true }))
+          .toEqual({ bindings: [{ result: String(data || shared) }] });
+      } finally { await store.close(); }
+    });
 });
