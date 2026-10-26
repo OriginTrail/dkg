@@ -1,3 +1,4 @@
+import { stubDurableSync } from './_helpers/stub-durable-sync.js';
 import { describe, expect, it } from 'vitest';
 import { PeerCapabilityRegistry } from '../src/p2p/peer-capability.js';
 import { PROTOCOL_SYNC, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
@@ -119,7 +120,7 @@ describe('sync-on-connect churn gates', () => {
     agent.config.syncSharedMemoryOnConnect = false;
     agent.getPeerProtocols = async () => [PROTOCOL_SYNC];
     const syncFromPeerDetailed = recorder(async () => emptyDetailedSync({ completedPhases: 1 }));
-    agent.syncFromPeerDetailed = syncFromPeerDetailed;
+    stubDurableSync(agent, syncFromPeerDetailed);
     agent.refreshMetaSyncedFlags = async () => undefined;
     agent.discoverContextGraphsFromStore = async () => 0;
     agent.planSharedMemorySyncContextGraphs = async () => ({
@@ -137,7 +138,7 @@ describe('sync-on-connect churn gates', () => {
     const agent = await createUnstartedAgent('ExplicitSystemGraphCatchup');
     agent.config.nodeRole = 'edge';
     const syncFromPeerDetailed = recorder(async () => emptyDetailedSync());
-    agent.syncFromPeerDetailed = syncFromPeerDetailed;
+    stubDurableSync(agent, syncFromPeerDetailed);
 
     await agent.syncFromPeer(PEER_A, [
       SYSTEM_CONTEXT_GRAPHS.AGENTS,
@@ -321,14 +322,14 @@ describe('sync-on-connect churn gates', () => {
       }],
     };
     (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
-    (agent as any).syncFromPeerDetailed = async () => emptyDetailedSync({
+    stubDurableSync((agent as any), async () => emptyDetailedSync({
       insertedTriples: 3,
       insertedDataTriples: 3,
       completedPhases: 1,
       checkpointAdvances: 1,
       timedOutPhases: 1,
       backoffWorthyFailures: 1,
-    });
+    }));
     (agent as any).refreshMetaSyncedFlags = async () => undefined;
     (agent as any).discoverContextGraphsFromStore = async () => 0;
     (agent as any).planSharedMemorySyncContextGraphs = async () => ({ targets: [] });
@@ -481,7 +482,7 @@ describe('sync-on-connect churn gates', () => {
     agent.planSharedMemorySyncContextGraphs = async () => ({
       targets: [{ contextGraphId: 'selected-cg', lane: 'selected-public' }],
     });
-    agent.syncFromPeerDetailed = async () => emptyDetailedSync({ complete: true });
+    stubDurableSync(agent, async () => emptyDetailedSync({ complete: true }));
     agent.refreshMetaSyncedFlags = async () => undefined;
     agent.discoverContextGraphsFromStore = async () => 0;
     agent.syncSelectedSharedMemoryFromPeerDetailed = async (
@@ -640,7 +641,7 @@ describe('sync-on-connect churn gates', () => {
     agent.persistLocalNodeMembership = () => undefined;
     agent.refreshMetaSyncedFlags = recorder(async () => undefined);
     agent.waitForSyncProtocol = recorder(async () => true);
-    agent.syncFromPeerDetailed = recorder(async () => ({
+    stubDurableSync(agent, recorder(async () => ({
       insertedTriples: 0,
       fetchedMetaTriples: 0,
       fetchedDataTriples: 0,
@@ -658,7 +659,7 @@ describe('sync-on-connect churn gates', () => {
       failedPeers: 0,
       failedPhases: 0,
       deniedPhases: 0,
-    }));
+    })));
     agent.syncSharedMemoryFromPeerDetailed = recorder(async () => ({
       insertedTriples: 4,
       fetchedMetaTriples: 0,

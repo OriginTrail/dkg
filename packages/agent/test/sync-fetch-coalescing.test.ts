@@ -1,3 +1,4 @@
+import { stubDurableSync } from './_helpers/stub-durable-sync.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   createGraphKnowledgeAssetScope,
@@ -2495,11 +2496,3 @@ describe('DKGAgent sync fetch coalescing', () => {
     }
   });
 });
-
-/** Stub both the public diagnostic facade and the internal round executor. */
-function stubDurableSync(agent: DKGAgent, sync: DKGAgent['syncFromPeerDetailed']) {
-  agent.syncFromPeerDetailed = sync;
-  (agent as any).runLegacyDurableSyncDetailed = async (_ctx: unknown, ...args: Parameters<typeof sync>) => ({
-    result: await sync(...args), recoveryRound: { strategy: 'full', confirmedCopies: 0 },
-  });
-}
