@@ -1,305 +1,16 @@
-import { durableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
-import { StoreContentFence } from '../src/internal/store-content-fence.js';
-import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
-import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
-import { RecoveryMaterializationOwner } from '../src/durable-recovery-materialization.js';
+import { describe, expect, it } from 'vitest';
 import type { ContextGraphSub } from '../src/dkg-agent-types.js';
-import { afterEach, describe, expect, it } from 'vitest';
-import {
-  MemoryLayer,
-  createGraphKnowledgeAssetScope,
-  knowledgeAssetLayerGraphUri,
-  type OperationContext,
-} from '@origintrail-official/dkg-core';
-import {
-  computeFlatKCRootV10,
-  generateGraphKnowledgeAssetMetadata,
-  overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
-} from '@origintrail-official/dkg-publisher';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
-import { SYNC_PAGE_SIZE } from '../src/dkg-agent-constants.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
-import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../src/sync/durable-recovery-runner.js';
 import { classifyDurableProgress } from '../src/sync/durable-progress.js';
-import {
-  heldGraphScopedAssetsReader,
-  readHeldGraphScopedAssets,
-} from '../src/sync/requester/stored-graph-assets.js';
-import {
-  runDurableSyncDetailed,
-  type DurableMetaContinuation,
-  type DurableSyncContext,
-} from '../src/sync/requester/durable-sync.js';
-import { materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
-import { deleteSyncPageCheckpoint, fetchSyncPages } from '../src/sync/requester/page-fetch.js';
-import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
-import type { DurableBatchVerificationMode } from '../src/sync-verify-worker.js';
-import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
+import { readHeldGraphScopedAssets } from '../src/sync/requester/stored-graph-assets.js';
+import { CG, PEER, SECOND_PEER, asset, servingPeer, node, generation, rowsOf } from './_helpers/durable-recovery-store.js';
 
-const CG = 'stored-prefix-cg';
-const PEER = '12D3KooWHeldRestartPeer';
-const SECOND_PEER = '12D3KooWHeldRestartPeerTwo';
-const ctx = { operationId: 'held-restart', operationName: 'sync' } as OperationContext;
-const stores: OxigraphStore[] = [];
-
-afterEach(async () => {
-  for (const store of stores.splice(0)) await store.close();
-});
-
-interface AssetFixture {
-  readonly ual: string;
-  readonly graph: string;
-  readonly payload: Quad[];
-  readonly meta: Quad[];
-  readonly version: string;
-  readonly rootHex: string;
-}
-
-function asset(kaNumber: number, version = '1'): AssetFixture {
-  const ual = `did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ef/${kaNumber}`;
-  const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, version));
-  const payload = Array.from({ length: 4 + kaNumber }, (_, index): Quad => ({
-    subject: `urn:held-restart:${kaNumber}:${index}`,
-    predicate: 'urn:held-restart:value',
-    object: `"v${version}-${index}"`,
-    graph,
-  }));
-  const merkleRoot = computeFlatKCRootV10(payload, []);
-  const meta = generateGraphKnowledgeAssetMetadata({
-    ual,
-    contextGraphId: CG,
-    merkleRoot,
-    publisherPeerId: 'publisher-peer',
-    accessPolicy: 'public',
-    timestamp: new Date(0),
-    assertionVersion: version,
-    publicTripleCount: payload.length,
-    privateTripleCount: 0,
-    assertionGraph: graph,
-  }, { status: 'tentative' });
-  return { ual, graph, payload, meta, version, rootHex: Buffer.from(merkleRoot).toString('hex') };
-}
-
-/**
- * A peer serving one graph: META, then DATA in manifest order (exact graphs by
- * code point), both narrowed to the requested assets of an exact request.
- */
-function servingPeer(initial: AssetFixture[]) {
-  let assets = initial;
-  let pending: { phase: string; offset: number; limit: number; assetUals?: string[] } | undefined;
-  const responses = new Map<string, Quad[]>();
-  const served = { dataRequests: 0, dataRows: 0, exactDataRows: 0 };
-  return {
-    served,
-    publish(next: AssetFixture[]) { assets = next; },
-    current: () => assets,
-    buildSyncRequest: async (
-      _cg: string, offset: number, limit: number, _swm: boolean, _peer: string, phase?: string,
-      _snapshotRef?: string, _sinceBatchId?: string, _session?: string, _recovery?: boolean, assetUals?: string[],
-    ) => {
-      pending = { phase: phase ?? 'data', offset, limit, assetUals };
-      return new TextEncoder().encode('request');
-    },
-    send: async () => {
-      const { phase, offset, limit, assetUals } = pending!;
-      const selected = [...assets]
-        .filter((fixture) => assetUals === undefined || assetUals.includes(fixture.ual))
-        .sort((left, right) => (left.graph < right.graph ? -1 : left.graph > right.graph ? 1 : 0));
-      const page = (phase === 'meta' ? selected.flatMap((fixture) => fixture.meta) : selected.flatMap((fixture) => fixture.payload))
-        .slice(offset, offset + limit);
-      if (phase === 'data') {
-        served.dataRequests += 1;
-        served.dataRows += page.length;
-        if (assetUals !== undefined) served.exactDataRows += page.length;
-      }
-      if (page.length === 0) return new Uint8Array();
-      const id = `response-${responses.size}`;
-      responses.set(id, page);
-      return new TextEncoder().encode(id);
-    },
-    parseAndFilter: async (body: string) => {
-      const quads = responses.get(body) ?? [];
-      return { quads, totalQuads: quads.length };
-    },
-  };
-}
-
-function processBatch(
-  dataQuads: Quad[],
-  metaQuads: Quad[],
-  _ctx: OperationContext,
-  acceptUnverified: boolean,
-  mode: DurableBatchVerificationMode,
-) {
-  const wire = processDurableBatchForWire(dataQuads, metaQuads, acceptUnverified, mode);
-  return {
-    verifiedData: wire.verifiedDataIndexes.map((index) => dataQuads[index]!),
-    verifiedMeta: wire.verifiedMetaIndexes.map((index) => metaQuads[index]!),
-    verifiedGraphScopedDataGraphs: wire.verifiedGraphScopedDataGraphs,
-    consumedUnpersistedMetaTriples: wire.consumedUnpersistedMetaTriples,
-    verifiedPrivateOnlyResponses: wire.verifiedPrivateOnlyResponses,
-    totalFetchedDataQuads: wire.totalFetchedDataQuads,
-    totalFetchedMetaQuads: wire.totalFetchedMetaQuads,
-    rejectedKcs: wire.rejectedKcs,
-    emptyResponses: wire.emptyResponses,
-    metaOnlyResponses: wire.metaOnlyResponses,
-    dataRejectedMissingMeta: wire.dataRejectedMissingMeta,
-  };
-}
-
-type ServingPeer = ReturnType<typeof servingPeer>;
-
-/**
- * One node: its triple store survives a restart; checkpoints and the owner's
- * memory need not. Its chain is the generation the first peer serves unless a
- * test moves it.
- */
-function node(
-  serving: ServingPeer | Record<string, ServingPeer>,
-  options: { subscriptionId?: () => string; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
-) {
-  const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
-  
-  const rawStore = new OxigraphStore();
-  stores.push(rawStore);
-  const contentFence = new StoreContentFence();
-  const store = createMutationObservedStore(rawStore, createObservedStoreMutation(() => {}, contentFence));
-  const writes: string[] = [];
-  const info: string[] = [];
-  let defaultSubscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
-  const materialization = new RecoveryMaterializationOwner({
-    chain: () => { throw new Error('chain reads supplied below'); }, store: () => store,
-    isClosed: () => false, subscription: () => {
-      if (options.subscription) return options.subscription();
-      const onChainId = options.subscriptionId?.() ?? '323';
-      if (defaultSubscription.onChainId !== onChainId) defaultSubscription = { ...defaultSubscription, onChainId };
-      return defaultSubscription;
-    },
-    bindingGeneration: () => 0, isBindingGenerationCurrent: (_id, captured) => captured === 0,
-    track: () => {}, verifyBinding: async () => true,
-    persistSubscription: async () => { throw new Error('already bound'); },
-    bindSubscription: () => { throw new Error('already bound'); }, recordDrops: () => {}, reconcile: async () => {},
-  }).forOperation({ ctx, contextGraphId: CG, authority: {
-    coalescing: 'owner-only', admitVerifiedPage() {}, isRegisteredPublic: () => true,
-    authenticate: () => { throw new Error('materialization supplied below'); },
-  } });
-  const round = (
-    checkpointStore: MemorySyncCheckpointStore,
-    remotePeerId: string,
-    roundOptions: Pick<DurableSyncContext, 'graphRecovery' | 'settlementSliceDeadline'>,
-  ) => materialization.withHeldAssetFence(fence => runDurableSyncDetailed({
-    ctx,
-    remotePeerId,
-    contextGraphIds: [CG],
-    durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-    fetchSyncPages: (request) => fetchSyncPages({
-      ctx: request.ctx,
-      remotePeerId: request.remotePeerId,
-      contextGraphId: request.contextGraphId,
-      includeSharedMemory: false,
-      phase: request.phase,
-      graphUri: request.graphUri,
-      deadline: request.fetchContext.deadline,
-      syncPageTimeoutMs: 5_000,
-      syncRouterAttempts: 1,
-      syncPageRetryAttempts: 1,
-      syncPageSize: SYNC_PAGE_SIZE,
-      syncDeniedResponse: '#DENIED',
-      debugSyncProgress: false,
-      protocolSync: '/test/durable-held-restart',
-      checkpointStore,
-      forceFreshSession: request.forceFreshSession,
-      manifestDigest: request.manifestDigest,
-      manifestPrefixDigestAtOffset: request.manifestPrefixDigestAtOffset,
-      durableResumeBoundary: request.durableResumeBoundary,
-      shouldStopAfterPage: request.shouldStopAfterPage,
-      returnAcceptedPrefixOnRetryableTransportFailure: request.returnAcceptedPrefixOnRetryableTransportFailure,
-      requesterScope: request.requesterScope,
-      assetUals: request.exactAssetUals,
-      buildSyncRequest: peers[request.remotePeerId]!.buildSyncRequest,
-      send: peers[request.remotePeerId]!.send,
-      parseAndFilter: peers[request.remotePeerId]!.parseAndFilter,
-      logWarn: () => {},
-      logInfo: () => {},
-      logDebug: () => {},
-    }),
-    ...roundOptions,
-    storedPrefix: { read: heldGraphScopedAssetsReader(store), openScope: contentFence.openScope.bind(contentFence), assertCurrent: fence.assertCurrent },
-    processDurableBatchInWorker: async (...args) => { await options.beforeVerify?.(); return processBatch(...args); },
-    storeInsert: async ({ quads }) => { await options.beforeMetaStore?.(); await store.insert(quads); },
-    storeGraphScopedAsset: async ({ asset: verified }) => {
-      writes.push(verified.ual);
-      // As chain authentication leaves it: confirmed, written with its rows in one replacement.
-      const metadataQuads = overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
-        verified.metadataQuads,
-        { ual: verified.ual, metaGraph: verified.metaGraph, receivedAt: new Date(0) },
-        {
-          status: 'confirmed',
-          materializedVersion: { blockNumber: 1, txIndex: 0 },
-          confirmation: { kind: 'finalized-materialization' },
-        },
-      );
-      const result = await materializeVerifiedGraphScopedAsset({ store, asset: { ...verified, metadataQuads } });
-      await options.afterAssetStore?.();
-      return result;
-    },
-    deleteCheckpoint: (key) => deleteSyncPageCheckpoint(checkpointStore, key),
-    setCheckpoint: (key, checkpoint) => {
-      if (checkpoint.binding) {
-        checkpointStore.setManifestBoundOffset(key, checkpoint.offset, checkpoint.binding.manifestDigest, Date.now(),
-          checkpoint.binding.manifestPrefixDigest, checkpoint.binding.terminal, checkpoint.responderSessionOffset);
-      } else checkpointStore.set(key, checkpoint.offset, Date.now(), checkpoint.responderSessionOffset);
-    },
-    logInfo: (_ctx, message) => { info.push(message); },
-    logWarn: (_ctx, message) => { info.push(message); },
-    logDebug: () => {},
-  }));
-
-  /**
-   * A process lifetime: a new owner and a new checkpoint store. With
-   * `sliceSpent`, each round starts past its slice's soft deadline, as once
-   * held-copy checks used the slice: a DATA round stops at its first complete graph.
-   */
-  const start = (startOptions: { sliceSpent?: boolean | (() => boolean); isRunning?: () => boolean; peerIds?: () => string[]; afterSlice?: () => void } = {}) => {
-    const checkpointStore = new MemorySyncCheckpointStore();
-    const dependencies: DurableRecoveryRunnerDependencies = {
-      checkpointStore,
-      isRunning: startOptions.isRunning ?? (() => true),
-      resolvePreferredPeerId: async () => undefined,
-      connectRequestedPeer: async () => {},
-      primeConnections: async () => {},
-      liveConnectionPeerIds: startOptions.peerIds ?? (() => Object.keys(peers)),
-      admitPeer: async () => true,
-      isPrivateContextGraph: async () => false,
-      orderPeerIds: (peerIds) => [...peerIds],
-      isSyncCapable: async () => true,
-      executeSlice: async (peerId, durableMetaContinuation: DurableMetaContinuation, _holdings, durableResumeBoundary) => {
-        const detailed = await round(checkpointStore, peerId, {
-          graphRecovery: { meta: durableMetaContinuation, holdings: {}, boundary: durableResumeBoundary },
-          settlementSliceDeadline: (typeof startOptions.sliceSpent === 'function' ? startOptions.sliceSpent() : startOptions.sliceSpent) ? Date.now() : undefined,
-        });
-        startOptions.afterSlice?.();
-        return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
-      },
-      logDebug: () => {},
-      logInfo: (message) => { info.push(message); },
-      logWarn: (message) => { info.push(message); },
-    };
-    const runner = new DurableRecoveryRunner();
-    return {
-      checkpointStore,
-      recover: () => runner.run({ contextGraphId: CG, dependencies }),
-    };
-  };
-  return { store, writes, info, start };
-}
-
-const generation = (version3 = '1') => [1, 2, 3, 4, 5, 6].map((n) => asset(n, n === 3 ? version3 : '1'));
-const rowsOf = (fixtures: readonly AssetFixture[]) => fixtures.reduce((rows, fixture) => rows + fixture.payload.length, 0);
+import { deleteSyncPageCheckpoint } from '../src/sync/requester/page-fetch.js';
+import type { AssetFixture } from './_helpers/durable-recovery-store.js';
 
 describe('cross-peer recovery keeps the actually stored prefix', () => {
-  it.each(['clean', 'deleted', 'corrupted', 'during-verification', 'during-store'].flatMap(change => [false, true].map(samePeer => ({ change, samePeer }))))('checks a live checkpoint after $change (same peer: $samePeer)', async ({ change, samePeer }) => {
+  it.each(['clean', 'deleted', 'corrupted', 'metadata', 'during-verification', 'during-store'].flatMap(change => [false, true].map(samePeer => ({ change, samePeer }))))('checks a live checkpoint after $change (same peer: $samePeer)', async ({ change, samePeer }) => {
     const fixtures = generation();
     const a = servingPeer(fixtures), b = servingPeer(fixtures);
     let running = true, first = true, activePeer = PEER, changed = false;
@@ -309,11 +20,11 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
       changed = true;
       await core.store.dropGraph(prefix.graph);
     };
-    const core = node({ [PEER]: a, [SECOND_PEER]: b }, {
+    const core = node({ [PEER]: a, [SECOND_PEER]: b }, { holdingsShortcut: false,
       beforeVerify: change === 'during-verification' ? mutate : undefined,
       afterAssetStore: change === 'during-store' ? mutate : undefined,
     });
-    const lifetime = core.start({ sliceSpent: () => first,
+    const lifetime = core.start({ exactRequests: false, sliceSpent: () => first,
       isRunning: () => running, peerIds: () => [activePeer],
       afterSlice: () => { if (first) running = false; },
     });
@@ -331,6 +42,16 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
       await core.store.delete([prefix.payload[0]!]);
       await core.store.insert([{ ...prefix.payload[0]!, object: '"tampered"' }]);
     }
+    if (change === 'metadata') {
+      const root = prefix.meta.find(q => q.predicate === 'http://dkg.io/ontology/merkleRoot')!;
+      const wrong = { ...root, object: root.object.replace(/[a-f0-9]{64}/i, 'f'.repeat(64)) };
+      expect(wrong.object).not.toBe(root.object);
+      await core.store.delete([root]); await core.store.insert([wrong]);
+      expect(await core.store.countQuads(prefix.graph)).toBe(prefix.payload.length);
+      const held = await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+        descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors });
+      expect(held.has(prefix.ual)).toBe(false);
+    }
     // Keep the original checkpoint and owner alive; only the serving peer changes.
     expect(lifetime.checkpointStore.get(sourceKey)).toEqual(checkpoint);
     first = false; running = true; activePeer = samePeer ? PEER : SECOND_PEER;
@@ -346,6 +67,75 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
     // A new peer primes its generation at offset zero, then resumes. The stored
     // prefix must not be materialized again unless its actual content is invalid.
     expect(core.writes.filter(ual => ual === prefix.ual)).toHaveLength(change === 'clean' ? 1 : 2);
+    const root = prefix.meta.find(q => q.predicate === 'http://dkg.io/ontology/merkleRoot')!;
+    expect(await core.store.query(`ASK { GRAPH <${root.graph}> { <${root.subject}> <${root.predicate}> ${root.object} } }`))
+      .toEqual({ type: 'boolean', value: true });
   });
 });
 
+
+
+describe('resumed-prefix edge cases', () => {
+  it('settles mixed public/private manifests without rewriting the proven private prefix', async () => {
+    const fixtures = [asset(1), asset(2, '1', true), asset(3), asset(4)];
+    const core = node(servingPeer(fixtures), { holdingsShortcut: false });
+    let rounds = 0;
+    const recovered = await core.start({ exactRequests: false, sliceSpent: true, isRunning: () => rounds < 12, afterSlice: () => { rounds++; } }).recover();
+    expect(recovered.outcome).toBe('terminal');
+    expect(core.writes).toEqual(fixtures.map(f => f.ual));
+    expect(await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+      descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors }))
+      .toEqual(new Set(fixtures.map(f => f.ual)));
+  });
+
+  it.each([false, true])('repairs ordinary tokenless resumes (proof unavailable: %s)', async unavailable => {
+    const fixtures = generation(); let disableProof = false;
+    const core = node(servingPeer(fixtures), { disablePrefixProof: () => disableProof });
+    const checkpoints = new MemorySyncCheckpointStore();
+    const first = await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() });
+    expect(first.result.complete).toBe(false);
+    const key = getSyncCheckpointKey(PEER, CG, false, 'data');
+    const saved = checkpoints.get(key)!;
+    expect(saved.offset).toBeGreaterThan(0);
+    const prefix = fixtures.find(f => core.writes.includes(f.ual))!;
+    await core.store.dropGraph(prefix.graph);
+    deleteSyncPageCheckpoint(checkpoints, key);
+    checkpoints.setManifestBoundOffset(key, saved.offset, saved.manifestDigest!, saved.updatedAtMs, saved.manifestPrefixDigest);
+    disableProof = unavailable;
+    let next = await core.round(checkpoints, PEER, {});
+    if (!next.result.complete) {
+      expect(checkpoints.get(key)?.terminal).not.toBe(true);
+      next = await core.round(checkpoints, PEER, {});
+    }
+    expect(next.result.complete).toBe(true);
+    expect(await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+      descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors }))
+      .toEqual(new Set(fixtures.map(f => f.ual)));
+  });
+
+  it.each(['generation', 'subscription'])('refuses prefix reuse after %s ownership changes', async change => {
+    const fixtures = generation(); let first = true, running = true, bindingGeneration = 0;
+    let subscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
+    const core = node(servingPeer(fixtures), { holdingsShortcut: false,
+      bindingGeneration: () => bindingGeneration, subscription: () => subscription,
+      beforeVerify: async () => {
+        if (first) return;
+        if (change === 'generation') bindingGeneration++;
+        else subscription = { ...subscription };
+        running = false;
+      },
+    });
+    const lifetime = core.start({ exactRequests: false, sliceSpent: () => first, isRunning: () => running,
+      afterSlice: () => { if (first) running = false; } });
+    await lifetime.recover();
+    const before = core.writes.length;
+    expect(before).toBeGreaterThan(0);
+    first = false; running = true;
+    const next = await lifetime.recover();
+    expect(next.result.complete).toBe(false);
+    expect(next.outcome).not.toBe('terminal');
+    expect(core.writes).toHaveLength(before);
+    expect(lifetime.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).not.toBe(true);
+    expect(classifyDurableProgress(next.result, { complete: next.result.complete }).completedReadinessCleanly).toBe(false);
+  });
+});

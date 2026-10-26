@@ -876,7 +876,7 @@ async function runDurableSyncWithBudget(
             offset,
           )?.prefixDigest
           : undefined,
-        preparedMeta.forceFreshUnboundDataSession,
+        preparedMeta.forceFreshUnboundDataSession || (graphScopedManifest !== null && !context.storedPrefix),
         // A full-graph round holds what it fetched until it is verified and
         // stored, so it ends at a checkpointable graph within a row/heap budget.
         // A caller that needs one complete snapshot from row 0 keeps one round.
@@ -1035,7 +1035,7 @@ async function runDurableSyncWithBudget(
         }
       }
 
-      if (durableMetaContinuation && graphScopedManifest && dataResult.resumedFromOffset > 0) {
+      if (graphScopedManifest && dataResult.resumedFromOffset > 0) {
         rejectPrefix = () => {
           deleteCheckpoint(dataResult.checkpointKey);
           deleteCheckpoint(metaResult.checkpointKey);
@@ -1257,6 +1257,10 @@ async function runDurableSyncWithBudget(
         ? contextGraphBudget.createGraphScopedAuthenticationDeadline()
         : deadline;
       for (const [assetIndex, asset] of partitioned.assets.entries()) {
+        // Bounded verification includes private-only assets in every round.
+        // The proven prefix already owns these copies; rewriting them would
+        // invalidate its content watch without adding any settled work.
+        if (prefixProof?.covers(asset.ual)) continue;
         if (
           assetIndex > 0
           && mayYieldAtSettledManifestBoundary

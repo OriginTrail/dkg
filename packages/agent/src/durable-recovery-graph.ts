@@ -154,8 +154,12 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       case 'unsupported-before-start': return runDurableSyncDetailed(durableContext);
     }
   }
-  if (!graphRecovery || onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
+  if (onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
+  if (!host.heldStore && !graphRecovery) return { result: await runDurableSync(durableContext) };
+  if (!host.heldStore) return runDurableSyncDetailed({ ...durableContext, graphRecovery });
   return materialization.withHeldAssetFence(fence => {
+    const storedPrefix = host.heldStore && { read: host.heldStore.read, openScope: host.heldStore.openScope, assertCurrent: fence.assertCurrent };
+    if (!graphRecovery) return runDurableSyncDetailed({ ...durableContext, storedPrefix });
     // An unbound subscription must authenticate and persist its numeric binding
     // through the existing materialization owner before it can skip DATA.
     const reader = fence.binding().onChainId === undefined ? undefined : currentHeldGraphScopedAssetsReader({
@@ -164,7 +168,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
     });
     return runDurableSyncDetailed({ ...durableContext,
-      storedPrefix: host.heldStore && { read: host.heldStore.read, openScope: host.heldStore.openScope, assertCurrent: fence.assertCurrent },
+      storedPrefix,
       graphRecovery: { ...graphRecovery,
       held: reader && host.heldStore ? { reader, assertCurrent: fence.assertCurrent,
         withStoreFence: host.heldStore.withScope } : undefined,
