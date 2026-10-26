@@ -546,6 +546,38 @@ describe('the owner\'s notice to a peer that becomes a follower after a change',
       .toEqual([{ told: notice(null, 'op-b'), recipients: [MEMBER_1] }]);
   });
 
+  it('keeps the latest different author through repeated changes at the same timestamp', async () => {
+    vi.useFakeTimers();
+    const { owner, deliveries } = restartedOwner({ minIntervalMs: 0 });
+    owner.afterRemoteChange(change(MEMBER_1, 'op-a'));
+    owner.afterRemoteChange(change(MEMBER_2, 'op-b1'));
+    owner.afterRemoteChange(change(MEMBER_2, 'op-b2', 'drafts'));
+    owner.afterRemoteChange(change(MEMBER_3, 'op-c1'));
+    owner.afterRemoteChange(change(MEMBER_3, 'op-c2', null));
+    await owner.settled();
+
+    owner.afterNewFollower(CG, MEMBER_3);
+    await owner.settled();
+    owner.afterNewFollower(CG, MEMBER_2);
+    await owner.settled();
+
+    expect(deliveries.map(({ notice: told, recipients }) => ({ told, recipients }))).toEqual([
+      { told: notice('drafts', 'op-b2'), recipients: [MEMBER_3] },
+      { told: notice(null, 'op-c2'), recipients: [MEMBER_2] },
+    ]);
+  });
+
+  it('does not revive an expired other-author change when the follower writes again', async () => {
+    vi.useFakeTimers();
+    const { owner, deliveries } = restartedOwner();
+    owner.afterRemoteChange(change(MEMBER_2, 'old'));
+    await vi.advanceTimersByTimeAsync(SWM_CHANGE_NOTICE_NEW_FOLLOWER_WINDOW_MS + 1);
+    owner.afterRemoteChange(change(MEMBER_1, 'current'));
+    owner.afterNewFollower(CG, MEMBER_1);
+    await owner.settled();
+    expect(deliveries).toEqual([]);
+  });
+
   it('tells it nothing of its own change, of a change older than the window, of another graph, or of a graph it does not own', async () => {
     vi.useFakeTimers();
     const own = restartedOwner();
@@ -588,6 +620,41 @@ describe('the owner\'s notice to a peer that becomes a follower after a change',
     expect(deliveries.map(({ at }) => at - started)).toEqual([0, 3_000, 18_000]);
     expect(log).toHaveBeenCalledWith(
       `SWM change notice for "${CG}" sub-graph "notes" (op-1) to new follower ${MEMBER_1.slice(-8)}: reached on a resend`,
+    );
+  });
+
+  it('ends a new follower resend wait on shutdown without another send', async () => {
+    vi.useFakeTimers();
+    const { owner, deliveries } = restartedOwner({
+      deliver: async (delivered, recipients) => {
+        deliveries.push({ at: Date.now(), notice: delivered, recipients });
+        return recipients.map((peerId) => ({ peerId, outcome: 'timeout' }));
+      },
+    });
+    owner.afterRemoteChange(change(MEMBER_2, 'op-1'));
+    owner.afterNewFollower(CG, MEMBER_1);
+    await vi.advanceTimersByTimeAsync(0);
+    owner.stop();
+    await owner.settled();
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(deliveries).toHaveLength(1);
+  });
+
+  it('does not retry a new follower that refuses the protocol', async () => {
+    vi.useFakeTimers();
+    const { owner, deliveries, log } = restartedOwner({
+      deliver: async (delivered, recipients) => {
+        deliveries.push({ at: Date.now(), notice: delivered, recipients });
+        return recipients.map((peerId) => ({ peerId, outcome: 'unsupported' }));
+      },
+    });
+    owner.afterRemoteChange(change(MEMBER_2, 'op-1'));
+    owner.afterNewFollower(CG, MEMBER_1);
+    await vi.advanceTimersByTimeAsync(60_000);
+    await owner.settled();
+    expect(deliveries).toHaveLength(1);
+    expect(log).toHaveBeenCalledWith(
+      `SWM change notice for "${CG}" sub-graph "notes" (op-1) to new follower ${MEMBER_1.slice(-8)}: not reached (unsupported)`,
     );
   });
 
