@@ -351,13 +351,14 @@ test('a report that must stay in shared memory fails at the first reading that m
   assert.match(dipped.text, /: MISSING from (the shared-working-memory view of reports|the cross-partition read) 0 s after the start of the promotions, though it must stay in shared memory$/);
   // Missing at the first reading and present later: a failure too.
   assert.equal((await kept(age => age >= 100)).outcome, 'fail');
-  // Missing at the check after the watch was closed.
-  let closedAt = Infinity;
-  const stub = wholeReportNode(cg, () => Date.now() < closedAt);
+  // Missing only at the final confirmation: an in-flight periodic read must
+  // still see the report even if it finishes after close().
+  let pair;
+  const stub = wholeReportNode(cg, () => !pair.confirm);
   const io = reportsOver(stub.api);
-  const handle = io.watch(io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound: Infinity }));
-  await new Promise(resolve => setTimeout(resolve, 200));
-  closedAt = Date.now();
+  [pair] = io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound: Infinity });
+  const handle = io.watch([pair]);
+  await handle.readOnce();
   handle.close();
   await handle.done;
   assert.match(pairOutcome(handle.pairs[0], { boundMs: 600 }).text, /: in shared memory at every reading, then MISSING from the shared-working-memory view of reports and from the cross-partition read when the 0 s had passed$/);
