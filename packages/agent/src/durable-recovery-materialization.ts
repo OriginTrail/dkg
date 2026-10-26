@@ -36,7 +36,6 @@ export interface RecoveryMaterializationScope {
 }
 export interface RecoveryMaterialization {
   withHeldAssetFence<T>(operation: (fence: {
-    binding(): Readonly<{ onChainId?: string; generation: number }>;
     assertCurrent(): void;
   }) => Promise<T>, signal?: AbortSignal): Promise<T>;
   readonly authenticateChallengePinnedAsset: ChallengeExactAssetFetchContext['authenticateChallengePinnedAsset'];
@@ -91,13 +90,7 @@ export class RecoveryMaterializationOwner {
         bindingChangedError: () => asSyncFetchAbortError(new Error(`Subscription for ${contextGraphId} changed during held recovery`)),
         operation: control => {
           const assertCurrent = () => { control.adoptEquivalentSubscription(); control.assertCurrent(); };
-          return operation({
-            assertCurrent,
-            binding: () => {
-              assertCurrent();
-              return { onChainId: control.subscription?.onChainId, generation: ports.bindingGeneration(contextGraphId) };
-            },
-          });
+          return operation({ assertCurrent });
         },
       }),
       authenticateChallengePinnedAsset: ({

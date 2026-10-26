@@ -142,6 +142,7 @@ function createTwoRoundHarness(
   const parsedResponses = new Map<string, Quad[]>();
   const dataRequests: DataRequestEvidence[] = [];
   const storedAssetUals: string[] = [];
+  const heldAssetUals = new Set<string>();
 
   const fetch = async (request: DurableSyncFetchRequest): Promise<SyncPageResult> => fetchSyncPages({
     ctx: request.ctx,
@@ -214,7 +215,7 @@ function createTwoRoundHarness(
       remotePeerId,
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      storedPrefix: { read: async () => new Set(storedAssetUals), assertCurrent: () => {},
+      storedPrefix: { read: async () => new Set(heldAssetUals), assertCurrent: () => {},
         openScope: scope => new StoreContentFence().openScope(scope) },
       fetchSyncPages: fetch,
       durableMetaContinuation, durableResumeBoundary,
@@ -224,7 +225,7 @@ function createTwoRoundHarness(
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
       storeGraphScopedAsset: async (request: DurableSyncGraphScopedStoreRequest) => {
-        storedAssetUals.push(request.asset.ual);
+        storedAssetUals.push(request.asset.ual); heldAssetUals.add(request.asset.ual);
         return 'applied';
       },
       deleteCheckpoint: (key) => deleteSyncPageCheckpoint(checkpointStore, key),
@@ -253,7 +254,7 @@ function createTwoRoundHarness(
     });
   };
 
-  return { checkpointStore, dataRequests, storedAssetUals, run };
+  return { checkpointStore, dataRequests, storedAssetUals, heldAssetUals, run };
 }
 
 function makeScenario(
@@ -487,7 +488,7 @@ describe('manifest-bound durable DATA continuation', () => {
     const manifest = createGraphScopedDurableManifestPlan(meta, contextGraphId)!;
     const offset = x[0]!.payload.length + x[1]!.payload.length;
     // Model the second assertion already stored by the source peer.
-    harness.storedAssetUals.push(x[1]!.ual);
+    harness.heldAssetUals.add(x[1]!.ual);
     const sourceKey = getSyncCheckpointKey('source-peer', contextGraphId, false, 'data');
     harness.checkpointStore.setManifestBoundOffset(sourceKey, offset, manifest.manifestDigest, Date.now(),
       graphScopedDurableManifestPrefixAtOffset(manifest, offset)!.prefixDigest);

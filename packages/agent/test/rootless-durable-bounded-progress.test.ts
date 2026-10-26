@@ -1,3 +1,4 @@
+import { StoreContentFence } from '../src/internal/store-content-fence.js';
 import { describe, expect, it } from 'vitest';
 import {
   MemoryLayer,
@@ -90,6 +91,12 @@ function manifest(meta: readonly Quad[]) {
   const plan = createGraphScopedDurableManifestPlan(meta, CONTEXT_GRAPH_ID);
   if (!plan) throw new Error('test fixture did not produce a graph-scoped manifest');
   return plan;
+}
+
+/** The fixture's previously materialized copies, independent of this round's writes. */
+function storedPrefix(fixtures: readonly AssetFixture[]) {
+  const fence = new StoreContentFence();
+  return { read: async () => new Set(fixtures.map(f => f.ual)), assertCurrent: () => {}, openScope: fence.openScope.bind(fence) };
 }
 
 function pageResult(
@@ -390,7 +397,7 @@ describe('bounded rootless durable progress', () => {
     expect(checkpoints.some(([key]) => key === `${CONTEXT_GRAPH_ID}:meta`)).toBe(false);
     expect(freshSessions).toEqual([
       ['meta', true],
-      ['data', false],
+      ['data', true],
     ]);
     expect(materialized.flatMap((entry) => entry.dataQuads)).toEqual([
       ...fixtures[0]!.payload,
@@ -482,6 +489,7 @@ describe('bounded rootless durable progress', () => {
     const continuationMaterialized: string[] = [];
     const continuationCheckpoints: Array<{ offset: number; terminal?: boolean }> = [];
     const continuationSummary = await runDurableSync({
+      storedPrefix: storedPrefix(selected.slice(0, 1)),
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
@@ -915,6 +923,7 @@ describe('bounded rootless durable progress', () => {
     const checkpoints: Array<{ offset: number; terminal?: boolean }> = [];
 
     const summary = await runDurableSync({
+      storedPrefix: storedPrefix(fixtures.slice(0, 2)),
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],

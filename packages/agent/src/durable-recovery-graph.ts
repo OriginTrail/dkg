@@ -153,7 +153,9 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       case 'unsupported-before-start': return runDurableSyncDetailed(durableContext);
     }
   }
-  if (!durableMetaContinuation || onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
+  if (onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
+  if (!host.heldStore && !durableMetaContinuation) return { result: await runDurableSync(durableContext) };
+  if (!host.heldStore) return runDurableSyncDetailed({ ...durableContext, durableMetaContinuation, durableResumeBoundary });
   return materialization.withHeldAssetFence(fence => runDurableSyncDetailed({
     ...durableContext, durableMetaContinuation, durableResumeBoundary,
     storedPrefix: host.heldStore && { read: host.heldStore.read, openScope: host.heldStore.openScope, assertCurrent: fence.assertCurrent },

@@ -55,16 +55,17 @@ interface AssetFixture {
   readonly rootHex: string;
 }
 
-function asset(kaNumber: number, version = '1'): AssetFixture {
+function asset(kaNumber: number, version = '1', privateOnly = false): AssetFixture {
   const ual = `did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ef/${kaNumber}`;
   const graph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, version));
-  const payload = Array.from({ length: 4 + kaNumber }, (_, index): Quad => ({
+  const privateRoot = privateOnly ? new Uint8Array(32).fill(0x66) : undefined;
+  const payload = Array.from({ length: privateOnly ? 0 : 4 + kaNumber }, (_, index): Quad => ({
     subject: `urn:held-restart:${kaNumber}:${index}`,
     predicate: 'urn:held-restart:value',
     object: `"v${version}-${index}"`,
     graph,
   }));
-  const merkleRoot = computeFlatKCRootV10(payload, []);
+  const merkleRoot = computeFlatKCRootV10(payload, privateRoot ? [privateRoot] : []);
   const meta = generateGraphKnowledgeAssetMetadata({
     ual,
     contextGraphId: CG,
@@ -74,7 +75,8 @@ function asset(kaNumber: number, version = '1'): AssetFixture {
     timestamp: new Date(0),
     assertionVersion: version,
     publicTripleCount: payload.length,
-    privateTripleCount: 0,
+    privateTripleCount: privateRoot ? 1 : 0,
+    ...(privateRoot ? { privateMerkleRoot: privateRoot } : {}),
     assertionGraph: graph,
   }, { status: 'tentative' });
   return { ual, graph, payload, meta, version, rootHex: Buffer.from(merkleRoot).toString('hex') };
@@ -156,10 +158,10 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { subscriptionId?: () => string; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
+  options: { subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
-  
+
   const rawStore = new OxigraphStore();
   stores.push(rawStore);
   const contentFence = new StoreContentFence();
@@ -175,7 +177,7 @@ function node(
       if (defaultSubscription.onChainId !== onChainId) defaultSubscription = { ...defaultSubscription, onChainId };
       return defaultSubscription;
     },
-    bindingGeneration: () => 0, isBindingGenerationCurrent: (_id, captured) => captured === 0,
+    bindingGeneration: () => options.bindingGeneration?.() ?? 0, isBindingGenerationCurrent: (_id, captured) => captured === (options.bindingGeneration?.() ?? 0),
     track: () => {}, verifyBinding: async () => true,
     persistSubscription: async () => { throw new Error('already bound'); },
     bindSubscription: () => { throw new Error('already bound'); }, recordDrops: () => {}, reconcile: async () => {},
@@ -224,7 +226,7 @@ function node(
       logDebug: () => {},
     }),
     ...roundOptions,
-    storedPrefix: { read: heldGraphScopedAssetsReader(store), openScope: contentFence.openScope.bind(contentFence), assertCurrent: fence.assertCurrent },
+    storedPrefix: options.disablePrefixProof?.() ? undefined : { read: heldGraphScopedAssetsReader(store), openScope: contentFence.openScope.bind(contentFence), assertCurrent: fence.assertCurrent },
     processDurableBatchInWorker: async (...args) => { await options.beforeVerify?.(); return processBatch(...args); },
     storeInsert: async ({ quads }) => { await options.beforeMetaStore?.(); await store.insert(quads); },
     storeGraphScopedAsset: async ({ asset: verified }) => {
@@ -291,14 +293,14 @@ function node(
       recover: () => runner.run({ contextGraphId: CG, dependencies }),
     };
   };
-  return { store, writes, info, start };
+  return { store, writes, info, start, round };
 }
 
 const generation = (version3 = '1') => [1, 2, 3, 4, 5, 6].map((n) => asset(n, n === 3 ? version3 : '1'));
 const rowsOf = (fixtures: readonly AssetFixture[]) => fixtures.reduce((rows, fixture) => rows + fixture.payload.length, 0);
 
 describe('cross-peer recovery keeps the actually stored prefix', () => {
-  it.each(['clean', 'deleted', 'corrupted', 'during-verification', 'during-store'].flatMap(change => [false, true].map(samePeer => ({ change, samePeer }))))('checks a live checkpoint after $change (same peer: $samePeer)', async ({ change, samePeer }) => {
+  it.each(['clean', 'deleted', 'corrupted', 'metadata', 'during-verification', 'during-store'].flatMap(change => [false, true].map(samePeer => ({ change, samePeer }))))('checks a live checkpoint after $change (same peer: $samePeer)', async ({ change, samePeer }) => {
     const fixtures = generation();
     const a = servingPeer(fixtures), b = servingPeer(fixtures);
     let running = true, first = true, activePeer = PEER, changed = false;
@@ -330,6 +332,16 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
       await core.store.delete([prefix.payload[0]!]);
       await core.store.insert([{ ...prefix.payload[0]!, object: '"tampered"' }]);
     }
+    if (change === 'metadata') {
+      const root = prefix.meta.find(q => q.predicate === 'http://dkg.io/ontology/merkleRoot')!;
+      const wrong = { ...root, object: root.object.replace(/[a-f0-9]{64}/i, 'f'.repeat(64)) };
+      expect(wrong.object).not.toBe(root.object);
+      await core.store.delete([root]); await core.store.insert([wrong]);
+      expect(await core.store.countQuads(prefix.graph)).toBe(prefix.payload.length);
+      const held = await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+        descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors });
+      expect(held.has(prefix.ual)).toBe(false);
+    }
     // Keep the original checkpoint and owner alive; only the serving peer changes.
     expect(lifetime.checkpointStore.get(sourceKey)).toEqual(checkpoint);
     first = false; running = true; activePeer = samePeer ? PEER : SECOND_PEER;
@@ -345,6 +357,75 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
     // A new peer primes its generation at offset zero, then resumes. The stored
     // prefix must not be materialized again unless its actual content is invalid.
     expect(core.writes.filter(ual => ual === prefix.ual)).toHaveLength(change === 'clean' ? 1 : 2);
+    const root = prefix.meta.find(q => q.predicate === 'http://dkg.io/ontology/merkleRoot')!;
+    expect(await core.store.query(`ASK { GRAPH <${root.graph}> { <${root.subject}> <${root.predicate}> ${root.object} } }`))
+      .toEqual({ type: 'boolean', value: true });
   });
 });
 
+
+
+describe('resumed-prefix edge cases', () => {
+  it('settles mixed public/private manifests without rewriting the proven private prefix', async () => {
+    const fixtures = [asset(1), asset(2, '1', true), asset(3), asset(4)];
+    const core = node(servingPeer(fixtures));
+    let rounds = 0;
+    const recovered = await core.start({ sliceSpent: true, isRunning: () => rounds < 12, afterSlice: () => { rounds++; } }).recover();
+    expect(recovered.outcome).toBe('terminal');
+    expect(core.writes).toEqual(fixtures.map(f => f.ual));
+    expect(await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+      descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors }))
+      .toEqual(new Set(fixtures.map(f => f.ual)));
+  });
+
+  it.each([false, true])('repairs ordinary tokenless resumes (proof unavailable: %s)', async unavailable => {
+    const fixtures = generation(); let disableProof = false;
+    const core = node(servingPeer(fixtures), { disablePrefixProof: () => disableProof });
+    const checkpoints = new MemorySyncCheckpointStore();
+    const first = await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() });
+    expect(first.result.complete).toBe(false);
+    const key = getSyncCheckpointKey(PEER, CG, false, 'data');
+    const saved = checkpoints.get(key)!;
+    expect(saved.offset).toBeGreaterThan(0);
+    const prefix = fixtures.find(f => core.writes.includes(f.ual))!;
+    await core.store.dropGraph(prefix.graph);
+    deleteSyncPageCheckpoint(checkpoints, key);
+    checkpoints.setManifestBoundOffset(key, saved.offset, saved.manifestDigest!, saved.updatedAtMs, saved.manifestPrefixDigest);
+    disableProof = unavailable;
+    let next = await core.round(checkpoints, PEER, {});
+    if (!next.result.complete) {
+      expect(checkpoints.get(key)?.terminal).not.toBe(true);
+      next = await core.round(checkpoints, PEER, {});
+    }
+    expect(next.result.complete).toBe(true);
+    expect(await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+      descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors }))
+      .toEqual(new Set(fixtures.map(f => f.ual)));
+  });
+
+  it.each(['generation', 'subscription'])('refuses prefix reuse after %s ownership changes', async change => {
+    const fixtures = generation(); let first = true, running = true, bindingGeneration = 0;
+    let subscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
+    const core = node(servingPeer(fixtures), {
+      bindingGeneration: () => bindingGeneration, subscription: () => subscription,
+      beforeVerify: async () => {
+        if (first) return;
+        if (change === 'generation') bindingGeneration++;
+        else subscription = { ...subscription };
+        running = false;
+      },
+    });
+    const lifetime = core.start({ sliceSpent: () => first, isRunning: () => running,
+      afterSlice: () => { if (first) running = false; } });
+    await lifetime.recover();
+    const before = core.writes.length;
+    expect(before).toBeGreaterThan(0);
+    first = false; running = true;
+    const next = await lifetime.recover();
+    expect(next.result.complete).toBe(false);
+    expect(next.outcome).not.toBe('terminal');
+    expect(core.writes).toHaveLength(before);
+    expect(lifetime.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).not.toBe(true);
+    expect(classifyDurableProgress(next.result, { complete: next.result.complete }).completedReadinessCleanly).toBe(false);
+  });
+});

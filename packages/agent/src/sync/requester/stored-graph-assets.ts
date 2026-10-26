@@ -4,7 +4,6 @@ import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphK
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
-import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
 const DKG_NS = 'http://dkg.io/ontology/';
 
@@ -37,7 +36,6 @@ export async function readHeldGraphScopedAssets(
   store: TripleStore,
   request: HeldGraphScopedAssetsRequest,
   chunkSize = HOLDINGS_READ_CHUNK,
-  onVerified?: (asset: VerifiedGraphScopedAsset) => Promise<void>,
 ): Promise<Set<string>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
   const predicates = ENVELOPE_PREDICATES.map((predicate) => `<${predicate}>`).join(' ');
@@ -79,15 +77,7 @@ export async function readHeldGraphScopedAssets(
       });
       if (content.status !== 'verified') continue;
       held.add(descriptor.ual);
-      await onVerified?.({
-        contextGraphId: request.contextGraphId, ual: descriptor.ual,
-        assertionVersion: BigInt(descriptor.assertionVersion), assertionGraph: descriptor.assertionGraph,
-        subGraphName: descriptor.subGraphName, merkleRootHex: descriptor.claimedRootHex,
-        metaGraph, dataQuads: content.quads,
-        metadataQuads: (rowsBySubject.get(descriptor.ual) ?? []).map(row => ({
-          ...row, subject: descriptor.ual, graph: metaGraph,
-        })),
-      });
+
     }
   }
   return held;

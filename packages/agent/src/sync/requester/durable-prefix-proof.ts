@@ -18,7 +18,7 @@ export async function proveStoredDurablePrefix(
   manifest: GraphScopedDurableManifestPlan,
   offset: number,
   signal?: AbortSignal,
-): Promise<{ assertCurrent(): void; close(): void }> {
+): Promise<{ assertCurrent(): void; close(): void; covers(ual: string): boolean }> {
   const prefix = graphScopedDurableManifestPrefixAtOffset(manifest, offset);
   if (!prefix || !capability) throw new Error('Cannot prove stored durable prefix');
   const descriptors = manifest.descriptors.slice(0, prefix.descriptorCount);
@@ -33,6 +33,6 @@ export async function proveStoredDurablePrefix(
     const held = await capability.read({ contextGraphId: manifest.contextGraphId, descriptors, signal });
     assertCurrent();
     if (descriptors.some(descriptor => !held.has(descriptor.ual))) throw new Error('Stored durable prefix is missing or corrupt');
-    return { assertCurrent, close: proof.close };
+    return { assertCurrent, close: proof.close, covers: ual => held.has(ual) };
   } catch (error) { proof.close(); throw error; }
 }

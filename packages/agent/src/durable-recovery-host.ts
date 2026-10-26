@@ -57,9 +57,7 @@ export interface DurableRecoveryHost {
   /** Which assets of a verified generation the store holds; a graph-owned round skips their DATA. */
   readonly heldStore?: {
     readonly read: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
-    readonly withScope: StoreContentFence['withScope'];
     readonly openScope: StoreContentFence['openScope'];
-    reconcile?(request: HeldGraphScopedAssetsRequest, held: ReadonlySet<string>, ctx: OperationContext): Promise<void>;
   };
   materialization(scope: RecoveryMaterializationScope): RecoveryMaterialization;
   resolveOrdinaryAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;
