@@ -57,7 +57,7 @@ export class AsyncLiftWalletPersistence {
     await deleteByPatternWithoutCount(this.store, {
       subject: walletLockSubject(walletId),
       graph: this.walletLockGraphUri,
-    });
+    }, { source: 'publisher.asyncLift.walletLock.delete' });
   }
 
   async readMetadata(walletId: string): Promise<WalletLockSnapshot | null> {

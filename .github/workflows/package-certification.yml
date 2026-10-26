@@ -1,8 +1,10 @@
 name: Installed package certification
 
-# Opt-in candidate rehearsal, with no publishing credentials or protected-branch
-# authority. This is not a replacement for the trusted planner's acceptance jobs.
+# Certify every commit pushed to main, with optional manual candidate rehearsals.
+# No publishing credentials or protected-branch authority are granted.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       candidate:
@@ -17,14 +19,14 @@ jobs:
   certify:
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      CANDIDATE: ${{ github.event_name == 'push' && github.sha || inputs.candidate }}
     steps:
-      - name: Validate requested source identity
-        env:
-          CANDIDATE: ${{ inputs.candidate }}
+      - name: Validate certification source identity
         run: '[[ "$CANDIDATE" =~ ^[a-f0-9]{40}$ ]]'
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
-          ref: ${{ inputs.candidate }}
+          ref: ${{ env.CANDIDATE }}
           fetch-depth: 0
           persist-credentials: false
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
@@ -37,16 +39,12 @@ jobs:
           echo "CANDIDATE_VERSION=$VERSION" >> "$GITHUB_ENV"
           node scripts/release-packages.mjs prepare-packages --version "$VERSION" --out "$RUNNER_TEMP/package-set"
       - name: Certify both actual npm layouts
-        env:
-          CANDIDATE: ${{ inputs.candidate }}
         run: |
           pnpm release:certify-install --bundle "$RUNNER_TEMP/package-set" --out "$RUNNER_TEMP/package-attempt" \
             --commit "$CANDIDATE" --version "$CANDIDATE_VERSION" --profile installed-local-rdf-v1
           pnpm release:verify-package-certificate --bundle "$RUNNER_TEMP/package-set" --certificate "$RUNNER_TEMP/package-attempt/receipt.json" \
             --commit "$CANDIDATE" --version "$CANDIDATE_VERSION" --profile installed-local-rdf-v1
       - name: Prove missing installed asset fails
-        env:
-          CANDIDATE: ${{ inputs.candidate }}
         run: |
           if pnpm release:certify-install --bundle "$RUNNER_TEMP/package-set" --out "$RUNNER_TEMP/package-negative" \
             --commit "$CANDIDATE" --version "$CANDIDATE_VERSION" --profile installed-local-rdf-v1 --negative-control missing-ui; then
@@ -66,7 +64,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: installed-packages-${{ inputs.candidate }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: installed-packages-${{ env.CANDIDATE }}-${{ github.run_id }}-${{ github.run_attempt }}
           retention-days: 14
           if-no-files-found: error
           include-hidden-files: true
