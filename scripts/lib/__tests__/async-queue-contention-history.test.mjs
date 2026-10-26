@@ -165,6 +165,31 @@ test('loadSeedFile reports a rejected load', async () => {
   }
 });
 
+test('loadSeedFile rejects with the read error for a missing seed file instead of crashing the process', async () => {
+  // never reached: the read fails before the first chunk is posted
+  const url = 'http://127.0.0.1:9/never-posted';
+  const crashed = [];
+  const onCrash = (err) => crashed.push(err);
+  process.on('uncaughtException', onCrash);
+  try {
+    // a .gz file reaches the consumer through gunzip: a read error on the file must be forwarded to it, not left
+    // as an unhandled 'error' event on the file stream
+    await assert.rejects(loadSeedFile(url, path.join(dir, 'missing.nq.gz')), { code: 'ENOENT' });
+    await assert.rejects(loadSeedFile(url, path.join(dir, 'missing.nq')), { code: 'ENOENT' });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(crashed, [], 'no unhandled stream error escaped to the process');
+  } finally {
+    process.off('uncaughtException', onCrash);
+  }
+});
+
+test('loadSeedFile rejects a seed file that is not valid gzip', async () => {
+  writeFileSync(path.join(dir, 'corrupt.nq.gz'), Buffer.from('this is not a gzip stream\n'.repeat(50)));
+  await assert.rejects(loadSeedFile('http://127.0.0.1:9/never-posted', path.join(dir, 'corrupt.nq.gz')), {
+    code: 'Z_DATA_ERROR',
+  });
+});
+
 test('loadGenerated inserts every batch with at most two in flight', async () => {
   let inflight = 0;
   let peak = 0;
