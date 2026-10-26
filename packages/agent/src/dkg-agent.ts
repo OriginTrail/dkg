@@ -14,7 +14,6 @@ import { createStorageAckLedgerTimestampWriter, type StorageAckLedgerTimestampWr
 import { createACKSendP2P } from './internal/storage-ack-owned-request.js';
 import { resolvePrivateSwmRecoveryBudgetMs } from './sync/requester/private-swm-recovery-budget.js';
 import { PrivateAccessMethods } from './private-access-request.js';
-import type { ACKCanonicalCandidatePeerSelectionResult } from '@origintrail-official/dkg-publisher';
 import { randomUUID } from 'node:crypto';
 import { createAuthorityIndexBootstrap } from './authority-index-bootstrap.js';
 import { planAuthorityIndexBootstrap } from './authority-index-config.js';
@@ -158,7 +157,7 @@ import {
   KA_ID_PRED, RESERVED_UAL_PRED,
   type CollectedACK, type V10CoreNodeACK, type V10ACKProviderParams,
   type LocalStorageAckHeadExpectation,
-  type ACKCollectorDeps,
+  type ACKCollectorDeps, type ACKCanonicalCandidatePeerSelectionResult,
   type ACKTransportFactory,
   type WorkspaceAgentRecipient,
   type WorkspaceAgentRecipientResolution,
