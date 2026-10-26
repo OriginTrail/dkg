@@ -247,6 +247,120 @@ Operation names are intentionally excluded from the common current-value
 gauges. They remain available in bounded diagnostic/log summaries, while
 metrics retain predictable cardinality.
 
+## Async admission usage line
+
+The daemon logs one `async_admission_usage` line every five minutes (and once at
+start), so an operator can tell whether the slow part of async share and async
+publish is admission, the store, or the workers. The line is the primary signal:
+OpenTelemetry export is opt-in, and the store scheduler's timeout warning is
+rate-limited. The line is never rate-limited and is logged when the node is idle.
+It is logfmt, like `resource_usage`:
+
+```text
+async_admission_usage interval_s=300 store_rejections=store/background/publisher.asyncLift/queue_full:3 store_max_wait_ms=store/ack:0,store/background:812,store/health:0,store/normal:120 http=publish_async/enqueue/202/-:41,publish_async/snapshot_preflight/503/STORE_SCHEDULER_BUSY:2,share_async/enqueue/200/-:120 http_share_n=120 http_share_p50_ms=40 http_share_p95_ms=211 http_share_max_ms=900 ...
+```
+
+### Cumulative counters and interval windows
+
+- **Counters are cumulative since the process started** and reset on restart.
+  Subtract two lines to get a rate; divide two counters to get a ratio (for
+  example share `503`s over share requests).
+- **Latency, wait and pick-up figures cover the five minutes before the line**,
+  each with its sample count (`*_n`). An empty window prints `-` for its
+  percentiles. A cumulative P95 over days would hide a regression, so the
+  windows are not cumulative; the OpenTelemetry histograms give the cumulative
+  view.
+- **Depths and gauges are read when the line is built.**
+- Lists are `a/b/c:n,...`, sorted by key, with `-` when empty. Millisecond values
+  are whole milliseconds.
+
+### Fields
+
+| Field | Kind | Meaning |
+| --- | --- | --- |
+| `interval_s` | seconds | Time since the previous line (`0` for the first) |
+| `store_rejections=<scheduler>/<lane>/<family>/<reason>:<n>` | cumulative | Store scheduler rejections by the lane, the operation family (the first two segments of the caller's `source`, such as `publisher.asyncLift`) and the reason (`queue_full`, `queue_wait_timeout`), for every registered scheduler |
+| `store_max_wait_ms=<scheduler>/<lane>:<ms>` | window | The longest queue wait that ended in the interval, per lane; `0` for a lane with none |
+| `http=<route>/<phase>/<status>/<code>:<n>` | cumulative | Admission requests by route (`share_async`, `publish_async`), answering phase, HTTP status and error code (`-` for none). Every outcome is counted, 2xx included, so rates have a denominator. Status `0` is a client that left before any answer (`client_closed`). At most 64 distinct code series are kept; later ones count under `other` |
+| `http_share_*`, `http_publish_*` (`_n`, `_p50_ms`, `_p95_ms`, `_max_ms`) | window | Admission latency per route, request start to response, every outcome |
+| `share_depth=<state>:<n>` | gauge | Share jobs per state (`queued`, `running`, `failed_retrying`, `succeeded`, `failed`); `-` if unreadable |
+| `lift_depth=<state>:<n>` | gauge | Publisher jobs per state; `accepted` is the accepted-but-unclaimed backlog; `-` if unreadable |
+| `lift_journal` | gauge | Entries in the append-only publisher admission journal |
+| `depth_errors` | cumulative | Depth reads that failed or timed out (15 s); the affected field prints `-` |
+| `share_reclaimed`, `share_abandoned` | cumulative | Expired share leases the sweep requeued, and ones it gave up on (the job failed for inspection) |
+| `lift_reclaimed` | cumulative | Publisher jobs reset to accepted by recovery |
+| `lift_stale_claims` | cumulative | Publisher workers that found their claim no longer matched |
+| `share_hb_n`, `_p95_ms`, `_p99_ms`, `_max_ms` | window | Share lease renewals: from the timer's call until `heartbeat` settles, so a renewal waiting behind the queue's mutex counts as late |
+| `share_hb_pending`, `share_hb_oldest_pending_ms` | gauge | Renewals still waiting at line time, and the age of the oldest; a renewal stuck behind the mutex is invisible until it settles otherwise |
+| `share_claim_n`, `_p50_ms`, `_p95_ms`, `_max_ms` | window | Share `claimNext` duration, mutex wait and idle polls included |
+| `share_attempted`, `share_succeeded`, `share_failed_terminal`, `share_failed_retrying` | cumulative | The share worker's own counters (since the worker started); `-` while no worker runs |
+| `lift_wallets` | gauge | Wallets that run publisher workers |
+| `lift_pickup_n`, `_p50_ms`, `_p95_ms` | window | Publisher pick-up: ready to claimed, every job |
+| `lift_pickup_free_n`, `_p50_ms`, `_p95_ms` | window | The same, only for jobs that became ready while a configured wallet held no lock (worker-free pick-up) |
+| `lift_pickup_unclassified` | cumulative | Jobs whose wallet state at ready time could not be determined, and which are left out of the worker-free sample |
+| `lift_c2f_n`, `_p50_ms`, `_p95_ms` | window | Claim-to-finish: claimed to finalized |
+| `lift_finalized`, `lift_failed` | cumulative | Publisher jobs that reached a terminal state through a worker; with the share counters these give completions per minute |
+
+### Admission phases
+
+The phase is the step that answered the request, so a rejection can be pinned on one
+pre-queue read:
+
+| Phase | Covers |
+| --- | --- |
+| `request` | Everything before the first read: rate limiting, in-flight load shedding, authentication, body and option validation, the worker or publisher availability `503`, and, on the share route, the storage-lane read for a node-level token that names an author |
+| `write_preflight` | The context-graph write preflight and its readiness wait (both routes) |
+| `intent_resolution` | The publish route's finalized-assertion intent resolution reads |
+| `snapshot_preflight` | The publish route's workspace snapshot reads |
+| `enqueue` | The enqueue itself, and every 2xx answer |
+
+### Pick-up definitions
+
+- **Ready** is the latest of `acceptedAt`, `lastRetriedAt` and `lastRecoveredAt`,
+  so a job that was retried or recovered is measured from that moment.
+- **Worker-free** counts a job only if, when it became ready, at least one of the
+  configured wallets held no wallet lock (each wallet runs one publisher worker).
+  Busy intervals come from wallet-lock writes and deletes, not job finish times.
+  Slow pick-up while every wallet is busy is worker capacity, not queue admission,
+  and stays out of this figure.
+- **Unclassified** jobs became ready before the node had seen the lock state of
+  enough wallets to say (for example right after a restart, when locks written
+  before the restart are only learned at the first claim attempt). They are counted
+  in `lift_pickup_unclassified` and never in the worker-free sample.
+- **Claim-to-finish** is sampled on the worker's normal transition to `finalized`.
+  `lift_finalized` and `lift_failed` count terminal transitions made through that
+  same path; a failed job has no claim-to-finish sample, and a job finalized or
+  failed by recovery or chain-proof resolution is not counted at all.
+
+### OpenTelemetry
+
+When metrics export is enabled, each recorder also feeds an instrument:
+
+| Instrument | Type | Attributes |
+| --- | --- | --- |
+| `dkg.async_admission.outcomes_total` | counter | `route`, `phase`, `status`, `code` |
+| `dkg.async_admission.latency_ms` | histogram | `route` |
+| `dkg.async_queue.lease_recoveries_total` | counter | `queue` (`share`, `lift`), `outcome` (`reclaimed`, `abandoned`) |
+| `dkg.async_queue.stale_claims_total` | counter | `queue` |
+| `dkg.async_queue.heartbeat_lateness_ms` | histogram | none |
+| `dkg.async_share.claim_next_ms` | histogram | none |
+| `dkg.async_lift.pickup_ms` | histogram | `worker_free` (`true`, `false`, `unknown`) |
+| `dkg.async_lift.claim_to_finish_ms` | histogram | none |
+| `dkg.async_queue.depth` | gauge | `queue`, `state` |
+| `dkg.async_queue.journal_entries` | gauge | none |
+| `dkg.async_lift.configured_wallets` | gauge | none |
+
+The store scheduler's `dkg.store.scheduler_rejections_total` carries the same
+`operation_family` as `store_rejections`.
+
+### Monitoring reads
+
+The depth reads are `COUNT ... GROUP BY` queries on the store's background lane
+under their own sources (`publisher.queueUsage.share`, `.lift`, `.liftJournal`), apart
+from the queues' own sources, so a monitoring read the scheduler refuses does not
+inflate the queue-source rejection counts it is there to measure. They take neither
+the share mutex nor the publisher claim lock.
+
 ## Failure containment
 
 Instrumentation is fail-open:
