@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { metrics } from '@opentelemetry/api';
 import { rebuildMetrics } from '@origintrail-official/dkg-core';
 import {
+  DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS,
   StorePriorityScheduler,
   externalStorePriorityScheduler,
 } from '../src/store-priority-scheduler.js';
@@ -20,6 +21,12 @@ const waits = (stats: StoreSchedulerStats) =>
   Object.fromEntries(stats.takeIntervalQueueWaits().map((w) => [w.lane, w.maxQueueWaitMs]));
 const OVERFLOW = STORE_QUEUE_WAIT_BUCKET_UPPER_MS.length;
 const BUCKETS = OVERFLOW + 1;
+/** Index of the bucket whose upper bound is `bound` (which must be one of the bounds). */
+const at = (bound: number) => {
+  const index = STORE_QUEUE_WAIT_BUCKET_UPPER_MS.indexOf(bound);
+  if (index < 0) throw new Error(`${bound} is not a bucket bound`);
+  return index;
+};
 /** Bucket counts of one lane's interval, as `{ bucketIndex: count }` so a test names only the non-empty ones. */
 const sparse = (buckets: number[]) =>
   Object.fromEntries(buckets.flatMap((count, index) => (count ? [[index, count]] : [])));
@@ -70,16 +77,51 @@ describe('StoreSchedulerStats', () => {
     expect(waits(stats)).toEqual({ ack: 0, health: 0, normal: 0, background: 0 });
   });
 
+  it('uses buckets that grow by about 10 % per step, from 1 ms to the 10 s queue-wait timeout', () => {
+    const bounds = STORE_QUEUE_WAIT_BUCKET_UPPER_MS;
+    // The documented rule: round(1.1 ** k) with duplicates dropped, below 9999, and then 10000.
+    const rule: number[] = [];
+    for (let k = 0; Math.round(1.1 ** k) < 10_000; k++) {
+      const bound = Math.round(1.1 ** k);
+      if (rule.length === 0 || bound > rule[rule.length - 1]) rule.push(bound);
+    }
+    expect(bounds).toEqual([...rule, 10_000]);
+    expect(bounds).toHaveLength(83);
+    expect([bounds[0], bounds[bounds.length - 1]]).toEqual([1, 10_000]);
+    for (let i = 1; i < bounds.length; i++) {
+      expect(bounds[i]).toBeGreaterThan(bounds[i - 1]);
+      const step = bounds[i] / bounds[i - 1];
+      // Whole-millisecond bounds are coarser below 7 ms; from there a step is at most 15 %.
+      if (bounds[i - 1] >= 7) expect(step).toBeLessThanOrEqual(1.15);
+    }
+    expect(DEFAULT_STORE_QUEUE_WAIT_TIMEOUT_MS).toBe(bounds[bounds.length - 1]);
+  });
+
   it('counts each wait in the first bucket whose upper bound it does not exceed, and the rest as overflow', () => {
     const stats = new StoreSchedulerStats(LANES);
-    expect(STORE_QUEUE_WAIT_BUCKET_UPPER_MS).toEqual([10, 50, 100, 250, 500, 1000, 2500, 5000, 10000]);
-    for (const wait of [0, 10, 11, 50, 51, 100, 250, 251, 500, 1000, 2500, 5000, 5001, 10000, 10001, 600000]) {
-      stats.recordQueueWait('ack', wait);
-    }
+    const bounds = STORE_QUEUE_WAIT_BUCKET_UPPER_MS;
+    // Every bound itself, and a hair past the previous one, which is the same bucket: two waits per bucket, 0 ms and 1 ms in the first.
+    const waits = [0, 1];
+    for (let i = 1; i < bounds.length; i++) waits.push(bounds[i - 1] + 0.001, bounds[i]);
+    waits.push(bounds[bounds.length - 1] + 0.001, 600_000);
+    for (const wait of waits) stats.recordQueueWait('ack', wait);
     const ack = laneWait(stats, 'ack');
-    expect(ack.queueWaitBuckets).toEqual({ 0: 2, 1: 2, 2: 2, 3: 1, 4: 2, 5: 1, 6: 1, 7: 1, 8: 2, [OVERFLOW]: 2 });
-    expect(ack).toMatchObject({ queueWaitCount: 16, maxQueueWaitMs: 600000 });
+    expect(ack.queueWaitBuckets).toEqual(Object.fromEntries(Array.from({ length: BUCKETS }, (_, index) => [index, 2])));
+    expect(ack).toMatchObject({ queueWaitCount: 2 * BUCKETS, maxQueueWaitMs: 600_000 });
     expect(stats.takeIntervalQueueWaits().every((w) => w.queueWaitBuckets.length === BUCKETS)).toBe(true);
+  });
+
+  it('puts a wait in the same bucket a plain scan of the bounds gives, over the whole range', () => {
+    const stats = new StoreSchedulerStats(['ack']);
+    let seed = 12345;
+    const next = () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296;
+    for (let n = 0; n < 3000; n++) {
+      const wait = 0.001 * 10 ** (next() * 7.3); // 0.001 ms to about 20000 ms, evenly spread on a log scale
+      stats.recordQueueWait('ack', wait);
+      const found = stats.takeIntervalQueueWaits()[0].queueWaitBuckets.findIndex((count) => count === 1);
+      const expected = STORE_QUEUE_WAIT_BUCKET_UPPER_MS.findIndex((upper) => wait <= upper);
+      expect(found).toBe(expected < 0 ? OVERFLOW : expected);
+    }
   });
 
   it('ignores a non-finite wait, counts a negative one as zero, and keeps lanes apart', () => {
@@ -90,7 +132,7 @@ describe('StoreSchedulerStats', () => {
     expect(laneWait(stats, 'ack')).toMatchObject({ queueWaitCount: 1, maxQueueWaitMs: 0, queueWaitBuckets: { 0: 1 } });
     expect(laneWait(stats, 'normal')).toMatchObject({ queueWaitCount: 0 });
     stats.recordQueueWait('normal', 300);
-    expect(laneWait(stats, 'normal')).toMatchObject({ queueWaitCount: 1, queueWaitBuckets: { 4: 1 } });
+    expect(laneWait(stats, 'normal')).toMatchObject({ queueWaitCount: 1, queueWaitBuckets: { [at(304)]: 1 } });
   });
 
   it('starts every lane\'s buckets again on each take, and hands out arrays the stats no longer use', () => {
@@ -99,7 +141,7 @@ describe('StoreSchedulerStats', () => {
     const [first] = stats.takeIntervalQueueWaits().filter((w) => w.lane === 'background');
     first.queueWaitBuckets.fill(99);
     stats.recordQueueWait('background', 2_000);
-    expect(laneWait(stats, 'background')).toMatchObject({ queueWaitCount: 1, queueWaitBuckets: { 6: 1 } });
+    expect(laneWait(stats, 'background')).toMatchObject({ queueWaitCount: 1, queueWaitBuckets: { [at(2048)]: 1 } });
     expect(laneWait(stats, 'background')).toMatchObject({ queueWaitCount: 0, queueWaitBuckets: {} });
   });
 
@@ -108,11 +150,11 @@ describe('StoreSchedulerStats', () => {
     expect(laneP95(stats, 'ack')).toBe(0);
     for (let n = 0; n < 19; n++) stats.recordQueueWait('ack', 3);
     stats.recordQueueWait('ack', 400);
-    expect(laneP95(stats, 'ack')).toBe(10);
+    expect(laneP95(stats, 'ack')).toBe(3);
     for (let n = 0; n < 18; n++) stats.recordQueueWait('ack', 3);
     stats.recordQueueWait('ack', 400);
     stats.recordQueueWait('ack', 400);
-    expect(laneP95(stats, 'ack')).toBe(500);
+    expect(laneP95(stats, 'ack')).toBe(405);
   });
 
   it('keeps a lane it was not told about once it is recorded', () => {
@@ -165,22 +207,61 @@ describe('estimateQueueWaitPercentileMs', () => {
   });
 
   it('is the upper bound of the only occupied bucket, not the waits inside it', () => {
-    expect(estimateQueueWaitPercentileMs(counts({ 0: 1 }))).toBe(10);
-    expect(estimateQueueWaitPercentileMs(counts({ 3: 40 }))).toBe(250);
-    expect(estimateQueueWaitPercentileMs(counts({ 8: 7 }))).toBe(10_000);
+    expect(estimateQueueWaitPercentileMs(counts({ 0: 1 }))).toBe(1);
+    expect(estimateQueueWaitPercentileMs(counts({ [at(252)]: 40 }))).toBe(252);
+    expect(estimateQueueWaitPercentileMs(counts({ [OVERFLOW - 1]: 7 }))).toBe(10_000);
   });
 
   it('takes the bucket holding the rank ceil(total * percentile), at and either side of the boundary', () => {
     // 20 waits: rank 19 of the 95th percentile.
-    expect(estimateQueueWaitPercentileMs(counts({ 0: 19, 4: 1 }))).toBe(10);
-    expect(estimateQueueWaitPercentileMs(counts({ 0: 18, 4: 2 }))).toBe(500);
+    expect(estimateQueueWaitPercentileMs(counts({ [at(10)]: 19, [at(490)]: 1 }))).toBe(10);
+    expect(estimateQueueWaitPercentileMs(counts({ [at(10)]: 18, [at(490)]: 2 }))).toBe(490);
     // 100 waits: rank 95.
-    expect(estimateQueueWaitPercentileMs(counts({ 1: 95, 5: 5 }))).toBe(50);
-    expect(estimateQueueWaitPercentileMs(counts({ 1: 94, 5: 6 }))).toBe(1_000);
+    expect(estimateQueueWaitPercentileMs(counts({ [at(50)]: 95, [at(1051)]: 5 }))).toBe(50);
+    expect(estimateQueueWaitPercentileMs(counts({ [at(50)]: 94, [at(1051)]: 6 }))).toBe(1051);
     // A single wait is every percentile; 1 and 0.5 pick the last and middle waits.
-    expect(estimateQueueWaitPercentileMs(counts({ 2: 1 }))).toBe(100);
-    expect(estimateQueueWaitPercentileMs(counts({ 0: 1, 8: 1 }), 0.5)).toBe(10);
-    expect(estimateQueueWaitPercentileMs(counts({ 0: 1, 8: 1 }), 1)).toBe(10_000);
+    expect(estimateQueueWaitPercentileMs(counts({ [at(97)]: 1 }))).toBe(97);
+    expect(estimateQueueWaitPercentileMs(counts({ 0: 1, [OVERFLOW - 1]: 1 }), 0.5)).toBe(1);
+    expect(estimateQueueWaitPercentileMs(counts({ 0: 1, [OVERFLOW - 1]: 1 }), 1)).toBe(10_000);
+  });
+
+  it('tells apart waits that differ by more than a tenth, so a 25 % margin can be judged on two figures', () => {
+    // Waits 20 % apart, and ones x2.3 apart, never share a bucket (the old bounds put 9 and 11 ms x5 apart, 105 and 245 ms together).
+    const p95 = (wait: number) => {
+      const stats = new StoreSchedulerStats(['ack']);
+      stats.recordQueueWait('ack', wait);
+      return laneP95(stats, 'ack');
+    };
+    expect(p95(9)).toBe(9);
+    expect(p95(11)).toBe(11);
+    expect(p95(105)).toBe(107);
+    expect(p95(245)).toBe(252);
+    expect(p95(245) / p95(105)).toBeGreaterThan(2);
+    // Two true figures 25 % apart print less than 15 % off that ratio either way.
+    for (const base of [40, 100, 250, 700, 2000, 6000]) {
+      const ratio = p95(base * 1.25) / p95(base);
+      expect(ratio).toBeGreaterThan(1.25 / 1.15);
+      expect(ratio).toBeLessThan(1.25 * 1.15);
+    }
+  });
+
+  it('is a merge of bucket counts: summing two intervals\' counts gives the P95 of both together', () => {
+    const together = new StoreSchedulerStats(['ack']);
+    const first = new StoreSchedulerStats(['ack']);
+    const second = new StoreSchedulerStats(['ack']);
+    for (let n = 0; n < 90; n++) { first.recordQueueWait('ack', 2); together.recordQueueWait('ack', 2); }
+    for (let n = 0; n < 10; n++) { second.recordQueueWait('ack', 100 + n); together.recordQueueWait('ack', 100 + n); }
+    const [a] = first.takeIntervalQueueWaits();
+    const [b] = second.takeIntervalQueueWaits();
+    const [all] = together.takeIntervalQueueWaits();
+    const sum = a.queueWaitBuckets.map((count, index) => count + b.queueWaitBuckets[index]);
+    expect(sum).toEqual(all.queueWaitBuckets);
+    expect(estimateQueueWaitPercentileMs(sum, 0.95, Math.max(a.maxQueueWaitMs, b.maxQueueWaitMs)))
+      .toBe(estimateQueueWaitPercentileMs(all.queueWaitBuckets, 0.95, all.maxQueueWaitMs));
+    // The per-interval P95s (2 and 117 ms) neither average nor max into it: rank 95 of the 100 waits is the 5th slow one.
+    expect(estimateQueueWaitPercentileMs(a.queueWaitBuckets)).toBe(2);
+    expect(estimateQueueWaitPercentileMs(b.queueWaitBuckets)).toBe(117);
+    expect(estimateQueueWaitPercentileMs(sum)).toBe(107);
   });
 
   it('answers with the overflow fallback when the rank falls past the last bound', () => {
@@ -188,7 +269,7 @@ describe('estimateQueueWaitPercentileMs', () => {
     expect(estimateQueueWaitPercentileMs(overflowing)).toBe(Infinity);
     expect(estimateQueueWaitPercentileMs(overflowing, 0.95, 42_000)).toBe(42_000);
     // One overflow wait in 20 sits above the 95th percentile.
-    expect(estimateQueueWaitPercentileMs(counts({ 0: 19, [OVERFLOW]: 1 }), 0.95, 42_000)).toBe(10);
+    expect(estimateQueueWaitPercentileMs(counts({ 0: 19, [OVERFLOW]: 1 }), 0.95, 42_000)).toBe(1);
     expect(estimateQueueWaitPercentileMs(counts({ [OVERFLOW]: 1 }), 0.95, 42_000)).toBe(42_000);
   });
 });
@@ -228,7 +309,7 @@ describe('store scheduler stats registry', () => {
       const buckets = (index: number | null) =>
         Array.from({ length: BUCKETS }, (_, n) => (n === index ? 1 : 0));
       expect(taken()?.queueWaits).toEqual([
-        { lane: 'control', maxQueueWaitMs: 31, queueWaitCount: 1, queueWaitBuckets: buckets(1) },
+        { lane: 'control', maxQueueWaitMs: 31, queueWaitCount: 1, queueWaitBuckets: buckets(at(31)) },
       ]);
       expect(taken()?.queueWaits).toEqual([
         { lane: 'control', maxQueueWaitMs: 0, queueWaitCount: 0, queueWaitBuckets: buckets(null) },
@@ -262,7 +343,7 @@ describe('StorePriorityScheduler stats wiring', () => {
     expect(taken.map((w) => [w.lane, w.maxQueueWaitMs, w.queueWaitCount])).toEqual([
       ['ack', 30, 1], ['health', 0, 0], ['normal', 0, 1], ['background', 30, 1],
     ]);
-    expect(sparse(taken[0].queueWaitBuckets)).toEqual({ 1: 1 });
+    expect(sparse(taken[0].queueWaitBuckets)).toEqual({ [at(31)]: 1 });
     expect(waits(sut.stats)).toEqual({ ack: 0, health: 0, normal: 0, background: 0 });
   });
 
@@ -315,7 +396,7 @@ describe('StorePriorityScheduler stats wiring', () => {
       expect(sut.stats.rejectionTotals()).toEqual([
         { lane: 'ack', family: 'agent.storageAck', reason: 'queue_wait_timeout', count: 1 },
       ]);
-      expect(laneWait(sut.stats, 'ack')).toMatchObject({ maxQueueWaitMs: 100, queueWaitCount: 2, queueWaitBuckets: { 0: 1, 2: 1 } });
+      expect(laneWait(sut.stats, 'ack')).toMatchObject({ maxQueueWaitMs: 100, queueWaitCount: 2, queueWaitBuckets: { 0: 1, [at(107)]: 1 } });
       release();
       await blocker;
     } finally {
@@ -335,7 +416,7 @@ describe('StorePriorityScheduler stats wiring', () => {
     controller.abort(reason);
     await expect(cancelled).rejects.toBe(reason);
     expect(sut.stats.rejectionTotals()).toEqual([]);
-    expect(laneWait(sut.stats, 'normal')).toMatchObject({ maxQueueWaitMs: 45, queueWaitCount: 2, queueWaitBuckets: { 0: 1, 1: 1 } });
+    expect(laneWait(sut.stats, 'normal')).toMatchObject({ maxQueueWaitMs: 45, queueWaitCount: 2, queueWaitBuckets: { 0: 1, [at(45)]: 1 } });
     release();
     await blocker;
   });

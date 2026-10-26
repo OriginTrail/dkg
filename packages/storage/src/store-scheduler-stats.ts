@@ -2,8 +2,8 @@
  * In-process figures a store scheduler keeps beside its OTel metrics. OTel is
  * opt-in and write-only, so the periodic admission log line reads these
  * instead: the longest queue wait of each lane over the interval, how many
- * waits fell in each fixed bucket (enough to estimate a P95), and the
- * cumulative rejections by lane, operation family and reason.
+ * waits fell in each fixed bucket (enough to estimate a P95 within about 10 %),
+ * and the cumulative rejections by lane, operation family and reason.
  *
  * One `StoreSchedulerStats` belongs to one scheduler instance and is keyed by
  * lane name, so a further scheduler (the queue control path) brings its own
@@ -28,8 +28,35 @@ export function storeOperationFamily(operation: string): string {
   return metricOperation(String(operation ?? '')).split('.', 2).join('.');
 }
 
-/** Inclusive upper bounds (ms) of the queue-wait buckets; one more bucket counts anything longer. */
-export const STORE_QUEUE_WAIT_BUCKET_UPPER_MS: readonly number[] = [10, 50, 100, 250, 500, 1000, 2500, 5000, 10000];
+/**
+ * Inclusive upper bounds (ms) of the queue-wait buckets; one more bucket counts anything longer.
+ *
+ * They grow by about 10 % per step: `round(1.1 ** k)` for k = 0, 1, 2 ... with duplicates dropped, up to 9412,
+ * then 10000 (the default queue-wait timeout). From 7 ms up a step is at most 15 %, so a bucket upper bound
+ * overstates the true value by that much at most, and "not worse than 25 %" can be judged on two of them;
+ * below 7 ms the whole-millisecond steps are coarser, which is within clock noise there.
+ *
+ * Do not change the list once a release ships it: the testnet test and the mainnet monitoring compare figures
+ * from different builds, which only works when both count in the same buckets.
+ */
+export const STORE_QUEUE_WAIT_BUCKET_UPPER_MS: readonly number[] = [
+  1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 19, 21, 23, 26, 28, 31, 34, 37, 41, 45,
+  50, 55, 60, 66, 73, 80, 88, 97, 107, 117, 129, 142, 156, 172, 189, 208, 229, 252, 277, 304, 335, 368,
+  405, 446, 490, 539, 593, 653, 718, 790, 869, 956, 1051, 1156, 1272, 1399, 1539, 1693, 1862, 2048, 2253,
+  2479, 2726, 2999, 3299, 3629, 3992, 4391, 4830, 5313, 5844, 6429, 7072, 7779, 8557, 9412, 10000,
+];
+
+/** Index of the bucket a wait falls in: the first whose upper bound it does not exceed, else the overflow bucket. */
+function queueWaitBucketIndex(waitMs: number): number {
+  let low = 0;
+  let high = STORE_QUEUE_WAIT_BUCKET_UPPER_MS.length;
+  while (low < high) {
+    const mid = (low + high) >>> 1;
+    if (waitMs <= STORE_QUEUE_WAIT_BUCKET_UPPER_MS[mid]) high = mid;
+    else low = mid + 1;
+  }
+  return low;
+}
 
 /**
  * Estimate a percentile (`0 < percentile <= 1`, default P95) of queue waits from
@@ -66,7 +93,7 @@ export interface StoreSchedulerRejectionTotal {
   count: number;
 }
 
-const emptyLaneWaits = () => ({ maxMs: 0, buckets: new Array<number>(STORE_QUEUE_WAIT_BUCKET_UPPER_MS.length + 1).fill(0) });
+const emptyLaneWaits = () => ({ maxMs: 0, buckets: Array.from({ length: STORE_QUEUE_WAIT_BUCKET_UPPER_MS.length + 1 }, () => 0) });
 
 export class StoreSchedulerStats {
   private readonly laneWaits = new Map<string, ReturnType<typeof emptyLaneWaits>>();
@@ -78,14 +105,16 @@ export class StoreSchedulerStats {
     for (const lane of lanes) this.laneWaits.set(lane, emptyLaneWaits());
   }
 
-  /** A queue wait ended: the entry started, timed out or was cancelled while queued. */
+  /**
+   * A queue wait ended: the entry started, timed out or was cancelled while queued. Work that starts at
+   * once counts too, as a wait of about 0 ms.
+   */
   recordQueueWait(lane: string, waitMs: number): void {
     if (!Number.isFinite(waitMs)) return;
     let waits = this.laneWaits.get(lane);
     if (!waits) this.laneWaits.set(lane, (waits = emptyLaneWaits()));
     waits.maxMs = Math.max(waits.maxMs, waitMs);
-    const bucket = STORE_QUEUE_WAIT_BUCKET_UPPER_MS.findIndex((upper) => waitMs <= upper);
-    waits.buckets[bucket < 0 ? STORE_QUEUE_WAIT_BUCKET_UPPER_MS.length : bucket] += 1;
+    waits.buckets[queueWaitBucketIndex(waitMs)] += 1;
   }
 
   /**

@@ -155,19 +155,25 @@ in-process. The `dkg.store.scheduler_rejections_total` counter carries
 `priority`, `reason` and `operation_family` (the first two dot-separated
 segments of the caller's `source`, such as `publisher.asyncLift`; at most 64
 families per scheduler, then `other`). `takeStoreSchedulerStatsReports()` returns,
-for each registered scheduler, the longest queue wait of each lane since the
-previous call (a wait ends when work starts, times out in the queue or is
-cancelled there), the count of those waits in fixed buckets, and the cumulative
-rejections by lane, family and reason. A rejection on a full queue never
-queued, so it adds no wait. The buckets (`queueWaitBuckets`) have the inclusive
-upper bounds in `STORE_QUEUE_WAIT_BUCKET_UPPER_MS` (10, 50, 100, 250, 500,
-1000, 2500, 5000 and 10000 ms) plus an overflow bucket for anything longer;
-`queueWaitCount` is their sum. `estimateQueueWaitPercentileMs(buckets, 0.95,
-maxQueueWaitMs)` turns them into a P95: the upper bound of the bucket that
-holds the rank, so it overstates the true value by up to one bucket width, it is
-0 for an empty interval, and in the overflow bucket it is the interval maximum.
-Each call ends the interval, so only the periodic admission log line should
-call it.
+for each registered scheduler, the queue waits of each lane since the previous
+call (`queueWaits`) and the cumulative rejections by lane, family and reason. A
+lane's figures are its longest wait and the count of its waits in fixed buckets.
+Every started operation counts, including one that starts at once, as a wait of
+about 0 ms; so do those that time out in the queue or are cancelled there. A
+rejection on a full queue never queued, so it adds no wait. The buckets
+(`queueWaitBuckets`) have the inclusive upper bounds in
+`STORE_QUEUE_WAIT_BUCKET_UPPER_MS`: 83 bounds from 1 ms to 10000 ms (the default
+queue-wait timeout) that grow by about 10 % per step (`round(1.1 ** k)`, with
+duplicates dropped, then 10000), plus an overflow bucket for anything longer.
+The list is fixed, because figures from different builds are compared;
+`queueWaitCount` is the sum of the counts.
+`estimateQueueWaitPercentileMs(buckets, 0.95, maxQueueWaitMs)` turns counts into
+a P95: the upper bound of the bucket that holds the rank, so it overstates the
+true value by at most one step (15 % from 7 ms up), it is 0 for an empty
+interval, and in the overflow bucket it is the interval maximum. Counts of
+several intervals add up, so the same function gives the P95 of a longer window;
+P95s of single intervals do not. Each call ends the interval, so only the
+periodic admission log line should call it.
 
 | Environment variable | Default | Purpose |
 |---|---:|---|
