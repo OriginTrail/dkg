@@ -2,7 +2,7 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { StoreContentFence } from './internal/store-content-fence.js';
-import { heldGraphScopedAssetsReader, readHeldGraphScopedAssets } from './sync/requester/durable-data-holdings.js';
+import { heldGraphScopedAssetsReader, readHeldGraphScopedAssets } from './sync/requester/stored-graph-assets.js';
 
 /** Bind private content ownership and existing SWM housekeeping at composition. */
 export function createDurableHeldStore(
