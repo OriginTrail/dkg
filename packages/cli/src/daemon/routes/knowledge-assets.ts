@@ -79,10 +79,8 @@ import {
   isKnowledgeAssetWorkspaceHeadCorruptError,
 } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
-import {
-  validateAssertionName,
-  contextGraphAssertionUri,
-} from "@origintrail-official/dkg-core";
+import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import { admissionStep } from "../async-admission-trace.js";
 import {
   formatFinalizedPublishOptionError,
   parseHttpFinalizedPublishOptions,
@@ -1346,11 +1344,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
       }
       try {
-        const result = await agent.assertion.promoteAsync(contextGraphId, name, {
+        const result = await admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
           entities: entities ?? "all",
           subGraphName,
           ...promoteStorageLane,
-        });
+        }));
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {
@@ -1389,7 +1387,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const asyncSelectedAuthor = resolveSelectedAuthorAgentAddress(ctx, parsed);
         if (!asyncSelectedAuthor.ok) return;
         const publishOptions = opts;
-        const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
+        const intent = await admissionStep(res, 'intent_resolution', () => agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
           ...publishCallerHintLane(writePreflightCallerAgentAddress),
           ...(asyncSelectedAuthor.value !== undefined
@@ -1403,8 +1401,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(publishOptions.publisherNodeIdentityIdOverride !== undefined
             ? { publisherNodeIdentityIdOverride: publishOptions.publisherNodeIdentityIdOverride }
             : {}),
-        });
-        await agent.preflightKnowledgeAssetVmPublishSnapshot(intent);
+        }));
+        await admissionStep(res, 'snapshot_preflight', () => agent.preflightKnowledgeAssetVmPublishSnapshot(intent));
         // 🔴 3824484639 — record WHO admitted this job, for authorization only. `requestAgentAddress`
         // is always resolvable (a node-level token maps to the default owner agent), unlike the
         // author-resolution hint, which is deliberately absent for node tokens — authorizing on
@@ -1413,9 +1411,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // Admission travels BESIDE the request (🟡 3824743779), never inside it: the operation
         // payload that execution and recovery act on carries no authorization principal.
         enqueueStarted = true;
-        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
+        const jobId = await admissionStep(res, 'enqueue', () => publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
           admittedByAgentAddress: requestAgentAddress,
-        });
+        }));
         return jsonResponse(res, 202, {
           jobId,
           status: "accepted",

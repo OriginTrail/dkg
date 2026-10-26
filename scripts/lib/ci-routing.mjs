@@ -230,6 +230,10 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['kosava_hardhat_plugins'],
     evmScopes: [],
   },
+  'packages/kafka-source': {
+    lanes: ['kosava_supporting'],
+    evmScopes: [],
+  },
   'packages/evm-module': {
     forceFull: true,
     lanes: [],
@@ -269,6 +273,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/adapter-elizaos': ['kosava_supporting'],
   'packages/network-sim': ['kosava_supporting'],
   'packages/kafka-plugin': ['kosava_hardhat_plugins'],
+  'packages/kafka-source': ['kosava_supporting'],
   'packages/evm-module': ['contracts'],
   demo: ['kosava_supporting'],
 });
@@ -311,7 +316,7 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
   /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
@@ -421,6 +426,12 @@ export const PATH_TRIGGERS = Object.freeze([
     lanes: ['bura_query'],
     evmScopes: [],
     reason: 'the query security tests assert the query README',
+  },
+  {
+    patterns: [/^docs\/use-dkg\/backpressure-observability\.md$/],
+    lanes: ['bura_cli'],
+    evmScopes: [],
+    reason: 'the CLI admission usage-log tests assert the backpressure observability document',
   },
   // Files other packages load by relative path, outside their declared
   // dependencies.
