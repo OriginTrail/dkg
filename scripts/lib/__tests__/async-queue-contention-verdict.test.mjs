@@ -32,6 +32,7 @@ import {
   pairRuns,
   percentile,
   pickReproductionRung,
+  repeatsPerCell,
   shareBacklog,
   summarize,
   validity,
@@ -180,6 +181,8 @@ const config = (o = {}) => ({
   lambda: 8,
   content: 4,
   aggregate: 2,
+  seed: 7300,
+  observerMs: 5000,
   calibrationSha256: 'cal',
   seedFileSha256: null,
   cpus: 10,
@@ -197,6 +200,8 @@ test('comparability names the settings two runs of a pair must share and only re
     lambda: 4,
     content: 3,
     aggregate: 1,
+    seed: 7301,
+    observerMs: 1000,
     calibrationSha256: 'other',
     seedFileSha256: 'seed',
     cpus: 8,
@@ -206,6 +211,8 @@ test('comparability names the settings two runs of a pair must share and only re
     'lambda',
     'content',
     'aggregate',
+    'seed',
+    'observerMs',
     'calibrationSha256',
     'seedFileSha256',
     'cpus',
@@ -214,6 +221,11 @@ test('comparability names the settings two runs of a pair must share and only re
     comparability(withConfig(), other, { ignoreSeed: true }).differs.includes('seedFileSha256'),
     false,
     'the flatness rule compares histories',
+  );
+  assert.deepEqual(
+    comparability(withConfig(), other, { ignoreSeed: true }).differs.filter((k) => k === 'seed' || k === 'observerMs'),
+    ['seed', 'observerMs'],
+    'but the arrival schedule and the observer load must still match',
   );
   assert.deepEqual(comparability({}, {}), { differs: [], envDiffers: false }, 'records without a config compare equal');
 });
@@ -235,6 +247,55 @@ test('pairRuns does not count a pair that differs in shared settings or has two 
   const flatPair = pairRuns([withConfig()], [withConfig({ seedFileSha256: 'seed' })], undefined, { ignoreSeed: true })
     .pairs[0];
   assert.equal(flatPair.valid, true);
+});
+
+test('pairRuns does not count a pair whose runs differ in the arrival seed or the observer period', () => {
+  const pair = (b, opts) => pairRuns([withConfig()], [withConfig(b)], undefined, opts).pairs[0];
+  assert.equal(pair({}).valid, true);
+  const seed = pair({ seed: 7301 });
+  assert.deepEqual([seed.valid, seed.reasons], [false, ['the runs differ in seed']]);
+  const period = pair({ observerMs: 1000 });
+  assert.deepEqual([period.valid, period.reasons], [false, ['the runs differ in observerMs']]);
+  const flatSeed = pair({ seed: 7301 }, { ignoreSeed: true });
+  assert.equal(flatSeed.valid, false, 'the flatness rule compares histories, not schedules');
+  assert.equal(pair({ observerMs: 1000 }, { ignoreSeed: true }).valid, false);
+  // from the run summaries: the metadata of a run carries both settings
+  const record = (cell) => {
+    const full = { history: 0, observer: 'default', rung: 'L3', repeat: 1, ...cell };
+    return extractRecord(summaryOf(true, 1000, { meta: { cell: full } }));
+  };
+  const base = { seed: 7301, observerMs: 5000 };
+  assert.equal(pairRuns([record(base)], [record(base)]).pairs[0].valid, true);
+  assert.equal(pairRuns([record(base)], [record({ ...base, seed: 7302 })]).pairs[0].valid, false);
+  assert.equal(pairRuns([record(base)], [record({ ...base, observerMs: 1000 })]).pairs[0].valid, false);
+});
+
+/** Valid pairs [a, b] P95s per cell; the key is the pairKey of the cell and the repeat index. */
+const cellPairs = (spec) =>
+  spec.flatMap(([cell, p95s]) => p95s.map(([a, b], i) => ({ key: `${cell}|${i}`, a: rec(a), b: rec(b), valid: true })));
+
+test('a rule needs three valid paired repeats in every cell: the pairs of different cells do not add up', () => {
+  const cells = ['0|default|L3', '0|none|L3', '50k|default|L3'];
+  const oneEach = cellPairs(cells.map((cell) => [cell, [[10_000, 4000]]]));
+  assert.deepEqual(repeatsPerCell(oneEach), { cells: Object.fromEntries(cells.map((c) => [c, 1])), have: 1 });
+  for (const result of [halve(oneEach), flat(oneEach), equivalent(oneEach, 0.5)]) {
+    assert.equal(result.status, 'incomplete', result.label);
+    assert.deepEqual([result.have, result.need], [1, 3]);
+    assert.match(result.reason, /needs 3 valid paired repeats in every cell, the thinnest has 1 \(/);
+  }
+  const three = [[10_000, 4000], [11_000, 5500], [9000, 4500]];
+  const full = cellPairs([['0|default|L3', three], ['0|none|L3', three]]);
+  assert.deepEqual([halve(full).status, halve(full).have], ['pass', 3]);
+  const thin = cellPairs([['0|default|L3', three], ['0|none|L3', three.slice(0, 2)]]);
+  const incomplete = halve(thin);
+  assert.deepEqual([incomplete.status, incomplete.have], ['incomplete', 2]);
+  assert.deepEqual(incomplete.cells, { '0|default|L3': 3, '0|none|L3': 2 });
+  const slow = cellPairs([['0|default|L3', three], ['0|none|L3', [[10_000, 4000], [11_000, 5501], [9000, 4500]]]]);
+  assert.equal(halve(slow).status, 'fail', 'every cell is judged: one failing repeat fails the rule');
+  // a cell with no valid pair at all is not a cell of the verdict; a discarded run does not block it
+  const stray = [...cellPairs([['0|default|L3', three]]), { key: '0|none|L3|0', a: rec(1), b: rec(1), valid: false }];
+  assert.equal(halve(stray).status, 'pass');
+  assert.deepEqual(repeatsPerCell([]), { cells: {}, have: 0 });
 });
 
 test('halve: candidate P95 <= 0.5 x base in 3 of 3 paired repeats', () => {
@@ -460,7 +521,17 @@ const summaryOf = (valid, p95, o = {}) => ({
   meta: {
     runId: 'r1',
     label: 'base',
-    cell: { history: 0, observer: 'default', rung: 'L3', repeat: 1, lambda: 8, content: 4, aggregate: 2 },
+    cell: {
+      history: 0,
+      observer: 'default',
+      rung: 'L3',
+      repeat: 1,
+      lambda: 8,
+      content: 4,
+      aggregate: 2,
+      seed: 7301,
+      observerMs: 5000,
+    },
     git: { sha: '0123456789abcdef', dirty: false },
     scriptSha256: 'abc',
     distStaleSuspected: false,
@@ -488,7 +559,17 @@ test('extractRecord maps a summary and ledgerMarkdown lists every run', () => {
   assert.deepEqual(good, {
     key: '0|default|L3|1',
     label: 'base',
-    cell: { history: 0, observer: 'default', rung: 'L3', repeat: 1, lambda: 8, content: 4, aggregate: 2 },
+    cell: {
+      history: 0,
+      observer: 'default',
+      rung: 'L3',
+      repeat: 1,
+      lambda: 8,
+      content: 4,
+      aggregate: 2,
+      seed: 7301,
+      observerMs: 5000,
+    },
     repeat: 1,
     valid: true,
     failedChecks: [],
@@ -504,6 +585,8 @@ test('extractRecord maps a summary and ledgerMarkdown lists every run', () => {
       lambda: 8,
       content: 4,
       aggregate: 2,
+      seed: 7301,
+      observerMs: 5000,
       calibrationSha256: 'cal',
       seedFileSha256: 'loaded',
       cpus: 10,
@@ -522,6 +605,14 @@ test('extractRecord maps a summary and ledgerMarkdown lists every run', () => {
     'a summary without the loaded hash falls back to the manifest hash',
   );
   assert.equal(bad.config.calibrationSha256, null);
+  const legacySchedule = extractRecord(
+    summaryOf(true, 1, { meta: { cell: { history: 0, observer: 'default', rung: 'L3', repeat: 1 } } }),
+  );
+  assert.deepEqual(
+    [legacySchedule.config.seed, legacySchedule.config.observerMs],
+    [null, null],
+    'a summary from before the schedule was recorded compares as unknown, not as a match to a known value',
+  );
   const table = ledgerMarkdown([good, bad]).split('\n');
   assert.equal(table.length, 4);
   assert.match(table[0], /\| worker ok\/failed\/agent errors \| P8c \|/);
@@ -620,25 +711,36 @@ const tmp = mkdtempSync(path.join(tmpdir(), 'aqc-verdict-'));
 after(() => rmSync(tmp, { recursive: true, force: true }));
 
 /**
- * Writes <root>/<name>/r<i>/summary.json for each p95 and returns the directory. `meta` and `worker` are merged into
- * the summary.
+ * Writes <root>/<name>/<tag>r<i>/summary.json for each p95 and returns the directory (a `tag` puts runs of several
+ * cells in one directory). `cellExtra` is added to each run's cell; `meta` and `worker` are merged into the summary.
  */
 function runs(
   name,
   p95s,
-  { history = '0', observer = 'default', valid = [], F = 0.5, sha = 'abc', dirty = false, meta = {}, worker = {} } = {},
+  {
+    history = '0',
+    observer = 'default',
+    tag = '',
+    cellExtra = {},
+    valid = [],
+    F = 0.5,
+    sha = 'abc',
+    dirty = false,
+    meta = {},
+    worker = {},
+  } = {},
 ) {
   p95s.forEach((p95, i) => {
-    const dir = path.join(tmp, name, `r${i}`);
+    const dir = path.join(tmp, name, `${tag}r${i}`);
     mkdirSync(dir, { recursive: true });
     const ok = valid[i] ?? true;
     writeFileSync(
       path.join(dir, 'summary.json'),
       JSON.stringify({
         meta: {
-          runId: `${name}-${i}`,
+          runId: `${name}-${tag}${i}`,
           label: name,
-          cell: { history, observer, rung: 'L3', repeat: i },
+          cell: { history, observer, rung: 'L3', repeat: i, ...cellExtra },
           git: { sha: '0123456789abcdef', dirty },
           scriptSha256: sha,
           distStaleSuspected: false,
@@ -744,6 +846,53 @@ test('verdict does not count a pair whose runs differ in windows, load or host, 
   assert.match(r.out, /warning: pair 0\|default\|L3\|0 does not count: the runs differ in windows/);
   const otherHost = runs('m-host', [4000, 5500, 4500], { meta: { windows: WINDOWS, host: { cpus: 4 } } });
   assert.match(cli('verdict', '--rule', 'halve', '--a', a, '--b', otherHost).out, /the runs differ in cpus/);
+});
+
+test('verdict does not count a pair whose runs differ in the arrival seed or the observer period', () => {
+  const load = { seed: 7300, observerMs: 5000 };
+  const a = runs('s-a', [10_000, 11_000, 9000], { cellExtra: load });
+  const same = runs('s-same', [4000, 5500, 4500], { cellExtra: load });
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', a, '--b', same).code, 0);
+  for (const [name, other, differs] of [
+    ['s-seed', { ...load, seed: 7301 }, 'seed'],
+    ['s-period', { ...load, observerMs: 1000 }, 'observerMs'],
+  ]) {
+    const r = cli('verdict', '--rule', 'halve', '--a', a, '--b', runs(name, [4000, 5500, 4500], { cellExtra: other }));
+    assert.equal(r.code, 2, `${differs}: three pairs on different loads are not three valid pairs`);
+    assert.match(r.out, /INCOMPLETE \(0 valid pairs/);
+    assert.match(r.out, new RegExp(`does not count: the runs differ in ${differs}`));
+  }
+});
+
+test('verdict needs three valid paired repeats in every cell, for the rules and for the A/A count', () => {
+  // three cells (history x observer), one repeat each, in both arms: three valid pairs, but not three of any one cell
+  const cells = (name, p95) => {
+    runs(name, [p95], { tag: 'h0-' });
+    runs(name, [p95], { history: '50k', tag: 'h50k-' });
+    runs(name, [p95], { observer: 'none', tag: 'none-' });
+    return path.join(tmp, name);
+  };
+  const a = cells('c-a', 10_000);
+  const b = cells('c-b', 4000);
+  const halved = cli('verdict', '--rule', 'halve', '--a', a, '--b', b);
+  assert.equal(halved.code, 2);
+  assert.match(halved.out, /INCOMPLETE \(1 valid pairs, 3 needed\) - needs 3 valid paired repeats in every cell/);
+  const aa = cli('verdict', '--rule', 'aa', '--a', a, '--b', b);
+  assert.equal(aa.code, 2, 'the A/A noise margin is not declared from three different cells');
+  assert.equal(JSON.parse(aa.out).validPairs, 1);
+  // a cell with its three repeats next to a thin one: the whole input is incomplete, one cell on its own is judged
+  const mixed = (name, p95) => {
+    runs(name, [p95, p95, p95], { tag: 'default-' });
+    runs(name, [p95], { observer: 'none', tag: 'none-' });
+    return path.join(tmp, name);
+  };
+  const ma = mixed('c-ma', 10_000);
+  const mb = mixed('c-mb', 4000);
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', ma, '--b', mb).code, 2);
+  assert.equal(cli('verdict', '--rule', 'aa', '--a', ma, '--b', mb).code, 2);
+  assert.equal(cli('verdict', '--rule', 'halve', '--a', ma, '--b', mb, '--where', 'observer=default').code, 0);
+  const aaOne = cli('verdict', '--rule', 'aa', '--a', ma, '--b', mb, '--where', 'observer=default');
+  assert.deepEqual([aaOne.code, JSON.parse(aaOne.out).validPairs], [0, 3]);
 });
 
 test('verdict does not pick between two valid runs of a cell, and reports env, P8c and a base under the knee', () => {

@@ -216,10 +216,21 @@ const canon = (x) =>
   );
 
 /**
- * Settings the two runs of a pair must share (plan 8.3: "identical flags"). The seed file is left out for the flatness
- * rule, which compares histories.
+ * Settings the two runs of a pair must share (plan 8.3: "identical flags"): `seed` is the arrival schedule and
+ * `observerMs` the list observer's polling period. The seed file is left out for the flatness rule, which compares
+ * histories.
  */
-const SAME_IN_A_PAIR = ['windows', 'lambda', 'content', 'aggregate', 'calibrationSha256', 'seedFileSha256', 'cpus'];
+const SAME_IN_A_PAIR = [
+  'windows',
+  'lambda',
+  'content',
+  'aggregate',
+  'seed',
+  'observerMs',
+  'calibrationSha256',
+  'seedFileSha256',
+  'cpus',
+];
 
 /**
  * { differs: the settings that differ, envDiffers }. The DKG_STORE_* env may differ on purpose (the knob under test),
@@ -286,11 +297,31 @@ export function pairRuns(aRecords, bRecords, keyOf = (r) => r.key, { ignoreSeed 
   return { pairs, missing };
 }
 
+/** The comparison cell of a pair key: the key without its trailing repeat (see pairKey). */
+const cellOfKey = (key) => (key.includes('|') ? key.slice(0, key.lastIndexOf('|')) : '');
+
 /**
- * metric ratio b/a per valid pair against limit (and an optional lower bound). Pass: >= PAIRED_MIN valid pairs and
- * every pair inside the bounds. Incomplete (not a fail): fewer valid pairs. With checkKnee, `belowKnee` lists the pairs
- * whose base run did not reach the knee: the plan calibrates the rung once on the base and does not re-judge each
- * repeat, so this is reported (a halving test against a healthy base is weak), not gating.
+ * Valid paired repeats per comparison cell (history, observer, rung): { cells: { cell: count }, have }. A rule needs
+ * PAIRED_MIN in EVERY cell, so `have` is the thinnest cell's count and the valid pairs of different cells never add up.
+ */
+export function repeatsPerCell(pairs) {
+  const repeats = new Map();
+  for (const p of pairs) {
+    if (!p.valid) continue;
+    const cell = cellOfKey(p.key);
+    repeats.set(cell, (repeats.get(cell) ?? new Set()).add(p.key));
+  }
+  const cells = Object.fromEntries([...repeats].map(([cell, keys]) => [cell, keys.size]));
+  const counts = Object.values(cells);
+  return { cells, have: counts.length ? Math.min(...counts) : 0 };
+}
+
+/**
+ * metric ratio b/a per valid pair against limit (and an optional lower bound). Pass: >= PAIRED_MIN valid paired repeats
+ * in every cell and every pair inside the bounds. Incomplete (not a fail): fewer valid repeats in some cell. With
+ * checkKnee, `belowKnee` lists the pairs whose base run did not reach the knee: the plan calibrates the rung once on
+ * the base and does not re-judge each repeat, so this is reported (a halving test against a healthy base is weak), not
+ * gating.
  */
 export function ratioRule({ pairs, metric = 'p95Ms', limit, lower, label, checkKnee = false }) {
   const valid = pairs.filter((p) => p.valid);
@@ -300,10 +331,16 @@ export function ratioRule({ pairs, metric = 'p95Ms', limit, lower, label, checkK
     const ratio = a === 0 ? (b === 0 ? 1 : Infinity) : b / a;
     return { key: p.key, a, b, ratio: r4(ratio), ok: ratio <= limit && (lower === undefined || ratio >= lower) };
   });
-  const out = { label, metric, limit, need: PAIRED_MIN, have: valid.length, perRepeat };
+  const { cells, have } = repeatsPerCell(pairs);
+  const out = { label, metric, limit, need: PAIRED_MIN, have, cells, perRepeat };
   if (checkKnee) out.belowKnee = valid.filter((p) => !kneeReached(p.a)).map((p) => p.key);
-  if (valid.length < PAIRED_MIN) {
-    return { ...out, status: 'incomplete', reason: `needs ${PAIRED_MIN} valid paired repeats, has ${valid.length}` };
+  if (have < PAIRED_MIN) {
+    const perCell = Object.keys(cells).length > 1 ? ` (${JSON.stringify(cells)})` : '';
+    return {
+      ...out,
+      status: 'incomplete',
+      reason: `needs ${PAIRED_MIN} valid paired repeats in every cell, the thinnest has ${have}${perCell}`,
+    };
   }
   return { ...out, status: perRepeat.every((r) => r.ok) ? 'pass' : 'fail' };
 }
@@ -421,6 +458,8 @@ export function extractRecord(s) {
       aggregate: cell.aggregate ?? null,
       calibrationSha256: s.meta.calibration?.sha256 ?? null,
       seedFileSha256: seed ? (seed.loadedSha256 ?? seed.sha256 ?? null) : null,
+      seed: cell.seed ?? null,
+      observerMs: cell.observerMs ?? null,
       cpus: s.meta.host?.cpus ?? null,
     },
     windowsDifferFromCalibration: Boolean(s.meta.calibration?.windowsDiffer),

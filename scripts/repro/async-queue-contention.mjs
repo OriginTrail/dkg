@@ -50,8 +50,9 @@
 //    calibration file, same flags and env except the knob under test, alternating base and head per repeat (ABBA):
 //      node ... verdict --rule halve --a $OUT/base --b $OUT/head                         # G1 from P4: b/a <= 0.5
 //      node ... verdict --rule equal --a $OUT/base --b $OUT/head --margin <from step 2>  # AC2 path off
-//    verdict only counts a pair whose two runs share windows, load, calibration, seed file and host (plan 8.3:
-//    identical flags); it lists what else it saw.
+//    verdict only counts a pair whose two runs share windows, load, arrival seed, observer period, calibration, seed
+//    file and host (plan 8.3: identical flags), and a rule needs 3 valid paired repeats in EVERY cell (history,
+//    observer, rung) it sees: use --where to judge one cell; it lists what else it saw.
 // 4. AC5, history cells (observer default and paged), 3 repeats each; then verdict --rule flat (b/a <= 1.25 in 3/3):
 //      node scripts/repro/async-queue-seed-history.mjs --jobs 50k --out $OUT/seed-50k.nq.gz
 //      node ... run --calibration ... --history 0 --label h0 --repeats 3 ...
@@ -69,13 +70,13 @@ import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, writeS
 import os from 'node:os';
 import path from 'node:path';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
-import { setTimeout as sleep } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { REPO_ROOT, loadDist, provenance, resolveEndpoint, withNamespace } from './async-queue-contention/backend.mjs';
 import { seedMainNamespace } from './async-queue-contention/fixture.mjs';
 import { loadGenerated, loadSeedFile, parseCount } from './async-queue-contention/history.mjs';
 import {
+  PAIRED_MIN,
   RUNGS,
   admissionSummary,
   equivalent,
@@ -94,15 +95,18 @@ import {
   pairKey,
   pairRuns,
   pickReproductionRung,
+  repeatsPerCell,
   shareBacklog,
   summarize,
   validity,
 } from './async-queue-contention/verdict.mjs';
 import {
   OBSERVER_CALLS,
+  beginEpoch,
   createIdlePublisher,
   createWorker,
   makePreflight,
+  sleepUntil,
   startObserver,
   startReaders,
   startShareProducers,
@@ -439,7 +443,7 @@ async function runOnce(c, dist, endpoint, outDir) {
         const cfg = { ...c, runTag };
         const world = {
           cfg,
-          t0: 0,
+          t0: null, // set by beginEpoch, once the worker and the idle publisher are up
           epoch0: 0,
           store,
           queue: null,
@@ -468,28 +472,34 @@ async function runOnce(c, dist, endpoint, outDir) {
           const maxOldest = {};
           const window = { from: c.warmupMs, to: c.warmupMs + c.measureMs };
           const preflight = makePreflight({ store, deps: dist });
-          world.t0 = performance.now();
-          world.epoch0 = Date.now();
-          loopMonitor.enable();
-          sampler = setInterval(() => {
-            const t = performance.now() - world.t0;
-            if (t < window.from || t >= window.to) return;
-            for (const s of core.backpressureRegistry.capture().schedulers) {
-              maxOldest[s.scheduler] = Math.max(maxOldest[s.scheduler] ?? 0, s.totals.oldestQueuedAgeMs);
-            }
-          }, 1000);
-          await worker.supervisor.start();
-          await idle.start();
+          // the epoch starts after the awaited startup; the samplers and every window boundary count from it
+          await beginEpoch(
+            world,
+            async () => {
+              await worker.supervisor.start();
+              await idle.start();
+            },
+            () => {
+              loopMonitor.enable();
+              sampler = setInterval(() => {
+                const t = performance.now() - world.t0;
+                if (t < window.from || t >= window.to) return;
+                for (const s of core.backpressureRegistry.capture().schedulers) {
+                  maxOldest[s.scheduler] = Math.max(maxOldest[s.scheduler] ?? 0, s.totals.oldestQueuedAgeMs);
+                }
+              }, 1000);
+            },
+          );
           running = true;
           const producers = startShareProducers(world, preflight);
           const readers = startReaders(world);
           const observer = startObserver(world, c.observer);
-          await sleep(c.warmupMs);
+          await sleepUntil(world, window.from);
           loopMonitor.reset();
           const before = core.backpressureRegistry.capture();
           const cpu0 = process.cpuUsage();
           const wall0 = performance.now();
-          await sleep(c.measureMs);
+          await sleepUntil(world, window.to);
           const cpu = process.cpuUsage(cpu0);
           const wallMs = performance.now() - wall0;
           const after = core.backpressureRegistry.capture();
@@ -497,7 +507,7 @@ async function runOnce(c, dist, endpoint, outDir) {
             p99Ms: Math.round((loopMonitor.percentile(99) / 1e6) * 10) / 10,
             maxMs: Math.round((loopMonitor.max / 1e6) * 10) / 10,
           };
-          await sleep(Math.max(0, window.to + c.cooldownMs - (performance.now() - world.t0)));
+          await sleepUntil(world, window.to + c.cooldownMs);
           producers.stop();
           readers.stop();
           observer.stop();
@@ -604,6 +614,7 @@ async function runOnce(c, dist, endpoint, outDir) {
                 aggregate: c.aggregate,
                 repeat: c.repeat,
                 seed: c.seed,
+                observerMs: c.observerMs,
               },
               windows: { warmupMs: c.warmupMs, measureMs: c.measureMs, cooldownMs: c.cooldownMs },
               calibration: c.calibration,
@@ -845,10 +856,11 @@ function verdictCommand(v) {
   const keyOf = rule === 'flat' ? (r) => pairKey(r, { ignoreHistory: true }) : (r) => r.key;
   const { pairs, missing } = pairRuns(A, B, keyOf, { ignoreSeed: rule === 'flat' });
   if (rule === 'aa') {
-    const valid = pairs.filter((p) => p.valid).length;
+    // three repeats of EACH cell: valid pairs of different cells do not add up
+    const { have, cells } = repeatsPerCell(pairs);
     const warnings = integrityWarnings([...A, ...B], pairs, null);
-    console.log(JSON.stringify({ margin: noiseMargin(pairs), validPairs: valid, warnings, missing }));
-    process.exit(valid >= 3 ? 0 : 2);
+    console.log(JSON.stringify({ margin: noiseMargin(pairs), validPairs: have, cells, warnings, missing }));
+    process.exit(have >= PAIRED_MIN ? 0 : 2);
   }
   const result = rule === 'halve' ? halve(pairs) : rule === 'flat' ? flat(pairs) : equivalent(pairs, margin);
   const g = guards(pairs);

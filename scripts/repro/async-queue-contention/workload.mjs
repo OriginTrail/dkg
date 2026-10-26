@@ -56,10 +56,36 @@ export function poissonArrivals(seed, lambda, horizonMs) {
   return out;
 }
 
+const TYPED_STORAGE_CODES = new Set(['STORE_SCHEDULER_BUSY', 'STORE_OPERATION_TIMEOUT']);
+
+/** The first typed storage failure in the cause chain of e (e itself included), or undefined. */
+function typedStorageFailure(e) {
+  const seen = new Set();
+  for (let c = e; c && typeof c === 'object' && !seen.has(c) && seen.size < 8; c = c.cause) {
+    if (TYPED_STORAGE_CODES.has(c.code)) return c;
+    seen.add(c);
+  }
+  return undefined;
+}
+
 /** Matches on `code`, which stays right when P3 makes busy errors carry priority 'control'. */
 export function classifyError(e) {
   const name = e?.name;
   const code = e?.code;
+  if (name === 'PromoteAdmissionUncertainError') {
+    // the queue could not confirm a write (bindRecovery, inline claim): uncertainty caused by a typed storage
+    // rejection is load, not an agent defect. Any other cause stays an 'error'.
+    const storage = typedStorageFailure(e.cause);
+    if (storage) {
+      return {
+        outcome: 'indeterminate',
+        code: storage.code,
+        phase: 'store',
+        admissionOutcome: 'indeterminate',
+        ...(e.jobId ? { jobId: e.jobId } : {}),
+      };
+    }
+  }
   if (name === 'PromoteAdmissionError' || code === 'PROMOTE_ADMISSION_UNAVAILABLE') {
     return {
       outcome: e.admissionOutcome === 'indeterminate' ? 'indeterminate' : 'typed_reject_not_admitted',
@@ -123,11 +149,32 @@ const NOOP = {
 };
 
 /**
+ * The workload epoch. world.t0 stays null (events stamped before it are not recorded) while `startup` is awaited, then
+ * is set, so the producers' schedule, every event timestamp, the resource samplers (`onEpoch`) and the window
+ * boundaries all count from one instant after the worker and the idle publisher are up: the startup time is neither
+ * charged to submission latency nor released as a burst of overdue arrivals.
+ */
+export async function beginEpoch(world, startup, onEpoch = () => {}) {
+  await startup();
+  world.t0 = performance.now();
+  world.epoch0 = Date.now();
+  onEpoch();
+}
+
+const requireEpoch = (world) => {
+  if (world.t0 === null) throw new Error('the workload epoch is not set: start the load after beginEpoch()');
+};
+
+/** Resolves when `ms` have passed since the epoch (immediately if they already have). */
+export const sleepUntil = (world, ms) => sleep(Math.max(0, ms - (performance.now() - world.t0)));
+
+/**
  * Open loop. The whole schedule is precomputed; every arrival whose intended time has passed is issued at once, so a
  * stalled driver cannot hide late requests (no coordinated omission) and latency is ended - intended. The window tag
  * comes from the intended time.
  */
 export function startShareProducers(world, preflight) {
+  requireEpoch(world);
   const { cfg } = world;
   const horizon = cfg.warmupMs + cfg.measureMs + cfg.cooldownMs;
   const arrivals = poissonArrivals(cfg.seed, cfg.lambda, horizon);
@@ -196,6 +243,7 @@ export function startShareProducers(world, preflight) {
  * COUNT over the NS_GRAPHS graphs.
  */
 export function startReaders(world) {
+  requireEpoch(world);
   const { cfg, store } = world;
   const rng = mulberry32(cfg.seed * 7919 + 17);
   const loops = [];
@@ -280,6 +328,7 @@ export function startObserver(world, mode) {
   const call = OBSERVER_CALLS[mode];
   const { observerMs } = world.cfg;
   if (mode === 'none' || !call) return NOOP;
+  requireEpoch(world);
   let stop = false;
   const loop = (async () => {
     while (!stop) {
@@ -335,10 +384,12 @@ export function createWorker(world, deps) {
             job = await v.apply(target, a);
             return job;
           } finally {
-            world.claimMs.push({ t: t0 - world.t0, ms: performance.now() - t0, job: Boolean(job) });
+            // the supervisor polls from its start(), before the epoch: those claims are startup, not workload
+            const live = world.t0 !== null;
+            if (live) world.claimMs.push({ t: t0 - world.t0, ms: performance.now() - t0, job: Boolean(job) });
             if (job) {
               enqueuedAt.set(job.jobId, job.enqueuedAt);
-              world.claimLatMs.push(Date.now() - job.enqueuedAt);
+              if (live) world.claimLatMs.push(Date.now() - job.enqueuedAt);
             }
           }
         };
@@ -346,11 +397,13 @@ export function createWorker(world, deps) {
       if (prop === 'succeed') {
         return async (...a) => {
           const r = await v.apply(target, a);
-          world.completions.push({
-            t: performance.now() - world.t0,
-            jobId: a[0],
-            latMs: Date.now() - (enqueuedAt.get(a[0]) ?? Date.now()),
-          });
+          if (world.t0 !== null) {
+            world.completions.push({
+              t: performance.now() - world.t0,
+              jobId: a[0],
+              latMs: Date.now() - (enqueuedAt.get(a[0]) ?? Date.now()),
+            });
+          }
           return r;
         };
       }

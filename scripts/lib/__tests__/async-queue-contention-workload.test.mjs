@@ -14,12 +14,14 @@ import {
 } from '../../repro/async-queue-contention/fixture.mjs';
 import {
   OBSERVER_CALLS,
+  beginEpoch,
   classifyError,
   createIdlePublisher,
   createWorker,
   makePreflight,
   mulberry32,
   poissonArrivals,
+  sleepUntil,
   startObserver,
   startReaders,
   startShareProducers,
@@ -107,6 +109,36 @@ test('classifyError maps the typed admission and store errors by code', () => {
     'typed_reject_not_admitted',
   );
   assert.deepEqual(classifyError(new TypeError('nope')), { outcome: 'error', code: 'TypeError', message: 'nope' });
+});
+
+/** What the queue throws when a write may or may not have landed (bindRecovery, inline claim). */
+const uncertain = (cause) =>
+  Object.assign(new Error('Durable share admission could not be confirmed', { cause }), {
+    name: 'PromoteAdmissionUncertainError',
+    jobId: 'j9',
+  });
+
+test('classifyError recognises queue uncertainty caused by a typed storage failure and nothing else', () => {
+  const busy = Object.assign(new Error('busy'), { code: 'STORE_SCHEDULER_BUSY', reason: 'queue_full' });
+  assert.deepEqual(classifyError(uncertain(busy)), {
+    outcome: 'indeterminate',
+    code: 'STORE_SCHEDULER_BUSY',
+    phase: 'store',
+    admissionOutcome: 'indeterminate',
+    jobId: 'j9',
+  });
+  const late = Object.assign(new Error('late'), { code: 'STORE_OPERATION_TIMEOUT' });
+  assert.equal(classifyError(uncertain(late)).code, 'STORE_OPERATION_TIMEOUT');
+  const deep = uncertain(new Error('write failed', { cause: new Error('adapter', { cause: busy }) }));
+  assert.equal(classifyError(deep).outcome, 'indeterminate', 'the cause chain is inspected, not just the first cause');
+  // a genuine defect behind the same wrapper, an untyped wrapper and a cyclic chain stay errors
+  assert.equal(classifyError(uncertain(new TypeError('the share body changed shape'))).outcome, 'error');
+  assert.equal(classifyError(uncertain(undefined)).outcome, 'error');
+  const unwrapped = Object.assign(new Error('x', { cause: busy }), { name: 'SomethingElse' });
+  assert.equal(classifyError(unwrapped).outcome, 'error', 'only the uncertainty wrapper is looked through');
+  const loop = new Error('loop');
+  loop.cause = loop;
+  assert.equal(classifyError(uncertain(loop)).outcome, 'error');
 });
 
 test('within resolves at the cap without keeping a timer alive', async () => {
@@ -241,6 +273,66 @@ test('a stalled driver issues the late arrivals at once and the latency counts f
     late.every((r) => r.ended - r.intended > 40),
     'and their latency includes the stall',
   );
+});
+
+test('the epoch starts after a slow startup: no inflated latency and no catch-up burst', async () => {
+  const w = world({ lambda: 40, warmupMs: 100, measureMs: 200, cooldownMs: 100 }, { t0: null });
+  w.queue = { enqueue: async ({ assertionName }) => `job-${jobNumber(assertionName)}` };
+  const schedule = poissonArrivals(7, 40, 400);
+  const startupMs = 250;
+  assert.ok(schedule.filter((t) => t < startupMs).length >= 5, 'a startup this long would owe a burst of arrivals');
+  const events = [];
+  await beginEpoch(
+    w,
+    async () => {
+      events.push('startup');
+      await sleep(startupMs); // the worker supervisor and the idle publisher coming up
+      events.push('up');
+    },
+    () => events.push(`samplers:${w.t0 !== null}`),
+  );
+  assert.deepEqual(events, ['startup', 'up', 'samplers:true'], 'the samplers start with the epoch, after the startup');
+  assert.ok(performance.now() - w.t0 < 100, 'the epoch is the end of the startup, not its start');
+  assert.ok(Math.abs(Date.now() - w.epoch0) < 100);
+  const producers = startShareProducers(w, async () => ({ ok: true }));
+  await sleep(450);
+  producers.stop();
+  assert.equal(await producers.drain(2000), 0);
+  assert.equal(w.requests.length, schedule.length);
+  assert.ok(
+    w.requests.every((r) => r.started >= r.intended && r.started - r.intended < 100),
+    'no arrival is issued late, so none is issued in a burst',
+  );
+  assert.ok(w.requests.every((r) => r.ended - r.intended < 100), 'and the startup is not in any latency');
+  assert.ok(w.requests[0].started < 100, 'the schedule starts at the epoch');
+});
+
+test('a failing startup sets no epoch, and the load refuses to start without one', async () => {
+  const w = world({}, { t0: null });
+  await assert.rejects(
+    beginEpoch(w, async () => {
+      throw new Error('supervisor failed to start');
+    }),
+    /supervisor failed/,
+  );
+  assert.equal(w.t0, null);
+  w.queue = { list: async () => [] };
+  w.store = { query: async () => ({ bindings: [] }) };
+  assert.throws(() => startShareProducers(w, async () => ({ ok: true })), /epoch is not set/);
+  assert.throws(() => startReaders(w), /epoch is not set/);
+  assert.throws(() => startObserver(w, 'default'), /epoch is not set/);
+  assert.equal(await startObserver(w, 'none').drain(), 0, 'no observer is nothing to start');
+});
+
+test('sleepUntil counts from the epoch, so a window boundary does not drift with the work done before it', async () => {
+  const w = world({}, { t0: performance.now() - 80 });
+  const t0 = performance.now();
+  await sleepUntil(w, 120);
+  const waited = performance.now() - t0;
+  assert.ok(waited >= 35 && waited < 250, `${waited} ms until 40 ms after now`);
+  const past = performance.now();
+  await sleepUntil(w, 10);
+  assert.ok(performance.now() - past < 50, 'a boundary already passed does not wait');
 });
 
 // ---------------------------------------------------------------- readers and observer
@@ -467,7 +559,15 @@ function workerRig(failWith) {
     if (failWith.error && calls.length === failWith.at) throw failWith.error;
     return { bindings: [] };
   };
-  const queue = { bindRecovery: async (id, token, binding) => ({ jobId: id, token, binding }) };
+  const queue = {
+    bindRecovery: async (id, token, binding) => {
+      calls.push({ kind: 'bindRecovery', args: [id] });
+      if (failWith.bindError) throw failWith.bindError;
+      return { jobId: id, token, binding };
+    },
+    claimNext: async () => ({ jobId: 'j1', enqueuedAt: Date.now(), lease: { claimToken: 'tok' } }),
+    succeed: async (id) => `done:${id}`,
+  };
   const w = world({}, { queue, store });
   const deps = {
     storage: { deleteByPatternWithoutCount: async () => {} },
@@ -483,7 +583,7 @@ function workerRig(failWith) {
     lease: { claimToken: 'tok' },
     request: { contextGraphId: CG_ID, assertionName: 't-s3', agentAddress: AGENT },
   };
-  return { ...rig, agent: rig.supervisor.cfg.agent, authority, job, calls };
+  return { ...rig, agent: rig.supervisor.cfg.agent, authority, job, calls, world: w };
 }
 
 test('the worker counts agent errors that are not store rejections and stops counting at freeze()', async () => {
@@ -521,6 +621,43 @@ test('the worker counts agent errors that are not store rejections and stops cou
   log('Worker w0 crashed processing j1: boom');
   log('Worker w1 stopped bookkeeping for j2 after shutdown timeout');
   assert.equal(crashes.log.crashes, 1, 'only the supervisor line for a job that crashed counts');
+});
+
+test('the worker does not count queue uncertainty from a typed storage failure, and does not hide it', async () => {
+  const busy = Object.assign(new Error('busy'), { code: 'STORE_SCHEDULER_BUSY', reason: 'queue_full' });
+  const rig = workerRig({ bindError: uncertain(busy) });
+  await assert.rejects(rig.agent.assertion.prepareQueuedShare(rig.job, rig.authority), (e) => {
+    assert.equal(e.name, 'PromoteAdmissionUncertainError', 'the supervisor still sees the uncertain write');
+    return true;
+  });
+  assert.equal(rig.calls.filter((c) => c.kind === 'bindRecovery').length, 1, 'the uncertain write is not retried');
+  assert.deepEqual([rig.stats.agentErrors, rig.stats.firstAgentError], [0, null], 'load, not a broken contract');
+
+  const defect = workerRig({ bindError: uncertain(new TypeError('the binding changed shape')) });
+  await assert.rejects(
+    defect.agent.assertion.prepareQueuedShare(defect.job, defect.authority),
+    /could not be confirmed/,
+  );
+  assert.deepEqual(
+    [defect.stats.agentErrors, defect.stats.firstAgentError],
+    [1, 'PromoteAdmissionUncertainError: Durable share admission could not be confirmed'],
+    'an uncertain write with an untyped cause is still an agent error',
+  );
+});
+
+test('events the worker produces before the epoch are not recorded', async () => {
+  const rig = workerRig({});
+  const { world: w } = rig;
+  w.t0 = null; // the supervisor is started, the epoch is not
+  const q = rig.agent.promoteQueue;
+  assert.equal((await q.claimNext('w0')).jobId, 'j1');
+  assert.equal(await q.succeed('j1', 'tok'), 'done:j1');
+  assert.deepEqual([w.claimMs.length, w.claimLatMs.length, w.completions.length], [0, 0, 0]);
+  await beginEpoch(w, async () => {});
+  await q.claimNext('w0');
+  await q.succeed('j1', 'tok');
+  assert.deepEqual([w.claimMs.length, w.claimLatMs.length, w.completions.length], [1, 1, 1]);
+  assert.ok(w.claimMs[0].t >= 0 && w.completions[0].t >= 0);
 });
 
 test('the idle publisher counts any job it is handed and survives a failed boot backfill', async () => {
