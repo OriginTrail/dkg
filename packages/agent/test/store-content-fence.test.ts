@@ -153,6 +153,7 @@ it('does not let delayed old outcomes poison a replacement or hide new-generatio
   const fence = new StoreContentFence(() => generation);
   const old = fence.begin({ everything: true });
   generation = 1;
+  expect(fence.openScope(scope)).toBeUndefined(); // An old client operation could still dispatch more work.
   old('indeterminate');
   const fresh = fence.openScope(scope)!;
   expect(fresh).toBeDefined(); fresh.close();
