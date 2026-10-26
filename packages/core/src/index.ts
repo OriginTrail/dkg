@@ -540,3 +540,5 @@ export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
 
 export * from './bulk-graph-wire.js';
 export * from './bulk-graph-transport.js';
+
+export { ProtocolReadLimitError } from './bounded-stream-read.js';

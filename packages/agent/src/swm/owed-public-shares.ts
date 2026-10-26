@@ -132,7 +132,7 @@ interface OwedRecord<S> extends OwedPublicShare<S> {
   resignFailures: number;
   /** The store's count of shares tried, taken when this one was last tried; 0 while it never was. */
   lastTry: number;
-  /** Cores that refused this share, with when they did; it is not sent to them again for `OWED_PUBLIC_SHARE_REFUSAL_HOLD_MS`. */
+  /** Cores and owner peers that refused this share, with when they did; it is not sent to them again for `OWED_PUBLIC_SHARE_REFUSAL_HOLD_MS`. */
   readonly refusedBy: Map<string, number>;
 }
 
@@ -368,12 +368,13 @@ export class OwedPublicShares<S> {
       this.#ports.logInfo(`${describeShare(share)} not sent again: the graph is not public now, or its access policy cannot be read`);
       return false;
     }
+    const refused = this.#refusedLately(share);
     const holders = share.holder
-      ? await settled(() => this.#ports.holderPeers(share.contextGraphId, share.subGraphName, this.#refusedLately(share)), [])
+      ? await settled(() => this.#ports.holderPeers(share.contextGraphId, share.subGraphName, refused), [])
       : [];
     const owners = share.owner
       ? (await lookUpOnce(lookups.owners, share.contextGraphId, () => this.#ports.ownerPeers(share.contextGraphId), []))
-        .slice(0, OWED_PUBLIC_SHARE_OWNER_PEERS_MAX)
+        .filter((peerId) => !refused.has(peerId)).slice(0, OWED_PUBLIC_SHARE_OWNER_PEERS_MAX)
       : [];
     if (!this.#open(generation) || (holders.length === 0 && owners.length === 0)) return false;
     share.attempts += 1;
@@ -395,13 +396,15 @@ export class OwedPublicShares<S> {
       if (!this.#open(generation)) return true;
       if (outcome === 'delivered') {
         this.#ports.logInfo(`${describeShare(share)} reached the graph's owner ${peerId.slice(-8)} on attempt ${share.attempts}`);
-      } else if (outcome === 'rejected') {
-        this.#ports.logWarn(`${describeShare(share)} refused by the graph's owner ${peerId.slice(-8)}; not sent again`);
-      } else {
-        continue;
+        share.owner = false;
+        break;
       }
-      share.owner = false;
-      break;
+      if (outcome === 'rejected') {
+        // One owner peer's refusal (another or an older node of the same wallet, or an owner not ready yet) leaves
+        // only that peer out of this share for a while: the other owner peers keep being tried until delivery or expiry.
+        share.refusedBy.set(peerId, this.#now());
+        this.#ports.logInfo(`${describeShare(share)} refused by the graph's owner peer ${peerId.slice(-8)}; that peer is left out for a while`);
+      }
     }
     if (!share.holder && !share.owner) this.#shares.delete(share.shareOperationId);
     return true;

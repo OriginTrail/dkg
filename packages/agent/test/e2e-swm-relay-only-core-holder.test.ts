@@ -31,8 +31,12 @@
  * White-box steps, each named where it is made: the Core is made host-only with
  * `unsubscribeFromContextGraph` and is kept out of member 1's followers (as a
  * Core that runs the catalog kill switch stays out), member 1's owner lookup
- * is stubbed, and the owner's circuit address is put into member 1's peer
- * store as the owner's phonebook profile would supply it.
+ * is stubbed, the owner's circuit address is put into member 1's peer
+ * store as the owner's phonebook profile would supply it, and the owner has
+ * no handler for a share a Core relays, as an owner of an earlier release: the
+ * Core's forward to the owner (`e2e-swm-relay-only-owner-via-core.test.ts`)
+ * then fails, and member 1's own route to the owner, asserted here, is the one
+ * that delivers.
  */
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
@@ -41,7 +45,7 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { peerIdFromString } from '@libp2p/peer-id';
 import { multiaddr } from '@multiformats/multiaddr';
-import { contextGraphWorkspaceTopic } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SWM_UPDATE_RELAYED, contextGraphWorkspaceTopic } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '../src/index.js';
 import { holdsCoreHostedOwnerDefinition } from '../src/core-hosted-definition.js';
 import { resolveDurableGraphScopedAuthorSealCandidateV1 } from '../src/durable-author-seal-resolver-v1.js';
@@ -181,6 +185,8 @@ describe('E2E: a relay-only member\'s sub-graph share while no Core subscribes a
     const member1 = await startEdge('CoreHolderMember1', MEMBER_1_KEY, core);
     const member2 = await startEdge('CoreHolderMember2', MEMBER_2_KEY, core);
     const edges = [owner, member1, member2];
+    // White-box: an owner of an earlier release, which refuses a share a Core relays.
+    (owner as unknown as { router: { unregister(protocolId: string): void } }).router.unregister(PROTOCOL_SWM_UPDATE_RELAYED);
     const ownerAddress = owner.getDefaultAgentAddress()!.toLowerCase();
     const member1Address = member1.getDefaultAgentAddress()!.toLowerCase();
 

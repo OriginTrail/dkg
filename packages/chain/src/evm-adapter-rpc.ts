@@ -16,6 +16,7 @@ import {
   errorStatus,
 } from './evm-adapter-errors.js';
 import { createRpcTimeoutError } from './chain-rpc-transport-error.js';
+import { RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS } from './evm-adapter-constants.js';
 import { ContextGraphAuthorityIndexBootstrapUnavailableError } from
   './context-graph-authority-index-snapshot.js';
 import { EvmLogRangeUnavailableError } from './evm-log-range.js';
@@ -48,6 +49,22 @@ export { boundedRetryFetchRequest } from './rpc-request-transport.js';
  */
 export function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Retry a signer-free broadcast pass after transient exhaustion of its endpoint set. */
+export async function retryBroadcastEndpointSet(broadcast: () => Promise<void>): Promise<void> {
+  for (let pass = 0; ; pass += 1) {
+    try {
+      await broadcast();
+      return;
+    } catch (err) {
+      if (errorCode(err) === 'RPC_ENDPOINTS_EXHAUSTED' && pass < RPC_ENDPOINT_SET_RETRIES) {
+        await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
+        continue;
+      }
+      throw err;
+    }
+  }
 }
 
 export function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {

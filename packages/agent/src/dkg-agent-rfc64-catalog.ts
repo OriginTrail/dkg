@@ -239,9 +239,8 @@ export interface Rfc64CatalogAuthorSignerV1 {
 /** Compatibility name retained for the legacy public/open authoring surface. */
 export type Rfc64OpenCatalogAuthorSignerV1 = Rfc64CatalogAuthorSignerV1;
 
-const RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1 =
-  'https://dkg.network/ontology#rfc64RosterVersion';
-const RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1 = 10_000_000_000_000n;
+import { RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1, RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1,
+  readPrivateRosterGeneration } from './private-roster-version.js';
 
 export interface AcceptOpenContextGraphPolicyInputV1 {
   readonly networkId: NetworkIdV1;
@@ -325,6 +324,7 @@ import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
+import { AuthorityAcceptedCatchupBatch } from './sync/on-connect/graph-scope.js';
 
 export interface PublishOpenAuthorCatalogSuccessorParamsV1 {
   /** Exact durable predecessor returned by genesis or a prior successor. */
@@ -499,8 +499,8 @@ const rfc64CatalogAuthorityProgressV1 =
   new WeakMap<DKGAgent, Map<string, Rfc64CatalogAuthorityProgressV1>>();
 const rfc64CatalogAuthorityRevisionsV1 =
   new WeakMap<DKGAgent, Map<string, number>>();
-const rfc64AuthorityAcceptedCatchupTimersV1 =
-  new WeakMap<DKGAgent, ReturnType<typeof setTimeout>>();
+const rfc64AuthorityAcceptedCatchupBatchesV1 =
+  new WeakMap<DKGAgent, AuthorityAcceptedCatchupBatch>();
 const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
 /**
  * Context graphs whose accepted policy was composed from a private join
@@ -1905,36 +1905,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     this: DKGAgent,
     contextGraphId: string,
   ): Promise<string> {
-    const contextGraphUri = contextGraphDataGraphUri(contextGraphId);
-    const metaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const result = await this.store.query(`
-      SELECT ?version WHERE {
-        GRAPH <${metaGraph}> {
-          <${contextGraphUri}> <${RFC64_PRIVATE_ROSTER_VERSION_PREDICATE_V1}> ?version .
-        }
-      }
-    `, { source: 'agent.rfc64.privateRosterVersion' });
-    if (result.type !== 'bindings' || result.bindings.length === 0) return '0';
-    const versions = new Set<string>();
-    for (const row of result.bindings) {
-      const raw = row['version'];
-      if (typeof raw !== 'string') {
-        throw new Error('RFC-64 private roster version is not a literal');
-      }
-      const lexical = raw.match(/^"([0-9]+)"(?:\^\^<[^>]+>)?$/u)?.[1]
-        ?? (/^[0-9]+$/u.test(raw) ? raw : undefined);
-      if (lexical === undefined || !/^(0|[1-9][0-9]*)$/u.test(lexical)) {
-        throw new Error('RFC-64 private roster version is not canonical');
-      }
-      if (BigInt(lexical) >= RFC64_PRIVATE_ROSTER_VERSION_RADIX_V1) {
-        throw new Error('RFC-64 private roster version exceeds its generation lane');
-      }
-      versions.add(lexical);
-    }
-    // The curator replaces its generation; a member's sync stores the newer one
-    // beside the one it held. Generations only advance, so the newest is current.
-    const newest = [...versions].map((version) => BigInt(version));
-    return newest.reduce((left, right) => (right > left ? right : left)).toString(10);
+    return readPrivateRosterGeneration(this.store, contextGraphId);
   }
 
   /**
@@ -3473,7 +3444,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       // rather than on every periodic unchanged refresh.
       if (previousAuthorityProgress?.state !== 'accepted' || authorityGenerationChanged) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
-        this.scheduleRfc64AuthorityAcceptedPeerCatchupV1();
+        this.scheduleRfc64AuthorityAcceptedPeerCatchupV1(contextGraphId);
         this.requestRfc64OwedShareInventoryDrainV1(); // Shares admitted behind the fence owe their rows now.
       }
       this.scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
@@ -3608,37 +3579,36 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
    * Coalesce a batch of accepted authority transitions into one connected-peer
    * catch-up. A peer may have completed an ordinary sync while those graphs
    * were correctly denied as pending; the resulting freshness stamp must not
-   * suppress the first pass with the newly accepted scope.
+   * suppress the first pass with the newly accepted scope. The pass covers
+   * only the batched graphs: the peer's other graphs did not change.
    */
-  private scheduleRfc64AuthorityAcceptedPeerCatchupV1(this: DKGAgent): void {
-    const existing = rfc64AuthorityAcceptedCatchupTimersV1.get(this);
-    if (existing !== undefined) clearTimeout(existing);
-    const timer = setTimeout(() => {
-      if (rfc64AuthorityAcceptedCatchupTimersV1.get(this) !== timer) return;
-      rfc64AuthorityAcceptedCatchupTimersV1.delete(this);
-      // The node can be stopped or restarting while the agent still reports
-      // started, and reading libp2p then throws from this timer, outside any
-      // caller that could catch it.
-      if (!this.started || !this.node.isStarted) return;
-      for (const peer of this.node.libp2p.getPeers()) {
-        const peerId = peer.toString();
-        this.queueSyncFromPeerOnConnect(
-          peerId,
-          (failedPeerId, error) => {
-            this.log.warn(
-              createOperationContext('sync'),
-              `RFC-64 authority catch-up from ${failedPeerId.slice(-8)} failed: ${
-                error instanceof Error ? error.message : String(error)
-              }`,
-            );
-          },
-          0,
-          { authorityScopeChanged: true },
-        );
-      }
-    }, 3_000);
-    (timer as ReturnType<typeof setTimeout> & { unref?: () => void }).unref?.();
-    rfc64AuthorityAcceptedCatchupTimersV1.set(this, timer);
+  private scheduleRfc64AuthorityAcceptedPeerCatchupV1(this: DKGAgent, contextGraphId: string): void {
+    let batch = rfc64AuthorityAcceptedCatchupBatchesV1.get(this);
+    if (batch === undefined) {
+      batch = new AuthorityAcceptedCatchupBatch(3_000, (authorityScopeContextGraphIds) => {
+        // The node can be stopped or restarting while the agent still reports
+        // started, and reading libp2p then throws from this timer, outside any
+        // caller that could catch it.
+        if (!this.started || !this.node.isStarted) return;
+        for (const peer of this.node.libp2p.getPeers()) {
+          this.queueSyncFromPeerOnConnect(
+            peer.toString(),
+            (failedPeerId, error) => {
+              this.log.warn(
+                createOperationContext('sync'),
+                `RFC-64 authority catch-up from ${failedPeerId.slice(-8)} failed: ${
+                  error instanceof Error ? error.message : String(error)
+                }`,
+              );
+            },
+            0,
+            { authorityScopeChanged: true, authorityScopeContextGraphIds },
+          );
+        }
+      });
+      rfc64AuthorityAcceptedCatchupBatchesV1.set(this, batch);
+    }
+    batch.add(contextGraphId);
   }
 
   /**
@@ -5264,8 +5234,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           store: this.store,
           verifyIssuerSignature: clients.verifyIssuerSignature,
           beforeAppliedHeadCommit,
-          acquireLegacySwmBoundaryLease: (scope) =>
-            acquireRfc64LegacySwmBoundaryReceiverLeaseV1(this, scope),
+          acquireLegacySwmBoundaryLease: (scope, request) =>
+            acquireRfc64LegacySwmBoundaryReceiverLeaseV1(this, scope, request),
           transportTimeoutMs: clients.transportTimeoutMs,
         });
         readNativeResourceStats = () => nativeReceiver.resourceStats();

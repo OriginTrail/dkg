@@ -300,4 +300,41 @@ describe('runDaemonInner publisher startup cancellation', () => {
     expect(late.runtime.stop.mock.invocationCallOrder[0]).toBeLessThan(agent.stop.mock.invocationCallOrder[0]);
     expect(process.exit).toHaveBeenCalledExactlyOnceWith(0);
   });
+
+  it('synchronously closes the active publisher controller from the installed shutdown handler before HTTP drains', async () => {
+    const late = lateRuntime();
+    const control = { close: vi.fn(() => late.stopRelease.promise) };
+    Object.assign(late.runtime, { control });
+    mocks.startPublisherRuntimeWithOutcome.mockResolvedValue(late.outcome);
+    const httpEntered = deferred<void>();
+    const httpRelease = deferred<void>();
+    releasePending.push(() => httpRelease.resolve());
+    const server = createFakeDaemonHttpServer();
+    server.close.mockImplementation(callback => {
+      httpEntered.resolve();
+      void httpRelease.promise.then(() => callback?.());
+      return server;
+    });
+    mocks.createServer.mockReturnValue(server);
+    const { readState } = await boot();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(readState().runtime).toBe(late.runtime);
+
+    void beginShutdown();
+    // No await before this assertion: production lifecycle wiring must fence the active
+    // controller synchronously, not when runtime.stop eventually runs after HTTP draining.
+    expect(control.close).toHaveBeenCalledOnce();
+    await httpEntered.promise;
+    expect(control.close.mock.invocationCallOrder[0]).toBeLessThan(server.close.mock.invocationCallOrder[0]);
+    expect(late.runtime.stop).not.toHaveBeenCalled();
+    expect(agent.stop).not.toHaveBeenCalled();
+    // Pending controller persistence must not prevent the daemon from starting HTTP drain.
+    httpRelease.resolve();
+    await late.stopEntered.promise;
+    expect(agent.stop).not.toHaveBeenCalled();
+    late.stopRelease.resolve();
+    await shutdown;
+    expect(agent.stop).toHaveBeenCalledOnce();
+    expect(process.exit).toHaveBeenCalledExactlyOnceWith(0);
+  });
 });

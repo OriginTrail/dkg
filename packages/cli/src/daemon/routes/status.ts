@@ -1,3 +1,4 @@
+import { handlePrivatePlacementRetry } from './private-placement-retry.js';
 // daemon/routes/status.ts
 //
 // Route handlers for status, info, connections, host, wallet, chain, identity, integrations, shutdown.
@@ -130,7 +131,6 @@ import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/regis
 import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken, canAdministerNode } from '../../auth.js';
-import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
@@ -561,6 +561,7 @@ export function summarizeContextGraphIdentityStatus(
 }
 
 export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
+  if (await handlePrivatePlacementRetry(ctx)) return;
   const {
     req,
     res,
@@ -593,10 +594,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     path,
     requestAgentAddress,
   } = ctx;
-  // Registering adapters, creating the node identity, backfilling the store and
-  // shutting down act on the whole node, so they require a node-level admin
-  // token. Resolved lazily, inside those routes only, so read-only routes never
-  // depend on the caller's authentication.
+  // Node-wide operations resolve operator authentication lazily, inside those routes only.
   const nodeAuth = () => actorFromRequestContext(ctx).authentication;
 
   if ((req.method === "GET" || req.method === "HEAD") && path === "/.well-known/skill.md") {
@@ -774,6 +772,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
+      runtime: canAdministerNode(actorFromRequestContext(ctx).authentication) ? { nodeVersion: process.version } : null,
       commit: buildInfo.commit !== "uncommitted"
         ? buildInfo.commit
         : (getCurrentCommitFull() ?? nodeCommit ?? null),

@@ -177,6 +177,7 @@ import {
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
 import { connectionCarriesShareDelivery } from './swm/relayed-connection-allowance.js';
 import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
+import { publicAllowlistPeersOf } from './swm/public-allowlist-peers.js';
 import { coreHostsPublicGraph } from './swm/relay-only-share-routes.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
@@ -1007,7 +1008,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       // requirement.
       if (!outcome.applied) return;
       this.maybeEmitSwmShareAck(outcome).catch(() => { /* swallowed; logged inside */ });
-      this.noticeSwmFollowersAfterApplyV1(outcome, from);
+      this.noticeSwmFollowersAfterApplyV1(outcome, from, data);
     });
   }
 
@@ -1536,6 +1537,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         isPrivateContextGraph: (cgId) => this.isPrivateContextGraph(cgId),
         getTopicSubscribers: (topic) => this.gossip.getSubscribers(topic),
         getSharedMemoryFollowers: (cgId) => sharedMemoryFollowersOf(this).followers(cgId),
+        getAllowlistedAgentPeers: (cgId) => publicAllowlistPeersOf(this).connected(cgId),
         // OT-RFC-38 / LU-6 Phase B — substrate caller passes the local
         // cleartext id; resolver derives the wire-form topic for the
         // peer-subscriber probe so the substrate doesn't query the
@@ -1568,13 +1570,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         // first; on parse failure (malformed gossipsub entry)
         // fall through to the catch → false → safe drop.
         //
-        // Pre-start: if libp2p hasn't booted, `getPeers()` throws
-        // → caught → return false → substrate target subset
-        // becomes empty for this CG → substrate fan-out is a
-        // no-op (gossip leg still runs). The pre-start GossipSub
-        // subscriber list is normally empty anyway since we
-        // haven't joined the mesh yet, so this path is rare in
-        // practice.
+        // Pre-start: if libp2p hasn't booted, `getPeers()` throws → caught → return false → substrate target
+        // subset becomes empty for this CG → substrate fan-out is a no-op (gossip leg still runs). The pre-start
+        // GossipSub subscriber list is normally empty anyway since we haven't joined the mesh yet, so this path
+        // is rare in practice.
         isPeerDialable: (peerId) => this.isPeerDialable(peerId),
       });
     }

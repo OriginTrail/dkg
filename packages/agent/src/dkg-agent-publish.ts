@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
-import { tryWithKeyedLocks, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
+import { tryWithKeyedLocks, assertionLifecycleWriteLockKey, type PromoteExecutionAuthority } from '@origintrail-official/dkg-publisher';
 
 import { createPromoteRetryableFailure } from '@origintrail-official/dkg-publisher';
 import { isTransientInventorySignerFailure } from './internal/promote/share-inventory-signing-capability.js';
@@ -95,7 +95,7 @@ import {
   type SwmSenderKeyMessageMsg,
   type SwmSenderKeyPackageAckReasonCode,
   type SwmSenderKeyPackageMsg,
-  type WorkspaceRecipientEncryptionKey,
+  type WorkspaceRecipientEncryptionKey, type EvmAddressV1,
   InMemoryMessageIdempotencyStore,
   InMemoryProtocolOutboxStore,
   type MessageIdempotencyStore,
@@ -126,7 +126,7 @@ import {
   type Quad,
   type LargeLiteralStorageConfig,
 } from '@origintrail-official/dkg-storage';
-import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
+import { EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, operationalSigningOf, type AuthorSigner, type EVMAdapterConfig, type ChainAdapter, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type TxResult, type V10PublishingConvictionAccountInfo } from '@origintrail-official/dkg-chain';
 import { signAuthorTypedDataCompact, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { externalAuthorSignerFor, heldAuthorSigner, registeredAgentAuthorSigner } from './author-signer.js';
 import  {
@@ -274,6 +274,7 @@ import {
   type OwedPublicShare, type OwedPublicShares, type OwedShareSendOutcome,
 } from './swm/owed-public-shares.js';
 import { SwmHostModeStore, type SwmHostModeStoreLimits } from './swm/host-mode-store.js';
+import { ownerTieOffersOf } from './swm/owner-tie-offer.js';
 import {
   BEACON_ACCESS_POLICY_CURATED,
   BEACON_REANNOUNCE_INTERVAL_MS,
@@ -1092,6 +1093,40 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /**
+   * On a running Edge, offer a registered graph's owner-peer tie to the connected
+   * Cores (`swm/owner-tie-offer.ts`), signed with this node's key of the wallet
+   * the graph id names. Never throws, and does not wait for the offer.
+   */
+  offerOwnerTieV1(this: DKGAgent, contextGraphId: string): void {
+    if ((this.config.nodeRole ?? 'edge') !== 'edge' || !this.started) return;
+    void ownerTieOffersOf(this, () => ({
+      holdsKeyOf: (wallet) => [...this.localAgents.keys(), ...(operationalSigningOf(this.chain)?.payerAddresses ?? [])]
+        .some((address) => address.toLowerCase() === wallet),
+      localOnChainId: (graphId) => this.subscribedContextGraphs.get(graphId)?.onChainId,
+      isPublic: async (graphId) => !(await this.isPrivateContextGraph(graphId).catch(() => true)),
+      cores: () => this.connectedSharedMemoryCoresV1(),
+      sign: (graphId, wallet, request) => {
+        const author = this.createRfc64CatalogAuthorSignerV1(wallet as EvmAddressV1);
+        return this.encodeWorkspaceGossipMessage(graphId, request, { agentAddress: wallet, signMessage: (message) => author.signMessage(message) });
+      },
+      send: (peerId, wire) => this.sendOwnerTieOfferV1(peerId, wire),
+      selfPeerId: () => this.peerId,
+      logDebug: (message) => this.log.debug(createOperationContext('share'), message),
+    })).offer(contextGraphId);
+  }
+
+  /** One send of an owner tie offer, drained by `stop()` like a fan-out; never queued in the outbox. */
+  async sendOwnerTieOfferV1(this: DKGAgent, peerId: string, wire: Uint8Array): Promise<void> {
+    const sending = this.messenger.sendRequestOwned(peerId, PROTOCOL_SWM_UPDATE, wire, {
+      timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS,
+    });
+    const tracked: Promise<void> = sending.then(() => undefined, () => undefined)
+      .finally(() => { this.inFlightSubstrateFanOuts.delete(tracked); });
+    this.inFlightSubstrateFanOuts.add(tracked);
+    await sending;
+  }
+
+  /**
    * Shutdown: owed shares are not sent again, and a share made while the agent
    * stops is not kept. Made here if need be, so that such a share finds it closed.
    */
@@ -1157,6 +1192,8 @@ export class PublishMethods extends DKGAgentBase {
   ): Promise<void> {
     // A graph written here is in use: keep it pulled from its owner (#3251).
     this.recentSharedMemoryPulls?.noteActivity(contextGraphId);
+    // On the owner's node, the Cores learn which node is the owner's (`swm/owner-tie-offer.ts`).
+    this.offerOwnerTieV1(contextGraphId);
     const payload = normalizeWorkspaceGossipPublishInput(payloadOrMessage);
     const message = payload.message;
     // OT-RFC-38 / LU-6 Phase B — derive the wire-form id ONCE at the
@@ -3013,6 +3050,7 @@ export class PublishMethods extends DKGAgentBase {
     name: string,
     agentAddress: string,
     opts?: {
+      executionAuthority?: import('@origintrail-official/dkg-publisher').PromoteExecutionAuthority;
       subGraphName?: string;
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestation;
@@ -3054,6 +3092,7 @@ export class PublishMethods extends DKGAgentBase {
     name: string,
     agentAddress: string,
     opts?: {
+      executionAuthority?: import('@origintrail-official/dkg-publisher').PromoteExecutionAuthority;
       subGraphName?: string;
       authorAgentAddress?: string;
       preSignedAuthorAttestation?: PreSignedAuthorAttestation;
@@ -3123,11 +3162,13 @@ export class PublishMethods extends DKGAgentBase {
       // version may need replacement, but a failure after its delete is safe:
       // the durable seal is written first and an idempotent finalize retry
       // repairs this row before returning.
+      await opts?.executionAuthority?.assertCurrent();
       await deleteByPatternWithoutCount(this.store, {
         graph: metaGraph,
         subject: lifecycleUri,
         predicate: ASSERTION_SEAL_PREDICATES.ASSERTION_VERSION,
       });
+      await opts?.executionAuthority?.assertCurrent();
       await this.store.insert([
         {
           subject: lifecycleUri,
@@ -3143,11 +3184,12 @@ export class PublishMethods extends DKGAgentBase {
         },
       ]);
       const merkleHexBare = ethers.hexlify(finalizedMerkleRoot).slice(2);
+      await opts?.executionAuthority?.assertCurrent();
       await this._stampPointerIfDivergedFromVm(
         lifecycleUri,
         WM_CURRENT_ASSERTION_PRED,
         merkleHexBare,
-        metaGraph,
+        metaGraph, opts?.executionAuthority,
       );
     };
 
@@ -3285,6 +3327,22 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
+    const commitFinalized = async (ual: string, version: string, root: Uint8Array, persistFreshSeal?: () => Promise<void>) => {
+      const assertCurrent = () => opts?.executionAuthority?.assertCurrent();
+      await assertCurrent();
+      const canonicalGraph = await this.publisher.materializeCanonicalWorkingMemory(
+        contextGraphId, ual, version, normalizedKnowledgeAssetQuads, opts?.subGraphName);
+      await assertCurrent();
+      await privateStore.replaceKnowledgeAssetPrivateTriples(
+        contextGraphId, createGraphKnowledgeAssetScope(ual, version), normalizedPrivateKnowledgeAssetQuads, opts?.subGraphName);
+      if (persistFreshSeal) { await assertCurrent(); await persistFreshSeal(); }
+      await stampFinalizedLifecycle(version, root); // Checks authority between its writes.
+      await assertCurrent();
+      await this.publisher.cleanupCanonicalWorkingMemorySources(
+        contextGraphId, name, agentAddress, canonicalGraph, [sourceWmGraphUri], opts?.subGraphName, opts?.executionAuthority);
+      await assertCurrent();
+      await privateStore.deleteKnowledgeAssetPrivateDraft(contextGraphId, agentAddress, name, opts?.subGraphName);
+    };
     // 4. Idempotency: if a seal already exists for this assertion,
     //    return it as-is when the merkleRoot matches. Mismatch means
     //    the assertion was mutated since the previous finalize —
@@ -3354,44 +3412,8 @@ export class PublishMethods extends DKGAgentBase {
         reservedKaId: reReservedKaId,
         schemeVersion: existingSeal.authorSchemeVersion,
       });
-      // A prior attempt may have stopped after the target swap, after the seal,
-      // or before source cleanup. Re-materialize and repair in that order so an
-      // idempotent finalize always converges to one exact canonical WM graph.
-      const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
-        contextGraphId,
-        existingSeal.kaUal,
-        existingSeal.assertionVersion,
-        normalizedKnowledgeAssetQuads,
-        opts?.subGraphName,
-      );
-      const existingScope = createGraphKnowledgeAssetScope(
-        existingSeal.kaUal,
-        existingSeal.assertionVersion,
-      );
-      await privateStore.replaceKnowledgeAssetPrivateTriples(
-        contextGraphId,
-        existingScope,
-        normalizedPrivateKnowledgeAssetQuads,
-        opts?.subGraphName,
-      );
-      await stampFinalizedLifecycle(
-        existingSeal.assertionVersion,
-        existingSeal.merkleRoot,
-      );
-      await this.publisher.cleanupCanonicalWorkingMemorySources(
-        contextGraphId,
-        name,
-        agentAddress,
-        canonicalWmGraphUri,
-        [sourceWmGraphUri],
-        opts?.subGraphName,
-      );
-      await privateStore.deleteKnowledgeAssetPrivateDraft(
-        contextGraphId,
-        agentAddress,
-        name,
-        opts?.subGraphName,
-      );
+      // Repair an interrupted finalize through the same commit protocol as a fresh seal.
+      await commitFinalized(existingSeal.kaUal, existingSeal.assertionVersion, existingSeal.merkleRoot);
       return {
         assertionUri,
         merkleRoot: existingSeal.merkleRoot,
@@ -3643,6 +3665,7 @@ export class PublishMethods extends DKGAgentBase {
         this.kaNumberAllocator.markReconciled();
         this.reconciledKaAuthors.add(key);
       }
+      await opts?.executionAuthority?.assertCurrent();
       freshNumber = BigInt(this.kaNumberAllocator.allocate(authorAddress).number);
       reservedKaId = packReservedKaId(authorAddress, freshNumber);
     } else {
@@ -3815,44 +3838,8 @@ export class PublishMethods extends DKGAgentBase {
       });
     }
 
-    // Crash-safe commit order:
-    //   1. atomically materialize the complete canonical target;
-    //   2. persist the seal (and a fresh identity, when needed);
-    //   3. repair lifecycle pointers/version;
-    //   4. remove obsolete source graphs.
-    // Any interruption leaves either the original source or the canonical
-    // target plus enough durable seal data for the idempotent branch above to
-    // finish the transition on retry.
-    const canonicalWmGraphUri = await this.publisher.materializeCanonicalWorkingMemory(
-      contextGraphId,
-      kaUal,
-      assertionVersion,
-      normalizedKnowledgeAssetQuads,
-      opts?.subGraphName,
-    );
-    const canonicalScope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
-    await privateStore.replaceKnowledgeAssetPrivateTriples(
-      contextGraphId,
-      canonicalScope,
-      normalizedPrivateKnowledgeAssetQuads,
-      opts?.subGraphName,
-    );
-    await this.store.insert(sealQuads);
-    await stampFinalizedLifecycle(assertionVersion, merkleRoot);
-    await this.publisher.cleanupCanonicalWorkingMemorySources(
-      contextGraphId,
-      name,
-      agentAddress,
-      canonicalWmGraphUri,
-      [sourceWmGraphUri],
-      opts?.subGraphName,
-    );
-    await privateStore.deleteKnowledgeAssetPrivateDraft(
-      contextGraphId,
-      agentAddress,
-      name,
-      opts?.subGraphName,
-    );
+    await commitFinalized(kaUal, assertionVersion.toString(), merkleRoot,
+      () => this.store.insert(sealQuads));
 
     return {
       assertionUri,
@@ -3871,7 +3858,7 @@ export class PublishMethods extends DKGAgentBase {
       kav10Address,
       eip712Digest,
     };
-    });
+    }, opts?.executionAuthority);
   }
 
   /**
@@ -6566,15 +6553,13 @@ export class PublishMethods extends DKGAgentBase {
    * `query()` rejects DELETE/INSERT — `stampLayerPointerSparql` is reserved for
    * backends that accept UPDATE via query(). `merkleHex` is stored bare (no 0x).
    */
-  async _stampPointer(
-    this: DKGAgent,
-    lifecycleUri: string,
-    pred: string,
-    merkleHex: string,
-    metaGraph: string,
+  async _stampPointer(this: DKGAgent, lifecycleUri: string, pred: string,
+    merkleHex: string, metaGraph: string, authority?: PromoteExecutionAuthority,
   ): Promise<void> {
     const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
+    await authority?.assertCurrent();
     await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
+    await authority?.assertCurrent();
     await this.store.insert([
       { subject: lifecycleUri, predicate: pred, object: `"${bare}"`, graph: metaGraph },
     ]);
@@ -6590,12 +6575,8 @@ export class PublishMethods extends DKGAgentBase {
    * to the vm value (see `agent.assertion.history()`), which also keeps
    * old-store rows (always materialised) readable unchanged.
    */
-  async _stampPointerIfDivergedFromVm(
-    this: DKGAgent,
-    lifecycleUri: string,
-    pred: string,
-    merkleHex: string,
-    metaGraph: string,
+  async _stampPointerIfDivergedFromVm(this: DKGAgent, lifecycleUri: string, pred: string,
+    merkleHex: string, metaGraph: string, authority?: PromoteExecutionAuthority,
   ): Promise<void> {
     const bare = merkleHex.startsWith('0x') ? merkleHex.slice(2) : merkleHex;
     let vmBare: string | undefined;
@@ -6611,11 +6592,12 @@ export class PublishMethods extends DKGAgentBase {
       // an extra convergent row is harmless (readers COALESCE), a missing
       // divergent row is not.
     }
+    await authority?.assertCurrent();
     if (vmBare !== undefined && vmBare === bare) {
       await deleteByPatternWithoutCount(this.store, { subject: lifecycleUri, predicate: pred, graph: metaGraph });
       return;
     }
-    await this._stampPointer(lifecycleUri, pred, bare, metaGraph);
+    await this._stampPointer(lifecycleUri, pred, bare, metaGraph, authority);
   }
 
   /**

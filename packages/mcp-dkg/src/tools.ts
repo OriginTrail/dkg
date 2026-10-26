@@ -204,10 +204,12 @@ export function registerReadTools(
           .boolean()
           .optional()
           .describe('When set with view: "working-memory", include SWM in the result set (the legacy `layer: "union"` semantics).'),
+        includeContextGraphPartitions: z.boolean().optional().describe('Without view, expand scoped GRAPH variables to registered content partitions.'),
+        includeSharedMemoryMeta: z.boolean().optional().describe('With includeContextGraphPartitions and no view, also read registered subgraph SWM attribution metadata; child context graphs remain excluded.'),
         limit: z.number().optional().describe('Row cap when rendering to markdown; does NOT modify the query'),
       },
     },
-    async ({ sparql, projectId, subGraphName, view, includeSharedMemory, limit }): Promise<ToolResult> => {
+    async ({ sparql, projectId, subGraphName, view, includeSharedMemory, includeContextGraphPartitions, includeSharedMemoryMeta, limit }): Promise<ToolResult> => {
       const pid = resolveProject(projectId, config);
       if (!pid) return projectErr();
       const fullSparql = sparql.startsWith('PREFIX') ? sparql : `${PREFIXES}\n${sparql}`;
@@ -221,6 +223,8 @@ export function registerReadTools(
           subGraphName,
           view,
           includeSharedMemory,
+          includeContextGraphPartitions,
+          includeSharedMemoryMeta,
           agentAddress,
         });
         if (result.type === 'boolean') {

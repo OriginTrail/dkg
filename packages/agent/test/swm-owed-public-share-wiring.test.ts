@@ -137,7 +137,7 @@ describe('a share into a public graph kept because it reached nobody or not the 
     }
   });
 
-  it('warns when the owner refuses it, and a send that throws counts as failed', async () => {
+  it('keeps it when the owner refuses it and says so, and a send that throws counts as failed', async () => {
     let throws = true;
     const { agent, wired, received, share } = await running({ answer: () => REFUSED });
     const messenger = (agent as unknown as { messenger: { sendRequestOwned: (...args: unknown[]) => Promise<unknown> } }).messenger;
@@ -153,10 +153,11 @@ describe('a share into a public graph kept because it reached nobody or not the 
       await owed.tick();
       expect(owed.size).toBe(1);
       throws = false;
-      const warn = vi.spyOn(wired.log, 'warn');
+      const info = vi.spyOn(wired.log, 'info');
       await owed.tick();
       expect(received.map((sent) => sent.peerId)).toEqual([OWNER]);
-      expect(warn.mock.calls.map(([, message]) => String(message)).some((line) => line.includes('refused'))).toBe(true);
+      expect(info.mock.calls.map(([, message]) => String(message)).some((line) => line.includes('refused by the graph\'s owner peer'))).toBe(true);
+      expect(owed.size, 'one owner peer\'s refusal does not end the obligation').toBe(1);
     } finally {
       agent.stopOwedPublicSharesV1();
       wired.started = false;

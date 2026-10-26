@@ -1,5 +1,31 @@
 [
   {
+    "pattern": "scripts/repro/publisher-live-control-restart.test.mts",
+    "lane": "native-crash-campaign",
+    "reason": "Five serial runtime starts prove persisted publisher pause, resume, startup override and graceful shutdown fencing in the first required CLI shard",
+    "cadence": "required",
+    "command": "node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts",
+    "prerequisites": [
+      "Node 22 with experimental SQLite",
+      "built publisher and CLI dependency closure",
+      "disposable loopback HTTP listeners and temporary persistent Oxigraph store"
+    ],
+    "layer": "Native publisher HTTP/Oxigraph process-crash regression"
+  },
+  {
+    "pattern": "packages/agent/campaigns/catalog-durable-head.test.ts",
+    "lane": "native-crash-campaign",
+    "reason": "Parent-owned process-death and restart matrix runs once in the required agent sidecar shard; ordinary Gate1 regression remains in the package inventory",
+    "cadence": "required",
+    "command": "node --experimental-sqlite --import tsx scripts/repro/rfc64-catalog-durable-head.mts",
+    "prerequisites": [
+      "Node 22 with experimental SQLite",
+      "built agent dependency closure",
+      "disposable loopback libp2p peers"
+    ],
+    "layer": "Native SQLite/Oxigraph/libp2p process-crash regression"
+  },
+  {
     "pattern": "packages/node-ui/browser-regressions/pr3236/*.spec.ts",
     "lane": "browser",
     "reason": "Standalone scoped-store and WebGL regressions run in the first required browser CI shard",
@@ -60,6 +86,17 @@
     ]
   },
   {
+    "pattern": "scripts/docs/*.test.mjs",
+    "lane": "docs",
+    "reason": "Documentation contracts workflow runs these dependency-free tests for documentation, example, and docs-tooling changes",
+    "cadence": "pull_request/manual",
+    "command": "node --test scripts/docs/*.test.mjs",
+    "layer": "documentation tooling",
+    "prerequisites": [
+      "Node.js 22"
+    ]
+  },
+  {
     "pattern": "devnet/rfc64-persistence-lifecycle/*.test.ts",
     "lane": "inventory-windows",
     "reason": "Gate 0 evidence-encoder, child-process cleanup and verifier unit tests run on the Windows inventory evidence leg before generation and on the Linux tornado-agent sidecar shard, which also runs the POSIX-only cases",
@@ -100,6 +137,13 @@
     "reason": "Native Oxigraph recovery plus real backend conformance; Blazegraph mandatory in CI",
     "cadence": "required",
     "command": "DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance"
+  },
+  {
+    "pattern": "packages/storage/test-live/blazegraph-prefix.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Native graph-prefix evaluation conformance is mandatory in the existing Blazegraph CI lane",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
   },
   {
     "pattern": "packages/agent/test-live/**/*.blazegraph.test.ts",

@@ -50,6 +50,22 @@ describe('a count the node refuses to read', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
+  it('applies SWM admission to attribution metadata even without an SWM view', async () => {
+    const { agent, query } = node({ resolveSharedMemoryReadAdmission: async () => ({ outcome: 'denied' }) });
+    expect(await agent.query(COUNT, { contextGraphId: 'cg-1', callerAgentAddress: OTHER,
+      includeContextGraphPartitions: true, includeSharedMemoryMeta: true })).toEqual(NO_DATA_COUNT);
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it('forwards metadata expansion only after shared-memory admission succeeds', async () => {
+    const admission = vi.fn(async () => ({ outcome: 'allowed' }));
+    const { agent, query } = node({ resolveSharedMemoryReadAdmission: admission });
+    await agent.query(COUNT, { contextGraphId: 'cg-1', callerAgentAddress: OTHER,
+      includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+    expect(admission).toHaveBeenCalledOnce();
+    expect(query.mock.calls[0][1]).toMatchObject({ includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+  });
+
   it('preserves caller cancellation rather than presenting it as an empty legacy read', async () => {
     const controller = new AbortController(), reason = new Error('caller cancelled during admission');
     const { agent, query } = node({ resolveSharedMemoryReadAdmission: async () => {

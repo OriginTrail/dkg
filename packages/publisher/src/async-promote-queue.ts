@@ -19,6 +19,7 @@ export type {
   PromoteResult,
   PromoteStats,
   PromoteTerminalJobClearer,
+  PromoteShareReconciler,
 } from './async-promote-queue-types.js';
 export {
   ASYNC_PROMOTE_QUEUE_FORMAT_VERSION,

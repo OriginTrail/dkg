@@ -58,6 +58,22 @@ afterEach(async () => {
 });
 
 describe('network peer isolation on real libp2p nodes', () => {
+  it('accepts a static-dial exemption with a different address spelling but still enforces mismatch denial', async () => {
+    const foreignRelay = await startNode({ enableRelayServer: true });
+    const relayAddr = multiaddr(tcpAddr(foreignRelay));
+    const local = await startNode({
+      networkIdentity: NETWORK_A,
+      otherNetworkRelays: [relayAddr.toString()],
+      staticDialExemptions: [`/dns4/cache.invalid/tcp/1/p2p/${foreignRelay.peerId}`],
+    });
+    expect(await dialOutcome(local.libp2p.dial(relayAddr))).toBe('connected');
+    expect(local.denyPeerAfterNetworkMismatch(foreignRelay.peerId)).toBe(true);
+    await local.libp2p.hangUp(peerIdFromString(foreignRelay.peerId));
+    expect(await dialOutcome(local.libp2p.dial(relayAddr))).toBe('DialDeniedError');
+    local.clearPeerNetworkMismatchDenial(foreignRelay.peerId);
+    expect(await dialOutcome(local.libp2p.dial(relayAddr))).toBe('connected');
+  }, TEST_TIMEOUT_MS);
+
   it('never dials another network\'s relay directly or as a circuit hop', async () => {
     const foreignRelay = await startNode({ enableRelayServer: true });
     const bystander = await startNode();

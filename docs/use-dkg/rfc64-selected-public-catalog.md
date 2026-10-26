@@ -470,6 +470,9 @@ node reports it as described below.
   more than 1,024 rows as a whole, so the catalog keeps its last head.
   `rfc64Catalog.authorCatalogCapacity` in the node status counts the scopes at
   the limit (`scopesAtCap`) and the parked placements (`parkedPlacements`).
+  Private placement failure diagnostics retain the `catalog_full` count and
+  failure age while capacity parking owns retries. They add no generic cooldown
+  that could delay placement when a row becomes free.
   Publishing itself is not refused: the asset is finalized as usual and only
   its catalog row waits. On a private graph registered on chain, a node that
   applies the graph's catalogs (see the 818 limit below) refuses an author's

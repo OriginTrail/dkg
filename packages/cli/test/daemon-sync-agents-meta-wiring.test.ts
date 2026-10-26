@@ -219,6 +219,58 @@ describe('runDaemonInner wires sync and authority index options into DKGAgent.cr
     expect(logs).not.toContain(skippedDefaultPrefix);
   });
 
+  describe('public and relay addresses only', () => {
+    const originalLanEnv = process.env.DKG_LAN_ADDRESSES_ENABLED;
+    afterEach(() => {
+      if (originalLanEnv === undefined) delete process.env.DKG_LAN_ADDRESSES_ENABLED;
+      else process.env.DKG_LAN_ADDRESSES_ENABLED = originalLanEnv;
+    });
+    const announcing = 'Addresses: announcing public and relay addresses only; a peer that announces no public address is reached over its open relay circuit';
+
+    it('holds for an Edge whose relays are all public, and says so', async () => {
+      delete process.env.DKG_LAN_ADDRESSES_ENABLED;
+      mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
+      const createArg = await captureCreateArg({ nodeRole: 'edge' });
+      expect(createArg.relayPeers).toEqual([networkFileRelay]);
+      expect(createArg.publicAddressesOnly).toBe(true);
+      const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+      expect(logs).toContain(announcing);
+    });
+
+    it('leaves an explicit announce list alone in what it says', async () => {
+      delete process.env.DKG_LAN_ADDRESSES_ENABLED;
+      mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
+      const createArg = await captureCreateArg({ nodeRole: 'edge', announceAddresses: ['/ip4/198.51.100.20/tcp/9000'] });
+      expect(createArg.publicAddressesOnly).toBe(true);
+      const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+      expect(logs).toContain('Addresses: a peer that announces no public address is reached over its open relay circuit');
+      expect(logs).not.toContain(announcing);
+    });
+
+    it.each([
+      ['a Core', { nodeRole: 'core' }],
+      ['an Edge with lanAddressesEnabled', { nodeRole: 'edge', lanAddressesEnabled: true }],
+      ['an Edge with a local relay, as on a devnet', {
+        nodeRole: 'edge', relay: '/ip4/127.0.0.1/tcp/9090/p2p/12D3KooWSmU3owJvB9sFw8uApDgKrv2VBMecsGGvgAc4Gq6hB57M',
+      }],
+      ['an Edge without relays', { nodeRole: 'edge', relay: 'none' }],
+    ])('does not hold for %s', async (_label, overrides) => {
+      delete process.env.DKG_LAN_ADDRESSES_ENABLED;
+      mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
+      const createArg = await captureCreateArg(overrides);
+      expect(createArg.publicAddressesOnly).toBe(false);
+      const logs = await readFile(join(tempHome!, 'daemon.log'), 'utf8');
+      expect(logs).not.toContain('is reached over its open relay circuit');
+    });
+
+    it('lets DKG_LAN_ADDRESSES_ENABLED=1 keep LAN addresses over the config', async () => {
+      process.env.DKG_LAN_ADDRESSES_ENABLED = '1';
+      mocks.loadOpWallets.mockResolvedValue({ adminWallet: undefined, wallets: [operationalWallet] });
+      const createArg = await captureCreateArg({ nodeRole: 'edge', lanAddressesEnabled: false });
+      expect(createArg.publicAddressesOnly).toBe(false);
+    });
+  });
+
   describe('transport-level network peer isolation', () => {
     const originalIsolationEnv = process.env.DKG_NETWORK_PEER_ISOLATION_ENABLED;
     afterEach(() => {
