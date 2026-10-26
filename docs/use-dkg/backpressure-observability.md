@@ -281,14 +281,14 @@ async_admission_usage interval_s=300 store_rejections=store/background/publisher
 | `interval_s` | seconds | Time since the previous line (`0` for the first) |
 | `store_rejections=<scheduler>/<lane>/<family>/<reason>:<n>` | cumulative | Store scheduler rejections by the lane, the operation family (the first two segments of the caller's `source`, such as `publisher.asyncLift`) and the reason (`queue_full`, `queue_wait_timeout`), for every registered scheduler |
 | `store_max_wait_ms=<scheduler>/<lane>:<ms>` | window | The longest queue wait that ended in the interval, per lane; `0` for a lane with none |
-| `http=<route>/<phase>/<status>/<code>:<n>` | cumulative | Admission requests by route (`share_async`, `publish_async`), answering phase, HTTP status and error code (`-` for none). Every outcome is counted, 2xx included, so rates have a denominator. Status `0` is a client that left before any answer (`client_closed`). At most 64 distinct code series are kept; later ones count under `other` |
+| `http=<route>/<phase>/<status>/<code>:<n>` | cumulative | Admission requests by route (`share_async`, `publish_async`), answering phase, HTTP status and error code (`-` for none). Every outcome is counted, 2xx included, so rates have a denominator. Status `0` is a client that left before any answer (`client_closed`). After 64 distinct series, a new code counts as `other` for its route, phase and status, so the list can exceed 64 entries (bounded) |
 | `http_share_*`, `http_publish_*` (`_n`, `_p50_ms`, `_p95_ms`, `_max_ms`) | window | Admission latency per route, request start to response, every outcome |
 | `share_depth=<state>:<n>` | gauge | Share jobs per state (`queued`, `running`, `failed_retrying`, `succeeded`, `failed`); `-` if unreadable |
 | `lift_depth=<state>:<n>` | gauge | Publisher jobs per state; `accepted` is the accepted-but-unclaimed backlog; `-` if unreadable |
 | `lift_journal` | gauge | Entries in the append-only publisher admission journal |
-| `depth_errors` | cumulative | Depth reads that failed or timed out (15 s); the affected field prints `-` |
-| `share_reclaimed`, `share_abandoned` | cumulative | Expired share leases the sweep requeued, and ones it gave up on (the job failed for inspection) |
-| `lift_reclaimed` | cumulative | Publisher jobs reset to accepted by recovery |
+| `depth_errors` | cumulative | Depth reads that failed or timed out (15 s), plus lines whose read was skipped because an earlier read was still running; every `-` in the depth fields adds at least one |
+| `share_reclaimed`, `share_abandoned` | cumulative | Expired share leases the sweep requeued, and ones it gave up on (the job failed for inspection). Share lease expiries are `share_reclaimed + share_abandoned` |
+| `lift_reclaimed` | cumulative | Publisher jobs reset to accepted by recovery, for any recovery reason (not only an expired lease), so it is not the publisher's lease-expiry count |
 | `lift_stale_claims` | cumulative | Publisher workers that found their claim no longer matched |
 | `share_hb_n`, `_p95_ms`, `_p99_ms`, `_max_ms` | window | Share lease renewals: from the timer's call until `heartbeat` settles, so a renewal waiting behind the queue's mutex counts as late |
 | `share_hb_pending`, `share_hb_oldest_pending_ms` | gauge | Renewals still waiting at line time, and the age of the oldest; a renewal stuck behind the mutex is invisible until it settles otherwise |

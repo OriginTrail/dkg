@@ -109,6 +109,14 @@ describe('WalletBusyTracker', () => {
       expect(t.classify(500)).toBe('free');
     });
 
+    it('marks a known wallet busy from the read that found its lock, not from its first sighting', () => {
+      const t = tracker(['a']);
+      t.markFree('a', 10); // first sighting long before the read
+      t.observe('a', true, 1_000); // a lock written outside this process's write path
+      expect(t.classify(500)).toBe('free');
+      expect(t.classify(1_100)).toBe('busy');
+    });
+
     it('learns a wallet is free from a delete it did not see the write of', () => {
       const t = tracker(['a']);
       t.markFree('a', 100);

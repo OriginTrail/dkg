@@ -63,7 +63,7 @@ export interface AsyncAdmissionUsageSnapshot {
   liftClaimToFinish: LatencySummary;
 }
 
-/** Distinct (route, phase, status, code) counters kept; later codes count under `other`. */
+/** Distinct (route, phase, status, code) counters kept; after that a new code counts as `other` for its route, phase and status. */
 const MAX_HTTP_KEYS = 64;
 const CODE_PATTERN = /^[A-Za-z0-9_.:-]{1,48}$/;
 

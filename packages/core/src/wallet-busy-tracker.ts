@@ -63,7 +63,8 @@ export class WalletBusyTracker {
     if (!usable) {
       this.markFree(walletId, atMs);
     } else if (!this.openSince.has(walletId)) {
-      this.openSince.set(walletId, this.knownSince.get(walletId)!);
+      // Busy as of this read, not back to the first sighting, which may be long before it.
+      this.openSince.set(walletId, atMs);
     }
   }
 

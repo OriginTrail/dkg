@@ -56,7 +56,7 @@ export interface AsyncAdmissionUsageSample {
   store: readonly StoreSchedulerStatsReport[];
   usage: AsyncAdmissionUsageSnapshot;
   depth: AsyncQueueDepthReading;
-  /** Cumulative count of queue depth reads that failed or timed out. */
+  /** Cumulative count of queue depth reads that failed, timed out, or were skipped behind a hung one. */
   depthErrors: number;
   shareWorker: ShareWorkerCountersView | null;
 }
@@ -193,7 +193,11 @@ export function startAsyncAdmissionUsageLog(options: AsyncAdmissionUsageLogOptio
 
   /** Never two reads at once: a read that outlived its deadline blocks the next until it settles. */
   const readDepth = async (): Promise<AsyncQueueDepthReading> => {
-    if (!options.readDepth || depthRead !== null) return NO_DEPTH;
+    if (!options.readDepth) return NO_DEPTH;
+    if (depthRead !== null) {
+      depthErrors += 1; // a hung store must read as an error, not only as `-`
+      return NO_DEPTH;
+    }
     const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {

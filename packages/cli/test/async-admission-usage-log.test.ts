@@ -366,12 +366,13 @@ describe('startAsyncAdmissionUsageLog', () => {
     expect(lines[0]).toContain(' share_depth=- lift_depth=- lift_journal=- depth_errors=1 ');
     expect(signals[0]!.aborted).toBe(true);
 
-    // The abandoned read is still running at the next tick: no second read starts; the line still goes out.
+    // The abandoned read is still running at the next tick: no second read starts, the line still goes
+    // out, and the skipped read counts as an error so a hung store does not read as a bare `-`.
     await vi.advanceTimersByTimeAsync(ASYNC_ADMISSION_USAGE_LOG_INTERVAL_MS);
     expect(readDepth).toHaveBeenCalledTimes(1);
     expect(lines).toHaveLength(2);
     expect(lines[1]).toContain(' share_depth=- ');
-    expect(lines[1]).toContain(' depth_errors=1 ');
+    expect(lines[1]).toContain(' depth_errors=2 ');
 
     // Once it settles, the next tick reads again (stopping the clock at the tick, inside the new read's deadline).
     finish[0]!();
@@ -381,6 +382,7 @@ describe('startAsyncAdmissionUsageLog', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(lines).toHaveLength(3);
     expect(lines[2]).toContain(' share_depth=failed:2,');
+    expect(lines[2]).toContain(' depth_errors=2 ');
     log.stop();
   });
 
