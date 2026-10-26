@@ -1,5 +1,5 @@
-import type { DurableRecoveryRoundDecision } from './sync/durable-recovery-round.js';
 // SPDX-License-Identifier: Apache-2.0
+import type { DurableRecoveryRoundDecision } from './sync/durable-recovery-round.js';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import { type DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import type { ExactBatchStreamOutcome } from './sync/requester/exact-recovery-transport.js';

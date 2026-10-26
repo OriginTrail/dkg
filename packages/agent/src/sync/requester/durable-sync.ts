@@ -1,4 +1,4 @@
-import type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
+import type { DurableMetaContinuation } from './durable-meta-continuation.js';
 export type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
 import type { DurableRecoveryRoundDecision } from '../durable-recovery-round.js';
 import type { DetailedDurableSyncResult } from './durable-sync-result.js';

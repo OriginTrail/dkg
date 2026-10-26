@@ -1,5 +1,5 @@
-import { durableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 // SPDX-License-Identifier: Apache-2.0
+import { durableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
