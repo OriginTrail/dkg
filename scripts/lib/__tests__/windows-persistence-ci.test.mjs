@@ -9,6 +9,14 @@ const workflow = parse(readFileSync(new URL('../../../.github/workflows/rfc64-in
 const ciWorkflow = parse(readFileSync(new URL('../../../.github/workflows/ci.yml', import.meta.url), 'utf8'));
 const job = workflow.jobs['inventory-lifecycle'];
 
+test('ordinary CI cannot cancel Windows evidence belonging to another nightly run', () => {
+  // The old branch-only key cancelled run 40405910651 during its build.
+  // Keep the caller's cancellation policy; this reusable job owns one attempt.
+  assert.equal(workflow.concurrency.group, 'rfc64-inventory-windows-${{ github.run_id }}-${{ github.run_attempt }}');
+  assert.equal(workflow.concurrency['cancel-in-progress'], true);
+  assert.ok(ciWorkflow.concurrency.group.includes('nightly-equivalent'));
+});
+
 test('the Windows gate runs directly for integration pushes and through CI for pull requests', () => {
   assert.ok(Object.hasOwn(workflow.on, 'workflow_call'));
   assert.deepEqual(workflow.on.push.branches, ['integration/rfc64-devnet']);

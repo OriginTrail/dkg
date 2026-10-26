@@ -54,6 +54,8 @@ export const UNFOLLOWED_LOADS = new Map([
     'the installed pnpm CLI or recorded Node executable, not a repository script; repository-owned profiles name the tests replayed in disposable checkouts'],
   ['scripts/lib/regressions/registry.mjs: invocation.command',
     'the installed pnpm CLI or recorded Node executable, resolved by subprocess.mjs like every proof launch, running the named-assertion discovery; not a repository script'],
+  ['scripts/lib/regressions/incident-closure.mjs: invocation.command',
+    'the installed pnpm CLI or recorded Node executable, resolved by subprocess.mjs, discovering the incident register tests under the required unit config; not a repository script'],
   ["devnet/rfc64-persistence-lifecycle/run.ts: childArguments(AGENT_PROCESS, stage ? ['--stage'] : [])",
     'agent-process.ts beside it, run under tsx (childArguments puts the script after the loader flags); a devnet file with run.ts\'s own route'],
   ['devnet/rfc64-persistence-lifecycle/run.ts: childArguments(LEASE_PROBE)',

@@ -357,6 +357,8 @@ jobs:
         run: node scripts/ci/fetch-trusted-controller.mjs
       - name: Test repository scripts
         run: pnpm run test:scripts
+      - name: Test devnet evidence parsers and suite manifest
+        run: pnpm test:devnet:manifest
       - name: Test share recovery evidence reducers
         run: |
           node --test scripts/testnet-share-recovery/*.test.mjs

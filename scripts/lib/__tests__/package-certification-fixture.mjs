@@ -16,7 +16,9 @@ export function releaseGitFixture(expected) {
     [`ls-remote origin refs/tags/${tag}`, `${object}\trefs/tags/${tag}`],
     [`rev-parse ${tag}^{commit}`, expected.commit],
   ]);
-  return { tag, gitRunner: (command, args) => {
+  // Publication-unit fixtures isolate registry/tag behavior. The decision verifier
+  // and its CLI requirement have independent integration and refusal tests.
+  return { tag, evidenceFile: 'fixture-decision.json', verifyEvidence: () => ({ outcome: 'PASS' }), gitRunner: (command, args) => {
     assert.equal(command, 'git');
     assert.ok(responses.has(args.join(' ')), `unexpected git operation: ${args.join(' ')}`);
     return responses.get(args.join(' '));

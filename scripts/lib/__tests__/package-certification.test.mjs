@@ -283,3 +283,15 @@ test('cyclic internal runtime dependencies fail publication before mutation', t 
   const f = fixture(t, { expected });
   assert.throws(() => preparedRelease(releaseOptions(f, { runner: () => assert.fail('cycle mutated') })), /cyclic internal publication dependency/);
 });
+
+
+test('promotion and direct stable publication cannot omit the decision or mutate after it fails', t => {
+  const f = fixture(t);
+  for (const extra of [{ mode: 'promote' }, { tags: ['latest'] }, { tags: ['mainnet'] }]) {
+    const options = releaseOptions(f, { ...extra, evidenceFile: undefined, runner: () => assert.fail('mutated without decision') });
+    assert.throws(() => preparedRelease(options), /decision file is required/);
+    options.evidenceFile = 'decision.json';
+    options.verifyEvidence = () => { throw new Error('decision invalid'); };
+    assert.throws(() => preparedRelease(options), /decision invalid/);
+  }
+});

@@ -205,6 +205,7 @@ describe('handleEventsQuery', () => {
   it('throws EpcisQueryError with 400 when date range is invalid', async () => {
     const { engine } = createTrackingQueryEngine();
 
+    // qa-assertion-catch: GH-3478 -- Catch asserts the domain error type/code; an AssertionError fails that check.
     try {
       await handleEventsQuery(
         new URLSearchParams('epc=urn:test&from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),

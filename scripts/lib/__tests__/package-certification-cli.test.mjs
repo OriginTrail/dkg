@@ -26,6 +26,8 @@ async function cliFixture(t, mode) {
   for (const name of [
     'scripts/release-packages.mjs', 'scripts/copy-cli-runtime-assets.mjs',
     'scripts/lib/release-policy.mjs', 'scripts/lib/release-process.mjs', 'scripts/lib/build-info.mjs',
+    'scripts/lib/release-evidence.mjs', 'scripts/ci/nightly-profile-results.mjs',
+    'scripts/ci/resolve-ci-profile.mjs', 'scripts/lib/playwright-executions.mjs',
     'scripts/lib/libp2p-pins.mjs', 'scripts/lib/package-certification/source.mjs',
     'scripts/lib/package-certification/bundle.mjs', 'scripts/lib/package-certification/publish.mjs',
     'packages/cli/blazegraph-image-metadata.cjs', 'packages/storage/blazegraph-namespace-contract.cjs',
@@ -86,7 +88,7 @@ if (${JSON.stringify(mode)} === 'publish-prepared') {
 }
 
 for (const mode of ['publish-prepared', 'promote']) for (const mismatch of [false, true]) {
-  test(`${mode} CLI ${mismatch ? 'rejects the wrong candidate before registry access' : 'forwards dry-run through real policy and registry reads'}`, async t => {
+  test(`${mode} CLI ${mismatch ? 'rejects the wrong candidate before registry access' : mode === 'promote' ? 'requires release evidence even for dry-run' : 'forwards dry-run through real policy and registry reads'}`, async t => {
     const f = await cliFixture(t, mode);
     const result = spawnSync(process.execPath, [path.join(f.source, 'scripts/release-packages.mjs'), mode,
       '--bundle', f.bundle, '--certificate', f.receiptFile,
@@ -94,11 +96,12 @@ for (const mode of ['publish-prepared', 'promote']) for (const mismatch of [fals
       '--version', f.expected.version, '--profile', PROFILE, '--tag', f.tag,
       ...(mode === 'promote' ? ['--tags', 'testnet,mainnet'] : ['--dist-tag', 'canary']), '--dry-run',
     ], { cwd: f.source, env: f.env, encoding: 'utf8', timeout: 30_000 });
-    assert.equal(result.status, mismatch ? 1 : 0, result.stderr);
+    assert.equal(result.status, mismatch || mode === 'promote' ? 1 : 0, result.stderr);
     const calls = fs.existsSync(f.calls) ? fs.readFileSync(f.calls, 'utf8').trim().split('\n').map(JSON.parse) : [];
-    assert.equal(calls.length, mismatch ? 0 : f.manifest.packages.length);
+    assert.equal(calls.length, mismatch || mode === 'promote' ? 0 : f.manifest.packages.length);
     assert.ok(calls.every(args => args[0] === 'view'), 'dry-run must never publish or change dist-tags');
     if (mismatch) assert.match(result.stderr, /intended candidate checkout/);
+    else if (mode === 'promote') assert.match(result.stderr, /Missing required --evidence/);
     else {
       const progress = JSON.parse(result.stdout.slice(result.stdout.indexOf('{')));
       assert.equal(progress.dryRun, true);

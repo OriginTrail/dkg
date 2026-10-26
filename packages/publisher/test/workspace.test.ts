@@ -2801,6 +2801,7 @@ describe('Workspace: conditionalShare (CAS)', () => {
       }],
     };
 
+    // qa-assertion-catch: GH-3478 -- Catch asserts the domain error type/code; an AssertionError fails that check.
     try {
       await publisher.conditionalShare(CONTEXT_GRAPH, [q(ENTITY, 'http://example.org/status', '"traveling"')], opts);
       expect.unreachable('should have thrown');

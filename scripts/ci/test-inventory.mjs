@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import fs from 'node:fs';
+import { validateIncidentClosure } from '../lib/regressions/incident-closure.mjs';
 import { validateRegressions } from '../lib/regressions/registry.mjs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -67,6 +68,8 @@ try {
   if (missing.length) throw new Error(`tests without an execution route:\n${missing.join('\n')}`);
   const regressions = validateRegressions(root, report);
   console.log(`Regression register: ${JSON.stringify(regressions)}`);
+  const incidents = JSON.parse(fs.readFileSync(path.join(root, 'test-policy/incidents/release-10.0.26.json'), 'utf8'));
+  console.log(`Incident closure: ${JSON.stringify(validateIncidentClosure(root, incidents, report))}`);
   console.log(`Verified ${report.length} test files across ${packages.length} Vitest packages and explicit secondary systems.`);
 } catch (error) {
   console.error(`test inventory: ${error.message}`); process.exitCode = 1;

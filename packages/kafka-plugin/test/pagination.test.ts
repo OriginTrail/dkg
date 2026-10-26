@@ -54,6 +54,7 @@ describe('parsePagination', () => {
     expect(() => parsePagination(new URLSearchParams('limit=   '))).toThrow(PaginationError);
   });
   it('PaginationError carries a descriptive message and field name', () => {
+    // qa-assertion-catch: GH-3478 -- Catch asserts the domain error type/code; an AssertionError fails that check.
     try {
       parsePagination(new URLSearchParams('limit=-1'));
       expect.fail('should have thrown');

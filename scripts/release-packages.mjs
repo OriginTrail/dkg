@@ -110,8 +110,14 @@ async function packageContext(args, certificate = true) {
 
 async function commandPreparedRelease(args, mode) {
   const { preparedRelease } = await import('./lib/package-certification/publish.mjs');
-  const progress = preparedRelease({
-    ...await packageContext(args), mode,
+  const context = await packageContext(args);
+  const tags = parseTags(requireArg(args, mode === 'publish' ? 'dist-tag' : 'tags'));
+  // A canary publication supplies the bytes that qualification installs. Moving
+  // production tags requires the complete decision, including for a dry-run.
+  const evidenceFile = mode === 'promote' || tags.some(tag => ['latest', 'mainnet'].includes(tag))
+    ? path.resolve(requireArg(args, 'evidence')) : undefined;
+  const progress = await preparedRelease({
+    ...context, mode, evidenceFile,
     tag: requireArg(args, 'tag'),
     tags: parseTags(requireArg(args, mode === 'publish' ? 'dist-tag' : 'tags')),
     otp: typeof args.otp === 'string' ? args.otp : process.env.NPM_CONFIG_OTP,
@@ -248,7 +254,8 @@ function usage() {
   node scripts/release-packages.mjs certify-install --bundle DIR --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --out NEW_ATTEMPT [--image IMAGE] [--negative-control missing-ui]
   node scripts/release-packages.mjs verify-package-certificate --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1
   node scripts/release-packages.mjs publish-prepared --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --dist-tag canary [--dry-run]
-  node scripts/release-packages.mjs promote --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --tags testnet [--dry-run]
+  node scripts/release-packages.mjs promote --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --tags testnet --evidence DECISION.json [--dry-run]
+  node scripts/release-packages.mjs verify-evidence --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --evidence DECISION.json
   node scripts/release-packages.mjs verify-published --bundle DIR --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 [--tags latest,mainnet,testnet]`);
 }
 
@@ -281,6 +288,14 @@ async function main() {
       const { certifyInstall } = await import('./lib/package-certification/certify.mjs');
       await certifyInstall({ ...await packageContext(args, false), output: path.resolve(requireArg(args, 'out')), image: args.image, negativeControl: args['negative-control'] });
       console.log('Installed package certification PASS');
+      break;
+    }
+    case 'verify-evidence': {
+      const { verifyCertificate } = await import('./lib/package-certification/bundle.mjs');
+      const { verifyReleaseEvidence } = await import('./lib/release-evidence.mjs');
+      const context = await packageContext(args);
+      const { manifest } = verifyCertificate(context.bundle, context.receiptFile, context.expected);
+      console.log(JSON.stringify(verifyReleaseEvidence({ ...context, manifest, evidenceFile: path.resolve(requireArg(args, 'evidence')) }), null, 2));
       break;
     }
     case 'verify-package-certificate': {

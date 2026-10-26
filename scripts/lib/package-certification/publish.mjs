@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { verifyReleaseTag } from '../release-policy.mjs';
 import { fileIdentity, verifyCertificate } from './bundle.mjs';
 import { run } from '../release-process.mjs';
+import { verifyReleaseEvidence } from '../release-evidence.mjs';
 
 function validateRegistry(registry) {
   if (!registry) return;
@@ -59,16 +60,20 @@ function mutate(command, args) {
   if (result.error || result.status !== 0) throw new Error('npm mutation failed; inspect npm output and obtain a fresh OTP if needed');
 }
 export function preparedRelease({
-  mode, bundle, receiptFile, expected, rootDir, tag, tags, registry, otp,
+  mode, bundle, receiptFile, expected, rootDir, tag, tags, registry, otp, evidenceFile,
   dryRun = false, readDist = pkg => registryDist(pkg, registry), runner = mutate,
   gitRunner = (cmd, args) => run(cmd, args, { cwd: rootDir }),
-  log = console.log,
+  log = console.log, verifyEvidence = verifyReleaseEvidence,
 }) {
   assert.ok(['publish', 'promote'].includes(mode));
   validateRegistry(registry);
   assert.ok(tags?.length > 0 && new Set(tags).size === tags.length && tags.every(t => /^[a-z][a-z0-9-]*$/.test(t)), 'invalid/duplicate dist-tags');
   if (mode === 'publish') assert.equal(tags.length, 1, 'publish accepts exactly one initial dist-tag');
+  if (mode === 'promote' || tags.some(channel => ['latest', 'mainnet'].includes(channel))) {
+    assert.ok(typeof evidenceFile === 'string' && evidenceFile, 'release decision file is required for promotion');
+  }
   const { manifest } = verifyCertificate(bundle, receiptFile, expected);
+  if (evidenceFile) verifyEvidence({ evidenceFile, expected, manifest, rootDir });
   const problems = verifyReleaseTag({ tag, version: expected.version, runner: gitRunner });
   assert.deepEqual(problems, [], 'release signed-tag/version/ancestry preflight failed');
   assert.equal(gitRunner('git', ['rev-parse', `${tag}^{commit}`]), expected.commit, 'tag does not identify prepared source');
@@ -88,6 +93,7 @@ export function preparedRelease({
   // Recheck package AND evidence bytes after acquisition and immediately before
   // mutation; no build-info generation/build/repack exists in this path.
   verifyCertificate(bundle, receiptFile, expected);
+  if (evidenceFile) verifyEvidence({ evidenceFile, expected, manifest, rootDir });
   try {
     for (const operation of operations) {
       const { pkg, channel, tarball, args } = operation;
