@@ -1,3 +1,4 @@
+import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import * as recoveryGraph from '../src/durable-recovery-graph.js';
@@ -208,7 +209,7 @@ async function captureGraphScopedStore(
   const agentLike: any = {
     config: {},
     chain,
-    store: {},
+    store: { mutationOwner: createStoreMutationOwner(() => {}) },
     subscribedContextGraphs: new Map(),
     contextGraphBindingState: new ContextGraphBindingState(),
     wireIdToLocalCgId: new Map(),
@@ -285,6 +286,7 @@ describe('durable sync lifecycle chain binding', () => {
   it.each(['ordinary-first', 'callback-first', 'two-callbacks'] as const)(
     'admits concurrent same-selection owners independently: %s', async (mode) => {
       const agentLike: any = {
+        store: { mutationOwner: createStoreMutationOwner(() => {}) },
         config: {}, node: {},
         processDurableBatchInWorker: async () => ({}),
         runContextGraphSyncWithBackpressure: LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure,
@@ -323,6 +325,7 @@ describe('durable sync lifecycle chain binding', () => {
   it.each<ExactRecoveryTransportMode>(['legacy', 'stream-preferred', 'stream-required'])(
     'shares only matching transport decisions for concurrent %s work', async exactRecoveryTransportMode => {
       const agentLike: any = {
+        store: { mutationOwner: createStoreMutationOwner(() => {}) },
         config: {}, node: {},
         processDurableBatchInWorker: async () => ({}),
         runContextGraphSyncWithBackpressure: LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure,
@@ -357,6 +360,7 @@ describe('durable sync lifecycle chain binding', () => {
   it('returns typed durable admission deferral without invoking work callbacks', async () => {
     const config = { syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 };
     const agentLike: any = {
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       config, node: {},
       processDurableBatchInWorker: async () => ({}),
       runContextGraphSyncWithBackpressure: LifecycleSyncMethods.prototype.runContextGraphSyncWithBackpressure,
@@ -420,6 +424,7 @@ describe('durable sync lifecycle chain binding', () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_800_000_000_000);
     const agentLike: any = {
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       config: {},
       processDurableBatchInWorker: async () => ({}),
       runContextGraphSyncWithBackpressure: async (
@@ -480,6 +485,7 @@ describe('durable sync lifecycle chain binding', () => {
     const controller = new AbortController();
     const admittedContextGraphs: string[] = [];
     const agentLike: any = {
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       config: {},
       processDurableBatchInWorker: async () => ({}),
       runContextGraphSyncWithBackpressure: async (
@@ -528,7 +534,7 @@ describe('durable sync lifecycle chain binding', () => {
     const agentLike: any = {
       config: {},
       chain: { chainId: 'none' },
-      store: {},
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       subscribedContextGraphs: new Map(),
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
@@ -580,11 +586,11 @@ describe('durable sync lifecycle chain binding', () => {
       const options = { ...input, signal };
       if (entry === 'durable') {
         await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
-          {} as any, ctx, 'peer', [contextGraphId], undefined, undefined, undefined, options,
+          { store: { mutationOwner: createStoreMutationOwner(() => {}) } } as any, ctx, 'peer', [contextGraphId], undefined, undefined, undefined, options,
         );
       } else {
         await LifecycleSyncMethods.prototype.runLegacyDurableSyncForContextGraphDetailed.call(
-          {} as any, ctx, 'peer', contextGraphId, 1, options,
+          { store: { mutationOwner: createStoreMutationOwner(() => {}) } } as any, ctx, 'peer', contextGraphId, 1, options,
         );
       }
       const forwarded = entry === 'durable' ? execute.mock.calls.at(-1)![0].options : graphExecute.mock.calls.at(-1)![0].options;
@@ -604,7 +610,7 @@ describe('durable sync lifecycle chain binding', () => {
     const execute = vi.spyOn(recoveryExecution, 'runDurableRecovery')
       .mockResolvedValue({ result: {} as any, exactFetchDisposition: 'found' });
     const reenterPublic = vi.fn(() => { throw new Error('Internal recovery must not re-enter public SDK normalization'); });
-    const agentLike = { runLegacyDurableSyncDetailed: reenterPublic } as any;
+    const agentLike = { store: { mutationOwner: createStoreMutationOwner(() => {}) }, runLegacyDurableSyncDetailed: reenterPublic } as any;
     const signal = new AbortController().signal;
     await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
       agentLike, 'fixture-peer', contextGraphId, [ual], { registeredPublicEvidence, signal },
@@ -633,7 +639,7 @@ describe('durable sync lifecycle chain binding', () => {
       const onWorkStarted = vi.fn();
       const isCurrent = () => true;
       await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
-        {} as any, 'fixture-peer', contextGraphId,
+        { store: { mutationOwner: createStoreMutationOwner(() => {}) } } as any, 'fixture-peer', contextGraphId,
         { kind: 'ual-only', assetUals: [ual] },
         { exactRecoveryTransportMode, signal, onWorkStarted, isCurrent },
       );
@@ -650,7 +656,7 @@ describe('durable sync lifecycle chain binding', () => {
       result: physicalResult,
       exactFetchDisposition: 'clean-absent' as const,
     });
-    const agentLike = {};
+    const agentLike = { store: { mutationOwner: createStoreMutationOwner(() => {}) } };
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
     const controller = new AbortController();
 
@@ -684,7 +690,7 @@ describe('durable sync lifecycle chain binding', () => {
       exactFetchDisposition: 'incomplete' as const,
     });
     await LifecycleSyncMethods.prototype.syncExactKnowledgeAssetsFromPeerDetailed.call(
-      {} as any,
+      { store: { mutationOwner: createStoreMutationOwner(() => {}) } } as any,
       '12D3KooWExactRecoveryPeer',
       '0x1111111111111111111111111111111111111111/public-recovery',
       { kind: 'ual-only', assetUals: ['did:dkg:base:84532/0x1111111111111111111111111111111111111111/1'] },
@@ -706,6 +712,7 @@ describe('durable sync lifecycle chain binding', () => {
           ...(outcome === undefined ? {} : { exactStreamOutcome: outcome }),
         });
       const agentLike: any = {
+        store: { mutationOwner: createStoreMutationOwner(() => {}) },
         config: {},
         runContextGraphSyncWithBackpressure: async (
           _ctx: unknown, _contextGraphId: string, _lane: string, _operationId: string,
@@ -737,6 +744,7 @@ describe('durable sync lifecycle chain binding', () => {
         exactStreamOutcome: 'responder-busy',
       });
     const agentLike: any = {
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       config: {},
       runContextGraphSyncWithBackpressure: async (
         _ctx: unknown, _contextGraphId: string, _lane: string, _operationId: string,
@@ -916,7 +924,7 @@ describe('durable sync lifecycle chain binding', () => {
     async (_mode, legacySyncAllowed, legacySwmAllowed, onPrivateLane) => {
       const agentLike: any = {
         config: {},
-        store: {},
+        store: { mutationOwner: createStoreMutationOwner(() => {}) },
         writeLocks: new Map(),
         publicSnapshotStore: undefined,
         syncCheckpoints: new Map(),
@@ -970,6 +978,7 @@ describe('durable sync lifecycle chain binding', () => {
     }));
     const privateRootLane = vi.fn(async () => false);
     const agentLike: any = {
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       config: {},
       log: { info: () => {}, warn: () => {}, debug: () => {} },
       resolveRfc64CompleteSwmProviderPeerIdsV1: () => [],
@@ -1008,6 +1017,7 @@ describe('durable sync lifecycle chain binding', () => {
     vi.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000);
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
     const agentLike: any = {
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       config: {},
       processDurableBatchInWorker: async () => ({}),
       runContextGraphSyncWithBackpressure: async (
@@ -1061,6 +1071,7 @@ describe('durable sync lifecycle chain binding', () => {
   it('keeps a multi-graph exact lifecycle result incomplete after a later clean absence', async () => {
     const exactUal = 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1';
     const agentLike: any = {
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       config: {},
       processDurableBatchInWorker: async () => ({}),
       runContextGraphSyncWithBackpressure: async (
@@ -1125,7 +1136,7 @@ describe('durable sync lifecycle chain binding', () => {
       },
       subscribedContextGraphs: new Map(),
       resolveRfc64CatalogReceiverAuthorityV1: () => ({ legacySyncAllowed: true }),
-      store: changelogCapableStore,
+      store: { ...changelogCapableStore, mutationOwner: createStoreMutationOwner(() => {}) },
       runChangelogLane,
       runLegacyDurableSync,
       log: { info: () => {}, warn: () => {}, debug: () => {} },
@@ -1201,7 +1212,7 @@ describe('durable sync lifecycle chain binding', () => {
         Rfc64CatalogMethods.prototype.resolveRfc64CatalogReceiverAuthorityV1,
       resolveRfc64AcceptedCompatibilityAuthorityV1:
         (Rfc64CatalogMethods.prototype as any).resolveRfc64AcceptedCompatibilityAuthorityV1,
-      store: {},
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       runLegacyDurableSync,
       log: { info: () => {}, warn: () => {}, debug: () => {} },
     };
@@ -1271,7 +1282,7 @@ describe('durable sync lifecycle chain binding', () => {
     const agentLike: any = {
       config: {},
       chain,
-      store: {},
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
@@ -1687,7 +1698,7 @@ describe('durable sync lifecycle chain binding', () => {
     });
     const agentLike: any = {
       config: {},
-      store: {},
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       writeLocks: new Map(),
       publicSnapshotStore: undefined,
       syncCheckpoints: new Map(),
@@ -1780,7 +1791,7 @@ describe('durable sync lifecycle chain binding', () => {
     const clearPublishedKnowledgeAssetSwm = vi.fn(async () => {});
     const agentLike: any = {
       config: {},
-      store: {},
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       writeLocks: new Map(),
       publicSnapshotStore: undefined,
       syncCheckpoints: new Map(),
@@ -1856,6 +1867,7 @@ describe('durable sync lifecycle chain binding', () => {
       return run;
     };
     const agentLike: any = {
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       config: {
         contextGraphSubscriptionStore: {
           loadAll: async () => [],
@@ -1918,7 +1930,7 @@ describe('durable sync lifecycle chain binding', () => {
     const agentLike: any = {
       config: {},
       chain,
-      store: {},
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),
@@ -2132,7 +2144,7 @@ describe('durable sync lifecycle chain binding', () => {
     const agentLike: any = {
       config: {},
       chain,
-      store: {},
+      store: { mutationOwner: createStoreMutationOwner(() => {}) },
       subscribedContextGraphs: new Map([[contextGraphId, subscription]]),
       contextGraphBindingState: new ContextGraphBindingState(),
       wireIdToLocalCgId: new Map(),

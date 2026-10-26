@@ -45,8 +45,3 @@ export class StoreContentFence {
     } finally { this.watches.delete(watch); }
   }
 }
-
-// The shared mutation executor also covers typed writers that bypass the decorator.
-const fences = new WeakMap<object, StoreContentFence>();
-export function bindStoreContentFence(owner: object, fence: StoreContentFence): void { fences.set(owner, fence); }
-export function storeContentFence(owner: object): StoreContentFence | undefined { return fences.get(owner); }

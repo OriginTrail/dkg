@@ -1,4 +1,3 @@
-import { storeContentFence } from '../src/internal/store-content-fence.js';
 import { readHeldGraphScopedAssets } from '../src/sync/requester/durable-data-holdings.js';
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
 import { afterEach, expect, it, vi } from 'vitest';
@@ -18,7 +17,7 @@ afterEach(async () => { for (const agent of agents.splice(0)) await agent.stop()
 function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
 
 it.each(['chain', 'worker'].flatMap(phase =>
-  ['clean', 'deactivate', 'recreate', 'equivalent', 'drop-graph', 'remove-subgraph'].map(change => [phase, change] as const)))(
+  ['clean', 'deactivate', 'recreate', 'equivalent', 'drop-graph', 'remove-subgraph'].map(change => [phase, change] as const)).concat([['preexisting', 'corrupt-before']]))(
   'fences held readiness through production recovery at %s: %s', async (phase, change) => {
     const chain = new MockChainAdapter('hardhat:31337');
     const agent = await DKGAgent.create({ name: 'HeldProduction', listenHost: '127.0.0.1', chainAdapter: chain,
@@ -44,8 +43,12 @@ it.each(['chain', 'worker'].flatMap(phase =>
       batchId: 0n, materializedVersion: { blockNumber: 1, txIndex: 0 },
     } } });
     await internal.store.insert([...data, ...meta]);
-    expect(storeContentFence(internal.store)).toBeDefined();
+    expect(internal.store.mutationOwner.contentFence).toBeDefined();
     expect(await readHeldGraphScopedAssets(internal.store, { contextGraphId: CG, descriptors: createGraphScopedDurableManifestPlan(meta, CG)!.descriptors })).toEqual(new Set([ual]));
+    if (change === 'corrupt-before') {
+      await internal.store.delete(data);
+      await internal.store.insert([{ ...data[0]!, object: '"tampered"' }]);
+    }
     const entered = deferred(), release = deferred();
     vi.spyOn(chain, 'getLatestMerkleRoot').mockImplementation(async () => {
       if (phase === 'chain') { entered.resolve(); await release.promise; }
@@ -62,7 +65,7 @@ it.each(['chain', 'worker'].flatMap(phase =>
     let dataRequests = 0;
     stubLifecycleFetch(agent, async call => {
       if (call.phase === 'data') dataRequests++;
-      const quads = call.phase === 'meta' ? meta : [];
+      const quads = call.phase === 'meta' ? meta : change === 'corrupt-before' && call.phase === 'data' ? data : [];
       return { quads, bytesReceived: quads.length * 100, resumedFromOffset: 0, nextOffset: quads.length,
         checkpointKey: getSyncCheckpointKey(PEER, CG, false, call.phase), completed: true, timedOut: false };
     });
@@ -70,6 +73,15 @@ it.each(['chain', 'worker'].flatMap(phase =>
     const run = agent.syncDurableRecoveryContextGraph(CG, {
       candidatePeerIds: [PEER], restrictToCandidatePeerIds: true, candidatesAreSyncCapable: true,
     });
+    if (change === 'corrupt-before') {
+      const recovered = await run;
+      expect(dataRequests).toBeGreaterThan(0);
+      expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+      expect(recovered.outcome).toBe('terminal');
+      const rows = await internal.store.query(`SELECT ?object WHERE { GRAPH <${graph}> { ?subject ?predicate ?object } }`);
+      expect(rows.bindings).toEqual([{ object: '"held"' }]);
+      return;
+    }
     try {
       await Promise.race([entered.promise, run.then(result => { throw new Error('Recovery ended before the paused verification: ' + JSON.stringify(result)); })]);
       if (change === 'deactivate') {

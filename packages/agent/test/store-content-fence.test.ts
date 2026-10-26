@@ -1,16 +1,16 @@
 import { expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
-import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
-import { storeContentFence } from '../src/internal/store-content-fence.js';
+import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
 
 const scope = { assertionGraphs: ['urn:assertion'], metadataGraph: 'urn:meta', subjects: ['urn:asset'] };
 const quad = { subject: 'urn:s', predicate: 'urn:p', object: '"value"', graph: 'urn:assertion' };
 function fixture() {
   const raw = new OxigraphStore();
-  const execute = createObservedStoreMutation(() => {});
-  const store = createMutationObservedStore(raw, execute);
-  return { raw, store, execute, fence: storeContentFence(store)! };
+  const mutationOwner = createStoreMutationOwner(() => {});
+  const execute = mutationOwner.execute;
+  const store = createMutationObservedStore(raw, { ...mutationOwner, execute: mutationOwner.execute.bind(undefined) });
+  return { raw, store, execute, fence: mutationOwner.contentFence };
 }
 
 it('observes shared typed writers as well as graph drops and partial row deletes', async () => {

@@ -1,3 +1,5 @@
+import { prepareGraphScopedChainViewRead } from './graph-scoped-chain-views.js';
+import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { executeGraphScopedPublication } from './graph-scoped-publication.js';
 import {
   parseDeterministicKnowledgeAssetUal,
@@ -111,7 +113,7 @@ export async function authenticateChallengePinnedGraphScopedAsset(
       `Graph-scoped durable sync UAL chain ${identity.chainId} does not match local chain ${chain.chainId}`,
     );
   }
-  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
+  const kaId = packKnowledgeAssetIdFromIdentity(identity);
   const boundContextGraphId = await chain.getKAContextGraphId(kaId, {
     signal: options.signal,
   });
@@ -157,22 +159,11 @@ export async function readGraphScopedAssetChainState(
   verifyContextGraphBinding: VerifyContextGraphBinding,
   options: { signal?: AbortSignal } = {},
 ): Promise<GraphScopedAssetChainState> {
-  if (chain.chainId === 'none' || !chain.getLatestMerkleRoot || !chain.getMerkleRootCount || !chain.getKAContextGraphId) {
-    throw Object.assign(
-      new Error('A held graph-scoped asset check requires chain root, assertion-count, and context-graph views'),
-      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
-    );
-  }
-  const identity = parseDeterministicKnowledgeAssetUal(copy.ual);
-  if (identity.chainId !== chain.chainId) {
-    throw new Error(`Held graph-scoped asset ${copy.ual} is not on local chain ${chain.chainId}`);
-  }
-  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
-  const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
-    chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
-    chain.getMerkleRootCount(kaId, { signal: options.signal }),
-    chain.getKAContextGraphId(kaId, { signal: options.signal }),
-  ]);
+  const views = prepareGraphScopedChainViewRead(chain, copy.ual, {
+    unsupported: 'A held graph-scoped asset check requires chain root, assertion-count, and context-graph views',
+    wrongChain: () => `Held graph-scoped asset ${copy.ual} is not on local chain ${chain.chainId}`,
+  }, options.signal);
+  const { latestRoot, rootCount, boundContextGraphId } = await views.read();
   return {
     onChainContextGraphId: boundContextGraphId.toString(),
     merkleRootHex: Buffer.from(latestRoot).toString('hex'),
@@ -214,25 +205,11 @@ export async function authenticateVerifiedGraphScopedAsset(
       onChainContextGraphId: null,
     };
   }
-  if (
-    !chain.getLatestMerkleRoot
-    || !chain.getMerkleRootCount
-    || !chain.getKAContextGraphId
-  ) {
-    throw Object.assign(
-      new Error(
-        'Graph-scoped durable sync requires chain root, assertion-count, and context-graph verification',
-      ),
-      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
-    );
-  }
-  const identity = parseDeterministicKnowledgeAssetUal(asset.ual);
-  if (identity.chainId !== chain.chainId) {
-    throw new Error(
-      `Graph-scoped durable sync UAL chain ${identity.chainId} does not match local chain ${chain.chainId}`,
-    );
-  }
-  const kaId = (BigInt(identity.agentAddress) << 96n) | BigInt(identity.kaNumber);
+  const views = prepareGraphScopedChainViewRead(chain, asset.ual, {
+    unsupported: 'Graph-scoped durable sync requires chain root, assertion-count, and context-graph verification',
+    wrongChain: identityChainId => `Graph-scoped durable sync UAL chain ${identityChainId} does not match local chain ${chain.chainId}`,
+  }, options.signal);
+  const { kaId } = views;
   // What the asset claims as provenance is fixed by its own metadata, so the
   // receipt of a first publish is requested with the views instead of after
   // them. Only the request moves: this is awaited after the checks on the
@@ -241,11 +218,7 @@ export async function authenticateVerifiedGraphScopedAsset(
   // that leaves it unawaited, so its rejection is observed here.
   const provenance = resolveProvenance(chain, asset, options.signal);
   provenance.catch(() => undefined);
-  const [latestRoot, rootCount, boundContextGraphId] = await Promise.all([
-    chain.getLatestMerkleRoot(kaId, { signal: options.signal }),
-    chain.getMerkleRootCount(kaId, { signal: options.signal }),
-    chain.getKAContextGraphId(kaId, { signal: options.signal }),
-  ]);
+  const { latestRoot, rootCount, boundContextGraphId } = await views.read();
   if (latestRoot.length !== 32 || Buffer.from(latestRoot).toString('hex') !== asset.merkleRootHex) {
     throw Object.assign(
       new Error(`Graph-scoped durable sync ${asset.ual} does not match the latest on-chain Merkle root`),

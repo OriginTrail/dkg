@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { bindStoreContentFence, storeContentFence } from './store-content-fence.js';
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
 import {
   deleteByPatternWithoutCount,
@@ -10,8 +9,12 @@ import {
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
-import { createObservedStoreMutation, type ObservedStoreMutation, type ProjectionDirtyCallback } from './observed-store-mutation.js';
+import { createStoreMutationOwner, type StoreMutationOwner, type ProjectionDirtyCallback } from './observed-store-mutation.js';
 export type { ProjectionDirtyCallback } from './observed-store-mutation.js';
+
+export type MutationObservedStore = TripleStore & Partial<SortedGraphSetSource> & {
+  readonly mutationOwner: StoreMutationOwner;
+};
 
 // A commit the canonical plan refuses is refused by the store before dispatch too; until it is,
 // it may change anything.
@@ -30,23 +33,23 @@ export function createListContextGraphsCacheInvalidatingStore(
   // names its target graph so deleted facts are fenced, not only inserted
   // ones) and the observer sees it before dispatch and again when it settles.
   observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
-): TripleStore & Partial<SortedGraphSetSource> {
-  return createMutationObservedStore(innerStore, createObservedStoreMutation(invalidate, observerOrCallback));
+): MutationObservedStore {
+  return createMutationObservedStore(innerStore, createStoreMutationOwner(invalidate, observerOrCallback));
 }
 
 /** Compose a store with the same observation owner used by typed agent writers. */
 export function createMutationObservedStore(
   innerStore: TripleStore,
-  invalidateAfterMutation: ObservedStoreMutation,
-): TripleStore & Partial<SortedGraphSetSource> {
+  mutationOwner: StoreMutationOwner,
+): MutationObservedStore {
+  const invalidateAfterMutation = mutationOwner.execute;
   const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
     === 'function'
     ? innerStore as TripleStore & SortedGraphSetSource
     : null;
-  const wrapper: TripleStore
-    & Partial<SortedGraphSetSource>
+  const wrapper: MutationObservedStore
     & { readonly innerStore: TripleStore } = {
-    innerStore,
+    innerStore, mutationOwner,
     get queryCancellation() {
       return innerStore.queryCancellation;
     },
@@ -237,7 +240,5 @@ export function createMutationObservedStore(
       return innerStore.close();
     },
   };
-  const fence = storeContentFence(invalidateAfterMutation);
-  if (fence) bindStoreContentFence(wrapper, fence);
   return wrapper;
 }

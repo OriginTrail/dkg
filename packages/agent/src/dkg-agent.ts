@@ -469,8 +469,8 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { createMutationObservedStore } from './internal/context-graph-cache-invalidating-store.js';
-import { createObservedStoreMutation } from './internal/observed-store-mutation.js';
+import { createMutationObservedStore, type MutationObservedStore } from './internal/context-graph-cache-invalidating-store.js';
+import { createStoreMutationOwner } from './internal/observed-store-mutation.js';
 import { createPublishedNamedKaVmLifecycleWriter, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
 import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
@@ -817,7 +817,7 @@ export class DKGAgent extends DKGAgentBase {
     config: ResolvedDKGAgentConfig,
     wallet: DKGAgentWallet,
     node: DKGNode,
-    store: TripleStore,
+    store: MutationObservedStore,
     publishedLifecycleWriter: PublishedNamedKaVmLifecycleWriter,
     ledgerTimestampWriter: StorageAckLedgerTimestampWriter,
     publisher: DKGPublisher,
@@ -1501,13 +1501,14 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    const executeMutation = createObservedStoreMutation(
+    const mutationOwner = createStoreMutationOwner(
       () => {
         agentRef?.invalidateListContextGraphsCache();
       },
       createProjectionMutationObserver(() => agentRef?.contextGraphMetaProjection),
     );
-    const agentStore = createMutationObservedStore(store, executeMutation);
+    const executeMutation = mutationOwner.execute;
+    const agentStore = createMutationObservedStore(store, mutationOwner);
     const publishedLifecycleWriter = createPublishedNamedKaVmLifecycleWriter({
       updateStore: store, fallbackStore: agentStore, executeMutation,
     });

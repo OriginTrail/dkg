@@ -1,3 +1,4 @@
+import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
 import * as recoveryGraph from '../src/durable-recovery-graph.js';
@@ -33,7 +34,7 @@ function fixture() {
     getSubscribedContextGraphs: () => a.subscribedContextGraphs,
     contextGraphBindingState: { capture: () => generation, isGenerationCurrent: (_: string, g: number) => g === generation },
     chain: { chainId: 'evm:31337', deploymentId: 'test', readPublicGraphSnapshot: vi.fn(async () => snapshot()) },
-    store: { insert: vi.fn(async () => {}) },
+    store: { mutationOwner: createStoreMutationOwner(() => {}), insert: vi.fn(async () => {}) },
     router: { send: vi.fn(async () => Buffer.from(JSON.stringify(snapshot()))) },
     recoverSnapshotExactAssets: vi.spyOn(exactRecovery, 'runExactRecovery'),
     persistContextGraphSubscriptionState: vi.fn(async () => {}),

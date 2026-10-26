@@ -1,4 +1,4 @@
-import { storeContentFence } from './internal/store-content-fence.js';
+import type { MutationObservedStore } from './internal/context-graph-cache-invalidating-store.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
@@ -209,7 +209,7 @@ import  {
   SUBSCRIPTION_SOURCES,
   pickNetworkTunables,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
 import {
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
@@ -585,7 +585,7 @@ export class DKGAgentBase {
     };
     const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
       reconcileAfterMaterialization(cleanup, asset, ctx);
-    const heldContent = storeContentFence(agent.store);
+    const heldContent = agent.store.mutationOwner.contentFence;
     const materialization = new RecoveryMaterializationOwner({
       chain: () => agent.chain,
       store: () => agent.store,
@@ -656,7 +656,7 @@ export class DKGAgentBase {
       storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
         priority: 'background', source: 'agent.durableSync.storeInsert', signal,
       }),
-      heldStore: heldContent ? { read: heldGraphScopedAssetsReader(agent.store), withScope: heldContent.withScope.bind(heldContent) } : undefined,
+      heldStore: { read: heldGraphScopedAssetsReader(agent.store), withScope: heldContent.withScope.bind(heldContent) },
       materialization: scope => materialization.forOperation(scope),
       checkpoints: {
         deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),
@@ -685,7 +685,7 @@ export class DKGAgentBase {
 
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
-  readonly store: TripleStore;
+  readonly store: MutationObservedStore;
   protected readonly storageAckLedgerTimestampWriter: StorageAckLedgerTimestampWriter;
   protected readonly publishedNamedKaVmLifecycleWriter: PublishedNamedKaVmLifecycleWriter;
   readonly publisher: DKGPublisher;
@@ -2084,7 +2084,7 @@ export class DKGAgentBase {
     config: ResolvedDKGAgentConfig,
     wallet: DKGAgentWallet,
     node: DKGNode,
-    store: TripleStore,
+    store: MutationObservedStore,
     publisher: DKGPublisher,
     queryEngine: DKGQueryEngine,
     eventBus: TypedEventBus,

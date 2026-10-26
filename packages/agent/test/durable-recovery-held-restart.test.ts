@@ -1,5 +1,4 @@
 import { createListContextGraphsCacheInvalidatingStore } from '../src/internal/context-graph-cache-invalidating-store.js';
-import { storeContentFence } from '../src/internal/store-content-fence.js';
 import { RecoveryMaterializationOwner } from '../src/durable-recovery-materialization.js';
 import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 import type { ContextGraphSub } from '../src/dkg-agent-types.js';
@@ -248,7 +247,7 @@ function node(
     ...roundOptions,
     graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery, held: {
       reader: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
-      withStoreFence: storeContentFence(store)!.withScope.bind(storeContentFence(store)!),
+      withStoreFence: store.mutationOwner.contentFence.withScope.bind(store.mutationOwner.contentFence),
     } } : undefined,
     processDurableBatchInWorker: async (...args) => { await options.beforeVerify?.(); return processBatch(...args); },
     storeInsert: async ({ quads }) => { await options.beforeMetaStore?.(); await store.insert(quads); },

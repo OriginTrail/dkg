@@ -1,3 +1,4 @@
+import { createListContextGraphsCacheInvalidatingStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer,
@@ -146,16 +147,29 @@ describe('which assets of a verified generation this node holds', () => {
     expect(await readHeldGraphScopedAssets(local, { contextGraphId: CG, descriptors })).toEqual(new Set([kept.ual]));
   });
 
-  it('fails a row count that does not return bindings', async () => {
+  it.each([false, true])('rejects a same-count edit before recovery, recreated owner=%s', async recreate => {
+    const raw = store();
+    const fixture = asset(1, { rows: 1 });
+    await storeConfirmed(raw, fixture);
+    const owner = createListContextGraphsCacheInvalidatingStore(raw, () => {});
+    await owner.delete(fixture.payload);
+    await owner.insert([{ ...fixture.payload[0]!, object: '"tampered"' }]);
+    const reader = recreate ? createListContextGraphsCacheInvalidatingStore(raw, () => {}) : owner;
+    expect(await reader.countQuads(fixture.graph)).toBe(1);
+    expect(await readHeldGraphScopedAssets(reader, { contextGraphId: CG, descriptors: manifestOf([fixture]).descriptors }))
+      .toEqual(new Set());
+  });
+
+  it('fails an assertion read that does not return bindings', async () => {
     const local = store();
     await storeConfirmed(local, asset(1));
     const counting = {
-      query: (sparql: string, options?: object) => (sparql.includes('COUNT(*)')
+      query: (sparql: string, options?: object) => (sparql.includes('SELECT ?subject')
         ? Promise.resolve({ type: 'quads', quads: [] })
         : local.query(sparql, options)),
     } as unknown as TripleStore;
     await expect(readHeldGraphScopedAssets(counting, { contextGraphId: CG, descriptors: manifestOf([asset(1)]).descriptors }))
-      .rejects.toThrow('Held asset row COUNT expected a bindings result');
+      .rejects.toThrow('Held asset content SELECT expected a bindings result');
   });
 
   it('fails a store read that does not return complete bindings', async () => {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import {
+  computeFlatKCRootV10,
   parseConfirmedGraphKnowledgeAssetMetadataEnvelope,
   type ConfirmedGraphKnowledgeAssetMetadataRead,
 } from '@origintrail-official/dkg-publisher';
@@ -33,9 +34,6 @@ const ENVELOPE_PREDICATES = [
 
 /** Assets per store read: one VALUES list of exact metadata subjects. */
 const HOLDINGS_READ_CHUNK = 200;
-
-/** Assertion graphs per row-count query, so one query never holds the background lane long. */
-const ROW_COUNT_CHUNK = 50;
 
 export interface HeldGraphScopedAssetsRequest {
   readonly contextGraphId: string;
@@ -79,12 +77,11 @@ export type DurableHoldingsPlan =
  * The assets of a verified META generation that this node already holds: a
  * confirmed graph-scoped copy at the descriptor's version, root, row counts,
  * graph and sub-graph, whose assertion graph still holds exactly the declared
- * number of public rows. Durable sync verified such a copy against its root
- * and the chain before it wrote the rows and the metadata in one atomic
- * replacement, but metadata alone is not proof: a removed sub-graph drops the
- * rows and keeps the envelope. One metadata query per chunk of assets, then
- * one row count per assertion graph, with no content re-hash. Whether the
- * copy is still the current version is for the caller to check.
+ * number of public rows and hashes to the declared root, including any private
+ * root commitment. Metadata and cardinality alone cannot prove a copy: a write
+ * before this recovery (or a process restart) may have changed rows without
+ * changing either. Read and verify one assertion at a time, bounded by its
+ * declared size plus one row. Whether it is current on chain is checked next.
  */
 export async function readHeldGraphScopedAssets(
   store: TripleStore,
@@ -120,26 +117,27 @@ export async function readHeldGraphScopedAssets(
         { contextGraphId: request.contextGraphId, ual: descriptor.ual },
       ),
     ));
-    for (let rowStart = 0; rowStart < confirmed.length; rowStart += ROW_COUNT_CHUNK) {
-      const counted = confirmed.slice(rowStart, rowStart + ROW_COUNT_CHUNK);
-      // One indexed count per exact assertion graph, as the responder's page plan reads them.
-      const counts = await store.query(`SELECT ?graph ?rows WHERE { ${counted.map(({ assertionGraph }) => {
-        const graph = `<${assertSafeIri(assertionGraph)}>`;
-        return `{ SELECT (${graph} AS ?graph) (COUNT(*) AS ?rows) WHERE { GRAPH ${graph} { ?s ?p ?o } } }`;
-      }).join(' UNION ')} }`, { ...options, source: 'agent.durableSync.heldAssetRows' });
-      if (counts.type !== 'bindings') throw new Error('Held asset row COUNT expected a bindings result');
-      const rowsByGraph = new Map(counts.bindings.map(({ graph, rows }) => [graph, integerLexical(rows)]));
-      for (const descriptor of counted) {
-        if (rowsByGraph.get(descriptor.assertionGraph) === descriptor.publicTripleCount) held.add(descriptor.ual);
-      }
+    for (const descriptor of confirmed) {
+      request.signal?.throwIfAborted();
+      const graph = assertSafeIri(descriptor.assertionGraph);
+      // sparql-scan-allow: R4 -- one exact assertion graph, bounded by its verified descriptor count
+      const payload = await store.query(
+        `SELECT ?subject ?predicate ?object WHERE { GRAPH <${graph}> { ?subject ?predicate ?object } } LIMIT ${descriptor.publicTripleCount + 1}`,
+        { ...options, source: 'agent.durableSync.heldAssetContent' },
+      );
+      if (payload.type !== 'bindings') throw new Error('Held asset content SELECT expected a bindings result');
+      if (payload.bindings.length !== descriptor.publicTripleCount) continue;
+      const quads = payload.bindings.map(({ subject, predicate, object }) => {
+        if (subject === undefined || predicate === undefined || object === undefined) {
+          throw new Error('Held asset content SELECT returned an incomplete binding');
+        }
+        return { subject, predicate, object, graph };
+      });
+      const root = computeFlatKCRootV10(quads, descriptor.privateRoot ? [descriptor.privateRoot] : []);
+      if (Buffer.from(root).toString('hex') === descriptor.claimedRootHex) held.add(descriptor.ual);
     }
   }
   return held;
-}
-
-function integerLexical(raw: string | undefined): number | undefined {
-  const lexical = raw?.replace(/^"([^"]*)"(?:\^\^.*)?$/, '$1');
-  return lexical !== undefined && /^\d+$/.test(lexical) ? Number(lexical) : undefined;
 }
 
 /** The holdings reader a recovery host gives graph-owned rounds. */

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { StoreContentFence, bindStoreContentFence } from './store-content-fence.js';
+import { StoreContentFence } from './store-content-fence.js';
 import { isStoreOperationNotStarted, type Quad, type StoreOperation } from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 
@@ -33,11 +33,20 @@ export type ObservedStoreMutation = <T>(
   operation?: StoreOperation,
 ) => Promise<T>;
 
-/** Shared mutation observation for the store wrapper and explicitly composed typed writers. */
+export interface StoreMutationOwner {
+  readonly execute: ObservedStoreMutation;
+  readonly contentFence: StoreContentFence;
+}
+
 export function createObservedStoreMutation(
+  invalidate: () => void, observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
+): ObservedStoreMutation { return createStoreMutationOwner(invalidate, observerOrCallback).execute; }
+
+/** Shared mutation observation for the store wrapper and explicitly composed typed writers. */
+export function createStoreMutationOwner(
   invalidate: () => void,
   observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
-): ObservedStoreMutation {
+): StoreMutationOwner {
   const contentFence = new StoreContentFence();
   const observer = typeof observerOrCallback === 'function'
     ? observerFromCallback(observerOrCallback)
@@ -71,6 +80,5 @@ export function createObservedStoreMutation(
     settle?.(didChange ? 'changed' : 'unchanged');
     return result;
   };
-  bindStoreContentFence(invalidateAfterMutation, contentFence);
-  return invalidateAfterMutation;
+  return { execute: invalidateAfterMutation, contentFence };
 }

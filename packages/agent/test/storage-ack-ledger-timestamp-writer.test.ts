@@ -6,7 +6,7 @@ import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection
 import { DKGAgent } from '../src/dkg-agent.js';
 import { VmPromotionMethods } from '../src/dkg-agent-vm-promotion.js';
 import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
-import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
+import { createStoreMutationOwner } from '../src/internal/observed-store-mutation.js';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { createStorageAckLedgerTimestampWriter } from '../src/internal/storage-ack-ledger-timestamp-writer.js';
 
@@ -23,8 +23,9 @@ async function stack() {
   const projection = new ContextGraphMetaProjection(raw);
   await projection.recipientKeyRouteFence.ensureReady();
   const invalidate = vi.fn();
-  const execute = createObservedStoreMutation(invalidate, createProjectionMutationObserver(() => projection));
-  return { raw, projection, invalidate, store: createMutationObservedStore(raw, execute),
+  const mutationOwner = createStoreMutationOwner(invalidate, createProjectionMutationObserver(() => projection));
+  const execute = mutationOwner.execute;
+  return { raw, projection, invalidate, store: createMutationObservedStore(raw, mutationOwner),
     writer: createStorageAckLedgerTimestampWriter(raw, execute) };
 }
 
