@@ -158,13 +158,13 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
+  options: { recoveryGeneration?: () => number | undefined; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
 
   const rawStore = new OxigraphStore();
   stores.push(rawStore);
-  const contentFence = new StoreContentFence();
+  const contentFence = new StoreContentFence(options.recoveryGeneration);
   const store = createMutationObservedStore(rawStore, createObservedStoreMutation(() => {}, contentFence));
   const writes: string[] = [];
   const info: string[] = [];
@@ -468,4 +468,33 @@ it('continues the prefix between independently materialized replicas', async () 
   expect((await lifetime.recover()).outcome).toBe('terminal');
   expect(core.writes.filter(ual => ual === prefix)).toHaveLength(1);
   expect(core.writes).toEqual(fixtures.map(f => f.ual));
+});
+
+
+it.each(['overlapping', 'unknown'])('recovers bounded DATA after confirmed backend replacement (%s uncertain write)', async scope => {
+  const fixtures = generation(); let epoch: number | undefined = 0;
+  const core = node(servingPeer(fixtures), { recoveryGeneration: () => epoch });
+  if (scope === 'overlapping') {
+    vi.spyOn(core.rawStore, 'dropGraph').mockRejectedValueOnce(new Error('lost response'));
+    await expect(core.store.dropGraph(fixtures[0]!.graph)).rejects.toThrow('lost response');
+  } else {
+    vi.spyOn(core.rawStore, 'update').mockRejectedValueOnce(new Error('lost response'));
+    await expect(core.store.update('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }')).rejects.toThrow('lost response');
+  }
+  let rounds = 0;
+  const lifetime = core.start({ sliceSpent: true, isRunning: () => rounds < 8, afterSlice: () => { rounds++; } });
+  const unsafe = await lifetime.recover();
+  expect(unsafe.outcome).not.toBe('terminal');
+  expect(unsafe.result.complete).toBe(false);
+  epoch = undefined; rounds = 0; // A restart request is still not completion.
+  expect((await lifetime.recover()).outcome).not.toBe('terminal');
+  // The abandoned old operation can still corrupt the stored prefix before termination.
+  await core.rawStore.delete(fixtures[0]!.payload);
+  epoch = 1; rounds = 0; // Supervisor confirms old process death and replacement readiness.
+  const recovered = await lifetime.recover();
+  expect(recovered.outcome).toBe('terminal');
+  expect(rounds).toBeGreaterThan(1);
+  expect(await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+    descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors }))
+    .toEqual(new Set(fixtures.map(f => f.ual)));
 });

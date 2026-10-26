@@ -1,3 +1,4 @@
+import { registerStoreRecoveryGeneration } from '../store-recovery-generation.js';
 import { isReadOnlyStoreOperation } from '../store-operation-outcome.js';
 import { classifyStoreReadTransport } from '../store-read-transport-failure.js';
 import { normalizeNonNegativeNumber, normalizeSampleRate, normalizeQuerySource } from "./sparql-telemetry-options.js";
@@ -18,16 +19,11 @@ import { SparqlHttpResponseError, isDefinitiveSparqlUpdateRejectionV1 } from './
  *
  * Works with Oxigraph server, Apache Jena Fuseki, GraphDB, Blazegraph,
  * Amazon Neptune, Stardog, and any SPARQL 1.1–compliant server.
- *
  * Example (Oxigraph server):
  *   queryEndpoint: 'http://127.0.0.1:7878/query'
  *   updateEndpoint: 'http://127.0.0.1:7878/update'
  *
- * Example (single URL for both, e.g. Blazegraph):
- *   queryEndpoint: 'http://127.0.0.1:9999/blazegraph/namespace/kb/sparql'
- *   updateEndpoint: same URL
  */
-
 import type {
   TripleStore,
   BoundedQueryResponseCapability,
@@ -292,6 +288,10 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       ?? managedRecovery?.recover;
     this.getRecoveryState = managedRuntimeHooks?.getRecoveryState
       ?? managedRecovery?.readState;
+    if (managedRuntimeHooks?.getRecoveryState) registerStoreRecoveryGeneration(this, () => {
+      const state = this.readRecoveryState();
+      return state && !state.recovering && !state.admissionsPaused ? state.generation : undefined;
+    });
     this.managedActivityLease = this.openManagedActivityLease(managedRuntimeHooks);
     this.workLifecycle = new AbortableStoreWorkLifecycle({
       onGenerationClosed: () => {

@@ -2,7 +2,7 @@ import { assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-officia
 import { STORAGE_ACK_LEDGER_GRAPH, STORAGE_ACK_LEDGER_PREDICATES } from '@origintrail-official/dkg-publisher';
 import { createAgentStoreComposition } from '../src/internal/agent-store-composition.js';
 import { expect, it, vi } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, createManagedOxigraphSparqlStoreV1 } from '@origintrail-official/dkg-storage';
 import { createMutationObservedStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { StoreContentFence } from '../src/internal/store-content-fence.js';
 import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
@@ -126,3 +126,57 @@ it.each([{ everything: true }, { removals: [{}] }, { quads: [{ ...quad, graph: '
     proof.close();
     expect(fence.openScope(scope)).toBeUndefined();
   });
+
+
+it('reopens uncertain scopes only after confirmed backend replacement and invalidates old proofs', () => {
+  let generation: number | undefined = 0;
+  const fence = new StoreContentFence(() => generation);
+  const before = fence.openScope(scope)!;
+  fence.begin({ everything: true })('indeterminate');
+  expect(before.assertCurrent).toThrow();
+  expect(fence.openScope(scope)).toBeUndefined();
+  fence.begin({ quads: [quad] })('changed');
+  expect(fence.openScope(scope)).toBeUndefined(); // A rewrite is not quiescence.
+  generation = undefined;
+  expect(fence.openScope(scope)).toBeUndefined(); // Signalled but not confirmed dead.
+  generation = 1;
+  const after = fence.openScope(scope)!;
+  expect(after).toBeDefined();
+  expect(after.assertCurrent).not.toThrow();
+  generation = 2;
+  expect(after.assertCurrent).toThrow(); // Replacement itself invalidates a live proof.
+  before.close(); after.close();
+});
+
+it('does not let delayed old outcomes poison a replacement or hide new-generation failures', () => {
+  let generation = 0;
+  const fence = new StoreContentFence(() => generation);
+  const old = fence.begin({ everything: true });
+  generation = 1;
+  old('indeterminate');
+  const fresh = fence.openScope(scope)!;
+  expect(fresh).toBeDefined(); fresh.close();
+  fence.begin({ quads: [quad] })('indeterminate');
+  expect(fence.openScope(scope)).toBeUndefined();
+  generation = 2;
+  const replaced = fence.openScope(scope)!;
+  expect(replaced).toBeDefined(); replaced.close();
+});
+
+
+it('wires supervised replacement through the production store composition', async () => {
+  let state = { generation: 0, recovering: false };
+  const raw = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:9/query',
+    updateEndpoint: 'http://127.0.0.1:9/update' }, { getRecoveryState: () => state });
+  const composed = createAgentStoreComposition(raw, () => {}, { begin: () => () => {} });
+  vi.spyOn(raw, 'update').mockRejectedValueOnce(new Error('response lost'));
+  try {
+    await expect(composed.store.update('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }')).rejects.toThrow('response lost');
+    expect(composed.heldContent.openScope(scope)).toBeUndefined();
+    state = { generation: 1, recovering: true };
+    expect(composed.heldContent.openScope(scope)).toBeUndefined();
+    state = { generation: 1, recovering: false };
+    const proof = composed.heldContent.openScope(scope)!;
+    expect(proof).toBeDefined(); proof.close();
+  } finally { await raw.close(); }
+});
