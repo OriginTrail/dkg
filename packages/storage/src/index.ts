@@ -1,4 +1,6 @@
 export { asQueryReadAdmissionCapability, type QueryReadAdmissionCapability } from './query-read-admission-capability.js';
+export { SparqlTsvResultsShapeError } from './sparql-tsv-query-result.js';
+export { SparqlResultsShapeError } from './sparql-results-shape-error.js';
 export { nonEmptyNamedGraphEnumerationPattern } from './adapters/graph-enumeration-query.js';
 export {
   BlazegraphNamespaceManager,

@@ -275,7 +275,7 @@ start_hardhat() {
       );
       child.unref();
       if (!child.pid) process.exit(1);
-      console.log(child.pid);
+      process.stdout.write(String(child.pid) + "\n");
     ')
   echo "$hh_pid" > "$pidfile"
   log "Hardhat node started (PID $hh_pid)"
@@ -1220,8 +1220,9 @@ collect_devnet_node_pids() {
   fi
 
   if command -v ps >/dev/null 2>&1; then
-    ps_pids=$(ps eww -axo pid=,command= 2>/dev/null | awk -v root="$root_node" '
-      index($0, "DKG_HOME=" root) > 0 || index($0, root "/") > 0 { print $1 }
+    # Keep BSD selection flags together: GNU ps rejects the mixed -axo form.
+    ps_pids=$(ps axeww -o pid=,command= 2>/dev/null | awk -v root="$root_node" -v exact="$node_num" '
+      (index($0, "DKG_HOME=" root) > 0 && (exact == "" || index($0 " ", "DKG_HOME=" root " ") > 0)) || index($0, root "/") > 0 { print $1 }
     ' 2>/dev/null || true)
     for pid in $ps_pids; do pids+=" $pid"; done
   fi

@@ -1,4 +1,6 @@
 export { journalEntriesContextGraphId } from './async-lift-control-plane.js';
+export { parseExactPullSource } from './assertion-draft-recovery.js';
+export type { ExactPullSource, AssertionPullFromOptions, AssertionPullFromResult, AssertionDraftEvidence } from './assertion-draft-recovery.js';
 export {
   decodeEntityShareMetadata,
   ENTITY_SHARE_METADATA_PREDICATES,

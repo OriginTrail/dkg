@@ -332,15 +332,15 @@ describe('deprecated V9 aliases still work', () => {
   });
 
   it('contextGraphFinalizationTopic maps to finalization topic', () => {
-    expect(contextGraphFinalizationTopic(id)).toBe(contextGraphFinalizationTopic(id));
+    expect(contextGraphFinalizationTopic(id)).toBe('dkg/context-graph/test-42/finalization');
   });
 
   it('contextGraphUpdateTopic maps to update topic', () => {
-    expect(contextGraphUpdateTopic(id)).toBe(contextGraphUpdateTopic(id));
+    expect(contextGraphUpdateTopic(id)).toBe('dkg/context-graph/test-42/update');
   });
 
   it('contextGraphAppTopic maps to app topic', () => {
-    expect(contextGraphAppTopic(id)).toBe(contextGraphAppTopic(id));
+    expect(contextGraphAppTopic(id)).toBe('dkg/context-graph/test-42/app');
   });
 
   it('contextGraphDataGraphUri maps to data URI', () => {
@@ -364,11 +364,11 @@ describe('deprecated V9 aliases still work', () => {
   });
 
   it('contextGraphSessionsTopic maps to sessions topic', () => {
-    expect(contextGraphSessionsTopic(id)).toBe(contextGraphSessionsTopic(id));
+    expect(contextGraphSessionsTopic(id)).toBe('dkg/context-graph/test-42/sessions');
   });
 
   it('contextGraphSessionTopic maps to session topic', () => {
-    expect(contextGraphSessionTopic(id, 'sess')).toBe(contextGraphSessionTopic(id, 'sess'));
+    expect(contextGraphSessionTopic(id, 'sess')).toBe('dkg/context-graph/test-42/sessions/sess');
   });
 
   it('all deprecated URIs use did:dkg:context-graph: prefix', () => {

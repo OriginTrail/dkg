@@ -487,6 +487,9 @@ function createManifestSettlementCheckpointer(options: {
     // The prefix helper includes every adjacent zero-public descriptor. Wait
     // until all of those descriptors have settled before binding this offset.
     if (!prefix || prefix.descriptorCount !== descriptorIndex) return undefined;
+    // Only a completed phase checkpoints the manifest's end, as terminal: no
+    // graph starts there for a non-terminal checkpoint to resume from.
+    if (safeOffset === manifest.manifestRowCount) return undefined;
     if (
       safeOffset === persistedOffset
       && descriptorIndex === persistedDescriptorCount
@@ -1421,6 +1424,8 @@ async function runDurableSyncWithBudget(
           ctx,
           `Yielding durable recovery for "${pid}" at an authenticated manifest boundary after the settlement slice expired`,
         );
+        // As after a whole page: the next round proves its DATA boundary with META fetched again from row zero.
+        if (updateMetaCheckpoint && metaResult.completed) deleteCheckpoint(metaResult.checkpointKey);
         markDurableTerminalBoundary(accumulator, false);
         endPhase();
         break;
