@@ -19,6 +19,7 @@ export default defineConfig({
     coverage: coverageForPackage("agent"),
     include: [
       "test/write-preflight-attribution.test.ts",
+      "test/assertion-author-sources.test.ts",
       "test/rfc64-manual-catalog-authority-scope-v1.test.ts",
       "test/sync-exact-export-admission.test.ts",
       "test/prepared-content-cache.test.ts",

@@ -46,6 +46,7 @@ import {
 import { enforceSignedRequestPostBody } from '../auth.js';
 import { knownNotWritableAnswer, resolveAwaitingWriteReadiness, type ContextGraphSubscriptionReader, type KnownNotWritable, type WriteReadinessOutcome } from './context-graph-write-readiness.js';
 import type { CorsAllowlist } from './state.js';
+import { admissionStep, noteAdmissionResponse } from './async-admission-trace.js';
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
   if (err instanceof PayloadTooLargeError) return true;
@@ -660,6 +661,7 @@ export function sendSerializedJsonResponse(
   extraHeaders?: Record<string, string>,
 ): void {
   const origin = corsOrigin !== undefined ? corsOrigin : (((res as any).__corsOrigin as string | null) ?? null);
+  noteAdmissionResponse(res, status, body);
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),
@@ -859,8 +861,8 @@ function rejectUnknownContextGraph(
  */
 export function resolveRequiredWriteContextGraphId(...args: Parameters<typeof resolveWriteContextGraphIdOnce>): Promise<string | null> {
   const [agent, , res] = args;
-  return resolveAwaitingWriteReadiness(agent, () => resolveWriteContextGraphIdOnce(...args),
-    (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome), res);
+  return admissionStep(res, 'write_preflight', () => resolveAwaitingWriteReadiness(agent, () => resolveWriteContextGraphIdOnce(...args),
+    (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome), res));
 }
 
 /** One pass of {@link resolveRequiredWriteContextGraphId}: a known graph that is not writable here is returned, not answered. */
