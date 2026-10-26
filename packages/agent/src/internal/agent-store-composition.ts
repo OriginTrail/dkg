@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { asStoreRecoveryGenerationReader, type TripleStore } from '@origintrail-official/dkg-storage';
 import { createPublishedNamedKaVmLifecycleWriter } from '../named-ka-vm-lifecycle.js';
 import { createMutationObservedStore } from './context-graph-cache-invalidating-store.js';
 import { createObservedStoreMutation } from './observed-store-mutation.js';
@@ -13,7 +13,7 @@ export function createAgentStoreComposition(
   invalidate: () => void,
   observer: StoreMutationObserver,
 ) {
-  const heldContent = new StoreContentFence();
+  const heldContent = new StoreContentFence(asStoreRecoveryGenerationReader(raw));
   const executeMutation = createObservedStoreMutation(invalidate, {
     begin(mutation) {
       const settleProjection = observer.begin(mutation);

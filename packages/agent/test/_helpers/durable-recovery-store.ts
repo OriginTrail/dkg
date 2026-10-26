@@ -159,13 +159,13 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 export function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
+  options: { recoveryGeneration?: () => number | undefined; holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
   const chain = options.chain ?? (() => Object.values(peers)[0]!.current());
   const rawStore = new OxigraphStore();
   stores.push(rawStore);
-  const contentFence = new StoreContentFence();
+  const contentFence = new StoreContentFence(options.recoveryGeneration);
   const store = createMutationObservedStore(rawStore, createObservedStoreMutation(() => {}, contentFence));
   const writes: string[] = [];
   const info: string[] = [];

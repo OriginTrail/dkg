@@ -1,3 +1,4 @@
+import { registerStoreRecoveryGeneration } from '../store-recovery-generation.js';
 import { runTrackedStoreWrite } from '../tracked-store-write.js';
 import { assertSubjectAndInsertPayload } from '../atomic-subject-insert.js';
 import { Worker } from 'node:worker_threads';
@@ -286,13 +287,12 @@ export class OxigraphWorkerStore implements TripleStore {
    * tier and the MAX_CONSECUTIVE_RESPAWNS give-up bound.
    */
   private consecutiveRespawnFailures = 0;
+  private recoveryGeneration = 0;
 
   constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
     this.operationTimeoutMs = normalizeNonNegativeInt(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
 
-    // Resolve the worker impl with a small search path so this keeps
-    // working in all three deployment shapes we actually run in:
-    //
+    // Resolve the worker impl across production, source-test and unbuilt trees:
     //   1. Production / npm install / built monorepo — this module is
     //      loaded from `dist/adapters/oxigraph-worker.js`, so the
     //      sibling `./oxigraph-worker-impl.js` resolves correctly.
@@ -302,9 +302,7 @@ export class OxigraphWorkerStore implements TripleStore {
     //      twin in `dist/adapters/` does as long as the caller ran
     //      `pnpm --filter ...dkg-storage build` first. Redirect to
     //      that path so the adapter is runnable in dev loops.
-    //   3. Neither file exists — genuinely unbuilt tree. Throw a loud,
-    //      actionable error explaining the fix (`pnpm build`), matching
-    //      the expectation in `test/storage.test.ts`.
+    //   3. Neither exists: report the required build.
     const siblingJsUrl = new URL('./oxigraph-worker-impl.js', import.meta.url);
     const siblingJsPath = fileURLToPath(siblingJsUrl);
     let workerPath: string | null = existsSync(siblingJsPath) ? siblingJsPath : null;
@@ -328,6 +326,8 @@ export class OxigraphWorkerStore implements TripleStore {
     this.workerPath = workerPath;
     this.persistPath = persistPath;
     this.spawnWorker();
+    registerStoreRecoveryGeneration(this, () => this.lifecycle === 'live' && !this.workerExited
+      && !this.replacementRevisionLifecycle ? this.recoveryGeneration : undefined);
   }
 
   /**
@@ -458,6 +458,7 @@ export class OxigraphWorkerStore implements TripleStore {
       // Distinguish the two unexpected exits up front so the log and the
       // lifecycle transition below agree on what just happened.
       const inMemoryLost = !intentional && this.persistPath === undefined;
+      if (!intentional && !inMemoryLost) this.recoveryGeneration++;
       if (!intentional && !inMemoryLost && !this.replacementRevisionLifecycle) {
         this.replacementRevisionLifecycle = this.writeGen.beginWrite({ kind: 'all' });
       }
