@@ -594,6 +594,7 @@ export class DKGAgentBase {
       verifyBinding: (id, onChainId, ctx, signal) => agent.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
       persistSubscription: (id, subscription, reason, isCurrent) => agent.persistContextGraphSyncStateStrict(id, subscription, reason, isCurrent),
       bindSubscription: (id, subscription, onChainId) => agent.bindSubscriptionOnChainId(id, subscription, onChainId),
+      logTiming: (ctx, message) => agent.log.debug(ctx, message),
       recordDrops: (drops, seam) => agent.oversizeTombstoneLog.record(drops, seam),
       reconcile,
     });
