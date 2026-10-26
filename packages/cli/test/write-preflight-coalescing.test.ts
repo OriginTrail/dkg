@@ -23,6 +23,7 @@ import {
   WRITE_PREFLIGHT_COALESCING_ENV,
   WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS,
   configureWritePreflightCoalescing,
+  canProbeWritePreflight,
   getWritePreflightCoalescingConfig,
   getWritePreflightCoalescingCounters,
   probeWritePreflight,
@@ -810,5 +811,13 @@ describe('the counters', () => {
       await expired;
       expect(counts()).toMatchObject({ cacheHits: 0, flights: 3 });
     });
+  });
+});
+
+describe('whether an agent can be probed', () => {
+  it('needs the probe, and only the probe', () => {
+    expect(canProbeWritePreflight({})).toBe(false);
+    expect(canProbeWritePreflight({ writePreflightIdentity: () => undefined })).toBe(false);
+    expect(canProbeWritePreflight({ probeContextGraphWritePreflight: async () => ACCEPT })).toBe(true);
   });
 });

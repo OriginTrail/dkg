@@ -29,10 +29,7 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import {
-  type DKGAgent,
-  type ContextGraphWritePreflightProbe,
-} from '@origintrail-official/dkg-agent';
+import { type DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   isStoreSchedulerBusyError,
@@ -875,10 +872,7 @@ async function resolveWriteContextGraphIdOnce(
     }): Promise<ExistingContextGraphRow[]>;
     contextGraphHasLocalContent?: (contextGraphId: string) => Promise<boolean>;
     contextGraphExists?: (contextGraphId: string) => Promise<boolean>;
-    probeContextGraphWritePreflight?: (
-      contextGraphId: string,
-      opts?: { callerAgentAddress?: string | null },
-    ) => Promise<ContextGraphWritePreflightProbe>;
+    probeContextGraphWritePreflight?: CoalescingProbeAgent['probeContextGraphWritePreflight'];
     /** Lets concurrent calls share one probe (`write-preflight-coalescing.ts`); absent, every call probes. */
     writePreflightIdentity?: CoalescingProbeAgent['writePreflightIdentity'];
     /**

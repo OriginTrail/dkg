@@ -174,6 +174,11 @@ export interface CoalescingProbeAgent {
   ) => { readonly key: string; readonly stamp: string } | undefined;
 }
 
+/** Whether `agent` offers the probe, so that it can be coalesced (a narrow provider may not). */
+export function canProbeWritePreflight(agent: Partial<CoalescingProbeAgent>): agent is CoalescingProbeAgent {
+  return typeof agent.probeContextGraphWritePreflight === 'function';
+}
+
 interface Flight {
   readonly id: number;
   readonly stamp: string;

@@ -3,7 +3,7 @@ import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import { classifyWritePreflightFailure } from '@origintrail-official/dkg-agent/write-preflight-attribution';
 import { sanitizeWritePreflightFailures, type WritePreflightDiagnosticFailure } from './write-preflight-attribution.js';
-import { probeWritePreflight, type CoalescingProbeAgent } from './write-preflight-coalescing.js';
+import { canProbeWritePreflight, probeWritePreflight, type CoalescingProbeAgent } from './write-preflight-coalescing.js';
 
 function hasActiveSyncedSubscription(probe: ContextGraphWritePreflightProbe): boolean {
   return (
@@ -212,7 +212,7 @@ export async function evaluateExactWritePreflight(
     isBareCandidateId,
     allowLocalExactFallback,
   } = opts;
-  if (!agent.probeContextGraphWritePreflight) {
+  if (!canProbeWritePreflight(agent)) {
     // Compatibility for narrow providers that do not expose the exact point
     // capability. Production agents do expose it; their canonical path below
     // never enumerates the catalog.
@@ -225,7 +225,7 @@ export async function evaluateExactWritePreflight(
       callerAgentAddress,
       allowLocalExactFallback,
     );
-    const exact = await probeWritePreflight(agent as CoalescingProbeAgent, candidateId, callerAgentAddress, {
+    const exact = await probeWritePreflight(agent, candidateId, callerAgentAddress, {
       accepts: fastAccepts,
       fresh: opts.freshProbe,
     });
