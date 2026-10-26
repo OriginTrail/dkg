@@ -5,6 +5,7 @@ import type { ClaimLockQueue } from './async-lift-claim-lock.js';
 import { claimTrace, withObservedClaimLock, type ClaimLockKind, type ClaimLockTrace } from './async-lift-claim-trace.js';
 import type { PublishResult } from './publisher.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import type {
   JournalKind,
   LiftJob,
@@ -294,6 +295,7 @@ export class AsyncLiftClaimCoordinator {
           claimToken,
           lastHeartbeatAt: now,
         });
+        asyncAdmissionUsage.recordLiftClaim(Math.max(current.timestamps.acceptedAt, current.timestamps.lastRetriedAt ?? 0, current.timestamps.lastRecoveredAt ?? 0), now);
         return committed;
       });
       if (!claimedJob) return idle('stale-candidate');
@@ -331,6 +333,7 @@ export class AsyncLiftClaimCoordinator {
           return release;
         } catch (error) {
           if (!(error instanceof StaleLiftJobClaimError)) throw error;
+          asyncAdmissionUsage.recordLiftStaleClaim();
           const current = await this.getStatus(claim.jobId);
           if (current && !this.claimFenceMatches(current, claim)) {
             release = { kind: 'replaced', job: current };
@@ -413,6 +416,12 @@ export class AsyncLiftClaimCoordinator {
     const next = this.renewActiveOwnership(candidate);
     this.dependencies.assertJobMatchesStatus(next);
     const committed = await this.dependencies.writeJob(section, next, kind);
+    // A finish is the entry into a terminal state; repeating an update of a finalized or failed job is not one.
+    // It is counted as soon as the write commits: the wallet cleanup below can still reject, and the retry
+    // that follows finds the status unchanged and counts nothing.
+    if (current.status !== committed.status) {
+      asyncAdmissionUsage.recordLiftFinish(committed.status, committed.timestamps.claimedAt, committed.timestamps.finalizedAt ?? committed.timestamps.failedAt ?? this.config.now());
+    }
     await this.persistOwnershipState(committed);
     return committed;
   }
@@ -713,6 +722,7 @@ export class AsyncLiftClaimCoordinator {
         this.assertLifecycleTransition(before, reset, 'accepted');
         // Reset must be claim-visible before the one-shot wallet-release notification fires.
         const committed = await this.dependencies.writeJob(section, reset, 'recover-reset');
+        asyncAdmissionUsage.recordLiftReclaim();
         await this.releaseJobOwnership(before);
         return committed;
       }),
@@ -936,11 +946,13 @@ export class AsyncLiftClaimCoordinator {
 
   private async writeWalletLock(lock: WalletLockRecord): Promise<void> {
     await this.walletLocks.write(lock);
+    if (lock.status === 'active') asyncAdmissionUsage.liftWalletBusy(lock.walletId, this.config.now());
     claimTrace.emit('wallet_lock_written', { jobId: lock.jobId, expiresAt: lock.expiresAt, lockStatus: lock.status }, lock.walletId);
   }
 
   private async deleteWalletLock(walletId: string, ownership?: WalletLockSnapshot): Promise<void> {
     await this.walletLocks.delete(walletId);
+    asyncAdmissionUsage.liftWalletFree(walletId, this.config.now());
     claimTrace.emit('wallet_lock_deleted', {}, walletId);
     if (ownership) completionTrace.walletOwnershipReleased(ownership.jobId, walletId, ownership.claimToken);
     this.dependencies.notifyWalletRelease(walletId);
@@ -951,6 +963,7 @@ export class AsyncLiftClaimCoordinator {
     const lock = ownership?.lock ?? null;
     const job = ownership?.job ?? null;
     const usableActiveLock = job !== null && lock !== null && this.isUsableActiveLock(lock, job);
+    asyncAdmissionUsage.liftWalletObserved(walletId, usableActiveLock, this.config.now());
     trace.emit('wallet_checked', {
       usableActiveLock, matching: job !== null && lock !== null && this.lockMatchesJob(lock, job),
       ownershipMode: job === null ? 'absent' : classifyLiftJobOwnershipMode(job),

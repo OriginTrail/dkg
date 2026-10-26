@@ -80,7 +80,7 @@ export async function probeContextGraphWritePreflight(
           BIND("gate" AS ?kind)
         }
       }
-    `);
+    `, { source: 'agent.writePreflight.declaration' });
 
     // Track B (write-preflight resilience): these four reads were previously
     // combined with `Promise.all`, so a single failing store read (slow-store
