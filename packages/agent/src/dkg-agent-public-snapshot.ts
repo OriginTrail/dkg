@@ -7,6 +7,7 @@ import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
 import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
 import { createPublicSnapshotHeldAssetCheck } from './public-snapshot-held-assets.js';
+import { isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { createPublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
@@ -112,120 +113,118 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     ]);
     const { signal } = lifecycle;
     try {
-      const operation = rpcScope.run(async () => {
-        let assertCurrent = () => {
-          signal.throwIfAborted();
-          if (!this.started || this.workLifetime.closed) throw new Error("Node is stopping");
-          if (lifetime !== this.workLifetime.generation) throw new Error("Snapshot job ownership changed");
-        };
-        const sourcePlan = await createPublicSnapshotSourcePlan({
-          config: this.config, chain: this.chain, peerId: this.peerId, router: this.router,
-          node: this.node, discovery: this.discovery, peerResolver: this.peerResolver,
-          networkAdmissionCoordinator: this.networkAdmissionCoordinator,
-          ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
-        }, normalized, signal, rpcScope);
-        const peers = sourcePlan.inventoryPeers;
-        assertCurrent();
-        const expected = {
-          chainId: this.chain.chainId,
-          deploymentId: this.chain.deploymentId!,
-          contextGraphId,
-          onChainId,
-        };
-        const read = createPublicSnapshotReader({ mode, chain:this.chain, request: sourcePlan.request,
-          peers, signal, expected, assertCurrent: () => assertCurrent() });
-        const initial = await read();
-        const snapshot = initial.snapshot;
-        assertCurrent();
-        // Discovery and inventory reads have made no local admission or writes.
-        // Restored membership may finish meanwhile; validate the live row before
-        // capturing ownership for this job, rather than an obsolete startup row.
-        const subscription = this.subscribedContextGraphs.get(contextGraphId);
-        if (subscription && (!subscription.subscribed && !subscription.coreHosted))
-          throw new Error("Graph subscription is inactive");
-        if (subscription?.onChainId && subscription.onChainId !== onChainId)
-          throw new Error("Graph binding differs from requested snapshot");
-        if (subscription?.onChainHash && subscription.onChainHash.toLowerCase() !== snapshot.nameHash.toLowerCase())
-          throw new Error("Graph name binding differs from requested snapshot");
-        return runGraphScopedPhysicalOperation({
-          contextGraphId, signal,
-          isClosed: () => !this.started || this.workLifetime.closed,
-          captureSubscription: () => this.subscribedContextGraphs.get(contextGraphId),
-          captureBindingGeneration: () => this.contextGraphBindingState.capture(contextGraphId),
-          isBindingGenerationCurrent: generation => this.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation),
-          assertLifecycleCurrent: () => { if (lifetime !== this.workLifetime.generation) throw new Error("Snapshot job ownership changed"); },
-          closedError: () => new Error("Node is stopping"),
-          bindingChangedError: () => new Error("Snapshot job ownership changed"),
-          asAbortError: reason => new Error("Snapshot job ownership changed", { cause: reason }),
-          track: run => { this.workLifetime.track(run); },
-          operation: async control => {
-            assertCurrent = control.assertCurrent;
-            const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
-            const evidence = new PublicSnapshotEvidence(initial, isCurrent);
-            // A validated public snapshot admits this job without scheduling the
-            // daemon's separate legacy subscribe/catch-up pipeline.
-            control.admitSubscription(() => {
-              admitAuthenticatedContextGraphSubscription(this, contextGraphId, { onChainId, onChainHash: snapshot.nameHash });
+      return await rpcScope.run(() => runGraphScopedPhysicalOperation({
+        contextGraphId, signal,
+        isClosed: () => !this.started || this.workLifetime.closed,
+        captureSubscription: () => this.subscribedContextGraphs.get(contextGraphId),
+        captureBindingGeneration: () => this.contextGraphBindingState.capture(contextGraphId),
+        isBindingGenerationCurrent: generation => this.contextGraphBindingState.isGenerationCurrent(contextGraphId, generation),
+        // Before admission, inventory reads depend on selection and binding,
+        // not the startup metadata readiness flags. A deleted/recreated row or
+        // changed binding generation remains a different owner.
+        isEquivalentSubscription: (captured, current) =>
+          isContextGraphSubscriptionStoredAgain(captured, current)
+          && captured?.subscribed === current?.subscribed
+          && (captured?.coreHosted === true) === (current?.coreHosted === true)
+          && captured?.syncMode === current?.syncMode
+          && captured?.onChainId === current?.onChainId
+          && captured?.onChainHash === current?.onChainHash,
+        assertLifecycleCurrent: () => { if (lifetime !== this.workLifetime.generation) throw new Error("Snapshot job ownership changed"); },
+        closedError: () => new Error("Node is stopping"),
+        bindingChangedError: () => new Error("Snapshot job ownership changed"),
+        asAbortError: reason => new Error("Snapshot job ownership changed", { cause: reason }),
+        track: run => { this.workLifetime.track(run); },
+        operation: async control => {
+          let readingInitialInventory = true;
+          const assertCurrent = () => {
+            if (readingInitialInventory) control.adoptEquivalentSubscription();
+            control.assertCurrent();
+          };
+          const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
+          const sourcePlan = await createPublicSnapshotSourcePlan({
+            config: this.config, chain: this.chain, peerId: this.peerId, router: this.router,
+            node: this.node, discovery: this.discovery, peerResolver: this.peerResolver,
+            networkAdmissionCoordinator: this.networkAdmissionCoordinator,
+            ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
+          }, normalized, signal, rpcScope);
+          const peers = sourcePlan.inventoryPeers;
+          assertCurrent();
+          const expected = {
+            chainId: this.chain.chainId,
+            deploymentId: this.chain.deploymentId!,
+            contextGraphId,
+            onChainId,
+          };
+          const read = createPublicSnapshotReader({ mode, chain:this.chain, request: sourcePlan.request,
+            peers, signal, expected, assertCurrent });
+          const initial = await read();
+          const snapshot = initial.snapshot;
+          assertCurrent();
+          if (subscription?.onChainHash && subscription.onChainHash.toLowerCase() !== snapshot.nameHash.toLowerCase())
+            throw new Error("Graph name binding differs from requested snapshot");
+          // From admission onward every captured write premise stays strict.
+          readingInitialInventory = false;
+          const evidence = new PublicSnapshotEvidence(initial, isCurrent);
+          // A validated public snapshot admits this job without scheduling the
+          // daemon's separate legacy subscribe/catch-up pipeline.
+          control.admitSubscription(() => {
+            admitAuthenticatedContextGraphSubscription(this, contextGraphId, { onChainId, onChainHash: snapshot.nameHash });
+          });
+          assertCurrent();
+          if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
+          assertCurrent();
+          const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
+          const recovery = { contextGraphId, peerBatches: sourcePlan.contentPeerBatches, uals, evidence, signal, assertCurrent };
+          let recovered: PublicSnapshotRecoveryResult;
+          if (transport === 'bulk') {
+            const { verification, reconcile } = DKGAgentBase.createDurableRecoveryCapabilities(this);
+            recovered = await recoverPublicSnapshotBulk({
+              store: this.store, router: this.router, verification, reconcile,
+              ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
+            }, { ...recovery,
+              deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
+              shouldQuarantineCommitted: () => {
+                const current = this.subscribedContextGraphs.get(contextGraphId);
+                return !current || (!current.subscribed && !current.coreHosted) || current.onChainId !== onChainId;
+              },
+              onCommitted: () => this.invalidateListContextGraphsCache(),
+              log: message => this.log.info(createOperationContext('sync'), message),
             });
-            assertCurrent();
-            if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
-            assertCurrent();
-            const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
-            const recovery = { contextGraphId, peerBatches: sourcePlan.contentPeerBatches, uals, evidence, signal, assertCurrent };
-            let recovered: PublicSnapshotRecoveryResult;
-            if (transport === 'bulk') {
-              const { verification, reconcile } = DKGAgentBase.createDurableRecoveryCapabilities(this);
-              recovered = await recoverPublicSnapshotBulk({
-                store: this.store, router: this.router, verification, reconcile,
-                ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
-              }, { ...recovery,
-                deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
-                shouldQuarantineCommitted: () => {
-                  const current = this.subscribedContextGraphs.get(contextGraphId);
-                  return !current || (!current.subscribed && !current.coreHosted) || current.onChainId !== onChainId;
-                },
-                onCommitted: () => this.invalidateListContextGraphsCache(),
-                log: message => this.log.info(createOperationContext('sync'), message),
-              });
-            } else recovered = await recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), {
-              ...recovery, deadline: startedAt + 3_600_000,
-              canAdmit: () => this.vmRecoverySyncAdmissionAvailable(contextGraphId),
-              holds: createPublicSnapshotHeldAssetCheck(this.store, evidence),
-            });
-            const { committed, bulkChunks, alreadyPresent } = recovered;
+          } else recovered = await recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), {
+            ...recovery, deadline: startedAt + 3_600_000,
+            canAdmit: () => this.vmRecoverySyncAdmissionAvailable(contextGraphId),
+            holds: createPublicSnapshotHeldAssetCheck(this.store, evidence),
+          });
+          const { committed, bulkChunks, alreadyPresent } = recovered;
 
-            // A new inventory/root comparison is required before claiming current coverage.
-            const fresh = await read(true);
-            assertCurrent();
-            const current =
-              fresh.snapshot.inventoryDigest === snapshot.inventoryDigest &&
-              fresh.snapshot.assetStorage === snapshot.assetStorage &&
-              fresh.snapshot.contextGraphStorage === snapshot.contextGraphStorage &&
-              BigInt(fresh.snapshot.blockNumber) >= BigInt(snapshot.blockNumber);
-            return {
-              mode, transport, bulkChunks,
-              ...sourcePlan.report(),
-              sourceCore: initial.sourceCore,
-              coverageSourceCore: fresh.sourceCore,
-              snapshotDigest: snapshot.snapshotDigest,
-              blockNumber: snapshot.blockNumber,
-              blockHash: snapshot.blockHash,
-              inventoryDigest: snapshot.inventoryDigest,
-              assets: uals.length,
-              committed: committed.size,
-              ...(alreadyPresent === undefined ? {} : { alreadyPresent }),
-              completeAsOfSnapshot: true,
-              current,
-              startedAt,
-              finishedAt: Date.now(),
-              elapsedMs: Date.now() - startedAt,
-            };
-          },
-        });
-      });
-      // Source discovery also owns physical work and must drain on shutdown.
-      this.workLifetime.track(operation);
-      return await operation;
+          // A new inventory/root comparison is required before claiming current coverage.
+          const fresh = await read(true);
+          assertCurrent();
+          const current =
+            fresh.snapshot.inventoryDigest === snapshot.inventoryDigest &&
+            fresh.snapshot.assetStorage === snapshot.assetStorage &&
+            fresh.snapshot.contextGraphStorage === snapshot.contextGraphStorage &&
+            BigInt(fresh.snapshot.blockNumber) >= BigInt(snapshot.blockNumber);
+          return {
+            mode, transport, bulkChunks,
+            ...sourcePlan.report(),
+            sourceCore: initial.sourceCore,
+            coverageSourceCore: fresh.sourceCore,
+            snapshotDigest: snapshot.snapshotDigest,
+            blockNumber: snapshot.blockNumber,
+            blockHash: snapshot.blockHash,
+            inventoryDigest: snapshot.inventoryDigest,
+            assets: uals.length,
+            committed: committed.size,
+            ...(alreadyPresent === undefined ? {} : { alreadyPresent }),
+            completeAsOfSnapshot: true,
+            current,
+            startedAt,
+            finishedAt: Date.now(),
+            elapsedMs: Date.now() - startedAt,
+          };
+        },
+      }));
     } finally {
       lifecycle.release();
       jobs.delete(this);
