@@ -126,15 +126,26 @@ export async function loadSeedFile(sparqlUrl, path, { chunkBytes = 4 << 20 } = {
   return { chunks, quads, sha256: hash.digest('hex') };
 }
 
-/** Generates and inserts the history through the (unscheduled) seed store, two batches in flight. */
+/**
+ * Generates and inserts the history through the (unscheduled) seed store, two batches in flight. A failed insert is
+ * recorded when it settles, not when the loop next looks at the in-flight set, so it cannot be lost to a sibling that
+ * settled first: no further batch starts after it, the insert still in flight settles, and the first failure is thrown.
+ */
 export async function loadGenerated(seedStore, deps, { jobs, baseTime }) {
   const t0 = performance.now();
-  const pending = new Set();
+  const inFlight = new Set();
+  const failures = [];
   for (const batch of historyBatches(deps, jobs, { baseTime })) {
-    const p = seedStore.insert(batch, { source: 'bench.seedHistory' }).finally(() => pending.delete(p));
-    pending.add(p);
-    if (pending.size >= 2) await Promise.race(pending);
+    if (failures.length) break;
+    const tracked = (async () => seedStore.insert(batch, { source: 'bench.seedHistory' }))()
+      .catch((err) => {
+        failures.push(err);
+      })
+      .finally(() => inFlight.delete(tracked));
+    inFlight.add(tracked);
+    if (inFlight.size >= 2) await Promise.race(inFlight);
   }
-  await Promise.all(pending);
+  await Promise.all(inFlight);
+  if (failures.length) throw failures[0];
   return { jobs, ms: Math.round(performance.now() - t0) };
 }

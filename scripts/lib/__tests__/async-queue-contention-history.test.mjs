@@ -189,6 +189,38 @@ test('loadGenerated inserts every batch with at most two in flight', async () =>
   assert.equal(peak, 2);
 });
 
+test('loadGenerated rejects when an insert fails, even when its sibling succeeds first', async () => {
+  // both inserts settle before loadGenerated resumes, the success first: the failure must not be dropped
+  let calls = 0;
+  const store = {
+    insert() {
+      calls++;
+      return calls === 1 ? Promise.resolve() : Promise.reject(new Error('seed batch rejected'));
+    },
+  };
+  await assert.rejects(loadGenerated(store, deps, { jobs: 5000, baseTime: BASE }), /seed batch rejected/);
+  assert.equal(calls, 2);
+});
+
+test('loadGenerated stops starting batches after a failure and settles the insert still in flight first', async () => {
+  let calls = 0;
+  let siblingSettled = false;
+  const store = {
+    async insert() {
+      const call = ++calls;
+      if (call === 1) {
+        await new Promise((r) => setTimeout(r, 5));
+        throw new Error('seed batch rejected');
+      }
+      await new Promise((r) => setTimeout(r, 30));
+      siblingSettled = true;
+    },
+  };
+  await assert.rejects(loadGenerated(store, deps, { jobs: 6000, baseTime: BASE }), /seed batch rejected/);
+  assert.equal(siblingSettled, true, 'the sibling insert is not left running behind a rejected load');
+  assert.equal(calls, 2, 'the third batch is never sent after the first one failed');
+});
+
 test('resolveEndpoint refuses anything that is not a loopback http(s) URL unless told otherwise', () => {
   const ok = 'http://127.0.0.1:19554/bigdata/namespace/kb/sparql';
   assert.equal(resolveEndpoint({ url: ok }), ok);

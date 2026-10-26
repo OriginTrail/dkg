@@ -395,6 +395,23 @@ test('noiseMargin is the worst A/A deviation with a 10 % floor; equivalent needs
     0.22,
   );
   assert.equal(noiseMargin(aa([[1000, 500]])), 1, 'a halving counts as a 100 % deviation');
+  // the margin is rounded up, never to nearest: a margin under the worst deviation fails the very pairs that set it
+  for (const [a, b] of [
+    [1000, 1123.44],
+    [1123.44, 1000],
+  ]) {
+    const same = aa([
+      [a, b],
+      [a, b],
+      [a, b],
+    ]);
+    const margin = noiseMargin(same);
+    assert.ok(margin >= 0.12344, `${a} vs ${b}: margin ${margin} is under the 12.344 % deviation`);
+    assert.ok(margin <= 0.1235, `${a} vs ${b}: margin ${margin} is rounded up to 4 decimals, no further`);
+    const replay = pairsOf([a, a, a], [b, b, b]);
+    assert.equal(equivalent(replay, margin).status, 'pass', `${a} vs ${b}: the A/A pairs pass their own margin`);
+  }
+  assert.equal(noiseMargin(aa([[1000, 1100]])), 0.1, 'an exact 10 % deviation stays on the floor');
   const ab = pairsOf([1000, 1000, 1000], [1050, 970, 1200]);
   assert.equal(equivalent(ab, 0.22).status, 'pass');
   assert.equal(equivalent(ab, 0.1).status, 'fail');
@@ -474,7 +491,7 @@ test('shareBacklog counts an indeterminate admission that reconciliation found p
   assert.deepEqual([done.max, done.last, done.jobs, done.openAtEnd], [2, 0, 2, 0]);
   // without reconciliation evidence only the acknowledged job is known
   const unreconciled = shareBacklog({
-    requests: requests.map(({ gtJobId, ...r }) => r),
+    requests: requests.map(({ gtJobId: _gtJobId, ...r }) => r),
     completions: [],
     from: 0,
     to: 4000,

@@ -403,11 +403,25 @@ export function flat(pairs, { aRecords = pairs.map((p) => p.a), bRecords = pairs
 
 /**
  * A/A: pairs of two same-build runs (a = first, b = second); the margin is the worst deviation, never below the 10 %
- * floor.
+ * floor. It is rounded UP to 4 decimals, never to nearest: equivalent() compares the unrounded ratios, so a margin a
+ * hair under the worst deviation would fail the very A/A pairs that set it.
  */
 export function noiseMargin(aaPairs) {
-  const rho = aaPairs.filter((p) => p.valid).map((p) => p.b.p95Ms / p.a.p95Ms);
-  return r4(Math.max(NOISE_FLOOR, ...rho.map((x) => Math.max(x, 1 / x) - 1)));
+  const valid = aaPairs.filter((p) => p.valid);
+  const worst = Math.max(
+    NOISE_FLOOR,
+    ...valid.map((p) => Math.abs(p.b.p95Ms - p.a.p95Ms) / Math.min(p.a.p95Ms, p.b.p95Ms)),
+  );
+  if (!Number.isFinite(worst)) return worst;
+  // also covers equivalent()'s own comparison, whose floats can sit an ulp off the deviation computed above
+  const covers = (m) =>
+    valid.every((p) => {
+      const ratio = p.b.p95Ms / p.a.p95Ms;
+      return ratio <= 1 + m && ratio >= 1 / (1 + m);
+    });
+  let n = Math.round(worst * 1e4);
+  while (n / 1e4 < worst || !covers(n / 1e4)) n++;
+  return n / 1e4;
 }
 /**
  * AC2 path-off equivalence: every b/a inside [1/(1+m), 1+m]. The margin is required so it is declared before the A/B.
