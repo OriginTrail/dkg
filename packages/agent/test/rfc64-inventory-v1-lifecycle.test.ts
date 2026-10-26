@@ -689,13 +689,13 @@ describe.runIf(process.platform !== 'win32')('RFC-64 inventory v1 SQLite lifecyc
     assertInitializedInventory(path);
     if (process.platform !== 'win32') expect(statSync(path).mode & 0o777).toBe(0o600);
     reopened.close();
-    // qa-assertion-catch: GH-3478 -- Catch asserts the domain error type/code; an AssertionError fails that check.
+    let error: unknown;
     try {
       reopened.quarantineAndRebuild();
-      expect.unreachable('closed foundation unexpectedly rebuilt');
-    } catch (error) {
-      expectOpenErrorCode(error, 'database-closed');
+    } catch (caught) {
+      error = caught;
     }
+    expectOpenErrorCode(error, 'database-closed');
   });
 
   it('migrates an exact V3 database without losing data and opens an empty repair queue', async () => {

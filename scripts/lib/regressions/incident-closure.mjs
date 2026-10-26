@@ -1,19 +1,16 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { createHash } from 'node:crypto';
+import { inside, sha256 } from './identity.mjs';
 import { namedTestDiscoveryInvocation, discoverNamedTests } from './named-test-discovery.mjs';
 import { analyzeTestSource } from '../disabled-test-scanner.mjs';
-const sha = bytes => createHash('sha256').update(bytes).digest('hex');
 function bytes(root, file) {
   assert.ok(typeof file === 'string' && file && !file.includes('..') && !path.isAbsolute(file) && !file.includes('\\'), 'unsafe incident evidence path');
-  const full = path.join(root, file);
-  assert.ok(fs.realpathSync(full).startsWith(`${fs.realpathSync(root)}${path.sep}`), 'incident evidence escapes checkout');
-  return fs.readFileSync(full);
+  return fs.readFileSync(inside(root, file));
 }
 function bound(root, descriptor) {
   const raw = bytes(root, descriptor.file);
-  assert.equal(sha(raw), descriptor.sha256, `stale incident evidence: ${descriptor.file}`);
+  assert.equal(sha256(raw), descriptor.sha256, `stale incident evidence: ${descriptor.file}`);
   return raw;
 }
 const detectorFiles = records => records.flatMap(row => row.detectors.map(detector => detector.file));

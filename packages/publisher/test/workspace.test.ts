@@ -2801,18 +2801,18 @@ describe('Workspace: conditionalShare (CAS)', () => {
       }],
     };
 
-    // qa-assertion-catch: GH-3478 -- Catch asserts the domain error type/code; an AssertionError fails that check.
+    let err: unknown;
     try {
       await publisher.conditionalShare(CONTEXT_GRAPH, [q(ENTITY, 'http://example.org/status', '"traveling"')], opts);
-      expect.unreachable('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(StaleWriteError);
-      const e = err as InstanceType<typeof StaleWriteError>;
-      expect(e.condition.subject).toBe(ENTITY);
-      expect(e.condition.predicate).toBe('http://example.org/status');
-      expect(e.condition.expectedValue).toBe('"recruiting"');
-      expect(e.actualValue).not.toBeNull();
+    } catch (caught) {
+      err = caught;
     }
+    expect(err).toBeInstanceOf(StaleWriteError);
+    const e = err as InstanceType<typeof StaleWriteError>;
+    expect(e.condition.subject).toBe(ENTITY);
+    expect(e.condition.predicate).toBe('http://example.org/status');
+    expect(e.condition.expectedValue).toBe('"recruiting"');
+    expect(e.actualValue).not.toBeNull();
   });
 
   it('supports multiple conditions (all must pass)', async () => {

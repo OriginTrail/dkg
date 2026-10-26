@@ -106,3 +106,28 @@ test('each verification acquires missing attempts once and reuses history and se
   calls.length = 0; f.verify();
   assert.deepEqual(calls, []);
 });
+
+test('rejected harness attempts retain the attempt ID and the failed invariant', t => {
+  for (const [damage, reason] of [
+    [state => { state.steps['overlap:share-publish'].buildsVerified = false; }, /unverified node builds: overlap:share-publish/],
+    [state => { delete state.steps['functional:six'].scenarios.recovery; }, /missing\/failed scenario: recovery/],
+  ]) {
+    const f = fixture(t); damage(f.state);
+    f.decision.harness.attempts[0].receipt = f.write('suite.json', f.state);
+    assert.throws(f.verify, error => {
+      assert.match(error.message, /latest harness attempt first/); assert.match(error.message, reason); return true;
+    });
+  }
+});
+
+test('unresolved earlier harness evidence retains its original rejection', t => {
+  const f = fixture(t), failed = structuredClone(f.state);
+  failed.steps['overlap:share-publish'].buildsVerified = false;
+  f.decision.harness.attempts.unshift({ id: 'earlier', receipt: f.write('earlier.json', failed) });
+  assert.throws(f.verify, /harness attempt earlier: unverified node builds: overlap:share-publish/);
+});
+test('malformed harness receipt retains a validation diagnostic', t => {
+  const f = fixture(t);
+  f.decision.harness.attempts[0].receipt = f.write('suite.json', null);
+  assert.throws(f.verify, /latest harness attempt first did not qualify: harness receipt must be an object/);
+});

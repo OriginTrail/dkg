@@ -205,18 +205,18 @@ describe('handleEventsQuery', () => {
   it('throws EpcisQueryError with 400 when date range is invalid', async () => {
     const { engine } = createTrackingQueryEngine();
 
-    // qa-assertion-catch: GH-3478 -- Catch asserts the domain error type/code; an AssertionError fails that check.
+    let err: unknown;
     try {
       await handleEventsQuery(
         new URLSearchParams('epc=urn:test&from=2024-12-31T00:00:00Z&to=2024-01-01T00:00:00Z'),
         { contextGraphId: CONTEXT_GRAPH_ID, queryEngine: engine, basePath: BASE_PATH },
       );
-      expect.fail('should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(EpcisQueryError);
-      expect((err as EpcisQueryError).statusCode).toBe(400);
-      expect((err as EpcisQueryError).message).toMatch(/date range/i);
+    } catch (caught) {
+      err = caught;
     }
+    expect(err).toBeInstanceOf(EpcisQueryError);
+    expect((err as EpcisQueryError).statusCode).toBe(400);
+    expect((err as EpcisQueryError).message).toMatch(/date range/i);
   });
 
   it('passes eventType filter through to SPARQL query', async () => {

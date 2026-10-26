@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import test from 'node:test';
+import { execFileSync } from 'node:child_process';
 import { fixture } from './release-evidence-fixture.mjs';
 import { installGithubFixture } from './github-evidence-fixture.mjs';
 
@@ -46,6 +47,9 @@ test('default GitHub acquisition accepts exact artifact bytes and reads each att
   assert.equal(attempts.length, 4);
   assert.equal(new Set(attempts).size, 4);
   assert.ok(calls.some(args => args.includes('--paginate')));
+  const download = calls.filter(args => args[0] === 'run');
+  assert.equal(download.length, 1);
+  assert.deepEqual(download[0].slice(0, -1), ['run', 'download', '123', '--repo', 'OriginTrail/dkg', '--name', 'nightly-profile-summary', '--dir']);
 });
 test('default GitHub acquisition rejects superseded nightly artifacts', t => {
   const f = githubFixture(t); f.resolveFailure(); f.config.latestAttempt = 2;
@@ -55,4 +59,13 @@ test('default GitHub acquisition rejects superseded nightly artifacts', t => {
 test('default GitHub acquisition rejects byte changes even for semantically identical artifacts', t => {
   const f = githubFixture(t); f.resolveFailure(); f.config.nightlyBytes += '\n';
   assert.throws(f.verify, /differs from authenticated Actions artifact/);
+});
+
+test('GitHub fixture refuses an artifact requested from another run or repository', t => {
+  const f = githubFixture(t);
+  for (const [runId, repo] of [['122', 'OriginTrail/dkg'], ['123', 'some/fork']]) {
+    assert.throws(() => execFileSync('gh', ['run', 'download', runId, '--repo', repo,
+      '--name', 'nightly-profile-summary', '--dir', path.dirname(f.options.evidenceFile)],
+    { env: f.gh.env, stdio: 'pipe' }), /unexpected artifact source/);
+  }
 });

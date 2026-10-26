@@ -21,14 +21,7 @@ test('recognizes node assertions but ignores similarly named unrelated APIs', ()
 });
 
 
-test('only a local incident-linked explanation exempts a reviewed catch', () => {
-  const body = 'try { check(1).toBe(2) } catch {}';
-  assert.deepEqual(scan('// qa-assertion-catch: GH-3478 -- Catch asserts the domain type; AssertionError is rejected.\n'+body), []);
-  assert.equal(scan('// qa-assertion-catch: ignore\n'+body).length, 1);
-  assert.equal(scan('// qa-assertion-catch: GH-3478 -- Catch asserts the domain type; AssertionError is rejected.\noperation();\n'+body).length, 1);
-});
-
-test('a reviewed outer catch does not exempt independent catches inside callbacks', () => {
-  assert.equal(scan('// qa-assertion-catch: GH-3478 -- Catch checks the domain type and rejects AssertionError.\n'
-    + 'try { register(() => { try { check(1).toBe(2) } catch {} }) } catch {}').length, 1);
+test('comments cannot exempt swallowed assertions, including independent callback catches', () => {
+  assert.equal(scan('// reviewed exception\ntry { check(1).toBe(2) } catch {}').length, 1);
+  assert.equal(scan('try { register(() => { try { check(1).toBe(2) } catch {} }) } catch {}').length, 1);
 });

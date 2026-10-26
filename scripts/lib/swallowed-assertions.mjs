@@ -30,10 +30,6 @@ export function swallowedAssertions(source, file) {
   function visit(node) {
     if (ts.isTryStatement(node) && node.catchClause
       && !contains(node.catchClause.block, child => ts.isThrowStatement(child))) {
-      const prefix = source.slice(Math.max(0, node.getStart(tree) - 350), node.getStart(tree));
-      // A narrowly reviewed exception must cite an incident and explain how the
-      // caught assertion still fails the enclosing test. It applies to one try.
-      const waived = /\/\/ qa-assertion-catch: GH-\d+ -- [^\n]{20,}\n\s*$/.test(prefix);
       const collect = child => {
         if (ts.isFunctionLike(child)) return;
         if (assertion(child)) {
@@ -43,7 +39,7 @@ export function swallowedAssertions(source, file) {
         }
         ts.forEachChild(child, collect);
       };
-      if (!waived) collect(node.tryBlock);
+      collect(node.tryBlock);
     }
     ts.forEachChild(node, visit);
   }

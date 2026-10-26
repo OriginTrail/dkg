@@ -51,3 +51,18 @@ test('undiscovered and ambiguous detector names cannot close an incident', () =>
   assert.throws(() => validateIncidentClosure(root, records, inventory, { discover: () => [] }), /executable detector/);
   assert.throws(() => validateIncidentClosure(root, records, inventory, { discover: () => [...discover(), ...discover()] }), /executable detector/);
 });
+
+test('incident evidence cannot escape through a path or a symlink', t => {
+  for (const file of ['../outside.ts', '/tmp/outside.ts', 'packages\\agent\\outside.ts']) {
+    const changed = structuredClone(records); changed[0].detectors[0].file = file;
+    assert.throws(() => validateIncidentClosure(root, changed, inventory, options), /unsafe incident evidence path/);
+  }
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'incident-symlink-'));
+  t.after(() => fs.rmSync(scratch, { recursive: true, force: true }));
+  const checkout = path.join(scratch, 'checkout'); fs.mkdirSync(checkout);
+  const outside = path.join(scratch, 'outside.ts'); fs.writeFileSync(outside, 'untrusted');
+  const row = structuredClone(records[0]);
+  const target = path.join(checkout, row.detectors[0].file); fs.mkdirSync(path.dirname(target), { recursive: true });
+  fs.symlinkSync(outside, target);
+  assert.throws(() => validateIncidentClosure(checkout, [row], inventory, options), /symlink escapes repository/);
+});

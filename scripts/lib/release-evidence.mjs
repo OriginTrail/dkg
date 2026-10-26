@@ -65,6 +65,7 @@ function artifact(root, descriptor) {
   return readJson(file);
 }
 function verifyHarness(state, candidate, harness) {
+  assert.ok(state && typeof state === 'object' && !Array.isArray(state), 'harness receipt must be an object');
   assert.equal(state.status, 'complete', 'harness incomplete');
   assert.equal(state.dkgCommit, candidate.commit, 'harness tested a different product');
   assert.equal(state.harnessCommit, harness.commit, 'wrong harness commit');
@@ -127,18 +128,23 @@ export function verifyReleaseEvidence({ evidenceFile, expected, manifest, rootDi
     assert.ok(typeof attempt.id === 'string' && attempt.id && !ids.has(attempt.id), 'missing/duplicate attempt');
     ids.add(attempt.id);
     const state = artifact(root, attempt.receipt);
-    let passed = true;
-    try { verifyHarness(state, decision.candidate, decision.harness); } catch { passed = false; }
-    return { ...attempt, state, passed };
+    let validationError = null;
+    try { verifyHarness(state, decision.candidate, decision.harness); } catch (error) {
+      if (!(error instanceof assert.AssertionError)) throw error;
+      validationError = error;
+    }
+    return { ...attempt, state, passed: validationError === null, validationError };
   });
-  assert.equal(attempts.at(-1).passed, true, 'latest harness attempt did not qualify');
+  const latest = attempts.at(-1);
+  assert.ok(latest.passed, `latest harness attempt ${latest.id} did not qualify: ${latest.validationError?.message}`);
   for (let i = 0; i < attempts.length; i++) {
     const attempt = attempts[i];
     if (attempt.passed) continue;
     const resolution = attempt.resolution;
-    assert.ok(['product', 'test', 'environment', 'unknown'].includes(resolution?.classification), 'failure lacks classification');
-    assert.match(resolution?.issue ?? '', /^https:\/\/github\.com\/OriginTrail\/(dkg|dkg-blackbox-harness)\/issues\/\d+$/, 'failure needs an owning issue');
-    assert.ok(attempts.slice(i + 1).some(row => row.id === resolution.supersededBy && row.passed), 'unresolved required failure');
+    const rejection = `harness attempt ${attempt.id}: ${attempt.validationError.message}`;
+    assert.ok(['product', 'test', 'environment', 'unknown'].includes(resolution?.classification), `${rejection}; failure lacks classification`);
+    assert.match(resolution?.issue ?? '', /^https:\/\/github\.com\/OriginTrail\/(dkg|dkg-blackbox-harness)\/issues\/\d+$/, `${rejection}; failure needs an owning issue`);
+    assert.ok(attempts.slice(i + 1).some(row => row.id === resolution.supersededBy && row.passed), `unresolved required failure ${attempt.id}: ${attempt.validationError.message}`);
   }
   assert.ok(Array.isArray(decision.priorCiFailures), 'prior CI failure inventory is required (may be empty)');
   const historicalFailures = history.filter(run => ['failure', 'cancelled', 'timed_out'].includes(run.conclusion));

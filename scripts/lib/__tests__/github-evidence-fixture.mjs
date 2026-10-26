@@ -9,7 +9,8 @@ export function installGithubFixture(bin, config) {
   const configFile = path.join(bin, 'github-fixture.json');
   const calls = path.join(bin, 'github-calls.jsonl');
   const script = path.join(bin, 'gh-fixture.cjs');
-  fs.writeFileSync(configFile, JSON.stringify(config));
+  const encoded = value => JSON.stringify({ ...value, artifacts: { 'OriginTrail/dkg/123/nightly-profile-summary': value.nightlyBytes } });
+  fs.writeFileSync(configFile, encoded(config));
   fs.writeFileSync(script, `const fs = require('node:fs'), path = require('node:path');
 const config = JSON.parse(fs.readFileSync(${JSON.stringify(configFile)}, 'utf8'));
 const args = process.argv.slice(2);
@@ -28,10 +29,12 @@ if (args[0] === 'api') {
   }
 } else if (args[0] === 'run' && args[1] === 'download') {
   if (args[args.indexOf('--name') + 1] !== 'nightly-profile-summary') throw new Error('wrong artifact');
-  fs.writeFileSync(path.join(args[args.indexOf('--dir') + 1], 'nightly-profile-summary.json'), config.nightlyBytes);
+  const artifactKey = args[args.indexOf('--repo') + 1] + '/' + args[2] + '/' + args[args.indexOf('--name') + 1];
+  if (!Object.hasOwn(config.artifacts, artifactKey)) throw new Error('unexpected artifact source: ' + artifactKey);
+  fs.writeFileSync(path.join(args[args.indexOf('--dir') + 1], 'nightly-profile-summary.json'), config.artifacts[artifactKey]);
 } else throw new Error('unexpected gh call: ' + args.join(' '));
 `);
   fs.writeFileSync(path.join(bin, 'gh'), `#!/bin/sh\nexec ${quote(process.execPath)} ${quote(script)} "$@"\n`, { mode: 0o755 });
-  return { calls, update: value => fs.writeFileSync(configFile, JSON.stringify(value)),
+  return { calls, update: value => fs.writeFileSync(configFile, encoded(value)),
     env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}` } };
 }

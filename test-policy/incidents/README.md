@@ -58,11 +58,7 @@ changes continue to run the complete inexpensive harness unit suite.
 `pnpm lint:tests` rejects direct assertions inside try blocks whose catch does
 not throw. Assertion observations should leave the tolerant catch before being
 checked. Conservative scanning does not claim to prove arbitrary control flow.
-A single reviewed exception can use
-`// qa-assertion-catch: GH-<incident> -- <why the enclosing test still fails>`
-immediately before the try. Four existing typed-error assertions have explicit
-exceptions: the catch rejects AssertionError by checking the domain error type
-or code. Aggregate comparison uses `isDeepStrictEqual` and checks the accumulated
+Aggregate comparison uses `isDeepStrictEqual` and checks the accumulated
 mismatches afterward. HTTP handler assertions now escape into the test body.
 
 The five pure devnet manifest/parser files run in the required build gate via
