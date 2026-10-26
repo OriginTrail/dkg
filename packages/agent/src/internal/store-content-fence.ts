@@ -60,8 +60,10 @@ export class StoreContentFence implements StoreMutationObserver {
     const watch = { touches, valid: true };
     this.watches.add(watch);
     return {
+      // begin() invalidates before dispatch; no need to rescan the full prefix
+      // for each suffix write after the initial uncertainty/pending check.
       assertCurrent: () => {
-        if (!watch.valid || this.isUncertain(scope)) throw Object.assign(
+        if (!watch.valid) throw Object.assign(
           new Error('Held assertion content changed during recovery'), { name: 'AbortError' });
       },
       close: () => { this.watches.delete(watch); },
