@@ -356,11 +356,17 @@ test('a report that must stay in shared memory fails at the first reading that m
   const stub = wholeReportNode(cg, () => Date.now() < closedAt);
   const io = reportsOver(stub.api);
   const handle = io.watch(io.pairs(4, wholeReport(cg, stub.started), [node], 'kept', { from: stub.started, fromWhat: 'start of the promotions', bound: Infinity }));
-  await new Promise(resolve => setTimeout(resolve, 200));
-  closedAt = Date.now();
+  await handle.readOnce();
   handle.close();
+  // close() includes its closing millisecond in the watch. Keep the report
+  // present through that actual boundary so a trailing poll cannot be mistaken
+  // for the deliberately missing post-bound confirmation.
+  closedAt = handle.pairs[0].from + handle.pairs[0].boundMs;
   await handle.done;
-  assert.match(pairOutcome(handle.pairs[0], { boundMs: 600 }).text, /: in shared memory at every reading, then MISSING from the shared-working-memory view of reports and from the cross-partition read when the 0 s had passed$/);
+  assert.equal(handle.pairs[0].lapsed, undefined);
+  assert.equal(handle.pairs[0].confirm.view.satisfied, false);
+  assert.equal(handle.pairs[0].confirm.partitions.satisfied, false);
+  assert.match(pairOutcome(handle.pairs[0], { boundMs: 600 }).text, /: in shared memory at every reading, then MISSING from the shared-working-memory view of reports and from the cross-partition read when the \d+ s had passed$/);
 });
 
 test('a pending watch reads from before the promotion and starts its bound when armed; a refused promotion cancels it', async () => {

@@ -152,6 +152,25 @@ describe('public store operations', () => {
     expect(store.state.animations).toEqual([]);
   });
 
+  it('combines observed timestamps chronologically and ignores results for a retired run', async () => {
+    await mount();
+    const began = Date.now();
+    act(() => store.dispatch({ type: 'START_SIMULATION', id: 'current', name: 'Current', config: runConfig }));
+    const op = { type: 'RECORD_OP' as const, opType: 'query', success: true, durationMs: 10 };
+    act(() => store.dispatch({ ...op, simulationId: 'current' }));
+    vi.setSystemTime(began + 100);
+    act(() => store.dispatch(op));
+    vi.setSystemTime(began + 200);
+    act(() => store.dispatch({ ...op, simulationId: 'current' }));
+    expect(store.state.liveMetrics.recentTimestamps).toEqual([began, began + 100, began + 200]);
+    const before = structuredClone(store.state.liveMetrics);
+    act(() => store.dispatch({ ...op, simulationId: 'retired' }));
+    expect(store.state.liveMetrics).toEqual(before);
+    act(() => store.dispatch({ type: 'RESET_LIVE_METRICS' }));
+    expect(store.state.liveMetrics).toMatchObject({ total: 2, recentTimestamps: [began, began + 200] });
+    expect(store.state.simulationRuns[0].metrics).toEqual(store.state.liveMetrics);
+  });
+
   it('reconciles server totals without double counting or overwriting manual work', async () => {
     await mount();
     act(() => store.dispatch({ type: 'START_SIMULATION', id: 'older', name: 'Older', config: runConfig }));
