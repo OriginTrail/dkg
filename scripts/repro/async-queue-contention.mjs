@@ -508,7 +508,7 @@ async function runOnce(c, dist, endpoint, outDir) {
             maxMs: Math.round((loopMonitor.max / 1e6) * 10) / 10,
           };
           await sleepUntil(world, window.to + c.cooldownMs);
-          producers.stop();
+          producers.stop(); // an arrival overdue at the horizon is still issued, so none is missing from the stats
           readers.stop();
           observer.stop();
           const stillInflight = await producers.drain(50_000);

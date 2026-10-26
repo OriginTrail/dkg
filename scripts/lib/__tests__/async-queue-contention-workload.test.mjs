@@ -1,5 +1,5 @@
 // The load generators and worker wiring of the async queue contention benchmark (OT-RFC-73 P2a) against fakes: no
-// backend, no dist.
+// backend, no dist. The worker over the real supervisor and queue is in async-queue-contention-replay.test.mjs.
 import assert from 'node:assert/strict';
 import { setTimeout as sleep } from 'node:timers/promises';
 import test from 'node:test';
@@ -12,6 +12,7 @@ import {
   replayOps,
   vmGraph,
 } from '../../repro/async-queue-contention/fixture.mjs';
+import { finalizeRequests } from '../../repro/async-queue-contention/verdict.mjs';
 import {
   OBSERVER_CALLS,
   beginEpoch,
@@ -275,6 +276,55 @@ test('a stalled driver issues the late arrivals at once and the latency counts f
   );
 });
 
+test('a stall across the final boundary still issues every overdue arrival, latency counted from its intended time', async () => {
+  const w = world({ lambda: 100, warmupMs: 0, measureMs: 200, cooldownMs: 100 });
+  w.queue = { enqueue: async ({ assertionName }) => `job-${jobNumber(assertionName)}` };
+  const schedule = poissonArrivals(7, 100, 300);
+  assert.ok(schedule.length >= 15 && schedule.at(-1) > 250, 'the schedule reaches the final boundary');
+  const producers = startShareProducers(w, async () => ({ ok: true }));
+  for (const end = performance.now() + 360; performance.now() < end;); // the driver stalls past the 300 ms horizon
+  producers.stop(); // and the run stops at once: the whole schedule is overdue
+  assert.equal(await producers.drain(2000), 0);
+  assert.deepEqual(
+    w.requests.map((r) => r.intended),
+    schedule,
+    'every scheduled request is in the stats',
+  );
+  assert.ok(w.requests.every((r) => r.outcome === 'success' && r.started >= 360 && r.ended >= r.started));
+  finalizeRequests(w.requests);
+  assert.ok(
+    w.requests.every((r) => r.latMs === r.ended - r.intended && r.latMs >= 360 - r.intended),
+    'the stall is in every latency, counted from the intended time',
+  );
+});
+
+test('arrivals not yet due when the producer stops are recorded as unsent failures, not dropped', async () => {
+  const w = world({ lambda: 100, warmupMs: 0, measureMs: 300, cooldownMs: 0 });
+  w.queue = { enqueue: async ({ assertionName }) => `job-${jobNumber(assertionName)}` };
+  const schedule = poissonArrivals(7, 100, 300);
+  assert.ok(schedule.some((t) => t < 60) && schedule.some((t) => t > 200), 'arrivals on both sides of the stop');
+  const producers = startShareProducers(w, async () => ({ ok: true }));
+  await sleep(120);
+  producers.stop();
+  assert.equal(await producers.drain(2000), 0);
+  assert.deepEqual(
+    w.requests.map((r) => r.key),
+    schedule.map((_, n) => `t-s${n}`),
+    'the whole schedule is represented',
+  );
+  const sent = w.requests.filter((r) => r.outcome === 'success');
+  const unsent = w.requests.filter((r) => r.outcome === 'not_issued');
+  assert.equal(sent.length + unsent.length, schedule.length);
+  assert.ok(sent.length > 0 && unsent.length > 0);
+  assert.ok(Math.max(...sent.map((r) => r.intended)) < Math.min(...unsent.map((r) => r.intended)));
+  assert.ok(unsent.every((r) => r.started === undefined && r.ended === undefined && r.windowTag === 'measure'));
+  finalizeRequests(w.requests);
+  assert.ok(
+    unsent.every((r) => r.outcome === 'caller_timeout' && r.rawOutcome === 'not_issued' && r.lateOutcome === 'unfinished'),
+    'finalizeRequests counts an unsent arrival as a censored failure',
+  );
+});
+
 test('the epoch starts after a slow startup: no inflated latency and no catch-up burst', async () => {
   const w = world({ lambda: 40, warmupMs: 100, measureMs: 200, cooldownMs: 100 }, { t0: null });
   w.queue = { enqueue: async ({ assertionName }) => `job-${jobNumber(assertionName)}` };
@@ -457,22 +507,51 @@ test('makePreflight runs the real probe through the agent resolve methods; a deg
   assert.equal((await preflight()).reject.code, 'PREFLIGHT_NOT_FAST_ACCEPT');
 });
 
-test('the supervisor gets the real queue behind a timing proxy and a fake agent replaying the 43 store operations', async () => {
+/** A job as claimNext returns it: running under a lease and still unbound (its request has no recovery binding). */
+const claimedJob = (jobId, assertionName) => ({
+  jobId,
+  state: 'running',
+  formatVersion: 4,
+  enqueuedAt: Date.now() - 50,
+  updatedAt: Date.now(),
+  attempt: { count: 1, maxRetries: 5 },
+  lease: {
+    workerId: 'w0',
+    acquiredAt: Date.now(),
+    expiresAt: Date.now() + 900_000,
+    lastHeartbeatAt: Date.now(),
+    claimToken: 'tok',
+  },
+  request: { contextGraphId: CG_ID, assertionName, agentAddress: AGENT, entities: 'all' },
+});
+
+/**
+ * What the queue's bindRecovery returns (a BoundPromoteJob): the claimed job and its lease, now format 4, with the
+ * whole-asset request carrying the immutable recovery binding. The supervisor runs the promote from this job's request.
+ */
+const boundJobOf = (job, binding) => ({
+  ...job,
+  formatVersion: 4,
+  request: { ...job.request, entities: 'all', agentAddress: job.request.agentAddress, recoveryBinding: binding },
+});
+
+test('the supervisor gets the real queue behind a timing proxy and a fake agent whose preparation returns the bound job', async () => {
   const calls = [];
+  const claimed = claimedJob('j1', 't-s12');
+  const bindings = [];
   const queue = {
     effectiveLeaseMs: 900_000,
     workScheduling: { token: 1 },
-    claimNext: async () => ({
-      jobId: 'j1',
-      enqueuedAt: Date.now() - 50,
-      lease: { claimToken: 'tok' },
-      request: { contextGraphId: CG_ID, assertionName: 't-s12', agentAddress: AGENT },
-    }),
+    claimNext: async () => claimed,
     succeed: async (id) => `done:${id}`,
     heartbeat: async function heartbeat(id) {
       return `hb:${id}:${this === queue}`;
     },
-    bindRecovery: async (id, token, binding) => ({ jobId: id, token, binding }),
+    bindRecovery: async (id, token, binding) => {
+      assert.deepEqual([id, token], ['j1', 'tok'], 'bound under the claim that prepared it');
+      bindings.push(binding);
+      return boundJobOf(claimed, binding);
+    },
   };
   const w = world({}, { queue, store: recordingStore(calls) });
   const deps = {
@@ -516,18 +595,25 @@ test('the supervisor gets the real queue behind a timing proxy and a fake agent 
     },
   };
   const prepared = await agent.assertion.prepareQueuedShare(job, authority);
-  assert.deepEqual([prepared.job.jobId, prepared.job.token, prepared.job.binding.sealDigest.length], ['j1', 'tok', 66]);
-  assert.equal(
-    await agent.assertion.promote(CG_ID, 't-s12', { executionAuthority: authority }).then((r) => r.promotedCount),
-    PAYLOAD_TRIPLES,
+  // the supervisor continues from prepared.job: its request is what the promote is run with
+  assert.equal(bindings.length, 1);
+  assert.deepEqual(
+    [prepared.job.jobId, prepared.job.state, prepared.job.formatVersion, prepared.job.lease.claimToken],
+    ['j1', 'running', 4, 'tok'],
   );
+  assert.deepEqual(
+    { ...prepared.job.request, recoveryBinding: undefined },
+    { contextGraphId: CG_ID, assertionName: 't-s12', agentAddress: AGENT, entities: 'all', recoveryBinding: undefined },
+  );
+  assert.equal(prepared.job.request.recoveryBinding, bindings[0]);
+  assert.equal(prepared.job.request.recoveryBinding.sealDigest.length, 66);
   assert.equal(await q.succeed('j1', 'tok'), 'done:j1');
   assert.equal(w.completions.length, 1);
   assert.ok(w.completions[0].latMs >= 50 && w.completions[0].jobId === 'j1');
   const storeOps = calls.filter((c) => !['ownership', 'assertCurrent'].includes(c.kind));
-  assert.equal(storeOps.length, 43, 'the replay issues the 43 data-plane operations of one share');
+  assert.equal(storeOps.length, 7, 'the preparation issues the 5 draft reads and the 2 seal reads');
   assert.equal(calls.filter((c) => c.kind === 'ownership').length, 1);
-  assert.equal(calls.filter((c) => c.kind === 'assertCurrent').length, 3);
+  assert.equal(calls.filter((c) => c.kind === 'assertCurrent').length, 2);
   assert.deepEqual(calls.find((c) => c.kind === 'ownership').args[0], {
     contextGraphId: CG_ID,
     assertionName: 't-s12',
@@ -535,7 +621,7 @@ test('the supervisor gets the real queue behind a timing proxy and a fake agent 
     subGraphName: undefined,
   });
   const sources = storeOps.map((c) => c.args.at(-1)?.source);
-  assert.equal(sources.length, 43);
+  assert.equal(sources.length, 7);
   assert.ok(
     sources.every((s) => s?.startsWith('bench.dp.')),
     'data-plane calls carry a source label and no priority',
@@ -544,10 +630,7 @@ test('the supervisor gets the real queue behind a timing proxy and a fake agent 
   supervisor.cfg.log('first');
   for (let i = 0; i < 60; i++) supervisor.cfg.log(`line ${i}`);
   assert.deepEqual([log.count, log.lines.length], [61, 50]);
-  assert.deepEqual(
-    [stats.dataOps, stats.agentErrors, stats.firstAgentError, log.crashes],
-    [DATA_OPS_PER_SHARE, 0, null, 0],
-  );
+  assert.deepEqual([stats.dataOps, stats.agentErrors, stats.firstAgentError, log.crashes], [7, 0, null, 0]);
 });
 
 /** The worker over a store whose operations can fail: returns the agent, the evidence and the calls. */
@@ -559,13 +642,14 @@ function workerRig(failWith) {
     if (failWith.error && calls.length === failWith.at) throw failWith.error;
     return { bindings: [] };
   };
+  const job = claimedJob('j1', 't-s3');
   const queue = {
     bindRecovery: async (id, token, binding) => {
       calls.push({ kind: 'bindRecovery', args: [id] });
       if (failWith.bindError) throw failWith.bindError;
-      return { jobId: id, token, binding };
+      return boundJobOf(job, binding);
     },
-    claimNext: async () => ({ jobId: 'j1', enqueuedAt: Date.now(), lease: { claimToken: 'tok' } }),
+    claimNext: async () => job,
     succeed: async (id) => `done:${id}`,
   };
   const w = world({}, { queue, store });
@@ -578,11 +662,6 @@ function workerRig(failWith) {
   };
   const rig = createWorker(w, deps);
   const authority = { run: async (fn) => fn(), assertCurrent: async () => {} };
-  const job = {
-    jobId: 'j1',
-    lease: { claimToken: 'tok' },
-    request: { contextGraphId: CG_ID, assertionName: 't-s3', agentAddress: AGENT },
-  };
   return { ...rig, agent: rig.supervisor.cfg.agent, authority, job, calls, world: w };
 }
 

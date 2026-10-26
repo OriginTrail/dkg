@@ -171,7 +171,9 @@ export const sleepUntil = (world, ms) => sleep(Math.max(0, ms - (performance.now
 /**
  * Open loop. The whole schedule is precomputed; every arrival whose intended time has passed is issued at once, so a
  * stalled driver cannot hide late requests (no coordinated omission) and latency is ended - intended. The window tag
- * comes from the intended time.
+ * comes from the intended time. stop() freezes the clock: every arrival due by then is still issued (a stall across
+ * the horizon leaves none out), and an arrival not yet due is recorded as an unsent failure (outcome 'not_issued', no
+ * `ended`, so finalizeRequests censors it), so world.requests holds the whole schedule once drain() has returned.
  */
 export function startShareProducers(world, preflight) {
   requireEpoch(world);
@@ -181,10 +183,11 @@ export function startShareProducers(world, preflight) {
   const inflight = new Set();
   const windowOf = (t) => (t < cfg.warmupMs ? 'warmup' : t < cfg.warmupMs + cfg.measureMs ? 'measure' : 'cooldown');
   let next = 0;
-  let stopped = false;
+  let stoppedAt = null; // run-relative ms of the stop() call
   world.arrivalCount = arrivals.length;
+  const keyOf = (n) => `${cfg.runTag}-s${n}`;
   const request = async (n, intended) => {
-    const key = `${cfg.runTag}-s${n}`;
+    const key = keyOf(n);
     const rec = { i: n, key, intended, started: performance.now() - world.t0, windowTag: windowOf(intended) };
     world.requests.push(rec);
     try {
@@ -213,9 +216,10 @@ export function startShareProducers(world, preflight) {
     }
   };
   const loop = (async () => {
-    while (!stopped && next < arrivals.length) {
-      const now = performance.now() - world.t0;
+    while (next < arrivals.length) {
+      const now = stoppedAt ?? performance.now() - world.t0;
       if (arrivals[next] > now) {
+        if (stoppedAt !== null) break;
         await sleep(Math.min(arrivals[next] - now, 50));
         continue;
       }
@@ -225,10 +229,21 @@ export function startShareProducers(world, preflight) {
         inflight.add(p);
       }
     }
+    for (; next < arrivals.length; next++) {
+      world.requests.push({
+        i: next,
+        key: keyOf(next),
+        intended: arrivals[next],
+        windowTag: windowOf(arrivals[next]),
+        outcome: 'not_issued',
+        code: 'PRODUCER_STOPPED_BEFORE_INTENDED_TIME',
+        phase: 'producer',
+      });
+    }
   })();
   return {
     stop() {
-      stopped = true;
+      stoppedAt ??= performance.now() - world.t0;
     },
     async drain(capMs) {
       await loop;

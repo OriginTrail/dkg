@@ -11,6 +11,8 @@ export const AGENT = '0x1234567890abcdef1234567890abcdef12345678';
 // "about 370 graphs" of the CG-wide aggregate; the graph count drives the listGraphs cost of the preflight
 export const NS_GRAPHS = 370;
 export const WM_POOL = 256;
+// the lifecycle subjects every share reuses
+export const ASSET_POOL = 16;
 export const PAYLOAD_TRIPLES = 128;
 export const AGG_ROWS = 8;
 // the replay table's size: the fake agent issues this many store operations per attempted share
@@ -25,11 +27,33 @@ export const swmGraph = (key) => `${CG_URI}/_shared_memory/${AGENT}/${key}`;
 export const snapGraph = (key) => `${CG_URI}/_shared_memory_snapshots/_/${key}/ka`;
 export const metaGraph = () => `${CG_URI}/_meta`;
 export const swmMetaGraph = () => `${CG_URI}/_shared_memory_meta`;
-export const assetOf = (jn) => `urn:dkg:assertion:${CG_ID}:${AGENT}:asset-${jn % 16}`;
+export const assetOf = (jn) => `urn:dkg:assertion:${CG_ID}:${AGENT}:asset-${jn % ASSET_POOL}`;
 export const entityOf = (k, j) => `urn:aqc:e:${k}:${j}`;
 
 const q = (graph, subject, predicate, object) => ({ graph, subject, predicate, object });
 const lit = (s) => JSON.stringify(String(s));
+
+// What a share stamps on its asset. The values belong to the asset slot, not to the share: every share reuses one of
+// ASSET_POOL subjects, so values carrying the share key would pile up on them (each completed share growing the next
+// seal and lifecycle reads), and the stamp can be deleted by value before it is written again. shareOperationId is
+// also written with the operation intent, with the same value.
+const PROVENANCE = [
+  'state',
+  'memoryLayer',
+  'assertionGraph',
+  'shareOperationId',
+  'type',
+  'startedAtTime',
+  'p7',
+  'p8',
+  'p9',
+];
+const slotOf = (c) => c.jn % ASSET_POOL;
+const operationId = (c) => lit(`op-${slotOf(c)}`);
+const provenance = (c) =>
+  PROVENANCE.map((p, i) =>
+    q(metaGraph(), c.a, `${DKG}${p}`, p === 'shareOperationId' ? operationId(c) : lit(`v${i}-${slotOf(c)}`)),
+  );
 
 /**
  * Context graph declaration, NS_GRAPHS verified-memory graphs, the working-memory pool and the lifecycle subjects the
@@ -66,7 +90,7 @@ export async function seedMainNamespace(store, core) {
       wm.push(q(wmPoolGraph(i), `urn:aqc:wm:${i}:${t}`, 'http://schema.org/name', lit(`Entity ${i}-${t}`)));
   await insert(wm);
   await insert(
-    Array.from({ length: 16 }, (_, i) =>
+    Array.from({ length: ASSET_POOL }, (_, i) =>
       q(metaGraph(), `urn:dkg:assertion:${CG_ID}:${AGENT}:asset-${i}`, `${DKG}state`, lit('finalized')),
     ),
   );
@@ -116,7 +140,7 @@ export function replayOps(deleteByPattern) {
       sel('askShareComplete', (c) => `ASK { GRAPH <${metaGraph()}> { <${c.a}> <${DKG}swmShareComplete> ?v } }`),
       del('markerDelete', (c) => ({ graph: metaGraph(), subject: c.a, predicate: `${DKG}swmShareComplete` })),
       ins('opIntentInsert', (c) => [
-        q(metaGraph(), c.a, `${DKG}shareOperationId`, lit(c.key)),
+        q(metaGraph(), c.a, `${DKG}shareOperationId`, operationId(c)),
         q(metaGraph(), c.a, `${DKG}promoteOperationIntent`, lit('{"v":1}')),
       ]),
       sel('readOpId', (c) => `SELECT ?id WHERE { GRAPH <${metaGraph()}> { <${c.a}> <${DKG}shareOperationId> ?id } }`),
@@ -143,15 +167,12 @@ export function replayOps(deleteByPattern) {
               q(metaGraph(), c.a, `${DKG}state`, lit('finalized')),
               q(metaGraph(), c.a, `${DKG}memoryLayer`, lit('WM')),
               q(metaGraph(), c.a, `${DKG}assertionGraph`, c.wmG),
+              ...provenance(c), // the previous share's stamp: replaced, not added to
             ],
             o,
           ),
       ],
-      ins('provenanceInsert', (c) =>
-        ['state', 'memoryLayer', 'assertionGraph', 'shareOperationId', 'type', 'startedAtTime', 'p7', 'p8', 'p9'].map(
-          (p, i) => q(metaGraph(), c.a, `${DKG}${p}`, lit(`v${i}-${c.key}`)),
-        ),
-      ),
+      ins('provenanceInsert', provenance),
       ['snapshotDrop', 'w', (s, c, o) => s.dropGraph(snapGraph(c.key), o)],
       ['snapshotInsert', 'w', (s, c, o) => s.insert(payload(snapGraph(c.key), c), o)], // payload write 2
       del('shareMetaDelete', (c) => ({ graph: swmMetaGraph(), subject: `urn:dkg:share:${CG_ID}:${c.key}` })),
