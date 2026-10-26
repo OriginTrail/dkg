@@ -1024,6 +1024,7 @@ async function resolveWriteContextGraphIdOnce(
     try {
       exactWritable = await contextGraphRowIsWritable(agent, exact);
     } catch (err) {
+      if (respondIfStoreUnavailable(res, err)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local writability: ${message}`,
@@ -1097,6 +1098,7 @@ async function resolveWriteContextGraphIdOnce(
         return candidateId;
       }
     } catch (err) {
+      if (respondIfStoreUnavailable(res, err)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local existence: ${message}`,

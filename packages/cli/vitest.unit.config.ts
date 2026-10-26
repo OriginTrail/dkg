@@ -343,6 +343,9 @@ export default defineConfig({
           // slow/closed. Real resolver + real agent probe + real (closed)
           // OxigraphWorkerStore; no hardhat needed.
           'test/write-preflight-resilience.test.ts',
+          // A store-busy refusal in the preflight's follow-up reads answers 503
+          // at both async admission routes.
+          'test/write-preflight-store-busy-route.test.ts',
           'test/http-literal-size-validation.test.ts',
           'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
