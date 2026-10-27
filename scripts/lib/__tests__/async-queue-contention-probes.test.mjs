@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import test, { before } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { loadDist } from '../../repro/async-queue-contention/backend.mjs';
-import { CG_ID } from '../../repro/async-queue-contention/fixture.mjs';
+import { CG_ID, DATA_OPS_PER_SHARE } from '../../repro/async-queue-contention/fixture.mjs';
 import {
   ACK_OPS_PER_ACK,
   ACK_SOURCES,
@@ -16,6 +16,7 @@ import {
   PROBE_RECONCILE_SOURCE,
   STATUS_SOURCE,
   ackOnce,
+  backgroundLoadEvidence,
   fixedSchedule,
   loadEvidence,
   makeMetricsQuery,
@@ -576,6 +577,121 @@ test('drain waits for the ASK of a status probe that outlived its caller, and re
   assert.equal(settled, null, 'the caller gave up long ago, the store query has not: the drain is still waiting');
   gate.release();
   assert.equal(await drained, 0);
+});
+
+// ---------------------------------------------------------------- the run's evidence of a store query left running
+/** A run whose every check but the background load's holds: a status ASK or COUNT left running must not be what fails it. */
+const SOUND_RUN = {
+  lambda: 1,
+  measureMs: 1000,
+  measured: 1,
+  stillInflight: 0,
+  admissionsPending: 0,
+  reconcileError: null,
+  successWithoutJob: 0,
+  doubleAdmissions: 0,
+  driverCpu: 0.1,
+  idlePublisherErrors: 0,
+  worker: { agentErrors: 0, crashes: 0, failedTerminal: 0, succeeded: 1, attempted: 1, dataOps: DATA_OPS_PER_SHARE },
+  seedFileVerified: true,
+};
+
+/**
+ * The runner's path from a drained probe load to the verdict's checks: the drain's count, the evidence the runner builds
+ * from the load and that count (backgroundLoadEvidence: the summary's probe block and validity's `load`), and validity
+ * over it.
+ */
+async function runEvidence(load, drainMs, loadFactors) {
+  const stillInflightAtDrain = await load.drain(drainMs);
+  const evidence = backgroundLoadEvidence({
+    loadFactors,
+    probeState: load.state,
+    from: 0,
+    to: 1e9,
+    stillInflightAtDrain,
+  });
+  return { drained: stillInflightAtDrain, evidence, checks: validity({ ...SOUND_RUN, load: evidence.load }) };
+}
+const STATUS_ONLY = { probes: true, ack: false, statusMs: 1000, metricsMs: 0, ackMs: null };
+const COUNT_ONLY = { probes: true, ack: false, statusMs: 0, metricsMs: 0, ackMs: null };
+
+test('a status ASK left running at the drain reaches the summary as unfinished work; its caller answered, so the run stays valid', async () => {
+  const stuck = storeWithGatedStatus();
+  const left = await runEvidence(await startAbandonedStatusLoad(stuck), 150, STATUS_ONLY);
+  assert.equal(left.drained, 1);
+  const { probes } = left.evidence;
+  assert.equal(probes.stillInflightAtDrain, 1, 'the count survives into the summary');
+  // the caller's answer is in the results: nothing is missing or censored, so the metrics checks have nothing to fail on
+  assert.deepEqual(
+    [probes.nStatus, probes.noAnswerStatus, probes.noAnswer, probes.metricsUnfinished],
+    [1, 1, 1, 0],
+    'the status probe is in the results as the no-answer its caller reported',
+  );
+  assert.deepEqual(
+    [left.evidence.load.statusProbes, left.evidence.load.probesUnfinished],
+    [1, 0],
+    "validity's evidence has the probe",
+  );
+  assert.deepEqual(
+    [left.checks.probesRan, left.checks.probesFinished, left.checks.ok],
+    [true, true, true],
+    'a status ASK still running is reported, not a failed check',
+  );
+  stuck.release();
+  await sleep(10);
+
+  // control: the same load whose ASK answered before the drain reports nothing left running
+  const answered = storeWithGatedStatus();
+  const load = await startAbandonedStatusLoad(answered);
+  answered.release();
+  await sleep(10);
+  const done = await runEvidence(load, 150, STATUS_ONLY);
+  assert.deepEqual([done.drained, done.evidence.probes.stillInflightAtDrain], [0, 0]);
+  assert.deepEqual(
+    [done.evidence.probes.nStatus, done.evidence.probes.noAnswerStatus],
+    [1, 1],
+    'the caller still gave up',
+  );
+  assert.deepEqual([done.checks.probesRan, done.checks.probesFinished, done.checks.ok], [true, true, true]);
+});
+
+test('a COUNT left running at the drain reaches the summary as unfinished work; nothing it measures is censored, so the run stays valid', async () => {
+  const stuck = storeWithGatedCount();
+  const left = await runEvidence(await startCountOnlyLoad(stuck), 120, COUNT_ONLY);
+  assert.equal(left.drained, 1);
+  assert.equal(left.evidence.probes.stillInflightAtDrain, 1, 'the count survives into the summary');
+  assert.deepEqual(
+    [left.evidence.probes.nCountRequests, left.evidence.probes.metricsUnfinished],
+    [1, 0],
+    'the COUNT request is an event of the run; no probe sample is censored',
+  );
+  assert.deepEqual([left.checks.probesRan, left.checks.probesFinished, left.checks.ok], [true, true, true]);
+  stuck.release();
+  await sleep(10);
+
+  // control: a COUNT that settled before the drain reports nothing left running
+  const settled = storeWithGatedCount();
+  const load = await startCountOnlyLoad(settled);
+  settled.release();
+  await sleep(10);
+  const done = await runEvidence(load, 120, COUNT_ONLY);
+  assert.deepEqual([done.drained, done.evidence.probes.stillInflightAtDrain], [0, 0]);
+  assert.equal(done.evidence.probes.nCountRequests, 1);
+  assert.deepEqual([done.checks.probesRan, done.checks.probesFinished, done.checks.ok], [true, true, true]);
+});
+
+test('the evidence of a run is built only with the drain count, and carries the load evidence only for a load that was switched on', () => {
+  const state = { events: [{ kind: 'status', t: 5, ms: 20, result: 'ok' }], counters: {}, schedule: {} };
+  const build = (o) => backgroundLoadEvidence({ probeState: state, from: 0, to: 1e9, stillInflightAtDrain: 2, ...o });
+  assert.equal(build({ loadFactors: STATUS_ONLY }).probes.stillInflightAtDrain, 2);
+  for (const missing of [undefined, null, '1', -1, 0.5])
+    assert.throws(() => build({ loadFactors: STATUS_ONLY, stillInflightAtDrain: missing }), /needs the drain's count/);
+  const off = build({ loadFactors: { probes: false, ack: false } });
+  assert.equal(off.load, null, 'no load switched on, no load evidence for validity');
+  assert.deepEqual(
+    build({ loadFactors: STATUS_ONLY }).load,
+    loadEvidence(STATUS_ONLY, probeAckSummary({ probeState: state, from: 0, to: 1e9 })),
+  );
 });
 
 test('withTrackedQueries hands the queries of the named sources to the tracker, and withTrackedCount only the COUNT', async () => {

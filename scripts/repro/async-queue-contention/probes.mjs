@@ -550,3 +550,29 @@ export function loadEvidence(loadFactors, pa) {
     acksUnfinished: pa.ack.acksUnfinished,
   };
 }
+
+/**
+ * The background load as the runner records it once the run is over, built in one place so that nothing the checks or
+ * the summary need can be dropped on the way (the runner takes all three blocks from here):
+ *   probes  summary.probes: probeAckSummary's, plus `stillInflightAtDrain` = what probeLoad.drain returned, the store
+ *           queries behind the probes (the status ASKs and the COUNT) it left running at its cap
+ *   ack     summary.ack: probeAckSummary's
+ *   load    validity()'s evidence (loadEvidence), null when neither load was switched on
+ * Policy for a status ASK or COUNT left running at the drain: it is REPORTED (probes.stillInflightAtDrain), it does not
+ * fail the run. Its caller's answer is already in the results (a status probe's 'no-answer' after its 5 s wait, the
+ * COUNT request's own event), so no measurement is missing or censored by it, unlike a metrics probe or an ACK still
+ * running at their drains (probesFinished, acksFinished).
+ */
+export function backgroundLoadEvidence({ loadFactors, probeState, ackState, from, to, stillInflightAtDrain }) {
+  // the drain's count is not optional: a run built without it would report no unfinished work, whatever was left
+  if (!Number.isInteger(stillInflightAtDrain) || stillInflightAtDrain < 0)
+    throw new Error(
+      `background load evidence needs the drain's count of queries left running, got ${stillInflightAtDrain}`,
+    );
+  const pa = probeAckSummary({ probeState, ackState, from, to });
+  return {
+    probes: { ...pa.probes, stillInflightAtDrain },
+    ack: pa.ack,
+    load: loadFactors.probes || loadFactors.ack ? loadEvidence(loadFactors, pa) : null,
+  };
+}

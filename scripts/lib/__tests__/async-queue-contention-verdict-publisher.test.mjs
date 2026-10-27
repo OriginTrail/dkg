@@ -40,6 +40,7 @@ import {
   noiseMargin,
   pairKey,
   pairRuns,
+  SHARE_ONLY_DEFAULTS,
   validity,
   withMetric,
 } from '../../repro/async-queue-contention/verdict.mjs';
@@ -607,6 +608,97 @@ test("a P2b summary maps to a record with the publisher stream's numbers; a P2a 
   const shareCell = extractRecord(summaryOf({ queue: 'share', rung: 'L3' }));
   assert.equal(shareCell.key, '0|default|L3|0');
   assert.deepEqual([shareCell.valid, shareCell.publishP95Ms, shareCell.pickupP50Ms], [true, null, null]);
+});
+
+// A share-only run as P2a and as P2b record it: the same load, seed and windows; P2b adds mu, the load factors and the
+// chain-time model to the cell (as the run writes them for a share cell: no publish rate, no probe or ACK load).
+const SHARE_LOAD = { lambda: 8, content: 4, aggregate: 2, seed: 7300, observerMs: 5000 };
+const p2aShare = (repeat = 0, load = {}) =>
+  extractRecord({
+    ...summaryOf({ queue: 'share', rung: 'L3', repeat }),
+    meta: {
+      ...summaryOf().meta,
+      runId: `p2a-${repeat}`,
+      cell: { history: '0', observer: 'default', rung: 'L3', repeat, ...SHARE_LOAD, ...load },
+    },
+    publish: undefined,
+    probes: undefined,
+    ack: undefined,
+  });
+const p2bShare = (repeat = 0, cell = {}) =>
+  extractRecord(
+    summaryOf({
+      queue: 'share',
+      rung: 'L3',
+      repeat,
+      o: {
+        cell: {
+          ...SHARE_LOAD,
+          mu: 0,
+          loadFactors: { ...SHARE_ONLY_DEFAULTS.loadFactors },
+          liftModel: null,
+          ...cell,
+        },
+      },
+    }),
+  );
+
+test('an equivalent P2a and P2b share-only summary pair; a different publisher or load configuration does not', () => {
+  const legacy = p2aShare();
+  const fresh = p2bShare();
+  assert.equal('mu' in legacy.config, false, 'the P2a record keeps its shape');
+  assert.deepEqual([fresh.config.mu, fresh.config.liftModel, fresh.config.loadFactors.probes], [0, null, false]);
+  assert.equal(legacy.key, fresh.key);
+  const hostUnknown = ['platform', 'cpuModel', 'hostId'];
+  assert.deepEqual(comparability(legacy, fresh), { differs: [], envDiffers: false, unverified: hostUnknown });
+  assert.deepEqual(comparability(fresh, legacy).differs, [], 'in either direction');
+  // three repeats per arm, as a verdict reads them: every pair counts, whichever arm is the old one
+  for (const [a, b] of [
+    [p2aShare, p2bShare],
+    [p2bShare, p2aShare],
+  ]) {
+    const { pairs, missing } = pairRuns(
+      [0, 1, 2].map((n) => a(n)),
+      [0, 1, 2].map((n) => b(n)),
+    );
+    assert.deepEqual(missing, []);
+    assert.deepEqual(
+      pairs.map((p) => [p.valid, p.reasons]),
+      Array(3).fill([true, []]),
+    );
+  }
+  // a missing P2a field is the share-only default, nothing looser: any other publisher, load or chain-time setting differs
+  const factors = (o) => ({ ...SHARE_ONLY_DEFAULTS.loadFactors, ...o });
+  for (const [what, cell, differs] of [
+    ['a publish rate', { mu: 0.4 }, ['mu']],
+    ['the probe load', { loadFactors: factors({ probes: true, statusMs: 1000 }) }, ['loadFactors']],
+    ['the ACK load', { loadFactors: factors({ ack: true, ackMs: 500, ackPayload: 8 }) }, ['loadFactors']],
+    ['a chain-time model', { liftModel: G1B_SETUP.liftModel }, ['liftModel']],
+  ]) {
+    const other = p2bShare(0, cell);
+    assert.deepEqual(comparability(legacy, other).differs, differs, `P2a vs P2b with ${what}`);
+    assert.deepEqual(comparability(other, legacy).differs, differs, `P2b with ${what} vs P2a`);
+    assert.equal(pairRuns([legacy], [other]).pairs[0].valid, false, what);
+  }
+  const seeded = { ...fresh, config: { ...fresh.config, liftSeedFileSha256: 'x' } };
+  assert.deepEqual(comparability(legacy, seeded).differs, ['liftSeedFileSha256'], 'a lift seed file');
+  // a share-only run against a mixed one of the same load, seed and windows (P2a or P2b): not a pair in any setting
+  // that makes them a different run
+  const mixed = extractRecord(
+    summaryOf({ queue: 'both', rung: 'MIX', o: { cell: { ...SHARE_LOAD, lambda: 4, content: 3, aggregate: 1 } } }),
+  );
+  const sameLoad = { lambda: 4, content: 3, aggregate: 1 };
+  for (const share of [p2bShare(0, sameLoad), p2aShare(0, sameLoad)]) {
+    assert.notEqual(share.key, mixed.key, 'the stream is part of the key');
+    assert.deepEqual(comparability(share, mixed).differs, ['mu', 'loadFactors', 'liftModel']);
+    assert.deepEqual(comparability(mixed, share).differs, ['mu', 'loadFactors', 'liftModel']);
+    const pair = pairRuns([{ ...share, key: 'k' }], [{ ...mixed, key: 'k' }]).pairs[0];
+    assert.deepEqual([pair.valid, pair.reasons], [false, ['the runs differ in mu, loadFactors, liftModel']]);
+  }
+  // only a share-only record reads a missing setting as the share-only default: a publisher record lacking the publish
+  // rate stays unknown, so it is not the share-only run's 0
+  const noRate = { ...fresh, cell: { ...fresh.cell, queue: 'lift' }, config: { ...fresh.config, mu: null } };
+  assert.deepEqual(comparability(noRate, fresh).differs, ['mu']);
 });
 
 test("a publish-only record needs its own metrics, and a mixed one both streams'", () => {
@@ -1524,6 +1616,12 @@ test("run --dry resolves the publisher and mixed cells: the queue, the rung's ra
     [share.config.queue, share.config.mu, share.config.liftModel, share.config.seed],
     ['share', 0, null, 7300],
     'a P2a share cell',
+  );
+  // what a P2a summary's missing fields are read as (the comparison's SHARE_ONLY_DEFAULTS) is what a share cell records
+  assert.deepEqual(
+    [share.config.mu, share.config.loadFactors, share.config.liftModel, share.config.liftSeedFile],
+    [SHARE_ONLY_DEFAULTS.mu, SHARE_ONLY_DEFAULTS.loadFactors, SHARE_ONLY_DEFAULTS.liftModel, null],
+    'the comparison reads a missing P2a field as the value a P2b share cell records',
   );
   assert.equal(dry('--queue', 'share', '--rung', 'L3', '--seed-base', '100', '--repeat', '4').config.seed, 104);
   const custom = dry('--queue', 'lift', '--mu', '1.5', '--content', '2', '--aggregate', '1');

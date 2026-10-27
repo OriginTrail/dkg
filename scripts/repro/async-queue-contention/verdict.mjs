@@ -336,6 +336,38 @@ const SAME_IN_A_PAIR = [
 ];
 
 /**
+ * What a share-only run records for the settings P2a summaries lack (the P2b cell fields, written for every cell): no
+ * publish arrivals (mu 0), no probe or ACK load (the all-off factors loadFactorsOf builds), no chain-time model, no
+ * lift seed file. A P2a summary is a share-only run by definition, so its missing field means exactly this value, and
+ * it pairs with an equivalent P2b share-only run. `run --dry` of a share cell must resolve to these values (the
+ * verdict-publisher tests check it). Only a share-only record is read this way: a missing field of a publisher or
+ * mixed record stays unknown.
+ */
+export const SHARE_ONLY_DEFAULTS = Object.freeze({
+  mu: 0,
+  loadFactors: Object.freeze({
+    probes: false,
+    ack: false,
+    statusMs: null,
+    metricsMs: null,
+    countMs: null,
+    ackMs: null,
+    ackPayload: null,
+  }),
+  liftModel: null,
+  liftSeedFileSha256: null,
+});
+
+/**
+ * The value of a SAME_IN_A_PAIR setting as the comparison reads it: the recorded one, or for a share-only record that
+ * lacks it (a P2a summary, or a field recorded as null) its SHARE_ONLY_DEFAULTS value.
+ */
+const settingOf = (r, k) => {
+  const v = r.config?.[k];
+  return isUnknown(v) && k in SHARE_ONLY_DEFAULTS && queueOf(r.cell ?? {}) === 'share' ? SHARE_ONLY_DEFAULTS[k] : v;
+};
+
+/**
  * The machine settings of SAME_IN_A_PAIR that older summaries lack (only the CPU count was recorded): a missing value is
  * unknown. Unknown is not "different" (an old summary stays usable) and not "the same" either: two runs that differ in a
  * field both record are not a pair, and a field either lacks is listed as `unverified`, which the verdict reports as a
@@ -354,7 +386,7 @@ export function comparability(a, b, { ignoreSeed = false, ignoreLiftSeed = false
   const unverified = HOST_IDENTITY.filter((k) => isUnknown(left[k]) || isUnknown(right[k]));
   const skipped = (k) => (ignoreSeed && k === 'seedFileSha256') || (ignoreLiftSeed && k === 'liftSeedFileSha256');
   const differs = SAME_IN_A_PAIR.filter(
-    (k) => !skipped(k) && !unverified.includes(k) && canon(left[k]) !== canon(right[k]),
+    (k) => !skipped(k) && !unverified.includes(k) && canon(settingOf(a, k)) !== canon(settingOf(b, k)),
   );
   return { differs, envDiffers: canon(left.env) !== canon(right.env), unverified };
 }

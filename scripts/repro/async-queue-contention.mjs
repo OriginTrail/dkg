@@ -168,8 +168,7 @@ import { jobRow, publishSummary } from './async-queue-contention/pickup.mjs';
 import {
   LOAD_DEFAULTS,
   PROBE_DRAIN_MS,
-  loadEvidence,
-  probeAckSummary,
+  backgroundLoadEvidence,
   startAckLoad,
   startProbeLoad,
 } from './async-queue-contention/probes.mjs';
@@ -894,11 +893,13 @@ async function runOnce(c, dist, endpoint, outDir) {
               config: { ...c.liftModel, mu: c.mu },
             });
           }
-          const pa = probeAckSummary({
+          const background = backgroundLoadEvidence({
+            loadFactors: lf,
             probeState: probeLoad?.state,
             ackState: ackLoad?.state,
             from: window.from,
             to: window.to,
+            stillInflightAtDrain: probesStillInflight,
           });
           const validityChecks = validity({
             lambda: c.lambda,
@@ -943,7 +944,7 @@ async function runOnce(c, dist, endpoint, outDir) {
                   },
                 }
               : {}),
-            ...(lf.probes || lf.ack ? { load: loadEvidence(lf, pa) } : {}),
+            ...(background.load ? { load: background.load } : {}),
           });
           const summary = {
             schema: 2,
@@ -1043,8 +1044,8 @@ async function runOnce(c, dist, endpoint, outDir) {
               latencyMs: summarize(reads.map((e) => e.ms)),
             },
             idlePublisher: idle?.state ?? null,
-            probes: { ...pa.probes, stillInflightAtDrain: probesStillInflight },
-            ack: pa.ack,
+            probes: background.probes,
+            ack: background.ack,
             backpressure: {
               before,
               after,

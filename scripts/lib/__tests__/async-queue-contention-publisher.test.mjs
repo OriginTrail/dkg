@@ -6,7 +6,15 @@ import assert from 'node:assert/strict';
 import test, { before } from 'node:test';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { loadDist } from '../../repro/async-queue-contention/backend.mjs';
-import { AGENT, CG_ID, LIFT_TAIL_OPS, seedMainNamespace } from '../../repro/async-queue-contention/fixture.mjs';
+import {
+  AGENT,
+  ASSET_POOL,
+  CG_ID,
+  LIFT_TAIL_OPS,
+  assetOf,
+  metaGraph,
+  seedMainNamespace,
+} from '../../repro/async-queue-contention/fixture.mjs';
 import { jobRow, pickupBlock, walletClassifier } from '../../repro/async-queue-contention/pickup.mjs';
 import {
   LIFT_DEFAULTS,
@@ -195,6 +203,69 @@ test('the synthetic handler verifies before the send, holds the wallet for the c
     tailOps: LIFT_TAIL_OPS,
   });
   assert.deepEqual([result.status, result.kaId, result.ual], ['confirmed', 1004n, 'did:dkg:x']);
+});
+
+const DKG = 'http://dkg.io/ontology/';
+
+test('cycling the asset pool keeps the metadata and the preflight seal result of every asset at a fixed size', async () => {
+  const store = new deps.storage.OxigraphStore();
+  await seedMainNamespace(store, deps.core);
+  // the preflight reads through a store that keeps the size of the intent.seal CONSTRUCT it gets back
+  const sealSizes = [];
+  const reading = {
+    query: async (sparql, options) => {
+      const result = await store.query(sparql, options);
+      if (options.source === 'bench.pre.intent.seal') sealSizes.push(result.quads.length);
+      return result;
+    },
+  };
+  const preflight = createPublishPreflight({ store: reading }, async () => ({ ok: true }));
+  const handler = createLiftHandler({ store, cfg: { walletHoldMs: 0 } }, deps);
+  const assets = Array.from({ length: ASSET_POOL }, (_, i) => assetOf(i));
+  const metaOf = async () => {
+    const rows = await store.query(
+      `SELECT ?s ?p ?o WHERE { GRAPH <${metaGraph()}> { VALUES ?s { ${assets.map((a) => `<${a}>`).join(' ')} } ?s ?p ?o } }`,
+    );
+    return rows.bindings.map((b) => [b.s, b.p.replace(DKG, ''), b.o]).sort((x, y) => (x.join() < y.join() ? -1 : 1));
+  };
+  const measure = async () => {
+    sealSizes.length = 0;
+    for (let slot = 0; slot < ASSET_POOL; slot++) await preflight(slot);
+    return { meta: await metaOf(), sealTriples: [...sealSizes] };
+  };
+  const publish = (jn) =>
+    handler.execute({ request: { name: `pub-t-${jn}`, kaUal: `did:dkg:x/${jn}` }, publishOptions: {} });
+  const cycles = [];
+  for (let cycle = 0; cycle < 5; cycle++) {
+    for (let i = 0; i < ASSET_POOL; i++) await publish(cycle * ASSET_POOL + i);
+    cycles.push(await measure());
+  }
+  assert.equal(handler.state.executions, 5 * ASSET_POOL);
+  for (const c of cycles.slice(1))
+    assert.deepEqual(c, cycles[0], 'a completed publication leaves the asset as the next one finds it');
+  // Stable is not enough (a tail that wrote nothing is stable too): each asset holds exactly the seeded state, the
+  // lifecycle state the tail sets and one value of each predicate the tail stamps, the value of its slot.
+  const perAsset = (slot) => cycles[0].meta.filter(([s]) => s === assets[slot]).map(([, p, o]) => [p, o]);
+  for (let slot = 0; slot < ASSET_POOL; slot++) {
+    const predicates = perAsset(slot).map(([p]) => p);
+    assert.deepEqual(
+      predicates,
+      ['catalogObligation', 'publishReceipt', 'publishedAt', 'retireAt', 'state', 'state', 'vmTwin'],
+      `the metadata of asset ${slot}: ${JSON.stringify(perAsset(slot))}`,
+    );
+    const value = (p) => perAsset(slot).find(([name]) => name === p)[1];
+    assert.deepEqual(
+      [value('publishReceipt'), value('vmTwin'), value('catalogObligation')],
+      [`"r${slot}"`, `"vm${slot}"`, `"c${slot}"`],
+      'the values belong to the slot, not to the publication',
+    );
+  }
+  assert.equal(cycles[0].meta.length, ASSET_POOL * 7);
+  assert.deepEqual(
+    cycles[0].sealTriples,
+    Array(ASSET_POOL).fill(7),
+    'the preflight seal read returns the 7 triples of the asset, not its history',
+  );
 });
 
 /** The benchmark's publisher on a seeded in-memory store: a lift side whose chain time and poll are short. */

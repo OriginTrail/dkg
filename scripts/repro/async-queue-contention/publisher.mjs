@@ -17,7 +17,7 @@
 // synthetic handler never fails, so a retried or recovered job is a run defect, see the reclaim check in verdict.mjs).
 import { createHash, randomBytes } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
-import { AGENT, CG_ID, metaGraph, swmMetaGraph } from './fixture.mjs';
+import { AGENT, ASSET_POOL, CG_ID, assetOf, metaGraph, swmMetaGraph } from './fixture.mjs';
 import { OBSERVER_CALLS, poissonArrivals, startArrivals, within } from './workload.mjs';
 
 export const AUTHOR = '0x1111111111111111111111111111111111111111';
@@ -35,6 +35,9 @@ const q = (graph, subject, predicate, object) => ({
   object,
 });
 const lit = (s) => JSON.stringify(String(s));
+
+/** The fixed timestamp (ms) the tail's lifecycle stamps carry, plus the asset slot: same size as a clock reading. */
+const STAMP_MS = 1_700_000_000_000;
 
 export const walletIdsOf = (n) => Array.from({ length: n }, (_, i) => `aqc-wallet-${i}`);
 
@@ -85,14 +88,14 @@ export function createPublishPreflight(world, shareProbe) {
   const { store } = world;
   const read = (name, sparql) => store.query(sparql, { source: `bench.pre.${name}` });
   return async function publishPreflight(n) {
-    const a = `urn:dkg:assertion:${CG_ID}:${AGENT}:asset-${n % 16}`;
+    const a = assetOf(n);
     const M = metaGraph();
     const S = swmMetaGraph();
     const pf = await shareProbe();
     if (pf.reject) return pf;
     await read(
       'intent.slots',
-      `SELECT ?s WHERE { GRAPH <${M}> { ?s <${DKG}state> ?o . FILTER(STRSTARTS(STR(?s), "urn:dkg:assertion:${CG_ID}:") && STRENDS(STR(?s), ":asset-${n % 16}")) } } LIMIT 100`,
+      `SELECT ?s WHERE { GRAPH <${M}> { ?s <${DKG}state> ?o . FILTER(STRSTARTS(STR(?s), "urn:dkg:assertion:${CG_ID}:") && STRENDS(STR(?s), ":asset-${n % ASSET_POOL}")) } } LIMIT 100`,
     );
     await read('intent.seal', `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${M}> { VALUES ?s { <${a}> } ?s ?p ?o } }`);
     await read('intent.state', `SELECT ?state WHERE { GRAPH <${M}> { <${a}> <${DKG}state> ?state } }`);
@@ -122,7 +125,6 @@ export function createLiftHandler(world, deps) {
   const { deleteByPatternWithoutCount } = deps.storage;
   const state = { preflights: 0, executions: 0, tailOps: 0 };
   let nonce = 0;
-  const assetOf = (jn) => `urn:dkg:assertion:${CG_ID}:${AGENT}:asset-${jn % 16}`;
   const jnOf = (input) => {
     const m = /-(\d+)$/.exec(String(input.request?.name));
     return m ? Number(m[1]) : 0;
@@ -138,8 +140,13 @@ export function createLiftHandler(world, deps) {
     await read('complete', `ASK { GRAPH <${M}> { <${a}> <${DKG}swmShareComplete> ?v } }`);
     await read('head', `SELECT ?head WHERE { GRAPH <${S}> { ?head <${DKG}assertionVersion> ?v } } LIMIT 5`);
   };
+  // What the tail writes on the asset subject belongs to the asset slot, not to the publication: publications reuse
+  // ASSET_POOL subjects, so a value carrying the publication number or the wall clock would pile up on them (each
+  // completed publication growing every later preflight and verification read of the subject, and with it the cost of
+  // the run's own reads). The fixture's share replay does the same (fixture.mjs PROVENANCE).
   const tail = async (jn) => {
     const a = assetOf(jn);
+    const slot = jn % ASSET_POOL;
     const M = metaGraph();
     const S = swmMetaGraph();
     const o = (name) => ({ source: `bench.dp.lift.${name}` });
@@ -148,14 +155,14 @@ export function createLiftHandler(world, deps) {
       await call();
     };
     const drop = (name, spec) => op(() => deleteByPatternWithoutCount(store, spec, o(name)));
-    await op(() => store.insert([q(M, a, `${DKG}publishReceipt`, lit(`r${jn}`))], o('receipt')));
+    await op(() => store.insert([q(M, a, `${DKG}publishReceipt`, lit(`r${slot}`))], o('receipt')));
     await op(() =>
       store.query(`SELECT ?h WHERE { GRAPH <${S}> { ?h <${DKG}assertionVersion> ?v } } LIMIT 5`, o('swmHead')),
     );
     await op(() =>
       store.query(`SELECT ?o WHERE { GRAPH <${S}> { <urn:dkg:share:${CG_ID}:so${jn}> ?p ?o } }`, o('opSubject')),
     );
-    await op(() => store.insert([q(M, a, `${DKG}retireAt`, lit(Date.now()))], o('retireSchedule')));
+    await op(() => store.insert([q(M, a, `${DKG}retireAt`, lit(STAMP_MS + slot))], o('retireSchedule')));
     await op(() => store.listGraphs(o('scopeGraphs')));
     await op(() => store.dropGraph(`did:dkg:context-graph:${CG_ID}/_shared_memory/pub${jn}`, o('dropSwm')));
     await op(() =>
@@ -175,12 +182,12 @@ export function createLiftHandler(world, deps) {
     await op(() => store.delete([q(M, a, `${DKG}state`, lit('shared'))], o('lifecycleDelete')));
     await op(() =>
       store.insert(
-        [q(M, a, `${DKG}state`, lit('published')), q(M, a, `${DKG}publishedAt`, lit(Date.now()))],
+        [q(M, a, `${DKG}state`, lit('published')), q(M, a, `${DKG}publishedAt`, lit(STAMP_MS + slot))],
         o('lifecycleInsert'),
       ),
     );
-    await op(() => store.insert([q(M, a, `${DKG}vmTwin`, lit(`vm${jn}`))], o('vmTwin')));
-    await op(() => store.insert([q(M, a, `${DKG}catalogObligation`, lit(`c${jn}`))], o('catalog')));
+    await op(() => store.insert([q(M, a, `${DKG}vmTwin`, lit(`vm${slot}`))], o('vmTwin')));
+    await op(() => store.insert([q(M, a, `${DKG}catalogObligation`, lit(`c${slot}`))], o('catalog')));
     await drop('clearShareComplete', { graph: M, subject: `${a}#swmComplete` });
   };
   return {
