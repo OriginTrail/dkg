@@ -1,8 +1,8 @@
-// CLI coverage of async-queue-seed-history.mjs --load (OT-RFC-73 P2a): the existing-data safeguard that refuses to load
-// history into a namespace whose queue control graph already holds rows, or that cannot be inspected, unless
-// --force-nonempty. The script runs as a child process against a loopback HTTP server that records every request it
-// receives, so each case asserts both the exit code and whether any N-Quads reached the namespace. Uses the real built
-// dist: run pnpm run build:packages first.
+// CLI coverage of async-queue-seed-history.mjs --load (OT-RFC-73 P2a/P2b): the existing-data safeguard that refuses to
+// load history into a namespace whose queue control graph (for --kind lift: the publisher's control graph or its audit
+// journal) already holds rows, or that cannot be inspected, unless --force-nonempty. The script runs as a child process
+// against a loopback HTTP server that records every request it receives, so each case asserts both the exit code and
+// whether any N-Quads reached the namespace. Uses the real built dist: run pnpm run build:packages first.
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -46,7 +46,7 @@ async function fixtureNamespace(answerInspection) {
       };
       requests.push(request);
       if (request.type === 'text/x-nquads') res.end('ok');
-      else answerInspection(req, res);
+      else answerInspection(req, res, request);
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -67,6 +67,15 @@ const answerStatus = (status, body = 'boom') => (req, res) => {
   res.end(body);
 };
 const dropConnection = (req) => req.socket.destroy();
+/** The graph IRIs a query names in `GRAPH <...>` patterns. */
+const graphsOf = (sparql) => [...sparql.matchAll(/GRAPH\s*<([^>]+)>/g)].map((m) => m[1]);
+/**
+ * A namespace that holds rows in exactly `occupied` (graph IRIs) and answers the guard's ASK as a store would: true
+ * when the query reaches a graph with rows, false when none of the graphs it names has any. A guard that does not
+ * ask about an occupied graph is told the namespace is empty.
+ */
+const answerOccupying = (occupied) => (req, res, request) =>
+  answerJson({ head: {}, boolean: graphsOf(request.body).some((g) => occupied.includes(g)) })(req, res);
 
 // Async spawn: the fixture server lives in this process, so a blocking spawnSync would leave it unable to answer.
 function runCli(args) {
@@ -82,11 +91,12 @@ function runCli(args) {
 }
 
 let seq = 0;
-async function seedAndLoad(answerInspection, { forceNonempty = false } = {}) {
+async function seedAndLoad(answerInspection, { forceNonempty = false, kind = 'share' } = {}) {
   const ns = await fixtureNamespace(answerInspection);
   const seedFile = path.join(dir, `seed-${seq++}.nq`);
   try {
     const args = ['--jobs', String(JOBS), '--base-time', BASE_TIME, '--out', seedFile, '--load', ns.url];
+    if (kind !== 'share') args.push('--kind', kind);
     if (forceNonempty) args.push('--force-nonempty');
     const result = await runCli(args);
     return { ...result, seedFile, inspections: ns.inspections(), loads: ns.loads() };
@@ -95,7 +105,7 @@ async function seedAndLoad(answerInspection, { forceNonempty = false } = {}) {
   }
 }
 
-function assertLoaded(r) {
+function assertLoaded(r, quads = JOBS * QUADS_PER_JOB) {
   assert.equal(r.code, 0, r.stderr);
   assert.ok(r.loads.length >= 1, 'the history was posted');
   assert.equal(
@@ -104,7 +114,7 @@ function assertLoaded(r) {
     'what the namespace received is exactly the seed file',
   );
   const manifest = JSON.parse(r.stdout.trim().split('\n').at(-1));
-  assert.equal(manifest.loaded.quads, JOBS * QUADS_PER_JOB);
+  assert.equal(manifest.loaded.quads, quads);
   assert.equal(manifest.loaded.sha256, manifest.sha256, 'the bytes loaded are the bytes of the seed file');
 }
 
@@ -121,8 +131,8 @@ test('an empty control graph (ASK false) is inspected once and then loaded', CAS
   assert.equal(r.inspections[0].method, 'POST');
   assert.equal(
     r.inspections[0].body,
-    `ASK { GRAPH <${deps.utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI}> { ?s ?p ?o } }`,
-    'the guard asks about the queue control graph',
+    `ASK { { GRAPH <${deps.utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI}> { ?s ?p ?o } } }`,
+    'the guard asks about the share queue control graph (the one graph a share seed lives in)',
   );
   assertLoaded(r);
 });
@@ -173,4 +183,51 @@ test('--force-nonempty loads into a namespace that answers non-empty', CASE, asy
 test('--force-nonempty also loads when the namespace cannot be inspected', CASE, async () => {
   const r = await seedAndLoad(answerStatus(500), { forceNonempty: true });
   assertLoaded(r);
+});
+
+// ---------------------------------------------------------------- --kind lift: the history lives in two graphs
+const liftGraphs = () => [deps.liftControl.DEFAULT_CONTROL_GRAPH_URI, deps.liftControl.DEFAULT_JOURNAL_GRAPH_URI];
+const liftManifestQuads = (r) => JSON.parse(r.stdout.trim().split('\n').at(-1)).quads;
+
+test('a lift seed into empty publisher graphs is inspected over both of them and then loaded', CASE, async () => {
+  const r = await seedAndLoad(answerOccupying([]), { kind: 'lift' });
+  assert.equal(r.inspections.length, 1, 'the namespace is inspected once, before the load');
+  const [control, journal] = liftGraphs();
+  assert.equal(
+    r.inspections[0].body,
+    `ASK { { GRAPH <${control}> { ?s ?p ?o } } UNION { GRAPH <${journal}> { ?s ?p ?o } } }`,
+    'the guard asks about the publisher control graph and the audit journal, the two graphs a lift seed lives in',
+  );
+  assertLoaded(r, liftManifestQuads(r));
+});
+
+test('a lift seed is refused when only the audit journal holds rows, and nothing is loaded', CASE, async () => {
+  const [control, journal] = liftGraphs();
+  const r = await seedAndLoad(answerOccupying([journal]), { kind: 'lift' });
+  // the control graph is empty, so a guard that asked about it alone would let this load through
+  assert.equal(r.inspections.length, 1);
+  assert.deepEqual(graphsOf(r.inspections[0].body), [control, journal], 'the one ASK covers both graphs');
+  assertRefused(r, /not empty; use --force-nonempty/);
+  assert.ok(r.stderr.includes(journal), 'the refusal names the graphs');
+  assert.equal(existsSync(r.seedFile), false, 'the refusal comes before any seed is generated');
+});
+
+test('a lift seed is refused when only the publisher control graph holds rows', CASE, async () => {
+  const [control] = liftGraphs();
+  const r = await seedAndLoad(answerOccupying([control]), { kind: 'lift' });
+  assert.equal(r.inspections.length, 1);
+  assertRefused(r, /not empty; use --force-nonempty/);
+});
+
+test('a share seed is judged on the share control graph alone, not on the publisher graphs', CASE, async () => {
+  const r = await seedAndLoad(answerOccupying(liftGraphs()));
+  assert.deepEqual(graphsOf(r.inspections[0].body), [deps.utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI]);
+  assertLoaded(r);
+});
+
+test('--force-nonempty loads a lift seed into a namespace whose audit journal holds rows', CASE, async () => {
+  const [, journal] = liftGraphs();
+  const r = await seedAndLoad(answerOccupying([journal]), { kind: 'lift', forceNonempty: true });
+  assert.equal(r.inspections.length, 0, 'the guard is skipped');
+  assertLoaded(r, liftManifestQuads(r));
 });

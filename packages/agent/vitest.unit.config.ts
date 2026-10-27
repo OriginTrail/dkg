@@ -104,6 +104,8 @@ export default defineConfig({
       "test/promote-async-default-agent.test.ts",
       "test/queued-share-scoped-recovery.test.ts",
       'test/durable-share-inventory.test.ts',
+      'test/owed-share-inventory.test.ts',
+      'test/owed-share-inventory-owner.test.ts',
       'test/committed-share-handoff.test.ts',
       'test/promote-lifecycle-partial-commit.test.ts',
       "test/promote-durable-root-companion.test.ts",

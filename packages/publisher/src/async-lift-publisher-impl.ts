@@ -4,7 +4,7 @@ import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
 import { completionTrace } from './async-lift-completion-trace.js';
 import { traceProcessNext } from './async-lift-claim-trace.js';
-import { LiftJobStoreSelectors } from './lift-job-store-selectors.js';
+import { LiftJobStoreSelectors, lifecycleKeyOfJob } from './lift-job-store-selectors.js';
 import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
 import { LiftJobChainObservations } from './lift-job-chain-observations.js';
 import { committedLiftJob, type CommittedLiftJob } from './lift-job-committed.js';
@@ -262,21 +262,6 @@ class InvalidLiftPublishResultError extends Error {
  *    budget is spent — is the durability violation GH#2270 forbids.
  */
 type ReacceptIntent = { readonly kind: 'retry' } | { readonly kind: 'freshClientMandate' };
-
-/**
- * #1828 / GH#2270 — the lifecycle key a persisted job belongs to, or null when it has none: a
- * non-VM-publish request, or a malformed legacy one (a pre-guard admission whose name carries
- * U+001F). A malformed PERSISTED job must never abort a scan and block an unrelated admission,
- * so it simply drops out of every group.
- */
-function lifecycleKeyOfJob(job: PersistedLiftJob): string | null {
-  if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return null;
-  try {
-    return knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
-  } catch {
-    return null;
-  }
-}
 
 /**
  * GH#2270 PR-3 r2 — a config carrying the pre-rename `chainRecoveryResolver` key is REJECTED, not
@@ -922,31 +907,15 @@ export class TripleStoreAsyncLiftPublisher
 
   /**
    * #1828 — idempotently backfill the ephemeral lifecycle index for VM-publish
-   * jobs admitted before the index existed. Reads the subjects already carrying
-   * the index and inserts ONLY the missing ones (additive insert; never
-   * deletes/rewrites, so it cannot race the runner), returning the real number
-   * of jobs repaired rather than a full-reindex count. Run once at boot.
+   * jobs admitted before the index existed. Selects ONLY the jobs missing the
+   * index (indexed history never transfers) and inserts their index rows
+   * (additive insert; never deletes/rewrites, so it cannot race the runner),
+   * returning the real number of jobs repaired rather than a full-reindex
+   * count. Run once at boot.
    */
   async ensureVmPublishIntentIndex(): Promise<number> {
     await this.ensureGraph();
-    const vmPublishJobs = (await this.list()).filter((job) =>
-      isKnowledgeAssetVmPublishJobRequest(job.request),
-    );
-    if (vmPublishJobs.length === 0) return 0;
-    // Subjects that already carry the lifecycle index. Object-unbound read of the
-    // one predicate — no job-payload scan — so we diff in JS and insert only the
-    // jobs missing it (VM-publish filtered above, never via a SPARQL MINUS, which
-    // would over-select raw-lift jobs).
-    const indexed = await this.store.query(
-      `SELECT ?job WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey } }`,
-      { source: 'publisher.asyncLift.ensureVmPublishIntentIndex' },
-    );
-    const alreadyIndexed = new Set(
-      expectBindings(indexed)
-        .map((row) => row['job'])
-        .filter((subject): subject is string => typeof subject === 'string'),
-    );
-    const missing = vmPublishJobs.filter((job) => !alreadyIndexed.has(jobSubject(job.jobId)));
+    const missing = await this.jobSelectors.unindexedVmPublishJobs();
     const quads = missing.flatMap((job) => serializeVmPublishIntentIndex(job, this.graphUri));
     if (quads.length > 0) await this.store.insert(quads, { source: 'publisher.asyncLift.writeVmPublishIntentIndex' });
     return missing.length;
@@ -1996,7 +1965,7 @@ export class TripleStoreAsyncLiftPublisher
     // since a sibling is not chain proof), so the selector groups the queue by lifecycle key and
     // admission reads its own group. The first entry is the record admission must answer for: a
     // held job before anything else, then the lifecycle's newest.
-    const candidates = await this.jobSelectors.vmPublishAdmissionCandidates(requestKey, lifecycleKeyOfJob);
+    const candidates = await this.jobSelectors.vmPublishAdmissionCandidates(requestKey);
     const job = selectLifecycleBindingJobs(candidates, lifecycleKeyOfJob).get(requestKey)?.at(0);
     if (!job || !isKnowledgeAssetVmPublishJobRequest(job.request)) return null;
     return {

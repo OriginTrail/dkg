@@ -173,6 +173,7 @@ export default defineConfig({
           'test/node-runtime-preflight.test.ts',
           'test/outbound-brotli-refusal.test.ts',
           'test/dkg-doctor.test.ts',
+          'test/doctor-command-config.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
           'test/init-command.test.ts',

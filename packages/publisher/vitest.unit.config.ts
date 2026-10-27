@@ -36,6 +36,8 @@ export default defineConfig({
       'test/async-lift-wallet-snapshot.test.ts',
       'test/async-lift-claim-candidates.test.ts',
       'test/async-lift-claim-trace.test.ts',
+      'test/async-lift-bounded-admission.test.ts',
+      'test/async-lift-bounded-admission-differential.test.ts',
       'test/async-lift-claim-lock.test.ts',
       'test/async-lift-journal-serialize.test.ts',
       'test/async-lift-journal-append.test.ts',
