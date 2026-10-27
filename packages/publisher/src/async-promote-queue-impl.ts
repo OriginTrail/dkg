@@ -193,7 +193,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     });
   }
 
-  /** The complete listing, read page by page (one hold of the mutex per page; not a snapshot). */
+  /** The complete listing: keys in large pages, then payloads in batches, one hold of the mutex per key read and per batch (not a snapshot). */
   async list(filter: PromoteListFilter = {}): Promise<PromoteJob[]> {
     return listAllPromoteJobs(this.listing, filter);
   }

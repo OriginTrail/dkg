@@ -9,7 +9,9 @@ import {
   PROMOTE_PAYLOAD, PROMOTE_STATE, PROMOTE_UNIQUENESS_KEY,
   comparePromoteJobs, expectBindings, literal, parseIntegerLiteral, parseJobPayload, parseLiteral, uniquenessLookupKeys,
 } from './async-promote-queue-utils.js';
-import { readPromoteJobPage, type PromoteJobKeyPage, type PromoteListingHost } from './promote-job-page.js';
+import {
+  readPromoteJobKeys, readPromoteJobPage, readPromoteJobPayloads, readPromoteRetryTimes, type PromoteKeyPage, type PromoteListingHost,
+} from './promote-job-page.js';
 import {
   PROMOTE_LIST_MAX_PAGE_SIZE, decodePromoteJobCursor, encodePromoteJobCursor, resolvePromotePageSize, type PromoteJobCursor,
 } from './promote-list-cursor.js';
@@ -18,27 +20,38 @@ import {
  * The share queue's listing, statistics and selector lookup (OT-RFC-73 P8a): everything the queue reads for its public list,
  * its statistics and the durable share path, kept out of the mutex-holding file. `claimNext` and recovery do not use any of it.
  *
- * Every read runs in a hold of the queue's mutex on the control path. A complete listing is a loop of such holds, one per page,
- * and is therefore NOT a snapshot: a job that changes state or arrives while the loop runs is seen as it is when its page is
- * read, once at most, and a job that matched the filter for the whole walk is always returned.
+ * Every read runs in a hold of the queue's mutex on the control path. A complete listing is a sequence of such holds, one per key
+ * read and one per batch of payloads, and is therefore NOT a snapshot: a job that arrives or changes after the key read that covers
+ * its position is not seen, a job whose payload no longer matches the filter when its batch is read is left out, and a job that
+ * matched the filter for the whole walk is always returned, once.
  */
 
 const logger = new Logger('AsyncPromoteList');
 
-/** Rows read per hold by a complete listing, and the row count above which one warns. A queue's config can lower them (tests do). */
+/**
+ * Payloads read per hold, keys read per ordered scan, and the row count above which a complete listing warns. A queue's config can
+ * lower them (tests do). The key page is large because every key read is a scan of all the rows that match the filter (the engine
+ * orders them before it cuts), so the number of scans of a complete listing is the rows over this size: about five at 50,000 retained jobs.
+ */
 export const PROMOTE_LIST_COMPLETE_PAGE_SIZE = PROMOTE_LIST_MAX_PAGE_SIZE;
+export const PROMOTE_LIST_KEY_PAGE_SIZE = 10_000;
+export const PROMOTE_LIST_MAX_KEY_PAGE_SIZE = 100_000;
 export const PROMOTE_LIST_WARN_ROWS = 5_000;
 const WARN_INTERVAL_MS = 60_000;
 
-export function promoteListingTuning(config: Pick<AsyncPromoteQueueConfig, 'listPageSize' | 'listWarnRows'>) {
+export function promoteListingTuning(config: Pick<AsyncPromoteQueueConfig, 'listPageSize' | 'listKeyPageSize' | 'listWarnRows'>) {
   const listPageSize = config.listPageSize ?? PROMOTE_LIST_COMPLETE_PAGE_SIZE;
   if (!Number.isSafeInteger(listPageSize) || listPageSize < 1 || listPageSize > PROMOTE_LIST_MAX_PAGE_SIZE) {
     throw new Error(`listPageSize must be an integer from 1 to ${PROMOTE_LIST_MAX_PAGE_SIZE}`);
   }
+  const listKeyPageSize = config.listKeyPageSize ?? PROMOTE_LIST_KEY_PAGE_SIZE;
+  if (!Number.isSafeInteger(listKeyPageSize) || listKeyPageSize < 1 || listKeyPageSize > PROMOTE_LIST_MAX_KEY_PAGE_SIZE) {
+    throw new Error(`listKeyPageSize must be an integer from 1 to ${PROMOTE_LIST_MAX_KEY_PAGE_SIZE}`);
+  }
   const listWarnRows = config.listWarnRows ?? PROMOTE_LIST_WARN_ROWS;
   // NaN would silence the warning for good and a value below one would fire it on every listing, so neither is a setting.
   if (typeof listWarnRows !== 'number' || !Number.isFinite(listWarnRows) || listWarnRows < 1) throw new Error('listWarnRows must be a finite number of at least 1');
-  return { listPageSize, listWarnRows };
+  return { listPageSize, listKeyPageSize, listWarnRows };
 }
 
 const lastWarnedAt = new Map<string, number>();
@@ -55,21 +68,56 @@ function warnCompleteListing(host: PromoteListingHost, rows: number): void {
 
 const LIST_SOURCES = { keys: 'publisher.asyncPromote.list', payloads: 'publisher.asyncPromote.list.payloads' } as const;
 
+/** The ready time `comparePromoteJobs` ranks a job by. */
+const readyTime = (job: PromoteJob): number => job.attempt.nextRetryAt ?? job.enqueuedAt;
+
 /**
- * The complete listing: every matching job in ready-time order (`comparePromoteJobs`), `limit` applied after the sort. Read as a
- * loop of keyset pages, each in its own hold of the mutex, so no hold lasts for the whole history.
+ * The complete listing: every matching job in ready-time order (`comparePromoteJobs`), `limit` applied after the sort.
+ *
+ * Linear in the rows: the ordered keys are read in key pages of `listKeyPageSize` (one scan each, so about five at 50,000 retained jobs and
+ * not one per 1,000 rows), then the payloads of those keys in batches of `listPageSize` by subject. Every key read and every batch is its own
+ * hold of the mutex, so no hold lasts for the whole history and none holds a full payload fetch.
+ *
+ * `limit` ends the walk early, without changing which jobs it keeps. Rows come in `(enqueuedAt, jobId)` order and the result is in ready
+ * order, which differs only for a job with a `nextRetryAt`. So the walk keeps the `limit` best rows read so far and stops once the
+ * last of them is strictly earlier than everything unread can be: the next unread key's `enqueuedAt`, or the earliest `nextRetryAt` of
+ * an unread job (read once up front, since a retry time may be before its job's enqueue time after a clock step). A job whose retry
+ * time is not an integer counts as the earliest possible one, and so does the retry time of a job the filter excludes (it is never read), which
+ * only makes the walk longer. Strictly earlier, because a tie is broken by job id and an unread job could win it.
  */
 export async function listAllPromoteJobs(host: PromoteListingHost, filter: PromoteListFilter): Promise<PromoteJob[]> {
-  const jobs: PromoteJob[] = [];
+  const limit = filter.limit && filter.limit > 0 ? Math.floor(filter.limit) : undefined;
+  if (limit === 0) return [];
+  const retryAt = limit ? await host.locked(() => readPromoteRetryTimes(host, LIST_SOURCES.keys)) : undefined;
+  const readIds = new Set<string>();
+  let jobs: PromoteJob[] = [];
+  let rowsRead = 0;
   let cursor: PromoteJobCursor | undefined;
-  do {
-    const page: PromoteJobKeyPage = await host.locked(() => readPromoteJobPage(host, filter, { cursor, pageSize: host.listPageSize, sources: LIST_SOURCES }));
-    for (const job of page.jobs) jobs.push(job);
-    cursor = page.next;
+  walk: do {
+    const keyPage: PromoteKeyPage = await host.locked(() => readPromoteJobKeys(host, filter, { cursor, pageSize: host.listKeyPageSize, source: LIST_SOURCES.keys }));
+    for (let at = 0; at < keyPage.keys.length;) {
+      // With a limit the first batch is no larger than it: the usual call (a few rows of a long queue) then reads one small batch.
+      const size = limit && rowsRead === 0 && readIds.size === 0 ? Math.min(limit, host.listPageSize) : host.listPageSize;
+      const keys = keyPage.keys.slice(at, at + size);
+      at += keys.length;
+      const batch = await host.locked(() => readPromoteJobPayloads(host, filter, keys, LIST_SOURCES.payloads));
+      rowsRead += batch.length;
+      jobs.push(...batch);
+      if (!limit || !retryAt) continue;
+      for (const key of keys) readIds.add(key.jobId);
+      jobs.sort(comparePromoteJobs);
+      if (jobs.length > limit) jobs = jobs.slice(0, limit);
+      const nextKey = at < keyPage.keys.length ? keyPage.keys[at] : keyPage.next;
+      if (!nextKey || jobs.length < limit) continue;
+      let earliestUnread = nextKey.enqueuedAt;
+      for (const [jobId, time] of retryAt) if (time < earliestUnread && !readIds.has(jobId)) earliestUnread = time;
+      if (readyTime(jobs[limit - 1]!) < earliestUnread) break walk;
+    }
+    cursor = keyPage.next;
   } while (cursor);
-  if (jobs.length > host.listWarnRows) warnCompleteListing(host, jobs.length);
+  if (rowsRead > host.listWarnRows) warnCompleteListing(host, rowsRead);
   jobs.sort(comparePromoteJobs);
-  return filter.limit && filter.limit > 0 ? jobs.slice(0, Math.floor(filter.limit)) : jobs;
+  return limit ? jobs.slice(0, limit) : jobs;
 }
 
 /** One page of the opt-in cursor listing. A malformed cursor or page size is a `PromoteListRequestError`, thrown before any read. */

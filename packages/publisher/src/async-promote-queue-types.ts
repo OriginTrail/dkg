@@ -380,8 +380,10 @@ export interface AsyncPromoteQueueConfig {
   backoff?: (attemptCount: number) => number;
   /** Random source of the default backoff's jitter, in [0, 1). Defaults to `Math.random`. */
   rand?: () => number;
-  /** Rows read per hold of the queue's mutex by a complete listing (`list`); defaults to 1,000 (the paged maximum). */
+  /** Payloads read per hold of the queue's mutex by a complete listing (`list`); defaults to 1,000 (the paged maximum). */
   listPageSize?: number;
+  /** Keys read per hold, and per ordered scan, by a complete listing; defaults to 10,000, at most 100,000. */
+  listKeyPageSize?: number;
   /** A complete listing of more rows than this logs a warning that points at cursor paging; defaults to 5,000. */
   listWarnRows?: number;
 }

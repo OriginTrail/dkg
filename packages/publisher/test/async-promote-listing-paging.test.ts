@@ -1,12 +1,15 @@
 /**
  * Paged and aggregate reads of the share queue (OT-RFC-73 P8a, AC6). The keyset page behind the public listing and the post-commit
- * sweep, the complete listing served as a loop of pages, the COUNT statistics and the key-scoped lookup of the durable share path:
+ * sweep, the complete listing served as key reads and payload batches, the COUNT statistics and the key-scoped lookup of the durable share path:
  *
  *   - static paging: every job exactly once, in `(enqueuedAt, jobId)` code point order, for every page size and filter;
  *   - interleaved mutations: a job inserted at the cursor's timestamp with a lower job id, a state change between pages, and a
  *     randomized model-based walk. No job is duplicated and every job that matched for the whole walk appears exactly once;
  *   - the queries: bounded, no OFFSET, payloads read for the page's rows only, values only through literal(), failing closed when
  *     a store returns rows in another order;
+ *   - the complete listing: one ordered scan per key page and a mutex release between every key read and payload batch, a `limit` that
+ *     stops early without changing which jobs it keeps (checked against the full sort, retry times before and after the enqueue
+ *     times), the filter re-check after the payload read, and a record with two state triples;
  *   - COUNT statistics, the sweep and the selector lookup against independent oracles over generated populations.
  *
  * Characterization of the unchanged behavior is in async-promote-listing-characterization.test.ts.
@@ -51,6 +54,13 @@ async function seeded(specs: readonly ShareRowSpec[], config: Partial<AsyncPromo
 }
 
 const walked = (pages: readonly PromoteJobPage[]) => pages.flatMap((page) => ids(page.jobs));
+
+/** The listing reads of a call, in order: `keys`, `retry` (the retry-time read behind `limit`), or `payloads:<subjects asked for>`. */
+const listingReads = (calls: ReadonlyArray<{ method: string; source?: string; text?: string }>) => calls
+  .filter((call) => call.method === 'query' && call.source?.startsWith('publisher.asyncPromote.list'))
+  .map((call) => (call.source!.endsWith('.payloads')
+    ? `payloads:${[...call.text!.matchAll(/<urn:dkg:promote-queue:job:[^>]+>/g)].length}`
+    : call.text!.includes('ORDER BY') ? 'keys' : 'retry'));
 
 describe('the keyset page, static', () => {
   it.each([1, 7, 100, 237, 1_000])('walks 237 jobs with tied timestamps and mixed-case ids once each, in (enqueuedAt, jobId) code point order, page size %i', async (pageSize) => {
@@ -215,16 +225,39 @@ describe('the page queries', () => {
     expect(await queue.list()).toHaveLength(30);
   });
 
-  it('serves the complete listing as one key read and one payload read per page', async () => {
+  it('serves the complete listing as one key read and payload reads in batches of subjects, one hold each', async () => {
     const tapped = tapStore(openStore());
     await seedShareRows(tapped.store, rows.slice(0, 8));
     const { queue } = queueOver(tapped.store, { listPageSize: 3 });
     expect(await queue.list()).toHaveLength(8);
-    expect(tapped.calls.filter((call) => call.method === 'query').map((call) => call.source)).toEqual([
-      'publisher.asyncPromote.list', 'publisher.asyncPromote.list.payloads',
-      'publisher.asyncPromote.list', 'publisher.asyncPromote.list.payloads',
-      'publisher.asyncPromote.list', 'publisher.asyncPromote.list.payloads',
-    ]);
+    // The ordered scan runs once; only the payloads are fetched in pieces (3 + 3 + 2).
+    expect(listingReads(tapped.calls)).toEqual(['keys', 'payloads:3', 'payloads:3', 'payloads:2']);
+    const keys = tapped.calls.find((call) => call.source === 'publisher.asyncPromote.list')!.text!;
+    expect(keys).toContain('LIMIT 10001');
+    expect(keys).not.toMatch(/OFFSET/i);
+    expect(keys).not.toContain('?payload');
+  });
+
+  it('reads the keys in pages of at most listKeyPageSize, each page once, so the ordered scans number ceil(rows / key page) and not ceil(rows / batch)', async () => {
+    const tapped = tapStore(openStore());
+    await seedShareRows(tapped.store, rows.slice(0, 8));
+    const { queue } = queueOver(tapped.store, { listPageSize: 3, listKeyPageSize: 5 });
+    expect(await queue.list()).toHaveLength(8);
+    // A batch never spans two key pages: the second key page's three rows are one batch.
+    expect(listingReads(tapped.calls)).toEqual(['keys', 'payloads:3', 'payloads:2', 'keys', 'payloads:3']);
+    const keyReads = tapped.calls.filter((call) => call.source === 'publisher.asyncPromote.list').map((call) => call.text!);
+    expect(keyReads[0]).toContain('LIMIT 6');
+    expect(keyReads[1]).toContain('LIMIT 6');
+    expect(keyReads[1]).toContain('STR(?job) > "urn:dkg:promote-queue:job:j-04"');
+
+    // At a larger scale: 600 rows read 20 payloads at a time and 300 keys at a time are 2 ordered scans, where the page loop made 30.
+    const big = tapStore(openStore());
+    await seedShareRows(big.store, Array.from({ length: 600 }, (_, i) => ({ id: `b-${String(i).padStart(3, '0')}`, state: 'succeeded' as const, enqueuedAt: NOW + i })));
+    const bigQueue = queueOver(big.store, { listPageSize: 20, listKeyPageSize: 300 }).queue;
+    expect(await bigQueue.list()).toHaveLength(600);
+    const reads = listingReads(big.calls);
+    expect(reads.filter((read) => read === 'keys')).toHaveLength(2);
+    expect(reads.filter((read) => read.startsWith('payloads'))).toHaveLength(30);
   });
 
   it('fails closed when a store returns the keys in another order, or ignores the cursor, instead of skipping or repeating a job', async () => {
@@ -385,13 +418,16 @@ describe('interleaved mutations between pages (AC6)', () => {
   });
 });
 
-describe('the complete listing is a loop of pages that each release the mutex', () => {
+describe('the complete listing releases the mutex between its key reads and its payload batches', () => {
   const rows = Array.from({ length: 10 }, (_, i) => ({ id: `q-${String(i).padStart(2, '0')}`, state: 'queued' as const, enqueuedAt: NOW + i * 10 }));
 
-  it('lets another queue operation run between two pages of a listing', async () => {
+  it.each([
+    ['the key read and the first payload batch', 'publisher.asyncPromote.list', ['keys', 'write', 'payloads']],
+    ['two payload batches', 'publisher.asyncPromote.list.payloads', ['keys', 'payloads', 'write', 'payloads']],
+  ])('lets another queue operation run between %s of a listing', async (_name, trigger, expected) => {
     let started = false;
     const tapped = tapStore(openStore(), { before: (call) => {
-      if (call.source === 'publisher.asyncPromote.list' && !started) {
+      if (call.source === trigger && !started) {
         started = true;
         void queue.enqueue({ contextGraphId: 'cg-rows', assertionName: 'newcomer', entities: 'all', agentAddress: ROW_AGENT });
       }
@@ -399,30 +435,47 @@ describe('the complete listing is a loop of pages that each release the mutex', 
     await seedShareRows(tapped.store, rows);
     const { queue } = queueOver(tapped.store, { listPageSize: 4 });
     expect(await queue.list()).toHaveLength(10);
-    const order = tapped.calls.filter((call) => call.source === 'publisher.asyncPromote.list' || call.method === 'replaceSubject').map((call) => (call.method === 'replaceSubject' ? 'write' : 'page'));
-    // The enqueue waited for the first page's hold and ran before the second page was read: the mutex was not kept for the whole listing.
-    expect(order.slice(0, 3)).toEqual(['page', 'write', 'page']);
+    const order = tapped.calls.flatMap((call) => {
+      if (call.source === 'publisher.asyncPromote.list') return ['keys'];
+      if (call.source === 'publisher.asyncPromote.list.payloads') return ['payloads'];
+      return call.method === 'replaceSubject' ? ['write'] : [];
+    });
+    // The enqueue arrived during the listing's hold and ran before the listing's next hold: the mutex was not kept for the whole listing,
+    // not between the key read and the payloads and not between two payload batches.
+    expect(order.slice(0, expected.length)).toEqual(expected);
     expect(ids(await queue.list({ state: ['queued'] }))).toContain(`gen-${NOW}`);
   });
 
-  it('is not a snapshot: a job that arrives or changes ahead of the walk is seen as it is when its page is read, a job behind it is not', async () => {
+  /** A read of 10 queued jobs whose first payload batch is followed by writes from outside this process. */
+  async function listingWithWritesAfterFirstBatch(config: Partial<AsyncPromoteQueueConfig>) {
     const raw = openStore();
     let payloadReads = 0;
     const tapped = tapStore(raw, { after: async (call, result) => {
       if (call.source === 'publisher.asyncPromote.list.payloads' && ++payloadReads === 1) {
         await putShareRow(raw, { id: 'ahead', state: 'queued', enqueuedAt: NOW + 75 }); // between q-07 and q-08: ahead of the cursor
-        await putShareRow(raw, { id: 'behind', state: 'queued', enqueuedAt: NOW + 5 }); // behind the cursor: not returned
-        await putShareRow(raw, { id: 'q-09', state: 'running', enqueuedAt: NOW + 90 }); // ahead, stops matching: not returned
+        await putShareRow(raw, { id: 'behind', state: 'queued', enqueuedAt: NOW + 5 }); // behind the cursor: never returned
+        await putShareRow(raw, { id: 'q-09', state: 'running', enqueuedAt: NOW + 90 }); // ahead, stops matching
         await putShareRow(raw, { id: 'q-00', state: 'running', enqueuedAt: NOW }); // already read as queued: stays in the result as read
       }
       return result;
     } });
     await seedShareRows(raw, rows);
-    const { queue } = queueOver(tapped.store, { listPageSize: 4 });
-    const listing = await queue.list({ state: ['queued'] });
+    return queueOver(tapped.store, config).queue.list({ state: ['queued'] });
+  }
+
+  it('is not a snapshot: a job that arrives or changes ahead of the walk is seen as it is when its key page is read, a job behind it is not', async () => {
+    const listing = await listingWithWritesAfterFirstBatch({ listPageSize: 4, listKeyPageSize: 4 });
+    // The write after the first batch lands before the third key page is read: 'ahead' is in it, q-09 no longer matches, 'behind' is behind the cursor.
     expect(ids(listing)).toEqual(['q-00', 'q-01', 'q-02', 'q-03', 'q-04', 'q-05', 'q-06', 'q-07', 'ahead', 'q-08']);
     expect(listing.find((job) => job.jobId === 'q-00')!.state).toBe('queued');
     expect(new Set(ids(listing)).size).toBe(listing.length);
+  });
+
+  it('does not see a job that arrives inside a key page that was already read, and drops one whose payload no longer matches', async () => {
+    const listing = await listingWithWritesAfterFirstBatch({ listPageSize: 4 }); // one key page for all ten
+    // Every key was read before the writes: 'ahead' and 'behind' are not in it. q-09's payload is read after the write and no longer matches the filter.
+    expect(ids(listing)).toEqual(['q-00', 'q-01', 'q-02', 'q-03', 'q-04', 'q-05', 'q-06', 'q-07', 'q-08']);
+    expect(listing.find((job) => job.jobId === 'q-00')!.state).toBe('queued');
   });
 
   it('leaves out a job that stopped matching between the key read and the payload read of its page, and still continues after it', async () => {
@@ -438,6 +491,24 @@ describe('the complete listing is a loop of pages that each release the mutex', 
     keyReads = -1000;
     const page = await queue.listPage({ state: ['queued'] }, { pageSize: 2 });
     expect(page.jobs.every((job) => job.state === 'queued')).toBe(true);
+  });
+
+  it('leaves out a job whose context graph was rewritten between the key read and the payload read, in a page and in a complete listing', async () => {
+    // The state re-check has its own test above; this one is the context graph's. The key read matched 'c-1' by the context graph triple it had then.
+    const mine = Array.from({ length: 4 }, (_, i): ShareRowSpec => ({ id: `c-${i}`, state: 'queued', enqueuedAt: NOW + i, contextGraphId: 'cg-a' }));
+    for (const read of ['page', 'complete'] as const) {
+      const raw = openStore();
+      let keyReads = 0;
+      const tapped = tapStore(raw, { after: async (call, result) => {
+        if (call.source === 'publisher.asyncPromote.list' && ++keyReads === 1) await putShareRow(raw, { id: 'c-1', state: 'queued', enqueuedAt: NOW + 1, contextGraphId: 'cg-b' }); // a writer outside this process
+        return result;
+      } });
+      await seedShareRows(raw, mine);
+      const { queue } = queueOver(tapped.store, { listPageSize: 2 });
+      const jobs = read === 'page' ? (await queue.listPage({ contextGraphId: 'cg-a' }, { pageSize: 10 })).jobs : await queue.list({ contextGraphId: 'cg-a' });
+      expect(ids(jobs), read).toEqual(['c-0', 'c-2', 'c-3']);
+      expect(jobs.every((job) => job.request.contextGraphId === 'cg-a')).toBe(true);
+    }
   });
 
   it('applies limit after the ready-time sort of the whole listing, whatever the page size', async () => {
@@ -536,6 +607,65 @@ describe('the complete listing is a loop of pages that each release the mutex', 
     expect(seen).toBeInstanceOf(PromoteJobConflictError);
     expect(seen).toMatchObject({ existingJobId: 'on-page', observedAdmission: true });
     expect(await queue.enqueue(request('second-asset')).catch((error: unknown) => error)).toMatchObject({ existingJobId: 'next-page', observedAdmission: false });
+  });
+});
+
+describe('limit ends a complete listing as soon as no unread job can rank among its first rows', () => {
+  const pad = (n: number) => String(n).padStart(4, '0');
+  const queuedRun = (count: number): ShareRowSpec[] => Array.from({ length: count }, (_, i) => ({ id: `q-${pad(i)}`, state: 'queued' as const, enqueuedAt: NOW + i }));
+
+  it('reads one batch of limit payloads for the first rows of a long queue, and no payload of the rest', async () => {
+    const tapped = tapStore(openStore());
+    await seedShareRows(tapped.store, queuedRun(3_000));
+    const { queue } = queueOver(tapped.store, { listPageSize: 100 });
+    tapped.calls.length = 0;
+    expect(ids(await queue.list({ limit: 5 }))).toEqual(['q-0000', 'q-0001', 'q-0002', 'q-0003', 'q-0004']);
+    expect(listingReads(tapped.calls)).toEqual(['retry', 'keys', 'payloads:5']);
+    tapped.calls.length = 0;
+    expect(await queue.list()).toHaveLength(3_000);
+    expect(listingReads(tapped.calls)).toEqual(['keys', ...Array.from({ length: 30 }, () => 'payloads:100')]); // no retry read without a limit
+    expect(await queue.list({ limit: 0.5 })).toEqual([]);
+  });
+
+  it('keeps reading while a job that is ready later than the rows read so far sits among them, and stops once the rest are later', async () => {
+    const tapped = tapStore(openStore());
+    await seedShareRows(tapped.store, [...queuedRun(20), { id: 'later', state: 'failed_retrying', enqueuedAt: NOW + 2, nextRetryAt: NOW + 500 }]);
+    const { queue } = queueOver(tapped.store, { listPageSize: 100 });
+    tapped.calls.length = 0;
+    // 'later' was enqueued early but is ready at +500, so the first three rows read (q-0, q-1, later) are not yet the three earliest to be ready.
+    expect(ids(await queue.list({ limit: 3 }))).toEqual(['q-0000', 'q-0001', 'q-0002']);
+    expect(listingReads(tapped.calls)).toEqual(['retry', 'keys', 'payloads:3', 'payloads:18']);
+  });
+
+  it('does not stop before an unread job whose retry time is earlier than its enqueue time, which a walk in enqueue order cannot see coming', async () => {
+    // a-x was enqueued at +1000 but is due at +1 (the clock stepped back between its enqueue and its failure): it ranks second, ahead of q-0001.
+    const { queue } = await seeded([...queuedRun(20), { id: 'a-x', state: 'failed_retrying', enqueuedAt: NOW + 1_000, nextRetryAt: NOW + 1 }], { listPageSize: 100 });
+    expect(ids(await queue.list({ limit: 3 }))).toEqual(['q-0000', 'a-x', 'q-0001']);
+    expect(ids(await queue.list({ limit: 1 }))).toEqual(['q-0000']);
+  });
+
+  it.each(Array.from({ length: 20 }, (_, seed) => seed))('returns exactly the first limit jobs of the sorted complete listing, retry times before and after their enqueue times, seed %i', async (seed) => {
+    const rand = mulberry32(31_000 + seed);
+    const specs = population(60 + Math.floor(rand() * 140), rand, { tieGroup: 1 + Math.floor(rand() * 6), contexts: ['cg-a', 'cg-b'] })
+      .map((spec): ShareRowSpec => (spec.state === 'failed_retrying' ? { ...spec, nextRetryAt: spec.enqueuedAt! + Math.floor(rand() * 90) - 30 } : spec));
+    const store = openStore();
+    await seedShareRows(store, specs);
+    const all = await readEveryShareJob(store);
+    const filters: Array<Omit<PromoteListFilter, 'limit'>> = [{}, { state: ['queued', 'failed_retrying'] }, { contextGraphId: 'cg-a' }, { state: ['failed_retrying'], contextGraphId: 'cg-b' }];
+    // The smallest batches are the costliest to run, so they take the small limits, where the stop rule is decided within a few batches.
+    for (const { config, limits } of [
+      { config: { listPageSize: 1, listKeyPageSize: 3 }, limits: [1, 3] },
+      { config: { listPageSize: 5, listKeyPageSize: 11 }, limits: [2, 7, 40] },
+      { config: { listPageSize: 1_000 }, limits: [1, 500] },
+    ]) {
+      const { queue } = queueOver(store, config);
+      for (const filter of filters) {
+        const matching = all.filter((job) => (!filter.state?.length || filter.state.includes(job.state)) && (!filter.contextGraphId || job.request.contextGraphId === filter.contextGraphId)).sort(comparePromoteJobs);
+        for (const limit of limits) {
+          expect(await queue.list({ ...filter, limit }), `${JSON.stringify(config)} ${JSON.stringify(filter)} limit ${limit}`).toEqual(matching.slice(0, limit));
+        }
+      }
+    }
   });
 });
 
