@@ -22,7 +22,7 @@ import { isSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
 
-import { filterOversizedSyncQuads, type OversizeDrop } from './oversize-filter.js';
+import { filterOversizedSyncQuads, insertPrefilteredSyncQuads, type OversizeGuardHooks } from './oversize-filter.js';
 
 const PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
 /** Operation subjects per stored-stamp read. */
@@ -97,21 +97,20 @@ export function planOperationPublishedAt(
 }
 
 /**
- * Write `rows` through `insert` keeping one publishedAt per share operation:
+ * Own guarded persistence of `rows`, keeping one publishedAt per share operation:
  * read the stamps `store` holds for the operations the rows stamp, write the
  * planned rows, then delete the stored stamps that lost. An interruption
  * between the two leaves an extra stamp, never none, and the next write of the
  * operation removes it.
  */
 export async function insertKeepingOnePublishedAt(
-  store: Pick<TripleStore, 'query' | 'delete'>,
+  store: Pick<TripleStore, 'query' | 'delete' | 'insert'>,
   rows: readonly Quad[],
-  insert: (rows: Quad[]) => Promise<readonly Quad[]>,
-  source: string,
-  recordDrops: (drops: OversizeDrop[]) => void,
-): Promise<void> {
+  options: { source: string; seam: string; recordDrops: OversizeGuardHooks['recordDrops'] },
+): Promise<Quad[]> {
+  const { source, seam, recordDrops } = options;
   const filtered = filterOversizedSyncQuads(rows);
-  if (filtered.dropped.length > 0) recordDrops(filtered.dropped);
+  if (filtered.dropped.length > 0) recordDrops(filtered.dropped, seam);
   const targets = new Map<string, Set<string>>();
   for (const row of rows) {
     if (!isOperationPublishedAtRow(row) || !isSafeIri(row.graph) || !isSafeIri(row.subject)) continue;
@@ -146,7 +145,10 @@ export async function insertKeepingOnePublishedAt(
   // an oversized early winner could discard the only writable later stamp.
   const plan = planOperationPublishedAt(filtered.kept, stored);
   assertUsableOperationTimestamps(targets, stored, plan.rows);
-  const inserted = plan.rows.length > 0 ? await insert(plan.rows) : [];
+  const inserted = await insertPrefilteredSyncQuads(
+    rows => store.insert(rows, { priority: 'background', source: `${source}.insert` }),
+    plan.rows, { recordDrops }, seam,
+  );
   assertUsableOperationTimestamps(targets, stored, inserted);
   const written = new Set(inserted.map(canonicalQuadKey));
   // A filtering insert can succeed without persisting its proposed winner.
@@ -155,6 +157,7 @@ export async function insertKeepingOnePublishedAt(
   if (retire.length > 0) {
     await store.delete(retire, { priority: 'background', source: `${source}.retirePublishedAt` });
   }
+  return inserted;
 }
 
 /** Never report a new operation as materialized without a persisted usable stamp. */

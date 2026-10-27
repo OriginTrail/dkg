@@ -42,7 +42,7 @@ import {
 import {
   type SwmRecoveryMutationRuntimeV1,
 } from './swm-recovery-apply.js';
-import { insertWithOversizeGuard, type OversizeGuardHooks } from '../oversize-filter.js';
+import { type OversizeGuardHooks } from '../oversize-filter.js';
 import { insertKeepingOnePublishedAt } from '../swm-operation-published-at.js';
 import {
   PrivateSwmSnapshotWalkRegistry,
@@ -271,15 +271,9 @@ export class SwmTargetExecutorV1 {
     const storeInsert = async (quads: Quad[]) => {
       // A peer's copy of an operation already held here carries the peer's
       // own publishedAt; the operation keeps one.
-      await insertKeepingOnePublishedAt(this.#ports.store, quads, (rows) => insertWithOversizeGuard(
-        (kept) => this.#ports.store.insert(kept, {
-          priority: 'background',
-          source: 'agent.sharedMemorySync.storeInsert',
-        }),
-        rows,
-        { recordDrops: this.#ports.recordDrops },
-        'swm-sync',
-      ), 'agent.sharedMemorySync', (drops) => this.#ports.recordDrops(drops, 'swm-sync'));
+      await insertKeepingOnePublishedAt(this.#ports.store, quads, {
+        source: 'agent.sharedMemorySync', seam: 'swm-sync', recordDrops: this.#ports.recordDrops,
+      });
       await this.#registerSyncedSubGraphs(target, quads);
     };
     return runSharedMemorySync({

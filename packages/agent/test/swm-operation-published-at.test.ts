@@ -1,4 +1,3 @@
-import { insertWithOversizeGuard } from '../src/sync/oversize-filter.js';
 /**
  * One dkg:publishedAt per share operation, and a defective head set aside
  * instead of every descriptor of its graph.
@@ -15,10 +14,10 @@ import { insertWithOversizeGuard } from '../src/sync/oversize-filter.js';
  * policy of both catch-up lanes; the set-aside cases exercise the round itself.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, OversizedRdfLiteralError, type OperationContext } from '@origintrail-official/dkg-core';
 import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
+import { canonicalGraphScopedSnapshotManifestQuads, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { parseGraphScopedSwmRecoveryHeadResults } from '../src/sync/graph-scoped-swm-recovery.js';
 import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
 import { insertKeepingOnePublishedAt, planOperationPublishedAt } from '../src/sync/swm-operation-published-at.js';
@@ -397,6 +396,33 @@ describe('a defective head is set aside, not its whole graph', () => {
     });
   });
 
+  it('keeps a removed alias owned by a defective head unresolved', async () => {
+    const alias = fx.share({ version: 1, operationId: 'op-z-alias', marker: 'valid',
+      ual: `did:dkg:hardhat:31337/${ADDRESS}/1` });
+    const badHead = `${valid.headSubject.replace("#dkg-swm-head", "-defective")}#dkg-swm-head`;
+    const servedMeta = [...stampedAt(valid.meta, valid.operationSubject, LATEST), ...stampedAt(alias.meta, alias.operationSubject, LATER),
+      ...valid.meta.filter(row => row.subject === valid.headSubject).map(row => ({ ...row,
+        subject: badHead,
+        object: row.predicate === `${DKG}shareOperationId` ? '"op-z-alias"' : row.object,
+      })),
+      { subject: badHead, predicate: `${DKG}assertionVersion`, object: '"2"', graph: WS_META },
+    ];
+    const { descriptors, setAside } = parseGraphScopedSwmRecoveryHeadResults({ contextGraphId: CG, metaQuads: servedMeta });
+    expect(descriptors).toHaveLength(1);
+    expect(setAside).toHaveLength(1);
+    expect(descriptors[0].snapshotSource.operationSubject).toBe(valid.operationSubject);
+    expect(canonicalGraphScopedSnapshotManifestQuads(servedMeta, descriptors)
+      .some(row => row.subject === alias.operationSubject)).toBe(false);
+    const store = newStore();
+    const summary = await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, servedMeta,
+      cachedSnapshots: new Map([[valid.digest, valid.payload]]),
+    }).run();
+    expect(await rowsOf(store, valid.assertionGraph)).toHaveLength(valid.payload.length);
+    expect(await rowsOf(store, WS_META, badHead)).toEqual([]);
+    expect(summary.swmCoverage).toMatchObject({ snapshotsResolved: 0, snapshotsTotal: 1, descriptorsAuthoritative: false });
+    expect(summary.failedPhases).toBeGreaterThan(0);
+  });
+
   it('leaves a snapshot ref unresolved when a set-aside head shares it', async () => {
     // Same content, so one snapshot ref serves both assets.
     const bad = defective('valid');
@@ -418,12 +444,13 @@ describe('a defective head is set aside, not its whole graph', () => {
 
 
 describe('timestamp replacement keeps stored evidence through failed writes', () => {
+  const options = { source: 'test', seam: 'test', recordDrops: () => {} };
   const row = (object: string): Quad => ({ subject: ack.operationSubject, predicate: PUBLISHED_AT, object, graph: WS_META });
   it('preserves the stored timestamp when an oversized replacement is dropped', async () => {
     const store = newStore();
     await store.insert([row(stamp(LOCAL))]);
     await insertKeepingOnePublishedAt(store, [row(`"${' '.repeat(60_001)}${EARLY}"`)],
-      rows => insertWithOversizeGuard(kept => store.insert(kept), rows, { recordDrops: () => {} }, 'test'), 'test', () => {});
+      options);
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
   });
   it('retires each operation only when its own replacement is persisted', async () => {
@@ -433,41 +460,49 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
     await store.insert([row(stamp(LOCAL)),
       { ...row(stamp(LOCAL)), subject: filtered },
       { ...row(stamp(LOCAL)), subject: held }, { ...row(stamp(LATER)), subject: held }]);
-    await insertKeepingOnePublishedAt(store, [row(stamp(PEER)),
-      { ...row(stamp(PEER)), subject: filtered }, { ...row(stamp(LATEST)), subject: held }], async rows => {
-      // Successful writes may return fresh quad objects and filter one operation.
-      const inserted = rows.filter(quad => quad.subject !== filtered).map(quad => ({ ...quad }));
-      await store.insert(inserted);
-      return inserted;
-    }, 'test', () => {});
+    const inserted = await insertKeepingOnePublishedAt(store, [row(stamp(PEER)),
+      { ...row(`"${' '.repeat(60_001)}${EARLY}"`), subject: filtered },
+      { ...row(stamp(LATEST)), subject: held }], options);
+    expect(inserted.map(quad => quad.subject)).toEqual([ack.operationSubject]);
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER]);
     expect(await publishedAtOf(store, filtered)).toEqual([LOCAL]);
     expect(await publishedAtOf(store, held)).toEqual([LOCAL]);
   });
   it('refuses an all-oversized new operation before committing any metadata', async () => {
-    const store = newStore(), insert = vi.fn(async (rows: Quad[]) => { await store.insert(rows); return rows; });
+    const store = newStore(), insert = vi.spyOn(store, 'insert');
     const drops = vi.fn();
     await expect(insertKeepingOnePublishedAt(store,
-      [row(`"${' '.repeat(60_001)}${EARLY}"`)], insert, 'test', drops)).rejects.toThrow('without a usable publishedAt');
+      [row(`"${' '.repeat(60_001)}${EARLY}"`)], { ...options, recordDrops: drops })).rejects.toThrow('without a usable publishedAt');
     expect(insert).not.toHaveBeenCalled();
     expect(drops).toHaveBeenCalledOnce();
   });
-  it('does not report success when a downstream filter drops a new operation timestamp', async () => {
+  it('returns persisted rows and attributes the store backstop without losing its timestamp', async () => {
     const store = newStore();
-    await expect(insertKeepingOnePublishedAt(store, [row(stamp(LOCAL))], async () => [], 'test', () => {}))
-      .rejects.toThrow('without a usable publishedAt');
+    const originalInsert = store.insert.bind(store);
+    vi.spyOn(store, 'insert').mockImplementationOnce(async () => {
+      throw new OversizedRdfLiteralError({ actualBytes: 70_000, maxBytes: 65_535 });
+    }).mockImplementation(originalInsert);
+    const oversized = { ...row('"' + 'x'.repeat(70_000) + '"'),
+      predicate: 'http://schema.org/text', graph: `did:dkg:context-graph:${CG}/_shared_memory` };
+    const drops = vi.fn();
+    const inserted = await insertKeepingOnePublishedAt(store, [row(stamp(LOCAL)), oversized],
+      { ...options, recordDrops: drops });
+    expect(inserted).toEqual([row(stamp(LOCAL))]);
+    expect(drops).toHaveBeenCalledWith([expect.objectContaining({ quad: oversized, kind: 'store-reject' })], 'test:store-reject');
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
   });
   it('does not retire stored evidence after a failed insert', async () => {
     const store = newStore(); await store.insert([row(stamp(LOCAL))]);
     const retire = vi.spyOn(store, 'delete');
-    await expect(insertKeepingOnePublishedAt(store, [row(stamp(PEER))], async () => { throw new Error('insert failed'); }, 'test', () => {}))
+    vi.spyOn(store, 'insert').mockRejectedValueOnce(new Error('insert failed'));
+    await expect(insertKeepingOnePublishedAt(store, [row(stamp(PEER))], options))
       .rejects.toThrow('insert failed');
     expect(retire).not.toHaveBeenCalled();
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
   });
   it('retains both stamps after failed retirement and converges on retry', async () => {
     const store = newStore(); await store.insert([row(stamp(LOCAL))]);
-    const write = () => insertKeepingOnePublishedAt(store, [row(stamp(PEER))], async rows => { await store.insert(rows); return rows; }, 'test', () => {});
+    const write = () => insertKeepingOnePublishedAt(store, [row(stamp(PEER))], options);
     const retire = vi.spyOn(store, 'delete').mockRejectedValueOnce(new Error('retire failed'));
     await expect(write()).rejects.toThrow('retire failed');
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER, LOCAL]);

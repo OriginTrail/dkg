@@ -863,6 +863,11 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       let materializationFailures = 0;
       let materializedQuads = 0;
       const manifest = collectPublicSnapshotManifest(snapshotManifestMeta);
+      // Canonicalization removes unselected alias rows, but their owners still
+      // constrain resolution of a shared ref when one head was set aside.
+      const ownershipSources = setAsideHeads.length > 0
+        ? collectPublicSnapshotManifest(processed.verifiedMeta).sourceSubjectsByRef
+        : manifest.sourceSubjectsByRef;
       const manifestSnapshots = manifest.snapshots;
       const entitySnapshotAuthority = createEntitySliceRecoveryPlan(
         pid, processed.verifiedMeta, manifest.sourceSubjectsByRef,
@@ -1438,7 +1443,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         // that fetched and then failed to write is not resolved, which is what
         // stops an all-cached round whose writes all failed from reporting
         // maximal coverage and silently ending the continuation.
-        if (refMaterialized && !setAsideHeadsMayOwnRef(setAsideHeads, snapshotRef, manifest.sourceSubjectsByRef)) {
+        if (refMaterialized && !setAsideHeadsMayOwnRef(setAsideHeads, snapshotRef, ownershipSources)) {
           materializedRefs.add(snapshotRef);
           materializedRefsForCg = materializedRefs.size;
         }
@@ -1467,31 +1472,9 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         // runs already cached the blobs materializes them on the next pass
         // without refetching a byte.
         //
-        // Wired UNCONDITIONALLY. It used to be gated on
-        // `snapshotDescriptorsByRef.size > 0`, which looked like an optimisation
-        // and was the reason a whole class of Context Graph reported `0/N`
-        // snapshots for ever.
-        //
-        // The manifest and the descriptors come from different readers.
-        // `collectPublicSnapshotMetadata` accepts any subject carrying
-        // `dkg:publicQuadsDigest` + `dkg:publicQuadsCount`, while
-        // `parseGraphScopedSwmRecoveryDescriptors` anchors on `#dkg-swm-head`
-        // subjects only. An entity-level share writes its public slice under a
-        // `urn:dkg:public-stage:...` subject and no head row, so a CG written
-        // entirely by that path — the primary shared-memory write API — produces
-        // refs in the manifest and NO descriptors at all. The hook was then never
-        // wired, `materializeReadySnapshot` never ran, and the ref could not be
-        // counted resolved by any path.
-        //
-        // `snapshotsResolved < snapshotsTotal` therefore held permanently, so
-        // `capablePeersForNextPass` kept nominating a peer that owed us nothing,
-        // on every pass of every catch-up job, at O(KA size) per cached ref.
-        //
-        // Wiring it always is what makes the descriptor-less branch inside
-        // `materializeReadySnapshot` reachable, and that branch is where the
-        // vacuity decision — and its `manifestComplete` guard — actually lives.
-        // The hook still early-returns when the materializer or the store is
-        // absent, so this costs nothing when there is genuinely no wiring.
+        // Entity-level shares have no graph-scoped descriptor, so this hook
+        // must also run for an empty descriptor map. Manifest completeness and
+        // authoritative ownership decide whether such a ref can resolve.
         onSnapshotReady: async (snapshot: PublicSnapshotMetadata) => {
           await materializeReadySnapshot(snapshot.ref);
           recoveryBoundary.assertCurrent();

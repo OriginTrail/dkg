@@ -18,7 +18,7 @@ import {
   canonicalizeGraphScopedSwmHeadRows,
   type GraphScopedSwmRecoveryDescriptor,
 } from '../graph-scoped-swm-recovery.js';
-import { insertWithOversizeGuard, type OversizeGuardHooks } from
+import { type OversizeGuardHooks } from
   '../oversize-filter.js';
 import { insertKeepingOnePublishedAt } from '../swm-operation-published-at.js';
 import { sharedMemoryOwnershipKeyFromGraph } from '../shared-memory-graphs.js';
@@ -97,21 +97,10 @@ export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
     insert: async (quads) => {
       // A source's copy of an operation already held here, such as a
       // preserved winner, carries its own publishedAt; the operation keeps one.
-      let inserted = 0;
-      await insertKeepingOnePublishedAt(params.store, quads, async (rows) => {
-        const kept = await insertWithOversizeGuard(
-          (kept) => params.store.insert(kept, {
-            priority: 'background',
-            source: 'agent.swmRecovery.insert',
-          }),
-          rows,
-          { recordDrops: params.recordDrops },
-          'swm-recovery',
-        );
-        inserted = kept.length;
-        return kept;
-      }, 'agent.swmRecovery', (drops) => params.recordDrops(drops, 'swm-recovery'));
-      if (inserted > 0) {
+      const inserted = await insertKeepingOnePublishedAt(params.store, quads, {
+        source: 'agent.swmRecovery', seam: 'swm-recovery', recordDrops: params.recordDrops,
+      });
+      if (inserted.length > 0) {
         params.invalidateListContextGraphsCache();
       }
     },
