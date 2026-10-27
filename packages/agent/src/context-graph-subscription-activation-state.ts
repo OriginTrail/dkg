@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
-import type { ContextGraphSub, ContextGraphSubscriptionRecord } from './dkg-agent-types.js';
+import { accountSubscriptionChanges } from './context-graph-subscription-accounting.js';
+import { rehydratedSubscriptionReachedSafeState } from './context-graph-subscription-authority-recovery.js';
+import type { ContextGraphSub, ContextGraphSubscriptionRecord, ContextGraphSubscriptionRehydrationInternalStatus } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 
@@ -43,9 +45,21 @@ interface ActivationAttempt {
   readonly listeners: Set<() => void>;
 }
 
+export interface SubscriptionActivationPorts {
+  readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
+  readonly contextGraphSubscriptionDormancyById: Map<string, ContextGraphDormancyReason>;
+  readonly contextGraphSubscriptionRehydrationPendingIds: Set<string>;
+  readonly contextGraphSubscriptionRehydrationSlotIds: Set<string>;
+  readonly contextGraphSubscriptionRehydrationAccountedIds: Set<string>;
+  getStatus(): ContextGraphSubscriptionRehydrationInternalStatus | null;
+  setStatus(status: ContextGraphSubscriptionRehydrationInternalStatus): void;
+  publish(id: string): void;
+}
+
 /** Owns activation attempts and their outcomes. External handles carry identity only;
  * waiters never load or reinterpret durable intent or mutate attempt phases. */
 export class ContextGraphSubscriptionActivations {
+  constructor(private readonly ports: SubscriptionActivationPorts) {}
   private readonly pending = new Map<string, ActivationAttempt>();
   reset(rows: readonly ContextGraphSubscriptionRecord[], dormancy: Map<string, ContextGraphDormancyReason>): void {
     for (const id of this.pending.keys()) this.cancel(id);
@@ -102,13 +116,22 @@ export class ContextGraphSubscriptionActivations {
       && sameIntent(attempt.intent, row) && isContextGraphSubscriptionStoredAgain(phase.subscription, live))
       attempt.repaired = { ...row };
   }
-  complete(id: string, live: ContextGraphSub, dormancy: Map<string, ContextGraphDormancyReason>, account: (transition: SubscriptionDormancyTransition) => void): boolean {
+  /** One owner commits bookkeeping, settles waiters, then publishes activation. */
+  finalize(id: string, claimRollingSlot: boolean): void {
+    const ports = this.ports, live = ports.subscribedContextGraphs.get(id);
     const attempt = this.pending.get(id), phase = attempt?.phase;
-    if (!attempt || phase?.kind !== 'ready' || !isContextGraphSubscriptionStoredAgain(phase.subscription, live)
-      || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live)) return false;
-    account(applyDormancy(dormancy, id, undefined));
+    if (!live || (!live.subscribed && !live.coreHosted) || !attempt || phase?.kind !== 'ready'
+      || !isContextGraphSubscriptionStoredAgain(phase.subscription, live)
+      || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live)) return;
+    const dormancy = applyDormancy(ports.contextGraphSubscriptionDormancyById, id, undefined);
+    ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+    if (claimRollingSlot && !live.coreHosted && !rehydratedSubscriptionReachedSafeState(live))
+      ports.contextGraphSubscriptionRehydrationSlotIds.add(id);
+    const status = ports.getStatus();
+    if (status) ports.setStatus(accountSubscriptionChanges(status, ports.contextGraphSubscriptionRehydrationAccountedIds,
+      [{ dormancy, kind: 'saved', persisted: true, active: true, hosted: live.coreHosted === true }]));
     this.settle(attempt, { kind: 'committed', subscription: live });
-    return true;
+    ports.publish(id);
   }
   wait(id: string, signal: AbortSignal): Promise<ActivationOutcome> {
     const attempt = this.pending.get(id);
@@ -128,11 +151,11 @@ export class ContextGraphSubscriptionActivations {
 
 /** Await the lifecycle's existing activation within the caller's original lifetime.
  * Denied, disabled and capped subscriptions retain their existing inactive behavior. */
-export async function waitForSubscriptionActivation(
+export function waitForSubscriptionActivation(
   workLifetime: AgentWorkLifetime, isStarted: () => boolean,
   subscriptions: ReadonlyMap<string, ContextGraphSub>, dormancy: Dormancy,
   id: string, caller: AbortSignal, activations: ContextGraphSubscriptionActivations,
-): Promise<void> {
+): Promise<void> | undefined {
   if (dormancy.get(id) !== 'authorityUnavailable') return;
   const generation = workLifetime.generation;
   const signal = AbortSignal.any([caller, workLifetime.signal]);
@@ -140,12 +163,13 @@ export async function waitForSubscriptionActivation(
     if (signal.aborted || generation !== workLifetime.generation || !isStarted()) throw changed();
   };
   assertCurrent();
-  const outcome = await workLifetime.track(activations.wait(id, signal));
-  assertCurrent();
-  const live = subscriptions.get(id);
-  // Preserve the caller's inactive-subscription error after an explicit unsubscribe.
-  if (live && !live.subscribed && !live.coreHosted && dormancy.get(id) !== 'authorityUnavailable') return;
-  if (outcome.kind !== 'committed' || !live || dormancy.has(id)
-    || !isContextGraphSubscriptionStoredAgain(outcome.subscription, live)
-    || !contextGraphSubscriptionAdmissionPremisesEqual(outcome.subscription, live)) throw changed();
+  return workLifetime.track(activations.wait(id, signal)).then(outcome => {
+    assertCurrent();
+    const live = subscriptions.get(id);
+    // Preserve the caller's inactive-subscription error after an explicit unsubscribe.
+    if (live && !live.subscribed && !live.coreHosted && dormancy.get(id) !== 'authorityUnavailable') return;
+    if (outcome.kind !== 'committed' || !live || dormancy.has(id)
+      || !isContextGraphSubscriptionStoredAgain(outcome.subscription, live)
+      || !contextGraphSubscriptionAdmissionPremisesEqual(outcome.subscription, live)) throw changed();
+  });
 }

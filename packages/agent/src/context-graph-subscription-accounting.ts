@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import type { SubscriptionDormancyTransition } from './context-graph-subscription-activation-state.js';
 import type { ContextGraphSubscriptionRehydrationInternalStatus } from './dkg-agent-types.js';
 
@@ -16,6 +17,7 @@ export function accountSubscriptionChanges(
   const hosted = new Set(status.hostedActivatedIds ?? []);
   for (const change of changes) {
     const { id, before, after } = change.dormancy;
+    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)) continue;
     const wasPersisted = accounted.has(id);
     const wasActive = wasPersisted && before === undefined;
     const isPersisted = change.kind === 'saved' ? change.persisted : change.kind === 'deactivated' && wasPersisted;

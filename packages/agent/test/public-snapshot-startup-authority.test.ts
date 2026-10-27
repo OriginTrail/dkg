@@ -1,4 +1,4 @@
-import { ContextGraphSubscriptionActivations } from '../src/context-graph-subscription-activation-state.js';
+import { createTestSubscriptionActivations } from './_helpers/subscription-activation-owner.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -18,7 +18,6 @@ function fixture() {
   }); };
   const a: any = {
     started: true, workLifetime: new AgentWorkLifetime(),
-    contextGraphSubscriptionActivations: new ContextGraphSubscriptionActivations(),
     subscribedContextGraphs: new Map([[graph, active()]]),
     contextGraphSubscriptionDormancyById: new Map([[graph, 'authorityUnavailable']]),
     waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
@@ -27,6 +26,7 @@ function fixture() {
     router: { send: vi.fn(async () => Buffer.from(JSON.stringify(snapshot()))) },
     store: { insert: vi.fn(async () => {}) },
   };
+  a.contextGraphSubscriptionActivations = createTestSubscriptionActivations(a);
   a.contextGraphSubscriptionActivations.observe({ id: graph, subscribed: true, syncScoped: true, synced: false, metaSynced: false, sharedMemorySynced: false, onChainId: '1', onChainHash: ethers.id(graph) });
   a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;
   const replace = (next: ReturnType<typeof active>) => {
@@ -45,7 +45,7 @@ function coldIntent(a: any) {
 function finish(a: any) {
   const owner = a.contextGraphSubscriptionActivations, row = a.subscribedContextGraphs.get(graph);
   a.contextGraphSubscriptionDormancyById.delete(graph);
-  if (row?.subscribed) { owner.stage(owner.get(graph), row); owner.complete(graph, row, a.contextGraphSubscriptionDormancyById, () => undefined); }
+  if (row?.subscribed) { owner.stage(owner.get(graph), row); owner.finalize(graph, false); }
   else owner.cancel(graph);
 }
 const run = (a: any, signal?: AbortSignal) => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a,

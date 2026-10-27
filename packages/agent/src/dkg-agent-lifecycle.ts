@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { accountSubscriptionChanges, type SubscriptionAccountingChange } from './context-graph-subscription-accounting.js';
-import { finalizePersistedSubscriptionActivation } from './context-graph-subscription-activation-finalization.js';
 import { isCommittedSubscription, waitForSubscriptionActivation } from './context-graph-subscription-activation-state.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
@@ -7896,7 +7895,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       && contextGraphSubscriptionRowsEqual(previous, nextRow)
       ? previous
       : nextRow;
-    if (previous !== undefined && canonicalNext !== previous) {
+    // Ending or replacing admission retires in-flight owners even if an
+    // unsubscribe/resubscribe restores identical fields in the same turn.
+    if (previous !== undefined && canonicalNext !== previous
+      && previous.subscribed === canonicalNext.subscribed
+      && (previous.coreHosted === true) === (canonicalNext.coreHosted === true)) {
       continueContextGraphSubscriptionLine(previous, canonicalNext);
     }
     const retainsInactiveBinding = retainsInactiveContextGraphBinding(previous, canonicalNext);
@@ -8848,7 +8851,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** Await an in-flight authority activation within the caller's existing lifetime. */
-  waitForContextGraphSubscriptionActivation(this: DKGAgent, id: string, signal: AbortSignal): Promise<void> {
+  waitForContextGraphSubscriptionActivation(this: DKGAgent, id: string, signal: AbortSignal): Promise<void> | undefined {
     return waitForSubscriptionActivation(this.workLifetime, () => this.started, this.subscribedContextGraphs, this.contextGraphSubscriptionDormancyById, id, signal, this.contextGraphSubscriptionActivations);
   }
 
@@ -8911,14 +8914,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /** Finalize the owner's committed activation before notifying synchronous listeners. */
   finalizePersistedContextGraphSubscriptionActivation(this: DKGAgent, contextGraphId: string, claimRollingSlot: boolean): void {
-    finalizePersistedSubscriptionActivation({
-      subscribedContextGraphs: this.subscribedContextGraphs,
-      contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
-      contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
-      accountContextGraphSubscriptionTransitions: this.accountContextGraphSubscriptionTransitions.bind(this),
-      completeActivation: (id, row, finalize) => this.contextGraphSubscriptionActivations.complete(id, row, this.contextGraphSubscriptionDormancyById, finalize),
-    }, contextGraphId, claimRollingSlot,
-      id => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }));
+    this.contextGraphSubscriptionActivations.finalize(contextGraphId, claimRollingSlot);
   }
 
   /**

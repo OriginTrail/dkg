@@ -1,3 +1,4 @@
+import { createTestSubscriptionActivations } from './_helpers/subscription-activation-owner.js';
 // SPDX-License-Identifier: Apache-2.0
 import { expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -8,7 +9,6 @@ import type { ContextGraphSub, ContextGraphSubscriptionRecord } from '../src/dkg
 function fixture() {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.assign(agent, {
-    contextGraphSubscriptionActivations: new ContextGraphSubscriptionActivations(),
     contextGraphSubscriptionDormancyById: new Map(),
     contextGraphSubscriptionRehydrationAccountedIds: new Set(),
     contextGraphSubscriptionRehydrationPendingIds: new Set(),
@@ -19,6 +19,7 @@ function fixture() {
     clearContextGraphSubscriptionPersistRevisionStateIfIdle: vi.fn(),
     eventBus: { emit: vi.fn() },
   });
+  agent.contextGraphSubscriptionActivations = createTestSubscriptionActivations(agent);
   return agent;
 }
 const intent = (id: string): ContextGraphSubscriptionRecord => ({ id, subscribed: true, synced: false, syncScoped: true });
@@ -35,14 +36,16 @@ it('accounts persistence and activation from captured transitions after dormancy
   owner.install(handle, live); owner.stage(handle, live);
   agent.subscribedContextGraphs.set(id, live);
   const wait = owner.wait(id, new AbortController().signal);
-  const account = agent.accountContextGraphSubscriptionTransitions.bind(agent);
+  let status = agent.contextGraphSubscriptionRehydrationStatus;
   const observations: unknown[] = [];
-  vi.spyOn(agent, 'accountContextGraphSubscriptionTransitions').mockImplementation((changes: unknown) => {
-    // The old reporting-before-mutation contract cannot satisfy this observation.
-    observations.push({ dormancy: agent.contextGraphSubscriptionDormancyById.get(id),
-      pending: agent.contextGraphSubscriptionRehydrationPendingIds.has(id),
-      slot: agent.contextGraphSubscriptionRehydrationSlotIds.has(id), owner: owner.get(id) === handle });
-    account(changes);
+  Object.defineProperty(agent, 'contextGraphSubscriptionRehydrationStatus', {
+    get: () => status,
+    set: next => {
+      observations.push({ dormancy: agent.contextGraphSubscriptionDormancyById.get(id),
+        pending: agent.contextGraphSubscriptionRehydrationPendingIds.has(id),
+        slot: agent.contextGraphSubscriptionRehydrationSlotIds.has(id), owner: owner.get(id) === handle });
+      status = next;
+    },
   });
   const atEvent: unknown[] = [];
   agent.eventBus.emit.mockImplementation(() => atEvent.push({ status: agent.getContextGraphSubscriptionRehydrationStatus(),

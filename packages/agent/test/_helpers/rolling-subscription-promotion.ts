@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { finalizePersistedSubscriptionActivation, type PersistedSubscriptionFinalizationPorts } from '../../src/context-graph-subscription-activation-finalization.js';
+import { createTestSubscriptionActivations } from './subscription-activation-owner.js';
 // Shared by the Hardhat fence suite and the hermetic request-lane suite.
 import { vi } from 'vitest';
 import { RollingSubscriptionChecks } from '../../src/context-graph-subscription-rolling-checks.js';
@@ -56,7 +56,7 @@ export function createRollingPromotionFixture(
     }, row, onChainId, isCurrent),
     wakeAuthorityRecovery: () => wakeDeferredContextGraphSubscriptionAuthorityRecovery(host.contextGraphSubscriptionAuthorityRecoveryRuntime),
     config: { contextGraphSubscriptionStore: { load, loadAll: async () => [...savedRows.values()] } },
-    contextGraphSubscriptionRehydrationStatus: { rehydrationEnabled: true, activationCap: options.cap ?? 64 },
+    contextGraphSubscriptionRehydrationStatus: { rehydrationEnabled: true, activationCap: options.cap ?? 64, persistedTotal: rows.length, activated: 0, hostedActivated: 0, hostedActivatedIds: [] as string[] },
     contextGraphSubscriptionRehydrationPromotionRuntime: runtime,
     contextGraphSubscriptionAuthorityRecoveryRuntime: undefined,
     contextGraphSubscriptionRollingChecks: options.checks ?? new RollingSubscriptionChecks({ minPauseMs: 0, pausePerCheckTime: 0 }),
@@ -70,9 +70,14 @@ export function createRollingPromotionFixture(
     touchStatus: vi.fn(),
     activated: vi.fn<(id: string) => void>(),
     transitionDormancy: (id: string, reason: ContextGraphDormancyReason | undefined) => { if (reason === undefined) host.contextGraphSubscriptionDormancyById.delete(id); else host.contextGraphSubscriptionDormancyById.set(id, reason); },
-    finalizeActivation: (id: string) => finalizePersistedSubscriptionActivation({ ...host, completeActivation: (key, _row, account) => { const before = host.contextGraphSubscriptionDormancyById.get(key); host.contextGraphSubscriptionDormancyById.delete(key); account({ id: key, before, after: undefined }); return true; } }, id, true, host.activated),
+    finalizeActivation: (id: string) => {
+      const live = host.subscribedContextGraphs.get(id);
+      if (!live) return;
+      const handle = activations.observe(savedRows.get(id)!);
+      activations.stage(handle, live);
+      activations.finalize(id, true);
+    },
     recordContextGraphSubscriptionClear: vi.fn<RollingSubscriptionPromotionPorts['recordContextGraphSubscriptionClear']>(),
-    accountContextGraphSubscriptionTransitions: vi.fn<PersistedSubscriptionFinalizationPorts['accountContextGraphSubscriptionTransitions']>(),
     persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionActivationPorts['persistBinding']>(async () => undefined),
     reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationPorts['reconcile']>(async () => undefined),
     resolveContextGraphSubscriptionBootstrapAuthority: vi.fn<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>(options.answer ?? (async () => options.authority === 'unavailable'
@@ -84,6 +89,7 @@ export function createRollingPromotionFixture(
       host.subscribedContextGraphs.set(row.id, promotionSubscription({ subscribed: row.subscribed, coreHosted: row.coreHosted, metaSynced: false, pendingMeta: false }));
     })),
   };
+  const activations = createTestSubscriptionActivations(host);
   return { agent: host, load } satisfies { agent: RollingSubscriptionPromotionPorts; load: typeof load };
 }
 

@@ -110,7 +110,11 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     try {
       // Subscription lifecycle owns provisional state and the abortable wait.
       // Its wait consumes this job's original deadline and issues no RPC.
-      try { await this.waitForContextGraphSubscriptionActivation(contextGraphId, signal); }
+      try {
+        const activation = this.waitForContextGraphSubscriptionActivation(contextGraphId, signal);
+        // A committed subscription must capture ownership in this same turn.
+        if (activation) await activation;
+      }
       catch (cause) { throw new Error('Snapshot job ownership changed', { cause }); }
       const subscription = this.subscribedContextGraphs.get(contextGraphId);
       if (subscription && (!subscription.subscribed && !subscription.coreHosted))

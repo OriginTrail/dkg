@@ -49,6 +49,35 @@ function fixture() {
 }
 const run = (a: any, mode: 'core-cache' | 'rpc-only') => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode});
 describe('public snapshot job ownership', () => {
+  it.each(['clear', 'unsubscribe-resubscribe'] as const)('a same-tick %s retires an already-active snapshot owner', async action => {
+    const chain = new MockChainAdapter();
+    Object.defineProperties(chain, { chainId: { value: 'evm:31337' }, deploymentId: { value: 'test' } });
+    const read = vi.fn(async () => snapshot());
+    Object.assign(chain, { readPublicGraphSnapshot: read });
+    const agent = await DKGAgent.create({ name: 'same-tick-snapshot-owner', listenHost: '127.0.0.1', listenPort: 0,
+      chainAdapter: chain, randomSamplingUseWorkerThread: false,
+      syncOnConnectEnabled: false, syncReconcilerEnabled: false, vmReconcilerEnabled: false });
+    try {
+      await agent.start();
+      agent.setContextGraphSubscription(graph, { subscribed: true, synced: false, syncMode: 'on-demand', onChainId: '1' }, { persist: false });
+      const insert = vi.spyOn((agent as any).store, 'insert');
+      const admit = vi.spyOn(agent, 'setContextGraphSubscription');
+      const pending = run(agent, 'rpc-only');
+      const rejection = expect(pending).rejects.toThrow('Snapshot job ownership changed');
+      // No yield between starting the snapshot and the operator mutation.
+      if (action === 'clear') await agent.clearContextGraphSubscriptions();
+      else {
+        agent.unsubscribeFromContextGraph(graph, { persist: false });
+        agent.setContextGraphSubscription(graph, { subscribed: true, synced: false, syncMode: 'on-demand', onChainId: '1' }, { persist: false });
+      }
+      const callsAfterOperator = admit.mock.calls.length;
+      await rejection;
+      expect(admit).toHaveBeenCalledTimes(callsAfterOperator);
+      expect(insert).not.toHaveBeenCalled();
+      if (action === 'clear') expect(agent.getSubscribedContextGraphs().has(graph)).toBe(false);
+    } finally { await agent.stop(); }
+  });
+
   it.each(['always-on', 'on-demand', 'core-hosted', 'inactive-core-hosted'] as const)('saves the complete binding according to %s intent after an empty job', async intent => {
     const saved = new Map<string, ContextGraphSubscriptionRecord>();
     const persistence = {

@@ -1515,7 +1515,6 @@ export class DKGAgentBase {
   /** Canonical dormant classification; public status arrays are projections. */
   protected readonly contextGraphSubscriptionDormancyById =
     new Map<string, ContextGraphDormancyReason>();
-  protected readonly contextGraphSubscriptionActivations = new ContextGraphSubscriptionActivations();
   /** Detached owner for post-readiness persisted-subscription authority recovery. */
   protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
     CoalescingRecurringTask;
@@ -1529,6 +1528,16 @@ export class DKGAgentBase {
   /** Which waiting row rolling activation checks next, and how soon; made anew when a start retires the runtime before. */
   protected contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
+  protected readonly contextGraphSubscriptionActivations = new ContextGraphSubscriptionActivations({
+    subscribedContextGraphs: this.subscribedContextGraphs,
+    contextGraphSubscriptionDormancyById: this.contextGraphSubscriptionDormancyById,
+    contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
+    contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
+    contextGraphSubscriptionRehydrationAccountedIds: this.contextGraphSubscriptionRehydrationAccountedIds,
+    getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
+    setStatus: status => { this.contextGraphSubscriptionRehydrationStatus = status; },
+    publish: id => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }),
+  });
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
