@@ -785,6 +785,19 @@ describe('repeated rows of one subject in the scan (review of P10a: equal-compar
     expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(3);
   });
 
+  it.each(['delete', 'report'] as const)('%s mode: a subject whose index holds two DISTINCT updatedAt values (the queue cannot write that) cannot stall a pass either', async mode => {
+    const store = new OxigraphStore();
+    const twoValues = serializeJobRecord(mk('odd', 'failed', { reason: 'cancelled' }, NOW - 100), GRAPH).jobQuads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? [q, { ...q, object: integer(300) }] : [q]));
+    await insertQuads(store, [...twoValues, ...serializeJobRecord(mk('after', 'succeeded', {}, NOW - 400), GRAPH).jobQuads]);
+    const retention = newRetention(store, { mode, batchSize: 1 });
+    const results = await calls(retention);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.reduce((n, r) => n + r.scanned, 0)).toBe(mode === 'delete' ? 2 : 3);                                       // report judges the subject at each of its values
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(mode === 'delete' ? 2 : 0);
+    expect((await storedIds(store)).size).toBe(mode === 'delete' ? 0 : 2);
+  });
+
   it('an engine that repeats every row of a scan answer (within its LIMIT) is no obstacle: rows are judged once, the walk advances, no anomaly', async () => {
     const store = new OxigraphStore();
     await insertQuads(store, Array.from({ length: 9 }, (_, i) => rowOf('succeeded', `d-${i}`, i < 5 ? 10 * W : 10 * W + 1000 * i)).flat());   // a group of five, then four distinct rows
