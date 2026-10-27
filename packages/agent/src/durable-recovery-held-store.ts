@@ -5,7 +5,7 @@ import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { ProveHeldAssets } from './sync/requester/held-assets-contracts.js';
 import { graphScopedDurableManifestPrefixAtOffset } from './sync/durable-integrity.js';
 import type { StoredDurablePrefix } from './sync/requester/durable-prefix-proof.js';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { LOCAL_TRUSTED_KA_CONTROLS_GRAPH, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { StoreContentFence } from './internal/store-content-fence.js';
 import { readHeldGraphScopedAssets } from './sync/requester/stored-graph-assets.js';
@@ -20,7 +20,7 @@ export function createDurableHeldStore(
   if (!fence) return undefined;
   return {
     prove: async request => {
-      const proof = fence.openScope({ assertionGraphs: request.descriptors.map(d => d.assertionGraph),
+      const proof = fence.openScope({ graphs: [...request.descriptors.map(d => d.assertionGraph), LOCAL_TRUSTED_KA_CONTROLS_GRAPH],
         metadataGraph: contextGraphMetaUri(request.contextGraphId), subjects: request.descriptors.map(d => d.ual) });
       if (!proof) return undefined;
       try {
