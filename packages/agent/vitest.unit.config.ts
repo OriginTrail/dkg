@@ -18,6 +18,7 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/recipient-key-route-scopes.test.ts",
       "test/write-preflight-attribution.test.ts",
       // S4a: which writes move the policy generation, what makes two probe calls interchangeable.
       "test/write-preflight-generation.test.ts",
