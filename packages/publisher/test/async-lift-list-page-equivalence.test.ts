@@ -12,6 +12,7 @@
  *  2. Membership. Does a walk of pages hold exactly the jobs `list(filter)` returns, in the page order, once each?
  *  3. Stats. Does the COUNT tally what the list-based tally it replaces did?
  *  4. Corrupted rows. Does a job stored with a repeated status or payload triple still walk once, in order?
+ *  5. The status. Does the status bound in the triple pattern select what `FILTER (?status = ...)` selected?
  *
  * Each runs over a fixed mixed inventory and as a property over random ones (100 cases per run, 1,000 nightly).
  */
@@ -20,6 +21,7 @@ import fc from 'fast-check';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import {
+  CONTROL_ACCEPTED_AT,
   CONTROL_CONTEXT_GRAPH_ID,
   CONTROL_HAS_REQUEST,
   CONTROL_PAYLOAD,
@@ -349,4 +351,54 @@ describe('publisher job page: a repeated status or payload triple changes no wal
     expect(stats.repeated).toBeGreaterThan(options.numRuns / 2);   // most cases carried a repeat
     expect(stats.multiPage).toBeGreaterThan(0);
   }, 300_000);
+});
+
+describe('publisher job page: the status bound in the pattern is the status filter it replaced', () => {
+  /** The key read as it was written before the status was bound: a variable that a FILTER compares afterwards. */
+  async function filterFormIds(store: OxigraphStore, filter: JobFilter): Promise<string[]> {
+    const conditions = [`FILTER (STRSTARTS(STR(?job), ${literal(jobSubject(''))}))`];
+    if (filter.status !== undefined) conditions.push(`FILTER (?status = ${literal(filter.status)})`);
+    if (filter.contextGraphId !== undefined) {
+      conditions.push(
+        `?job <${CONTROL_HAS_REQUEST}> ?request . ?request <${CONTROL_CONTEXT_GRAPH_ID}> ${literal(filter.contextGraphId)} .`,
+        `FILTER NOT EXISTS { ?request <${CONTROL_SWM_ID}> ?swmId }`,
+      );
+    }
+    const result = await store.query(`SELECT ?job WHERE { GRAPH <${GRAPH}> {
+      ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_ACCEPTED_AT}> ?acceptedAt ; <${CONTROL_PAYLOAD}> ?stored .
+      ${conditions.join('\n')}
+    } } ORDER BY ?acceptedAt STR(?job)`);
+    if (result.type !== 'bindings') throw new Error('expected bindings');
+    // The old form returned a job once per matching row; a job with two status triples is one job.
+    return [...new Set(result.bindings.map((row) => row['job']!.slice(jobSubject('').length)))];
+  }
+
+  it('selects the same jobs in the same order for every status and graph filter, with jobs that carry a second status triple', async () => {
+    const specs = fixedSpecs();
+    const { store } = await inventory(specs);
+    await store.insert([
+      { subject: jobSubject('vm-accepted-cg-a'), predicate: CONTROL_STATUS, object: literal('failed'), graph: GRAPH },
+      { subject: jobSubject('vm-finalized-cg-b'), predicate: CONTROL_STATUS, object: literal('accepted'), graph: GRAPH },
+      { subject: jobSubject('raw-claimed-cg-c'), predicate: CONTROL_STATUS, object: literal('finalized'), graph: GRAPH },
+    ]);
+    let compared = 0;
+    for (const status of [...STATUSES, 'validated' as const, 'broadcast' as const, 'included' as const]) {
+      for (const contextGraphId of [undefined, ...GRAPHS, 'cg-none']) {
+        const filter: JobFilter = { ...(status ? { status } : {}), ...(contextGraphId ? { contextGraphId } : {}) };
+        const legacy = await filterFormIds(store, filter);
+        expect(await preFilterIds(store, filter), JSON.stringify(filter)).toEqual(legacy);
+        if (legacy.length > 0) compared += 1;
+      }
+    }
+    expect(compared).toBe(20);   // (4 populated statuses + no status) x (unscoped + 3 graphs); the other combinations are empty
+  });
+
+  it('reads a job under each of its statuses and a hostile status as no status at all', async () => {
+    const { store, publisher } = await inventory(fixedSpecs());
+    await store.insert([{ subject: jobSubject('vm-accepted-cg-a'), predicate: CONTROL_STATUS, object: literal('failed'), graph: GRAPH }]);
+    expect((await walkPages(publisher, { status: 'failed', contextGraphId: 'cg-a' })).ids).toContain('vm-accepted-cg-a');
+    expect((await walkPages(publisher, { status: 'accepted', contextGraphId: 'cg-a' })).ids).toContain('vm-accepted-cg-a');
+    expect((await walkPages(publisher, { status: 'finalized' as never, contextGraphId: 'cg-a' })).ids).not.toContain('vm-accepted-cg-a');
+    expect(await publisher.listPage({ status: 'accepted" . ?s ?p ?o #' as never })).toEqual({ jobs: [], nextCursor: null, complete: true });
+  });
 });

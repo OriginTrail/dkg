@@ -230,8 +230,18 @@ describe('publisher job page: the query', () => {
     const inner = query.slice(query.indexOf('{ SELECT'), query.indexOf('LIMIT 4'));
     expect(inner).not.toContain('?payload');
     expect(query.slice(query.indexOf('LIMIT 4'))).toContain(`<${CONTROL_PAYLOAD}> ?payload`);
-    expect(query).toContain(`FILTER (?status = ${literal('failed')})`);
     expect(query).toContain(literal('cg-a'));
+  });
+
+  it('binds the status as the constant object of the triple pattern, so the engine can range-scan it, rather than filtering it afterwards', () => {
+    const bound = buildLiftJobPageQuery(GRAPH, { ...base, status: 'failed' });
+    expect(bound).toContain(`?job <${CONTROL_STATUS}> ${literal('failed')} ;`);
+    expect(bound).not.toMatch(/FILTER \(\?status/);
+    expect(bound).not.toContain('?status');
+    // Without a status the pattern only asks that a status triple exist, as before.
+    const open = buildLiftJobPageQuery(GRAPH, base);
+    expect(open).toContain(`?job <${CONTROL_STATUS}> ?status ;`);
+    expect(open).not.toContain(literal('failed'));
   });
 
   it('keeps the inner select DISTINCT: a job stored with a repeated status or payload triple is one candidate, not two', () => {

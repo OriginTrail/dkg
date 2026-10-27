@@ -96,11 +96,15 @@ export interface LiftJobPageQueryParams {
  * joined on only for those rows. Keyset: no `OFFSET`, so a deep page costs the same as the first. The scan is
  * proportional to the jobs that match the filters, not to the page. The inner select is DISTINCT so that a job stored
  * with a repeated triple is one candidate for the `LIMIT` (see REPEATED TRIPLES above).
+ *
+ * A status filter is the constant object of the status triple pattern (`?job <status> "failed"`), as the claim
+ * selectors write theirs, and not a `FILTER (?status = ...)` over every job's status: an engine can then range-scan
+ * the status index for the jobs in that state instead of enumerating all of them to drop most. It selects the same
+ * jobs (the stored status is a plain string literal, written by the same `literal()`).
  */
 export function buildLiftJobPageQuery(graphUri: string, params: LiftJobPageQueryParams): string {
   const { status, contextGraphId, after, limit } = params;
   const conditions: string[] = [`FILTER (STRSTARTS(STR(?job), ${literal(SUBJECT_PREFIX)}))`];
-  if (status !== undefined) conditions.push(`FILTER (?status = ${literal(status)})`);
   if (contextGraphId !== undefined) {
     conditions.push(
       `?job <${CONTROL_HAS_REQUEST}> ?request . ?request <${CONTROL_CONTEXT_GRAPH_ID}> ${literal(contextGraphId)} .`,
@@ -114,7 +118,7 @@ export function buildLiftJobPageQuery(graphUri: string, params: LiftJobPageQuery
   }
   return `SELECT ?job ?acceptedAt ?payload WHERE {
   { SELECT DISTINCT ?job ?acceptedAt WHERE { GRAPH <${graphUri}> {
-      ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_ACCEPTED_AT}> ?acceptedAt ; <${CONTROL_PAYLOAD}> ?stored .
+      ?job <${CONTROL_STATUS}> ${status === undefined ? '?status' : literal(status)} ; <${CONTROL_ACCEPTED_AT}> ?acceptedAt ; <${CONTROL_PAYLOAD}> ?stored .
       ${conditions.join('\n      ')}
   } } ORDER BY ?acceptedAt STR(?job) LIMIT ${limit + 1} }
   GRAPH <${graphUri}> { ?job <${CONTROL_PAYLOAD}> ?payload }
