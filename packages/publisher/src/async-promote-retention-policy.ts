@@ -82,19 +82,27 @@ export function emptyClassCounts(): Record<PromoteRetentionJobClass, number> {
   return { succeeded: 0, cancelled: 0, retired_no_effect: 0 };
 }
 
+/** Absent, or exactly an integer of 0 up to (not including) the first format that stores all five marker flags. `Object.is` keeps `-0` out: it is `=== 0`, but it is no value a writer produced. */
+function isPreMarkerFormat(version: unknown): boolean {
+  if (version === undefined) return true;
+  return typeof version === 'number' && Number.isInteger(version) && !Object.is(version, -0) && version >= 0 && version < ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION;
+}
+
 /**
  * The commit marker of a benign-class candidate is evidence the class rests on (`promoteStarted`, `swmInserted`), so every flag it holds must be a boolean. The
  * shared classifier checks four of the five and lets a bad `promoteStarted` through, and this gate does not lean on it for any of them. Absent is not bad: a job
  * that never ran has no marker. Only a row written before format 2 may have a marker without `promoteStarted` (the parser accepts it, so does retention); from
  * format 2 on every writer stores all five flags, so a missing one there is a mangled key, not history, and says nothing about whether promote started.
+ * "Before format 2" is exact: `formatVersion` ABSENT, or exactly the integer 0 or 1. Anything else proves nothing about the row, and "any number below 2" is
+ * too wide: -1, 1.5, -0, 1e-300 and -Infinity (the JSON text -1e999) are all below 2 and none is a format a writer produced; nor are a string, `null` or an
+ * object. The parser does not validate `formatVersion`, so this gate does, and every other shape keeps the job.
  */
 function hasReadableCommitMarker(job: StructurallyValidPromoteJobPayload): boolean {
   const marker: unknown = job.commitMarker;
   if (marker === undefined) return true;
   if (typeof marker !== 'object' || marker === null) return false;
   const flags = marker as Record<string, unknown>;
-  const version: unknown = job.formatVersion;
-  const legacy = version === undefined || (typeof version === 'number' && version < ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION);
+  const legacy = isPreMarkerFormat(job.formatVersion);
   return PROMOTE_COMMIT_MARKER_STEPS.every(step => (flags[step] === undefined ? step === 'promoteStarted' && legacy : typeof flags[step] === 'boolean'));
 }
 

@@ -9,7 +9,7 @@ import { decidePromoteRetention } from '../src/async-promote-retention-policy.js
 import { SHARE_RETENTION_DEFAULTS, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import {
   AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, W, WF, binding, noPending,
-  decide, deletedSubjects, drain, insertQuads, mk, newRetention, pick, present, put, registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, from,
+  decide, decideText, deletedSubjects, drain, insertQuads, mk, newRetention, pick, present, put, parseText, payloadWithFormatVersion, registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, from,
   captureLogger, policy, standInForTheQueue, type Kind, type Quads, type QueryResult,
 } from './_helpers/share-retention-fixtures.js';
 
@@ -802,6 +802,63 @@ describe('a missing promoteStarted is a legacy shape only before format 2, and a
     for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
     expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: readable.length, retired_no_effect: 0 });
     expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: readable.length }, kept: { unreadable: unreadable.length, failed_retained: contradictory.length } });
+  });
+});
+
+describe('the legacy carve-out is exactly formatVersion absent, 0 or 1 (third review of P10a: a number below 2 is not a legacy format)', () => {
+  /** The marker of a row written before format 2: every flag but `promoteStarted`. */
+  const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
+  const cancelled = (id: string, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', commitMarker: LEGACY, ...over });
+  // JSON numbers as the parser reads them from the stored payload text. `JSON.stringify` writes -0 as 0 and -Infinity as null, so the text is built by hand.
+  const NOT_LEGACY: ReadonlyArray<[string, string, number]> = [
+    ['-1', '-1', -1], ['1.5', '1.5', 1.5], ['-0', '-0', -0], ['1e-300', '1e-300', 1e-300], ['-Infinity (the text -1e999)', '-1e999', Number.NEGATIVE_INFINITY],
+  ];
+
+  it.each(NOT_LEGACY)('keeps a cancelled job whose formatVersion is %s and whose marker has no promoteStarted, however old (unreadable)', (_label, text, value) => {
+    const payload = payloadWithFormatVersion(cancelled('odd'), text);
+    expect(Object.is(parseText(payload).formatVersion, value), 'the parser reads the number the case names').toBe(true);
+    expect(decideText(payload)).toEqual({ delete: false, reason: 'unreadable' });
+    expect(decideText(payload, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  it.each([['0', '0', 0], ['1', '1', 1]])('still deletes a cancelled job of format %s with the legacy marker (the integers below 2)', (_label, text, value) => {
+    const payload = payloadWithFormatVersion(cancelled('legacy'), text);
+    expect(Object.is(parseText(payload).formatVersion, value)).toBe(true);
+    expect(decideText(payload)).toEqual({ delete: true, jobClass: 'cancelled' });
+  });
+
+  it('still deletes a cancelled job with no formatVersion at all and the legacy marker', () => {
+    const payload = JSON.stringify(cancelled('absent', { formatVersion: undefined }));
+    expect(payload).not.toContain('formatVersion');
+    expect(parseText(payload).formatVersion).toBeUndefined();
+    expect(decideText(payload)).toEqual({ delete: true, jobClass: 'cancelled' });
+  });
+
+  it('only the missing promoteStarted is affected: a complete marker is read the same at any formatVersion', () => {
+    for (const [, text] of NOT_LEGACY) expect(decideText(payloadWithFormatVersion(cancelled('full', { commitMarker: NO_MARKERS }), text)), text).toEqual({ delete: true, jobClass: 'cancelled' });
+  });
+
+  it('a delete sweep over the real store leaves every one of those jobs untouched and deletes the legacy ones; a report sweep counts exactly those', async () => {
+    const stored = (job: PromoteJob, text?: string): Quads => serializeJobRecord(job, GRAPH).jobQuads.map(q => (q.predicate === PROMOTE_PAYLOAD && text !== undefined ? { ...q, object: literal(payloadWithFormatVersion(job, text)) } : q));
+    const odd = NOT_LEGACY.map(([, text], i) => ({ job: cancelled(`odd-${i}`), text }));
+    const legacy = [{ job: cancelled('fv-0'), text: '0' }, { job: cancelled('fv-1'), text: '1' }, { job: cancelled('fv-absent', { formatVersion: undefined }), text: undefined }];
+    const seed = async () => { const s = new OxigraphStore(); await insertQuads(s, [...odd, ...legacy].flatMap(({ job, text }) => stored(job, text))); return s; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 3 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: legacy.length, retired_no_effect: 0 }, kept: { unreadable: odd.length } });
+    expect((await storedIds(reportStore)).size).toBe(odd.length + legacy.length);
+
+    const store = await seed();
+    const before = new Map(await Promise.all(odd.map(async ({ job }) => [job.jobId, await present(store, job.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 3 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual(odd.map(({ job }) => job.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: legacy.length, retired_no_effect: 0 });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: legacy.length }, kept: { unreadable: odd.length } });
   });
 });
 

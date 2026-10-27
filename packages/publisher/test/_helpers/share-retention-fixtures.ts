@@ -53,6 +53,15 @@ export const POST_COMMIT_ERROR = { message: 'post-commit failure', retryable: fa
 export const parse = (j: PromoteJob) => { const r = classifyJobPayload(literal(JSON.stringify(j))); if (r.kind !== 'job') throw new Error('bad fixture'); return r.job; };
 export const decide = (j: PromoteJob, p: PromoteRetentionPolicy = policy, pending: (id: string) => boolean = noPending, now = NOW) => decidePromoteRetention(parse(j), now, p, pending);
 
+/**
+ * The payload TEXT of `j` with its `formatVersion` replaced by the JSON number `numberText`. `JSON.stringify` cannot write `-0` (it writes `0`) or `-Infinity` (it writes
+ * `null`), and the parser reads `-0` and `-1e999` as exactly those values: the text is how such a number reaches the policy.
+ */
+export const payloadWithFormatVersion = (j: PromoteJob, numberText: string): string => JSON.stringify({ ...j, formatVersion: '__FORMAT_VERSION__' }).replace('"__FORMAT_VERSION__"', numberText);
+/** `decide`, from the stored payload text (the way the sweep reads a job under the lock). */
+export const parseText = (payload: string) => { const r = classifyJobPayload(literal(payload)); if (r.kind !== 'job') throw new Error('bad fixture'); return r.job; };
+export const decideText = (payload: string, p: PromoteRetentionPolicy = policy, pending: (id: string) => boolean = noPending, now = NOW) => decidePromoteRetention(parseText(payload), now, p, pending);
+
 export type Quads = ReturnType<typeof serializeJobRecord>['jobQuads'];
 export async function insertQuads(store: TripleStore, quads: Quads) { for (let i = 0; i < quads.length; i += 4000) await store.insert(quads.slice(i, i + 4000)); }
 export async function put(store: TripleStore, ...jobs: PromoteJob[]) { for (const j of jobs) await store.insert(serializeJobRecord(j, GRAPH).jobQuads); }
