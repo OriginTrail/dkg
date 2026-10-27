@@ -2,11 +2,12 @@ import { Rfc64SwmAuthorInventoryProducerErrorV1 } from '../../rfc64/swm-author-i
 import { Rfc64ControlEnvelopeSigningErrorV1 } from '../../rfc64/control-envelope-signer-v1.js';
 import { isTransientInventorySignerFailure } from './share-inventory-signing-capability.js';
 import { createPromoteRetryableFailure, createPromotePostCommitFailure } from '@origintrail-official/dkg-publisher';
+import { SWM_INVENTORY_HANDOFF_PENDING_CODE } from '@origintrail-official/dkg-core';
 import { isInventoryPersistenceFailure } from '../../rfc64/inventory-persistence-failure.js';
 import { SwmCatalogAuthorityNotReady, SwmInventoryWriteFailure } from '../swm-inventory-write.js';
 
 /** Cause code of a committed share whose inventory handoff has not completed yet. */
-export const SWM_INVENTORY_HANDOFF_PENDING_CODE = 'SWM_INVENTORY_HANDOFF_PENDING';
+export { SWM_INVENTORY_HANDOFF_PENDING_CODE };
 
 /** Closed set, so the daemon can name the waiting step without quoting a raw dependency error. */
 type InventoryHandoffPendingReason =

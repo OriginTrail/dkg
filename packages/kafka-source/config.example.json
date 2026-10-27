@@ -1,0 +1,30 @@
+{
+  "pollIntervalMs": 5000,
+  "stateFile": "./.state/kafka-source.json",
+  "daemonUrl": "http://127.0.0.1:9200",
+  "daemonToken": "REPLACE_WITH_EXISTING_DKG_AGENT_TOKEN",
+  "handlerModule": "./node_modules/@origintrail-official/dkg-source-kafka/src/handler.mjs",
+  "sources": [
+    {
+      "id": "example-kafka-source",
+      "kind": "kafka",
+      "clusterId": "example-cluster-stable-id",
+      "brokers": ["broker.example.com:9094"],
+      "topic": "example-events",
+      "groupId": "example-dkg-consumer",
+      "ssl": true,
+      "saslMechanism": "scram-sha-512",
+      "usernameEnv": "KAFKA_USERNAME",
+      "passwordEnv": "KAFKA_PASSWORD",
+      "fromBeginning": false,
+      "maxMessages": 10,
+      "maxBatchBytes": 24000,
+      "readTimeoutMs": 10000,
+      "agentAddress": "0x0000000000000000000000000000000000000000",
+      "contextGraphId": "0x0000000000000000000000000000000000000000/example-data",
+      "mapping": [
+        { "field": "deviceId", "predicate": "https://example.com/ontology/deviceId" }
+      ]
+    }
+  ]
+}

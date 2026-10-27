@@ -1,0 +1,11 @@
+# Run through the authenticated DKG query API with the configured Context Graph,
+# agentAddress, view: "working-memory", includeContextGraphPartitions: true.
+PREFIX streams: <https://ontology.dkg.io/streams#>
+SELECT ?record ?source ?topic ?partition ?offset ?fetchedAt ?payload
+WHERE {
+  ?record a streams:KafkaSourceRecord ;
+    streams:sourceId ?source ; streams:kafkaTopic ?topic ;
+    streams:kafkaPartition ?partition ; streams:kafkaOffset ?offset ;
+    streams:sourceFetchedAt ?fetchedAt ; streams:sourceRecordJson ?payload .
+}
+LIMIT 100

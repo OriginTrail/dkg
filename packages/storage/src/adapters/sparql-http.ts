@@ -41,10 +41,8 @@ import type {
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import { decodeSparqlHttpQueryResponse, sparqlQueryResponseAccept } from './sparql-query-response.js';
-import {
-  externalStorePriorityScheduler,
-  type StorePriorityScheduler,
-} from '../store-priority-scheduler.js';
+import { externalStorePriorityScheduler, type StorePriorityScheduler } from '../store-priority-scheduler.js';
+import { selectStoreScheduler } from '../store-control-path.js';
 import {
   GraphWriteGenTracker,
   type GraphWriteLifecycle,
@@ -451,7 +449,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     return this.workLifecycle.run(
       options?.signal,
       (signal, context) => {
-        return this.scheduler.run(
+        return selectStoreScheduler(this.scheduler, options).run(
           options?.priority,
           options?.source ?? `sparql-http.${operation}`,
           () => work(signal, context),

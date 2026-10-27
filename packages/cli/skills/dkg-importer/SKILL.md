@@ -503,7 +503,7 @@ loop.
 | Method | Route | Purpose |
 |---|---|---|
 | `POST` | `/api/knowledge-assets/<name>/swm/share-async` | Enqueue. Body: `{ contextGraphId, entities?: [...] \| "all", subGraphName? }`. Returns `202 { jobId, state: "queued", enqueuedAt }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. |
-| `GET`  | `/api/knowledge-assets/swm/share-jobs` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`. |
+| `GET`  | `/api/knowledge-assets/swm/share-jobs` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`, every matching job. `pageSize=N` (1-1000; alone it asks for the first page) and `cursor=<nextCursor>` page it instead (not with `limit`): `{ jobs, nextCursor, complete }`, oldest first, until `complete`; `complete` means no further job when that page was read, not that none arrived since. A bad `cursor` or `pageSize` is `400` with `code: PROMOTE_LIST_CURSOR_INVALID` or `PROMOTE_LIST_PAGE_SIZE_INVALID`. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs/<jobId>` | Read one job: `state`, `attempt.count`, `commitMarker`, `result`, `attempt.lastError` with `classification: transient\|cap_exceeded\|fatal`. |
 | `DELETE` | `/api/knowledge-assets/swm/share-jobs/<jobId>` | Cancel a `queued` / `failed_retrying` job. `409` if the job is `running` (let the lease expire). |
 | `POST` | `/api/knowledge-assets/swm/share-jobs/<jobId>/recover` | Re-queue a `failed` job after fixing whatever was wrong (subdivide an over-large entity set, restart an upstream, etc.). |
