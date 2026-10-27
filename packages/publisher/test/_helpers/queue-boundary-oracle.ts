@@ -214,8 +214,8 @@ export const PUBLISHER_TAGGING_ROWS: readonly TaggingRow[] = [
       'writeJob', 'writeJobRequest', 'deleteJob', 'deleteJobRequest',
       'walletLock.write', 'walletLock.delete', 'walletLock.read', 'walletLock.ownership', 'walletLock.sweep',
       'appendJournalEntry', 'allocateJournalSeq',
-      // P11: bulk clear's sibling read, under the claim lock and the job lock.
-      'clear.siblings',
+      // P11: bulk clear's sibling read (under the claim lock and the job lock) and retention's verify, wallet-lock and sibling reads (inside the claim transaction).
+      'clear.siblings', 'retention.siblings', 'retention.verify', 'retention.walletLocks',
     ].map((name) => `${LIFT}${name}`),
   },
   {
@@ -233,6 +233,13 @@ export const PUBLISHER_TAGGING_ROWS: readonly TaggingRow[] = [
     row: 'Bounded page and COUNT reads (P9a): listPage(), getStats(). Decided: normal, the caller\'s lane',
     lane: 'normal',
     sources: ['listPage', 'stats'].map((name) => `${LIFT}${name}`),
+  },
+  {
+    // P11: the retention candidate scan runs outside the claim lock and is not queue control work, so it is the one background row of the sweep.
+    id: 'retention-scan',
+    row: 'Publisher retention candidate scan (P11): outside the claim lock, explicit background lane, no control tag',
+    lane: 'background',
+    sources: [`${LIFT}retention.scan`],
   },
   {
     id: 'queue-usage',

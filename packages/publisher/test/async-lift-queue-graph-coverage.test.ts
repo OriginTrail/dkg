@@ -25,7 +25,7 @@ import {
   auditPublisherCalls,
   type RecordedStoreCall,
 } from './_helpers/queue-boundary-oracle.js';
-import { runPublisherPagingScenario, runPublisherWorkload, type PublisherStack } from './_helpers/publisher-queue-scenarios.js';
+import { runPublisherPagingScenario, runPublisherRetentionScenario, runPublisherWorkload, type PublisherStack } from './_helpers/publisher-queue-scenarios.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const PACKAGES = join(REPO_ROOT, 'packages');
@@ -178,6 +178,24 @@ const QUEUE_FILES: Readonly<Record<string, QueueFile>> = {
     storeCalls: [],
     note: 'P11: bulk clear\'s sibling read; the label is issued through the selectors by the publisher (no store call of its own)',
   },
+  'packages/publisher/src/async-lift-retention-access.ts': {
+    role: 'sites',
+    labels: [L('retention.siblings')],
+    storeCalls: [],
+    note: 'P11: retention\'s sibling read inside the claim transaction, issued through the selectors; control',
+  },
+  'packages/publisher/src/async-lift-retention-scan.ts': {
+    role: 'sites',
+    labels: [L('retention.scan')],
+    storeCalls: ['query', 'query'],
+    note: 'P11: the candidate scan (range and tie shapes), outside the claim lock: explicit background lane, no control tag',
+  },
+  'packages/publisher/src/async-lift-retention.ts': {
+    role: 'sites',
+    labels: [L('retention.verify'), L('retention.walletLocks')].sort(),
+    storeCalls: ['query', 'query', 'flush'].sort(),
+    note: 'P11: the verify and wallet-lock reads inside the claim transaction (control); the flush after it takes no options. Deletes go through the job\'s own removal scope (deleteJob, deleteJobRequest)',
+  },
   'packages/publisher/src/job-record-atomic-write.ts': {
     role: 'sites',
     labels: [L('writeJob'), L('writeJobRequest')].sort(),
@@ -294,7 +312,10 @@ describe('publisher queue graph references (observed)', () => {
     const calls: RecordedStoreCall[] = [];
     for (const stack of STACKS) {
       // The paging scenario is separate from the workload the AC2 lane trace compares with the base SHA, which has no page read.
-      for (const run of [await runPublisherWorkload(stack), await runPublisherPagingScenario(stack)]) {
+      for (const run of [
+        await runPublisherWorkload(stack), await runPublisherPagingScenario(stack),
+        await runPublisherRetentionScenario(stack, { mode: 'delete' }),
+      ]) {
         expect(auditPublisherCalls(run.calls, { pathOn: true }).violations).toEqual([]);
         calls.push(...run.calls);
       }

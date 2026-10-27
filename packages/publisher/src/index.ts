@@ -573,6 +573,17 @@ export {
 } from './async-promote-retention.js';
 export { PROMOTE_RETENTION_JOB_CLASSES, PROMOTE_RETENTION_KEEP_REASONS, type PromoteRetentionJobClass, type PromoteRetentionKeepReason } from './async-promote-retention-policy.js';
 
+// Publisher-queue retention core (OT-RFC-73 P11). Passive, like the share sweep: the mode, the timer and the config that drive it are the daemon's (P10b); the mode defaults to off.
+export {
+  createPublisherRetention, PUBLISHER_RETENTION_DEFAULTS, PUBLISHER_RETENTION_MODES, PUBLISHER_RETENTION_WINDOW_MS,
+  type PublisherRetention, type PublisherRetentionBatchResult, type PublisherRetentionConfig, type PublisherRetentionCounters, type PublisherRetentionJob,
+  type PublisherRetentionLogger, type PublisherRetentionMode, type PublisherRetentionPassSummary, type PublisherRetentionSkip,
+} from './async-lift-retention.js';
+export {
+  PUBLISHER_RETENTION_JOB_CLASSES, PUBLISHER_RETENTION_KEEP_REASONS, type PublisherRetentionJobClass, type PublisherRetentionKeepReason,
+} from './async-lift-retention-policy.js';
+export type { LiftRetentionAccess, LiftRetentionTransaction, VmPublishRetentionAccess } from './async-lift-retention-access.js';
+
 export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
 
 export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } from './assertion-lifecycle-record.js';

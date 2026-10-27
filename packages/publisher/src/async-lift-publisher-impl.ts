@@ -6,6 +6,7 @@ import { completionTrace } from './async-lift-completion-trace.js';
 import { traceProcessNext } from './async-lift-claim-trace.js';
 import { LiftJobListingSelectors } from './lift-job-listing-selectors.js';
 import { clearTerminalJobsGuarded, LIFT_CLEAR_SIBLINGS_SOURCE } from './async-lift-guarded-clear.js';
+import { createLiftRetentionAccess, type LiftRetentionAccess } from './async-lift-retention-access.js';
 import { lifecycleKeyOfJob } from './lift-job-store-selectors.js';
 import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
 import { LiftJobChainObservations } from './lift-job-chain-observations.js';
@@ -2843,6 +2844,12 @@ export class TripleStoreAsyncLiftPublisher
         siblings: (key) => this.jobSelectors.vmPublishCandidates(key, controlStoreOptions('publisher', LIFT_CLEAR_SIBLINGS_SOURCE)),
       });
     });
+  }
+
+  /** OT-RFC-73 P11: the retention sweep's window onto the claim transaction (async-lift-retention-access.ts). */
+  retentionAccess(): LiftRetentionAccess {
+    return createLiftRetentionAccess({ store: this.store, graphUri: this.graphUri, walletLockGraphUri: DEFAULT_WALLET_LOCK_GRAPH_URI,
+      ensureGraph: () => this.ensureGraph(), journal: this.journalCompletion, claims: this.claimCoordinator, selectors: this.jobSelectors });
   }
 
   /**
