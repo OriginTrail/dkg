@@ -1,4 +1,4 @@
-import { readHeldGraphScopedAssets } from '../../src/sync/requester/durable-data-holdings.js';
+import { readHeldGraphScopedAssets } from '../../src/sync/requester/stored-graph-assets.js';
 import { createGraphScopedDurableManifestPlan } from '../../src/sync/durable-integrity.js';
 import { expect, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
