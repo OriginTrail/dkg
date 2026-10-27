@@ -53,8 +53,7 @@ import {
   DEFAULT_REPLENISH_TARGET_MULTIPLE,
   resolveRpcRequestGovernorPolicy,
   resolveContextGraphAuthorityIndexTickMs,
-  resolveFinalityConfirmations,
-  resolveReceiptTimeoutMs,
+  resolveFinalityConfirmations, resolveReceiptTimeoutMs,
   type ApprovalPolicy, type ChainSignerSettings,
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
@@ -1056,6 +1055,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
      */
     postCommitRecoveryIntervalMs?: number;
   };
+  queueRetention?: import('./retention-config.js').RetentionConfigInput; // async queue retention, default off; docs/promote-queue-operations.md
   /**
    * Allowed CORS origins. When unset, only the API port's loopback origins
    * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`)
