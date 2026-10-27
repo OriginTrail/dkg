@@ -159,6 +159,7 @@
 // I/O (qa/member-sharing.mjs, qa/busy-slot.mjs, qa/admission-trace.mjs,
 // qa/known-gaps.mjs).
 
+import { auditFeederIsolation } from './lib/member-sharing/feeder-isolation.mjs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { busyMember, fillBigGraph } from './lib/member-sharing/busy-member.mjs';
@@ -232,12 +233,7 @@ async function precondition(caseId, when) {
   return false;
 }
 
-/** A feeder that ran must not follow the public graph (`publicGraph`), as no Core may: its gossip could carry writes. */
-async function feederOutOf(publicGraph, when) {
-  const fed = await graphs.following(edges.feeder, publicGraph);
-  if (fed.state === 'following') fail(2, `${when} the feeder ${edges.feeder.label} follows the public graph: its gossip may have carried writes`);
-  else if (fed.state !== 'not-following') fail(2, `${when} it is not known whether the feeder ${edges.feeder.label} follows the public graph (${fed.reason ?? fed.state})`);
-}
+const feederOutOf = (publicGraph, when) => auditFeederIsolation({ edges, graphs, fail }, publicGraph, when);
 
 /**
  * The large graph of case 6's attempt `attempt`, kept away from the Cores and

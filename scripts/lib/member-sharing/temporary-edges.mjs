@@ -56,7 +56,10 @@ export class TemporaryEdges {
   get feederUp() { return this.#feederState === 'ready'; }
   get feederRunning() { return this.#feederState === 'ready' || this.#feederState === 'needs-stop'; }
   /** Whether a node number is one of the temporary nodes. */
-  isTemporary(number) { return [...this.nodes, this.feeder].some(node => node?.number === number); }
+  isTemporary(number) {
+    return this.nodes.some(node => node?.number === number)
+      || (this.feeder?.number === number && this.claims(this.feeder));
+  }
 
   /** The name of the file that marks a node folder as this suite's: a suite built on this class names its own, so that no suite takes another's nodes for its own. */
   get markName() { return OWN_MARK; }
@@ -76,9 +79,17 @@ export class TemporaryEdges {
    */
   removeOwnNode(number) {
     const { devnet } = this;
+    if (!existsSync(this.ownMark(number))) return `node${number} has no suite claim; it is left as it is`;
     devnet.devnetShSync(['stop-node', String(number)]);
     const end = Date.now() + 30_000;
     while (devnet.nodePorts(number).some(devnet.listening) && Date.now() < end) spawnSync('sleep', ['1']);
+    return this.removeStoppedOwnNode(number);
+  }
+
+  /** Remove a claimed directory only after its caller has stopped and drained the daemon. */
+  removeStoppedOwnNode(number) {
+    const { devnet } = this;
+    if (!existsSync(this.ownMark(number))) return `node${number} has no suite claim; it is left as it is`;
     const busy = devnet.nodePorts(number).filter(devnet.listening);
     if (busy.length) return `node${number} still listens on port(s) ${busy.join(', ')} after it was stopped; its folder is kept`;
     rmSync(devnet.nodeDir(number), { recursive: true, force: true });
@@ -226,7 +237,7 @@ export class TemporaryEdges {
     await this.#stopFeeder();
     if (existsSync(this.devnet.nodeDir(feeder.number))) {
       if (!this.claims(feeder)) throw new Error(`node${feeder.number} is no longer this run's; it is left as it is`);
-      const problem = this.removeOwnNode(feeder.number);
+      const problem = this.removeStoppedOwnNode(feeder.number);
       if (problem) { this.#feederState = 'needs-stop'; throw new Error(problem); }
     }
     // Without its folder the number is free again: another suite may take it

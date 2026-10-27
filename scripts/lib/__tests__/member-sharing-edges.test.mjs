@@ -4,6 +4,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { openDevnet } from '../member-sharing/devnet.mjs';
+import { createGraphs } from '../member-sharing/graphs.mjs';
+import { auditFeederIsolation } from '../member-sharing/feeder-isolation.mjs';
 import { TemporaryEdges } from '../member-sharing/temporary-edges.mjs';
 
 const MARK = '.issue-3251-member-sharing';
@@ -81,7 +83,7 @@ test('a fourth free node number is kept for the feeder of case 6\'s later attemp
     label: 'node10 (feeder)', relay: 'r2', member: false, overrides: { relay: 'r2', announceAddresses: ['/ip4/127.0.0.1/tcp/9', 'r2/p2p-circuit'] },
   });
   // It is a temporary node, but no participant of the other cases' graphs.
-  assert.ok(edges.isTemporary(10) && !edges.nodes.includes(edges.feeder));
+  assert.ok(!edges.isTemporary(10) && !edges.nodes.includes(edges.feeder), 'a reserved number without a claim is not excluded');
   assert.deepEqual([edges.owner, edges.member1, edges.member2].map(node => node.member), [false, true, true]);
   // Node 10 taken by another suite: no feeder, the owner holds the large graphs.
   const crowded = fakeDevnet(t);
@@ -132,8 +134,10 @@ test('each later attempt of case 6 gets a fresh feeder: the one that ran is stop
   edges.allocate({ relay1: 'r1', relay2: 'r2' });
   await edges.prepareLargeGraphAuthor(2, async () => {});
   writeFileSync(join(devnet.nodeDir(10), 'held-large-graph'), 'the large graph of the attempt before');
+  const stopsBefore = devnet.calls.filter(call => call === 'stop-node 10').length;
   assert.equal(await edges.prepareLargeGraphAuthor(3, async () => {}), edges.feeder);
-  assert.deepEqual(devnet.calls.filter(call => /^(addnode|stop-node) 10/.test(call)), ['addnode 10 edge', 'stop-node 10', 'stop-node 10', 'addnode 10 edge']);
+  assert.equal(devnet.calls.filter(call => call === 'stop-node 10').length, stopsBefore + 1, 'renewal stops exactly once');
+  assert.deepEqual(devnet.calls.filter(call => /^(addnode|stop-node) 10/.test(call)), ['addnode 10 edge', 'stop-node 10', 'addnode 10 edge']);
   assert.ok(!existsSync(join(devnet.nodeDir(10), 'held-large-graph')), 'the new feeder holds nothing of the old one');
   assert.ok(edges.feederRunning && edges.feederUp && edges.feeder.peerId === 'peer-10');
   assert.equal(edges.largeAuthor, edges.feeder);
@@ -350,13 +354,10 @@ for (const state of ['following', 'unknown', 'not-following']) {
     const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
     edges.allocate({ relay1: 'r1', relay2: 'r2' });
     const failures = [];
-    // Execute the actual scenario audit without starting the devnet CLI.
-    const runner = readFileSync(new URL('../../devnet-test-issue-3251-member-sharing.mjs', import.meta.url), 'utf8');
-    const source = runner.match(/async function feederOutOf\([^)]*\) \{[\s\S]*?\n\}/)?.[0];
-    assert.ok(source, 'scenario owns the feeder isolation audit');
-    const feederOutOf = new Function('edges', 'graphs', 'fail', `return (${source});`)(edges,
-      { following: async () => { devnet.calls.push('audit'); return { state }; } },
-      (id, message) => { failures.push([id, message]); devnet.calls.push('verdict'); });
+    const feederOutOf = (graph, when) => auditFeederIsolation({ edges,
+      graphs: { following: async () => { devnet.calls.push('audit'); return { state }; } },
+      fail: (id, message) => { failures.push([id, message]); devnet.calls.push('verdict'); },
+    }, graph, when);
     const audit = () => feederOutOf('public', 'before removal');
     await edges.prepareLargeGraphAuthor(2, audit);
     await edges.prepareLargeGraphAuthor(3, audit);
@@ -398,13 +399,36 @@ test('a busy-port removal after a successful stop stays eligible for final shutd
   let busy = false, now = 0;
   devnet.nodePorts = () => [12345]; devnet.listening = () => busy;
   t.mock.method(Date, 'now', () => now += 30_000);
-  const sync = devnet.devnetShSync;
-  devnet.devnetShSync = (...args) => { busy = true; return sync(...args); };
+  const remove = edges.removeStoppedOwnNode.bind(edges);
+  edges.removeStoppedOwnNode = (...args) => { busy = true; return remove(...args); };
   assert.equal(await edges.prepareLargeGraphAuthor(3, async () => {}), edges.owner);
   assert.equal(edges.feederRunning, true);
   const failures = [];
   await edges.finishFeeder(async () => {}, error => failures.push(error.message));
   assert.equal(failures.length, 1);
   assert.match(failures[0], /still listens/);
-  assert.equal(devnet.calls.filter(call => call === 'stop-node 10').length, 4);
+  assert.equal(devnet.calls.filter(call => call === 'stop-node 10').length, 3);
+});
+
+for (const activation of ['before', 'after-failure']) test(`a foreign Core on the reserved feeder number remains visible ${activation} activation`, async t => {
+  const devnet = fakeDevnet(t);
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  foreign(devnet, 10);
+  const calls = [];
+  devnet.nodeNumbers = () => [1, 2, 10];
+  devnet.nodeConfig = () => ({ nodeRole: 'core' });
+  devnet.api = async (node, method, path) => {
+    calls.push([node, method, path]);
+    const body = { contextGraphs: node === 10 ? [{ id: 'public', subscribed: true }] : [] };
+    return { status: 200, json: body, text: JSON.stringify(body) };
+  };
+  if (activation === 'after-failure') assert.equal(await edges.prepareLargeGraphAuthor(2, async () => {}), edges.owner);
+  const graphs = createGraphs(devnet, edges, { stamp: 'S', sub: 's', say() {} });
+  assert.deepEqual(graphs.coreNodes(), [1, 2, 10]);
+  assert.deepEqual((await graphs.coresFollowing({ id: 'public' })).following, ['node10']);
+  await graphs.keepCoresOut({ id: 'public', key: 'public' });
+  assert.ok(calls.some(([node, method, path]) => node === 10 && method === 'POST' && path.endsWith('/unsubscribe')));
+  assert.ok(untouched(devnet, 10));
+  assert.ok(!devnet.calls.includes('stop-node 10'));
 });
