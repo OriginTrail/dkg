@@ -22,6 +22,20 @@ export function releaseGitFixture(expected) {
     return responses.get(args.join(' '));
   } };
 }
+// A registry's dist-tags, faked for promotion: what `runner` writes is what
+// `readTags` reads back. `write` sees every npm call first; throwing fails it.
+export function fakeDistTags({ write = () => {} } = {}) {
+  const tags = new Map();
+  return {
+    readTags: pkg => ({ ...tags.get(pkg.name) }),
+    runner: (command, args, options) => {
+      write(command, args, options);
+      if (args[0] !== 'dist-tag') return;
+      const [, , spec, channel] = args, at = spec.lastIndexOf('@');
+      tags.set(spec.slice(0, at), { ...tags.get(spec.slice(0, at)), [channel]: spec.slice(at + 1) });
+    },
+  };
+}
 export function archive(files) {
   const records = [];
   for (const [name, value] of Object.entries(files)) {

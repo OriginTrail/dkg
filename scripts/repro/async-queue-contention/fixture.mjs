@@ -17,6 +17,8 @@ export const PAYLOAD_TRIPLES = 128;
 export const AGG_ROWS = 8;
 // the replay table's size: the fake agent issues this many store operations per attempted share
 export const DATA_OPS_PER_SHARE = 43;
+// the publisher stream's executor-tail operations per publication (publisher.mjs replays them in the synthetic handler)
+export const LIFT_TAIL_OPS = 16;
 
 const DKG = 'http://dkg.io/ontology/';
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
