@@ -1337,7 +1337,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       await this.hostModeReconcileInflight;
       return;
     }
-    const inflight = (async () => {
+    const inflight = withDefaultStoreWorkPriority('background', async () => {
       try {
         const graphManager = new GraphManager(this.store);
         const knownCgs = (
@@ -1364,7 +1364,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       } finally {
         this.hostModeReconcileInflight = undefined;
       }
-    })();
+    });
     this.hostModeReconcileInflight = inflight;
     await inflight;
   }

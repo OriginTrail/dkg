@@ -34,6 +34,7 @@ type SelectionPass = { kind: 'complete' | 'answered' }
 export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, options: PublicSnapshotExactRecoveryOptions): Promise<PublicSnapshotRecoveryResult> {
   const { contextGraphId, uals, evidence, signal, assertCurrent, deadline } = options;
   const committed = new Set<string>();
+  let lastCompletePeer: string | undefined;
   let alreadyPresent = 0;
   const ctx = createOperationContext('sync');
   const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
@@ -63,13 +64,20 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
     });
     const before = committed.size;
     for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
+    // A completed, verified batch is a scheduling hint within this job only.
+    // It grants no authority or coverage for any later asset; all other
+    // admitted providers remain available, with unchanged retry/hold rules.
+    if (result.streamOutcome === 'complete' && result.disposition === 'found'
+      && selection.every(ual => result.committedExactAssetUals?.includes(ual))) lastCompletePeer = peer;
     return pacing.settle(peer, result, committed.size - before);
   };
   // One pass reports what happened. Only the scheduler below advances
   // discovery or waits; answer history belongs to the asset selection.
   const pass = async (selection: RecoverySelection, peers: readonly string[]): Promise<SelectionPass> => {
     let wait: 'admission' | 'peer' | undefined;
-    for (const peer of peers) {
+    const ordered = lastCompletePeer && peers.includes(lastCompletePeer)
+      ? [lastCompletePeer, ...peers.filter(peer => peer !== lastCompletePeer)] : peers;
+    for (const peer of ordered) {
       const remaining = selection.uals.filter(ual => !committed.has(ual));
       if (!remaining.length) return { kind: 'complete' };
       if (selection.answered.has(peer)) continue;

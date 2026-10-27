@@ -118,7 +118,7 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
       for (const [assetIndex, assetUal] of assetUals.entries()) {
         session.signal.throwIfAborted();
         if (options.servingWithheld?.(request.contextGraphId)) refuse('serving', 'BUSY');
-        while (!window.canStartAsset) await readAck();
+        const awaitingCredit = !window.canStartAsset;
         // A long batch must stop before the next KA if normal CG authority
         // becomes private. This never enters the private/member join lane.
         await requirePublicAuthority(request.contextGraphId, session.signal);
@@ -129,14 +129,30 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
           // fenced by the cache as a changed source, before ASSET_END.
           authorizeMissingAccessPolicy: () => readPublicAuthority(request.contextGraphId, session.signal),
           onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context),
-          onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) });
+          onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) }).catch(async error => {
+            // Preparation may overlap a pending commit, but a refusal must
+            // not cut that commit short merely because it was found earlier.
+            session.signal.throwIfAborted();
+            while (!window.canStartAsset) await readAck();
+            throw error;
+          });
         observeExactBatch(() => options.onStage?.('export', assetIndex,
           Math.max(0, performance.now() - started - (lease?.encodingDurationMs ?? 0)), context));
         if (!lease) {
           session.signal.throwIfAborted();
+          while (!window.canStartAsset) await readAck();
           throw new ExactBatchResponderRefusal('RESOURCE_LIMIT');
         }
         try {
+          // Prepare at most one ordinary budgeted lease while the receiver
+          // commits. Wire credit remains fixed at two assets, and no bytes
+          // from this lease are sent until a commit ACK grants that credit.
+          while (!window.canStartAsset) await readAck();
+          session.signal.throwIfAborted();
+          if (awaitingCredit) {
+            if (options.servingWithheld?.(request.contextGraphId)) refuse('serving', 'BUSY');
+            await requirePublicAuthority(request.contextGraphId, session.signal);
+          }
           // Bounded observation cannot affect exporter ownership or response.
           if (lease.wholePayloadExports !== undefined) {
             observeExactBatch(() => options.onExport?.(assetIndex, lease.wholePayloadExports!, context));
