@@ -94,6 +94,7 @@ export default defineConfig({
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
           'test/promote-admission-route.test.ts',
+          'test/async-share-control-busy-admission.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
           // The dashboard shell carries the operator token only for trusted
           // local requests (loopback socket and loopback Host). Pure helpers

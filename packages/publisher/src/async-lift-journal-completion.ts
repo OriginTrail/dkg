@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
-import { findTripleStoreCapability, type TripleStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, findTripleStoreCapability, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { AdmissionJournalEntry } from './lift-job.js';
 import {
   DEFAULT_JOURNAL_GRAPH_URI, JOURNAL_LIFECYCLE_KEY, JOURNAL_SEQ,
@@ -163,7 +163,7 @@ export class AsyncLiftJournalCompletion {
       await released;
       const seq = await this.allocateSequence(captured.lineageKey);
       const entry = { ...captured, seq, at: this.now() };
-      await this.store.insert(serializeJournalEntry(entry, DEFAULT_JOURNAL_GRAPH_URI), { source: 'publisher.asyncLift.appendJournalEntry' });
+      await this.store.insert(serializeJournalEntry(entry, DEFAULT_JOURNAL_GRAPH_URI), controlStoreOptions('publisher', 'publisher.asyncLift.appendJournalEntry'));
     });
   }
 
@@ -171,7 +171,7 @@ export class AsyncLiftJournalCompletion {
   private async allocateSequence(lineageKey: string): Promise<number> {
     const result = await this.store.query(
       `SELECT (MAX(?seq) AS ?m) WHERE { GRAPH <${DEFAULT_JOURNAL_GRAPH_URI}> { ?e <${JOURNAL_LIFECYCLE_KEY}> ${literal(lineageKey)} ; <${JOURNAL_SEQ}> ?seq } }`,
-      { source: 'publisher.asyncLift.allocateJournalSeq' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.allocateJournalSeq'),
     );
     const rows = expectBindings(result);
     const raw = rows.length === 0 ? undefined : rows[0]?.['m'];
