@@ -142,6 +142,9 @@ Invariants:
 | Schedule canonical JSON | `{"base":2,"missingLimitSurcharge":10,"perAggregation":5,"perFilter":1,"perJoinVar":2,"perOptionalOrUnion":3,"perPropertyPath":3,"perTriplePattern":1,"rowsPerDeliveryUnit":100,"version":"dkg-mkt-query-cost/1"}` (keys sorted, `JSON.stringify`) |
 | `QUERY_COST_SCHEDULE_V1_DIGEST` | `sha256:70beea38241810353b4934b29627f4ef0699d6b0159d33ccf0357b070f7b0642` |
 | `DEFAULT_QUERY_GUARDS` | `{ timeoutMs: 10_000, maxRows: 10_000 }` |
+| `QUERY_MAX_SPARQL_BYTES` | `8192` (UTF-8 bytes). A wire limit, not a schedule term (not in the digest). `analyzeQuery` is quadratic on adversarial input (measured: 8 KiB → 75 ms, 32 KiB → 1.3 s), so both seats refuse longer queries before analysing them (§6.1) |
+| `MAX_SERVE_RESULT_BYTES` | `8 * 1024 * 1024`. Seller-side cap on result bytes, checked before a receipt is signed. The protocol router's read cap is 10 MiB, so a larger result would be signed and claimed but never delivered (§5.6, §6.2) |
+| `TOOL_CALL_SLACK_UNITS` | `128n`. Extra authorized units when native tool calls may be returned (§8.1) |
 | Gateway base path | `/api/marketplace/gateway/v1` |
 | Gateway key format | `dkg_gw_<8 lowercase hex>_<43 base64url chars>`. Regex `^dkg_gw_([0-9a-f]{8})_([A-Za-z0-9_-]{43})$`; `keyId = 'gw_' + group1` |
 | Prompt-tool transport key | `__dkg_tool_calls__` (fork: `__nsm_tool_calls__`); generated call ids `call_dkg_<24 hex>` |
@@ -158,7 +161,7 @@ This is byte-identical to `words(text).length` in `llm-stub.mjs`.
 | GV-3 | GV-2 with `max_tokens: 3` | llm-stub reply `STUB:WORLD MARKETPLACE HELLO`, finish `length`, usage `{17, 3, 20}` |
 | GV-4 | `[{role:'user',content:'  multiple   spaces\tand\nnewlines  '}]` | prompt 11. Reply `STUB:NEWLINES AND SPACES MULTIPLE :: ok` (6). Usage `{11, 6, 17}` |
 | GV-5 | `[{role:'user',content:''}]` | prompt 7. Reply `STUB: :: ok` (3) |
-| GV-6 | `chatPromptUpperBound(GV-2 messages, {})` | **56**. Breakdown: `(14+6+3) + (23+4+3) + 3` |
+| GV-6 | `chatPromptUpperBound(GV-2 messages, {})` | **56**. Breakdown: `(14+6+3) + (23+4+3) + 3`. Formula: `Σ_m (utf8Bytes(m.content) + utf8Bytes(m.role) + T.perMessageTokens) + T.perReplyPrimerTokens + utf8Bytes(toolEnvelopeText(messages, options))` |
 | GV-7 | `boundCompletion(stubWords, 'a b c d e', 3n)` | `{ text: 'a b c ', truncated: true }`. The trailing space is kept: it is the longest code-point prefix whose count ≤ 3 |
 | GV-8 | `queryAdmissionUnits(…)` | `SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5` → **3**. Same without `LIMIT 5` → **13**. `PREFIX mkt: <https://w3id.org/dkg/marketplace#> SELECT ?o ?a WHERE { ?o a mkt:Offer . ?o mkt:askPerUnitWei ?a . } LIMIT 10` → **6**. `SELECT ?s WHERE { ?s <http://x/p>/<http://x/q>* ?o . OPTIONAL { ?s ?p2 ?o2 } FILTER(?o > 3) } LIMIT 3` → **17** |
 | GV-9 | `queryDeliveryUnits(rows)` | rows 0→0, 1→1, 100→1, 101→2, 10000→100 |
@@ -238,6 +241,7 @@ export type MarketplaceConnectorConfig =
       secretEnvFile?: string;        // ABSOLUTE path; omitted → no Authorization header
       secretEnvKey?: string;         // default 'OPENAI_API_KEY'
       toolTransport?: 'native' | 'prompt' | 'none';  // default 'native'
+      maxTokensField?: 'max_tokens' | 'max_completion_tokens'; // default 'max_tokens'; OpenAI reasoning models reject max_tokens
       contextLength?: bigint;
       timeoutMs?: number; }          // default 120_000, range 1_000..600_000
   | { kind: 'llamacpp';
@@ -288,8 +292,11 @@ Per connector kind:
   - **Mount fails** if the file is missing (`CONNECTOR_SECRET_ABSENT`), if it is
     group/world accessible (`(mode & 0o077) !== 0` → `CONNECTOR_SECRET_PERMS`),
     or if the key line is absent or empty.
-  - **Never echoed.** Upstream error bodies are cut to 160 chars and
-    `replaceAll(secret, '[redacted]')` is applied before they enter `detail`.
+  - **Never echoed.** `replaceAll(secret, '[redacted]')` runs on the **whole**
+    upstream error body first, and only then is the result cut to 160 chars.
+    Truncating first could leave a partial key at the cut.
+  - **Mount errors name the file and the key, never content.** A parse fault
+    reports `secretEnvFile line <n>`, never the line itself.
 - **codex-oauth.** Tokens live in the auth file (`{ tokens: { access_token,
   refresh_token, account_id, id_token }, last_refresh }`), mode 0600, under a
   `.secrets/` dir with mode 0700.
@@ -298,7 +305,16 @@ Per connector kind:
   - The connector reads at call time, refreshes proactively when the
     access-token JWT `exp` is under 5 min away, and refreshes once on an
     upstream 401/403.
-  - It writes refreshed tokens back atomically with mode 0600.
+  - **Refresh is single-flight per auth file.** Concurrent callers await one
+    in-process refresh promise. Refresh tokens rotate (single use), so two
+    parallel refreshes would invalidate the token family and strand the
+    connector until a new login.
+  - It writes refreshed tokens back atomically (tmp file with mode 0600, then
+    rename, then `chmod 0600`; `writeFileSync`'s `mode` applies only on
+    create). D's OAuth flow writes the file the same way and creates `.secrets/`
+    with mode 0700.
+  - `detail` strings redact the values of `access_token`, `refresh_token`,
+    `id_token` and `account_id` (redact first, then truncate).
 - **llamacpp** has no secret.
 - `status` surfaces report only `secretConfigured: boolean`. They report
   `upstreamOrigin` (scheme://host:port), never the full URL, path, query, or
@@ -320,7 +336,12 @@ A config offering whose connector fails at boot is held `failed`:
 - it is not served (quote → `available:false, declineCode:'CONNECTOR_UNAVAILABLE'`;
   serve → `UNKNOWN_OFFERING`);
 - it is not published;
-- it is reported by `marketplaceConnectorStatus()`.
+- it is reported by `marketplaceConnectorStatus()`;
+- it is **retried** in the background with backoff (60 s, doubling, capped at
+  10 min). A local llama.cpp server that starts after the daemon is the common
+  case. A successful retry swaps the offering into the served set. It does not
+  publish: boot never publishes, as today. A later `marketplaceSetOfferings`
+  cancels pending retries.
 
 | Connector | Mount checks (no spend) | Health probe (on demand) | Call timeout |
 |---|---|---|---|
@@ -363,7 +384,9 @@ A config offering whose connector fails at boot is held `failed`:
   therefore needs all three of the following:
   1. `acknowledgeSubscriptionScope: true` in config.
   2. A non-empty `allowedBuyers`. The seller refuses any other buyer with
-     `BUYER_NOT_ALLOWED` before execution.
+     `BUYER_NOT_ALLOWED`. The check runs **after** the authorization signature
+     verifies and before execution (§7.5). Running it earlier would let an
+     unauthenticated prober test arbitrary addresses against the private list.
   3. Publication with `mkt:access "restricted"`, so routers of buyers who did
      not allow-list this seller skip it (§8.2).
 
@@ -372,13 +395,19 @@ A config offering whose connector fails at boot is held `failed`:
 ### 4.6 Connector specifics (port notes)
 
 - **openai-compatible.** `POST {baseUrl}/chat/completions` with
-  `{ model: upstreamModel, messages, max_tokens, temperature: temperature ?? 0,
-  stream: false, top_p?, seed?, stop?, tools?, tool_choice?, parallel_tool_calls? }`.
+  `{ model: upstreamModel, messages, [maxTokensField]: maxTokens, stream: false,
+  temperature?, top_p?, seed?, stop?, tools?, tool_choice?, parallel_tool_calls? }`.
+  - Every sampler field is sent **only when the request carries it**. The
+    fork's forced `temperature: 0` is dropped: OpenAI reasoning models reject
+    any value but the default, and reject `max_tokens` (hence `maxTokensField`).
   - Tool fields are sent only when `toolTransport === 'native'`.
-  - Response: `choices[0].message.content` (null → `''`), `tool_calls`
-    (normalized with A `normalizeToolCalls`; invalid → `UPSTREAM_ERROR`),
-    `finish_reason`, and `usage.prompt_tokens/completion_tokens`
-    (non-negative safe integers or absent).
+  - Response: `choices[0].message.content` (null → `''`; any other non-string →
+    `UPSTREAM_ERROR`), `tool_calls`, `finish_reason`, and
+    `usage.prompt_tokens/completion_tokens` (non-negative safe integers or absent).
+  - `tool_calls` that is **absent, null or `[]`** means no tool calls. vLLM
+    returns `[]` on every plain reply, and the fork's `normalizeToolCalls`
+    rejects empty arrays. Otherwise normalize with A `normalizeToolCalls`;
+    invalid → `UPSTREAM_ERROR`.
 - **llamacpp.** `POST {baseUrl}/v1/chat/completions` with `{ model: <server model id>,
   messages, max_tokens, temperature: Number(settings.temperature), seed:
   settings.seed, stop?, stream: false }`.
@@ -416,10 +445,25 @@ export interface TokenCountEngine {
 ```
 
 - `createHfBpeEngine(bytes)` and `createTiktokenO200kEngine(bytes)`: port of
-  fork `bpe.ts`. Keep `bytesToUnicode`, `QWEN_SPLIT`, `O200K_SPLIT`, merge-rank
-  BPE and the tiktoken rank parse verbatim. HF merges accept both `"a b"`
-  strings and `[a,b]` pairs. Construction throws on unparseable input.
-  `encodeCount` counts unknown pieces as one each, which keeps it deterministic.
+  fork `bpe.ts`. Keep `bytesToUnicode`, `QWEN_SPLIT`, `O200K_SPLIT`, the
+  merge-rank semantics and the tiktoken rank parse verbatim. HF merges accept
+  both `"a b"` strings and `[a,b]` pairs. Construction throws on unparseable
+  input. `encodeCount` counts unknown pieces as one each, which keeps it
+  deterministic.
+- **Bounded cost (MUST).** The fork's merge loops are O(n²) per pre-tokenized
+  piece: they rescan and rebuild the whole symbol array on every merge. One
+  long `\p{L}+` run, such as 2 MB of concatenated words, then blocks the event
+  loop for minutes to hours. Sellers count prompts after admission, and the
+  buyer gateway counts per candidate offer, so this is a DoS on both seats.
+  - Implement both merge loops with a doubly-linked symbol list plus a min-heap
+    keyed `(rank, leftmost position)` with lazy invalidation, which is
+    O(n log n). This is the HF tokenizers / tiktoken "large piece" algorithm.
+    For BPE-consistent merge lists it is result-identical to the fork loops: a
+    merge involving a merged symbol always ranks after the merge that created it.
+  - Keep the verbatim fork loops in `test/` only, as an oracle. The
+    differential test is in §15.1.
+  - Both seats run the same A code, so the heap implementation *is* the count
+    definition for every `hf-bpe-v1` / `tiktoken-o200k-v1` pin.
 - `createStubWordsEngine()`: §3.2 formula, digest `STUB_WORDS_DIGEST`. This is
   the devnet engine. It reproduces the llm-stub `usage` formula exactly, so
   both seats and the stub agree on GV-2..GV-5.
@@ -493,15 +537,34 @@ Rules:
   `offerContentKey` already compares every non-revision predicate, so a pin or
   model change republishes as a KA update and an unchanged offer still sends no transaction.
 - **Discovery side.** Extend the parse with these fields. Malformed metering or
-  model fields (unknown enum, digest not matching `^sha256:[0-9a-f]{64}$`,
-  non-decimal numerics, `pinned` without kind+digest) drop **only the extension
-  group** (`metering`, `model`, `queryCost`, `apiShape`, `toolTransport`); the
-  offer itself is kept. Malformed core fields still skip the offer (existing rule).
-- **Discovery query.** C may keep the single SELECT and add OPTIONALs, or switch
-  to a triple scan: `SELECT ?g ?offer ?p ?o WHERE { GRAPH ?g { ?offer a mkt:Offer ; ?p ?o } } LIMIT 20000`,
-  grouped by `(g, offer)` in TS. The existing authority (graph author ==
-  `sellerAddress`), newest-revision and per-node monotonic rules MUST be
-  preserved unchanged.
+  model fields drop **only the extension group** (`metering`, `model`,
+  `queryCost`, `apiShape`, `toolTransport`), and the offer itself is kept.
+  Malformed means any of:
+  - an unknown enum;
+  - a digest not matching `^sha256:[0-9a-f]{64}$`;
+  - non-decimal numerics;
+  - `pinned` without kind+digest;
+  - `tokenizerKind 'stub-words-v1'` with a digest ≠ `STUB_WORDS_DIGEST`;
+  - `chatTemplate 'openai-chat-count/v1'` with a digest ≠ `CHAT_TEMPLATE_OPENAI_COUNT_V1_DIGEST`;
+  - a `queryCostSchedule` id/digest pair that is not exactly V1's (the group is
+    dropped, so recount reports `schedule-drift`).
+
+  Malformed core fields still skip the offer (existing rule).
+- **Discovery query (MUST be a triple scan).** Use:
+  `SELECT ?g ?offer ?p ?o WHERE { GRAPH ?g { ?offer a mkt:Offer ; ?p ?o . FILTER(STRSTARTS(STR(?p), "https://w3id.org/dkg/marketplace#")) } }`,
+  grouped by `(g, offer)` in TS.
+  - **Do not extend the existing SELECT with OPTIONALs.** The `marketplace` CG
+    has an open publish policy, and the authority check runs in TS *after* the
+    engine has produced the rows. One KA carrying k values for each of ~20
+    OPTIONAL predicates makes every buyer's discovery materialize k^20 rows.
+  - **No `LIMIT`.** A truncating LIMIT with no ORDER BY would let junk triples
+    push real offers out of the result.
+  - **Bounded TS work.** A `(g, offer)` group with more than 64 triples is
+    skipped. A core predicate with more than one distinct value skips the
+    offer. An extension predicate with more than one distinct value drops its
+    extension group.
+  - The existing authority rule (graph author == `sellerAddress`) and the
+    newest-revision and per-node monotonic rules MUST be preserved unchanged.
 
 `MarketplaceOffer` additions (A `types.ts`, all optional):
 
@@ -526,8 +589,12 @@ access?: 'open' | 'restricted';
 - **R3. Empty output.** An empty delivered completion is legal and counts 0
   completion units.
 - **R4. Tool calls.** Tool calls count as
-  `encodeCount(JSON.stringify(tool_calls))`, computed over the normalized array
-  exactly as delivered.
+  `encodeCount(JSON.stringify(tool_calls))`.
+  - The seller counts the normalized array it serializes.
+  - The buyer counts `JSON.stringify` of the array **as JSON-parsed from the
+    result bytes**, with no re-normalization.
+  - `parseChatServeResult` rejects tool calls with missing or extra keys.
+  - For a conforming result the two strings are identical.
 
 The fork's token-id-sequence evidence and round-trip requirement are **not**
 ported. Both seats count with the same pinned engine over the same committed
@@ -552,8 +619,13 @@ servedUnits     = promptUnits + toolUnits + completionUnits
 `messageMetadata[i] = { name?, tool_call_id?, tool_calls? }`, built in that key
 order from each normalized message.
 
+`chatPromptUpperBound` is the GV-6 formula: utf8 bytes in place of `E` for
+content, role and the tool envelope, plus the template constants. It bounds
+every engine's `promptUnits + toolUnits`, because each engine counts ≤ utf8 bytes.
+
 The executor algorithm, for one serve. It runs after the existing seller
-admission: auth signature, replay, `UNDERFUNDED`, and the new `allowedBuyers` check.
+admission, which proceeds in this order: replay, `UNDERFUNDED`, auth signature,
+and then the new `allowedBuyers` check (`BUYER_NOT_ALLOWED`, §7.5).
 
 1. **Parse the payload.** Use A `parseChatServePayload` with `allowParts:false`,
    `maxMessages 256` and `maxBytes 2_000_000`.
@@ -587,18 +659,27 @@ admission: auth signature, replay, `UNDERFUNDED`, and the new `allowedBuyers` ch
    **provider-reported basis:**
    - `providerUsage` absent or invalid → `UPSTREAM_ERROR`.
    - `servedUnits = promptTokens + completionTokens`.
-   - `servedUnits > maxUnits` → `OVER_MAX_UNITS` (fail closed, 0 units).
+   - `servedUnits > maxUnits` → `METERING_OVERRUN` (fail closed, 0 units).
+     This is a **seller** fault, not `OVER_MAX_UNITS`. The buyer sized
+     `maxUnits` from the strict byte bound. A provider prompt count above it
+     comes from the provider's hidden template or system prompt, and raising
+     `max_tokens` cannot fix it.
    - `servedUnits === 0` → `EMPTY_RESULT` (existing check).
 7. **Normalize `finish_reason`.** `tool_calls` if tool calls are present, else
    `length` if truncated or upstream said `length`, else `stop`.
 8. **Emit the result.** Write the result JSON (§7.3) as UTF-8 `JSON.stringify`
    with no whitespace. `unitsServed = servedUnits`.
+   - If `resultBytes.byteLength > MAX_SERVE_RESULT_BYTES`, refuse with
+     `UPSTREAM_ERROR` before any receipt exists. JSON escaping can grow an
+     8 MiB upstream body past the router's 10 MiB read cap. A signed claim for
+     an undeliverable response would charge the buyer for nothing.
 
 **"Overrun fails closed with 0 units"** means:
 
 - Any path where the delivered work cannot be metered within the authorization
-  produces a refusal `errorCode`. That is either `OVER_MAX_UNITS`, or a
-  provider-reported total above `maxUnits`.
+  produces a refusal `errorCode`. That is either `OVER_MAX_UNITS` (pinned
+  tool-call overflow, a caller-addressable bound) or `METERING_OVERRUN`
+  (provider-reported total above `maxUnits`).
 - The seller signs no receipt and the buyer is charged nothing.
 - The authorization stays burned. This is the existing fail-closed replay rule.
 - The seller absorbs the upstream cost.
@@ -623,6 +704,14 @@ This applies only to openai-compatible offerings configured without
 
 - Port `analyzeQuery` **verbatim**. Both seats run the same function over the
   same bytes. Its approximations are part of the schedule, so do not "fix" them.
+- **Size gate (MUST).** `assertQueryWithinLimit(sparql)` throws
+  `QueryTooLargeError` when `utf8Bytes(sparql) > QUERY_MAX_SPARQL_BYTES`, and
+  every exported function that analyses a query calls it first. The
+  property-path and triple-pattern regexes backtrack quadratically on long
+  whitespace runs and undotted bodies.
+  - Buyer: `MarketplaceRequestError('invalid_sparql', …, 'sparql')`, sent
+    before routing.
+  - Seller: `BAD_PAYLOAD`, sent before analysis.
 - `queryAdmissionUnits(sparql, s)` returns `bigint` and computes:
   ```
   base + triplePatterns·perTriplePattern + joinVars·perJoinVar
@@ -648,7 +737,9 @@ This applies only to openai-compatible offerings configured without
 3. Execute through the injected query fn with a guard. Pass `{ timeout:
    guards.timeoutMs, signal: AbortSignal.timeout(guards.timeoutMs) }` through to
    `agent.query` (`QueryOptions.timeout`/`signal` exist).
-4. Outcomes:
+4. Outcomes. `rows` is **`countResultRows(value)` over the exact value the
+   seller serializes as `result`**, never the query fn's own `rowCount`. Today's
+   mixin counts only `bindings`, while the buyer recount also counts `quads`.
    - **Delivered** (`rows ≤ rowCap`): `servedUnits = admission + delivery(rows)`.
      The result is `{ schema, result, rowCount, metering: { scheduleDigest,
      admissionUnits, deliveryUnits, servedUnits, rowCount } }`.
@@ -656,7 +747,10 @@ This applies only to openai-compatible offerings configured without
      decrement, so **admission is still owed** (`admission ≥ base = 2 > 0`).
      `servedUnits = admission`. The result is `{ schema, result: null, rowCount: 0,
      metering: { …, deliveryUnits: 0, servedUnits: admission, aborted: { reason:
-     'timeout' | 'row-cap' } } }`. The receipt settles admission only.
+     'timeout' | 'row-cap' | 'size-cap' } } }`. The receipt settles admission only.
+   - **Size-cap abort**: the delivered result would serialize past
+     `MAX_SERVE_RESULT_BYTES`. It is handled exactly like a guard abort, with
+     reason `'size-cap'`, and the check runs before signing.
    - **Backend failure** (not a guard): `EXECUTION_FAILED`, no receipt.
 5. Seller guards come from config `marketplace.seller.queryGuards` and default to `DEFAULT_QUERY_GUARDS`.
 
@@ -747,7 +841,8 @@ charged. `packages/core` is untouched.
 
 | Code | Raised by |
 |---|---|
-| `BUYER_NOT_ALLOWED` | seller-service, after resolving buyer and before headroom |
+| `BUYER_NOT_ALLOWED` | seller-service, **after** `#verifyAuthSignature` and before `executor.execute` (no membership oracle for unauthenticated probers) |
+| `METERING_OVERRUN` | chat executor step 6, provider-reported total above `maxUnits` (seller fault) |
 | `TOOLS_UNSUPPORTED` | chat executor step 2 |
 | `MODEL_MISMATCH` | chat executor step 1 |
 | `CONTEXT_EXCEEDED` | executor step 3, or llama.cpp classification |
@@ -767,6 +862,9 @@ delivery history (C):
 - `UNDERFUNDED`
 - `BUYER_NOT_ALLOWED`
 
+`METERING_OVERRUN`, `UPSTREAM_*` and `EXECUTION_FAILED` **do** count as
+seller delivery failures.
+
 ## 8. Buyer runtime (C)
 
 ### 8.1 Per-request `maxUnits` derivation
@@ -780,21 +878,56 @@ For chat, C supplies the callback below. `bucketCap` is
 If no bucket matches → `MarketplaceRouteError('no-bucket')`.
 
 ```
+wireFor(offer):                          // the ONLY place wire messages/options are built
+  transport = offer.toolTransport ?? 'none'
+  native    → { wire: messages, wireOpts: options }
+  prompt    → { wire: (requestHasTools || hasToolHistory(messages)) ? buildPromptToolTransport(messages, options) : messages,
+                wireOpts: {} }
+  none      → { wire: messages, wireOpts: {} }      // reached only when requiresTools is false: tool fields are STRIPPED
+                                                     // (tools + tool_choice 'none' would otherwise hit seller TOOLS_UNSUPPORTED)
 maxUnitsFor(offer):
-  wire     = offer.toolTransport === 'prompt' && (requestHasTools || hasToolHistory(messages))
-               ? buildPromptToolTransport(messages, options) : messages
-  wireOpts = offer.toolTransport === 'prompt' ? {} : options
+  { wire, wireOpts } = wireFor(offer)
   engine   = offer.metering?.basis === 'pinned' ? registry.get(offer.metering.tokenizer.kind, offer.metering.tokenizer.digest) : undefined
   fixed    = engine ? countChatPromptUnits(engine, wire) + countChatToolUnits(engine, wire, wireOpts)
                     : chatPromptUpperBound(wire, wireOpts)           // strict: count ≤ utf8 bytes for every engine
   wanted   = explicitMaxTokens ?? defaultMaxTokens (256)
-  units    = fixed + wanted
-  if (explicitMaxTokens === undefined && units > bucketCap && bucketCap − fixed ≥ 1) units = bucketCap   // clamp only a DEFAULT
+  slack    = (offer.toolTransport === 'native' && wireOpts.tools?.length && wireOpts.toolChoice !== 'none') ? TOOL_CALL_SLACK_UNITS : 0n
+  units    = fixed + wanted + slack
+  if (explicitMaxTokens === undefined && units > bucketCap && bucketCap − fixed − slack ≥ 1) units = bucketCap   // clamp only a DEFAULT
   return units          // router rejects 'max-units' when units ≤ 0 or > bucketCap
 ```
 
-- The payload `max_tokens = decision.maxUnits − fixed(chosen offer)`.
+- The payload `max_tokens = decision.maxUnits − fixed(chosen offer) − slack(chosen offer)`.
 - The authorization carries `decision.maxUnits` (§8.2).
+- **Why the slack.** R4 counts `JSON.stringify(tool_calls)`, which includes
+  provider ids and wrapper keys that the upstream's own `max_tokens` does not
+  bound. Without slack, a tool call near `max_tokens` fails closed with
+  `OVER_MAX_UNITS` after the upstream work is done. The slack is usable only by
+  tool calls, because the content cap stays `max_tokens − toolCallUnits`
+  (§5.6 step 6).
+- **Validate before routing (MUST).** For each candidate offer,
+  `parseChatServePayload(JSON.parse(JSON.stringify(payloadFor(offer))))` must
+  succeed. Otherwise throw `MarketplaceRequestError` (400) before any
+  reservation or quote probe. This covers every seller-side limit: stop
+  lengths, `maxBytes` after the prompt transport adds the tool system message,
+  and enum ranges.
+- **Count exactly what is sent (MUST).** `fixed`, the payload, and the recount
+  (§8.3) all use the **same** `wire`/`wireOpts` objects that are serialized
+  into the payload. A adds a property test that
+  `normalizeChatMessages(JSON.parse(JSON.stringify(m)), {allowParts:false})`
+  deep-equals `m` for every normalized `m`. The seller re-normalizes, so any
+  non-idempotence would make an honest seller's prompt count differ from the
+  buyer's.
+- **Unicode.** `normalizeChatMessages` rejects strings that are not
+  well-formed UTF-16 (lone surrogates → `invalid_messages`). Upstreams reject
+  them, and the engines would see U+FFFD.
+- **Memoize.** Memoize `fixed` per `(engine digest | 'upper', transport)`
+  within one request. Up to 8 offers are evaluated and most share a pin.
+- **Authorization TTL floor for chat.** `expiry = chainNow +
+  max(authTtlSeconds, ceil(chatServeTimeoutMs / 1000) + 300)`. A seller checks
+  the batching margin at admission, *before* a ≤ 200 s upstream call. A short
+  operator TTL would otherwise let the claim expire in the batcher and be
+  dropped as a revert.
 - For the generic `invoke()` path and the query path, `request.maxUnits` keeps
   its current meaning. The query gateway passes `queryWorstCaseUnits` (§6.3).
 - Timeouts:
@@ -811,6 +944,9 @@ interface RouteRequest {                                 // existing fields unch
   requiresTools?: boolean;                               // tools requested (toolChoice ≠ 'none') or tool history present
   sellerStanding?: ReadonlyMap<string, SellerStanding>;  // keyed by sellerIdentityId decimal; absent = 'trusted'
 }
+// api-shape is SYMMETRIC: offer.apiShape !== request.requireApiShape (undefined on both sides = equal) → 'api-shape'.
+// The generic invoke() therefore never routes a { prompt }/{ sparql } payload to a chat offer, which would refuse
+// BAD_PAYLOAD. The buyer's quote-probe prefilter (#probeQuotes) applies the same predicate, so probes are not wasted.
 type RouteRejectionReason = /* existing */ | 'max-units' | 'api-shape' | 'tools-unsupported' | 'recount-denied' | 'restricted';
 // RouteDecision (ok:true) gains   maxUnits: bigint    (request.maxUnits, or maxUnitsFor(chosen offer))
 ```
@@ -819,7 +955,7 @@ The per-offer evaluation order is the following. The first failing check names t
 
 1. service-mismatch
 2. model-mismatch
-3. api-shape: `requireApiShape` set and `offer.apiShape !==` it
+3. api-shape: `offer.apiShape !== requireApiShape` (symmetric; both undefined is a pass)
 4. tools-unsupported: `requiresTools` and `toolTransport` not `native`/`prompt`
 5. offer-expired
 6. restricted: `offer.access === 'restricted'` and `policy.sellerAllow` lacks the seller
@@ -836,9 +972,15 @@ The per-offer evaluation order is the following. The first failing check names t
 Preference order:
 
 1. Standing tier: `trusted` before `deprioritized`.
-2. Lowest live ask.
-3. Net delivery score (existing).
-4. Lexicographic `sellerPeerId`.
+2. Lowest `worstCaseCostWei` (= units × live ask).
+3. Lowest live ask.
+4. Net delivery score (existing).
+5. Lexicographic `sellerPeerId`.
+
+Comparing raw asks across offers that pin different tokenizers is
+apples-to-oranges. The per-offer worst case prices the request's own prompt
+under each pin. When units are uniform (the generic path), step 2 orders
+exactly as the old lowest-ask rule did, so the existing router tests are unchanged.
 
 ### 8.3 Recount and seller standing
 
@@ -865,7 +1007,7 @@ The chat rules, in order:
 
 | Condition | Verdict | Reason |
 |---|---|---|
-| Result malformed | `unverifiable` | `malformed-result` |
+| Result malformed (`parseChatServeResult` fails on a receipt-verified result) | `mismatch` (no `recountUnits`) | `malformed-result` |
 | Basis `provider-reported` | `unverifiable` | `provider-reported` |
 | Buyer lacks the engine for the pinned digest | `unverifiable` | `no-engine` |
 | `result.metering.tokenizer.digest ≠ offer pin` | `mismatch` | `tokenizer-drift` |
@@ -874,13 +1016,30 @@ The chat rules, in order:
 | `recount = meterChat(engine, {wire, wireOpts, delivered content, delivered tool_calls})` ≠ `receipt.servedUnits` | `mismatch` | `units-differ` |
 | Otherwise | `match` | — |
 
-The query rules are the same shape:
+A malformed result counts against the seller, not as `unverifiable`. The seller
+was paid for bytes that do not conform to the `apiShape` it advertised. If this
+row were `unverifiable`, a dishonest seller could dodge every recount simply by
+emitting slightly malformed results. C still surfaces the call as a failure.
+The receipt is valid and charged, so C throws `MarketplaceInvokeError('MALFORMED_RESULT', …, 'served')`
+after recording the verdict. The same rule applies to a malformed query result
+(`parseQueryServeResult` fails).
 
+`wireMessages`/`wireOptions` passed to `recountChat` are the exact objects that
+were serialized into the payload (§8.1).
+
+The query rules are the same shape, in order:
+
+- The offer has no `queryCost` group (a pre-schedule seller) → `unverifiable`,
+  reason `not-metered`. The result is **not parsed**, so a legacy `{ result }`
+  never counts as malformed.
 - Offer schedule digest ≠ V1 → `unverifiable`, reason `schedule-drift`.
+- `parseQueryServeResult` fails → `mismatch`, reason `malformed-result`.
 - Otherwise recount = `admission(sparql) + delivery(countResultRows(result.result))`.
 - An aborted result recounts to admission only.
 
-`stub-inference` and other non-pinned payloads return `unverifiable`, reason `not-metered`.
+`stub-inference` and other non-pinned payloads return `unverifiable`, reason
+`not-metered`, before any parse. The malformed-result rule applies only to
+offers that advertise `apiShape` or `queryCost`.
 
 **Standing data and thresholds** (A `SellerStandingBook`; C persists it):
 
@@ -936,8 +1095,11 @@ its window cannot roll. Once the cool-down passes, the seller is still
 |---|---|---|
 | `native` | yes | Send normalized `tools` / `tool_choice` / `parallel_tool_calls` and messages unchanged. Validate the result's `tool_calls` with `validateToolCallsAgainstOptions` |
 | `prompt` | yes | `wire = buildPromptToolTransport(messages, options)`, no tool fields on the wire. On the result, `parsePromptToolTransport(content, options)`. Returned tool calls make `message.content = null` and `finish_reason = 'tool_calls'` |
-| `none` / absent | yes | Router rejects `tools-unsupported` |
+| `none` / absent | `requiresTools` (tools with `tool_choice ≠ 'none'`, or tool history) | Router rejects `tools-unsupported` |
+| `none` / absent | tools present but `tool_choice: 'none'`, no history | Routable. `wireFor` **strips** `tools` / `tool_choice` / `parallel_tool_calls` (§8.1) |
 | any | no | Plain messages |
+
+All wire shapes come from `wireFor(offer)` (§8.1). This table describes it.
 
 Recount always uses the seller-delivered result, not the buyer's transformed
 message.
@@ -963,9 +1125,17 @@ Call order: route → `guard.admit(decision.worstCaseCostWei)` → `plan.meter.r
 | Outcome | `settle(…)` |
 |---|---|
 | Success | `{receiptValueWei, servedUnits, 'served'}` |
+| Receipt verified, then a post-receipt failure (`MarketplaceInvalidToolResponseError`, `MALFORMED_RESULT` from a chat/query parse) | `{receiptValueWei, servedUnits, 'served'}`: the receipt is trusted, so the actual charge is known. This matches the error's `charged_wei = cost` |
 | Plan reserve throws, or `not-served` | `{0n, 0n, 'not-served'}` |
-| `served` failure (bad receipt or invalid tool response) | `{worstCaseCostWei, 0n, 'served'}` |
+| `served` failure before the receipt verified (`BAD_RECEIPT`, `MALFORMED_RECEIPT`, `UNVERIFIABLE_SELLER`, result JSON unparseable) | `{worstCaseCostWei, 0n, 'served'}` |
 | `ambiguous` | `{worstCaseCostWei, 0n, 'ambiguous'}` |
+
+- **Admit errors propagate unchanged.** If `admit` throws, C rethrows the same
+  error object (no wrapping), calls no `settle`, records no delivery failure
+  and no recount, and leaves the plan meter untouched.
+- **Settle errors are swallowed.** If `settle` throws, C logs one warning (keyId
+  is unknown to C, so it logs the callId only) and swallows the error, so the
+  caller still sees the invoke outcome.
 
 The ambiguous case counts the worst case against the key, permanently. That is
 a conservative sub-cap. Document it.
@@ -987,6 +1157,15 @@ Base: `/api/marketplace/gateway/v1`. An OpenAI SDK `baseURL` of
 ### 9.2 Chat request handling (order matters)
 
 1. **Authenticate the key** (§11). Fail → 401. No body is read.
+   - The key is taken **only** from `Authorization: Bearer <key>`: scheme
+     case-insensitive, exactly one token, surrounding whitespace trimmed.
+   - It is never taken from the query string, the body, cookies or
+     `x-api-key`. A key-shaped `?api_key=`/`?key=` parameter is ignored, never
+     logged, and the request is judged on its header alone.
+   - Every response sent before the body is read (401/404/405/429/503) carries
+     `Connection: close`. An unread request body must not pin the socket or the
+     admission slot.
+   - A 401 also carries `WWW-Authenticate: Bearer realm="dkg-marketplace-gateway"`.
 2. **Per-key rps.** `SlidingWindowRateLimiter.tryAcquire(keyId, record.scopes.rps, now)`.
    Fail → 429 `rate_limit_exceeded` with `Retry-After: 1`.
 3. **Gateway concurrency.** Fewer than `maxConcurrent` (default 16) requests
@@ -1038,7 +1217,7 @@ Query:
 
 ```json
 { "object": "dkg.query.result", "id": "<callId>", "result": <seller result.result | null>, "row_count": n,
-  "aborted": null | { "reason": "timeout"|"row-cap" },
+  "aborted": null | { "reason": "timeout"|"row-cap"|"size-cap" },
   "usage": { "admission_units": n, "delivery_units": n, "total_units": n },
   "dkg": <DkgCallBlock> }
 ```
@@ -1110,6 +1289,9 @@ by the key's `modelAllowlist`.
                        "routable": true } } ] }
 ```
 
+`context_length` is a JSON **number**: discovery already rejects values above
+2^53. Every other bigint in `dkg` is a decimal string.
+
 `routable` is true when the active plan has a bucket matching
 `{serviceType:'inference', modelId}`. When unsubscribed, the list is still
 returned and every model has `routable:false`.
@@ -1124,6 +1306,11 @@ Every gateway error body has this shape:
 ```
 
 `charged_wei` is non-zero only for served-but-failed calls and ambiguous holds.
+It is **always the `costWei` that this call's spend guard `settle` received**:
+D's guard closure records it, and D never infers it from the error code.
+`MALFORMED_RESULT` is the case that needs this. Before the receipt verifies,
+the charge is the worst case; after it verifies, the charge is the receipt
+value (§8.5).
 
 | Condition | HTTP | type | code |
 |---|---|---|---|
@@ -1149,9 +1336,10 @@ Every gateway error body has this shape:
 | Invoke `BAD_PAYLOAD` / `MODEL_MISMATCH` / `TOOLS_UNSUPPORTED` | 400 | invalid_request_error | `seller_rejected_request` (`dkg.reason` = code) |
 | Invoke `UPSTREAM_RATE_LIMITED` | 429 | rate_limit_error | `upstream_rate_limited` |
 | Invoke `UPSTREAM_TIMEOUT` | 504 | api_error | `upstream_timeout` |
-| Invoke `UPSTREAM_ERROR` / `UPSTREAM_AUTH` / `EXECUTION_FAILED` / `CONNECTOR_UNAVAILABLE` / `SELLER_NOT_READY` / `EMPTY_RESULT` | 502 | api_error | `upstream_error` (`dkg.reason`) |
+| Invoke `UPSTREAM_ERROR` / `UPSTREAM_AUTH` / `EXECUTION_FAILED` / `CONNECTOR_UNAVAILABLE` / `SELLER_NOT_READY` / `EMPTY_RESULT` / `METERING_OVERRUN` | 502 | api_error | `upstream_error` (`dkg.reason`) |
+| `QueryTooLargeError` surfaced as `MarketplaceRequestError('invalid_sparql')` | 400 | invalid_request_error | `invalid_sparql` (param `sparql`) |
 | Invoke `DELIVERY_UNKNOWN` (ambiguous) | 504 | api_error | `delivery_unknown` (`charged_wei` = worst case held) |
-| Invoke `BAD_RECEIPT` / `MALFORMED_RECEIPT` / `MALFORMED_RESULT` / `UNVERIFIABLE_SELLER` | 502 | api_error | `bad_receipt` (`charged_wei` = worst case) |
+| Invoke `BAD_RECEIPT` / `MALFORMED_RECEIPT` / `MALFORMED_RESULT` / `UNVERIFIABLE_SELLER` | 502 | api_error | `bad_receipt` (`charged_wei` = what the guard settled: worst case, or the receipt value for a post-receipt `MALFORMED_RESULT`) |
 | Any other seller refusal code (`EXPIRED`, `STALE_AUTHORIZATION`, `REPLAYED_CALL_ID`, `BAD_AUTH`, `WRONG_SELLER`, `BAD_ASK`, `SETTLEMENT_CLOSED`, `UNKNOWN_OFFERING`, `UNSUPPORTED_VERSION`, `MALFORMED_REQUEST`, `WRONG_PAYLOAD_KIND`, `BUYER_NOT_ALLOWED`, `NOT_DELIVERED`) | 502 | api_error | `seller_refused` (`dkg.reason`) |
 | `MarketplaceInvalidToolResponseError` | 502 | api_error | `invalid_tool_response` (`charged_wei` = cost) |
 | Runtime off (existing `isMarketplaceOff` patterns) | 503 | service_unavailable | `marketplace_unavailable` |
@@ -1184,16 +1372,42 @@ interface GatewayKeyRecord { keyId: string; keyHash: string; scopes: GatewayKeyS
 - **File:** `<dkgDir>/marketplace/gateway-keys.json`, mode 0600. The directory
   is created with mode 0700 if absent. Written atomically
   (`daemon/atomic-write.ts` `writeFileAtomicWith`) after every mint, revoke and
-  settle. Loaded once at daemon start.
+  settle. Loaded once at daemon start. Two properties of that helper need care:
+  - **Mode.** It takes an `io` whose `writeFile(path, data)` has no mode
+    argument. D's `io.writeFile` must pass `{ mode: 0o600 }`, and D chmods the
+    final file to 0600 after the rename.
+  - **Serialized writes (MUST).** The helper's tmp name is
+    `${path}.tmp.${pid}.${Date.now().toString(36)}`, so two writes in the same
+    millisecond collide on one tmp file, and unordered async writes can land an
+    older snapshot last. All writes go through one per-store queue: at most one
+    write in flight, and at most one pending write that serializes the
+    *latest* ledger state when it starts.
+- **Mint is durable before it returns.** `mint` resolves only after its write
+  completed. A plaintext is never returned for a key that a crash could forget.
+  A `keyId` that collides with an existing record is re-drawn.
+- **Malformed file: fail closed, keep booting.** At start the store records the
+  error and logs it once, naming the file. The daemon still boots.
+  - Every gateway path answers 503 `marketplace_unavailable`.
+  - The key admin routes answer 500 with the file path and parse error.
+  - Mint refuses.
+  - The file is never overwritten. The operator fixes or removes it, then restarts.
 - **Content:** `GatewayKeyLedgerJson = { version: 1, keys: [...] }`. Bigints are
   decimal strings. `reservedWei` and reservations are **not persisted**: they
   are in-flight state.
 - **Hashed at rest.** `keyHash = 'sha256:' + sha256hex(plaintext)`. The
   plaintext is returned exactly once, by mint, and never stored or logged.
-- **Lookup:** parse the `keyId` from the presented string (§3.1 regex), find
-  the record, then `timingSafeEqual(sha256(presented), storedHashBytes)`. A
-  malformed string or unknown keyId → `invalid_api_key`, with the same
-  response shape and timing class.
+- **Lookup (order is normative):**
+  1. Match the §3.1 regex.
+  2. Find the record by `keyId`.
+  3. Compare `timingSafeEqual(sha256(presented), storedHashBytes)`. For an
+     unknown `keyId`, compare against a fixed dummy hash, so both paths hash
+     and compare.
+  4. **Only after the hash matches**, check revoked → `key_revoked`, then
+     expired → `key_expired`.
+
+  Any failure in steps 1–3 is `invalid_api_key`. The distinct revoked/expired
+  codes are therefore only ever shown to a holder of the correct secret, and a
+  prober cannot enumerate which `keyId`s exist or were revoked.
 - **Singleton:** `openGatewayKeyStore(dir)` caches one store per path, so the
   gateway dispatch and the key admin routes share in-memory state. That makes
   revocation effective on the **next call**. Calls already in flight complete.
@@ -1356,7 +1570,18 @@ are never added to `validTokens`.
   are never logged. Logs carry `keyId` and `callId` only.
 - **S9 Existing gates still apply.** Rate limiting and admission control run
   before the carve-out, as for every request, plus per-key rps and the gateway
-  concurrency cap.
+  concurrency cap. Loopback clients bypass the per-IP limiter for every
+  `/api/` path, the gateway included. Brute force stays infeasible: the secret
+  part has 256 bits.
+- **S10 Header-only credential.** The key is read only from
+  `Authorization: Bearer` (§9.2). Browsers never attach that header
+  cross-site on their own, and no cookie, query or body credential exists, so
+  cross-site requests (CSRF) and DNS rebinding cannot spend without the
+  plaintext key. CORS headers on gateway responses come from the existing
+  allowlist (`resolveCorsOrigin`), which defaults to loopback origins.
+- **S11 No key-state oracle.** `key_revoked` / `key_expired` are returned only
+  after the presented secret's hash matched (§10.2). Every other failure is
+  `invalid_api_key`, with the same shape and the same hash-and-compare work.
 
 ## 12. Operator config reference (D parses; JSON wei amounts as decimal strings)
 
@@ -1369,7 +1594,7 @@ are never added to `validTokens`.
         "askPerUnitWei": "500000000000", "executor": "chat-connector",
         "connector": { "kind": "openai-compatible", "baseUrl": "http://127.0.0.1:18080/v1", "upstreamModel": "stub-chat",
                        "secretEnvFile": "/abs/.devnet/node1/marketplace/.secrets/llm-stub.env", "toolTransport": "native",
-                       "timeoutMs": 120000 },
+                       "maxTokensField": "max_tokens", "timeoutMs": 120000 },
         "metering": { "tokenizer": { "kind": "stub-words-v1" } },
         "model": { "displayName": "Stub Chat", "contextLength": "32768" },
         "allowedBuyers": [] }
@@ -1493,7 +1718,7 @@ resolves nodes and tokens, so `-t gateway` runs alone on a seeded devnet.
 |---|---|
 | G1 publish | A: `[devnet-llm, devnet-knowledge, devnet-chat(→ stub port)]`. B: `[devnet-llm, devnet-chat]`. Publish assets show `devnet-chat` published, the others unchanged (or `devnet-knowledge` published once for its new schedule fields) |
 | G2 discover | Poll `/api/marketplace/offers` until two offers have `modelId 'stub-chat'`, `apiShape 'openai-chat/v1'`, `metering.basis 'pinned'` and the stub-words digest |
-| G3 subscribe | Current epoch (post-warp), `amountWei 2e15`. Policy buckets: `[{inference, modelId 'stub-chat', budget 1e15, cap 1e12, maxUnitsPerCall 4000}, {query, budget 5e14, cap 2e13, maxUnitsPerCall 200}]` |
+| G3 subscribe | Current epoch (post-warp), `amountWei 2e15`. Policy `totalBudgetWei 2e15`, buckets: `[{inference, modelId 'stub-chat', budget 1e15, cap 1e12, maxUnitsPerCall 4000}, {query, budget 5e14, cap 2e13, maxUnitsPerCall 200}]` |
 | G4 mint | `POST /api/marketplace/keys` `{label:'e2e', budgetWei:'1000000000000000', modelAllowlist:['stub-chat'], allowQuery:true, rps:5}` → 201. The plaintext matches §3.1. The list shows the key without hash or plaintext |
 | G5 models | With the key → `stub-chat` present, `dkg.offers 2`, `routable true`. With no auth → 401 `invalid_api_key`. With the node token → 401 (S5) |
 | G6 chat | GV-2 messages → 200. Content `STUB:WORLD MARKETPLACE HELLO :: ok`. Usage `{17,5,22}`. `dkg.seller.identity_id = A` (cheaper). `dkg.metering.provider_usage = {17,5}`. `dkg.recount.verdict 'match'`. `cost_wei = 22·5e11`. The receipt signature recovers (reuse `receiptDigest`). `stub.state.lastAuthorization === 'Bearer devnet-stub-key'`. Key `spent_wei` = cost |
@@ -1526,6 +1751,11 @@ bearer enforcement.
   `/node/<n>/api/marketplace/gateway/v1/`, forward the **browser's**
   `Authorization` header and **never inject the node token**. All other proxied
   paths are unchanged.
+  - The existing `checkMutationOrigin` and loopback-Host guard still apply.
+  - Gateway paths use a proxy timeout ≥ 210 s. Today's `PROXY_TIMEOUT_MS` is
+    180 s, below the 200 s chat serve timeout.
+  - A key mint answers **201**. `rememberMutation` records 200s only, and it
+    must never persist a mint response: that response holds the plaintext key.
 - **Seller view.** Show `GET /node/<n>/api/marketplace/seller/connectors`
   (state, origin, metering pin).
 - **README.** Document the llm-stub script, the secret files, key minting, and
@@ -1548,8 +1778,8 @@ A and B run in parallel first. C starts after A is pushed, D after C, and E afte
 |---|---|---|
 | **A** | `packages/marketplace/src/**` (new: `chat-messages.ts`, `token-engines.ts`, `chat-metering.ts`, `query-cost.ts`, `serve-wire.ts`, `recount.ts`, `gateway-keys.ts`, `model-id.ts`, `stream-chain.ts`; modified: `types.ts`, `router.ts`, `metering.ts` (only `@deprecated` on `queryUnits`), `index.ts`), `packages/marketplace/test/**` (incl. `test/fixtures/**`), `packages/marketplace/README.md` | everything else |
 | **B** | `devnet/marketplace-rfc27/llm-stub.mjs`, root `package.json` (the one script line) | everything else |
-| **C** | `packages/agent/src/marketplace/**` (incl. new `connectors/**`, `chat-executor.ts`, `buyer-chat.ts`, `tokenizer-files.ts`, `seller-standing-store.ts`, optional `offer-rdf.ts`), `packages/agent/src/dkg-agent-marketplace.ts`, `packages/agent/src/index.ts` (marketplace export block only), `packages/agent/test/marketplace-*.test.ts` (existing + new) | `dkg-agent.ts`, `dkg-agent-types.ts`, `packages/core/**`, `packages/marketplace/**` |
-| **D** | `packages/cli/src/marketplace-config.ts`, new `packages/cli/src/marketplace-connector-config.ts`, new `packages/cli/src/marketplace-gateway-key-store.ts`, new `packages/cli/src/marketplace-codex-oauth-flow.ts`, new `packages/cli/src/daemon/marketplace-gateway-dispatch.ts`, new `packages/cli/src/daemon/routes/marketplace-gateway.ts` (+ optional `marketplace-gateway-errors.ts`, `routes/marketplace-keys.ts`), `packages/cli/src/daemon/routes/marketplace.ts`, `packages/cli/src/daemon/lifecycle.ts` (≤ 15 lines: dispatch build + carve-out), `packages/cli/src/api-client-marketplace.ts`, `packages/cli/src/commands/marketplace.ts`, `packages/cli/test/*marketplace*` (existing + new) | `auth.ts`, `config.ts`, `api-client.ts`, `handle-request.ts`, every non-marketplace route |
+| **C** | `packages/agent/src/marketplace/**` (incl. new `connectors/**`, `chat-executor.ts`, `buyer-chat.ts`, `tokenizer-files.ts`, `seller-standing-store.ts`, `gateway-domain.ts` (§14.3.3), optional `offer-rdf.ts`), `packages/agent/src/dkg-agent-marketplace.ts`, `packages/agent/src/index.ts` (marketplace export block only; it is 713/800 lines, so add one `export * from './marketplace/gateway-domain.js'` plus the few new runtime names, not a long list), `packages/agent/test/marketplace-*.test.ts` (existing + new) | `dkg-agent.ts`, `dkg-agent-types.ts`, `dkg-agent-lifecycle.ts`, `packages/core/**`, `packages/marketplace/**` |
+| **D** | `packages/cli/src/marketplace-config.ts`, new `packages/cli/src/marketplace-connector-config.ts`, new `packages/cli/src/marketplace-gateway-key-store.ts`, new `packages/cli/src/marketplace-codex-oauth-flow.ts`, new `packages/cli/src/daemon/marketplace-gateway-dispatch.ts`, new `packages/cli/src/daemon/routes/marketplace-gateway.ts` (+ optional `marketplace-gateway-errors.ts`, `routes/marketplace-keys.ts`), `packages/cli/src/daemon/routes/marketplace.ts`, `packages/cli/src/daemon/lifecycle.ts` (≤ 15 lines: dispatch build + carve-out), `packages/cli/src/api-client-marketplace.ts`, `packages/cli/src/commands/marketplace.ts`, `packages/cli/test/*marketplace*` (existing + new). New node-admin route modules (`routes/marketplace-keys.ts` etc.) are **called from `handleMarketplaceRoutes`**: `handle-request.ts` is not touched, and it already dispatches every `/api/marketplace*` path there | `auth.ts`, `config.ts`, `api-client.ts`, `handle-request.ts`, every non-marketplace route |
 | **E** | `devnet/marketplace-rfc27/automated.test.ts`, new `devnet/marketplace-rfc27/gateway-helpers.ts`, new `devnet/marketplace-rfc27/llm-stub.test.mjs`, `devnet/marketplace-rfc27/vitest.config.ts` (only if needed), `devnet/marketplace-rfc27/console/**` | `llm-stub.mjs` (report stub defects to B or the orchestrator), packages |
 
 Shared files that nobody may edit: `pnpm-lock.yaml`, `pnpm-workspace.yaml`,
@@ -1610,8 +1840,9 @@ export function countChatCompletionUnits(engine: TokenCountEngine, content: stri
 export interface ChatUnitBreakdown { promptUnits: bigint; toolUnits: bigint; completionUnits: bigint; servedUnits: bigint }
 export function meterChat(engine: TokenCountEngine, input: { messages: readonly ChatMessage[]; options: ChatToolOptions;
   content: string | null; toolCalls?: readonly ChatToolCall[]; template?: ChatTemplate }): ChatUnitBreakdown;
-export function chatPromptUpperBound(messages: readonly ChatMessage[], options: ChatToolOptions, template?: ChatTemplate): bigint;
+export function chatPromptUpperBound(messages: readonly ChatMessage[], options: ChatToolOptions, template?: ChatTemplate): bigint; // GV-6 formula
 export function boundCompletion(engine: Pick<TokenCountEngine, 'encodeCount'>, text: string, maxUnits: bigint): { text: string; truncated: boolean };
+export const TOOL_CALL_SLACK_UNITS: bigint;             // 128n (§8.1)
 
 // query-cost.ts
 export interface QueryCostSchedule { readonly version: 'dkg-mkt-query-cost/1'; readonly base: number; readonly perTriplePattern: number;
@@ -1631,11 +1862,15 @@ export function queryRowCap(sparql: string, maxUnits: bigint, guardMaxRows: bigi
 export interface QueryGuards { timeoutMs: number; maxRows: number }
 export const DEFAULT_QUERY_GUARDS: QueryGuards;
 export function countResultRows(result: unknown): number;
+export const QUERY_MAX_SPARQL_BYTES: 8192;
+export class QueryTooLargeError extends Error { readonly name: 'QueryTooLargeError'; readonly bytes: number }
+export function assertQueryWithinLimit(sparql: string): void;   // analyzeQuery / queryAdmissionUnits / queryWorstCaseUnits / queryRowCap call it first
 
 // serve-wire.ts
 export const CHAT_PAYLOAD_SCHEMA = 'openai-chat/v1';
 export const CHAT_RESULT_SCHEMA = 'openai-chat-result/v1';
 export const QUERY_RESULT_SCHEMA = 'sparql-result/v1';
+export const MAX_SERVE_RESULT_BYTES: number;            // 8 MiB (§3.1)
 export type MeteringBasis = 'pinned' | 'provider-reported';
 export interface ChatServePayload { schema: 'openai-chat/v1'; model: string; messages: ChatMessage[]; tools?: ChatTool[];
   tool_choice?: ChatToolChoice; parallel_tool_calls?: boolean; max_tokens: number; temperature?: number; top_p?: number;
@@ -1650,7 +1885,7 @@ export interface ChatServeResult { schema: 'openai-chat-result/v1'; model: strin
   usage: { prompt_tokens: number; completion_tokens: number; total_tokens: number }; metering: ChatMeteringBlock }
 export function parseChatServeResult(raw: unknown): { ok: true; result: ChatServeResult } | { ok: false; detail: string };
 export interface QueryMeteringBlock { scheduleDigest: string; admissionUnits: number; deliveryUnits: number; servedUnits: number;
-  rowCount: number; aborted?: { reason: 'timeout' | 'row-cap' } }
+  rowCount: number; aborted?: { reason: 'timeout' | 'row-cap' | 'size-cap' } }
 export interface QueryServeResult { schema: 'sparql-result/v1'; result: unknown; rowCount: number; metering: QueryMeteringBlock }
 export function parseQueryServeResult(raw: unknown): { ok: true; result: QueryServeResult } | { ok: false; detail: string };
 
@@ -1690,8 +1925,9 @@ export type GatewayKeyScopeVerdict = { ok: true } | { ok: false; code: 'model_no
 export interface GatewayKeyLedgerJson { version: 1; keys: Array<Record<string, unknown>> }
 export class GatewayKeyLedger {
   constructor(json?: GatewayKeyLedgerJson);                 // throws on a malformed file
-  mint(scopes: GatewayKeyScopes, nowSeconds: number, random?: (n: number) => Uint8Array): { plaintext: string; record: GatewayKeyRecord };
-  authenticate(presented: string | undefined, nowSeconds: number): GatewayKeyAuthVerdict;
+  mint(scopes: GatewayKeyScopes, nowSeconds: number, random?: (n: number) => Uint8Array): { plaintext: string; record: GatewayKeyRecord }; // re-draws a colliding keyId
+  remove(keyId: string): boolean;                           // ONLY to roll back a mint whose persist failed (§10.2)
+  authenticate(presented: string | undefined, nowSeconds: number): GatewayKeyAuthVerdict; // §10.2 lookup order; revoked/expired only after the hash matched
   checkScope(record: GatewayKeyRecord, request: { kind: 'inference' | 'query'; modelId?: string }): GatewayKeyScopeVerdict;
   reserve(keyId: string, reservationId: string, worstCaseWei: bigint): { ok: true } | { ok: false; code: 'key_budget_exceeded'; remainingWei: bigint };
   settle(reservationId: string, outcome: { costWei: bigint; servedUnits: bigint; kind: 'inference' | 'query' }, nowSeconds: number): void;
@@ -1710,6 +1946,8 @@ export function streamChainAccumulator(): { push(frame: Uint8Array): void; root(
 export function streamChainVerifier(): { push(frame: Uint8Array): void; finalize(claim: { streamChainRoot: string; frameCount: number; bytesDigest: string }): { ok: true; bytes: Uint8Array } | { ok: false; detail: string } };
 
 // types.ts / router.ts additions: §5.4 (MarketplaceOffer, OfferMetering, OfferQueryCost = { schedule: string; digest: string }), §8.2 (RouteRequest, RouteRejectionReason, RouteDecision.maxUnits)
+// router.ts behavior: api-shape is symmetric; preference = tier → worstCaseCostWei → ask → delivery score → peerId (§8.2)
+// recount.ts behavior: malformed result → { verdict: 'mismatch', reason: 'malformed-result' } (moves standing, §8.3)
 ```
 
 #### 14.3.2 C → D (exported from `@origintrail-official/dkg-agent`)
@@ -1717,12 +1955,51 @@ export function streamChainVerifier(): { push(frame: Uint8Array): void; finalize
 Config types: `MarketplaceConnectorConfig` and the extended
 `MarketplaceOfferingConfig` / `DKGAgentMarketplaceConfig` (§4.2, §12).
 
-Runtime exports: `MarketplaceSpendGuard`, `MarketplaceSpendRefusedError`
-(`name 'MarketplaceSpendRefusedError'`, `code`), `MarketplaceRequestError`
-(`name`, `code`, `param?`), `MarketplaceModelNotFoundError`,
-`MarketplaceInvalidToolResponseError` (`name`, `costWei`, `invoke`),
-`MarketplaceConnectorMountError` (`name`, `code`), `CODEX_OAUTH_CLIENT_ID`,
-`CODEX_DEFAULT_BASE`, `CODEX_TOKEN_URL`, and `defaultCodexAuthFile(dataDir: string): string`.
+Runtime exports. Constructor signatures are pinned so that D's tests can
+construct the same shapes C throws:
+
+```ts
+export interface MarketplaceSpendGuard { admit(worstCaseCostWei: bigint): void;
+  settle(o: { costWei: bigint; servedUnits: bigint; delivery: 'served' | 'not-served' | 'ambiguous' }): void }
+export class MarketplaceSpendRefusedError extends Error {           // name 'MarketplaceSpendRefusedError'
+  constructor(readonly code: 'key_budget_exceeded', message: string, readonly remainingWei?: bigint) }
+export class MarketplaceRequestError extends Error {               // name 'MarketplaceRequestError'
+  constructor(readonly code: 'invalid_messages' | 'invalid_tools' | 'invalid_parameter' | 'unsupported_parameter'
+    | 'invalid_model' | 'invalid_sparql', message: string, readonly param?: string) }
+export class MarketplaceModelNotFoundError extends Error {         // name 'MarketplaceModelNotFoundError'
+  constructor(readonly model: string) }
+export class MarketplaceInvalidToolResponseError extends Error {   // name 'MarketplaceInvalidToolResponseError'
+  constructor(message: string, readonly invoke: MarketplaceInvokeResult, readonly recount: RecountVerdict)
+  get costWei(): bigint /* = invoke.costWei */; get servedUnits(): bigint /* = invoke.servedUnits */ }
+export class MarketplaceConnectorMountError extends Error {        // name 'MarketplaceConnectorMountError'
+  constructor(readonly code: /* §4.1 list */ string, message: string, readonly offeringLocalId?: string) }
+export const CODEX_OAUTH_CLIENT_ID: string, CODEX_DEFAULT_BASE: string, CODEX_TOKEN_URL: string;
+export function defaultCodexAuthFile(dataDir: string): string;
+```
+
+**Check order in `marketplaceChatCompletion`** (C; E's assertions depend on it):
+
+1. runtime on, else the existing "not running" error → 503;
+2. `MarketplaceNotSubscribedError`;
+3. input normalization → `MarketplaceRequestError`;
+4. model resolution: discovery returned ≥ 1 offer but none with
+   `apiShape 'openai-chat/v1'` and this canonical model →
+   `MarketplaceModelNotFoundError`; discovery returned 0 offers →
+   `MarketplaceRouteError('no-offers')`;
+5. bucket (`no-bucket`);
+6. payload validation (§8.1), once per distinct `toolTransport` among that
+   model's chat offers, before any quote probe;
+7. route (quote probes + `selectRoute`);
+8. `spendGuard.admit`;
+9. plan reserve;
+10. sign;
+11. serve;
+12. receipt verify;
+13. recount + standing record;
+14. tool-response validation.
+
+`marketplaceGatewayQuery` follows the same order with
+`assertQueryWithinLimit` at step 3, and it has no step 4.
 
 Mixin methods added to `MarketplaceMethods`:
 
@@ -1753,7 +2030,7 @@ export interface MarketplaceChatCompletionResult {
   metering: ChatMeteringBlock; recount: RecountVerdict; invoke: MarketplaceInvokeResult;
 }
 export interface MarketplaceGatewayQueryResult {
-  callId: string; result: unknown; rowCount: number; aborted?: { reason: 'timeout' | 'row-cap' };
+  callId: string; result: unknown; rowCount: number; aborted?: { reason: 'timeout' | 'row-cap' | 'size-cap' };
   metering: QueryMeteringBlock; recount: RecountVerdict; invoke: MarketplaceInvokeResult;
 }
 export interface MarketplaceGatewayModel {
@@ -1771,18 +2048,37 @@ export interface MarketplaceConnectorStatus {
 
 #### 14.3.3 Agent re-exports for D
 
-The cli package has no direct `dkg-marketplace` dependency. C adds one block to
-`agent/src/index.ts`:
+The cli package has no direct `dkg-marketplace` dependency. Adding one would
+need a `pnpm-lock.yaml` edit, which nobody may make.
+
+C creates **`packages/agent/src/marketplace/gateway-domain.ts`**, a pure module
+with no runtime-root imports, and the agent root re-exports it with
+`export * from './marketplace/gateway-domain.js'`:
 
 ```ts
+// packages/agent/src/marketplace/gateway-domain.ts
 export {
   GatewayKeyLedger, SlidingWindowRateLimiter, GATEWAY_KEY_PREFIX, GATEWAY_KEY_PATTERN, publicGatewayKeyRecord,
-  canonicalModelId, TOKENIZER_KINDS, isTokenizerKind,
+  canonicalModelId, TOKENIZER_KINDS, isTokenizerKind, QUERY_MAX_SPARQL_BYTES,
   type GatewayKeyScopes, type GatewayKeyRecord, type PublicGatewayKeyRecord, type GatewayKeyLedgerJson,
   type GatewayKeyAuthVerdict, type GatewayKeyScopeVerdict, type TokenizerKind, type ChatToolCall,
   type ChatMeteringBlock, type QueryMeteringBlock, type RecountVerdict, type SellerStanding, type MeteringBasis,
 } from '@origintrail-official/dkg-marketplace';
+export {
+  MarketplaceSpendRefusedError, MarketplaceRequestError, type MarketplaceSpendGuard,
+} from './buyer-errors.js';                                  // C: errors live in a dependency-free module
+export {
+  CODEX_OAUTH_CLIENT_ID, CODEX_DEFAULT_BASE, CODEX_TOKEN_URL, defaultCodexAuthFile,
+} from './connectors/codex-constants.js';                   // C: constants split from the connector
 ```
+
+D imports **values** from
+`@origintrail-official/dkg-agent/dist/marketplace/gateway-domain.js`. The
+package's `./dist/*` export allows this, and the cli already imports
+`dkg-agent/dist/...` modules elsewhere. The point is that the key store,
+gateway routes and OAuth flow, together with their fast unit tests, never load
+the agent runtime root. That is the same convention `routes/marketplace.ts`
+documents. Types may come from the root.
 
 #### 14.3.4 D → E (HTTP)
 
@@ -1815,35 +2111,60 @@ The `llm-stub.mjs` exports and behaviors of §13.1, and the GV-2..GV-5 numbers.
 
   Pin hand-checked counts for ~6 strings per engine, including an unknown piece
   and a multi-byte character.
+  - **Differential test.** Compare against the verbatim fork loops (kept in
+    `test/oracle-bpe.ts`) on the fixtures plus 500 seeded random strings over
+    the fixture alphabet: equal counts.
+  - **Cost gate.** Build a generated chain vocab: 26 letters, then merges that
+    form every prefix of a 4096-letter pseudo-random sequence. A 2 MiB
+    single-piece input made of that sequence counts in < 3 s on both engines.
+    This fails loudly if an O(n²) loop is ported.
 - **`chat-messages.test.ts`.** Port the fork's normalization cases:
   - string / text parts / null content;
   - image part refusal and `allowParts:false` refusal;
   - bounds;
   - tool normalization and tool_choice forms;
   - `validateToolCallsAgainstOptions` (unlisted tool, required, none, parallel);
-  - prompt-transport build/parse round trip, prose-with-marker refusal, deterministic ids.
+  - prompt-transport build/parse round trip, prose-with-marker refusal, deterministic ids;
+  - **idempotence**: `normalize(JSON.parse(JSON.stringify(normalize(x))), {allowParts:false})`
+    deep-equals `normalize(x)` for every accepted `x`, including tool history,
+    names and empty content;
+  - lone surrogates → `invalid_messages`;
+  - `tool_calls: []` / `null` on a message → treated as absent.
 - **`chat-metering.test.ts`.** GV-2..GV-7. `toolEnvelopeText` is `''` without
   tools and stable JSON with them. `boundCompletion` invariants (prefix,
   `count ≤ cap`, no split surrogate pairs, cap 0). `meterChat` sums.
 - **`query-cost.test.ts`.** GV-8..GV-10. Schedule digest and canonical JSON.
   `queryRowCap` admit/deny edges. `countResultRows` shapes.
+  `QUERY_MAX_SPARQL_BYTES` boundary: 8192 bytes accepted, 8193 refused with
+  `QueryTooLargeError`. The refusal comes before any regex runs: a 1 MiB
+  whitespace run returns in < 50 ms.
 - **`serve-wire.test.ts`.** Payload/result parse accept/reject matrix, including
   non-safe-integer units, `servedUnits` ≠ sum, an unknown schema, and
   `finish_reason` enums.
-- **`recount.test.ts`.** Every verdict row of §8.3. Standing transitions:
+- **`recount.test.ts`.** Every verdict row of §8.3. A malformed result →
+  `mismatch` / `malformed-result`, and it moves standing. Standing transitions:
   - 0 → 1 → 3 mismatches;
   - cool-down expiry → `deprioritized`;
   - 20 clean recounts → `trusted`;
   - `unverifiable` never moves standing;
   - JSON round trip.
 - **`gateway-keys.test.ts`.** Format regex. Hash at rest (no plaintext in `toJSON`).
-  Auth paths: unknown, malformed, revoked, expired. Scope checks. Reserve/settle/release.
+  Auth paths: unknown, malformed, revoked, expired. A revoked or expired
+  `keyId` presented with a **wrong secret** → `invalid_api_key` (S11). `keyId`
+  collision on mint is re-drawn (inject `random`). `remove`. Scope checks.
+  Reserve/settle/release.
   Budget refusal. The conservation invariant over a randomized op sequence.
   JSON round trip drops reservations. `SlidingWindowRateLimiter` window and
   bounded key map.
 - **`router.test.ts` (extend).** Each new rejection reason. Per-offer
   `maxUnitsFor` (different units per offer; `decision.maxUnits`). Standing tier
   beats a cheaper deprioritized ask. Denied rejected. Restricted vs sellerAllow.
+  More cases:
+  - **Symmetric api-shape**: a request without `requireApiShape` rejects
+    apiShape offers.
+  - **Worst-case preference**: a lower ask with more per-offer units loses to
+    a higher ask whose `units × ask` is lower.
+
   Existing cases unchanged.
 - **`stream-chain.test.ts`.** Chain root changes on a tampered, dropped or
   reordered frame. Reassembly digest.
@@ -1873,29 +2194,50 @@ port 0. Tokenizer fixtures are written to a tmp dir from inline strings.
     tool → `UPSTREAM_ERROR`); 429/500/401/redirect/timeout classification; secret
     read at call time (rotate the file between calls); perms 0644 → mount fails;
     the secret never appears in `detail` (an upstream echoes the bearer in its
-    error body, and the test asserts redaction).
+    error body, and the test asserts redaction). Further cases:
+    - an echo placed so that the key straddles char 160 is still fully redacted;
+    - `tool_calls: []` / `null` in a plain reply succeeds (vLLM shape);
+    - `maxTokensField: 'max_completion_tokens'` is honored;
+    - no `temperature` is sent when the request has none.
   - **llamacpp**: non-loopback refused; GGUF digest + cache hit on the second
     mount (spy on hashing); unhealthy at mount; context-overflow classification.
   - **codex-oauth**: SSE accumulate; refresh on 401 and on an expiring JWT, with
-    the file rewritten 0600; `response.failed`; a missing scope ack or empty
-    `allowedBuyers` fails mount.
+    the file rewritten 0600, including over a pre-existing 0644 file;
+    `response.failed`; a missing scope ack or empty `allowedBuyers` fails mount.
+    **Single-flight**: 5 concurrent calls with an expired token make exactly 1
+    request to the fake token endpoint.
+  - **llamacpp**: a server that comes up after the mount fails is picked up by
+    the boot retry (fake timers).
 - **`marketplace-chat-executor.test.ts`.**
   - The stub-words path matches GV-2/GV-3 exactly against an in-test stub
     (re-implement the 10-line stub formula inline; do not import devnet files).
   - `boundCompletion` truncation when the upstream ignores `max_tokens`.
   - `OVER_MAX_UNITS` when `fixed ≥ maxUnits`. Tool-call overflow fails closed.
-  - Provider-reported: usage over `maxUnits` fails closed; missing usage fails.
+  - Provider-reported: usage over `maxUnits` fails closed with
+    `METERING_OVERRUN`; missing usage fails.
+  - Result bytes over `MAX_SERVE_RESULT_BYTES` (inject a small cap) → refusal,
+    no receipt.
   - `MODEL_MISMATCH`. `TOOLS_UNSUPPORTED` on prompt offerings.
   - The result JSON validates with `parseChatServeResult`, and
     `metering.servedUnits == unitsServed`.
 - **`marketplace-query-schedule.test.ts`.** Admission, delivery and abort
-  semantics (timeout through a slow query fn, row cap). `OVER_MAX_UNITS` before
+  semantics (timeout through a slow query fn, row cap, size cap).
+  `OVER_MAX_UNITS` before execution. Rows come from `countResultRows` of the
+  served value: a query fn returning `{ quads: [...] }` with `rowCount: 0`
+  still meters the quads. A SPARQL above 8192 bytes → `BAD_PAYLOAD` before
   execution. Update the existing `marketplace-flow.test.ts` query expectations
   from `queryUnits` to the schedule.
 - **`marketplace-offer-publisher.test.ts` (extend).** New predicates are
   published; secrets, URLs and paths are never present in the quads (assert by
   scanning the object strings). Discovery parses the pin. A malformed extension
   drops only the extension group. A pin change → republish, unchanged → no-op.
+  More cases:
+  - **Triple-scan safety.** One offer with 4 values on each of 10 extension
+    predicates parses in linear time and drops those groups. Assert the SPARQL
+    string has no `OPTIONAL`.
+  - A group with more than 64 triples is skipped.
+  - A duplicated core predicate skips the offer.
+  - A stub-words pin with a wrong digest drops the metering group.
 - **`marketplace-buyer-chat.test.ts`.** End to end over the messenger pair:
   - the gateway chat flow with a spend guard (admit/settle exactly once per outcome);
   - per-offer `maxUnits` for two sellers with different pins;
@@ -1906,14 +2248,30 @@ port 0. Tokenizer fixtures are written to a tmp dir from inline strings.
     `denied` and routing skips it;
   - standings persist across a service restart;
   - caller-fault codes do not count as delivery failures;
-  - `chatServeTimeoutMs` honored.
+  - `chatServeTimeoutMs` honored;
+  - generic `invoke()` never routes to an `apiShape` offer (symmetric api-shape);
+  - tools + `tool_choice:'none'` routed to a `toolTransport:'none'` offer sends
+    no tool fields;
+  - native tools add `TOOL_CALL_SLACK_UNITS` to `maxUnits` while the payload
+    `max_tokens` stays at `wanted`;
+  - an invalid tool response settles the spend guard at the receipt value;
+  - a guard `admit` throw propagates the same error object, with no
+    reservation and no delivery record;
+  - the chat authorization expiry honors the TTL floor;
+  - a seller that returns a non-conforming chat result → `MALFORMED_RESULT`,
+    verdict `mismatch`.
 - **`marketplace-agent-wiring.test.ts` (extend).**
   - Boot with a failing connector → the offering is reported `failed`, the
     quote declines `CONNECTOR_UNAVAILABLE`, and it is not published.
   - `marketplaceSetOfferings` is all-or-nothing on a mount failure.
   - `allowedBuyers` → `BUYER_NOT_ALLOWED` plus `mkt:access restricted`.
-- Run `pnpm --filter @origintrail-official/dkg-agent test:package-exports` (the
-  agent runs it) after the export changes.
+    A request carrying a **bad** auth signature from a non-allowed buyer gets
+    `BAD_AUTH`, not `BUYER_NOT_ALLOWED`, which shows there is no membership oracle.
+- After the export changes, run `pnpm --filter @origintrail-official/dkg-agent build`.
+  Its script runs `test:types` and `test:package-root`. The agent has no
+  `test:package-exports` script. The root-import check the build already
+  performs is the gate. `scripts/test-package-root.mjs` is not C's file, so
+  leave it unchanged.
 
 ### 15.4 D: `packages/cli/test/*marketplace*.test.ts`
 
@@ -1923,7 +2281,12 @@ port 0. Tokenizer fixtures are written to a tmp dir from inline strings.
     `/api/marketplace/gateway/v1/%2e%2e/%2e%2e/status` and
     `//api/marketplace/gateway/v1/models`, all resolving **outside** the prefix;
   - **body not read before auth**: send headers with an unknown key and leave
-    the body stream open; the response must be 401 without waiting.
+    the body stream open; the response must be 401 without waiting, with
+    `Connection: close`;
+  - **header-only key**: a valid key in `?api_key=`, in the body, or in
+    `x-api-key`, with no `Authorization` header → 401;
+  - **S11**: a revoked key's `keyId` with a wrong secret → `invalid_api_key`,
+    not `key_revoked`.
 - **`marketplace-gateway-auth-carveout.test.ts`.** A mini HTTP server that
   reproduces the lifecycle order (OPTIONS → carve-out → `authenticateHttpRequest`
   → `handleRequest` spy) with a fake agent, plus a **source-order pin**. It
@@ -1952,17 +2315,33 @@ port 0. Tokenizer fixtures are written to a tmp dir from inline strings.
   - per-key rps 429 and concurrency 503;
   - spend guard → ledger reserve, settle and release per delivery state;
   - the `dkg` block bigints as strings;
+  - `charged_wei` equals the cost the guard settled (worst case vs receipt
+    value for `MALFORMED_RESULT`);
+  - the module graph of the gateway routes and the key store does not import
+    the agent runtime root (assert by importing them in a test that stubs
+    nothing and checks `DKGAgent` was never evaluated, or by a source scan for
+    `from '@origintrail-official/dkg-agent'` value imports);
   - no `Authorization` or prompt text in captured logs.
 - **`marketplace-gateway-key-store.test.ts`.** File mode 0600, atomic writes, a
-  reload preserving usage, a malformed file failing loudly, the mint response
-  shape (plaintext once), and the list without hash.
+  reload preserving usage, the mint response shape (plaintext once), and the
+  list without hash. More cases:
+  - **0600 after overwriting** a pre-existing 0644 file.
+  - **Serialized writes**: 50 concurrent settles with a frozen `Date.now`
+    leave one well-formed file whose usage equals the in-memory ledger, with no
+    leftover `.tmp.` files.
+  - **Mint durability**: when the injected write fails, mint rejects, no
+    plaintext is returned, and `ledger.get(keyId)` is undefined.
+  - **Malformed file**: the store opens in fail-closed mode, the gateway
+    answers 503, the admin routes answer 500 naming the file, mint refuses, and
+    the file is left untouched.
 - **`marketplace-config.test.ts` (extend).** Connector, metering, gateway and
   `queryGuards` parsing. Relative paths rejected. `acknowledgeSubscriptionScope`
   must be literal true. `DKG_MARKETPLACE_GATEWAY_ENABLED`. Policy
   `match.modelId` canonicalized.
 - **`marketplace-codex-oauth-flow.test.ts`.** PKCE challenge correctness. A
   state mismatch is refused. A fake token endpoint → the auth file is written
-  0600 in the connector's shape. Timeout. Single flow at a time. Injectable port.
+  0600 in the connector's shape, including over an existing 0644 file, and
+  `.secrets/` is 0700. Timeout. Single flow at a time. Injectable port.
 - **`daemon-marketplace-routes.test.ts` (extend).** Keys, connectors, recount
   reset, the codex login routes, and the gateway-prefix 404 guard.
 
@@ -2020,3 +2399,121 @@ Run before committing. Report every command and its result.
   CORS allowlist. Server-side SDK use is the target.
 - Cancelling the p2p call on client disconnect.
 - Recount evidence export and dispute: the RFC settles regardless, so standing stays local.
+- Truncating (rather than aborting) a query that exceeds its row cap. V1 keeps
+  the fork's abort-with-admission rule.
+- Tokenizer drift during offer propagation. A seller that re-pins its tokenizer
+  takes a transient `tokenizer-drift` mismatch from buyers still holding the old
+  offer. Denial needs 3 mismatches within the window, so the cost is bounded.
+
+## 18. Review amendments (adversarial review of d8629be6)
+
+Every item below was verified against the code or measured. The sections named
+carry the normative text.
+
+1. **BPE cost bound (§5.1, §15.1).** The fork's merge loops are O(n²) per
+   pre-tokenized piece, and one 2 MB letter run blocks a seller or buyer event
+   loop for minutes to hours. They are now required to be heap/linked-list
+   O(n log n), with the verbatim loops kept as a test oracle, a differential
+   test, and a perf gate.
+2. **SPARQL size gate (§3.1, §6.1).** `analyzeQuery` is quadratic: measured
+   75 ms at 8 KiB and 1.3 s at 32 KiB, extrapolating to minutes at 1 MB. Both
+   seats now refuse queries above 8192 bytes before analysing them.
+3. **Discovery must be a triple scan (§5.4).** Adding ~20 OPTIONALs to the
+   GRAPH SELECT let any publisher in the open `marketplace` CG make every buyer
+   materialize k^20 rows: the authority check runs only after the engine.
+   OPTIONAL extension is now forbidden. The scan has no truncating LIMIT, caps
+   each group at 64 triples, applies duplicate-value rules, and checks that
+   pin/digest pairs are consistent.
+4. **Key store persistence (§10.2, §15.4).** `writeFileAtomicWith` has no mode
+   argument, and its tmp name collides within one millisecond. Writes are now
+   serialized and coalesced, the file is chmodded to 0600, mint is durable
+   before it returns (`ledger.remove` rolls back), and a malformed file makes
+   the gateway fail closed without failing the boot.
+5. **Key auth oracle (§10.2, §11.3 S11).** `key_revoked` / `key_expired` are
+   returned only after the secret's hash matched, and unknown keyIds compare
+   against a dummy hash.
+6. **Header-only credential (§9.2, §11.3 S10).** The key is read only from the
+   `Authorization` header, never from a query, body, cookie or `x-api-key`.
+   This also states the CSRF and DNS-rebinding reasoning. Pre-body rejections
+   carry `Connection: close`, and 401s carry `WWW-Authenticate`.
+7. **`BUYER_NOT_ALLOWED` after signature verification (§4.5, §5.6, §7.5).**
+   Before verification it was an unauthenticated membership oracle for the
+   private allowlist.
+8. **Symmetric api-shape routing (§8.2).** The generic `invoke()` could route
+   `{prompt}` payloads to chat offers, which refuse with `BAD_PAYLOAD`. The
+   quote prefilter now matches the router.
+9. **Preference by worst-case cost (§8.2).** Raw asks are not comparable across
+   different pins. The new order is identical to the old one when units are
+   uniform.
+10. **Exact count inputs (§8.1, §8.3, §5.5 R4).** One `wireFor(offer)`
+    function now covers all three transports. The `none` transport strips tool
+    fields, which `tools` + `tool_choice:'none'` previously left in, so the
+    seller answered `TOOLS_UNSUPPORTED`. Payloads are validated before any
+    quote probe. Counting and recount use exactly the serialized objects, with
+    a normalization-idempotence property test. Lone surrogates are rejected,
+    and tool calls are counted as delivered.
+11. **Tool-call slack (§3.1, §8.1).** R4 counts provider ids and wrapper keys
+    that the upstream's `max_tokens` does not bound. Native tool calls get
+    `TOOL_CALL_SLACK_UNITS` of authorization headroom, which only tool calls
+    can use.
+12. **`METERING_OVERRUN` (§5.6, §7.5, §9.6).** A provider-reported overrun is a
+    seller fault, so it is a 502 that counts as a delivery failure. It was
+    previously `OVER_MAX_UNITS`, a misleading 400 that blamed the caller.
+13. **Result size cap (§3.1, §5.6, §6.2).** The router's read cap is 10 MiB.
+    Larger results are refused (chat) or size-cap-aborted (query) before
+    signing, so a buyer is never charged for an undeliverable response.
+14. **Query rows from the delivered value (§6.2).** The current mixin counts
+    only `bindings`, while the recount also counts `quads`. Rows are now
+    `countResultRows` of the value the seller serializes.
+15. **Malformed results count against the seller (§8.3).** As `unverifiable`
+    they let a dishonest seller dodge every recount. They are now `mismatch`
+    plus `MALFORMED_RESULT`.
+16. **Spend-guard settlement (§8.5, §9.6).** A post-receipt failure settles at
+    the receipt value, which is consistent with `charged_wei`. `admit` errors
+    propagate unchanged, and `charged_wei` always equals what the guard settled.
+17. **Secrets (§4.3, §4.6).**
+    - Redaction now runs before truncation. Truncating first could leak a key
+      prefix at the cut.
+    - Codex token values are redacted, and mount errors never quote file content.
+    - Codex refresh is single-flight, because concurrent refreshes burn the
+      rotating refresh token.
+    - Auth-file writes are atomic with 0600 and a chmod, and `.secrets/` is 0700.
+18. **Upstream compatibility (§4.2, §4.6).**
+    - `tool_calls: []` / `null` means no tool calls. vLLM sends `[]` on every
+      plain reply, which used to make every call an `UPSTREAM_ERROR`.
+    - The new `maxTokensField` option covers OpenAI reasoning models.
+    - Sampler fields are sent only when set. The forced `temperature: 0` is
+      dropped, because those models reject it.
+19. **Operational fixes.**
+    - Boot-time mount retry with backoff (§4.4).
+    - Chat authorization TTL floor (§8.1).
+    - `context_length` is a JSON number (§9.5).
+    - Console proxy timeout ≥ 210 s, and mint responses are never persisted (§13.4).
+    - G3 sets `totalBudgetWei` (§13.3).
+20. **Contracts (§14.2, §14.3).**
+    - Error constructors and the `marketplaceChatCompletion` check order are pinned.
+    - New `gateway-domain.ts` module: D imports its values via
+      `dkg-agent/dist/marketplace/gateway-domain.js`, so cli unit tests never
+      load the agent root.
+    - D's new admin routes are dispatched from `handleMarketplaceRoutes`.
+    - The agent `index.ts` budget note (713/800).
+    - New A exports: `QUERY_MAX_SPARQL_BYTES`, `QueryTooLargeError`,
+      `assertQueryWithinLimit`, `MAX_SERVE_RESULT_BYTES`,
+      `TOOL_CALL_SLACK_UNITS`, `GatewayKeyLedger.remove`, and abort reason
+      `'size-cap'`.
+21. **Gate fix (§15.3).** The agent has no `test:package-exports` script. Its
+    build runs `test:types` + `test:package-root`.
+
+Checked and found sound, so unchanged:
+- The carve-out position and the WHATWG path cases (`..`, `%2e%2e`, `%2F`,
+  `//api`, backslashes), because both the carve-out and `authenticateHttpRequest`
+  parse the same `new URL(req.url, host)`.
+- No route other than the gateway is reachable with a gateway key or with no
+  credential.
+- The template, stub-words and schedule digests, and GV-1..GV-10: recomputed;
+  GV-8 was recomputed with a verbatim `analyzeQuery`.
+- `boundCompletion` GV-7: no off-by-one.
+- Stub-words and llm-stub usage are equal on GV-2..GV-5.
+- The drill arithmetic, now 9.35e14 > 9.2e14.
+- `MARKETPLACE_SERVE_VERSION` is unchanged.
+- The file budgets of `lifecycle.ts`, `auth.ts`, `config.ts` and `api-client.ts`.
