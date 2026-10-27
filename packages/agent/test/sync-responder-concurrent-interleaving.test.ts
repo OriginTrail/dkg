@@ -994,14 +994,14 @@ describe('sync responder pagination interleaving', () => {
     store.query = (async (sparql: string) => {
       const normalized = sparql.replace(/\s+/g, ' ').trim();
       if (
-        /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
+        normalized.startsWith('SELECT ?g ?s ?p ?o WHERE {') &&
         normalized.includes('VALUES ?g') &&
         normalized.includes('ORDER BY ?g ?s ?p ?o')
       ) {
         throw new Error(`durable fallback must not globally sort graph rows: ${normalized}`);
       }
       if (
-        /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
+        normalized.startsWith('SELECT ?g ?s ?p ?o WHERE {') &&
         normalized.includes(`VALUES ?g { <${cgPrefix}> <${fallbackGraph}>`)
       ) {
         exactGraphRowLoads++;
