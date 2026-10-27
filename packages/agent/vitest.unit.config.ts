@@ -207,6 +207,7 @@ export default defineConfig({
       "test/durable-recovery-slice-yield.test.ts",
       "test/durable-recovery-stored-prefix.test.ts",
       "test/durable-prefix-production.test.ts",
+      "test/store-content-fence-bounds.test.ts",
       "test/store-lane-yield.test.ts",
       "test/durable-progress.test.ts",
       "test/gossip-publish-handler.test.ts",
