@@ -3,6 +3,8 @@ import { decodePublicGraphSnapshot, normalizePublicGraphSnapshot } from '@origin
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { PublicSnapshotMode, PublicSnapshotObservation } from './public-snapshot-evidence.js';
 
+export class PublicSnapshotUnavailableError extends Error {}
+
 export const PUBLIC_GRAPH_SNAPSHOT_PROTOCOL = '/dkg/10.0.0/public-graph-snapshot/1';
 import type { SnapshotRequest } from './public-snapshot-policy.js';
 export function createPublicSnapshotReader(options: {
@@ -22,15 +24,21 @@ export function createPublicSnapshotReader(options: {
   };
   return async (refresh=false) => {
     let failure: unknown;
+    let unavailable = false;
     for (const peer of options.peers) {
       assertCurrent();
       try {
         const bytes = await request(peer, refresh, signal);
+        if (JSON.parse(new TextDecoder().decode(bytes))?.unavailable === true) {
+          unavailable = true;
+          throw new PublicSnapshotUnavailableError('Snapshot temporarily unavailable');
+        }
         const snapshot=decodePublicGraphSnapshot(bytes,expected);
         assertCurrent();
         return {mode:'core-cache',snapshot,sourceCore:peer};
       } catch(error) { failure=error; signal.throwIfAborted(); }
     }
-    throw new Error('No configured core supplied a valid public snapshot',{cause:failure});
+    const Failure = unavailable ? PublicSnapshotUnavailableError : Error;
+    throw new Failure('No configured core supplied a valid public snapshot',{cause:failure});
   };
 }

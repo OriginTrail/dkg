@@ -70,13 +70,6 @@ export function createRollingPromotionFixture(
     touchStatus: vi.fn(),
     activated: vi.fn<(id: string) => void>(),
     transitionDormancy: (id: string, reason: ContextGraphDormancyReason | undefined) => { if (reason === undefined) host.contextGraphSubscriptionDormancyById.delete(id); else host.contextGraphSubscriptionDormancyById.set(id, reason); },
-    finalizeActivation: (id: string) => {
-      const live = host.subscribedContextGraphs.get(id);
-      if (!live) return;
-      const handle = activations.observe(savedRows.get(id)!);
-      activations.stage(handle, live);
-      activations.finalize(id, true);
-    },
     recordContextGraphSubscriptionClear: vi.fn<RollingSubscriptionPromotionPorts['recordContextGraphSubscriptionClear']>(),
     persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionActivationPorts['persistBinding']>(async () => undefined),
     reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationPorts['reconcile']>(async () => undefined),
@@ -85,9 +78,16 @@ export function createRollingPromotionFixture(
       : options.authority === 'denied'
         ? { outcome: 'denied', grantScope: 'none', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible' }
         : { outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible' })),
-    activatePersistedContextGraphSubscriptionRecord: vi.fn<RollingSubscriptionActivationPorts['activate']>(options.activate ?? (async row => {
-      host.subscribedContextGraphs.set(row.id, promotionSubscription({ subscribed: row.subscribed, coreHosted: row.coreHosted, metaSynced: false, pendingMeta: false }));
-    })),
+    activatePersistedContextGraphSubscriptionRecord: vi.fn<RollingSubscriptionActivationPorts['activate']>(async (row, activationOptions) => {
+      if (options.activate) await options.activate(row, activationOptions);
+      else host.subscribedContextGraphs.set(row.id, promotionSubscription({ subscribed: row.subscribed, coreHosted: row.coreHosted, metaSynced: false, pendingMeta: false }));
+      const live = host.subscribedContextGraphs.get(row.id);
+      if (live) {
+        const handle = activations.observe(row);
+        activations.install(handle, live);
+        activations.commit(handle, live, activationOptions.claimRollingSlot === true);
+      }
+    }),
   };
   const activations = createTestSubscriptionActivations(host);
   return { agent: host, load } satisfies { agent: RollingSubscriptionPromotionPorts; load: typeof load };

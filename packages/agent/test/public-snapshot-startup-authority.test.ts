@@ -45,7 +45,7 @@ function coldIntent(a: any) {
 function finish(a: any) {
   const owner = a.contextGraphSubscriptionActivations, row = a.subscribedContextGraphs.get(graph);
   a.contextGraphSubscriptionDormancyById.delete(graph);
-  if (row?.subscribed) { owner.stage(owner.get(graph), row); owner.finalize(graph, false); }
+  if (row?.subscribed) { owner.install(owner.get(graph), row); owner.commit(owner.get(graph), row, false); }
   else owner.cancel(graph);
 }
 const run = (a: any, signal?: AbortSignal) => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a,

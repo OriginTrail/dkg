@@ -35,7 +35,7 @@ function sameDurableIntent(left: ContextGraphSubscriptionRecord, right: ContextG
 const activationHandleBrand: unique symbol = Symbol('subscription-activation');
 type ActivationHandle = Readonly<{ id: string; [activationHandleBrand]: true }>;
 type ActivationOutcome = { kind: 'committed'; subscription: ContextGraphSub } | { kind: 'cancelled' };
-type ActivationPhase = { kind: 'queued' } | { kind: 'installing' | 'ready'; subscription: ContextGraphSub }
+type ActivationPhase = { kind: 'queued' } | { kind: 'installing'; subscription: ContextGraphSub }
   | { kind: 'settled'; outcome: ActivationOutcome };
 interface ActivationAttempt {
   readonly handle: ActivationHandle;
@@ -107,22 +107,20 @@ export class ContextGraphSubscriptionActivations {
   install(handle: ActivationHandle, subscription: ContextGraphSub): void {
     this.owned(handle).phase = { kind: 'installing', subscription };
   }
-  stage(handle: ActivationHandle, subscription: ContextGraphSub): void {
-    this.owned(handle).phase = { kind: 'ready', subscription };
-  }
   repaired(row: ContextGraphSubscriptionRecord, live: ContextGraphSub): void {
     const attempt = this.pending.get(row.id), phase = attempt?.phase;
-    if (attempt && phase && (phase.kind === 'installing' || phase.kind === 'ready')
+    if (attempt && phase && phase.kind === 'installing'
       && sameIntent(attempt.intent, row) && isContextGraphSubscriptionStoredAgain(phase.subscription, live))
       attempt.repaired = { ...row };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
-  finalize(id: string, claimRollingSlot: boolean): void {
-    const ports = this.ports, live = ports.subscribedContextGraphs.get(id);
-    const attempt = this.pending.get(id), phase = attempt?.phase;
-    if (!live || (!live.subscribed && !live.coreHosted) || !attempt || phase?.kind !== 'ready'
+  commit(handle: ActivationHandle, live: ContextGraphSub, claimRollingSlot: boolean): void {
+    const ports = this.ports, id = handle.id;
+    const attempt = this.owned(handle), phase = attempt.phase;
+    if (ports.subscribedContextGraphs.get(id) !== live || (!live.subscribed && !live.coreHosted)
+      || phase.kind !== 'installing'
       || !isContextGraphSubscriptionStoredAgain(phase.subscription, live)
-      || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live)) return;
+      || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live)) throw changed();
     const dormancy = applyDormancy(ports.contextGraphSubscriptionDormancyById, id, undefined);
     ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
     if (claimRollingSlot && !live.coreHosted && !rehydratedSubscriptionReachedSafeState(live))

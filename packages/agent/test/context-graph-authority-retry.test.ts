@@ -302,13 +302,11 @@ describe('Context Graph subscription authority retry', () => {
         activate: async (row) => {
           activationOrder.push(row.id);
           await Promise.resolve();
+          status.activated += 1;
+          dormancyById.delete(row.id);
         },
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: (contextGraphId) => {
-          status.activated += 1;
-          dormancyById.delete(contextGraphId);
-        },
       },
     );
     await recovery;
@@ -384,7 +382,7 @@ describe('Context Graph subscription authority retry', () => {
       activate: vi.fn(async () => undefined),
       warn: vi.fn(),
       capped: vi.fn(),
-      activated: vi.fn(),
+
     };
     const runPass = () => recoverDeferredContextGraphSubscriptionAuthorities(
       new AbortController().signal,
@@ -464,7 +462,7 @@ describe('Context Graph subscription authority retry', () => {
         activate: vi.fn(async () => undefined),
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: vi.fn(),
+
       },
     );
 
@@ -542,7 +540,7 @@ describe('Context Graph subscription authority retry', () => {
         activate: vi.fn(),
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: vi.fn(),
+
       },
     );
 
@@ -619,10 +617,9 @@ describe('Context Graph subscription authority retry', () => {
         touchStatus: () => undefined,
         clearStatus: vi.fn(),
         resolveAuthority,
-        activate: async (row) => { activated.push(row.id); },
+        activate: async (row) => { activated.push(row.id); status.activated += 1; },
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: () => { status.activated += 1; },
       },
     );
 
@@ -714,7 +711,6 @@ describe('Context Graph subscription authority retry', () => {
         activate,
         warn: vi.fn(),
         capped: vi.fn(),
-        activated: () => { status.activated += 1; },
       },
     );
 
@@ -2383,7 +2379,7 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       resolveAuthority: async () => allowed('51'),
       activate,
       warn: vi.fn(),
-      activated: vi.fn(),
+
       capped,
     });
 
@@ -2447,7 +2443,7 @@ describe('Context Graph subscription rehydration startup authority budget (#2815
       },
       activate: vi.fn(),
       warn: vi.fn(),
-      activated: vi.fn(),
+
       capped: vi.fn(),
     });
 

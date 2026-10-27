@@ -8861,7 +8861,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions = {},
   ): Promise<ContextGraphSub> {
     const activation = this.contextGraphSubscriptionActivations.observe(row);
-    const activated = await activatePersistedContextGraphSubscriptionTransaction(row, {
+    return activatePersistedContextGraphSubscriptionTransaction(row, {
       install: (record, input) => {
         const installed = this.setContextGraphSubscription(record.id, {
           name: record.name,
@@ -8905,16 +8905,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.retireLiveContextGraphNamePlaceholderFor(id);
         const committed = this.setContextGraphSubscription(id, this.subscribedContextGraphs.get(id)!, { persist: false, preserveAdmittedWireBinding: true });
         if (wire && !this.subscribedContextGraphs.has(wire.localId)) void this.persistContextGraphSubscription(id, { retiredNamePredecessor: { ...wire.subscription, id: wire.localId } });
+        this.contextGraphSubscriptionActivations.commit(activation, committed, options.claimRollingSlot === true);
         return committed;
       },
     }, options);
-    this.contextGraphSubscriptionActivations.stage(activation, activated);
-    return activated;
-  }
-
-  /** Finalize the owner's committed activation before notifying synchronous listeners. */
-  finalizePersistedContextGraphSubscriptionActivation(this: DKGAgent, contextGraphId: string, claimRollingSlot: boolean): void {
-    this.contextGraphSubscriptionActivations.finalize(contextGraphId, claimRollingSlot);
   }
 
   /**
@@ -9012,13 +9006,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           `Deferred persisted context-graph subscription "${contextGraphId}" after authority recovery: ${error instanceof Error ? error.message : String(error)}`,
         );
       },
-      activated: (contextGraphId) => {
-        this.finalizePersistedContextGraphSubscriptionActivation(contextGraphId, false);
-        this.log.info(
-          ctx,
-          `Activated persisted context-graph subscription "${contextGraphId}" after authority recovery`,
-        );
-      },
       capped: (contextGraphId) => {
         this.contextGraphSubscriptionRehydrationPendingIds.add(contextGraphId);
         this.requestContextGraphSubscriptionPromotion(contextGraphId);
@@ -9048,7 +9035,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       subscribedContextGraphs: this.subscribedContextGraphs,
       log: this.log,
       recordContextGraphSubscriptionClear: this.recordContextGraphSubscriptionClear.bind(this),
-      finalizeActivation: (contextGraphId) => this.finalizePersistedContextGraphSubscriptionActivation(contextGraphId, true),
       resolveAuthority: (binding, ownerSignal) => this.resolveContextGraphSubscriptionBootstrapAuthority(binding.contextGraphId, {
         allowSubscriptionFallback: false, signal: ownerSignal,
         durableSubscriptionBinding: binding,
@@ -9429,6 +9415,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           : undefined;
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
           restorePendingMeta,
+          claimRollingSlot: cap > 0,
           onChainId: healedOnChainId,
           ...(healedOnChainId !== undefined && healedOnChainId !== row.onChainId
             ? {
@@ -9445,7 +9432,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               }
             : {}),
         });
-        this.finalizePersistedContextGraphSubscriptionActivation(row.id, cap > 0);
         // A restored hosted graph gets the owner's definition back (or keeps it current).
         if (row.coreHosted) void ensureCoreHostedDefinition(this, row.id, 'restored');
         if (restrictedApprovalBootstrap) {

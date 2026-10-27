@@ -104,6 +104,7 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
 }
 
 export interface PersistedContextGraphSubscriptionActivationOptions {
+  readonly claimRollingSlot?: boolean;
   readonly onChainId?: string;
   readonly restorePendingMeta?: boolean;
   readonly rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
@@ -183,7 +184,6 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
     revision: number,
   ): Promise<void>;
   warn(contextGraphId: string, error: unknown): void;
-  activated(contextGraphId: string): void;
   /**
    * The activation cap has no room for this user row, now dormant as
    * `activationCap`. Rolling activation takes it over, as it does a row the
@@ -357,7 +357,6 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       continue;
     }
     if (!ports.isCurrent()) return;
-    ports.activated(contextGraphId);
   }
 }
 
@@ -397,7 +396,7 @@ export async function activateRollingSubscriptionPromotion(
   isCurrent: (subscription: ContextGraphSub) => boolean,
 ): Promise<void> {
   await ports.activate(row, {
-    onChainId, updateRehydrationStatus: false, rollbackSlotRelease: 'rolling-rollback',
+    onChainId, claimRollingSlot: true, updateRehydrationStatus: false, rollbackSlotRelease: 'rolling-rollback',
     prepare: async (subscription) => {
       if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
       if (onChainId !== undefined && onChainId !== row.onChainId) {
@@ -413,8 +412,6 @@ export async function activateRollingSubscriptionPromotion(
 
 /** Rolling promotion owns candidate ordering and generation fences. */
 export interface RollingSubscriptionPromotionPorts {
-  /** Complete dormancy, status and slot bookkeeping, then publish activation. */
-  finalizeActivation(contextGraphId: string): void;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load' | 'loadAll'>;
   getStatus(): Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
   isCurrent(signal: AbortSignal): boolean;
@@ -589,7 +586,6 @@ export async function promoteDormantContextGraphSubscriptions(
       if (!ports.isCurrent(signal)) return 'idle';
 
       pass.activated();
-      ports.finalizeActivation(contextGraphId);
       ports.log.info(
         ctx,
         `Promoted pending persisted context-graph subscription "${contextGraphId}"; ` +
