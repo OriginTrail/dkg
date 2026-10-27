@@ -16,7 +16,9 @@
  * restart begins a new pass. Many rows with ONE `updatedAt` are walked in key order (`ORDER BY STR(?job)`, the subject IRI) through a second cursor component
  * (`tie`), so even a group larger than a batch is covered.
  *
- * CANDIDATES. A subject is read only if the query itself says all of the following (both scan queries carry the same filters, so they select the same rows):
+ * CANDIDATES. A subject is read only if the query itself says all of the following (the range query and the tie query carry the same subject and timestamp filters, so they
+ * select the same rows; the tie query has no cutoff of its own, it walks one `updatedAt` value that a range scan found at or below the cutoff, and a row's age is checked
+ * again under the lock before anything is deleted):
  *  - it is an IRI under the queue's job prefix (`isIRI`, `STRSTARTS`). A blank node has no `STR`, so `ORDER BY STR(?job)` leaves its rows in engine order and the
  *    key check of the tie walk rejects them: an anomaly on every call, the class never advances. An IRI outside the prefix is no job and could only be kept; an
  *    ASCII one was harmless, but one that mixes astral and high BMP characters stalls the tie walk in the same way (limit 3);
