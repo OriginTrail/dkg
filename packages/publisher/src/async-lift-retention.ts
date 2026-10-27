@@ -35,7 +35,7 @@
 import { controlStoreOptions } from '@origintrail-official/dkg-storage';
 import { isSafeJobId } from './job-id.js';
 import { CONTROL_FINALIZED_AT, CONTROL_LIFECYCLE_KEY, CONTROL_LOCKED_JOB, CONTROL_PAYLOAD, CONTROL_STATUS, jobSubject, parseLiteral } from './async-lift-control-plane.js';
-import { compareAcceptedJobs, expectBindings } from './async-lift-publisher-utils.js';
+import { compareAcceptedJobs, expectBindings, type AcceptanceOrderKey } from './async-lift-publisher-utils.js';
 import { decodeLiftJobPayload } from './lift-job-payload-codec.js';
 import type { LiftJob, PersistedLiftJob } from './lift-job.js';
 import { lifecycleKeyOfJob } from './lift-job-store-selectors.js';
@@ -243,13 +243,14 @@ class PublisherRetentionImpl implements PublisherRetention {
   private readonly guard: RetentionClockGuard;
   private pass = newPass(true);
   /**
-   * Per lifecycle key, the `acceptedAt` of the oldest record this walk of the scan KEPT although the records alone might let it go later: it waits for an older record that finished
-   * later, a rule that needs the job alone holds it (a wallet lock, a stored index that disagrees, a date after now), an older failed sibling stands in front of it, or the key could not
-   * be read. The scan moves past a kept record, and whatever held it can pass before the walk ends (the clock moves on, an operator clears the failed job, the key becomes readable): so
-   * every record of the key accepted at or after it waits too, and the records of a key leave strictly oldest first: what a failed or stopped sweep leaves behind is always a suffix of
-   * the key. One number per key the walk has kept a record of (the keys held back by a failed job are most of it). Cleared when the scan restarts.
+   * Per lifecycle key, the MARK: the oldest record, in the key's own order (`acceptedAt`, then job id: `compareAcceptedJobs`), that this walk of the scan KEPT although the records
+   * alone might let it go later: it waits for an older record that finished later, a rule that needs the job alone holds it (a wallet lock, a stored index that disagrees, a date after
+   * now), an older failed sibling stands in front of it, or the key could not be read. The scan moves past a kept record, and whatever held it can pass before the walk ends (the clock
+   * moves on, an operator clears the failed job, the key becomes readable): so every record of the key AFTER the mark in that order waits too, and the records of a key leave strictly
+   * oldest first: what a failed or stopped sweep leaves behind is always a suffix of the key. A record before the mark is not held by it, even one accepted in the same millisecond
+   * (a lower job id is older). One acceptance time and id per key the walk has kept a record of (the keys held back by a failed job are most of it). Cleared when the scan restarts.
    */
-  private readonly blockedSince = new Map<string, number>();
+  private readonly blockedSince = new Map<string, AcceptanceOrderKey>();
   private lastCompletePass: PublisherRetentionPassSummary | undefined;
   private readonly totals = {
     batches: 0, anomalies: 0, scanned: 0, holds: 0, holdBudgetExceeded: 0, maxHoldMs: 0,
@@ -472,7 +473,7 @@ class PublisherRetentionImpl implements PublisherRetention {
         const reason = plan.kept.get(j.row.jobId);
         if (!inKey.has(j.row.jobId)) { b.kept.index_mismatch += 1; this.block(key, j.job); continue; }   // admission cannot reach this record: its siblings cannot be judged
         if (reason !== undefined) { b.kept[reason === 'blocked' ? 'older_sibling_kept' : reason as PublisherRetentionKeepReason] += 1; this.block(key, j.job); continue; }
-        if (!inOrder.has(j.row.jobId) || j.job.timestamps.acceptedAt >= (this.blockedSince.get(key) ?? Number.POSITIVE_INFINITY)) {
+        if (!inOrder.has(j.row.jobId) || this.heldByMark(key, j.job)) {
           b.kept.older_sibling_pending += 1; this.block(key, j.job); continue;
         }
         doom(j);
@@ -516,10 +517,17 @@ class PublisherRetentionImpl implements PublisherRetention {
     return refused;
   }
 
+  /** Keep `job`'s place as the mark of its key when it comes before the mark there is (the mark stays the OLDEST record kept, whatever order the walk met them in). */
   private block(key: string | null, job: LiftJob): void {
     if (key === null) return;
-    const since = this.blockedSince.get(key);
-    if (since === undefined || job.timestamps.acceptedAt < since) this.blockedSince.set(key, job.timestamps.acceptedAt);
+    const mark = this.blockedSince.get(key);
+    if (mark === undefined || compareAcceptedJobs(job, mark) < 0) this.blockedSince.set(key, { jobId: job.jobId, timestamps: { acceptedAt: job.timestamps.acceptedAt } });
+  }
+
+  /** `job` comes strictly after the mark of `key` in the key's order, so it waits for the record the walk kept (the record that is the mark is not held by itself). */
+  private heldByMark(key: string, job: LiftJob): boolean {
+    const mark = this.blockedSince.get(key);
+    return mark !== undefined && compareAcceptedJobs(job, mark) > 0;
   }
 
   /** Time the hold and adapt the slice size. */

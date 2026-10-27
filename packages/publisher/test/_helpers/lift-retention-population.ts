@@ -14,9 +14,12 @@ export interface Rec { readonly spec: KeyedSpec; readonly kind: 'old' | 'young' 
 
 export const FAILED_STATES: ReadonlySet<KeyedState> = new Set(['retryable', 'held', 'terminal', 'recovery']);
 
+/** The order of a key, restated from the spec: by acceptance time, then by job id (two records of a key may be accepted in the same millisecond). */
+export const keyOrder = (a: KeyedSpec, b: KeyedSpec): number => a.acceptedAt - b.acceptedAt || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0);
+
 /** The documented admission rule, restated from the spec: which records of one key bind it, in the order admission answers for them. */
 export function bindingOracle(records: readonly KeyedSpec[]): string[] {
-  const ordered = [...records].sort((a, b) => a.acceptedAt - b.acceptedAt || (a.id < b.id ? -1 : 1));
+  const ordered = [...records].sort(keyOrder);
   const newest = ordered.at(-1);
   const occupying = (r: KeyedSpec) => r.state === 'accepted' || r.state === 'claimed' || r.state === 'retryable' || r.state === 'held' || r.state === 'recovery';
   const binds = ordered.filter((r) => occupying(r) && !(FAILED_STATES.has(r.state) && r.state !== 'held' && r !== newest));
@@ -25,7 +28,7 @@ export function bindingOracle(records: readonly KeyedSpec[]): string[] {
 
 /** What the spec says a full run deletes from one key: the oldest records, up to the first that is not a finalized record old enough and not dated after now. */
 export function prefixOracle(records: readonly KeyedSpec[], now: number): KeyedSpec[] {
-  const ordered = [...records].sort((a, b) => a.acceptedAt - b.acceptedAt || (a.id < b.id ? -1 : 1));
+  const ordered = [...records].sort(keyOrder);
   const prefix: KeyedSpec[] = [];
   for (const r of ordered) {
     const finished = r.finalizedAt ?? Number.NaN;
@@ -49,7 +52,9 @@ export function genPopulation(r: () => number): Rec[] {
     const n = Math.floor(r() * 7);
     let day = 1 + r() * 5;
     for (let i = 0; i < n; i++) {
-      day += 1 + r() * 12;                                                                    // strictly increasing acceptedAt within the key
+      // acceptedAt rises within the key, but now and then a record is accepted in the same millisecond as the one before it: the key's order is then the job id (a
+      // lower id is older), and the two finish in either order, so half of those pairs are met by the walk NEWER first (online review round 1)
+      if (i === 0 || r() >= 0.15) day += 1 + r() * 12;
       const id = `k${k}-${i}`;
       const roll = r();
       const acceptedAt = Math.round(day * DAY);

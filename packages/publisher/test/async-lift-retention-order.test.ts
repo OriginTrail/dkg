@@ -58,8 +58,10 @@ async function bindingView(publisher: TripleStoreAsyncLiftPublisher, key: string
 async function expectSuffix(w: World, order: readonly string[], when: string): Promise<void> {
   expectKeySuffix(await idsOf(w), order, when);
 }
-/** `drain`, with no error and the suffix asserted after every batch. */
-async function walk(retention: ReturnType<typeof newRetention>, w: World, order: readonly string[], label: string): Promise<PublisherRetentionBatchResult[]> {
+/** `drain`, with no error and the suffix asserted after every batch; `between` runs after each batch that did not end the pass (a change between two batches). */
+async function walk(
+  retention: ReturnType<typeof newRetention>, w: World, order: readonly string[], label: string, between?: (batch: number) => Promise<void>,
+): Promise<PublisherRetentionBatchResult[]> {
   const results: PublisherRetentionBatchResult[] = [];
   for (let i = 0; i < 50; i++) {
     const res = await retention.runBatch();
@@ -67,6 +69,7 @@ async function walk(retention: ReturnType<typeof newRetention>, w: World, order:
     expect(res.error, `${label} batch ${i}`).toBeUndefined();
     await expectSuffix(w, order, `${label} batch ${i}`);
     if (!res.hasMore && res.scanned === 0) break;
+    await between?.(i);
   }
   return results;
 }
@@ -153,7 +156,7 @@ describe('a reason to keep an older record passes between two batches of one pas
   it('two older records kept for reasons that can pass, met newest first: the record behind both waits for the OLDER one, whose reason passed first', async () => {
     // A (accepted day 10, finished day 31, updated after now), B (day 20, finished 32), C (day 30, finished 25). The walk meets C first (kept: A in front of it is dated
     // after now), then A (kept: dated after now). The clock passes A's date, and then the walk meets B with A, deletable now, still in front of it: B must wait. The key's
-    // mark is the OLDEST record kept (A), not the latest one kept (C, which is behind B).
+    // mark is the OLDEST record kept (A), not the newest one kept (C, which is behind B).
     const order = ['A', 'B', 'C'];
     let t = NOW;
     const w = await world([{ ...fin('A', 'k', 10, 31), updatedAt: NOW + HOUR }, fin('B', 'k', 20, 32), fin('C', 'k', 30, 25)]);
@@ -320,5 +323,76 @@ describe('records of one key that finished at the same instant', () => {
     const report = await drain(newRetention(reportWorld.publisher, { mode: 'report', batchSize: 1 }));
     expect(wouldDeleteIds(report)).toEqual(['a-old']);
     expect(kept(report)).toEqual({ older_sibling_pending: 1 });
+  });
+});
+
+describe('the mark of a key: the oldest record the walk kept, in the key\'s own order (acceptance time, then job id)', () => {
+  it('two records accepted in the same millisecond, met newer first (online review 4394031865): the newer one waits, the older one goes when the walk reaches it, the newer one in the next pass', async () => {
+    // a and b share their acceptance time, so the job id orders them: a is the older. a finished on day 40, b on day 30, one row per batch: the walk meets b first, with a in front
+    // of it, so b waits and becomes the key's mark. Then it meets a, which comes BEFORE the mark in the key's order, and a goes. A mark of the acceptance time alone held a back
+    // too (it was accepted at the mark's millisecond), and every pass then kept both.
+    const order = ['a', 'b'];
+    const specs = [fin('a', 'k', 10, 40), fin('b', 'k', 10, 30)];
+    let t = NOW;
+    const w = await world(specs);
+    const retention = newRetention(w.publisher, { batchSize: 1, now: () => t, rescanIntervalMs: 24 * HOUR });
+    const first = await walk(retention, w, order, 'pass 1');
+    expect(deletedIds(first)).toEqual(['a']);
+    expect(kept(first)).toEqual({ older_sibling_pending: 1 });
+    expect(await idsOf(w)).toEqual(['b']);
+    t = NOW + 30 * HOUR;                                                           // the next pass: nothing stands in front of b
+    expect(deletedIds(await walk(retention, w, order, 'pass 2'))).toEqual(['b']);
+    expect(await idsOf(w)).toEqual([]);
+    // report names no more than delete removes: a, in every pass (it removes nothing, so b keeps finding a in front of it)
+    const reportWorld = await world(specs);
+    let r = NOW;
+    const report = newRetention(reportWorld.publisher, { mode: 'report', batchSize: 1, now: () => r, rescanIntervalMs: 24 * HOUR });
+    expect(wouldDeleteIds(await walk(report, reportWorld, order, 'report pass 1'))).toEqual(['a']);
+    r = NOW + 30 * HOUR;
+    expect(wouldDeleteIds(await walk(report, reportWorld, order, 'report pass 2'))).toEqual(['a']);
+  });
+
+  it.each([
+    ['one batch each', { batchSize: 1 }],
+    ['in one batch', {}],
+  ])('a record accepted in the same millisecond as an older one the walk kept, and after it by job id, waits for it (%s)', async (_name, over) => {
+    // a and b share their acceptance time (a first by id); a wallet lock names a. The plan of the key does not read the locks, and b finished after a, so only the mark a leaves
+    // keeps b while a stays: the mark compares the job id too, and a record equal to it in acceptance time but after it by id is after it.
+    const order = ['a', 'b'];
+    const w = await world([fin('a', 'k', 10, 30), fin('b', 'k', 10, 40)]);
+    await seedWalletLock(w.store, 'a', 'wallet-1', 'released');
+    const results = await walk(newRetention(w.publisher, over), w, order, 'pass 1');
+    expect(deletedIds(results)).toEqual([]);
+    expect(kept(results)).toEqual({ bound_obligation: 1, older_sibling_pending: 1 });
+    expect(await idsOf(w)).toEqual(['a', 'b']);
+  });
+
+  it('the record that is the mark, met again later in the walk and deletable by then, is not held back by itself', async () => {
+    // j is stored with a second, stray finish time (day 10; its payload and its own triple say day 15). The walk meets it at day 10 and keeps it (index_mismatch): j is the key's
+    // mark. The stray triple is removed before the next batch, which meets j again at day 15, where the index agrees. Nothing older than j was kept, so j goes in this pass.
+    const order = ['j'];
+    const w = await world([fin('j', 'k', 5, 15)], (quads) => [...quads, { subject: jobSubject('j'), predicate: CONTROL_FINALIZED_AT, object: `"${Math.round(10 * DAY)}"${INTEGER}`, graph: DEFAULT_CONTROL_GRAPH_URI }]);
+    const stray = { subject: jobSubject('j'), predicate: CONTROL_FINALIZED_AT, object: `"${Math.round(10 * DAY)}"${INTEGER}`, graph: DEFAULT_CONTROL_GRAPH_URI };
+    const results = await walk(newRetention(w.publisher, { batchSize: 1 }), w, order, 'pass 1', async (batch) => { if (batch === 0) await w.store.delete([stray]); });
+    expect(kept(results)).toEqual({ index_mismatch: 1 });
+    expect(deletedIds(results)).toEqual(['j']);
+  });
+
+  it.each([
+    ['one batch each', { batchSize: 1 }],
+    ['in one batch', {}],
+  ])('a key whose records finished in the reverse of their acceptance order loses one record per pass, oldest first (%s)', async (_name, over) => {
+    // A (accepted day 10, finished 50), B (day 20, finished 40), C (day 30, finished 30). The walk meets C, then B, then A. A record met after a successor goes in that pass only
+    // if it then leads a rising run of its key: A does; B, met after C, does not, because A (finished later) is still in front of it. So B waits for the second pass, C for the third.
+    const order = ['A', 'B', 'C'];
+    let t = NOW;
+    const w = await world([fin('A', 'k', 10, 50), fin('B', 'k', 20, 40), fin('C', 'k', 30, 30)]);
+    const retention = newRetention(w.publisher, { ...over, now: () => t, rescanIntervalMs: 24 * HOUR });
+    const passes: string[][] = [];
+    for (let pass = 0; pass < 3; pass++) {
+      t = NOW + pass * 30 * HOUR;
+      passes.push(deletedIds(await walk(retention, w, order, `pass ${pass + 1}`)));
+    }
+    expect(passes).toEqual([['A'], ['B'], ['C']]);
   });
 });
