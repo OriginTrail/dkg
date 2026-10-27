@@ -25,6 +25,12 @@ import {
  * not see: a store that was down, an answer that consulted the chain, a probe during which the stamp
  * moved. A negative answer is never kept either: it is cheaper to ask again than to keep a refusal
  * after the cause went away.
+ *
+ * Every elapsed-time decision here (the join limit, the cache TTL) is measured on a monotonic clock
+ * (`performance.now`), never on the wall clock: a correction of the system clock, in either direction, can neither
+ * keep an old probe joinable past `WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS` nor keep a cache entry past its TTL. The
+ * agent measures its unresolved-write window the same way (`WritePreflightGeneration`). No wall-clock time is
+ * reported from here.
  */
 
 /** Turns coalescing off (`0`, `false`, `no`, `off`) or on (the default). Applies after a daemon restart. */
@@ -225,9 +231,24 @@ export function canProbeWritePreflight(agent: Partial<CoalescingProbeAgent>): ag
   return typeof agent.probeContextGraphWritePreflight === 'function';
 }
 
+/** Milliseconds on a monotonic clock: only differences between two of its readings mean anything. */
+export type MonotonicClockMs = () => number;
+
+const monotonicNowMs: MonotonicClockMs = () => performance.now();
+
+/**
+ * Whether something begun at `startedAt` is younger than `limitMs`. A negative age means the clock went backwards
+ * (`performance.now` never does; an injected clock might), and that is never taken for a young one.
+ */
+function isYoungerThan(startedAt: number, now: number, limitMs: number): boolean {
+  const age = now - startedAt;
+  return age >= 0 && age < limitMs;
+}
+
 interface Flight {
   readonly id: number;
   readonly stamp: string;
+  /** On the monotonic clock. */
   readonly startedAt: number;
   /** The probe consulted the chain, so its answer can change without a local write. */
   chainDerived: boolean;
@@ -238,6 +259,7 @@ interface CachedProbe {
   /** The probe the entry was kept from: callers that shared it keep the one entry, which is counted once. */
   readonly flightId: number;
   readonly stamp: string;
+  /** When the probe began, on the monotonic clock. */
   readonly startedAt: number;
   readonly probe: Probe;
 }
@@ -324,13 +346,13 @@ const noop = (): void => {};
  * `accepts` is the caller's fast-accept decision, applied to a probe the cache would serve, so that the cache
  * serves only what this caller would fast-accept. `fresh` (the second pass after a readiness wait) neither joins
  * nor reads the cache: that pass exists to see what changed while it waited, which the stamp does not cover
- * (content that arrived).
+ * (content that arrived). `now` is the monotonic clock in milliseconds, `performance.now` unless a test supplies one.
  */
 export async function probeWritePreflight(
   agent: CoalescingProbeAgent,
   contextGraphId: string,
   callerAgentAddress: string | null,
-  options: { accepts: (probe: Probe) => boolean; fresh?: boolean },
+  options: { accepts: (probe: Probe) => boolean; fresh?: boolean; now?: MonotonicClockMs },
 ): Promise<CoalescedProbe> {
   const config = effectiveConfig;
   const identity = config.coalescing ? identityOf(agent, contextGraphId, callerAgentAddress) : undefined;
@@ -340,13 +362,12 @@ export async function probeWritePreflight(
   }
 
   const state = stateOf(agent);
-  const now = Date.now();
+  const now = (options.now ?? monotonicNowMs)();
 
   if (options.fresh !== true && config.cacheTtlMs > 0) {
     const hit = state.cache.get(identity.key);
     if (hit !== undefined) {
-      const age = now - hit.startedAt;
-      if (hit.stamp !== identity.stamp || age < 0 || age >= config.cacheTtlMs) state.cache.delete(identity.key);
+      if (hit.stamp !== identity.stamp || !isYoungerThan(hit.startedAt, now, config.cacheTtlMs)) state.cache.delete(identity.key);
       else if (options.accepts(hit.probe)) {
         counters.cacheHits += 1;
         return { probe: copyProbe(hit.probe), fastAccepted: noop };
@@ -355,7 +376,7 @@ export async function probeWritePreflight(
   }
 
   let flight = options.fresh === true ? undefined : state.flights.get(identity.key);
-  if (flight === undefined || flight.stamp !== identity.stamp || now - flight.startedAt >= WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS) {
+  if (flight === undefined || flight.stamp !== identity.stamp || !isYoungerThan(flight.startedAt, now, WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS)) {
     const started: Flight = { id: nextFlightId += 1, stamp: identity.stamp, startedAt: now, chainDerived: false, promise: undefined as unknown as Promise<Probe> };
     // A synchronous throw of the probe call becomes the flight's rejection, as for a rejected promise.
     started.promise = new Promise<Probe>((resolve) => resolve(agent.probeContextGraphWritePreflight(contextGraphId, {

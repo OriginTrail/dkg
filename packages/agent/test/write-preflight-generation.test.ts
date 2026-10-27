@@ -397,6 +397,32 @@ describe('a policy write whose outcome is unknown', () => {
     expect(identity()).toBeUndefined();
   });
 
+  describe('on its default clock', () => {
+    afterEach(() => { vi.useRealTimers(); });
+
+    it('is measured in elapsed time, so a wall-clock step back cannot keep sharing off past the window', () => {
+      vi.useFakeTimers();
+      const generation = new WritePreflightGeneration();
+      generation.bumpUnresolved();
+      expect(generation.sharingAllowed()).toBe(false);
+      // Two minutes pass, then the system clock is corrected back by an hour: the window is over all the same.
+      vi.advanceTimersByTime(TWO_MINUTES_MS);
+      vi.setSystemTime(Date.now() - 3_600_000);
+      expect(generation.sharingAllowed()).toBe(true);
+    });
+
+    it('is measured in elapsed time, so a wall-clock step forward cannot end the window early', () => {
+      vi.useFakeTimers();
+      const generation = new WritePreflightGeneration();
+      generation.bumpUnresolved();
+      vi.advanceTimersByTime(TWO_MINUTES_MS - 1);
+      vi.setSystemTime(Date.now() + 3_600_000);
+      expect(generation.sharingAllowed()).toBe(false);
+      vi.advanceTimersByTime(1);
+      expect(generation.sharingAllowed()).toBe(true);
+    });
+  });
+
   describe('with another window set by the daemon', () => {
     it('resumes exactly when that window has passed', () => {
       const { clock, identity, settle } = sharing({ unresolvedWindowMs: 5_000 });

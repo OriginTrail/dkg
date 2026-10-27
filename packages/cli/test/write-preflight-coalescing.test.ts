@@ -305,6 +305,66 @@ describe('a probe in flight stops being joinable', () => {
     expect((await stillJoined).probe.hasLocalContent).toBe(false);
   });
 
+  it('by the elapsed time of a monotonic clock: a wall-clock step back cannot keep an old probe joinable', async () => {
+    vi.useFakeTimers();
+    const { agent, probe, pending } = fakeAgent();
+    const hung = call(agent, ALICE);
+    // A minute passes, then the system clock is corrected back by an hour: by the wall clock the probe is "from the future".
+    vi.advanceTimersByTime(60_000);
+    vi.setSystemTime(Date.now() - 3_600_000);
+    const fresh = call(agent, ALICE);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(getWritePreflightCoalescingCounters()).toMatchObject({ flights: 2, joins: 0 });
+    pending[1]!.resolve(ACCEPT);
+    await expect(fresh).resolves.toMatchObject({ probe: ACCEPT });
+    pending[0]!.resolve(ACCEPT);
+    await hung;
+  });
+
+  it('by the elapsed time of a monotonic clock: a step back that leaves the wall-clock age under the limit changes nothing', async () => {
+    vi.useFakeTimers();
+    const { agent, probe, pending } = fakeAgent();
+    const hung = call(agent, ALICE);
+    vi.advanceTimersByTime(WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS + 5_000);
+    // By the wall clock the probe is now 1 s old, well inside the limit.
+    vi.setSystemTime(Date.now() - (WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS + 4_000));
+    const fresh = call(agent, ALICE);
+    expect(probe).toHaveBeenCalledTimes(2);
+    pending.forEach((entry) => entry.resolve(ACCEPT));
+    await Promise.all([hung, fresh]);
+  });
+
+  it('by the elapsed time of a monotonic clock: a wall-clock step forward does not end the join early', async () => {
+    vi.useFakeTimers();
+    const { agent, probe, pending } = fakeAgent();
+    const pendingProbe = call(agent, ALICE);
+    vi.advanceTimersByTime(1_000);
+    vi.setSystemTime(Date.now() + 3_600_000);
+    const joined = call(agent, ALICE);
+    expect(probe).toHaveBeenCalledTimes(1);
+    pending[0]!.resolve(ACCEPT);
+    await Promise.all([pendingProbe, joined]);
+  });
+
+  it('on the clock it is given: the limit counts that clock\'s milliseconds, and a clock that reads earlier never makes a probe joinable', async () => {
+    const clock = { now: 5_000 };
+    const now = () => clock.now;
+    const { agent, probe, pending } = fakeAgent();
+    const started = probeWritePreflight(agent, CG, ALICE, { accepts: fastAccepts, now });
+    clock.now = 5_000 + WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS - 1;
+    const joined = probeWritePreflight(agent, CG, ALICE, { accepts: fastAccepts, now });
+    expect(probe).toHaveBeenCalledTimes(1);
+    clock.now = 5_000 + WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS;
+    const afterLimit = probeWritePreflight(agent, CG, ALICE, { accepts: fastAccepts, now });
+    expect(probe).toHaveBeenCalledTimes(2);
+    // Even a clock that reads earlier than the newest probe's start (which no monotonic clock does) fails closed.
+    clock.now = 0;
+    const backwards = probeWritePreflight(agent, CG, ALICE, { accepts: fastAccepts, now });
+    expect(probe).toHaveBeenCalledTimes(3);
+    pending.forEach((entry) => entry.resolve(ACCEPT));
+    await Promise.all([started, joined, afterLimit, backwards]);
+  });
+
   it('for the second pass after a readiness wait, which neither joins nor is joined away from the newest probe', async () => {
     const { agent, probe, pending } = fakeAgent();
     const concurrent = call(agent, ALICE);
@@ -434,12 +494,56 @@ describe('the result cache', () => {
     await expired;
   });
 
-  it('does not trust an entry that is dated after now, as when the clock stepped back', async () => {
+  it('counts its TTL on a monotonic clock: a wall-clock step back cannot keep an entry past it', async () => {
     vi.useFakeTimers();
     const { agent, probe, pending } = fakeAgent();
     await accepted(agent, pending);
-    vi.setSystemTime(Date.now() - 60_000);
+    // Ten seconds pass (five times the TTL), then the system clock is corrected back by nine: by the wall clock the
+    // entry is 1 s old, inside the TTL, but it was kept 10 s ago.
+    vi.advanceTimersByTime(10_000);
+    vi.setSystemTime(Date.now() - 9_000);
     const stepped = call(agent, ALICE);
+    expect(probe).toHaveBeenCalledTimes(2);
+    expect(getWritePreflightCoalescingCounters()).toMatchObject({ cacheHits: 0, flights: 2 });
+    pending[1]!.resolve(ACCEPT);
+    await stepped;
+  });
+
+  it('counts its TTL on a monotonic clock: a wall-clock step back to before the entry was kept does not keep it either', async () => {
+    vi.useFakeTimers();
+    const { agent, probe, pending } = fakeAgent();
+    await accepted(agent, pending);
+    vi.advanceTimersByTime(WRITE_PREFLIGHT_CACHE_DEFAULT_TTL_MS);
+    vi.setSystemTime(Date.now() - 3_600_000);
+    const stepped = call(agent, ALICE);
+    expect(probe).toHaveBeenCalledTimes(2);
+    pending[1]!.resolve(ACCEPT);
+    await stepped;
+  });
+
+  it('counts its TTL on a monotonic clock: a wall-clock step forward does not expire an entry early', async () => {
+    vi.useFakeTimers();
+    const { agent, probe, pending } = fakeAgent();
+    await accepted(agent, pending);
+    vi.advanceTimersByTime(WRITE_PREFLIGHT_CACHE_DEFAULT_TTL_MS - 1);
+    vi.setSystemTime(Date.now() + 3_600_000);
+    const hit = await call(agent, ALICE);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(hit.probe).toEqual(ACCEPT);
+  });
+
+  it('does not trust an entry that is dated after now, as when an injected clock reads earlier', async () => {
+    const clock = { now: 50_000 };
+    const now = () => clock.now;
+    const { agent, probe, pending } = fakeAgent();
+    const first = probeWritePreflight(agent, CG, ALICE, { accepts: fastAccepts, now });
+    pending[0]!.resolve(ACCEPT);
+    (await first).fastAccepted();
+    clock.now = 50_000 + WRITE_PREFLIGHT_CACHE_DEFAULT_TTL_MS - 1;
+    await probeWritePreflight(agent, CG, ALICE, { accepts: fastAccepts, now });
+    expect(probe).toHaveBeenCalledTimes(1);
+    clock.now = 40_000;
+    const stepped = probeWritePreflight(agent, CG, ALICE, { accepts: fastAccepts, now });
     expect(probe).toHaveBeenCalledTimes(2);
     pending[1]!.resolve(ACCEPT);
     await stepped;
