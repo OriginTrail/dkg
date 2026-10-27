@@ -6,11 +6,11 @@
  * fallback branch of `replaceSubjectAtomicallyOrFallback`, the path on and off, under each ambient lane. The worker wake-path
  * scenario is in the cli package's async-promote-worker.test.ts.
  */
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore, withDefaultStoreWorkPriority, type StoreWorkPriority } from '@origintrail-official/dkg-storage';
+import { createPromoteOwnershipReader } from '../src/async-promote-ownership.js';
 import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI } from '../src/async-promote-queue-utils.js';
+import { ROUTING_DRIVEN_METHODS } from '../../storage/test/helpers/store-control-routing-calls.js';
 import {
   ROUTING_TEST_METHODS,
   SHARE_OWNERSHIP_READER_SOURCE,
@@ -201,8 +201,29 @@ describe('the oracle can fail', () => {
 });
 
 describe('the covered-method list follows the adapter routing test', () => {
-  it('names only methods packages/storage/test/store-control-routing.test.ts drives', () => {
-    const routing = readFileSync(fileURLToPath(new URL('../../storage/test/store-control-routing.test.ts', import.meta.url)), 'utf8');
-    for (const method of ROUTING_TEST_METHODS) expect(routing, method).toMatch(new RegExp(`\\b${method}\\b`));
+  // The list is data shared with packages/storage/test/store-control-routing.test.ts, which checks that its `CALLS` has exactly these cases and
+  // that each reaches exactly the methods listed (so the list cannot keep a name after its case is gone), and this compares the sets.
+  it('is exactly the set of store methods the routing test drives', () => {
+    expect([...ROUTING_TEST_METHODS].sort()).toEqual([...ROUTING_DRIVEN_METHODS]);
+  });
+
+  it('can fail: a method the routing test no longer drives, or a new one, is a difference', () => {
+    const without = ROUTING_DRIVEN_METHODS.filter((method) => method !== 'flush');
+    expect([...ROUTING_TEST_METHODS].sort()).not.toEqual(without);
+    expect([...ROUTING_TEST_METHODS, 'replaceGraph'].sort()).not.toEqual([...ROUTING_DRIVEN_METHODS]);
+  });
+});
+
+describe('the lock-free ownership reader\'s options', () => {
+  it('are one frozen object with its own source and no control tag or priority, on every read', async () => {
+    const recorder = recordShareStore(new OxigraphStore());
+    const read = createPromoteOwnershipReader(recorder.store);
+    await read({ contextGraphId: 'cg', assertionName: 'a' });
+    await read({ contextGraphId: 'cg', assertionName: 'b' });
+    const [first, second] = recorder.calls.map((call) => call.options);
+    expect(recorder.calls).toHaveLength(2);
+    expect(first).toEqual({ source: SHARE_OWNERSHIP_READER_SOURCE });
+    expect(Object.isFrozen(first)).toBe(true);
+    expect(second).toBe(first);
   });
 });
