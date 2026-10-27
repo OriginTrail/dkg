@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, onTestFinished } from 'vitest';
 import { createServer } from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -8,6 +8,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const execFileAsync = promisify(execFile);
+const invocationSignals = new WeakMap<NodeJS.ProcessEnv, AbortSignal>();
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const TSX_LOADER = join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'loader.mjs');
@@ -749,11 +750,19 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 });
 
 function testEnv(dkgHome: string, apiPort: string): NodeJS.ProcessEnv {
-  return { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: apiPort };
+  const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: apiPort };
+  const lifetime = new AbortController();
+  invocationSignals.set(env, lifetime.signal);
+  // A timed-out sequence must neither keep its child alive nor issue the
+  // remaining commands against the following test's HTTP request collector.
+  onTestFinished(() => lifetime.abort());
+  return env;
 }
 
 async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
-  return execFileAsync('node', ['--import', TSX_LOADER_URL, CLI_SOURCE, ...args], { env });
+  const signal = invocationSignals.get(env);
+  signal?.throwIfAborted();
+  return execFileAsync('node', ['--import', TSX_LOADER_URL, CLI_SOURCE, ...args], { env, signal });
 }
 
 async function readJsonBody(req: Parameters<Parameters<typeof createServer>[0]>[0]): Promise<any> {
