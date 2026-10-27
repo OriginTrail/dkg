@@ -1,5 +1,5 @@
 export type { SyncPageFetchOptions } from './sync-page-fetch-options.js';
-import { seedVerifiedDurableBoundary, type VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
+import { eligibleDurableBoundarySource, type VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
 import {
   assertSyncWorkAdmission,
   composeSyncWorkAdmission,
@@ -32,8 +32,7 @@ import {
   type SyncCheckpointStore,
 } from '../checkpoint/state.js';
 import {
-  resolveManifestCheckpointDecision,
-  resolveResponderResumeDecision,
+  resolveManifestResumePlan,
   resolveResponderSessionLossCleanup,
 } from './manifest-resume-policy.js';
 import {
@@ -663,86 +662,38 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
   throwIfAborted(signal);
   const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
   const checkpointKey = checkpointKeyForFetch(params);
-  if (forceFreshSession) {
-    checkpointStore.delete(checkpointKey);
-    unfinishedSyncResponderSessions.delete(checkpointKey);
-  }
-  if (!forceFreshSession && !includeSharedMemory && phase === 'data' && assetUals === undefined) {
-    seedVerifiedDurableBoundary(checkpointStore, checkpointKey, durableResumeBoundary, {
-      manifestDigest, prefixDigestAtOffset: manifestPrefixDigestAtOffset,
-      clearCheckpoint: () => deleteSyncPageCheckpoint(checkpointStore, checkpointKey),
-    });
-  }
-  let checkpoint = checkpointStore.get(checkpointKey);
-  const savedPrefixDigest = checkpoint && manifestDigest
-    ? manifestPrefixDigestAtOffset?.(checkpoint.offset)
-    : undefined;
-  const manifestCheckpointDecision = resolveManifestCheckpointDecision({
-    checkpoint,
-    manifestDigest,
-    prefixDigestAtOffset: savedPrefixDigest,
-    hasExactAssetFilter: assetUals !== undefined,
-  });
-  if (manifestCheckpointDecision.kind === 'reset') {
-    // OFFSET has meaning only inside the exact META generation that produced
-    // it. A missing/changed prefix or a store that cannot persist the binding
-    // restarts both the verified and raw responder coordinates.
-    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
-    checkpoint = undefined;
-  } else if (manifestCheckpointDecision.kind === 'rebind-and-prime') {
-    checkpointStore.setManifestBoundOffset(
-      checkpointKey,
-      checkpoint!.offset,
-      manifestDigest!,
-      Date.now(),
-      manifestCheckpointDecision.prefixDigest,
-    );
-    unfinishedSyncResponderSessions.delete(checkpointKey);
-    checkpoint = checkpointStore.get(checkpointKey);
-    logInfo(
-      ctx,
-      `Reusing verified durable prefix for "${contextGraphId}" through offset ${checkpoint?.offset ?? 0} after META generation change`,
-    );
-  } else if (manifestCheckpointDecision.prefixUpgrade) {
-    // Upgrade an otherwise generation-bound checkpoint so a later suffix
-    // change or responder restart can reuse its verified prefix safely.
-    checkpointStore.setManifestBoundOffset(
-      checkpointKey,
-      checkpoint!.offset,
-      manifestDigest!,
-      Date.now(),
-      manifestCheckpointDecision.prefixUpgrade,
-    );
-    checkpoint = checkpointStore.get(checkpointKey);
-  }
+  const existingCheckpoint = checkpointStore.get(checkpointKey);
+  const proposedCheckpoint = !forceFreshSession && !includeSharedMemory && phase === 'data' && assetUals === undefined
+    ? eligibleDurableBoundarySource(checkpointStore, checkpointKey, durableResumeBoundary) : undefined;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
-  // A successful caller deletes the checkpoint after verification/storage.
-  // The process-local cache can outlive that synchronous delete, so never let
-  // a cache-only token resurrect a completed snapshot at offset zero.
-  if (!checkpoint) unfinishedSyncResponderSessions.delete(checkpointKey);
-  const savedResponderSession = usesPageSession
-    ? (
-        getPersistedSyncResponderSession(checkpoint, manifestDigest, sessionStartedAt)
-        ?? (checkpoint
-          ? getUnfinishedSyncResponderSession(checkpointKey, manifestDigest, sessionStartedAt)
-          : undefined)
-      )
+  // A cache-only token cannot resurrect a completed snapshot at offset zero.
+  const existingSession = usesPageSession && existingCheckpoint
+    ? getPersistedSyncResponderSession(existingCheckpoint, manifestDigest, sessionStartedAt)
+      ?? getUnfinishedSyncResponderSession(checkpointKey, manifestDigest, sessionStartedAt)
     : undefined;
-  const responderSessionStartedFresh = savedResponderSession === undefined;
-  const responderResumeDecision = resolveResponderResumeDecision({
-    checkpoint,
-    usesPageSession,
-    savedResponderSessionOffset: savedResponderSession?.responderSessionOffset,
-    manifestCheckpointDecision,
-  });
-  if (responderResumeDecision.kind === 'reset-unmappable') {
-    // Without its token, only a prefix proven for this manifest is primed
-    // (resolveManifestCheckpointDecision); restart any other offset instead of
-    // guessing that its verified and raw coordinates match.
+  const plan = resolveManifestResumePlan({ checkpoint: existingCheckpoint, proposedCheckpoint,
+    manifestDigest, prefixDigestAtOffset: manifestPrefixDigestAtOffset,
+    hasExactAssetFilter: assetUals !== undefined, usesPageSession, forceFreshSession,
+    savedResponderSessionOffset: existingSession?.responderSessionOffset, nowMs: sessionStartedAt });
+  // Apply the final binding exactly once. A proposed source never becomes an
+  // intermediate persisted checkpoint, and cannot carry another peer's token.
+  if (plan.checkpointAction === 'reset' || plan.checkpointAction === 'replace') {
     deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
-    checkpoint = undefined;
   }
+  if (plan.checkpointAction === 'replace' || plan.checkpointAction === 'upgrade') {
+    const final = plan.checkpoint!;
+    checkpointStore.setManifestBoundOffset(checkpointKey, final.offset, final.manifestDigest!,
+      final.updatedAtMs, final.manifestPrefixDigest, final.terminal, final.responderSessionOffset);
+    if (existingCheckpoint?.manifestDigest !== final.manifestDigest) logInfo(ctx,
+      `Reusing verified durable prefix for "${contextGraphId}" through offset ${final.offset} after META generation change`);
+  }
+  const checkpoint = checkpointStore.get(checkpointKey);
+  if (!checkpoint) unfinishedSyncResponderSessions.delete(checkpointKey);
+  const savedResponderSession = plan.checkpointAction === 'reset' || plan.checkpointAction === 'replace'
+    ? undefined : existingSession;
+  const responderSessionStartedFresh = savedResponderSession === undefined;
+  const responderResumeDecision = plan.resume;
   const verifiedOffset = responderResumeDecision.verifiedOffset;
   let offset = responderResumeDecision.rawOffset;
   const responderSessionNeedsPriming = responderResumeDecision.kind === 'prime';

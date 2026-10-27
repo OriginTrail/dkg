@@ -58,7 +58,9 @@ export function createObservedStoreMutation(
         ? mutation !== undefined : !isStoreOperationNotStarted(error, operation);
       if (indeterminate) invalidate();
       const generation = operation === undefined ? undefined : readStoreOperationExecutionGeneration(error, operation);
-      settle?.(indeterminate ? 'indeterminate' : 'unchanged', generation === undefined ? undefined : { generation });
+      const outcome = indeterminate ? 'indeterminate' : 'unchanged';
+      if (generation === undefined) settle?.(outcome);
+      else settle?.(outcome, { generation });
       throw error;
     }
     const didChange = changed(result);

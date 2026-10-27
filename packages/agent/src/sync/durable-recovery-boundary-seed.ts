@@ -5,7 +5,6 @@ import type {
   SyncCheckpointEntry,
   SyncCheckpointStore,
 } from './checkpoint/state.js';
-import { resolveManifestCheckpointDecision } from './requester/manifest-resume-policy.js';
 
 /**
  * A verified DATA prefix of one manifest generation, whichever peer served it.
@@ -91,35 +90,6 @@ export function eligibleDurableBoundarySource(
   const source = liveDurableBoundarySource(store, boundary);
   const current = store.get(checkpointKey);
   return source && (!current || current.offset < boundary.offset) ? source : undefined;
-}
-
-/** Install a proposed boundary only after this peer's completed META proves it. */
-export function seedVerifiedDurableBoundary(
-  store: SyncCheckpointStore,
-  checkpointKey: string,
-  boundary: VerifiedDurableBoundary | undefined,
-  proof: {
-    manifestDigest?: DurableManifestDigest;
-    prefixDigestAtOffset?: (offset: number) => DurableManifestPrefixDigest | undefined;
-    clearCheckpoint: () => void;
-  },
-): boolean {
-  const source = eligibleDurableBoundarySource(store, checkpointKey, boundary);
-  if (!source || !proof.manifestDigest) return false;
-  // The source's raw responder coordinate belongs to another peer. Only its
-  // verified manifest boundary is proposed; the destination keeps its own
-  // checkpoint and session until that boundary is proven by its current META.
-  const decision = resolveManifestCheckpointDecision({
-    checkpoint: { ...source, responderSessionOffset: undefined },
-    manifestDigest: proof.manifestDigest,
-    prefixDigestAtOffset: proof.prefixDigestAtOffset?.(source.offset),
-    hasExactAssetFilter: false,
-  });
-  if (decision.kind === 'reset') return false;
-  proof.clearCheckpoint();
-  store.setManifestBoundOffset(checkpointKey, source.offset, source.manifestDigest!,
-    source.updatedAtMs, source.manifestPrefixDigest);
-  return true;
 }
 
 /** Cross-peer resume state for one graph, retained across recovery runs. */
