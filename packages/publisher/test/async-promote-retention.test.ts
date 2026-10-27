@@ -8,7 +8,7 @@ import type { PromoteJob } from '../src/async-promote-queue-types.js';
 import { decidePromoteRetention } from '../src/async-promote-retention-policy.js';
 import { SHARE_RETENTION_DEFAULTS, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import {
-  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, ATTEMPTED, UNCLAIMED, W, WF, binding, cancelledJob, noPending,
+  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, ATTEMPTED, W, WF, binding, cancelledJob, noPending,
   decide, decideText, deletedSubjects, drain, insertQuads, mk, newRetention, pick, present, put, parseText, payloadWithFormatVersion, registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, from,
   captureLogger, policy, standInForTheQueue, type Kind, type Quads, type QueryResult,
 } from './_helpers/share-retention-fixtures.js';
@@ -1507,7 +1507,7 @@ describe('the scan checks an engine\'s answer against the query it asked, and ev
   it.each(['delete', 'report'] as const)('%s mode: an answer of more than limit + 1 rows (an engine that ignores LIMIT) is an anomaly, and no more than the batch is judged from it', async mode => {
     const store = new OxigraphStore();
     await insertQuads(store, OLD(6));
-    const { retention, state } = faulty(store, (sparql, ask) => (/ORDER BY \?updatedAt LIMIT 4$/.test(sparql) ? ask(without(sparql, / LIMIT \d+$/)) : undefined), { mode, batchSize: 3 });
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.endsWith('ORDER BY ?updatedAt LIMIT 4') ? ask(without(sparql, / LIMIT \d+$/)) : undefined), { mode, batchSize: 3 });
     state.armed = true;
     const first = await retention.runBatch();
     expect(state.fired).toBe(1);
@@ -1519,7 +1519,7 @@ describe('the scan checks an engine\'s answer against the query it asked, and ev
   it.each(['delete', 'report'] as const)('%s mode: a tie walk answered with more than limit + 1 rows is an anomaly, and no more than the batch is judged from it', async mode => {
     const store = new OxigraphStore();
     await insertQuads(store, Array.from({ length: 6 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W)).flat());              // one group, larger than the batch
-    const { retention, state } = faulty(store, (sparql, ask) => (/ORDER BY STR\(\?job\) LIMIT 3$/.test(sparql) ? ask(without(sparql, / LIMIT \d+$/)) : undefined), { mode, batchSize: 2 });
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.endsWith('ORDER BY STR(?job) LIMIT 3') ? ask(without(sparql, / LIMIT \d+$/)) : undefined), { mode, batchSize: 2 });
     state.armed = true;
     const first = await retention.runBatch();
     expect(state.fired).toBe(1);
