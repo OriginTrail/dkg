@@ -1,7 +1,7 @@
-import type { PromoteJob, PromotePostCommitRecoveryEvent } from './async-promote-queue-types.js';
-import { postCommitRecoveryExhaustedReason } from './async-promote-queue-utils.js';
+import type { PromoteJob, PromoteListFilter, PromotePostCommitRecoveryEvent } from './async-promote-queue-types.js';
+import { comparePromoteJobs, postCommitRecoveryExhaustedReason, type PromoteReadyOrder } from './async-promote-queue-utils.js';
 import { isAutomaticallyRecoverablePostCommitFailure } from './async-promote-recovery-policy.js';
-import { readPromoteJobPage, type PromoteListingHost } from './promote-job-page.js';
+import { readPromoteJobPage, readPromoteJobPayloads, type PromoteListingHost } from './promote-job-page.js';
 import type { PromoteJobCursor } from './promote-list-cursor.js';
 import { PROMOTE_POST_COMMIT_FAILURE_CODE, PROMOTE_POST_COMMIT_FAILURE_MESSAGE } from './promote-replay-safety.js';
 
@@ -12,11 +12,21 @@ import { PROMOTE_POST_COMMIT_FAILURE_CODE, PROMOTE_POST_COMMIT_FAILURE_MESSAGE }
  * nothing landed. Re-running it is therefore the same recovery an operator performs through `recover()`, minus the reset of
  * the attempt counter: the replay spends the job's own retry budget so a durable tail that keeps failing cannot loop forever.
  *
- * Reads. The sweep used to read every failed job under the mutex and judge each in JS. The engine now drops the failed jobs
- * whose payload text names neither the post-commit diagnostic code nor the producer's fixed message, which are the only two
- * ways `isAutomaticallyRecoverablePostCommitFailure` recognizes a row; what is left is judged by that unchanged function, so
- * a lookalike that merely contains the text is still left alone. The rest is walked in keyset pages, one hold of the mutex
- * per page, and each page's rows are decided inside the hold that read them.
+ * Reads. The sweep used to read every failed job under the mutex and judge each in JS, in the queue's order (`comparePromoteJobs`:
+ * ready time, then `jobId.localeCompare`). The engine now drops the failed jobs whose payload text names neither the post-commit
+ * diagnostic code nor the producer's fixed message, which are the only two ways `isAutomaticallyRecoverablePostCommitFailure`
+ * recognizes a row; what is left is judged by that unchanged function, so a lookalike that merely contains the text is still left
+ * alone. The order is part of the outcome: requeuing a job makes it the active owner of its assertion, which defers every later
+ * candidate of the same assertion, so a different order can requeue a different job. The keyset pages come in `(enqueuedAt, jobId)`
+ * order, which is not that order (code point against locale ties, and a failed row may carry a `nextRetryAt` the keys do not know),
+ * so the sweep works in two passes, each holding the mutex for at most `pageSize` rows at a time:
+ *   1. find: walk the keyset pages, one hold each, and keep only the accepted rows' ranking fields (`jobId`, `enqueuedAt`,
+ *      `nextRetryAt`), then sort those with `comparePromoteJobs`. That is a few small records, never the payloads;
+ *   2. decide: take the sorted candidates `pageSize` at a time, and in one hold per turn read their rows again by subject and judge
+ *      each, in order, with the unchanged policy and the in-hold conflict lookup. The re-read is what makes the gap between the
+ *      passes safe: a candidate that left the failed state or changed meanwhile (an operator's `recover`, a cancel) is judged as it
+ *      is now and never overwritten from an older copy.
+ * A candidate that appears after the find pass is a change after the walk and waits for the next sweep.
  *
  * No scheduler wake: every requeued row carries a future `nextRetryAt` that the worker's durable poll already honours.
  * A sweep no longer shows the admission coordinator the failed jobs it does not touch (it used to observe all of them); an
@@ -26,7 +36,8 @@ import { PROMOTE_POST_COMMIT_FAILURE_CODE, PROMOTE_POST_COMMIT_FAILURE_MESSAGE }
 export const POST_COMMIT_SWEEP_PAGE_SIZE = 50;
 /** The two spellings of the producer's marker in a payload (JSON text): the code, and the message of rows written before the code existed. */
 export const POST_COMMIT_MARKERS = [PROMOTE_POST_COMMIT_FAILURE_CODE, JSON.stringify(PROMOTE_POST_COMMIT_FAILURE_MESSAGE).slice(1, -1)] as const;
-const SWEEP_SOURCES = { keys: 'publisher.asyncPromote.recoverPostCommit' } as const;
+const SWEEP_SOURCES = { keys: 'publisher.asyncPromote.recoverPostCommit', payloads: 'publisher.asyncPromote.recoverPostCommit.payloads' } as const;
+const FAILED: Pick<PromoteListFilter, 'state'> = { state: ['failed'] };
 
 export interface PostCommitSweepOps {
   readonly backoff: (attemptCount: number) => number;
@@ -36,13 +47,26 @@ export interface PostCommitSweepOps {
 }
 
 export async function sweepPostCommitFailures(host: PromoteListingHost, ops: PostCommitSweepOps, pageSize = POST_COMMIT_SWEEP_PAGE_SIZE): Promise<PromotePostCommitRecoveryEvent[]> {
-  const events: PromotePostCommitRecoveryEvent[] = [];
+  // Find: the candidates the policy accepts, a page per hold, keeping only what ranks them.
+  const candidates: PromoteReadyOrder[] = [];
   let cursor: PromoteJobCursor | undefined;
   do {
     cursor = await host.locked(async () => {
-      const now = host.now();
-      const page = await readPromoteJobPage(host, { state: ['failed'] }, { cursor, pageSize, sources: SWEEP_SOURCES, payloadContainsAny: POST_COMMIT_MARKERS });
+      const page = await readPromoteJobPage(host, FAILED, { cursor, pageSize, sources: { keys: SWEEP_SOURCES.keys }, payloadContainsAny: POST_COMMIT_MARKERS });
       for (const job of page.jobs) {
+        if (isAutomaticallyRecoverablePostCommitFailure(job)) candidates.push({ jobId: job.jobId, enqueuedAt: job.enqueuedAt, attempt: { nextRetryAt: job.attempt.nextRetryAt } });
+      }
+      return page.next;
+    });
+  } while (cursor);
+  candidates.sort(comparePromoteJobs);
+  // Decide: `pageSize` candidates per hold, in that order, each on the row as the hold reads it (a candidate that left the failed state since is not touched).
+  const events: PromotePostCommitRecoveryEvent[] = [];
+  for (let at = 0; at < candidates.length; at += pageSize) {
+    const turn = candidates.slice(at, at + pageSize);
+    await host.locked(async () => {
+      const now = host.now();
+      for (const job of await readPromoteJobPayloads(host, FAILED, turn, SWEEP_SOURCES.payloads)) {
         if (!isAutomaticallyRecoverablePostCommitFailure(job)) continue;
         const attemptCount = Math.max(1, job.attempt.count);
         const maxAttempts = job.attempt.maxRetries;
@@ -69,8 +93,7 @@ export async function sweepPostCommitFailures(host: PromoteListingHost, ops: Pos
         });
         events.push({ jobId: job.jobId, action: 'requeued', attempt: attemptCount, maxAttempts, nextRetryAt });
       }
-      return page.next;
     });
-  } while (cursor);
+  }
   return events;
 }

@@ -27,7 +27,7 @@ import { isAutomaticallyRecoverablePostCommitFailure, promoteFailureTransition }
 import { POST_COMMIT_MARKERS } from '../src/promote-post-commit-sweep.js';
 import { PROMOTE_POST_COMMIT_FAILURE_MESSAGE } from '../src/promote-replay-safety.js';
 import {
-  LANES, POST_COMMIT_ERRORS, SPELLINGS, STATES, expectedSweep, failedPopulation, population, respell, selectorPopulation, walkPages,
+  LANES, POST_COMMIT_ERRORS, SPELLINGS, STATES, expectedSweep, failedPopulation, population, respell, selectorPopulation, tiedContenders, walkPages,
 } from './_helpers/share-listing-models.js';
 import {
   ROW_AGENT, ROW_NOW as NOW, deleteShareRow, keysetOrder, mulberry32, putShareRow, randomJobId, readEveryShareJob, seedShareRows, seedUnreadableRow,
@@ -856,8 +856,76 @@ describe('the post-commit sweep reads only its candidates and decides them as be
     expect(reads[0]!.text).not.toMatch(/OFFSET/i);
     expect(reads.every((call) => call.options?.controlQueue === 'share')).toBe(true);
     expect(tapped.calls.some((call) => call.source === 'publisher.asyncPromote.list')).toBe(false);
+    // Its candidates are then decided 50 at a time, each in a hold of its own that reads the rows it is about to judge by subject.
+    const decided = tapped.calls.filter((call) => call.source === 'publisher.asyncPromote.recoverPostCommit.payloads');
+    expect(decided.map((call) => [...call.text!.matchAll(/<urn:dkg:promote-queue:job:[^>]+>/g)].length)).toEqual([50, 50, 30]);
+    expect(decided.every((call) => call.options?.controlQueue === 'share')).toBe(true);
   });
 
+  describe('decides its candidates in the queue\'s own order, ties included', () => {
+    const failed = (id: string, at: number, over: Partial<ShareRowSpec> = {}): ShareRowSpec =>
+      ({ id, state: 'failed', enqueuedAt: NOW + at, lastError: code, attemptCount: 1, maxRetries: 3, ...over });
+    const sweepOf = async (specs: readonly ShareRowSpec[]) => {
+      const { queue, store, setNow } = await seeded(specs);
+      const now = NOW + 77_000;
+      setNow(now);
+      return { queue, store, now, expected: expectedSweep(specs, now) };
+    };
+    const storedAs = async (store: TripleStore, id: string) => (await readEveryShareJob(store)).find((job) => job.jobId === id)!;
+
+    it('requeues the localeCompare-first of two tied jobs that share an assertion and defers the other, though code point order puts it second', async () => {
+      // 'a' < 'B' by locale, 'B' < 'a' by code point: the order the previous sweep decided in (comparePromoteJobs) is what picks the winner.
+      expect('a'.localeCompare('B')).toBeLessThan(0);
+      const specs = [failed('B', 10, { name: 'asset' }), failed('a', 10, { name: 'asset' })];
+      const { queue, store, now } = await sweepOf(specs);
+      expect(await queue.recoverPostCommitFailures()).toEqual([{ jobId: 'a', action: 'requeued', attempt: 1, maxAttempts: 3, nextRetryAt: now + 1_000 }]);
+      expect(await storedAs(store, 'a')).toMatchObject({ state: 'failed_retrying' });
+      expect(await storedAs(store, 'B')).toEqual(shareRow(specs[0]!)); // deferred: untouched, left for a later sweep
+    });
+
+    it.each([0, 1, 2, 25, 49])('decides a block of 120 tied jobs exactly as the previous sweep did when %i earlier candidates put the first page boundary inside it', async (earlier) => {
+      // 120 recoverable jobs at one enqueue time, three to an assertion, behind `earlier` jobs of their own: the page boundaries (every 50 candidates) cut through tied jobs and assertions.
+      const specs = [...Array.from({ length: earlier }, (_, i) => failed(`early-${i}`, -1_000 + i, { name: `early-asset-${i}` })), ...tiedContenders(mulberry32(90 + earlier), 120)];
+      const { queue, store, expected } = await sweepOf(specs);
+      // Not vacuous: in some assertion the job the locale order picks is not the one code point order picks.
+      const winner = (group: readonly ShareRowSpec[], order: (a: string, b: string) => number) => [...group].sort((x, y) => order(x.id, y.id))[0]!.id;
+      const groups = new Map<string, ShareRowSpec[]>();
+      for (const spec of specs.filter((spec) => spec.id.includes('-tie'))) groups.set(spec.name!, [...(groups.get(spec.name!) ?? []), spec]);
+      const differing = [...groups.values()].filter((group) => winner(group, (a, b) => a.localeCompare(b)) !== winner(group, (a, b) => (a < b ? -1 : 1)));
+      expect(differing.length).toBeGreaterThan(3);
+      expect(expected.events).toHaveLength(earlier + 40);
+      expect(await queue.recoverPostCommitFailures()).toEqual(expected.events);
+      const stored = new Map((await readEveryShareJob(store)).map((job) => [job.jobId, job]));
+      for (const [id, job] of expected.finals) expect(stored.get(id), id).toEqual(JSON.parse(JSON.stringify(job)));
+    });
+
+    it('orders a failed row that carries a retry time by that time, as the previous sweep did, not by its enqueue time', async () => {
+      // The queue never leaves a retry time on a failed row, but the payload format allows it (an older release, a repaired record). X was enqueued first and is due at +1000; Y is due at +500.
+      const specs = [failed('X', 1, { name: 'asset', nextRetryAt: NOW + 1_000 }), failed('Y', 500, { name: 'asset' })];
+      const { queue, store, now, expected } = await sweepOf(specs);
+      expect(expected.events.map((event) => event['jobId'])).toEqual(['Y']);
+      expect(await queue.recoverPostCommitFailures()).toEqual([{ jobId: 'Y', action: 'requeued', attempt: 1, maxAttempts: 3, nextRetryAt: now + 1_000 }]);
+      expect(await storedAs(store, 'X')).toEqual(shareRow(specs[0]!));
+      expect(await storedAs(store, 'Y')).toMatchObject({ state: 'failed_retrying' });
+    });
+
+    it('judges a candidate on the row as it is when its turn comes: one that left the failed state since it was found is not touched', async () => {
+      const raw = openStore();
+      const operator = { ...failed('moved', 2, { name: 'asset-2' }), state: 'queued' as const, lastError: undefined };
+      let moved = 0;
+      const tapped = tapStore(raw, { before: async (call) => {
+        if (call.source !== 'publisher.asyncPromote.recoverPostCommit.payloads') return;
+        moved++;
+        await putShareRow(raw, operator); // an operator recovered the job after the sweep found it
+      } });
+      await seedShareRows(tapped.store, [failed('stays', 1, { name: 'asset-1' }), failed('moved', 2, { name: 'asset-2' }), failed('last', 3, { name: 'asset-3' })]);
+      const { queue, setNow } = queueOver(tapped.store);
+      setNow(NOW + 5_000);
+      expect((await queue.recoverPostCommitFailures()).map((event) => event.jobId)).toEqual(['stays', 'last']);
+      expect(moved).toBeGreaterThan(0);
+      expect(await storedAs(raw, 'moved')).toEqual(shareRow(operator));
+    });
+  });
 });
 
 describe('the key-scoped lookup of the durable share path', () => {

@@ -53,7 +53,7 @@ const CONTROL_LABELS_BY_OPERATION: Readonly<Record<string, readonly string[]>> =
   'succeed': [`${P}readJob`, `${P}writeJob`],
   'fail (retryable)': [`${P}readJob`, `${P}writeJob`],
   'fail (post-commit)': [`${P}readJob`, `${P}writeJob`],
-  'recoverPostCommitFailures': [`${P}findActiveConflict`, `${P}recoverPostCommit`, `${P}writeJob`],
+  'recoverPostCommitFailures': [`${P}findActiveConflict`, `${P}recoverPostCommit`, `${P}recoverPostCommit.payloads`, `${P}writeJob`],
   'cancel': [`${P}readJob`, `${P}writeJob`],
   'recover': [`${P}findActiveConflict`, `${P}readJob`, `${P}writeJob`],
   'recoverOnStartup': [`${P}findActiveConflict`, `${P}recoverExpired`, `${P}writeJob`],
