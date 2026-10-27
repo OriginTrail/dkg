@@ -11,6 +11,10 @@
  * The route renders the ADMISSION verdict (`admissionOutcome`), never the nested store outcome; both are asserted.
  * Two controls keep it honest: the same queue succeeds when nothing is held, and a saturated SHARED scheduler refuses the queue
  * with the path off (in the caller's lane) but not with it on.
+ * "No job exists" has to be able to fail, so the stub endpoint is stateful: it records every update request that reaches the wire and
+ * answers job reads from what those updates wrote. Every refusal then asserts, after the held pressure is released and the scheduler
+ * has had time to run anything it wrongly kept, that no job write was dispatched and the queue lists nothing; the admitted control
+ * asserts the opposite through the same stub (one job write, and `queue.list()` returns that job).
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -34,16 +38,54 @@ const WAIT_MS = 40;
 const json = (body: unknown): Response =>
   new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/sparql-results+json' } });
 
-/** What the stub endpoint does with each request; `onConflictRead` runs while the queue's conflict read is in flight. */
-const endpoint = { onConflictRead: undefined as (() => void) | undefined };
+/**
+ * The stub SPARQL endpoint, stateful so that "no job exists" can fail:
+ *   - `updates` is every update request that reached the wire, so a dispatched job write cannot go unnoticed;
+ *   - `payloads` is what those updates wrote (graph -> job subject -> payload JSON), and the queue's job reads answer from it, so a
+ *     persisted job is visible to `queue.list()` the way it would be on a real endpoint.
+ * `onConflictRead` runs while the queue's conflict read is in flight.
+ */
+const endpoint = {
+  onConflictRead: undefined as (() => void) | undefined,
+  updates: [] as string[],
+  payloads: new Map<string, Map<string, string>>(),
+};
 
-/** Updates 200, ASK true, everything else an empty SELECT: an empty control graph that accepts writes. */
+/** The queue's job record keeps its whole job in one `urn:dkg:promote-queue:payload` literal (a JSON string literal). */
+const PAYLOAD_TRIPLE = /^\s*<([^>]+)> <urn:dkg:promote-queue:payload> ("(?:[^"\\]|\\.)*") \.$/gm;
+const SUBJECT_CLEAR = /DELETE WHERE \{ GRAPH <([^>]+)> \{ <([^>]+)> \?p \?o \} \}/g;
+
+/** Record an update and apply what the queue sends: `replaceSubject` is a subject clear followed by an INSERT DATA of its quads. */
+function applyUpdate(update: string): void {
+  endpoint.updates.push(update);
+  for (const [, graph, subject] of update.matchAll(SUBJECT_CLEAR)) endpoint.payloads.get(graph!)?.delete(subject!);
+  const graph = /INSERT DATA \{\s*GRAPH <([^>]+)>/.exec(update)?.[1];
+  if (graph === undefined) return;
+  const records = endpoint.payloads.get(graph) ?? new Map<string, string>();
+  endpoint.payloads.set(graph, records);
+  for (const [, subject, payload] of update.matchAll(PAYLOAD_TRIPLE)) records.set(subject!, JSON.parse(payload!) as string);
+}
+
+/** Answer `SELECT ?payload` from the stored records of the queried graph (a read pinned to one job subject returns only that job). */
+function payloadRows(query: string): Response {
+  const graph = /GRAPH <([^>]+)>/.exec(query)?.[1] ?? '';
+  const pinned = /GRAPH <[^>]+> \{ <([^>]+)> <urn:dkg:promote-queue:payload> \?payload/.exec(query)?.[1];
+  const bindings = [...(endpoint.payloads.get(graph) ?? [])]
+    .filter(([subject]) => pinned === undefined || subject === pinned)
+    .map(([, payload]) => ({ payload: { type: 'literal', value: payload } }));
+  return json({ head: { vars: ['payload'] }, results: { bindings } });
+}
+
+/** Updates 200 and are recorded, ASK true, job reads answer from the recorded writes: an empty control graph that accepts writes. */
 async function stubFetch(_input: unknown, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
   const body = typeof init?.body === 'string' ? init.body : '';
-  if (/sparql-update|nquads/i.test(headers.get('content-type') ?? '')) return new Response('', { status: 200 });
+  if (/sparql-update|nquads/i.test(headers.get('content-type') ?? '')) { applyUpdate(body); return new Response('', { status: 200 }); }
   if (/\bASK\b/.test(body)) return json({ head: {}, boolean: true });
-  if (/SELECT\s+\?payload/.test(body)) endpoint.onConflictRead?.();
+  if (/SELECT\s+\?payload/.test(body)) {
+    endpoint.onConflictRead?.();
+    return payloadRows(body);
+  }
   return json({ head: { vars: ['payload'] }, results: { bindings: [] } });
 }
 
@@ -53,6 +95,7 @@ interface Harness {
   control: StorePriorityScheduler;
   path: StoreControlPath;
   queue: TripleStoreAsyncPromoteQueue;
+  graphUri: string;
 }
 
 let graphCounter = 0;
@@ -64,6 +107,21 @@ const stores: TripleStore[] = [];
 async function releaseAll(): Promise<void> {
   for (const release of gates.splice(0)) release();
   await Promise.all(held.splice(0));
+}
+
+/** The job writes that reached the wire for this queue: the updates addressed to its control graph. */
+const jobWrites = (h: Harness): string[] => endpoint.updates.filter((update) => update.includes(`<${h.graphUri}>`));
+
+/**
+ * The refusal left no job behind. Releases the held pressure first and then gives the scheduler longer than its queue wait to run
+ * anything it wrongly kept, so a refused write that executes late is caught here; then checks both views of the same stub: no job
+ * write was dispatched, and the queue (read through the same endpoint) lists nothing.
+ */
+async function expectNoJobPersisted(h: Harness): Promise<void> {
+  await releaseAll();
+  await new Promise((resolve) => setTimeout(resolve, WAIT_MS * 2));
+  expect(jobWrites(h)).toEqual([]);
+  expect(await h.queue.list()).toEqual([]);
 }
 
 /** A shared scheduler with `sharedMaxConcurrent` slots (1 lets a test saturate it with one holder and one waiter). */
@@ -89,8 +147,9 @@ async function harness(sharedMaxConcurrent = 4): Promise<Harness> {
     },
   });
   stores.push(store);
-  const queue = new TripleStoreAsyncPromoteQueue(store, { graphUri: `urn:test:share-control-busy:${graphCounter++}` });
-  return { store, shared, control: path.share!, path, queue };
+  const graphUri = `urn:test:share-control-busy:${graphCounter++}`;
+  const queue = new TripleStoreAsyncPromoteQueue(store, { graphUri });
+  return { store, shared, control: path.share!, path, queue, graphUri };
 }
 
 /** Occupy `scheduler`'s only slot until the test ends; resolves once the holder is running. */
@@ -143,6 +202,8 @@ const body = (record: { body: string }) => JSON.parse(record.body) as Record<str
 let warn: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
+  endpoint.updates.length = 0;
+  endpoint.payloads.clear();
   vi.stubGlobal('fetch', stubFetch);
   warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);   // the scheduler's queue-wait-timeout diagnostic
 });
@@ -169,6 +230,14 @@ describe('the share queue under control-lane pressure, control path on', () => {
     expect(lanes.length).toBeGreaterThanOrEqual(2);              // the conflict read and the job write
     expect(lanes.every((lane) => lane === 'control')).toBe(true);
     expect(startedLanes(h.shared)).toEqual([]);
+    // The job really was persisted, and the stub shows it both ways: exactly one job write reached the wire, and the queue reads
+    // that job back through the same endpoint. This is what makes "no job" in the refusal cases below able to fail.
+    const { jobId } = body(record) as { jobId: string };
+    expect(jobWrites(h)).toHaveLength(1);
+    expect(jobWrites(h)[0]).toContain(`urn:dkg:promote-queue:job:${jobId}`);
+    expect(await h.queue.list()).toMatchObject([
+      { jobId, state: 'queued', request: { contextGraphId: 'busy-cg', assertionName: 'asset' } },
+    ]);
   });
 
   it('refuses the conflict read with queue_full: control-lane busy cause, not_admitted at the conflict phase, 503 retryable, no job', async () => {
@@ -198,8 +267,7 @@ describe('the share queue under control-lane pressure, control path on', () => {
     expect(body(record)).not.toHaveProperty('jobId');
     expect(body(record)).not.toHaveProperty('outcome');
 
-    await releaseAll();
-    expect(await h.queue.list()).toEqual([]);
+    await expectNoJobPersisted(h);
   });
 
   it('refuses the conflict read with queue_wait_timeout after the control wait, the same way', async () => {
@@ -218,6 +286,7 @@ describe('the share queue under control-lane pressure, control path on', () => {
     expect(record.status).toBe(503);
     expect(body(record)).toMatchObject({ retryable: true, admissionOutcome: 'not_admitted', phase: 'conflict' });
     expect(classifyStoreUnavailable(cause)?.outcome).toBe('not_started');
+    await expectNoJobPersisted(h);
   });
 
   it('refuses the job write with queue_wait_timeout after a successful read: not_admitted at the persist phase, and no job exists', async () => {
@@ -245,8 +314,7 @@ describe('the share queue under control-lane pressure, control path on', () => {
     expect(body(record)).not.toHaveProperty('jobId');
     expect(body(record)).not.toHaveProperty('statusPath');
 
-    await releaseAll();
-    expect(await h.queue.list()).toEqual([]);
+    await expectNoJobPersisted(h);
   });
 });
 
@@ -266,6 +334,7 @@ describe('what a saturated shared scheduler does to the share queue', () => {
     await handleKaShareAsyncEnqueue(ctx, 'asset');
     expect(record.status).toBe(200);
     expect(body(record)).toMatchObject({ state: 'queued' });
+    expect(jobWrites(h)).toHaveLength(1);
   });
 
   it('refuses the queue with the path off, in the caller\'s lane and not the control lane', async () => {
@@ -278,5 +347,6 @@ describe('what a saturated shared scheduler does to the share queue', () => {
     const cause = (thrown.error as PromoteAdmissionError).cause;
     expect(isStoreSchedulerBusyError(cause)).toBe(true);
     expect(cause).toMatchObject({ reason: 'queue_full', priority: 'normal' });
+    await expectNoJobPersisted(h);
   });
 });
