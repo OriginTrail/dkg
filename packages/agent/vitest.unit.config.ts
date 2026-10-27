@@ -19,6 +19,7 @@ export default defineConfig({
     coverage: coverageForPackage("agent"),
     include: [
       "test/held-metadata-controls.test.ts",
+      "test/recipient-key-route-scopes.test.ts",
       "test/write-preflight-attribution.test.ts",
       // S4a: which writes move the policy generation, what makes two probe calls interchangeable.
       "test/write-preflight-generation.test.ts",
@@ -483,6 +484,7 @@ export default defineConfig({
       "test/recipient-key-route-fence.test.ts",
       "test/recipient-key-route-fence-wrapper.test.ts",
       "test/recipient-key-route-fence.property.test.ts",
+      "test/share-retention-key-route-fence.test.ts",
       "test/peer-gate-revision.test.ts",
       "test/recipient-key-route-dependencies.test.ts",
       "test/recipient-key-route-lifecycle.test.ts",

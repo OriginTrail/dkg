@@ -140,8 +140,8 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
    * the graph, read 2 is the confirmation after the first collect, read 3 after
    * the second and read 4 after the third, the last. `unrelated` runs the writes
    * above during every read after the first; `churn` names the reads during
-   * which a key fact of an agent outside the roster is written, which moves the
-   * key and route revision but cannot change the resolved set;
+   * which a member's existing route is re-written, which moves its dependency
+   * revision but cannot change the resolved set;
    * `during(read, context)` applies one real change at a chosen read.
    */
   function churningHost(options: {
@@ -181,7 +181,10 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
       resolveSwmTransportAuthority: vi.fn(async (): Promise<ChurnTransport> => {
         reads += 1;
         if (reads > 1 && options.unrelated) await unrelatedWrites(stack);
-        if (options.churn?.includes(reads)) await stack.store.insert([bystanderRoute()]);
+        if (options.churn?.includes(reads)) await stack.store.insert([{
+          subject: context.memberUri, predicate: DKG_ONTOLOGY.DKG_PEER_ID,
+          object: `"${context.peerId}"`, graph: PROFILE_GRAPH,
+        }]);
         await options.during?.(reads, context);
         return state.transport ?? { kind: 'private-roster', participantAgents: [...state.roster] };
       }),
@@ -423,6 +426,21 @@ describe('recipient stability loop under sustained authority churn (GH#3067)', (
     expectRecipients(await resolve(host), 2);
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
     expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps private publication stable under unrelated agent key-route churn', async () => {
+    let writes = 0;
+    const { host, ready, projection } = churningHost({ seed: profileKeys,
+      during: async (read, context) => {
+        if (read > 1) { writes++; await context.store.insert([bystanderRoute()]); }
+      },
+    });
+    await ready;
+    const collect = vi.spyOn(projection.recipientKeyCollect, 'resolve');
+    expectRecipients(await resolve(host), 2);
+    expect(writes).toBe(1);
+    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+    expect(collect).toHaveBeenCalledTimes(2); // One collect for each actual member.
   });
 
   it('names the throw site of an authority that is unavailable at the first read', async () => {

@@ -43,7 +43,9 @@ dkg ka write <name> -c <cg> --input-file <rdf-file>           # append RDF paylo
 dkg ka finalize <name> -c <cg>                                # seal the WM draft
 dkg ka share <name> -c <cg>                                   # WM -> SWM
 dkg ka share-async <name> -c <cg>                             # enqueue async WM -> SWM share
-dkg ka share-jobs [--context-graph-id <cg>]                   # list async share jobs
+dkg ka share-jobs [--context-graph-id <cg>] [--state <s>] [--limit <n>]   # list async share jobs (all of them, or up to --limit)
+dkg ka share-jobs ... --all [--page-size <n>]                 # page through the whole list and print every job, in enqueue order
+dkg ka share-jobs ... --page-size <n> [--cursor <cursor>]     # print one page, then "Next cursor: ..." for the page after it
 dkg ka publish <name> -c <cg>                                 # sync SWM -> VM publish
 dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]  # enqueue SWM -> VM publish
 dkg ka pull-from <name> -c <cg> --layer swm|vm                # seed WM from SWM or VM
@@ -68,7 +70,9 @@ dkg subscribe <cg>                       # subscribe to a CG's gossip topics
 # Async publisher (optional, for batching)
 dkg publisher enable                     # enable the async publisher
 dkg publisher publish-async <cg> <name> [--publisher-node-identity-id 0]  # alias for dkg ka publish-async
-dkg publisher jobs                       # list publisher jobs
+dkg publisher jobs [--status <s>] [--context-graph <cg>]  # list publisher jobs (all of them, as a JSON array)
+dkg publisher jobs ... --all [--page-size <n>]            # page through the whole list and print every job, in acceptance order
+dkg publisher jobs ... --page-size <n> [--cursor <cursor>]  # print one page as { jobs, nextCursor, complete }
 dkg publisher stats                      # publisher throughput stats
 # publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
@@ -164,6 +168,18 @@ This cleanup clears every non-system, non-`coreHosted` user subscription,
 including legitimate subscriptions. It preserves `agents`, `ontology`, hosted
 core state, and the graph's VM/SWM data. Re-add wanted user subscriptions
 explicitly after cleanup.
+
+## Listing async jobs
+
+`dkg ka share-jobs` and `dkg publisher jobs` print the complete list, as they always did, unless a paging flag is given. They take the same three flags (the route parameters are in [Listing async jobs](api.md#listing-async-jobs)):
+
+| Flag | Effect |
+|---|---|
+| `--page-size <n>` | Print one page of up to `n` jobs (1-1000, 100 when only `--cursor` is given). Alone, it prints the first page. With `--all`, it is the number of jobs per request (1000 by default). |
+| `--cursor <cursor>` | Print the page after this cursor, the `nextCursor` of an earlier page. |
+| `--all` | Request pages until one is complete and print every job. The output has the shape of the complete list, in the order of the pages (admission time, then job ID) and not in the order of the complete list. |
+
+`ka share-jobs` prints a single page's jobs and then `Next cursor: <cursor>`, or `No further jobs when this page was read.` for the last page; with `--json` it prints `{ jobs, nextCursor, complete }`. `publisher jobs` always prints JSON: that object for a single page and the bare array for the complete list and for `--all`. `--limit` caps the complete list and cannot be combined with a paging flag; `--all` cannot be combined with `--cursor`. A finished `--all` listed every job that was listed for its whole walk; a job missing from it is not thereby proven absent. With the daemon stopped, `publisher jobs` pages the node's store directly in the same way.
 
 ## Client request timeouts
 
