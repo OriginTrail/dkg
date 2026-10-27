@@ -211,6 +211,8 @@ describe('an older record the sweep can never delete keeps every record behind i
 
   const stale: Array<[string, (quads: Quad[]) => Quad[]]> = [
     ['no stored finish time', (quads) => quads.filter((quad) => quad.predicate !== CONTROL_FINALIZED_AT)],
+    // the scan reads `xsd:integer` finish times only (online review round 1), so it never meets a record whose finish time is stored as a decimal of the same value
+    ['a stored finish time that is a decimal of the right value', (quads) => quads.map((quad) => (quad.predicate === CONTROL_FINALIZED_AT ? { ...quad, object: quad.object.replace(/^"(\d+)"\^\^<[^>]+>$/, '"$1.0"^^<http://www.w3.org/2001/XMLSchema#decimal>') } : quad))],
     ['a stored finish time in the future (the scan does not reach it yet)', (quads) => quads.map((quad) => (quad.predicate === CONTROL_FINALIZED_AT ? { ...quad, object: `"${NOW + DAY}"${INTEGER}` } : quad))],
     ['a stored status that is not finalized (a stale index row)', (quads) => quads.map((quad) => (quad.predicate === CONTROL_STATUS ? { ...quad, object: '"accepted"' } : quad))],
   ];

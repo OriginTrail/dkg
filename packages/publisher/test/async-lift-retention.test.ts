@@ -489,6 +489,87 @@ describe('the scan', () => {
   });
 });
 
+describe('finish times a JS number cannot hold exactly, and repeated rows (online review round 1: 4394031868, 4394031890)', () => {
+  // The cursor holds a JS number and the engine compares terms exactly. Before the scan read `xsd:integer` finish times only, a decimal that a double rounds
+  // (`100.0000000000000001`) came back after a cursor at 100 forever, and a job indexed at 100 and 100.0 came back twice in the tie walk at 100: either was an anomaly on every
+  // call, and the job at 200 behind it was never reached. The retained record J is a finalized job of its own key whose finish-time index the case writes; E, at 200, can go.
+  const XSD = 'http://www.w3.org/2001/XMLSchema#';
+  const int = (n: number) => `"${n}"^^<${XSD}integer>`;
+  const dec = (lexical: string) => `"${lexical}"^^<${XSD}decimal>`;
+  const J: KeyedSpec = { id: 'J', key: 'kj', state: 'finalized', acceptedAt: 50, finalizedAt: 100 };
+  const E: KeyedSpec = { id: 'E', key: 'ke', state: 'finalized', acceptedAt: 150, finalizedAt: 200 };
+  const withFinishTerms = (spec: KeyedSpec, terms: readonly string[]): Quad[] =>
+    keyedQuads(templates, spec).flatMap((quad) => (quad.predicate === CONTROL_FINALIZED_AT ? terms.map((object) => ({ ...quad, object })) : [quad]));
+  /** At most `max` calls, stopping when the pass is over or a call failed. */
+  const calls = async (retention: ReturnType<typeof newRetention>, max = 6): Promise<PublisherRetentionBatchResult[]> => {
+    const results: PublisherRetentionBatchResult[] = [];
+    for (let i = 0; i < max; i++) { const res = await retention.runBatch(); results.push(res); if (!res.hasMore || res.error) break; }
+    return results;
+  };
+  const CASES: ReadonlyArray<{ label: string; terms: string[]; judgedJ: number }> = [
+    { label: 'J indexed at the integer 100 and the decimal 100.0 (equal in every engine)', terms: [int(100), dec('100.0')], judgedJ: 1 },
+    { label: 'J indexed at the decimals 100.0000000000000001 and 100.0000000000000002 (both 100 as doubles)', terms: [dec('100.0000000000000001'), dec('100.0000000000000002')], judgedJ: 0 },
+    { label: 'J indexed at two integers, 100 and 300', terms: [int(100), int(300)], judgedJ: 2 },
+    { label: 'J indexed at the decimal 100.0000000000000001 alone (the review\'s repro)', terms: [dec('100.0000000000000001')], judgedJ: 0 },
+  ];
+
+  it.each(CASES.flatMap((c) => (['delete', 'report'] as const).map((mode) => [c.label, mode, c] as const)))('%s, %s mode: J stays untouched, E behind it is reached, the pass completes in at most 3 calls at batch size 1 and 2, no anomaly', async (_label, mode, c) => {
+    for (const batchSize of [1, 2]) {
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.createGraph(DEFAULT_CONTROL_GRAPH_URI);
+      await store.insert([...withFinishTerms(J, c.terms), ...keyedQuads(templates, E)]);
+      const before = await present(store, 'J');
+      const retention = newRetention(publisherOver(store), { mode, batchSize });
+      const results = await calls(retention);
+      const where = `batch size ${batchSize}: ${results.length} calls, anomalies ${results.map((r) => r.anomalies).join(',')}`;
+      expect(results.at(-1)!.hasMore, where).toBe(false);
+      expect(results.length, where).toBeLessThanOrEqual(3);
+      expect(results.every((r) => r.anomalies === 0 && r.error === undefined), where).toBe(true);
+      expect(results.filter((r) => r.passCompleted), where).toHaveLength(1);
+      expect(mode === 'delete' ? deletedIds(results) : wouldDeleteIds(results), where).toEqual(['E']);
+      expect(mode === 'delete' ? wouldDeleteIds(results) : deletedIds(results), where).toEqual([]);
+      expect(await present(store, 'J'), where).toBe(before);
+      // a J the scan can read (it has an integer finish time) is judged at each one an answer holds, and kept: its index does not match its one payload; one it cannot read is not a candidate at all
+      expect(kept(results), where).toEqual(c.judgedJ > 0 ? { index_mismatch: c.judgedJ } : {});
+      expect(results.reduce((n, r) => n + r.scanned, 0), where).toBe(1 + c.judgedJ);
+      expect(retention.counters().lastCompletePass, where).toMatchObject(mode === 'delete' ? { deleted: { finalized: 1 }, wouldDelete: { finalized: 0 } } : { deleted: { finalized: 0 }, wouldDelete: { finalized: 1 } });
+    }
+  });
+
+  it.each(['delete', 'report'] as const)('%s mode: an engine that answers one subject twice (two integer forms of one value, "100" and "0100", which Oxigraph merges, so the repeat is made on its answer) judges it once and reaches the job behind it', async (mode) => {
+    // J is retained by a wallet lock, so neither mode removes it. Batch size 1: the window of the range scan is J twice, so the walk enters the tie at 100, whose answer is J twice too.
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedKeyed(store, templates, [J, E]);
+    await seedWalletLock(store, 'J', 'wallet-1', 'released');
+    const before = await present(store, 'J');
+    const served: string[][] = [];
+    const spy = spyStore(store, {
+      rewrite: async (entry, run) => {
+        if (entry.source !== `${RETENTION}scan`) return run();
+        const all = await store.query(entry.text.replace(/ LIMIT \d+$/, ''));
+        if (all.type !== 'bindings') return all;
+        const bindings = all.bindings.flatMap((b) => (b['job'] === jobSubject('J') ? [b, b] : [b])).slice(0, Number(/LIMIT (\d+)$/.exec(entry.text)![1]));
+        served.push(bindings.map((b) => String(b['job']).slice(jobSubject('').length)));
+        return { ...all, bindings };
+      },
+    });
+    const retention = newRetention(publisherOver(spy.store), { mode, batchSize: 1 });
+    const results = await calls(retention);
+    const where = `${results.length} calls, anomalies ${results.map((r) => r.anomalies).join(',')}, served ${JSON.stringify(served)}`;
+    expect(served.some((ids) => ids.length === 2 && ids[0] === 'J' && ids[1] === 'J'), `the engine repeated J (${where})`).toBe(true);
+    expect(results.at(-1)!.hasMore, where).toBe(false);
+    expect(results.length, where).toBeLessThanOrEqual(4);
+    expect(results.every((r) => r.anomalies === 0 && r.error === undefined), where).toBe(true);
+    expect(results.filter((r) => r.passCompleted), where).toHaveLength(1);
+    expect(verifiedSubjects(spy.log), where).toEqual([jobSubject('J'), jobSubject('E')]);            // each judged once, in order
+    expect(kept(results), where).toEqual({ bound_obligation: 1 });
+    expect(mode === 'delete' ? deletedIds(results) : wouldDeleteIds(results), where).toEqual(['E']);
+    expect(await present(store, 'J'), where).toBe(before);
+  });
+});
+
 describe('failures', () => {
   it('ends the batch with the phase that failed, moves no cursor, and judges the same rows on the next call', async () => {
     for (const [phase, source] of [['scan', `${RETENTION}scan`], ['verify', `${RETENTION}verify`], ['verify', `${RETENTION}walletLocks`], ['verify', `${RETENTION}siblings`]] as const) {

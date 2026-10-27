@@ -159,7 +159,7 @@ Never removed, whatever its age:
 - a job that is not `finalized` (`accepted`, `claimed`, `validated`, `broadcast`, `included`, and every `failed` job);
 - a job a wallet lock still names (an obligation that is still bound);
 - a job whose payload is unreadable, ambiguous (several payload records), another job's, a format this build does not understand, a legacy payload written by a much older version, or without a finish time;
-- a job whose stored status, finish time or lifecycle key disagrees with its payload;
+- a job whose stored status, finish time or lifecycle key disagrees with its payload, or whose stored finish time is not an integer (the scan reads `xsd:integer` finish times only, as the share scan does, so it never meets such a job; it is not counted, and it holds the newer jobs of its key);
 - a job dated after the current time (`finalizedAt` or `updatedAt`);
 - **a job with an older sibling that is kept** (the rule below).
 

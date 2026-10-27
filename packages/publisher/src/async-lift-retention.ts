@@ -45,7 +45,7 @@ import {
   PUBLISHER_RETENTION_MODES, PUBLISHER_RETENTION_WINDOW_MS, emptyClassCounts, emptyKeptCounts, judgeFinalizedRecord,
   type PublisherRetentionJobClass, type PublisherRetentionKeepReason, type PublisherRetentionMode, type PublisherRetentionPolicy,
 } from './async-lift-retention-policy.js';
-import { LIFT_JOB_SUBJECT_PREFIX, LiftRetentionScanState, planFinalizedScan, type LiftScanRow } from './async-lift-retention-scan.js';
+import { LIFT_JOB_SUBJECT_PREFIX, LiftRetentionScanState, exactFinishTime, planFinalizedScan, type LiftScanRow } from './async-lift-retention-scan.js';
 import {
   HoldBudget, RETENTION_SKIPS, RETENTION_SWEEP_DEFAULTS, RetentionClockGuard, ageWindowMs, boundedInteger, claimBatch, errorMessage, lazyRetentionLogger, positiveFinite, sumInto,
   type RetentionLogger, type RetentionSkip,
@@ -224,10 +224,12 @@ interface Judged { readonly row: SliceRow; readonly job: LiftJob; readonly key: 
 interface Doomed { readonly row: SliceRow; readonly entry: PublisherRetentionJob; readonly job: LiftJob; readonly key: string | null }
 
 const termString = (term: string | undefined): string | undefined => { try { return parseLiteral(String(term)) as string; } catch { return undefined; } };
-const termNumber = (term: string | undefined): number => { const m = /^"?([^"^]*)"?(?:\^\^<[^>]*>)?$/.exec(String(term ?? '')); return m && m[1] !== '' ? Number(m[1]) : Number.NaN; };
-/** The stored status and finish time are what the scan reads a row by: they agree with the payload when the scan meets the record as a finalized row of its finish time. */
+/**
+ * The stored status and finish time are what the scan reads a row by: they agree with the payload when the scan meets the record as a finalized row of its finish time, one
+ * `xsd:integer` term (a decimal or any other term of the same value is one the scan never reads, async-lift-retention-scan.ts).
+ */
 const indexAgrees = (states: ReadonlySet<string>, finishes: ReadonlySet<string>, finalizedAt: number | undefined): boolean =>
-  states.size === 1 && termString([...states][0]) === 'finalized' && finishes.size === 1 && termNumber([...finishes][0]) === finalizedAt;
+  states.size === 1 && termString([...states][0]) === 'finalized' && finishes.size === 1 && exactFinishTime([...finishes][0]) === finalizedAt;
 /** Most subjects one verify read names: a key with a long history is read in several queries. */
 const VERIFY_CHUNK = 100;
 
@@ -486,7 +488,7 @@ class PublisherRetentionImpl implements PublisherRetention {
    * The finalized records of `key` older than its youngest candidate (and not candidates themselves) that this sweep could not delete itself: the plan must not reach past them,
    * or a newer record would go while they stay. A record the scan met earlier and kept is in `blockedSince`, and one it would delete (in report mode, one an earlier hold counted) is
    * no obstacle. What `blockedSince` cannot know is a record the scan never meets: a pre-upgrade payload the sweep does not delete, a stored status or finish time that is missing
-   * or disagrees with the payload. So the stored index of each is read and the candidate checks of `judgeCandidates` are applied to it: one that would not pass is refused, and a
+   * or disagrees with the payload, or a finish time stored as a term the scan does not read (not an `xsd:integer`). So the stored index of each is read and the candidate checks of `judgeCandidates` are applied to it: one that would not pass is refused, and a
    * refused record ends the plan's prefix. The answer is a function of the stored records alone, so report and delete mode give the same one.
    */
   private async refusedSiblings(siblings: readonly PersistedLiftJob[], key: string, members: readonly Judged[]): Promise<Set<string>> {

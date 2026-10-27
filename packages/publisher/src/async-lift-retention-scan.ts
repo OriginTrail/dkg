@@ -14,11 +14,25 @@
  * larger than a batch is covered. The scan relies on the engine honouring ORDER BY / LIMIT; the result is checked (sorted, after the cursor, within the cutoff)
  * and a violation is reported in `anomalies` and never advances the cursor.
  *
+ * CANDIDATES. A row is read only if its stored `finalizedAt` is an `xsd:integer` term of at least 0 (both queries carry the same filter, so they select the same rows; the
+ * share scan has the same rule, async-promote-retention-scan.ts). The cursor holds a JS number and the engine compares terms exactly, so a term a double cannot represent reads
+ * back as a number the engine does not consider equal to it: `"100.0000000000000001"^^xsd:decimal` reads as 100, the tie walk at 100 does not return it and the range scan
+ * `> 100` does, so the cursor would never leave it, and every eligible job behind it would starve. An integer in [0, cutoff] is exact in a double, so the number the cursor
+ * holds IS the term (the queue writes nothing else). A job whose only finish times are other terms (a decimal, a double, a plain literal, a negative number) is never a
+ * candidate: it is not read, judged, counted or deleted, so it stays, and so does every newer record of its key, which the sweep keeps as `older_sibling_kept` because the
+ * stored-index check of older siblings reads the same rule (async-lift-retention.ts).
+ *
+ * REPEATED ROWS. One subject can still come back as several rows: an engine that keeps two integer lexical forms of one value apart (`"100"`, `"0100"`; Oxigraph merges
+ * them) answers it once per term, and a job indexed at two distinct integers (the queue never writes that) comes back at each. The rows of a subject in one answer are collapsed
+ * to one judged row, a window of limit + 1 ROWS counts as full however few subjects the repeats left in it, and the walk goes on after the last subject judged, so repeats cost
+ * calls and never stall. A job indexed at two values is judged once per answer it is in, and kept each time (`index_mismatch`: its index does not match its one payload). A job
+ * indexed at an integer and at an equal decimal (`100`, `100.0`) is read at the integer alone, and kept for the same reason.
+ *
  * The scan runs outside the claim lock, on the background lane (OT-RFC-73 §5.1 tagging table: it is not queue control work). It reads only the two stored
  * index triples; the payload is judged later, under the lock.
  */
 import type { QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { CONTROL_FINALIZED_AT, CONTROL_STATUS, jobSubject, literal } from './async-lift-control-plane.js';
+import { CONTROL_FINALIZED_AT, CONTROL_STATUS, XSD_INTEGER, jobSubject, literal } from './async-lift-control-plane.js';
 import { expectBindings } from './async-lift-publisher-utils.js';
 
 export const LIFT_RETENTION_SCAN_SOURCE = 'publisher.asyncLift.retention.scan';
@@ -36,6 +50,16 @@ export interface LiftRetentionScanCursor {
 }
 
 const num = (n: number): string => (Number.isFinite(n) ? String(n) : '0');
+/** The terms a scan may read: exact integers, which a JS number holds without loss (see CANDIDATES). Both scan queries carry it, so they select the same rows. */
+const EXACT_FINISH_TIME = `FILTER (DATATYPE(?finalizedAt) = <${XSD_INTEGER}> && ?finalizedAt >= 0)`;
+const INTEGER_TERM_END = `"^^<${XSD_INTEGER}>`;
+/** The finish time a stored term holds when the scan reads it (an `xsd:integer` of at least 0, exact in a JS number), else undefined: the sweep's index checks use the same rule. */
+export function exactFinishTime(term: string | undefined): number | undefined {
+  if (term === undefined || !term.startsWith('"') || !term.endsWith(INTEGER_TERM_END)) return undefined;
+  const lexical = term.slice(1, -INTEGER_TERM_END.length);
+  const value = /^\+?\d+$/.test(lexical) ? Number(lexical) : Number.NaN;
+  return Number.isSafeInteger(value) ? value : undefined;
+}
 
 /**
  * Candidate scan: the rows whose stored `status` is finalized and whose stored `finalizedAt` lies after the cursor and not after `cutoff`, oldest first. It asks for
@@ -44,13 +68,13 @@ const num = (n: number): string => (Number.isFinite(n) ? String(n) : '0');
  */
 export function buildLiftRetentionScanQuery(graph: string, cutoff: number, limit: number, cursor: LiftRetentionScanCursor = {}): string {
   const lower = cursor.after === undefined ? '' : ` FILTER (?finalizedAt > ${num(cursor.after)})`;
-  return `SELECT ?job ?finalizedAt WHERE { GRAPH <${graph}> { ?job <${CONTROL_STATUS}> ${literal('finalized')} ; <${CONTROL_FINALIZED_AT}> ?finalizedAt . FILTER (?finalizedAt <= ${num(cutoff)})${lower} } } ORDER BY ?finalizedAt LIMIT ${limit + 1}`;
+  return `SELECT ?job ?finalizedAt WHERE { GRAPH <${graph}> { ?job <${CONTROL_STATUS}> ${literal('finalized')} ; <${CONTROL_FINALIZED_AT}> ?finalizedAt . ${EXACT_FINISH_TIME} FILTER (?finalizedAt <= ${num(cutoff)})${lower} } } ORDER BY ?finalizedAt LIMIT ${limit + 1}`;
 }
 
 /** The finalized rows that share exactly one `finalizedAt`, in key order after `afterKey` (only used inside a group larger than one batch). */
 export function buildLiftRetentionTieQuery(graph: string, finalizedAt: number, limit: number, afterKey?: string): string {
   const after = afterKey === undefined ? '' : ` FILTER (STR(?job) > ${literal(afterKey)})`;
-  return `SELECT ?job ?finalizedAt WHERE { GRAPH <${graph}> { ?job <${CONTROL_STATUS}> ${literal('finalized')} ; <${CONTROL_FINALIZED_AT}> ?finalizedAt . FILTER (?finalizedAt = ${num(finalizedAt)})${after} } } ORDER BY STR(?job) LIMIT ${limit + 1}`;
+  return `SELECT ?job ?finalizedAt WHERE { GRAPH <${graph}> { ?job <${CONTROL_STATUS}> ${literal('finalized')} ; <${CONTROL_FINALIZED_AT}> ?finalizedAt . ${EXACT_FINISH_TIME} FILTER (?finalizedAt = ${num(finalizedAt)})${after} } } ORDER BY STR(?job) LIMIT ${limit + 1}`;
 }
 
 export interface LiftScanRow { readonly iri: string; readonly finalizedAt: number }
@@ -65,6 +89,8 @@ export interface LiftScanPlan {
 
 const termNumber = (term: string | undefined): number => { const m = /^"?([^"^]*)"?(?:\^\^<[^>]*>)?$/.exec(String(term ?? '')); return m && m[1] !== '' ? Number(m[1]) : Number.NaN; };
 const byIri = (a: LiftScanRow, b: LiftScanRow) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0);
+/** One row per subject, the first of an ordered answer (the oldest): a subject whose index holds several matching terms comes back once per term. */
+const distinctRows = (rows: readonly LiftScanRow[]): LiftScanRow[] => { const seen = new Set<string>(); return rows.filter(r => (seen.has(r.iri) ? false : (seen.add(r.iri), true))); };
 
 function parseScanRows(bindings: ReadonlyArray<Record<string, string>>): { rows: LiftScanRow[]; clean: boolean } {
   const rows: LiftScanRow[] = [];
@@ -84,22 +110,23 @@ export async function planFinalizedScan(ctx: LiftScanContext, cutoff: number, li
   if (cursor.tie) {                                                                    // inside a group of more than one batch sharing one finalizedAt: key order
     const { finalizedAt, afterKey } = cursor.tie;
     const { rows, clean } = parseScanRows(expectBindings(await ctx.store.query(buildLiftRetentionTieQuery(ctx.graphUri, finalizedAt, limit, afterKey), SCAN_OPTIONS)));
-    const ordered = clean && rows.length <= limit + 1 && rows.every((r, i) => r.finalizedAt === finalizedAt && (afterKey === undefined || r.iri > afterKey) && (i === 0 || rows[i - 1]!.iri < r.iri));
-    if (!ordered) return keepCursor([...rows].sort(byIri).slice(0, limit));
-    const judged = rows.slice(0, limit);
+    const ordered = clean && rows.length <= limit + 1 && rows.every((r, i) => r.finalizedAt === finalizedAt && (afterKey === undefined || r.iri > afterKey) && (i === 0 || rows[i - 1]!.iri <= r.iri));   // <=: a subject's own rows are adjacent
+    if (!ordered) return keepCursor(distinctRows([...rows].sort(byIri)).slice(0, limit));
+    const judged = distinctRows(rows).slice(0, limit);
+    // limit + 1 rows = a full window, which may hide more subjects even when repeats left fewer than limit + 1 of them: continue after the last subject judged
     return { plan: { judged, next: rows.length <= limit ? { after: finalizedAt } : { ...cursor, tie: { finalizedAt, afterKey: judged[judged.length - 1]!.iri } }, caughtUp: false }, anomaly: false, queries: 1 };
   }
   const { rows, clean } = parseScanRows(expectBindings(await ctx.store.query(buildLiftRetentionScanQuery(ctx.graphUri, cutoff, limit, cursor), SCAN_OPTIONS)));
   const afterOk = (t: number) => cursor.after === undefined || t > cursor.after;
   const ordered = clean && rows.length <= limit + 1 && rows.every((r, i) => afterOk(r.finalizedAt) && r.finalizedAt <= cutoff && (i === 0 || rows[i - 1]!.finalizedAt <= r.finalizedAt));
-  if (!ordered) return keepCursor([...rows].sort((a, b) => a.finalizedAt - b.finalizedAt).slice(0, limit));
+  if (!ordered) return keepCursor(distinctRows([...rows].sort((a, b) => a.finalizedAt - b.finalizedAt)).slice(0, limit));
   if (rows.length <= limit) {                                                          // the end of the old-enough region: everything left is judged now
-    return { plan: { judged: rows, next: rows.length ? { after: rows[rows.length - 1]!.finalizedAt } : cursor, caughtUp: true }, anomaly: false, queries: 1 };
+    return { plan: { judged: distinctRows(rows), next: rows.length ? { after: rows[rows.length - 1]!.finalizedAt } : cursor, caughtUp: true }, anomaly: false, queries: 1 };
   }
   // limit + 1 rows came back: the last one may belong to a group that continues beyond the result, so judge only what is strictly older than it
   const last = rows[limit]!.finalizedAt;
   const older = rows.filter(r => r.finalizedAt < last);
-  if (older.length > 0) return { plan: { judged: older, next: { after: older[older.length - 1]!.finalizedAt }, caughtUp: false }, anomaly: false, queries: 1 };
+  if (older.length > 0) return { plan: { judged: distinctRows(older), next: { after: older[older.length - 1]!.finalizedAt }, caughtUp: false }, anomaly: false, queries: 1 };
   const walk = await planFinalizedScan(ctx, cutoff, limit, { ...cursor, tie: { finalizedAt: last } });   // one group larger than a batch: walk it by key, starting now
   return { ...walk, queries: walk.queries + 1 };
 }
