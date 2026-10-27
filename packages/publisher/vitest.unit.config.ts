@@ -97,6 +97,11 @@ export default defineConfig({
       'test/async-lift-queue-boundary-oracle.test.ts',
       'test/async-lift-queue-graph-coverage.test.ts',
       'test/async-lift-queue-lane-trace.test.ts',
+      // OT-RFC-73 P9a: the publisher job page (cursor codec, keyset walks, scope and COUNT equivalence, interleaved mutation).
+      'test/lift-job-page-cursor.test.ts',
+      'test/async-lift-list-page.test.ts',
+      'test/async-lift-list-page-equivalence.test.ts',
+      'test/async-lift-list-page-mutation.test.ts',
       'test/async-queue-depth.test.ts',
       'test/async-queue-usage-hooks.test.ts',
       'test/async-lift-terminal-clear.test.ts',

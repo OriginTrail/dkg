@@ -218,10 +218,19 @@ export const PUBLISHER_TAGGING_ROWS: readonly TaggingRow[] = [
   },
   {
     id: 'unlocked-full-history',
-    row: 'Unlocked full-history reads: list(), getStats(), reconciliationInventory, boot backfill',
+    row: 'Unlocked full-history reads that stay complete: list(), reconciliationInventory, boot backfill',
     lane: 'normal',
     sources: ['list', 'reconciliationInventory', 'ensureVmPublishIntentIndex', 'writeVmPublishIntentIndex']
       .map((name) => `${LIFT}${name}`),
+  },
+  {
+    // P9a bounded the two reads a client can drive (the job listing page and the stats). They hold no lock, so the
+    // control path (two slots that a claim or an admission waits for) is not theirs, and a background lane would
+    // starve them exactly when an operator needs them. They keep the caller's lane, like the reads they replace.
+    id: 'bounded-page-reads',
+    row: 'Bounded page and COUNT reads (P9a): listPage(), getStats(). Decided: normal, the caller\'s lane',
+    lane: 'normal',
+    sources: ['listPage', 'stats'].map((name) => `${LIFT}${name}`),
   },
   {
     id: 'queue-usage',
@@ -314,6 +323,8 @@ export function auditPublisherCalls(calls: readonly RecordedStoreCall[], audit: 
 /** Labels this PR adds map to the base label of the same operation before families are compared (AC2). */
 export const LABEL_TO_BASE: Readonly<Record<string, string>> = Object.freeze({
   'publisher.asyncLift.retryList': 'publisher.asyncLift.list',
+  // getStats() was a list() until P9a made it a COUNT: one call before, one call after.
+  'publisher.asyncLift.stats': 'publisher.asyncLift.list',
 });
 
 /** A call's source label with the labels this PR adds mapped back to the base label of the same operation. */

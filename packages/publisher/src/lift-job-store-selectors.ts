@@ -48,14 +48,14 @@ export function lifecycleKeyOfJob(job: PersistedLiftJob): string | null {
  *
  * OT-RFC-73 S1: a read that runs under the global claim lock (the admission duplicate check, claim candidate
  * selection, and a bulk retry's list when its caller passes the control options) is tagged for the publisher's
- * control path. The unlocked full-history reads (`list()`, `reconciliationInventory`, the boot backfill) keep the
- * caller's lane until S3 bounds them.
+ * control path. The unlocked reads (`list()`, `reconciliationInventory`, the boot backfill, and the bounded page and
+ * COUNT reads of `LiftJobListingSelectors`) keep the caller's lane.
  */
 export class LiftJobStoreSelectors {
   constructor(
-    private readonly store: Pick<TripleStore, 'query'>,
-    private readonly graphUri: string,
-    private readonly project: (job: PersistedLiftJob) => PersistedLiftJob,
+    protected readonly store: Pick<TripleStore, 'query'>,
+    protected readonly graphUri: string,
+    protected readonly project: (job: PersistedLiftJob) => PersistedLiftJob,
     private readonly legacyScan = new LiftLegacyScanMemo(store, graphUri),
   ) {}
 
@@ -212,7 +212,7 @@ export class LiftJobStoreSelectors {
   }
 }
 
-function parseInventoryPayload(binding?: string): PersistedLiftJob | null {
+export function parseInventoryPayload(binding?: string): PersistedLiftJob | null {
   const decoded = decodeLiftJobPayload(binding);
   return decoded.kind === 'canonical' || decoded.kind === 'compatibility' ? decoded.job : null;
 }
