@@ -8,6 +8,11 @@
  * never a priority, and a tagged call resolves exactly like the same call without the tag. The resolved lane is the
  * routing-tested resolution of the recorded options and the ambient default (explicit ?? ambient ?? normal; the
  * production selector is exercised against the same calls below). Labels the PR adds map to their base label first.
+ *
+ * The family multiset cannot see a change that keeps every family's count (two sites of one family exchanging lanes
+ * or labels, a site moving while another moves the other way). So the same workload is also compared site by site:
+ * the multiset of (resolved lane, source label), against a second golden recorded by the same recorder on the same
+ * base SHA (`publisher-lane-trace-base-by-source.json`, which folds to the family golden exactly).
  */
 import { readFileSync } from 'node:fs';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -18,11 +23,21 @@ import {
   setStoreControlPathForTesting,
   type StoreWorkPriority,
 } from '@origintrail-official/dkg-storage';
-import { LABEL_TO_BASE, laneTrace, type RecordedStoreCall } from './_helpers/queue-boundary-oracle.js';
+import {
+  LABEL_TO_BASE,
+  familyOfSourceTrace,
+  laneTrace,
+  sourceTrace,
+  type RecordedStoreCall,
+} from './_helpers/queue-boundary-oracle.js';
 import { runPublisherWorkload, type PublisherStack } from './_helpers/publisher-queue-scenarios.js';
 
 const BASE = JSON.parse(readFileSync(new URL('./_helpers/publisher-lane-trace-base.json', import.meta.url), 'utf8')) as
   Record<string, Record<string, number> | string>;
+
+const BASE_BY_SOURCE = JSON.parse(
+  readFileSync(new URL('./_helpers/publisher-lane-trace-base-by-source.json', import.meta.url), 'utf8'),
+) as Record<string, Record<string, number> | string>;
 
 const STACKS: readonly PublisherStack[] = ['atomic', 'fallback'];
 const AMBIENTS: ReadonlyArray<StoreWorkPriority | undefined> = [undefined, 'background'];
@@ -37,6 +52,33 @@ describe('publisher queue lane trace with the control path off (AC2)', () => {
       expect(laneTrace(run.calls)).toEqual(BASE[`${stack}/${ambient ?? 'none'}`]);
     },
   );
+
+  it.each(STACKS.flatMap((stack) => AMBIENTS.map((ambient) => [stack, ambient] as const)))(
+    '%s stack, ambient %s: the same multiset of (lane, source label) as the base SHA, site by site',
+    async (stack, ambient) => {
+      const run = await runPublisherWorkload(stack, { ambient });
+      expect(sourceTrace(run.calls)).toEqual(BASE_BY_SOURCE[`${stack}/${ambient ?? 'none'}`]);
+    },
+  );
+
+  it('keeps the two goldens in step: the per-site golden folds to the family golden', () => {
+    const keys = Object.keys(BASE).filter((key) => !key.startsWith('_'));
+    expect(keys).toHaveLength(STACKS.length * AMBIENTS.length);
+    expect(Object.keys(BASE_BY_SOURCE).filter((key) => !key.startsWith('_'))).toEqual(keys);
+    for (const key of keys) {
+      expect(familyOfSourceTrace(BASE_BY_SOURCE[key] as Record<string, number>), key).toEqual(BASE[key]);
+    }
+  });
+
+  it('keeps the bulk retry\'s listing the one site whose label changed: base list = list + retryList', async () => {
+    for (const stack of STACKS) {
+      const run = await runPublisherWorkload(stack);
+      const own = (label: string) => run.calls.filter((call) => call.source === label).length;
+      const baseList = (BASE_BY_SOURCE[`${stack}/none`] as Record<string, number>)['normal publisher.asyncLift.list'];
+      expect(own('publisher.asyncLift.retryList'), stack).toBeGreaterThan(0);
+      expect(own('publisher.asyncLift.list') + own('publisher.asyncLift.retryList'), stack).toBe(baseList);
+    }
+  });
 
   it('maps the labels the PR adds to the base label of the same operation', () => {
     expect(LABEL_TO_BASE).toEqual({ 'publisher.asyncLift.retryList': 'publisher.asyncLift.list' });
@@ -62,6 +104,23 @@ describe('publisher queue lane trace with the control path off (AC2)', () => {
           .toBe(externalStorePriorityScheduler);
       }
     }
+  });
+
+  it('notices what the family multiset cannot: two sites of one family exchanging lanes (the per-site comparison can fail)', () => {
+    const at = (index: number, name: string, ambient: StoreWorkPriority | undefined): RecordedStoreCall => ({
+      index, method: 'query', graphs: ['job'], source: `publisher.asyncLift.${name}`,
+      options: { source: `publisher.asyncLift.${name}`, controlQueue: 'publisher' }, ambient, first: 'q',
+    });
+    // Site A runs on the normal lane and site B on the background lane; a change that swaps them keeps every
+    // (lane, family) count.
+    const before = [at(0, 'getStatus', undefined), at(1, 'lookupVmPublishIntent', 'background')];
+    const swapped = [at(0, 'getStatus', 'background'), at(1, 'lookupVmPublishIntent', undefined)];
+    expect(laneTrace(swapped)).toEqual(laneTrace(before));
+    expect(sourceTrace(swapped)).not.toEqual(sourceTrace(before));
+    // Two sites exchanging their labels keep every count by lane and by family as well.
+    const relabelled = [at(0, 'lookupVmPublishIntent', undefined), at(1, 'getStatus', 'background')];
+    expect(laneTrace(relabelled)).toEqual(laneTrace(before));
+    expect(sourceTrace(relabelled)).not.toEqual(sourceTrace(before));
   });
 
   it('would notice a tag that moves a call to a priority (the comparison can fail)', () => {
