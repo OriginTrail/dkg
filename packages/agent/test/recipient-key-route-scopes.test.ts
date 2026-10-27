@@ -91,7 +91,7 @@ describe('recipient dependencies stay scoped to the roster', () => {
     expect(fence.isCurrentFor(fence.revision, [A])).toBe(true);
   });
 
-  it('tracks an initially harmless removal even in a mixed write with another agent\'s key', async () => {
+  it.each(['changed', 'unchanged', 'indeterminate'] as const)('tracks overlapping writes until a mixed removal settles %s', async outcome => {
     const fence = await ready();
     const settle = fence.begin({
       quads: [{ ...quad(B), graph: 'urn:other-keys' }],
@@ -100,8 +100,14 @@ describe('recipient dependencies stay scoped to the roster', () => {
     expect(fence.isCurrentFor(fence.revision, [A])).toBe(true);
     fence.noteQuads([quad(A)]);
     expect(fence.isCurrentFor(fence.revision, [A])).toBe(false);
-    settle('unchanged');
+    const settleOther = fence.begin({ quads: [quad(B)] });
+    settle(outcome);
+    settle(outcome);
+    expect(fence.hasPendingWrites).toBe(true);
+    expect(fence.cacheable).toBe(false);
+    settleOther('unchanged');
     expect(fence.hasPendingWrites).toBe(false);
+    expect(fence.cacheable).toBe(outcome !== 'indeterminate');
     expect(fence.isCurrentFor(fence.revision, [A])).toBe(true);
   });
 

@@ -81,7 +81,6 @@ export class RecipientKeyRouteFence {
   private staleGeneration = 0;
   private scannedGeneration = -1;
   private pendingEverything = 0;
-  private pendingRecipientWrites = 0;
   private recipientWritesUnknown = false;
   private graphsUnknown = false;
   private readonly graphBoundRemovals = new Set<GraphBoundRemoval>();
@@ -97,20 +96,26 @@ export class RecipientKeyRouteFence {
 
   /** Memoized collects are usable only with settled, trustworthy dependencies. */
   get cacheable(): boolean {
-    return this.trusted && !this.recipientWritesUnknown && !this.hasPendingWrites;
+    return this.cacheableFor([]);
   }
 
-  get hasPendingWrites(): boolean { return this.pendingRecipientWrites > 0; }
+  get hasPendingWrites(): boolean {
+    return this.changes.hasPending([]) || this.hasPendingGraphRemoval;
+  }
+
+  private get hasPendingGraphRemoval(): boolean {
+    return [...this.graphBoundRemovals].some(removal => removal.counted);
+  }
 
   /** A private roster depends on its own agent/key subjects and every unclassified write. */
   isCurrentFor(revision: number, agents: readonly string[]): boolean {
-    return ![...this.graphBoundRemovals].some(removal => removal.counted)
+    return !this.hasPendingGraphRemoval
       && this.changes.current(revision, this.value, agents);
   }
 
   cacheableFor(agents: readonly string[]): boolean {
     return this.trusted && !this.recipientWritesUnknown
-      && ![...this.graphBoundRemovals].some(removal => removal.counted)
+      && !this.hasPendingGraphRemoval
       && !this.changes.hasPending(agents);
   }
 
@@ -160,7 +165,6 @@ export class RecipientKeyRouteFence {
     const relevant = unscoped
       || mutation.quads?.some(isKeyRouteFact) === true
       || mutation.removals?.some((removal) => this.removalMayChange(removal)) === true;
-    if (relevant) this.pendingRecipientWrites += 1;
     const settleScope = relevant ? this.changes.begin(unscoped ? null : this.scope(mutation)) : undefined;
     // A mixed mutation can name one agent's key and remove a currently empty
     // graph. The removal can acquire another agent's dependency while pending.
@@ -189,8 +193,6 @@ export class RecipientKeyRouteFence {
       } finally {
         settleScope?.();
         if (graphBound) this.graphBoundRemovals.delete(graphBound);
-        if (relevant) this.pendingRecipientWrites -= 1;
-        if (graphBound?.counted) this.pendingRecipientWrites -= 1;
         if (relevant || graphBound?.counted) {
           if (outcome === 'indeterminate') this.recipientWritesUnknown = true;
         } else if (graphBound && outcome === 'indeterminate') {
@@ -235,7 +237,6 @@ export class RecipientKeyRouteFence {
     for (const removal of this.graphBoundRemovals) {
       if (removal.counted || !removal.graphs.includes(graph)) continue;
       removal.counted = true;
-      this.pendingRecipientWrites += 1;
     }
   }
 
