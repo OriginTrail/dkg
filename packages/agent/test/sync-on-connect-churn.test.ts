@@ -693,6 +693,26 @@ describe('sync-on-connect churn gates', () => {
     });
   });
 
+  it.each([0, 3].flatMap(meta => ['clean', 'incomplete', 'failed', 'metadata-only'].map(state => ({ meta, state }))))(
+    'accounts held completion with $meta META inserts ($state)', async ({ meta, state }) => {
+      const accounting: Array<{ fresh: boolean; progress?: boolean }> = [];
+      await runSyncOnConnect({ signal: ACTIVE_SYNC_LIFETIME, remotePeer: PEER_A,
+        syncingPeers: new InMemoryPeerSyncLease(), getPeerProtocols: async () => [PROTOCOL_SYNC],
+        peerCapabilities: new PeerCapabilityRegistry(), getSyncContextGraphs: () => ['held-cg'],
+        syncFromPeer: async () => emptyDetailedSync({ complete: state !== 'incomplete',
+          insertedTriples: meta, insertedMetaTriples: meta, insertedDataTriples: 0,
+          verifiedHeldAssets: state === 'metadata-only' ? 0 : 6, metaOnlyResponses: state === 'metadata-only' ? 1 : 0,
+          resumedPhases: 1, completedPhases: 2, failedPhases: state === 'failed' ? 1 : 0 }),
+        refreshMetaSyncedFlags: async () => {}, discoverContextGraphsFromStore: async () => 0,
+        logInfo: noopLog, onSyncAccounting: (_peer, result) => { accounting.push(result); },
+      });
+      if (state === 'clean' || state === 'failed') {
+        expect(accounting).toHaveLength(1);
+        expect(accounting[0]).toMatchObject({ fresh: state === 'clean', progress: state === 'clean' });
+      } else expect(accounting).toEqual([]);
+    },
+  );
+
   it('continues post-durable sync-on-connect fanout past backoff-worthy per-CG durable pressure', async () => {
     const refreshMetaSyncedFlags = recorder(async () => undefined);
     const discoverContextGraphsFromStore = recorder(async () => 0);

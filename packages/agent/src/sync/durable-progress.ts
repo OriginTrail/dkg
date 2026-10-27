@@ -40,6 +40,7 @@ export interface DurableProgressClassification {
   /** A completed generation was found already stored and current: readiness proof without inserts. */
   readonly hasVerifiedHeldAssets: boolean;
   readonly hasCleanVerifiedPrivateOnlyCompletion: boolean;
+  readonly hasCleanVerifiedHeldCompletion: boolean;
   readonly integrityRejected: boolean;
   readonly metadataOnly: boolean;
   readonly timedOut: boolean;
@@ -104,20 +105,29 @@ export function classifyDurableProgress(
     && !denied
     && !integrityRejected;
 
+  const completedWithoutFailure = progress != null
+    && options.complete !== false
+    && completedPhases > 0
+    && !hasBlockingFailure;
+  const hasCleanVerifiedHeldCompletion = hasVerifiedHeldAssets && completedWithoutFailure;
+  const unprovenHeldCompletion = hasVerifiedHeldAssets && !hasCleanVerifiedHeldCompletion;
+
   const metadataOnly = !hasCleanVerifiedPrivateOnlyCompletion
+    && !hasCleanVerifiedHeldCompletion
     && (progress?.insertedDataTriples ?? 0) === 0
     && (
       metaOnlyResponses > 0
       || (insertedMetaTriples > 0 && insertedTriples > 0)
     );
   const insertedDataTriples = progress?.insertedDataTriples
-    ?? (metadataOnly ? 0 : insertedTriples);
+    ?? (hasVerifiedHeldAssets ? Math.max(0, insertedTriples - insertedMetaTriples) : metadataOnly ? 0 : insertedTriples);
   const hasInsertedData = insertedDataTriples > 0;
 
   const madeReconnectProgress = !integrityRejected && (
     hasInsertedData
     || hasCleanVerifiedPrivateOnlyCompletion
-    || (!metadataOnly && (completedPhases > 0 || checkpointAdvances > 0))
+    || hasCleanVerifiedHeldCompletion
+    || (!unprovenHeldCompletion && !metadataOnly && (completedPhases > 0 || checkpointAdvances > 0))
   );
 
   // Explicit catch-up historically also treats a resumed completed phase as
@@ -128,10 +138,6 @@ export function classifyDurableProgress(
     || checkpointAdvances > 0
     || (completedPhases > 0 && resumedPhases > 0);
 
-  const completedWithoutFailure = progress != null
-    && options.complete !== false
-    && completedPhases > 0
-    && !hasBlockingFailure;
 
   return {
     insertedDataTriples,
@@ -139,6 +145,7 @@ export function classifyDurableProgress(
     hasMetadataEvidence,
     hasVerifiedPrivateOnlyResponse,
     hasCleanVerifiedPrivateOnlyCompletion,
+    hasCleanVerifiedHeldCompletion,
     hasVerifiedHeldAssets,
     integrityRejected,
     metadataOnly,
@@ -161,7 +168,8 @@ export function classifyDurableProgress(
       && !timedOut
       && !denied
       && !integrityRejected
-      && !metadataOnly,
+      && !metadataOnly
+      && !unprovenHeldCompletion,
   };
 }
 
