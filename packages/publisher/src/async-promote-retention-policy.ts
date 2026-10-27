@@ -9,7 +9,8 @@
  *
  * A job is NEVER deleted when (checked from the payload, under the queue mutation lock, immediately before the delete):
  *  - its payload is unreadable, malformed, ambiguous (several payload triples), or carries a state this build does not recognise;
- *  - a benign-class candidate's commit marker holds a flag that is not a boolean (a bad value is no evidence that promote never started);
+ *  - a benign-class candidate's commit marker holds a flag that is not a boolean, or lacks `promoteStarted` although it was written by format 2 or later (a bad
+ *    or missing value is no evidence that promote never started);
  *  - it has index triples but no payload, or its stored `state` triple is missing or differs from the payload's state;
  *  - it was written by a newer queue format than this build understands;
  *  - it is not terminal (`queued`, `running`, `failed_retrying`: a job that a worker holds, waits to retry or has not run);
@@ -22,7 +23,7 @@
  */
 import { hasUnfinishedBoundObligation } from './async-promote-ownership.js';
 import { isAutomaticallyRecoverablePostCommitFailure, requiresManualInspection } from './async-promote-recovery-policy.js';
-import { ASYNC_PROMOTE_QUEUE_FORMAT_VERSION, PROMOTE_COMMIT_MARKER_STEPS, PROMOTE_JOB_STATES, type PromoteJob } from './async-promote-queue-types.js';
+import { ASYNC_PROMOTE_QUEUE_FORMAT_VERSION, ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION, PROMOTE_COMMIT_MARKER_STEPS, PROMOTE_JOB_STATES, type PromoteJob } from './async-promote-queue-types.js';
 import { isPromotePostCommitAttemptError, type StructurallyValidPromoteJobPayload } from './async-promote-queue-utils.js';
 import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
 
@@ -83,14 +84,17 @@ export function emptyClassCounts(): Record<PromoteRetentionJobClass, number> {
 /**
  * The commit marker of a benign-class candidate is evidence the class rests on (`promoteStarted`, `swmInserted`), so every flag it holds must be a boolean. The
  * shared classifier checks four of the five and lets a bad `promoteStarted` through, and this gate does not lean on it for any of them. Absent is not bad: a job
- * that never ran has no marker, and the marker of a row written before format 2 has no `promoteStarted` (the parser accepts it, so does retention).
+ * that never ran has no marker. Only a row written before format 2 may have a marker without `promoteStarted` (the parser accepts it, so does retention); from
+ * format 2 on every writer stores all five flags, so a missing one there is a mangled key, not history, and says nothing about whether promote started.
  */
 function hasReadableCommitMarker(job: StructurallyValidPromoteJobPayload): boolean {
   const marker: unknown = job.commitMarker;
   if (marker === undefined) return true;
   if (typeof marker !== 'object' || marker === null) return false;
   const flags = marker as Record<string, unknown>;
-  return PROMOTE_COMMIT_MARKER_STEPS.every(step => (flags[step] === undefined ? step === 'promoteStarted' : typeof flags[step] === 'boolean'));
+  const version: unknown = job.formatVersion;
+  const legacy = version === undefined || (typeof version === 'number' && version < ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION);
+  return PROMOTE_COMMIT_MARKER_STEPS.every(step => (flags[step] === undefined ? step === 'promoteStarted' && legacy : typeof flags[step] === 'boolean'));
 }
 
 /** The benign failed classes of D-6: nothing else that failed is ever deletable. */

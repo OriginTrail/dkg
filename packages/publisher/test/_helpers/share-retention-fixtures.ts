@@ -184,7 +184,8 @@ export const POPULATION_KINDS = [
   'succeeded', 'succeeded-future', 'succeeded-newer', 'succeeded-legacy',
   'queued', 'running', 'failed_retrying',
   'failed-plain', 'failed-ambiguity', 'failed-legacy', 'failed-postcommit', 'failed-postcommit-exhausted', 'failed-bound',
-  'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-retired',
+  'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-cancelled-legacy',
+  'failed-cancelled-no-started-flag', 'failed-retired',
 ] as const;
 export type PopulationKind = (typeof POPULATION_KINDS)[number];
 
@@ -208,12 +209,14 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
     case 'failed-cancelled-swm': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, swmInserted: true } }, age);
     case 'failed-cancelled-bound': return mk(id, 'failed', { reason: 'cancelled', bound: true }, age);
     case 'failed-cancelled-bad-marker': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, promoteStarted: 'true' } }, age);
+    case 'failed-cancelled-legacy': return mk(id, 'failed', { reason: 'cancelled', formatVersion: 1, commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);
+    case 'failed-cancelled-no-started-flag': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);   // format 4: not legacy
     case 'failed-retired': return retired(id, age);
   }
 }
 
 /** The jobs a correct sweep may delete once old enough, written from the D-6 list and nothing else (not from the product predicate). */
-export const DELETABLE_KINDS: ReadonlySet<PopulationKind> = new Set(['succeeded', 'succeeded-legacy', 'failed-cancelled', 'failed-retired']);
+export const DELETABLE_KINDS: ReadonlySet<PopulationKind> = new Set(['succeeded', 'succeeded-legacy', 'failed-cancelled', 'failed-cancelled-legacy', 'failed-retired']);
 
 /** Ages around both windows (and the future), tied and distinct, so every boundary and every tie of the scan is met. */
 export function populationAges(_r: () => number): number[] {

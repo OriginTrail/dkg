@@ -714,6 +714,79 @@ describe('a commit marker flag that is not a boolean is no evidence that promote
   });
 });
 
+describe('a missing promoteStarted is a legacy shape only before format 2 (second review of P10a)', () => {
+  /** The marker of a row written before format 2: every flag but `promoteStarted`. */
+  const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
+  const cancelled = (id: string, commitMarker: unknown, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', commitMarker, ...over });
+  /** A marker as the parser reads it from JSON: `__proto__` is an own key there, not the prototype. */
+  const fromJson = (json: string) => JSON.parse(json) as Record<string, unknown>;
+  const NO_PS = '"swmInserted":false,"wmCleaned":false,"lifecycleStamped":false,"gossiped":false';
+
+  // Every writer since format 2 writes all five flags (recordCommitMarker), and reclaim / recover drop the marker; a format 2-4 marker without promoteStarted is corruption.
+  const ABSENT: ReadonlyArray<[string, unknown]> = [
+    ['the legacy-shaped marker', LEGACY],
+    ['a mis-cased key (PromoteStarted: true)', { ...LEGACY, PromoteStarted: true }],
+    ['a key with a trailing space ("promoteStarted ": true)', fromJson(`{"promoteStarted ":true,${NO_PS}}`)],
+    ['a __proto__ key that carries the flag', fromJson(`{"__proto__":{"promoteStarted":true},${NO_PS}}`)],
+    ['a snake_case key (promote_started: true)', { ...LEGACY, promote_started: true }],
+  ];
+
+  it.each([2, 3, 4])('keeps a cancelled job of format %s whose marker has no promoteStarted, however old: the exemption is for rows written before format 2 (unreadable)', formatVersion => {
+    for (const [label, marker] of ABSENT) {
+      const job = cancelled(`abs-${formatVersion}`, marker, { formatVersion });
+      expect(decide(job), `${label}, through the classifier`).toEqual({ delete: false, reason: 'unreadable' });
+      expect(decide(job, policy, noPending, NOW + 1000 * W), label).toEqual({ delete: false, reason: 'unreadable' });
+    }
+  });
+
+  it('keeps a retired no-effect rejection (always format 4) whose marker has no promoteStarted', () => {
+    const { promoteStarted: _dropped, ...rest } = NO_MARKERS;
+    expect(decide({ ...retired('r-abs'), commitMarker: rest } as never)).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  it.each([['absent', undefined], ['0', 0], ['1', 1]])('still deletes a legacy cancelled job (format %s) with the pre-format-2 marker, and with no marker', (_label, formatVersion) => {
+    const over = formatVersion === undefined ? { formatVersion: undefined } : { formatVersion };
+    for (const marker of [LEGACY, NO_MARKERS, undefined]) {
+      expect(decide(cancelled('legacy', marker, over)), JSON.stringify(marker)).toEqual({ delete: true, jobClass: 'cancelled' });
+    }
+  });
+
+  it.each([['"1"', '1'], ['"legacy"', 'legacy'], ['null', null], ['{}', {}], ['[]', []], ['true', true]])('a formatVersion of %s is not a legacy format: the missing promoteStarted keeps the job (unreadable)', (_label, formatVersion) => {
+    expect(decide(cancelled('fv', LEGACY, { formatVersion }))).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  it('does not tighten the retired class: a certified no-effect rejection may have entered promote (promoteStarted: true) and is still deletable', () => {
+    expect(decide({ ...retired('r-started'), commitMarker: STARTED } as never)).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+  });
+
+  it('a delete sweep leaves every one of those jobs untouched and deletes the readable cancelled jobs; a report sweep counts exactly those', async () => {
+    const unreadable = [
+      ...ABSENT.flatMap(([, marker], i) => [2, 3, 4].map(formatVersion => cancelled(`abs-${i}-f${formatVersion}`, marker, { formatVersion }))),
+      { ...retired('abs-retired'), commitMarker: (({ promoteStarted: _p, ...rest }) => rest)(NO_MARKERS) } as PromoteJob,
+    ];
+    const readable = [cancelled('ok-none', undefined), cancelled('ok-clear', NO_MARKERS), cancelled('ok-legacy', LEGACY, { formatVersion: 1 }), cancelled('ok-legacy-0', LEGACY, { formatVersion: undefined })];
+    const seed = async () => { const s = new OxigraphStore(); await put(s, ...unreadable, ...readable); return s; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 5 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({
+      wouldDelete: { succeeded: 0, cancelled: readable.length, retired_no_effect: 0 }, kept: { unreadable: unreadable.length },
+    });
+    expect((await storedIds(reportStore)).size).toBe(unreadable.length + readable.length);
+
+    const store = await seed();
+    const before = new Map(await Promise.all(unreadable.map(async j => [j.jobId, await present(store, j.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 5 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual(unreadable.map(j => j.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: readable.length, retired_no_effect: 0 });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: readable.length }, kept: { unreadable: unreadable.length } });
+  });
+});
+
 describe('repeated rows of one subject in the scan (review of P10a: equal-comparing timestamp terms must not stall the pass)', () => {
   const XSD = 'http://www.w3.org/2001/XMLSchema#';
   const SCAN = 'publisher.asyncPromote.retention.scan';
