@@ -573,3 +573,16 @@ export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvi
 export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
 
 export { readShareQueueDepth, readLiftQueueDepth, readLiftJournalEntryCount, type AsyncQueueDepthOptions } from './async-queue-depth.js';
+export {
+  LIFT_JOB_PAGE_DEFAULT_LIMIT,
+  LIFT_JOB_PAGE_MAX_LIMIT,
+  LiftJobPageError,
+  decodeLiftJobPageCursor,
+  encodeLiftJobPageCursor,
+  liftJobPageLimit,
+  type LiftJobPage,
+  type LiftJobPageErrorCode,
+  type LiftJobPageKey,
+  type LiftJobPageRequest,
+  type VmPublishJobPager,
+} from './lift-job-page.js';

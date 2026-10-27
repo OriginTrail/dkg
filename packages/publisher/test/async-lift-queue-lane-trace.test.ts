@@ -39,7 +39,10 @@ describe('publisher queue lane trace with the control path off (AC2)', () => {
   );
 
   it('maps the labels the PR adds to the base label of the same operation', () => {
-    expect(LABEL_TO_BASE).toEqual({ 'publisher.asyncLift.retryList': 'publisher.asyncLift.list' });
+    expect(LABEL_TO_BASE).toEqual({
+      'publisher.asyncLift.retryList': 'publisher.asyncLift.list',
+      'publisher.asyncLift.stats': 'publisher.asyncLift.list',
+    });
   });
 
   it('adds nothing but the queue tag and the source to a control call: no priority, no other option', async () => {

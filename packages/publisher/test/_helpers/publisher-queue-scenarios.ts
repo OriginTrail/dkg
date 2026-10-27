@@ -181,6 +181,38 @@ export async function runPublisherWorkload(
 }
 
 /**
+ * OT-RFC-73 P9a: the bounded reads a client drives, on the same recorded store. Kept out of `runPublisherWorkload`
+ * because the AC2 lane trace compares that workload, call for call, with the base SHA, which has no page read.
+ *
+ * Three jobs are admitted (the control calls), then a walk of the listing in pages of two, a graph-scoped page, a
+ * status page and the stats COUNT. The page and stats calls must resolve to the caller's lane and carry no control tag.
+ */
+export async function runPublisherPagingScenario(
+  stack: PublisherStack,
+  options: { ambient?: StoreWorkPriority } = {},
+): Promise<WorkloadRun> {
+  const inner = new OxigraphStore();
+  try {
+    const { store, calls } = recordLiftStore(inner, stack === 'fallback' ? FALLBACK_HIDDEN : []);
+    const publisher = new TripleStoreAsyncLiftPublisher(store, { ...clockAndIds().config, journalWrites: true });
+    const scope = <T>(work: () => Promise<T>): Promise<T> =>
+      options.ambient === undefined ? work() : withDefaultStoreWorkPriority(options.ambient, work);
+    await scope(async () => {
+      for (const name of ['albums', 'songs', 'artists']) {
+        await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name }));
+      }
+      const first = await publisher.listPage({ limit: 2 });
+      await publisher.listPage({ limit: 2, cursor: first.nextCursor! });
+      await publisher.listPage({ contextGraphId: 'music-social', status: 'accepted' });
+      await publisher.getStats();
+    });
+    return { stack, calls, handlerObservations: [] };
+  } finally {
+    await inner.close();
+  }
+}
+
+/**
  * The publisher's wake path (AC1 check 1, the wake-path scenario): a real `AsyncLiftRunner` is started outside any
  * lane, then a job is admitted from a caller running in `enqueueAmbient`. The enqueue's journal settlement pokes the
  * runner (`notifyWorkAvailable`), the wallet loop wakes and runs `processNext`: claim, then `processClaim`, whose
