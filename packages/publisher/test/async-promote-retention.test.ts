@@ -713,7 +713,7 @@ describe('a commit marker flag that is not a boolean is no evidence that promote
 });
 
 describe('a missing promoteStarted is never accepted, a legacy row is no cancelled class, and a marker that says the job ran keeps it (second and fourth review of P10a)', () => {
-  /** The marker a row written before format 2 carries: every flag but `promoteStarted`. A claim by such a worker proves the job ran. */
+  /** The marker a row written before format 2 carries: every flag but `promoteStarted`. Only a claim writes it, so it proves the job was claimed and ran. */
   const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
   const cancelled = (id: string, commitMarker: unknown, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', commitMarker, ...over });
   /** A marker as the parser reads it from JSON: `__proto__` is an own key there, not the prototype. */
@@ -730,7 +730,7 @@ describe('a missing promoteStarted is never accepted, a legacy row is no cancell
     ['a snake_case key (promote_started: true)', { ...LEGACY, promote_started: true }],
   ];
 
-  it.each([2, 3, 4])('keeps a cancelled job of format %s whose marker has no promoteStarted, however old: the exemption is for rows written before format 2 (unreadable)', formatVersion => {
+  it.each([2, 3, 4])('keeps a cancelled job of format %s whose marker has no promoteStarted, however old: a missing flag is never accepted (unreadable)', formatVersion => {
     for (const [label, marker] of ABSENT) {
       const job = cancelled(`abs-${formatVersion}`, marker, { formatVersion });
       expect(decide(job), `${label}, through the classifier`).toEqual({ delete: false, reason: 'unreadable' });
@@ -746,11 +746,11 @@ describe('a missing promoteStarted is never accepted, a legacy row is no cancell
   // The legacy history is uncertain: a 4-flag marker was only ever written by claimNext, so it proves the job was claimed and ran, and a pre-v2 reclaim cleared the marker
   // of a running job and requeued it, so a later cancel leaves a row with no marker that may have started promote. The queue's own reclaim never infers the absence of
   // effects from a missing legacy marker (it sends every pre-v2 row to manual inspection), so retention does not read "never started" off it either.
+  const TIMED_OUT = { count: 3, maxRetries: 5, lastError: { classification: 'transient', retryable: true, message: 'promote timed out', recordedAt: 1 } };
   it('the reviewer reproduction: a cancelled job with the legacy marker (or none) and a retry history of three timed-out attempts is kept, not deleted as "never started promote"', () => {
-    const lastError = { classification: 'transient', retryable: true, message: 'promote timed out', recordedAt: 1 };
     for (const [label, over] of [['formatVersion absent', { formatVersion: undefined }], ['formatVersion 1', { formatVersion: 1 }]] as const) {
       for (const marker of [{ ...LEGACY }, undefined]) {
-        const job = cancelled('repro', marker, { ...over, attempt: { count: 3, maxRetries: 5, lastError } });
+        const job = cancelled('repro', marker, { ...over, attempt: TIMED_OUT });
         expect(decide(job), `${label}, ${marker ? 'marker' : 'no marker'}`).toEqual({ delete: false, reason: 'failed_retained' });
         expect(decide(job, policy, noPending, NOW + 1000 * W), `${label}, ${marker ? 'marker' : 'no marker'}, any age`).toEqual({ delete: false, reason: 'failed_retained' });
       }
@@ -798,6 +798,7 @@ describe('a missing promoteStarted is never accepted, a legacy row is no cancell
       cancelled('legacy-1', LEGACY, { formatVersion: 1 }), cancelled('legacy-0', LEGACY, { formatVersion: 0 }), cancelled('legacy-absent', LEGACY, { formatVersion: undefined }),
       cancelled('legacy-1-none', undefined, { formatVersion: 1 }), cancelled('legacy-absent-none', undefined, { formatVersion: undefined }),
       cancelled('legacy-absent-clear', NO_MARKERS, { formatVersion: undefined }),
+      cancelled('legacy-1-timed-out', LEGACY, { formatVersion: 1, attempt: TIMED_OUT }), cancelled('legacy-absent-timed-out', undefined, { formatVersion: undefined, attempt: TIMED_OUT }),   // the reviewer's payloads
     ];
     const readable = [cancelled('ok-none', undefined), cancelled('ok-clear', NO_MARKERS)];
     const protectedJobs = [...unreadable, ...contradictory, ...legacy];
