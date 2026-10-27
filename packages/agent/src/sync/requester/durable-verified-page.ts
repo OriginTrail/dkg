@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { AuthenticatedHeldMetadataDescriptor } from '../durable-integrity.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { recordDurableSyncDiagnostics, type DurableSyncAccumulator } from '../durable-progress.js';
@@ -45,14 +46,15 @@ export async function persistDurableHoldingsMetadata(
   context: Pick<DurableSyncContext, 'ctx' | 'signal' | 'processDurableBatchInWorker' | 'storeInsert' | 'admitVerifiedPage'>,
   contextGraphId: string,
   meta: SyncPageResult,
+  descriptors: readonly AuthenticatedHeldMetadataDescriptor[],
   accumulator: DurableSyncAccumulator,
   assertCurrent: () => void,
 ): Promise<void> {
   assertCurrent();
-  // No assertion payload was fetched. Its envelope is already held or belongs
-  // to a later exact request; only independently admissible META may be stored.
+  // The caller owns the content proof through this write and has confirmed
+  // these exact descriptors on chain. Missing assets grant no META authority.
   const processed = await verifyDurablePage(context, [], meta.quads, false,
-    { kind: 'changelogPage', changedDataGraphs: [] });
+    { kind: 'heldMetadata', descriptors });
   assertCurrent();
   if (processed.rejectedKcs > 0 || processed.dataRejectedMissingMeta > 0) {
     recordDurableSyncDiagnostics(accumulator, { rejectedKcs: processed.rejectedKcs,

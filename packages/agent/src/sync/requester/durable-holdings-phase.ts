@@ -57,7 +57,8 @@ export async function attemptDurableHoldingsPhase(input: {
       return { strategy: 'full', continuation: 'reconsider-holdings' };
     }
     assertCurrent(); context.signal?.throwIfAborted();
-    await persistDurableHoldingsMetadata(context, contextGraphId, meta, accumulator, assertCurrent);
+    await persistDurableHoldingsMetadata(context, contextGraphId, meta,
+      manifest.descriptors.filter(copy => proof.held.has(copy.ual)), accumulator, assertCurrent);
     assertCurrent();
     input.recordMetaPhase();
     context.logInfo(context.ctx, settleDurableDataFromHoldings({

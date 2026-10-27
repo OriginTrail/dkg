@@ -93,10 +93,14 @@ export interface DurableIntegrityLogEntry {
   message: string;
 }
 
+/** Evidence passed only while the caller owns a content proof and has confirmed these descriptors on chain. */
+export type AuthenticatedHeldMetadataDescriptor = Pick<GraphScopedDescriptor, 'ual' | 'metadataDigestHex'>;
+
 export type DurableIntegrityVerificationMode =
   | { kind: 'fullSnapshot' }
   | { kind: 'sinceBatchId'; sinceBatchId: bigint }
-  | { kind: 'changelogPage'; changedDataGraphs: ReadonlySet<string> };
+  | { kind: 'changelogPage'; changedDataGraphs: ReadonlySet<string> }
+  | { kind: 'heldMetadata'; descriptors: readonly AuthenticatedHeldMetadataDescriptor[] };
 
 export interface DurableIntegritySelection {
   dataIndexes: number[];
@@ -551,6 +555,7 @@ export function selectVerifiedDurableSyncQuads(
   acceptUnverified = false,
   mode: DurableIntegrityVerificationMode = { kind: 'fullSnapshot' },
 ): DurableIntegritySelection {
+  if (mode.kind === 'heldMetadata' && dataQuads.length > 0) throw new Error('Held metadata evidence cannot authenticate fetched DATA');
   const logs: DurableIntegrityLogEntry[] = [];
   if (metaQuads.length === 0) {
     if (!acceptUnverified && dataQuads.length > 0) {
@@ -838,6 +843,9 @@ function verifyGraphScopedCandidates(
   let fatalUnscopedFailure = parsed.fatalUnscopedFailure;
   const logs = [...parsed.logs];
 
+  const heldMetadata = mode.kind === 'heldMetadata'
+    ? new Map(mode.descriptors.map(copy => [copy.ual, copy.metadataDigestHex])) : undefined;
+
   for (const candidate of graphScopedCandidates) {
     const { ual, descriptor } = candidate;
     let scope: ReturnType<typeof classifyGraphScopedCandidateScope>;
@@ -856,6 +864,9 @@ function verifyGraphScopedCandidates(
     // only a scoped data payload. Out-of-scope descriptors are structurally
     // valid, yet their peer-supplied rows are not authenticated by this page.
     if (scope !== 'in-scope') {
+      // Only repeated lifecycle controls gain authority from a held proof.
+      // Do not re-admit the peer's descriptor or claim any DATA was fetched.
+      if (heldMetadata?.get(ual) === descriptor.metadataDigestHex) authenticatedMetadataUals.add(ual);
       // The shared metadata record includes descriptors for unchanged assets.
       // They are structurally valid but not authenticated by this page's
       // payload, so never select their peer-supplied rows for replacement.
@@ -1002,7 +1013,7 @@ function verifyLegacyCandidates(
 
   const partitioned = skolemizeByEntity(dataQuads as Quad[]);
   for (const kcUal of legacyKcUals) {
-    if (!metadata.merkleSubjects.has(kcUal)) continue;
+    if (!metadata.merkleSubjects.has(kcUal) || mode.kind === 'heldMetadata') continue;
     if (mode.kind === 'sinceBatchId') {
       try {
         if (!candidateIsNewerThan(metadata.metaBySubject.get(kcUal) ?? [], mode.sinceBatchId)) {
@@ -1114,6 +1125,7 @@ function classifyGraphScopedCandidateScope(
   mode: DurableIntegrityVerificationMode,
 ): 'in-scope' | 'out-of-scope' | 'tentative-without-batch' {
   if (mode.kind === 'fullSnapshot') return 'in-scope';
+  if (mode.kind === 'heldMetadata') return 'out-of-scope';
   if (mode.kind === 'changelogPage') {
     return mode.changedDataGraphs.has(assertionGraph) ? 'in-scope' : 'out-of-scope';
   }

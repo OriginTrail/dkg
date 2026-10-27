@@ -106,3 +106,23 @@ it('settles held VM recovery on the first run with finalized snapshot cleanup en
   expect(h.markPublished).toHaveBeenCalled();
   expect(h.internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).toBe(true);
 }, 15_000);
+
+it.each(['valid', 'wrong-graph', 'wrong-version', 'wrong-owner', 'wrong-scope', 'ambiguous-owner'])(
+  'admits only authenticated lifecycle pointers during held recovery: %s', async fault => {
+    const h = await createHeldProductionHarness();
+    const ns = 'http://dkg.io/ontology/', subject = 'urn:held:new-lifecycle', graph = h.meta[0]!.graph;
+    const row = (predicate: string, object: string) => ({ subject, predicate: ns + predicate, object, graph });
+    const integer = (n: number) => `"${n}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+    h.meta.push(row('kaUal', fault === 'wrong-owner' ? 'urn:unheld' : h.ual),
+      row('contentScopeVersion', integer(fault === 'wrong-scope' ? 1 : 2)),
+      row('assertionVersion', integer(fault === 'wrong-version' ? 2 : 1)),
+      row('assertionGraph', fault === 'wrong-graph' ? 'urn:forged-graph' : h.graph));
+    if (fault === 'ambiguous-owner') h.meta.push(row('reservedUal', 'urn:unheld'));
+    const recovered = await h.run();
+    expect(recovered.outcome).toBe('terminal');
+    expect(recovered.result.verifiedHeldAssets).toBe(1);
+    expect(h.dataRequests()).toBe(0);
+    const pointers = await h.internal.store.query(`SELECT ?pointer WHERE { GRAPH <${graph}> { <${subject}> <${ns}assertionGraph> ?pointer } }`);
+    expect(pointers.bindings).toEqual(fault === 'valid' ? [{ pointer: h.graph }] : []);
+  }, 15_000,
+);
