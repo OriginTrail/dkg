@@ -1,3 +1,4 @@
+import { readFinalizedTwinSwmHead } from './finalized-swm-twin-head.js';
 import {
   MemoryLayer,
   assertSafeIri,
@@ -208,12 +209,13 @@ export async function reconcileFinalizedSwmTwin(params: {
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
   const evidence = evidenceFromVmAsset(params.asset);
-  return reconcileFinalizedSwmTwinEvidence({
+  const outcome = await reconcileFinalizedSwmTwinEvidence({
     store: params.store,
     writeLocks: params.writeLocks,
     evidence,
     retire: params.retire,
   });
+  return outcome === 'inexact-head-without-data' ? 'already-retired-finalized' : outcome;
 }
 
 /**
@@ -234,12 +236,13 @@ export async function reconcileFinalizedSwmTwinFromDescriptor(params: {
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
   const evidence = evidenceFromSwmDescriptor(params.contextGraphId, params.descriptor);
-  return reconcileFinalizedSwmTwinEvidence({
+  const outcome = await reconcileFinalizedSwmTwinEvidence({
     store: params.store,
     writeLocks: params.writeLocks,
     evidence,
     retire: params.retire,
   });
+  return outcome === 'inexact-head-without-data' ? 'retired-head-residue' : outcome;
 }
 
 /**
@@ -256,12 +259,13 @@ export async function reconcileFinalizedSwmTwinFromCatalogProjection(params: {
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
   const evidence = evidenceFromCatalogProjection(params.evidence);
-  return reconcileFinalizedSwmTwinEvidence({
+  const outcome = await reconcileFinalizedSwmTwinEvidence({
     store: params.store,
     writeLocks: params.writeLocks,
     evidence,
     retire: params.retire,
   });
+  return outcome === 'inexact-head-without-data' ? 'already-retired-finalized' : outcome;
 }
 
 interface CommonFinalizedSwmTwinEvidence extends FinalizedSwmTwinRetirement {
@@ -303,7 +307,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
   readonly writeLocks: Map<string, Promise<void>>;
   readonly evidence: FinalizedSwmTwinEvidence;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
-}): Promise<FinalizedSwmTwinReconciliationOutcome> {
+}): Promise<Exclude<FinalizedSwmTwinReconciliationOutcome, 'retired-head-residue'> | 'inexact-head-without-data'> {
   const { evidence } = params;
   const lockKey = swmKaWriteLockKey(
     evidence.contextGraphId,
@@ -316,12 +320,12 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
     // under the shared SWM write lock before rereading the complete VM payload;
     // a later SWM arrival runs its own symmetric reconciliation after commit.
     const vmArrivalHead = evidence.arrival === 'vm'
-      ? await readExactSwmHead(params.store, {
+      ? await readFinalizedTwinSwmHead(params.store, {
           metaGraph: evidence.swmMetaGraph,
           headSubject: evidence.headSubject,
         })
       : undefined;
-    if (vmArrivalHead === null) return 'head-missing-or-ambiguous';
+    if (vmArrivalHead && vmArrivalHead.kind !== 'exact') return 'head-missing-or-ambiguous';
 
     // A public-byte match alone is insufficient: VM graph names are stable
     // across assertion versions and a private-only update can preserve every
@@ -335,11 +339,11 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       return 'vm-metadata-mismatch';
     }
 
-    const head = vmArrivalHead ?? await readExactSwmHead(params.store, {
+    const head = vmArrivalHead ?? await readFinalizedTwinSwmHead(params.store, {
       metaGraph: evidence.swmMetaGraph,
       headSubject: evidence.headSubject,
     });
-    if (head === null) {
+    if (head.kind !== 'exact') {
       // Only the post-SWM-materialization call can interpret a missing head as
       // terminal. At that call site the descriptor and graph were just written
       // under the same KA lock; a missing head here means a concurrent VM-first
@@ -347,12 +351,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       // outer bulk metadata append prevents resurrection of a dangling head.
       const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
       if (swmQuads.length === 0) {
-        // The descriptor path tells an absent copy from rows of a head that is
-        // not exact: residue that a write of the snapshot repairs. Catalog
-        // receipts keep the outcome they had.
-        return evidence.arrival === 'swm' && await hasSwmHeadRows(params.store, evidence)
-          ? 'retired-head-residue'
-          : 'already-retired-finalized';
+        return head.kind === 'inexact' ? 'inexact-head-without-data' : 'already-retired-finalized';
       }
       if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';
       await retireAndInvalidate(params, evidence);
@@ -747,42 +746,4 @@ async function readExactGraph(store: TripleStore, graph: string): Promise<Quad[]
     throw new Error(`Unexpected exact-graph query result for ${graph}: ${result.type}`);
   }
   return result.quads.map((quad) => ({ ...quad, graph: '' }));
-}
-
-async function readExactSwmHead(
-  store: TripleStore,
-  input: Readonly<{ metaGraph: string; headSubject: string }>,
-): Promise<Readonly<{
-  version: bigint;
-  kaUal: string;
-  assertionGraph: string;
-  shareOperationId: string;
-}> | null> {
-  const result = await store.query(
-    `SELECT DISTINCT ?version ?kaUal ?assertionGraph ?shareOperationId WHERE { `
-    + `GRAPH <${assertSafeIri(input.metaGraph)}> { `
-    + `<${assertSafeIri(input.headSubject)}> <${DKG}assertionVersion> ?version ; `
-    + `<${DKG}kaUal> ?kaUal ; <${DKG}assertionGraph> ?assertionGraph ; `
-    + `<${DKG}shareOperationId> ?shareOperationId } }`,
-    { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.readHead' },
-  );
-  if (result.type !== 'bindings' || result.bindings.length !== 1) return null;
-  const row = result.bindings[0]!;
-  const version = parseInteger(row['version']);
-  const kaUal = row['kaUal'];
-  const assertionGraph = row['assertionGraph'];
-  const shareOperationId = literalValue(row['shareOperationId'])?.trim();
-  if (version === null || !kaUal || !assertionGraph || !shareOperationId) return null;
-  return { version, kaUal, assertionGraph, shareOperationId };
-}
-
-/** Whether any row of the SWM head is stored, exact or not. */
-async function hasSwmHeadRows(store: TripleStore, evidence: FinalizedSwmTwinEvidence): Promise<boolean> {
-  const result = await store.query(
-    `SELECT ?p WHERE { GRAPH <${assertSafeIri(evidence.swmMetaGraph)}> { `
-    + `<${assertSafeIri(evidence.headSubject)}> ?p ?o } } LIMIT 1`,
-    { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.headRows' },
-  );
-  // A result that is not bindings proves no absence.
-  return result.type !== 'bindings' || result.bindings.length > 0;
 }

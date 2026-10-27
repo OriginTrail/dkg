@@ -466,6 +466,31 @@ describe('a public graph that its subscribe job left unproven is caught up again
     };
   }
 
+  it.each(['prepare', 'commit'] as const)('keeps retries armed after two readiness %s failures despite clean stalled diagnostics', async phase => {
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const member = memberEdge();
+    const { runs } = stubRunner([stalledRound(12), stalledRound(12), cleanEmptyRound]);
+    if (phase === 'prepare') {
+      vi.spyOn(member.agent, 'prepareContextGraphReadinessWithPrivateEmptyVmV1')
+        .mockRejectedValueOnce(new Error('readiness prepare failed'))
+        .mockRejectedValueOnce(new Error('readiness prepare failed'));
+    } else {
+      vi.spyOn(member.store, 'setContextGraphReadinessProvenance')
+        .mockImplementationOnce(() => { throw new Error('readiness commit failed'); })
+        .mockImplementationOnce(() => { throw new Error('readiness commit failed'); });
+    }
+    const api = await startRoutes(member);
+    expect(await api.finished(await api.subscribe())).toMatchObject({ status: 'failed' });
+    fire(await waitUntil(() => armed()[0], 'first retry armed'));
+    await waitUntil(() => runs.length === 2 ? true : undefined, 'first retry');
+    expect(await api.finished(api.latestJobId()!)).toMatchObject({ status: 'failed' });
+    fire(await waitUntil(() => armed()[0], 'second retry remains armed'));
+    await waitUntil(() => runs.length === 3 ? true : undefined, 'second retry');
+    await api.finished(api.latestJobId()!);
+    expect(member.subscription()).toMatchObject({ synced: true });
+    expect(armed()).toEqual([]);
+  });
+
   it('ends the chain after two jobs in a row that stalled without writing anything new', async () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     const member = memberEdge();

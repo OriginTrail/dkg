@@ -155,7 +155,7 @@ function admitsRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
 function stalledWithoutProgress(job: CatchupJob): boolean {
   const result = job.result;
   const sharedMemory = result?.diagnostics?.sharedMemory;
-  if (sharedMemory === undefined || job.selectedLaneFoundInactive === true) return false;
+  if (job.status === 'failed' || sharedMemory === undefined || job.selectedLaneFoundInactive === true) return false;
   // A clean walk is what the shared failure policy (`classifyDurableProgress`)
   // calls one: no peer or phase failed, timed out or was denied, nothing was
   // rejected, and local admission deferred nothing. Its shared-memory counts

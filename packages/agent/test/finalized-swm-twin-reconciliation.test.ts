@@ -246,6 +246,29 @@ function catalogEvidenceFor(input: ReturnType<typeof fixture>) {
 }
 
 describe('durable VM / SWM tier reconciliation', () => {
+  for (const arrival of ['vm', 'swm', 'catalog'] as const) {
+    it.each(['absent', 'partial', 'ambiguous', 'exact', 'unexpected'] as const)(`${arrival} classifies %s head state with one read`, async state => {
+      const store = new OxigraphStore(), input = fixture();
+      await seedTwin(store, input); await store.dropGraph(input.swmGraph);
+      if (state === 'absent') await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      if (state === 'partial') await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject, predicate: `${DKG}shareOperationId` });
+      if (state === 'ambiguous') await store.insert([{ graph: input.swmMetaGraph, subject: input.headSubject,
+        predicate: `${DKG}assertionVersion`, object: '"999"' }]);
+      const original = store.query.bind(store);
+      const query = vi.spyOn(store, 'query').mockImplementation((sparql, options) =>
+        state === 'unexpected' && options?.source === 'agent.durableSync.finalizedSwmTwin.readHead'
+          ? Promise.resolve({ type: 'quads', quads: [] }) : original(sparql, options));
+      const retire = vi.fn(async () => {}), common = { store, retire, writeLocks: new Map<string, Promise<void>>() };
+      const outcome = arrival === 'vm' ? await reconcileFinalizedSwmTwin({ ...common, asset: input.asset })
+        : arrival === 'swm' ? await reconcileFinalizedSwmTwinFromDescriptor({ ...common, contextGraphId: CG, descriptor: descriptorFor(input) })
+        : await reconcileFinalizedSwmTwinFromCatalogProjection({ ...common, evidence: catalogEvidenceFor(input) });
+      expect(outcome).toBe(state === 'exact' ? 'retired' : arrival === 'vm' ? 'head-missing-or-ambiguous'
+        : arrival === 'swm' && state !== 'absent' ? 'retired-head-residue' : 'already-retired-finalized');
+      expect(retire).toHaveBeenCalledTimes(state === 'exact' ? 1 : 0);
+      expect(query.mock.calls.filter(([, options]) => options?.source === 'agent.durableSync.finalizedSwmTwin.readHead')).toHaveLength(1);
+    });
+  }
+
   it.each([undefined, 'code'])('does not reread finalized VM when no SWM head exists for subgraph %s', async (subGraphName) => {
     const store = new OxigraphStore();
     const input = fixture(subGraphName);
