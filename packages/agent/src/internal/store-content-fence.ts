@@ -74,7 +74,7 @@ export class StoreContentFence implements StoreMutationObserver {
         // Queue admission precedes backend dispatch. A queued write may execute
         // on a replacement, so only a replacement AFTER its settled outcome can
         // retire uncertainty. A supervised epoch remains available while recovery is in progress.
-        const generation = this.recoveryGeneration?.() ?? this.recoveryGeneration?.epoch?.();
+        const generation = this.recoveryGeneration?.()?.generation;
         this.uncertain.set(generation,
           combine(this.uncertain.get(generation) ?? { kind: 'graphs', graphs: new Map() }, pending));
       }
@@ -82,8 +82,9 @@ export class StoreContentFence implements StoreMutationObserver {
   }
 
   openScope(scope: StoreContentScope): { assertCurrent(): void; close(): void } | undefined {
-    const generation = this.recoveryGeneration?.();
-    if (this.recoveryGeneration && generation === undefined) return undefined;
+    const state = this.recoveryGeneration?.();
+    if (this.recoveryGeneration && !state?.ready) return undefined;
+    const generation = state?.generation;
     const effect = scopeEffect(scope);
     for (const [epoch, uncertain] of this.uncertain) {
       // Unbound epochs stay fail-closed. Active client operations can span a
@@ -96,7 +97,8 @@ export class StoreContentFence implements StoreMutationObserver {
     this.watches.add(watch);
     return {
       assertCurrent: () => {
-        if (!watch.valid || this.recoveryGeneration?.() !== generation) throw Object.assign(
+        const current = this.recoveryGeneration?.();
+        if (!watch.valid || (this.recoveryGeneration && (!current?.ready || current.generation !== generation))) throw Object.assign(
           new Error('Held assertion content changed during recovery'), { name: 'AbortError' });
       },
       close: () => { this.watches.delete(watch); },

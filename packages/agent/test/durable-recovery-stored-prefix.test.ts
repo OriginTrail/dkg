@@ -1,3 +1,4 @@
+import type { StoreRecoveryGenerationReader } from '@origintrail-official/dkg-storage';
 import { createDurableHeldStore, createStoredPrefixAcquirer } from '../src/durable-recovery-held-store.js';
 import { runAdmittedDurableGraph } from '../src/durable-recovery-graph.js';
 import type { DurableRecoveryHost } from '../src/durable-recovery-host.js';
@@ -163,7 +164,7 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: () => number | undefined; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
+  options: { signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: StoreRecoveryGenerationReader; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
 
@@ -509,7 +510,7 @@ it('continues the prefix between independently materialized replicas', async () 
 
 it.each(['overlapping', 'unknown'])('recovers bounded DATA after confirmed backend replacement (%s uncertain write)', async scope => {
   const fixtures = generation(); let epoch: number | undefined = 0;
-  const core = node(servingPeer(fixtures), { recoveryGeneration: () => epoch });
+  const core = node(servingPeer(fixtures), { recoveryGeneration: () => epoch === undefined ? undefined : { generation: epoch, ready: true } });
   if (scope === 'overlapping') {
     vi.spyOn(core.rawStore, 'dropGraph').mockRejectedValueOnce(new Error('lost response'));
     await expect(core.store.dropGraph(fixtures[0]!.graph)).rejects.toThrow('lost response');
@@ -574,7 +575,7 @@ it.each(['clean', 'deleted', 'corrupted', 'unavailable'])('resumes production ex
 
 it('reuses a bounded prefix after an uncertain write rejects during supervised recovery', async () => {
   const fixtures = generation(); let epoch = 0, recovering = false;
-  const read = Object.assign(() => recovering ? undefined : epoch, { epoch: () => epoch });
+  const read = () => ({ generation: epoch, ready: !recovering });
   const core = node(servingPeer(fixtures), { recoveryGeneration: read });
   vi.spyOn(core.rawStore, 'dropGraph').mockImplementationOnce(async () => {
     epoch = 1; recovering = true;

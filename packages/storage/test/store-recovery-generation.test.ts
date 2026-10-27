@@ -3,20 +3,18 @@ import { SparqlHttpStore, createManagedOxigraphSparqlStoreV1 } from '../src/adap
 import { asStoreRecoveryGenerationReader } from '../src/store-recovery-generation.js';
 
 const options = { queryEndpoint: 'http://127.0.0.1:9/query', updateEndpoint: 'http://127.0.0.1:9/update' };
-it('exposes only supervised generations, and withholds them until replacement is ready', async () => {
+it('exposes one supervised epoch/readiness snapshot without granting early proof admission', async () => {
   let state = { generation: 0, recovering: false, admissionsPaused: false };
   const store = createManagedOxigraphSparqlStoreV1(options, { getRecoveryState: () => state });
   try {
     const read = asStoreRecoveryGenerationReader({ innerStore: store })!;
-    expect(read()).toBe(0);
+    expect(read()).toEqual({ generation: 0, ready: true });
     state = { generation: 0, recovering: false, admissionsPaused: true };
-    expect(read()).toBeUndefined(); // Verification/signalling is not termination.
-    expect(read.epoch?.()).toBe(0);
+    expect(read()).toEqual({ generation: 0, ready: false }); // Signalling is not termination.
     state = { generation: 1, recovering: true, admissionsPaused: false };
-    expect(read()).toBeUndefined();
-    expect(read.epoch?.()).toBe(1);
+    expect(read()).toEqual({ generation: 1, ready: false });
     state = { generation: 1, recovering: false, admissionsPaused: false };
-    expect(read()).toBe(1);
+    expect(read()).toEqual({ generation: 1, ready: true });
   } finally { await store.close(); }
 });
 it('does not grant recovery authority to a generic endpoint or a forged object', async () => {

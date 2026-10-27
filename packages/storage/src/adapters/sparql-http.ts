@@ -288,8 +288,8 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
       ?? managedRecovery?.readState;
     if (managedRuntimeHooks?.getRecoveryState) registerStoreRecoveryGeneration(this, () => {
       const state = this.readRecoveryState();
-      return state && !state.recovering && !state.admissionsPaused ? state.generation : undefined;
-    }, () => this.readRecoveryState()?.generation);
+      return state ? { generation: state.generation, ready: !state.recovering && !state.admissionsPaused } : undefined;
+    });
     this.managedActivityLease = this.openManagedActivityLease(managedRuntimeHooks);
     this.workLifecycle = new AbortableStoreWorkLifecycle({
       onGenerationClosed: () => {

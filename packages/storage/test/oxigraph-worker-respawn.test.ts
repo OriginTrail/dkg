@@ -118,10 +118,11 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
 
       const before = internals(store).worker;
       const readRecovery = asStoreRecoveryGenerationReader(store)!;
-      const oldRecoveryGeneration = readRecovery()!;
+      const oldRecoveryGeneration = readRecovery()!.generation;
+      expect(readRecovery()?.ready).toBe(true);
       expect(oldRecoveryGeneration).toBeTypeOf('number');
       await killWorker(store);
-      expect(readRecovery()).toBeUndefined();
+      expect(readRecovery()?.ready).toBe(false);
       const replacing = revisions.getWriteRevision('urn:test:');
       expect(replacing.stable).toBe(false);
       expect(replacing.generation).toBeGreaterThan(beforeCrash.generation);
@@ -132,7 +133,8 @@ describe('OxigraphWorkerStore respawn after unexpected worker exit', () => {
       // Reads see the persisted data again — the exact op that used to fail
       // forever with "the store is closed".
       expect(await store.countQuads('urn:test:g')).toBe(10);
-      expect(readRecovery()).toBeGreaterThan(oldRecoveryGeneration);
+      expect(readRecovery()?.generation).toBeGreaterThan(oldRecoveryGeneration);
+      expect(readRecovery()?.ready).toBe(true);
       const recovered = revisions.getWriteRevision('urn:test:');
       expect(recovered.stable).toBe(true);
       expect(recovered.generation).toBeGreaterThan(replacing.generation);
