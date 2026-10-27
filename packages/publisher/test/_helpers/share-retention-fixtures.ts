@@ -49,6 +49,8 @@ export const retired = (id: string, age = 10 * W): PromoteJob => {
     request: { contextGraphId: 'cg', assertionName: `n-${id}`, entities: 'all', agentAddress: AG, recoveryBinding: b } }, age);
 };
 
+/** Three attempts that each timed out in promote, as the retry history of a legacy job that was claimed and ran. */
+const LEGACY_HISTORY = { count: 3, maxRetries: 5, lastError: { classification: 'transient', retryable: true, message: 'promote timed out', recordedAt: 1 } };
 export const POST_COMMIT_ERROR = { message: 'post-commit failure', retryable: false, classification: 'fatal', recordedAt: 1, diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE' };
 
 export const parse = (j: PromoteJob) => { const r = classifyJobPayload(literal(JSON.stringify(j))); if (r.kind !== 'job') throw new Error('bad fixture'); return r.job; };
@@ -229,7 +231,7 @@ export const POPULATION_KINDS = [
   'succeeded', 'succeeded-future', 'succeeded-newer', 'succeeded-legacy',
   'queued', 'running', 'failed_retrying',
   'failed-plain', 'failed-ambiguity', 'failed-legacy', 'failed-postcommit', 'failed-postcommit-exhausted', 'failed-bound',
-  'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-cancelled-legacy',
+  'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-cancelled-legacy', 'failed-cancelled-legacy-no-marker',
   'failed-cancelled-no-started-flag', 'failed-cancelled-contradictory', 'failed-retired',
 ] as const;
 export type PopulationKind = (typeof POPULATION_KINDS)[number];
@@ -254,7 +256,10 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
     case 'failed-cancelled-swm': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, swmInserted: true } }, age);
     case 'failed-cancelled-bound': return mk(id, 'failed', { reason: 'cancelled', bound: true }, age);
     case 'failed-cancelled-bad-marker': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, promoteStarted: 'true' } }, age);
-    case 'failed-cancelled-legacy': return mk(id, 'failed', { reason: 'cancelled', formatVersion: 1, commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);
+    // The history of a legacy cancelled row is uncertain, so it is a protected kind: a 4-flag marker was only ever written by claimNext (the job was claimed and ran), and a pre-v2
+    // reclaim cleared the marker of a running job and requeued it with its attempt count, so a later cancel leaves no marker on a job that may have started promote.
+    case 'failed-cancelled-legacy': return mk(id, 'failed', { reason: 'cancelled', formatVersion: 1, commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false }, attempt: LEGACY_HISTORY }, age);
+    case 'failed-cancelled-legacy-no-marker': return mk(id, 'failed', { reason: 'cancelled', formatVersion: undefined, attempt: LEGACY_HISTORY }, age);
     case 'failed-cancelled-no-started-flag': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);   // format 4: not legacy
     case 'failed-cancelled-contradictory': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, gossiped: true } }, age);
     case 'failed-retired': return retired(id, age);
@@ -262,7 +267,7 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
 }
 
 /** The jobs a correct sweep may delete once old enough, written from the D-6 list and nothing else (not from the product predicate). */
-export const DELETABLE_KINDS: ReadonlySet<PopulationKind> = new Set(['succeeded', 'succeeded-legacy', 'failed-cancelled', 'failed-cancelled-legacy', 'failed-retired']);
+export const DELETABLE_KINDS: ReadonlySet<PopulationKind> = new Set(['succeeded', 'succeeded-legacy', 'failed-cancelled', 'failed-retired']);
 
 /** Ages around both windows (and the future), tied and distinct, so every boundary and every tie of the scan is met. */
 export function populationAges(_r: () => number): number[] {

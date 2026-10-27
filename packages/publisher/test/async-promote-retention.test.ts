@@ -656,8 +656,6 @@ describe('keep rules the policy adds to the prototype', () => {
 describe('a commit marker flag that is not a boolean is no evidence that promote never started (review of P10a: malformed promoteStarted)', () => {
   const FLAGS = ['promoteStarted', 'swmInserted', 'wmCleaned', 'lifecycleStamped', 'gossiped'] as const;
   const BAD: ReadonlyArray<[string, unknown]> = [['"true"', 'true'], ['"false"', 'false'], ['""', ''], ['1', 1], ['0', 0], ['null', null], ['{}', {}], ['[]', []]];
-  /** The marker of a row written before format 2: every flag but `promoteStarted` (the parser accepts it, and so must retention). */
-  const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
   const cancelled = (id: string, commitMarker?: unknown, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', ...(commitMarker === undefined ? {} : { commitMarker }), ...over });
   // The shared classifier checks four of the five flags and lets a bad promoteStarted through, and the policy must not lean on it for the other four either:
   // the unit cases hand the policy the raw object, bypassing the classifier.
@@ -679,8 +677,8 @@ describe('a commit marker flag that is not a boolean is no evidence that promote
     expect(raw(cancelled('m', { promoteStarted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false }))).toEqual({ delete: false, reason: 'unreadable' });   // swmInserted absent: only promoteStarted may be
   });
 
-  it('still deletes the cancelled jobs it can read: no marker, a marker with every flag false, and the legacy marker without promoteStarted', () => {
-    for (const job of [cancelled('c-none'), cancelled('c-clear', NO_MARKERS), cancelled('c-legacy', LEGACY, { formatVersion: 1 })]) {
+  it('still deletes the cancelled jobs it can read: no marker, and a marker with every flag false', () => {
+    for (const job of [cancelled('c-none'), cancelled('c-clear', NO_MARKERS)]) {
       expect(decide(job), job.jobId).toEqual({ delete: true, jobClass: 'cancelled' });
     }
     expect(decide(retired('r-ok'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
@@ -692,13 +690,13 @@ describe('a commit marker flag that is not a boolean is no evidence that promote
       ...BAD.map(([label, value]) => [`ps-${label}`, { ...NO_MARKERS, promoteStarted: value }] as const),
       ...FLAGS.slice(1).map(flag => [`${flag}-str`, { ...NO_MARKERS, [flag]: 'true' }] as const),
     ].map(([label, marker], i) => cancelled(`mal-${i}-${label.replace(/[^a-z0-9]/gi, '_')}`, marker));
-    const readable = [cancelled('ok-none'), cancelled('ok-clear', NO_MARKERS), cancelled('ok-legacy', LEGACY, { formatVersion: 1 })];
+    const readable = [cancelled('ok-none'), cancelled('ok-clear', NO_MARKERS)];
     const seed = async () => { const s = new OxigraphStore(); await put(s, ...malformed, ...readable); return s; };
 
     const reportStore = await seed();
     const report = newRetention(reportStore, { mode: 'report', batchSize: 5 });
     await drain(report);
-    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: 3, retired_no_effect: 0 }, kept: { unreadable: malformed.length } });
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: readable.length, retired_no_effect: 0 }, kept: { unreadable: malformed.length } });
     expect((await storedIds(reportStore)).size).toBe(malformed.length + readable.length);
 
     const store = await seed();
@@ -708,14 +706,14 @@ describe('a commit marker flag that is not a boolean is no evidence that promote
     expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
     expect([...(await storedIds(store))].sort()).toEqual(malformed.map(j => j.jobId).sort());
     for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
-    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: 3, retired_no_effect: 0 });
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: readable.length, retired_no_effect: 0 });
     expect(retention.counters().kept.unreadable).toBeGreaterThanOrEqual(malformed.length);
-    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: 3 }, kept: { unreadable: malformed.length } });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: readable.length }, kept: { unreadable: malformed.length } });
   });
 });
 
-describe('a missing promoteStarted is a legacy shape only before format 2, and a marker that says the job ran keeps it (second review of P10a)', () => {
-  /** The marker of a row written before format 2: every flag but `promoteStarted`. */
+describe('a missing promoteStarted is never accepted, a legacy row is no cancelled class, and a marker that says the job ran keeps it (second and fourth review of P10a)', () => {
+  /** The marker a row written before format 2 carries: every flag but `promoteStarted`. A claim by such a worker proves the job ran. */
   const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
   const cancelled = (id: string, commitMarker: unknown, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', commitMarker, ...over });
   /** A marker as the parser reads it from JSON: `__proto__` is an own key there, not the prototype. */
@@ -723,6 +721,7 @@ describe('a missing promoteStarted is a legacy shape only before format 2, and a
   const NO_PS = '"swmInserted":false,"wmCleaned":false,"lifecycleStamped":false,"gossiped":false';
 
   // Every writer since format 2 writes all five flags (recordCommitMarker), and reclaim / recover drop the marker; a format 2-4 marker without promoteStarted is corruption.
+  // A marker without it at format 0, 1 or absent is the legacy shape: it is no corruption, and it is no evidence either (see the legacy tests below).
   const ABSENT: ReadonlyArray<[string, unknown]> = [
     ['the legacy-shaped marker', LEGACY],
     ['a mis-cased key (PromoteStarted: true)', { ...LEGACY, PromoteStarted: true }],
@@ -744,15 +743,29 @@ describe('a missing promoteStarted is a legacy shape only before format 2, and a
     expect(decide({ ...retired('r-abs'), commitMarker: rest } as never)).toEqual({ delete: false, reason: 'unreadable' });
   });
 
-  it.each([['absent', undefined], ['0', 0], ['1', 1]])('still deletes a legacy cancelled job (format %s) with the pre-format-2 marker, and with no marker', (_label, formatVersion) => {
-    const over = formatVersion === undefined ? { formatVersion: undefined } : { formatVersion };
-    for (const marker of [LEGACY, NO_MARKERS, undefined]) {
-      expect(decide(cancelled('legacy', marker, over)), JSON.stringify(marker)).toEqual({ delete: true, jobClass: 'cancelled' });
+  // The legacy history is uncertain: a 4-flag marker was only ever written by claimNext, so it proves the job was claimed and ran, and a pre-v2 reclaim cleared the marker
+  // of a running job and requeued it, so a later cancel leaves a row with no marker that may have started promote. The queue's own reclaim never infers the absence of
+  // effects from a missing legacy marker (it sends every pre-v2 row to manual inspection), so retention does not read "never started" off it either.
+  it('the reviewer reproduction: a cancelled job with the legacy marker (or none) and a retry history of three timed-out attempts is kept, not deleted as "never started promote"', () => {
+    const lastError = { classification: 'transient', retryable: true, message: 'promote timed out', recordedAt: 1 };
+    for (const [label, over] of [['formatVersion absent', { formatVersion: undefined }], ['formatVersion 1', { formatVersion: 1 }]] as const) {
+      for (const marker of [{ ...LEGACY }, undefined]) {
+        const job = cancelled('repro', marker, { ...over, attempt: { count: 3, maxRetries: 5, lastError } });
+        expect(decide(job), `${label}, ${marker ? 'marker' : 'no marker'}`).toEqual({ delete: false, reason: 'failed_retained' });
+        expect(decide(job, policy, noPending, NOW + 1000 * W), `${label}, ${marker ? 'marker' : 'no marker'}, any age`).toEqual({ delete: false, reason: 'failed_retained' });
+      }
     }
   });
 
-  it.each([['"1"', '1'], ['"legacy"', 'legacy'], ['null', null], ['{}', {}], ['[]', []], ['true', true]])('a formatVersion of %s is not a legacy format: the missing promoteStarted keeps the job (unreadable)', (_label, formatVersion) => {
-    expect(decide(cancelled('fv', LEGACY, { formatVersion }))).toEqual({ delete: false, reason: 'unreadable' });
+  it.each([['absent', undefined], ['0', 0], ['1', 1]])('keeps a legacy cancelled job (format %s) whatever its marker: none, the pre-format-2 marker, a complete one (failed_retained)', (_label, formatVersion) => {
+    const over = formatVersion === undefined ? { formatVersion: undefined } : { formatVersion };
+    for (const marker of [LEGACY, NO_MARKERS, undefined]) {
+      expect(decide(cancelled('legacy', marker, over)), JSON.stringify(marker)).toEqual({ delete: false, reason: 'failed_retained' });
+    }
+  });
+
+  it.each([['"1"', '1'], ['"legacy"', 'legacy'], ['null', null], ['{}', {}], ['[]', []], ['true', true]])('a formatVersion of %s is no format a writer produced: the cancelled job is kept, whatever its marker (failed_retained)', (_label, formatVersion) => {
+    for (const marker of [LEGACY, NO_MARKERS, undefined]) expect(decide(cancelled('fv', marker, { formatVersion })), JSON.stringify(marker)).toEqual({ delete: false, reason: 'failed_retained' });
   });
 
   // The marker of a cancelled job records the promote steps that ran: any flag set means it ran, whatever promoteStarted says.
@@ -781,15 +794,20 @@ describe('a missing promoteStarted is a legacy shape only before format 2, and a
       cancelled('con-gossiped', { ...NO_MARKERS, gossiped: true }), cancelled('con-wm', { ...NO_MARKERS, wmCleaned: true }),
       cancelled('con-life-legacy', { ...LEGACY, lifecycleStamped: true }, { formatVersion: 1 }),
     ];
-    const readable = [cancelled('ok-none', undefined), cancelled('ok-clear', NO_MARKERS), cancelled('ok-legacy', LEGACY, { formatVersion: 1 }), cancelled('ok-legacy-0', LEGACY, { formatVersion: undefined })];
-    const protectedJobs = [...unreadable, ...contradictory];
+    const legacy = [
+      cancelled('legacy-1', LEGACY, { formatVersion: 1 }), cancelled('legacy-0', LEGACY, { formatVersion: 0 }), cancelled('legacy-absent', LEGACY, { formatVersion: undefined }),
+      cancelled('legacy-1-none', undefined, { formatVersion: 1 }), cancelled('legacy-absent-none', undefined, { formatVersion: undefined }),
+      cancelled('legacy-absent-clear', NO_MARKERS, { formatVersion: undefined }),
+    ];
+    const readable = [cancelled('ok-none', undefined), cancelled('ok-clear', NO_MARKERS)];
+    const protectedJobs = [...unreadable, ...contradictory, ...legacy];
     const seed = async () => { const s = new OxigraphStore(); await put(s, ...protectedJobs, ...readable); return s; };
 
     const reportStore = await seed();
     const report = newRetention(reportStore, { mode: 'report', batchSize: 5 });
     await drain(report);
     expect(report.counters().lastCompletePass).toMatchObject({
-      wouldDelete: { succeeded: 0, cancelled: readable.length, retired_no_effect: 0 }, kept: { unreadable: unreadable.length, failed_retained: contradictory.length },
+      wouldDelete: { succeeded: 0, cancelled: readable.length, retired_no_effect: 0 }, kept: { unreadable: unreadable.length, failed_retained: contradictory.length + legacy.length },
     });
     expect((await storedIds(reportStore)).size).toBe(protectedJobs.length + readable.length);
 
@@ -801,64 +819,76 @@ describe('a missing promoteStarted is a legacy shape only before format 2, and a
     expect([...(await storedIds(store))].sort()).toEqual(protectedJobs.map(j => j.jobId).sort());
     for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
     expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: readable.length, retired_no_effect: 0 });
-    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: readable.length }, kept: { unreadable: unreadable.length, failed_retained: contradictory.length } });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: readable.length }, kept: { unreadable: unreadable.length, failed_retained: contradictory.length + legacy.length } });
   });
 });
 
-describe('the legacy carve-out is exactly formatVersion absent, 0 or 1 (third review of P10a: a number below 2 is not a legacy format)', () => {
-  /** The marker of a row written before format 2: every flag but `promoteStarted`. */
+describe('the cancelled class needs a format that stores the whole commit marker: an integer from 2 up to this build\'s (third and fourth review of P10a: no legacy row is "never started")', () => {
+  /** The marker a row written before format 2 carries: every flag but `promoteStarted`. */
   const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
   const cancelled = (id: string, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', commitMarker: LEGACY, ...over });
+  const MARKERS: ReadonlyArray<[string, unknown]> = [['the pre-format-2 marker', LEGACY], ['a complete marker', NO_MARKERS], ['no marker', undefined]];
   // JSON numbers as the parser reads them from the stored payload text. `JSON.stringify` writes -0 as 0 and -Infinity as null, so the text is built by hand.
-  const NOT_LEGACY: ReadonlyArray<[string, string, number]> = [
-    ['-1', '-1', -1], ['1.5', '1.5', 1.5], ['-0', '-0', -0], ['1e-300', '1e-300', 1e-300], ['-Infinity (the text -1e999)', '-1e999', Number.NEGATIVE_INFINITY],
+  // 0 and 1 are the legacy formats; the others are numbers no writer produced (the parser does not validate `formatVersion`, so the policy does).
+  const NOT_WRITER_FORMAT: ReadonlyArray<[string, string, number]> = [
+    ['0', '0', 0], ['1', '1', 1], ['-1', '-1', -1], ['1.5', '1.5', 1.5], ['-0', '-0', -0], ['1e-300', '1e-300', 1e-300], ['-Infinity (the text -1e999)', '-1e999', Number.NEGATIVE_INFINITY],
+    ['1.999999999999999', '1.999999999999999', 1.999999999999999], ['3.5', '3.5', 3.5],
   ];
 
-  it.each(NOT_LEGACY)('keeps a cancelled job whose formatVersion is %s and whose marker has no promoteStarted, however old (unreadable)', (_label, text, value) => {
-    const payload = payloadWithFormatVersion(cancelled('odd'), text);
-    expect(Object.is(parseText(payload).formatVersion, value), 'the parser reads the number the case names').toBe(true);
-    expect(decideText(payload)).toEqual({ delete: false, reason: 'unreadable' });
-    expect(decideText(payload, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason: 'unreadable' });
+  it.each(NOT_WRITER_FORMAT)('keeps a cancelled job whose formatVersion is %s, whatever its marker, however old (failed_retained)', (_label, text, value) => {
+    for (const [label, commitMarker] of MARKERS) {
+      const payload = payloadWithFormatVersion(cancelled('odd', { commitMarker }), text);
+      expect(Object.is(parseText(payload).formatVersion, value), 'the parser reads the number the case names').toBe(true);
+      expect(decideText(payload), label).toEqual({ delete: false, reason: 'failed_retained' });
+      expect(decideText(payload, policy, noPending, NOW + 1000 * W), `${label}, any age`).toEqual({ delete: false, reason: 'failed_retained' });
+    }
   });
 
-  it.each([['0', '0', 0], ['1', '1', 1]])('still deletes a cancelled job of format %s with the legacy marker (the integers below 2)', (_label, text, value) => {
-    const payload = payloadWithFormatVersion(cancelled('legacy'), text);
-    expect(Object.is(parseText(payload).formatVersion, value)).toBe(true);
-    expect(decideText(payload)).toEqual({ delete: true, jobClass: 'cancelled' });
+  it('keeps a cancelled job with no formatVersion at all, whatever its marker', () => {
+    for (const [label, commitMarker] of MARKERS) {
+      const payload = JSON.stringify(cancelled('absent', { commitMarker, formatVersion: undefined }));
+      expect(payload).not.toContain('formatVersion');
+      expect(parseText(payload).formatVersion).toBeUndefined();
+      expect(decideText(payload), label).toEqual({ delete: false, reason: 'failed_retained' });
+    }
   });
 
-  it('still deletes a cancelled job with no formatVersion at all and the legacy marker', () => {
-    const payload = JSON.stringify(cancelled('absent', { formatVersion: undefined }));
-    expect(payload).not.toContain('formatVersion');
-    expect(parseText(payload).formatVersion).toBeUndefined();
-    expect(decideText(payload)).toEqual({ delete: true, jobClass: 'cancelled' });
+  it.each([2, 3, 4])('still deletes a cancelled job of format %s with no marker and with a complete one: the formats that store the whole marker', formatVersion => {
+    for (const commitMarker of [undefined, NO_MARKERS]) {
+      const payload = payloadWithFormatVersion(cancelled('writer', { commitMarker }), String(formatVersion));
+      expect(Object.is(parseText(payload).formatVersion, formatVersion)).toBe(true);
+      expect(decideText(payload), JSON.stringify(commitMarker)).toEqual({ delete: true, jobClass: 'cancelled' });
+    }
   });
 
-  it('only the missing promoteStarted is affected: a complete marker is read the same at any formatVersion', () => {
-    for (const [, text] of NOT_LEGACY) expect(decideText(payloadWithFormatVersion(cancelled('full', { commitMarker: NO_MARKERS }), text)), text).toEqual({ delete: true, jobClass: 'cancelled' });
+  it('the format is a condition of the cancelled class only: a succeeded job and a certified retired rejection do not depend on it', () => {
+    for (const formatVersion of [undefined, 0, 1, 2, 3, 4]) expect(decide(mk('s', 'succeeded', { formatVersion })), String(formatVersion)).toEqual({ delete: true, jobClass: 'succeeded' });
+    expect(decide(retired('r'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
   });
 
-  it('a delete sweep over the real store leaves every one of those jobs untouched and deletes the legacy ones; a report sweep counts exactly those', async () => {
+  it('a delete sweep over the real store leaves every one of those jobs untouched and deletes the ones of a writer format; a report sweep counts exactly those', async () => {
     const stored = (job: PromoteJob, text?: string): Quads => serializeJobRecord(job, GRAPH).jobQuads.map(q => (q.predicate === PROMOTE_PAYLOAD && text !== undefined ? { ...q, object: literal(payloadWithFormatVersion(job, text)) } : q));
-    const odd = NOT_LEGACY.map(([, text], i) => ({ job: cancelled(`odd-${i}`), text }));
-    const legacy = [{ job: cancelled('fv-0'), text: '0' }, { job: cancelled('fv-1'), text: '1' }, { job: cancelled('fv-absent', { formatVersion: undefined }), text: undefined }];
-    const seed = async () => { const s = new OxigraphStore(); await insertQuads(s, [...odd, ...legacy].flatMap(({ job, text }) => stored(job, text))); return s; };
+    const odd = NOT_WRITER_FORMAT.flatMap(([, text], i) => MARKERS.map(([label, commitMarker]) => ({ job: cancelled(`odd-${i}-${label.replace(/\W+/g, '_')}`, { commitMarker }), text })));
+    const absent = MARKERS.map(([label, commitMarker]) => ({ job: cancelled(`absent-${label.replace(/\W+/g, '_')}`, { commitMarker, formatVersion: undefined }), text: undefined }));
+    const writer = [2, 3, 4].flatMap(n => [undefined, NO_MARKERS].map((commitMarker, i) => ({ job: cancelled(`writer-${n}-${i}`, { commitMarker }), text: String(n) })));
+    const kept = [...odd, ...absent];
+    const seed = async () => { const s = new OxigraphStore(); await insertQuads(s, [...kept, ...writer].flatMap(({ job, text }) => stored(job, text))); return s; };
 
     const reportStore = await seed();
     const report = newRetention(reportStore, { mode: 'report', batchSize: 3 });
     await drain(report);
-    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: legacy.length, retired_no_effect: 0 }, kept: { unreadable: odd.length } });
-    expect((await storedIds(reportStore)).size).toBe(odd.length + legacy.length);
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: writer.length, retired_no_effect: 0 }, kept: { failed_retained: kept.length, unreadable: 0 } });
+    expect((await storedIds(reportStore)).size).toBe(kept.length + writer.length);
 
     const store = await seed();
-    const before = new Map(await Promise.all(odd.map(async ({ job }) => [job.jobId, await present(store, job.jobId)] as const)));
+    const before = new Map(await Promise.all(kept.map(async ({ job }) => [job.jobId, await present(store, job.jobId)] as const)));
     const retention = newRetention(store, { batchSize: 3 });
     const results = await drain(retention);
     expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
-    expect([...(await storedIds(store))].sort()).toEqual(odd.map(({ job }) => job.jobId).sort());
+    expect([...(await storedIds(store))].sort()).toEqual(kept.map(({ job }) => job.jobId).sort());
     for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
-    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: legacy.length, retired_no_effect: 0 });
-    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: legacy.length }, kept: { unreadable: odd.length } });
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: writer.length, retired_no_effect: 0 });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: writer.length }, kept: { failed_retained: kept.length, unreadable: 0 } });
   });
 });
 

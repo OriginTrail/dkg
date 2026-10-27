@@ -9,9 +9,12 @@
  *
  * A job is NEVER deleted when (checked from the payload, under the queue mutation lock, immediately before the delete):
  *  - its payload is unreadable, malformed, ambiguous (several payload triples), or carries a state this build does not recognise;
- *  - a benign-class candidate's commit marker holds a flag that is not a boolean, or lacks `promoteStarted` although it was written by format 2 or later (a bad
- *    or missing value is no evidence that promote never started);
+ *  - a benign-class candidate's commit marker holds a flag that is not a boolean, or lacks one, `promoteStarted` included (a bad or missing value is no evidence
+ *    that promote never started);
  *  - a cancelled job's commit marker has ANY flag set (`wmCleaned`, `lifecycleStamped`, `gossiped` as well as `promoteStarted`, `swmInserted`): it ran, whatever `promoteStarted` says;
+ *  - a cancelled job's `formatVersion` is not an integer from 2 (the first format whose workers record the whole marker before they enter promote) up to this build's:
+ *    a row from before (absent, 0 or 1) may have started promote, so its history is uncertain, and retention does not infer the absence of effects from a missing
+ *    legacy marker any more than the queue's own reclaim does. Any other value is no format a writer produced either;
  *  - it has index triples but no payload, or its stored `state` triple is missing or differs from the payload's state;
  *  - it was written by a newer queue format than this build understands;
  *  - it is not terminal (`queued`, `running`, `failed_retrying`: a job that a worker holds, waits to retry or has not run);
@@ -82,35 +85,38 @@ export function emptyClassCounts(): Record<PromoteRetentionJobClass, number> {
   return { succeeded: 0, cancelled: 0, retired_no_effect: 0 };
 }
 
-/** Absent, or exactly an integer of 0 up to (not including) the first format that stores all five marker flags. `Object.is` keeps `-0` out: it is `=== 0`, but it is no value a writer produced. */
-function isPreMarkerFormat(version: unknown): boolean {
-  if (version === undefined) return true;
-  return typeof version === 'number' && Number.isInteger(version) && !Object.is(version, -0) && version >= 0 && version < ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION;
+/**
+ * A format whose workers record the whole commit marker (all five flags, `promoteStarted` included) before they enter promote: an integer from the first such format
+ * up (a format above this build's was kept as `newer_format` before this is asked). A row from before (`formatVersion` absent, 0 or 1) is no "never started" evidence:
+ * a pre-format-2 worker could enter promote without recording a marker, the only marker such a row can carry (four flags) is written when a worker claims the job,
+ * and a pre-format-2 reclaim cleared the marker of a running job and kept its attempt count, so a later cancel leaves no marker on a job that may have run. The queue's
+ * own reclaim sends every such row to manual inspection and never infers the absence of effects from a missing legacy marker. The parser does not validate
+ * `formatVersion`, so this gate does: -1, 1.5, -0, 1e-300 and -Infinity (the JSON text -1e999) are numbers no writer produced, and so are a string, `null` or an object.
+ */
+function isMarkerWriterFormat(version: unknown): boolean {
+  return typeof version === 'number' && Number.isInteger(version) && version >= ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION;
 }
 
 /**
- * The commit marker of a benign-class candidate is evidence the class rests on (`promoteStarted`, `swmInserted`), so every flag it holds must be a boolean. The
- * shared classifier checks four of the five and lets a bad `promoteStarted` through, and this gate does not lean on it for any of them. Absent is not bad: a job
- * that never ran has no marker. Only a row written before format 2 may have a marker without `promoteStarted` (the parser accepts it, so does retention); from
- * format 2 on every writer stores all five flags, so a missing one there is a mangled key, not history, and says nothing about whether promote started.
- * "Before format 2" is exact: `formatVersion` ABSENT, or exactly the integer 0 or 1. Anything else proves nothing about the row, and "any number below 2" is
- * too wide: -1, 1.5, -0, 1e-300 and -Infinity (the JSON text -1e999) are all below 2 and none is a format a writer produced; nor are a string, `null` or an
- * object. The parser does not validate `formatVersion`, so this gate does, and every other shape keeps the job.
+ * The commit marker of a benign-class candidate is evidence the class rests on (`promoteStarted`, `swmInserted`), so every one of the five flags it holds must be a
+ * boolean. The shared classifier checks four of the five and lets a bad `promoteStarted` through, and this gate does not lean on it for any of them. Absent is not bad
+ * as a whole: a job that never ran has no marker. A marker WITHOUT a flag is: every writer from format 2 on stores all five, so a missing one is a mangled key and says
+ * nothing about whether promote started. (The pre-format-2 shape, a marker without `promoteStarted`, is no readable evidence either: `isMarkerWriterFormat`.)
  */
 function hasReadableCommitMarker(job: StructurallyValidPromoteJobPayload): boolean {
   const marker: unknown = job.commitMarker;
   if (marker === undefined) return true;
   if (typeof marker !== 'object' || marker === null) return false;
   const flags = marker as Record<string, unknown>;
-  const legacy = isPreMarkerFormat(job.formatVersion);
-  return PROMOTE_COMMIT_MARKER_STEPS.every(step => (flags[step] === undefined ? step === 'promoteStarted' && legacy : typeof flags[step] === 'boolean'));
+  return PROMOTE_COMMIT_MARKER_STEPS.every(step => typeof flags[step] === 'boolean');
 }
 
 /** The benign failed classes of D-6: nothing else that failed is ever deletable. */
 function benignFailedClass(job: StructurallyValidPromoteJobPayload): Exclude<PromoteRetentionJobClass, 'succeeded'> | undefined {
   if (isRetiredBoundRejection(job)) return 'retired_no_effect';
-  // "Never started promote" is read off the whole marker: a flag for any later step (`wmCleaned`, `lifecycleStamped`, `gossiped`) also says the job ran
-  if (job.reason === 'cancelled' && job.request.recoveryBinding === undefined && !PROMOTE_COMMIT_MARKER_STEPS.some(step => job.commitMarker?.[step] === true)) return 'cancelled';
+  // "Never started promote" is read off the whole marker: a flag for any later step (`wmCleaned`, `lifecycleStamped`, `gossiped`) also says the job ran. It is read only
+  // from a format that records the marker before promote is entered: a legacy row's missing marker (or its marker without `promoteStarted`) proves nothing.
+  if (job.reason === 'cancelled' && isMarkerWriterFormat(job.formatVersion) && job.request.recoveryBinding === undefined && !PROMOTE_COMMIT_MARKER_STEPS.some(step => job.commitMarker?.[step] === true)) return 'cancelled';
   return undefined;
 }
 
