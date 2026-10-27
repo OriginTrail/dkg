@@ -62,6 +62,24 @@ describe('bounded snapshot recovery overlap', () => {
     expect(count).toBe(2);
   });
 
+  it('reports whole-job progress including held assets when one lane exhausts its suppliers', async () => {
+    const otherLaneComplete = deferred();
+    const assets = uals.slice(0, 21);
+    vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
+      const selection = selected(request);
+      if (selection.some(ual => assets.slice(10, 20).includes(ual))) {
+        await otherLaneComplete.promise;
+        return { ...success([]), disposition: 'clean-absent', streamOutcome: undefined };
+      }
+      if (selection.includes(assets[20]!)) otherLaneComplete.resolve();
+      return success(selection);
+    });
+    const holds = vi.fn(async (ual: string) => ual === assets[10]);
+    await expect(recoverPublicSnapshotParallelExact(host, { ...options(), uals: assets, holds }))
+      .rejects.toThrow('Snapshot recovery incomplete: 12/21 committed');
+    expect(holds).toHaveBeenCalledTimes(assets.length);
+  });
+
   it('does not start work after cancellation or the original deadline', async () => {
     const run = vi.spyOn(execution, 'runExactRecovery');
     const caller = new AbortController(); caller.abort(new Error('cancelled'));

@@ -2,6 +2,8 @@
 import { assertSafeIri, assertQuadLiteralsMutf8Safe, JAVA_WRITE_UTF_MAX_BYTES } from '@origintrail-official/dkg-core';
 import { assertReplacementPayload, assertSubjectReplacementPayload, formatGraphBlock } from './atomic-graph-replace.js';
 import type { Quad } from './triple-store.js';
+import { ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES } from './atomic-asset-limits.js';
+export { ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES } from './atomic-asset-limits.js';
 
 /** One atomic visibility boundary, independently bounded from a transport chunk. */
 export interface AtomicAssetReplacement {
@@ -11,8 +13,6 @@ export interface AtomicAssetReplacement {
   metadataSubject: string;
   metadataQuads: Quad[];
 }
-export const ATOMIC_ASSET_GROUP_MAX_ASSETS = 8;
-export const ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES = 32 * 1024 * 1024;
 
 /** Validate the entire group before any write; one backend transaction publishes all pairs. */
 export function validateAtomicAssetGroup(assets: readonly AtomicAssetReplacement[]): void {

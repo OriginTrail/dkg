@@ -5,7 +5,6 @@ import {
   buildAtomicSubjectReplaceUpdate,
 } from '../atomic-graph-replace.js';
 import { buildAtomicSubjectAndInsertUpdate } from '../atomic-subject-insert.js';
-import { tryBuildAtomicAssetGroupUpdate } from '../atomic-asset-group.js';
 import type { Quad } from '../triple-store.js';
 import { sparqlStatements } from './sparql-statements.js';
 
@@ -30,9 +29,18 @@ export function prepareAtomicGraphAndSubjectReplace(
   adapter: Adapter, graphUri: string, graphQuads: Quad[],
   metaGraphUri: string, metadataSubject: string, metadataQuads: Quad[],
 ) {
+  return prepareGraphAndSubjectReplace(adapter, graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, 'staged');
+}
+
+/** One preflight/reporting boundary, independent of the selected write strategy. */
+function prepareGraphAndSubjectReplace(
+  adapter: Adapter, graphUri: string, graphQuads: Quad[],
+  metaGraphUri: string, metadataSubject: string, metadataQuads: Quad[],
+  strategy: 'staged' | 'bounded-direct',
+) {
   validateLiterals(adapter, 'replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
   const plan = buildAtomicGraphAndSubjectReplaceUpdate(
-    graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
+    graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, strategy,
   );
   sparqlStatements(adapter).checkIris.replaceGraphAndSubject(
     graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
@@ -47,16 +55,8 @@ export function prepareBlazegraphGraphAndSubjectReplace(
   graphUri: string, graphQuads: Quad[], metaGraphUri: string,
   metadataSubject: string, metadataQuads: Quad[],
 ) {
-  validateLiterals('blazegraph', 'replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
-  sparqlStatements('blazegraph').checkIris.replaceGraphAndSubject(
-    graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
-  );
-  const direct = graphUri === metaGraphUri ? null : tryBuildAtomicAssetGroupUpdate([
-    { graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads },
-  ]);
-  return direct ? { update: direct.update, cleanup: '' }
-    : prepareAtomicGraphAndSubjectReplace('blazegraph', graphUri, graphQuads,
-      metaGraphUri, metadataSubject, metadataQuads);
+  return prepareGraphAndSubjectReplace('blazegraph', graphUri, graphQuads,
+    metaGraphUri, metadataSubject, metadataQuads, 'bounded-direct');
 }
 
 export function prepareAtomicSubjectReplace(

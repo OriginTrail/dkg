@@ -412,6 +412,8 @@ export async function activateRollingSubscriptionPromotion(
 
 /** Rolling promotion owns candidate ordering and generation fences. */
 export interface RollingSubscriptionPromotionPorts {
+  /** Publish only after committed activation, dormancy clearing and slot bookkeeping. */
+  activated(contextGraphId: string): void;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load' | 'loadAll'>;
   getStatus(): Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
   isCurrent(signal: AbortSignal): boolean;
@@ -599,6 +601,7 @@ export async function promoteDormantContextGraphSubscriptions(
       ) {
         ports.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
       }
+      ports.activated(contextGraphId);
       ports.log.info(
         ctx,
         `Promoted pending persisted context-graph subscription "${contextGraphId}"; ` +

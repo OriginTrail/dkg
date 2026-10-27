@@ -8939,9 +8939,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return committed;
       },
     }, options);
-    // Activation restores the persisted flags and starts no catch-up: the
-    // daemon decides whether this subscription still needs one.
-    this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: row.id });
+    // Deferred status owners publish after clearing dormancy and claiming slots.
+    if (options.updateRehydrationStatus !== false) this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: row.id });
     return activated;
   }
 
@@ -9045,6 +9044,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           subscribed: row?.subscribed ?? false,
           coreHosted: row?.coreHosted,
         });
+        this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId });
         this.log.info(
           ctx,
           `Activated persisted context-graph subscription "${contextGraphId}" after authority recovery`,
@@ -9079,6 +9079,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       log: this.log,
       updateContextGraphSubscriptionRehydrationStatusAfterClear: this.updateContextGraphSubscriptionRehydrationStatusAfterClear.bind(this),
       updateContextGraphSubscriptionRehydrationStatusAfterPersist: this.updateContextGraphSubscriptionRehydrationStatusAfterPersist.bind(this),
+      activated: (contextGraphId) => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId }),
       resolveAuthority: (binding, ownerSignal) => this.resolveContextGraphSubscriptionBootstrapAuthority(binding.contextGraphId, {
         allowSubscriptionFallback: false, signal: ownerSignal,
         durableSubscriptionBinding: binding,
