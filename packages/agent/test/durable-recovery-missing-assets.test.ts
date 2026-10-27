@@ -4,9 +4,7 @@ import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/che
 import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
 import {
   DurableRecoveryRunner,
-  exactMissingAssetRequest,
   type DurableRecoveryRunnerDependencies,
-  type ExactMissingAssetSource,
 } from '../src/sync/durable-recovery-runner.js';
 import type { MissingDurableAsset, DurableHoldingsOptions } from '../src/sync/requester/durable-data-holdings.js';
 
@@ -220,35 +218,5 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
     expect((await f.run()).outcome).toBe('terminal');
     expect(f.offered).toEqual([false]);
     expect(f.exactRequests).toEqual([]);
-  });
-});
-
-describe('the owner exact request', () => {
-  function source(answer: Awaited<ReturnType<ExactMissingAssetSource['syncExactKnowledgeAssetsFromPeerDetailed']>>) {
-    const calls: unknown[][] = [];
-    const stop = new AbortController();
-    const agent: ExactMissingAssetSource = {
-      node: { stopSignal: stop.signal },
-      syncExactKnowledgeAssetsFromPeerDetailed: async (...args) => {
-        calls.push(args);
-        return answer;
-      },
-    };
-    return { agent, calls, stop };
-  }
-
-  it('is complete when every requested asset was found and stored', async () => {
-    const found = source({ result: { ...createIncompleteDurableSyncResult(), complete: true }, disposition: 'found' });
-    const request = exactMissingAssetRequest(found.agent, GRAPH, 660_000);
-
-    expect(await request(PEER, ['ual-1', 'ual-2'])).toMatchObject({ complete: true, result: { complete: true } });
-    expect(found.calls).toEqual([[PEER, GRAPH, ['ual-1', 'ual-2'], { signal: found.stop.signal, totalTimeoutMs: 660_000 }]]);
-  });
-
-  it('is incomplete when the fetch missed an asset or did not store one', async () => {
-    const missed = source({ result: { ...createIncompleteDurableSyncResult(), complete: true }, disposition: 'incomplete' });
-    const unstored = source({ result: createIncompleteDurableSyncResult(), disposition: 'found' });
-    expect((await exactMissingAssetRequest(missed.agent, GRAPH, 1)(PEER, ['ual-1'])).complete).toBe(false);
-    expect((await exactMissingAssetRequest(unstored.agent, GRAPH, 1)(PEER, ['ual-1'])).complete).toBe(false);
   });
 });

@@ -1,3 +1,6 @@
+import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../src/sync/durable-recovery-runner.js';
+import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
+import { DURABLE_RECOVERY_HARD_TIMEOUT_MS } from '../src/durable-recovery-scheduling.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import * as recoveryGraph from '../src/durable-recovery-graph.js';
@@ -85,7 +88,7 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
   >();
   return {
     ...actual,
-    reconcileFinalizedSwmTwin: vi.fn(async () => 'head-missing-or-ambiguous' as const),
+    reconcileFinalizedSwmTwinFromCommitment: vi.fn(async () => 'head-missing-or-ambiguous' as const),
     reconcileFinalizedSwmTwinFromDescriptor: vi.fn(
       async () => 'head-missing-or-ambiguous' as const,
     ),
@@ -117,7 +120,7 @@ import {
 import { runSharedMemorySync } from '../src/sync/requester/shared-memory-sync.js';
 import { recoverContextGraphSwm } from '../src/sync/requester/swm-recovery.js';
 import {
-  reconcileFinalizedSwmTwin,
+  reconcileFinalizedSwmTwinFromCommitment,
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
@@ -136,7 +139,7 @@ const mockedRunDurableSyncDetailed = vi.mocked(runDurableSyncDetailed);
 const mockedMaterialize = vi.mocked(materializeVerifiedGraphScopedAsset);
 const mockedRunSharedMemorySync = vi.mocked(runSharedMemorySync);
 const mockedRecoverContextGraphSwm = vi.mocked(recoverContextGraphSwm);
-const mockedReconcileFinalizedSwmTwin = vi.mocked(reconcileFinalizedSwmTwin);
+const mockedReconcileFinalizedSwmTwin = vi.mocked(reconcileFinalizedSwmTwinFromCommitment);
 const mockedReconcileFinalizedSwmTwinFromDescriptor = vi.mocked(
   reconcileFinalizedSwmTwinFromDescriptor,
 );
@@ -166,8 +169,10 @@ function graphScopedAsset(
     assertionVersion,
     assertionGraph,
     metaGraph,
-    dataQuads: [],
+    dataQuads: [{ subject: 'urn:fixture', predicate: 'urn:value', object: '"content"', graph: assertionGraph }],
     metadataQuads: [
+      { subject: ual, predicate: `${DKG}publicTripleCount`, object: '"1"', graph: metaGraph },
+      { subject: ual, predicate: `${DKG}privateTripleCount`, object: '"0"', graph: metaGraph },
       {
         subject: ual,
         predicate: `${DKG}merkleRoot`,
@@ -2489,5 +2494,40 @@ describe('durable sync lifecycle chain binding', () => {
     ))).rejects.toBe(deterministicError);
     expect(siblingSignal?.aborted).toBe(true);
     expect(mockedMaterialize).not.toHaveBeenCalled();
+  });
+});
+
+describe('agent composition of the owner exact request', () => {
+  afterEach(() => vi.restoreAllMocks());
+  async function request(disposition: 'found' | 'incomplete', complete: boolean) {
+    let execute!: NonNullable<DurableRecoveryRunnerDependencies['executeExactSlice']>;
+    vi.spyOn(DurableRecoveryRunner.prototype, 'run').mockImplementation(async ({ dependencies }) => {
+      execute = dependencies.executeExactSlice!;
+      return { outcome: 'terminal', result: createIncompleteDurableSyncResult(), peerResults: [], slices: 0, safeOffset: 0 };
+    });
+    const node = { stopSignal: new AbortController().signal };
+    const exact = vi.fn(async () => ({ disposition, result: { ...createIncompleteDurableSyncResult(), complete } }));
+    const agentLike: any = { node, syncExactKnowledgeAssetsFromPeerDetailed: exact };
+    await LifecycleSyncMethods.prototype.syncDurableRecoveryContextGraph.call(agentLike, contextGraphId);
+    return { execute, exact, node };
+  }
+  it('forwards the current shutdown signal and timeout on each call', async () => {
+    const h = await request('found', true);
+    expect((await h.execute('peer', ['ual-1'])).complete).toBe(true);
+    expect(h.exact).toHaveBeenLastCalledWith('peer', contextGraphId, ['ual-1'],
+      { signal: h.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS });
+    h.node.stopSignal = new AbortController().signal;
+    await h.execute('peer', ['ual-2']);
+    expect(h.exact).toHaveBeenLastCalledWith('peer', contextGraphId, ['ual-2'],
+      { signal: h.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS });
+  });
+  it.each([['incomplete', true], ['found', false]] as const)('does not complete %s / stored=%s', async (disposition, complete) => {
+    const h = await request(disposition, complete);
+    expect((await h.execute('peer', ['ual-1'])).complete).toBe(false);
+  });
+  it('preserves a failed exact request', async () => {
+    const h = await request('found', true);
+    h.exact.mockRejectedValueOnce(new Error('transport failed'));
+    await expect(h.execute('peer', ['ual-1'])).rejects.toThrow('transport failed');
   });
 });

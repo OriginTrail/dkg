@@ -201,12 +201,9 @@ export async function reconcileFinalizedSwmTwin(params: {
   readonly asset: VerifiedGraphScopedAsset;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
-  const evidence = evidenceFromVmCommitment(commitmentFromVmAsset(params.asset));
-  return reconcileFinalizedSwmTwinEvidence({
-    store: params.store,
-    writeLocks: params.writeLocks,
-    evidence,
-    retire: params.retire,
+  return reconcileFinalizedSwmTwinFromCommitment({
+    store: params.store, writeLocks: params.writeLocks,
+    commitment: commitmentFromVmAsset(params.asset), retire: params.retire,
   });
 }
 

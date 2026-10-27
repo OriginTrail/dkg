@@ -187,7 +187,6 @@ import {
 } from './sync/checkpoint/state.js';
 import {
   DurableRecoveryRunner,
-  exactMissingAssetRequest,
   type DurableRecoveryExecution,
 } from './sync/durable-recovery-runner.js';
 export type {
@@ -6612,7 +6611,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               signal: this.node.stopSignal ?? undefined, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY, source: 'vm-recovery' },
           });
         },
-        executeExactSlice: exactMissingAssetRequest(this, contextGraphId, DURABLE_RECOVERY_HARD_TIMEOUT_MS),
+        executeExactSlice: async (peerId, assetUals) => {
+          const exact = await this.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
+            signal: this.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
+          });
+          return { result: exact.result, complete: exact.disposition === 'found' && exact.result.complete === true };
+        },
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),
         logWarn: (message) => this.log.warn(ctx, message),

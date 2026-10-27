@@ -25,7 +25,6 @@ import {
 } from './durable-recovery-coordinator.js';
 import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
-import type { ExactDurableFetchDisposition } from './requester/exact-durable-fetch.js';
 import { DurableGraphResumePolicy, type VerifiedDurableBoundary } from './durable-recovery-boundary-seed.js';
 import { DurableRecoveryFetchPolicy, type DurableRecoveryAction } from './durable-recovery-fetch-policy.js';
 
@@ -82,35 +81,6 @@ export interface DurableRecoveryRunnerDependencies {
   logDebug(message: string): void;
   logInfo(message: string): void;
   logWarn(message: string): void;
-}
-
-/** What the owner's exact requests need from the agent. */
-export interface ExactMissingAssetSource {
-  readonly node: { readonly stopSignal?: AbortSignal };
-  syncExactKnowledgeAssetsFromPeerDetailed(
-    remotePeerId: string,
-    contextGraphId: string,
-    assetUals: readonly string[],
-    options: { signal?: AbortSignal; totalTimeoutMs?: number },
-  ): Promise<{ readonly result: DurableSyncResult; readonly disposition: ExactDurableFetchDisposition }>;
-}
-
-/**
- * The owner's exact request for assets a held generation lacks. It is complete
- * when the fetch found every requested asset and stored it.
- */
-export function exactMissingAssetRequest(
-  source: ExactMissingAssetSource,
-  contextGraphId: string,
-  totalTimeoutMs: number,
-): NonNullable<DurableRecoveryRunnerDependencies['executeExactSlice']> {
-  return async (peerId, assetUals) => {
-    const exact = await source.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
-      signal: source.node.stopSignal,
-      totalTimeoutMs,
-    });
-    return { result: exact.result, complete: exact.disposition === 'found' && exact.result.complete === true };
-  };
 }
 
 type MutableDurableRecoveryPeerHealth = {
