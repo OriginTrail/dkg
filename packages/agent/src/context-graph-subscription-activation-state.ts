@@ -105,11 +105,11 @@ export class ContextGraphSubscriptionActivations {
     return attempt;
   }
   /** One retry owns installation, repair, network effects, rollback and commit. */
-  async activate(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts,
+  async activate<Transition extends Readonly<{ subscription: ContextGraphSub }>>(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts<Transition>,
     options: PersistedContextGraphSubscriptionActivationOptions = {}): Promise<ContextGraphSub> {
     const handle = this.observe(row), attempt = this.owned(handle);
     if (attempt.phase.kind !== 'queued') throw changed();
-    const previous = ports.current(row.id);
+    const previous = this.ports.subscribedContextGraphs.get(row.id);
     const restorePendingMeta = options.restorePendingMeta === true;
     const subscription = ports.install(row, { onChainId: options.onChainId, restorePendingMeta,
       updateRehydrationStatus: options.updateRehydrationStatus !== false });
@@ -118,6 +118,7 @@ export class ContextGraphSubscriptionActivations {
     let networkEffectsStarted = false;
     try {
       await options.prepare?.(subscription, record => this.repaired(handle, subscription, record));
+      this.assertInstalled(handle);
       if (options.isCurrent && !options.isCurrent(subscription)) {
         throw new Error(`Persisted subscription activation for "${row.id}" became stale`);
       }
@@ -127,12 +128,12 @@ export class ContextGraphSubscriptionActivations {
         if (row.subscribed) { ports.subscribe(row.id); ports.persistMembership(row.id); }
       }
       const plan = ports.prepareCommit(row.id);
-      return this.commit(handle, plan.subscription, plan.apply, options.claimRollingSlot === true);
+      return this.commit(handle, plan, ports.applyCommit, options.claimRollingSlot === true);
     } catch (error) {
       try {
         // Before network effects, preserve a concurrently replaced generation.
         // All network ports are synchronous, so later changes belong to this retry.
-        if (networkEffectsStarted || ports.current(row.id) === subscription) {
+        if (networkEffectsStarted || this.ports.subscribedContextGraphs.get(row.id) === subscription) {
           try { ports.rollbackNetworkEffects(row.id, options.rollbackSlotRelease ?? 'activation-rollback'); }
           finally {
             ports.remove(row.id);
@@ -146,6 +147,15 @@ export class ContextGraphSubscriptionActivations {
       throw error;
     }
   }
+  /** Mandatory generation fence after asynchronous preparation and before commit. */
+  private assertInstalled(handle: ActivationHandle): ActivationAttempt {
+    const attempt = this.owned(handle), phase = attempt.phase;
+    const live = this.ports.subscribedContextGraphs.get(handle.id);
+    if (!live || (!live.subscribed && !live.coreHosted) || phase.kind !== 'installing'
+      || !isContextGraphSubscriptionStoredAgain(phase.subscription, live)
+      || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live)) throw changed();
+    return attempt;
+  }
   /** Activation preparation explicitly reports its acknowledged durable repair. */
   private repaired(handle: ActivationHandle, subscription: ContextGraphSub, row: ContextGraphSubscriptionRecord): void {
     const attempt = this.owned(handle);
@@ -156,20 +166,15 @@ export class ContextGraphSubscriptionActivations {
     if (sameIntent(attempt.intent, row)) attempt.repaired = { ...row };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
-  private commit(handle: ActivationHandle, expected: ContextGraphSub, apply: () => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {
+  private commit<Transition extends Readonly<{ subscription: ContextGraphSub }>>(handle: ActivationHandle, transition: Transition, apply: (transition: Transition) => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {
     const ports = this.ports, id = handle.id;
-    const attempt = this.owned(handle), phase = attempt.phase;
-    const before = ports.subscribedContextGraphs.get(id);
     // Fence the old owner before the verified transition retires any wire custody.
-    if (!before || (!before.subscribed && !before.coreHosted)
-      || phase.kind !== 'installing'
-      || !isContextGraphSubscriptionStoredAgain(phase.subscription, before)
-      || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, before)) throw changed();
-    const live = apply();
+    const attempt = this.assertInstalled(handle);
+    const live = apply(transition);
     // The canonical setter may legitimately start a new line when it adopts
     // verified Core hosting. Validate against the authorized projection instead.
     if (this.pending.get(id) !== attempt || ports.subscribedContextGraphs.get(id) !== live
-      || !contextGraphSubscriptionAdmissionPremisesEqual(expected, live)) throw changed();
+      || !contextGraphSubscriptionAdmissionPremisesEqual(transition.subscription, live)) throw changed();
     const dormancy = applyDormancy(ports.contextGraphSubscriptionDormancyById, id, undefined);
     ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
     if (claimRollingSlot && !live.coreHosted && !rehydratedSubscriptionReachedSafeState(live))

@@ -81,7 +81,7 @@ export function releaseRollingSubscriptionSlot(
   return true;
 }
 
-export interface PersistedContextGraphSubscriptionActivationPorts {
+export interface PersistedContextGraphSubscriptionActivationPorts<Transition extends Readonly<{ subscription: ContextGraphSub }>> {
   install(
     row: ContextGraphSubscriptionRecord,
     input: Readonly<{
@@ -90,7 +90,6 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
       updateRehydrationStatus: boolean;
     }>,
   ): ContextGraphSub;
-  current(contextGraphId: string): ContextGraphSub | undefined;
   remove(contextGraphId: string): void;
   /** Restore the captured identity-only state after compensating activation. */
   restoreInactive?(contextGraphId: string, subscription: ContextGraphSub): void;
@@ -100,7 +99,8 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
   subscribe(contextGraphId: string): void;
   persistMembership(contextGraphId: string): void;
   /** Retire/adopt wire custody only after all speculative effects succeed. */
-  prepareCommit(contextGraphId: string): { subscription: ContextGraphSub; apply(): ContextGraphSub };
+  prepareCommit(contextGraphId: string): Transition;
+  applyCommit(transition: Transition): ContextGraphSub;
 }
 
 export interface PersistedContextGraphSubscriptionActivationOptions {

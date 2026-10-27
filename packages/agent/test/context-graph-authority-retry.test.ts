@@ -154,7 +154,6 @@ describe('Context Graph subscription authority retry', () => {
         subscriptions.set(contextGraphId, subscription);
         return subscription;
       },
-      current: (id: string) => subscriptions.get(id),
       remove: (id: string) => { subscriptions.delete(id); },
       rollbackNetworkEffects: (id: string) => {
         syncScope.delete(id);
@@ -171,7 +170,8 @@ describe('Context Graph subscription authority retry', () => {
         if (failSubscribe) throw new Error('gossip topic install failed');
       },
       persistMembership: () => undefined,
-      prepareCommit: (id: string) => ({ subscription: subscriptions.get(id), apply: () => subscriptions.get(id) }),
+      prepareCommit: (id: string) => ({ subscription: subscriptions.get(id) }),
+      applyCommit: (transition: { subscription: any }) => transition.subscription,
     };
 
     await expect(activations.activate(row, ports))

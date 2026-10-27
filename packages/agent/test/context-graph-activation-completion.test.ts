@@ -11,7 +11,9 @@ async function fixture() {
     syncReconcilerEnabled: false, vmReconcilerEnabled: false });
   const a = agent as any, id = 'commit-before-return';
   a.node = { peerId: '12D3KooWActivationCommit', libp2p: { getConnections: () => [], getPeers: () => [] } };
-  a.gossip = { subscribe() {}, unsubscribe() {}, onMessage() {}, async publish() {}, getSubscribers: () => [] };
+  const topics = new Set<string>();
+  a.gossip = { subscribe(topic: string) { topics.add(topic); }, unsubscribe(topic: string) { topics.delete(topic); },
+    onMessage() {}, async publish() {}, getSubscribers: () => [] };
   a.contextGraphSubscriptionDormancyById.set(id, 'activationCap');
   a.contextGraphSubscriptionRehydrationPendingIds.add(id);
   a.contextGraphSubscriptionRehydrationStatus = { persistedTotal: 1, activated: 0,
@@ -24,7 +26,7 @@ async function fixture() {
     owner: a.contextGraphSubscriptionActivations.get(id),
   }));
   const row = { id, subscribed: true, synced: false, metaSynced: false, syncScoped: false, onChainId: '7' };
-  return { a, id, row, events };
+  return { a, id, row, events, topics };
 }
 
 it.each([false, true])('returns a completed activation and publishes once with rolling slot policy %s', async claimRollingSlot => {
@@ -85,4 +87,22 @@ it('rejects an overlapping retry without replacing the installing owner', async 
     expect(events).toEqual([]);
   } finally { release(); }
   await first; expect(events).toHaveLength(1);
+});
+
+it('preserves a replacement subscription and gossip when preparation resumes without an optional fence', async () => {
+  const { a, id, row, events, topics } = await fixture();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const activation = a.activatePersistedContextGraphSubscriptionRecord(row, { prepare: () => gate });
+  const rejection = expect(activation).rejects.toThrow('ownership changed');
+  a.unsubscribeFromContextGraph(id, { persist: false });
+  a.subscribeToContextGraph(id, { persist: false, deferSharedMemoryGossipSubscribe: true });
+  const replacement = a.subscribedContextGraphs.get(id), replacementTopics = new Set(topics);
+  expect(replacement.subscribed).toBe(true); expect(topics.size).toBeGreaterThan(0);
+  const subscribe = vi.spyOn(a, 'subscribeToContextGraph'), unsubscribe = vi.spyOn(a, 'unsubscribeFromContextGraph');
+  release(); await rejection;
+  expect(a.subscribedContextGraphs.get(id)).toBe(replacement);
+  expect(topics).toEqual(replacementTopics);
+  expect(subscribe).not.toHaveBeenCalled(); expect(unsubscribe).not.toHaveBeenCalled();
+  expect(events).toEqual([]);
 });

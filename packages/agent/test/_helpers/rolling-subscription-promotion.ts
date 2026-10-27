@@ -84,10 +84,10 @@ export function createRollingPromotionFixture(
       const live = host.subscribedContextGraphs.get(row.id);
       if (live) {
         await activations.activate(row, {
-          install: () => live, current: id => host.subscribedContextGraphs.get(id),
+          install: () => live,
           remove: id => { host.subscribedContextGraphs.delete(id); },
           rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
-          prepareCommit: () => ({ subscription: live, apply: () => live }),
+          prepareCommit: () => ({ subscription: live }), applyCommit: transition => transition.subscription,
         }, { claimRollingSlot: activationOptions.claimRollingSlot });
       }
     }),

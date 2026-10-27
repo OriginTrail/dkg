@@ -187,12 +187,27 @@ describe('persisted activation commits admitted wire adoption after successful e
     const before = f.state.subscribedContextGraphs.get(LOCAL)!;
     const plan = f.agent.prepareContextGraphSubscriptionWrite(LOCAL, { ...before, subscribed: true }, { persist: false });
     f.agent.setContextGraphSubscription(LOCAL, { ...before, pendingMeta: true }, { persist: false, deferWireAdoption: true });
-    expect(() => plan.apply()).toThrow('Subscription transition changed before apply');
+    expect(() => f.agent.applyContextGraphSubscriptionWrite(plan)).toThrow('Subscription transition changed before apply');
     expect(f.state.subscribedContextGraphs.get(HASH)).toBe(f.originalWire);
     expect(f.state.subscribedContextGraphs.get(LOCAL)?.pendingMeta).toBe(true);
     expect(f.state.subscribedContextGraphs.get(LOCAL)?.subscribed).toBe(false);
     expect(f.remove).not.toHaveBeenCalled();
     await f.assertHostLive(); await f.drain();
+  });
+
+  it('applies a readonly no-op projection once without changing row identity or custody', async () => {
+    const f = await fixture('host');
+    const before = f.state.subscribedContextGraphs.get(LOCAL)!;
+    const options = { persist: false, deferWireAdoption: true };
+    const transition = f.agent.prepareContextGraphSubscriptionWrite(LOCAL, { ...before }, options);
+    expect(Object.isFrozen(transition)).toBe(true); expect(Object.isFrozen(transition.options)).toBe(true);
+    expect(transition.subscription).toBe(before);
+    options.persist = true;
+    expect(transition.options.persist).toBe(false);
+    expect(() => f.agent.applyContextGraphSubscriptionWrite({ ...transition })).toThrow('Subscription transition changed before apply');
+    expect(f.agent.applyContextGraphSubscriptionWrite(transition)).toBe(before);
+    expect(() => f.agent.applyContextGraphSubscriptionWrite(transition)).toThrow('Subscription transition changed before apply');
+    await f.drain(); f.unchanged(); await f.assertHostLive();
   });
 
   it('stops dispatch when the native host listener is unwired', async () => {

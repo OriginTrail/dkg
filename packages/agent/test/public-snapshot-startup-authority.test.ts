@@ -47,10 +47,10 @@ function coldIntent(a: any) {
 async function finish(a: any) {
   const owner = a.contextGraphSubscriptionActivations, row = a.subscribedContextGraphs.get(graph);
   if (row?.subscribed) await owner.activate(a.activationIntent, {
-    install: () => row, current: (id: string) => a.subscribedContextGraphs.get(id),
+    install: () => row,
     remove: (id: string) => { a.subscribedContextGraphs.delete(id); },
     rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
-    prepareCommit: () => ({ subscription: row, apply: () => row }),
+    prepareCommit: () => ({ subscription: row }), applyCommit: (transition: { subscription: typeof row }) => transition.subscription,
   });
   else { a.contextGraphSubscriptionDormancyById.delete(graph); owner.cancel(graph); }
 }
