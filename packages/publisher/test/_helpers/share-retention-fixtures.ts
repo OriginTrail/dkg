@@ -8,6 +8,7 @@ import { PROMOTE_NO_EFFECT_REJECTION_CODE } from '../../src/promote-no-effect-re
 import { PROMOTE_STATE, PROMOTE_UPDATED_AT, DEFAULT_PROMOTE_CONTROL_GRAPH_URI as GRAPH, PROMOTE_PAYLOAD, classifyJobPayload, jobSubject, literal, promoteLaneConflictScope, serializeJobRecord } from '../../src/async-promote-queue-utils.js';
 import { decidePromoteRetention, type PromoteRetentionPolicy } from '../../src/async-promote-retention-policy.js';
 import { createShareRetention, type ShareRetention, type ShareRetentionBatchResult, type ShareRetentionConfig, type ShareRetentionLogger } from '../../src/async-promote-retention.js';
+import { RETENTION_SCAN_SOURCE } from '../../src/async-promote-retention-scan.js';
 import { validatePromoteRecoveryBinding } from '../../src/promote-recovery-binding.js';
 import { createPromoteOperationIntent } from '../../src/promote-operation-intent.js';
 import type { PromoteJob } from '../../src/async-promote-queue-types.js';
@@ -67,7 +68,8 @@ export async function insertQuads(store: TripleStore, quads: Quads) { for (let i
 export async function put(store: TripleStore, ...jobs: PromoteJob[]) { for (const j of jobs) await store.insert(serializeJobRecord(j, GRAPH).jobQuads); }
 /**
  * `put`, but each job named in `twinned` has a second `updatedAt` triple of the same value (`"100"^^xsd:integer` and `"100.0"^^xsd:decimal` are two terms, equal
- * in every engine): a scan that read both would return the subject twice, and the sweep must judge and delete it once.
+ * in every engine). The scan reads exact integer terms only, so the decimal twin is ignored: this checks that a twin neither makes the sweep judge or delete the
+ * subject twice nor stalls a pass. It does NOT repeat a scan row (`repeatingScanRows` does).
  */
 export async function putTwinned(store: TripleStore, twinned: ReadonlySet<string>, ...jobs: PromoteJob[]) {
   const twin = (j: PromoteJob) => `"${j.updatedAt}.0"^^<http://www.w3.org/2001/XMLSchema#decimal>`;
@@ -116,6 +118,40 @@ export function spy(store: TripleStore, rewrite?: (sparql: string, source: strin
   } }) as TripleStore;
   return { store: proxy, log };
 }
+
+/**
+ * Copies of a scan row that the engine in `repeatingScanRows` answers for `iri`: 1 for about half of the subjects, 2 to 4 for the rest. Stateless (a hash of the seed and
+ * the subject), so it does not consume the caller's random stream and a replayed seed repeats the same rows.
+ */
+export function scanRowCopies(seed: number, iri: string): number {
+  let h = (seed ^ 0x811c9dc5) >>> 0;
+  for (let i = 0; i < iri.length; i++) h = Math.imul(h ^ iri.charCodeAt(i), 0x01000193) >>> 0;
+  const r = rng(h)();
+  return r < 0.5 ? 1 : r < 0.8 ? 2 : r < 0.95 ? 3 : 4;
+}
+
+/**
+ * `store` behind an engine that answers every retention scan query with the rows of some subjects REPEATED (side by side: the equal-valued rows of a subject sort
+ * together), cut to the query's LIMIT afterwards, as an engine does that keeps two integer lexical forms of one value ("100" and "0100") apart and answers a subject
+ * once per term. Oxigraph canonicalises such terms into one triple, so the repeat is made on the answer. The answer is a conforming one: sorted, within the LIMIT, no
+ * reordering. Every other query goes through unchanged. The coordinator lookup is by store object, so register admissions on the RETURNED store.
+ */
+export function repeatingScanRows(store: TripleStore, seed: number) {
+  /** `repeatedRows`: rows served beyond the first of their subject, in the answers that were returned. */
+  const stats = { scans: 0, repeatedRows: 0 };
+  const spied = spy(store, async (sparql, source, run) => {
+    if (source !== RETENTION_SCAN_SOURCE) return run();
+    const limit = /LIMIT (\d+)$/.exec(sparql);
+    const all = await store.query(sparql.replace(/ LIMIT \d+$/, ''));
+    if (all.type !== 'bindings' || !limit) return all;
+    const rows = all.bindings.flatMap(b => Array.from({ length: scanRowCopies(seed, String(b['job'])) }, () => b)).slice(0, Number(limit[1]));
+    stats.scans += 1;
+    stats.repeatedRows += rows.length - new Set(rows.map(b => b['job'])).size;
+    return { ...all, bindings: rows } as QueryResult;
+  });
+  return { ...spied, stats };
+}
+
 export const from = (log: Logged[], what: string) => log.filter(l => l.source === `publisher.asyncPromote.retention.${what}`);
 export const verifiedSubjects = (log: Logged[]) => from(log, 'verify').flatMap(l => [...(/VALUES \?job \{([^}]*)\}/.exec(l.sparql)?.[1] ?? '').matchAll(/<([^>]+)>/g)].map(m => m[1]!));
 export const deletedSubjects = (log: Logged[]) => from(log, 'delete').filter(l => l.kind === 'deleteByPatternWithoutCount' || l.kind === 'deleteByPattern').map(l => (JSON.parse(l.sparql) as { subject: string }).subject);
@@ -233,10 +269,14 @@ export function populationAges(_r: () => number): number[] {
   return [10 * W, W + 1, W, W - 1, 1000, -5000, WF, WF - 1, WF + 1, 100 * W];
 }
 
-export function genPopulation(r: () => number, size: number): Array<{ kind: PopulationKind; job: PromoteJob }> {
-  const ages = populationAges(r);
+/**
+ * `ties`: put the jobs on three ages only and never spread them, so most of a class shares one `updatedAt` (groups larger than the batch, which the scan walks by
+ * key). Without it, half the jobs are spread by their index and the groups stay small.
+ */
+export function genPopulation(r: () => number, size: number, opts: { ties?: boolean } = {}): Array<{ kind: PopulationKind; job: PromoteJob }> {
+  const ages = opts.ties ? [10 * W, 9 * W, WF + 1] : populationAges(r);
   return Array.from({ length: size }, (_, i) => {
     const kind = pick(r, POPULATION_KINDS);
-    return { kind, job: jobOfKind(kind, `j${String(i).padStart(3, '0')}`, pick(r, ages) + (r() < 0.5 ? 0 : i)) };
+    return { kind, job: jobOfKind(kind, `j${String(i).padStart(3, '0')}`, pick(r, ages) + (opts.ties || r() < 0.5 ? 0 : i)) };
   });
 }

@@ -3,7 +3,7 @@ import fc from 'fast-check';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { propertyOptions } from '../../../scripts/testing/property-options.js';
 import {
-  NOW, W, WF, POPULATION_KINDS, drain, genPopulation, graphFingerprint, newRetention, pick, present, putTwinned, registerPendingFlight, rng,
+  NOW, W, WF, POPULATION_KINDS, drain, genPopulation, graphFingerprint, newRetention, pick, present, putTwinned, registerPendingFlight, repeatingScanRows, rng,
   type PopulationKind,
 } from './_helpers/share-retention-fixtures.js';
 import type { PromoteRetentionJobClass } from '../src/async-promote-retention-policy.js';
@@ -13,6 +13,12 @@ import type { PromoteRetentionJobClass } from '../src/async-promote-retention-po
 // batch and slice size, random uncertain admissions and a clock that moves between passes; it replays from the integer seed fast-check prints. The oracle is written
 // from the generator's own knowledge of what it built (the KIND of each job), not from the product predicate. The PR budget is the repository default (100 runs,
 // fixed seed); the nightly profile raises it through DKG_PROPERTY_RUNS (1,000) and DKG_PROPERTY_SEED.
+//
+// The sweep runs over an engine that REPEATS scan rows (`repeatingScanRows`: about a third of the subjects come back two or three times, side by side, within the
+// query's LIMIT, as an engine does that answers a subject once per equal-valued term), so the property also covers the collapse of a subject's rows to one judged
+// row: a repeat is no reordering and no stall, a subject is judged and deleted once, and a window of repeats still counts as full (the walk goes on after it). A quarter
+// of the jobs additionally carry a decimal `updatedAt` twin, which the scan ignores (it reads exact integer terms only): that is a check that a twin changes nothing, not
+// a repeated row.
 
 const options = propertyOptions();
 
@@ -24,19 +30,20 @@ const WINDOW: Readonly<Record<PromoteRetentionJobClass, number>> = { succeeded: 
 
 interface Tally {
   cases: number; deleted: number; byClass: Record<PromoteRetentionJobClass, number>;
-  protectedOldEnough: number; pendingProtected: number; futureDated: number; clockSkips: number; kindsSeen: Set<PopulationKind>;
+  protectedOldEnough: number; pendingProtected: number; futureDated: number; clockSkips: number; kindsSeen: Set<PopulationKind>; scans: number; repeatedRows: number;
 }
 
 async function oneCase(seed: number, tally: Tally): Promise<void> {
   const r = rng(seed);
-  const population = genPopulation(r, 1 + Math.floor(r() * 26));
+  const ties = r() < 0.4;                                                              // most jobs on three ages: groups larger than the batch, walked by key
+  const population = genPopulation(r, 1 + Math.floor(r() * 26), { ties });
   const kinds = new Map(population.map(p => [p.job.jobId, p.kind] as const));
   const jobs = new Map(population.map(p => [p.job.jobId, p.job] as const));
   const mode = pick(r, ['report', 'delete', 'delete'] as const);
   const withBenign = r() < 0.75;
   const batchSize = pick(r, [1, 2, 5, 100]), sliceSize = pick(r, [1, 3, 10]);
   const pending = new Set(population.filter(() => r() < 0.15).map(p => p.job.jobId));
-  const twinned = new Set(population.filter(() => r() < 0.25).map(p => p.job.jobId));   // a second, equal-comparing updatedAt term (a decimal): the scan reads integer terms only, so each of these subjects is still judged once
+  const twinned = new Set(population.filter(() => r() < 0.25).map(p => p.job.jobId));   // a second, equal-valued updatedAt term (a decimal): the scan reads integer terms only and ignores it
 
   const store = new OxigraphStore();
   try {
@@ -44,11 +51,12 @@ async function oneCase(seed: number, tally: Tally): Promise<void> {
     const control = await graphFingerprint(store);
     const before = new Map<string, string>();
     for (const id of jobs.keys()) before.set(id, await present(store, id));
-    const flights = [...pending].map(id => registerPendingFlight(store, id));
+    const { store: engine, stats } = repeatingScanRows(store, seed);                    // the sweep's store: scan rows come back repeated. Admissions belong to ITS coordinator
+    const flights = [...pending].map(id => registerPendingFlight(engine, id));
 
     let t = NOW;
     const INTERVAL = 600_000;
-    const retention = newRetention(store, { mode, batchSize, sliceSize, benignFailedMaxAgeMs: withBenign ? WF : null, now: () => t, intervalMs: INTERVAL, rescanIntervalMs: 1000 });
+    const retention = newRetention(engine, { mode, batchSize, sliceSize, benignFailedMaxAgeMs: withBenign ? WF : null, now: () => t, intervalMs: INTERVAL, rescanIntervalMs: 1000 });
     type Flag = { jobId: string; jobClass: PromoteRetentionJobClass; updatedAt: number; at: number };
     const passes: Flag[][] = [];
     const pass = async () => {
@@ -60,6 +68,8 @@ async function oneCase(seed: number, tally: Tally): Promise<void> {
         for (const j of mode === 'delete' ? res.deletedJobs : res.wouldDeleteJobs) flags.push({ jobId: j.jobId, jobClass: j.jobClass, updatedAt: j.updatedAt, at: t });
       }
       passes.push(flags);
+      // one drain is one pass at one clock reading: however often the engine repeated a row, no job is flagged twice (a repeated subject is collapsed to one judged row)
+      expect(new Set(flags.map(f => f.jobId)).size, `a job was flagged more than once in one pass: ${flags.map(f => f.jobId)}`).toBe(flags.length);
     };
 
     await pass();                                                                        // phase 1: now = NOW, admissions pending
@@ -108,6 +118,7 @@ async function oneCase(seed: number, tally: Tally): Promise<void> {
       if (job.updatedAt > NOW + 13_000) tally.futureDated++;
     }
     if (mode === 'delete') { tally.deleted += flagged.length; for (const f of flagged) tally.byClass[f.jobClass]++; }
+    tally.scans += stats.scans; tally.repeatedRows += stats.repeatedRows;
     tally.cases++;
   } finally {
     await store.close();
@@ -115,7 +126,7 @@ async function oneCase(seed: number, tally: Tally): Promise<void> {
 }
 
 it('retention never flags a protected job, only the D-6 classes, never a row dated after now, and misses no eligible job (random populations, modes, slices, pending admissions, a clock that moves)', async () => {
-  const tally: Tally = { cases: 0, deleted: 0, byClass: { succeeded: 0, cancelled: 0, retired_no_effect: 0 }, protectedOldEnough: 0, pendingProtected: 0, futureDated: 0, clockSkips: 0, kindsSeen: new Set() };
+  const tally: Tally = { cases: 0, deleted: 0, byClass: { succeeded: 0, cancelled: 0, retired_no_effect: 0 }, protectedOldEnough: 0, pendingProtected: 0, futureDated: 0, clockSkips: 0, kindsSeen: new Set(), scans: 0, repeatedRows: 0 };
   await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 0x7fffffff }), seed => oneCase(seed, tally)),
     { seed: options.seed, numRuns: options.numRuns, endOnFailure: true, ...(options.path ? { path: options.path } : {}) });
   // The generator must really reach what the claim is about. The floors apply from the 100-run default up and only to a full run (a replay of one failing path
@@ -131,7 +142,8 @@ it('retention never flags a protected job, only the D-6 classes, never a row dat
       expect(tally.pendingProtected).toBeGreaterThan(0);
       expect(tally.futureDated).toBeGreaterThan(0);
       expect(tally.clockSkips).toBeGreaterThan(0);
+      expect(tally.repeatedRows, 'the engine never repeated a scan row: the collapse is not exercised').toBeGreaterThan(options.numRuns);
     }
   }
-  console.log(`retention AC7 property: seed=${options.seed} runs=${tally.cases} deleted=${tally.deleted} by-class=${JSON.stringify(tally.byClass)} old-protected-seen=${tally.protectedOldEnough} pending-eligible=${tally.pendingProtected} future-dated=${tally.futureDated} clock-skips=${tally.clockSkips}`);
+  console.log(`retention AC7 property: seed=${options.seed} runs=${tally.cases} deleted=${tally.deleted} by-class=${JSON.stringify(tally.byClass)} old-protected-seen=${tally.protectedOldEnough} pending-eligible=${tally.pendingProtected} future-dated=${tally.futureDated} clock-skips=${tally.clockSkips} scans=${tally.scans} repeated-rows=${tally.repeatedRows}`);
 }, 300_000);
