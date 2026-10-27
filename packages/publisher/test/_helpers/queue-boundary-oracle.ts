@@ -327,17 +327,51 @@ export const LABEL_TO_BASE: Readonly<Record<string, string>> = Object.freeze({
   'publisher.asyncLift.stats': 'publisher.asyncLift.list',
 });
 
+/** A call's source label with the labels this PR adds mapped back to the base label of the same operation. */
+const baseSourceOf = (call: Pick<RecordedStoreCall, 'source'>): string | undefined =>
+  call.source === undefined ? undefined : (LABEL_TO_BASE[call.source] ?? call.source);
+
+const tally = (keys: Iterable<string>): Record<string, number> => {
+  const trace: Record<string, number> = {};
+  for (const key of keys) trace[key] = (trace[key] ?? 0) + 1;
+  return Object.fromEntries(Object.entries(trace).sort(([a], [b]) => (a < b ? -1 : 1)));
+};
+
 /**
  * The lane trace of a workload (AC2): how many calls resolved to each (lane, operation family) with the control path
  * OFF. The resolved lane is explicit ?? ambient ?? `normal`; the family is the first two dot-separated segments of
  * the call's source label, after the label mapping. A call with no label is counted under `(unlabelled)`.
  */
 export function laneTrace(calls: readonly RecordedStoreCall[]): Record<string, number> {
-  const trace: Record<string, number> = {};
-  for (const call of calls) {
-    const source = call.source === undefined ? undefined : (LABEL_TO_BASE[call.source] ?? call.source);
-    const key = `${resolveLane(call, false)} ${source === undefined ? '(unlabelled)' : storeOperationFamily(source)}`;
-    trace[key] = (trace[key] ?? 0) + 1;
+  return tally(calls.map((call) => {
+    const source = baseSourceOf(call);
+    return `${resolveLane(call, false)} ${source === undefined ? '(unlabelled)' : storeOperationFamily(source)}`;
+  }));
+}
+
+/**
+ * The per-site lane trace (AC2): how many calls resolved to each (lane, source label) with the control path OFF.
+ * The family trace above cannot see a change that keeps every family's count, such as two sites of one family
+ * exchanging lanes or labels; every queue site has a label of its own (the static coverage test fails on a shared
+ * one), so counting by label compares the workload site by site. A call with no label is counted under
+ * `(unlabelled:<method>)`, so the option-less `createGraph` and `flush` calls stay apart from unlabelled queries.
+ */
+export function sourceTrace(calls: readonly RecordedStoreCall[]): Record<string, number> {
+  return tally(calls.map((call) => {
+    const source = baseSourceOf(call);
+    return `${resolveLane(call, false)} ${source ?? `(unlabelled:${call.method})`}`;
+  }));
+}
+
+/** The family trace a per-site trace folds to, for checking the two goldens against each other. */
+export function familyOfSourceTrace(trace: Readonly<Record<string, number>>): Record<string, number> {
+  const family: Record<string, number> = {};
+  for (const [key, count] of Object.entries(trace)) {
+    const space = key.indexOf(' ');
+    const lane = key.slice(0, space);
+    const source = key.slice(space + 1);
+    const folded = `${lane} ${source.startsWith('(unlabelled') ? '(unlabelled)' : storeOperationFamily(source)}`;
+    family[folded] = (family[folded] ?? 0) + count;
   }
-  return Object.fromEntries(Object.entries(trace).sort(([a], [b]) => (a < b ? -1 : 1)));
+  return Object.fromEntries(Object.entries(family).sort(([a], [b]) => (a < b ? -1 : 1)));
 }

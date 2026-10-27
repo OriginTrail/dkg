@@ -11,6 +11,7 @@ import {
   CONTROL_STATUS,
   DEFAULT_CONTROL_GRAPH_URI,
   jobSubject,
+  knowledgeAssetVmPublishLifecycleKey,
   literal,
   serializeJob,
   serializeVmPublishIntentIndex,
@@ -57,12 +58,18 @@ interface Scenario {
 
 const intentKey = (intent: string): string => `sha256:${intent.repeat(64).slice(0, 64)}`;
 
+/** Frozen pre-P7 `lifecycleKeyOfJob` of the publisher: the classification the pre-P7 admission was handed as its `keyOfJob` parameter. */
+function baseLifecycleKeyOfJob(job: PersistedLiftJob): string | null {
+  if (!isKnowledgeAssetVmPublishJobRequest(job.request)) return null;
+  try {
+    return knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish);
+  } catch {
+    return null;
+  }
+}
+
 /** Frozen pre-P7 `LiftJobStoreSelectors.vmPublishAdmissionCandidates`: the oracle of the differential. */
-async function baseAdmissionCandidates(
-  store: OxigraphStore,
-  lifecycleKey: string,
-  keyOfJob: (job: PersistedLiftJob) => string | null,
-): Promise<PersistedLiftJob[]> {
+async function baseAdmissionCandidates(store: OxigraphStore, lifecycleKey: string): Promise<PersistedLiftJob[]> {
   const result = await store.query(
     `SELECT ?payload ?status ?indexed WHERE { GRAPH <${GRAPH}> {
         {
@@ -81,7 +88,7 @@ async function baseAdmissionCandidates(
   for (const row of rows) {
     if (row['indexed'] === undefined) continue;
     const job = decodedLiftJobOrThrow(decodeLiftJobPayload(row['payload']));
-    if (job !== null && keyOfJob(job) !== lifecycleKey) {
+    if (job !== null && baseLifecycleKeyOfJob(job) !== lifecycleKey) {
       throw new Error(`Malformed persisted LiftJob payload: lifecycle index does not match ${lifecycleKey}`);
     }
     if (job !== null && row['status'] !== undefined) jobs.set(job.jobId, job);
@@ -213,7 +220,7 @@ it('the bounded admission lookup and the unindexed-only backfill decide exactly 
           jobSelectors: { vmPublishAdmissionCandidates: LiftJobStoreSelectors['vmPublishAdmissionCandidates'] };
           ensureVmPublishIntentIndex: () => Promise<number>;
         };
-        swapped.jobSelectors.vmPublishAdmissionCandidates = (key, keyOfJob) => baseAdmissionCandidates(store, key, keyOfJob);
+        swapped.jobSelectors.vmPublishAdmissionCandidates = (key) => baseAdmissionCandidates(store, key);
         swapped.ensureVmPublishIntentIndex = () => baseEnsureIndex(publisher, store);
       }
       return publisher;
