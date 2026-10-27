@@ -19,6 +19,9 @@ import {
   OxigraphStore,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
+  activeDefaultStoreWorkPriority,
+  withDefaultStoreWorkPriority,
+  type StoreWorkPriority,
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
@@ -28,7 +31,13 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
-import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE, asyncAdmissionUsage } from '@origintrail-official/dkg-core';
+import {
+  expectShareTaggingTable,
+  recordShareStore,
+  resolveLane,
+  withControlPath,
+} from '../../publisher/test/_helpers/share-control-recorder.js';
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE, SWM_INVENTORY_HANDOFF_PENDING_CODE, asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import {
   createPromoteWorkerSupervisor,
   runPromoteJob,
@@ -670,6 +679,31 @@ describe('runPromoteJob', () => {
     // The allowlist is built from the shared contract code, so the wire value is what gets named.
     expect(RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE)
       .toBe('RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS');
+  });
+
+  it('names a pending catalog inventory handoff behind a retryable bound share replay', async () => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async () => {
+        throw createPromoteRetryableFailure(Object.assign(
+          new Error('Durable share inventory remains pending: inactive-lane'),
+          { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'inactive-lane' },
+        ));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    expect(promoteFailureDiagnostics(logs)[0]).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+      errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      causeCode: 'SWM_INVENTORY_HANDOFF_PENDING',
+    });
+    expect(SWM_INVENTORY_HANDOFF_PENDING_CODE).toBe('SWM_INVENTORY_HANDOFF_PENDING');
   });
 
   describe('a promote refused by the legacy SWM retirement fence', () => {
@@ -1925,5 +1959,114 @@ describe('createPromoteWorkerSupervisor', () => {
       await sup.stop();
       expect((await queue.getStats()).succeeded).toBe(1);
     });
+  });
+});
+
+/**
+ * OT-RFC-73 AC1, share queue's required wake-path scenario (the worker-tick guard). `enqueue` calls `notifyWorkAvailable()` from
+ * inside the queue mutex and the supervisor starts its tick synchronously from it, so whatever the queue's tagging puts on
+ * that chain follows the worker. The queue tags with explicit store options, never an ambient lane, and issues the wake with no
+ * lane scope: the claimed job's data-plane calls carry no control tag and inherit no ambient lane, whichever lane the enqueueing
+ * caller was scoped to. The recorder sits on the one store both the queue and the job's data-plane work use.
+ */
+describe('share control path: the wake from inside the mutex (OT-RFC-73 AC1)', () => {
+  const SHARE_GRAPHS = ['urn:dkg:promote-queue:control-plane'];
+  const DATA_GRAPH = 'urn:test:worker-wake:data';
+
+  async function runWakeScenario(ambient: StoreWorkPriority, pathOn: boolean) {
+    const recorder = recordShareStore(new OxigraphStore());
+    const queue = new TripleStoreAsyncPromoteQueue(recorder.store, { now: () => Date.now(), backoff: () => 50, maxRetries: 2 });
+    const wakes: Array<{ ambient: StoreWorkPriority | undefined; beforeEnqueueSettled: boolean }> = [];
+    let enqueueSettled = false;
+    const observedQueue = new Proxy(queue, {
+      get(target, prop) {
+        if (prop === 'workScheduling') {
+          return {
+            attachScheduler: (scheduler: { onWorkAvailable(): void }) => target.workScheduling.attachScheduler({
+              onWorkAvailable: () => {
+                wakes.push({ ambient: activeDefaultStoreWorkPriority(), beforeEnqueueSettled: !enqueueSettled });
+                scheduler.onWorkAvailable();
+              },
+            }),
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as AsyncPromoteQueue;
+    const promoted = deferred();
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: observedQueue,
+        assertion: {
+          prepareQueuedShare: async (job: unknown) => ({ job }),
+          // The claimed job's data-plane work, on the store the queue uses.
+          async promote() {
+            await recorder.store.query(`SELECT ?s WHERE { GRAPH <${DATA_GRAPH}> { ?s ?p ?o } } LIMIT 1`, { source: 'test.worker.dataPlane' });
+            await recorder.store.insert([{ subject: 'urn:test:worker-wake:s', predicate: 'urn:test:p', object: '"v"', graph: DATA_GRAPH }],
+              { source: 'test.worker.dataPlane' });
+            promoted.resolve();
+            return { promotedCount: 1 };
+          },
+        },
+      } as never,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'wake',
+    });
+    let lanes: string[] = [];
+    await withControlPath(pathOn, async () => {
+      await sup.start();
+      const jobId = await withDefaultStoreWorkPriority(ambient, () => queue.enqueue({ contextGraphId: 'cg', assertionName: 'wake-path', entities: 'all' }));
+      enqueueSettled = true;
+      await Promise.race([
+        promoted.promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('wake timed out')), 2_000)),
+      ]);
+      await vi.waitFor(async () => { expect((await queue.getStatus(jobId))?.state).toBe('succeeded'); });
+      await sup.stop();
+      lanes = recorder.calls.map(resolveLane); // resolved while the path is injected
+      expectShareTaggingTable(recorder.calls, SHARE_GRAPHS, { pathOn });
+    });
+    return { calls: recorder.calls, lanes, wakes };
+  }
+
+  it.each([
+    { ambient: 'background' as const, pathOn: true },
+    { ambient: 'background' as const, pathOn: false },
+    { ambient: 'health' as const, pathOn: true },
+    { ambient: 'health' as const, pathOn: false },
+  ])('enqueue inside the $ambient lane (control path on: $pathOn) -> synchronous wake -> worker tick', async ({ ambient, pathOn }) => {
+    const { calls, lanes, wakes } = await runWakeScenario(ambient, pathOn);
+
+    // The wake is delivered synchronously from the enqueue, and with no lane scope although the enqueue had one.
+    expect(wakes.length).toBeGreaterThanOrEqual(1);
+    expect(wakes[0]).toEqual({ ambient: undefined, beforeEnqueueSettled: true });
+    expect(wakes.every((wake) => wake.ambient === undefined)).toBe(true);
+
+    // The claimed job's data-plane calls: no control tag, no priority, and no ambient lane inherited from the enqueue caller.
+    const dataPlane = calls.filter((call) => call.source === 'test.worker.dataPlane');
+    expect(dataPlane.map((call) => call.method)).toEqual(['query', 'insert']);
+    for (const call of dataPlane) {
+      expect(call.options?.controlQueue).toBeUndefined();
+      expect(call.options?.priority).toBeUndefined();
+      expect(call.ambient).toBeUndefined();
+    }
+    expect(dataPlane.map((call) => lanes[call.index])).toEqual(['normal', 'normal']);
+
+    // The worker tick's own queue reads carry the control tag and inherit nothing either.
+    const claim = calls.filter((call) => call.source === 'publisher.asyncPromote.claimNext.candidates');
+    expect(claim.length).toBeGreaterThanOrEqual(1);
+    for (const call of claim) {
+      expect(call.options?.controlQueue).toBe('share');
+      expect(call.ambient).toBeUndefined();
+    }
+
+    // The enqueue itself ran in the caller's lane scope; its control calls ignore that scope when the path is on.
+    const conflictCheck = calls.find((call) => call.source === 'publisher.asyncPromote.findActiveConflict')!;
+    expect(conflictCheck.ambient).toBe(ambient);
+    expect(lanes[conflictCheck.index]).toBe(pathOn ? 'control:share' : ambient);
   });
 });

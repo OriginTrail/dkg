@@ -58,3 +58,17 @@ describe('Oxigraph source with real WASM', () => {
     await expect(source.tripleCount()).resolves.toBe(2);
   });
 });
+
+
+describe('Oxigraph browser initialization and RDF terms', () => {
+  it('accepts an explicit WASM URL after initialization and preserves blank-node identity', async () => {
+    const source = createSource();
+    // initSync in this file's beforeAll already loaded local WASM bytes: no network request occurs.
+    await source.init('https://example.invalid/already-initialized.wasm');
+    await source.loadNTriples('_:subject <urn:p> _:object .');
+    const result = await source.construct('CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }');
+    expect(result.triples).toHaveLength(1); expect(result.triples[0].subject).toMatch(/^_:/); expect(result.triples[0].object).toMatch(/^_:/); expect(result.triples[0].subject).not.toBe(result.triples[0].object);
+    const selected = await source.select('SELECT ?s ?o WHERE { ?s <urn:p> ?o }');
+    expect(selected.bindings[0]).toEqual({ s: result.triples[0].subject, o: result.triples[0].object });
+  });
+});

@@ -190,7 +190,7 @@ export interface PublisherInspector {
    * knobs, so its `autoRetryEligible` could contradict the lane that actually runs. The
    * detailed retry counts carry no such dependency (the manual path ignores the kill-switch).
    */
-  readonly publisher: AsyncLiftPublisher & AsyncLiftDetailedRetrier;
+  readonly publisher: AsyncLiftPublisher & AsyncLiftDetailedRetrier & Pick<VmPublisherControl, 'listPage'>;
   readonly stop: () => Promise<void>;
 }
 

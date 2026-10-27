@@ -30,8 +30,8 @@ on:
         description: Optional signed 32-bit property seed (nightly default is the recorded run number)
         type: string
         required: false
-  schedule:
-    - cron: '23 2 * * *'
+  # nightly-ci.yml owns the clock on the default branch and dispatches this
+  # workflow at testnet-canary with the nightly-equivalent profile.
 
 concurrency:
   # Keep campaigns independent of ordinary pushes/PRs; supersede duplicate
@@ -639,6 +639,39 @@ jobs:
           pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts
           DKG_RFC64_GATE1_STORE_BACKEND=blazegraph node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
+
+      # OT-RFC-73 AC4: the share conflict lookup's payload de-duplication answers a duplicate-row hazard that exists only on an engine which gives two
+      # uniqueness-key spellings (they differ by a trailing U+001F) ONE stored term. The suite above reports whether the service container above does;
+      # the image pinned in blazegraph-image.json (the one the node setup provisions) does, so the same live differential runs against THAT image with
+      # the reproduction required (BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1): the real-engine check cannot turn vacuous when the image changes.
+      - name: "Share promote lookup live differential on the provisioned Blazegraph image (U+001F positive control required)"
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          # Fields come from the canonical reader (it validates the whole contract), requested by name like the image contract check does.
+          if ! image="$(node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json image)" \
+            || ! container_port="$(node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json containerPort)"; then
+            echo "::error::Could not read image contract from blazegraph-image.json"
+            exit 1
+          fi
+          container="dkg-ci-promote-lookup-blazegraph-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$container" -p "127.0.0.1::${container_port}" "$image" >/dev/null
+          binding="$(docker port "$container" "${container_port}/tcp" | head -n 1)"
+          host_port="${binding##*:}"
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:${host_port}/bigdata/status"; then ready=1; break; fi
+            sleep 2
+          done
+          if [ "$ready" != 1 ]; then
+            docker logs "$container" || true
+            echo "::error::Pinned Blazegraph image did not serve /bigdata/status within 120s"
+            exit 1
+          fi
+          BLAZEGRAPH_TEST_URL="http://127.0.0.1:${host_port}/bigdata/namespace/kb/sparql" \
+          BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1 \
+          pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts test-live/async-promote-bounded-lookup.blazegraph.test.ts
 
       - name: Upload store conformance packet
         if: always()
