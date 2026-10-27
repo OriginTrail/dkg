@@ -1,3 +1,4 @@
+import { setImmediate as yieldToEventLoop } from 'node:timers/promises';
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { SyncRow } from './snapshot-cache.js';
@@ -71,6 +72,7 @@ export async function readExactGraphSnapshotBatch(
     byGraph.set(g!, graphRows);
   }
   const rows: SyncRow[] = [];
+  let sortedSinceYield = 0;
   for (const entry of entries) {
     const graphRows = byGraph.get(entry.graph) ?? [];
     const count = graphRows.length;
@@ -81,6 +83,12 @@ export async function readExactGraphSnapshotBatch(
     // Sorting a whole unordered snapshot at the end blocks interactive reads.
     graphRows.sort(compareRows);
     rows.push(...graphRows);
+    sortedSinceYield += graphRows.length;
+    if (sortedSinceYield >= 128 && rows.length < total) {
+      // Background snapshot work must let ready interactive callbacks run.
+      await yieldToEventLoop();
+      sortedSinceYield = 0;
+    }
   }
   return rows;
 }

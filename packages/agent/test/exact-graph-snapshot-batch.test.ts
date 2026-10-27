@@ -107,6 +107,20 @@ describe('bounded exact graph snapshot batches', () => {
     } finally { await store.close(); }
   });
 
+  it('lets queued event-loop work run before a bulk snapshot finishes', async () => {
+    const store: TripleStore = new OxigraphStore();
+    try {
+      const snapshot = plan(Array(32).fill(20));
+      const expected = await seed(store, snapshot);
+      let settled = false;
+      const pending = readExactGraphPlanSnapshot(store, snapshot, cache, limits)
+        .then(rows => { settled = true; return rows; });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(settled).toBe(false);
+      expect(await pending).toEqual(expected);
+    } finally { await store.close(); }
+  });
+
   it.each([[[2, 4]], [[2, 3]], [[4, 3]]])('rejects per-graph count drift even when totals compensate (%j)', async (counts) => {
     const store: TripleStore = new OxigraphStore();
     try {
