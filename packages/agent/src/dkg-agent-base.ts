@@ -586,7 +586,6 @@ export class DKGAgentBase {
     const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) => reconcileAfterMaterialization(cleanup, asset, ctx);
     const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, reconcile, () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
     const materialization = new RecoveryMaterializationOwner({
-      proveHeldAssets: heldStore?.prove,
       chain: () => agent.chain, store: () => agent.store,
       isClosed: () => agent.graphScopedStoreClosed,
       subscription: id => agent.subscribedContextGraphs.get(id),

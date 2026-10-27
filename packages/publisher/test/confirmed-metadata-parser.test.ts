@@ -1,3 +1,4 @@
+import { parseGraphKnowledgeAssetStructure } from '../src/graph-metadata-envelope.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri,
@@ -99,4 +100,38 @@ it('preserves tentative envelopes without requiring chain provenance or upgradin
   const corrupt = rows.map(q => q.predicate === `${DKG}assertionGraph` ? { ...q, object: 'urn:wrong' } : q);
   expect(parseGraphKnowledgeAssetMetadataEnvelope(corrupt, input)).toEqual({ state: 'invalid' });
   expect(parseGraphKnowledgeAssetMetadataEnvelope([...rows, { ...rows[0]!, predicate: `${DKG}status`, object: '"confirmed"' }], input)).toEqual({ state: 'invalid' });
+});
+
+
+describe('shared structural parsing policies', () => {
+  it.each(['canonical', 'duplicate', 'leading-zero', 'bare-number', 'scope-version'])(
+    'preserves wire versus stored acceptance for %s', fault => {
+      const rows = fixture(2, 'documents');
+      const version = rows.find(row => row.predicate === `${DKG}assertionVersion`)!;
+      if (fault === 'duplicate') rows.push({ ...version });
+      if (fault === 'leading-zero') version.object = '"03"';
+      if (fault === 'bare-number') version.object = '3';
+      if (fault === 'scope-version') rows.find(row => row.predicate === `${DKG}contentScopeVersion`)!.object = '"999"';
+      const wire = parseGraphKnowledgeAssetStructure(rows, input, { syntax: 'wire', context: 'required' });
+      expect(wire).toMatchObject({ assertionVersion: '3', contextGraphId: input.contextGraphId,
+        publicTripleCount: 2, privateTripleCount: 2, subGraphName: 'documents' });
+      const stored = parseGraphKnowledgeAssetMetadataEnvelope(rows, input, 'stored-context');
+      expect(stored.state).toBe(fault === 'canonical' ? 'confirmed' : 'invalid');
+      if (stored.state === 'confirmed') {
+        expect(stored.envelope.merkleRoot).toEqual(wire.merkleRoot);
+        expect(stored.envelope.privateMerkleRoot).toEqual(wire.privateMerkleRoot);
+      }
+    });
+
+  it.each(['missing-context', 'wrong-context', 'wrong-meta-graph', 'rootEntity', 'partOf'])(
+    'enforces stored context admission without changing external confirmed readers (%s)', fault => {
+      let rows = fixture();
+      if (fault === 'missing-context') rows = rows.filter(row => row.predicate !== `${DKG}contextGraph`);
+      else if (fault === 'wrong-context') rows.find(row => row.predicate === `${DKG}contextGraph`)!.object = 'did:dkg:context-graph:other';
+      else if (fault === 'wrong-meta-graph') rows = rows.map(row => ({ ...row, graph: 'urn:wrong' }));
+      else rows.push({ ...rows[0]!, predicate: `${DKG}${fault}`, object: 'urn:legacy' });
+      expect(parseGraphKnowledgeAssetMetadataEnvelope(rows, input).state).toBe('confirmed');
+      expect(parseGraphKnowledgeAssetMetadataEnvelope(rows, input, 'stored-context')).toEqual({ state: 'invalid' });
+      expect(() => parseGraphKnowledgeAssetStructure(rows, input, { syntax: 'wire', context: 'required' })).toThrow();
+    });
 });

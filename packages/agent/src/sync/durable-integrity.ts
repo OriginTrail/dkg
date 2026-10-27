@@ -2,14 +2,11 @@ import { normalizeGraphScopedHex32 as normalizeHex32 } from "./graph-scoped-root
 import { createHash } from 'node:crypto';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
-  MemoryLayer,
-  createGraphKnowledgeAssetScope,
   parseGraphScopedAssertionSealCandidate,
-  knowledgeAssetLayerGraphUri,
   parseDeterministicKnowledgeAssetUal,
-  validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import {
+  parseGraphKnowledgeAssetStructure,
   computeFlatKCRootV10 as computeStructuredKCRoot,
   skolemizeByEntity,
 } from '@origintrail-official/dkg-publisher';
@@ -25,14 +22,12 @@ const CONTENT_SCOPE_VERSION = `${DKG_NS}contentScopeVersion`;
 const KA_UAL = `${DKG_NS}kaUal`;
 const ASSERTION_VERSION = `${DKG_NS}assertionVersion`;
 const ASSERTION_GRAPH = `${DKG_NS}assertionGraph`;
-const CONTEXT_GRAPH = `${DKG_NS}contextGraph`;
 const BATCH_ID = `${DKG_NS}batchId`;
 const STATUS = `${DKG_NS}status`;
 const RESERVED_UAL = `${DKG_NS}reservedUal`;
 const PUBLIC_TRIPLE_COUNT = `${DKG_NS}publicTripleCount`;
 const PRIVATE_TRIPLE_COUNT = `${DKG_NS}privateTripleCount`;
 const PRIVATE_MERKLE_ROOT = `${DKG_NS}privateMerkleRoot`;
-const SUB_GRAPH_NAME = `${DKG_NS}subGraphName`;
 const ROOT_ENTITY = `${DKG_NS}rootEntity`;
 const PART_OF = `${DKG_NS}partOf`;
 const SKOLEM_SUFFIX = '/.well-known/genid/';
@@ -1512,105 +1507,13 @@ export function parseGraphScopedDescriptor(
   ual: string,
   rows: readonly Quad[],
 ): GraphScopedDescriptor {
-  const requireSingle = (predicate: string, field: string): string => {
-    const values = distinctObjects(rows, predicate);
-    if (values.length !== 1) {
-      throw new Error(`${values.length === 0 ? 'missing' : 'ambiguous'} ${field} metadata`);
-    }
-    return values[0]!;
-  };
-  const optionalSingle = (predicate: string, field: string): string | undefined => {
-    const values = distinctObjects(rows, predicate);
-    if (values.length > 1) throw new Error(`ambiguous ${field} metadata`);
-    return values[0];
-  };
-
-  const metadataUal = requireSingle(KA_UAL, 'kaUal');
-  if (metadataUal !== ual) throw new Error(`kaUal mismatch: found ${metadataUal}`);
-  const contentScopeVersion = parseInteger(
-    requireSingle(CONTENT_SCOPE_VERSION, 'contentScopeVersion'),
-    'contentScopeVersion',
+  const { merkleRoot, privateMerkleRoot, ...structure } = parseGraphKnowledgeAssetStructure(
+    rows, { ual }, { syntax: 'wire', context: 'required' },
   );
-  const assertionVersion = parseInteger(
-    requireSingle(ASSERTION_VERSION, 'assertionVersion'),
-    'assertionVersion',
-  );
-  const scope = createGraphKnowledgeAssetScope(ual, assertionVersion);
-  if (scope.ual !== ual) throw new Error(`non-canonical kaUal: expected ${scope.ual}`);
-
-  const contextGraphUri = requireSingle(CONTEXT_GRAPH, 'contextGraph');
-  const contextGraphPrefix = 'did:dkg:context-graph:';
-  if (!contextGraphUri.startsWith(contextGraphPrefix)) {
-    throw new Error(`invalid contextGraph metadata: ${contextGraphUri}`);
-  }
-  const contextGraphId = contextGraphUri.slice(contextGraphPrefix.length);
-  if (!contextGraphId) throw new Error('empty context graph id');
-  const expectedMetaGraph = `${contextGraphUri}/_meta`;
-  for (const row of rows) {
-    if (row.graph !== expectedMetaGraph) {
-      throw new Error(`metadata graph mismatch: expected ${expectedMetaGraph}, found ${row.graph}`);
-    }
-    if (row.predicate === ROOT_ENTITY || row.predicate === PART_OF) {
-      throw new Error('graph-scoped KA metadata must not contain legacy root bindings');
-    }
-  }
-
-  const subGraphRaw = optionalSingle(SUB_GRAPH_NAME, 'subGraphName');
-  const subGraphName = subGraphRaw === undefined ? undefined : stripLiteral(subGraphRaw);
-  if (subGraphName !== undefined) {
-    const validation = validateSubGraphName(subGraphName);
-    if (!validation.valid) throw new Error(`invalid subGraphName: ${validation.reason}`);
-  }
-
-  const expectedAssertionGraph = knowledgeAssetLayerGraphUri(
-    contextGraphId,
-    MemoryLayer.VerifiableMemory,
-    scope,
-    subGraphName,
-  );
-  const assertionGraph = requireSingle(ASSERTION_GRAPH, 'assertionGraph');
-  if (assertionGraph !== expectedAssertionGraph) {
-    throw new Error(`assertionGraph mismatch: expected ${expectedAssertionGraph}, found ${assertionGraph}`);
-  }
-
-  const publicTripleCount = safeCount(
-    requireSingle(PUBLIC_TRIPLE_COUNT, 'publicTripleCount'),
-    'publicTripleCount',
-  );
-  const privateTripleCount = safeCount(
-    requireSingle(PRIVATE_TRIPLE_COUNT, 'privateTripleCount'),
-    'privateTripleCount',
-  );
-  if (publicTripleCount === 0 && privateTripleCount === 0) {
-    throw new Error('empty graph-scoped asset');
-  }
-  const privateRootValues = distinctObjects(rows, PRIVATE_MERKLE_ROOT);
-  if (privateTripleCount > 0 && privateRootValues.length !== 1) {
-    throw new Error(`${privateRootValues.length === 0 ? 'missing' : 'ambiguous'} privateMerkleRoot metadata`);
-  }
-  if (privateTripleCount === 0 && privateRootValues.length > 0) {
-    throw new Error('privateMerkleRoot present without private content');
-  }
-  const privateRootHex = privateRootValues[0]
-    ? normalizeHex32(privateRootValues[0], 'privateMerkleRoot')
-    : undefined;
-
   return {
-    ual,
-    contentScopeVersion: contentScopeVersion.toString(),
-    assertionVersion: assertionVersion.toString(),
-    contextGraphId,
-    ...(subGraphName === undefined ? {} : { subGraphName }),
-    assertionGraph,
-    publicTripleCount,
-    privateTripleCount,
-    ...(privateRootHex
-      ? {
-          privateRoot: hexToBytes(privateRootHex),
-          privateRootHex,
-        }
-      : {}),
-    claimedRootHex: normalizeHex32(requireSingle(MERKLE_ROOT, 'merkleRoot'), 'merkleRoot'),
+    ...structure,
+    ...(privateMerkleRoot ? { privateRoot: privateMerkleRoot, privateRootHex: toHex(privateMerkleRoot) } : {}),
+    claimedRootHex: toHex(merkleRoot),
     metadataDigestHex: digestGraphScopedMetadataRows(rows),
   };
 }
@@ -1623,15 +1526,6 @@ function parseInteger(raw: string, field: string): bigint {
   if (!/^-?\d+$/.test(raw)) throw new Error(`invalid ${field}: ${raw}`);
   return BigInt(raw);
 }
-
-function safeCount(raw: string, field: string): number {
-  const value = parseInteger(raw, field);
-  if (value < 0n || value > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw new Error(`invalid ${field}: ${value}`);
-  }
-  return Number(value);
-}
-
 
 function hexToBytes(hex: string): Uint8Array {
   return Uint8Array.from(hex.match(/.{2}/g)!.map((pair) => Number.parseInt(pair, 16)));

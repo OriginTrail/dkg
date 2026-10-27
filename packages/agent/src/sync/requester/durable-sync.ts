@@ -1,4 +1,4 @@
-import { createManifestSettlementCheckpointer } from './manifest-settlement-checkpointer.js';
+import { createManifestSettlementCheckpointer, preserveResumedManifestCheckpoint } from './manifest-settlement-checkpointer.js';
 import { DurableGraphSettlementGuard, type StoredDurablePrefix } from './durable-prefix-proof.js';
 import type { GraphOwnedRecoveryContext } from './graph-owned-recovery.js';
 import { verifyDurablePage, prepareDurableVerifiedPage, persistDurableRemainingMetadata } from './durable-verified-page.js';
@@ -1029,6 +1029,7 @@ async function runDurableSyncWithBudget(
       }
 
       if (graphScopedManifest && dataResult.resumedFromOffset > 0) {
+        preserveResumedManifestCheckpoint(graphScopedManifest, dataResult, setCheckpoint);
         await settlement.acquire(context.storedPrefix, graphScopedManifest, dataResult.resumedFromOffset, () => {
           deleteCheckpoint(dataResult.checkpointKey);
           deleteCheckpoint(metaResult.checkpointKey);
@@ -1047,7 +1048,7 @@ async function runDurableSyncWithBudget(
           verificationMode,
         );
       } catch (error) {
-        if (graphScopedManifest) deleteCheckpoint(rawDataResult.checkpointKey);
+        if (graphScopedManifest && !signal?.aborted) deleteCheckpoint(rawDataResult.checkpointKey);
         throw error;
       }
       settlement.assertCurrent();

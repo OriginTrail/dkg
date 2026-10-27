@@ -1,4 +1,4 @@
-import { createDurableHeldStore } from '../../src/durable-recovery-held-store.js';
+import { createDurableHeldStore, createStoredPrefixAcquirer } from '../../src/durable-recovery-held-store.js';
 import { runAdmittedDurableGraph } from '../../src/durable-recovery-graph.js';
 import type { DurableRecoveryHost } from '../../src/durable-recovery-host.js';
 import { exactAssetFetchSessionPolicy } from '../../src/sync/requester/exact-durable-fetch.js';
@@ -163,7 +163,7 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 export function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: () => number | undefined; holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
+  options: { signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: () => number | undefined; holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
   const chain = options.chain ?? (() => Object.values(peers)[0]!.current());
@@ -179,7 +179,6 @@ export function node(
   let chainAnswersLeft = chainAnswersPerRound;
   let defaultSubscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
   const materialization = new RecoveryMaterializationOwner({
-    proveHeldAssets: createDurableHeldStore(store, contentFence, async () => {}, () => options.noChain ? 'integrity-only' : 'confirmed')?.prove,
     chain: () => { throw new Error('chain reads supplied below'); }, store: () => store,
     isClosed: () => false, subscription: () => {
       if (options.subscription) return options.subscription();
@@ -215,6 +214,7 @@ export function node(
     ctx,
     remotePeerId,
     contextGraphIds: [CG],
+    signal: options.signal?.(),
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
     fetchSyncPages: (request) => fetchSyncPages({
       ctx: request.ctx,
@@ -248,7 +248,7 @@ export function node(
       logDebug: () => {},
     }),
     ...roundOptions,
-    storedPrefix: options.disablePrefixProof?.() ? undefined : fence.acquireStoredPrefix,
+    storedPrefix: options.disablePrefixProof?.() ? undefined : createStoredPrefixAcquirer(createDurableHeldStore(store, contentFence, async () => {}, () => options.noChain ? 'integrity-only' : 'confirmed')?.prove, CG, fence.assertCurrent),
     graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery, held: options.holdingsShortcut === false ? undefined : {
       confirmCurrent: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
       prove: async request => {
@@ -297,7 +297,7 @@ export function node(
       log: { info: context.logInfo, warn: context.logWarn, debug: context.logDebug },
       reconcile: async () => {}, resolveOrdinaryAuthority: () => { throw new Error('supplied authority'); },
       materialization: () => ({ ...materialization, storeGraphScopedAsset: context.storeGraphScopedAsset! }),
-      heldStore: createDurableHeldStore(store, contentFence, async () => {}),
+      heldStore: options.disablePrefixProof?.() ? undefined : createDurableHeldStore(store, contentFence, async () => {}),
     };
     return runAdmittedDurableGraph({ host, ctx, remotePeerId, contextGraphId: CG, remainingContextGraphs: 1,
       authority: { coalescing: 'owner-only', admitVerifiedPage() {}, isRegisteredPublic: () => true,
@@ -305,7 +305,7 @@ export function node(
       options: { exactAssetFetchPolicy: exactAssetFetchSessionPolicy(selection), exactRecoveryTransportMode: 'legacy',
         settlementSliceTimeoutMs: roundOptions.settlementSliceDeadline === undefined ? undefined : 1 },
     });
-  });
+  }, options.signal?.());
 
   /**
    * A process lifetime: a new owner and a new checkpoint store. With

@@ -575,3 +575,4 @@ export { validateShareReconciliationInput, type ShareReconciliationInput, type S
 export { readShareQueueDepth, readLiftQueueDepth, readLiftJournalEntryCount, type AsyncQueueDepthOptions } from './async-queue-depth.js';
 
 export { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';
+export { parseGraphKnowledgeAssetStructure, type GraphKnowledgeAssetStructure, type GraphKnowledgeAssetStructurePolicy } from './graph-metadata-envelope.js';
