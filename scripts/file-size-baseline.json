@@ -57,7 +57,7 @@
     "packages/agent/src/sync/graph-scoped-swm-recovery.ts": 905,
     "packages/agent/src/sync/requester/durable-sync.ts": 1579,
     "packages/agent/src/sync/requester/page-fetch.ts": 1413,
-    "packages/agent/src/sync/requester/shared-memory-sync.ts": 2255,
+    "packages/agent/src/sync/requester/shared-memory-sync.ts": 2254,
     "packages/agent/src/sync/requester/swm-recovery.ts": 809,
     "packages/agent/src/sync/requester/swm-snapshot-materializer.ts": 928,
     "packages/agent/src/sync/responder/exact-graph-reader.ts": 885,
