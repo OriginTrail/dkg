@@ -465,10 +465,12 @@ export default defineConfig({
       // equal-count version change safe.
       "test/swm-materialization-witness.test.ts",
       "test/replace-subject-agent-wrapper.test.ts",
+      "test/mutation-observed-store-control-options.test.ts",
       "test/replace-subject-and-insert-agent-wrapper.test.ts",
       "test/recipient-key-route-fence.test.ts",
       "test/recipient-key-route-fence-wrapper.test.ts",
       "test/recipient-key-route-fence.property.test.ts",
+      "test/share-retention-key-route-fence.test.ts",
       "test/peer-gate-revision.test.ts",
       "test/recipient-key-route-dependencies.test.ts",
       "test/recipient-key-route-lifecycle.test.ts",
