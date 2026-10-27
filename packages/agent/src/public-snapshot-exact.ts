@@ -15,7 +15,7 @@ export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecove
   readonly canAdmit?: () => boolean;
   /** Whether the asset is already stored as the snapshot pins it. */
   readonly holds?: (ual: string) => Promise<boolean>;
-  /** One lane by default; two still require multiple admitted suppliers. */
+  /** One lane by default; per-peer locks serialize requests to a shared supplier. */
   readonly maxLanes?: 1 | 2;
 }
 
@@ -39,14 +39,7 @@ export async function recoverPublicSnapshotExact(
 ): Promise<PublicSnapshotRecoveryResult> {
   const job = new PublicSnapshotExactJob(options);
   job.assertActive();
-  let lanes = 1;
-  if (options.maxLanes === 2 && options.uals.length > 10) {
-    const discovery = options.peerBatches()[Symbol.asyncIterator]();
-    try {
-      const first = await discovery.next();
-      if (!first.done && first.value.length >= 2) lanes = 2;
-    } finally { await discovery.return?.(); }
-  }
+  const lanes = options.maxLanes === 2 && options.uals.length > 10 ? 2 : 1;
   const partitions: string[][] = Array.from({ length: lanes }, () => []);
   for (let offset = 0; offset < options.uals.length; offset += 10)
     partitions[(offset / 10) % lanes]!.push(...options.uals.slice(offset, offset + 10));
@@ -116,6 +109,7 @@ async function recoverLane(
   for (let offset = 0; offset < uals.length; offset += 10) {
     const batch = uals.slice(offset, offset + 10);
     await skipHeld(batch);
+    if (batch.every(ual => committed.has(ual))) continue;
     const selections: RecoverySelection[] = [
       { uals: batch, transport: 'stream-preferred', answered: new Set() },
       // The stream profile excludes private commitments. Only missing assets

@@ -19,6 +19,27 @@ function deferred() { let resolve!: () => void; const promise = new Promise<void
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('bounded snapshot recovery overlap', () => {
+  it('checks held assets before any supplier discovery', async () => {
+    const discover = vi.fn(() => { throw new Error('held assets must not discover suppliers'); });
+    const transfer = vi.spyOn(execution, 'runExactRecovery');
+    const result = await recoverPublicSnapshotExact(host, { ...options(), holds: async () => true, peerBatches: discover });
+    expect(result).toEqual({ committed: new Set(uals), alreadyPresent: uals.length });
+    expect(discover).not.toHaveBeenCalled(); expect(transfer).not.toHaveBeenCalled();
+  });
+
+  it('serializes all transfers when both workers have one supplier', async () => {
+    let active = 0, peak = 0;
+    const calls: string[][] = [];
+    vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
+      active++; peak = Math.max(peak, active); calls.push([...selected(request)]);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      active--; return success(selected(request));
+    });
+    const result = await recoverPublicSnapshotExact(host, { ...options(), peerBatches: async function* () { yield ['core-a']; } });
+    expect(result.committed).toEqual(new Set(uals)); expect(peak).toBe(1);
+    expect(calls.flat().sort()).toEqual([...uals].sort()); expect(calls.every(batch => batch.length <= 10)).toBe(true);
+  });
+
   it('uses at most two disjoint ten-asset streams and preserves every asset, held check and attempt bound', async () => {
     const gates = [deferred(), deferred()], entered = deferred();
     let active = 0, peak = 0;

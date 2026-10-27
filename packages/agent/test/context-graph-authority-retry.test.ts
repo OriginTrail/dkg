@@ -1179,7 +1179,7 @@ describe('Context Graph subscription authority retry', () => {
     });
   }, 15_000);
 
-  it('retries a transient startup policy failure through the same durable binding', async () => {
+  it.each([false, true])('retries a transient startup policy failure with inactive legacy rows=%s', async includeInactive => {
     const contextGraphId = 'persisted-authoritative-binding-retry';
     const chain = new MockChainAdapter();
     const rows = new Map<string, any>([[contextGraphId, {
@@ -1191,6 +1191,8 @@ describe('Context Graph subscription authority retry', () => {
       syncScoped: true,
       onChainId: '7',
     }]]);
+    const inactiveId = 'inactive-legacy-row';
+    if (includeInactive) rows.set(inactiveId, { id: inactiveId, subscribed: false, coreHosted: false, onChainId: '8' });
     agent = await DKGAgent.create({
       name: 'PersistedAuthoritativeBindingRetry',
       chainAdapter: chain,
@@ -1233,6 +1235,10 @@ describe('Context Graph subscription authority retry', () => {
       { timeout: 10_000 },
     );
 
+    if (includeInactive) {
+      expect(rows.get(inactiveId)).toMatchObject({ subscribed: false, coreHosted: false });
+      expect(agent.getSubscribedContextGraphs().get(inactiveId)?.subscribed).not.toBe(true);
+    }
     expect(targetPolicyAttempts).toBe(2);
     expect(reverse.mock.calls.some(([nameHash]) => nameHash === targetNameHash)).toBe(false);
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({

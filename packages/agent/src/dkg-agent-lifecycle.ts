@@ -9151,7 +9151,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // the sync scope keeps resolving to the cleartext id.
       this.recordPersistedContextGraphIdAliases(persistedRows);
       this.rewriteContextGraphSyncScopeAliases();
-      let rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
+      let rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id) && (r.subscribed || r.coreHosted));
       const namePlaceholders = partitionSupersededContextGraphNamePlaceholders(rows);
       rows = namePlaceholders.active;
       this.contextGraphSubscriptionActivations.reset(rows);
