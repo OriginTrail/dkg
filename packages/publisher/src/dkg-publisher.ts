@@ -12,6 +12,7 @@ import { tryCreateShareCompletionEvidence } from './share-completion-evidence.js
 import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import { readAssertionLifecycleRecord, resolveAssertionReadAuthor, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
+import { readAssertionLifecycleSubjects } from './assertion-lifecycle-subjects.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
@@ -7809,9 +7810,7 @@ export class DKGPublisher implements Publisher {
       await assertKaSlotOwnershipAvailable(this.store, contextGraphId, agentAddress, name, kaNumber, subGraphName);
     }
 
-    const staleEvents = await this.store.query(
-      `SELECT DISTINCT ?s WHERE { GRAPH <${metaGraph}> { ?s ?p ?o . FILTER(STR(?s) = "${lifecycleSubject}" || STRSTARTS(STR(?s), "${lifecycleSubject}/")) } }`,
-    );
+    const staleEvents = await readAssertionLifecycleSubjects(this.store, metaGraph, lifecycleSubject);
     if (staleEvents.type === 'bindings') {
       for (const row of staleEvents.bindings) {
         const subj = row['s'];
