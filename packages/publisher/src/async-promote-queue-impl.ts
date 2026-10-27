@@ -13,7 +13,7 @@ import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { countLeaseRecovery, isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
 /** RDF queue: immutable bound replay or conservative legacy recovery; one owner per assertion. */
 
-import { controlStoreOptions, deleteByPatternWithoutCount, type TripleStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, deleteByPatternWithoutCount, withoutDefaultStoreWorkPriority, type TripleStore } from '@origintrail-official/dkg-storage';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import {
@@ -600,7 +600,9 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private notifyWorkAvailable(): void {
     this.nextIdleClaimAt = 0;
     try {
-      this.workScheduler?.onWorkAvailable();
+      // Issued with no lane scope: the worker tick this starts synchronously (often from inside the mutex) inherits
+      // no ambient lane from the caller, so its data-plane work stays on the shared scheduler's default lane.
+      withoutDefaultStoreWorkPriority(() => this.workScheduler?.onWorkAvailable());
     } catch {
       // Queue persistence has already committed. A best-effort in-process
       // wake must never change the enqueue/recover result; periodic polling

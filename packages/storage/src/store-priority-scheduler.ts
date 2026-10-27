@@ -46,6 +46,15 @@ export function activeDefaultStoreWorkPriority(): StoreWorkPriority | undefined 
 }
 
 /**
+ * Run `fn` with no ambient default lane, whatever its caller scoped. Work `fn` starts, however long it outlives
+ * the call, resolves its lane as if no caller had set one. A wake that starts a long-lived worker from inside a
+ * caller's scope runs through it, so the worker inherits no lane from whoever happened to trigger it.
+ */
+export function withoutDefaultStoreWorkPriority<T>(fn: () => T): T {
+  return defaultStoreWorkPriority.exit(fn);
+}
+
+/**
  * How many operations of one shared lane `store` admits at once, or undefined
  * when the store does not say. Without `priority` it answers for the lane that
  * unprioritised work started here runs in. A caller that fans out reads uses
