@@ -50,7 +50,7 @@ The promote queue keeps its jobs in the node's triple store and never removes a 
 | `intervalMs` | 60,000 | 1,000 to 3,600,000. The pause between two ticks; the first tick comes one interval after the start |
 | `batchSize` | 100 | 1 to 1,000. Rows one tick judges at most |
 | `succeededMaxAgeMs` | 7 days | at least 24 hours (86,400,000) |
-| `benignFailedMaxAgeMs` | 7 days | at least 24 hours, or `null` to keep the two harmless failed classes as well |
+| `benignFailedMaxAgeMs` | 7 days | at least 24 hours, or `null` to keep the two harmless failed classes (the cancelled class and the retired no-effect rejection) as well |
 | `rescanIntervalMs` | 3,600,000 | 60,000 to 7 days. How often a finished pass starts again from the oldest row |
 
 - **`off`** creates nothing and makes no store call.
@@ -68,14 +68,19 @@ A tick judges at most `batchSize` rows, so a large backlog drains at about `batc
   1. `report` has run for at least 14 days on at least one live node, and throughout, the share jobs the 7-day window would keep stay below the 1,000-row bound of the share reconciliation query. The estimate is an upper bound: the share jobs admitted in any trailing 7 days (the accepted `share_async` submissions in the `http=` counters) plus the failed share jobs the policy keeps (the `failed` count of `share_depth`, minus the `cancelled` and `retired_no_effect` figures of `share_retention_pass_would_delete`). If it would not stay below the bound, the window is shortened or the bound revisited before any delete runs.
   2. The would-delete set has been independently reviewed against the policy below and shows an empty diff against the offline oracle.
   3. A CONSTRUCT export of both control graphs was taken immediately before the first delete run.
-  4. The named retention owner signed off immediately before the first delete run.
+  4. The named retention owner signed off immediately before the first delete run, having read the two limits of the cancelled class under "Limits to know about" (recovering and then cancelling a job erases its history; "proven unstarted" covers only `promoteStarted` and `swmInserted`).
 - Starting a node in `delete` mode logs a warning saying so. Never turn `delete` on to "see what happens": use `report`.
 
 ### What it removes, and what it never removes
 
-Removed, each 7 days (the configured window) after the job finished (its `updatedAt`): a **succeeded** job, an **operator-cancelled** job that never started promote and has no recovery binding, and a **certified retired no-effect rejection**. Every other failed job is kept until an operator clears it, because it may be needed for inspection or `recover`.
+Removed, each 7 days (the configured window) after the job finished (its `updatedAt`): a **succeeded** job, an **operator-cancelled** job in which **every attempt is proven unstarted** (below) that has no recovery binding, and a **certified retired no-effect rejection**. Every other failed job is kept until an operator clears it, because it may be needed for inspection or `recover`.
 
-Never removed, whatever its age: a job that is not terminal (`queued`, `running`, `failed_retrying`), one that still owns an unfinished bound share obligation, one an uncertain admission (a lost acknowledgement) still refers to, one a post-commit failure could replay, one written by a newer queue format than this build understands, one whose payload is unreadable or disagrees with its stored index, and one dated after the current time. Every decision is made again from the job's payload, under the queue's lock, immediately before the delete. The publisher queue's journal is never touched.
+**The cancelled class is the narrowest.** A job's commit marker, format and last error describe only its **last** attempt (every claim resets the marker, a reclaim drops it, a later failure overwrites the error), so a job whose first attempt entered promote and whose last attempt was reclaimed reads, once cancelled, like a job that never ran. The sweep therefore deletes a cancelled job only when both of these hold:
+
+- **Every attempt is proven unstarted.** Either the job was never claimed (`attempt.count` is 0 and no preparation attempt is recorded), or `attempt.count` equals `preparationAttempts`, the number of attempts that ended with `promoteStarted` and `swmInserted` both false (recorded from queue format 4). A count the evidence does not cover, one that exceeds it, and one that is not a non-negative integer prove nothing, and the job is kept. A commit marker, when the job has one, must hold all five flags as booleans and none of them may be set.
+- **Its `formatVersion` is an integer of 2 or more**, the first format whose workers record the whole commit marker before they enter promote. A job written by an older queue format (no `formatVersion`, 0 or 1) may have started promote and its history is uncertain, so legacy formats are kept, as is any `formatVersion` that is not an integer from 0 up to this build's (a string, `null`, a fraction, a negative number).
+
+Never removed, whatever its age: a job that is not terminal (`queued`, `running`, `failed_retrying`), one that still owns an unfinished bound share obligation, one an uncertain admission (a lost acknowledgement) still refers to, one a post-commit failure could replay, one written by a newer queue format than this build understands, a cancelled job that fails either condition above, one whose payload is unreadable or disagrees with its stored index, and one dated after the current time. Every decision is made again from the job's payload, under the queue's lock, immediately before the delete. The publisher queue's journal is never touched.
 
 ### After a job is removed
 
@@ -97,6 +102,8 @@ No other runtime reads `queueRetention`: a standalone agent or library use, a wo
 - **Retention never calls `observe()`.** An admission whose outcome is uncertain stays kept (`pending_admission`) until some other durable read of the job settles it, such as a status read through the queue. A sweep never settles it, so such a job can outlive its window.
 - **`held` has no share-queue representation.** A share job a worker holds under a lease is `running`, which the sweep keeps as `not_terminal`.
 - **The `kept` counters are cumulative judgments:** a row kept by one pass is counted again by the next. Only the `lastCompletePass` figures are per pass.
+- **`recover()` followed by `cancel()` erases the history the cancelled class rests on.** An operator `recover` resets `attempt.count` to 0 and drops the commit marker, the last error and `preparationAttempts`. A job that did run (a fatal error, a post-commit failure) and was then recovered and cancelled therefore looks exactly like a job nobody ever claimed, and is deleted once the window has passed. The row cannot tell the two apart: the cancelled class is "no attempt visible on the row", not "no attempt ever". An operator who recovers a job to inspect it and then cancels it should expect it to age out; to keep cancelled jobs regardless, set `benignFailedMaxAgeMs` to `null` (which keeps the retired no-effect rejections too).
+- **"Proven unstarted" is narrower than "had no effect".** It means only that `promoteStarted` and `swmInserted` were false when the attempt ended. Effects of the preparation phase (sealing the share, clearing a prepared completion, the VM cleanup of an assertion's promote recovery) still count as unstarted, the same evidence the queue uses to certify a retired no-effect rejection.
 
 ### Reading the `async_admission_usage` line
 

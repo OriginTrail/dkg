@@ -50,7 +50,7 @@ export interface ShareRetentionSettings {
   batchSize?: number;
   /** Default 7 days (D-6); at least 24 hours. */
   succeededMaxAgeMs?: number;
-  /** Default 7 days (D-6); at least 24 hours. `null` keeps the two harmless failed classes (operator-cancelled, retired no-effect rejection) too. */
+  /** Default 7 days (D-6); at least 24 hours. `null` keeps the two harmless failed classes too: a cancelled job whose every attempt is proven unstarted (at an integer format of 2 or more; legacy formats are always kept) and a retired no-effect rejection. */
   benignFailedMaxAgeMs?: number | null;
   /** Default 3,600,000; from 60,000 to 7 days. */
   rescanIntervalMs?: number;

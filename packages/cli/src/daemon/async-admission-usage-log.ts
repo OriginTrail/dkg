@@ -57,7 +57,8 @@ import type { RetentionQueueName, RetentionUsageView } from './retention-timer.j
  *     share_retention_pass_scanned=300 share_retention_pass_would_delete=cancelled:1,retired_no_effect:0,succeeded:240 share_retention_pass_deleted=cancelled:0,...
  * `_deleted`, `_kept` (judgments by reason), `_skipped` (ticks not run, by reason) and `_errors` (by phase, `tick` for a batch that threw) are cumulative since the
  * process started; `_kept`, `_skipped` and `_errors` list only what is not zero. The `_pass_` fields are a gauge of the latest COMPLETE pass, not cumulative (`-`
- * until one completed): in report mode `_pass_would_delete` is what the plan's delete gate reads.
+ * until one completed): in report mode `_pass_would_delete` is what the plan's delete gate reads. The `cancelled` class counts only jobs whose every attempt is proven
+ * unstarted at an integer format of 2 or more; docs/promote-queue-operations.md states that rule and its two limits.
  *
  * `http=` counts every admission request, 2xx included: `<route>/<phase>/<status>/<code>`, where
  * the phase is the step that answered (`request`, `write_preflight`, `intent_resolution`,

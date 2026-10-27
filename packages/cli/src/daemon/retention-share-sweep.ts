@@ -9,6 +9,11 @@
  *
  * Mode `off` builds nothing and touches neither the agent nor the store.
  *
+ * What may be deleted is decided by the core, never here. For the cancelled class (P10a's final rule) the core deletes a job only when every attempt is proven unstarted
+ * (`attempt.count` equals `preparationAttempts`, or nothing was ever claimed) at an integer `formatVersion` of 2 or more; a legacy format is kept. Two limits belong to the
+ * operator and the delete-gate owner and are stated in docs/promote-queue-operations.md: `recover()` followed by `cancel()` erases the history the class rests on,
+ * and "proven unstarted" means only that `promoteStarted` and `swmInserted` were false when the attempt ended.
+ *
  * If the core still refuses with `ShareRetentionAdmissionUnavailableError` (the queue was not made over `agent.store`: a wiring defect, not something an operator can
  * configure away), the factory logs it as an error, naming the cause, and returns no sweep. The daemon keeps running with share retention not started. That is the
  * deliberate choice: retention is an optional janitor and not starting it is the safe side (nothing is judged, nothing is deleted, every row stays), whereas
