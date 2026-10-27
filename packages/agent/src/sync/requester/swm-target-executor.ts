@@ -16,7 +16,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   reconcileFinalizedSwmTwinFromDescriptor,
-  type FinalizedSwmTwinReconciliationOutcome,
+  type FinalizedSwmTwinDescriptorReconciliationOutcome,
   type FinalizedSwmTwinRetirement,
 } from './finalized-swm-twin-reconciliation.js';
 import { FinalizedSwmTwinMemoV1 } from './finalized-swm-twin-memo.js';
@@ -423,7 +423,7 @@ export class SwmTargetExecutorV1 {
     target: PublicSwmTargetV1,
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-  ): Promise<FinalizedSwmTwinReconciliationOutcome> {
+  ): Promise<FinalizedSwmTwinDescriptorReconciliationOutcome> {
     return reconcileFinalizedSwmTwinFromDescriptor({
       store: this.#ports.store,
       writeLocks: this.#ports.writeLocks,
@@ -437,7 +437,7 @@ export class SwmTargetExecutorV1 {
     target: PublicSwmTargetV1,
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-    retirement: FinalizedSwmTwinReconciliationOutcome,
+    retirement: FinalizedSwmTwinDescriptorReconciliationOutcome,
   ): Promise<void> {
     // The twin's graph and head are already gone at this point. The rest of
     // its cleanup is separate: if its failure escaped, the caller would treat

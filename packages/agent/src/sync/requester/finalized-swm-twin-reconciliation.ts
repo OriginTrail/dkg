@@ -38,17 +38,25 @@ const DKG = 'http://dkg.io/ontology/';
 export type FinalizedSwmTwinReconciliationOutcome =
   | 'retired'
   | 'already-retired-finalized'
-  /**
-   * Descriptor path only: the copy's graph is gone, but rows of a head that is
-   * not exact are left. Elsewhere that reads as 'already-retired-finalized'.
-   */
-  | 'retired-head-residue'
   | 'head-missing-or-ambiguous'
   | 'head-version-mismatch'
   | 'vm-metadata-mismatch'
   | 'swm-commitment-mismatch'
   | 'vm-changed'
   | 'content-mismatch';
+
+/**
+ * The descriptor path's outcomes: also a copy whose graph is gone while rows
+ * of a head that is not exact are left ('retired-head-residue'), which a
+ * caller that has not written the snapshot must not take for a finished
+ * retirement. The VM and catalog arrivals read it as 'already-retired-finalized'.
+ */
+export type FinalizedSwmTwinDescriptorReconciliationOutcome =
+  | FinalizedSwmTwinReconciliationOutcome
+  | 'retired-head-residue';
+
+/** The shared proof's own result, before an entry point names an inexact head over an empty graph. */
+type FinalizedSwmTwinProofOutcome = FinalizedSwmTwinReconciliationOutcome | 'inexact-head-without-data';
 
 export interface FinalizedSwmTwinRetirement {
   readonly contextGraphId: string;
@@ -234,7 +242,7 @@ export async function reconcileFinalizedSwmTwinFromDescriptor(params: {
   readonly contextGraphId: string;
   readonly descriptor: GraphScopedSwmRecoveryDescriptor;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
-}): Promise<FinalizedSwmTwinReconciliationOutcome> {
+}): Promise<FinalizedSwmTwinDescriptorReconciliationOutcome> {
   const evidence = evidenceFromSwmDescriptor(params.contextGraphId, params.descriptor);
   const outcome = await reconcileFinalizedSwmTwinEvidence({
     store: params.store,
@@ -307,7 +315,7 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
   readonly writeLocks: Map<string, Promise<void>>;
   readonly evidence: FinalizedSwmTwinEvidence;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
-}): Promise<Exclude<FinalizedSwmTwinReconciliationOutcome, 'retired-head-residue'> | 'inexact-head-without-data'> {
+}): Promise<FinalizedSwmTwinProofOutcome> {
   const { evidence } = params;
   const lockKey = swmKaWriteLockKey(
     evidence.contextGraphId,
