@@ -8,7 +8,7 @@ import type { PromoteJob } from '../src/async-promote-queue-types.js';
 import { decidePromoteRetention } from '../src/async-promote-retention-policy.js';
 import { SHARE_RETENTION_DEFAULTS, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import {
-  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, W, WF, binding, noPending,
+  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, UNCLAIMED, W, WF, binding, cancelledJob, noPending,
   decide, decideText, deletedSubjects, drain, insertQuads, mk, newRetention, pick, present, put, parseText, payloadWithFormatVersion, registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, from,
   captureLogger, policy, standInForTheQueue, type Kind, type Quads, type QueryResult,
 } from './_helpers/share-retention-fixtures.js';
@@ -22,7 +22,7 @@ import {
 describe('retention decision (one job)', () => {
   it('deletes an old succeeded job, an old operator-cancelled job and an old certified no-effect rejection', () => {
     expect(decide(mk('s', 'succeeded'))).toEqual({ delete: true, jobClass: 'succeeded' });
-    expect(decide(mk('c', 'failed', { reason: 'cancelled' }))).toEqual({ delete: true, jobClass: 'cancelled' });
+    expect(decide(cancelledJob('c', {}))).toEqual({ delete: true, jobClass: 'cancelled' });
     expect(decide(retired('r'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
   });
 
@@ -35,18 +35,18 @@ describe('retention decision (one job)', () => {
     ['failed with an exhausted post-commit recovery (needs the operator)', mk('ex', 'failed', { reason: 'automatic post-commit recovery exhausted after 5 attempts; needs operator inspection' }), 'failed_retained'],
     ['failed partial-promote ambiguity', mk('amb', 'failed', { reason: 'partial promote ambiguity: lease expired while job was running; needs operator inspection' }), 'failed_retained'],
     ['failed legacy / fatal error', mk('fatal', 'failed', { attempt: { count: 5, maxRetries: 5, lastError: { message: 'boom', retryable: false, classification: 'fatal', recordedAt: 1 } } }), 'failed_retained'],
-    ['cancelled-looking row that already started promote', mk('cs', 'failed', { reason: 'cancelled', commitMarker: STARTED }), 'failed_retained'],
+    ['cancelled-looking row that already started promote', cancelledJob('cs', { commitMarker: STARTED }), 'failed_retained'],
     ['written by a newer queue format', mk('nf', 'succeeded', { formatVersion: 5 }), 'newer_format'],
     ['younger than the window', mk('y', 'succeeded', {}, W - 1), 'too_recent'],
     ['updatedAt in the future', mk('fut', 'succeeded', {}, -1000), 'future_dated'],
   ])('keeps %s', (_name, j, reason) => { expect(decide(j as ReturnType<typeof mk>)).toEqual({ delete: false, reason }); });
 
   it('never deletes a failed job when no benign-failed window is configured, and respects each window exactly at its boundary', () => {
-    expect(decide(mk('c', 'failed', { reason: 'cancelled' }), { succeededMaxAgeMs: W })).toEqual({ delete: false, reason: 'failed_retained' });
+    expect(decide(cancelledJob('c', {}), { succeededMaxAgeMs: W })).toEqual({ delete: false, reason: 'failed_retained' });
     expect(decide(mk('e', 'succeeded', {}, W))).toEqual({ delete: true, jobClass: 'succeeded' });
     expect(decide(mk('e', 'succeeded', {}, W - 1))).toEqual({ delete: false, reason: 'too_recent' });
-    expect(decide(mk('f', 'failed', { reason: 'cancelled' }, WF))).toEqual({ delete: true, jobClass: 'cancelled' });
-    expect(decide(mk('f', 'failed', { reason: 'cancelled' }, WF - 1))).toEqual({ delete: false, reason: 'too_recent' });
+    expect(decide(cancelledJob('f', {}, WF))).toEqual({ delete: true, jobClass: 'cancelled' });
+    expect(decide(cancelledJob('f', {}, WF - 1))).toEqual({ delete: false, reason: 'too_recent' });
   });
 
   it('keeps a job an uncertain admission still refers to', () => {
@@ -178,7 +178,7 @@ describe('retention batch against the real queue', () => {
   it('a delete removes the triples of its own subject in the control graph and nothing else: the same subject in another graph, other subjects and other graphs survive', async () => {
     const store = new OxigraphStore();
     const OTHER_GRAPH = 'urn:dkg:publisher:journal';
-    await put(store, mk('s', 'succeeded'), mk('f', 'failed', { reason: 'cancelled' }), mk('q', 'queued'), mk('bystander', 'succeeded', {}, 1000));
+    await put(store, mk('s', 'succeeded'), cancelledJob('f', {}), mk('q', 'queued'), mk('bystander', 'succeeded', {}, 1000));
     const foreign = [
       { subject: jobSubject('s'), predicate: 'urn:test:p', object: '"same subject, other graph"', graph: OTHER_GRAPH },
       { subject: 'urn:test:journal:entry-1', predicate: 'urn:test:p', object: '"journal row"', graph: OTHER_GRAPH },
@@ -252,7 +252,7 @@ describe('retention batch against the real queue', () => {
   it('a window at the floor behaves as configured: a succeeded job just over 24 hours old goes, one just under stays', async () => {
     const DAY = 24 * 3_600_000;
     const store = new OxigraphStore();
-    await put(store, mk('over', 'succeeded', {}, DAY + 1), mk('exact', 'succeeded', {}, DAY), mk('under', 'succeeded', {}, DAY - 1), mk('cancelled-over', 'failed', { reason: 'cancelled' }, DAY + 1), mk('cancelled-under', 'failed', { reason: 'cancelled' }, DAY - 1));
+    await put(store, mk('over', 'succeeded', {}, DAY + 1), mk('exact', 'succeeded', {}, DAY), mk('under', 'succeeded', {}, DAY - 1), cancelledJob('cancelled-over', {}, DAY + 1), cancelledJob('cancelled-under', {}, DAY - 1));
     await drain(newRetention(store, { succeededMaxAgeMs: DAY, benignFailedMaxAgeMs: DAY, batchSize: 10 }));
     expect([...(await storedIds(store))].sort()).toEqual(['cancelled-under', 'under']);
   });
@@ -541,7 +541,7 @@ describe('retention safety on randomised stores (independent oracle)', () => {
         const kind = pick(r, ['succeeded', 'succeeded', 'queued', 'running', 'failed_retrying', 'failed-plain', 'failed-cancelled', 'failed-bound', 'failed-retired', 'failed-ambiguity', 'newer']);
         jobs.push(kind === 'succeeded' ? mk(`j${i}`, 'succeeded', {}, age) : kind === 'queued' ? mk(`j${i}`, 'queued', {}, age) : kind === 'running' ? mk(`j${i}`, 'running', { lease: LEASE }, age)
           : kind === 'failed_retrying' ? mk(`j${i}`, 'failed_retrying', {}, age) : kind === 'failed-plain' ? mk(`j${i}`, 'failed', {}, age)
-          : kind === 'failed-cancelled' ? mk(`j${i}`, 'failed', { reason: 'cancelled' }, age) : kind === 'failed-bound' ? mk(`j${i}`, 'failed', { bound: true }, age)
+          : kind === 'failed-cancelled' ? cancelledJob(`j${i}`, {}, age) : kind === 'failed-bound' ? mk(`j${i}`, 'failed', { bound: true }, age)
           : kind === 'failed-retired' ? retired(`j${i}`, age) : kind === 'failed-ambiguity' ? mk(`j${i}`, 'failed', { reason: 'partial promote ambiguity: x' }, age)
           : mk(`j${i}`, 'succeeded', { formatVersion: 5 }, age));
       }
@@ -585,11 +585,11 @@ describe('retention safety on randomised stores (independent oracle)', () => {
 
 describe('keep rules the policy adds to the prototype', () => {
   it.each([
-    ['a cancelled job that carries a post-commit failure', mk('c1', 'failed', { reason: 'cancelled', attempt: { count: 1, maxRetries: 5, lastError: POST_COMMIT_ERROR } }), 'post_commit_recoverable'],
-    ['a cancelled job whose free text asks for manual inspection', mk('c2', 'failed', { reason: 'cancelled', attempt: { count: 1, maxRetries: 5, lastError: { message: 'partial promote ambiguity', retryable: false, classification: 'fatal', recordedAt: 1 } } }), 'failed_retained'],
-    ['a cancelled job whose free text is not a string (the predicates throw: kept as unreadable)', mk('c3', 'failed', { reason: 'cancelled', attempt: { count: 1, maxRetries: 5, lastError: { message: 42, retryable: false, classification: 'fatal', recordedAt: 1 } } }), 'unreadable'],
-    ['a cancelled job that swm-inserted', mk('c4', 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, swmInserted: true } }), 'failed_retained'],
-    ['a bound cancelled job (it owns a recovery obligation)', mk('c5', 'failed', { reason: 'cancelled', bound: true }), 'unfinished_bound_obligation'],
+    ['a cancelled job that carries a post-commit failure', cancelledJob('c1', { attempt: { count: 1, maxRetries: 5, lastError: POST_COMMIT_ERROR } }), 'post_commit_recoverable'],
+    ['a cancelled job whose free text asks for manual inspection', cancelledJob('c2', { attempt: { count: 1, maxRetries: 5, lastError: { message: 'partial promote ambiguity', retryable: false, classification: 'fatal', recordedAt: 1 } } }), 'failed_retained'],
+    ['a cancelled job whose free text is not a string (the predicates throw: kept as unreadable)', cancelledJob('c3', { attempt: { count: 1, maxRetries: 5, lastError: { message: 42, retryable: false, classification: 'fatal', recordedAt: 1 } } }), 'unreadable'],
+    ['a cancelled job that swm-inserted', cancelledJob('c4', { commitMarker: { ...NO_MARKERS, swmInserted: true } }), 'failed_retained'],
+    ['a bound cancelled job (it owns a recovery obligation)', cancelledJob('c5', { bound: true }), 'unfinished_bound_obligation'],
   ])('keeps %s', (_name, job, reason) => { expect(decide(job as ReturnType<typeof mk>)).toEqual({ delete: false, reason }); });
 
   describe('the diagnostic code alone does not make a retired no-effect rejection: the certification the class requires does', () => {
@@ -644,7 +644,7 @@ describe('keep rules the policy adds to the prototype', () => {
   it('the default windows are the D-6 window of seven days for both classes', async () => {
     const store = new OxigraphStore();
     const day = 24 * 3_600_000;
-    await put(store, mk('s6', 'succeeded', {}, 6 * day), mk('s7', 'succeeded', {}, 7 * day), mk('c6', 'failed', { reason: 'cancelled' }, 6 * day), mk('c7', 'failed', { reason: 'cancelled' }, 7 * day),
+    await put(store, mk('s6', 'succeeded', {}, 6 * day), mk('s7', 'succeeded', {}, 7 * day), cancelledJob('c6', {}, 6 * day), cancelledJob('c7', {}, 7 * day),
       mk('r7', 'failed', {}, 30 * day));
     standInForTheQueue(store);                                                                    // no queue is built here; the sweep needs the coordinator its constructor makes
     const retention = createShareRetention({ store, mode: 'delete', intervalMs: 60_000, now: () => NOW, monotonicNow: () => 0, logger: captureLogger() });
@@ -656,7 +656,7 @@ describe('keep rules the policy adds to the prototype', () => {
 describe('a commit marker flag that is not a boolean is no evidence that promote never started (review of P10a: malformed promoteStarted)', () => {
   const FLAGS = ['promoteStarted', 'swmInserted', 'wmCleaned', 'lifecycleStamped', 'gossiped'] as const;
   const BAD: ReadonlyArray<[string, unknown]> = [['"true"', 'true'], ['"false"', 'false'], ['""', ''], ['1', 1], ['0', 0], ['null', null], ['{}', {}], ['[]', []]];
-  const cancelled = (id: string, commitMarker?: unknown, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', ...(commitMarker === undefined ? {} : { commitMarker }), ...over });
+  const cancelled = (id: string, commitMarker?: unknown, over: Record<string, unknown> = {}) => cancelledJob(id, { ...(commitMarker === undefined ? {} : { commitMarker }), ...over });
   // The shared classifier checks four of the five flags and lets a bad promoteStarted through, and the policy must not lean on it for the other four either:
   // the unit cases hand the policy the raw object, bypassing the classifier.
   const raw = (j: PromoteJob) => decidePromoteRetention(j as never, NOW, policy, noPending);
@@ -715,7 +715,7 @@ describe('a commit marker flag that is not a boolean is no evidence that promote
 describe('a missing promoteStarted is never accepted, a legacy row is no cancelled class, and a marker that says the job ran keeps it (second and fourth review of P10a)', () => {
   /** The marker a row written before format 2 carries: every flag but `promoteStarted`. Only a claim writes it, so it proves the job was claimed and ran. */
   const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
-  const cancelled = (id: string, commitMarker: unknown, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', commitMarker, ...over });
+  const cancelled = (id: string, commitMarker: unknown, over: Record<string, unknown> = {}) => cancelledJob(id, { commitMarker, ...over });
   /** A marker as the parser reads it from JSON: `__proto__` is an own key there, not the prototype. */
   const fromJson = (json: string) => JSON.parse(json) as Record<string, unknown>;
   const NO_PS = '"swmInserted":false,"wmCleaned":false,"lifecycleStamped":false,"gossiped":false';
@@ -827,7 +827,7 @@ describe('a missing promoteStarted is never accepted, a legacy row is no cancell
 describe('the cancelled class needs a format that stores the whole commit marker: an integer from 2 up to this build\'s (third and fourth review of P10a: no legacy row is "never started")', () => {
   /** The marker a row written before format 2 carries: every flag but `promoteStarted`. */
   const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
-  const cancelled = (id: string, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', commitMarker: LEGACY, ...over });
+  const cancelled = (id: string, over: Record<string, unknown> = {}) => cancelledJob(id, { commitMarker: LEGACY, ...over });
   const MARKERS: ReadonlyArray<[string, unknown]> = [['the pre-format-2 marker', LEGACY], ['a complete marker', NO_MARKERS], ['no marker', undefined]];
   // JSON numbers as the parser reads them from the stored payload text. `JSON.stringify` writes -0 as 0 and -Infinity as null, so the text is built by hand.
   // 0 and 1 are the legacy formats; the others are numbers no writer produced (the parser does not validate `formatVersion`, so the policy does).
@@ -1039,7 +1039,7 @@ describe('repeated rows of one subject in the scan (review of P10a: a subject th
 
   it.each(['delete', 'report'] as const)('%s mode, batch size 1: a retained job whose index holds 100 (integer) and 100.0 (decimal) stays, the cancelled job at 200 behind it is judged, the pass completes, no anomaly', async mode => {
     const store = new OxigraphStore();
-    await insertQuads(store, [...withUpdatedAtTerms(mk('retained', 'failed', {}, NOW - 100), ...same(100)), ...serializeJobRecord(mk('eligible', 'failed', { reason: 'cancelled' }, NOW - 200), GRAPH).jobQuads]);
+    await insertQuads(store, [...withUpdatedAtTerms(mk('retained', 'failed', {}, NOW - 100), ...same(100)), ...serializeJobRecord(cancelledJob('eligible', {}, NOW - 200), GRAPH).jobQuads]);
     const { store: spied, log } = spy(store);
     const retention = newRetention(spied, { mode, batchSize: 1 });
     const results = await calls(retention);
@@ -1096,7 +1096,7 @@ describe('repeated rows of one subject in the scan (review of P10a: a subject th
 
   it.each(['delete', 'report'] as const)('%s mode: a subject whose index holds two DISTINCT updatedAt values (the queue cannot write that) cannot stall a pass either', async mode => {
     const store = new OxigraphStore();
-    const twoValues = serializeJobRecord(mk('odd', 'failed', { reason: 'cancelled' }, NOW - 100), GRAPH).jobQuads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? [q, { ...q, object: integer(300) }] : [q]));
+    const twoValues = serializeJobRecord(cancelledJob('odd', {}, NOW - 100), GRAPH).jobQuads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? [q, { ...q, object: integer(300) }] : [q]));
     await insertQuads(store, [...twoValues, ...serializeJobRecord(mk('after', 'succeeded', {}, NOW - 400), GRAPH).jobQuads]);
     const retention = newRetention(store, { mode, batchSize: 1 });
     const results = await calls(retention);
@@ -1194,7 +1194,7 @@ describe('only exact integer timestamps are scan candidates (second review of P1
   it.each(CASES.flatMap(c => (['delete', 'report'] as const).map(mode => [c.label, mode, c] as const)))('%s, %s mode: the pass completes at batch size 1 and 2, the cancelled job behind is reached, no anomaly', async (_label, mode, c) => {
     for (const batchSize of [1, 2]) {
       const store = new OxigraphStore();
-      await insertQuads(store, [...withTerms(mk('ret', 'failed', {}, NOW - c.retained), ...c.terms), ...serializeJobRecord(mk('eligible', 'failed', { reason: 'cancelled' }, NOW - c.eligible), GRAPH).jobQuads]);
+      await insertQuads(store, [...withTerms(mk('ret', 'failed', {}, NOW - c.retained), ...c.terms), ...serializeJobRecord(cancelledJob('eligible', {}, NOW - c.eligible), GRAPH).jobQuads]);
       const retention = newRetention(store, { mode, batchSize });
       const results = await calls(retention);
       const at = `batch size ${batchSize}, ${results.length} calls, anomalies ${results.map(r => r.anomalies)}`;
@@ -1213,7 +1213,7 @@ describe('only exact integer timestamps are scan candidates (second review of P1
   it('a job whose only updatedAt term is not an integer is never a candidate: it is neither judged nor deleted, even when it would be eligible', async () => {
     const store = new OxigraphStore();
     await insertQuads(store, [
-      ...withTerms(mk('dec', 'failed', { reason: 'cancelled' }, NOW - 150), decimal('150')), ...withTerms(mk('dbl', 'succeeded', {}, NOW - 160), `"1.6E2"^^<${XSD}double>`),
+      ...withTerms(cancelledJob('dec', {}, NOW - 150), decimal('150')), ...withTerms(mk('dbl', 'succeeded', {}, NOW - 160), `"1.6E2"^^<${XSD}double>`),
       ...withTerms(mk('str', 'succeeded', {}, NOW - 170), '"170"'), ...withTerms(mk('neg', 'succeeded', {}, NOW + 5), integer(-5)),
       ...serializeJobRecord(mk('plain', 'succeeded', {}, NOW - 300), GRAPH).jobQuads,
     ]);

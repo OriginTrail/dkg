@@ -36,6 +36,15 @@ export function mk(id: string, state: PromoteJob['state'], over: Record<string, 
   return { jobId: id, request, state, enqueuedAt: NOW - age - 1000, updatedAt: NOW - age, attempt: { count: 1, maxRetries: 5 }, formatVersion: 4, ...rest } as PromoteJob;
 }
 
+/** The attempt state of a job no worker ever claimed (`count` 0): every one of its (no) attempts is trivially unstarted. */
+export const UNCLAIMED = { count: 0, maxRetries: 5 };
+/**
+ * An operator-cancelled job that retention may delete once old enough: cancelled while queued and never claimed (`attempt.count` 0, format 4, no recovery binding,
+ * no marker). `mk` defaults to `attempt.count` 1 with no `preparationAttempts`, which is NOT proven unstarted (an earlier attempt may have entered promote), so a test
+ * that means a deletable cancelled job, or that isolates one other rule on an otherwise deletable one, builds it here. `over` replaces any field.
+ */
+export const cancelledJob = (id: string, over: Record<string, unknown> = {}, age = 10 * W): PromoteJob => mk(id, 'failed', { reason: 'cancelled', attempt: UNCLAIMED, ...over }, age);
+
 export const NO_MARKERS = { promoteStarted: false, swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
 export const STARTED = { ...NO_MARKERS, promoteStarted: true };
 export const LEASE = { workerId: 'w', acquiredAt: 1, expiresAt: 9e12, lastHeartbeatAt: 1, claimToken: 't' };
@@ -163,7 +172,7 @@ export type Kind = 'succeeded' | 'cancelled' | 'retired' | 'fatal' | 'bound' | '
 export const DELETABLE: ReadonlySet<Kind> = new Set(['succeeded', 'cancelled', 'retired']);
 export function rowOf(kind: Kind, id: string, age: number): Quads {
   const jobFor: Record<Kind, () => PromoteJob> = {
-    succeeded: () => mk(id, 'succeeded', {}, age), cancelled: () => mk(id, 'failed', { reason: 'cancelled' }, age), retired: () => retired(id, age),
+    succeeded: () => mk(id, 'succeeded', {}, age), cancelled: () => cancelledJob(id, {}, age), retired: () => retired(id, age),
     fatal: () => mk(id, 'failed', { attempt: { count: 5, maxRetries: 5, lastError: { message: 'boom', retryable: false, classification: 'fatal', recordedAt: 1 } } }, age),
     bound: () => mk(id, 'failed', { bound: true }, age), newer: () => mk(id, 'succeeded', { formatVersion: 5 }, age), corrupt: () => mk(id, 'succeeded', {}, age),
     orphan: () => mk(id, 'succeeded', {}, age), lying: () => mk(id, 'succeeded', {}, age),
@@ -251,17 +260,17 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
     case 'failed-postcommit': return mk(id, 'failed', { commitMarker: STARTED, attempt: { count: 1, maxRetries: 5, lastError: POST_COMMIT_ERROR } }, age);
     case 'failed-postcommit-exhausted': return mk(id, 'failed', { reason: 'automatic post-commit recovery exhausted after 5 attempts; needs operator inspection', commitMarker: STARTED, attempt: { count: 5, maxRetries: 5, lastError: POST_COMMIT_ERROR } }, age);
     case 'failed-bound': return mk(id, 'failed', { bound: true }, age);
-    case 'failed-cancelled': return mk(id, 'failed', { reason: 'cancelled' }, age);
-    case 'failed-cancelled-started': return mk(id, 'failed', { reason: 'cancelled', commitMarker: STARTED }, age);
-    case 'failed-cancelled-swm': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, swmInserted: true } }, age);
-    case 'failed-cancelled-bound': return mk(id, 'failed', { reason: 'cancelled', bound: true }, age);
-    case 'failed-cancelled-bad-marker': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, promoteStarted: 'true' } }, age);
+    case 'failed-cancelled': return cancelledJob(id, {}, age);
+    case 'failed-cancelled-started': return cancelledJob(id, { commitMarker: STARTED }, age);
+    case 'failed-cancelled-swm': return cancelledJob(id, { commitMarker: { ...NO_MARKERS, swmInserted: true } }, age);
+    case 'failed-cancelled-bound': return cancelledJob(id, { bound: true }, age);
+    case 'failed-cancelled-bad-marker': return cancelledJob(id, { commitMarker: { ...NO_MARKERS, promoteStarted: 'true' } }, age);
     // The history of a legacy cancelled row is uncertain, so it is a protected kind: a 4-flag marker was only ever written by claimNext (the job was claimed and ran), and a pre-v2
     // reclaim cleared the marker of a running job and requeued it with its attempt count, so a later cancel leaves no marker on a job that may have started promote.
-    case 'failed-cancelled-legacy': return mk(id, 'failed', { reason: 'cancelled', formatVersion: 1, commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false }, attempt: LEGACY_HISTORY }, age);
-    case 'failed-cancelled-legacy-no-marker': return mk(id, 'failed', { reason: 'cancelled', formatVersion: undefined, attempt: LEGACY_HISTORY }, age);
-    case 'failed-cancelled-no-started-flag': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);   // format 4: not legacy
-    case 'failed-cancelled-contradictory': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, gossiped: true } }, age);
+    case 'failed-cancelled-legacy': return cancelledJob(id, { formatVersion: 1, commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false }, attempt: LEGACY_HISTORY }, age);
+    case 'failed-cancelled-legacy-no-marker': return cancelledJob(id, { formatVersion: undefined, attempt: LEGACY_HISTORY }, age);
+    case 'failed-cancelled-no-started-flag': return cancelledJob(id, { commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);   // format 4: not legacy
+    case 'failed-cancelled-contradictory': return cancelledJob(id, { commitMarker: { ...NO_MARKERS, gossiped: true } }, age);
     case 'failed-retired': return retired(id, age);
   }
 }

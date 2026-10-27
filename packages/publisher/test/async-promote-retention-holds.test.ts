@@ -10,7 +10,7 @@ import { SHARE_RETENTION_DEFAULTS } from '../src/async-promote-retention.js';
 import { JOB_SUBJECT_PREFIX } from '../src/async-promote-retention-scan.js';
 import { jobSubject } from '../src/async-promote-queue-utils.js';
 import { withPromoteControlLock } from '../src/promote-control-lock.js';
-import { AG, GRAPH, NOW, W, deletedSubjects, drain, from, mk, newRetention, present, put, registerPendingFlight, retired, spy, storedIds, type Logged } from './_helpers/share-retention-fixtures.js';
+import { AG, GRAPH, NOW, W, cancelledJob, deletedSubjects, drain, from, mk, newRetention, present, put, registerPendingFlight, retired, spy, storedIds, type Logged } from './_helpers/share-retention-fixtures.js';
 
 const RETENTION = 'publisher.asyncPromote.retention.';
 const isRetention = (l: Logged) => l.source?.startsWith(RETENTION) === true;
@@ -74,7 +74,7 @@ describe('verify and delete are on the control path, the scan is background, del
   it('tags every call with its row of the tagging table and never issues a bulk update', async () => {
     const store = new OxigraphStore();
     const { store: spied, log } = spy(store);
-    await put(store, ...oldJobs(6), retired('r1'), mk('c1', 'failed', { reason: 'cancelled' }));
+    await put(store, ...oldJobs(6), retired('r1'), cancelledJob('c1', {}));
     await newRetention(spied, { batchSize: 100, sliceSize: 4 }).runBatch();
     const scans = from(log, 'scan'), verifies = from(log, 'verify'), deletes = from(log, 'delete');
     expect(scans.length).toBeGreaterThan(0);
@@ -327,7 +327,7 @@ describe('interleavings with the queue never cost a job that is no longer, or no
       },
     });
     holder.queue = queueOver(spied);
-    await put(store, mk('cancelled-1', 'failed', { reason: 'cancelled' }), mk('cancelled-2', 'failed', { reason: 'cancelled' }, 10 * W + 5), ...oldJobs(2));
+    await put(store, cancelledJob('cancelled-1', {}), cancelledJob('cancelled-2', {}, 10 * W + 5), ...oldJobs(2));
     const res = await newRetention(spied, { batchSize: 100 }).runBatch();
     expect(revived).toBe(true);
     expect(res.deletedJobs.map(j => j.jobId).sort()).toEqual(['cancelled-2', 'old-000', 'old-001']);
@@ -347,7 +347,7 @@ describe('interleavings with the queue never cost a job that is no longer, or no
     });
     holder.queue = queueOver(spied);
     // the oldest rows first: three succeeded (hold 1), then the cancelled job, then more succeeded
-    await put(store, mk('s1', 'succeeded', {}, 100 * W), mk('s2', 'succeeded', {}, 99 * W), mk('s3', 'succeeded', {}, 98 * W), mk('cancelled-late', 'failed', { reason: 'cancelled' }, 97 * W),
+    await put(store, mk('s1', 'succeeded', {}, 100 * W), mk('s2', 'succeeded', {}, 99 * W), mk('s3', 'succeeded', {}, 98 * W), cancelledJob('cancelled-late', {}, 97 * W),
       mk('s4', 'succeeded', {}, 96 * W), mk('s5', 'succeeded', {}, 95 * W));
     const res = await newRetention(spied, { batchSize: 100, sliceSize: 3 }).runBatch();
     await recovered;
@@ -403,7 +403,7 @@ describe('interleavings with the queue never cost a job that is no longer, or no
   it('operations interleaved with every store call of a batch: nothing that became non-terminal or pending is deleted afterwards', async () => {
     const store = new OxigraphStore();
     const holder: { queue?: TripleStoreAsyncPromoteQueue } = {};
-    const revivable = Array.from({ length: 8 }, (_, i) => mk(`cx-${i}`, 'failed', { reason: 'cancelled' }, 10 * W + i));
+    const revivable = Array.from({ length: 8 }, (_, i) => cancelledJob(`cx-${i}`, {}, 10 * W + i));
     const guarded = Array.from({ length: 8 }, (_, i) => mk(`gx-${i}`, 'succeeded', {}, 10 * W + 100 + i));
     const revived = new Set<string>(), guardedAt = new Map<string, number>();
     const ops: Promise<unknown>[] = [];
