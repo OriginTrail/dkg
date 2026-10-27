@@ -421,6 +421,7 @@ table td,
 }
 
 input[type="text"],
+input[type="password"],
 input[type="number"],
 select,
 textarea {
@@ -442,6 +443,13 @@ textarea {
   resize: vertical;
   min-height: 84px;
   line-height: 1.5;
+}
+
+input:disabled,
+select:disabled {
+  color: var(--text-3);
+  background: var(--sunken);
+  cursor: not-allowed;
 }
 
 input.is-invalid,
@@ -1609,8 +1617,89 @@ details.receipt > summary {
   list-style-position: inside;
 }
 
-details.receipt > .kv {
+details.receipt > .kv,
+details.receipt > .table-wrap {
   padding: 0 var(--sp-3) var(--sp-3);
+}
+
+/* buyer gateway (API keys) */
+
+.gw-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--sp-5);
+}
+
+.gw-col {
+  min-width: 0;
+}
+
+.gw-col .seg-toggle {
+  margin-bottom: var(--sp-2);
+  flex-wrap: wrap;
+}
+
+/* A label-styled caption for a control group that is not a single input. */
+.label-like {
+  display: block;
+  font-size: var(--fs-xs);
+  font-weight: 600;
+  color: var(--text-2);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.label-like + .check {
+  min-height: 34px;
+}
+
+.snippet {
+  max-height: 320px;
+  white-space: pre-wrap;
+}
+
+.key-once .state-title code {
+  font-size: 1em;
+}
+
+.key-reveal {
+  background: var(--surface);
+  border: 1px dashed var(--ok);
+  border-radius: var(--radius);
+  padding: var(--sp-2) var(--sp-3);
+  margin-top: var(--sp-2);
+  font-family: var(--font-mono);
+  font-size: var(--fs-sm);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.key-reveal code {
+  font-size: 1em;
+}
+
+.gw-chat-form {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1fr);
+  gap: var(--sp-3);
+  align-items: start;
+}
+
+.gw-chat-form .gw-wide {
+  grid-column: 1 / -1;
+}
+
+.gw-chat-form textarea {
+  min-height: 56px;
+}
+
+/* offerings editor: one full-width line under a chat-connector row */
+.offering-row .offering-ext {
+  grid-column: 1 / -1;
+  font-size: var(--fs-xs);
+  color: var(--text-2);
+  line-height: 1.5;
 }
 
 /* checklist */
@@ -1929,6 +2018,16 @@ footer {
   .bucket-row,
   .offering-row {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .gw-grid,
+  .gw-chat-form {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  code.nowrap-sm {
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .bucket-row .rm,

@@ -2,8 +2,13 @@
 // Every amount is bigint wei; display strings are derived with exact
 // integer math (no floating-point money). Talks only to the console server:
 //   /node/<n>/api/marketplace/*  (token injected server-side)
+//   /node/2/api/marketplace/gateway/v1/*
+//                                 (the buyer gateway: the console forwards THIS page's
+//                                  `Authorization: Bearer <gateway key>`, never a node token)
 //   /chain/*                      (server-side ethers reads + devnet controls)
 //   /console/state                (plan policies / offering sets the console sent)
+//   /console/llm-stub             (is the devnet llm-stub up?)
+// A minted gateway key lives in this page's memory only (never in storage).
 'use strict';
 
 (() => {
@@ -32,13 +37,23 @@
       { serviceType: 'query', modelId: '', budgetTrac: '0.004', capMicro: '20', maxUnits: '200' },
     ],
   };
-  const DEVNET_OFFERINGS = {
+  /**
+   * Fallback "devnet defaults" when the console server does not serve the
+   * seeder's sets (devnet-offerings.mjs → /console/state devnetOfferings).
+   * Chat-connector offerings need server-side paths, so they come only from
+   * the server.
+   */
+  const DEVNET_OFFERINGS_FALLBACK = {
     1: [
-      { id: 'devnet-llm', serviceType: 'inference', unit: 'token', modelId: '', askMicro: '0.5' },
-      { id: 'devnet-knowledge', serviceType: 'query', unit: 'query-unit', modelId: '', askMicro: '15' },
+      { id: 'devnet-llm', serviceType: 'inference', unit: 'token', modelId: '', askMicro: '0.5', ext: null },
+      { id: 'devnet-knowledge', serviceType: 'query', unit: 'query-unit', modelId: '', askMicro: '15', ext: null },
     ],
-    3: [{ id: 'devnet-llm', serviceType: 'inference', unit: 'token', modelId: '', askMicro: '0.8' }],
+    3: [{ id: 'devnet-llm', serviceType: 'inference', unit: 'token', modelId: '', askMicro: '0.8', ext: null }],
   };
+  /** Offering-config fields beyond the editor's columns (OT-RFC-27 chat connectors), carried verbatim on republish. */
+  const EXT_KEYS = ['executor', 'connector', 'metering', 'model', 'allowedBuyers'];
+  const GATEWAY_BASE = '/api/marketplace/gateway/v1';
+  const GW_SAMPLE = { system: 'You are terse.', prompt: 'hello marketplace world' };
   const SAMPLE_PROMPT = 'Explain in two sentences how an OT-RFC-27 subscription pays sellers: the buyer funds a pool, sellers claim signed receipts, and rewards follow QIF.';
   const SAMPLE_SPARQL = 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5';
 
@@ -53,6 +68,11 @@
     'offer-expired': 'the offer has expired',
     'service-mismatch': 'it is a different service',
     'model-mismatch': 'it is a different model',
+    'api-shape': 'it serves a different API shape (OpenAI-chat offers take gateway chat calls only)',
+    'max-units': 'this call’s units exceed the bucket’s max units per call',
+    'tools-unsupported': 'the offer does not support tool calls',
+    'recount-denied': 'your node’s recounts caught this seller over-billing (denied for a cool-down)',
+    restricted: 'the seller serves listed buyers only',
   };
 
   const SELLER_CODES = {
@@ -78,6 +98,16 @@
     MALFORMED_RESULT: 'The seller’s result was not valid JSON.',
     UNVERIFIABLE_SELLER: 'The receipt signer could not be resolved to an on-chain identity.',
     NO_MARKETPLACE_ADDRESS: 'The buyer node cannot resolve the Marketplace contract.',
+    BUYER_NOT_ALLOWED: 'The seller serves listed buyers only, and your node is not on its list.',
+    METERING_OVERRUN: 'The seller’s upstream reported more tokens than the authorization allows. The seller refused to bill it (a seller-side fault; nothing charged).',
+    TOOLS_UNSUPPORTED: 'The seller’s offer does not accept tool calls.',
+    MODEL_MISMATCH: 'The seller serves a different model under this offering.',
+    CONTEXT_EXCEEDED: 'The prompt does not fit the model’s context length.',
+    UPSTREAM_RATE_LIMITED: 'The seller’s upstream model rate-limited the call.',
+    UPSTREAM_ERROR: 'The seller’s upstream model failed (on the devnet: is the llm-stub running?).',
+    UPSTREAM_TIMEOUT: 'The seller’s upstream model did not answer in time.',
+    UPSTREAM_AUTH: 'The seller’s upstream rejected the seller’s credentials (its secret file).',
+    CONNECTOR_UNAVAILABLE: 'The seller’s chat connector is not mounted right now.',
   };
 
   const REVERT_WORDS = [
@@ -103,6 +133,21 @@
     status: { 1: slot(), 2: slot(), 3: slot() },
     meter: slot(),
     offers: { 1: slot(), 2: slot(), 3: slot() },
+    /** Seller chat-connector status (GET …/seller/connectors) and the last live probe per offering. */
+    connectors: { 1: slot(), 3: slot() },
+    connHealth: { 1: {}, 3: {} },
+    /** Buyer gateway keys (GET …/keys; public records, never a hash or plaintext). */
+    keys: slot(),
+    llmStub: slot(),
+    gw: {
+      /** { key, keyId, record, at } right after a mint — memory only, cleared on reload or "Hide". */
+      minted: null,
+      form: { label: 'console', budgetMicro: '1000', models: 'stub-chat', expires: '86400', allowQuery: true, rps: '5' },
+      chat: { key: '', model: 'stub-chat', system: GW_SAMPLE.system, prompt: GW_SAMPLE.prompt, maxTokens: '', stream: false },
+      snippet: 'curl',
+      confirmRevoke: null,
+      showDead: false,
+    },
     epochs: {},
     viewEpoch: null,
     viewEpochPinned: false,
@@ -321,13 +366,15 @@
 
   // ───────────────────────────── API ─────────────────────────────
 
-  async function api(path, { method = 'GET', body, timeoutMs = 60_000 } = {}) {
+  async function api(path, { method = 'GET', body, timeoutMs = 60_000, authorization } = {}) {
     const ctl = new AbortController();
     const timer = setTimeout(() => ctl.abort(), timeoutMs);
     try {
-      const init = { method, signal: ctl.signal, credentials: 'same-origin', cache: 'no-store' };
+      const init = { method, signal: ctl.signal, credentials: 'same-origin', cache: 'no-store', headers: {} };
+      // Only gateway calls carry an Authorization (a gateway key the user holds).
+      if (authorization) init.headers.Authorization = authorization;
       if (body !== undefined) {
-        init.headers = { 'Content-Type': 'application/json' };
+        init.headers['Content-Type'] = 'application/json';
         init.body = JSON.stringify(body);
       }
       const res = await fetch(path, init);
@@ -686,8 +733,12 @@
    * Mirror of the router's filters and ranking, on the best-known LIVE ask
    * (sellerSide), since the real router ranks on live quotes, not on the
    * discovered ask. Quote availability and the soft ceiling still decide at
-   * call time.
+   * call time. OpenAI-chat offers (`apiShape`) never take a "Try it" call
+   * (the router's api-shape rule): they rank separately, per model, for
+   * gateway chat calls (group `chat:<model>`). Same pin → same units, so
+   * the lowest ask is the lowest worst case.
    */
+  const routeGroup = (o) => (o.apiShape ? `chat:${o.modelId ?? ''}` : o.serviceType);
   function routerPreview(offers, policy) {
     const verdict = new Map();
     const now = chainNowSec();
@@ -709,7 +760,7 @@
       else if (side.served === false) why = 'the seller no longer serves it (its quote will decline)';
       else if (ask > W(bucket.priceCapWeiPerUnit)) why = 'ask above your price cap';
       if (why) verdict.set(key, { why, side, ask });
-      else (candidates[o.serviceType] ??= []).push({ o, side, ask });
+      else (candidates[routeGroup(o)] ??= []).push({ o, side, ask });
     }
     const picks = {};
     for (const [svc, list] of Object.entries(candidates)) {
@@ -719,7 +770,7 @@
         return String(a.o.sellerPeerId) < String(b.o.sellerPeerId) ? -1 : 1;
       });
       picks[svc] = { ...list[0].o, liveAskWei: list[0].ask, side: list[0].side };
-      list.forEach((c, i) => verdict.set(offerKey(c.o), i === 0 ? { pick: true, side: c.side, ask: c.ask } : { why: 'pricier than the pick', side: c.side, ask: c.ask }));
+      list.forEach((c, i) => verdict.set(offerKey(c.o), i === 0 ? { pick: true, chat: Boolean(c.o.apiShape), side: c.side, ask: c.ask } : { why: 'pricier than the pick', side: c.side, ask: c.ask }));
     }
     return { verdict, picks };
   }
@@ -789,7 +840,13 @@
       const often = n === node && S.view === 'buyer' ? 2 : 3;
       if (full || S.tick % often === 0 || !S.offers[n].loaded) jobs.push(load(S.offers[n], nodePath(n, '/offers'), { timeoutMs: 45_000 }));
     }
-    if (S.view === 'buyer') jobs.push(load(S.meter, nodePath(2, '/meter')));
+    if (S.view === 'buyer') {
+      jobs.push(load(S.meter, nodePath(2, '/meter')));
+      jobs.push(load(S.keys, nodePath(2, '/keys')));
+    } else {
+      jobs.push(load(S.connectors[node], nodePath(node, '/seller/connectors')));
+    }
+    if (full || S.tick % 3 === 0 || !S.llmStub.loaded) jobs.push(load(S.llmStub, '/console/llm-stub', { timeoutMs: 5_000 }));
     await Promise.all(jobs);
     const e = viewEpoch();
     const epochs = new Set([e === null ? null : String(e)]);
@@ -1076,10 +1133,12 @@
           ${panel('offers', 'Offers on the network', { span: 12, step: '3' })}
           ${panel('try', 'Try it', { span: 7, step: '4' })}
           ${panel('history', 'This session’s calls', { span: 5 })}
-          ${panel('settle', 'Settlement', { span: 12, step: '5' })}
+          ${panel('gateway', 'API keys & OpenAI gateway', { span: 12, step: '5' })}
+          ${panel('settle', 'Settlement', { span: 12, step: '6' })}
         </div>`;
       mountSubscribe();
       mountPlayground();
+      mountGateway();
     } else {
       const n = VIEWS[S.view].node;
       main.innerHTML = `
@@ -1087,6 +1146,7 @@
         <div class="grid">
           ${panel('seller', 'Seller node', { span: 5, step: '1' })}
           ${panel('offerings', 'Offerings', { span: 7, step: '2' })}
+          ${panel('connectors', 'Chat connectors', { span: 12 })}
           ${panel('receipts', 'Receipts', { span: 5, step: '3' })}
           ${panel('claims', 'Claims on-chain', { span: 7, step: '4' })}
           ${panel('rewards', 'Epoch reward', { span: 12, step: '5' })}
@@ -1104,11 +1164,13 @@
       renderOffers();
       renderPlaygroundLive();
       renderHistory();
+      renderGatewayLive();
       renderBuyerSettlement();
     } else {
       const n = VIEWS[S.view].node;
       renderSellerStatus(n);
       renderOfferingsLive(n);
+      renderConnectors(n);
       renderReceipts(n);
       renderClaims(n);
       renderRewards(n);
@@ -1505,6 +1567,20 @@
 
   // ───────────────────────────── BUYER: offers ─────────────────────────────
 
+  /** One line on how an offer is metered: the tokenizer pin (chat) or the query cost schedule. */
+  function offerPinNote(o) {
+    const bits = [];
+    if (o.metering?.basis === 'pinned') {
+      bits.push(`metered by pinned <code title="${esc(o.metering.tokenizer?.digest ?? '')}">${esc(o.metering.tokenizer?.kind ?? '?')}</code>`);
+    } else if (o.metering?.basis === 'provider-reported') {
+      bits.push('metered by the upstream’s own usage (no pin, no recount)');
+    }
+    if (o.apiShape && o.toolTransport) bits.push(`tools ${esc(o.toolTransport)}`);
+    if (o.access === 'restricted') bits.push('restricted to listed buyers');
+    if (o.queryCost) bits.push(`cost schedule <code title="${esc(o.queryCost.digest)}">${esc(o.queryCost.schedule)}</code>`);
+    return bits.length ? `<div class="why">${bits.join(' · ')}</div>` : '';
+  }
+
   function renderOffers() {
     const o = S.offers[2];
     if (!o.loaded) return;
@@ -1545,13 +1621,13 @@
         askNote = `<div class="why warn-text ask-note"><span class="tag tag-warn">stale</span> seller now asks ${askAmt(side.liveAsk, x.unit)} (${esc(from)}); this node has not received the update yet</div>`;
       }
       const routerCell = v.pick
-        ? `<span class="tag tag-ok">router pick</span>${side.stale && side.liveAsk !== null ? '<div class="why">ranked on the seller’s current ask</div>' : ''}`
+        ? `<span class="tag tag-ok">${v.chat ? 'gateway pick' : 'router pick'}</span>${v.chat ? `<div class="why">gateway chat for <code>${esc(x.modelId ?? '')}</code> routes here</div>` : ''}${side.stale && side.liveAsk !== null ? '<div class="why">ranked on the seller’s current ask</div>' : ''}`
         : v.why ? `<span class="why">${esc(v.why)}</span>` : '<span class="why">—</span>';
       return `<tr class="${v.pick ? 'is-pick' : ''}">
         <td data-label="Seller">${whoIdentity(x.sellerIdentityId)}<div class="why hex">peer …${esc(String(x.sellerPeerId).slice(-8))}</div></td>
         <td data-label="Router">${routerCell}</td>
         <td class="r" data-label="Ask">${askAmt(discovered, x.unit)}${askNote}</td>
-        <td data-label="Service">${esc(SERVICE_LABEL[x.serviceType] ?? x.serviceType)}${x.modelId ? `<div class="why">${esc(x.modelId)}</div>` : ''}</td>
+        <td data-label="Service">${esc(x.apiShape ? 'OpenAI chat' : SERVICE_LABEL[x.serviceType] ?? x.serviceType)}${x.modelId ? `<div class="why">${esc(x.modelId)}</div>` : ''}${offerPinNote(x)}</td>
         <td data-label="Offering"><code>${esc(localIdOf(x.offerId) || shortHex(x.offeringId))}</code></td>
       </tr>`;
     }).join('');
@@ -1561,7 +1637,7 @@
         : '<strong>your draft plan</strong> in Subscribe (not subscribed yet)'
       : 'your <strong>active plan</strong>';
     setBody('offers', `${staleBanner(o)}
-      <p class="lede">${offers.length} offer${offers.length === 1 ? '' : 's'} discovered in node 2’s view of the <code>marketplace</code> context graph. The <strong>router ranks on each seller’s live quote</strong>, not on the discovered ask; where a seller’s own node reports a newer ask, it is flagged and used here. “Router” previews the pick with ${basis}; at call time the live quotes and the soft ceiling decide.</p>
+      <p class="lede">${offers.length} offer${offers.length === 1 ? '' : 's'} discovered in node 2’s view of the <code>marketplace</code> context graph. The <strong>router ranks on each seller’s live quote</strong>, not on the discovered ask; where a seller’s own node reports a newer ask, it is flagged and used here. “Router” previews the pick with ${basis}; at call time the live quotes and the soft ceiling decide. <strong>OpenAI chat</strong> offers are called through the gateway (step 5), not “Try it”.</p>
       ${anyStale ? warnBox('Some discovered asks are out of date', 'A seller changed an offer and buyer node 2 has not applied the update yet. An update usually arrives within seconds and at most about a minute later; the seller’s Offerings panel warns when one takes longer. Calls still use the seller’s live quote, so you pay the current ask.') : ''}
       <div class="table-wrap"><table class="table-cards">
         <thead><tr><th>Seller</th><th>Router</th><th class="r">Ask (discovered)</th><th>Service</th><th>Offering</th></tr></thead>
@@ -1620,7 +1696,7 @@
     if (!policy) {
       // No known policy: cheapest best-known live ask among offers the seller still serves.
       pick = offers
-        .filter((o) => o.serviceType === pg.service)
+        .filter((o) => o.serviceType === pg.service && !o.apiShape)
         .map((o) => ({ o, side: sellerSide(o) }))
         .filter((x) => x.side.served !== false)
         .map((x) => ({ ...x.o, side: x.side, liveAskWei: effectiveAsk(x.o, x.side) }))
@@ -1678,8 +1754,7 @@
       bits.push(`prompt ≈ ${t} tokens (served ≈ prompt + echo, capped at the max units)`);
       if (e.maxUnits !== null && BigInt(t) > e.maxUnits) bits.push('<span class="warn">the prompt alone exceeds the max units</span>');
     } else {
-      const bytes = new TextEncoder().encode(pg.sparql).length;
-      bits.push(`query meters ${10 + Math.ceil(bytes / 100)} units + 1 per result row`);
+      bits.push('query meters its admission units (static cost schedule: base 2, +1 per triple pattern, +10 without LIMIT, …) + 1 unit per 100 result rows — the sample query is 3 + 1');
     }
     setHtml(prev, bits.map((b) => `<span>${b}</span>`).join(''));
     const blocker = runBlocker(e);
@@ -1715,7 +1790,7 @@
         const cols = [...new Set(bindings.flatMap((b) => Object.keys(b)))];
         output = `<div class="table-wrap"><table><thead><tr>${cols.map((c) => `<th>?${esc(c)}</th>`).join('')}</tr></thead><tbody>${bindings.map((b) => `<tr>${cols.map((c) => `<td class="hex">${esc(typeof b[c] === 'string' ? b[c] : JSON.stringify(b[c] ?? ''))}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`;
       } else if (bindings) {
-        output = emptyBox('Query returned no rows', 'Still metered: the static schedule charges 10 + ⌈bytes/100⌉ units per query.');
+        output = emptyBox('Query returned no rows', 'Still metered: the static cost schedule charges the query’s admission units (3 for the sample query) even with no rows.');
       } else {
         output = `<pre class="result-output">${esc(JSON.stringify(inner, null, 2))}</pre>`;
       }
@@ -1756,8 +1831,22 @@
           <dt>Expires</dt><dd>${esc(fmtTime(au.expiry))} (chain time)</dd>
           <dt>Session-key sig</dt><dd class="hex">${esc(au.signature)}</dd>
           <dt>Buyer (funding)</dt><dd>${whoAddress(au.buyer)}</dd>
+          ${j.recount ? `<dt>Buyer recount</dt><dd>${recountTag(j.recount)}</dd>` : ''}
         </dl>
       </details>`;
+  }
+
+  /** The buyer's own recount of a served call (spec §8.3): match / mismatch / unverifiable (+ reason). */
+  function recountTag(rc) {
+    const verdict = rc?.verdict ?? '?';
+    const cls = verdict === 'match' ? 'tag-ok' : verdict === 'mismatch' ? 'tag-danger' : 'tag-muted';
+    const units = rc?.recountUnits ?? rc?.recount_units;
+    const reason = rc?.reason ? ` <span class="code-chip">${esc(rc.reason)}</span>` : '';
+    const words = verdict === 'match'
+      ? `your node recounted ${esc(String(units ?? '?'))} units — same as the receipt`
+      : verdict === 'mismatch' ? 'your node’s recount disagrees with the receipt (the seller’s standing drops)'
+        : rc?.reason === 'not-metered' ? 'this offer publishes no metering pin, so there is nothing to recount' : 'not recountable';
+    return `<span class="tag ${cls}">${esc(verdict)}</span>${reason} <span class="muted">${words}</span>`;
   }
 
   const HISTORY_KEY = 'mkt-console-history';
@@ -1870,6 +1959,520 @@
         <td class="r" data-label="Cost">${x.state === 'ok' ? amt(x.costWei, { unit: 'micro' }) : x.state === 'failed' ? '—' : x.state === 'pending' && S.busy.invoke ? '<span class="muted">…</span>' : '<span class="muted">unknown</span>'}</td>
       </tr>`).join('')}</tbody></table></div>
       <p class="hint">Times are chain time (UTC), like the rest of the page; hover for the browser’s wall-clock time. Only calls this browser tab ran are listed.</p>`);
+  }
+
+  // ───────────────────────────── BUYER: gateway (API keys) ─────────────────────────────
+  //
+  // OT-RFC-27 buyer gateway: an OpenAI-compatible surface on node 2 at
+  // /api/marketplace/gateway/v1, authenticated by scoped keys (dkg_gw_…)
+  // instead of the node token. Keys are minted, listed and revoked through
+  // the node-admin routes (the console server adds node 2's token); calls go
+  // through the console proxy with the key THIS page holds — the server
+  // forwards it and never injects the node token on gateway paths.
+
+  /** [title, plain words] per gateway error code (spec §9.6). */
+  const GW_ERROR_WORDS = {
+    invalid_api_key: ['Key not accepted', 'The gateway accepts only a gateway key (<code>dkg_gw_…</code>) in the <code>Authorization: Bearer</code> header — node tokens never work here. Check for a typo, or mint a new key.'],
+    key_revoked: ['Key revoked', 'This key was revoked; it can no longer spend. Mint a new one.'],
+    key_expired: ['Key expired', 'This key passed its expiry. Mint a new one.'],
+    key_budget_exceeded: ['Key budget too small for this call', 'The call’s worst case (the units it may use × the seller’s ask) is more than what is left on this key. Nothing was reserved or charged. Lower max tokens, or mint a key with a larger budget.'],
+    rate_limit_exceeded: ['Too many requests for this key', 'Each key has a requests-per-second limit. Wait a second and retry.'],
+    gateway_busy: ['Gateway busy', 'Node 2’s gateway is at its concurrency limit. Retry shortly.'],
+    model_not_allowed: ['Model not allowed for this key', 'This key’s model allowlist does not include the model you asked for.'],
+    query_not_allowed: ['SPARQL not allowed for this key', 'This key was minted without “Allow /query”.'],
+    model_not_found: ['No offer for this model', 'No discovered seller offers this model as OpenAI chat. Check the model id in Offers (step 3).'],
+    not_subscribed: ['No active plan on the buyer node', 'Subscribe first (step 2). A gateway call spends from your plan like any call; the key is an extra cap on top.'],
+    no_plan_bucket: ['Your plan has no bucket for this model', 'Add an inference bucket (for this model, or for any model) to your plan, then try again.'],
+    max_units_exceeded: ['Too many tokens for one call', 'Prompt + max tokens exceed the bucket’s max units per call. Lower max tokens, or subscribe with a higher limit. Nothing was charged.'],
+    soft_ceiling: ['Soft ceiling reached', 'The call’s worst case would be more than 95% of what is left in your bucket. Nothing was reserved or charged.'],
+    no_offers: ['No offers discovered yet', 'Node 2 has not discovered any OpenAI-chat offer yet (seed with <code>pnpm devnet:marketplace:seed</code>).'],
+    no_route: ['No seller can take this call', 'Offers exist, but your plan rejected every one of them:'],
+    underfunded: ['The seller refused: bucket underfunded', esc(SELLER_CODES.UNDERFUNDED)],
+    context_length_exceeded: ['Prompt too long for the model', 'The prompt plus the reply budget does not fit the model’s context length.'],
+    upstream_error: ['The seller’s model failed', 'The seller’s upstream did not deliver, so there is no receipt and nothing was charged. On the devnet, check that the llm-stub runs.'],
+    upstream_timeout: ['The seller’s model timed out', 'The seller’s upstream did not answer in time. Nothing was charged.'],
+    upstream_rate_limited: ['The seller’s model is rate-limited', 'The seller’s upstream refused with a rate limit. Nothing was charged; retry later.'],
+    delivery_unknown: ['Outcome unknown', 'The connection to the seller failed mid-call, so it may have served. The worst case stays counted against the key.'],
+    bad_receipt: ['Seller receipt failed verification', 'Your node could not verify the seller’s receipt; the worst case was settled against the key.'],
+    seller_refused: ['The seller refused the call', 'The seller answered with a refusal code (below). Nothing was charged.'],
+    seller_rejected_request: ['The seller rejected the request', 'The seller could not accept this request as sent (code below). Nothing was charged.'],
+    invalid_tool_response: ['Invalid tool call from the seller', 'The seller returned a tool call your request did not allow. Its receipt was valid, so the call is charged.'],
+    marketplace_unavailable: ['Marketplace unavailable on node 2', 'The marketplace runtime is off, or the gateway key store is unusable (see the status above).'],
+    internal_error: ['Gateway internal error', 'Node 2’s daemon log has the request id.'],
+  };
+
+  const buyerApiPort = () => nodeInfo(2)?.apiPort ?? 9202;
+  const gatewayUrl = () => `http://127.0.0.1:${buyerApiPort()}${GATEWAY_BASE}`;
+  /** The key the "Try chat" form sends: the pasted one, else the one minted in this page. */
+  const gwChatKey = () => S.gw.chat.key.trim() || S.gw.minted?.key || '';
+
+  /** Discovered OpenAI-chat models (sorted), for the chat form. */
+  function chatModels() {
+    const ids = new Set((S.offers[2].data?.offers ?? []).filter((o) => o.apiShape && o.modelId).map((o) => o.modelId));
+    return [...ids].sort();
+  }
+
+  function mountGateway() {
+    const body = document.getElementById('b-gateway');
+    if (!body) return;
+    const f = S.gw.form;
+    const c = S.gw.chat;
+    body._html = null;
+    body.innerHTML = `
+      <p class="lede">Any OpenAI client can call node 2 through its <strong>buyer gateway</strong>, authenticated by a scoped <strong>API key</strong> instead of the node token. Every call is routed, authorized with your session key and charged to your plan like “Try it”; the key adds its own budget, model list and rate limit on top. Keys are minted here through node 2’s admin route — the node stores only a hash, so a key is shown <strong>once</strong>.</p>
+      <div id="gw-status"></div>
+      <div class="gw-grid">
+        <div class="gw-col">
+          <div class="section-label">Mint a key</div>
+          <div class="form-grid">
+            <div class="field"><label for="gw-label">Label</label><input type="text" id="gw-label" data-gw="label" value="${esc(f.label)}" maxlength="64" autocomplete="off"></div>
+            <div class="field"><label for="gw-budget">Budget <span class="unit">µTRAC</span></label><input type="text" inputmode="decimal" id="gw-budget" data-gw="budgetMicro" value="${esc(f.budgetMicro)}" aria-describedby="gw-budget-prev gw-budget-err"><div class="wei-preview" id="gw-budget-prev"></div><div class="hint danger-text" id="gw-budget-err"></div></div>
+            <div class="field"><label for="gw-models">Models</label><input type="text" id="gw-models" data-gw="models" value="${esc(f.models)}" placeholder="any model" autocomplete="off" aria-describedby="gw-models-hint"><div class="hint" id="gw-models-hint">Comma-separated model ids; empty = any model.</div></div>
+            <div class="field"><label for="gw-expires">Expires</label><select id="gw-expires" data-gw="expires">${[['3600', 'in 1 hour'], ['86400', 'in 1 day'], ['604800', 'in 7 days'], ['never', 'never']].map(([v, l]) => `<option value="${v}"${v === f.expires ? ' selected' : ''}>${l}</option>`).join('')}</select></div>
+            <div class="field"><label for="gw-rps">Requests / second</label><input type="text" inputmode="numeric" id="gw-rps" data-gw="rps" value="${esc(f.rps)}"><div class="hint danger-text" id="gw-rps-err"></div></div>
+            <div class="field"><span class="label-like">SPARQL</span><label class="check"><input type="checkbox" id="gw-query" data-gw="allowQuery"${f.allowQuery ? ' checked' : ''}> Allow <code>/query</code></label></div>
+          </div>
+          <div class="row mt-3"><button type="button" class="btn btn-primary" data-action="gw-mint" id="gw-mint">Mint key</button><span class="hint" id="gw-mint-why"></span></div>
+          <div id="gw-minted" aria-live="polite"></div>
+        </div>
+        <div class="gw-col">
+          <div class="section-label">Call it from code</div>
+          <div class="seg-toggle" role="group" aria-label="Snippet language">
+            <button type="button" data-gw-snippet="curl" aria-pressed="${S.gw.snippet === 'curl'}">curl</button>
+            <button type="button" data-gw-snippet="js" aria-pressed="${S.gw.snippet === 'js'}">OpenAI SDK · JS</button>
+            <button type="button" data-gw-snippet="py" aria-pressed="${S.gw.snippet === 'py'}">OpenAI SDK · Python</button>
+          </div>
+          <div id="gw-snippet"></div>
+        </div>
+      </div>
+      <div class="section-label">Keys on node 2</div>
+      <div id="gw-keys"></div>
+      <div class="section-label">Try chat through the gateway</div>
+      <div class="gw-chat-form">
+        <div class="field gw-key-field"><label for="gwc-key">API key</label><input type="password" id="gwc-key" data-gwc="key" value="${esc(c.key)}" placeholder="dkg_gw_… (paste a key, or mint one above)" autocomplete="off" spellcheck="false" aria-describedby="gwc-key-hint"><div class="hint" id="gwc-key-hint"></div></div>
+        <div class="field"><label for="gwc-model">Model</label><select id="gwc-model" data-gwc="model"></select></div>
+        <div class="field"><label for="gwc-max">Max tokens</label><input type="text" inputmode="numeric" id="gwc-max" data-gwc="maxTokens" value="${esc(c.maxTokens)}" placeholder="default (256)"></div>
+        <div class="field"><span class="label-like">Response</span><label class="check"><input type="checkbox" id="gwc-stream" data-gwc="stream"${c.stream ? ' checked' : ''}> Stream (SSE)</label></div>
+        <div class="field gw-wide"><label for="gwc-system">System message</label><input type="text" id="gwc-system" data-gwc="system" value="${esc(c.system)}" placeholder="optional"></div>
+        <div class="field gw-wide"><label for="gwc-prompt">User message</label><textarea id="gwc-prompt" data-gwc="prompt" rows="2" spellcheck="false">${esc(c.prompt)}</textarea></div>
+      </div>
+      <div class="row mt-3"><button type="button" class="btn btn-primary" data-action="gw-chat" id="gwc-send">Send chat</button><span class="hint" id="gwc-why"></span></div>
+      <div class="result" id="gw-chat-result" aria-live="polite"></div>`;
+    renderGatewayLive();
+  }
+
+  /** Validate the mint form → { body, errors }. */
+  function gwMintDraft() {
+    const f = S.gw.form;
+    const errors = {};
+    let budgetWei = 0n;
+    try {
+      budgetWei = parseMicro(f.budgetMicro);
+      if (budgetWei <= 0n) throw new Error('must be > 0');
+      if (budgetWei >= UINT96) throw new Error('too large');
+    } catch (e) {
+      errors.budget = e.message;
+    }
+    const rps = Number(String(f.rps).trim());
+    if (!Number.isSafeInteger(rps) || rps < 1 || rps > 1000) errors.rps = 'a whole number 1–1000';
+    const models = String(f.models).split(',').map((m) => m.trim()).filter(Boolean);
+    const body = {
+      label: f.label.trim().slice(0, 64),
+      budgetWei: budgetWei.toString(),
+      modelAllowlist: models.length ? models : null,
+      allowQuery: Boolean(f.allowQuery),
+      rps,
+      ...(f.expires !== 'never' ? { expiresInSeconds: Number(f.expires) } : {}),
+    };
+    return { body, errors, budgetWei };
+  }
+
+  function gwSnippet() {
+    const key = S.gw.minted?.key;
+    const model = S.gw.chat.model || chatModels()[0] || 'stub-chat';
+    const base = gatewayUrl();
+    const messages = [{ role: 'system', content: GW_SAMPLE.system }, { role: 'user', content: GW_SAMPLE.prompt }];
+    if (S.gw.snippet === 'js') {
+      return `import OpenAI from 'openai';
+
+const client = new OpenAI({
+  baseURL: '${base}',
+  apiKey: ${key ? `'${key}'` : 'process.env.DKG_GATEWAY_KEY'},
+});
+
+const res = await client.chat.completions.create({
+  model: '${model}',
+  messages: ${JSON.stringify(messages)},
+});
+console.log(res.choices[0].message.content, res.usage, res.dkg?.cost_wei);`;
+    }
+    if (S.gw.snippet === 'py') {
+      return `${key ? '' : 'import os\n'}from openai import OpenAI
+
+client = OpenAI(
+    base_url="${base}",
+    api_key=${key ? `"${key}"` : 'os.environ["DKG_GATEWAY_KEY"]'},
+)
+
+res = client.chat.completions.create(
+    model="${model}",
+    messages=${JSON.stringify(messages).replace(/","/g, '", "').replace(/":"/g, '": "')},
+)
+print(res.choices[0].message.content, res.usage)`;
+    }
+    return `curl ${base}/chat/completions \\
+  -H "Authorization: Bearer ${key ?? '$DKG_GATEWAY_KEY'}" \\
+  -H "Content-Type: application/json" \\
+  -d '${JSON.stringify({ model, messages })}'`;
+  }
+
+  function gwStatusHtml() {
+    const st = S.status[2];
+    if (!st.loaded) return skeleton();
+    if (!st.data) return errorBox(st.error, { retry: true });
+    const g = st.data.gateway;
+    const parts = [];
+    if (!g) parts.push(warnBox('Gateway status unknown', 'Node 2 does not report a buyer gateway — its daemon predates it. Rebuild (<code>pnpm build</code>) and restart the devnet.'));
+    else if (g.enabled === false) parts.push(warnBox('Gateway disabled on node 2', '<code>marketplace.buyer.gateway.enabled</code> is false, or <code>DKG_MARKETPLACE_GATEWAY_ENABLED=0</code>. Key admin still works; calls answer 404.'));
+    if (g?.error) parts.push(warnBox('Key store unusable', `${esc(g.error)}. The gateway answers 503 to every call until the file is fixed or removed and the node restarts.`));
+    const stub = S.llmStub.data;
+    const stubCell = !S.llmStub.loaded ? '<span class="muted">checking…</span>'
+      : stub?.ok ? `<span class="tag tag-ok">up</span> <span class="muted">:${esc(String(stub.port))} · model ${esc(stub.model ?? '?')}</span>`
+        : `<span class="tag tag-danger">down</span> <span class="muted">chat calls fail until it runs:</span> <code class="nowrap-sm">${esc(stub?.runHint ?? S.cstate.data?.llmStub?.runHint ?? 'pnpm devnet:marketplace:llm-stub')}</code>`;
+    const subscribed = Boolean(st.data.buyer?.subscribed);
+    parts.push(`<dl class="kv">
+      <dt>Base URL</dt><dd><code class="hex" id="gw-base">${esc(gatewayUrl())}</code> <button type="button" class="btn btn-sm btn-ghost" data-action="copy" data-copy="#gw-base">Copy</button></dd>
+      <dt>Gateway</dt><dd>${g ? (g.enabled ? '<span class="tag tag-ok">enabled</span>' : '<span class="tag tag-muted">disabled</span>') : '<span class="muted">unknown</span>'} <span class="muted">${esc(String(g?.keys ?? 0))} key${g?.keys === 1 ? '' : 's'} on file</span></dd>
+      <dt>Plan</dt><dd>${subscribed ? `<span class="tag tag-ok">active</span> <span class="muted">epoch ${esc(String(st.data.buyer.epoch))} — calls spend from it</span>` : '<span class="tag tag-warn">none</span> <span class="muted">calls answer <code>not_subscribed</code> until you subscribe (step 2); keys can be minted any time</span>'}</dd>
+      <dt>llm-stub</dt><dd>${stubCell}</dd>
+    </dl>`);
+    return parts.join('');
+  }
+
+  function gwKeyState(k, nowSec) {
+    if (k.revokedAt !== null && k.revokedAt !== undefined) return ['revoked', 'tag-muted'];
+    if (k.scopes?.expiresAt && Number(k.scopes.expiresAt) <= nowSec) return ['expired', 'tag-warn'];
+    return ['active', 'tag-ok'];
+  }
+
+  function gwKeysHtml() {
+    const ks = S.keys;
+    if (!ks.loaded) return skeleton();
+    if (!ks.data) {
+      const j = ks.error?.json;
+      if (j?.code === 'KEY_STORE_UNAVAILABLE') {
+        return `<div class="state state-error" role="alert"><div class="state-title">Key store unusable <span class="code-chip">KEY_STORE_UNAVAILABLE</span></div><p>${esc(j.error)}</p><p class="hint">File: <code>${esc(j.file ?? '')}</code> — ${esc(j.reason ?? '')}</p></div>`;
+      }
+      return errorBox(ks.error, { retry: true });
+    }
+    const keys = Array.isArray(ks.data.keys) ? ks.data.keys : [];
+    const parts = [staleBanner(ks)];
+    const rv = S.results.gwRevoke;
+    if (rv && !rv.ok) parts.push(errorBox(rv.r, { title: 'Revoke failed' }));
+    if (keys.length === 0) {
+      parts.push(emptyBox('No keys yet', 'Mint one above. The node keeps only its hash; the plaintext is shown once, in this page.'));
+      return parts.join('');
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    const sorted = [...keys].sort((a, b) => Number(b.mintedAt ?? 0) - Number(a.mintedAt ?? 0));
+    const row = (k) => {
+      const [state, cls] = gwKeyState(k, nowSec);
+      const u = k.usage ?? {};
+      const budget = W(k.scopes?.budgetWei);
+      const spent = W(u.spentWei);
+      const remaining = budget - spent - W(u.reservedWei);
+      const models = Array.isArray(k.scopes?.modelAllowlist) ? (k.scopes.modelAllowlist.length ? k.scopes.modelAllowlist.map((m) => `<code>${esc(m)}</code>`).join(', ') : '<span class="muted">none</span>') : 'any model';
+      const expires = k.scopes?.expiresAt ? `${esc(fmtTime(k.scopes.expiresAt))}` : 'never';
+      const confirming = S.gw.confirmRevoke === k.keyId;
+      const action = state === 'revoked'
+        ? `<span class="muted">revoked ${esc(fmtTime(k.revokedAt))}</span>`
+        : `<button type="button" class="btn btn-sm ${confirming ? 'btn-danger' : ''}" data-action="gw-revoke" data-arg="${esc(k.keyId)}" ${S.busy[`revoke:${k.keyId}`] ? 'disabled' : ''}>${S.busy[`revoke:${k.keyId}`] ? '<span class="spin"></span>Revoking…' : confirming ? 'Confirm revoke' : 'Revoke'}</button>`;
+      return `<tr>
+        <td data-label="Key"><code>${esc(k.keyId)}</code>${k.scopes?.label ? `<div class="why">${esc(k.scopes.label)}</div>` : ''}${S.gw.minted?.keyId === k.keyId ? '<div class="why ok-text">minted in this page</div>' : ''}</td>
+        <td data-label="State"><span class="tag ${cls}">${state}</span></td>
+        <td class="r" data-label="Budget">${amt(budget, { unit: 'micro' })}</td>
+        <td class="r" data-label="Spent">${amt(spent, { unit: 'micro' })}<div class="why">${esc(String(u.calls ?? 0))} call${u.calls === 1 ? '' : 's'} · ${esc(groupInt(String(u.servedUnits ?? 0)))} units</div></td>
+        <td class="r" data-label="Left">${amt(remaining > 0n ? remaining : 0n, { unit: 'micro' })}</td>
+        <td data-label="Scope"><span>${models}</span><div class="why">${k.scopes?.allowQuery ? 'chat + SPARQL' : 'chat only'} · ${esc(String(k.scopes?.rps ?? '?'))} req/s · expires ${expires}</div></td>
+        <td class="r" data-label="Action">${action}</td>
+      </tr>`;
+    };
+    const table = (list) => `<div class="table-wrap"><table class="table-cards">
+      <thead><tr><th>Key</th><th>State</th><th class="r">Budget</th><th class="r">Spent</th><th class="r">Left</th><th>Scope</th><th class="r"><span class="visually-hidden">Action</span></th></tr></thead>
+      <tbody>${list.map(row).join('')}</tbody></table></div>`;
+    // Active keys up front; revoked and expired ones (they can no longer spend) one click deeper.
+    const live = sorted.filter((k) => gwKeyState(k, nowSec)[0] === 'active');
+    const dead = sorted.filter((k) => gwKeyState(k, nowSec)[0] !== 'active');
+    parts.push(live.length
+      ? table(live)
+      : emptyBox('No active keys', 'Every key on file is revoked or expired. Mint a new one above.'));
+    if (dead.length) {
+      parts.push(`<details class="receipt mt-2"${S.gw.showDead ? ' open' : ''} data-gw-dead><summary>${dead.length} revoked or expired key${dead.length === 1 ? '' : 's'} (can no longer spend)</summary>${table(dead)}</details>`);
+    }
+    parts.push('<p class="hint">“Left” = budget − spent − held for calls in flight. A call whose outcome is unknown keeps its worst case counted against the key.</p>');
+    return parts.join('');
+  }
+
+  /** A gateway refusal in plain words (OpenAI-style `{ error }` body, spec §9.6). */
+  function gwErrorBox(r) {
+    const e = r?.json?.error;
+    if (!e || typeof e !== 'object') return errorBox(r, { ctx: { kind: 'invoke' } });
+    const [title, words] = GW_ERROR_WORDS[e.code] ?? ['The gateway refused the call', ''];
+    const reason = e.dkg?.reason;
+    const charged = W(e.dkg?.charged_wei);
+    const rejections = Array.isArray(e.dkg?.rejections) ? e.dkg.rejections : [];
+    return `<div class="state state-error" role="alert">
+      <div class="state-title">${esc(title)} <span class="code-chip">${esc(`HTTP ${r.status} · ${e.code}`)}</span>${reason ? ` <span class="code-chip">${esc(reason)}</span>` : ''}</div>
+      ${words ? `<p>${words}</p>` : ''}
+      ${reason && SELLER_CODES[reason] ? `<p>${esc(SELLER_CODES[reason])}</p>` : ''}
+      ${rejections.length ? `<ul>${rejections.map((x) => `<li>${rejectionLine(x)}</li>`).join('')}</ul>` : ''}
+      <p class="hint">${charged > 0n ? `Charged: ${amt(charged, { unit: 'micro' })}. ` : 'Nothing was charged. '}${e.dkg?.retryable ? 'Retryable.' : ''}</p>
+      <details><summary>Gateway message</summary><div class="hex">${esc(e.message ?? '')}${e.param ? ` (param ${esc(e.param)})` : ''}</div></details>
+    </div>`;
+  }
+
+  /** Normalize a JSON or SSE chat reply → { content, toolCalls, finish, usage, dkg, events }. */
+  function gwChatReply(last) {
+    if (!last.stream) {
+      const j = last.r.json ?? {};
+      const choice = j.choices?.[0] ?? {};
+      return { content: choice.message?.content ?? null, toolCalls: choice.message?.tool_calls ?? [], finish: choice.finish_reason, usage: j.usage, dkg: j.dkg, model: j.model, events: null };
+    }
+    const events = String(last.r.text ?? '').split('\n\n').filter((b) => b.startsWith('data: ')).map((b) => b.slice(6));
+    let content = '';
+    let finish = null;
+    let usage = null;
+    let dkg = null;
+    let model = null;
+    const toolCalls = [];
+    for (const raw of events) {
+      if (raw === '[DONE]') continue;
+      let ev;
+      try {
+        ev = JSON.parse(raw);
+      } catch {
+        continue;
+      }
+      model ??= ev.model;
+      const choice = ev.choices?.[0];
+      if (choice?.delta?.content) content += choice.delta.content;
+      if (Array.isArray(choice?.delta?.tool_calls)) toolCalls.push(...choice.delta.tool_calls);
+      if (choice?.finish_reason) finish = choice.finish_reason;
+      if (ev.usage) usage = ev.usage;
+      if (ev.dkg) dkg = ev.dkg;
+    }
+    return { content: content || (toolCalls.length ? null : ''), toolCalls, finish, usage, dkg, model, events: events.length };
+  }
+
+  function gwChatResultHtml() {
+    const last = S.results.gwChat;
+    if (!last) {
+      return emptyBox('No gateway call yet', 'Mint a key (or paste one), then send. The call goes from this page through the console server to node 2’s gateway with <em>your</em> key; the console never adds the node token on gateway paths.');
+    }
+    if (!last.r.ok) return gwErrorBox(last.r);
+    const x = gwChatReply(last);
+    const d = x.dkg ?? {};
+    const served = W(d.served_units);
+    const cost = W(d.cost_wei);
+    const m = d.metering ?? {};
+    const reply = x.toolCalls.length
+      ? `<pre class="result-output">${esc(JSON.stringify(x.toolCalls, null, 2))}</pre>`
+      : `<pre class="result-output">${esc(x.content ?? '')}</pre>`;
+    return `${okBox(`Served by ${whoIdentity(d.seller?.identity_id)}`, `${esc(groupInt(served.toString()))} tokens × ${askAmt(d.ask_per_unit_wei, 'token')} = <strong>${amt(cost, { unit: 'micro' })}</strong> · receipt verified by your node · charged to key <code>${esc(d.key?.key_id ?? '?')}</code> (${amt(d.key?.remaining_wei, { unit: 'micro' })} left)`)}
+      ${last.stream ? `<p class="hint">Streamed as ${esc(String(x.events ?? 0))} SSE events — buffered: the gateway sends them after the seller’s receipt verified.</p>` : ''}
+      ${reply}
+      <div class="stats mt-3">
+        <div class="stat"><div class="k">Usage</div><div class="v num">${esc(String(x.usage?.prompt_tokens ?? '?'))} + ${esc(String(x.usage?.completion_tokens ?? '?'))}</div><div class="s">prompt + completion = ${esc(String(x.usage?.total_tokens ?? '?'))} tokens</div></div>
+        <div class="stat"><div class="k">Finish</div><div class="v">${esc(x.finish ?? '?')}</div><div class="s">${m.truncated ? 'cut to fit the authorization' : 'as the model ended'}</div></div>
+        <div class="stat"><div class="k">Metering</div><div class="v">${esc(m.basis ?? '?')}</div><div class="s">${m.tokenizer_kind ? `<code title="${esc(m.tokenizer_digest ?? '')}">${esc(m.tokenizer_kind)}</code> · ${esc(m.chat_template ?? '')}` : 'upstream-reported usage'}</div></div>
+      </div>
+      <p class="mt-2">Buyer recount: ${recountTag({ verdict: d.recount?.verdict, reason: d.recount?.reason, recountUnits: d.recount?.recount_units })}</p>
+      <details class="receipt"><summary>Receipt &amp; call</summary>
+        <dl class="kv">
+          <dt>Call id</dt><dd class="hex">${esc(d.call_id)}</dd>
+          <dt>Offering id</dt><dd class="hex">${esc(d.offering_id)}</dd>
+          <dt>Model</dt><dd><code>${esc(x.model ?? '')}</code></dd>
+          <dt>authDigest</dt><dd class="hex">${esc(d.receipt?.auth_digest)}</dd>
+          <dt>resultCommitment</dt><dd class="hex">${esc(d.receipt?.result_commitment)}</dd>
+          <dt>Seller signature</dt><dd class="hex">${esc(d.receipt?.seller_sig)}</dd>
+          <dt>Signed by</dt><dd>${whoAddress(d.seller?.address)}</dd>
+          <dt>Units</dt><dd>prompt ${esc(String(m.prompt_units ?? '?'))} · tools ${esc(String(m.tool_units ?? '?'))} · completion ${esc(String(m.completion_units ?? '?'))}${m.provider_usage ? ` <span class="muted">(upstream said ${esc(String(m.provider_usage.prompt_tokens))} + ${esc(String(m.provider_usage.completion_tokens))})</span>` : ''}</dd>
+        </dl>
+      </details>`;
+  }
+
+  function renderGatewayLive() {
+    const statusEl = $('#gw-status');
+    if (!statusEl) return;
+    setHtml(statusEl, gwStatusHtml());
+    const st = S.status[2].data;
+    const disabled = st?.gateway?.enabled === false;
+    const draft = gwMintDraft();
+    const prev = $('#gw-budget-prev');
+    if (prev) prev.textContent = draft.errors.budget ? '' : `= ${groupInt(draft.budgetWei.toString())} wei`;
+    const bErr = $('#gw-budget-err');
+    if (bErr) bErr.textContent = draft.errors.budget ?? '';
+    const rErr = $('#gw-rps-err');
+    if (rErr) rErr.textContent = draft.errors.rps ?? '';
+    const mint = $('#gw-mint');
+    if (mint) {
+      mint.disabled = Boolean(S.busy.gwMint) || disabled || Object.keys(draft.errors).length > 0 || !st;
+      mint.innerHTML = S.busy.gwMint ? '<span class="spin"></span>Minting…' : 'Mint key';
+    }
+    const why = $('#gw-mint-why');
+    if (why) why.textContent = !st ? 'Node 2 is not answering.' : disabled ? 'The gateway is disabled on node 2.' : 'Node-admin route: the console server adds node 2’s token. The node stores only a hash.';
+    const minted = $('#gw-minted');
+    if (minted) {
+      const mr = S.results.gwMint;
+      let html = '';
+      if (S.gw.minted) {
+        html = `<div class="state state-ok key-once" role="status">
+          <div class="state-title">Key <code>${esc(S.gw.minted.keyId)}</code> minted — copy it now</div>
+          <div class="state-body"><p>It is shown only here, and only until you reload this page or hide it: node 2 keeps just its hash. The snippets and “Try chat” use it while it is shown.</p>
+          <div class="key-reveal"><code id="gw-key-text">${esc(S.gw.minted.key)}</code></div>
+          <div class="row mt-2"><button type="button" class="btn btn-sm btn-primary" data-action="copy" data-copy="#gw-key-text">Copy key</button><button type="button" class="btn btn-sm btn-ghost" data-action="gw-hide-key">Hide (forget it here)</button></div></div>
+        </div>`;
+      } else if (mr && !mr.ok) {
+        html = errorBox(mr.r, { title: 'Mint failed' });
+      }
+      setHtml(minted, html);
+    }
+    const snip = $('#gw-snippet');
+    if (snip) {
+      const keyNote = S.gw.minted
+        ? '<p class="hint warn-text">This snippet contains the key you just minted — treat it like a password.</p>'
+        : '<p class="hint">Set <code>DKG_GATEWAY_KEY</code> to a key. The key is filled in here only right after you mint one.</p>';
+      setHtml(snip, `<pre class="result-output snippet" id="gw-snippet-text">${esc(gwSnippet())}</pre>
+        <div class="row mt-2"><button type="button" class="btn btn-sm" data-action="copy" data-copy="#gw-snippet-text">Copy snippet</button></div>${keyNote}`);
+    }
+    for (const b of $$('[data-gw-snippet]')) b.setAttribute('aria-pressed', String(b.dataset.gwSnippet === S.gw.snippet));
+    const keysEl = $('#gw-keys');
+    if (keysEl) setHtml(keysEl, gwKeysHtml());
+    // Chat form: model options follow discovery; the key hint follows the mint.
+    const sel = $('#gwc-model');
+    if (sel) {
+      const models = chatModels();
+      if (!models.includes(S.gw.chat.model) && S.gw.chat.model) models.push(S.gw.chat.model);
+      const html = (models.length ? models : ['stub-chat']).map((m) => `<option value="${esc(m)}"${m === S.gw.chat.model ? ' selected' : ''}>${esc(m)}</option>`).join('');
+      if (sel._html !== html) {
+        sel._html = html;
+        sel.innerHTML = html;
+      }
+    }
+    const keyHint = $('#gwc-key-hint');
+    if (keyHint) {
+      keyHint.innerHTML = S.gw.chat.key.trim() ? 'Using the key you pasted (kept in this page only).'
+        : S.gw.minted ? `Empty: uses <code>${esc(S.gw.minted.keyId)}</code>, minted above.` : 'Paste a key, or mint one above.';
+    }
+    const send = $('#gwc-send');
+    const sendWhy = $('#gwc-why');
+    const blocker = !gwChatKey() ? 'Needs a key: paste one, or mint one above.' : !st ? 'Node 2 is not answering.' : '';
+    if (send) {
+      send.disabled = Boolean(S.busy.gwChat) || Boolean(blocker);
+      send.innerHTML = S.busy.gwChat ? '<span class="spin"></span>Calling…' : 'Send chat';
+    }
+    if (sendWhy) sendWhy.innerHTML = blocker ? `<span class="warn-text">${esc(blocker)}</span>` : '';
+    const res = $('#gw-chat-result');
+    if (res) setHtml(res, gwChatResultHtml());
+  }
+
+  async function doMint() {
+    const draft = gwMintDraft();
+    if (Object.keys(draft.errors).length > 0) {
+      toast('Fix the highlighted key fields first.', 'warn');
+      return;
+    }
+    S.busy.gwMint = true;
+    renderGatewayLive();
+    const r = await api(nodePath(2, '/keys'), { method: 'POST', body: draft.body, timeoutMs: 30_000 });
+    S.busy.gwMint = false;
+    if (r.status === 201 && typeof r.json?.key === 'string') {
+      // The plaintext lives in this object only (never storage, never logs).
+      S.gw.minted = { key: r.json.key, keyId: r.json.record?.keyId, at: Date.now() };
+      S.results.gwMint = { ok: true };
+      toast(`Key ${esc(r.json.record?.keyId ?? '')} minted — copy it now; it is shown once.`);
+    } else {
+      S.results.gwMint = { ok: false, r };
+    }
+    await refreshAll();
+  }
+
+  async function doRevoke(keyId) {
+    if (S.gw.confirmRevoke !== keyId) {
+      S.gw.confirmRevoke = keyId;
+      renderGatewayLive();
+      setTimeout(() => {
+        if (S.gw.confirmRevoke === keyId) {
+          S.gw.confirmRevoke = null;
+          renderGatewayLive();
+        }
+      }, 6000);
+      return;
+    }
+    S.gw.confirmRevoke = null;
+    S.busy[`revoke:${keyId}`] = true;
+    renderGatewayLive();
+    const r = await api(nodePath(2, `/keys/${encodeURIComponent(keyId)}/revoke`), { method: 'POST', body: {}, timeoutMs: 30_000 });
+    S.busy[`revoke:${keyId}`] = false;
+    S.results.gwRevoke = r.ok ? { ok: true } : { ok: false, r };
+    if (r.ok) {
+      toast(`Key ${esc(keyId)} revoked — its next call answers 401.`);
+      if (S.gw.minted?.keyId === keyId) S.gw.minted = null;
+    }
+    await refreshAll();
+  }
+
+  async function doGatewayChat() {
+    const c = S.gw.chat;
+    const key = gwChatKey();
+    if (!key) {
+      toast('Paste a gateway key, or mint one first.', 'warn');
+      return;
+    }
+    if (!c.prompt.trim()) {
+      toast('Enter a user message.', 'warn');
+      return;
+    }
+    let maxTokens;
+    if (String(c.maxTokens).trim()) {
+      maxTokens = Number(String(c.maxTokens).trim());
+      if (!Number.isSafeInteger(maxTokens) || maxTokens < 1 || maxTokens > 1_000_000) {
+        toast('Max tokens: a whole number 1–1,000,000 (or empty for the default).', 'warn');
+        return;
+      }
+    }
+    const body = {
+      model: c.model || 'stub-chat',
+      messages: [...(c.system.trim() ? [{ role: 'system', content: c.system }] : []), { role: 'user', content: c.prompt }],
+      ...(maxTokens !== undefined ? { max_tokens: maxTokens } : {}),
+      ...(c.stream ? { stream: true } : {}),
+    };
+    S.busy.gwChat = true;
+    renderGatewayLive();
+    // Past the console's 240 s gateway proxy timeout, so a slow node is
+    // reported by the server (504) rather than by a browser abort.
+    const r = await api(`/node/2${GATEWAY_BASE}/chat/completions`, { method: 'POST', body, authorization: `Bearer ${key}`, timeoutMs: 250_000 });
+    if (S.unloading) return;
+    S.busy.gwChat = false;
+    S.results.gwChat = { r, stream: Boolean(c.stream), at: Date.now() };
+    await refreshAll();
+  }
+
+  /** Copy the text of `selector` (a key, a URL, a snippet). */
+  async function copyText(selector) {
+    const el = $(selector);
+    if (!el) return;
+    try {
+      await navigator.clipboard.writeText(el.textContent ?? '');
+      toast('Copied.');
+    } catch {
+      const range = document.createRange();
+      range.selectNodeContents(el);
+      const sel = window.getSelection();
+      sel?.removeAllRanges();
+      sel?.addRange(range);
+      toast('Selected — press Ctrl/Cmd+C to copy.', 'warn');
+    }
   }
 
   // ───────────────────────────── BUYER: settlement ─────────────────────────────
@@ -1988,6 +2591,7 @@
       <div class="stat"><div class="k">Offerings served</div><div class="v num">${esc(String(sv.offerings ?? 0))}</div><div class="s">${s.sellerReady ? 'answering quotes' : 'seller off'}</div></div>
       <div class="stat"><div class="k">Pending receipts</div><div class="v num">${esc(String(sv.pendingReceipts ?? 0))}</div><div class="s">signed, not yet on-chain</div></div>
       <div class="stat"><div class="k">Submitted claims</div><div class="v num">${esc(String(sv.submittedClaims ?? 0))}</div><div class="s">since node start</div></div>
+      ${sv.connectors ? `<div class="stat"><div class="k">Chat connectors</div><div class="v num">${esc(String(sv.connectors.mounted ?? 0))}</div><div class="s">mounted${W(sv.connectors.failed) > 0n ? ` · <span class="danger-text">${esc(String(sv.connectors.failed))} failed</span>` : ''}${W(sv.connectors.mounting) > 0n ? ` · ${esc(String(sv.connectors.mounting))} mounting` : ''}</div></div>` : ''}
     </div>`);
     const extra = (node?.opWallets?.length ?? 0) > 1 ? ` <span class="muted">+${node.opWallets.length - 1} more</span>` : '';
     // /chain/nodes (identity, wallets, online probe) needs the chain: when it
@@ -2011,6 +2615,36 @@
   }
 
   // ───────────────────────────── SELLER: offerings editor ─────────────────────────────
+
+  /** The OT-RFC-27 extension fields of an offering config (connector, pin, model facts), or null. */
+  function offeringExt(o) {
+    const ext = {};
+    for (const k of EXT_KEYS) if (o?.[k] !== undefined) ext[k] = o[k];
+    return Object.keys(ext).length ? ext : null;
+  }
+
+  /** Editor rows for the seeder's offering sets (served by /console/state from devnet-offerings.mjs). */
+  function devnetDefaultRows(n) {
+    const sets = S.cstate.data?.devnetOfferings?.[String(n)];
+    if (!Array.isArray(sets)) return (DEVNET_OFFERINGS_FALLBACK[n] ?? []).map((r) => ({ ...r }));
+    return sets.map((o) => ({
+      id: o.offeringLocalId,
+      serviceType: o.serviceType,
+      unit: o.unit,
+      modelId: o.modelId ?? '',
+      askMicro: decimal(W(o.askPerUnitWei), 12).replace(/,/g, ''),
+      ext: offeringExt(o),
+    }));
+  }
+
+  /** "Chat connector openai-compatible · pin stub-words-v1 · tools native" — never a path or a secret. */
+  function connectorSummary(ext) {
+    const c = ext?.connector;
+    if (!c) return '';
+    const pin = ext.metering?.tokenizer?.kind;
+    const transport = c.kind === 'openai-compatible' ? c.toolTransport ?? 'native' : 'prompt';
+    return `Chat connector <code>${esc(c.kind)}</code>${c.upstreamModel ? ` → upstream model <code>${esc(c.upstreamModel)}</code>` : ''} · ${pin ? `tokenizer pin <code>${esc(pin)}</code>` : 'metered by the upstream’s usage (no pin)'} · tools ${esc(transport)}${ext.allowedBuyers?.length ? ` · ${ext.allowedBuyers.length} allowed buyer(s)` : ''}`;
+  }
 
   function initEditor(n, { force = false } = {}) {
     if (S.editors[n] && !force) return S.editors[n];
@@ -2036,12 +2670,15 @@
           unit: o.unit,
           modelId: o.modelId ?? '',
           askMicro: decimal(ask, 12).replace(/,/g, ''),
+          ext: offeringExt(o),
         };
       });
     } else if (own.length) {
       const byId = new Map();
       for (const o of own) byId.set(localIdOf(o.offerId) || o.offeringId, o);
-      rows = [...byId.entries()].map(([id, o]) => ({ id, serviceType: o.serviceType, unit: o.unit, modelId: o.modelId ?? '', askMicro: decimal(W(o.askPerUnitWei), 12).replace(/,/g, '') }));
+      // A chat offer's connector config (upstream URL, secret file) is
+      // seller-local and never published, so the graph cannot restore it.
+      rows = [...byId.entries()].map(([id, o]) => ({ id, serviceType: o.serviceType, unit: o.unit, modelId: o.modelId ?? '', askMicro: decimal(W(o.askPerUnitWei), 12).replace(/,/g, ''), ext: null, chatUnknown: Boolean(o.apiShape) }));
       source = 'graph';
     }
     // A published set waits for the graph view too (its asks may be newer).
@@ -2065,6 +2702,8 @@
       } catch (e) {
         errors[`${i}.ask`] = e.message;
       }
+      if (r.chatUnknown) errors[`${i}.id`] = 'chat offer: its connector config is not known here — Load devnet defaults or rerun the seeder';
+      if (r.ext?.connector && !r.modelId.trim()) errors[`${i}.modelId`] = 'a chat connector offering needs a model id';
     });
     return errors;
   }
@@ -2074,21 +2713,28 @@
     const body = document.getElementById('b-offerings');
     if (!body) return;
     body._html = null;
-    const rows = ed.rows.map((r, i) => `
+    const rows = ed.rows.map((r, i) => {
+      // A chat connector serves inference metered per token: those two are fixed.
+      const fixed = r.ext?.connector ? ' disabled title="A chat connector offering serves inference, metered per token"' : '';
+      return `
       <div class="offering-row">
         <div class="field"><label for="of-id-${i}">Offering id</label><input type="text" id="of-id-${i}" data-of="id" data-i="${i}" value="${esc(r.id)}" autocomplete="off"><div class="hint danger-text" data-of-err="${i}.id"></div></div>
-        <div class="field"><label for="of-svc-${i}">Service</label><select id="of-svc-${i}" data-of="serviceType" data-i="${i}">${SERVICE_TYPES.map((t) => `<option value="${t}"${t === r.serviceType ? ' selected' : ''}>${esc(SERVICE_LABEL[t])}</option>`).join('')}</select></div>
-        <div class="field"><label for="of-unit-${i}">Unit</label><select id="of-unit-${i}" data-of="unit" data-i="${i}">${UNITS.map((u) => `<option value="${u}"${u === r.unit ? ' selected' : ''}>${esc(UNIT_LABEL[u])}</option>`).join('')}</select></div>
-        <div class="field"><label for="of-model-${i}">Model</label><input type="text" id="of-model-${i}" data-of="modelId" data-i="${i}" value="${esc(r.modelId)}" placeholder="optional"></div>
+        <div class="field"><label for="of-svc-${i}">Service</label><select id="of-svc-${i}" data-of="serviceType" data-i="${i}"${fixed}>${SERVICE_TYPES.map((t) => `<option value="${t}"${t === r.serviceType ? ' selected' : ''}>${esc(SERVICE_LABEL[t])}</option>`).join('')}</select></div>
+        <div class="field"><label for="of-unit-${i}">Unit</label><select id="of-unit-${i}" data-of="unit" data-i="${i}"${fixed}>${UNITS.map((u) => `<option value="${u}"${u === r.unit ? ' selected' : ''}>${esc(UNIT_LABEL[u])}</option>`).join('')}</select></div>
+        <div class="field"><label for="of-model-${i}">Model</label><input type="text" id="of-model-${i}" data-of="modelId" data-i="${i}" value="${esc(r.modelId)}" placeholder="${r.ext?.connector ? 'required' : 'optional'}"><div class="hint danger-text" data-of-err="${i}.modelId"></div></div>
         <div class="field"><label for="of-ask-${i}">Ask <span class="unit">µTRAC/unit</span></label><input type="text" inputmode="decimal" id="of-ask-${i}" data-of="askMicro" data-i="${i}" value="${esc(r.askMicro)}"><div class="wei-preview" data-of-prev="${i}"></div><div class="hint danger-text" data-of-err="${i}.ask"></div></div>
         <button type="button" class="btn btn-ghost btn-sm rm" data-action="of-rm" data-arg="${i}" aria-label="Remove offering ${esc(r.id || i + 1)}" title="Remove offering">×</button>
-      </div>`).join('');
+        ${r.ext?.connector ? `<div class="offering-ext">${connectorSummary(r.ext)}. <span class="muted">Connector config comes from the seeder; its secret stays in a file on the node. See “Chat connectors” below.</span></div>` : ''}
+        ${r.chatUnknown ? '<div class="offering-ext warn-text">OpenAI-chat offer found in the graph, but its connector config (upstream URL, secret file) is seller-local and never published. Use “Load devnet defaults” (or rerun the seeder) before publishing.</div>' : ''}
+      </div>`;
+    }).join('');
+    const defaults = devnetDefaultRows(n);
     body.innerHTML = `
-      <p class="lede">Each offering is published as a Knowledge Asset into the shared <code>marketplace</code> context graph. Inference uses the deterministic devnet stub; queries run against this node’s marketplace graph view. Removing an offering stops this node from quoting it (buyers skip it), though its KA stays in the graph.</p>
+      <p class="lede">Each offering is published as a Knowledge Asset into the shared <code>marketplace</code> context graph. <code>devnet-llm</code> uses the deterministic devnet stub; <code>devnet-chat</code> relays OpenAI chat calls to the devnet llm-stub through a chat connector, metered with a pinned tokenizer; queries run against this node’s marketplace graph view. Removing an offering stops this node from quoting it (buyers skip it), though its KA stays in the graph.</p>
       ${ed.rows.length === 0 ? emptyBox('No offerings on this node', 'Add one, or load the devnet defaults used by the e2e suite.') : `<div class="bucket-rows">${rows}</div>`}
       <div class="row mt-3">
         <button type="button" class="btn btn-sm" data-action="of-add">Add offering</button>
-        ${DEVNET_OFFERINGS[n] ? '<button type="button" class="btn btn-sm" data-action="of-defaults">Load devnet defaults</button>' : ''}
+        ${defaults.length ? '<button type="button" class="btn btn-sm" data-action="of-defaults">Load devnet defaults</button>' : ''}
         <button type="button" class="btn btn-sm btn-ghost" data-action="of-reload">Reset to published</button>
       </div>
       <div id="of-live"></div>
@@ -2185,7 +2831,7 @@
                 `The last publish from this console was ${esc(fmtDur(Math.round(ageMin * 60)))} ago, but buyer node 2 still does not see this node’s current ask. A changed ask is an on-chain update of the same offer Knowledge Asset and usually reaches the buyer within seconds, at most about a minute later. Check that the publish succeeded, and look in <code>.devnet/node2/daemon.log</code> for <code>VM reconcile for "marketplace" failed</code>. Calls still route on the seller’s <strong>live quote</strong>, so buyers pay the new ask; only their Offers table shows the old one (the console flags it as stale).`,
               );
             }
-            return `<tr><td data-label="Offering"><code>${esc(localIdOf(x.offerId))}</code></td><td data-label="Service">${esc(SERVICE_LABEL[x.serviceType] ?? x.serviceType)}</td><td class="r" data-label="Ask (this node)">${askAmt(x.askPerUnitWei, x.unit)}</td><td data-label="Buyer node 2">${buyerCell}</td></tr>`;
+            return `<tr><td data-label="Offering"><code>${esc(localIdOf(x.offerId))}</code></td><td data-label="Service">${esc(x.apiShape ? `OpenAI chat · ${x.modelId ?? '?'}` : SERVICE_LABEL[x.serviceType] ?? x.serviceType)}</td><td class="r" data-label="Ask (this node)">${askAmt(x.askPerUnitWei, x.unit)}</td><td data-label="Buyer node 2">${buyerCell}</td></tr>`;
           }).join('');
           graphHtml = `<div class="table-wrap"><table class="table-cards"><thead><tr><th>Offering</th><th>Service</th><th class="r">Ask (this node)</th><th>Buyer node 2 sees</th></tr></thead><tbody>${rowsHtml}</tbody></table></div>`;
         } else {
@@ -2244,6 +2890,8 @@
       unit: r.unit,
       ...(r.modelId.trim() ? { modelId: r.modelId.trim() } : {}),
       askPerUnitWei: parseMicro(r.askMicro).toString(),
+      // Connector / tokenizer pin / model facts, verbatim (secrets stay in files).
+      ...r.ext,
     }));
     S.busy[`publish${n}`] = true;
     renderOfferingsLive(n);
@@ -2256,6 +2904,70 @@
       toast(`Node ${n}: ${esc(publishSummary(r.json))}.`);
     }
     await refreshAll({ full: true });
+  }
+
+  // ───────────────────────────── SELLER: chat connectors ─────────────────────────────
+
+  function renderConnectors(n) {
+    const c = S.connectors[n];
+    if (!c || !c.loaded) return;
+    setMeta('connectors', since(c.at, c));
+    if (!c.data) {
+      setBody('connectors', errorBox(c.error, { retry: true }));
+      return;
+    }
+    const list = Array.isArray(c.data.connectors) ? c.data.connectors : [];
+    const stub = S.llmStub.data;
+    const stubLine = !S.llmStub.loaded ? ''
+      : stub?.ok ? `<p class="hint">Devnet llm-stub: <span class="ok-text">up</span> on :${esc(String(stub.port))} (model ${esc(stub.model ?? '?')}).</p>`
+        : `<p class="hint">Devnet llm-stub: <span class="danger-text">down</span> — chat calls to it fail with <code>upstream_error</code> until you run <code>${esc(stub?.runHint ?? 'pnpm devnet:marketplace:llm-stub')}</code>.</p>`;
+    if (list.length === 0) {
+      setBody('connectors', `${staleBanner(c)}${emptyBox('No chat connectors on this node', 'A chat-connector offering mounts one: an OpenAI-compatible upstream, a local llama.cpp server, or Codex. The seeder gives both sellers <code>devnet-chat</code> → the devnet llm-stub (Offerings → “Load devnet defaults” restores it).')}${stubLine}`);
+      return;
+    }
+    const health = S.connHealth[n] ?? {};
+    const rows = list.map((x) => {
+      const stateCls = x.state === 'mounted' ? 'tag-ok' : x.state === 'failed' ? 'tag-danger' : 'tag-warn';
+      const m = x.metering ?? {};
+      const pin = m.basis === 'pinned'
+        ? `<span>pinned <code>${esc(m.tokenizerKind ?? '?')}</code></span><div class="why hex" title="${esc(m.tokenizerDigest ?? '')}">${esc(shortHex(m.tokenizerDigest ?? '', 14, 6))}</div>`
+        : '<span class="muted">upstream-reported usage (no pin)</span>';
+      const h = health[x.offeringLocalId] ?? x.health;
+      const healthCell = h
+        ? `<span>${h.ok ? '<span class="tag tag-ok">ok</span>' : '<span class="tag tag-danger">failing</span>'} <span class="muted">${esc(String(h.latencyMs ?? '?'))} ms</span></span>${h.detail ? `<div class="why">${esc(h.detail)}</div>` : ''}<div class="why">checked ${esc(fmtTime(h.checkedAt))}</div>`
+        : '<span class="muted">not probed</span>';
+      return `<tr>
+        <td data-label="Offering"><code>${esc(x.offeringLocalId)}</code><div class="why">model ${esc(x.modelId ?? '?')}</div></td>
+        <td data-label="Connector"><code>${esc(x.kind)}</code>${x.upstreamOrigin ? `<div class="why hex">${esc(x.upstreamOrigin)}</div>` : ''}${x.weightsDigest ? `<div class="why hex" title="${esc(x.weightsDigest)}">weights ${esc(shortHex(x.weightsDigest, 14, 6))}</div>` : ''}</td>
+        <td data-label="State"><span class="tag ${stateCls}">${esc(x.state)}</span>${x.detail ? `<div class="why">${esc(x.detail)}</div>` : ''}</td>
+        <td data-label="Secret">${x.secretConfigured ? '<span class="ok-text">configured</span>' : '<span class="muted">none</span>'}</td>
+        <td data-label="Metering pin">${pin}</td>
+        <td data-label="Health">${healthCell}</td>
+      </tr>`;
+    }).join('');
+    const pr = S.results[`probe${n}`];
+    setBody('connectors', `${staleBanner(c)}
+      <p class="lede">Each chat-connector offering relays OpenAI chat calls to an upstream model. The node meters every call with the tokenizer its offer <strong>pins</strong>, so buyers can recount it. Only the upstream origin and whether a secret is configured are shown — base URLs, file paths and keys stay on the node.</p>
+      <div class="table-wrap"><table class="table-cards">
+        <thead><tr><th>Offering</th><th>Connector</th><th>State</th><th>Secret</th><th>Metering pin</th><th>Health</th></tr></thead>
+        <tbody>${rows}</tbody></table></div>
+      ${pr && !pr.ok ? errorBox(pr.r, { title: 'Probe failed' }) : ''}
+      <div class="row mt-3"><button type="button" class="btn btn-sm" data-action="conn-probe" ${S.busy[`probe${n}`] ? 'disabled' : ''}>${S.busy[`probe${n}`] ? '<span class="spin"></span>Probing…' : 'Probe upstream health'}</button><span class="hint">Calls each upstream’s <code>/models</code> with the node’s secret (no spend).</span></div>
+      ${stubLine}`);
+  }
+
+  async function doProbe(n) {
+    S.busy[`probe${n}`] = true;
+    renderConnectors(n);
+    const r = await api(nodePath(n, '/seller/connectors?probe=1'), { timeoutMs: 60_000 });
+    S.busy[`probe${n}`] = false;
+    S.results[`probe${n}`] = r.ok ? { ok: true } : { ok: false, r };
+    if (r.ok) {
+      for (const x of r.json?.connectors ?? []) if (x.health) S.connHealth[n][x.offeringLocalId] = x.health;
+      S.connectors[n].data = r.json;
+      S.connectors[n].at = Date.now();
+    }
+    renderConnectors(n);
   }
 
   // ───────────────────────────── SELLER: receipts ─────────────────────────────
@@ -2563,6 +3275,12 @@
       applyTheme(c);
       return;
     }
+    const snipBtn = ev.target.closest('[data-gw-snippet]');
+    if (snipBtn) {
+      S.gw.snippet = snipBtn.dataset.gwSnippet;
+      renderGatewayLive();
+      return;
+    }
     const svcBtn = ev.target.closest('[data-pg-svc]');
     if (svcBtn) {
       const ta = $('#pg-input');
@@ -2641,7 +3359,7 @@
         mountOfferings(n);
         break;
       case 'of-defaults':
-        S.editors[n].rows = DEVNET_OFFERINGS[n].map((r) => ({ ...r }));
+        S.editors[n].rows = devnetDefaultRows(n);
         S.editors[n].dirty = true;
         mountOfferings(n);
         break;
@@ -2658,6 +3376,26 @@
         break;
       case 'claim':
         doClaim(n);
+        break;
+      case 'gw-mint':
+        doMint();
+        break;
+      case 'gw-hide-key':
+        S.gw.minted = null;
+        S.results.gwMint = null;
+        renderGatewayLive();
+        break;
+      case 'gw-revoke':
+        doRevoke(act.dataset.arg);
+        break;
+      case 'gw-chat':
+        doGatewayChat();
+        break;
+      case 'copy':
+        copyText(act.dataset.copy);
+        break;
+      case 'conn-probe':
+        doProbe(n);
         break;
       default:
         break;
@@ -2682,6 +3420,10 @@
     if (ev.key === 'Enter' && ev.target.id === 'pg-input' && (ev.metaKey || ev.ctrlKey)) {
       ev.preventDefault();
       doInvoke();
+    }
+    if (ev.key === 'Enter' && ev.target.id === 'gwc-prompt' && (ev.metaKey || ev.ctrlKey)) {
+      ev.preventDefault();
+      if (!S.busy.gwChat) doGatewayChat();
     }
   });
 
@@ -2719,6 +3461,16 @@
       renderOfferingsLive(n);
       return;
     }
+    if (t.dataset?.gw) {
+      S.gw.form[t.dataset.gw] = t.type === 'checkbox' ? t.checked : t.value;
+      renderGatewayLive();
+      return;
+    }
+    if (t.dataset?.gwc) {
+      S.gw.chat[t.dataset.gwc] = t.type === 'checkbox' ? t.checked : t.value;
+      renderGatewayLive();
+      return;
+    }
     if (t.id === 'pg-input') {
       if (S.pg.service === 'query') S.pg.sparql = t.value;
       else S.pg.prompt = t.value;
@@ -2750,6 +3502,11 @@
       renderOffers();
     }
   });
+
+  // <details> open state survives re-renders (toggle does not bubble: capture it).
+  document.addEventListener('toggle', (ev) => {
+    if (ev.target?.dataset?.gwDead !== undefined) S.gw.showDead = ev.target.open;
+  }, true);
 
   document.addEventListener('visibilitychange', () => {
     if (!document.hidden) refreshAll();

@@ -4,13 +4,19 @@
 //
 //   GET  /                         static console (public/index.html, app.js, styles.css)
 //   GET|POST /node/<n>/api/marketplace/*   → node n's daemon, bearer token injected server-side
+//   GET|POST /node/<n>/api/marketplace/gateway/v1[/*]
+//                                  → node n's OpenAI-compatible buyer gateway: the BROWSER's
+//                                    `Authorization` (a gateway key) is forwarded and the node
+//                                    token is NEVER injected
 //   GET  /node/<n>/api/status      → node n's public status (no token)
 //   GET  /chain/state              chain clock, epoch, deadline, params, pools
 //   GET  /chain/epoch/<e>          buckets, per-seller claims, per-node accounting (R/Q/QIF/reward)
 //   GET  /chain/nodes              nodes 1..6: role, port, op wallets, identity, TRAC
 //   POST /chain/warp               {seconds} | {toDeadline:true, epoch?}   (devnet time travel)
 //   POST /chain/fund-buyer         {node, trac}                            (devnet TRAC top-up)
-//   GET  /console/state            what the console last sent (plan policies, offering sets)
+//   GET  /console/state            what the console last sent (plan policies, offering sets),
+//                                  plus the devnet default offering sets and the llm-stub port
+//   GET  /console/llm-stub         is the devnet llm-stub up? ({ ok, port, runHint })
 //
 // Env: HOST (127.0.0.1), PORT (9300), CONSOLE_ACCESS_KEY (optional),
 //      DEVNET_RPC (http://127.0.0.1:8545), DEVNET_DIR (<repo>/.devnet).
@@ -21,6 +27,7 @@ import { createHash, timingSafeEqual } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
+import { devnetOfferings, llmStubPort, LLM_STUB_RUN_HINT, probeLlmStub } from './devnet-offerings.mjs';
 import {
   CONSOLE_DIR,
   NODE_NUMS,
@@ -51,6 +58,11 @@ const PORT = Number(process.env.PORT ?? 9300);
 const ACCESS_KEY = process.env.CONSOLE_ACCESS_KEY ?? '';
 const MAX_BODY_BYTES = 64 * 1024;
 const PROXY_TIMEOUT_MS = 180_000;
+// Gateway chat calls wait for the seller's upstream (the buyer's chat serve
+// timeout is 200 s), so the proxy must outlast it.
+const GATEWAY_PROXY_TIMEOUT_MS = 240_000;
+const GATEWAY_BASE_PATH = '/api/marketplace/gateway/v1';
+const KEYS_PATH = '/api/marketplace/keys';
 const MAX_WARP_SECONDS = 400 * 24 * 3600;
 const MAX_TOPUP_WEI = 1_000_000n * SCALE18;
 
@@ -254,8 +266,14 @@ function serveStatic(res, pathname) {
 
 // ───────────────────────────── node proxy ─────────────────────────────
 
+/** The node's buyer gateway (exact base or a subpath; `apiPath` is the WHATWG-normalized pathname). */
+const isGatewayPath = (apiPath) => apiPath === GATEWAY_BASE_PATH || apiPath.startsWith(`${GATEWAY_BASE_PATH}/`);
+/** Gateway key administration: its 201 mint response carries the one-time plaintext key. */
+const isKeysPath = (apiPath) => apiPath === KEYS_PATH || apiPath.startsWith(`${KEYS_PATH}/`);
+
 async function proxyToNode(req, res, num, apiPath, search) {
   const isMarketplace = apiPath === '/api/marketplace' || apiPath.startsWith('/api/marketplace/');
+  const isGateway = isGatewayPath(apiPath);
   const isStatus = apiPath === '/api/status';
   if (!isMarketplace && !isStatus) {
     return sendError(res, 404, 'only /api/marketplace/* and GET /api/status are proxied');
@@ -271,13 +289,21 @@ async function proxyToNode(req, res, num, apiPath, search) {
     bodyText = await readBody(req);
     parseJsonBody(bodyText); // reject malformed JSON before it reaches the node
   }
-  const headers = { Accept: 'application/json' };
-  // Token injected server-side for marketplace routes only; it never reaches the browser.
-  if (isMarketplace) {
+  const headers = { Accept: isGateway ? 'application/json, text/event-stream' : 'application/json' };
+  if (isGateway) {
+    // The gateway authenticates by a scoped key the BROWSER holds: forward its
+    // Authorization header verbatim (never logged) and NEVER inject the node
+    // token — a node token on a gateway path is refused, and injecting it
+    // would let any page on this origin spend without a key.
+    const auth = req.headers.authorization;
+    if (typeof auth === 'string' && auth.length > 0) headers.Authorization = auth;
+  } else if (isMarketplace) {
+    // Token injected server-side for marketplace routes only; it never reaches the browser.
     const token = readToken(num);
     if (token) headers.Authorization = `Bearer ${token}`;
   }
   if (bodyText !== undefined) headers['Content-Type'] = 'application/json';
+  const timeoutMs = isGateway ? GATEWAY_PROXY_TIMEOUT_MS : PROXY_TIMEOUT_MS;
   const started = Date.now();
   let upstream;
   try {
@@ -285,18 +311,20 @@ async function proxyToNode(req, res, num, apiPath, search) {
       method: req.method,
       headers,
       ...(bodyText !== undefined ? { body: bodyText } : {}),
-      signal: AbortSignal.timeout(PROXY_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (err) {
     const timedOut = err?.name === 'TimeoutError';
     return sendError(res, timedOut ? 504 : 502, timedOut
-      ? `node${num} did not answer within ${PROXY_TIMEOUT_MS / 1000}s`
+      ? `node${num} did not answer within ${timeoutMs / 1000}s`
       : `node${num} is unreachable on :${node.apiPort} (${errMessage(err.cause ?? err)})`, { code: 'NODE_UNREACHABLE' });
   }
   const text = await upstream.text();
   if (req.method === 'POST') {
     console.log(`[console] node${num} POST ${apiPath} → ${upstream.status} (${Date.now() - started} ms)`);
-    if (upstream.status === 200) rememberMutation(num, apiPath, bodyText, text);
+    // Only plan policies and offering sets are remembered, from 200s. A key
+    // mint (201) carries the plaintext key: it is never persisted or logged.
+    if (upstream.status === 200 && !isGateway && !isKeysPath(apiPath)) rememberMutation(num, apiPath, bodyText, text);
   }
   send(res, upstream.status, text, {
     'Content-Type': upstream.headers.get('content-type') ?? 'application/json; charset=utf-8',
@@ -779,7 +807,15 @@ async function handle(req, res) {
       accessKeyRequired: Boolean(ACCESS_KEY),
       plans: s.plans,
       offerings: s.offerings,
+      // The seeder's offering sets ("Load devnet defaults"). Connector config
+      // names the secret FILE only, never its content.
+      devnetOfferings: devnetOfferings(),
+      llmStub: { port: llmStubPort(), runHint: LLM_STUB_RUN_HINT },
+      gatewayBasePath: GATEWAY_BASE_PATH,
     });
+  }
+  if (pathname === '/console/llm-stub' && req.method === 'GET') {
+    return sendJson(res, 200, { port: llmStubPort(), runHint: LLM_STUB_RUN_HINT, ...(await probeLlmStub()) });
   }
 
   try {
@@ -840,6 +876,8 @@ server.listen(PORT, HOST, async () => {
       + `${n.peerId ? `  peer …${n.peerId.slice(-8)}` : ''}${n.marketplaceEnabled ? '' : '  (marketplace disabled)'}`,
     );
   }
+  const stub = await probeLlmStub();
+  lines.push(`  Stub    llm-stub :${llmStubPort()} ${stub.ok ? `up (model ${stub.model})` : `DOWN — start it: ${LLM_STUB_RUN_HINT}`}`);
   lines.push('  Views   Buyer = node2 · Seller A = node1 · Seller B = node3', '');
   console.log(lines.join('\n'));
 });

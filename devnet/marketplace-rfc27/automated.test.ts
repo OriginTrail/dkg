@@ -16,9 +16,10 @@
  *      session key are asserted against the Marketplace contract views.
  *   4. Drill phase A: a chat-style invoke routes to seller A (CHEAPER ask — B
  *      offers the same `devnet-llm` at a higher price as the routing check)
- *      and a SPARQL invoke serves against A's local graph; results, metered
- *      costs, receipt value math and the shared RCPT_DOMAIN EIP-191 crypto
- *      are asserted. A's claims stay UNSUBMITTED (no flush).
+ *      and a SPARQL invoke serves against A's local graph, metered by the
+ *      static query cost schedule (admission 3 + delivery 0|1 units);
+ *      results, metered costs, receipt value math and the shared RCPT_DOMAIN
+ *      EIP-191 crypto are asserted. A's claims stay UNSUBMITTED (no flush).
  *   5. Drill phase B: a deny-list re-subscribe drives usage to B while A's
  *      claims are still unsubmitted — the genuine RFC over-authorization
  *      race. Sellers now refuse UNDERFUNDED when on-chain claimed + their OWN
@@ -40,8 +41,21 @@
  *      recomputed in the test from the on-chain `R_i, Q_i, ΣR, ΣQ, λ`, and the
  *      per-epoch reward distribution totals reconciled against the payouts.
  *
+ * A second describe, `… buyer gateway (devnet e2e)` (steps G1–G15, spec
+ * agent-docs/plans/2026-10-27-rfc27-sellers-gateway.md §13.3), drives the
+ * OpenAI-compatible buyer gateway end to end in the epoch after the drill:
+ * both sellers serve `devnet-chat` (an openai-compatible chat connector to an
+ * IN-PROCESS llm-stub, metered with the pinned `stub-words-v1` tokenizer),
+ * the buyer subscribes, mints a scoped gateway key, and calls /models, chat
+ * (JSON, buffered SSE, truncation, native tool calls) and /query with the
+ * key; usage equals the stub-words count, the buyer's recount agrees, the key
+ * budget refuses an over-budget call, scopes hold, the auth carve-out admits
+ * gateway keys nowhere else, revocation is immediate, and seller A's on-chain
+ * claim grows by exactly the gateway costs. It is self-sufficient: `-t
+ * gateway` runs it alone on a seeded devnet.
+ *
  * AMOUNTS: the subscription is deliberately funded in SMALL wei amounts
- * (Σ = 0.001 TRAC) while the buyer wallet is topped up BY 10 TRAC on top of
+ * (Σ = 0.00092 TRAC) while the buyer wallet is topped up BY 10 TRAC on top of
  * whatever it already holds (its bootstrap balance is real node capital and
  * must survive this suite) — at the RFC-pinned
  * asks (0.5 µTRAC/token, 15 µTRAC/query-unit) that is what makes the
@@ -74,8 +88,8 @@
  *
  * Run: pnpm test:devnet:marketplace-rfc27
  */
-import { describe, it, expect, beforeAll } from 'vitest';
-import { readFileSync } from 'node:fs';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { ethers } from 'ethers';
 import {
@@ -86,11 +100,38 @@ import {
   fundTrac,
   getJson,
   postJson,
+  sleep,
   timeWarpSeconds,
   waitFor,
   type DevnetNode,
   type DevnetState,
 } from '../_bootstrap/harness.js';
+import {
+  GATEWAY_KEY_PATTERN,
+  adminRequest,
+  asBigInt,
+  expectGatewayError,
+  expectGatewayUnauthorized,
+  gatewayRequest,
+  httpRequest,
+  parseSse,
+  type HttpReply,
+} from './gateway-helpers.js';
+// Plain-ESM devnet tooling (no type declarations; vitest transpiles without type checks).
+import { createLlmStub } from './llm-stub.mjs';
+import {
+  ASK_CHAT_A,
+  ASK_CHAT_B,
+  ASK_KNOWLEDGE_A as SEED_ASK_KNOWLEDGE_A,
+  ASK_LLM_A as SEED_ASK_LLM_A,
+  ASK_LLM_B as SEED_ASK_LLM_B,
+  LLM_STUB_API_KEY,
+  STUB_MODEL_ID,
+  chatOffering,
+  llmStubPort,
+  stubSecretFile,
+  writeStubSecret,
+} from './console/devnet-offerings.mjs';
 
 // ───────────────────────────── constants ─────────────────────────────────
 
@@ -114,12 +155,14 @@ const ASK_LLM_B = 800_000_000_000n; // 8e11 wei/token
 //     pending → 4.9e14 ≤ 5e14 ✓
 //   phase B (funded 9e14 after tranche 2; A's claims still UNSUBMITTED and
 //     invisible to B): inference worst 800·8e11 = 6.4e14 ≤ 9e14 ✓
-//   combined actuals ≥ 2.5e14 + 11·1.5e13 + 6.4e14 = 1.055e15 > 1e15 = the
+//   combined actuals ≥ 2.5e14 + 3·1.5e13 + 6.4e14 = 9.35e14 > 9.2e14 = the
 //     final funded total (tranche 3 lands only after both phases flushed).
+//     The query serves admission 3 + delivery 0|1 units under the static
+//     query cost schedule, so its actual is 3–4 units, not its worst case.
 const SUB1_WEI = 500_000_000_000_000n; // 5e14
 const SUB2_WEI = 400_000_000_000_000n; // 4e14
-const SUB3_WEI = 100_000_000_000_000n; // 1e14
-const FUNDED_TOTAL_WEI = SUB1_WEI + SUB2_WEI + SUB3_WEI; // 1e15 (0.001 TRAC)
+const SUB3_WEI = 20_000_000_000_000n; // 2e13
+const FUNDED_TOTAL_WEI = SUB1_WEI + SUB2_WEI + SUB3_WEI; // 9.2e14 (0.00092 TRAC)
 
 // The shared prototype token schedule is countTokens = ceil(utf8Bytes/4), and
 // the deterministic inference stub SATURATES: the echo is truncated to fit,
@@ -138,8 +181,11 @@ const PROMPT = BASE_SENTENCE.repeat(18);
 const SPARQL_PROBE = 'SELECT ?s ?p ?o WHERE { ?s ?p ?o } LIMIT 5'; // 42 UTF-8 bytes
 
 // TIGHT per-call unit grants: worst case == actual for the saturated
-// inference calls; the query's worst case caps the deterministic schedule
-// queryUnits = 10 + ceil(42/100) + rows, rows ≤ 5 (LIMIT 5) → [11, 16] units.
+// inference calls. The query is metered by the static query cost schedule
+// (dkg-mkt-query-cost/1): admission = base 2 + 1 triple pattern (LIMIT
+// present, so no surcharge) = 3, delivery = ceil(rows/100) with rows ≤ 5
+// (LIMIT 5) → served ∈ [3, 4]; the seller's row cap (16 − 3)·100 = 1300
+// never binds. The grant keeps its worst case 16·1.5e13 for the drill.
 const INF_MAX_UNITS_A = 500n; // worst 500·5e11 = 2.5e14 (tranche-1 bucket 5e14)
 const INF_MAX_UNITS_B = 800n; // worst 800·8e11 = 6.4e14 (funded 9e14 at phase B)
 const QUERY_MAX_UNITS = 16n; // worst 16·1.5e13 = 2.4e14 (fits 5e14 − 2.5e14 pending)
@@ -369,9 +415,43 @@ function qif18Mirror(
 
 const absDiff = (a: bigint, b: bigint): bigint => (a > b ? a - b : b - a);
 
-// ───────────────────────────── beforeAll ─────────────────────────────────
+// ───────────────────────────── devnet connection ─────────────────────────
 
-beforeAll(async () => {
+/** Chain + node handles both describes need (each describe connects on its own). */
+interface DevnetHandles {
+  state: DevnetState;
+  marketplace: ethers.Contract;
+  chronos: ethers.Contract;
+  sellerA: DevnetNode;
+  sellerB: DevnetNode;
+  buyer: DevnetNode;
+  /** node2's primary operational wallet: the adapter's primary signer is fundSubscription's msg.sender. */
+  buyerAddr: string;
+}
+
+/** Wall-clock ms of this process's last chain time warp (0 = none). */
+let lastWarpAtMs = 0;
+
+/** evm_increaseTime + mine, remembering when (see `waitForNodeChainClocks`). */
+async function warpChain(state: DevnetState, seconds: number): Promise<void> {
+  await timeWarpSeconds(state.provider, seconds);
+  lastWarpAtMs = Date.now();
+}
+
+/**
+ * Nodes keep a chain-time OFFSET that they refresh at most every 30 s (the
+ * marketplace chain clock). Right after a warp, a buyer whose last refresh
+ * predates the warp signs an authorization expiry in the PAST (by the warp)
+ * — sellers refuse it EXPIRED, or a seller with an equally stale clock
+ * serves it and the claim reverts on-chain. Wait out one refresh interval
+ * after this process's last warp before signing new calls.
+ */
+async function waitForNodeChainClocks(): Promise<void> {
+  const left = lastWarpAtMs + 31_000 - Date.now();
+  if (lastWarpAtMs > 0 && left > 0) await sleep(left);
+}
+
+async function connectMarketplaceDevnet(): Promise<DevnetHandles> {
   const detected = await detectDevnet(6);
   if (!detected) {
     throw new Error(
@@ -419,42 +499,29 @@ beforeAll(async () => {
 
   expect(sellerA.identityId, 'node1 (seller A) must have an on-chain identity').toBeGreaterThan(0n);
   expect(sellerB.identityId, 'node3 (seller B) must have an on-chain identity').toBeGreaterThan(0n);
+  return { state, marketplace, chronos, sellerA, sellerB, buyer, buyerAddr: buyer.opWallets[0]!.address };
+}
 
-  // Epoch-boundary guard: every subscription tranche below pins the SAME
-  // epoch, and fundSubscription only accepts current/current+1 — so if we are
-  // within ~20 minutes of the boundary, warp into a fresh epoch first instead
-  // of flaking mid-run. (This suite already time-warps for settlement.)
-  const untilNext: bigint = await chronos.timeUntilNextEpoch();
-  if (untilNext < 1200n) {
-    await timeWarpSeconds(state.provider, Number(untilNext) + 30);
+/**
+ * Epoch-boundary guard: every subscription tranche pins ONE epoch, and
+ * fundSubscription only accepts current/current+1 — so within ~20 minutes of
+ * the boundary, warp into a fresh epoch first instead of flaking mid-run.
+ * With `emptyBucket`, also warp when the buyer already funded the current
+ * epoch (an earlier run's gateway arc, a console or `seed --subscribe`
+ * subscription): the drill pins exact bucket and pool totals. Returns the
+ * epoch to fund.
+ */
+async function currentEpochWithHeadroom(h: DevnetHandles, { emptyBucket = false } = {}): Promise<bigint> {
+  const untilNext: bigint = await h.chronos.timeUntilNextEpoch();
+  const current: bigint = await h.chronos.getCurrentEpoch();
+  const funded = emptyBucket ? BigInt((await h.marketplace.getBucket(h.buyerAddr, current)).funded) : 0n;
+  if (untilNext < 1200n || funded > 0n) {
+    await warpChain(h.state, Number(untilNext) + 30);
   }
-  const epoch: bigint = await chronos.getCurrentEpoch();
+  const epoch: bigint = await h.chronos.getCurrentEpoch();
   expect(epoch).toBeGreaterThan(0n);
-
-  // TOP UP the buyer's on-chain funding wallet (node2's primary operational
-  // wallet — the adapter's primary signer is fundSubscription's msg.sender).
-  // fundTrac OVERWRITES the ERC-20 balance slot, so read-modify-write: setting
-  // it to a bare 10 TRAC would wipe the wallet's bootstrap balance (~1M TRAC),
-  // which the node's other on-chain roles rely on.
-  const buyerAddr = buyer.opWallets[0]!.address;
-  const buyerTracBefore: bigint = await state.token.balanceOf(buyerAddr);
-  await fundTrac(state, buyerAddr, buyerTracBefore + ethers.parseEther('10'));
-
-  ctx = {
-    state,
-    marketplace,
-    chronos,
-    sellerA,
-    sellerB,
-    buyer,
-    idA: sellerA.identityId,
-    idB: sellerB.identityId,
-    buyerAddr,
-    epoch,
-    expectedClaimA: 0n,
-    expectedClaimB: 0n,
-  };
-});
+  return epoch;
+}
 
 // ───────────────────────────── scenario ──────────────────────────────────
 //
@@ -469,6 +536,35 @@ beforeAll(async () => {
 // boundSessionKeys — so every historically bound key keeps authorizing.)
 
 describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
+  beforeAll(async () => {
+    const h = await connectMarketplaceDevnet();
+    // (This suite already time-warps for settlement.)
+    const epoch = await currentEpochWithHeadroom(h, { emptyBucket: true });
+
+    // TOP UP the buyer's on-chain funding wallet (node2's primary operational
+    // wallet — the adapter's primary signer is fundSubscription's msg.sender).
+    // fundTrac OVERWRITES the ERC-20 balance slot, so read-modify-write:
+    // setting it to a bare 10 TRAC would wipe the wallet's bootstrap balance
+    // (~1M TRAC), which the node's other on-chain roles rely on.
+    const buyerTracBefore: bigint = await h.state.token.balanceOf(h.buyerAddr);
+    await fundTrac(h.state, h.buyerAddr, buyerTracBefore + ethers.parseEther('10'));
+
+    ctx = {
+      state: h.state,
+      marketplace: h.marketplace,
+      chronos: h.chronos,
+      sellerA: h.sellerA,
+      sellerB: h.sellerB,
+      buyer: h.buyer,
+      idA: h.sellerA.identityId,
+      idB: h.sellerB.identityId,
+      buyerAddr: h.buyerAddr,
+      epoch,
+      expectedClaimA: 0n,
+      expectedClaimB: 0n,
+    };
+  });
+
   it('1. sellers publish offer KAs into the marketplace CG', async () => {
     // Each offering is its own Knowledge Asset published to Verifiable Memory
     // (an on-chain KA publish from the seller's operational wallet), and the
@@ -617,6 +713,10 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
   });
 
   it('4. drill phase A: router picks the cheaper seller A; SPARQL serves from A; claims stay unsubmitted', async () => {
+    // A warp in this process (the epoch guard) must reach the nodes' chain
+    // clocks before the buyer signs expiries (no-op otherwise).
+    await waitForNodeChainClocks();
+
     // Saturation preconditions — pure math, so a mis-sized prompt fails HERE
     // with a clear message instead of as an UNDERFUNDED/arithmetic surprise:
     // promptTokens ≤ maxUnits < 2·promptTokens makes the stub serve maxUnits
@@ -655,15 +755,20 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
 
     // One SPARQL call — only A offers `devnet-knowledge`, served against A's
     // local graph via the query executor. Worst case 16·1.5e13 = 2.4e14 fits
-    // the 5e14 bucket on top of A's own 2.5e14 unsubmitted exposure.
+    // the 5e14 bucket on top of A's own 2.5e14 unsubmitted exposure. (Chat
+    // offers carry `apiShape openai-chat/v1` and never take a generic
+    // `{ prompt }` invoke — the router's symmetric api-shape rule.)
     const q = await postJson(ctx.buyer, '/api/marketplace/invoke', {
       serviceType: 'query',
       payload: { sparql: SPARQL_PROBE },
       maxUnits: QUERY_MAX_UNITS.toString(),
     });
     const queryCost = assertServedInvoke(q, 'query invoke', ctx.idA, ASK_KNOWLEDGE_A);
-    // The deterministic schedule: 10 + ceil(42/100) + rows(0..5) ∈ [11, 16].
-    expect(big(q.json?.servedUnits, 'query servedUnits')).toBeGreaterThanOrEqual(11n);
+    // The static query cost schedule: admission 3 + delivery ceil(rows/100),
+    // rows ∈ 0..5 → served ∈ [3, 4].
+    const queryUnits = big(q.json?.servedUnits, 'query servedUnits');
+    expect(queryUnits, 'query servedUnits = admission 3 + delivery 0|1').toBeGreaterThanOrEqual(3n);
+    expect(queryUnits, 'query servedUnits = admission 3 + delivery 0|1').toBeLessThanOrEqual(4n);
     ctx.expectedClaimA += queryCost;
 
     // Meter movement: settled usage must be visible on the meter route.
@@ -737,7 +842,7 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
     await flushAndConfirmClaim(ctx.sellerB, ctx.idB, ctx.expectedClaimB, 'seller B');
 
     // The over-authorization is already on-chain: combined claims exceed even
-    // the FINAL funded total (tranche 3, another 1e14, lands in step 7).
+    // the FINAL funded total (tranche 3, another 2e13, lands in step 7).
     const bucket = await ctx.marketplace.getBucket(ctx.buyerAddr, ctx.epoch);
     expect(bucket.totalClaimed, 'combined claims must be exact').toBe(
       ctx.expectedClaimA + ctx.expectedClaimB,
@@ -821,7 +926,7 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
     const deadline: bigint = await ctx.marketplace.settlementDeadline(ctx.epoch);
     const block = await ctx.state.provider.getBlock('latest');
     const warp = deadline - BigInt(block!.timestamp) + 15n;
-    if (warp > 0n) await timeWarpSeconds(ctx.state.provider, Number(warp));
+    if (warp > 0n) await warpChain(ctx.state, Number(warp));
 
     // The settle route takes { action, buyer?, epoch? } only — pagination is
     // internal: the agent calls the adapter's marketplaceFinalizeBucket without
@@ -955,5 +1060,691 @@ describe('OT-RFC-27 marketplace protocol prototype (devnet e2e)', () => {
       dist.undistributed,
       'QIF must distribute the pool up to floor residue',
     ).toBeLessThanOrEqual(REWARD_TOLERANCE_WEI);
+  });
+});
+
+// ═════════════════════════════ buyer gateway arc ═════════════════════════════
+//
+// Spec agent-docs/plans/2026-10-27-rfc27-sellers-gateway.md §13.3 (G1–G15).
+// Golden numbers are copied from the spec (§3): they are NOT recomputed here.
+
+const STUB_WORDS_DIGEST = 'sha256:77c4f56809020ef019a66d94aeb5e2f45cd300521472a4418c7ab4e502215c95';
+const CHAT_TEMPLATE_ID = 'openai-chat-count/v1';
+const CHAT_TEMPLATE_DIGEST = 'sha256:53662e1fb5c8ef588e2d3e3b8fc9025e25a7a4caf0650842a64323b29c71cee8';
+const QUERY_SCHEDULE_ID = 'dkg-mkt-query-cost/1';
+const QUERY_SCHEDULE_DIGEST = 'sha256:70beea38241810353b4934b29627f4ef0699d6b0159d33ccf0357b070f7b0642';
+
+// GV-2 / GV-3: stub-words prompt 17, reply 5 (3 with max_tokens 3).
+const GV2_MESSAGES = [
+  { role: 'system', content: 'You are terse.' },
+  { role: 'user', content: 'hello marketplace world' },
+];
+const GV2_REPLY = 'STUB:WORLD MARKETPLACE HELLO :: ok';
+const GV3_REPLY = 'STUB:WORLD MARKETPLACE HELLO';
+
+// Chat asks equal the devnet-llm asks (spec §13.2): A 0.5 µTRAC, B 0.8 µTRAC.
+const ASK_CHAT_A_WEI = 500_000_000_000n;
+const ASK_CHAT_B_WEI = 800_000_000_000n;
+/** marketplace.buyer.gateway.defaultMaxTokens (default 256): GV-2 authorizes 17 + 256 = 273 units. */
+const GATEWAY_DEFAULT_MAX_TOKENS = 256;
+const GW_SUB_WEI = 2_000_000_000_000_000n; // 2e15
+const GW_KEY_BUDGET_WEI = 1_000_000_000_000_000n; // 1e15
+/** 1e13 < the GV-2 worst case 273 · 5e11 = 1.365e14 → refused by the key, before any reservation. */
+const GW_SMALL_KEY_BUDGET_WEI = 10_000_000_000_000n;
+
+interface GatewayCtx extends DevnetHandles {
+  idA: bigint;
+  idB: bigint;
+  epoch: bigint;
+  stub: {
+    state: { calls: number; lastAuthorization: string | null; lastBody: any };
+    close(): Promise<void>;
+  };
+  stubPort: number;
+  /** Set once G1 re-pointed the sellers' devnet-chat at the in-process stub. */
+  repointed: boolean;
+  key: string;
+  keyId: string;
+  /** Extra keys minted by G11/G12, revoked in G14. */
+  helperKeyIds: string[];
+  claimABefore: bigint;
+  claimBBefore: bigint;
+  /** Σ cost_wei of every gateway call served (all by seller A). */
+  costsA: bigint;
+  chatContent: string;
+  chatCallId: string;
+}
+
+let gw: GatewayCtx;
+
+/** The offering sets G1 serves: the seeder's (console/devnet-offerings.mjs), chat → `port`. */
+function gatewayOfferingSets(port: number): Array<[DevnetNode, Array<Record<string, unknown>>, string]> {
+  return [
+    [
+      gw.sellerA,
+      [
+        { offeringLocalId: 'devnet-llm', serviceType: 'inference', unit: 'token', askPerUnitWei: ASK_LLM_A.toString() },
+        { offeringLocalId: 'devnet-knowledge', serviceType: 'query', unit: 'query-unit', askPerUnitWei: ASK_KNOWLEDGE_A.toString() },
+        chatOffering({ askPerUnitWei: ASK_CHAT_A, secretEnvFile: stubSecretFile(1), port }),
+      ],
+      'seller A',
+    ],
+    [
+      gw.sellerB,
+      [
+        { offeringLocalId: 'devnet-llm', serviceType: 'inference', unit: 'token', askPerUnitWei: ASK_LLM_B.toString() },
+        chatOffering({ askPerUnitWei: ASK_CHAT_B, secretEnvFile: stubSecretFile(3), port }),
+      ],
+      'seller B',
+    ],
+  ];
+}
+
+/** Mint a gateway key on the buyer (node-admin route). */
+async function mintGatewayKey(body: Record<string, unknown>, label: string): Promise<{ key: string; keyId: string; record: any }> {
+  const r = await adminRequest(gw.buyer, '/api/marketplace/keys', { method: 'POST', body });
+  expect(r.status, `${label} mint: ${r.text.slice(0, 400)}`).toBe(201);
+  const m = GATEWAY_KEY_PATTERN.exec(String(r.json?.key));
+  expect(m, `${label}: the plaintext key must match dkg_gw_<8hex>_<43 b64url>`).not.toBeNull();
+  expect(r.json.record?.keyId).toBe(`gw_${m![1]}`);
+  return { key: r.json.key, keyId: r.json.record.keyId, record: r.json.record };
+}
+
+async function listGatewayKeys(): Promise<{ text: string; keys: any[] }> {
+  const r = await adminRequest(gw.buyer, '/api/marketplace/keys');
+  expect(r.status, `GET /api/marketplace/keys: ${r.text.slice(0, 300)}`).toBe(200);
+  return { text: r.text, keys: Array.isArray(r.json?.keys) ? r.json.keys : [] };
+}
+
+/** Wall-clock ms of the arc's last gateway request (see `gwCall`). */
+let lastGatewayCallMs = 0;
+
+/**
+ * A gateway request under the buyer's base path. Keys are minted with
+ * `rps: 5` (spec G4) and the gateway counts them in a sliding 1 s window, so
+ * consecutive calls are spaced ≥ 250 ms: a 429 must never pre-empt the
+ * answer a step asserts.
+ */
+async function gwCall(subPath: string, key: string | null, opts: Parameters<typeof gatewayRequest>[3] = {}): Promise<HttpReply> {
+  const wait = lastGatewayCallMs + 250 - Date.now();
+  if (wait > 0) await sleep(wait);
+  lastGatewayCallMs = Date.now();
+  return gatewayRequest(gw.buyer, subPath, key, opts);
+}
+
+function chatRequest(key: string, body: Record<string, unknown>): Promise<HttpReply> {
+  return gwCall('/chat/completions', key, { method: 'POST', body: { model: STUB_MODEL_ID, messages: GV2_MESSAGES, ...body } });
+}
+
+/**
+ * Assert a gateway call's `dkg` block (spec §9.3): the serving seller, the
+ * offering, cost = served·ask, and the seller's EIP-191 receipt signature
+ * over the independently recomputed RCPT_DOMAIN digest. Returns cost_wei.
+ */
+function assertGatewayCall(
+  dkg: any,
+  label: string,
+  expected: { sellerId: bigint; offering: string; askPerUnitWei: bigint; servedUnits: bigint },
+): bigint {
+  const dump = `${label}: dkg=${JSON.stringify(dkg)}`;
+  expect(String(dkg?.call_id), dump).toMatch(/^0x[0-9a-f]{64}$/i);
+  expect(String(dkg?.offering_id).toLowerCase(), dump).toBe(offeringIdFor(expected.offering).toLowerCase());
+  expect(asBigInt(dkg?.seller?.identity_id, `${label} seller`), `${label}: routed to the wrong seller`).toBe(expected.sellerId);
+  expect(String(dkg?.seller?.peer_id), dump).toMatch(/^12D3Koo/);
+  const servedUnits = asBigInt(dkg?.served_units, `${label} served_units`);
+  expect(servedUnits, dump).toBe(expected.servedUnits);
+  expect(asBigInt(dkg?.ask_per_unit_wei, `${label} ask`), dump).toBe(expected.askPerUnitWei);
+  const costWei = asBigInt(dkg?.cost_wei, `${label} cost_wei`);
+  expect(costWei, `${label}: cost_wei must equal served_units · ask`).toBe(servedUnits * expected.askPerUnitWei);
+  const rc = dkg?.receipt ?? {};
+  expect(String(rc.auth_digest), dump).toMatch(/^0x[0-9a-fA-F]{64}$/);
+  expect(String(rc.result_commitment), dump).toMatch(/^0x[0-9a-fA-F]{64}$/);
+  const digest = receiptDigest(rc.auth_digest, servedUnits, costWei, rc.result_commitment);
+  const recovered = ethers.verifyMessage(ethers.getBytes(digest), rc.seller_sig);
+  expect(
+    recovered.toLowerCase(),
+    `${label}: seller_sig must recover to the seller's receipt wallet over the shared RCPT_DOMAIN digest`,
+  ).toBe(String(dkg?.seller?.address).toLowerCase());
+  return costWei;
+}
+
+/** GV-2 / GV-3 pinned chat metering block (spec §9.3), as strings. */
+function expectChatMetering(dkg: any, label: string, units: { prompt: number; tool: number; completion: number }, providerUsage: { prompt_tokens: number; completion_tokens: number }): void {
+  expect(dkg?.metering, `${label}: metering`).toMatchObject({
+    basis: 'pinned',
+    tokenizer_kind: 'stub-words-v1',
+    tokenizer_digest: STUB_WORDS_DIGEST,
+    chat_template: CHAT_TEMPLATE_ID,
+    prompt_units: String(units.prompt),
+    tool_units: String(units.tool),
+    completion_units: String(units.completion),
+    provider_usage: providerUsage,
+  });
+  expect(typeof dkg?.metering?.truncated, label).toBe('boolean');
+  const served = units.prompt + units.tool + units.completion;
+  expect(dkg?.recount, `${label}: the buyer's stub-words recount must agree with the receipt`).toEqual({
+    verdict: 'match',
+    reason: null,
+    recount_units: String(served),
+  });
+}
+
+describe('OT-RFC-27 marketplace buyer gateway (devnet e2e)', () => {
+  beforeAll(async () => {
+    const h = await connectMarketplaceDevnet();
+    const st = await getJson(h.buyer, '/api/marketplace/status');
+    if (st.json?.gateway?.enabled !== true) {
+      throw new Error(
+        `node2 reports gateway ${JSON.stringify(st.json?.gateway)} — the buyer gateway must be enabled ` +
+          '(default with the marketplace; check marketplace.buyer.gateway.enabled / DKG_MARKETPLACE_GATEWAY_ENABLED) ' +
+          'and the daemon built from this branch.',
+      );
+    }
+    // The upstream every devnet-chat call reaches: an IN-PROCESS llm-stub on
+    // an ephemeral loopback port, pinned to the key the sellers read from
+    // their secret files — so `state.lastAuthorization` proves that wiring.
+    const stub = createLlmStub({ apiKey: LLM_STUB_API_KEY, log: () => {} });
+    const stubPort: number = await stub.listen(0, '127.0.0.1');
+    // The seller-local secret files (0600 in a 0700 dir); config names only the path.
+    for (const node of [h.sellerA, h.sellerB]) {
+      const file = writeStubSecret(node.num);
+      expect(file, `node${node.num}'s secret file must live in its devnet home`).toBe(stubSecretFile(node.num));
+      expect(file.startsWith(h.state.nodes[node.num]!.home), `${file} outside ${node.home}`).toBe(true);
+      expect(statSync(file).mode & 0o777, `${file} must be 0600`).toBe(0o600);
+    }
+    gw = {
+      ...h,
+      idA: h.sellerA.identityId,
+      idB: h.sellerB.identityId,
+      epoch: 0n,
+      stub,
+      stubPort,
+      repointed: false,
+      key: '',
+      keyId: '',
+      helperKeyIds: [],
+      claimABefore: 0n,
+      claimBBefore: 0n,
+      costsA: 0n,
+      chatContent: '',
+      chatCallId: '',
+    };
+  });
+
+  afterAll(async () => {
+    if (!gw) return;
+    // Hand the sellers back to the STANDALONE stub the seeder points at
+    // (same published content, so no transaction), keeping a console
+    // session usable after this suite closes its in-process stub.
+    if (gw.repointed) {
+      for (const [node, offerings, label] of gatewayOfferingSets(llmStubPort())) {
+        try {
+          const r = await adminRequest(node, '/api/marketplace/seller/offerings', { method: 'POST', body: { offerings, publish: false } });
+          if (r.status !== 200) console.warn(`[gateway e2e] could not re-point ${label}'s devnet-chat at :${llmStubPort()}: ${r.status} ${r.text.slice(0, 200)}`);
+        } catch (err) {
+          console.warn(`[gateway e2e] could not re-point ${label}'s devnet-chat: ${String(err)}`);
+        }
+      }
+    }
+    await gw.stub.close();
+  });
+
+  it('G1. sellers serve devnet-chat: an openai-compatible connector to the llm-stub, pinned to stub-words-v1', async () => {
+    // The shared offering module must carry the spec's asks (§13.2).
+    expect(BigInt(ASK_CHAT_A)).toBe(ASK_CHAT_A_WEI);
+    expect(BigInt(ASK_CHAT_B)).toBe(ASK_CHAT_B_WEI);
+    expect([BigInt(SEED_ASK_LLM_A), BigInt(SEED_ASK_KNOWLEDGE_A), BigInt(SEED_ASK_LLM_B)]).toEqual([ASK_LLM_A, ASK_KNOWLEDGE_A, ASK_LLM_B]);
+
+    for (const [node, offerings, label] of gatewayOfferingSets(gw.stubPort)) {
+      const r = await postJson(node, '/api/marketplace/seller/offerings', { offerings, publish: true });
+      expect(r.status, `${label} offerings: ${JSON.stringify(r.json)}`).toBe(200);
+      expect(r.json?.offerings, label).toBe(offerings.length);
+      // An offering whose published content is unchanged is left alone (no
+      // transaction): devnet-chat is `published` on its first publish and
+      // `unchanged` once seeded (the stub port is seller-local, never
+      // published); devnet-knowledge republishes once for its schedule pin.
+      const assets: any[] = Array.isArray(r.json?.assets) ? r.json.assets : [];
+      expect(assets.map((a) => a.offeringLocalId).sort(), `${label} assets`).toEqual(
+        offerings.map((o) => String(o.offeringLocalId)).sort(),
+      );
+      for (const a of assets) {
+        expect(['published', 'unchanged'], `${label} ${a.offeringLocalId}: ${JSON.stringify(a)}`).toContain(a.outcome);
+      }
+    }
+    gw.repointed = true;
+
+    // Connector status (node-admin): mounted, upstream ORIGIN only, the
+    // secret reported as a boolean, the stub-words pin; the live probe
+    // (GET <base>/models with the secret-file bearer) proves the wiring.
+    for (const [node, label] of [[gw.sellerA, 'seller A'], [gw.sellerB, 'seller B']] as const) {
+      const c = await adminRequest(node, '/api/marketplace/seller/connectors?probe=1');
+      expect(c.status, `${label} connectors: ${c.text.slice(0, 300)}`).toBe(200);
+      const chat = (c.json?.connectors ?? []).find((x: any) => x.offeringLocalId === 'devnet-chat');
+      expect(chat, `${label}: devnet-chat connector status: ${c.text.slice(0, 400)}`).toBeTruthy();
+      expect(chat).toMatchObject({
+        modelId: STUB_MODEL_ID,
+        kind: 'openai-compatible',
+        state: 'mounted',
+        upstreamOrigin: `http://127.0.0.1:${gw.stubPort}`,
+        secretConfigured: true,
+        metering: { basis: 'pinned', tokenizerKind: 'stub-words-v1', tokenizerDigest: STUB_WORDS_DIGEST },
+      });
+      expect(chat.health?.ok, `${label}: health probe ${JSON.stringify(chat.health)}`).toBe(true);
+      expect(c.text, `${label}: status must not carry the secret`).not.toContain(LLM_STUB_API_KEY);
+      expect(c.text, `${label}: status must not carry file paths`).not.toContain('.secrets');
+    }
+    expect(gw.stub.state.lastAuthorization, 'the health probe must send the secret-file key').toBe(`Bearer ${LLM_STUB_API_KEY}`);
+  });
+
+  it('G2. buyer discovers both devnet-chat offers with the OpenAI-chat shape and the stub-words pin', async () => {
+    const chatId = offeringIdFor('devnet-chat');
+    const knowledgeId = offeringIdFor('devnet-knowledge');
+    const find = (offers: any[], offeringId: string, sellerId: bigint) =>
+      offers.find((o) => {
+        try {
+          return String(o?.offeringId).toLowerCase() === offeringId.toLowerCase() && BigInt(o?.sellerIdentityId) === sellerId;
+        } catch {
+          return false;
+        }
+      });
+    const pinned = (o: any): boolean =>
+      o?.modelId === STUB_MODEL_ID &&
+      o?.apiShape === 'openai-chat/v1' &&
+      o?.metering?.basis === 'pinned' &&
+      o?.metering?.tokenizer?.kind === 'stub-words-v1' &&
+      o?.metering?.tokenizer?.digest === STUB_WORDS_DIGEST;
+    const seen = await waitFor(
+      'buyer sees devnet-chat from A and B (pinned, openai-chat/v1) and A devnet-knowledge with its schedule pin',
+      360_000,
+      3_000,
+      async () => {
+        const r = await getJson(gw.buyer, '/api/marketplace/offers');
+        if (r.status !== 200) return null;
+        const list: any[] = r.json?.offers ?? [];
+        const chatA = find(list, chatId, gw.idA);
+        const chatB = find(list, chatId, gw.idB);
+        const knowledge = find(list, knowledgeId, gw.idA);
+        return pinned(chatA) && pinned(chatB) && knowledge?.queryCost ? { list, chatA, chatB, knowledge } : null;
+      },
+    );
+    expect(seen.list.filter((o: any) => o.modelId === STUB_MODEL_ID).length, 'exactly two stub-chat offers').toBe(2);
+    for (const [o, ask, label] of [[seen.chatA, ASK_CHAT_A_WEI, 'A'], [seen.chatB, ASK_CHAT_B_WEI, 'B']] as const) {
+      expect(big(o.askPerUnitWei, `${label} chat ask`)).toBe(ask);
+      expect(o.serviceType).toBe('inference');
+      expect(o.unit).toBe('token');
+      expect(o.toolTransport).toBe('native');
+      expect(o.metering.chatTemplate).toEqual({ id: CHAT_TEMPLATE_ID, digest: CHAT_TEMPLATE_DIGEST });
+      expect(o.model).toMatchObject({ provenanceClass: 'upstream-claimed', upstreamModel: STUB_MODEL_ID, displayName: 'Stub Chat' });
+      expect(big(o.model.contextLength, `${label} contextLength`)).toBe(32_768n);
+      expect(o.access ?? 'open', `${label}: no allowedBuyers → open access`).toBe('open');
+    }
+    expect(seen.knowledge.queryCost).toEqual({ schedule: QUERY_SCHEDULE_ID, digest: QUERY_SCHEDULE_DIGEST });
+    // Offer KAs never carry endpoints, file paths or secrets (spec §5.4).
+    const published = JSON.stringify(seen.list);
+    for (const leak of [LLM_STUB_API_KEY, '.secrets', 'llm-stub.env', `127.0.0.1:${gw.stubPort}`]) {
+      expect(published, `discovered offers must not carry ${leak}`).not.toContain(leak);
+    }
+  });
+
+  it('G3. buyer subscribes for the current epoch with a stub-chat inference bucket and a query bucket', async () => {
+    gw.epoch = await currentEpochWithHeadroom(gw);
+    const before = await gw.marketplace.getBucket(gw.buyerAddr, gw.epoch);
+    const sub = await adminRequest(gw.buyer, '/api/marketplace/subscribe', {
+      method: 'POST',
+      body: {
+        amountWei: GW_SUB_WEI.toString(),
+        epoch: Number(gw.epoch),
+        policy: {
+          totalBudgetWei: GW_SUB_WEI.toString(),
+          buckets: [
+            {
+              match: { serviceType: 'inference', modelId: STUB_MODEL_ID },
+              budgetWei: '1000000000000000', // 1e15
+              priceCapWeiPerUnit: '1000000000000', // 1e12 admits both chat asks
+              maxUnitsPerCall: '4000',
+            },
+            {
+              match: { serviceType: 'query' },
+              budgetWei: '500000000000000', // 5e14
+              priceCapWeiPerUnit: '20000000000000', // 2e13 ≥ the 1.5e13 knowledge ask
+              maxUnitsPerCall: '200',
+            },
+          ],
+        },
+      },
+      timeoutMs: 120_000,
+    });
+    expect(sub.status, `subscribe failed: ${sub.text.slice(0, 400)}`).toBe(200);
+    expect(big(sub.json?.epoch, 'subscribe epoch')).toBe(gw.epoch);
+    const funded = BigInt(before.funded) + GW_SUB_WEI;
+    await waitFor(`bucket(${gw.buyerAddr}, ${gw.epoch}).funded == ${funded}`, 60_000, 2_000, async () => {
+      const b = await gw.marketplace.getBucket(gw.buyerAddr, gw.epoch);
+      return b.funded === funded ? b : null;
+    });
+    const st = await getJson(gw.buyer, '/api/marketplace/status');
+    expect(st.json?.buyer?.subscribed, JSON.stringify(st.json)).toBe(true);
+    expect(big(st.json?.buyer?.epoch, 'status buyer.epoch')).toBe(gw.epoch);
+
+    // G15's baseline, taken BEFORE any gateway call: drain anything pending
+    // first (a re-run in the same epoch), then read both sellers' claims.
+    for (const seller of [gw.sellerA, gw.sellerB]) {
+      const flush = await adminRequest(seller, '/api/marketplace/settle', { method: 'POST', body: { action: 'flush-receipts' } });
+      expect(flush.status, `node${seller.num} flush: ${flush.text.slice(0, 300)}`).toBe(200);
+      await waitFor(`node${seller.num} has no pending receipts`, 60_000, 2_000, async () => {
+        const s = await getJson(seller, '/api/marketplace/status');
+        return s.json?.seller?.pendingReceipts === 0 ? true : null;
+      });
+    }
+    gw.claimABefore = BigInt((await gw.marketplace.getSellerClaim(gw.buyerAddr, gw.epoch, gw.idA)).claimed);
+    gw.claimBBefore = BigInt((await gw.marketplace.getSellerClaim(gw.buyerAddr, gw.epoch, gw.idB)).claimed);
+  });
+
+  it('G4. node admin mints a scoped gateway key: plaintext once, hashed at rest', async () => {
+    const minted = await mintGatewayKey(
+      { label: 'e2e', budgetWei: GW_KEY_BUDGET_WEI.toString(), modelAllowlist: [STUB_MODEL_ID], allowQuery: true, rps: 5 },
+      'G4',
+    );
+    const secretPart = GATEWAY_KEY_PATTERN.exec(minted.key)![2]!;
+    expect(minted.record).toMatchObject({
+      keyId: minted.keyId,
+      scopes: {
+        label: 'e2e',
+        budgetWei: GW_KEY_BUDGET_WEI.toString(),
+        expiresAt: null,
+        modelAllowlist: [STUB_MODEL_ID],
+        allowQuery: true,
+        rps: 5,
+      },
+      revokedAt: null,
+    });
+    expect(asBigInt(minted.record.usage?.spentWei, 'usage.spentWei')).toBe(0n);
+    expect(minted.record.keyHash, 'the record must never carry the hash').toBeUndefined();
+    expect(JSON.stringify(minted.record)).not.toContain(secretPart);
+
+    const list = await listGatewayKeys();
+    expect(list.keys.some((k) => k.keyId === minted.keyId), 'GET /api/marketplace/keys lists the new key').toBe(true);
+    expect(list.text, 'the key list must not carry the plaintext').not.toContain(secretPart);
+    expect(list.text, 'the key list must not carry hashes').not.toContain('keyHash');
+
+    // Hashed at rest: the store file is 0600 and holds no plaintext.
+    const keyFile = join(gw.buyer.home, 'marketplace', 'gateway-keys.json');
+    expect(statSync(keyFile).mode & 0o777, `${keyFile} must be 0600`).toBe(0o600);
+    const stored = readFileSync(keyFile, 'utf8');
+    expect(stored).toContain(minted.keyId);
+    expect(stored, 'the key store must not hold the plaintext').not.toContain(secretPart);
+    gw.key = minted.key;
+    gw.keyId = minted.keyId;
+  });
+
+  it('G5. /models lists stub-chat for the key; no key and the node token are 401', async () => {
+    const r = await gwCall('/models', gw.key);
+    expect(r.status, r.text.slice(0, 400)).toBe(200);
+    expect(r.json?.object).toBe('list');
+    // The key's allowlist is ['stub-chat'], so that is all it may see.
+    expect((r.json?.data ?? []).map((m: any) => m.id)).toEqual([STUB_MODEL_ID]);
+    const model = r.json.data[0];
+    expect(model).toMatchObject({ id: STUB_MODEL_ID, object: 'model', created: 0, owned_by: 'dkg-marketplace', context_length: 32_768 });
+    expect(model.dkg).toMatchObject({
+      offers: 2,
+      min_ask_per_unit_wei: ASK_CHAT_A_WEI.toString(),
+      metering_bases: ['pinned'],
+      tokenizer_kinds: ['stub-words-v1'],
+      provenance_classes: ['upstream-claimed'],
+      tool_transports: ['native'],
+      routable: true,
+    });
+    expect([...model.dkg.sellers].map(String).sort()).toEqual([gw.idA.toString(), gw.idB.toString()].sort());
+
+    expectGatewayUnauthorized(await gwCall('/models', null), 'models without a key', 'invalid_api_key');
+    // S5: node tokens never spend through the gateway.
+    expectGatewayUnauthorized(
+      await httpRequest(gw.buyer, '/api/marketplace/gateway/v1/models', { authorization: `Bearer ${gw.buyer.authToken}` }),
+      'models with the node-admin token',
+      'invalid_api_key',
+    );
+  });
+
+  it('G6. chat (JSON): GV-2 → usage 17/5/22 metered by stub-words, recount match, signed receipt, key charged', async () => {
+    // A warp in this process (the drill's settlement step, or G3's epoch
+    // guard) must reach the nodes' chain clocks before the buyer signs.
+    await waitForNodeChainClocks();
+    const callsBefore = gw.stub.state.calls;
+    const r = await chatRequest(gw.key, {});
+    expect(r.status, `G6: ${r.text.slice(0, 600)}`).toBe(200);
+    const j = r.json;
+    expect(j).toMatchObject({ object: 'chat.completion', model: STUB_MODEL_ID, system_fingerprint: null });
+    expect(j.id).toBe(`chatcmpl-${String(j.dkg?.call_id).slice(2)}`);
+    expect(Number.isSafeInteger(j.created)).toBe(true);
+    expect(j.choices).toEqual([
+      { index: 0, message: { role: 'assistant', content: GV2_REPLY }, finish_reason: 'stop', logprobs: null },
+    ]);
+    expect(j.usage).toEqual({ prompt_tokens: 17, completion_tokens: 5, total_tokens: 22 });
+    const cost = assertGatewayCall(j.dkg, 'G6', { sellerId: gw.idA, offering: 'devnet-chat', askPerUnitWei: ASK_CHAT_A_WEI, servedUnits: 22n });
+    expect(cost).toBe(22n * ASK_CHAT_A_WEI);
+    expectChatMetering(j.dkg, 'G6', { prompt: 17, tool: 0, completion: 5 }, { prompt_tokens: 17, completion_tokens: 5 });
+    expect(j.dkg.metering.truncated).toBe(false);
+
+    // The upstream saw the seller's secret-file key and exactly the GV-2
+    // request, capped at the gateway default (authorized 17 + 256 = 273).
+    expect(gw.stub.state.calls).toBe(callsBefore + 1);
+    expect(gw.stub.state.lastAuthorization).toBe(`Bearer ${LLM_STUB_API_KEY}`);
+    expect(gw.stub.state.lastBody).toMatchObject({ model: STUB_MODEL_ID, messages: GV2_MESSAGES, max_tokens: GATEWAY_DEFAULT_MAX_TOKENS, stream: false });
+
+    // Key accounting: the call settled against the key at the receipt value.
+    expect(j.dkg.key.key_id).toBe(gw.keyId);
+    expect(asBigInt(j.dkg.key.spent_wei, 'spent_wei')).toBe(cost);
+    expect(asBigInt(j.dkg.key.remaining_wei, 'remaining_wei')).toBe(GW_KEY_BUDGET_WEI - cost);
+    gw.costsA += cost;
+    gw.chatContent = j.choices[0].message.content;
+    gw.chatCallId = j.dkg.call_id;
+  });
+
+  it('G7. chat (stream): buffered SSE carries the same reply and units as the JSON call', async () => {
+    const r = await chatRequest(gw.key, { stream: true });
+    expect(r.status, `G7: ${r.text.slice(0, 600)}`).toBe(200);
+    expect(String(r.headers.get('content-type'))).toMatch(/^text\/event-stream/);
+    const sse = parseSse(r.text);
+    expect(sse.done, 'the stream must end with data: [DONE]').toBe(true);
+    expect(sse.events.length, `G7 events: ${r.text.slice(0, 600)}`).toBe(4); // role, content, finish, usage
+    const usageChunk = sse.events.at(-1);
+    const id = `chatcmpl-${String(usageChunk?.dkg?.call_id).slice(2)}`;
+    for (const e of sse.events) {
+      expect(e).toMatchObject({ id, object: 'chat.completion.chunk', model: STUB_MODEL_ID });
+    }
+    const [role, content, finish] = sse.events;
+    expect(role.choices).toEqual([{ index: 0, delta: { role: 'assistant', content: '' }, finish_reason: null }]);
+    expect(content.choices).toEqual([{ index: 0, delta: { content: gw.chatContent }, finish_reason: null }]);
+    expect(finish.choices).toEqual([{ index: 0, delta: {}, finish_reason: 'stop' }]);
+    const streamed = sse.events.slice(0, -1).map((e) => e.choices[0]?.delta?.content ?? '').join('');
+    expect(streamed, 'concatenated deltas = the JSON reply').toBe(GV2_REPLY);
+    expect(usageChunk.choices).toEqual([]);
+    expect(usageChunk.usage).toEqual({ prompt_tokens: 17, completion_tokens: 5, total_tokens: 22 });
+    expect(usageChunk.dkg.call_id, 'a new call, not a replay').not.toBe(gw.chatCallId);
+    const cost = assertGatewayCall(usageChunk.dkg, 'G7', { sellerId: gw.idA, offering: 'devnet-chat', askPerUnitWei: ASK_CHAT_A_WEI, servedUnits: 22n });
+    expectChatMetering(usageChunk.dkg, 'G7', { prompt: 17, tool: 0, completion: 5 }, { prompt_tokens: 17, completion_tokens: 5 });
+    gw.costsA += cost;
+  });
+
+  it('G8. chat truncation: max_tokens 3 → GV-3 reply, finish length, usage 17/3/20', async () => {
+    const r = await chatRequest(gw.key, { max_tokens: 3 });
+    expect(r.status, `G8: ${r.text.slice(0, 600)}`).toBe(200);
+    expect(r.json.choices[0]).toMatchObject({ message: { role: 'assistant', content: GV3_REPLY }, finish_reason: 'length' });
+    expect(r.json.usage).toEqual({ prompt_tokens: 17, completion_tokens: 3, total_tokens: 20 });
+    expect(gw.stub.state.lastBody?.max_tokens, 'the upstream cap is the caller max_tokens').toBe(3);
+    const cost = assertGatewayCall(r.json.dkg, 'G8', { sellerId: gw.idA, offering: 'devnet-chat', askPerUnitWei: ASK_CHAT_A_WEI, servedUnits: 20n });
+    expectChatMetering(r.json.dkg, 'G8', { prompt: 17, tool: 0, completion: 3 }, { prompt_tokens: 17, completion_tokens: 3 });
+    gw.costsA += cost;
+  });
+
+  it('G9. native tool calls: tool_choice required → finish tool_calls, the named function, recount match', async () => {
+    const tools = [{ type: 'function', function: { name: 'lookup', parameters: { type: 'object' } } }];
+    const r = await chatRequest(gw.key, { tools, tool_choice: 'required' });
+    expect(r.status, `G9: ${r.text.slice(0, 600)}`).toBe(200);
+    const choice = r.json.choices[0];
+    expect(choice.finish_reason).toBe('tool_calls');
+    expect(choice.message.content).toBeNull();
+    expect(choice.message.tool_calls).toHaveLength(1);
+    const call = choice.message.tool_calls[0];
+    expect(call.type).toBe('function');
+    expect(call.function.name).toBe('lookup');
+    expect(call.id).toMatch(/^call_stub_[0-9a-f]{16}$/);
+    expect(JSON.parse(call.function.arguments)).toEqual({ echo: 3 }); // words('hello marketplace world')
+    // The upstream got the tools natively, max_tokens still the default (the
+    // tool-call slack is authorization headroom only tool calls can use).
+    expect(gw.stub.state.lastBody).toMatchObject({ tool_choice: 'required', max_tokens: GATEWAY_DEFAULT_MAX_TOKENS });
+    expect(gw.stub.state.lastBody.tools?.[0]?.function?.name).toBe('lookup');
+    // Units: prompt 17 + the tool envelope (one whitespace-free JSON word under
+    // stub-words) + the tool call's JSON (one word).
+    const toolUnits = Number(r.json.dkg?.metering?.tool_units);
+    expect(toolUnits, 'the tool envelope is metered').toBeGreaterThanOrEqual(1);
+    expect(r.json.usage).toEqual({ prompt_tokens: 17 + toolUnits, completion_tokens: 1, total_tokens: 18 + toolUnits });
+    const cost = assertGatewayCall(r.json.dkg, 'G9', {
+      sellerId: gw.idA,
+      offering: 'devnet-chat',
+      askPerUnitWei: ASK_CHAT_A_WEI,
+      servedUnits: BigInt(18 + toolUnits),
+    });
+    expectChatMetering(r.json.dkg, 'G9', { prompt: 17, tool: toolUnits, completion: 1 }, { prompt_tokens: 17, completion_tokens: 1 });
+    gw.costsA += cost;
+  });
+
+  it('G10. /query: the static cost schedule meters admission 3 + delivery 0|1, recount match', async () => {
+    const r = await gwCall('/query', gw.key, { method: 'POST', body: { sparql: SPARQL_PROBE, max_rows: 100 } });
+    expect(r.status, `G10: ${r.text.slice(0, 600)}`).toBe(200);
+    const j = r.json;
+    expect(j.object).toBe('dkg.query.result');
+    expect(j.id).toBe(j.dkg?.call_id);
+    expect(j.aborted).toBeNull();
+    expect(j.row_count).toBeGreaterThanOrEqual(0);
+    expect(j.row_count).toBeLessThanOrEqual(5);
+    const delivery = j.row_count > 0 ? 1 : 0;
+    expect(j.usage).toEqual({ admission_units: 3, delivery_units: delivery, total_units: 3 + delivery });
+    expect(j.dkg.metering).toEqual({ schedule_digest: QUERY_SCHEDULE_DIGEST, admission_units: '3', delivery_units: String(delivery) });
+    expect(j.dkg.recount).toEqual({ verdict: 'match', reason: null, recount_units: String(3 + delivery) });
+    const cost = assertGatewayCall(j.dkg, 'G10', {
+      sellerId: gw.idA,
+      offering: 'devnet-knowledge',
+      askPerUnitWei: ASK_KNOWLEDGE_A,
+      servedUnits: BigInt(3 + delivery),
+    });
+    gw.costsA += cost;
+    // Every gateway call so far was served by A and charged to this key.
+    expect(asBigInt(j.dkg.key.spent_wei, 'spent_wei'), 'key spend = Σ gateway costs').toBe(gw.costsA);
+    expect(asBigInt(j.dkg.key.remaining_wei, 'remaining_wei')).toBe(GW_KEY_BUDGET_WEI - gw.costsA);
+  });
+
+  it('G11. key budget: a call whose worst case exceeds the key budget is refused 429 with zero movement', async () => {
+    const small = await mintGatewayKey(
+      { label: 'e2e-small', budgetWei: GW_SMALL_KEY_BUDGET_WEI.toString(), modelAllowlist: [STUB_MODEL_ID] },
+      'G11',
+    );
+    gw.helperKeyIds.push(small.keyId);
+    const meterBefore = await getJson(gw.buyer, '/api/marketplace/meter');
+    expect(meterBefore.status).toBe(200);
+    const callsBefore = gw.stub.state.calls;
+    const r = await chatRequest(small.key, {});
+    expectGatewayError(r, 'G11 over-budget chat', { status: 429, type: 'insufficient_quota', code: 'key_budget_exceeded', chargedWei: 0n });
+    const meterAfter = await getJson(gw.buyer, '/api/marketplace/meter');
+    expect(meterAfter.json?.state, 'the refused call must not move the plan meter').toEqual(meterBefore.json?.state);
+    expect(meterAfter.json?.state?.totalReservedWei).toBe(meterBefore.json?.state?.totalReservedWei);
+    expect(gw.stub.state.calls, 'the refused call never reaches the upstream').toBe(callsBefore);
+    const rec = (await listGatewayKeys()).keys.find((k) => k.keyId === small.keyId);
+    expect(asBigInt(rec?.usage?.spentWei, 'small key spentWei')).toBe(0n);
+  });
+
+  it('G12. key scopes: allowQuery false → 403 query_not_allowed; another model only → 403 model_not_allowed', async () => {
+    const noQuery = await mintGatewayKey({ label: 'e2e-no-query', budgetWei: GW_KEY_BUDGET_WEI.toString(), allowQuery: false }, 'G12 no-query');
+    gw.helperKeyIds.push(noQuery.keyId);
+    expectGatewayError(
+      await gwCall('/query', noQuery.key, { method: 'POST', body: { sparql: SPARQL_PROBE } }),
+      'G12 query without allowQuery',
+      { status: 403, type: 'permission_error', code: 'query_not_allowed', chargedWei: 0n },
+    );
+    const other = await mintGatewayKey(
+      { label: 'e2e-other-model', budgetWei: GW_KEY_BUDGET_WEI.toString(), modelAllowlist: ['other-model'] },
+      'G12 other-model',
+    );
+    gw.helperKeyIds.push(other.keyId);
+    expectGatewayError(await chatRequest(other.key, {}), 'G12 chat outside the allowlist', {
+      status: 403,
+      type: 'permission_error',
+      code: 'model_not_allowed',
+      param: 'model',
+      chargedWei: 0n,
+    });
+    const models = await gwCall('/models', other.key);
+    expect(models.status).toBe(200);
+    expect(models.json?.data, '/models is filtered by the key allowlist').toEqual([]);
+  });
+
+  it('G13. carve-out: a gateway key authenticates nothing outside the gateway; unknown gateway paths 404 after the key', async () => {
+    const asKey = { authorization: `Bearer ${gw.key}` };
+    expect((await httpRequest(gw.buyer, '/api/marketplace/status', asKey)).status, 'gateway key on /api/marketplace/status').toBe(401);
+    expect(
+      (await httpRequest(gw.buyer, '/api/marketplace/keys', { ...asKey, method: 'POST', body: { budgetWei: '1' } })).status,
+      'gateway key on the key admin route',
+    ).toBe(401);
+    expect(
+      (await httpRequest(gw.buyer, '/api/query', { ...asKey, method: 'POST', body: { sparql: 'SELECT ?s WHERE { ?s ?p ?o } LIMIT 1' } })).status,
+      'gateway key on /api/query',
+    ).toBe(401);
+    expectGatewayError(await gwCall('/keys', gw.key), 'G13 unknown gateway path', {
+      status: 404,
+      type: 'invalid_request_error',
+      code: 'unknown_url',
+      chargedWei: 0n,
+    });
+    expectGatewayError(await gwCall('/chat/completions', gw.key), 'G13 wrong method', {
+      status: 405,
+      type: 'invalid_request_error',
+      code: 'method_not_allowed',
+      chargedWei: 0n,
+    });
+    // The route table is not enumerable without a key (S3).
+    expectGatewayUnauthorized(await gwCall('/keys', null), 'unknown gateway path without a key', 'invalid_api_key');
+  });
+
+  it('G14. revoke: idempotent, and the very next call with the key is 401 key_revoked', async () => {
+    const r = await adminRequest(gw.buyer, `/api/marketplace/keys/${gw.keyId}/revoke`, { method: 'POST', body: {} });
+    expect(r.status, `revoke: ${r.text.slice(0, 300)}`).toBe(200);
+    expect(r.json?.keyId).toBe(gw.keyId);
+    expect(Number.isSafeInteger(r.json?.revokedAt)).toBe(true);
+    const again = await adminRequest(gw.buyer, `/api/marketplace/keys/${gw.keyId}/revoke`, { method: 'POST', body: {} });
+    expect(again.status).toBe(200);
+    expect(again.json?.revokedAt, 'a second revoke keeps the original revokedAt').toBe(r.json.revokedAt);
+    const callsBefore = gw.stub.state.calls;
+    expectGatewayUnauthorized(await chatRequest(gw.key, {}), 'chat with the revoked key', 'key_revoked');
+    expect(gw.stub.state.calls).toBe(callsBefore);
+    const rec = (await listGatewayKeys()).keys.find((k) => k.keyId === gw.keyId);
+    expect(rec?.revokedAt).toBe(r.json.revokedAt);
+    // Leave nothing spendable behind.
+    for (const keyId of gw.helperKeyIds) {
+      const h = await adminRequest(gw.buyer, `/api/marketplace/keys/${keyId}/revoke`, { method: 'POST', body: {} });
+      expect(h.status, `revoke ${keyId}`).toBe(200);
+    }
+  });
+
+  it('G15. claims: seller A\'s on-chain claim grows by exactly the gateway costs; B served nothing', async () => {
+    expect(gw.costsA).toBeGreaterThan(0n);
+    // The plan meter (fresh since G3's subscribe) settled exactly the gateway costs.
+    const meter = await getJson(gw.buyer, '/api/marketplace/meter');
+    expect(big(meter.json?.state?.totalSettledWei, 'meter totalSettledWei')).toBe(gw.costsA);
+    expect(big(meter.json?.state?.totalReservedWei, 'meter totalReservedWei')).toBe(0n);
+
+    const flush = await adminRequest(gw.sellerA, '/api/marketplace/settle', { method: 'POST', body: { action: 'flush-receipts' } });
+    expect(flush.status, `seller A flush: ${flush.text.slice(0, 300)}`).toBe(200);
+    const expectedA = gw.claimABefore + gw.costsA;
+    const claim = await waitFor(
+      `getSellerClaim(buyer, ${gw.epoch}, A).claimed == ${gw.claimABefore} + ${gw.costsA}`,
+      120_000,
+      3_000,
+      async () => {
+        const c = await gw.marketplace.getSellerClaim(gw.buyerAddr, gw.epoch, gw.idA);
+        return c.claimed === expectedA ? c : null;
+      },
+    );
+    expect(claim.enrolled).toBe(true);
+    const claimB = await gw.marketplace.getSellerClaim(gw.buyerAddr, gw.epoch, gw.idB);
+    expect(BigInt(claimB.claimed), 'the pricier seller B served no gateway call').toBe(gw.claimBBefore);
   });
 });
