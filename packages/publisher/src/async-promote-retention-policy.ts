@@ -11,6 +11,7 @@
  *  - its payload is unreadable, malformed, ambiguous (several payload triples), or carries a state this build does not recognise;
  *  - a benign-class candidate's commit marker holds a flag that is not a boolean, or lacks `promoteStarted` although it was written by format 2 or later (a bad
  *    or missing value is no evidence that promote never started);
+ *  - a cancelled job's commit marker has ANY flag set (`wmCleaned`, `lifecycleStamped`, `gossiped` as well as `promoteStarted`, `swmInserted`): it ran, whatever `promoteStarted` says;
  *  - it has index triples but no payload, or its stored `state` triple is missing or differs from the payload's state;
  *  - it was written by a newer queue format than this build understands;
  *  - it is not terminal (`queued`, `running`, `failed_retrying`: a job that a worker holds, waits to retry or has not run);
@@ -100,8 +101,8 @@ function hasReadableCommitMarker(job: StructurallyValidPromoteJobPayload): boole
 /** The benign failed classes of D-6: nothing else that failed is ever deletable. */
 function benignFailedClass(job: StructurallyValidPromoteJobPayload): Exclude<PromoteRetentionJobClass, 'succeeded'> | undefined {
   if (isRetiredBoundRejection(job)) return 'retired_no_effect';
-  if (job.reason === 'cancelled' && job.request.recoveryBinding === undefined
-    && job.commitMarker?.promoteStarted !== true && job.commitMarker?.swmInserted !== true) return 'cancelled';
+  // "Never started promote" is read off the whole marker: a flag for any later step (`wmCleaned`, `lifecycleStamped`, `gossiped`) also says the job ran
+  if (job.reason === 'cancelled' && job.request.recoveryBinding === undefined && !PROMOTE_COMMIT_MARKER_STEPS.some(step => job.commitMarker?.[step] === true)) return 'cancelled';
   return undefined;
 }
 

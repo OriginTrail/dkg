@@ -185,7 +185,7 @@ export const POPULATION_KINDS = [
   'queued', 'running', 'failed_retrying',
   'failed-plain', 'failed-ambiguity', 'failed-legacy', 'failed-postcommit', 'failed-postcommit-exhausted', 'failed-bound',
   'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-cancelled-legacy',
-  'failed-cancelled-no-started-flag', 'failed-retired',
+  'failed-cancelled-no-started-flag', 'failed-cancelled-contradictory', 'failed-retired',
 ] as const;
 export type PopulationKind = (typeof POPULATION_KINDS)[number];
 
@@ -211,6 +211,7 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
     case 'failed-cancelled-bad-marker': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, promoteStarted: 'true' } }, age);
     case 'failed-cancelled-legacy': return mk(id, 'failed', { reason: 'cancelled', formatVersion: 1, commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);
     case 'failed-cancelled-no-started-flag': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);   // format 4: not legacy
+    case 'failed-cancelled-contradictory': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, gossiped: true } }, age);
     case 'failed-retired': return retired(id, age);
   }
 }

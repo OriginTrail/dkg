@@ -714,7 +714,7 @@ describe('a commit marker flag that is not a boolean is no evidence that promote
   });
 });
 
-describe('a missing promoteStarted is a legacy shape only before format 2 (second review of P10a)', () => {
+describe('a missing promoteStarted is a legacy shape only before format 2, and a marker that says the job ran keeps it (second review of P10a)', () => {
   /** The marker of a row written before format 2: every flag but `promoteStarted`. */
   const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
   const cancelled = (id: string, commitMarker: unknown, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', commitMarker, ...over });
@@ -755,6 +755,19 @@ describe('a missing promoteStarted is a legacy shape only before format 2 (secon
     expect(decide(cancelled('fv', LEGACY, { formatVersion }))).toEqual({ delete: false, reason: 'unreadable' });
   });
 
+  // The marker of a cancelled job records the promote steps that ran: any flag set means it ran, whatever promoteStarted says.
+  it.each([
+    ['gossiped: true, format 4', { ...NO_MARKERS, gossiped: true }, {}],
+    ['wmCleaned: true, format 4', { ...NO_MARKERS, wmCleaned: true }, {}],
+    ['lifecycleStamped: true, legacy marker', { ...LEGACY, lifecycleStamped: true }, { formatVersion: 1 }],
+    ['wmCleaned: true, legacy marker', { ...LEGACY, wmCleaned: true }, { formatVersion: 1 }],
+    ['every later flag true, promoteStarted false', { ...NO_MARKERS, wmCleaned: true, lifecycleStamped: true, gossiped: true }, {}],
+  ])('keeps a cancelled job whose marker contradicts itself (%s): it ran, so it is not "never started"', (_label, marker, over) => {
+    const job = cancelled('contra', marker, over);
+    expect(decide(job)).toEqual({ delete: false, reason: 'failed_retained' });
+    expect(decide(job, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason: 'failed_retained' });
+  });
+
   it('does not tighten the retired class: a certified no-effect rejection may have entered promote (promoteStarted: true) and is still deletable', () => {
     expect(decide({ ...retired('r-started'), commitMarker: STARTED } as never)).toEqual({ delete: true, jobClass: 'retired_no_effect' });
   });
@@ -764,26 +777,31 @@ describe('a missing promoteStarted is a legacy shape only before format 2 (secon
       ...ABSENT.flatMap(([, marker], i) => [2, 3, 4].map(formatVersion => cancelled(`abs-${i}-f${formatVersion}`, marker, { formatVersion }))),
       { ...retired('abs-retired'), commitMarker: (({ promoteStarted: _p, ...rest }) => rest)(NO_MARKERS) } as PromoteJob,
     ];
+    const contradictory = [
+      cancelled('con-gossiped', { ...NO_MARKERS, gossiped: true }), cancelled('con-wm', { ...NO_MARKERS, wmCleaned: true }),
+      cancelled('con-life-legacy', { ...LEGACY, lifecycleStamped: true }, { formatVersion: 1 }),
+    ];
     const readable = [cancelled('ok-none', undefined), cancelled('ok-clear', NO_MARKERS), cancelled('ok-legacy', LEGACY, { formatVersion: 1 }), cancelled('ok-legacy-0', LEGACY, { formatVersion: undefined })];
-    const seed = async () => { const s = new OxigraphStore(); await put(s, ...unreadable, ...readable); return s; };
+    const protectedJobs = [...unreadable, ...contradictory];
+    const seed = async () => { const s = new OxigraphStore(); await put(s, ...protectedJobs, ...readable); return s; };
 
     const reportStore = await seed();
     const report = newRetention(reportStore, { mode: 'report', batchSize: 5 });
     await drain(report);
     expect(report.counters().lastCompletePass).toMatchObject({
-      wouldDelete: { succeeded: 0, cancelled: readable.length, retired_no_effect: 0 }, kept: { unreadable: unreadable.length },
+      wouldDelete: { succeeded: 0, cancelled: readable.length, retired_no_effect: 0 }, kept: { unreadable: unreadable.length, failed_retained: contradictory.length },
     });
-    expect((await storedIds(reportStore)).size).toBe(unreadable.length + readable.length);
+    expect((await storedIds(reportStore)).size).toBe(protectedJobs.length + readable.length);
 
     const store = await seed();
-    const before = new Map(await Promise.all(unreadable.map(async j => [j.jobId, await present(store, j.jobId)] as const)));
+    const before = new Map(await Promise.all(protectedJobs.map(async j => [j.jobId, await present(store, j.jobId)] as const)));
     const retention = newRetention(store, { batchSize: 5 });
     const results = await drain(retention);
     expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
-    expect([...(await storedIds(store))].sort()).toEqual(unreadable.map(j => j.jobId).sort());
+    expect([...(await storedIds(store))].sort()).toEqual(protectedJobs.map(j => j.jobId).sort());
     for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
     expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: readable.length, retired_no_effect: 0 });
-    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: readable.length }, kept: { unreadable: unreadable.length } });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: readable.length }, kept: { unreadable: unreadable.length, failed_retained: contradictory.length } });
   });
 });
 
