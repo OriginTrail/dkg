@@ -110,7 +110,7 @@ export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
         );
         inserted = kept.length;
         return kept;
-      }, 'agent.swmRecovery');
+      }, 'agent.swmRecovery', (drops) => params.recordDrops(drops, 'swm-recovery'));
       if (inserted > 0) {
         params.invalidateListContextGraphsCache();
       }

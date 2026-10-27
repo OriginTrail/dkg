@@ -279,7 +279,7 @@ export class SwmTargetExecutorV1 {
         rows,
         { recordDrops: this.#ports.recordDrops },
         'swm-sync',
-      ), 'agent.sharedMemorySync');
+      ), 'agent.sharedMemorySync', (drops) => this.#ports.recordDrops(drops, 'swm-sync'));
       await this.#registerSyncedSubGraphs(target, quads);
     };
     return runSharedMemorySync({

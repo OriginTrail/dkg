@@ -602,4 +602,4 @@ export {
   type VmPublishJobPager,
 } from './lift-job-page.js';
 
-export { decodeWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from './workspace-operation-timestamp.js';
+export { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from './workspace-operation-timestamp.js';

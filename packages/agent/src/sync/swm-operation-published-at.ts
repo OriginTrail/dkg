@@ -20,7 +20,9 @@
 import { canonicalQuadKey } from './requester/quad-key.js';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { decodeWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
+import { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
+
+import { filterOversizedSyncQuads, type OversizeDrop } from './oversize-filter.js';
 
 const PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
 /** Operation subjects per stored-stamp read. */
@@ -31,13 +33,13 @@ const READ_CHUNK = 100;
  * stamp. A missing or unparseable stamp still fails closed.
  */
 export function operationPublishedAtMs(rows: readonly Quad[], operationSubject: string): number {
-  const stamps = [...new Set(rows.filter((row) => row.predicate === PUBLISHED_AT).map((row) => row.object))]
-    .map(decodeWorkspaceOperationTimestamp);
-  if (stamps.length === 0) throw new Error('missing publishedAt');
-  if (stamps.some((ms) => !Number.isFinite(ms))) {
+  const earliest = earliestWorkspaceOperationTimestamp(
+    rows.filter((row) => row.predicate === PUBLISHED_AT).map((row) => row.object));
+  if (earliest === undefined) throw new Error('missing publishedAt');
+  if (!Number.isFinite(earliest)) {
     throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
   }
-  return Math.min(...stamps);
+  return earliest;
 }
 
 export interface OperationPublishedAtPlan {
@@ -106,7 +108,10 @@ export async function insertKeepingOnePublishedAt(
   rows: readonly Quad[],
   insert: (rows: Quad[]) => Promise<readonly Quad[]>,
   source: string,
+  recordDrops: (drops: OversizeDrop[]) => void,
 ): Promise<void> {
+  const filtered = filterOversizedSyncQuads(rows);
+  if (filtered.dropped.length > 0) recordDrops(filtered.dropped);
   const targets = new Map<string, Set<string>>();
   for (const row of rows) {
     if (!isOperationPublishedAtRow(row) || !isSafeIri(row.graph) || !isSafeIri(row.subject)) continue;
@@ -137,14 +142,34 @@ export async function insertKeepingOnePublishedAt(
       }
     }
   }
-  const plan = planOperationPublishedAt(rows, stored);
+  // Select only stamps that can survive the canonical ingest filter. Otherwise
+  // an oversized early winner could discard the only writable later stamp.
+  const plan = planOperationPublishedAt(filtered.kept, stored);
+  assertUsableOperationTimestamps(targets, stored, plan.rows);
   const inserted = plan.rows.length > 0 ? await insert(plan.rows) : [];
+  assertUsableOperationTimestamps(targets, stored, inserted);
   const written = new Set(inserted.map(canonicalQuadKey));
   // A filtering insert can succeed without persisting its proposed winner.
   const retire = plan.retirements.flatMap(({ rows: losingRows, requiredReplacement }) =>
     requiredReplacement === undefined || written.has(canonicalQuadKey(requiredReplacement)) ? [...losingRows] : []);
   if (retire.length > 0) {
     await store.delete(retire, { priority: 'background', source: `${source}.retirePublishedAt` });
+  }
+}
+
+/** Never report a new operation as materialized without a persisted usable stamp. */
+function assertUsableOperationTimestamps(
+  targets: ReadonlyMap<string, ReadonlySet<string>>,
+  stored: ReadonlyMap<string, readonly string[]>,
+  rows: readonly Quad[],
+): void {
+  const incoming = new Set(rows.filter(row => isOperationPublishedAtRow(row) && usableStampMs(row.object) !== null)
+    .map(row => `${row.graph}\u0000${row.subject}`));
+  for (const [graph, subjects] of targets) for (const subject of subjects) {
+    const key = `${graph}\u0000${subject}`;
+    if (!incoming.has(key) && !(stored.get(key) ?? []).some(object => usableStampMs(object) !== null)) {
+      throw new Error(`Cannot materialize SWM operation ${subject} without a usable publishedAt`);
+    }
   }
 }
 

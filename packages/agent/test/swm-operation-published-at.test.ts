@@ -193,6 +193,21 @@ describe('catch-up keeps one publishedAt on a share operation', () => {
     expect(head?.publishedAt).toBe(String(Date.parse(kept)));
   });
 
+  it.each(['catch-up', 'private'] as const)('keeps a writable timestamp for a new operation during %s', async lane => {
+    const store = newStore();
+    const meta = [...stampedAt(ack.meta, ack.operationSubject, LOCAL),
+      { subject: ack.operationSubject, predicate: PUBLISHED_AT, object: `"${' '.repeat(60_001)}${EARLY}"`, graph: WS_META }];
+    if (lane === 'catch-up') expect((await catchUp(store, meta, [ack])).failedPhases).toBe(0);
+    else {
+      const executor = await executorServing(store, meta, [ack]);
+      await expect(executor.recoverPrivateTarget({ remotePeerId: 'peer-source', contextGraphId: CG,
+        recoveryGuard: { signal: new AbortController().signal, assertCurrent: () => undefined },
+      })).resolves.toMatchObject({ completed: true });
+    }
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
+    expect(parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads: await rowsOf(store, WS_META) })).toHaveLength(1);
+  });
+
   it('heals an operation that already carries several stamps', async () => {
     const store = newStore();
     await seedMaterialized(store, ack, stampedAt(ack.meta, ack.operationSubject, LOCAL, LATER));
@@ -408,7 +423,7 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
     const store = newStore();
     await store.insert([row(stamp(LOCAL))]);
     await insertKeepingOnePublishedAt(store, [row(`"${' '.repeat(60_001)}${EARLY}"`)],
-      rows => insertWithOversizeGuard(kept => store.insert(kept), rows, { recordDrops: () => {} }, 'test'), 'test');
+      rows => insertWithOversizeGuard(kept => store.insert(kept), rows, { recordDrops: () => {} }, 'test'), 'test', () => {});
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
   });
   it('retires each operation only when its own replacement is persisted', async () => {
@@ -424,22 +439,35 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
       const inserted = rows.filter(quad => quad.subject !== filtered).map(quad => ({ ...quad }));
       await store.insert(inserted);
       return inserted;
-    }, 'test');
+    }, 'test', () => {});
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER]);
     expect(await publishedAtOf(store, filtered)).toEqual([LOCAL]);
     expect(await publishedAtOf(store, held)).toEqual([LOCAL]);
   });
+  it('refuses an all-oversized new operation before committing any metadata', async () => {
+    const store = newStore(), insert = vi.fn(async (rows: Quad[]) => { await store.insert(rows); return rows; });
+    const drops = vi.fn();
+    await expect(insertKeepingOnePublishedAt(store,
+      [row(`"${' '.repeat(60_001)}${EARLY}"`)], insert, 'test', drops)).rejects.toThrow('without a usable publishedAt');
+    expect(insert).not.toHaveBeenCalled();
+    expect(drops).toHaveBeenCalledOnce();
+  });
+  it('does not report success when a downstream filter drops a new operation timestamp', async () => {
+    const store = newStore();
+    await expect(insertKeepingOnePublishedAt(store, [row(stamp(LOCAL))], async () => [], 'test', () => {}))
+      .rejects.toThrow('without a usable publishedAt');
+  });
   it('does not retire stored evidence after a failed insert', async () => {
     const store = newStore(); await store.insert([row(stamp(LOCAL))]);
     const retire = vi.spyOn(store, 'delete');
-    await expect(insertKeepingOnePublishedAt(store, [row(stamp(PEER))], async () => { throw new Error('insert failed'); }, 'test'))
+    await expect(insertKeepingOnePublishedAt(store, [row(stamp(PEER))], async () => { throw new Error('insert failed'); }, 'test', () => {}))
       .rejects.toThrow('insert failed');
     expect(retire).not.toHaveBeenCalled();
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
   });
   it('retains both stamps after failed retirement and converges on retry', async () => {
     const store = newStore(); await store.insert([row(stamp(LOCAL))]);
-    const write = () => insertKeepingOnePublishedAt(store, [row(stamp(PEER))], async rows => { await store.insert(rows); return rows; }, 'test');
+    const write = () => insertKeepingOnePublishedAt(store, [row(stamp(PEER))], async rows => { await store.insert(rows); return rows; }, 'test', () => {});
     const retire = vi.spyOn(store, 'delete').mockRejectedValueOnce(new Error('retire failed'));
     await expect(write()).rejects.toThrow('retire failed');
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER, LOCAL]);
