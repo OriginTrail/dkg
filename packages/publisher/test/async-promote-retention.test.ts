@@ -862,6 +862,125 @@ describe('the legacy carve-out is exactly formatVersion absent, 0 or 1 (third re
   });
 });
 
+describe('subjects that are not share jobs cannot stall a pass (third review of P10a: blank nodes carrying the queue\'s state and updatedAt triples)', () => {
+  const calls = async (retention: ReturnType<typeof newRetention>, max = 12): Promise<ShareRetentionBatchResult[]> => {
+    const results: ShareRetentionBatchResult[] = [];
+    for (let i = 0; i < max; i++) { const res = await retention.runBatch(); results.push(res); if (!res.hasMore || res.error) break; }
+    return results;
+  };
+  /** A foreign writer's subject that carries the queue's two index triples (and nothing else). */
+  const foreign = (subject: string, state: string, updatedAt: number, graph = GRAPH): Quads => [
+    { subject, predicate: PROMOTE_STATE, object: literal(state), graph }, { subject, predicate: PROMOTE_UPDATED_AT, object: integer(updatedAt), graph },
+  ];
+  /** Every triple of the graph except those of the real jobs named in `jobs`, as sorted lines: what a sweep must leave exactly as it found it. */
+  const notJobs = async (store: OxigraphStore, ...jobs: string[]): Promise<string> => {
+    const skip = new Set(jobs.map(id => jobSubject(id)));
+    const r = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${GRAPH}> { ?s ?p ?o } }`);
+    return r.type === 'bindings' ? r.bindings.filter(b => !skip.has(b['s']!)).map(b => `${b['s']} ${b['p']} ${b['o']}`).sort().join('\n') : '';
+  };
+  const T = NOW - 10 * W;
+  const tieGroup = (subjects: readonly string[], state = 'succeeded') => subjects.flatMap(subject => foreign(subject, state, T));
+
+  it.each(['delete', 'report'] as const)('%s mode: five blank nodes sharing one updatedAt (a tie group larger than the batch) in front of an eligible job: the job is reached, the pass completes, no anomaly, the blank nodes are untouched', async mode => {
+    for (const batchSize of [1, 2, 3, 4]) {
+      const store = new OxigraphStore();
+      await insertQuads(store, [...tieGroup(['_:b1', '_:b2', '_:b3', '_:b4', '_:b5']), ...rowOf('succeeded', 'eligible', 5 * W)]);
+      const foreignBefore = await notJobs(store, 'eligible');
+      expect(foreignBefore.split('\n')).toHaveLength(10);
+      const retention = newRetention(store, { mode, batchSize });
+      const results = await calls(retention);
+      const at = `batch size ${batchSize}: ${results.length} calls, anomalies ${results.map(r => r.anomalies)}, scanned ${results.map(r => r.scanned)}`;
+      expect(results.at(-1)!.hasMore, at).toBe(false);
+      expect(results.every(r => r.anomalies === 0 && !r.error), at).toBe(true);
+      expect(retention.counters().anomalies, at).toBe(0);
+      expect(results.filter(r => r.passCompleted), at).toHaveLength(1);
+      expect(results.reduce((n, r) => n + r.scanned, 0), `${at}: the blank nodes are not candidates, the job is`).toBe(1);
+      expect(results.reduce((n, r) => n + r.deleted, 0), at).toBe(mode === 'delete' ? 1 : 0);
+      expect((await present(store, 'eligible')) !== '', at).toBe(mode !== 'delete');
+      expect(retention.counters().lastCompletePass, at).toMatchObject(mode === 'delete' ? { deleted: { succeeded: 1 }, wouldDelete: { succeeded: 0 } } : { deleted: { succeeded: 0 }, wouldDelete: { succeeded: 1 } });
+      expect(await notJobs(store, 'eligible'), `${at}: the blank nodes are untouched`).toBe(foreignBefore);
+    }
+  });
+
+  it('blank nodes among distinct timestamps (the range scan, no tie group) are no candidates either: never judged, never counted, never deleted', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...foreign('_:early', 'succeeded', NOW - 20 * W), ...foreign('_:mid', 'failed', NOW - 9 * W), ...rowOf('cancelled', 'eligible', 8 * W), ...rowOf('succeeded', 'eligible2', 7 * W)]);
+    const foreignBefore = await notJobs(store, 'eligible', 'eligible2');
+    const retention = newRetention(store, { batchSize: 2 });
+    const results = await calls(retention);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.reduce((n, r) => n + r.scanned, 0)).toBe(2);
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { succeeded: 1, cancelled: 1 }, kept: { unreadable: 0 } });
+    expect(await notJobs(store, 'eligible', 'eligible2')).toBe(foreignBefore);
+  });
+
+  // The engine labels a blank node afresh in every store, so where its rows land among the real jobs of a group varies from store to store: eight stores.
+  it('a tie group that mixes blank nodes and real jobs: every real job of the group is judged once, the blank nodes are skipped (eight stores, the engine labels blank nodes afresh)', async () => {
+    const jobs = ['m1', 'm2', 'm3', 'm4'];
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const store = new OxigraphStore();
+      await insertQuads(store, [...tieGroup(['_:x1', '_:x2', '_:x3']), ...jobs.flatMap(id => rowOf('succeeded', id, 10 * W))]);
+      const foreignBefore = await notJobs(store, ...jobs);
+      const { store: spied, log } = spy(store);
+      const results = await calls(newRetention(spied, { batchSize: 2 }), 20);
+      expect(results.at(-1)!.hasMore, `store ${attempt}`).toBe(false);
+      expect(results.every(r => r.anomalies === 0 && !r.error), `store ${attempt}`).toBe(true);
+      expect(verifiedSubjects(log).sort(), `store ${attempt}`).toEqual(jobs.map(jobSubject));
+      for (const id of jobs) expect(await present(store, id), id).toBe('');
+      expect(await notJobs(store, ...jobs), `store ${attempt}: the three blank nodes are as they were`).toBe(foreignBefore);
+    }
+  });
+
+  // An IRI that is not a share job IRI (another prefix) is no candidate either: the scan reads IRIs under the job prefix only. An ASCII one was already kept safely (as
+  // unreadable, once each), but one that mixes astral and high BMP characters stalls a class: an engine orders it by code point and the key check by UTF-16.
+  it.each(['delete', 'report'] as const)('%s mode: IRI subjects with another prefix sharing one updatedAt (ASCII, and mixing astral and high BMP characters), in front of an eligible job: not read, the job is reached, no anomaly, untouched', async mode => {
+    const others = [
+      ['ASCII', ['urn:other:job:o1', 'urn:other:job:o2', 'urn:dkg:promote-queue:jobs:o3', 'http://example.org/job/o4', 'urn:dkg:promote-queue:job']],
+      ['astral and high BMP', ['urn:other:\uFF5E', 'urn:other:\u{1F600}', 'urn:other:a', 'urn:other:\u{10000}', 'urn:other:\uFF5F']],
+    ] as const;
+    for (const [label, subjects] of others) for (const batchSize of [1, 2, 3]) {
+      const store = new OxigraphStore();
+      await insertQuads(store, [...tieGroup(subjects), ...rowOf('succeeded', 'eligible', 5 * W)]);
+      const foreignBefore = await notJobs(store, 'eligible');
+      const { store: spied, log } = spy(store);
+      const retention = newRetention(spied, { mode, batchSize });
+      const results = await calls(retention);
+      const at = `${label}, batch size ${batchSize}: ${results.length} calls, anomalies ${results.map(r => r.anomalies)}`;
+      expect(results.at(-1)!.hasMore, at).toBe(false);
+      expect(results.every(r => r.anomalies === 0 && !r.error), at).toBe(true);
+      expect(results.reduce((n, r) => n + r.scanned, 0), `${at}: the foreign subjects are not candidates`).toBe(1);
+      expect(verifiedSubjects(log), `${at}: only the share job IRI is ever verified`).toEqual([jobSubject('eligible')]);
+      expect(deletedSubjects(log), at).toEqual(mode === 'delete' ? [jobSubject('eligible')] : []);
+      expect(retention.counters().lastCompletePass, at).toMatchObject({ kept: { unreadable: 0 } });
+      expect(await notJobs(store, 'eligible'), at).toBe(foreignBefore);
+    }
+  });
+
+  // The documented limit: under the job prefix a non-ASCII id needs a foreign writer (the queue's ids are ASCII, `isSafeJobId`), and an engine that orders such ids by
+  // code point disagrees with the key check, which reads UTF-16. The scan fails closed: an anomaly on every call, no cursor moves, nothing outside the judged rows is touched.
+  it('in-prefix IRI subjects with astral and high BMP characters (needs a foreign writer) fail closed: anomalies, no pass completes, nothing foreign is touched', async () => {
+    const store = new OxigraphStore();
+    const prefixed = ['\uFF5E', '\u{1F600}', 'a'].map(id => jobSubject(id));
+    await insertQuads(store, [...tieGroup(prefixed), ...rowOf('succeeded', 'eligible', 5 * W)]);
+    const foreignBefore = await notJobs(store, 'eligible');
+    const retention = newRetention(store, { mode: 'report', batchSize: 1 });
+    const results = await calls(retention, 6);
+    expect(results.at(-1)!.hasMore).toBe(true);
+    expect(results.some(r => r.anomalies > 0)).toBe(true);
+    expect(results.every(r => !r.error)).toBe(true);
+    expect(retention.counters().lastCompletePass).toBeUndefined();
+    expect(await notJobs(store, 'eligible')).toBe(foreignBefore);
+  });
+
+  it('the scan and tie queries select IRI subjects only', () => {
+    expect(buildRetentionScanQuery(GRAPH, 'succeeded', NOW - W, 5)).toContain('FILTER (isIRI(?job))');
+    expect(buildRetentionScanQuery(GRAPH, 'failed', NOW - W, 5, { after: 7, inclusive: true })).toContain('FILTER (isIRI(?job))');
+    expect(buildRetentionTieQuery(GRAPH, 'succeeded', 42, 10)).toContain('FILTER (isIRI(?job))');
+    expect(buildRetentionTieQuery(GRAPH, 'failed', 42, 10, 'urn:dkg:promote-queue:job:a')).toContain('FILTER (isIRI(?job))');
+  });
+});
+
 describe('repeated rows of one subject in the scan (review of P10a: a subject that comes back more than once must not stall the pass)', () => {
   const XSD = 'http://www.w3.org/2001/XMLSchema#';
   const SCAN = 'publisher.asyncPromote.retention.scan';

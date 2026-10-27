@@ -56,6 +56,12 @@ const num = (n: number): string => (Number.isFinite(n) ? String(n) : '0');
 export const JOB_SUBJECT_PREFIX = jobSubject('');
 /** The terms a scan may read: exact integers, which a JS number holds without loss (see the module doc). Both scan queries carry it, so they select the same rows. */
 const EXACT_TIMESTAMP = `FILTER (DATATYPE(?updatedAt) = <${XSD_INTEGER}> && ?updatedAt >= 0)`;
+/**
+ * The subjects a scan may read: IRIs under the queue's job prefix. A blank node has no `STR`, so `ORDER BY STR(?job)` leaves its rows in engine order and the key check of
+ * the tie walk rejects them (an anomaly on every call, the class never advances); an IRI outside the prefix is no job and can only be kept, and one that mixes astral and
+ * high BMP characters is ordered differently by an engine (code points) and by the key check (UTF-16) with the same effect. Neither is a candidate, so neither is read.
+ */
+const JOB_SUBJECT_ONLY = `FILTER (isIRI(?job)) FILTER (STRSTARTS(STR(?job), ${literal(JOB_SUBJECT_PREFIX)}))`;
 
 /**
  * Candidate scan of one class: the rows whose stored `state` is the class and whose stored `updatedAt` lies after the cursor and not after `cutoff`, oldest first.
@@ -64,13 +70,13 @@ const EXACT_TIMESTAMP = `FILTER (DATATYPE(?updatedAt) = <${XSD_INTEGER}> && ?upd
  */
 export function buildRetentionScanQuery(graph: string, scanClass: PromoteRetentionScanClass, cutoff: number, limit: number, cursor: PromoteRetentionScanCursor = {}): string {
   const lower = cursor.after === undefined ? '' : ` FILTER (?updatedAt ${cursor.inclusive ? '>=' : '>'} ${num(cursor.after)})`;
-  return `SELECT ?job ?updatedAt WHERE { GRAPH <${graph}> { ?job <${PROMOTE_STATE}> ${literal(scanClass)} ; <${PROMOTE_UPDATED_AT}> ?updatedAt . ${EXACT_TIMESTAMP} FILTER (?updatedAt <= ${num(cutoff)})${lower} } } ORDER BY ?updatedAt LIMIT ${limit + 1}`;
+  return `SELECT ?job ?updatedAt WHERE { GRAPH <${graph}> { ?job <${PROMOTE_STATE}> ${literal(scanClass)} ; <${PROMOTE_UPDATED_AT}> ?updatedAt . ${EXACT_TIMESTAMP} ${JOB_SUBJECT_ONLY} FILTER (?updatedAt <= ${num(cutoff)})${lower} } } ORDER BY ?updatedAt LIMIT ${limit + 1}`;
 }
 
 /** The rows of one class that share exactly one `updatedAt`, in key order after `afterKey` (only used inside a group larger than one batch). */
 export function buildRetentionTieQuery(graph: string, scanClass: PromoteRetentionScanClass, updatedAt: number, limit: number, afterKey?: string): string {
   const after = afterKey === undefined ? '' : ` FILTER (STR(?job) > ${literal(afterKey)})`;
-  return `SELECT ?job ?updatedAt WHERE { GRAPH <${graph}> { ?job <${PROMOTE_STATE}> ${literal(scanClass)} ; <${PROMOTE_UPDATED_AT}> ?updatedAt . ${EXACT_TIMESTAMP} FILTER (?updatedAt = ${num(updatedAt)})${after} } } ORDER BY STR(?job) LIMIT ${limit + 1}`;
+  return `SELECT ?job ?updatedAt WHERE { GRAPH <${graph}> { ?job <${PROMOTE_STATE}> ${literal(scanClass)} ; <${PROMOTE_UPDATED_AT}> ?updatedAt . ${EXACT_TIMESTAMP} ${JOB_SUBJECT_ONLY} FILTER (?updatedAt = ${num(updatedAt)})${after} } } ORDER BY STR(?job) LIMIT ${limit + 1}`;
 }
 
 /** Payload and stored state of a slice of candidate subjects (read again under the lock). The slice is bounded by the caller. */
