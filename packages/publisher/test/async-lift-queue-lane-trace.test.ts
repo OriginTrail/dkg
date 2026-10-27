@@ -70,13 +70,15 @@ describe('publisher queue lane trace with the control path off (AC2)', () => {
     }
   });
 
-  it('keeps the bulk retry\'s listing the one site whose label changed: base list = list + retryList', async () => {
+  it('keeps the bulk retry\'s listing and the stats COUNT the only sites whose label changed: base list = list + retryList + stats', async () => {
     for (const stack of STACKS) {
       const run = await runPublisherWorkload(stack);
       const own = (label: string) => run.calls.filter((call) => call.source === label).length;
       const baseList = (BASE_BY_SOURCE[`${stack}/none`] as Record<string, number>)['normal publisher.asyncLift.list'];
       expect(own('publisher.asyncLift.retryList'), stack).toBeGreaterThan(0);
-      expect(own('publisher.asyncLift.list') + own('publisher.asyncLift.retryList'), stack).toBe(baseList);
+      expect(own('publisher.asyncLift.stats'), stack).toBeGreaterThan(0);
+      expect(own('publisher.asyncLift.list') + own('publisher.asyncLift.retryList') + own('publisher.asyncLift.stats'), stack)
+        .toBe(baseList);
     }
   });
 
