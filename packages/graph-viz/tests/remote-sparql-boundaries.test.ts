@@ -71,3 +71,25 @@ describe('remote SPARQL response boundaries', () => {
     expect(warn).toHaveBeenCalledExactlyOnceWith(expect.stringContaining('read-only'));
   });
 });
+
+
+describe('remote SPARQL readiness', () => {
+  it.each([200, 503])('reports HTTP status %i without issuing a query', async status => {
+    vi.useFakeTimers(); const fetcher = vi.fn<typeof fetch>(async () => new Response('', { status })); vi.stubGlobal('fetch', fetcher);
+    const source = new RemoteSparqlSource({ endpoint: 'https://example.invalid/' });
+    expect(await source.isReady()).toBe(status === 200); expect(fetcher).toHaveBeenCalledWith('https://example.invalid', { method: 'GET', signal: expect.any(AbortSignal) });
+    vi.clearAllTimers();
+  });
+  it('returns false for network failures and aborts stalled readiness checks', async () => {
+    vi.useFakeTimers(); const fetcher = vi.fn<typeof fetch>().mockRejectedValueOnce(new Error('offline')).mockImplementationOnce((_url, init) => new Promise((_resolve, reject) => { init!.signal!.addEventListener('abort', () => reject(init!.signal!.reason)); }));
+    vi.stubGlobal('fetch', fetcher); const source = new RemoteSparqlSource({ endpoint: 'https://example.invalid' }); expect(await source.isReady()).toBe(false);
+    const ready = source.isReady(); await vi.advanceTimersByTimeAsync(5000); expect(await ready).toBe(false); expect(fetcher.mock.calls[1][1]?.signal?.aborted).toBe(true);
+  });
+});
+
+it('preserves URI objects alongside literals in a CONSTRUCT document with comments', async () => {
+  vi.stubGlobal('fetch', vi.fn(async () => new Response('# exported graph\n\n<urn:s> <urn:link> <urn:o> .\n<urn:s> <urn:label> "name" .\n')));
+  expect((await new RemoteSparqlSource({ endpoint: 'https://example.invalid' }).construct('CONSTRUCT fixture')).triples).toEqual([
+    { subject: 'urn:s', predicate: 'urn:link', object: 'urn:o' }, { subject: 'urn:s', predicate: 'urn:label', object: 'name', datatype: undefined, language: undefined },
+  ]);
+});

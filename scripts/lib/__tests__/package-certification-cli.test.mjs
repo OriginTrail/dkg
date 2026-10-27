@@ -78,6 +78,9 @@ process.stdout.write(results[key]);`);
   shim('npm', `const fs = require('node:fs');
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
+if (args[0] === 'dist-tag' && args[1] === 'ls') {
+  process.stdout.write('canary: ${version}\\nlatest: 10.0.24\\n'); process.exit(0);
+}
 if (args[0] !== 'view') process.exit(91);
 if (${JSON.stringify(mode)} === 'publish-prepared') {
   process.stdout.write(JSON.stringify({ error: { code: 'E404' } })); process.exitCode = 1;
@@ -96,8 +99,9 @@ for (const mode of ['publish-prepared', 'promote']) for (const mismatch of [fals
     ], { cwd: f.source, env: f.env, encoding: 'utf8', timeout: 30_000 });
     assert.equal(result.status, mismatch ? 1 : 0, result.stderr);
     const calls = fs.existsSync(f.calls) ? fs.readFileSync(f.calls, 'utf8').trim().split('\n').map(JSON.parse) : [];
-    assert.equal(calls.length, mismatch ? 0 : f.manifest.packages.length);
-    assert.ok(calls.every(args => args[0] === 'view'), 'dry-run must never publish or change dist-tags');
+    // Promotion also reads every package's dist-tags.
+    assert.equal(calls.length, mismatch ? 0 : f.manifest.packages.length * (mode === 'promote' ? 2 : 1));
+    assert.ok(calls.every(args => args[0] === 'view' || (args[0] === 'dist-tag' && args[1] === 'ls')), 'dry-run must never publish or change dist-tags');
     if (mismatch) assert.match(result.stderr, /intended candidate checkout/);
     else {
       const progress = JSON.parse(result.stdout.slice(result.stdout.indexOf('{')));

@@ -3304,13 +3304,12 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       if (approvedPrivateReplicaAuthority !== null) {
         this.eventBus.emit(DKGEvent.CATALOG_READINESS_CHECK_REQUESTED, { contextGraphId });
       }
-      // A first subscription attempt can race this authority bootstrap and
-      // correctly fail closed. Re-enter the idempotent transport reconciler
-      // exactly when authority becomes usable (or its generation changes),
-      // rather than on every periodic unchanged refresh.
+      // Retry subscriptions that raced bootstrap when authority becomes usable
+      // or changes generation; unchanged refreshes need no transport reconciliation.
       if (previousAuthorityProgress?.state !== 'accepted' || authorityGenerationChanged) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
         this.scheduleRfc64AuthorityAcceptedPeerCatchupV1(contextGraphId);
+        this.requestRfc64OwedShareInventoryDrainV1(); // Shares admitted behind the fence owe their rows now.
       }
       this.scheduleRfc64AuthorityAcceptedCatalogRecoveryV1(
         contextGraphId,
