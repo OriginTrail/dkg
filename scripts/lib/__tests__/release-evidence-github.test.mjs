@@ -44,8 +44,7 @@ test('default GitHub acquisition accepts exact artifact bytes and reads each att
   assert.equal(f.verify().outcome, 'PASS');
   const calls = fs.readFileSync(f.gh.calls, 'utf8').trim().split('\n').map(JSON.parse);
   const attempts = calls.filter(args => args[0] === 'api' && args[1]?.includes('/attempts/')).map(args => args[1]);
-  assert.equal(attempts.length, 4);
-  assert.equal(new Set(attempts).size, 4);
+  assert.deepEqual(attempts, ['repos/OriginTrail/dkg/actions/runs/121/attempts/1']);
   assert.ok(calls.some(args => args.includes('--paginate')));
   const download = calls.filter(args => args[0] === 'run');
   assert.equal(download.length, 1);
@@ -73,16 +72,32 @@ test('GitHub fixture refuses an artifact requested from another run or repositor
 test('GitHub fixture enforces method, candidate and projection semantics', t => {
   const f = githubFixture(t);
   const base = ['api', '--paginate', '-X', 'GET', 'repos/OriginTrail/dkg/actions/workflows/ci.yml/runs',
-    '-f', `head_sha=${f.options.expected.commit}`, '-f', 'per_page=100', '--jq', '.workflow_runs[] | {id, run_attempt}'];
+    '-f', `head_sha=${f.options.expected.commit}`, '-f', 'per_page=100', '--jq', '.workflow_runs[]'];
   const run = args => execFileSync('gh', args, { env: f.gh.env, encoding: 'utf8', stdio: 'pipe' });
   assert.equal(run(base).trim().split('\n').length, 3);
   for (const [args, reason] of [
     [base.filter((_, i) => i !== 2 && i !== 3), /must use GET/],
     [base.map(arg => arg === 'GET' ? 'POST' : arg), /must use GET/],
     [base.slice(0, -2), /wrong run history projection/],
-    [base.map(arg => arg === '.workflow_runs[] | {id, run_attempt}' ? '.workflow_runs[] | {id}' : arg), /wrong run history projection/],
+    [base.map(arg => arg === '.workflow_runs[]' ? '.workflow_runs[] | {id}' : arg), /wrong run history projection/],
     [base.map(arg => arg.startsWith('head_sha=') ? `head_sha=${'f'.repeat(40)}` : arg), /wrong candidate query/],
     [base.filter((_, i) => i !== 5 && i !== 6), /wrong candidate query/],
     [base.map(arg => arg.replace('repos/OriginTrail/dkg/', 'repos/some/fork/')), /unexpected API repository/],
   ]) assert.throws(() => run(args), reason);
+});
+
+test('single-attempt histories reuse listing metadata and refresh on every verification', t => {
+  const f = githubFixture(t), template = f.config.runs['122/1'];
+  const listed = Array.from({ length: 12 }, (_, i) => ({ id: 122 + i, run_attempt: 1 }));
+  f.config.pages = [listed.slice(0, 6), listed.slice(6)];
+  f.config.runs = Object.fromEntries(listed.map(row => [`${row.id}/1`, { ...template, ...row }]));
+  assert.equal(f.verify().outcome, 'PASS');
+  let calls = fs.readFileSync(f.gh.calls, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(calls.filter(args => args.some(arg => arg.endsWith('/workflows/ci.yml/runs'))).length, 1);
+  assert.equal(calls.filter(args => args.some(arg => arg.includes('/attempts/'))).length, 0);
+  f.config.runs['130/1'].conclusion = 'startup_failure';
+  assert.throws(f.verify, /omitted failed CI attempt: 130\/1/);
+  calls = fs.readFileSync(f.gh.calls, 'utf8').trim().split('\n').map(JSON.parse);
+  assert.equal(calls.filter(args => args.some(arg => arg.endsWith('/workflows/ci.yml/runs'))).length, 2);
+  assert.equal(calls.filter(args => args.some(arg => arg.includes('/attempts/'))).length, 0);
 });

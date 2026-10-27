@@ -25,9 +25,9 @@ if (args[0] === 'api') {
     if (method !== 'GET') throw new Error('run history must use GET');
     if (fields.filter(field => field?.startsWith('head_sha=')).length !== 1
       || !fields.includes('head_sha=' + config.candidateCommit)) throw new Error('wrong candidate query');
-    if (option('--jq') !== '.workflow_runs[] | {id, run_attempt}') throw new Error('wrong run history projection');
+    if (option('--jq') !== '.workflow_runs[]') throw new Error('wrong run history projection');
     const pages = args.includes('--paginate') ? config.pages : config.pages.slice(0, 1);
-    process.stdout.write(pages.flat().map(row => JSON.stringify(row)).join('\\n'));
+    process.stdout.write(pages.flat().map(row => JSON.stringify(config.runs[row.id + '/' + row.run_attempt])).join('\\n'));
   } else {
     const match = endpoint.match(/\\/runs\\/(\\d+)(?:\\/attempts\\/(\\d+))?$/);
     if (!match) throw new Error('unexpected API endpoint: ' + endpoint);

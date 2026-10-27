@@ -24,11 +24,12 @@ export function githubRunAttempts(commit) {
   assert.match(commit, /^[a-f0-9]{40}$/);
   const listing = execFileSync('gh', ['api', '--paginate', '-X', 'GET',
     'repos/OriginTrail/dkg/actions/workflows/ci.yml/runs', '-f', `head_sha=${commit}`, '-f', 'per_page=100',
-    '--jq', '.workflow_runs[] | {id, run_attempt}'], { encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
+    '--jq', '.workflow_runs[]'], { encoding: 'utf8', timeout: 60000, maxBuffer: 8 * 1024 * 1024 });
   const attempts = new Map();
   for (const line of listing.trim().split('\n').filter(Boolean)) {
     const run = JSON.parse(line);
-    for (let attempt = 1; attempt <= run.run_attempt; attempt++) {
+    attempts.set(`${run.id}/${run.run_attempt}`, run);
+    for (let attempt = 1; attempt < run.run_attempt; attempt++) {
       const key = `${run.id}/${attempt}`;
       if (!attempts.has(key)) attempts.set(key, githubRun(run.id, attempt));
     }
