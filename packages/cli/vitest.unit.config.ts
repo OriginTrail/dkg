@@ -41,6 +41,8 @@ export default defineConfig({
           'test/retention-timer.test.ts',
           'test/retention-sweeps.test.ts',
           'test/retention-share-sweep.test.ts',
+          // OT-RFC-73 P11 — the publisher sweep over the daemon admission instance's own store object and claim transaction, with real publisher rows.
+          'test/retention-publisher-sweep.test.ts',
           'test/retention-runtime-scope.test.ts',
           'test/daemon-queue-retention-live.test.ts',
           'test/async-admission-usage-retention.test.ts',
