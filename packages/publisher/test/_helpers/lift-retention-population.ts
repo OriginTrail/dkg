@@ -92,8 +92,8 @@ export function genPopulation(r: () => number): Rec[] {
     }
   }
   // finished at the same instant: now and then two or three old finalized records of one key share one finish time, preferably in the run of old records a key
-  // starts with (where the sweep can reach them). The scan walks the rows of one finish time in subject order, so half the time their ids are renamed to sort against
-  // the key's order and the walk meets the NEWEST of them first.
+  // starts with (where the sweep can reach them). The scan walks the rows of one finish time by subject when they are more than a batch (ORDER BY STR(?job)), and in
+  // the engine's order inside one batch, so half the time their ids are renamed to sort against the key's order: a walk by subject then meets the NEWEST of them first.
   if (r() < 0.4) {
     const byKey = new Map<string, Rec[]>(), leading = new Map<string, { open: boolean; run: Rec[] }>();
     for (const rec of recs) {

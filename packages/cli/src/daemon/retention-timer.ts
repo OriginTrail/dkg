@@ -53,7 +53,7 @@ export interface RetentionSweep {
 export interface RetentionUsageView extends RetentionSweepCounters {
   readonly queue: RetentionQueueName;
   readonly mode: ActiveRetentionMode;
-  /** Ticks that have run to the end (a failed tick counts). */
+  /** Ticks since this sweep's timer started (the daemon starts it after the API is listening), each counted when it ends, whatever it did: skipped and failed ticks too. */
   readonly ticks: number;
 }
 
