@@ -40,9 +40,9 @@ const seedVerifiedDurableBoundary = (
     manifestDigest: GENERATION, prefixDigestAtOffset: () => boundary?.manifestPrefixDigest,
     hasExactAssetFilter: false, usesPageSession: true, nowMs: Date.now() });
   if (!plan.seeded) return false;
-  const final = plan.checkpoint;
+  const final = plan.update;
   deleteSyncPageCheckpoint(store, key);
-  store.setManifestBoundOffset(key, final.offset, final.manifestDigest, final.updatedAtMs, final.manifestPrefixDigest);
+  store.setManifestBoundOffset(key, final.offset, final.manifestDigest, final.nowMs, final.manifestPrefixDigest);
   return true;
 };
 

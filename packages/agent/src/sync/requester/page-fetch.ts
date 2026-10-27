@@ -682,11 +682,11 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
   }
   if (plan.checkpointAction === 'replace' || plan.checkpointAction === 'upgrade') {
-    const final = plan.checkpoint;
-    checkpointStore.setManifestBoundOffset(checkpointKey, final.offset, final.manifestDigest,
-      final.updatedAtMs, final.manifestPrefixDigest, final.terminal, final.responderSessionOffset);
-    if (existingCheckpoint?.manifestDigest !== final.manifestDigest) logInfo(ctx,
-      `Reusing verified durable prefix for "${contextGraphId}" through offset ${final.offset} after META generation change`);
+    const update = plan.update;
+    checkpointStore.setManifestBoundOffset(checkpointKey, update.offset, update.manifestDigest,
+      update.nowMs, update.manifestPrefixDigest);
+    if (existingCheckpoint?.manifestDigest !== update.manifestDigest) logInfo(ctx,
+      `Reusing verified durable prefix for "${contextGraphId}" through offset ${update.offset} after META generation change`);
   }
   const checkpoint = checkpointStore.get(checkpointKey);
   if (!checkpoint) unfinishedSyncResponderSessions.delete(checkpointKey);
