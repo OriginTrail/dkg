@@ -1,5 +1,6 @@
 import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+import * as accounting from '../src/sync/durable-recovery-peer-health.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
 import {
@@ -219,4 +220,24 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
     expect(f.offered).toEqual([false]);
     expect(f.exactRequests).toEqual([]);
   });
+});
+
+
+it.each([true, false])('accounts graph planning, exact success=%s and terminal completion once per action', async succeeds => {
+  const updates: Array<{ kind: accounting.DurableRecoveryAccounting; health: accounting.MutableDurableRecoveryPeerHealth }> = [];
+  const original = accounting.accountDurableRecoveryAction;
+  const spy = vi.spyOn(accounting, 'accountDurableRecoveryAction').mockImplementation((health, kind, result, now) => {
+    original(health, kind, result, now);
+    updates.push({ kind, health: { ...health } });
+  });
+  try {
+    const f = runner([leaves(missing(['ual-1', '2'])), held], async () => {
+      if (!succeeds) throw new Error('transport reset');
+      return true;
+    });
+    expect((await f.run()).outcome).toBe('terminal');
+    expect(updates.map(row => row.kind)).toEqual(['success', succeeds ? 'success' : 'failure', 'terminal']);
+    expect(updates[1]!.health).toMatchObject({ attempts: 2, successfulSlices: succeeds ? 2 : 1, recentTransportResets: succeeds ? 0 : 1 });
+    expect(updates[2]!.health).toMatchObject({ attempts: 3, successfulSlices: succeeds ? 3 : 2, recentTransportResets: 0 });
+  } finally { spy.mockRestore(); }
 });
