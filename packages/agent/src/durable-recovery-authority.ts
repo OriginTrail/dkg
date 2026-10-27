@@ -1,5 +1,4 @@
-import type { GraphScopedChainEvidence } from './sync/requester/graph-scoped-chain-views.js';
-import type { GraphScopedDescriptor } from './sync/durable-integrity.js';
+import type { AuthenticateHeldAsset } from './sync/requester/held-assets-contracts.js';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
 import { authenticateDurableGraphScopedAsset,
@@ -20,8 +19,7 @@ export interface DurableRecoveryAuthority {
   authenticate(asset: VerifiedGraphScopedAsset, deadline: number, signal?: AbortSignal):
     AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
   /** Authenticate a proven local copy. An authenticated mismatch is a typed result; unavailable evidence rejects. */
-  authenticateHeld?(copy: GraphScopedDescriptor, requiredBinding: string | undefined, deadline: number,
-    signal?: AbortSignal): Promise<GraphScopedChainEvidence>;
+  readonly authenticateHeld?: AuthenticateHeldAsset;
 }
 
 /** Public compatibility evidence; authentication strategies remain internal. */

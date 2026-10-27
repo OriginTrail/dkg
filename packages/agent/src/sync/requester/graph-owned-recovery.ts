@@ -3,7 +3,7 @@ import type { DurableMetaContinuation } from './durable-meta-continuation.js';
 import type { DurableHoldingsOptions, ConfirmHeldAssetsCurrent } from './durable-data-holdings.js';
 import type { VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
 import type { HeldGraphScopedAssetsRequest } from './stored-graph-assets.js';
-import type { ProveHeldAssets } from '../../durable-recovery-held-store.js';
+import type { ProveHeldAssets } from './held-assets-contracts.js';
 
 /** Owner state is supplied together; the graph boundary adds the physical capabilities. */
 export interface GraphOwnedRecoveryInput {

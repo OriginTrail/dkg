@@ -16,7 +16,8 @@ import { MAX_EXACT_SYNC_ASSETS } from '../exact-assets.js';
 import { mapWithConcurrencyDrained } from '../../map-with-concurrency.js';
 import { DEFAULT_DURABLE_DATA_ROUND_BUDGET, type DurableDataRoundBudget } from './durable-data-round.js';
 import type { DurableSyncContext } from './durable-sync.js';
-import type { DurableRecoveryAuthority } from '../../durable-recovery-authority.js';
+import type { AuthenticateHeldAsset } from './held-assets-contracts.js';
+import type { GraphScopedChainEvidence } from './graph-scoped-chain-views.js';
 import type { SyncPageResult } from './page-fetch.js';
 
 /** An asset of a verified generation that this node does not hold at that version. */
@@ -91,7 +92,7 @@ const heldCopyKey = (descriptor: GraphScopedDescriptor) =>
 /** Chain confirmation for content already owned by an acquired store proof. */
 interface HeldAssetsConfirmationInput {
   readonly binding?: () => Readonly<{ onChainId?: string; generation: number }>;
-  readonly authenticateHeld?: DurableRecoveryAuthority['authenticateHeld'];
+  readonly authenticateHeld?: AuthenticateHeldAsset;
   /** The round's budget: the chain checks share one authentication deadline. */
   readonly budget: { createGraphScopedAuthenticationDeadline(): number };
 }
@@ -114,7 +115,7 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
       HELD_CHAIN_CHECK_CONCURRENCY,
       async (descriptor) => {
         const { ual } = descriptor;
-        let current: Awaited<ReturnType<NonNullable<DurableRecoveryAuthority['authenticateHeld']>>>;
+        let current: GraphScopedChainEvidence;
         try {
           current = await authenticateHeld(descriptor, binding?.onChainId, deadline, request.signal);
         } catch (error) {

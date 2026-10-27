@@ -4,7 +4,7 @@ import type { SyncAdmissionSource, SyncContextGraphPriorityConfig } from './sync
 import type { SyncOperationLane } from './sync/attempt-telemetry.js';
 import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
 import type { DurableSyncContext, DurableSyncFetchRequest } from './sync/requester/durable-sync.js';
-import type { ProveHeldAssets } from './durable-recovery-held-store.js';
+import type { ProveHeldAssets } from './sync/requester/held-assets-contracts.js';
 import type { HeldGraphScopedAssetsRequest } from './sync/requester/stored-graph-assets.js';
 import type { ExactBatchStreamDriverPorts } from './sync/requester/exact-batch-stream-driver.js';
 import type { DurableRecoveryAuthority, DurableRecoveryInput } from './durable-recovery-authority.js';

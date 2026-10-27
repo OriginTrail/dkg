@@ -1,19 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import type { HeldGraphScopedAssetsRequest } from './sync/requester/stored-graph-assets.js';
+import type { ProveHeldAssets } from './sync/requester/held-assets-contracts.js';
 import { graphScopedDurableManifestPrefixAtOffset } from './sync/durable-integrity.js';
 import type { StoredDurablePrefix } from './sync/requester/durable-prefix-proof.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { StoreContentFence } from './internal/store-content-fence.js';
 import { heldGraphScopedAssetsReader, readHeldGraphScopedAssets } from './sync/requester/stored-graph-assets.js';
-
-export interface HeldAssetsProof {
-  readonly held: ReadonlySet<string>;
-  assertCurrent(): void;
-  close(): void;
-}
-export type ProveHeldAssets = (request: HeldGraphScopedAssetsRequest) => Promise<HeldAssetsProof | undefined>;
 
 /** Bind private content ownership and existing SWM housekeeping at composition. */
 export function createDurableHeldStore(
