@@ -5,7 +5,7 @@ import { createGraphScopedDurableManifestPlan, graphScopedDurableManifestPrefixA
 import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { stubLifecycleFetch } from './_helpers/sync-fetch-coalescing.js';
-import { CG, PEER, createHeldProductionHarness, stopHeldProductionAgents } from './_helpers/durable-held-production.js';
+import { CG, PEER, createHeldProductionHarness, stopHeldProductionAgents, storeConfirmedPrefix } from './_helpers/durable-held-production.js';
 
 afterEach(async () => { await stopHeldProductionAgents(); vi.restoreAllMocks(); });
 
@@ -23,7 +23,7 @@ it('keeps a proven VM prefix while materializing a suffix and retiring its SWM t
   }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
     batchId: 0n, materializedVersion: { blockNumber: 1, txIndex: 0 },
   } } });
-  await h.internal.store.insert([...data, ...meta]);
+  await storeConfirmedPrefix(h.internal.store, CG, data, meta);
   const generation = [...meta, ...h.meta];
   const manifest = createGraphScopedDurableManifestPlan(generation, CG)!;
   expect(manifest.descriptors[0]!.ual).toBe(ual);

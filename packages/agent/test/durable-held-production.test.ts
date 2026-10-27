@@ -1,3 +1,5 @@
+import { LOCAL_TRUSTED_KA_CONTROLS_GRAPH } from '@origintrail-official/dkg-storage';
+import { replaceLocallyTrustedKnowledgeAssetControlEnvelope } from '@origintrail-official/dkg-publisher';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
 import * as contentVerifier from '../src/exact-graph-content-verifier.js';
@@ -169,3 +171,60 @@ it.each(['valid', 'wrong-graph', 'wrong-version', 'wrong-owner', 'wrong-scope', 
     expect(pointers.bindings).toEqual(fault === 'valid' ? [{ pointer: h.graph }] : []);
   }, 15_000,
 );
+
+it.each(['accessPolicy', 'publisherPeerId', 'attribution'])(
+  'repairs divergent descriptor metadata through authenticated replay: %s', async field => {
+    const h = await createHeldProductionHarness();
+    const predicate = field === 'attribution' ? 'http://www.w3.org/ns/prov#wasAttributedTo' : `http://dkg.io/ontology/${field}`;
+    const row = { subject: h.ual, predicate, graph: h.meta[0]!.graph, object: '"ownerOnly"' };
+    await h.internal.store.deleteByPattern({ subject: row.subject, predicate, graph: row.graph });
+    await h.internal.store.insert([row]);
+    h.fetchMissingData();
+    const recovered = await h.run();
+    expect(recovered.outcome).toBe('terminal');
+    expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+    expect(h.dataRequests()).toBeGreaterThan(0);
+    const values = await h.internal.store.query(`SELECT ?value WHERE { GRAPH <${row.graph}> { <${h.ual}> <${predicate}> ?value } }`);
+    expect(values.bindings).toEqual(field === 'attribution' ? []
+      : [{ value: field === 'accessPolicy' ? '"public"' : '"publisher-peer"' }]);
+  }, 15_000,
+);
+
+it('keeps a trusted local ACL instead of the peer public ACL while skipping DATA', async () => {
+  const h = await createHeldProductionHarness({ localAccessPolicy: 'ownerOnly' }), predicate = 'http://dkg.io/ontology/accessPolicy';
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal'); expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(h.dataRequests()).toBe(0);
+  expect(await h.internal.store.query(`ASK { GRAPH <${h.meta[0]!.graph}> { <${h.ual}> <${predicate}> "ownerOnly" } }`))
+    .toEqual({ type: 'boolean', value: true });
+}, 15_000);
+
+it('retains the receiver timestamp and stronger receipt provenance during held completion', async () => {
+  const h = await createHeldProductionHarness(), ns = 'http://dkg.io/ontology/', graph = h.meta[0]!.graph;
+  const row = (name: string, object: string) => ({ subject: h.ual, predicate: ns + name, object, graph });
+  const local = [row('publishedAt', '"2020-02-03T04:05:06.000Z"^^<http://www.w3.org/2001/XMLSchema#dateTime>'),
+    row('confirmationKind', '"transaction"'), row('transactionHash', '"0x' + '42'.repeat(32) + '"'), row('materializedVersion', '"99:3"')];
+  for (const q of local) await h.internal.store.deleteByPattern({ subject: h.ual, graph, predicate: q.predicate });
+  await h.internal.store.insert(local);
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal'); expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(h.dataRequests()).toBe(0);
+  for (const q of local) expect(await h.internal.store.query(`ASK { GRAPH <${graph}> { <${h.ual}> <${q.predicate}> ${q.object} } }`))
+    .toEqual({ type: 'boolean', value: true });
+}, 15_000);
+
+it('fences a local control-sidecar change after the content proof was acquired', async () => {
+  const h = await createHeldProductionHarness(); h.pause('chain');
+  const pending = h.run();
+  try {
+    await Promise.race([h.entered.promise, pending.then(() => { throw new Error('round ended before chain confirmation'); })]);
+    await h.internal.store.deleteByPattern({ graph: LOCAL_TRUSTED_KA_CONTROLS_GRAPH, predicate: 'http://dkg.io/ontology/accessPolicy' });
+    await replaceLocallyTrustedKnowledgeAssetControlEnvelope(h.internal.store, h.ual,
+      { assertionVersion: '1', merkleRoot: h.root },
+      { accessPolicy: 'ownerOnly', publisherPeerId: 'publisher-peer', allowedPeers: [] });
+  } finally { h.release.resolve(); }
+  const recovered = await pending;
+  expect(recovered.outcome).not.toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+  expect(h.internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).not.toBe(true);
+}, 15_000);

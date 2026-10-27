@@ -7,7 +7,7 @@ import { quadToNQuad, quadsToNQuads } from '@origintrail-official/dkg-storage';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { createGraphScopedDurableManifestPlan, graphScopedDurableManifestPrefixAtOffset } from '../src/sync/durable-integrity.js';
 import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
-import { CG, PEER, createHeldProductionHarness, stopHeldProductionAgents } from './_helpers/durable-held-production.js';
+import { CG, PEER, createHeldProductionHarness, stopHeldProductionAgents, storeConfirmedPrefix } from './_helpers/durable-held-production.js';
 
 afterEach(async () => { await stopHeldProductionAgents(); vi.restoreAllMocks(); });
 
@@ -34,7 +34,7 @@ it('resumes a stored 100,001-row asset above the default read byte limit and set
   }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
     batchId: 0n, materializedVersion: { blockNumber: 1, txIndex: 0 },
   } } });
-  await h.internal.store.insert([...prefix, ...meta]);
+  await storeConfirmedPrefix(h.internal.store, CG, prefix, meta);
   const metadata = [...meta, ...h.meta], data = [...prefix, ...h.data];
   const manifest = createGraphScopedDurableManifestPlan(metadata, CG)!;
   expect(manifest.descriptors[0]!.ual).toBe(ual);
