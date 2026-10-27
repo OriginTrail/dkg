@@ -89,7 +89,7 @@ describe('store initialization and polling', () => {
     await advance(3000); expect(fetchNodeStatus).toHaveBeenCalledTimes(6);
     await advance(9999); expect(fetchNodeStatus).toHaveBeenCalledTimes(6);
     await advance(1); expect(fetchNodeStatus).toHaveBeenCalledTimes(9);
-    act(() => store.dispatch({ type: 'STOP_SIMULATION' }));
+    act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'run' }));
     await advance(10000); expect(fetchNodeStatus).toHaveBeenCalledTimes(12);
     await advance(3000); expect(fetchNodeStatus).toHaveBeenCalledTimes(15);
   });
@@ -174,7 +174,7 @@ describe('public store operations', () => {
   it('reconciles server totals without double counting or overwriting manual work', async () => {
     await mount();
     act(() => store.dispatch({ type: 'START_SIMULATION', id: 'older', name: 'Older', config: runConfig }));
-    act(() => store.dispatch({ type: 'STOP_SIMULATION' }));
+    act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'older' }));
     const older = structuredClone(store.state.simulationRuns[0]);
     act(() => store.dispatch({ type: 'START_SIMULATION', id: 'recovering', name: 'Recovering', config: runConfig }));
     act(() => store.dispatch({ type: 'RECORD_OP', simulationId: 'recovering', opType: 'publish', success: true, durationMs: 100, phases: { prepare: 10, chain: 70 } }));
@@ -205,10 +205,12 @@ describe('public store operations', () => {
     act(() => store.dispatch({ type: 'RESET_LIVE_METRICS' }));
     act(() => store.dispatch({ type: 'RECONCILE_SIMULATION', id: 'recovering', snapshot }));
     expect(store.state.liveMetrics).toEqual(store.state.simulationRuns[1].metrics);
-    act(() => store.dispatch({ type: 'RECONCILE_SIMULATION', id: 'recovering', snapshot: { ...snapshot, type: 'done' } }));
+    act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'recovering', snapshot: { ...snapshot, type: 'done' } }));
+    expect(store.state.activeSimulationId).toBeNull();
+    expect(store.state.simulationRuns[1].finishedAt).toBe(previous.startedAt + snapshot.elapsedMs);
     const finishedAt = store.state.simulationRuns[1].finishedAt;
     vi.setSystemTime(Date.now() + 5_000);
-    act(() => store.dispatch({ type: 'STOP_SIMULATION' }));
+    act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'recovering' }));
     expect(store.state.simulationRuns[1].finishedAt).toBe(finishedAt);
   });
 
@@ -225,7 +227,7 @@ describe('public store operations', () => {
       byType: { publish: { total: 2, success: 1, errors: 1, totalDurationMs: 140, successDurationMs: 100,
         phaseTotals: { prepare: 25, chain: 70 }, phaseCounts: { prepare: 2, chain: 1 } } }, recentTimestamps: [Date.now()] });
     expect(store.state.simulationRuns[0].metrics).toEqual(store.state.liveMetrics);
-    act(() => store.dispatch({ type: 'STOP_SIMULATION' }));
+    act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'one' }));
     const finished = structuredClone(store.state.simulationRuns[0]);
     expect(finished.finishedAt).toBe(Date.now());
     act(() => store.dispatch({ type: 'RECORD_OP', opType: 'query', success: true, durationMs: 12 }));
@@ -254,8 +256,25 @@ it('keeps setup errors scoped to the active run and replaces their provisional c
   } }));
   expect(store.state.liveMetrics.errors).toBe(0);
   expect(store.state.simulationRuns[0].error).toBeUndefined();
-  act(() => store.dispatch({ type: 'STOP_SIMULATION' }));
+  act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'current-errors' }));
   const finished = store.state.simulationRuns[0];
   act(() => store.dispatch({ type: 'SIMULATION_ERROR', id: 'current-errors', message: 'late failure' }));
   expect(store.state.simulationRuns[0]).toEqual(finished);
+});
+
+
+it('ignores completion from an older run and reuses metric projections across animation ticks', async () => {
+  await mount();
+  act(() => store.dispatch({ type: 'START_SIMULATION', id: 'old', name: 'Old', config: runConfig }));
+  act(() => store.dispatch({ type: 'START_SIMULATION', id: 'new', name: 'New', config: runConfig }));
+  act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'old' }));
+  expect(store.state.activeSimulationId).toBe('new');
+  const metrics = store.state.liveMetrics;
+  act(() => store.dispatch({ type: 'TICK_ANIMATIONS', dt: 0.016 }));
+  expect(store.state.liveMetrics).toBe(metrics);
+  act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'new' }));
+  expect(store.state.activeSimulationId).toBeNull();
+  expect(store.state.simulationRuns[1].finishedAt).toBe(Date.now());
+  act(() => store.dispatch({ type: 'TICK_ANIMATIONS', dt: 0.016 }));
+  expect(store.state.liveMetrics).toBe(metrics);
 });

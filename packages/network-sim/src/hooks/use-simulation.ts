@@ -34,10 +34,8 @@ export function useSimulation(onComplete: () => void) {
     run.startAbort.abort();
     setDisconnected(false); setFailure(typeof result === 'string' ? result : null);
     if (typeof result === 'string') setSelectedRunId(null);
-    else {
-      dispatch({ type: 'RECONCILE_SIMULATION', id: run.id, snapshot: result });
-    }
-    dispatch({ type: 'STOP_SIMULATION' });
+    dispatch({ type: 'COMPLETE_SIMULATION', id: run.id,
+      ...(typeof result === 'string' ? {} : { snapshot: result }) });
     if (typeof result !== 'string') onComplete();
   }, [dispatch, onComplete]);
 

@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useRef,
+  useMemo,
   type ReactNode,
 } from 'react';
 import type { DevnetNode, Activity, GraphAnimation, DevnetConfig, OperationType } from './types';
@@ -54,9 +55,9 @@ type Action =
   | { type: 'RECORD_OP'; simulationId?: string; opType: string; success: boolean; durationMs: number; phases?: Record<string, number> }
   | { type: 'RESET_LIVE_METRICS' }
   | { type: 'START_SIMULATION'; id: string; name: string; config: SimulationRun['config'] }
-  | { type: 'RECONCILE_SIMULATION'; id: string; snapshot: DoneEvent | StatusEvent }
+  | { type: 'RECONCILE_SIMULATION'; id: string; snapshot: StatusEvent }
   | { type: 'SIMULATION_ERROR'; id: string; message: string }
-  | { type: 'STOP_SIMULATION' };
+  | { type: 'COMPLETE_SIMULATION'; id: string; snapshot?: DoneEvent };
 
 const MAX_ACTIVITIES = 200;
 
@@ -140,8 +141,7 @@ function reducer(state: StoredState, action: Action): StoredState {
       if (action.id !== state.activeSimulationId) return state;
       const run = state.simulationRuns.find(r => r.id === action.id)!;
       const metrics = snapshotMetrics(action.snapshot, run.metrics);
-      const updated = { ...run, metrics, error: action.snapshot.type === 'status' ? undefined : run.error,
-        ...(action.snapshot.type === 'done' ? { finishedAt: run.startedAt + action.snapshot.elapsedMs } : {}) };
+      const updated = { ...run, metrics, error: undefined };
       return { ...state,
         simulationRuns: state.simulationRuns.map(r => r.id === action.id ? updated : r) };
     }
@@ -150,10 +150,13 @@ function reducer(state: StoredState, action: Action): StoredState {
       return { ...state, simulationRuns: state.simulationRuns.map(run => run.id === action.id
         ? { ...run, error: action.message, metrics: { ...run.metrics, errors: run.metrics.errors + 1 } } : run) };
     }
-    case 'STOP_SIMULATION': {
-      const runs = state.simulationRuns.map((r) =>
-        r.id === state.activeSimulationId ? { ...r, finishedAt: r.finishedAt ?? Date.now() } : r,
-      );
+    case 'COMPLETE_SIMULATION': {
+      if (action.id !== state.activeSimulationId) return state;
+      const runs = state.simulationRuns.map(run => run.id === action.id ? {
+        ...run,
+        metrics: action.snapshot ? snapshotMetrics(action.snapshot, run.metrics) : run.metrics,
+        finishedAt: action.snapshot ? run.startedAt + action.snapshot.elapsedMs : Date.now(),
+      } : run);
       return { ...state, activeSimulationId: null, simulationRuns: runs };
     }
     default:
@@ -374,7 +377,8 @@ export function StoreProvider({ children }: { children: ReactNode }) {
 
   const { manualMetrics, liveSimulationId, ...visibleState } = state;
   const liveRun = state.simulationRuns.find(run => run.id === liveSimulationId);
-  const view: State = { ...visibleState, liveMetrics: combineMetrics(manualMetrics, liveRun?.metrics) };
+  const liveMetrics = useMemo(() => combineMetrics(manualMetrics, liveRun?.metrics), [manualMetrics, liveRun?.metrics]);
+  const view: State = { ...visibleState, liveMetrics };
   return (
     <Ctx.Provider value={{ state: view, dispatch, addOperation, addBroadcast, completeOperation }}>
       {children}

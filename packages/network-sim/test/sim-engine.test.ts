@@ -36,7 +36,7 @@ function mockRes(): ServerResponse & { statusCode: number; headers: Record<strin
     statusCode: 0,
     headers: {} as Record<string, string>,
     body: '',
-    writeHead(statusCode: number, headers?: Record<string, string> | Record<string, string[]>) {
+    writeHead(this: ReturnType<typeof mockRes>, statusCode: number, headers?: Record<string, string> | Record<string, string[]>) {
       this.statusCode = statusCode;
       if (headers) {
         const flat = headers as Record<string, string>;
@@ -48,7 +48,7 @@ function mockRes(): ServerResponse & { statusCode: number; headers: Record<strin
       chunks.push(typeof chunk === 'string' ? chunk : chunk.toString());
       return true;
     },
-    end(chunk?: string | Buffer) {
+    end(this: ReturnType<typeof mockRes>, chunk?: string | Buffer) {
       if (chunk !== undefined) chunks.push(typeof chunk === 'string' ? chunk : chunk.toString());
       this.body = chunks.join('');
       return this;
