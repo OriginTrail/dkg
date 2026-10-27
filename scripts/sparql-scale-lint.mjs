@@ -526,15 +526,42 @@ export function scanSource(filePath, source) {
 // Drivers
 // ---------------------------------------------------------------------------
 
-function git(args, cwd = process.cwd()) {
+function git(args, cwd = process.cwd(), env = process.env) {
   // Capture stderr: fileAt() probes base versions of ADDED files, and git's
   // expected "exists on disk, but not in <sha>" must not pollute CI logs.
   return execFileSync('git', args, {
     encoding: 'utf8',
     maxBuffer: 64 * 1024 * 1024,
     cwd,
+    env,
     stdio: ['ignore', 'pipe', 'pipe'],
   });
+}
+
+/**
+ * The environment for git commands that must act ONLY on the throwaway
+ * repository in their cwd (the self-test). Git takes its repository, index,
+ * object store and configuration from GIT_* variables BEFORE it looks at cwd,
+ * and git itself exports GIT_DIR / GIT_INDEX_FILE to hooks, so a caller's
+ * environment would otherwise make the self-test's `git init`, `git commit`
+ * and `git config` re-initialise, commit to and reconfigure the CALLER'S
+ * repository. Every GIT_* variable is dropped rather than a list of today's
+ * repository-locating ones (GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE,
+ * GIT_COMMON_DIR, GIT_OBJECT_DIRECTORY, GIT_NAMESPACE, GIT_CONFIG_PARAMETERS,
+ * GIT_CONFIG_COUNT/KEY_n/VALUE_n, GIT_AUTHOR_*, ...) so a variable git adds
+ * later cannot reopen the hole. The system and global config files are then
+ * switched off, so signing, hooksPath or template settings on the machine
+ * cannot change what the throwaway repository does. The real-repository
+ * callers (--diff, --all) deliberately keep process.env.
+ */
+export function hermeticGitEnv(base = process.env) {
+  const env = {};
+  for (const [name, value] of Object.entries(base)) {
+    if (!/^GIT_/i.test(name)) env[name] = value;
+  }
+  env.GIT_CONFIG_NOSYSTEM = '1';
+  env.GIT_CONFIG_GLOBAL = '/dev/null';
+  return env;
 }
 
 function listTrackedSourceFiles() {
@@ -547,11 +574,12 @@ function scannableSourceFile(file) {
   return Boolean(file && SCANNED_EXTENSIONS.test(file) && !EXCLUDED_PATH.test(file));
 }
 
-function changedSourceEntries(baseSha, headSha, cwd = process.cwd()) {
+function changedSourceEntries(baseSha, headSha, cwd = process.cwd(), env = process.env) {
   const entries = [];
   for (const line of git(
     ['diff', '--name-status', '--find-renames', '--diff-filter=ACMR', baseSha, headSha],
     cwd,
+    env,
   ).split('\n')) {
     if (!line) continue;
     const [status, first, second] = line.split('\t');
@@ -570,9 +598,9 @@ function changedSourceEntries(baseSha, headSha, cwd = process.cwd()) {
   return entries;
 }
 
-function fileAt(sha, path, cwd = process.cwd()) {
+function fileAt(sha, path, cwd = process.cwd(), env = process.env) {
   try {
-    return git(['show', `${sha}:${path}`], cwd);
+    return git(['show', `${sha}:${path}`], cwd, env);
   } catch {
     return null; // added file — no baseline
   }
@@ -595,13 +623,13 @@ function report(finding, { status, level }) {
  * must block, even though the copy's normalized text is identical. Each head
  * occurrence consumes one baseline occurrence; the surplus is new.
  */
-export function computeDiffFindings(baseSha, headSha, cwd = process.cwd()) {
-  const entries = changedSourceEntries(baseSha, headSha, cwd);
+export function computeDiffFindings(baseSha, headSha, cwd = process.cwd(), env = process.env) {
+  const entries = changedSourceEntries(baseSha, headSha, cwd, env);
   const files = entries.map((entry) => entry.headPath);
   const baseline = new Map();
   for (const entry of entries) {
     if (!entry.basePath) continue;
-    const baseSource = fileAt(baseSha, entry.basePath, cwd);
+    const baseSource = fileAt(baseSha, entry.basePath, cwd, env);
     if (!baseSource) continue;
     for (const f of scanSource(entry.basePath, baseSource)) {
       baseline.set(f.fingerprint, (baseline.get(f.fingerprint) ?? 0) + 1);
@@ -609,7 +637,7 @@ export function computeDiffFindings(baseSha, headSha, cwd = process.cwd()) {
   }
   const results = [];
   for (const entry of entries) {
-    const headSource = fileAt(headSha, entry.headPath, cwd);
+    const headSource = fileAt(headSha, entry.headPath, cwd, env);
     if (headSource === null) continue;
     for (const f of scanSource(entry.headPath, headSource)) {
       if (f.allowed) {
@@ -888,15 +916,23 @@ const FIXTURES = [
  *   3. a true rename keeps the moved query grandfathered;
  *   4. adding a genuinely new offending query blocks, including through the
  *      real CLI exit code used by required CI.
+ *
+ * Hermetic by construction: this runs wherever the lint runs, including inside
+ * git hooks and tools that export GIT_DIR / GIT_WORK_TREE / GIT_INDEX_FILE, so
+ * every git command and every child process gets hermeticGitEnv() and the
+ * commit identity is passed with `-c`, never written with `git config`.
  */
 function diffGateSelfTest() {
   const dir = mkdtempSync(join(tmpdir(), 'sparql-lint-selftest-'));
-  const g = (...args) => git(args, dir);
+  const env = hermeticGitEnv();
+  const g = (...args) => git([
+    '-c', 'user.name=sparql-lint-selftest',
+    '-c', 'user.email=selftest@example.invalid',
+    ...args,
+  ], dir, env);
   const BAD = 'const a = `SELECT ?s WHERE { ?s ?p ?o }`;\n';
   try {
     g('init', '-q');
-    g('config', 'user.email', 'selftest@example.invalid');
-    g('config', 'user.name', 'sparql-lint-selftest');
     mkdirSync(join(dir, 'src'), { recursive: true });
     writeFileSync(join(dir, 'src/a.ts'), BAD);
     g('add', '-A');
@@ -907,7 +943,7 @@ function diffGateSelfTest() {
     g('mv', 'src/a.ts', 'src/moved.ts');
     g('commit', '-qm', 'rename');
     const renameHead = g('rev-parse', 'HEAD').trim();
-    const renamed = computeDiffFindings(base, renameHead, dir).results;
+    const renamed = computeDiffFindings(base, renameHead, dir, env).results;
     if (renamed.some((f) => f.verdict === 'new')
       || renamed.filter((f) => f.verdict === 'grandfathered').length !== 1) {
       console.error(`DIFF-GATE FAIL: rename → ${JSON.stringify(renamed.map((f) => f.verdict))} (want one grandfathered)`);
@@ -919,7 +955,7 @@ function diffGateSelfTest() {
     writeFileSync(join(dir, 'src/a.ts'), BAD + 'const b = `SELECT ?s WHERE { ?s ?p ?o }`;\n');
     g('commit', '-aqm', 'dup');
     const dupHead = g('rev-parse', 'HEAD').trim();
-    const dup = computeDiffFindings(base, dupHead, dir).results;
+    const dup = computeDiffFindings(base, dupHead, dir, env).results;
     const dupNew = dup.filter((f) => f.verdict === 'new').length;
     const dupOld = dup.filter((f) => f.verdict === 'grandfathered').length;
     if (dupNew !== 1 || dupOld !== 1) {
@@ -931,7 +967,7 @@ function diffGateSelfTest() {
     writeFileSync(join(dir, 'src/a.ts'), 'const a = `SELECT ?s\n  WHERE {\n    ?s ?p ?o\n  }`;\n');
     g('commit', '-aqm', 'reindent');
     const reHead = g('rev-parse', 'HEAD').trim();
-    const re = computeDiffFindings(base, reHead, dir).results;
+    const re = computeDiffFindings(base, reHead, dir, env).results;
     if (re.some((f) => f.verdict === 'new') || re.filter((f) => f.verdict === 'grandfathered').length !== 1) {
       console.error(`DIFF-GATE FAIL: reindent → ${JSON.stringify(re.map((f) => f.verdict))} (want one grandfathered)`);
       return false;
@@ -941,7 +977,7 @@ function diffGateSelfTest() {
     writeFileSync(join(dir, 'src/a.ts'), BAD + 'const c = `SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }`;\n');
     g('commit', '-aqm', 'new-shape');
     const newHead = g('rev-parse', 'HEAD').trim();
-    const fresh = computeDiffFindings(base, newHead, dir).results;
+    const fresh = computeDiffFindings(base, newHead, dir, env).results;
     if (fresh.filter((f) => f.verdict === 'new').length !== 1) {
       console.error(`DIFF-GATE FAIL: new shape → ${JSON.stringify(fresh.map((f) => f.verdict))} (want one new)`);
       return false;
@@ -956,7 +992,7 @@ function diffGateSelfTest() {
         {
           cwd: dir,
           encoding: 'utf8',
-          env: { ...process.env, SPARQL_LINT_NO_SPAWN_CHECK: '1' },
+          env: { ...env, SPARQL_LINT_NO_SPAWN_CHECK: '1' },
         },
       );
       if (cli.status !== 1 || !cli.stdout.includes('NEW — blocks merge')) {
@@ -979,7 +1015,7 @@ function diffGateSelfTest() {
     g('add', '-A');
     g('commit', '-qm', 'tsx-shape');
     const tsxHead = g('rev-parse', 'HEAD').trim();
-    const tsx = computeDiffFindings(newHead, tsxHead, dir).results
+    const tsx = computeDiffFindings(newHead, tsxHead, dir, env).results
       .filter((f) => f.file.endsWith('.tsx'));
     if (tsx.filter((f) => f.verdict === 'new' && f.rule === 'R2').length !== 1) {
       console.error(`DIFF-GATE FAIL: tsx → ${JSON.stringify(tsx)} (want one new R2)`);
@@ -993,7 +1029,7 @@ function diffGateSelfTest() {
       const out = execFileSync(
         process.execPath,
         [process.argv[1], '--files', join(dir, 'src/a.ts')],
-        { encoding: 'utf8', env: { ...process.env, SPARQL_LINT_NO_SPAWN_CHECK: '1' } },
+        { encoding: 'utf8', env: { ...env, SPARQL_LINT_NO_SPAWN_CHECK: '1' } },
       );
       if (!/self-test: .*pass/.test(out) || !out.includes('sparql-scale-lint R1')) {
         console.error(`DIFF-GATE FAIL: --files did not self-test before scanning:\n${out}`);
