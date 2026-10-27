@@ -20,9 +20,18 @@ import type { PromoteRetentionJobClass } from '../src/async-promote-retention-po
 // of the jobs additionally carry a decimal `updatedAt` twin, which the scan ignores (it reads exact integer terms only): that is a check that a twin changes nothing, not
 // a repeated row.
 //
-// Each rule of the cancelled class has a kind that ONLY that rule protects, so dropping one rule fails this property. The format rule (`isMarkerWriterFormat`) is the only
-// thing that keeps `failed-cancelled-unclaimed-legacy-absent|0|1`: a pre-format-2 cancelled job with `attempt.count` 0 and no `preparationAttempts`, which the every-attempt
-// rule alone proves unstarted (there was no attempt). The legacy kinds that were claimed (`attempt.count` 3) are protected by the every-attempt rule as well.
+// Six rules decide the cancelled class (the five conditions of `benignFailedClass` and the marker-readability gate after it). Five of them have a kind that ONLY that rule
+// protects, so dropping any one of them fails this property on that kind (each was dropped in turn and this property run with the default seed):
+//  - `reason === 'cancelled'`: `failed-unstarted-not-cancelled`, a job that failed terminally in preparation: every attempt proven unstarted, no binding, an all-false marker, not cancelled;
+//  - the format rule (`isMarkerWriterFormat`): `failed-cancelled-unclaimed-legacy-absent|0|1`, a pre-format-2 cancelled job with `attempt.count` 0 and no `preparationAttempts`, which the
+//    every-attempt rule alone proves unstarted (there was no attempt);
+//  - the every-attempt rule (`everyAttemptProvenUnstarted`): `failed-cancelled-attempted` and `failed-cancelled-attempted-partial`;
+//  - the marker-flag rule (a flag set for any step): `failed-cancelled-started`, `failed-cancelled-swm` and `failed-cancelled-contradictory`;
+//  - the marker-readability gate (`hasReadableCommitMarker`): `failed-cancelled-bad-marker` and `failed-cancelled-no-started-flag`.
+// The sixth, the `recoveryBinding === undefined` condition, has no such kind and cannot have one: it decides nothing, because `hasUnfinishedBoundObligation` runs first and keeps a bound failed job that
+// is not a certified retired rejection (a cancelled job never is: certification needs `reason === undefined`), so `failed-cancelled-bound` is kept as `unfinished_bound_obligation` before the
+// clause is asked and this property passes with the clause dropped. It is defence in depth, not a rule this property protects. The legacy kinds that were claimed (`attempt.count` 3) are kept
+// by the format rule and the every-attempt rule together, so dropping either one alone leaves them kept.
 
 const options = propertyOptions();
 

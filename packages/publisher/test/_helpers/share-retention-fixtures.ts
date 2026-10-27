@@ -51,6 +51,16 @@ export const ATTEMPTED = { count: 2, maxRetries: 5 };
  */
 export const cancelledJob = (id: string, over: Record<string, unknown> = {}, age = 10 * W): PromoteJob => mk(id, 'failed', { reason: 'cancelled', attempt: UNCLAIMED, ...over }, age);
 
+/** The last error of a job that failed in preparation: terminal, not a post-commit failure, and its free text asks for no inspection. */
+export const PREPARATION_ERROR = { message: 'seal preparation failed', retryable: false, classification: 'fatal', recordedAt: 1 };
+/**
+ * A job that failed terminally in preparation and was NOT cancelled (`reason` absent, which is what the queue leaves for a terminal failure): every one of its two attempts is
+ * proven unstarted (`preparationAttempts` equals `attempt.count`, at format 4), it has no recovery binding and an all-false marker. It meets every condition of the cancelled
+ * class except `reason === 'cancelled'`, so only that reason keeps it (D-6: every `failed` job that is not one of the two benign classes is kept). `over` replaces any field.
+ */
+export const failedInPreparation = (id: string, over: Record<string, unknown> = {}, age = 10 * W): PromoteJob =>
+  mk(id, 'failed', { attempt: { count: 2, maxRetries: 5, lastError: PREPARATION_ERROR }, preparationAttempts: 2, commitMarker: NO_MARKERS, ...over }, age);
+
 export const NO_MARKERS = { promoteStarted: false, swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
 export const STARTED = { ...NO_MARKERS, promoteStarted: true };
 export const LEASE = { workerId: 'w', acquiredAt: 1, expiresAt: 9e12, lastHeartbeatAt: 1, claimToken: 't' };
@@ -248,7 +258,8 @@ export const POPULATION_KINDS = [
   'failed-plain', 'failed-ambiguity', 'failed-legacy', 'failed-postcommit', 'failed-postcommit-exhausted', 'failed-bound',
   'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-cancelled-legacy', 'failed-cancelled-legacy-no-marker',
   'failed-cancelled-unclaimed-legacy-absent', 'failed-cancelled-unclaimed-legacy-0', 'failed-cancelled-unclaimed-legacy-1',
-  'failed-cancelled-no-started-flag', 'failed-cancelled-contradictory', 'failed-cancelled-prepared', 'failed-cancelled-attempted', 'failed-cancelled-attempted-partial', 'failed-retired',
+  'failed-cancelled-no-started-flag', 'failed-cancelled-contradictory', 'failed-cancelled-prepared', 'failed-cancelled-attempted', 'failed-cancelled-attempted-partial',
+  'failed-unstarted-not-cancelled', 'failed-retired',
 ] as const;
 export type PopulationKind = (typeof POPULATION_KINDS)[number];
 
@@ -288,6 +299,8 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
     case 'failed-cancelled-prepared': return cancelledJob(id, { attempt: { count: 2, maxRetries: 5 }, preparationAttempts: 2 }, age);
     case 'failed-cancelled-attempted': return cancelledJob(id, { attempt: ATTEMPTED }, age);
     case 'failed-cancelled-attempted-partial': return cancelledJob(id, { attempt: { count: 3, maxRetries: 5 }, preparationAttempts: 1 }, age);
+    // Meets every condition of the cancelled class but the reason (see `failedInPreparation`): a job that failed terminally in preparation is `failed` and kept, not a cancelled one. Protected.
+    case 'failed-unstarted-not-cancelled': return failedInPreparation(id, {}, age);
     case 'failed-retired': return retired(id, age);
   }
 }

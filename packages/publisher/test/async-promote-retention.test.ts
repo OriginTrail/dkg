@@ -8,7 +8,7 @@ import type { PromoteJob } from '../src/async-promote-queue-types.js';
 import { decidePromoteRetention } from '../src/async-promote-retention-policy.js';
 import { SHARE_RETENTION_DEFAULTS, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import {
-  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, ATTEMPTED, W, WF, binding, cancelledJob, noPending,
+  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, ATTEMPTED, W, WF, binding, cancelledJob, failedInPreparation, noPending,
   decide, decideText, deletedSubjects, drain, insertQuads, mk, newRetention, pick, present, put, parseText, payloadWithFormatVersion, registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, from,
   captureLogger, policy, standInForTheQueue, type Kind, type Quads, type QueryResult,
 } from './_helpers/share-retention-fixtures.js';
@@ -40,6 +40,26 @@ describe('retention decision (one job)', () => {
     ['younger than the window', mk('y', 'succeeded', {}, W - 1), 'too_recent'],
     ['updatedAt in the future', mk('fut', 'succeeded', {}, -1000), 'future_dated'],
   ])('keeps %s', (_name, j, reason) => { expect(decide(j as ReturnType<typeof mk>)).toEqual({ delete: false, reason }); });
+
+  // A job that failed terminally in preparation is reachable and meets every condition of the cancelled class except its reason: every attempt proven unstarted (`preparationAttempts`
+  // equal to `attempt.count`, format 4), no binding, an all-false marker. Only `reason === 'cancelled'` keeps it from being deleted as one; nothing else in the policy stops it.
+  it.each([
+    ['no reason (what the queue leaves for a terminal failure)', {}],
+    ['a reason that is not "cancelled"', { reason: 'seal preparation failed' }],
+    ['a reason that only resembles it', { reason: 'Cancelled' }],
+    ['no last error either', { attempt: { count: 2, maxRetries: 5 } }],
+  ])('keeps a job that failed in preparation, not cancelled, although every attempt is proven unstarted: %s (failed_retained, at any age)', (_label, over) => {
+    const job = failedInPreparation('prep', over as Record<string, unknown>);
+    expect(job.preparationAttempts).toBe(job.attempt.count);                                       // the premise: every attempt is proven unstarted
+    expect(decide(job)).toEqual({ delete: false, reason: 'failed_retained' });
+    expect(decide(job, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason: 'failed_retained' });
+    expect(decide(failedInPreparation('prep0', { ...over as Record<string, unknown>, attempt: { count: 0, maxRetries: 5 }, preparationAttempts: 0 }))).toEqual({ delete: false, reason: 'failed_retained' });
+  });
+
+  it('deletes the same job once its reason is "cancelled": the reason is the only difference', () => {
+    expect(decide(failedInPreparation('prep', { reason: 'cancelled' }))).toEqual({ delete: true, jobClass: 'cancelled' });
+    expect(decide(failedInPreparation('prep', { reason: 'cancelled' }, WF - 1))).toEqual({ delete: false, reason: 'too_recent' });
+  });
 
   it('never deletes a failed job when no benign-failed window is configured, and respects each window exactly at its boundary', () => {
     expect(decide(cancelledJob('c', {}), { succeededMaxAgeMs: W })).toEqual({ delete: false, reason: 'failed_retained' });
