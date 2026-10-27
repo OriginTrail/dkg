@@ -177,22 +177,20 @@ describe('owed share inventory owner', () => {
   });
 });
 
-it('paces notifications to the canonical graph settlement owner independently of marker attempts', async () => {
-  let now = 0;
+it('coalesces marker notifications per graph and lets the canonical owner deduplicate active work', async () => {
   const requestGraphSettlement = vi.fn();
   const drain = vi.fn(async () => 'waiting' as const);
   const owner = new Rfc64OwedShareInventoryOwnerV1({ list: () => [marker('one'), marker('two')],
-    unreadableAtOpen: () => 0, retryIntervalMs: () => 0, now: () => now, drain, requestGraphSettlement,
+    unreadableAtOpen: () => 0, retryIntervalMs: () => 0, drain, requestGraphSettlement,
     remove: async () => { throw new Error('waiting markers must be retained'); }, warn: vi.fn() });
   owner.start(createOperationContext('system'));
   await owner.whenIdle();
   owner.request(); await owner.whenIdle();
-  expect(requestGraphSettlement).toHaveBeenCalledOnce();
-  expect(drain).toHaveBeenCalledTimes(4);
-  now += 5_000;
-  owner.request(); await owner.whenIdle();
   expect(requestGraphSettlement).toHaveBeenCalledTimes(2);
+  expect(drain).toHaveBeenCalledTimes(4);
+  owner.request(); await owner.whenIdle();
+  expect(requestGraphSettlement).toHaveBeenCalledTimes(3);
   await owner.close();
   owner.request(); await owner.whenIdle();
-  expect(requestGraphSettlement).toHaveBeenCalledTimes(2);
+  expect(requestGraphSettlement).toHaveBeenCalledTimes(3);
 });

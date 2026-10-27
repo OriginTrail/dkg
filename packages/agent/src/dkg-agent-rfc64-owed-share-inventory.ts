@@ -50,7 +50,7 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
       drain: (marker, ctx) => this.drainRfc64OwedShareInventoryV1(marker, ctx),
       requestGraphSettlement: contextGraphId => {
         if (rfc64SwmInventorySettlementCanConvergeV1(this.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId))) {
-          this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
+          this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId, { coalesceExisting: true });
         }
       },
       remove: async (marker) => { await this.rfc64PersistenceV1?.owedShareInventories.delete(marker); },

@@ -65,7 +65,6 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
   readonly #dependencies: OwedShareInventoryOwnerDependenciesV1;
   readonly #failed = new Map<string, FailedAttemptV1>();
   #runner: CoalescingRecurringTask | undefined;
-  readonly #settleAfter = new Map<string, number>();
   #ctx: OperationContext = createOperationContext('system');
 
   constructor(dependencies: OwedShareInventoryOwnerDependenciesV1) {
@@ -79,7 +78,6 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
     }
     this.#ctx = ctx;
     this.#failed.clear();
-    this.#settleAfter.clear();
     const unreadable = this.#dependencies.unreadableAtOpen();
     if (unreadable > 0) {
       this.#dependencies.warn(ctx, `${unreadable} owed share inventory marker file(s) could not be read; `
@@ -115,7 +113,6 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
   async #runPass(signal: AbortSignal): Promise<'rearm' | 'idle'> {
     const markers = this.#dependencies.list();
     const kept = new Set(markers.map(markerIdentity));
-    const keptGraphs = new Set<string>(markers.map(marker => marker.contextGraphId));
     for (const identity of this.#failed.keys()) {
       if (!kept.has(identity)) this.#failed.delete(identity);
     }
@@ -125,18 +122,11 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
       if (await this.#attempt(marker, signal)) waitingGraphs.add(marker.contextGraphId);
     }
     for (const graph of waitingGraphs) this.#scheduleSettlement(graph);
-    for (const graph of this.#settleAfter.keys()) if (!keptGraphs.has(graph)) this.#settleAfter.delete(graph);
     return this.#dependencies.list().length > 0 ? 'rearm' : 'idle';
   }
 
   #scheduleSettlement(contextGraphId: string): void {
-    const request = this.#dependencies.requestGraphSettlement;
-    const now = this.#dependencies.now?.() ?? Date.now();
-    if (!request || !this.#runner || now < (this.#settleAfter.get(contextGraphId) ?? 0)) return;
-    // Authority/settlement events retry markers immediately. Pace their requests
-    // into the existing batched responsibility owner to avoid a feedback loop.
-    this.#settleAfter.set(contextGraphId, now + Math.max(5_000, this.#dependencies.retryIntervalMs()));
-    request(contextGraphId);
+    this.#dependencies.requestGraphSettlement?.(contextGraphId);
   }
 
   async #attempt(marker: Readonly<Rfc64OwedShareInventoryV1>, signal: AbortSignal): Promise<boolean> {
