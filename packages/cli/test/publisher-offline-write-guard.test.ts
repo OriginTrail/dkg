@@ -155,7 +155,7 @@ describe('dkg publisher cancel | retry | clear with a daemon that is running but
     ['jobs', ['publisher', 'jobs']],
     ['job', ['publisher', 'job', 'job-1']],
     ['stats', ['publisher', 'stats']],
-  ] as const)('does not guard the read-only command %s: it writes nothing, so it still reads offline next to a running daemon', async (_name, args) => {
+  ] as const)('does not guard the inspecting command %s: it changes no queue state, so it still falls back offline next to a running daemon (closing a file-backed store still rewrites it, #3551)', async (_name, args) => {
     liveDaemon();
     const { exitCode } = await run(args, new Error('Daemon is not running'));
     expect(created).toHaveBeenCalledTimes(1);

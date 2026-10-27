@@ -5,8 +5,10 @@
  * "Cannot be reached" is not "not running": a daemon that is starting, stalled, restarting, or one that answers a route it does not know with 404/405/501 is exactly as alive
  * as before, and its admission instance (admission, claims, the retention sweep) is the queue's one writer. A second process that writes the same control graph is not
  * excluded by the daemon's claim lock or by the job locks, so retention's verify-then-delete could meet a job the inspector just revived, and a clear could remove what an
- * admission just bound. The inspector therefore refuses every destructive command while the node's pid file names a live process, with the pid and what to do. Read-only
- * commands (jobs, job, stats) are not guarded: they write nothing.
+ * admission just bound. The inspector therefore refuses every destructive command while the node's pid file names a live process, with the pid and what to do. The
+ * inspecting commands (jobs, job, stats) are not guarded: they change no queue state, and they still fall back. They are not free of writes, though. With the file-backed
+ * Oxigraph backends, closing the inspector's store rewrites the store file from what the inspector loaded (`OxigraphStore.close()` always flushes;
+ * https://github.com/OriginTrail/dkg/issues/3551). Run them next to a stalled daemon only when needed.
  *
  * The detection is the one `dkg start` uses for "Daemon already running": the pid file of the selected node home and a liveness probe of that pid.
  */
