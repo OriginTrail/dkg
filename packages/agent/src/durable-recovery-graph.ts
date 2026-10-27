@@ -173,21 +173,25 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
 
 export interface OwnedDurableGraphRequest extends Omit<DurableGraphRequest, 'options' | 'remainingContextGraphs'> {
   readonly recovery: GraphOwnedRecoveryInput;
-  readonly options: Omit<DurableGraphOptions, 'exactAssetFetchPolicy' | 'onVerifiedFullSnapshot'>;
+  readonly options: Omit<DurableGraphOptions, 'exactAssetFetchPolicy' | 'onVerifiedFullSnapshot' | 'sinceBatchIdFor'>;
 }
 
 /** A graph owner receives a required decision without adding policy fields to transport results. */
 export async function runAdmittedGraphOwnedDurableGraph(request: OwnedDurableGraphRequest): Promise<DurableRecoveryRoundOutcome> {
   const { host, authority, ctx, contextGraphId, recovery, options } = request;
   const { durableContext, materialization, contextGraphBudget } = prepareDurableGraph({ ...request, remainingContextGraphs: 1 });
+  const { contextGraphIds: _contextGraphIds, sinceBatchIdFor: _sinceBatchIdFor,
+    exactAssetSelectionFor: _exactAssetSelectionFor, exactAssetFetchPolicyFor: _exactAssetFetchPolicyFor,
+    onVerifiedFullSnapshot: _onVerifiedFullSnapshot, authenticateChallengePinnedAsset: _authenticateChallengePinnedAsset,
+    ...ownedContext } = durableContext;
   const runPaging = async (fence?: HeldAssetFence): Promise<DurableRecoveryRoundOutcome> => {
     // An unbound subscription must persist its numeric binding before skipping DATA.
     const confirmCurrent = fence && fence.binding().onChainId !== undefined
       ? currentHeldGraphScopedAssetsConfirmer({ binding: fence.binding,
           authenticateHeld: authority.authenticateHeld?.bind(authority), budget: contextGraphBudget }) : undefined;
-    return runGraphOwnedDurableSyncDetailed({ ...durableContext,
+    return runGraphOwnedDurableSyncDetailed({ ...ownedContext, contextGraphId,
       storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
-      graphRecovery: { ...recovery,
+      recovery: { ...recovery,
         held: confirmCurrent && host.heldStore && fence
           ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent,
               reconcile: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve() } : undefined },

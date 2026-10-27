@@ -127,10 +127,10 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
   const round = (durableMetaContinuation: DurableMetaContinuation) => runGraphOwnedDurableSyncDetailed({
     ctx,
     remotePeerId: PEER,
-    contextGraphIds: [CG],
+    contextGraphId: CG,
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
     settlementSliceDeadline: Date.now(),
-    graphRecovery: { meta: durableMetaContinuation, holdings: {} },
+    recovery: { meta: durableMetaContinuation, holdings: {} },
     storedPrefix: async () => ({ assertCurrent() {}, close() {}, covers: ual => new Set(writes).has(ual) }),
     fetchSyncPages: (request) => {
       if (request.phase === 'data') {

@@ -328,8 +328,6 @@ export interface DurableSyncContext {
     contextGraphId: string,
   ) => UalOnlyExactAssetSelection | undefined;
   exactAssetFetchPolicyFor?: (contextGraphId: string) => Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }> | undefined;
-  /** Present only for the graph-owned bounded recovery runner. */
-  graphRecovery?: GraphOwnedRecoveryContext;
   storedPrefix?: StoredDurablePrefix;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
@@ -371,6 +369,14 @@ export interface DurableSyncContext {
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
+}
+
+/** One graph's owned full recovery. Selection, delta and full-snapshot modes use other entries. */
+export interface GraphOwnedDurableSyncContext extends Omit<DurableSyncContext,
+  'contextGraphIds' | 'sinceBatchIdFor' | 'exactAssetSelectionFor' | 'exactAssetFetchPolicyFor' | 'onVerifiedFullSnapshot'
+> {
+  readonly contextGraphId: string;
+  readonly recovery: GraphOwnedRecoveryContext;
 }
 
 /**
@@ -431,11 +437,12 @@ export async function runDurableSyncDetailed(
   return physicalDurableSyncResult(await runDurableSyncWithBudget(normalizeDurableSyncContext(context)));
 }
 
-/** The owner-only result boundary; ordinary sync and exact transport expose no decision. */
+/** One graph and its owner capabilities enter together; ordinary/exact inputs carry neither. */
 export async function runGraphOwnedDurableSyncDetailed(
-  context: DurableSyncContext & { graphRecovery: GraphOwnedRecoveryContext },
+  context: GraphOwnedDurableSyncContext,
 ): Promise<DurableRecoveryRoundOutcome> {
-  const detailed = await runDurableSyncWithBudget(normalizeDurableSyncContext(context));
+  const { contextGraphId, recovery, ...sharedContext } = context;
+  const detailed = await runDurableSyncWithBudget({ ...sharedContext, contextGraphIds: [contextGraphId] }, recovery);
   return { result: detailed.result, decision: detailed.recoveryRound };
 }
 
@@ -468,6 +475,7 @@ export async function runChallengeExactAssetFetch(
 
 async function runDurableSyncWithBudget(
   context: InternalDurableSyncContext,
+  graphRecovery?: GraphOwnedRecoveryContext,
 ): Promise<InternalDetailedDurableSyncResult> {
   const {
     ctx,
@@ -482,7 +490,6 @@ async function runDurableSyncWithBudget(
     fetchSyncPages,
     sinceBatchIdFor,
     exactAssetFetchPolicyFor,
-    graphRecovery,
     stopOnBackoffWorthyFailure = false,
     storeInsert,
     storeGraphScopedAsset,
@@ -502,7 +509,6 @@ async function runDurableSyncWithBudget(
     signal,
   });
 
-  if (graphRecovery && contextGraphIds.length !== 1) throw new Error('Graph-owned recovery requires exactly one context graph');
   const durableMetaContinuation = graphRecovery?.meta;
   const durableResumeBoundary = graphRecovery?.boundary;
   const accumulator = createDurableSyncAccumulator();
@@ -713,7 +719,7 @@ async function runDurableSyncWithBudget(
         exactAssetUals,
         manifestDigest,
         manifestPrefixDigestAtOffset,
-        durableResumeBoundary: phase === 'data' && exactAssetUals === undefined ? durableResumeBoundary : undefined,
+        durableResumeBoundary: phase === 'data' ? durableResumeBoundary : undefined,
         // DATA safely resumes at verified graph boundaries. META is the
         // manifest that proves those boundaries, so resuming it independently
         // would return only a suffix and make the DATA prefix unverifiable.
@@ -851,7 +857,7 @@ async function runDurableSyncWithBudget(
       const graphScopedManifest = preparedMeta.manifestPlan;
       recoveryRound = await attemptDurableHoldingsPhase({
         context, contextGraphId: pid, manifest: graphScopedManifest, meta: metaResult, accumulator,
-        recovery: exactAssetUals === undefined && onVerifiedFullSnapshot === undefined ? graphRecovery : undefined,
+        recovery: graphRecovery,
         recordMetaPhase: () => recordPhaseOutcome(metaResult, { updateCheckpoint: true }),
       });
       if (recoveryRound.strategy === 'held' || recoveryRound.strategy === 'exact-missing') {

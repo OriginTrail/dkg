@@ -217,7 +217,6 @@ function createTwoRoundHarness(
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       storedPrefix: async () => ({ assertCurrent() {}, close() {}, covers: ual => new Set(heldAssetUals).has(ual) }),
       fetchSyncPages: fetch,
-      graphRecovery: durableMetaContinuation || durableResumeBoundary ? { meta: durableMetaContinuation ?? { requesterScope: 'candidate-test-meta' }, holdings: {}, boundary: durableResumeBoundary } : undefined,
       exactAssetSelectionFor: exactAssetUals
         ? () => ({ kind: 'ual-only', assetUals: exactAssetUals })
         : undefined,
@@ -251,9 +250,12 @@ function createTwoRoundHarness(
       logWarn: () => {},
       logDebug: () => {},
     } satisfies DurableSyncContext;
-    return context.graphRecovery
-      ? runGraphOwnedDurableSyncDetailed({ ...context, graphRecovery: context.graphRecovery })
-      : runDurableSyncDetailed(context);
+    if (durableMetaContinuation || durableResumeBoundary) {
+      const { contextGraphIds: _contextGraphIds, exactAssetSelectionFor: _exactAssetSelectionFor, ...shared } = context;
+      return runGraphOwnedDurableSyncDetailed({ ...shared, contextGraphId,
+        recovery: { meta: durableMetaContinuation ?? { requesterScope: 'candidate-test-meta' }, holdings: {}, boundary: durableResumeBoundary } });
+    }
+    return runDurableSyncDetailed(context);
   };
 
   const run = async (...args: Parameters<typeof runDetailed>) => (await runDetailed(...args)).result;
@@ -773,11 +775,11 @@ describe('manifest-bound durable DATA continuation', () => {
     let round = 0;
     let dataFetches = 0;
 
-    const run = () => runDurableSync({
+    const run = async () => (await runGraphOwnedDurableSyncDetailed({
       ctx,
       remotePeerId,
-      contextGraphIds: [contextGraphId],
-      graphRecovery: { meta: continuation, holdings: {} },
+      contextGraphId,
+      recovery: { meta: continuation, holdings: {} },
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({ phase, manifestDigest }) => {
         if (phase === 'meta') {
@@ -830,7 +832,7 @@ describe('manifest-bound durable DATA continuation', () => {
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
-    });
+    })).result;
 
     const first = await run();
     expect(first.complete).toBe(false);

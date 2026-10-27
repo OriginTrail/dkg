@@ -4,6 +4,7 @@ import { MemorySyncCheckpointStore } from '../../src/sync/checkpoint/state.js';
 import { createUalOnlyExactAssetSelection } from '../../src/sync/exact-assets.js';
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../../src/sync/durable-recovery-runner.js';
 import { currentHeldGraphScopedAssetsConfirmer } from '../../src/sync/requester/durable-data-holdings.js';
+import type { GraphOwnedRecoveryContext } from '../../src/sync/requester/graph-owned-recovery.js';
 import { runDurableSyncDetailed, runGraphOwnedDurableSyncDetailed, type DurableMetaContinuation, type DurableSyncContext } from '../../src/sync/requester/durable-sync.js';
 import { CG, createRecoveryFixture, type RecoveryFixtureOptions, type RecoveryPeers, type AssetFixture } from './durable-recovery-fixture.js';
 export { CG, PEER, SECOND_PEER, asset, servingPeer, generation, rowsOf, type AssetFixture } from './durable-recovery-fixture.js';
@@ -35,24 +36,28 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
     budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 60_000 },
   });
   const round = (checkpointStore: MemorySyncCheckpointStore, remotePeerId: string,
-    roundOptions: Pick<DurableSyncContext, 'graphRecovery' | 'exactAssetSelectionFor' | 'settlementSliceDeadline'>,
+    roundOptions: Pick<DurableSyncContext, 'settlementSliceDeadline'> & (
+      { recovery: GraphOwnedRecoveryContext; exactAssetSelectionFor?: never }
+      | { recovery?: never; exactAssetSelectionFor?: DurableSyncContext['exactAssetSelectionFor'] }),
   ) => materialization.withHeldAssetFence(async fence => {
+    const { recovery, ...ordinaryOptions } = roundOptions;
     const context = {
-    ...fixture.pagingPorts(checkpointStore, remotePeerId), ...roundOptions,
-    storedPrefix: createStoredPrefixAcquirer(fixture.heldStore()?.prove, CG, fence.assertCurrent),
-    graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery,
-      held: options.holdings?.enabled === false ? undefined : {
-        confirmCurrent: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
-        prove: async request => {
-          if (holdingsUnreadable) throw new Error('store queue wait timeout');
-          return fixture.confirmedHoldings.prove(request);
+      ...fixture.pagingPorts(checkpointStore, remotePeerId), ...ordinaryOptions,
+      storedPrefix: createStoredPrefixAcquirer(fixture.heldStore()?.prove, CG, fence.assertCurrent),
+    } satisfies DurableSyncContext;
+    if (!recovery) return runDurableSyncDetailed(context);
+    const { contextGraphIds: _contextGraphIds, exactAssetSelectionFor: _exactAssetSelectionFor, ...shared } = context;
+    return runGraphOwnedDurableSyncDetailed({ ...shared, contextGraphId: CG,
+      recovery: { ...recovery,
+        held: options.holdings?.enabled === false ? undefined : {
+          confirmCurrent: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
+          prove: async request => {
+            if (holdingsUnreadable) throw new Error('store queue wait timeout');
+            return fixture.confirmedHoldings.prove(request);
+          },
         },
       },
-    } : undefined,
-    } satisfies DurableSyncContext;
-    return context.graphRecovery
-      ? runGraphOwnedDurableSyncDetailed({ ...context, graphRecovery: context.graphRecovery })
-      : runDurableSyncDetailed(context);
+    });
   }, options.lifecycle?.signal?.());
 
   /**
@@ -76,7 +81,7 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
       executeSlice: async (peerId, durableMetaContinuation: DurableMetaContinuation, durableRecoveryRound, durableResumeBoundary) => {
         chainAnswersLeft = chainAnswersPerRound;
         const detailed = await round(checkpointStore, peerId, {
-          graphRecovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary },
+          recovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary },
           settlementSliceDeadline: (typeof startOptions.sliceSpent === 'function' ? startOptions.sliceSpent() : startOptions.sliceSpent) ? Date.now() : undefined,
         });
         startOptions.afterSlice?.();

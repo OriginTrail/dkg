@@ -17,3 +17,29 @@ import type { DetailedDurableSyncResult } from '../src/sync/requester/durable-sy
 declare const physical: DetailedDurableSyncResult;
 // @ts-expect-error Ordinary transport results do not expose graph-owner continuation decisions.
 void physical.recoveryRound;
+
+import { runDurableSyncDetailed, runChallengeExactAssetFetch, runGraphOwnedDurableSyncDetailed,
+  type DurableSyncContext, type ChallengeExactAssetFetchContext, type GraphOwnedDurableSyncContext,
+} from '../src/sync/requester/durable-sync.js';
+declare const ordinaryRequester: DurableSyncContext;
+declare const challengeRequester: ChallengeExactAssetFetchContext;
+declare const ownedRequester: GraphOwnedDurableSyncContext;
+void runGraphOwnedDurableSyncDetailed(ownedRequester);
+// @ts-expect-error The requester accepts a single graph id, never multi-graph owner state.
+void runGraphOwnedDurableSyncDetailed({ ...ownedRequester, contextGraphIds: ['a', 'b'] });
+// @ts-expect-error Recovery capabilities are absent from the ordinary requester.
+void runDurableSyncDetailed({ ...ordinaryRequester, graphRecovery: ownedRequester.recovery });
+// @ts-expect-error The distinct owned input cannot be used as ordinary transport.
+void runDurableSyncDetailed(ownedRequester);
+// @ts-expect-error Challenge-only retrieval cannot accept graph-owner state.
+void runChallengeExactAssetFetch({ ...challengeRequester, recovery: ownedRequester.recovery });
+// @ts-expect-error Historical recovery fields cannot leak through the challenge context either.
+void runChallengeExactAssetFetch({ ...challengeRequester, graphRecovery: ownedRequester.recovery });
+// @ts-expect-error Owned recovery cannot request exact selections.
+void runGraphOwnedDurableSyncDetailed({ ...ownedRequester, exactAssetSelectionFor: () => undefined });
+// @ts-expect-error Owned recovery cannot request exact fetch policies.
+void runGraphOwnedDurableSyncDetailed({ ...ownedRequester, exactAssetFetchPolicyFor: () => undefined });
+// @ts-expect-error Owned recovery cannot become a full-snapshot consumer.
+void runGraphOwnedDurableSyncDetailed({ ...ownedRequester, onVerifiedFullSnapshot: async () => {} });
+// @ts-expect-error Owned recovery is full-graph and cannot use delta watermarks.
+void runGraphOwnedDurableSyncDetailed({ ...ownedRequester, sinceBatchIdFor: () => '1' });
