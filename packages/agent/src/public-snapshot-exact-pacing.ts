@@ -54,6 +54,7 @@ export interface PublicSnapshotPacingOptions {
 export class PublicSnapshotRecoveryPacing {
   private readonly setbacks = new VmRecoveryStreamSetbackPolicy();
   private refusals = 0;
+  private admissionWaitPending = false;
 
   constructor(private readonly options: PublicSnapshotPacingOptions) {}
 
@@ -62,6 +63,7 @@ export class PublicSnapshotRecoveryPacing {
     if (committed === 0 && (attempt.admission === 'local-admission-deferred'
       || (attempt.result?.deferredBackpressure ?? 0) > 0)) {
       this.refusals += 1;
+      this.admissionWaitPending = true;
       return 'local-refusal';
     }
     if (attempt.admission === 'work-started') this.refusals = 0;
@@ -79,6 +81,11 @@ export class PublicSnapshotRecoveryPacing {
     return this.setbacks.heldOff(this.options.contextGraphId, peerId, Date.now());
   }
 
+  /** A queued worker must honor a refusal already observed by this job. */
+  localAdmissionDeferred(): boolean {
+    return this.admissionWaitPending;
+  }
+
   /** The bound of the next attempt, which never runs past the job's limit. */
   attemptTimeoutMs(): number {
     return Math.max(0, Math.min(PUBLIC_SNAPSHOT_ATTEMPT_TIMEOUT_MS, this.options.deadline - Date.now()));
@@ -94,6 +101,7 @@ export class PublicSnapshotRecoveryPacing {
     while (!this.admissionAvailable()) {
       if (!(await this.sleep(jitter(PUBLIC_SNAPSHOT_RETRY_MS)))) return false;
     }
+    this.admissionWaitPending = false;
     return true;
   }
 

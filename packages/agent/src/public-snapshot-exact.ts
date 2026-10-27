@@ -64,6 +64,7 @@ async function recoverLane(
   };
   const transfer = async (peer: string, selection: string[], transport: ExactTransport): Promise<PublicSnapshotAttemptVerdict> => {
     job.assertActive();
+    if (pacing.localAdmissionDeferred()) return 'local-refusal';
     // Another lane may have received BUSY while this one waited for the peer.
     if (pacing.heldOff(peer)) return 'retry-peer';
     const result = await exactRecovery.runExactRecovery({
