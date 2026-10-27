@@ -50,11 +50,12 @@ export class DurableGraphSettlementGuard {
     catch (error) { reject(); throw error; }
   }
 
-  readonly assertCurrent = (): void => {
+  readonly assertPrefixCurrent = (): void => {
     try { this.current?.proof.assertCurrent(); }
     catch (error) { this.current?.reject(); throw error; }
-    this.assertNotAborted();
   };
+
+  readonly assertCurrent = (): void => { this.assertPrefixCurrent(); this.assertNotAborted(); };
 
   covers(ual: string): boolean { return this.current?.proof.covers(ual) ?? false; }
 

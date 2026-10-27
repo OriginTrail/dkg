@@ -655,7 +655,7 @@ export class DKGAgentBase {
       storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
         priority: 'background', source: 'agent.durableSync.storeInsert', signal,
       }),
-      heldStore: createDurableHeldStore(agent.store, agent.heldStoreContentFence),
+      heldStore: createDurableHeldStore(agent.store, agent.heldStoreContentFence, () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed'),
       materialization: scope => materialization.forOperation(scope),
       checkpoints: {
         deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),

@@ -8,6 +8,7 @@ import { heldGraphScopedAssetsReader } from './sync/requester/stored-graph-asset
 export function createDurableHeldStore(
   store: TripleStore,
   fence: StoreContentFence | undefined,
+  confirmation: () => 'confirmed' | 'integrity-only' = () => 'confirmed',
 ): DurableRecoveryHost['heldStore'] {
-  return fence ? { read: heldGraphScopedAssetsReader(store), openScope: fence.openScope.bind(fence) } : undefined;
+  return fence ? { read: heldGraphScopedAssetsReader(store, confirmation), openScope: fence.openScope.bind(fence) } : undefined;
 }

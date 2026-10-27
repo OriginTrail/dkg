@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
+import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
@@ -16,7 +16,7 @@ export interface HeldGraphScopedAssetsRequest {
 
 /**
  * The assets of a verified META generation that this node already holds: a
- * confirmed graph-scoped copy at the descriptor's version, root, row counts,
+ * graph-scoped copy (confirmed, or explicitly integrity-only in no-chain mode) at the descriptor's version, root, row counts,
  * graph and sub-graph, whose assertion graph still holds exactly the declared
  * number of public rows and hashes to the declared root, including any private
  * root commitment. Metadata and cardinality alone cannot prove a copy: a write
@@ -28,6 +28,7 @@ export async function readHeldGraphScopedAssets(
   store: TripleStore,
   request: HeldGraphScopedAssetsRequest,
   chunkSize = HOLDINGS_READ_CHUNK,
+  confirmation: 'confirmed' | 'integrity-only' = 'confirmed',
 ): Promise<Set<string>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
   const predicates = GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES.map((predicate) => `<${predicate}>`).join(' ');
@@ -51,14 +52,14 @@ export async function readHeldGraphScopedAssets(
       rows.push({ predicate, object });
       rowsBySubject.set(ual, rows);
     }
-    const confirmed = chunk.filter((descriptor) => holdsDescriptor(
+    const eligible = chunk.filter((descriptor) => holdsDescriptor(
       descriptor,
-      parseConfirmedGraphKnowledgeAssetMetadataEnvelope(
+      parseGraphKnowledgeAssetMetadataEnvelope(
         rowsBySubject.get(descriptor.ual) ?? [],
         { contextGraphId: request.contextGraphId, ual: descriptor.ual },
-      ),
+      ), confirmation,
     ));
-    for (const descriptor of confirmed) {
+    for (const descriptor of eligible) {
       request.signal?.throwIfAborted();
       const content = await verifyExactGraphContent(store, {
         graphUri: descriptor.assertionGraph,
@@ -77,15 +78,17 @@ export async function readHeldGraphScopedAssets(
 /** The holdings reader a recovery host gives graph-owned rounds. */
 export function heldGraphScopedAssetsReader(
   store: TripleStore,
+  confirmation: () => 'confirmed' | 'integrity-only' = () => 'confirmed',
 ): (request: HeldGraphScopedAssetsRequest) => Promise<Set<string>> {
-  return (request) => readHeldGraphScopedAssets(store, request);
+  return (request) => readHeldGraphScopedAssets(store, request, undefined, confirmation());
 }
 
 function holdsDescriptor(
   descriptor: GraphScopedDescriptor,
-  stored: ConfirmedGraphKnowledgeAssetMetadataRead,
+  stored: GraphKnowledgeAssetMetadataRead,
+  confirmation: 'confirmed' | 'integrity-only',
 ): boolean {
-  if (stored.state !== 'confirmed') return false;
+  if (stored.state !== 'confirmed' && !(confirmation === 'integrity-only' && stored.state === 'tentative')) return false;
   const { envelope } = stored;
   return BigInt(envelope.assertionVersion) === BigInt(descriptor.assertionVersion)
     && Buffer.from(envelope.merkleRoot).toString('hex') === descriptor.claimedRootHex

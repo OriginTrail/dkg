@@ -150,9 +150,10 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     switch (outcome.kind) {
       case 'settled': return outcome.detailed;
       case 'not-selected':
-      case 'unsupported-before-start': return runDurableSyncDetailed(durableContext);
+      case 'unsupported-before-start': break; // Paging uses the same stored-prefix proof as full-graph recovery.
     }
   }
+  if (exactAssetSelection !== undefined && !host.heldStore) return runDurableSyncDetailed(durableContext);
   if (onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
   if (!host.heldStore && !durableMetaContinuation) return { result: await runDurableSync(durableContext) };
   if (!host.heldStore) return runDurableSyncDetailed({ ...durableContext, durableMetaContinuation, durableResumeBoundary });
