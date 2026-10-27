@@ -235,7 +235,9 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
     expect(server.httpVersions).toEqual([RUNNING_FETCH_NEGOTIATES_HTTP2 ? '2.0' : '1.1', '1.1', '1.1']);
   });
 
-  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-10-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
+  // Revalidated on Node 26.12.1 / undici 8.12.2: all ten transport assertions passed.
+  // Evidence: https://github.com/OriginTrail/dkg/actions/runs/40424510611/job/121926907356
+  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-11-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
   it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
     'go through a dispatcher the application installed, with its own TLS trust',
     async () => {
@@ -264,7 +266,7 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
     },
   );
 
-  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-10-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
+  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-11-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
   it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
     'go through the proxy of NODE_USE_ENV_PROXY',
     async () => {
@@ -283,7 +285,7 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
     },
   );
 
-  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-10-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
+  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-11-26 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
   it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
     'stay on HTTP/1.1 when a chain RPC call is the first request of a fresh process',
     async () => {
