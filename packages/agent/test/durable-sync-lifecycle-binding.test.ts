@@ -2520,7 +2520,8 @@ describe('agent composition of the owner exact request', () => {
   }
   it('forwards the current shutdown signal and timeout on each call', async () => {
     const h = await request('found', true);
-    expect((await h.execute('peer', ['ual-1'])).complete).toBe(true);
+    expect(await h.execute('peer', ['ual-1'])).toEqual({ selection: 'complete',
+      diagnostics: expect.not.objectContaining({ complete: expect.anything() }) });
     expect(h.exact).toHaveBeenLastCalledWith('peer', contextGraphId, ['ual-1'],
       { signal: h.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS });
     h.node.stopSignal = new AbortController().signal;
@@ -2530,7 +2531,7 @@ describe('agent composition of the owner exact request', () => {
   });
   it.each([['incomplete', true], ['found', false]] as const)('does not complete %s / stored=%s', async (disposition, complete) => {
     const h = await request(disposition, complete);
-    expect((await h.execute('peer', ['ual-1'])).complete).toBe(false);
+    expect((await h.execute('peer', ['ual-1'])).selection).toBe('incomplete');
   });
   it('preserves a failed exact request', async () => {
     const h = await request('found', true);

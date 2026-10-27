@@ -1,3 +1,4 @@
+import { exactRecoveryActionOutcome } from '../src/sync/durable-recovery-action.js';
 import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { describe, expect, it, vi } from 'vitest';
 import * as accounting from '../src/sync/durable-recovery-peer-health.js';
@@ -70,7 +71,7 @@ function runner(
       executeExactSlice: async (_peerId: string, assetUals: readonly string[]) => {
         exactRequests.push([...assetUals]);
         const complete = await exact(assetUals);
-        return { ...createIncompleteDurableSyncResult(), insertedDataTriples: complete ? 7 : 0, complete };
+        return exactRecoveryActionOutcome({ ...createIncompleteDurableSyncResult(), insertedDataTriples: complete ? 7 : 0, complete });
       },
     } : {}),
     logDebug: () => {},

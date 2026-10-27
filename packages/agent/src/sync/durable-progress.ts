@@ -313,6 +313,8 @@ export class DurableSyncAccumulator {
     return this.observedTerminalBoundaries > 0;
   }
 
+  diagnosticsSnapshot(): InitializedDurableSyncDiagnostics { return { ...this.diagnostics }; }
+
   finalize(): InitializedDurableSyncResult {
     return {
       ...this.diagnostics,

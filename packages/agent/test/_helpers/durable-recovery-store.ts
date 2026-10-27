@@ -1,8 +1,9 @@
+import { exactRecoveryActionOutcome } from '../../src/sync/durable-recovery-action.js';
 import { createRpcTimeoutError } from '@origintrail-official/dkg-chain';
 import { MemorySyncCheckpointStore } from '../../src/sync/checkpoint/state.js';
 import { createUalOnlyExactAssetSelection } from '../../src/sync/exact-assets.js';
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../../src/sync/durable-recovery-runner.js';
-import { currentHeldGraphScopedAssetsConfirmer } from '../../src/sync/requester/durable-data-holdings.js';
+import { HeldAssetsConfirmationRun } from '../../src/sync/requester/durable-data-holdings.js';
 import type { GraphOwnedRecoveryContext } from '../../src/sync/requester/graph-owned-recovery.js';
 import { runDurableSyncDetailed, runGraphOwnedDurableSyncDetailed, type DurableMetaContinuation, type DurableSyncContext } from '../../src/sync/requester/durable-sync.js';
 import { CG, createRecoveryFixture, type RecoveryFixtureOptions, type RecoveryPeers, type AssetFixture } from './durable-recovery-fixture.js';
@@ -21,7 +22,7 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
   let holdingsUnreadable = options.holdings?.unreadable === true;
   let chainAnswersPerRound = Number.POSITIVE_INFINITY;
   let chainAnswersLeft = chainAnswersPerRound;
-  const holdings = (binding: () => Readonly<{ onChainId?: string; generation: number }>) => currentHeldGraphScopedAssetsConfirmer({
+  const holdings = (binding: () => Readonly<{ onChainId?: string; generation: number }>, confirmation = new HeldAssetsConfirmationRun()) => confirmation.forRound({
     binding,
     authenticateHeld: async (descriptor, requiredBinding) => {
       const { ual } = descriptor;
@@ -56,7 +57,7 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
     return runGraphOwnedDurableSyncDetailed({ ...shared, contextGraphId: CG,
       recovery: { ...recovery,
         held: options.holdings?.enabled === false || options.noChain ? undefined : {
-          confirmCurrent: holdings(fence.binding)!,
+          confirmCurrent: holdings(fence.binding, recovery.confirmation)!,
         },
       },
     });
@@ -80,10 +81,10 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
       isPrivateContextGraph: async () => false,
       orderPeerIds: (peerIds) => [...peerIds],
       isSyncCapable: async () => true,
-      executeSlice: async (peerId, durableMetaContinuation: DurableMetaContinuation, durableRecoveryRound, durableResumeBoundary) => {
+      executeSlice: async (peerId, durableMetaContinuation: DurableMetaContinuation, durableRecoveryRound, durableResumeBoundary, confirmation) => {
         chainAnswersLeft = chainAnswersPerRound;
         const detailed = await round(checkpointStore, peerId, {
-          recovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary },
+          recovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary, confirmation },
           settlementSliceDeadline: (typeof startOptions.sliceSpent === 'function' ? startOptions.sliceSpent() : startOptions.sliceSpent) ? Date.now() : undefined,
         });
         startOptions.afterSlice?.();
@@ -94,7 +95,7 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
         executeExactSlice: async (peerId: string, assetUals: readonly string[]) => {
           const selection = createUalOnlyExactAssetSelection(assetUals);
           const { result } = await round(checkpointStore, peerId, { exactAssetSelectionFor: () => selection });
-          return result;
+          return exactRecoveryActionOutcome(result);
         },
       }),
       logDebug: () => {},

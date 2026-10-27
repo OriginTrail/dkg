@@ -1,3 +1,4 @@
+import { exactRecoveryActionOutcome } from './sync/durable-recovery-action.js';
 import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
 // SPDX-License-Identifier: Apache-2.0
 import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
@@ -6600,12 +6601,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         isSyncCapable: (peerId) => this.waitForSyncProtocol({
           toString: () => peerId,
         }),
-        executeSlice: async (peerId, durableMetaContinuation, durableRecoveryRound, durableResumeBoundary) => {
+        executeSlice: async (peerId, durableMetaContinuation, durableRecoveryRound, durableResumeBoundary, confirmation) => {
           if (!durableSyncEnabled(this.config) || !await this.canUseLegacyDurableSyncForContextGraphV1(contextGraphId)) {
             return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult(), { strategy: 'not-started' });
           }
           return this.runGraphOwnedDurableRecoveryRound({ ctx, remotePeerId: peerId, contextGraphId,
-            recovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary },
+            recovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary, confirmation },
             options: { stopOnBackoffWorthyFailure: true, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
               settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
               signal: this.node.stopSignal ?? undefined, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY, source: 'vm-recovery' },
@@ -6615,7 +6616,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const exact = await this.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
             signal: this.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
           });
-          return { ...exact.result, complete: exact.disposition === 'found' && exact.result.complete === true };
+          return exactRecoveryActionOutcome(exact.result, exact.disposition === 'found');
         },
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),
@@ -6625,8 +6626,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * The live connections' remote peers (one per peer id, in connection order)
-   * that pass network admission: the catch-up candidate set. A still-open
+   * Live remote peers passing network admission form the catch-up candidate set. A still-open
    * connection to a peer that failed the network-identity proof (another DKG
    * network's relay, say) must never become a sync peer. Both catch-up runners
    * (in-process and the CLI worker bridge) select from this one predicate.

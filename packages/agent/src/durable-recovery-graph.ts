@@ -9,7 +9,7 @@ import { runChallengeExactAssetFetch, runDurableSyncDetailed, runGraphOwnedDurab
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
-import { currentHeldGraphScopedAssetsConfirmer } from './sync/requester/durable-data-holdings.js';
+import { HeldAssetsConfirmationRun } from './sync/requester/durable-data-holdings.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from './dkg-agent-constants.js';
 
 import type { DurableGraphCommonOptions, DurableGraphOptions, PhysicalDurableSyncResult } from './durable-recovery-types.js';
@@ -176,7 +176,7 @@ export async function runAdmittedGraphOwnedDurableGraph(request: OwnedDurableGra
   const runPaging = async (fence?: HeldAssetFence): Promise<DurableRecoveryRoundOutcome> => {
     // An unbound subscription must persist its numeric binding before skipping DATA.
     const confirmCurrent = fence && fence.binding().onChainId !== undefined
-      ? currentHeldGraphScopedAssetsConfirmer({ binding: fence.binding,
+      ? (recovery.confirmation ?? new HeldAssetsConfirmationRun()).forRound({ binding: fence.binding,
           authenticateHeld: authority.authenticateHeld?.bind(authority), budget: contextGraphBudget }) : undefined;
     return runGraphOwnedDurableSyncDetailed({ ...ports, ...host.checkpoints,
       ...graphPageTransport(host, { forceFreshSession: false }), contextGraphId,

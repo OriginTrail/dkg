@@ -13,11 +13,9 @@ export class DurableRecoveryFetchPolicy {
   private pending: Extract<DurableRecoveryAction, { kind: 'exact-batch' }>[] = [];
   private readonly fetched = new Set<string>();
   private fullGraph = false;
-  private readonly confirmedHeldCopies = new Set<string>();
 
   holdings(exactAvailable: boolean): DurableHoldingsOptions {
-    return { ownerFetchesMissingAssets: exactAvailable && !this.fullGraph,
-      confirmedHeldCopies: this.confirmedHeldCopies };
+    return { ownerFetchesMissingAssets: exactAvailable && !this.fullGraph };
   }
 
   nextExact(): Extract<DurableRecoveryAction, { kind: 'exact-batch' }> | undefined {

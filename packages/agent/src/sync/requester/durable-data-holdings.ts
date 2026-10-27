@@ -33,12 +33,7 @@ export interface MissingDurableAsset {
 export interface DurableHoldingsOptions {
   /** Set by the owner when it fetches missing assets itself. */
   readonly ownerFetchesMissingAssets?: boolean;
-  /**
-   * Held copies the owner's run has confirmed current on chain, shared by its
-   * rounds: a round whose checks ran out of budget leaves the next round only
-   * the rest. A full-graph run likewise authenticates each asset once.
-   */
-  readonly confirmedHeldCopies?: Set<string>;
+
 }
 
 export type DurableDataStrategy<HeldEvidence = unknown, FullEvidence = unknown> =
@@ -76,13 +71,12 @@ export const HELD_CHAIN_CHECK_BUDGET_MS = 120_000;
  * that cannot answer for every held copy within one budget
  * ({@link HELD_CHAIN_CHECK_BUDGET_MS}, or the round's authentication deadline
  * if earlier) rejects with an ordinary error, and the round runs its DATA
- * rounds, which authenticate what they fetch. Copies in `confirmed` are not
- * checked again; each copy confirmed here is added to it.
+ * rounds, which authenticate what they fetch. The run-scoped confirmer owns
+ * successful identities and only checks the remaining copies next round.
  */
 export type ConfirmHeldAssetsCurrent = (
   request: HeldGraphScopedAssetsRequest,
   held: HeldAssetMembership,
-  confirmed?: Set<string>,
 ) => Promise<void>;
 
 const heldCopyKey = (descriptor: GraphScopedDescriptor) =>
@@ -95,10 +89,20 @@ interface HeldAssetsConfirmationInput {
   /** The round's budget: the chain checks share one authentication deadline. */
   readonly budget: { createGraphScopedAuthenticationDeadline(): number };
 }
+/** Authentication owns successful identities across the graph owner's rounds. */
+export class HeldAssetsConfirmationRun {
+  private readonly confirmed = new Set<string>();
+  forRound(input: HeldAssetsConfirmationInput): ConfirmHeldAssetsCurrent | undefined {
+    return bindHeldAssetsConfirmer(input, this.confirmed);
+  }
+}
 export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmationInput): ConfirmHeldAssetsCurrent | undefined {
+  return new HeldAssetsConfirmationRun().forRound(input);
+}
+function bindHeldAssetsConfirmer(input: HeldAssetsConfirmationInput, confirmed: Set<string>): ConfirmHeldAssetsCurrent | undefined {
   const { authenticateHeld } = input;
   if (!authenticateHeld) return undefined;
-  return async (request, held, confirmed) => {
+  return async (request, held) => {
     const deadline = Math.min(
       input.budget.createGraphScopedAuthenticationDeadline(),
       Date.now() + HELD_CHAIN_CHECK_BUDGET_MS,
@@ -110,7 +114,7 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
     const cacheKey = (descriptor: GraphScopedDescriptor) => `${capturedBinding}\0${heldCopyKey(descriptor)}`;
     await mapWithConcurrencyDrained(
       request.descriptors.filter((descriptor) => held.has(descriptor.ual)
-        && !confirmed?.has(cacheKey(descriptor))),
+        && !confirmed.has(cacheKey(descriptor))),
       HELD_CHAIN_CHECK_CONCURRENCY,
       async (descriptor) => {
         const { ual } = descriptor;
@@ -127,7 +131,7 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
         }
         request.signal?.throwIfAborted();
         if (current.kind === 'mismatch') throw new HeldGenerationNotCurrentError(`Held asset ${ual} of "${contextGraphId}" is not current on chain: ${current.message}`);
-        confirmed?.add(cacheKey(descriptor));
+        confirmed.add(cacheKey(descriptor));
       },
     );
     if (input.binding && bindingKey(input.binding()) !== capturedBinding) {
@@ -205,7 +209,7 @@ export async function planDurableDataFromLocalHoldings(input: {
     input.signal?.throwIfAborted();
     plan = planDurableDataFromHoldings(manifest, held, options.ownerFetchesMissingAssets === true);
     // Full-graph rounds authenticate every asset they fetch: only a plan that skips held copies asks the chain.
-    if (plan.kind !== 'full') await confirmCurrent(request, held, options.confirmedHeldCopies);
+    if (plan.kind !== 'full') await confirmCurrent(request, held);
   } catch (error) {
     input.signal?.throwIfAborted();
     if (error instanceof HeldGenerationNotCurrentError || (error instanceof Error && error.name === 'AbortError')) throw error;

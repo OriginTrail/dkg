@@ -28,7 +28,7 @@ import {
   describeDurableHoldingsPlan,
   planDurableDataFromHoldings,
   planDurableDataFromLocalHoldings,
-  currentHeldGraphScopedAssetsConfirmer,
+  currentHeldGraphScopedAssetsConfirmer, HeldAssetsConfirmationRun,
   HELD_CHAIN_CHECK_BUDGET_MS,
   HeldGenerationNotCurrentError,
   settleDurableDataFromHoldings,
@@ -419,8 +419,9 @@ describe('holding a copy only while it is current on chain', () => {
     reads: string[] = [],
     deadlines: number[] = [],
     authenticationDeadline = () => 42,
+    confirmation = new HeldAssetsConfirmationRun(),
   ) {
-    return currentHeldGraphScopedAssetsConfirmer({
+    return confirmation.forRound({
       authenticateHeld: async (descriptor, requiredBinding, deadline) => {
         const { ual } = descriptor;
         reads.push(ual);
@@ -447,13 +448,39 @@ describe('holding a copy only while it is current on chain', () => {
       binding: () => ({ onChainId, generation: 0 }),
       budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 1000 },
     })!;
-    const confirmed = new Set<string>();
     const request = { contextGraphId: CG, descriptors: manifest.descriptors };
-    await holdings(request, new Set([descriptor.ual]), confirmed);
-    await holdings(request, new Set([descriptor.ual]), confirmed);
+    await holdings(request, new Set([descriptor.ual]));
+    await holdings(request, new Set([descriptor.ual]));
     expect(authenticateHeld).toHaveBeenCalledTimes(1);
     onChainId = '582';
-    await expect(holdings(request, new Set([descriptor.ual]), confirmed)).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+    await expect(holdings(request, new Set([descriptor.ual]))).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+    expect(authenticateHeld).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(['generation', 'version', 'root', 'context'] as const)('reuses only the same authenticated identity across rounds: %s', async change => {
+    const owner = new HeldAssetsConfirmationRun();
+    const descriptor = generation(1).descriptors[0]!;
+    let bindingGeneration = 0;
+    const authenticateHeld = vi.fn(async () => ({ kind: 'match' as const }));
+    const nextRound = () => owner.forRound({ authenticateHeld,
+      binding: () => ({ onChainId: '323', generation: bindingGeneration }),
+      budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 1000 },
+    })!;
+    const held = new Set([descriptor.ual]);
+    const request = { contextGraphId: CG, descriptors: [descriptor] };
+    await nextRound()(request, held);
+    await nextRound()(request, held);
+    expect(authenticateHeld).toHaveBeenCalledTimes(1);
+    if (change === 'generation') bindingGeneration++;
+    const changed = { contextGraphId: change === 'context' ? `${CG}-other` : CG,
+      descriptors: [{ ...descriptor,
+        ...(change === 'version' ? { assertionVersion: '2' } : {}),
+        ...(change === 'root' ? { claimedRootHex: 'cd'.repeat(32) } : {}),
+      }],
+    };
+    await nextRound()(changed, held);
+    expect(authenticateHeld).toHaveBeenCalledTimes(2);
+    await nextRound()(changed, held);
     expect(authenticateHeld).toHaveBeenCalledTimes(2);
   });
 
@@ -529,18 +556,19 @@ describe('holding a copy only while it is current on chain', () => {
   it('leaves a later round of the run only the copies an earlier round did not confirm', async () => {
     const manifest = generation(300);
     const all = manifest.descriptors.map((descriptor) => descriptor.ual);
-    const confirmed = new Set<string>();
-    const confirmOnce = (chain: Map<string, ChainState>, reads: string[]) => reader(chain, reads)({ contextGraphId: CG, descriptors: manifest.descriptors }, new Set(all), confirmed);
+    const confirmation = new HeldAssetsConfirmationRun();
+    const confirmOnce = (chain: Map<string, ChainState>, reads: string[]) => reader(chain, reads, [], () => 42, confirmation)({ contextGraphId: CG, descriptors: manifest.descriptors }, new Set(all));
 
     // The first round's budget ends after a third of the checks; the ones it finished stay confirmed.
     await expect(confirmOnce(new Map([...currentOf(manifest)].slice(0, 100)), []))
       .rejects.toThrow("within the round's budget");
-    expect(confirmed.size).toBe(100);
 
     const reads: string[] = [];
     await confirmOnce(currentOf(manifest), reads);
     expect(reads.sort()).toEqual(all.slice(100).sort());
-    expect(confirmed.size).toBe(300);
+    reads.length = 0;
+    await confirmOnce(currentOf(manifest), reads);
+    expect(reads).toEqual([]);
   });
 
   it('stops at an abort, and offers no confirmation without a chain', async () => {
