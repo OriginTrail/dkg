@@ -12,14 +12,14 @@ export type { PublisherAssertionPromoteOptions } from './assertion-promote-types
 import { tryCreateShareCompletionEvidence } from './share-completion-evidence.js';
 import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
-import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
+import { readAssertionLifecycleRecord, resolveAssertionReadAuthor, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
 import { PublishedSnapshotRetirement } from './published-snapshot-retirement.js';
 import type { Quad, SharedMemoryGraphScope, TripleStore } from '@origintrail-official/dkg-storage';
-import type { AuthorSigner, ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
-import type { PreBroadcastRecord } from './publisher.js';
+import type { AuthorSigner, ChainAdapter, OnChainPublishResult, AddBatchToContextGraphParams } from '@origintrail-official/dkg-chain';
+import { createWriteAheadHook } from './publisher-write-ahead.js';
 import { enrichEvmError } from '@origintrail-official/dkg-chain';
 import { fallbackAuthorResolver, type FallbackAuthor } from './fallback-author.js';
 import type { EventBus, GraphKnowledgeAssetScope, OperationContext } from '@origintrail-official/dkg-core';
@@ -28,7 +28,7 @@ import { DKGEvent, Logger, createOperationContext, sha256, encodeWorkspacePublis
 import { GraphManager, deleteByPatternWithoutCount, PrivateContentStore, loadSharedMemoryQuadsForScope, loadSelectedSharedMemoryQuads, resolveSharedMemoryScopeGraphs, tryReplaceGraphAndSubjectAtomically, tryReplaceGraphAtomically } from '@origintrail-official/dkg-storage';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
-import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type BasePublicationOptions, type InitialPublishOptions, type PublishOptions, type UpdateOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type PhaseCallback, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
+import { DEFAULT_PUBLISH_EPOCHS, MAX_PUBLISH_EPOCHS, type Publisher, type BasePublicationOptions, type InitialPublishOptions, type PublishOptions, type UpdateOptions, type PublishLifecycleHooks, type PublishResult, type KAManifestEntry, type V10CoreNodeACK, type V10ACKProviderParams, type V10ACKProviderObject, type LegacyV10ACKProvider } from './publisher.js';
 import {
   assertPublicationPricingPolicyApplicable,
   formatPublicationPricingPolicyRequirement,
@@ -121,6 +121,7 @@ import {
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
+import { snapshotAssertionPullOptions, verifyExactAssertionDraft, draftRecoveryError, rethrowDraftSourceFailure, rethrowDraftVerificationFailure, type AssertionPullFromOptions, type AssertionPullFromResult } from './assertion-draft-recovery.js';
 import { resolveAssertionPullSource, type AssertionPromoteState } from './assertion-pull-source.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
@@ -584,68 +585,7 @@ function formatGossipLimit(bytes: number): string {
   return formatBytesAsKb(bytes);
 }
 
-/**
- * GH#2270 PR-3 r4 — the ONE write-ahead hook for both signing paths.
- *
- * `publish` and `update` each carried a private copy of the same three-part contract: a once-only
- * latch (adapters may invoke `onBroadcast` more than once across retries, the boundary must fire
- * once), the hash-bearing `chain:txsigned` breadcrumb and `chain:writeahead:start`
- * instrumentation FIRST, and the durable `onBeforeBroadcast` callback LAST — awaited, so nothing
- * fallible runs between the durable record and the send, and a throw anywhere in here aborts the
- * broadcast with the record and the wire still agreeing. Two copies of an ordering contract is
- * two places for the order to be edited in one; this is the single owner.
- *
- * The phase-name-encodes-the-hash convention (PR #241): `PhaseCallback` is a 2-arg function, so
- * the signed tx identity travels as `chain:txsigned:tx-<hash>`, emitted as a balanced start/end
- * pair to preserve the golden-sequence "every start has a matching end" invariant. The durable
- * callback used to run FIRST; a rejecting `onPhase` after it then aborted the broadcast with the
- * 'broadcast' record already on disk — a persisted transaction that was never sent (r3).
- *
- * `didWriteAhead()` is how the call sites keep the surrounding `try/finally` contract: the
- * balancing `chain:writeahead:end` is emitted only if `:start` actually fired.
- */
-function createWriteAheadHook(hooks: {
-  onPhase?: PhaseCallback;
-  onBeforeBroadcast?: (record: PreBroadcastRecord) => Promise<void> | void;
-  /**
-   * GH#2270 PR #2300 r3 — WHICH BRANCH is signing, recorded because it cannot be inferred later.
-   * Recovery's absence-release is create-only, and the job's request does not settle the question:
-   * the queued publish resolves its update branch from `request.vmCurrentAssertion ?? the live
-   * lifecycle pointer`, so a request carrying no pointer of its own can still sign an update. The
-   * one moment the answer is certain is here, at the signing site, and it is a static fact of the
-   * call site: this builder's two consumers ARE the two branches.
-   */
-  operationKind: 'create' | 'update';
-}): {
-  emitWriteAheadStart: (signal: PreBroadcastSignal) => Promise<void>;
-  didWriteAhead: () => boolean;
-} {
-  const { onPhase, onBeforeBroadcast, operationKind } = hooks;
-  let wroteAhead = false;
-  const emitPhase = async (phase: string, status: 'start' | 'end') => {
-    await (onPhase?.(phase, status) as unknown as Promise<void> | void);
-  };
-  return {
-    didWriteAhead: () => wroteAhead,
-    // The signal is REQUIRED (r3 3811569467): a call with no signed transaction would latch the
-    // hook, emit the write-ahead phase, skip the durable callback, and then suppress the real
-    // signal that follows — a state the chain interface never produces and this contract must
-    // not permit.
-    emitWriteAheadStart: async (signal: PreBroadcastSignal) => {
-      if (wroteAhead) return;
-      wroteAhead = true;
-      // Instrumentation runs FIRST. It is caller-supplied and therefore fallible, and it is
-      // awaited, so a rejecting listener aborts the send — which is fine, and even desirable,
-      // as long as nothing durable has been written yet.
-      const phase = `chain:txsigned:tx-${signal.txHash}`;
-      await emitPhase(phase, 'start');
-      await emitPhase(phase, 'end');
-      await emitPhase('chain:writeahead', 'start');
-      // The DURABLE boundary is LAST, so nothing fallible runs between it and the send.
-      await onBeforeBroadcast?.({ ...signal, operationKind });
-    },
-  };
-}
+
 
 function recoverCompactMessageSigner(
   message: Uint8Array,
@@ -4028,6 +3968,9 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
             onBroadcastAccepted: (signal) =>
               onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
+            ...(writeAhead.onBeforeReplacementBroadcast
+              ? { onBeforeReplacementBroadcast: writeAhead.onBeforeReplacementBroadcast }
+              : {}),
           });
         } finally {
           if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
@@ -5527,6 +5470,9 @@ export class DKGPublisher implements Publisher {
             onBroadcast: emitWriteAheadStart,
             onBroadcastAccepted: (signal) =>
               onBroadcastAccepted?.({ ...signal, operationKind: 'update' }),
+            ...(writeAhead.onBeforeReplacementBroadcast
+              ? { onBeforeReplacementBroadcast: writeAhead.onBeforeReplacementBroadcast }
+              : {}),
           });
         } catch (v10Err) {
           const errorName = extractV10UpdateRejectionName(v10Err);
@@ -6485,7 +6431,7 @@ export class DKGPublisher implements Publisher {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const res = await this.store.query(
-      `ASK { GRAPH <${metaGraph}> { <${lifecycleUri}> <${SWM_SHARE_COMPLETE_PRED}> ?o } }`,
+      `ASK { GRAPH <${metaGraph}> { <${lifecycleUri}> <${SWM_SHARE_COMPLETE_PRED}> ?o } }`, { source: 'publisher.hasSwmShareComplete' },
     );
     return res.type === 'boolean' && res.value;
   }
@@ -8078,8 +8024,8 @@ export class DKGPublisher implements Publisher {
     subGraphName?: string,
   ): Promise<Quad[]> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
-    return this.assertionScopedQuads(graphUri);
+    const storedAuthor = await resolveAssertionReadAuthor(this.store, contextGraphId, agentAddress, name, subGraphName);
+    return this.assertionScopedQuads(await this.wmGraphUri(contextGraphId, storedAuthor, name, subGraphName));
   }
 
   async assertionQueryPrivate(
@@ -8111,30 +8057,12 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     sourceLayer: 'swm' | 'vm',
-    opts?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
-  ): Promise<{
-    seeded: number;
-    seededPublic: number;
-    seededPrivate: number;
-    fromLayer: 'swm' | 'vm';
-    contentScopeVersion: number;
-    kaUal: string;
-    assertionVersion: string;
-  }> {
-    const stableOpts = opts ? { ...opts } : undefined;
-    return this.withAssertionLifecycleWriteLock(
-      contextGraphId,
-      name,
-      agentAddress,
-      stableOpts?.subGraphName,
-      () => this.assertionPullFromUnlocked(
-        contextGraphId,
-        name,
-        agentAddress,
-        sourceLayer,
-        stableOpts,
-      ),
-    );
+    opts?: AssertionPullFromOptions,
+  ): Promise<AssertionPullFromResult> {
+    const stableOpts = snapshotAssertionPullOptions(opts);
+    const run = () => this.assertionPullFromUnlocked(contextGraphId, name, agentAddress, sourceLayer, stableOpts);
+    return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, stableOpts?.subGraphName,
+      () => stableOpts?.recoverExact ? run().catch(rethrowDraftVerificationFailure) : run());
   }
 
   private async assertionPullFromUnlocked(
@@ -8142,28 +8070,23 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     sourceLayer: 'swm' | 'vm',
-    opts?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
-  ): Promise<{
-    seeded: number;
-    seededPublic: number;
-    seededPrivate: number;
-    fromLayer: 'swm' | 'vm';
-    contentScopeVersion: number;
-    kaUal: string;
-    assertionVersion: string;
-  }> {
+    opts?: AssertionPullFromOptions,
+  ): Promise<AssertionPullFromResult> {
     const subGraphName = opts?.subGraphName;
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
-    const { loadedSeal: selectedSeal, scope, payload: validated } = await resolveAssertionPullSource({
-      contextGraphId, name, agentAddress, subGraphName, sourceLayer,
+    const source = await resolveAssertionPullSource({
+      contextGraphId, name, agentAddress, subGraphName, sourceLayer, recoverExact: opts?.recoverExact,
       state: await this.inspectAssertionPromoteState(contextGraphId, name, agentAddress, subGraphName),
       loadSeals: () => this.loadAssertionSeals(contextGraphId, name, agentAddress, subGraphName),
       verifyRecovery: (operationId) => this.verifyPullRecoverySeal(contextGraphId, name, agentAddress, operationId, subGraphName),
       readPublicQuads: (graph) => this.assertionScopedQuads(graph),
       readPrivateQuads: (scope) => this.privateStore.getKnowledgeAssetPrivateTriples(contextGraphId, scope, subGraphName),
+    }).catch(error => {
+      if (opts?.recoverExact) rethrowDraftSourceFailure(error);
+      throw error;
     });
+    const { loadedSeal: selectedSeal, scope, payload: validated } = source;
     const wmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.WorkingMemory, scope, subGraphName);
-
     const publicDraftExists = await this.assertionScopedHasQuads(wmGraph);
     const privateDraft = await this.privateStore.getKnowledgeAssetPrivateDraftTriples(
       contextGraphId,
@@ -8171,6 +8094,17 @@ export class DKGPublisher implements Publisher {
       name,
       subGraphName,
     );
+    if (opts?.recoverExact) {
+      await this.assertDraftUnsealedForWrite(contextGraphId, name, agentAddress, subGraphName);
+      if (await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName) !== wmGraph)
+        throw draftRecoveryError('WM_DRAFT_NOT_EXACT');
+      const draftEvidence = await verifyExactAssertionDraft({ source, contextGraphId, name, agentAddress,
+        subGraphName, fromLayer: sourceLayer, publicQuads: await this.assertionScopedQuads(wmGraph), privateQuads: privateDraft });
+      return { seeded: draftEvidence.publicTripleCount + draftEvidence.privateTripleCount,
+        seededPublic: draftEvidence.publicTripleCount, seededPrivate: draftEvidence.privateTripleCount,
+        fromLayer: sourceLayer, contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: scope.ual, assertionVersion: scope.assertionVersion, merkleRoot: draftEvidence.merkleRoot, recovered: true, draftEvidence };
+    }
     const hasDraft = publicDraftExists || privateDraft.length > 0;
     if (hasDraft && (opts?.onConflict ?? 'reject') === 'reject') {
       throw Object.assign(
@@ -8228,7 +8162,7 @@ export class DKGPublisher implements Publisher {
       fromLayer: sourceLayer,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       kaUal: scope.ual,
-      assertionVersion: scope.assertionVersion,
+      assertionVersion: scope.assertionVersion, merkleRoot: ethers.hexlify(selectedSeal.seal.merkleRoot),
     };
   }
 

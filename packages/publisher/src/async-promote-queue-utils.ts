@@ -387,12 +387,15 @@ export function postCommitRecoveryExhaustedReason(attempts: number): string {
 
 export { defaultBackoffMs, createDefaultPromoteBackoff } from './promote-retry-policy.js';
 
+/** The fields `comparePromoteJobs` ranks by, so a caller can keep these in place of whole jobs. */
+export type PromoteReadyOrder = Pick<PromoteJob, 'jobId' | 'enqueuedAt'> & { readonly attempt: Pick<PromoteJob['attempt'], 'nextRetryAt'> };
+
 /**
  * Stable sort key for queued/failed_retrying jobs: oldest `nextRetryAt`
  * (or `enqueuedAt` when no retry has been scheduled), then `jobId` as a
  * deterministic tie-breaker for same-millisecond enqueues.
  */
-export function comparePromoteJobs(a: PromoteJob, b: PromoteJob): number {
+export function comparePromoteJobs(a: PromoteReadyOrder, b: PromoteReadyOrder): number {
   const aReady = a.attempt.nextRetryAt ?? a.enqueuedAt;
   const bReady = b.attempt.nextRetryAt ?? b.enqueuedAt;
   if (aReady !== bReady) return aReady - bReady;

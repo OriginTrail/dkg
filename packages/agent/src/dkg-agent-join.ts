@@ -1,5 +1,7 @@
 
 import { verifiedDelegationKeyIds, verifyJoinEncryptionKeyBundle } from './internal/join-encryption-key-bundle.js';
+import { answerJoinFromHeldApproval } from './internal/context-graph-authority/approved-member-metadata-pending.js';
+import { joinAdmissionActiveMembers } from './internal/context-graph-authority/join-admission-members.js';
 import type { PeerSyncConnection } from './p2p/peer-connection.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -1124,7 +1126,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       getContextGraphMeta: (contextGraphId) => this.getCgMeta(contextGraphId),
       getActiveMembers: (contextGraphId) => withRpcUsageSite(
         CG_AUTH_RPC_SITES.joinAdmissionRoster,
-        () => this.getMemberRecoveryRosterSource(contextGraphId),
+        () => joinAdmissionActiveMembers(this, contextGraphId),
       ),
       getContextGraphOwner: (contextGraphId) => this.getContextGraphOwner(contextGraphId),
       resolveLocalOwnerAddress: (ownerDid) => this.resolveLocalJoinPolicyOwnerAddress(ownerDid),
@@ -1605,7 +1607,8 @@ export class JoinRequestMethods extends DKGAgentBase {
    * Return a just-applied decision to pending when the notification handler
    * could not commit its downstream durable state. The generation/status
    * guard prevents compensation from overwriting a newer request or a
-   * concurrent conflicting decision.
+   * concurrent conflicting decision; with `curatorPeerId`, a decision of
+   * another curator is left alone too. Resolves whether it changed the state.
    */
   async restoreRequesterJoinDecisionAfterFailedApply(
     this: DKGAgent,
@@ -1613,21 +1616,24 @@ export class JoinRequestMethods extends DKGAgentBase {
     agentAddress: string,
     requestGeneration: string,
     appliedStatus: 'approved' | 'rejected',
-  ): Promise<void> {
+    curatorPeerId?: string,
+  ): Promise<boolean> {
     const key = requesterJoinStateKey(contextGraphId, agentAddress);
-    await withRequesterJoinStateLock(this, key, async () => {
+    return withRequesterJoinStateLock(this, key, async () => {
       const current = await this.readRequesterJoinRequestState(contextGraphId, agentAddress);
       if (
         !current ||
         current.requestGeneration !== requestGeneration ||
-        current.status !== appliedStatus
+        current.status !== appliedStatus ||
+        (curatorPeerId !== undefined && current.curatorPeerId !== curatorPeerId)
       ) {
-        return;
+        return false;
       }
       await this.writeRequesterJoinRequestState(contextGraphId, agentAddress, {
         ...current,
         status: 'pending',
       });
+      return true;
     });
   }
 
@@ -3261,14 +3267,12 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
+    options: { reRequest?: boolean } = {},
+  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean; approvedMetadataPending?: boolean }> {
     const key = requesterJoinStateKey(contextGraphId, delegation.agentAddress);
-    return withRequesterJoinForwardLock(this, key, () => this.forwardJoinRequestOnce(
-      contextGraphId,
-      delegation,
-      agentName,
-      curatorPeerId,
-    ));
+    return withRequesterJoinForwardLock(this, key, async () => (options.reRequest === true ? undefined
+      : await answerJoinFromHeldApproval(this, contextGraphId, delegation.agentAddress, curatorPeerId))
+      ?? this.forwardJoinRequestOnce(contextGraphId, delegation, agentName, curatorPeerId));
   }
 
   async forwardJoinRequestOnce(this: DKGAgent,

@@ -444,6 +444,7 @@ export {
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
   ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
   RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
+  SWM_INVENTORY_HANDOFF_PENDING_CODE,
   isRfc64LegacySwmBoundaryRetirementInProgressError,
   QUERY_ACCESS_DENIED_CODE,
   QUERY_ACCESS_DENIED_MESSAGE,
@@ -541,3 +542,5 @@ export * from './bulk-graph-wire.js';
 export * from './bulk-graph-transport.js';
 
 export { ProtocolReadLimitError } from './bounded-stream-read.js';
+
+export * from './async-admission-usage.js';

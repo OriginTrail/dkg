@@ -7,6 +7,7 @@ import { RecoveryMaterializationOwner } from './durable-recovery-materialization
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
+import { VersionedSubscriptionRegistry } from './internal/versioned-subscription-registry.js';
 import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
@@ -29,6 +30,7 @@ import type { RecentSharedMemoryPullRuntime } from './recent-shared-memory-pull-
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { controlPlaneRefusalSummary } from './sync/control-plane-refusals.js';
 import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
 import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
 import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
@@ -457,7 +459,6 @@ import {
   type PeerConnectionSnapshot,
   type PeerDiagnostics,
   type ChatSendResult,
-  type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
@@ -840,6 +841,8 @@ export class DKGAgentBase {
    */
   protected readonly reconciledKaAuthors = new Set<string>();
   protected readonly log = new Logger('DKGAgent');
+  /** Control-plane fetches refused for want of a sync slot: one warning per interval. */
+  readonly controlPlaneRefusals = controlPlaneRefusalSummary(this.log);
   /** Rate limit for the "Named KA recovery ... remains pending" warning. */
   protected readonly namedKaRecoveryPendingLog = new NamedKaRecoveryPendingLog();
 
@@ -1496,7 +1499,7 @@ export class DKGAgentBase {
    * (restart contract on {@link DKGAgentBase}): only the gossip wiring derived
    * from it is session-scoped and re-established by `start()`.
    */
-  protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  protected readonly subscribedContextGraphs = new VersionedSubscriptionRegistry();
   /**
    * Process-local fence for a registration operation whose durable marker has
    * moved (or is about to move) to `pending`. Authority and policy readers use

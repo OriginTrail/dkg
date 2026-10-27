@@ -20,9 +20,12 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-legacy-swm-promote-admission.test.ts",
   "test/rfc64-legacy-swm-promote-admission-schedules.test.ts",
   "test/rfc64-inventory-v1-lifecycle.test.ts",
+  // A pre-migration copy and the down-migration let `dkg rollback` return a node to an older release.
+  "test/rfc64-inventory-v1-rollback.test.ts",
   "test/rfc64-inventory-v1-candidates.test.ts",
   "test/rfc64-inventory-v1-applied-head.test.ts",
   "test/rfc64-swm-author-inventory-persistence-v1.test.ts",
+  "test/rfc64-owed-share-inventory-store-v1.test.ts",
   "test/rfc64-swm-author-inventory-producer-v1.test.ts",
   "test/rfc64-swm-catalog-durable-asset-resolver-v1.test.ts",
   "test/rfc64-swm-inventory-catalog-reconciler-v1.test.ts",
@@ -58,6 +61,10 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-public-catalog-current-head-discovery-v1.test.ts",
   "test/rfc64-public-catalog-receiver-v1.test.ts",
   "test/rfc64-receiver-task-lifecycle-scoped-idle-v1.test.ts",
+  // A lease turn applies the newest delivered head of its scope.
+  "test/rfc64-receiver-lease-coalescing.test.ts",
+  // An announced head no provider serves is re-pulled with a doubling delay, then left quiet.
+  "test/rfc64-announced-current-head-retry-v1.test.ts",
   "test/rfc64-public-catalog-reconciliation-outcome-v1.test.ts",
   "test/rfc64-public-catalog-reconciliation-failure-v1.test.ts",
   "test/rfc64-public-catalog-service-v1.test.ts",

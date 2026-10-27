@@ -29,6 +29,12 @@
  * with `connectThroughRelay`, and proves the link with `expectRelayOnlyLink`
  * before it concludes anything from what crossed it.
  *
+ * A node that does not filter what it announces lists every interface it has:
+ * loopback, a LAN, a container bridge, a VPN in the shared range (100.64/10).
+ * `addressing({ interfaces: true })` announces those as well, all unreachable,
+ * so a peer's store holds what it holds for such a node on a public network.
+ * A dial to one fails at once or runs into libp2p's per-address timeout.
+ *
  * Two things a suite should know about such a link (both are libp2p's, measured
  * with bare nodes as well):
  *  - a request does not always take milliseconds. While the only connection to
@@ -102,13 +108,19 @@ export class RelayOnlyNetwork {
 
   /**
    * Addressing for ONE agent: reserve on the relay, and announce a dead direct
-   * address plus the circuit address. Each call opens its own dead port.
+   * address plus the circuit address. Each call opens its own dead port. With
+   * `interfaces`, also the unreachable addresses of the agent's other
+   * interfaces (see the top of this file).
    */
-  async addressing(): Promise<RelayOnlyAddressing> {
+  async addressing(options: { interfaces?: boolean } = {}): Promise<RelayOnlyAddressing> {
     const deadPort = await this.openDeadPort();
+    const host = `${(deadPort >> 8) & 0xff}.${deadPort & 0xff}`;
+    const interfaces = options.interfaces
+      ? [`/ip4/10.254.${host}/tcp/${deadPort}`, `/ip4/172.17.0.1/tcp/${deadPort}`, `/ip4/100.64.${host}/tcp/${deadPort}`]
+      : [];
     return {
       relayPeers: [this.relayAddress],
-      announceAddresses: [`/ip4/${LOOPBACK}/tcp/${deadPort}`, `${this.relayAddress}/p2p-circuit`],
+      announceAddresses: [`/ip4/${LOOPBACK}/tcp/${deadPort}`, ...interfaces, `${this.relayAddress}/p2p-circuit`],
     };
   }
 
