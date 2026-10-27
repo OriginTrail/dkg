@@ -110,7 +110,7 @@ async function packageContext(args, certificate = true) {
 
 async function commandPreparedRelease(args, mode) {
   const { preparedRelease } = await import('./lib/package-certification/publish.mjs');
-  const progress = preparedRelease({
+  const progress = await preparedRelease({
     ...await packageContext(args), mode,
     tag: requireArg(args, 'tag'),
     tags: parseTags(requireArg(args, mode === 'publish' ? 'dist-tag' : 'tags')),
@@ -248,7 +248,8 @@ function usage() {
   node scripts/release-packages.mjs certify-install --bundle DIR --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --out NEW_ATTEMPT [--image IMAGE] [--negative-control missing-ui]
   node scripts/release-packages.mjs verify-package-certificate --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1
   node scripts/release-packages.mjs publish-prepared --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --dist-tag canary [--dry-run]
-  node scripts/release-packages.mjs promote --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --tags testnet [--dry-run]
+  node scripts/release-packages.mjs promote --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --tags testnet[,mainnet,latest] [--otp CODE] [--dry-run]
+    (promote asks for the npm one-time code in a terminal unless --otp or NPM_CONFIG_OTP is set)
   node scripts/release-packages.mjs verify-published --bundle DIR --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 [--tags latest,mainnet,testnet]`);
 }
 

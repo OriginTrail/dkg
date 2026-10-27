@@ -1,6 +1,7 @@
 import { handlePublisherLiveControlRoute } from './publisher-live-control.js';
 import { normalizeContextGraphIdOrUri } from '../../context-graph-identifiers.js';
 import { hasNodeOperatorReadAccess, requireContextGraphReadAuthority } from './context-graph-read-authority.js';
+import { parsePublisherJobsQuery, respondPublisherJobs } from './publisher-job-page.js';
 // daemon/routes/publisher.ts
 //
 // Route handlers for publisher jobs / stats / cancel / retry / clear.
@@ -555,22 +556,16 @@ export async function handlePublisherRoutes(ctx: RequestContext): Promise<void> 
   } = actor;
 
 
-  // GET /api/publisher/jobs?status=...
+  // GET /api/publisher/jobs?status=...  (complete); &pageSize=...&cursor=... pages it (publisher-job-page.ts)
   if (req.method === "GET" && path === "/api/publisher/jobs") {
-    const status =
-      typeof url.searchParams.get("status") === "string"
-        ? url.searchParams.get("status")!
-        : undefined;
+    const query = parsePublisherJobsQuery(url, res);
+    if (!query) return; // a 400 was already sent
     const rawContextGraphId = url.searchParams.get('contextGraphId');
     const contextGraphId = rawContextGraphId === null ? null : normalizeContextGraphIdOrUri(rawContextGraphId);
     if (contextGraphId !== null || !hasNodeOperatorReadAccess(ctx)) {
       if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
     }
-    const jobs = await publisherControl.list({
-      ...(status ? { status: status as any } : {}),
-      ...(contextGraphId === null ? {} : { contextGraphId }),
-    });
-    return jsonResponse(res, 200, { jobs });
+    return respondPublisherJobs(res, publisherControl, query, contextGraphId);
   }
 
   // GET /api/publisher/job?id=...  (new route, wrapped response)

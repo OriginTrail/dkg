@@ -202,6 +202,44 @@ because admitted operations are not preempted. Setting
 `DKG_STORE_BACKGROUND_RESERVED_SLOTS=0` retains strict normal-before-background
 ordering. Schedulers with multiple ordinary slots retain their capacity reserves.
 
+### Queue control path
+
+The async share and publisher queues can run their own store calls on two small
+schedulers of their own, beside the shared one (OT-RFC-73 S1), so queue
+bookkeeping never waits behind client reads or data-plane work. The shared
+scheduler's lanes, limits and `StorePressureSnapshot` are unchanged; the
+control schedulers add slots on top of them: one for the share queue and two for
+the publisher queue, which are also the caps. Each is built only for a queue
+whose configured slots are above 0, once per process, with every capacity
+option explicit (no ACK, health, normal or background reserve; the shared
+scheduler's queue limit and wait as values; the same timeout diagnostics).
+
+A call reaches its queue's scheduler by naming the queue and nothing else:
+
+```ts
+import { controlStoreOptions } from '@origintrail-official/dkg-storage';
+
+await store.query(sparql, { ...controlStoreOptions('share', 'publisher.asyncPromote.writeJob'), signal });
+```
+
+`controlStoreOptions(queue, source)` returns `{ source, controlQueue: queue }`
+and sets no priority. When the queue's path is on, the `blazegraph` and
+`sparql-http` adapters run the call on that queue's scheduler in one fixed lane
+that is reported as `control` (in the `503` body's `priority`, metric
+attributes, the backpressure registry under `store-control-share` /
+`store-control-publisher`, and the queue-wait stats), whatever `priority` or
+ambient `withDefaultStoreWorkPriority` lane the caller has. When it is off, the
+call resolves exactly like the same call without the tag. Embedded Oxigraph
+backends ignore priority and so see no effect.
+
+| Environment variable | Default | Purpose |
+|---|---:|---|
+| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset (off) | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host; the default, when it is switched on, adds no slots on hosts with 2 or fewer CPUs. Read once at start. |
+
+The daemon logs the effective geometry once at start
+(`logStoreControlPathGeometry`). Tests replace the process-wide path with
+`setStoreControlPathForTesting(buildStoreControlPath(...))`.
+
 Blazegraph's deadline can also be set per store, which takes precedence over
 the environment default:
 
