@@ -104,7 +104,9 @@ export class RecipientKeyRouteFence {
   }
 
   private get hasPendingGraphRemoval(): boolean {
-    return [...this.graphBoundRemovals].some(removal => removal.counted);
+    // An opaque write can add a dependency without naming its graph. Until the
+    // graph inventory is trusted again, none of these removals is proven harmless.
+    return [...this.graphBoundRemovals].some(removal => removal.counted || !this.trusted);
   }
 
   /** A private roster depends on its own agent/key subjects and every unclassified write. */

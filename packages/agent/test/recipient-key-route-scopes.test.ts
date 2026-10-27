@@ -122,6 +122,41 @@ describe('recipient dependencies stay scoped to the roster', () => {
     expect(fence.isCurrentFor(revision, [third])).toBe(true);
   });
 
+  it.each([false, true])('blocks a pending removal after an indeterminate opaque write (mixed: %s)', async mixed => {
+    const isolated = new OxigraphStore();
+    try {
+      const fence = new RecipientKeyRouteFence(isolated);
+      await fence.ensureReady();
+      const removal = fence.begin({ removals: [{ graph }],
+        ...(mixed ? { quads: [{ ...quad(A), graph: 'urn:other-keys' }] } : {}) });
+      expect(fence.isCurrentFor(fence.revision, [B])).toBe(true);
+      const opaque = fence.begin({ everything: true });
+      // An UPDATE can commit without reporting a determinate outcome to its caller.
+      await isolated.insert([quad(B)]);
+      opaque('indeterminate');
+      await fence.ensureReady();
+      const snapshot = fence.revision;
+      expect(await isolated.countQuads(graph)).toBe(1);
+      expect(fence.hasPendingWrites).toBe(true);
+      expect(fence.isCurrentFor(snapshot, [B])).toBe(false);
+      removal('unchanged');
+      expect(fence.hasPendingWrites).toBe(false);
+      expect(fence.isCurrentFor(fence.revision, [B])).toBe(true);
+      expect(fence.cacheableFor([B])).toBe(false);
+    } finally { await isolated.close(); }
+  });
+
+  it('reuses unrelated snapshots once a fresh scan proves the watched graph harmless again', async () => {
+    const fence = await ready();
+    const removal = fence.begin({ quads: [{ ...quad(A), graph: 'urn:other-keys' }], removals: [{ graph }] });
+    fence.begin({ everything: true })('changed');
+    expect(fence.isCurrentFor(fence.revision, [B])).toBe(false);
+    await fence.ensureReady();
+    expect(fence.isCurrentFor(fence.revision, [B])).toBe(true);
+    expect(fence.isCurrentFor(fence.revision, [A])).toBe(false);
+    removal('unchanged');
+  });
+
   it('falls back to global invalidation for oversized scopes and unclassified rosters', async () => {
     const fence = await ready(); const revision = fence.revision;
     const settle = fence.begin({ quads: Array.from({ length: 129 }, (_, i) => quad(`0x${i.toString(16).padStart(40, '0')}`)) });
