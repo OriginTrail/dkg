@@ -13,6 +13,13 @@ The campaign uses a fixed public author address and graph suffix in the scripts.
 
 The publisher and share job lists that `snapshot.mjs`, `live-run.mjs` and `restart-regression.mjs` read are read a page at a time (`pageSize`, `cursor`; `job-pages.mjs`), and the saved evidence keeps the shape of the complete list (`value.jobs`). A walk that ends on `complete` lists the jobs that were listed for the whole walk; a job missing from it is not proven absent (one admitted behind the cursor is not part of the walk), so the scripts only ever count a job they saw and keep polling until the deadline. A daemon that predates paging ignores the parameters and answers its complete list, which is used as it is.
 
+Reading by pages changes what the scripts save, compared with the complete reads they used before:
+
+- **Order.** A page is ordered by the time the job was admitted, then by job ID, so the saved share-job evidence (`-api-knowledge-assets-swm-share-jobs.json`) is now in enqueue order, not in ready-time order (`nextRetryAt` when a retry is scheduled, else `enqueuedAt`). A lookup that takes the first job with a given `assertionName` (`restart-regression.mjs` and `reviewer-evidence.py`) could therefore pick a different job if one name ever had several jobs. The saved publisher-job evidence is in acceptance order, and jobs accepted in the same millisecond can be ordered differently than before (job ID by code point, not `localeCompare`).
+- **The `live-run.mjs` observation.** `observation-N.json` keeps only the first page's `route`, `startedAt` and `durationMs` next to the merged `jobs`, so the duration is the first page's, not the walk's, and the route reads `/api/publisher/jobs?pageSize=1000` (the old `?limit=1000` was never honored by the publisher route and is refused together with `pageSize`). A walk that cannot be completed is saved as a failed request (`status: null` and the error), and the observation loop polls again.
+- **`requests.jsonl`.** `live-run.mjs` writes one `observe:jobs` line per page, not one per observation. `reviewer-evidence.py` reads only the `recovery-observe:` lines.
+- **No tests of their own.** `snapshot.mjs`, `live-run.mjs` and `restart-regression.mjs` have none (they had none before); the walk they share is tested in `job-pages.test.mjs`.
+
 The protocol records a 20-minute publication deadline from traffic start and a 20-minute catalog deadline from traffic end. Polls are sampled; use their recorded timestamps to establish deadline coverage and recovery-time bounds. Naturally occurring failures and the two injected requests have separate denominators. Manual repairs must always be reported separately and never count as automatic recovery.
 
 A main-run fault file has this shape (use the actual arm's graph):
