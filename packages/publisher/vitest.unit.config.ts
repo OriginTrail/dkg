@@ -105,6 +105,7 @@ export default defineConfig({
       'test/async-queue-depth.test.ts',
       'test/async-queue-usage-hooks.test.ts',
       'test/async-lift-terminal-clear.test.ts',
+      'test/async-lift-bulk-clear-characterization.test.ts',
       'test/entity-grouping.test.ts',
       'test/async-promote-terminal-clear.test.ts',
       'test/async-promote-bounded-lookup.test.ts',
