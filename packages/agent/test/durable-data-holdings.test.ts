@@ -418,12 +418,14 @@ describe('holding a copy only while it is current on chain', () => {
     authenticationDeadline = () => 42,
   ) {
     return currentHeldGraphScopedAssetsConfirmer({
-      readChainState: async ({ ual }, deadline) => {
+      authenticateHeld: async (descriptor, requiredBinding, deadline) => {
+        const { ual } = descriptor;
         reads.push(ual);
         deadlines.push(deadline);
         const state = chain.get(ual);
         if (!state) throw createRpcTimeoutError('held chain check exceeded its context-graph deadline');
-        return state;
+        return state.bound && (requiredBinding === undefined || state.onChainContextGraphId === requiredBinding)
+          && state.merkleRootHex === descriptor.claimedRootHex && state.assertionVersion === BigInt(descriptor.assertionVersion);
       },
       budget: { createGraphScopedAuthenticationDeadline: authenticationDeadline },
     })!;
@@ -435,12 +437,9 @@ describe('holding a copy only while it is current on chain', () => {
     const manifest = generation(1);
     const descriptor = manifest.descriptors[0]!;
     let onChainId = '323';
-    const readChainState = vi.fn(async () => ({
-      merkleRootHex: descriptor.claimedRootHex, assertionVersion: BigInt(descriptor.assertionVersion),
-      bound: true, onChainContextGraphId: '323',
-    }));
+    const authenticateHeld = vi.fn(async (_descriptor, requiredBinding) => requiredBinding === '323');
     const holdings = currentHeldGraphScopedAssetsConfirmer({
-      readChainState,
+      authenticateHeld,
       binding: () => ({ onChainId, generation: 0 }),
       budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 1000 },
     })!;
@@ -448,10 +447,10 @@ describe('holding a copy only while it is current on chain', () => {
     const request = { contextGraphId: CG, descriptors: manifest.descriptors };
     await holdings(request, new Set([descriptor.ual]), confirmed);
     await holdings(request, new Set([descriptor.ual]), confirmed);
-    expect(readChainState).toHaveBeenCalledTimes(1);
+    expect(authenticateHeld).toHaveBeenCalledTimes(1);
     onChainId = '582';
     await expect(holdings(request, new Set([descriptor.ual]), confirmed)).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
-    expect(readChainState).toHaveBeenCalledTimes(2);
+    expect(authenticateHeld).toHaveBeenCalledTimes(2);
   });
 
   it('confirms held copies the chain shows current, and reads only those', async () => {
@@ -483,7 +482,7 @@ describe('holding a copy only while it is current on chain', () => {
     chain.set(behind.ual, { merkleRootHex: 'ab'.repeat(32), assertionVersion: 2n, bound: true });
 
     await expect(confirm(reader(chain), manifest, all))
-      .rejects.toThrow(`${behind.ual} is at version 2 on chain, 1 here and at the peer`);
+      .rejects.toThrow(`Held asset ${behind.ual} of "${CG}" is not current on chain`);
     // The same version with another root is not current either.
     chain.set(behind.ual, { merkleRootHex: 'ab'.repeat(32), assertionVersion: 1n, bound: true });
     await expect(confirm(reader(chain), manifest, all)).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
@@ -495,7 +494,7 @@ describe('holding a copy only while it is current on chain', () => {
     const unbound = currentOf(manifest);
     unbound.set(first.ual, { ...unbound.get(first.ual)!, bound: false });
     await expect(confirm(reader(unbound), manifest, [first.ual]))
-      .rejects.toThrow(`Held asset ${first.ual} is not bound to "${CG}" on chain`);
+      .rejects.toThrow(`Held asset ${first.ual} of "${CG}" is not current on chain`);
 
     const unanswered = confirm(reader(new Map()), manifest, [first.ual]);
     await expect(unanswered).rejects.toThrow("against the chain within the round's budget");

@@ -16,7 +16,7 @@ import { MAX_EXACT_SYNC_ASSETS } from '../exact-assets.js';
 import { mapWithConcurrencyDrained } from '../../map-with-concurrency.js';
 import { DEFAULT_DURABLE_DATA_ROUND_BUDGET, type DurableDataRoundBudget } from './durable-data-round.js';
 import type { DurableSyncContext } from './durable-sync.js';
-import type { GraphScopedAssetChainState } from './graph-scoped-materialization.js';
+import type { DurableRecoveryAuthority } from '../../durable-recovery-authority.js';
 import type { SyncPageResult } from './page-fetch.js';
 
 /** An asset of a verified generation that this node does not hold at that version. */
@@ -93,14 +93,13 @@ interface HeldAssetsConfirmationInput {
   /** Retry best-effort SWM housekeeping after every skipped copy is authenticated. */
   readonly reconcileHeld?: (request: HeldGraphScopedAssetsRequest, held: ReadonlySet<string>) => Promise<void>;
   readonly binding?: () => Readonly<{ onChainId?: string; generation: number }>;
-  readonly readChainState?: (copy: { readonly ual: string; readonly contextGraphId: string },
-    deadline: number, signal?: AbortSignal) => Promise<GraphScopedAssetChainState>;
+  readonly authenticateHeld?: DurableRecoveryAuthority['authenticateHeld'];
   /** The round's budget: the chain checks share one authentication deadline. */
   readonly budget: { createGraphScopedAuthenticationDeadline(): number };
 }
 export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmationInput): ConfirmHeldAssetsCurrent | undefined {
-  const { readChainState } = input;
-  if (!readChainState) return undefined;
+  const { authenticateHeld } = input;
+  if (!authenticateHeld) return undefined;
   return async (request, held, confirmed) => {
     const deadline = Math.min(
       input.budget.createGraphScopedAuthenticationDeadline(),
@@ -116,10 +115,10 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
         && !confirmed?.has(cacheKey(descriptor))),
       HELD_CHAIN_CHECK_CONCURRENCY,
       async (descriptor) => {
-        const { ual, assertionVersion, claimedRootHex } = descriptor;
-        let state: GraphScopedAssetChainState;
+        const { ual } = descriptor;
+        let current: boolean;
         try {
-          state = await readChainState({ ual, contextGraphId }, deadline, request.signal);
+          current = await authenticateHeld(descriptor, binding?.onChainId, deadline, request.signal);
         } catch (error) {
           request.signal?.throwIfAborted();
           throw new Error(
@@ -128,15 +127,8 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
             { cause: error },
           );
         }
-        if (!state.bound || (binding?.onChainId !== undefined && binding.onChainId !== state.onChainContextGraphId)) {
-          throw new HeldGenerationNotCurrentError(`Held asset ${ual} is not bound to "${contextGraphId}" on chain`);
-        }
-        if (state.assertionVersion !== BigInt(assertionVersion) || state.merkleRootHex !== claimedRootHex) {
-          throw new HeldGenerationNotCurrentError(
-            `This peer's generation of "${contextGraphId}" is behind the chain: ${ual} is at version `
-              + `${state.assertionVersion} on chain, ${assertionVersion} here and at the peer`,
-          );
-        }
+        request.signal?.throwIfAborted();
+        if (!current) throw new HeldGenerationNotCurrentError(`Held asset ${ual} of "${contextGraphId}" is not current on chain`);
         confirmed?.add(cacheKey(descriptor));
       },
     );

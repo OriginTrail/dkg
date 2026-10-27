@@ -164,7 +164,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       ? currentHeldGraphScopedAssetsConfirmer({
           binding: fence.binding,
           reconcileHeld: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve(),
-          readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
+          authenticateHeld: authority.authenticateHeld?.bind(authority), budget: contextGraphBudget,
         }) : undefined;
     return runDurableSyncDetailed({ ...durableContext,
       storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,

@@ -1,8 +1,9 @@
+import type { GraphScopedDescriptor } from './sync/durable-integrity.js';
 import { createAbortError as asSyncFetchAbortError } from './bounded-operation.js';
 import { withRetry } from '@origintrail-official/dkg-core';
 import { createRpcTimeoutError, isChainRpcTransportError, type ChainAdapter } from '@origintrail-official/dkg-chain';
 import { authenticateChallengePinnedGraphScopedAsset, authenticateVerifiedGraphScopedAsset,
-  readGraphScopedAssetChainState, type ChallengePinnedGraphScopedAsset, type GraphScopedAssetChainState,
+  authenticateHeldGraphScopedDescriptor, type ChallengePinnedGraphScopedAsset,
   type VerifiedGraphScopedAsset, type VerifyContextGraphBinding,
 } from './sync/requester/graph-scoped-materialization.js';
 import type { ExactAssetCommitment } from './sync/exact-assets.js';
@@ -104,14 +105,15 @@ export async function authenticateChallengePinnedGraphScopedAssetWithinDeadline(
   return authenticated;
 }
 
-/** A held copy's chain views, under the authentication retry policy and the round's deadline. */
-export function readHeldGraphScopedAssetChainStateWithinDeadline(params: {
+/** Authenticate a held descriptor under the canonical retry policy and the round's deadline. */
+export function authenticateHeldGraphScopedAssetWithinDeadline(params: {
   chain: ChainAdapter;
-  copy: { readonly ual: string; readonly contextGraphId: string };
+  copy: GraphScopedDescriptor;
+  requiredBinding?: string;
   verifyContextGraphBinding: VerifyContextGraphBinding;
   deadline: number;
   signal?: AbortSignal;
-}): Promise<GraphScopedAssetChainState> {
+}): Promise<boolean> {
   const { chain, copy, verifyContextGraphBinding, deadline, signal } = params;
   return runAuthenticationWithinDeadline({
     deadline,
@@ -120,7 +122,7 @@ export function readHeldGraphScopedAssetChainStateWithinDeadline(params: {
     ),
     signal,
     operation: (deadlineSignal) => withRetry(
-      () => readGraphScopedAssetChainState(chain, copy, verifyContextGraphBinding, { signal: deadlineSignal }),
+      () => authenticateHeldGraphScopedDescriptor(chain, copy, params.requiredBinding, verifyContextGraphBinding, { signal: deadlineSignal }),
       {
         maxAttempts: DURABLE_AUTHENTICATION_MAX_ATTEMPTS,
         baseDelayMs: DURABLE_AUTHENTICATION_RETRY_BASE_MS,

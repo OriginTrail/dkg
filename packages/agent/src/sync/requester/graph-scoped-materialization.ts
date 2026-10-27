@@ -1,4 +1,4 @@
-import { prepareGraphScopedChainViewRead } from './graph-scoped-chain-views.js';
+import { prepareGraphScopedChainViewRead, assertGraphScopedChainEvidence, type VerifyContextGraphBinding } from './graph-scoped-chain-views.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { executeGraphScopedPublication } from './graph-scoped-publication.js';
 import {
@@ -20,7 +20,7 @@ import {
   filterOversizedSyncQuads,
   type OversizeGuardHooks,
 } from '../oversize-filter.js';
-import { parseGraphScopedDescriptor } from '../durable-integrity.js';
+import { parseGraphScopedDescriptor, type GraphScopedDescriptor } from '../durable-integrity.js';
 import {
   exactAssetCommitmentMatchesDescriptor,
   type ExactAssetCommitment,
@@ -66,11 +66,7 @@ export interface AuthenticatedGraphScopedAsset {
   onChainContextGraphId: string | null;
 }
 
-export type VerifyContextGraphBinding = (
-  localContextGraphId: string,
-  onChainContextGraphId: bigint,
-  signal?: AbortSignal,
-) => Promise<boolean>;
+export type { VerifyContextGraphBinding } from './graph-scoped-chain-views.js';
 
 export type GraphScopedMaterializationOutcome =
   | 'applied'
@@ -138,39 +134,25 @@ export async function authenticateChallengePinnedGraphScopedAsset(
   });
 }
 
-/** Where the chain stands for one graph-scoped asset. */
-export interface GraphScopedAssetChainState {
-  readonly onChainContextGraphId: string;
-  readonly merkleRootHex: string;
-  readonly assertionVersion: bigint;
-  /** The asset is bound on chain to the local context graph. */
-  readonly bound: boolean;
-}
-
-/**
- * Read the views authentication checks a fetched copy against (latest root,
- * root count, context-graph binding) for an asset this node already holds,
- * so a held copy can be checked against current chain truth without a copy
- * from a peer.
- */
-export async function readGraphScopedAssetChainState(
-  chain: ChainAdapter,
-  copy: { readonly ual: string; readonly contextGraphId: string },
-  verifyContextGraphBinding: VerifyContextGraphBinding,
-  options: { signal?: AbortSignal } = {},
-): Promise<GraphScopedAssetChainState> {
+/** Authority-owned authentication of an already content-proven descriptor. */
+export async function authenticateHeldGraphScopedDescriptor(
+  chain: ChainAdapter, copy: GraphScopedDescriptor, requiredBinding: string | undefined,
+  verifyContextGraphBinding: VerifyContextGraphBinding, options: { signal?: AbortSignal } = {},
+): Promise<boolean> {
   const views = prepareGraphScopedChainViewRead(chain, copy.ual, {
     unsupported: 'A held graph-scoped asset check requires chain root, assertion-count, and context-graph views',
     wrongChain: () => `Held graph-scoped asset ${copy.ual} is not on local chain ${chain.chainId}`,
   }, options.signal);
-  const { latestRoot, rootCount, boundContextGraphId } = await views.read();
-  return {
-    onChainContextGraphId: boundContextGraphId.toString(),
-    merkleRootHex: Buffer.from(latestRoot).toString('hex'),
-    assertionVersion: rootCount,
-    bound: boundContextGraphId > 0n
-      && await verifyContextGraphBinding(copy.contextGraphId, boundContextGraphId, options.signal),
-  };
+  const evidence = await views.read();
+  try {
+    await assertGraphScopedChainEvidence({ ...copy, assertionVersion: BigInt(copy.assertionVersion),
+      merkleRootHex: copy.claimedRootHex }, evidence, verifyContextGraphBinding, options.signal, requiredBinding);
+    return true;
+  } catch (error) {
+    if (['VM_CHAIN_ROOT_MISMATCH', 'VM_CHAIN_ASSERTION_VERSION_MISMATCH', 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH']
+      .includes((error as { code?: string }).code ?? '')) return false;
+    throw error;
+  }
 }
 
 /**
@@ -219,48 +201,7 @@ export async function authenticateVerifiedGraphScopedAsset(
   const provenance = resolveProvenance(chain, asset, options.signal);
   provenance.catch(() => undefined);
   const { latestRoot, rootCount, boundContextGraphId } = await views.read();
-  if (latestRoot.length !== 32 || Buffer.from(latestRoot).toString('hex') !== asset.merkleRootHex) {
-    throw Object.assign(
-      new Error(`Graph-scoped durable sync ${asset.ual} does not match the latest on-chain Merkle root`),
-      { code: 'VM_CHAIN_ROOT_MISMATCH' },
-    );
-  }
-  if (rootCount !== asset.assertionVersion) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} assertionVersion ${asset.assertionVersion} ` +
-        `does not match on-chain root count ${rootCount}`,
-      ),
-      { code: 'VM_CHAIN_ASSERTION_VERSION_MISMATCH' },
-    );
-  }
-  if (boundContextGraphId <= 0n) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} is bound to invalid context graph ${boundContextGraphId}`,
-      ),
-      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
-    );
-  }
-  if (!verifyContextGraphBinding) {
-    throw Object.assign(
-      new Error('Graph-scoped durable sync requires local-to-chain context-graph verification'),
-      { code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' },
-    );
-  }
-  if (!(await verifyContextGraphBinding(
-    asset.contextGraphId,
-    boundContextGraphId,
-    options.signal,
-  ))) {
-    throw Object.assign(
-      new Error(
-        `Graph-scoped durable sync ${asset.ual} is bound to context graph ${boundContextGraphId}, `
-        + `which does not match local context graph ${asset.contextGraphId}`,
-      ),
-      { code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' },
-    );
-  }
+  await assertGraphScopedChainEvidence(asset, { latestRoot, rootCount, boundContextGraphId }, verifyContextGraphBinding, options.signal);
   const claimed = await provenance;
 
   let materializedBlock: number;

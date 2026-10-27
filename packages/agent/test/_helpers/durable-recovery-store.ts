@@ -196,12 +196,14 @@ export function node(
   } });
   const holdings = (binding: () => Readonly<{ onChainId?: string; generation: number }>) => currentHeldGraphScopedAssetsConfirmer({
     binding,
-    readChainState: async ({ ual }) => {
+    authenticateHeld: async (descriptor, requiredBinding) => {
+      const { ual } = descriptor;
       await options.beforeChainRead?.();
       if (chainAnswersLeft <= 0) throw createRpcTimeoutError('held chain check exceeded its context-graph deadline');
       chainAnswersLeft -= 1;
       const onChain = chain().find((fixture) => fixture.ual === ual)!;
-      return { merkleRootHex: onChain.rootHex, assertionVersion: BigInt(onChain.version), bound: true, onChainContextGraphId: '323' };
+      return (requiredBinding === undefined || requiredBinding === '323')
+        && onChain.rootHex === descriptor.claimedRootHex && BigInt(onChain.version) === BigInt(descriptor.assertionVersion);
     },
     budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 60_000 },
   });

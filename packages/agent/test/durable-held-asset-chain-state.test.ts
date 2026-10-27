@@ -1,88 +1,78 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createRpcTimeoutError, type ChainAdapter } from '@origintrail-official/dkg-chain';
-import { readHeldGraphScopedAssetChainStateWithinDeadline } from '../src/durable-recovery-authentication.js';
+import { authenticateHeldGraphScopedAssetWithinDeadline } from '../src/durable-recovery-authentication.js';
 import { createRecoveryAuthority } from '../src/durable-recovery-authority.js';
-import { readGraphScopedAssetChainState } from '../src/sync/requester/graph-scoped-materialization.js';
+import { authenticateHeldGraphScopedDescriptor } from '../src/sync/requester/graph-scoped-materialization.js';
+import type { GraphScopedDescriptor } from '../src/sync/durable-integrity.js';
 
 const UAL = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ef/7';
 const KA_ID = (0xefn << 96n) | 7n;
 const ROOT = new Uint8Array(32).fill(0x5a);
-const COPY = { ual: UAL, contextGraphId: 'held-chain-cg' };
+const COPY: GraphScopedDescriptor = { ual: UAL, contextGraphId: 'held-chain-cg', assertionVersion: '3',
+  contentScopeVersion: '2', claimedRootHex: '5a'.repeat(32), assertionGraph: 'urn:assertion',
+  publicTripleCount: 1, privateTripleCount: 0, metadataDigestHex: '00'.repeat(32) };
 
 function chain(overrides: Partial<ChainAdapter> = {}): ChainAdapter {
-  return {
-    chainId: 'hardhat:31337',
-    getLatestMerkleRoot: async () => ROOT,
-    getMerkleRootCount: async () => 3n,
-    getKAContextGraphId: async () => 9n,
-    ...overrides,
-  } as unknown as ChainAdapter;
+  return { chainId: 'hardhat:31337', getLatestMerkleRoot: async () => ROOT,
+    getMerkleRootCount: async () => 3n, getKAContextGraphId: async () => 9n,
+    ...overrides } as unknown as ChainAdapter;
 }
+const authenticate = (adapter: ChainAdapter, binding = '9', verify = async () => true) =>
+  authenticateHeldGraphScopedDescriptor(adapter, COPY, binding, verify);
 
-describe('the chain views of a held graph-scoped asset', () => {
-  it('reads the latest root, the root count and the binding authentication checks', async () => {
+describe('authority-owned authentication of a held graph-scoped asset', () => {
+  it('authenticates current chain evidence for the descriptor and required binding', async () => {
     const asked: bigint[] = [];
     const verifyBinding = vi.fn(async (id: string, onChainId: bigint) => id === COPY.contextGraphId && onChainId === 9n);
-    const state = await readGraphScopedAssetChainState(chain({
-      getLatestMerkleRoot: async (kaId: bigint) => { asked.push(kaId); return ROOT; },
-    }), COPY, verifyBinding);
-
-    expect(state).toEqual({ merkleRootHex: '5a'.repeat(32), assertionVersion: 3n, bound: true, onChainContextGraphId: '9' });
+    expect(await authenticateHeldGraphScopedDescriptor(chain({
+      getLatestMerkleRoot: async kaId => { asked.push(kaId); return ROOT; },
+    }), COPY, '9', verifyBinding)).toBe(true);
     expect(asked).toEqual([KA_ID]);
-  });
-
-  it('is unbound when the chain binds the asset nowhere or to another graph', async () => {
-    const verifyBinding = vi.fn(async () => false);
-    expect((await readGraphScopedAssetChainState(chain({ getKAContextGraphId: async () => 0n }), COPY, verifyBinding)).bound)
-      .toBe(false);
-    expect(verifyBinding).not.toHaveBeenCalled();
-    expect((await readGraphScopedAssetChainState(chain(), COPY, verifyBinding)).bound).toBe(false);
     expect(verifyBinding).toHaveBeenCalledOnce();
   });
 
-  it('refuses a chain without those views, and an asset of another chain', async () => {
-    const verifyBinding = async () => true;
-    await expect(readGraphScopedAssetChainState(chain({ chainId: 'none' }), COPY, verifyBinding))
-      .rejects.toMatchObject({ code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' });
-    await expect(readGraphScopedAssetChainState(chain({ getKAContextGraphId: undefined }), COPY, verifyBinding))
-      .rejects.toMatchObject({ code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' });
-    await expect(readGraphScopedAssetChainState(chain({ chainId: 'hardhat:1' }), COPY, verifyBinding))
-      .rejects.toThrow('is not on local chain hardhat:1');
+  it.each(['root', 'short-root', 'version', 'unbound', 'wrong-binding', 'wrong-local-binding'])(
+    'refuses a held generation with %s evidence', async fault => {
+      const adapter = chain({
+        ...(fault === 'root' ? { getLatestMerkleRoot: async () => new Uint8Array(32) } : {}),
+        ...(fault === 'short-root' ? { getLatestMerkleRoot: async () => new Uint8Array(1) } : {}),
+        ...(fault === 'version' ? { getMerkleRootCount: async () => 4n } : {}),
+        ...(fault === 'unbound' ? { getKAContextGraphId: async () => 0n } : {}),
+      });
+      expect(await authenticate(adapter, fault === 'wrong-binding' ? '10' : '9', async () => fault !== 'wrong-local-binding')).toBe(false);
+    });
+
+  it('distinguishes unavailable chain evidence from an authenticated mismatch', async () => {
+    await expect(authenticate(chain({ chainId: 'none' }))).rejects.toMatchObject({ code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' });
+    await expect(authenticate(chain({ getKAContextGraphId: undefined }))).rejects.toMatchObject({ code: 'VM_CHAIN_VERIFICATION_UNSUPPORTED' });
+    await expect(authenticate(chain({ chainId: 'hardhat:1' }))).rejects.toThrow('is not on local chain hardhat:1');
   });
 
-  it('retries a transient read, and fails at the deadline', async () => {
+  it('retries a transient read and fails at the deadline', async () => {
     let reads = 0;
-    const flaky = chain({
-      getMerkleRootCount: async () => {
-        reads += 1;
-        if (reads === 1) throw createRpcTimeoutError('endpoint stalled');
-        return 3n;
-      },
-    });
-    await expect(readHeldGraphScopedAssetChainStateWithinDeadline({
-      chain: flaky, copy: COPY, verifyContextGraphBinding: async () => true, deadline: Date.now() + 30_000,
-    })).resolves.toMatchObject({ assertionVersion: 3n, bound: true, onChainContextGraphId: '9' });
+    const flaky = chain({ getMerkleRootCount: async () => {
+      reads += 1;
+      if (reads === 1) throw createRpcTimeoutError('endpoint stalled');
+      return 3n;
+    } });
+    await expect(authenticateHeldGraphScopedAssetWithinDeadline({
+      chain: flaky, copy: COPY, requiredBinding: '9', verifyContextGraphBinding: async () => true, deadline: Date.now() + 30_000,
+    })).resolves.toBe(true);
     expect(reads).toBe(2);
-
-    await expect(readHeldGraphScopedAssetChainStateWithinDeadline({
-      chain: chain(), copy: COPY, verifyContextGraphBinding: async () => true, deadline: Date.now() - 1,
+    await expect(authenticateHeldGraphScopedAssetWithinDeadline({
+      chain: chain(), copy: COPY, requiredBinding: '9', verifyContextGraphBinding: async () => true, deadline: Date.now() - 1,
     })).rejects.toThrow('exceeded its context-graph deadline');
   });
 
-  it('is read by the recovery authority with its memoised binding proof', async () => {
+  it('uses the recovery authority and its memoised binding proof', async () => {
     const verifyContextGraphBinding = vi.fn(async () => true);
-    const authority = createRecoveryAuthority({
-      chain: chain(),
-      verifyContextGraphBinding,
-      resolveAuthority: async () => { throw new Error('not read'); },
-      warn: () => {},
-    });
-
+    const authority = createRecoveryAuthority({ chain: chain(), verifyContextGraphBinding,
+      resolveAuthority: async () => { throw new Error('not read'); }, warn: () => {} });
     for (let read = 0; read < 2; read += 1) {
-      await expect(authority.readHeldAssetChainState!(COPY, Date.now() + 30_000))
-        .resolves.toEqual({ merkleRootHex: '5a'.repeat(32), assertionVersion: 3n, bound: true, onChainContextGraphId: '9' });
+      await expect(authority.authenticateHeld!(COPY, '9', Date.now() + 30_000)).resolves.toBe(true);
     }
     expect(verifyContextGraphBinding).toHaveBeenCalledOnce();
     expect(verifyContextGraphBinding.mock.calls[0]!.slice(0, 2)).toEqual([COPY.contextGraphId, '9']);
+    await expect(authority.authenticateHeld!(COPY, '10', Date.now() + 30_000)).resolves.toBe(false);
   });
 });
