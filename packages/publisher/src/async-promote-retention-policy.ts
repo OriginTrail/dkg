@@ -36,6 +36,10 @@
  * post-commit failure) and was then recovered and cancelled looks exactly like a job nobody ever claimed, and is deleted once the window has passed. The row cannot tell the two
  * apart; an operator who recovers a job to inspect it and then cancels it should expect it to age out. The cancelled class is therefore "no attempt visible on the row", not "no
  * attempt ever".
+ *
+ * ALSO FOR THE DELETE-GATE OWNER: "proven unstarted" means only that `promoteStarted` and `swmInserted` were false when the attempt ended (`recordUnstartedPromoteAttempt`), so effects of
+ * the preparation phase (`prepareShareSeal`; `clearPreparedShareCompletion` and the VM cleanup in `prepareAssertionPromoteRecovery`) still count as unstarted: the same evidence
+ * `canRetireBoundRejection` uses to certify a retired no-effect rejection.
  */
 import { hasUnfinishedBoundObligation } from './async-promote-ownership.js';
 import { isAutomaticallyRecoverablePostCommitFailure, requiresManualInspection } from './async-promote-recovery-policy.js';
