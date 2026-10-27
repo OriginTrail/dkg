@@ -73,6 +73,11 @@ async function walk(
   }
   return results;
 }
+/** The stored finish time of `id`, replaced by `day` (an `xsd:integer`, as the queue writes it). */
+async function setFinishIndex(w: World, id: string, day: number): Promise<void> {
+  await w.store.deleteByPattern({ subject: jobSubject(id), predicate: CONTROL_FINALIZED_AT, graph: DEFAULT_CONTROL_GRAPH_URI });
+  await w.store.insert([{ subject: jobSubject(id), predicate: CONTROL_FINALIZED_AT, object: `"${Math.round(day * DAY)}"${INTEGER}`, graph: DEFAULT_CONTROL_GRAPH_URI }]);
+}
 
 describe('a reason to keep an older record passes between two batches of one pass', () => {
   it('an older record dated after now whose date passes: the record behind it waits, and the next pass takes the two in order', async () => {
@@ -376,6 +381,55 @@ describe('the mark of a key: the oldest record the walk kept, in the key\'s own 
     const results = await walk(newRetention(w.publisher, { batchSize: 1 }), w, order, 'pass 1', async (batch) => { if (batch === 0) await w.store.delete([stray]); });
     expect(kept(results)).toEqual({ index_mismatch: 1 });
     expect(deletedIds(results)).toEqual(['j']);
+  });
+
+  it('the oldest record kept is met BEFORE a newer one kept: the mark stays on the oldest, and a record between the two waits', async () => {
+    // A (finished day 10), B (day 30), C (day 20), accepted in that order; wallet locks name A and C. The walk meets A (kept), C (kept), then B. The plan does not read the locks and
+    // B's finish rises after A's, so only the mark keeps B: it must still be A, the OLDER record kept, not C, the one kept last (which is behind B).
+    const order = ['A', 'B', 'C'];
+    let t = NOW;
+    const w = await world([fin('A', 'k', 1, 10), fin('B', 'k', 2, 30), fin('C', 'k', 3, 20)]);
+    await seedWalletLock(w.store, 'A', 'wallet-1', 'released');
+    await seedWalletLock(w.store, 'C', 'wallet-2', 'released');
+    const retention = newRetention(w.publisher, { batchSize: 1, now: () => t, rescanIntervalMs: 24 * HOUR });
+    const first = await walk(retention, w, order, 'pass 1');
+    expect(deletedIds(first)).toEqual([]);
+    expect(kept(first)).toEqual({ bound_obligation: 2, older_sibling_pending: 1 });
+    await w.store.deleteByPattern({ graph: DEFAULT_WALLET_LOCK_GRAPH_URI });         // the locks are gone: A and B go, C (finished before B) waits for the pass after
+    t = NOW + 30 * HOUR;
+    expect(deletedIds(await walk(retention, w, order, 'pass 2'))).toEqual(['A', 'B']);
+    t = NOW + 60 * HOUR;
+    expect(deletedIds(await walk(retention, w, order, 'pass 3'))).toEqual(['C']);
+  });
+
+  it('an older record kept because its stored finish time disagreed, repaired behind the cursor before the next batch: the records behind it still wait', async () => {
+    // A's payload says day 10, its stored finish time day 15: the walk meets it at day 15 and keeps it (index_mismatch). Before the next batch the index is repaired to day 10,
+    // behind the cursor, so the walk does not meet A again in this pass, and the plan of the key now reads A as an old finalized record it could delete: only the mark A left
+    // keeps B and C (the key's newest) while A stays. The next pass meets A at day 10 and takes the three in order.
+    const order = ['A', 'B', 'C'];
+    let t = NOW;
+    const w = await world([fin('A', 'k', 1, 10), fin('B', 'k', 2, 20), fin('C', 'k', 3, 30)],
+      (quads, spec) => (spec.id !== 'A' ? quads : quads.map((quad) => (quad.predicate === CONTROL_FINALIZED_AT ? { ...quad, object: `"${Math.round(15 * DAY)}"${INTEGER}` } : quad))));
+    const retention = newRetention(w.publisher, { batchSize: 1, now: () => t, rescanIntervalMs: 24 * HOUR });
+    const first = await walk(retention, w, order, 'pass 1', async (batch) => { if (batch === 0) await setFinishIndex(w, 'A', 10); });
+    expect(deletedIds(first)).toEqual([]);
+    expect(kept(first)).toEqual({ index_mismatch: 1, older_sibling_pending: 2 });
+    t = NOW + 30 * HOUR;
+    expect(deletedIds(await walk(retention, w, order, 'pass 2'))).toEqual(['A', 'B', 'C']);
+  });
+
+  it('a record met before an older one of its key waits and becomes the mark, so the newest record, met after the older one went, waits too (the mutation review\'s scenario)', async () => {
+    // A (accepted day 10, finished 31), B (day 20, finished 25), C (day 30, finished 32), one row per batch. The walk meets B first: A stands in front of it, B waits (the mark).
+    // Then A, which goes. Then C: with A gone, the plan of the key is B, C, rising, so only the mark B left keeps C (the key's newest) while B stays.
+    const order = ['A', 'B', 'C'];
+    let t = NOW;
+    const w = await world([fin('A', 'k', 10, 31), fin('B', 'k', 20, 25), fin('C', 'k', 30, 32)]);
+    const retention = newRetention(w.publisher, { batchSize: 1, now: () => t, rescanIntervalMs: 24 * HOUR });
+    const first = await walk(retention, w, order, 'pass 1');
+    expect(deletedIds(first)).toEqual(['A']);
+    expect(kept(first)).toEqual({ older_sibling_pending: 2 });
+    t = NOW + 30 * HOUR;
+    expect(deletedIds(await walk(retention, w, order, 'pass 2'))).toEqual(['B', 'C']);
   });
 
   it.each([
