@@ -566,7 +566,10 @@ export { classifyQueuedSharePreparation } from './bind-promote-recovery.js';
 export type { ACKDiagnosticSummary } from './ack-diagnostics.js';
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
 
-export { PromoteListRequestError, PROMOTE_LIST_DEFAULT_PAGE_SIZE, PROMOTE_LIST_MAX_PAGE_SIZE, type PromoteListRequestErrorCode } from './promote-list-cursor.js';
+export {
+  PromoteListRequestError, PromoteListStoredRowError, PROMOTE_LIST_DEFAULT_PAGE_SIZE, PROMOTE_LIST_MAX_PAGE_SIZE,
+  type PromoteListRequestErrorCode, type PromoteListStoredRowErrorCode,
+} from './promote-list-cursor.js';
 export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';
 
 export { assertionLifecycleWriteLockKey } from './store-write-locks.js';

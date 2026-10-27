@@ -5,7 +5,7 @@ import {
   expectBindings, integer, jobSubject, literal, parseIntegerLiteral, parseJobPayload,
 } from './async-promote-queue-utils.js';
 import { isSafeJobId } from './job-id.js';
-import { comparePromoteJobCursors, type PromoteJobCursor } from './promote-list-cursor.js';
+import { PromoteListStoredRowError, comparePromoteJobCursors, type PromoteJobCursor } from './promote-list-cursor.js';
 
 /**
  * Reads of the share queue's jobs by key (OT-RFC-73 P8a): the keyset page behind the paged listing and the post-commit sweep, and the
@@ -112,12 +112,12 @@ async function readKeyRows(
   for (let i = 0; i < keyed.length; i++) {
     const before = i === 0 ? read.cursor : keyed[i - 1]!.key;
     if (before && comparePromoteJobCursors(before, keyed[i]!.key) >= 0) {
-      throw new Error('Share job listing: the store returned job keys out of order or at/before the cursor');
+      throw new PromoteListStoredRowError('unordered_page', 'Share job listing: the store returned job keys out of order or at/before the cursor');
     }
   }
   const page = keyed.filter(({ onPage }) => onPage);
   const more = rows.length > read.pageSize;
-  if (more && page.length === 0) throw new Error('Share job listing: a full page held no share job to continue from');
+  if (more && page.length === 0) throw new PromoteListStoredRowError('unresumable_page', 'Share job listing: a full page held no share job to continue from');
   return { page: page.map(({ key, row }) => ({ key, row })), ...(more ? { next: page[page.length - 1]!.key } : {}) };
 }
 

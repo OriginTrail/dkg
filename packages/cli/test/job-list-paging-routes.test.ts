@@ -19,6 +19,8 @@ import { OxigraphStore, StoreSchedulerBusyError } from '@origintrail-official/dk
 import {
   LIFT_JOB_STATES,
   LiftJobPageError,
+  PromoteListRequestError,
+  PromoteListStoredRowError,
   TripleStoreAsyncLiftPublisher,
   TripleStoreAsyncPromoteQueue,
   encodeLiftJobPageCursor,
@@ -266,7 +268,9 @@ describe('GET /api/knowledge-assets/swm/share-jobs', () => {
   it('answers a fault in the stored rows with 500, not 400: one warn line, a fixed message, no job named', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     tamper = rows => [...rows].reverse();
-    await expect(queue.listPage({}, { pageSize: 5 })).rejects.toThrow(/^Share job listing: the store returned job keys out of order/);
+    await expect(queue.listPage({}, { pageSize: 5 })).rejects.toMatchObject({
+      name: 'PromoteListStoredRowError', code: 'unordered_page', message: expect.stringMatching(/^Share job listing: the store returned job keys out of order/),
+    });
     const response = await get(`${SHARE}?pageSize=5`);
     expect(response.status).toBe(500);
     expect(response.body).toEqual({ error: expect.stringMatching(/^The job list cannot be paged: a stored job row is unreadable or out of order/) });
@@ -279,12 +283,48 @@ describe('GET /api/knowledge-assets/swm/share-jobs', () => {
   it('keeps the queue\'s own message, which may name a job, out of the 500 body and the warn line', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const subject = 'urn:dkg:promote-queue:job:job-07';
-    vi.spyOn(queue, 'listPage').mockRejectedValue(new Error(`Share job listing: ${subject} cannot be placed in the page order`));
+    vi.spyOn(queue, 'listPage').mockRejectedValue(new PromoteListStoredRowError('unordered_page', `Share job listing: ${subject} cannot be placed in the page order`));
     const response = await get(`${SHARE}?pageSize=5`);
     expect(response.status).toBe(500);
     expect(JSON.stringify(response.body)).not.toMatch(/job-07|urn:dkg/);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]![0])).not.toMatch(/job-07|urn:dkg/);
+  });
+
+  // The queue's message is a diagnostic: rewording it must not change what the route does with the fault.
+  it.each([
+    ['unordered_page', 'Share listing: the store returned job keys in another order'],
+    ['unreadable_row', 'the last row of the page cannot be named by a cursor'],
+    ['unresumable_page', ''],
+    ['unordered_page', 'Share job listing: an old wording that still starts with the prefix'],
+  ] as const)('classifies a stored-row fault (%s) by its type, whatever its message says: %j', async (code, message) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(queue, 'listPage').mockRejectedValue(new PromoteListStoredRowError(code, message));
+    const response = await get(`${SHARE}?pageSize=5`);
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: expect.stringMatching(/^The job list cannot be paged: a stored job row is unreadable or out of order \(see the node log\)$/) });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/^\[list-paging\] GET \/api\/knowledge-assets\/swm\/share-jobs: .*\(stored_rows\); answering 500$/);
+  });
+
+  it('does not take the wording of a plain error for a fault in the stored rows: it keeps the daemon\'s own 500 and logs nothing', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(queue, 'listPage').mockRejectedValue(new Error('Share job listing: the store returned job keys out of order or at/before the cursor'));
+    const response = await get(`${SHARE}?pageSize=5`);
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: 'Share job listing: the store returned job keys out of order or at/before the cursor' });
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('answers the request\'s own error with 400 and its code, whatever its message says, with no warn line', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const refused = new PromoteListRequestError('PROMOTE_LIST_PAGE_SIZE_INVALID');
+    refused.message = 'Share job listing: reworded';
+    vi.spyOn(queue, 'listPage').mockRejectedValue(refused);
+    const response = await get(`${SHARE}?pageSize=5`);
+    expect(response.status).toBe(400);
+    expect(response.body).toEqual({ error: 'Share job listing: reworded', code: 'PROMOTE_LIST_PAGE_SIZE_INVALID' });
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('does not log or rewrite any other fault: an error of another kind keeps the daemon\'s own 500', async () => {
