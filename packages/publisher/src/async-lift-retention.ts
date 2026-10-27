@@ -461,11 +461,13 @@ class PublisherRetentionImpl implements PublisherRetention {
       const refused = await this.refusedSiblings(siblings, key, ordered);
       const plan = planKeyDeletion(siblings, key, record => (refused.has(record.jobId) ? 'index_mismatch' : judgeFinalizedRecord(record, now, this.cfg.policy)));
       const inKey = new Set(plan.order.map(record => record.jobId));
-      // Records leave a key oldest first. The scan walks by finish time, and the rows of one finish time not in the key's order (by subject when they are more than a batch,
-      // ORDER BY STR(?job); inside one batch, in the engine's order): so the records of the plan that go in THIS pass are those from the oldest up to the first whose finish is
-      // not strictly later than the one before it. A record accepted earlier but finished later (or at the same instant) may be met after its successors: those met before it,
-      // and every record behind them, wait for the next pass, when the ones in front are gone. The rule reads the records stored now, so a slice or batch boundary, or the mode,
-      // changes the answer in one case only: a tie, the older one met a hold earlier. Delete has removed it by then and the newer one leads the key; report, which removes nothing, keeps the newer one. Nothing leaves out of order.
+      // Records leave a key oldest first. The scan walks by finish time, and it meets the rows of one finish time in an order that need not be the key's (by subject when they
+      // are more than a batch, ORDER BY STR(?job); inside one batch, in the engine's order): so the records of the plan that go in THIS pass are those from the oldest up to the
+      // first whose finish is not strictly later than the one before it. A record accepted earlier but finished later (or at the same instant) may be met after its successors: those
+      // met before it wait, with every record behind them (the key's mark), for a later pass; it goes when the walk reaches it only if it is in such a run and before the mark. The rule reads
+      // the records stored now, so a slice or batch boundary, or the mode, changes the answer in one case only: a tie whose older record was judged in an earlier hold. The newer one
+      // goes in this pass only if delete removed the older one before the hold that judges the newer one (a removal the hold budget deferred is retried at the front of the next
+      // hold); otherwise, and always in report, which removes nothing, it waits. Nothing leaves out of order.
       const inOrder = new Set<string>();
       for (let last = Number.NEGATIVE_INFINITY, i = 0; i < plan.prefix.length && plan.prefix[i]!.timestamps.finalizedAt! > last; i++) {
         last = plan.prefix[i]!.timestamps.finalizedAt!;
