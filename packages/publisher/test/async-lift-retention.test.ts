@@ -12,15 +12,16 @@ import {
 } from '../src/index.js';
 import { PromoteAdmissionCoordinator } from '../src/promote-admission.js';
 import {
-  CONTROL_FINALIZED_AT, CONTROL_LIFECYCLE_KEY, CONTROL_PAYLOAD, CONTROL_STATUS, DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI, jobSubject,
+  CONTROL_FINALIZED_AT, CONTROL_LIFECYCLE_KEY, CONTROL_PAYLOAD, CONTROL_STATUS, DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI, jobSubject, requestSubject,
 } from '../src/async-lift-control-plane.js';
+import { LIFT_JOB_SUBJECT_PREFIX, buildLiftRetentionScanQuery, buildLiftRetentionTieQuery } from '../src/async-lift-retention-scan.js';
 import { LiftLegacyScanMemo } from '../src/lift-legacy-scan-memo.js';
 import { LiftJobPayloadUnreadableError } from '../src/lift-job-payload-unreadable.js';
 import { lifecycleKeyOfJob } from '../src/lift-job-store-selectors.js';
 import {
   DAY, NOW, WINDOW, at, bySource, createRetentionTemplates, fin, graphFingerprint, keyedQuads, present, seedKeyed, seedWalletLock, spyStore, stampKeyed, type KeyedSpec, type RetentionTemplates,
 } from './_helpers/lift-retention-fixtures.js';
-import { RETENTION, captureLogger, drain, newRetention, verifiedSubjects } from './_helpers/lift-retention-sweep.js';
+import { RETENTION, captureLogger, drain, newRetention, removedJobIds, verifiedSubjects } from './_helpers/lift-retention-sweep.js';
 
 let templates: RetentionTemplates;
 beforeAll(async () => { templates = await createRetentionTemplates(); });
@@ -569,6 +570,136 @@ describe('finish times a JS number cannot hold exactly, and repeated rows (onlin
     expect(kept(results), where).toEqual({ bound_obligation: 1 });
     expect(mode === 'delete' ? deletedIds(results) : wouldDeleteIds(results), where).toEqual(['E']);
     expect(await present(store, 'J'), where).toBe(before);
+  });
+});
+
+describe('subjects that are not publisher jobs cannot stall a pass (verification of online review round 1: the share scan\'s subject filter, P10a cdfd3448a)', () => {
+  // A foreign writer's subject that carries the finalized status and an integer finish time. A blank node has no STR, so ORDER BY STR(?job) leaves its rows in engine order and the
+  // key check of the tie walk rejects them; an IRI outside the job prefix that mixes astral and high BMP characters is ordered by code point in Oxigraph and by UTF-16 in the key check.
+  // Before the scan read IRIs under the job prefix only, either was an anomaly on every call, and the job behind it was never reached.
+  const XSD_INT = '^^<http://www.w3.org/2001/XMLSchema#integer>';
+  const T = Math.round(10 * DAY);
+  const E = fin('E', 'ke', 20);
+  const foreign = (subject: string, finalizedAt = T): Quad[] => [
+    { subject, predicate: CONTROL_STATUS, object: '"finalized"', graph: DEFAULT_CONTROL_GRAPH_URI },
+    { subject, predicate: CONTROL_FINALIZED_AT, object: `"${finalizedAt}"${XSD_INT}`, graph: DEFAULT_CONTROL_GRAPH_URI },
+  ];
+  const tieGroup = (subjects: readonly string[]): Quad[] => subjects.flatMap((subject) => foreign(subject));
+  async function storeWith(quads: readonly Quad[]): Promise<OxigraphStore> {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await store.createGraph(DEFAULT_CONTROL_GRAPH_URI);
+    await store.insert([...quads]);
+    return store;
+  }
+  /** Every triple of the control graph except those of the real jobs named in `jobs` (job and request subjects), as sorted lines: what a sweep must leave as it found it. */
+  const notJobs = async (store: OxigraphStore, ...jobs: string[]): Promise<string> => {
+    const skip = new Set(jobs.flatMap((id) => [jobSubject(id), requestSubject(id)]));
+    const r = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${DEFAULT_CONTROL_GRAPH_URI}> { ?s ?p ?o } }`);
+    return r.type === 'bindings' ? r.bindings.filter((b) => !skip.has(b['s']!)).map((b) => `${b['s']} ${b['p']} ${b['o']}`).sort().join('\n') : '';
+  };
+  const calls = async (retention: ReturnType<typeof newRetention>, max = 12): Promise<PublisherRetentionBatchResult[]> => {
+    const results: PublisherRetentionBatchResult[] = [];
+    for (let i = 0; i < max; i++) { const res = await retention.runBatch(); results.push(res); if (!res.hasMore || res.error) break; }
+    return results;
+  };
+  const passOf = (mode: 'delete' | 'report', n: number) => (mode === 'delete' ? { deleted: { finalized: n }, wouldDelete: { finalized: 0 } } : { deleted: { finalized: 0 }, wouldDelete: { finalized: n } });
+
+  it.each(['delete', 'report'] as const)('%s mode: five blank nodes sharing one finish time (a tie group larger than the batch) in front of an eligible job: the job is reached, the pass completes, no anomaly, the blank nodes are untouched', async (mode) => {
+    for (const batchSize of [1, 2, 3, 4]) {
+      const store = await storeWith([...tieGroup(['_:b1', '_:b2', '_:b3', '_:b4', '_:b5']), ...keyedQuads(templates, E)]);
+      const foreignBefore = await notJobs(store, 'E');
+      expect(foreignBefore.split('\n')).toHaveLength(10);
+      const retention = newRetention(publisherOver(store), { mode, batchSize });
+      const results = await calls(retention);
+      const at = `batch size ${batchSize}: ${results.length} calls, anomalies ${results.map((r) => r.anomalies).join(',')}, scanned ${results.map((r) => r.scanned).join(',')}`;
+      expect(results.at(-1)!.hasMore, at).toBe(false);
+      expect(results.every((r) => r.anomalies === 0 && r.error === undefined), at).toBe(true);
+      expect(retention.counters().anomalies, at).toBe(0);
+      expect(results.filter((r) => r.passCompleted), at).toHaveLength(1);
+      expect(results.reduce((n, r) => n + r.scanned, 0), `${at}: the blank nodes are not candidates, the job is`).toBe(1);
+      expect(mode === 'delete' ? deletedIds(results) : wouldDeleteIds(results), at).toEqual(['E']);
+      expect((await present(store, 'E')) !== '', at).toBe(mode !== 'delete');
+      expect(retention.counters().lastCompletePass, at).toMatchObject({ ...passOf(mode, 1), kept: { unreadable: 0 } });
+      expect(await notJobs(store, 'E'), `${at}: the blank nodes are untouched`).toBe(foreignBefore);
+    }
+  });
+
+  it('blank nodes among distinct finish times (the range scan, no tie group) are no candidates either: never judged, never counted, never deleted', async () => {
+    const store = await storeWith([...foreign('_:early', Math.round(5 * DAY)), ...foreign('_:mid', Math.round(15 * DAY)), ...keyedQuads(templates, fin('E1', 'k1', 10)), ...keyedQuads(templates, fin('E2', 'k2', 20))]);
+    const foreignBefore = await notJobs(store, 'E1', 'E2');
+    const retention = newRetention(publisherOver(store), { batchSize: 2 });
+    const results = await calls(retention);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every((r) => r.anomalies === 0 && r.error === undefined)).toBe(true);
+    expect(results.reduce((n, r) => n + r.scanned, 0)).toBe(2);
+    expect(retention.counters().lastCompletePass).toMatchObject({ scanned: 2, deleted: { finalized: 2 }, kept: { unreadable: 0 } });
+    expect(await notJobs(store, 'E1', 'E2')).toBe(foreignBefore);
+  });
+
+  // The engine labels a blank node afresh in every store, so where its rows land among the real jobs of a group varies from store to store: eight stores.
+  it('a tie group that mixes blank nodes and real jobs: every real job of the group is judged once, the blank nodes are skipped (eight stores, the engine labels blank nodes afresh)', async () => {
+    const jobs = ['m1', 'm2', 'm3', 'm4'];
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const store = await storeWith([...tieGroup(['_:x1', '_:x2', '_:x3']), ...jobs.flatMap((id) => keyedQuads(templates, { ...fin(id, `key-${id}`, 5), finalizedAt: T }))]);
+      const foreignBefore = await notJobs(store, ...jobs);
+      const spy = spyStore(store);
+      const results = await calls(newRetention(publisherOver(spy.store), { batchSize: 2 }), 20);
+      expect(results.at(-1)!.hasMore, `store ${attempt}`).toBe(false);
+      expect(results.every((r) => r.anomalies === 0 && r.error === undefined), `store ${attempt}`).toBe(true);
+      expect(verifiedSubjects(spy.log).sort(), `store ${attempt}`).toEqual(jobs.map((id) => jobSubject(id)));
+      for (const id of jobs) expect(await present(store, id), `store ${attempt}: ${id}`).toBe('');
+      expect(await notJobs(store, ...jobs), `store ${attempt}: the three blank nodes are as they were`).toBe(foreignBefore);
+    }
+  });
+
+  // An IRI outside the job prefix is no publisher job either. An ASCII one was already kept safely (as unreadable, once each), but one that mixes astral and high BMP characters
+  // stalled the pass: an engine orders it by code point and the key check by UTF-16.
+  it.each(['delete', 'report'] as const)('%s mode: IRI subjects with another prefix sharing one finish time (ASCII, and mixing astral and high BMP characters), in front of an eligible job: not read, the job is reached, no anomaly, untouched', async (mode) => {
+    const others = [
+      ['ASCII', ['urn:other:job:o1', 'urn:dkg:publisher:lift-request:o2', 'urn:dkg:publisher:lift-jobs:o3', 'http://example.org/job/o4', 'urn:dkg:publisher:lift-job']],
+      ['astral and high BMP', ['urn:other:～', 'urn:other:\u{1F600}', 'urn:other:a', 'urn:other:\u{10000}', 'urn:other:｟']],
+    ] as const;
+    for (const [label, subjects] of others) for (const batchSize of [1, 2, 3]) {
+      const store = await storeWith([...tieGroup(subjects), ...keyedQuads(templates, E)]);
+      const foreignBefore = await notJobs(store, 'E');
+      const spy = spyStore(store);
+      const retention = newRetention(publisherOver(spy.store), { mode, batchSize });
+      const results = await calls(retention);
+      const at = `${label}, batch size ${batchSize}: ${results.length} calls, anomalies ${results.map((r) => r.anomalies).join(',')}`;
+      expect(results.at(-1)!.hasMore, at).toBe(false);
+      expect(results.every((r) => r.anomalies === 0 && r.error === undefined), at).toBe(true);
+      expect(results.reduce((n, r) => n + r.scanned, 0), `${at}: the foreign subjects are not candidates`).toBe(1);
+      expect(verifiedSubjects(spy.log), `${at}: only the publisher job IRI is ever verified`).toEqual([jobSubject('E')]);
+      expect(removedJobIds(spy.log), at).toEqual(mode === 'delete' ? ['E'] : []);
+      expect(retention.counters().lastCompletePass, at).toMatchObject({ ...passOf(mode, 1), kept: { unreadable: 0 } });
+      expect(await notJobs(store, 'E'), at).toBe(foreignBefore);
+    }
+  });
+
+  // The limit that stays: under the job prefix a non-ASCII id needs a foreign writer (the queue's ids are ASCII, `isSafeJobId`), and an engine that orders such ids by code point
+  // disagrees with the key check, which reads UTF-16. The scan fails closed: an anomaly on every call that meets the pair, no cursor moves, nothing foreign is touched.
+  it('in-prefix IRI subjects with astral and high BMP characters (needs a foreign writer) fail closed: anomalies, no pass completes, nothing foreign is touched', async () => {
+    const store = await storeWith([...tieGroup(['～', '\u{1F600}', 'a'].map((id) => jobSubject(id))), ...keyedQuads(templates, E)]);
+    const foreignBefore = await notJobs(store, 'E');
+    const retention = newRetention(publisherOver(store), { mode: 'report', batchSize: 1 });
+    const results = await calls(retention, 6);
+    expect(results.at(-1)!.hasMore).toBe(true);
+    expect(results.some((r) => r.anomalies > 0)).toBe(true);
+    expect(results.every((r) => r.error === undefined)).toBe(true);
+    expect(retention.counters().lastCompletePass).toBeUndefined();
+    expect(await notJobs(store, 'E')).toBe(foreignBefore);
+  });
+
+  it('the scan and tie queries select IRI subjects under the job prefix only', () => {
+    const prefix = `FILTER (STRSTARTS(STR(?job), ${JSON.stringify(LIFT_JOB_SUBJECT_PREFIX)}))`;
+    for (const query of [
+      buildLiftRetentionScanQuery(DEFAULT_CONTROL_GRAPH_URI, NOW - WINDOW, 5), buildLiftRetentionScanQuery(DEFAULT_CONTROL_GRAPH_URI, NOW - WINDOW, 5, { after: 7 }),
+      buildLiftRetentionTieQuery(DEFAULT_CONTROL_GRAPH_URI, 42, 10), buildLiftRetentionTieQuery(DEFAULT_CONTROL_GRAPH_URI, 42, 10, jobSubject('a')),
+    ]) {
+      expect(query).toContain('FILTER (isIRI(?job))');
+      expect(query).toContain(prefix);
+    }
   });
 });
 

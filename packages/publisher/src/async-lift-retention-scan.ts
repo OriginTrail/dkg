@@ -14,13 +14,18 @@
  * larger than a batch is covered. The scan relies on the engine honouring ORDER BY / LIMIT; the result is checked (sorted, after the cursor, within the cutoff)
  * and a violation is reported in `anomalies` and never advances the cursor.
  *
- * CANDIDATES. A row is read only if its stored `finalizedAt` is an `xsd:integer` term of at least 0 (both queries carry the same filter, so they select the same rows; the
- * share scan has the same rule, async-promote-retention-scan.ts). The cursor holds a JS number and the engine compares terms exactly, so a term a double cannot represent reads
- * back as a number the engine does not consider equal to it: `"100.0000000000000001"^^xsd:decimal` reads as 100, the tie walk at 100 does not return it and the range scan
- * `> 100` does, so the cursor would never leave it, and every eligible job behind it would starve. An integer in [0, cutoff] is exact in a double, so the number the cursor
- * holds IS the term (the queue writes nothing else). A job whose only finish times are other terms (a decimal, a double, a plain literal, a negative number) is never a
- * candidate: it is not read, judged, counted or deleted, so it stays, and so does every newer record of its key, which the sweep keeps as `older_sibling_kept` because the
- * stored-index check of older siblings reads the same rule (async-lift-retention.ts).
+ * CANDIDATES. A row is read only if its subject is an IRI under the queue's job prefix and its stored `finalizedAt` is an `xsd:integer` term of at least 0 (both queries carry
+ * the same filters, so they select the same rows; the share scan has the same rules, async-promote-retention-scan.ts). A blank node has no `STR`, so `ORDER BY STR(?job)` leaves
+ * its rows in engine order and the key check of the tie walk rejects them: an anomaly on every call, and the cursor never moves. An IRI outside the prefix is no job and could
+ * only be kept; an ASCII one was harmless, but one that mixes astral and high BMP characters is ordered by code point in Oxigraph and by UTF-16 in the key check, with the same
+ * effect. Neither is a candidate, so neither is read, judged or counted. (Under the prefix such an id needs a foreign writer, the queue's ids being ASCII, `isSafeJobId`; the
+ * scan then fails closed as for any reordering: an anomaly on every call that meets the pair, no cursor moves, nothing is deleted on that answer.)
+ * The cursor holds a JS number and the engine compares terms exactly, so a term a double cannot represent reads back as a number the engine does not consider equal to it:
+ * `"100.0000000000000001"^^xsd:decimal` reads as 100, the tie walk at 100 does not return it and the range scan `> 100` does, so the cursor would never leave it, and every
+ * eligible job behind it would starve. An integer in [0, cutoff] is exact in a double, so the number the cursor holds IS the term (the queue writes nothing else). A job whose
+ * only finish times are other terms (a decimal, a double, a plain literal, a negative number) is never a candidate: it is not read, judged, counted or deleted, so it stays, and
+ * so does every newer record of its key, which the sweep keeps as `older_sibling_kept` because the stored-index check of older siblings reads the same rule
+ * (async-lift-retention.ts).
  *
  * REPEATED ROWS. One subject can still come back as several rows: an engine that keeps two integer lexical forms of one value apart (`"100"`, `"0100"`; Oxigraph merges
  * them) answers it once per term, and a job indexed at two distinct integers (the queue never writes that) comes back at each. The rows of a subject in one answer are collapsed
@@ -52,6 +57,8 @@ export interface LiftRetentionScanCursor {
 const num = (n: number): string => (Number.isFinite(n) ? String(n) : '0');
 /** The terms a scan may read: exact integers, which a JS number holds without loss (see CANDIDATES). Both scan queries carry it, so they select the same rows. */
 const EXACT_FINISH_TIME = `FILTER (DATATYPE(?finalizedAt) = <${XSD_INTEGER}> && ?finalizedAt >= 0)`;
+/** The subjects a scan may read: IRIs under the queue's job prefix (see CANDIDATES: a blank node, or an IRI elsewhere, could stall the tie walk). Both scan queries carry it. */
+const JOB_SUBJECT_ONLY = `FILTER (isIRI(?job)) FILTER (STRSTARTS(STR(?job), ${literal(LIFT_JOB_SUBJECT_PREFIX)}))`;
 const INTEGER_TERM_END = `"^^<${XSD_INTEGER}>`;
 /** The finish time a stored term holds when the scan reads it (an `xsd:integer` of at least 0, exact in a JS number), else undefined: the sweep's index checks use the same rule. */
 export function exactFinishTime(term: string | undefined): number | undefined {
@@ -68,13 +75,13 @@ export function exactFinishTime(term: string | undefined): number | undefined {
  */
 export function buildLiftRetentionScanQuery(graph: string, cutoff: number, limit: number, cursor: LiftRetentionScanCursor = {}): string {
   const lower = cursor.after === undefined ? '' : ` FILTER (?finalizedAt > ${num(cursor.after)})`;
-  return `SELECT ?job ?finalizedAt WHERE { GRAPH <${graph}> { ?job <${CONTROL_STATUS}> ${literal('finalized')} ; <${CONTROL_FINALIZED_AT}> ?finalizedAt . ${EXACT_FINISH_TIME} FILTER (?finalizedAt <= ${num(cutoff)})${lower} } } ORDER BY ?finalizedAt LIMIT ${limit + 1}`;
+  return `SELECT ?job ?finalizedAt WHERE { GRAPH <${graph}> { ?job <${CONTROL_STATUS}> ${literal('finalized')} ; <${CONTROL_FINALIZED_AT}> ?finalizedAt . ${EXACT_FINISH_TIME} ${JOB_SUBJECT_ONLY} FILTER (?finalizedAt <= ${num(cutoff)})${lower} } } ORDER BY ?finalizedAt LIMIT ${limit + 1}`;
 }
 
 /** The finalized rows that share exactly one `finalizedAt`, in key order after `afterKey` (only used inside a group larger than one batch). */
 export function buildLiftRetentionTieQuery(graph: string, finalizedAt: number, limit: number, afterKey?: string): string {
   const after = afterKey === undefined ? '' : ` FILTER (STR(?job) > ${literal(afterKey)})`;
-  return `SELECT ?job ?finalizedAt WHERE { GRAPH <${graph}> { ?job <${CONTROL_STATUS}> ${literal('finalized')} ; <${CONTROL_FINALIZED_AT}> ?finalizedAt . ${EXACT_FINISH_TIME} FILTER (?finalizedAt = ${num(finalizedAt)})${after} } } ORDER BY STR(?job) LIMIT ${limit + 1}`;
+  return `SELECT ?job ?finalizedAt WHERE { GRAPH <${graph}> { ?job <${CONTROL_STATUS}> ${literal('finalized')} ; <${CONTROL_FINALIZED_AT}> ?finalizedAt . ${EXACT_FINISH_TIME} ${JOB_SUBJECT_ONLY} FILTER (?finalizedAt = ${num(finalizedAt)})${after} } } ORDER BY STR(?job) LIMIT ${limit + 1}`;
 }
 
 export interface LiftScanRow { readonly iri: string; readonly finalizedAt: number }
