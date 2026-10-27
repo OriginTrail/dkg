@@ -226,6 +226,27 @@ describe('the report gauge: the would-delete count by class of the latest comple
     expect(retention.counters().lastCompletePass).toEqual(pass);                         // ... but not part of the complete pass
   });
 
+  it('a safety rescan starts a clean tally: rows a parked sweep judged since the last complete pass are counted once, by the next complete pass, not twice', async () => {
+    const store = new OxigraphStore();
+    await standardStore(store);
+    let t = NOW;
+    const retention = newRetention(store, { mode: 'report', now: () => t, batchSize: 100, rescanIntervalMs: 10_000 });
+    await drain(retention);
+    const pass1 = retention.counters().lastCompletePass!;
+    expect(pass1).toMatchObject({ scanned: 10, wouldDelete: { succeeded: 3, cancelled: 2, retired_no_effect: 2 } });
+    await put(store, mk('late-1', 'succeeded', {}, W - 1000), mk('late-2', 'succeeded', {}, W - 500));
+    t += 2000;                                                                           // both are old enough now; the 10 s safety interval has not elapsed
+    expect(await retention.runBatch()).toMatchObject({ wouldDelete: 2, passCompleted: false });   // the parked sweep judges them: they belong to no complete pass yet
+    expect(retention.counters().lastCompletePass).toEqual(pass1);
+    t += 20_000;                                                                         // the safety rescan: a new pass walks every row again
+    await drain(retention);
+    const pass2 = retention.counters().lastCompletePass!;
+    expect(pass2.completedAt).toBe(t);
+    expect(pass2.scanned).toBe(12);                                                      // each row once (not 14: the two the parked sweep judged would be counted again)
+    expect(pass2.wouldDelete).toEqual({ succeeded: 5, cancelled: 2, retired_no_effect: 2 });   // not 7 succeeded
+    expect(pass2.kept).toEqual(pass1.kept);
+  });
+
   it('in delete mode the pass summary carries what was deleted, and the would-delete gauge is zero', async () => {
     const store = new OxigraphStore();
     await standardStore(store);

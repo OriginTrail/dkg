@@ -266,6 +266,28 @@ describe('the hold budget', () => {
     expect(retention.counters().sliceSize).toBe(6);
   });
 
+  it('halves the slice after a hold past the budget even when nothing was deferred: a slow verify in report mode, which never deletes', async () => {
+    const t = timed({ ms: 60 });
+    await put(t.inner, ...oldJobs(20));
+    const retention = newRetention(t.store, { mode: 'report', batchSize: 20, sliceSize: 8, monotonicNow: t.mono });
+    const res = await retention.runBatch();
+    expect(res).toMatchObject({ wouldDelete: 20, deleted: 0 });
+    expect(verifySizes(t.log)).toEqual([8, 4, 2, 1, 1, 1, 1, 1, 1]);                    // 8, then half of it after every hold of 60 ms, down to one
+    expect(res).toMatchObject({ holds: 9, holdBudgetExceeded: 9 });
+    expect(retention.counters().sliceSize).toBe(1);
+  });
+
+  it('halves the slice after a hold past the budget in delete mode too, when a slow verify finds nothing to delete (so nothing is deferred)', async () => {
+    const t = timed({ ms: 60 });
+    await put(t.inner, ...Array.from({ length: 15 }, (_, i) => mk(`fatal-${String(i).padStart(2, '0')}`, 'failed', {}, 10 * W + i)));
+    const retention = newRetention(t.store, { batchSize: 15, sliceSize: 8, monotonicNow: t.mono });
+    const res = await retention.runBatch();
+    expect(res).toMatchObject({ scanned: 15, deleted: 0, kept: { failed_retained: 15 }, holdBudgetExceeded: 4 });
+    expect(verifySizes(t.log)).toEqual([8, 4, 2, 1]);
+    expect(deletesPerHold(t.log)).toEqual([0, 0, 0, 0]);
+    expect(retention.counters().sliceSize).toBe(1);
+  });
+
   it('verifies again the jobs a hold had no time for: a deferred job another operation put back to work is kept, never deleted unjudged', async () => {
     const t = timed({ ms: 20 });
     await put(t.inner, ...oldJobs(6));                                                  // deleted oldest first: old-005 is the first, old-000 the last

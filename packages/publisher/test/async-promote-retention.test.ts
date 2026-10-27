@@ -3,9 +3,10 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import { PROMOTE_STATE, PROMOTE_UPDATED_AT, PROMOTE_PAYLOAD, jobSubject, literal, integer } from '../src/async-promote-queue-utils.js';
 import { buildRetentionScanQuery, buildRetentionTieQuery, buildRetentionVerifyQuery } from '../src/async-promote-retention-scan.js';
+import { PROMOTE_NO_EFFECT_REJECTION_CODE } from '../src/promote-no-effect-rejection.js';
 import { SHARE_RETENTION_DEFAULTS, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import {
-  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, W, WF,
+  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, W, WF, binding, noPending,
   decide, deletedSubjects, drain, insertQuads, mk, newRetention, pick, present, put, registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, from,
   captureLogger, policy, standInForTheQueue, type Kind, type Quads, type QueryResult,
 } from './_helpers/share-retention-fixtures.js';
@@ -588,6 +589,46 @@ describe('keep rules the policy adds to the prototype', () => {
     ['a cancelled job that swm-inserted', mk('c4', 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, swmInserted: true } }), 'failed_retained'],
     ['a bound cancelled job (it owns a recovery obligation)', mk('c5', 'failed', { reason: 'cancelled', bound: true }), 'unfinished_bound_obligation'],
   ])('keeps %s', (_name, job, reason) => { expect(decide(job as ReturnType<typeof mk>)).toEqual({ delete: false, reason }); });
+
+  describe('the diagnostic code alone does not make a retired no-effect rejection: the certification the class requires does', () => {
+    const b = (id: string) => binding(id);
+    const proof = (id: string) => ({ sealDigest: b(id).sealDigest, operationId: b(id).intent.operationId });
+    const lastError = (extra: Record<string, unknown>) => ({ message: 'no effect', retryable: false, classification: 'cap_exceeded', recordedAt: 1, diagnosticCode: PROMOTE_NO_EFFECT_REJECTION_CODE, ...extra });
+    const failedWith = (id: string, over: Record<string, unknown>, error: Record<string, unknown>) =>
+      mk(id, 'failed', { commitMarker: NO_MARKERS, preparationAttempts: 0, attempt: { count: 1, maxRetries: 5, lastError: lastError(error) }, ...over });
+    const unbound = { request: { contextGraphId: 'cg', assertionName: 'n-x', entities: 'all', agentAddress: AG } };
+    const bound = (id: string) => ({ request: { contextGraphId: 'cg', assertionName: `n-${id}`, entities: 'all', agentAddress: AG, recoveryBinding: b(id) } });
+
+    it('sanity: the certified fixture is the retired class, and the same job without its certification is not', () => {
+      expect(decide(retired('ok'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+      expect(decide(failedWith('ok', bound('ok'), { noEffectProof: proof('ok') }))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+    });
+
+    it.each([
+      ['a job with no recovery binding that carries only the code (no proof)', 'u1', () => ({ ...unbound }), () => ({}), 'failed_retained'],
+      ['a job with no recovery binding whose error even carries a proof', 'u2', () => ({ ...unbound }), () => ({ noEffectProof: proof('u2') }), 'failed_retained'],
+      ['an unbound job with the code, fully "certified" by every other field', 'u3', () => ({ ...unbound, formatVersion: 4 }), () => ({ noEffectProof: proof('u3') }), 'failed_retained'],
+      ['a bound job with the code but no proof', 'b1', () => bound('b1'), () => ({}), 'unfinished_bound_obligation'],
+      ['a bound job whose proof names another seal', 'b2', () => bound('b2'), () => ({ noEffectProof: { ...proof('b2'), sealDigest: `0x${'ab'.repeat(32)}` } }), 'unfinished_bound_obligation'],
+      ['a bound job whose proof names another operation', 'b3', () => bound('b3'), () => ({ noEffectProof: { ...proof('b3'), operationId: 'op-other' } }), 'unfinished_bound_obligation'],
+      ['a bound job with the code and a proof but a retryable error', 'b4', () => bound('b4'), () => ({ retryable: true, noEffectProof: proof('b4') }), 'unfinished_bound_obligation'],
+      ['a bound job with the code and a proof but another classification', 'b5', () => bound('b5'), () => ({ classification: 'fatal', noEffectProof: proof('b5') }), 'unfinished_bound_obligation'],
+      ['a bound job with the code and a proof but an swm insert on record', 'b6', () => ({ ...bound('b6'), commitMarker: { ...NO_MARKERS, swmInserted: true } }), () => ({ noEffectProof: proof('b6') }), 'unfinished_bound_obligation'],
+    ])('keeps %s, however old', (_name, id, over, error, reason) => {
+      const job = failedWith(id, over() as Record<string, unknown>, error() as Record<string, unknown>);
+      expect(decide(job)).toEqual({ delete: false, reason });
+      expect(decide(job, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason });
+    });
+
+    it('and a batch keeps such a job in delete mode while the certified one beside it goes', async () => {
+      const store = new OxigraphStore();
+      await put(store, failedWith('u1', unbound, {}), retired('ok'), failedWith('ok-unbound-twin', unbound, { noEffectProof: proof('ok') }));
+      const res = await newRetention(store, { batchSize: 10 }).runBatch();
+      expect(res.deletedJobs.map(j => ({ id: j.jobId, class: j.jobClass }))).toEqual([{ id: 'ok', class: 'retired_no_effect' }]);
+      expect(res.kept.failed_retained).toBe(2);
+      expect([...(await storedIds(store))].sort()).toEqual(['ok-unbound-twin', 'u1']);
+    });
+  });
 
   it('a job with an unrecognised state string is kept (unknown_state), and the log of a batch names no payload', async () => {
     expect(decide(mk('u', 'archived' as never))).toEqual({ delete: false, reason: 'unknown_state' });
