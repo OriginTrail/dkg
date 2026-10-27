@@ -22,7 +22,9 @@ import { PromoteListRequestError } from '../src/promote-list-cursor.js';
 import {
   PromoteJobConflictError, type AsyncPromoteQueueConfig, type PromoteJob, type PromoteJobPage, type PromoteJobState, type PromoteListFilter,
 } from '../src/async-promote-queue-types.js';
-import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_STATE, comparePromoteJobs, jobSubject, serializeJobRecord, uniquenessLookupKeys } from '../src/async-promote-queue-utils.js';
+import {
+  DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_ENQUEUED_AT, PROMOTE_STATE, comparePromoteJobs, integer, jobSubject, serializeJobRecord, uniquenessLookupKeys,
+} from '../src/async-promote-queue-utils.js';
 import { isAutomaticallyRecoverablePostCommitFailure, promoteFailureTransition } from '../src/async-promote-recovery-policy.js';
 import { POST_COMMIT_MARKERS } from '../src/promote-post-commit-sweep.js';
 import { PROMOTE_POST_COMMIT_FAILURE_MESSAGE } from '../src/promote-replay-safety.js';
@@ -893,17 +895,17 @@ describe('the post-commit sweep reads only its candidates and decides them as be
     expect(decided.every((call) => call.options?.controlQueue === 'share')).toBe(true);
   });
 
-  describe('decides its candidates in the queue\'s own order, ties included', () => {
-    const failed = (id: string, at: number, over: Partial<ShareRowSpec> = {}): ShareRowSpec =>
-      ({ id, state: 'failed', enqueuedAt: NOW + at, lastError: code, attemptCount: 1, maxRetries: 3, ...over });
-    const sweepOf = async (specs: readonly ShareRowSpec[]) => {
-      const { queue, store, setNow } = await seeded(specs);
-      const now = NOW + 77_000;
-      setNow(now);
-      return { queue, store, now, expected: expectedSweep(specs, now) };
-    };
-    const storedAs = async (store: TripleStore, id: string) => (await readEveryShareJob(store)).find((job) => job.jobId === id)!;
+  const failed = (id: string, at: number, over: Partial<ShareRowSpec> = {}): ShareRowSpec =>
+    ({ id, state: 'failed', enqueuedAt: NOW + at, lastError: code, attemptCount: 1, maxRetries: 3, ...over });
+  const sweepOf = async (specs: readonly ShareRowSpec[]) => {
+    const { queue, store, setNow } = await seeded(specs);
+    const now = NOW + 77_000;
+    setNow(now);
+    return { queue, store, now, expected: expectedSweep(specs, now) };
+  };
+  const storedAs = async (store: TripleStore, id: string) => (await readEveryShareJob(store)).find((job) => job.jobId === id)!;
 
+  describe('decides its candidates in the queue\'s own order, ties included', () => {
     it('requeues the localeCompare-first of two tied jobs that share an assertion and defers the other, though code point order puts it second', async () => {
       // 'a' < 'B' by locale, 'B' < 'a' by code point: the order the previous sweep decided in (comparePromoteJobs) is what picks the winner.
       expect('a'.localeCompare('B')).toBeLessThan(0);
@@ -955,6 +957,59 @@ describe('the post-commit sweep reads only its candidates and decides them as be
       expect((await queue.recoverPostCommitFailures()).map((event) => event.jobId)).toEqual(['stays', 'last']);
       expect(moved).toBeGreaterThan(0);
       expect(await storedAs(raw, 'moved')).toEqual(shareRow(operator));
+    });
+  });
+
+  it('reads the clock once per decide turn and not once per sweep: with a moving clock the later turns requeue to a later time (documented)', async () => {
+    // The previous sweep read the clock once. Each turn now reads it in its own hold, so a clock that moves between turns stamps their rows later.
+    const specs = Array.from({ length: 60 }, (_, i) => failed(`turn-${String(i).padStart(2, '0')}`, i, { name: `turn-asset-${i}` }));
+    let moveClock = () => {};
+    let turns = 0;
+    const tapped = tapStore(openStore(), { after: (call, result) => {
+      if (call.source === 'publisher.asyncPromote.recoverPostCommit.payloads' && ++turns === 1) moveClock(); // after the first turn has read its rows and its clock
+      return result;
+    } });
+    await seedShareRows(tapped.store, specs);
+    const { queue, setNow } = queueOver(tapped.store);
+    const now = NOW + 77_000;
+    setNow(now);
+    moveClock = () => setNow(now + 500);
+    const events = await queue.recoverPostCommitFailures();
+    expect(events.map((event) => event.jobId)).toEqual(expectedSweep(specs, now).events.map((event) => event['jobId']));
+    expect(events.map((event) => event.nextRetryAt)).toEqual([...Array(50).fill(now + 1_000), ...Array(10).fill(now + 1_500)]);
+  });
+
+  describe('a failed record with a second enqueuedAt triple is one candidate (corruption only; the queue never writes one)', () => {
+    /** The same job under a second enqueue time: the find pass's key read, which has no `enqueuedAt` in its payload, returns the job once per triple. */
+    const withSecondEnqueuedAt = (store: TripleStore, id: string, at: number) =>
+      store.insert([{ subject: jobSubject(id), predicate: PROMOTE_ENQUEUED_AT, object: integer(NOW + at), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI }]);
+
+    it('judges it once, as the previous sweep did: one event and one final row, not a second requeue of the same job', async () => {
+      const specs = [failed('dup', 1, { name: 'asset-1' }), failed('other', 3, { name: 'asset-2' })];
+      const { queue, store, expected } = await sweepOf(specs);
+      await withSecondEnqueuedAt(store, 'dup', 2);
+      expect(expected.events.map((event) => event['jobId'])).toEqual(['dup', 'other']);
+      expect(await queue.recoverPostCommitFailures()).toEqual(expected.events);
+      expect(await storedAs(store, 'dup')).toEqual(JSON.parse(JSON.stringify(expected.finals.get('dup'))));
+      expect(await storedAs(store, 'other')).toEqual(JSON.parse(JSON.stringify(expected.finals.get('other'))));
+      expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    });
+
+    it('judges it once when its two keys fall on two key pages of the find pass but one decide turn', async () => {
+      // Forty-nine failed rows that name the marker without being recoverable (a lookalike message) and the first copy fill the first key page,
+      // so the second copy is the first key of the second page, and the two copies are the only candidates: one turn.
+      const lookalikes = Array.from({ length: 49 }, (_, i) => failed(`look-${String(i).padStart(2, '0')}`, -1_000 + i, { name: `look-asset-${i}`, lastError: POST_COMMIT_ERRORS.lookalike }));
+      const specs = [...lookalikes, failed('dup', 1, { name: 'asset-1' })];
+      const tapped = tapStore(openStore());
+      await seedShareRows(tapped.store, specs);
+      const { queue, setNow } = queueOver(tapped.store);
+      const now = NOW + 77_000;
+      setNow(now);
+      await withSecondEnqueuedAt(tapped.store, 'dup', 2);
+      tapped.calls.length = 0;
+      expect(await queue.recoverPostCommitFailures()).toEqual(expectedSweep(specs, now).events);
+      expect(tapped.calls.filter((call) => call.source === 'publisher.asyncPromote.recoverPostCommit')).toHaveLength(2);
+      expect(await storedAs(tapped.store, 'dup')).toMatchObject({ state: 'failed_retrying', attempt: { nextRetryAt: now + 1_000 } });
     });
   });
 });

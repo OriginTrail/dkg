@@ -21,7 +21,7 @@ import { PROMOTE_POST_COMMIT_FAILURE_CODE, PROMOTE_POST_COMMIT_FAILURE_MESSAGE }
  * order, which is not that order (code point against locale ties, and a failed row may carry a `nextRetryAt` the keys do not know),
  * so the sweep works in two passes, each holding the mutex for at most `pageSize` rows at a time:
  *   1. find: walk the keyset pages, one hold each, and keep only the accepted rows' ranking fields (`jobId`, `enqueuedAt`,
- *      `nextRetryAt`), then sort those with `comparePromoteJobs`. That is a few small records, never the payloads;
+ *      `nextRetryAt`), one candidate per job, then sort those with `comparePromoteJobs`. That is a few small records, never the payloads;
  *   2. decide: take the sorted candidates `pageSize` at a time, and in one hold per turn read their rows again by subject and judge
  *      each, in order, with the unchanged policy and the in-hold conflict lookup. The re-read is what makes the gap between the
  *      passes safe: a candidate that left the failed state or changed meanwhile (an operator's `recover`, a cancel) is judged as it
@@ -48,18 +48,22 @@ export interface PostCommitSweepOps {
 
 export async function sweepPostCommitFailures(host: PromoteListingHost, ops: PostCommitSweepOps, pageSize = POST_COMMIT_SWEEP_PAGE_SIZE): Promise<PromotePostCommitRecoveryEvent[]> {
   // Find: the candidates the policy accepts, a page per hold, keeping only what ranks them.
-  const candidates: PromoteReadyOrder[] = [];
+  // One candidate per job: a record with a second `enqueuedAt` triple (corruption; the queue never writes one) comes back once per triple, on one
+  // key page or on two. The ranking fields are those of the decoded payload, not of the key, so every copy ranks alike and the first read stands for the job.
+  const found = new Map<string, PromoteReadyOrder>();
   let cursor: PromoteJobCursor | undefined;
   do {
     cursor = await host.locked(async () => {
       const page = await readPromoteJobPage(host, FAILED, { cursor, pageSize, sources: { keys: SWEEP_SOURCES.keys }, payloadContainsAny: POST_COMMIT_MARKERS });
       for (const job of page.jobs) {
-        if (isAutomaticallyRecoverablePostCommitFailure(job)) candidates.push({ jobId: job.jobId, enqueuedAt: job.enqueuedAt, attempt: { nextRetryAt: job.attempt.nextRetryAt } });
+        if (!found.has(job.jobId) && isAutomaticallyRecoverablePostCommitFailure(job)) {
+          found.set(job.jobId, { jobId: job.jobId, enqueuedAt: job.enqueuedAt, attempt: { nextRetryAt: job.attempt.nextRetryAt } });
+        }
       }
       return page.next;
     });
   } while (cursor);
-  candidates.sort(comparePromoteJobs);
+  const candidates = [...found.values()].sort(comparePromoteJobs);
   // Decide: `pageSize` candidates per hold, in that order, each on the row as the hold reads it (a candidate that left the failed state since is not touched).
   const events: PromotePostCommitRecoveryEvent[] = [];
   for (let at = 0; at < candidates.length; at += pageSize) {
