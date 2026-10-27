@@ -182,12 +182,15 @@ describe('persisted activation commits admitted wire adoption after successful e
     expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: false, coreHosted: true, lastReconciledOrdinal: 1 });
     await f.drain();
   });
-  it('rejects a stale prepared transition before retiring Core custody', async () => {
+  it('rejects a stale activation before the canonical write retires Core custody', async () => {
     const f = await fixture('host');
-    const before = f.state.subscribedContextGraphs.get(LOCAL)!;
-    const plan = f.agent.prepareContextGraphSubscriptionWrite(LOCAL, { ...before, subscribed: true }, { persist: false });
-    f.agent.setContextGraphSubscription(LOCAL, { ...before, pendingMeta: true }, { persist: false, deferWireAdoption: true });
-    expect(() => f.agent.applyContextGraphSubscriptionWrite(plan)).toThrow('Subscription transition changed before apply');
+    await expect(f.agent.activatePersistedContextGraphSubscriptionRecord(f.saved, {
+      prepare: async () => {
+        const live = f.state.subscribedContextGraphs.get(LOCAL)!;
+        f.agent.setContextGraphSubscription(LOCAL, { ...live, subscribed: false, pendingMeta: true },
+          { persist: false, deferWireAdoption: true });
+      },
+    })).rejects.toThrow('ownership changed');
     expect(f.state.subscribedContextGraphs.get(HASH)).toBe(f.originalWire);
     expect(f.state.subscribedContextGraphs.get(LOCAL)?.pendingMeta).toBe(true);
     expect(f.state.subscribedContextGraphs.get(LOCAL)?.subscribed).toBe(false);
@@ -195,18 +198,13 @@ describe('persisted activation commits admitted wire adoption after successful e
     await f.assertHostLive(); await f.drain();
   });
 
-  it('applies a readonly no-op projection once without changing row identity or custody', async () => {
+  it('keeps no-op row identity and independent custody across repeated canonical writes', async () => {
     const f = await fixture('host');
     const before = f.state.subscribedContextGraphs.get(LOCAL)!;
-    const options = { persist: false, deferWireAdoption: true };
-    const transition = f.agent.prepareContextGraphSubscriptionWrite(LOCAL, { ...before }, options);
-    expect(Object.isFrozen(transition)).toBe(true); expect(Object.isFrozen(transition.options)).toBe(true);
-    expect(transition.subscription).toBe(before);
-    options.persist = true;
-    expect(transition.options.persist).toBe(false);
-    expect(() => f.agent.applyContextGraphSubscriptionWrite({ ...transition })).toThrow('Subscription transition changed before apply');
-    expect(f.agent.applyContextGraphSubscriptionWrite(transition)).toBe(before);
-    expect(() => f.agent.applyContextGraphSubscriptionWrite(transition)).toThrow('Subscription transition changed before apply');
+    for (let i = 0; i < 2; i++) {
+      expect(f.agent.setContextGraphSubscription(LOCAL, { ...before },
+        { persist: false, deferWireAdoption: true })).toBe(before);
+    }
     await f.drain(); f.unchanged(); await f.assertHostLive();
   });
 

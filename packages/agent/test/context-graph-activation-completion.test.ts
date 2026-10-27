@@ -106,3 +106,33 @@ it('preserves a replacement subscription and gossip when preparation resumes wit
   expect(subscribe).not.toHaveBeenCalled(); expect(unsubscribe).not.toHaveBeenCalled();
   expect(events).toEqual([]);
 });
+
+
+it('rejects a queued replacement after activation before the snapshot reads inventory', async () => {
+  const { a, id, row, topics } = await fixture();
+  a.started = true;
+  a.node.stop = async () => {};
+  a.contextGraphSubscriptionDormancyById.set(id, 'authorityUnavailable');
+  a.contextGraphSubscriptionActivations.observe(row);
+  const send = vi.fn(async () => Buffer.from('{"unavailable":true}'));
+  a.router = { send };
+  let replacement: unknown, replacementTopics: Set<string>;
+  a.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, () => {
+    queueMicrotask(() => {
+      a.unsubscribeFromContextGraph(id, { persist: false });
+      a.subscribeToContextGraph(id, { persist: false, deferSharedMemoryGossipSubscribe: true });
+      replacement = a.subscribedContextGraphs.get(id);
+      replacementTopics = new Set(topics);
+    });
+  });
+  const pending = a.syncPublicGraphSnapshot({ contextGraphId: id, onChainId: '7',
+    mode: 'core-cache', trustedCorePeerIds: ['core'] });
+  const rejected = expect(pending).rejects.toThrow('Snapshot job ownership changed');
+  await a.activatePersistedContextGraphSubscriptionRecord(row);
+  await rejected;
+  expect(send).not.toHaveBeenCalled();
+  expect(replacement).toBeDefined();
+  expect(a.subscribedContextGraphs.get(id)).toBe(replacement);
+  expect(topics).toEqual(replacementTopics!);
+  expect(a.workLifetime.physicalRuns.size).toBe(0);
+});

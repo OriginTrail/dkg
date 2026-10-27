@@ -50,7 +50,7 @@ async function finish(a: any) {
     install: () => row,
     remove: (id: string) => { a.subscribedContextGraphs.delete(id); },
     rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
-    prepareCommit: () => ({ subscription: row }), applyCommit: (transition: { subscription: typeof row }) => transition.subscription,
+    commit: () => row,
   });
   else { a.contextGraphSubscriptionDormancyById.delete(graph); owner.cancel(graph); }
 }

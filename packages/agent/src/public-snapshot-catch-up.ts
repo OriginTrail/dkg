@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { PublicSnapshotUnavailableError } from './public-snapshot-reader.js';
-import { vmRecoveryRetryDelay } from './vm-recovery-pass-authority.js';
+import { PUBLIC_SNAPSHOT_ADMISSION_WINDOW_MS } from './public-snapshot-admission.js';
+import { waitForPublicSnapshotRetry } from './public-snapshot-exact-pacing.js';
 import type { PublicSnapshotObservation } from './public-snapshot-evidence.js';
 import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 
@@ -28,11 +29,8 @@ export async function recoverPublicSnapshotToCurrent(options: {
         // The wire deliberately hides whether refusal means private, missing or
         // busy. Wait a full serving admission window; never relax validation or
         // extend this job. Short slices retain the ownership fence while waiting.
-        const until = Math.min(Date.now() + 60_000, options.deadline);
-        while (Date.now() < until) {
-          await vmRecoveryRetryDelay(Math.min(2_500, until - Date.now()), options.signal);
-          active();
-        }
+        await waitForPublicSnapshotRetry(Math.min(Date.now() + PUBLIC_SNAPSHOT_ADMISSION_WINDOW_MS, options.deadline),
+          options.signal, active);
       }
     }
   };

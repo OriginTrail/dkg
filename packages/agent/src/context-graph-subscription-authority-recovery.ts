@@ -81,7 +81,7 @@ export function releaseRollingSubscriptionSlot(
   return true;
 }
 
-export interface PersistedContextGraphSubscriptionActivationPorts<Transition extends Readonly<{ subscription: ContextGraphSub }>> {
+export interface PersistedContextGraphSubscriptionActivationPorts {
   install(
     row: ContextGraphSubscriptionRecord,
     input: Readonly<{
@@ -99,8 +99,7 @@ export interface PersistedContextGraphSubscriptionActivationPorts<Transition ext
   subscribe(contextGraphId: string): void;
   persistMembership(contextGraphId: string): void;
   /** Retire/adopt wire custody only after all speculative effects succeed. */
-  prepareCommit(contextGraphId: string): Transition;
-  applyCommit(transition: Transition): ContextGraphSub;
+  commit(contextGraphId: string): ContextGraphSub;
 }
 
 export interface PersistedContextGraphSubscriptionActivationOptions {

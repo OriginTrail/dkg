@@ -508,7 +508,7 @@ import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
 import { ensureCoreHostedDefinition, noteCoreHostedOwnerShare, refreshCoreHostedDefinitionBeforeServing } from './core-hosted-definition.js';
 import { isCanonicalAuthoritativeContextGraphId, type ContextGraphBindingSubscriptionFacts } from
   './context-graph-binding-state.js';
-import { prepareSubscriptionWriteTransition, consumeSubscriptionWriteTransition, type ContextGraphSubscriptionWriteOptions, type ContextGraphSubscriptionWriteTransition } from './context-graph-subscription-write-transition.js';
+import type { ContextGraphSubscriptionWriteOptions, ContextGraphSubscriptionWriteTransition } from './context-graph-subscription-write-transition.js';
 import { projectDormantContextGraphIdentities } from './context-graph-dormant-identity.js';
 import {
   normalizeAgentDid,
@@ -7830,15 +7830,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     next: ContextGraphSubInput,
     options?: ContextGraphSubscriptionWriteOptions,
   ): ContextGraphSub {
-    return this.applyContextGraphSubscriptionWrite(this.prepareContextGraphSubscriptionWrite(contextGraphId, next, options));
+    return this.writeContextGraphSubscription(contextGraphId, next, options).subscription;
   }
 
-  /** Prepare once; activation validates and applies this same canonical transition. */
-  prepareContextGraphSubscriptionWrite(this: DKGAgent,
+  /** Project, validate and apply one canonical write without yielding ownership. */
+  writeContextGraphSubscription(this: DKGAgent,
     contextGraphId: string,
     next: ContextGraphSubInput,
     options?: ContextGraphSubscriptionWriteOptions,
-  ): ContextGraphSubscriptionWriteTransition {
+  ): Pick<ContextGraphSubscriptionWriteTransition, 'subscription' | 'adoptedWire'> {
     const previous = this.subscribedContextGraphs.get(contextGraphId);
     // A local id is always cleartext unless the subscription explicitly says
     // otherwise through `onChainHash`. This distinction matters for a valid
@@ -7875,16 +7875,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       : nextRow;
     const adoptedWire = adoptsWireOnlySubscription
       ? { ...wireOnlySubscription!.subscription, id: wireOnlySubscription!.localId } : undefined;
-    return prepareSubscriptionWriteTransition(this.subscribedContextGraphs, {
+    const transition: ContextGraphSubscriptionWriteTransition = {
       contextGraphId, source: previous, wireSource: wireOnlySubscription ?? undefined,
       subscription: canonicalNext, adoptedWire, localWireId, previousWireId, nextWireId, options: options ?? {},
-    });
-  }
-
-  /** Apply the registered projection once; reject stale sources before any effects. */
-  applyContextGraphSubscriptionWrite(this: DKGAgent, transition: ContextGraphSubscriptionWriteTransition): ContextGraphSub {
-    const { contextGraphId, source: previous, subscription: canonicalNext, previousWireId, nextWireId, options } = transition;
-    consumeSubscriptionWriteTransition(transition, this.subscribedContextGraphs, this.resolveWireOnlyContextGraphSubscription(contextGraphId));
+    };
+    const currentWire = this.resolveWireOnlyContextGraphSubscription(contextGraphId);
+    if (this.subscribedContextGraphs.get(contextGraphId) !== previous
+      || currentWire?.localId !== wireOnlySubscription?.localId
+      || currentWire?.subscription !== wireOnlySubscription?.subscription)
+      throw new Error('Subscription source changed during write');
     this.retireContextGraphSubscriptionPredecessors(transition);
     // Ending or replacing admission retires in-flight owners even if an
     // unsubscribe/resubscribe restores identical fields in the same turn.
@@ -7928,7 +7927,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.updateContextGraphSubscriptionActivationSlot(transition);
     this.updateContextGraphSubscriptionReceiverEffects(transition, bindingFacts);
     this.persistContextGraphSubscriptionTransition(transition, retainsInactiveBinding);
-    return canonicalNext;
+    return { subscription: canonicalNext, adoptedWire };
   }
 
   retireContextGraphSubscriptionPredecessors(this: DKGAgent, transition: ContextGraphSubscriptionWriteTransition): void {
@@ -8877,7 +8876,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** Await an in-flight authority activation within the caller's existing lifetime. */
-  waitForContextGraphSubscriptionActivation(this: DKGAgent, id: string, signal: AbortSignal): Promise<void> | undefined {
+  waitForContextGraphSubscriptionActivation(this: DKGAgent, id: string, signal: AbortSignal): Promise<ContextGraphSub> | undefined {
     return waitForSubscriptionActivation(this.workLifetime, () => this.started, this.subscribedContextGraphs, this.contextGraphSubscriptionDormancyById, id, signal, this.contextGraphSubscriptionActivations);
   }
 
@@ -8923,13 +8922,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         syncMode: 'always-on',
       }),
       persistMembership: (id) => this.persistLocalNodeMembership(id, 'rehydrated-subscription'),
-      prepareCommit: (id) => this.prepareContextGraphSubscriptionWrite(id, this.subscribedContextGraphs.get(id)!, {
-        persist: false, preserveAdmittedWireBinding: true, retireNamePlaceholder: true,
-      }),
-      applyCommit: (transition) => {
-        const committed = this.applyContextGraphSubscriptionWrite(transition);
-        if (transition.adoptedWire) void this.persistContextGraphSubscription(transition.contextGraphId, { retiredNamePredecessor: transition.adoptedWire });
-        return committed;
+      commit: (id) => {
+        const { subscription, adoptedWire } = this.writeContextGraphSubscription(id, this.subscribedContextGraphs.get(id)!, {
+          persist: false, preserveAdmittedWireBinding: true, retireNamePlaceholder: true,
+        });
+        if (adoptedWire) void this.persistContextGraphSubscription(id, { retiredNamePredecessor: adoptedWire });
+        return subscription;
       },
     }, options);
   }

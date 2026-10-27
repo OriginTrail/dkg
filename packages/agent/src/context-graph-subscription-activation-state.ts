@@ -105,7 +105,7 @@ export class ContextGraphSubscriptionActivations {
     return attempt;
   }
   /** One retry owns installation, repair, network effects, rollback and commit. */
-  async activate<Transition extends Readonly<{ subscription: ContextGraphSub }>>(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts<Transition>,
+  async activate(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts,
     options: PersistedContextGraphSubscriptionActivationOptions = {}): Promise<ContextGraphSub> {
     const handle = this.observe(row), attempt = this.owned(handle);
     if (attempt.phase.kind !== 'queued') throw changed();
@@ -127,8 +127,7 @@ export class ContextGraphSubscriptionActivations {
         if (row.syncScoped) ports.trackSync(row.id);
         if (row.subscribed) { ports.subscribe(row.id); ports.persistMembership(row.id); }
       }
-      const plan = ports.prepareCommit(row.id);
-      return this.commit(handle, plan, ports.applyCommit, options.claimRollingSlot === true);
+      return this.commit(handle, ports.commit, options.claimRollingSlot === true);
     } catch (error) {
       try {
         // Before network effects, preserve a concurrently replaced generation.
@@ -166,15 +165,15 @@ export class ContextGraphSubscriptionActivations {
     if (sameIntent(attempt.intent, row)) attempt.repaired = { ...row };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
-  private commit<Transition extends Readonly<{ subscription: ContextGraphSub }>>(handle: ActivationHandle, transition: Transition, apply: (transition: Transition) => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {
+  private commit(handle: ActivationHandle, write: (id: string) => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {
     const ports = this.ports, id = handle.id;
     // Fence the old owner before the verified transition retires any wire custody.
     const attempt = this.assertInstalled(handle);
-    const live = apply(transition);
+    const live = write(id);
     // The canonical setter may legitimately start a new line when it adopts
-    // verified Core hosting. Validate against the authorized projection instead.
+    // verified Core hosting. The canonical write returns its committed row.
     if (this.pending.get(id) !== attempt || ports.subscribedContextGraphs.get(id) !== live
-      || !contextGraphSubscriptionAdmissionPremisesEqual(transition.subscription, live)) throw changed();
+      || (!live.subscribed && !live.coreHosted)) throw changed();
     const dormancy = applyDormancy(ports.contextGraphSubscriptionDormancyById, id, undefined);
     ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
     if (claimRollingSlot && !live.coreHosted && !rehydratedSubscriptionReachedSafeState(live))
@@ -208,7 +207,7 @@ export function waitForSubscriptionActivation(
   workLifetime: AgentWorkLifetime, isStarted: () => boolean,
   subscriptions: ReadonlyMap<string, ContextGraphSub>, dormancy: Dormancy,
   id: string, caller: AbortSignal, activations: ContextGraphSubscriptionActivations,
-): Promise<void> | undefined {
+): Promise<ContextGraphSub> | undefined {
   if (dormancy.get(id) !== 'authorityUnavailable') return;
   const generation = workLifetime.generation;
   const signal = AbortSignal.any([caller, workLifetime.signal]);
@@ -220,9 +219,10 @@ export function waitForSubscriptionActivation(
     assertCurrent();
     const live = subscriptions.get(id);
     // Preserve the caller's inactive-subscription error after an explicit unsubscribe.
-    if (live && !live.subscribed && !live.coreHosted && dormancy.get(id) !== 'authorityUnavailable') return;
+    if (live && !live.subscribed && !live.coreHosted && dormancy.get(id) !== 'authorityUnavailable') return live;
     if (outcome.kind !== 'committed' || !live || dormancy.has(id)
       || !isContextGraphSubscriptionStoredAgain(outcome.subscription, live)
       || !contextGraphSubscriptionAdmissionPremisesEqual(outcome.subscription, live)) throw changed();
+    return live;
   });
 }

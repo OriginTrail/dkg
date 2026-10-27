@@ -87,7 +87,7 @@ export function createRollingPromotionFixture(
           install: () => live,
           remove: id => { host.subscribedContextGraphs.delete(id); },
           rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
-          prepareCommit: () => ({ subscription: live }), applyCommit: transition => transition.subscription,
+          commit: () => live,
         }, { claimRollingSlot: activationOptions.claimRollingSlot });
       }
     }),

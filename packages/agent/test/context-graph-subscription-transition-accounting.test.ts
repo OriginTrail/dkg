@@ -52,7 +52,7 @@ it('accounts persistence and activation from captured transitions after dormancy
     install: () => { agent.subscribedContextGraphs.set(id, live); return live; },
     remove: key => { agent.subscribedContextGraphs.delete(key); },
     rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
-    prepareCommit: () => ({ subscription: live }), applyCommit: transition => transition.subscription,
+    commit: () => live,
   }, { claimRollingSlot: true });
   expect(observations).toEqual([{ dormancy: undefined, pending: false, slot: true, owner: true }]);
   expect(atEvent).toEqual([{ status: expect.objectContaining({ persistedTotal: 1, activated: 1, dormant: 0 }), slot: true, owner: undefined }]);
