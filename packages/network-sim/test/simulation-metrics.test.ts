@@ -72,7 +72,7 @@ it('keeps run diagnostics out of operation totals while preserving legacy wire c
   registry.fail(admission.run, new Error('setup diagnostic'));
   expect(snapshotMetrics({ type: 'status', ...registry.status(admission.run) }, emptyMetrics()))
     .toEqual(emptyMetrics());
-  registry.record(admission.run, { type: 'op', opType: 'query', nodeId: 1, success: true, durationMs: 5, detail: 'ok' });
+  registry.record(admission.run, { type: 'op', opType: 'query', nodeId: 1, success: true, durationMs: 5, detail: 'ok', phases: {} });
   registry.fail(admission.run, new Error('transport diagnostic'));
   const terminal = registry.finish(admission.run);
   expect(terminal).toMatchObject({ completed: 1, errors: 2 });
