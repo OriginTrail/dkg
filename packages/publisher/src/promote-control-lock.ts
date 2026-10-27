@@ -4,8 +4,9 @@
  * Every public queue method runs its store work inside `withPromoteControlLock`, so a job cannot be read
  * stale and then written over a conflicting row, and the store calls made inside it are the ones the
  * share control path serves (OT-RFC-73 S1: each carries `controlStoreOptions('share', source)`). It is a
- * plain FIFO chain, not a lane scope: the lock sets no ambient store priority, so a worker wake started
- * from inside it (`notifyWorkAvailable`) inherits nothing from the queue.
+ * plain FIFO chain, not a lane scope: the lock sets no ambient store priority, and the worker wake the
+ * queue raises from inside it (`notifyWorkAvailable`) runs with no lane scope at all, so the worker tick
+ * inherits nothing from the queue or from the caller that enqueued.
  *
  * Keyed on the control-graph URI rather than the queue instance, so two queues over one graph (the
  * daemon's admission instance and its runtime instance, or a retention sweep) exclude each other.
