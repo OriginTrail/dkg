@@ -88,7 +88,7 @@ that matches the whole retained history a page of up to 1,000 jobs takes at most
 0.03 s whatever the history. The share mutex is therefore held for at most that long per page, where the single complete read held it for
 the whole read (1.2 to 1.5 s at 50,000 retained jobs, and longer under load).
 
-## What the complete listing costs, and how it was made linear
+## What the complete listing costs, and how its cost was cut
 
 The cursorless call has to return everything. The first version of this change made it a loop of keyset pages of 1,000 rows. Every pass
 reran the filtered, ordered scan, so its total cost grew with the pages times the matching rows (quadratic in the history), and `limit`,
@@ -149,7 +149,7 @@ history of other states.
 - The P8a bound for AC5 is the product-code table above: at 50,000 retained jobs a listing page is held for at most about 0.35 s (0.16 s for
   a first page), against 1.2 to 1.5 s for the single read, so a share submission that arrives during an observer's page waits at most that
   page, and at most one page per observer poll.
-- The cost of the cursorless observer's whole call is not flat, but it is linear in the history and split into short holds: 0.5 s per poll
+- The cost of the cursorless observer's whole call is not flat, but it is about N/10,000 ordered scans plus linear payload batches, split into short holds: 0.5 s per poll
   at 10,000 and 3.2 s at 50,000 retained jobs (10 s in the first version of this change), with a longest wait of 84 ms and 288 ms. The
   benchmark's `default` observer measures exactly that call (`queue.list({})`); its `paged` observer now walks `queue.listPage` 100 rows
   at a time.

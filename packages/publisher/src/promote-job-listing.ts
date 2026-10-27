@@ -21,8 +21,9 @@ import {
  * its statistics and the durable share path, kept out of the mutex-holding file. `claimNext` and recovery do not use any of it.
  *
  * Every read runs in a hold of the queue's mutex on the control path. A complete listing is a sequence of such holds, one per key
- * read and one per batch of payloads, and is therefore NOT a snapshot: a job that arrives or changes after the key read that covers
- * its position is not seen, a job whose payload no longer matches the filter when its batch is read is left out, and a job that
+ * read and one per batch of payloads, and is therefore NOT a snapshot: a job that starts matching (arrives, or changes into the filter)
+ * after the key read that covers its position is not seen, a job that changes but still matches is returned as its batch read it, a job
+ * whose payload no longer matches the filter when its batch is read is left out, and a job that
  * matched the filter for the whole walk is always returned, once.
  */
 
@@ -74,8 +75,8 @@ const readyTime = (job: PromoteJob): number => job.attempt.nextRetryAt ?? job.en
 /**
  * The complete listing: every matching job in ready-time order (`comparePromoteJobs`), `limit` applied after the sort.
  *
- * Linear in the rows: the ordered keys are read in key pages of `listKeyPageSize` (one scan each, so about five at 50,000 retained jobs and
- * not one per 1,000 rows), then the payloads of those keys in batches of `listPageSize` by subject. Every key read and every batch is its own
+ * About N / `listKeyPageSize` ordered scans plus linear payload batches: the ordered keys are read in key pages of `listKeyPageSize` (one
+ * scan of the matching rows each, so about five at 50,000 retained jobs and not one per 1,000 rows), then the payloads of those keys in batches of `listPageSize` by subject. Every key read and every batch is its own
  * hold of the mutex, so no hold lasts for the whole history and none holds a full payload fetch.
  *
  * `limit` ends the walk early, without changing which jobs it keeps. Rows come in `(enqueuedAt, jobId)` order and the result is in ready
