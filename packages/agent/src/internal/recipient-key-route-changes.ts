@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { AGENT_DID_PREFIX, isSafeIri } from '@origintrail-official/dkg-core';
+import {
+  AGENT_DID_PREFIX, canonicalAgentDidSubject, isEvmAgentDidSubject, isSafeIri,
+} from '@origintrail-official/dkg-core';
 
 /** null means the write cannot be restricted to a known set of agent subjects. */
 export type RecipientKeyRouteScope = ReadonlySet<string> | null;
@@ -9,8 +11,8 @@ const HISTORY_LIMIT = 512;
 /** Lookup reads agent DIDs and their derived key fragments, never another agent's subjects. */
 export function recipientSubjectAgent(subject: string | undefined): string | undefined {
   if (!subject || !isSafeIri(subject) || !subject.startsWith(AGENT_DID_PREFIX)) return;
-  const match = /^(0x[0-9a-fA-F]{40})(?:#.*)?$/.exec(subject.slice(AGENT_DID_PREFIX.length));
-  return match?.[1].toLowerCase();
+  const agent = subject.slice(AGENT_DID_PREFIX.length).split('#', 1)[0];
+  return isEvmAgentDidSubject(agent) ? canonicalAgentDidSubject(agent) : undefined;
 }
 
 /** Bounded invalidation history. An expired history fails closed rather than guessing. */
@@ -42,8 +44,8 @@ export class RecipientKeyRouteChanges {
   }
 
   private roster(agents: readonly string[]): RecipientKeyRouteScope {
-    if (agents.length === 0 || agents.some(agent => !/^0x[0-9a-fA-F]{40}$/.test(agent))) return null;
-    return new Set(agents.map(agent => agent.toLowerCase()));
+    if (agents.length === 0 || agents.some(agent => !isEvmAgentDidSubject(agent))) return null;
+    return new Set(agents.map(canonicalAgentDidSubject));
   }
 
   private intersects(scope: RecipientKeyRouteScope, roster: RecipientKeyRouteScope): boolean {
