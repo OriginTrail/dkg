@@ -194,12 +194,23 @@ it('retention never deletes anything but old finalized records, never changes th
     cases: 0, deleted: 0, keptBehindFailed: 0, inversions: 0, futureDated: 0, faultsInjected: 0, keys: 0, reportEqualsDelete: 0, clockSkips: 0,
     heldByUnreachable: 0, midPassClears: 0, clockPassedFutureUpdate: 0,
   };
-  await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 0x7fffffff }), (seed) => oneCase(seed, templates, tally)),
-    { seed: options.seed, numRuns: options.numRuns, endOnFailure: true, ...(options.path ? { path: options.path } : {}) });
+  // Count the turns the event loop takes while the cases run (the floor below). Every term Oxigraph hands back from a query is a wasm object that is freed by a
+  // FinalizationRegistry callback, and V8 runs those callbacks as tasks between two turns of the loop. A case is microtasks from start to end (the in-memory store never
+  // waits for I/O), so without a turn between cases the callbacks of every case pile up: the wasm memory and the heap grew with the case index (about 2 MB a case) and a
+  // case cost more the later it ran, which made the nightly's 1,000 runs unfinishable. A case therefore ends by letting the loop turn once, after its stores are unreachable.
+  let turns = 0;
+  let ticker: NodeJS.Immediate | undefined;
+  const tick = (): void => { turns += 1; ticker = setImmediate(tick); };
+  ticker = setImmediate(tick);
+  try {
+    await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 0x7fffffff }), async (seed) => { await oneCase(seed, templates, tally); await new Promise<void>((resolve) => setImmediate(resolve)); }),
+      { seed: options.seed, numRuns: options.numRuns, endOnFailure: true, ...(options.path ? { path: options.path } : {}) });
+  } finally { clearImmediate(ticker); }
   // The generator must really reach what the claim is about. The floors apply from the 100-run default up and only to a full run (a replay of one failing path
   // executes just the cases along it).
   if (!options.path) {
     expect(tally.cases).toBe(options.numRuns);
+    expect(turns, 'the event loop turned between the cases').toBeGreaterThanOrEqual(tally.cases);
     if (options.numRuns >= 100) {
       expect(tally.deleted).toBeGreaterThan(options.numRuns);                           // many records really deleted: the property is not vacuous
       expect(tally.keptBehindFailed).toBeGreaterThan(10);                                // old finalized records an older sibling really held back
