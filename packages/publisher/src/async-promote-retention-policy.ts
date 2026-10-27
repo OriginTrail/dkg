@@ -9,6 +9,7 @@
  *
  * A job is NEVER deleted when (checked from the payload, under the queue mutation lock, immediately before the delete):
  *  - its payload is unreadable, malformed, ambiguous (several payload triples), or carries a state this build does not recognise;
+ *  - a benign-class candidate's commit marker holds a flag that is not a boolean (a bad value is no evidence that promote never started);
  *  - it has index triples but no payload, or its stored `state` triple is missing or differs from the payload's state;
  *  - it was written by a newer queue format than this build understands;
  *  - it is not terminal (`queued`, `running`, `failed_retrying`: a job that a worker holds, waits to retry or has not run);
@@ -21,7 +22,7 @@
  */
 import { hasUnfinishedBoundObligation } from './async-promote-ownership.js';
 import { isAutomaticallyRecoverablePostCommitFailure, requiresManualInspection } from './async-promote-recovery-policy.js';
-import { ASYNC_PROMOTE_QUEUE_FORMAT_VERSION, PROMOTE_JOB_STATES, type PromoteJob } from './async-promote-queue-types.js';
+import { ASYNC_PROMOTE_QUEUE_FORMAT_VERSION, PROMOTE_COMMIT_MARKER_STEPS, PROMOTE_JOB_STATES, type PromoteJob } from './async-promote-queue-types.js';
 import { isPromotePostCommitAttemptError, type StructurallyValidPromoteJobPayload } from './async-promote-queue-utils.js';
 import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
 
@@ -79,6 +80,19 @@ export function emptyClassCounts(): Record<PromoteRetentionJobClass, number> {
   return { succeeded: 0, cancelled: 0, retired_no_effect: 0 };
 }
 
+/**
+ * The commit marker of a benign-class candidate is evidence the class rests on (`promoteStarted`, `swmInserted`), so every flag it holds must be a boolean. The
+ * shared classifier checks four of the five and lets a bad `promoteStarted` through, and this gate does not lean on it for any of them. Absent is not bad: a job
+ * that never ran has no marker, and the marker of a row written before format 2 has no `promoteStarted` (the parser accepts it, so does retention).
+ */
+function hasReadableCommitMarker(job: StructurallyValidPromoteJobPayload): boolean {
+  const marker: unknown = job.commitMarker;
+  if (marker === undefined) return true;
+  if (typeof marker !== 'object' || marker === null) return false;
+  const flags = marker as Record<string, unknown>;
+  return PROMOTE_COMMIT_MARKER_STEPS.every(step => (flags[step] === undefined ? step === 'promoteStarted' : typeof flags[step] === 'boolean'));
+}
+
 /** The benign failed classes of D-6: nothing else that failed is ever deletable. */
 function benignFailedClass(job: StructurallyValidPromoteJobPayload): Exclude<PromoteRetentionJobClass, 'succeeded'> | undefined {
   if (isRetiredBoundRejection(job)) return 'retired_no_effect';
@@ -106,6 +120,7 @@ export function decidePromoteRetention(
   } else {
     const benign = policy.benignFailedMaxAgeMs === undefined ? undefined : benignFailedClass(job);
     if (benign === undefined) return { delete: false, reason: 'failed_retained' };
+    if (!hasReadableCommitMarker(job)) return { delete: false, reason: 'unreadable' };      // the class rests on the marker: `!== true` reads "true" or null as "never started"
     // The classes above are an allow-list; these two are independent reasons to keep that hold if either predicate ever drifts. A payload
     // whose free-text fields have an unexpected type makes the predicates throw: that row is kept as unreadable, never a stuck batch.
     try {

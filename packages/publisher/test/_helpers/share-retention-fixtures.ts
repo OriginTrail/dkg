@@ -173,7 +173,7 @@ export const POPULATION_KINDS = [
   'succeeded', 'succeeded-future', 'succeeded-newer', 'succeeded-legacy',
   'queued', 'running', 'failed_retrying',
   'failed-plain', 'failed-ambiguity', 'failed-legacy', 'failed-postcommit', 'failed-postcommit-exhausted', 'failed-bound',
-  'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-retired',
+  'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-retired',
 ] as const;
 export type PopulationKind = (typeof POPULATION_KINDS)[number];
 
@@ -196,6 +196,7 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
     case 'failed-cancelled-started': return mk(id, 'failed', { reason: 'cancelled', commitMarker: STARTED }, age);
     case 'failed-cancelled-swm': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, swmInserted: true } }, age);
     case 'failed-cancelled-bound': return mk(id, 'failed', { reason: 'cancelled', bound: true }, age);
+    case 'failed-cancelled-bad-marker': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, promoteStarted: 'true' } }, age);
     case 'failed-retired': return retired(id, age);
   }
 }

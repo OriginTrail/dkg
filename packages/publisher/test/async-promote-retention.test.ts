@@ -4,6 +4,8 @@ import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js
 import { PROMOTE_STATE, PROMOTE_UPDATED_AT, PROMOTE_PAYLOAD, jobSubject, literal, integer } from '../src/async-promote-queue-utils.js';
 import { buildRetentionScanQuery, buildRetentionTieQuery, buildRetentionVerifyQuery } from '../src/async-promote-retention-scan.js';
 import { PROMOTE_NO_EFFECT_REJECTION_CODE } from '../src/promote-no-effect-rejection.js';
+import type { PromoteJob } from '../src/async-promote-queue-types.js';
+import { decidePromoteRetention } from '../src/async-promote-retention-policy.js';
 import { SHARE_RETENTION_DEFAULTS, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import {
   AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, W, WF, binding, noPending,
@@ -648,5 +650,66 @@ describe('keep rules the policy adds to the prototype', () => {
     const retention = createShareRetention({ store, mode: 'delete', intervalMs: 60_000, now: () => NOW, monotonicNow: () => 0, logger: captureLogger() });
     await drain(retention);
     expect([...(await storedIds(store))].sort()).toEqual(['c6', 'r7', 's6']);
+  });
+});
+
+describe('a commit marker flag that is not a boolean is no evidence that promote never started (review of P10a: malformed promoteStarted)', () => {
+  const FLAGS = ['promoteStarted', 'swmInserted', 'wmCleaned', 'lifecycleStamped', 'gossiped'] as const;
+  const BAD: ReadonlyArray<[string, unknown]> = [['"true"', 'true'], ['"false"', 'false'], ['""', ''], ['1', 1], ['0', 0], ['null', null], ['{}', {}], ['[]', []]];
+  /** The marker of a row written before format 2: every flag but `promoteStarted` (the parser accepts it, and so must retention). */
+  const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
+  const cancelled = (id: string, commitMarker?: unknown, over: Record<string, unknown> = {}) => mk(id, 'failed', { reason: 'cancelled', ...(commitMarker === undefined ? {} : { commitMarker }), ...over });
+  // The shared classifier checks four of the five flags and lets a bad promoteStarted through, and the policy must not lean on it for the other four either:
+  // the unit cases hand the policy the raw object, bypassing the classifier.
+  const raw = (j: PromoteJob) => decidePromoteRetention(j as never, NOW, policy, noPending);
+
+  it('the reviewer reproduction: an old cancelled job with promoteStarted "true" and no other sign of a start is kept as unreadable, not deleted as cancelled', () => {
+    const job = cancelled('mal', { promoteStarted: 'true', swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false });
+    expect(decide(job)).toEqual({ delete: false, reason: 'unreadable' });                 // through the classifier, as the sweep does
+    expect(decide(job, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  it.each(FLAGS.flatMap(flag => BAD.map(([label, value]) => [flag, label, value] as const)))('keeps a cancelled job whose %s is %s, however old (unreadable)', (flag, _label, value) => {
+    expect(raw(cancelled('m', { ...NO_MARKERS, [flag]: value }))).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  it('keeps a retired no-effect rejection whose marker has a flag that is not a boolean, and a marker that is not an object', () => {
+    expect(raw({ ...retired('r1'), commitMarker: { ...NO_MARKERS, promoteStarted: 'x' } } as never)).toEqual({ delete: false, reason: 'unreadable' });
+    for (const marker of ['started', 7, null, [], true]) expect(raw(cancelled('m', marker))).toEqual({ delete: false, reason: 'unreadable' });
+    expect(raw(cancelled('m', { promoteStarted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false }))).toEqual({ delete: false, reason: 'unreadable' });   // swmInserted absent: only promoteStarted may be
+  });
+
+  it('still deletes the cancelled jobs it can read: no marker, a marker with every flag false, and the legacy marker without promoteStarted', () => {
+    for (const job of [cancelled('c-none'), cancelled('c-clear', NO_MARKERS), cancelled('c-legacy', LEGACY, { formatVersion: 1 })]) {
+      expect(decide(job), job.jobId).toEqual({ delete: true, jobClass: 'cancelled' });
+    }
+    expect(decide(retired('r-ok'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+    expect(decide(cancelled('c-started', STARTED))).toEqual({ delete: false, reason: 'failed_retained' });   // a readable start still keeps it
+  });
+
+  it('a delete sweep leaves every job with a malformed marker flag untouched and deletes the readable cancelled jobs; a report sweep counts exactly those', async () => {
+    const malformed = [
+      ...BAD.map(([label, value]) => [`ps-${label}`, { ...NO_MARKERS, promoteStarted: value }] as const),
+      ...FLAGS.slice(1).map(flag => [`${flag}-str`, { ...NO_MARKERS, [flag]: 'true' }] as const),
+    ].map(([label, marker], i) => cancelled(`mal-${i}-${label.replace(/[^a-z0-9]/gi, '_')}`, marker));
+    const readable = [cancelled('ok-none'), cancelled('ok-clear', NO_MARKERS), cancelled('ok-legacy', LEGACY, { formatVersion: 1 })];
+    const seed = async () => { const s = new OxigraphStore(); await put(s, ...malformed, ...readable); return s; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 5 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: 3, retired_no_effect: 0 }, kept: { unreadable: malformed.length } });
+    expect((await storedIds(reportStore)).size).toBe(malformed.length + readable.length);
+
+    const store = await seed();
+    const before = new Map(await Promise.all(malformed.map(async j => [j.jobId, await present(store, j.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 5 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual(malformed.map(j => j.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: 3, retired_no_effect: 0 });
+    expect(retention.counters().kept.unreadable).toBeGreaterThanOrEqual(malformed.length);
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: 3 }, kept: { unreadable: malformed.length } });
   });
 });
