@@ -784,6 +784,20 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     }
     : undefined;
 
+  const retainResponderSession = () => {
+    if (!responderSession) return;
+    // Fetch owns the token's liveness, not durable progress. Keep its raw
+    // coordinate paired with the verified starting boundary until settlement
+    // commits a new boundary. Fetched progress belongs only to the result.
+    persistUnfinishedSyncResponderSession(checkpointStore, checkpointKey, {
+      ...responderSession,
+      expiresAt: responsePages > 0
+        ? Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS : responderSession.expiresAt,
+    }, manifestDigest, manifestPrefixDigestAtOffset?.(resumedFromOffset),
+    !includeSharedMemory && phase === 'data' && manifestDigest !== undefined
+      ? rawResumedFromOffset : offset);
+  };
+
   const requestPage = async (
     requestOffset: number,
     selectPageSize: () => number,
@@ -1131,24 +1145,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
         // one page with this token: keep the session so a retry can resume from
         // the last certified checkpoint. Recovery never persists a responder
         // session to resume (see the timeout branch below + Codex #1173).
-        const refreshedResponderSession = responsePages > 0
-          ? {
-              ...responderSession,
-              // The responder touches both its token and immutable row-list
-              // TTL on every successfully served page. Mirror that sliding
-              // expiry locally so a long, progressing snapshot is not forced
-              // back to offset zero merely because it crossed ten minutes.
-              expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
-            }
-          : responderSession;
-        persistUnfinishedSyncResponderSession(
-          checkpointStore,
-          checkpointKey,
-          refreshedResponderSession,
-          manifestDigest,
-          manifestPrefixDigestAtOffset?.(resumedFromOffset),
-          offset,
-        );
+        retainResponderSession();
       }
     }
     if (
@@ -1277,20 +1274,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       // even without a process restart. Persistent stores additionally write
       // the token through setResponderSession(); the process-local path keeps
       // older/custom checkpoint stores correct within one daemon lifetime.
-      const refreshedResponderSession = responsePages > 0
-        ? {
-            ...responderSession,
-            expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
-          }
-        : responderSession;
-      persistUnfinishedSyncResponderSession(
-        checkpointStore,
-        checkpointKey,
-        refreshedResponderSession,
-        manifestDigest,
-        manifestPrefixDigestAtOffset?.(resumedFromOffset),
-        offset,
-      );
+      retainResponderSession();
     } else {
       forgetUnfinishedSyncResponderSession(checkpointStore, checkpointKey);
     }
