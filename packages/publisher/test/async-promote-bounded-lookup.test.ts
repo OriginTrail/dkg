@@ -43,7 +43,7 @@ describe('bounded promote conflict lookup', () => {
     await put(store, GRAPH, ...done, job('q1', 'queued'), job('fail-plain', 'failed', { reason: 'cancelled' }), job('fail-bound', 'failed', { bound: true }), job('other-key', 'queued', { name: 'zzz' }));
     const lookup = promoteOwnershipLookup(req());
     const reference = await referenceCandidates(store, GRAPH, lookup);
-    const bounded = await readPromoteOwnershipCandidates(store, GRAPH, lookup);
+    const bounded = await readPromoteOwnershipCandidates(store, GRAPH, lookup, SOURCE);
     expect(reference.length).toBe(40 + 3);
     expect(ids(bounded)).toEqual(['fail-bound', 'q1']);                      // succeeded rows and the unbound failed row are never decoded
     expect(ids(bounded.filter(decisive))).toEqual(ids(reference.filter(decisive)));
@@ -96,7 +96,7 @@ describe('bounded promote conflict lookup', () => {
         const rawIds = raw.map(x => parseJobPayload(x.payload)!.jobId).sort();
         const repeated = raw.length - new Set(raw.map(x => x.payload)).size;
         expect(ids(await referenceCandidates(store, GRAPH, lookup))).toEqual(['A', 'B', 'C', 'D', 'E', 'F']);
-        expect(ids(await readPromoteOwnershipCandidates(store, GRAPH, lookup))).toEqual(['A', 'B', 'C', 'D']);
+        expect(ids(await readPromoteOwnershipCandidates(store, GRAPH, lookup, SOURCE))).toEqual(['A', 'B', 'C', 'D']);
         expect(rawIds).toEqual(engine === 'exact' ? ['A', 'B', 'C', 'D'] : ['A', 'A', 'B', 'B', 'C', 'D', 'D']);
         expect(repeated).toBe(engine === 'exact' ? 0 : 3);                      // the control: the model really makes the query repeat rows, so the dedupe assertions above discriminate
         expect((await createPromoteOwnershipReader(store, GRAPH)(req()))?.jobId).toBe('D');
@@ -109,7 +109,7 @@ describe('bounded promote conflict lookup', () => {
     const [p1, p2, p3] = [job('j1', 'queued'), job('j2', 'queued'), job('j3', 'queued')].map(payloadOf) as [string, string, string];
     const twin = payloadOf(job('j1', 'running', { lease }));
     const stub = (rows: string[]) => ({ query: async () => ({ type: 'bindings', bindings: rows.map(payload => ({ payload })) }) }) as unknown as TripleStore;
-    const read = async (rows: string[]) => (await readPromoteOwnershipCandidates(stub(rows), GRAPH, promoteOwnershipLookup(req()))).map(j => j.jobId);
+    const read = async (rows: string[]) => (await readPromoteOwnershipCandidates(stub(rows), GRAPH, promoteOwnershipLookup(req()), SOURCE)).map(j => j.jobId);
     expect(await read([p1, p1, p2, p1, p3, p2])).toEqual(['j1', 'j2', 'j3']);
     expect(await read([p3, p1, p2])).toEqual(['j3', 'j1', 'j2']);
     expect(await read([])).toEqual([]);
@@ -136,7 +136,7 @@ describe('bounded promote conflict lookup', () => {
       await put(store, GRAPH, job('bad', state));
       await store.deleteByPattern({ subject: jobSubject('bad'), predicate: PROMOTE_PAYLOAD, graph: GRAPH });
       await store.insert([{ subject: jobSubject('bad'), predicate: PROMOTE_PAYLOAD, object: literal('{}'), graph: GRAPH }]);
-      await expect(readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req()))).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+      await expect(readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req()), SOURCE)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
       await expect(createPromoteOwnershipReader(store, GRAPH)(req())).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
     }
     // A row without a state triple and rows with an unrecognised state value are returned too: the query drops two named classes, it is not an allowlist of states.
@@ -150,11 +150,11 @@ describe('bounded promote conflict lookup', () => {
     await setStateTriple('weird-queued', 'weird');
     await setStateTriple('weird-succeeded', 'weird');                           // a "succeeded" payload behind an unrecognised state value is not dropped: only the triple `succeeded` is
     const lookup = promoteOwnershipLookup(req());
-    expect(ids(await readPromoteOwnershipCandidates(store, GRAPH, lookup))).toEqual(['no-state', 'weird-queued', 'weird-succeeded']);
+    expect(ids(await readPromoteOwnershipCandidates(store, GRAPH, lookup, SOURCE))).toEqual(['no-state', 'weird-queued', 'weird-succeeded']);
     expect(ids(await referenceCandidates(store, GRAPH, lookup))).toEqual(['no-state', 'plain-succeeded', 'weird-queued', 'weird-succeeded']);   // the previous lookup, for contrast
     // and a row whose payload itself carries an unrecognised state is unreadable to the decoder, so it fails closed exactly as before
     await put(store, GRAPH, { ...job('weird-payload', 'queued'), state: 'weird' } as unknown as PromoteJob);
-    await expect(readPromoteOwnershipCandidates(store, GRAPH, lookup)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+    await expect(readPromoteOwnershipCandidates(store, GRAPH, lookup, SOURCE)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
     await expect(referenceCandidates(store, GRAPH, lookup)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
   });
 
@@ -166,7 +166,7 @@ describe('bounded promote conflict lookup', () => {
         await store.deleteByPattern({ subject: jobSubject('bad'), predicate: PROMOTE_PAYLOAD, graph: GRAPH });
         await store.insert([{ subject: jobSubject('bad'), predicate: PROMOTE_PAYLOAD, object: literal('{}'), graph: GRAPH }]);
         await expect(referenceCandidates(store, GRAPH, promoteOwnershipLookup(req()))).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
-        expect(await readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req()))).toEqual([]);
+        expect(await readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req()), SOURCE)).toEqual([]);
       }
     });
 
@@ -175,7 +175,7 @@ describe('bounded promote conflict lookup', () => {
       await put(store, GRAPH, job('bound-bad', 'failed', { bound: true }));
       await store.deleteByPattern({ subject: jobSubject('bound-bad'), predicate: PROMOTE_PAYLOAD, graph: GRAPH });
       await store.insert([{ subject: jobSubject('bound-bad'), predicate: PROMOTE_PAYLOAD, object: literal('{"recoveryBinding":'), graph: GRAPH }]);
-      await expect(readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req()))).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
+      await expect(readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req()), SOURCE)).rejects.toMatchObject({ code: 'KA_PROMOTE_RECOVERY_REQUIRED' });
     });
 
     it('D4: a lookup no longer clears another process\'s stale owner observation of a job that became terminal there; any read of that job still does', async () => {
@@ -235,7 +235,7 @@ describe('bounded promote conflict lookup', () => {
         const lookup = promoteOwnershipLookup(req());
         const previous = await referenceCandidates(store, GRAPH, lookup);
         const previousRows = counter.rows; counter.rows = 0;
-        const bounded = await readPromoteOwnershipCandidates(store, GRAPH, lookup);
+        const bounded = await readPromoteOwnershipCandidates(store, GRAPH, lookup, SOURCE);
         rowsRead.push({ finished, previous: previousRows, bounded: counter.rows });
         expect(ids(bounded.filter(decisive))).toEqual(['hot-live']);
         expect(ids(previous.filter(decisive))).toEqual(['hot-live']);
@@ -251,7 +251,7 @@ describe('bounded promote conflict lookup', () => {
       // control: the previous query is flagged by the same check (one unbound key pattern), so the assertions below discriminate old from new
       await referenceCandidates(store, GRAPH, fresh);
       expect(counter.queries.splice(0).map(keyObjects)).toEqual([['?key']]);
-      expect(await readPromoteOwnershipCandidates(store, GRAPH, fresh)).toEqual([]);
+      expect(await readPromoteOwnershipCandidates(store, GRAPH, fresh, SOURCE)).toEqual([]);
       expect(counter.queries.splice(0).map(keyObjects)).toEqual([uniquenessLookupKeys(req({ assertionName: 'fresh' })).map(literal)]);   // one constant per key spelling, in key order
       expect(counter.rows).toBe(0);
       const queue = new TripleStoreAsyncPromoteQueue(store, { idGenerator: () => 'fresh-1' });
@@ -267,7 +267,7 @@ describe('bounded promote conflict lookup', () => {
       const inner = memory();
       await put(inner, GRAPH, ...Array.from({ length: 60 }, (_, i) => job(`done-${i}`, 'succeeded')), ...Array.from({ length: 7 }, (_, i) => job(`q-${i}`, 'queued')));
       const { store, counter } = countingStore(inner);
-      const bounded = await readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req()));
+      const bounded = await readPromoteOwnershipCandidates(store, GRAPH, promoteOwnershipLookup(req()), SOURCE);
       expect(counter.rows).toBe(7);
       expect(bounded).toHaveLength(7);
     });

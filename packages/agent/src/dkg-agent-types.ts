@@ -1540,6 +1540,8 @@ export interface DKGAgentConfig {
   }>;
   dataDir?: string;
   store?: TripleStore;
+  /** Write-preflight unresolved-write window in ms (default 120 s; 0 = strict). A policy, not a store guarantee: see `dkg-agent-write-preflight.ts`. */
+  writePreflightUnresolvedWriteWindowMs?: number;
   /** Triple store backend configuration (e.g. oxigraph-worker, blazegraph). If omitted, defaults to oxigraph-worker when dataDir is set. */
   storeConfig?: TripleStoreConfig;
   /** Out-of-line storage for large public SWM RDF literal object terms. Defaults on for local Oxigraph-backed dataDir stores. */

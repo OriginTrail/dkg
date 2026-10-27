@@ -13,6 +13,7 @@ import {
   type StoreSchedulerStatsReport,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import { getWritePreflightCoalescingCounters, type WritePreflightCoalescingCounters } from './write-preflight-coalescing.js';
 
 /**
  * One `async_admission_usage` line every five minutes: how the async share and async publish
@@ -34,6 +35,7 @@ import {
  *     share_depth=failed:0,failed_retrying:0,queued:3,running:1,succeeded:200 lift_depth=accepted:2,... lift_journal=812 depth_errors=0
  *     share_reclaimed=0 share_abandoned=0 lift_reclaimed=0 lift_stale_claims=0
  *     share_hb_n=40 share_hb_p95_ms=12 ... share_claim_n=300 ... lift_wallets=2 lift_pickup_n=41 ...
+ *     ... lift_finalized=40 lift_failed=3 preflight_flights=812 preflight_joins=3390 preflight_cache_hits=0 preflight_cache_stores=0 preflight_direct=0
  *
  * `store_wait_p95_ms` is an upper bound: the top of the fixed bucket (about 10 % wider than the one below, 1 to
  * 10000 ms) holding the 95th-percentile wait, so the true P95 is at most that and up to one step lower; past
@@ -42,6 +44,10 @@ import {
  * also prints `store_wait_buckets`, the lane's wait counts as `<upper bound ms>x<count>` for each bucket that
  * holds a wait, ascending, joined by `|` (`infx<count>` past 10000 ms, `-` for none). Adding those counts over
  * the lines of a test cell or a monitoring window gives that window's P95 (docs/use-dkg/backpressure-observability.md).
+ *
+ * `preflight_*` are cumulative counts of the write preflight's coalescing (`write-preflight-coalescing.ts`): probes
+ * started, calls that joined one, calls served from the result cache, probes kept in it, and calls probed outright.
+ * `-` when the sample carries none.
  *
  * `http=` counts every admission request, 2xx included: `<route>/<phase>/<status>/<code>`, where
  * the phase is the step that answered (`request`, `write_preflight`, `intent_resolution`,
@@ -75,6 +81,8 @@ export interface AsyncAdmissionUsageSample {
   /** Cumulative count of queue depth reads that failed, timed out, or were skipped behind a hung one. */
   depthErrors: number;
   shareWorker: ShareWorkerCountersView | null;
+  /** What write preflight coalescing has done since the daemon started; absent prints `-`. */
+  preflight?: Readonly<WritePreflightCoalescingCounters>;
 }
 
 const UNKNOWN = '-';
@@ -117,7 +125,7 @@ function windowFields(prefix: string, summary: LatencySummary, figures: readonly
 }
 
 export function formatAsyncAdmissionUsageLine(sample: AsyncAdmissionUsageSample): string {
-  const { usage, depth, shareWorker } = sample;
+  const { usage, depth, shareWorker, preflight } = sample;
   const rejections: Array<[string, number]> = [];
   const maxWaits: Array<[string, number]> = [];
   const waitCounts: Array<[string, number]> = [];
@@ -173,6 +181,11 @@ export function formatAsyncAdmissionUsageLine(sample: AsyncAdmissionUsageSample)
     ...windowFields('lift_c2f', usage.liftClaimToFinish, ['p50', 'p95']),
     `lift_finalized=${usage.liftFinalized}`,
     `lift_failed=${usage.liftFailed}`,
+    `preflight_flights=${counter(preflight?.flights)}`,
+    `preflight_joins=${counter(preflight?.joins)}`,
+    `preflight_cache_hits=${counter(preflight?.cacheHits)}`,
+    `preflight_cache_stores=${counter(preflight?.cacheStores)}`,
+    `preflight_direct=${counter(preflight?.direct)}`,
   ];
   return `async_admission_usage ${fields.join(' ')}`;
 }
@@ -205,6 +218,8 @@ export interface AsyncAdmissionUsageLogOptions {
   capture?: () => { store: readonly StoreSchedulerStatsReport[]; usage: AsyncAdmissionUsageSnapshot };
   readDepth?: (signal: AbortSignal) => Promise<AsyncQueueDepthReading>;
   shareWorkerCounters?: () => ShareWorkerCountersView | null;
+  /** The write preflight coalescer's counters; the live ones by default. */
+  preflightCounters?: () => Readonly<WritePreflightCoalescingCounters>;
   intervalMs?: number;
   depthTimeoutMs?: number;
   now?: () => number;
@@ -274,6 +289,7 @@ export function startAsyncAdmissionUsageLog(options: AsyncAdmissionUsageLogOptio
         depth,
         depthErrors,
         shareWorker: options.shareWorkerCounters?.() ?? null,
+        preflight: (options.preflightCounters ?? getWritePreflightCoalescingCounters)(),
       }));
     } catch {
       // A failed sample is skipped; the next one is taken on time.

@@ -9,7 +9,7 @@ import { buildPromoteOwnershipCandidateQuery, promoteOwnershipLookup, readPromot
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import { PromoteJobConflictError } from '../src/async-promote-queue-types.js';
 import { expectBindings } from '../src/async-promote-queue-utils.js';
-import { AG, decisive, differentialCase, ids, job, probeUnitSeparatorCollapse, put, referenceCandidates, req, rng, type DifferentialCase } from '../test/_helpers/promote-lookup-differential.js';
+import { AG, CONFLICT_READ_OPTIONS, decisive, differentialCase, ids, job, probeUnitSeparatorCollapse, put, referenceCandidates, req, rng, type DifferentialCase } from '../test/_helpers/promote-lookup-differential.js';
 
 // OT-RFC-73 P6 / AC4: the decision-identity differential of the bounded share conflict lookup on a REAL Blazegraph (the in-memory twin is
 // test/async-promote-bounded-lookup.property.test.ts, same generator and same oracle). It needs a live endpoint and fails loudly without one:
@@ -93,14 +93,14 @@ describe('bounded promote conflict lookup (live Blazegraph)', () => {
       await put(store, graph, job('hot-live', 'queued'));
       const lookup = promoteOwnershipLookup(req());
       const reference = await referenceCandidates(store, graph, lookup);
-      const bounded = await readPromoteOwnershipCandidates(store, graph, lookup);
+      const bounded = await readPromoteOwnershipCandidates(store, graph, lookup, CONFLICT_READ_OPTIONS);
       const raw = expectBindings(await store.query(buildPromoteOwnershipCandidateQuery(graph, lookup), SOURCE));
       expect(reference).toHaveLength(finished + 1);
       expect(raw).toHaveLength(1);
       expect(ids(bounded)).toEqual(['hot-live']);
       expect(ids(bounded.filter(decisive))).toEqual(ids(reference.filter(decisive)));
       const median = async (run: () => Promise<unknown>) => { const t: number[] = []; for (let i = 0; i < 3; i++) { const s = performance.now(); await run(); t.push(performance.now() - s); } return Math.round(t.sort((a, b) => a - b)[1]!); };
-      timings.push(`${finished} rows under the key: previous ${await median(() => referenceCandidates(store, graph, lookup))} ms | bounded ${await median(() => readPromoteOwnershipCandidates(store, graph, lookup))} ms`);
+      timings.push(`${finished} rows under the key: previous ${await median(() => referenceCandidates(store, graph, lookup))} ms | bounded ${await median(() => readPromoteOwnershipCandidates(store, graph, lookup, CONFLICT_READ_OPTIONS))} ms`);
     }
     console.log(`INFO  G2b hot key, median of 3 (query + JS decode): ${timings.join(' ;; ')}`);
   }, 300_000);
@@ -115,9 +115,9 @@ describe('bounded promote conflict lookup (live Blazegraph)', () => {
       for (; stored < history; stored += 500) {
         await put(store, graph, ...Array.from({ length: 500 }, (_, i) => job(`h-${stored + i}`, 'succeeded', { name: `n-${stored + i}` })));
       }
-      expect(await readPromoteOwnershipCandidates(store, graph, fresh)).toEqual([]);
+      expect(await readPromoteOwnershipCandidates(store, graph, fresh, CONFLICT_READ_OPTIONS)).toEqual([]);
       expect(expectBindings(await store.query(buildPromoteOwnershipCandidateQuery(graph, fresh), SOURCE))).toEqual([]);
-      timings.push(`${history} retained jobs: previous ${await median(() => referenceCandidates(store, graph, fresh))} ms | bounded ${await median(() => readPromoteOwnershipCandidates(store, graph, fresh))} ms`);
+      timings.push(`${history} retained jobs: previous ${await median(() => referenceCandidates(store, graph, fresh))} ms | bounded ${await median(() => readPromoteOwnershipCandidates(store, graph, fresh, CONFLICT_READ_OPTIONS))} ms`);
     }
     console.log(`INFO  distinct fresh key beside retained history, median of 3: ${timings.join(' ;; ')}`);
     let n = 0;

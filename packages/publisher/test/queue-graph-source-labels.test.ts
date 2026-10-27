@@ -8,7 +8,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, OxigraphStore, controlStoreOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import {
@@ -154,6 +154,8 @@ describe('RFC-73 P1b queue-graph source labels', () => {
       first: { subject: walletLockSubject('wallet-1'), graph: DEFAULT_WALLET_LOCK_GRAPH_URI },
       source: 'publisher.asyncLift.walletLock.delete',
     });
+    // OT-RFC-73 S1: the label travels with the queue tag, as exactly the control options (no priority).
+    expect(calls[0]!.options).toEqual(controlStoreOptions('publisher', 'publisher.asyncLift.walletLock.delete'));
   });
 
   it('labels the request insert and the fallback delete and insert of a job record write', async () => {

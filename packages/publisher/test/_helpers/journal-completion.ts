@@ -37,8 +37,10 @@ export function observe<T>(promise: Promise<T>) {
 
 export interface JournalEntryView { kind: string; jobId: string }
 export interface JournalHooks {
-  read?: () => Promise<void>;
-  insert?: (entry: JournalEntryView) => Promise<void>;
+  /** Runs before the sequence-allocation read; receives the options the journal passed to the store. */
+  read?: (options?: QueryOptions) => Promise<void>;
+  /** Runs before the journal insert; receives the options the journal passed to the store. */
+  insert?: (entry: JournalEntryView, options?: QueryOptions) => Promise<void>;
   walletWrite?: () => Promise<void>;
 }
 
@@ -73,7 +75,7 @@ export function fixture(): JournalFixture {
         if (key === 'query') return async (query: string, options?: QueryOptions) => {
           if (options?.source === 'publisher.asyncLift.allocateJournalSeq') {
             journalReads();
-            await hooks.read?.();
+            await hooks.read?.(options);
           }
           return target.query(query, options);
         };
@@ -82,7 +84,7 @@ export function fixture(): JournalFixture {
             const value = (predicate: string): string => JSON.parse(quads.find((quad) => quad.predicate === predicate)!.object) as string;
             const entry = { kind: value(JOURNAL_KIND), jobId: value(JOURNAL_JOB_ID) };
             journalInserts.push(entry);
-            await hooks.insert?.(entry);
+            await hooks.insert?.(entry, options);
           }
           await delegate.insert(quads, options);
         };

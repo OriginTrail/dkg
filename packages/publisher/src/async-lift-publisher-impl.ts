@@ -19,7 +19,7 @@ import {
 } from './chain-proof-retry-schedule.js';
 import { ReconciliationSnapshotCoordinator } from './reconciliation-snapshot-coordinator.js';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
@@ -854,7 +854,7 @@ export class TripleStoreAsyncLiftPublisher
   private async readJobPayload(jobId: string): Promise<LiftJobPayloadDecodeResult> {
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PAYLOAD_PREDICATE}> ?payload } }`,
-      { source: 'publisher.asyncLift.getStatus' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.getStatus'),
     );
     const rows = expectBindings(result);
     return decodeLiftJobPayload(rows[0]?.['payload']);
@@ -877,7 +877,7 @@ export class TripleStoreAsyncLiftPublisher
     // so a transient false `none` cannot by itself create a duplicate active job.
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${PAYLOAD_PREDICATE}> ?payload } }`,
-      { source: 'publisher.asyncLift.lookupVmPublishIntent' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.lookupVmPublishIntent'),
     );
     const jobs = expectBindings(result)
       .map((row) => this.parseJobPayload(row['payload']))
@@ -2810,7 +2810,7 @@ export class TripleStoreAsyncLiftPublisher
     // swept" guarantee does not hold.
     return this.claimCoordinator.runClaimTransaction(owner, async (section) => {
       const counts = { retried: 0, blockedPendingRecovery: 0, skipped: 0 };
-      for (const job of (await this.list({ status: 'failed' })).filter(isFailedJob)) {
+      for (const job of (await this.jobSelectors.list({ status: 'failed' }, controlStoreOptions('publisher', 'publisher.asyncLift.retryList'))).filter(isFailedJob)) {
         // The WRITE decision, taken over the job alone — the operator's kill-switch is not an
         // input here and the signature cannot accept one.
         const action = classifyRetryAction(job);
@@ -3041,7 +3041,7 @@ export class TripleStoreAsyncLiftPublisher
   private async readJournalEntriesBy(predicate: string, value: string): Promise<AdmissionJournalEntry[]> {
     const result = await this.store.query(
       `SELECT ?e ?p ?o WHERE { GRAPH <${this.journalGraphUri}> { ?e <${predicate}> ${literal(value)} . ?e ?p ?o } }`,
-      { source: 'publisher.asyncLift.readJournalEntries' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.readJournalEntries'),
     );
     const bySubject = new Map<string, Record<string, string>>();
     for (const row of expectBindings(result)) {
@@ -3060,8 +3060,8 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   private async deleteJob(jobId: string): Promise<void> {
-    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri }, { source: 'publisher.asyncLift.deleteJob' });
-    await deleteByPatternWithoutCount(this.store, { subject: requestSubject(jobId), graph: this.graphUri }, { source: 'publisher.asyncLift.deleteJobRequest' });
+    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri }, controlStoreOptions('publisher', 'publisher.asyncLift.deleteJob'));
+    await deleteByPatternWithoutCount(this.store, { subject: requestSubject(jobId), graph: this.graphUri }, controlStoreOptions('publisher', 'publisher.asyncLift.deleteJobRequest'));
   }
 
   // Scheduling-only — the claim attempt re-checks every guard — and it must never throw into
