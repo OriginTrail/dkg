@@ -67,38 +67,29 @@ const HELD_CHAIN_CHECK_CONCURRENCY = 8;
 export const HELD_CHAIN_CHECK_BUDGET_MS = 120_000;
 
 /**
- * What a graph-owned round reads about holdings: which assets of a verified
- * generation the store holds, and whether those copies are current on chain.
- * The round asks the chain only when its plan relies on held copies.
+ * Resolve once every held copy is the asset's current version, as
+ * authentication requires of a fetched copy: its chain root and root count
+ * are the descriptor's, and the asset is bound to this context graph. A copy
+ * the chain shows superseded or bound elsewhere rejects with
+ * {@link HeldGenerationNotCurrentError}: this peer serves a superseded
+ * generation, so the round fails and the owner tries another peer. A chain
+ * that cannot answer for every held copy within one budget
+ * ({@link HELD_CHAIN_CHECK_BUDGET_MS}, or the round's authentication deadline
+ * if earlier) rejects with an ordinary error, and the round runs its DATA
+ * rounds, which authenticate what they fetch. Copies in `confirmed` are not
+ * checked again; each copy confirmed here is added to it.
  */
-export interface DurableHoldingsReader {
-  read(request: HeldGraphScopedAssetsRequest): Promise<ReadonlySet<string>>;
-  /**
-   * Resolve once every held copy is the asset's current version, as
-   * authentication requires of a fetched copy: its chain root and root count
-   * are the descriptor's, and the asset is bound to this context graph. A copy
-   * the chain shows superseded or bound elsewhere rejects with
-   * {@link HeldGenerationNotCurrentError}: this peer serves a superseded
-   * generation, so the round fails and the owner tries another peer. A chain
-   * that cannot answer for every held copy within one budget
-   * ({@link HELD_CHAIN_CHECK_BUDGET_MS}, or the round's authentication deadline
-   * if earlier) rejects with an ordinary error, and the round runs its DATA
-   * rounds, which authenticate what they fetch. Copies in `confirmed` are not
-   * checked again; each copy confirmed here is added to it.
-   */
-  confirmCurrent(
-    request: HeldGraphScopedAssetsRequest,
-    held: ReadonlySet<string>,
-    confirmed?: Set<string>,
-  ): Promise<void>;
-}
+export type ConfirmHeldAssetsCurrent = (
+  request: HeldGraphScopedAssetsRequest,
+  held: ReadonlySet<string>,
+  confirmed?: Set<string>,
+) => Promise<void>;
 
 const heldCopyKey = (descriptor: GraphScopedDescriptor) =>
   `${descriptor.ual}\0${descriptor.assertionVersion}\0${descriptor.claimedRootHex}`;
 
-/** A store read and a chain read make a holdings reader; without either, rounds plan no shortcut. */
-interface HeldAssetsReaderInput {
-  readonly readHeld?: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
+/** Chain confirmation for content already owned by an acquired store proof. */
+interface HeldAssetsConfirmationInput {
   /** Retry best-effort SWM housekeeping after every skipped copy is authenticated. */
   readonly reconcileHeld?: (request: HeldGraphScopedAssetsRequest, held: ReadonlySet<string>) => Promise<void>;
   readonly binding?: () => Readonly<{ onChainId?: string; generation: number }>;
@@ -107,57 +98,52 @@ interface HeldAssetsReaderInput {
   /** The round's budget: the chain checks share one authentication deadline. */
   readonly budget: { createGraphScopedAuthenticationDeadline(): number };
 }
-export function currentHeldGraphScopedAssetsReader(input: HeldAssetsReaderInput): DurableHoldingsReader | undefined {
-  const confirmCurrent = currentHeldGraphScopedAssetsConfirmer(input);
-  return input.readHeld && confirmCurrent ? { read: input.readHeld, confirmCurrent } : undefined;
-}
-
-export function currentHeldGraphScopedAssetsConfirmer(input: Omit<HeldAssetsReaderInput, 'readHeld'>): DurableHoldingsReader['confirmCurrent'] | undefined {
+export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmationInput): ConfirmHeldAssetsCurrent | undefined {
   const { readChainState } = input;
   if (!readChainState) return undefined;
   return async (request, held, confirmed) => {
-      const deadline = Math.min(
-        input.budget.createGraphScopedAuthenticationDeadline(),
-        Date.now() + HELD_CHAIN_CHECK_BUDGET_MS,
-      );
-      const { contextGraphId } = request;
-      const binding = input.binding?.();
-      const bindingKey = (value: typeof binding) => `${contextGraphId}\0${value?.generation ?? ''}\0${value?.onChainId ?? ''}`;
-      const capturedBinding = bindingKey(binding);
-      const cacheKey = (descriptor: GraphScopedDescriptor) => `${capturedBinding}\0${heldCopyKey(descriptor)}`;
-      await mapWithConcurrencyDrained(
-        request.descriptors.filter((descriptor) => held.has(descriptor.ual)
-          && !confirmed?.has(cacheKey(descriptor))),
-        HELD_CHAIN_CHECK_CONCURRENCY,
-        async (descriptor) => {
-          const { ual, assertionVersion, claimedRootHex } = descriptor;
-          let state: GraphScopedAssetChainState;
-          try {
-            state = await readChainState({ ual, contextGraphId }, deadline, request.signal);
-          } catch (error) {
-            request.signal?.throwIfAborted();
-            throw new Error(
-              `Could not check held asset ${ual} of "${contextGraphId}" against the chain within the round's budget: `
-                + `${error instanceof Error ? error.message : String(error)}`,
-              { cause: error },
-            );
-          }
-          if (!state.bound || (binding?.onChainId !== undefined && binding.onChainId !== state.onChainContextGraphId)) {
-            throw new HeldGenerationNotCurrentError(`Held asset ${ual} is not bound to "${contextGraphId}" on chain`);
-          }
-          if (state.assertionVersion !== BigInt(assertionVersion) || state.merkleRootHex !== claimedRootHex) {
-            throw new HeldGenerationNotCurrentError(
-              `This peer's generation of "${contextGraphId}" is behind the chain: ${ual} is at version `
-                + `${state.assertionVersion} on chain, ${assertionVersion} here and at the peer`,
-            );
-          }
-          confirmed?.add(cacheKey(descriptor));
-        },
-      );
-      await input.reconcileHeld?.(request, held);
-      if (input.binding && bindingKey(input.binding()) !== capturedBinding) {
-        throw new HeldGenerationNotCurrentError(`Local binding for "${contextGraphId}" changed during held-copy checks`);
-      }
+    const deadline = Math.min(
+      input.budget.createGraphScopedAuthenticationDeadline(),
+      Date.now() + HELD_CHAIN_CHECK_BUDGET_MS,
+    );
+    const { contextGraphId } = request;
+    const binding = input.binding?.();
+    const bindingKey = (value: typeof binding) => `${contextGraphId}\0${value?.generation ?? ''}\0${value?.onChainId ?? ''}`;
+    const capturedBinding = bindingKey(binding);
+    const cacheKey = (descriptor: GraphScopedDescriptor) => `${capturedBinding}\0${heldCopyKey(descriptor)}`;
+    await mapWithConcurrencyDrained(
+      request.descriptors.filter((descriptor) => held.has(descriptor.ual)
+        && !confirmed?.has(cacheKey(descriptor))),
+      HELD_CHAIN_CHECK_CONCURRENCY,
+      async (descriptor) => {
+        const { ual, assertionVersion, claimedRootHex } = descriptor;
+        let state: GraphScopedAssetChainState;
+        try {
+          state = await readChainState({ ual, contextGraphId }, deadline, request.signal);
+        } catch (error) {
+          request.signal?.throwIfAborted();
+          throw new Error(
+            `Could not check held asset ${ual} of "${contextGraphId}" against the chain within the round's budget: `
+              + `${error instanceof Error ? error.message : String(error)}`,
+            { cause: error },
+          );
+        }
+        if (!state.bound || (binding?.onChainId !== undefined && binding.onChainId !== state.onChainContextGraphId)) {
+          throw new HeldGenerationNotCurrentError(`Held asset ${ual} is not bound to "${contextGraphId}" on chain`);
+        }
+        if (state.assertionVersion !== BigInt(assertionVersion) || state.merkleRootHex !== claimedRootHex) {
+          throw new HeldGenerationNotCurrentError(
+            `This peer's generation of "${contextGraphId}" is behind the chain: ${ual} is at version `
+              + `${state.assertionVersion} on chain, ${assertionVersion} here and at the peer`,
+          );
+        }
+        confirmed?.add(cacheKey(descriptor));
+      },
+    );
+    await input.reconcileHeld?.(request, held);
+    if (input.binding && bindingKey(input.binding()) !== capturedBinding) {
+      throw new HeldGenerationNotCurrentError(`Local binding for "${contextGraphId}" changed during held-copy checks`);
+    }
   };
 }
 
@@ -211,25 +197,26 @@ export function planDurableDataFromHoldings(
 /**
  * Plan a graph-owned round's DATA phase once its META generation is verified,
  * and leave a `fetch-missing` plan to the owner. A held copy the chain shows
- * superseded fails the round. A store or chain read that cannot answer plans
+ * superseded fails the round. A chain read that cannot answer plans
  * a retryable full-graph attempt: the round then runs its bounded full-graph rounds as before.
  */
 export async function planDurableDataFromLocalHoldings(input: {
   readonly contextGraphId: string;
   readonly manifest: GraphScopedDurableManifestPlan;
   readonly options: DurableHoldingsOptions;
-  readonly holdings: DurableHoldingsReader;
+  readonly held: ReadonlySet<string>;
+  readonly confirmCurrent: ConfirmHeldAssetsCurrent;
   readonly signal?: AbortSignal;
   readonly logWarn: (message: string) => void;
 }): Promise<DurableHoldingsPlan & { continuation: 'full-graph' | 'reconsider-holdings' }> {
-  const { contextGraphId, manifest, options, holdings } = input;
+  const { contextGraphId, manifest, options, held, confirmCurrent } = input;
   const request = { contextGraphId, descriptors: manifest.descriptors, signal: input.signal };
   let plan: DurableHoldingsPlan;
   try {
-    const held = await holdings.read(request);
+    input.signal?.throwIfAborted();
     plan = planDurableDataFromHoldings(manifest, held, options.ownerFetchesMissingAssets === true);
     // Full-graph rounds authenticate every asset they fetch: only a plan that skips held copies asks the chain.
-    if (plan.kind !== 'full') await holdings.confirmCurrent(request, held, options.confirmedHeldCopies);
+    if (plan.kind !== 'full') await confirmCurrent(request, held, options.confirmedHeldCopies);
   } catch (error) {
     input.signal?.throwIfAborted();
     if (error instanceof HeldGenerationNotCurrentError || (error instanceof Error && error.name === 'AbortError')) throw error;

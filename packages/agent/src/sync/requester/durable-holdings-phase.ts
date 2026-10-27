@@ -41,7 +41,7 @@ export async function attemptDurableHoldingsPhase(input: {
     const assertCurrent = () => { held.assertCurrent(); proof.assertCurrent(); };
     assertCurrent();
     const plan = await planDurableDataFromLocalHoldings({
-      contextGraphId, manifest, options: recovery.holdings, holdings: { read: async () => proof.held, confirmCurrent: held.confirmCurrent },
+      contextGraphId, manifest, options: recovery.holdings, held: proof.held, confirmCurrent: held.confirmCurrent,
       signal: context.signal, logWarn: message => context.logWarn(context.ctx, message),
     });
     if (plan.kind === 'full') return { strategy: 'full', continuation: plan.continuation };

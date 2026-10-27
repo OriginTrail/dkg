@@ -23,14 +23,14 @@ import {
   describeDurableHoldingsPlan,
   planDurableDataFromHoldings,
   planDurableDataFromLocalHoldings,
-  currentHeldGraphScopedAssetsReader,
+  currentHeldGraphScopedAssetsConfirmer,
   HELD_CHAIN_CHECK_BUDGET_MS,
   HeldGenerationNotCurrentError,
   readHeldGraphScopedAssets,
   settleDurableDataFromHoldings,
   settleHeldDurableData,
   type DurableHoldingsOptions,
-  type DurableHoldingsReader,
+  type ConfirmHeldAssetsCurrent,
 } from '../src/sync/requester/durable-data-holdings.js';
 import { materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 import { partitionVerifiedGraphScopedAssets } from '../src/sync/requester/verified-asset-preparation.js';
@@ -254,14 +254,14 @@ describe('planning a DATA phase from holdings', () => {
     expect(planDurableDataFromHoldings(manifest, firstHeld, true, budget(8))).toEqual({ kind: 'full', held: 1 });
   });
 
-  it('hands a fetch-missing plan to the owner and reconsiders holdings after a failed store read', async () => {
+  it('hands a fetch-missing plan to the owner and reconsiders holdings after a chain timeout', async () => {
     const manifest = generation(3);
     const channel: DurableHoldingsOptions = { ownerFetchesMissingAssets: true };
     const outcome = await planDurableDataFromLocalHoldings({
       contextGraphId: CG,
       manifest,
       options: channel,
-      holdings: { read: async () => new Set(uals(manifest).slice(1)), confirmCurrent: async () => {} },
+      held: new Set(uals(manifest).slice(1)), confirmCurrent: async () => {},
       logWarn: () => {},
     });
     const plan = outcome;
@@ -275,11 +275,11 @@ describe('planning a DATA phase from holdings', () => {
       contextGraphId: CG,
       manifest,
       options: {},
-      holdings: { read: async () => { throw new Error('store queue wait timeout'); }, confirmCurrent: async () => {} },
+      held: new Set(uals(manifest)), confirmCurrent: async () => { throw new Error('chain timeout'); },
       logWarn,
     });
     expect(failed).toEqual({ kind: 'full', held: 0, continuation: 'reconsider-holdings' });
-    expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('store queue wait timeout'));
+    expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('chain timeout'));
 
     const aborted = new AbortController();
     aborted.abort(new Error('node stopping'));
@@ -287,7 +287,7 @@ describe('planning a DATA phase from holdings', () => {
       contextGraphId: CG,
       manifest,
       options: {},
-      holdings: { read: async () => { throw new Error('aborted read'); }, confirmCurrent: async () => {} },
+      held: new Set(uals(manifest)), confirmCurrent: async () => {},
       signal: aborted.signal,
       logWarn,
     })).rejects.toThrow('node stopping');
@@ -297,10 +297,8 @@ describe('planning a DATA phase from holdings', () => {
       contextGraphId: CG,
       manifest,
       options: {},
-      holdings: {
-        read: async () => new Set(uals(manifest)),
-        confirmCurrent: async () => { throw new HeldGenerationNotCurrentError('behind the chain'); },
-      },
+      held: new Set(uals(manifest)),
+      confirmCurrent: async () => { throw new HeldGenerationNotCurrentError('behind the chain'); },
       logWarn,
     })).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
   });
@@ -312,7 +310,7 @@ describe('planning a DATA phase from holdings', () => {
       contextGraphId: CG,
       manifest,
       options: { ownerFetchesMissingAssets },
-      holdings: { read: async () => new Set(held), confirmCurrent },
+      held: new Set(held), confirmCurrent,
       logWarn: () => {},
     });
 
@@ -419,8 +417,7 @@ describe('holding a copy only while it is current on chain', () => {
     deadlines: number[] = [],
     authenticationDeadline = () => 42,
   ) {
-    return currentHeldGraphScopedAssetsReader({
-      readHeld: async () => new Set<string>(),
+    return currentHeldGraphScopedAssetsConfirmer({
       readChainState: async ({ ual }, deadline) => {
         reads.push(ual);
         deadlines.push(deadline);
@@ -431,8 +428,8 @@ describe('holding a copy only while it is current on chain', () => {
       budget: { createGraphScopedAuthenticationDeadline: authenticationDeadline },
     })!;
   }
-  const confirm = (holdings: DurableHoldingsReader, manifest: GraphScopedDurableManifestPlan, held: readonly string[],
-    signal?: AbortSignal) => holdings.confirmCurrent({ contextGraphId: CG, descriptors: manifest.descriptors, signal }, new Set(held));
+  const confirm = (holdings: ConfirmHeldAssetsCurrent, manifest: GraphScopedDurableManifestPlan, held: readonly string[],
+    signal?: AbortSignal) => holdings({ contextGraphId: CG, descriptors: manifest.descriptors, signal }, new Set(held));
 
   it('rechecks a cached held copy when the numeric subscription binding changes', async () => {
     const manifest = generation(1);
@@ -442,18 +439,18 @@ describe('holding a copy only while it is current on chain', () => {
       merkleRootHex: descriptor.claimedRootHex, assertionVersion: BigInt(descriptor.assertionVersion),
       bound: true, onChainContextGraphId: '323',
     }));
-    const holdings = currentHeldGraphScopedAssetsReader({
-      readHeld: async () => new Set([descriptor.ual]), readChainState,
+    const holdings = currentHeldGraphScopedAssetsConfirmer({
+      readChainState,
       binding: () => ({ onChainId, generation: 0 }),
       budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 1000 },
     })!;
     const confirmed = new Set<string>();
     const request = { contextGraphId: CG, descriptors: manifest.descriptors };
-    await holdings.confirmCurrent(request, new Set([descriptor.ual]), confirmed);
-    await holdings.confirmCurrent(request, new Set([descriptor.ual]), confirmed);
+    await holdings(request, new Set([descriptor.ual]), confirmed);
+    await holdings(request, new Set([descriptor.ual]), confirmed);
     expect(readChainState).toHaveBeenCalledTimes(1);
     onChainId = '582';
-    await expect(holdings.confirmCurrent(request, new Set([descriptor.ual]), confirmed)).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+    await expect(holdings(request, new Set([descriptor.ual]), confirmed)).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
     expect(readChainState).toHaveBeenCalledTimes(2);
   });
 
@@ -517,7 +514,7 @@ describe('holding a copy only while it is current on chain', () => {
       contextGraphId: CG,
       manifest,
       options: channel,
-      holdings: { read: async () => new Set(manifest.descriptors.map((descriptor) => descriptor.ual)), confirmCurrent: holdings.confirmCurrent },
+      held: new Set(manifest.descriptors.map((descriptor) => descriptor.ual)), confirmCurrent: holdings,
       logWarn,
     });
 
@@ -530,8 +527,7 @@ describe('holding a copy only while it is current on chain', () => {
     const manifest = generation(300);
     const all = manifest.descriptors.map((descriptor) => descriptor.ual);
     const confirmed = new Set<string>();
-    const confirmOnce = (chain: Map<string, ChainState>, reads: string[]) => reader(chain, reads)
-      .confirmCurrent({ contextGraphId: CG, descriptors: manifest.descriptors }, new Set(all), confirmed);
+    const confirmOnce = (chain: Map<string, ChainState>, reads: string[]) => reader(chain, reads)({ contextGraphId: CG, descriptors: manifest.descriptors }, new Set(all), confirmed);
 
     // The first round's budget ends after a third of the checks; the ones it finished stay confirmed.
     await expect(confirmOnce(new Map([...currentOf(manifest)].slice(0, 100)), []))
@@ -544,7 +540,7 @@ describe('holding a copy only while it is current on chain', () => {
     expect(confirmed.size).toBe(300);
   });
 
-  it('stops at an abort, and plans no shortcut without a store or a chain', async () => {
+  it('stops at an abort, and offers no confirmation without a chain', async () => {
     const manifest = generation();
     const aborted = new AbortController();
     aborted.abort(new Error('node stopping'));
@@ -552,8 +548,6 @@ describe('holding a copy only while it is current on chain', () => {
       .rejects.toThrow('node stopping');
 
     const budget = { createGraphScopedAuthenticationDeadline: () => 42 };
-    expect(currentHeldGraphScopedAssetsReader({ readHeld: async () => new Set<string>(), budget })).toBeUndefined();
-    expect(currentHeldGraphScopedAssetsReader({ readChainState: async () => ({ merkleRootHex: '', assertionVersion: 1n, bound: true }), budget }))
-      .toBeUndefined();
+    expect(currentHeldGraphScopedAssetsConfirmer({ budget })).toBeUndefined();
   });
 });

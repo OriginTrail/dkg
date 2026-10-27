@@ -28,8 +28,7 @@ import { MemorySyncCheckpointStore } from '../../src/sync/checkpoint/state.js';
 import { createUalOnlyExactAssetSelection } from '../../src/sync/exact-assets.js';
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../../src/sync/durable-recovery-runner.js';
 import {
-  currentHeldGraphScopedAssetsReader,
-  heldGraphScopedAssetsReader,
+  currentHeldGraphScopedAssetsConfirmer,
 } from '../../src/sync/requester/durable-data-holdings.js';
 import {
   runDurableSyncDetailed,
@@ -195,12 +194,8 @@ export function node(
     coalescing: 'owner-only', admitVerifiedPage() {}, isRegisteredPublic: () => true,
     authenticate: () => { throw new Error('materialization supplied below'); },
   } });
-  const holdings = (binding: () => Readonly<{ onChainId?: string; generation: number }>) => currentHeldGraphScopedAssetsReader({
+  const holdings = (binding: () => Readonly<{ onChainId?: string; generation: number }>) => currentHeldGraphScopedAssetsConfirmer({
     binding,
-    readHeld: async (request) => {
-      if (holdingsUnreadable) throw new Error('store queue wait timeout');
-      return heldGraphScopedAssetsReader(store)(request);
-    },
     readChainState: async ({ ual }) => {
       await options.beforeChainRead?.();
       if (chainAnswersLeft <= 0) throw createRpcTimeoutError('held chain check exceeded its context-graph deadline');
@@ -254,7 +249,7 @@ export function node(
     ...roundOptions,
     storedPrefix: options.disablePrefixProof?.() ? undefined : { prove: createDurableHeldStore(store, contentFence, async () => {}, () => options.noChain ? 'integrity-only' : 'confirmed')!.prove, assertCurrent: fence.assertCurrent },
     graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery, held: options.holdingsShortcut === false ? undefined : {
-      confirmCurrent: holdings(fence.binding)!.confirmCurrent, assertCurrent: fence.assertCurrent,
+      confirmCurrent: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
       prove: async request => {
         if (holdingsUnreadable) throw new Error('store queue wait timeout');
         return createDurableHeldStore(store, contentFence, async () => {})!.prove(request);

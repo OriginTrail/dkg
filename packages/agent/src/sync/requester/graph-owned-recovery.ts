@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { DurableMetaContinuation } from './durable-meta-continuation.js';
-import type { DurableHoldingsOptions, DurableHoldingsReader } from './durable-data-holdings.js';
+import type { DurableHoldingsOptions, ConfirmHeldAssetsCurrent } from './durable-data-holdings.js';
 import type { VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
 import type { ProveHeldAssets } from '../../durable-recovery-held-store.js';
 
@@ -14,7 +14,7 @@ export interface GraphOwnedRecoveryInput {
 export interface GraphOwnedRecoveryContext extends GraphOwnedRecoveryInput {
   /** A holdings reader is usable only with both lifecycle and store-content ownership. */
   readonly held?: {
-    readonly confirmCurrent: DurableHoldingsReader['confirmCurrent'];
+    readonly confirmCurrent: ConfirmHeldAssetsCurrent;
     assertCurrent(): void;
     readonly prove: ProveHeldAssets;
   };
