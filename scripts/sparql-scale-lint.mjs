@@ -925,9 +925,14 @@ const FIXTURES = [
 function diffGateSelfTest() {
   const dir = mkdtempSync(join(tmpdir(), 'sparql-lint-selftest-'));
   const env = hermeticGitEnv();
+  // GIT_CONFIG_GLOBAL=/dev/null does not stop git from reading the default
+  // global ignore and attributes files (~/.config/git/ignore, ...attributes),
+  // so a user's ignore rule could leave nothing to commit.
   const g = (...args) => git([
     '-c', 'user.name=sparql-lint-selftest',
     '-c', 'user.email=selftest@example.invalid',
+    '-c', 'core.excludesFile=/dev/null',
+    '-c', 'core.attributesFile=/dev/null',
     ...args,
   ], dir, env);
   const BAD = 'const a = `SELECT ?s WHERE { ?s ?p ?o }`;\n';
