@@ -1,3 +1,4 @@
+import { isCountedDiagnostic } from '../simulation-protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import type { CancellationResult, DoneEvent, ScopedSimEvent, SimulationSettings } from '../simulation-protocol';
@@ -110,7 +111,7 @@ export function useSimulation(onComplete: () => void) {
           } else if (event.type === 'status') {
             dispatch({ type: 'RECONCILE_SIMULATION', id, snapshot: event });
             setFailure(null);
-          } else if (event.type === 'error') dispatch({ type: 'SIMULATION_ERROR', id, message: event.message });
+          } else if (event.type === 'error' && isCountedDiagnostic(event)) dispatch({ type: 'SIMULATION_ERROR', id, message: event.message });
         } catch { /* Ignore malformed stream data. */ }
       };
     };

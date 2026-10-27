@@ -10,7 +10,7 @@ import {
 } from 'react';
 import type { DevnetNode, Activity, GraphAnimation, DevnetConfig, OperationType } from './types';
 import type { DoneEvent, StatusEvent, SimulationSettings } from './simulation-protocol';
-import { snapshotMetrics, recordMetric, combineMetrics, emptyMetrics } from './simulation-metrics';
+import { snapshotRunAccounting, recordMetric, combineMetrics, emptyMetrics } from './simulation-metrics';
 import { fetchDevnetConfig, fetchNodeStatus } from './api';
 
 import type { LiveOpMetrics } from './simulation-metrics';
@@ -141,8 +141,7 @@ function reducer(state: StoredState, action: Action): StoredState {
     case 'RECONCILE_SIMULATION': {
       if (action.id !== state.activeSimulationId) return state;
       const run = state.simulationRuns.find(r => r.id === action.id)!;
-      const metrics = snapshotMetrics(action.snapshot, run.metrics);
-      const updated = { ...run, metrics, error: undefined, diagnosticCount: action.snapshot.errors - metrics.errors };
+      const updated = { ...run, ...snapshotRunAccounting(action.snapshot, run.metrics), error: undefined };
       return { ...state,
         simulationRuns: state.simulationRuns.map(r => r.id === action.id ? updated : r) };
     }
@@ -155,9 +154,7 @@ function reducer(state: StoredState, action: Action): StoredState {
       if (action.id !== state.activeSimulationId) return state;
       const runs = state.simulationRuns.map(run => {
         if (run.id !== action.id) return run;
-        const metrics = action.snapshot ? snapshotMetrics(action.snapshot, run.metrics) : run.metrics;
-        return { ...run, metrics,
-          diagnosticCount: action.snapshot ? action.snapshot.errors - metrics.errors : run.diagnosticCount,
+        return { ...run, ...(action.snapshot ? snapshotRunAccounting(action.snapshot, run.metrics) : {}),
           finishedAt: action.snapshot ? run.startedAt + action.snapshot.elapsedMs : Date.now(),
         };
       });

@@ -378,11 +378,11 @@ async function execChat(
 // Simulation runner
 // ---------------------------------------------------------------------------
 
-async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, signal: AbortSignal, broadcast: (event: SimEvent) => void): Promise<void> {
+async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, signal: AbortSignal, report: { notice(message: string): void; fail(error: unknown): void }): Promise<void> {
   try {
     // Create context graph on every node that will be used for publish/shared-memory/query.
     // Each node checks contextGraphExists() locally, so all must have the context graph definition.
-    broadcast({ type: 'error', message: `Ensuring context graph "${contextGraphId}" exists on all nodes...` });
+    report.notice(`Ensuring context graph "${contextGraphId}" exists on all nodes...`);
     const createBody = JSON.stringify({
       id: contextGraphId,
       name: contextGraphId,
@@ -413,22 +413,24 @@ async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, sig
     for (const r of results) {
       if (r.status === 'rejected') throw r.reason;
     }
-    broadcast({ type: 'error', message: `Context graph "${contextGraphId}" ready on all nodes.` });
+    report.notice(`Context graph "${contextGraphId}" ready on all nodes.`);
     await new Promise((r) => setTimeout(r, 500));
   } catch (err) {
-    broadcast({ type: 'error', message: `Context graph setup failed: ${err instanceof Error ? err.message : String(err)}` });
+    report.fail(`Context graph setup failed: ${err instanceof Error ? err.message : String(err)}`);
   }
 }
 
 async function runSimulation(config: SimConfig, run: SimulationRun) {
   const { stats } = run;
   const signal = run.abort.signal;
-  const broadcast = (event: SimEvent) => runs.emit(run, event);
+  const broadcast = (event: Exclude<SimEvent, { type: 'error' }>) => runs.emit(run, event);
   const nodes = getNodes();
 
   await loadNodeTokens(nodes);
   if (signal.aborted) return;
-  await ensureContextGraph(nodes, config.contextGraph, signal, broadcast);
+  await ensureContextGraph(nodes, config.contextGraph, signal, {
+    notice: message => runs.notice(run, message), fail: error => runs.fail(run, error),
+  });
   if (signal.aborted) return;
 
   if (config.enabledOps.includes('chat')) {

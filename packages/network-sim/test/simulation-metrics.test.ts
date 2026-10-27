@@ -1,7 +1,8 @@
+import type { ServerResponse } from 'node:http';
 import { afterEach, expect, it, vi } from 'vitest';
 import { SimulationRuns } from '../src/server/simulation-runs';
-import { combineMetrics, emptyMetrics, recordMetric, snapshotMetrics } from '../src/simulation-metrics';
-import type { OpEvent, SimOp } from '../src/simulation-protocol';
+import { combineMetrics, emptyMetrics, recordMetric, snapshotMetrics, snapshotRunAccounting } from '../src/simulation-metrics';
+import { isCountedDiagnostic, type ScopedSimEvent, type OpEvent, type SimOp } from '../src/simulation-protocol';
 
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
@@ -78,4 +79,31 @@ it('keeps run diagnostics out of operation totals while preserving legacy wire c
   expect(terminal).toMatchObject({ completed: 1, errors: 2 });
   expect(snapshotMetrics(terminal, emptyMetrics())).toMatchObject({ total: 1, success: 1, errors: 0 });
   expect(admission.run.stats).toMatchObject({ completed: 1, errors: 0 });
+});
+
+it('normalizes streamed and recovered diagnostics identically while ignoring setup progress', () => {
+  const registry = new SimulationRuns();
+  const admission = registry.admit('diagnostic-boundary', 1);
+  if (!admission.accepted) throw new Error('fixture run rejected');
+  let diagnostics = 0;
+  const client = { write(chunk: string) {
+    const event: ScopedSimEvent = JSON.parse(chunk.slice(6));
+    if (event.type === 'error' && isCountedDiagnostic(event)) diagnostics++;
+    return true;
+  }, end() {} } as unknown as ServerResponse;
+  registry.subscribe(client, admission.run.id);
+  registry.notice(admission.run, 'creating graph');
+  expect(diagnostics).toBe(0);
+  expect(registry.status(admission.run).errors).toBe(0);
+  registry.fail(admission.run, 'setup failed');
+  const event: OpEvent = { type: 'op', opType: 'query', nodeId: 1, success: false, durationMs: 5, detail: 'failed', phases: {} };
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  registry.record(admission.run, event);
+  registry.notice(admission.run, 'continuing');
+  registry.fail(admission.run, 'transport diagnostic');
+  const metrics = recordMetric(emptyMetrics(), event);
+  expect(snapshotRunAccounting({ type: 'status', ...registry.status(admission.run) }, metrics))
+    .toEqual({ metrics, diagnosticCount: diagnostics });
+  expect(snapshotRunAccounting(registry.finish(admission.run), metrics)).toEqual({ metrics, diagnosticCount: 2 });
+  expect(diagnostics).toBe(2);
 });

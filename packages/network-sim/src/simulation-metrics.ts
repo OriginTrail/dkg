@@ -34,6 +34,12 @@ export function snapshotMetrics(snapshot: DoneEvent | StatusEvent, previous: Liv
   };
 }
 
+/** Normalize combined legacy wire errors once at the recovery boundary. */
+export function snapshotRunAccounting(snapshot: DoneEvent | StatusEvent, previous: LiveOpMetrics) {
+  const metrics = snapshotMetrics(snapshot, previous);
+  return { metrics, diagnosticCount: Math.max(0, snapshot.errors - metrics.errors) };
+}
+
 /** Dictionary keys may come from daemon phase names; never read inherited entries. */
 export function ownValue<T>(values: Record<string, T>, key: string): T | undefined {
   return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : undefined;

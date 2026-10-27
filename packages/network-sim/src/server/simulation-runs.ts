@@ -86,10 +86,15 @@ export class SimulationRuns {
   fail(run: SimulationRun, error: unknown) {
     if (run.terminal) return;
     run.diagnosticCount++;
-    this.emit(run, { type: 'error', message: String(error instanceof Error ? error.message : error) });
+    this.publish(run.id, { type: 'error', runId: run.id, message: String(error instanceof Error ? error.message : error) });
   }
 
-  emit(run: SimulationRun, event: SimEvent) {
+  /** Setup progress retains the legacy wire envelope without becoming a failure. */
+  notice(run: SimulationRun, message: string) {
+    if (!run.terminal) this.publish(run.id, { type: 'error', runId: run.id, message, counted: false });
+  }
+
+  emit(run: SimulationRun, event: Exclude<SimEvent, { type: 'error' }>) {
     if (run.terminal) return;
     if (event.type === 'op' && !event.success && run.errorLogCount < 20) {
       run.errorLogCount++;

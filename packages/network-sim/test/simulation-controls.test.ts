@@ -220,6 +220,8 @@ describe('simulation form and streamed results', () => {
     act(() => source().onmessage?.({ data: 'malformed JSON' }));
     source().emit({ type: 'heartbeat' });
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('0/1');
+    source().emit({ type: 'error', message: 'setup progress', counted: false });
+    expect(store.state.simulationRuns.at(-1)?.diagnosticCount ?? 0).toBe(0);
     source().emit({ type: 'error', message: 'setup error' });
     expect(ui.container.querySelector('[role="alert"]')?.textContent).toBe('setup error');
     expect(store.state.liveMetrics.errors).toBe(0);

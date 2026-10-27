@@ -41,9 +41,11 @@ export interface DoneEvent {
   byOp: Record<string, OpStats>;
 }
 
-interface ErrorEvent {
+export interface ErrorEvent {
   type: 'error';
   message: string;
+  /** False for setup progress; omitted legacy errors remain counted diagnostics. */
+  counted?: boolean;
 }
 
 export type SimEvent = OpEvent | StatusEvent | DoneEvent | ErrorEvent | { type: 'unavailable'; message: string };
@@ -63,3 +65,6 @@ export interface OpStats {
   phaseCounts: Record<string, number>;
 }
 
+
+/** Normalize the legacy error envelope before consumers account for diagnostics. */
+export function isCountedDiagnostic(event: ErrorEvent): boolean { return event.counted !== false; }
