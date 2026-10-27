@@ -560,16 +560,19 @@ export async function readExactGraphPlanSnapshot(
   }
   const rows: SyncRow[] = [];
   let bytesEstimate = 0;
-  for (let index = 0; index < plan.entries.length;) {
-    const entry = plan.entries[index]!;
+  // Each graph load is sorted. Ordering the much smaller graph catalog lets
+  // us concatenate those runs without one blocking full-snapshot row sort.
+  const entries = [...plan.entries].sort((a, b) => compareCodePoint(a.graph, b.graph));
+  for (let index = 0; index < entries.length;) {
+    const entry = entries[index]!;
     const width = plan.activeGraphRows?.graph === entry.graph || plan.activeGraphRowsLoad?.graph === entry.graph
       ? 1
-      : exactGraphSnapshotBatchWidth(store, plan.entries, index, limits.maxRows - rows.length, plan.pagedGraphs);
+      : exactGraphSnapshotBatchWidth(store, entries, index, limits.maxRows - rows.length, plan.pagedGraphs);
     let graphRows: readonly SyncRow[] | null;
     try {
       graphRows = width === 1
         ? await loadExactGraphRowsSnapshot(store, plan, entry, limits)
-        : await readExactGraphSnapshotBatch(store, plan.entries.slice(index, index + width),
+        : await readExactGraphSnapshotBatch(store, entries.slice(index, index + width),
           snapshotResponseByteLimit(limits.maxBytesEstimate - bytesEstimate));
     } catch (error) {
       if (!(error instanceof StoreResponseTooLargeError)) throw error;
@@ -603,7 +606,7 @@ export async function readExactGraphPlanSnapshot(
       bytesEstimate = nextBytes;
     }
   }
-  return rows.sort(compareRows);
+  return rows;
 }
 
 

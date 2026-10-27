@@ -87,6 +87,26 @@ describe('bounded exact graph snapshot batches', () => {
     } finally { await store.close(); }
   });
 
+  it('keeps code-point order across shuffled graph plans, rows and batch boundaries', async () => {
+    const store: TripleStore = new OxigraphStore();
+    try {
+      const snapshot = plan([...Array(70).fill(2), 2049, 2]);
+      snapshot.entries[0]!.graph = 'urn:graph:\uFF01';
+      snapshot.entries[1]!.graph = 'urn:graph:\u{1F600}';
+      const expected = await seed(store, snapshot);
+      snapshot.entries.reverse();
+      const original = store.query.bind(store);
+      vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+        const result = await original(sparql, options);
+        return result.type === 'bindings'
+          ? { ...result, bindings: [...result.bindings].reverse() } : result;
+      });
+      const originalOrder = snapshot.entries.map(entry => entry.graph);
+      expect(await readExactGraphPlanSnapshot(store, snapshot, cache, limits)).toEqual(expected);
+      expect(snapshot.entries.map(entry => entry.graph)).toEqual(originalOrder);
+    } finally { await store.close(); }
+  });
+
   it.each([[[2, 4]], [[2, 3]], [[4, 3]]])('rejects per-graph count drift even when totals compensate (%j)', async (counts) => {
     const store: TripleStore = new OxigraphStore();
     try {

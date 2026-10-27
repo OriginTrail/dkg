@@ -1,6 +1,7 @@
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { SyncRow } from './snapshot-cache.js';
+import { compareRows } from './row-serialization.js';
 
 interface SnapshotEntry { readonly graph: string; readonly rowCount: number }
 
@@ -31,7 +32,7 @@ export function exactGraphSnapshotBatchWidth(
   return Math.max(1, width);
 }
 
-/** Read only admitted exact graphs, with a sentinel and independent count checks. */
+/** Read admitted graphs in entry order, with sorted rows and independent count checks. */
 export async function readExactGraphSnapshotBatch(
   store: TripleStore,
   entries: readonly SnapshotEntry[],
@@ -56,25 +57,30 @@ export async function readExactGraphSnapshotBatch(
     priority: 'background', source: 'sync.responder.readExactGraphSnapshotBatch', maxResponseBytes,
   });
   if (result.type !== 'bindings') throw new Error('Sync exact-graph snapshot returned non-binding rows');
-  const counts = new Map<string, number>();
-  const rows: SyncRow[] = [];
+  const byGraph = new Map<string, SyncRow[]>();
   for (const row of result.bindings) {
     const { g, s, p, o } = row;
     if (!expected.has(g!) || !s || !p || !o) {
       throw new Error('Sync exact-graph snapshot returned an unadmitted graph or malformed row');
     }
-    const count = (counts.get(g!) ?? 0) + 1;
-    if (count > expected.get(g!)!) {
+    const graphRows = byGraph.get(g!) ?? [];
+    if (graphRows.length + 1 > expected.get(g!)!) {
       throw new Error(`Sync exact-graph plan changed while reading ${g}: surplus rows`);
     }
-    counts.set(g!, count);
-    rows.push({ g: g!, s, p, o });
+    graphRows.push({ g: g!, s, p, o });
+    byGraph.set(g!, graphRows);
   }
+  const rows: SyncRow[] = [];
   for (const entry of entries) {
-    const count = counts.get(entry.graph) ?? 0;
+    const graphRows = byGraph.get(entry.graph) ?? [];
+    const count = graphRows.length;
     if (count !== entry.rowCount) {
       throw new Error(`Sync exact-graph plan changed while reading ${entry.graph}: expected ${entry.rowCount} rows, found ${count}`);
     }
+    // Sort bounded graph runs here, before the next awaited store request.
+    // Sorting a whole unordered snapshot at the end blocks interactive reads.
+    graphRows.sort(compareRows);
+    rows.push(...graphRows);
   }
   return rows;
 }
