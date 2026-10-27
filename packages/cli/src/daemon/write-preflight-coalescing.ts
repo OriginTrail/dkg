@@ -215,13 +215,42 @@ function stateOf(agent: object): AgentState {
   return state;
 }
 
-/** Every caller gets its own copy, so none can change what another reads. */
+/**
+ * Every caller gets its own copy, so none can change what another reads. The copy is made of the declared Probe
+ * model and nothing else: its scalars, its two subscription records and its failure-attribution records are
+ * copied field by field, so no object is shared between callers whatever a probe carries, and a member outside
+ * the model is not handed on. Naming every declared field below is checked by the compiler: a field added to the
+ * model leaves `undeclared` non-empty and this function stops compiling until the new field is copied here.
+ */
 function copyProbe(probe: Probe): Probe {
-  try {
-    return structuredClone(probe);
-  } catch {
-    return { ...probe };
-  }
+  const {
+    storeAvailable, exists, hasLocalContent, inMemorySubscription, persistedSubscription, declarationFound,
+    accessPolicy, curator, callerAuthorized, storeUnavailable, storeErrorMessage, failureAttribution,
+    ...undeclared
+  } = probe;
+  const allFieldsCopied: keyof typeof undeclared extends never ? true : never = true;
+  void allFieldsCopied;
+  // A field the probe did not set stays unset, as in the probe itself.
+  return {
+    storeAvailable,
+    ...(exists !== undefined ? { exists } : {}),
+    ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
+    ...(inMemorySubscription !== undefined
+      ? { inMemorySubscription: { subscribed: inMemorySubscription.subscribed, synced: inMemorySubscription.synced } }
+      : {}),
+    ...(persistedSubscription !== undefined
+      ? { persistedSubscription: { subscribed: persistedSubscription.subscribed, synced: persistedSubscription.synced } }
+      : {}),
+    ...(declarationFound !== undefined ? { declarationFound } : {}),
+    ...(accessPolicy !== undefined ? { accessPolicy } : {}),
+    ...(curator !== undefined ? { curator } : {}),
+    ...(callerAuthorized !== undefined ? { callerAuthorized } : {}),
+    ...(storeUnavailable !== undefined ? { storeUnavailable } : {}),
+    ...(storeErrorMessage !== undefined ? { storeErrorMessage } : {}),
+    ...(failureAttribution !== undefined
+      ? { failureAttribution: failureAttribution.map(({ site, kind }) => ({ site, kind })) }
+      : {}),
+  };
 }
 
 function identityOf(agent: CoalescingProbeAgent, contextGraphId: string, caller: string | null) {

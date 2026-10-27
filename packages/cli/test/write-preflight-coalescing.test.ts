@@ -47,6 +47,12 @@ const ACCEPT: Probe = {
   storeAvailable: true, exists: true, hasLocalContent: true, declarationFound: true,
   accessPolicy: 'public', callerAuthorized: true,
 };
+/** A probe as a caller that edits what it was given sees it. */
+const editable = (probe: Probe) => probe as unknown as {
+  inMemorySubscription: { subscribed: boolean; synced: boolean };
+  persistedSubscription: { subscribed: boolean; synced: boolean };
+  failureAttribution: { site: string; kind: string }[];
+};
 const fastAccepts = (probe: Probe): boolean => probe.storeAvailable && probe.exists === true
   && probe.hasLocalContent === true && probe.callerAuthorized === true;
 
@@ -172,15 +178,50 @@ describe('who shares a probe', () => {
     await expect(retry).resolves.toMatchObject({ probe: ACCEPT });
   });
 
-  it('still gives each caller its own copy of a probe that cannot be cloned', async () => {
+  it('gives each caller a copy of every declared field, nested records included, that no other caller can change', async () => {
+    const { agent, pending } = fakeAgent();
+    const full: Probe = {
+      storeAvailable: false, exists: true, hasLocalContent: false, declarationFound: true, accessPolicy: 'private',
+      curator: 'did:dkg:agent:0x9999999999999999999999999999999999999999', callerAuthorized: false,
+      inMemorySubscription: { subscribed: true, synced: false },
+      persistedSubscription: { subscribed: false, synced: true },
+      storeUnavailable: true, storeErrorMessage: 'down',
+      failureAttribution: [{ site: 'declaration', kind: 'deadline' }, { site: 'caller-access', kind: 'unknown' }],
+    };
+    const calls = [call(agent, ALICE), call(agent, ALICE), call(agent, ALICE)];
+    pending[0]!.resolve(full);
+    const [first, second, third] = await Promise.all(calls);
+    for (const { probe } of [first!, second!, third!]) expect(probe).toStrictEqual(full);
+
+    // The first caller changes every nested record it was given; the second only adds to the list.
+    const mine = editable(first!.probe);
+    mine.inMemorySubscription.synced = true;
+    mine.persistedSubscription.subscribed = true;
+    mine.failureAttribution[0]!.kind = 'incomplete';
+    mine.failureAttribution.push({ site: 'content', kind: 'unknown' });
+    editable(second!.probe).failureAttribution.length = 0;
+
+    expect(third!.probe).toStrictEqual(full);
+    expect(full.inMemorySubscription).toEqual({ subscribed: true, synced: false });
+    expect(full.failureAttribution).toHaveLength(2);
+  });
+
+  it('hands out only the fields of the Probe model, and leaves a field the probe did not set unset', async () => {
     const { agent, pending } = fakeAgent();
     const calls = [call(agent, ALICE), call(agent, ALICE)];
-    // A probe carrying a function: a plain copy of its fields is what is left to hand out.
-    pending[0]!.resolve({ ...ACCEPT, onNote: () => {} } as Probe);
+    // Outside the Probe model: a member that cannot be cloned and a nested record. A copy is made of what the
+    // model declares, so neither is handed out, and nothing nested in the model is shared on the way.
+    const undeclared = { onNote: () => {}, note: { text: 'shared' } };
+    pending[0]!.resolve({
+      storeAvailable: true, exists: true, inMemorySubscription: { subscribed: true, synced: true },
+      failureAttribution: [{ site: 'existence', kind: 'unknown' }], ...undeclared,
+    } as Probe);
     const [first, second] = await Promise.all(calls);
+    expect(Object.keys(first!.probe).sort()).toEqual(['exists', 'failureAttribution', 'inMemorySubscription', 'storeAvailable']);
+    expect(first!.probe).toStrictEqual(second!.probe);
     expect(first!.probe).not.toBe(second!.probe);
-    expect(first!.probe).toMatchObject({ callerAuthorized: true, exists: true });
-    expect(second!.probe).toMatchObject({ callerAuthorized: true, exists: true });
+    expect(first!.probe.inMemorySubscription).not.toBe(second!.probe.inMemorySubscription);
+    expect(first!.probe.failureAttribution).not.toBe(second!.probe.failureAttribution);
   });
 
   it('turns a probe that throws before returning a promise into a rejection for all callers', async () => {
@@ -340,6 +381,24 @@ describe('the result cache', () => {
     settled.fastAccepted();
     return settled;
   }
+
+  it('serves every hit a copy of its own, and keeps what it holds out of reach of the callers it was served to', async () => {
+    const { agent, probe, pending } = fakeAgent();
+    const kept: Probe = {
+      ...ACCEPT, inMemorySubscription: { subscribed: true, synced: true },
+      failureAttribution: [{ site: 'declaration', kind: 'unknown' }],
+    };
+    const origin = await accepted(agent, pending, ALICE, CG, kept);
+    // The caller that probed changes its copy after the entry was kept.
+    editable(origin.probe).inMemorySubscription.synced = false;
+    editable(origin.probe).failureAttribution.length = 0;
+    const firstHit = await call(agent, ALICE);
+    editable(firstHit.probe).inMemorySubscription.synced = false;
+    editable(firstHit.probe).failureAttribution.length = 0;
+    const secondHit = await call(agent, ALICE);
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(secondHit.probe).toStrictEqual(kept);
+  });
 
   it('is off by default: a fast accept is probed again', async () => {
     configure();
