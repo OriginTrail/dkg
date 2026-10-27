@@ -179,6 +179,7 @@ export function node(
   let chainAnswersLeft = chainAnswersPerRound;
   let defaultSubscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
   const materialization = new RecoveryMaterializationOwner({
+    proveHeldAssets: createDurableHeldStore(store, contentFence, async () => {}, () => options.noChain ? 'integrity-only' : 'confirmed')?.prove,
     chain: () => { throw new Error('chain reads supplied below'); }, store: () => store,
     isClosed: () => false, subscription: () => {
       if (options.subscription) return options.subscription();
@@ -247,7 +248,7 @@ export function node(
       logDebug: () => {},
     }),
     ...roundOptions,
-    storedPrefix: options.disablePrefixProof?.() ? undefined : { prove: createDurableHeldStore(store, contentFence, async () => {}, () => options.noChain ? 'integrity-only' : 'confirmed')!.prove, assertCurrent: fence.assertCurrent },
+    storedPrefix: options.disablePrefixProof?.() ? undefined : fence.acquireStoredPrefix,
     graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery, held: options.holdingsShortcut === false ? undefined : {
       confirmCurrent: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
       prove: async request => {

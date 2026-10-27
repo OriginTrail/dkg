@@ -2,7 +2,7 @@
 import { assertSafeIri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import type { GraphScopedDescriptor } from '../durable-integrity.js';
+import { parseGraphScopedDescriptor, type GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 
@@ -34,7 +34,7 @@ export async function readHeldGraphScopedAssets(
 
 ): Promise<Set<string>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
-  const predicates = GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES.map((predicate) => `<${predicate}>`).join(' ');
+  const predicates = [...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `http://dkg.io/ontology/${name}`)].map((predicate) => `<${predicate}>`).join(' ');
   const options = { priority: 'background' as const, signal: request.signal };
   const held = new Set<string>();
   for (let start = 0; start < request.descriptors.length; start += chunkSize) {
@@ -55,13 +55,16 @@ export async function readHeldGraphScopedAssets(
       rows.push({ predicate, object });
       rowsBySubject.set(ual, rows);
     }
-    const eligible = chunk.filter((descriptor) => holdsDescriptor(
-      descriptor,
-      parseGraphKnowledgeAssetMetadataEnvelope(
-        rowsBySubject.get(descriptor.ual) ?? [],
-        { contextGraphId: request.contextGraphId, ual: descriptor.ual },
-      ), confirmation,
-    ));
+    const eligible = chunk.filter(descriptor => {
+      const rows = rowsBySubject.get(descriptor.ual) ?? [];
+      try {
+        const local = parseGraphScopedDescriptor(descriptor.ual,
+          rows.map(row => ({ ...row, subject: descriptor.ual, graph: metaGraph })));
+        if (local.contextGraphId !== request.contextGraphId) return false;
+      } catch { return false; }
+      return holdsDescriptor(descriptor, parseGraphKnowledgeAssetMetadataEnvelope(rows,
+        { contextGraphId: request.contextGraphId, ual: descriptor.ual }), confirmation);
+    });
     for (const descriptor of eligible) {
       request.signal?.throwIfAborted();
       const content = await verifyExactGraphContent(store, {

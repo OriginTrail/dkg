@@ -205,3 +205,23 @@ it('fences a queued write dispatched on the replacement backend after its respon
     expect(proof).toBeDefined(); proof.assertCurrent(); proof.close();
   } finally { admit(); await store.close(); }
 });
+
+it('retires writes that fail during supervised replacement only after a later stable epoch', async () => {
+  let state = { generation: 0, recovering: false };
+  const raw = createManagedOxigraphSparqlStoreV1({ queryEndpoint: 'http://127.0.0.1:9/query',
+    updateEndpoint: 'http://127.0.0.1:9/update' }, { getRecoveryState: () => state });
+  const composed = createAgentStoreComposition(raw, () => {}, { begin: () => () => {} });
+  vi.spyOn(raw, 'update').mockImplementationOnce(async () => {
+    state = { generation: 1, recovering: true };
+    throw new Error('worker exited during replacement');
+  });
+  try {
+    await expect(composed.store.update('DELETE WHERE { GRAPH ?g { ?s ?p ?o } }')).rejects.toThrow('worker exited');
+    expect(composed.heldContent.openScope(scope)).toBeUndefined();
+    state = { generation: 1, recovering: false };
+    expect(composed.heldContent.openScope(scope)).toBeUndefined();
+    state = { generation: 2, recovering: false };
+    const proof = composed.heldContent.openScope(scope)!;
+    expect(proof).toBeDefined(); proof.assertCurrent(); proof.close();
+  } finally { await raw.close(); }
+});

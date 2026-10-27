@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { HeldAssetFence } from './durable-recovery-materialization.js';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import { type DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import { type OperationContext } from '@origintrail-official/dkg-core';
@@ -156,7 +157,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
   }
   // Resolve continuation policy once; snapshots own a fresh full walk.
   const continuation = onVerifiedFullSnapshot ? undefined : graphRecovery;
-  const runPaging = (fence?: Parameters<Parameters<typeof materialization.withHeldAssetFence>[0]>[0]) => {
+  const runPaging = (fence?: HeldAssetFence) => {
     // An unbound subscription must persist its numeric binding before skipping DATA.
     const confirmCurrent = continuation && fence && fence.binding().onChainId !== undefined
       ? currentHeldGraphScopedAssetsConfirmer({
@@ -165,8 +166,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
           readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
         }) : undefined;
     return runDurableSyncDetailed({ ...durableContext,
-      storedPrefix: host.heldStore && fence
-        ? { prove: host.heldStore.prove, assertCurrent: fence.assertCurrent } : undefined,
+      storedPrefix: fence?.acquireStoredPrefix,
       graphRecovery: continuation ? { ...continuation,
         held: confirmCurrent && host.heldStore && fence
           ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent } : undefined,

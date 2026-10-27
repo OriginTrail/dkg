@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import { createStoredPrefixAcquirer, type ProveHeldAssets } from './durable-recovery-held-store.js';
+import type { StoredDurablePrefix } from './sync/requester/durable-prefix-proof.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { ContextGraphSub } from './dkg-agent-types.js';
@@ -14,6 +16,7 @@ import type { ChallengeExactAssetFetchContext, DurableSyncContext } from './sync
 
 type MaterializationOptions = Parameters<typeof materializeVerifiedGraphScopedAsset>[0];
 export interface RecoveryMaterializationPorts {
+  readonly proveHeldAssets?: ProveHeldAssets;
   chain(): ChainAdapter;
   store(): MaterializationOptions['store'];
   isClosed(): boolean;
@@ -34,11 +37,13 @@ export interface RecoveryMaterializationScope {
   readonly isCurrent?: () => boolean;
   readonly onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
 }
+export interface HeldAssetFence {
+  binding(): Readonly<{ onChainId?: string; generation: number }>;
+  assertCurrent(): void;
+  readonly acquireStoredPrefix?: StoredDurablePrefix;
+}
 export interface RecoveryMaterialization {
-  withHeldAssetFence<T>(operation: (fence: {
-    binding(): Readonly<{ onChainId?: string; generation: number }>;
-    assertCurrent(): void;
-  }) => Promise<T>, signal?: AbortSignal): Promise<T>;
+  withHeldAssetFence<T>(operation: (fence: HeldAssetFence) => Promise<T>, signal?: AbortSignal): Promise<T>;
   readonly authenticateChallengePinnedAsset: ChallengeExactAssetFetchContext['authenticateChallengePinnedAsset'];
   readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
 }
@@ -92,6 +97,7 @@ export class RecoveryMaterializationOwner {
           const assertCurrent = () => { control.adoptEquivalentSubscription(); control.assertCurrent(); };
           return operation({
             assertCurrent,
+            acquireStoredPrefix: createStoredPrefixAcquirer(ports.proveHeldAssets, contextGraphId, assertCurrent),
             binding: () => {
               assertCurrent();
               return { onChainId: control.subscription?.onChainId, generation: ports.bindingGeneration(contextGraphId) };

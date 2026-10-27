@@ -215,7 +215,7 @@ function createTwoRoundHarness(
       remotePeerId,
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      storedPrefix: { prove: async () => ({ held: new Set(heldAssetUals), assertCurrent: () => {}, close: () => {} }), assertCurrent: () => {} },
+      storedPrefix: async () => ({ assertCurrent() {}, close() {}, covers: ual => new Set(heldAssetUals).has(ual) }),
       fetchSyncPages: fetch,
       graphRecovery: durableMetaContinuation || durableResumeBoundary ? { meta: durableMetaContinuation ?? { requesterScope: 'candidate-test-meta' }, holdings: {}, boundary: durableResumeBoundary } : undefined,
       exactAssetSelectionFor: exactAssetUals

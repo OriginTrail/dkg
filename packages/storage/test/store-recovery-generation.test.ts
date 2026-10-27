@@ -11,8 +11,10 @@ it('exposes only supervised generations, and withholds them until replacement is
     expect(read()).toBe(0);
     state = { generation: 0, recovering: false, admissionsPaused: true };
     expect(read()).toBeUndefined(); // Verification/signalling is not termination.
+    expect(read.epoch?.()).toBe(0);
     state = { generation: 1, recovering: true, admissionsPaused: false };
     expect(read()).toBeUndefined();
+    expect(read.epoch?.()).toBe(1);
     state = { generation: 1, recovering: false, admissionsPaused: false };
     expect(read()).toBe(1);
   } finally { await store.close(); }

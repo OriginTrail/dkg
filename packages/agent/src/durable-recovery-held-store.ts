@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import type { HeldGraphScopedAssetsRequest } from './sync/requester/stored-graph-assets.js';
+import { graphScopedDurableManifestPrefixAtOffset } from './sync/durable-integrity.js';
+import type { StoredDurablePrefix } from './sync/requester/durable-prefix-proof.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { StoreContentFence } from './internal/store-content-fence.js';
@@ -40,5 +42,26 @@ export function createDurableHeldStore(
         ...request, descriptors: request.descriptors.filter(descriptor => held.has(descriptor.ual)),
       }, undefined, asset => reconcile(asset, ctx));
     },
+  };
+}
+
+/** Materialization binds subscription ownership and content acquisition once. */
+export function createStoredPrefixAcquirer(
+  prove: ProveHeldAssets | undefined, contextGraphId: string, assertOwnership: () => void,
+): StoredDurablePrefix | undefined {
+  if (!prove) return undefined;
+  return async (manifest, offset, signal) => {
+    const prefix = graphScopedDurableManifestPrefixAtOffset(manifest, offset);
+    if (!prefix || manifest.contextGraphId !== contextGraphId) throw new Error('Cannot prove stored durable prefix');
+    const descriptors = manifest.descriptors.slice(0, prefix.descriptorCount);
+    assertOwnership(); signal?.throwIfAborted();
+    const proof = await prove({ contextGraphId, descriptors, signal });
+    if (!proof) throw new Error('Cannot prove stored durable prefix');
+    const assertCurrent = () => { assertOwnership(); proof.assertCurrent(); signal?.throwIfAborted(); };
+    try {
+      assertCurrent();
+      if (descriptors.some(descriptor => !proof.held.has(descriptor.ual))) throw new Error('Stored durable prefix is missing or corrupt');
+      return { assertCurrent, close: proof.close, covers: ual => proof.held.has(ual) };
+    } catch (error) { proof.close(); throw error; }
   };
 }

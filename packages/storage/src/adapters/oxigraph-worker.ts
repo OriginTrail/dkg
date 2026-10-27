@@ -327,7 +327,7 @@ export class OxigraphWorkerStore implements TripleStore {
     this.persistPath = persistPath;
     this.spawnWorker();
     registerStoreRecoveryGeneration(this, () => this.lifecycle === 'live' && !this.workerExited
-      && !this.replacementRevisionLifecycle ? this.recoveryGeneration : undefined);
+      && !this.replacementRevisionLifecycle ? this.recoveryGeneration : undefined, () => this.recoveryGeneration);
   }
 
   /**

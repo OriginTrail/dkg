@@ -1,3 +1,4 @@
+import { createStoredPrefixAcquirer } from '../src/durable-recovery-held-store.js';
 import { describe, expect, it } from 'vitest';
 import {
   MemoryLayer,
@@ -94,7 +95,8 @@ function manifest(meta: readonly Quad[]) {
 
 /** The fixture's previously materialized copies, independent of this round's writes. */
 function storedPrefix(fixtures: readonly AssetFixture[]) {
-  return { prove: async () => ({ held: new Set(fixtures.map(f => f.ual)), assertCurrent: () => {}, close: () => {} }), assertCurrent: () => {} };
+  return createStoredPrefixAcquirer(async () => ({ held: new Set(fixtures.map(f => f.ual)),
+    assertCurrent() {}, close() {} }), CONTEXT_GRAPH_ID, () => {});
 }
 
 function pageResult(
