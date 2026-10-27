@@ -16,6 +16,7 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   reconcileFinalizedSwmTwinFromDescriptor,
+  type FinalizedSwmTwinReconciliationOutcome,
   type FinalizedSwmTwinRetirement,
 } from './finalized-swm-twin-reconciliation.js';
 import { FinalizedSwmTwinMemoV1 } from './finalized-swm-twin-memo.js';
@@ -52,6 +53,21 @@ import {
 import { SyncedSubGraphRegistration } from './synced-sub-graph-registration.js';
 
 type RecoverContextGraphSwmOptions = Parameters<typeof recoverContextGraphSwm>[0];
+
+/**
+ * What each caller of the finalized-twin proof takes for a retired twin. The
+ * round that just wrote the snapshot also takes a head left in part, as a
+ * concurrent retirement leaves it: its metadata must stay out of the round's
+ * writes. A round that holds the snapshot without writing it does not: that
+ * residue is what the write repairs, and any row of it keeps the asset's legacy
+ * marker from retiring.
+ */
+const RETIRED_AFTER_WRITE: ReadonlySet<FinalizedSwmTwinReconciliationOutcome> = new Set([
+  'retired', 'already-retired-finalized', 'retired-head-residue',
+]);
+const RETIRED_WITHOUT_WRITE: ReadonlySet<FinalizedSwmTwinReconciliationOutcome> = new Set([
+  'retired', 'already-retired-finalized',
+]);
 
 export interface SwmTargetExecutorPortsV1 {
   /** Defaults to ten minutes for callers composed before this port existed. */
@@ -319,7 +335,7 @@ export class SwmTargetExecutorV1 {
       resolveRootSnapshotAtomicCompanion:
         this.#ports.resolveRootSnapshotAtomicCompanion,
       reconcileFinalizedTwin: async (contextGraphId, descriptor) => (
-        await this.#reconcileFinalizedTwin(target, contextGraphId, descriptor)
+        await this.#reconcileFinalizedTwin(target, contextGraphId, descriptor, RETIRED_AFTER_WRITE)
           ? 'suppress-metadata'
           : 'preserve'
       ),
@@ -367,12 +383,14 @@ export class SwmTargetExecutorV1 {
   /**
    * A snapshot this node proved finalized and retired in an earlier round
    * (`finalized-swm-twin-memo.ts`) is held only once the same proof passes
-   * again, under the asset's write lock: Verified Memory still holds that
-   * content, and the shared-memory copy is gone. The proof writes nothing
-   * unless a share brought the copy back, which it retires. When Verified
-   * Memory no longer holds that content, another head is back, or a row of a
-   * head is left, the entry is forgotten and the round takes the snapshot the
-   * usual way, as it does when the proof cannot run.
+   * again: Verified Memory still holds that content, and the shared-memory copy
+   * is gone, head and all. The proof writes nothing unless a share brought the
+   * copy back, which it retires. When it fails, the entry is forgotten and the
+   * round takes the snapshot the usual way, as it does when the proof cannot
+   * run. Nothing of a held twin is written, and a named sub-graph is registered
+   * from the rows a round writes: it is registered here from the snapshot's
+   * verified rows instead, so a registration that failed in the round that
+   * retired the twin gets its next try, and its finalized content its reads.
    */
   async #heldAsRetiredFinalizedTwin(
     target: PublicSwmTargetV1,
@@ -380,7 +398,7 @@ export class SwmTargetExecutorV1 {
     descriptor: GraphScopedSwmRecoveryDescriptor,
   ): Promise<boolean> {
     if (!this.finalizedTwins.retired(contextGraphId, descriptor)) return false;
-    return this.#reconcileFinalizedTwin(target, contextGraphId, descriptor, { beforeMaterialization: true })
+    const held = await this.#reconcileFinalizedTwin(target, contextGraphId, descriptor, RETIRED_WITHOUT_WRITE)
       .catch((cause: unknown) => {
         this.finalizedTwins.forget(contextGraphId, descriptor);
         this.#ports.logWarn(
@@ -390,20 +408,22 @@ export class SwmTargetExecutorV1 {
         );
         return false;
       });
+    if (held) await this.#registerSyncedSubGraphs(target, descriptor.metadataQuads);
+    return held;
   }
 
   /**
    * The finalized-twin proof (`finalized-swm-twin-reconciliation.ts`): Verified
    * Memory holds this snapshot's exact content, and a shared-memory copy of it
-   * is retired. False when the proof fails and a copy stays. The memo follows:
-   * a proven twin is remembered, so a later round holds it, and a failed proof
-   * forgets it.
+   * is retired. False when the outcome is not one the caller takes for a
+   * retired twin, and a copy stays. The memo follows: a proven twin is
+   * remembered, so a later round holds it, and a failed proof forgets it.
    */
   async #reconcileFinalizedTwin(
     target: PublicSwmTargetV1,
     contextGraphId: string,
     descriptor: GraphScopedSwmRecoveryDescriptor,
-    options: { readonly beforeMaterialization?: boolean } = {},
+    retired: ReadonlySet<FinalizedSwmTwinReconciliationOutcome>,
   ): Promise<boolean> {
     const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
       store: this.#ports.store,
@@ -412,17 +432,7 @@ export class SwmTargetExecutorV1 {
       descriptor,
       retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
     });
-    // Only the call right after this round wrote the snapshot may read a head
-    // that is not exact as a finished retirement (see the reconciliation).
-    // Before that write it counts only once no row of the head is left: a
-    // partial or ambiguous head is residue that materialization repairs, and
-    // any row of it keeps the asset's legacy marker from retiring. That check
-    // takes the lock again: a writer in between is seen, or meets the next round.
-    const proven = retirement === 'retired' || (
-      retirement === 'already-retired-finalized'
-      && (options.beforeMaterialization !== true || await this.#swmCopyGone(contextGraphId, descriptor))
-    );
-    if (!proven) {
+    if (!retired.has(retirement)) {
       this.finalizedTwins.forget(contextGraphId, descriptor);
       return false;
     }
@@ -443,31 +453,6 @@ export class SwmTargetExecutorV1 {
       );
     }
     return true;
-  }
-
-  /**
-   * Under the asset's write lock: no row of the snapshot's shared-memory head,
-   * exact or partial, and no quad of its graph is left. That is also the state
-   * in which the asset's legacy marker can retire.
-   */
-  async #swmCopyGone(contextGraphId: string, descriptor: GraphScopedSwmRecoveryDescriptor): Promise<boolean> {
-    const anyRow = async (pattern: string): Promise<boolean> => {
-      const result = await this.#ports.store.query(`SELECT * WHERE { ${pattern} } LIMIT 1`, {
-        priority: 'background',
-        source: 'agent.sharedMemorySync.finalizedTwin.copyGone',
-      });
-      // A result that is not bindings proves nothing: count it as a row.
-      return result.type !== 'bindings' || result.bindings.length > 0;
-    };
-    return this.#snapshotMaterializer.withKaWriteLock(
-      contextGraphId,
-      descriptor.subGraphName,
-      descriptor.kaUal,
-      async () => (
-        !await anyRow(`GRAPH <${assertSafeIri(descriptor.metaGraph)}> { <${assertSafeIri(descriptor.headSubject)}> ?p ?o }`)
-        && !await anyRow(`GRAPH <${assertSafeIri(descriptor.assertionGraph)}> { ?s ?p ?o }`)
-      ),
-    );
   }
 
   /**

@@ -28,15 +28,19 @@ import {
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
 import {
+  computeFlatKCRootV10,
   generateKnowledgeAssetShareMetadata,
   generateSubGraphRegistration,
   workspacePublicQuadsDigest,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
+import { ethers } from 'ethers';
 import {
-  SwmTargetExecutorV1,
+  SwmTargetExecutorSessionFactoryV1,
+  type SwmTargetExecutorV1,
   type SwmTargetExecutorPortsV1,
 } from '../src/sync/requester/swm-target-executor.js';
+import type { FinalizedSwmTwinRetirement } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import { createSwmRecoveryMutationRuntimeV1 } from '../src/sync/requester/swm-recovery-apply.js';
 import {
   SYNCED_SUB_GRAPH_CREATED_BY_FALLBACK,
@@ -91,7 +95,7 @@ function share(subGraph: string | null = SUB) {
     { subject: headSubject, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: metaGraph },
     { subject: headSubject, predicate: `${DKG}shareOperationId`, object: `"${operationId}"`, graph: metaGraph },
   ];
-  return { payload, digest, meta, metaGraph, assertionGraph };
+  return { payload, digest, meta, metaGraph, assertionGraph, headSubject, operationSubject };
 }
 
 type Share = ReturnType<typeof share>;
@@ -112,12 +116,14 @@ interface Member {
 
 /**
  * A member's public sync lane over `store`. Each `executor()` is one sync
- * session, as the agent creates one per sync run; all share the write locks.
+ * session, as the agent creates one per sync run; all share the write locks
+ * and what the node remembers of finalized twins.
  */
 function member(
   store: OxigraphStore,
   shared: Share,
   listSubGraphs: SwmTargetExecutorPortsV1['listSubGraphs'] = async () => [],
+  retireFinalizedSwmTwin: SwmTargetExecutorPortsV1['retireFinalizedSwmTwin'] = async () => undefined,
 ): Member {
   const logInfo = vi.fn();
   const logWarn = vi.fn();
@@ -161,12 +167,13 @@ function member(
     deleteCheckpoint: () => undefined,
     deletePublicCheckpoint: () => undefined,
     ensureOwnedMap: () => new Map(),
-    retireFinalizedSwmTwin: async () => undefined,
+    retireFinalizedSwmTwin,
     logInfo,
     logWarn,
     logDebug: () => undefined,
   };
-  return { executor: () => new SwmTargetExecutorV1(ports), logInfo, logWarn, invalidateListContextGraphsCache };
+  const sessions = new SwmTargetExecutorSessionFactoryV1(ports);
+  return { executor: () => sessions.createSession(), logInfo, logWarn, invalidateListContextGraphsCache };
 }
 
 /** One sync of the graph's shared memory from the owner, the root left to the catalog as on a catalog-owned graph. */
@@ -340,6 +347,61 @@ describe('a sub-graph share that a member receives only by sync (#1611)', () => 
 
     expect((await registrationRows(store)).map(([p]) => p)).toContain(`${DKG}createdBy`);
     expect(m.logInfo).toHaveBeenCalledWith(expect.anything(), AUTO_REGISTERED);
+  });
+  it('registers the sub-graph of a finalized twin it holds, after the round that retired it could not', async () => {
+    const store = newStore();
+    const shared = share();
+    // Verified Memory already holds the share's content, finalized: the round that syncs it retires the twin.
+    const vmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(UAL, 1), SUB);
+    await store.insert([
+      ...shared.payload.map((quad) => ({ ...quad, graph: vmGraph })),
+      { subject: UAL, predicate: `${DKG}assertionVersion`, object: `"1"^^<${XSD_INTEGER}>`, graph: META },
+      { subject: UAL, predicate: `${DKG}assertionGraph`, object: vmGraph, graph: META },
+      { subject: UAL, predicate: `${DKG}status`, object: '"confirmed"', graph: META },
+      { subject: UAL, predicate: `${DKG}publicTripleCount`, object: `"${shared.payload.length}"^^<${XSD_INTEGER}>`, graph: META },
+      { subject: UAL, predicate: `${DKG}privateTripleCount`, object: `"0"^^<${XSD_INTEGER}>`, graph: META },
+      { subject: UAL, predicate: `${DKG}merkleRoot`, object: `"${ethers.hexlify(computeFlatKCRootV10(shared.payload, []))}"`, graph: META },
+    ]);
+    const swmRows = async () => (await store.countQuads(shared.assertionGraph))
+      + (await store.countQuads(shared.metaGraph));
+    const headRows = async () => {
+      const result = await store.query(`SELECT ?p WHERE { GRAPH <${shared.metaGraph}> { <${shared.headSubject}> ?p ?o } }`);
+      return result.type === 'bindings' ? result.bindings.length : -1;
+    };
+    // Stand-in for the publisher's named-lifecycle cleanup: graph, then head and operation.
+    const retireFinalizedSwmTwin = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
+      await store.dropGraph(candidate.swmGraph);
+      await store.deleteByPattern({ graph: shared.metaGraph, subject: shared.headSubject });
+      await store.deleteByPattern({ graph: shared.metaGraph, subject: shared.operationSubject });
+    });
+    const insert = store.insert.bind(store);
+    let refuseRegistration = true;
+    vi.spyOn(store, 'insert').mockImplementation(async (quads, ...rest) => {
+      if (refuseRegistration && quads.some((quad) => quad.object === `${DKG}SubGraph`)) {
+        throw new Error('store refused the write');
+      }
+      return insert(quads, ...rest);
+    });
+    const m = member(store, shared, undefined, retireFinalizedSwmTwin);
+
+    expect((await syncFromOwner(m.executor())).failedPhases).toBe(0);
+    expect(retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(await registrationRows(store)).toEqual([]);
+    expect(await partitionsHolding(store, 'urn:member-one:note')).toEqual([]);
+    expect(await headRows()).toBe(0);
+    const swmRowsAfterRetirement = await swmRows();
+    refuseRegistration = false;
+
+    // A later round holds the twin and writes none of it, and its sub-graph is registered.
+    const later = await syncFromOwner(m.executor());
+    expect(later.alreadyHeldAssets).toBe(1);
+    expect(retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect((await registrationRows(store)).map(([p]) => p)).toContain(`${DKG}createdBy`);
+    expect(m.logInfo).toHaveBeenCalledWith(expect.anything(), AUTO_REGISTERED);
+    // Its retired shared memory stays as the retirement left it.
+    expect(await swmRows()).toBe(swmRowsAfterRetirement);
+    expect(await headRows()).toBe(0);
+    expect(await partitionsHolding(store, 'urn:member-one:note')).toEqual([vmGraph]);
   });
 });
 

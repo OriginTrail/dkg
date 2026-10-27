@@ -726,6 +726,40 @@ describe('durable VM / SWM tier reconciliation', () => {
     expect(retire).not.toHaveBeenCalled();
   });
 
+  it('tells a head left in part from an absent copy on the descriptor path, and only there', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input);
+    await store.dropGraph(input.swmGraph);
+    await store.deleteByPattern({
+      graph: input.swmMetaGraph,
+      subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
+    });
+    // A partial replay left the head without its operation pointer: not exact, and not absent.
+    await store.deleteByPattern({
+      graph: input.swmMetaGraph,
+      subject: input.headSubject,
+      predicate: `${DKG}shareOperationId`,
+    });
+    const retire = vi.fn(async () => {});
+
+    await expect(reconcileFinalizedSwmTwinFromDescriptor({
+      store,
+      writeLocks: new Map(),
+      contextGraphId: CG,
+      descriptor: descriptorFor(input),
+      retire,
+    })).resolves.toBe('retired-head-residue');
+    // Catalog receipts keep the outcome they had.
+    await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
+      store,
+      writeLocks: new Map(),
+      evidence: catalogEvidenceFor(input),
+      retire,
+    })).resolves.toBe('already-retired-finalized');
+    expect(retire).not.toHaveBeenCalled();
+  });
+
   it('preserves an identical SWM payload when its head is newer than finalized VM', async () => {
     const store = new OxigraphStore();
     const input = fixture();

@@ -27,6 +27,9 @@ import {
 } from '@origintrail-official/dkg-storage';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
 import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
+import {
+  literalValue, normalizeHex32, optionalHex32, parseInteger, parseSafeCount,
+} from './finalized-swm-twin-literals.js';
 import { ethers } from 'ethers';
 
 const DKG = 'http://dkg.io/ontology/';
@@ -34,6 +37,11 @@ const DKG = 'http://dkg.io/ontology/';
 export type FinalizedSwmTwinReconciliationOutcome =
   | 'retired'
   | 'already-retired-finalized'
+  /**
+   * Descriptor path only: the copy's graph is gone, but rows of a head that is
+   * not exact are left. Elsewhere that reads as 'already-retired-finalized'.
+   */
+  | 'retired-head-residue'
   | 'head-missing-or-ambiguous'
   | 'head-version-mismatch'
   | 'vm-metadata-mismatch'
@@ -214,6 +222,9 @@ export async function reconcileFinalizedSwmTwin(params: {
  * finalized graph. The descriptor is authenticated by the SWM parser and its
  * count/digest-bound snapshot materializer; this function still re-reads both
  * local graphs and the current head under the per-KA lock before deletion.
+ * It tells an absent copy from a head left in part ('retired-head-residue'),
+ * so a caller that has not written the snapshot can refuse what its write
+ * would repair.
  */
 export async function reconcileFinalizedSwmTwinFromDescriptor(params: {
   readonly store: TripleStore;
@@ -335,7 +346,14 @@ async function reconcileFinalizedSwmTwinEvidence(params: {
       // reconciliation completed after that lock was released. Suppressing the
       // outer bulk metadata append prevents resurrection of a dangling head.
       const swmQuads = await readExactGraph(params.store, evidence.swmGraph);
-      if (swmQuads.length === 0) return 'already-retired-finalized';
+      if (swmQuads.length === 0) {
+        // The descriptor path tells an absent copy from rows of a head that is
+        // not exact: residue that a write of the snapshot repairs. Catalog
+        // receipts keep the outcome they had.
+        return evidence.arrival === 'swm' && await hasSwmHeadRows(params.store, evidence)
+          ? 'retired-head-residue'
+          : 'already-retired-finalized';
+      }
       if (workspacePublicQuadsDigest(swmQuads) !== vmDigest) return 'content-mismatch';
       await retireAndInvalidate(params, evidence);
       return 'retired';
@@ -758,40 +776,13 @@ async function readExactSwmHead(
   return { version, kaUal, assertionGraph, shareOperationId };
 }
 
-function parseInteger(value: string | undefined): bigint | null {
-  if (!value) return null;
-  const match = /^"?([0-9]+)"?(?:\^\^<[^>]+>)?$/.exec(value);
-  if (!match?.[1]) return null;
-  try {
-    return BigInt(match[1]);
-  } catch {
-    return null;
-  }
-}
-
-function parseSafeCount(value: string | undefined): number | null {
-  const parsed = parseInteger(value);
-  if (parsed === null || parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return Number(parsed);
-}
-
-function literalValue(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const match = /^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^<[^>]+>|@[A-Za-z0-9-]+)?$/.exec(value);
-  return match?.[1] ?? value;
-}
-
-function normalizeHex32(value: string): string {
-  const raw = literalValue(value)?.trim().replace(/^0x/i, '').toLowerCase();
-  if (!raw || !/^[0-9a-f]{64}$/.test(raw)) throw new Error('Expected a 32-byte hexadecimal value');
-  return `0x${raw}`;
-}
-
-function optionalHex32(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  try {
-    return normalizeHex32(value);
-  } catch {
-    return undefined;
-  }
+/** Whether any row of the SWM head is stored, exact or not. */
+async function hasSwmHeadRows(store: TripleStore, evidence: FinalizedSwmTwinEvidence): Promise<boolean> {
+  const result = await store.query(
+    `SELECT ?p WHERE { GRAPH <${assertSafeIri(evidence.swmMetaGraph)}> { `
+    + `<${assertSafeIri(evidence.headSubject)}> ?p ?o } } LIMIT 1`,
+    { priority: 'background', source: 'agent.durableSync.finalizedSwmTwin.headRows' },
+  );
+  // A result that is not bindings proves no absence.
+  return result.type !== 'bindings' || result.bindings.length > 0;
 }
