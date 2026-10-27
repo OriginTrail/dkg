@@ -110,8 +110,11 @@ export class ContextGraphSubscriptionActivations {
   /** Activation preparation explicitly reports its acknowledged durable repair. */
   repaired(handle: ActivationHandle, row: ContextGraphSubscriptionRecord): void {
     const attempt = this.owned(handle);
-    if (attempt.phase.kind !== 'installing' || !sameIntent(attempt.intent, row)) throw changed();
-    attempt.repaired = { ...row };
+    if (attempt.phase.kind !== 'installing') throw changed();
+    // Preserving independent Core custody can add hosting to the saved row.
+    // That is not a binding repair of this attempt's member intent; canonical
+    // commit still validates the custody transfer before applying it.
+    if (sameIntent(attempt.intent, row)) attempt.repaired = { ...row };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
   commit(handle: ActivationHandle, expected: ContextGraphSub, apply: () => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {
