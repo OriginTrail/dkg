@@ -107,6 +107,10 @@ for (const [name, answers] of [
   ['a cursor that does not move on', [{ jobs: [{ jobId: 'a' }], nextCursor: 'x', complete: false }, { jobs: [{ jobId: 'b' }], nextCursor: 'x', complete: false }]],
   ['a later page without the paging fields', [{ jobs: [{ jobId: 'a' }], nextCursor: 'x', complete: false }, { jobs: [{ jobId: 'b' }] }]],
   ['a completeness flag that is not a boolean', [{ jobs: [], nextCursor: null, complete: 'yes' }]],
+  // With a fresh cursor the page looks continuable: only the flag stops the walk, so each of these pins the `complete !== false` guard.
+  ['a flag that is not a boolean, with a fresh cursor', [{ jobs: [{ jobId: 'a' }], nextCursor: 'x', complete: 'no' }, { jobs: [{ jobId: 'b' }], nextCursor: null, complete: true }]],
+  ['the string "false" as the flag, with a fresh cursor', [{ jobs: [{ jobId: 'a' }], nextCursor: 'x', complete: 'false' }, { jobs: [{ jobId: 'b' }], nextCursor: null, complete: true }]],
+  ['a missing flag on a later page, with a fresh cursor', [{ jobs: [{ jobId: 'a' }], nextCursor: 'x', complete: false }, { jobs: [{ jobId: 'b' }], nextCursor: 'y' }, { jobs: [{ jobId: 'c' }], nextCursor: null, complete: true }]],
 ]) {
   test(`throws instead of returning a list it cannot show to be complete: ${name}`, async () => {
     const pages = [...answers];
