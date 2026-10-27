@@ -697,7 +697,8 @@ describe('limit ends a complete listing as soon as no unread job can rank among 
 
     /** A listing of `specs` where `write` runs, as a writer outside this process, at the point `at` picks out (once). */
     async function listingWithWrite(specs: readonly ShareRowSpec[], config: Partial<AsyncPromoteQueueConfig>, limit: number,
-      at: { when: 'before' | 'after'; call: (call: TappedCall) => boolean; nth?: number }, write: (store: OxigraphStore) => Promise<void>) {
+      at: { when: 'before' | 'after'; call: (call: TappedCall) => boolean; nth?: number }, write: (store: OxigraphStore) => Promise<void>,
+      filter: Omit<PromoteListFilter, 'limit'> = {}) {
       const raw = openStore();
       let seen = 0, written = false;
       const hook = async (call: TappedCall) => {
@@ -709,7 +710,7 @@ describe('limit ends a complete listing as soon as no unread job can rank among 
       await seedShareRows(raw, specs);
       const { queue } = queueOver(tapped.store, config);
       tapped.calls.length = 0;
-      const listing = await queue.list({ limit });
+      const listing = await queue.list({ ...filter, limit });
       expect(written, 'the write ran').toBe(true);
       return { listing, raw, reads: listingReads(tapped.calls) };
     }
@@ -740,6 +741,20 @@ describe('limit ends a complete listing as soon as no unread job can rank among 
       expect((await readEveryShareJob(raw)).find((job) => job.jobId === 'B')).toMatchObject({ state: 'failed_retrying', attempt: { nextRetryAt: NOW + 110_000 } });
       expect(ids(listing)).toEqual(['B']);
       expect(listing).toEqual(await fullSort(raw, 1));
+    });
+
+    it('does not return a running job that fails with an early retry time after a key page covered its position without it, which only holds the stop back', async () => {
+      // Under a state filter that leaves running out, r has no key in the page. It fails after that read, due at +10, ahead of q1 (+100). The retry
+      // times name it and it is unread, so the walk cannot stop at q1 and reads on, but it never reaches the batch of a key it does not have: not a snapshot.
+      const rows: ShareRowSpec[] = [
+        { id: 'q1', state: 'queued', enqueuedAt: NOW + 100 }, { id: 'r', state: 'running', enqueuedAt: NOW + 150 },
+        { id: 'q2', state: 'queued', enqueuedAt: NOW + 200 }, { id: 'q3', state: 'queued', enqueuedAt: NOW + 300 },
+      ];
+      const { listing, reads, raw } = await listingWithWrite(rows, { listPageSize: 1 }, 1, { when: 'after', call: isKeyRead },
+        (store) => putShareRow(store, { id: 'r', state: 'failed_retrying', enqueuedAt: NOW + 150, nextRetryAt: NOW + 10 }), { state: ['queued', 'failed_retrying'] });
+      expect(ids(listing)).toEqual(['q1']);
+      expect(reads).toEqual(['keys', 'payloads:1', 'retry', 'payloads:1', 'payloads:1']); // one retry read, then the walk to the end of the keys it has
+      expect(ids(await fullSort(raw, 1))).toEqual(['r']); // the store has moved on to a row that matches the filter now
     });
 
     it('decides a later stop on retry times read in the hold that decides it, not on the ones that blocked an earlier stop', async () => {
