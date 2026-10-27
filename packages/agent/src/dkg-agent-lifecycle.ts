@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import { accountSubscriptionChanges, type SubscriptionAccountingChange } from './context-graph-subscription-accounting.js';
 import { finalizePersistedSubscriptionActivation } from './context-graph-subscription-activation-finalization.js';
 import { isCommittedSubscription, waitForSubscriptionActivation } from './context-graph-subscription-activation-state.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
@@ -8140,123 +8141,48 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /** Record an acknowledged durable write and its explicit activation transition. */
   recordContextGraphSubscriptionPersistence(this: DKGAgent, contextGraphId: string, persisted?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>): void {
-    // The report counts the previous dormant-to-active transition.
-    this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, persisted);
     const live = this.subscribedContextGraphs.get(contextGraphId);
-    const remainsDormant = (persisted?.subscribed || persisted?.coreHosted) && !live?.subscribed && !live?.coreHosted;
-    this.transitionContextGraphSubscriptionDormancy(contextGraphId, remainsDormant
+    const isPersisted = persisted?.subscribed === true || persisted?.coreHosted === true;
+    const isActive = live?.subscribed === true || live?.coreHosted === true;
+    const reason = isPersisted && !isActive
       ? this.contextGraphSubscriptionDormancyById.get(contextGraphId)
         ?? (this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled')
-      : undefined);
+      : undefined;
+    this.contextGraphSubscriptionActivations.transition(this.contextGraphSubscriptionDormancyById, contextGraphId, reason,
+      dormancy => this.accountContextGraphSubscriptionTransitions([{ dormancy, kind: 'saved',
+        persisted: isPersisted, active: isActive, hosted: live?.coreHosted === true }]));
   }
 
-  updateContextGraphSubscriptionRehydrationStatusAfterPersist(this: DKGAgent,
-    contextGraphId: string,
-    next?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>,
-  ): void {
+  /** All lifecycle accounting consumes captured transitions after map mutation, before notification. */
+  accountContextGraphSubscriptionTransitions(this: DKGAgent, changes: readonly SubscriptionAccountingChange[]): void {
+    const systemIds = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+    const relevant = changes.filter(change => !systemIds.has(change.dormancy.id));
+    for (const change of relevant) {
+      if (change.kind === 'saved') continue;
+      const { id } = change.dormancy;
+      this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+      releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, id, 'clear');
+    }
     const status = this.contextGraphSubscriptionRehydrationStatus;
-    if (!status) return;
-    if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
-
-    const sortIds = (ids: string[]): string[] => [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
-    const wasDormant = this.contextGraphSubscriptionDormancyById.has(contextGraphId);
-    const hostedActivatedIds = status.hostedActivatedIds ?? [];
-    const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId);
-    const isPersisted = next?.subscribed === true || next?.coreHosted === true;
-    const live = this.subscribedContextGraphs.get(contextGraphId);
-    const isActive = live?.subscribed === true || live?.coreHosted === true;
-
-    let persistedTotal = status.persistedTotal;
-    let activated = status.activated;
-    let nextHostedActivatedIds = hostedActivatedIds.filter((id) => id !== contextGraphId);
-    if (live?.coreHosted === true) {
-      nextHostedActivatedIds = sortIds([...nextHostedActivatedIds, contextGraphId]);
+    if (status) this.contextGraphSubscriptionRehydrationStatus = accountSubscriptionChanges(
+      status, this.contextGraphSubscriptionRehydrationAccountedIds, relevant);
+    for (const change of relevant) {
+      if (change.kind === 'cleared') this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(change.dormancy.id);
     }
-
-    if (isPersisted) {
-      if (wasDormant && isActive) {
-        activated += 1;
-      } else if (!wasAccounted) {
-        persistedTotal += 1;
-        if (isActive) activated += 1;
-      } else if (!wasDormant && !isActive) {
-        activated = Math.max(0, activated - 1);
-      }
-      this.contextGraphSubscriptionRehydrationAccountedIds.add(contextGraphId);
-    } else if (wasAccounted) {
-      persistedTotal = Math.max(0, persistedTotal - 1);
-      if (!wasDormant) {
-        activated = Math.max(0, activated - 1);
-      }
-      this.contextGraphSubscriptionRehydrationAccountedIds.delete(contextGraphId);
-    }
-
-    this.contextGraphSubscriptionRehydrationStatus = {
-      ...status,
-      persistedTotal,
-      hostedActivated: nextHostedActivatedIds.length,
-      hostedActivatedIds: nextHostedActivatedIds,
-      activated,
-      updatedAt: Date.now(),
-    };
   }
 
   recordContextGraphSubscriptionClear(this: DKGAgent,
     clearedIds: Iterable<string>,
     deactivatedIds: Iterable<string> = [],
   ): void {
-    const clearedSet = new Set(clearedIds), deactivatedSet = new Set(deactivatedIds);
-    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-    const previousDormancy = new Set(this.contextGraphSubscriptionDormancyById.keys());
-    for (const id of clearedSet) if (!systemContextGraphs.has(id)) this.transitionContextGraphSubscriptionDormancy(id, undefined);
-    for (const id of deactivatedSet) if (!systemContextGraphs.has(id) && !clearedSet.has(id)) this.transitionContextGraphSubscriptionDormancy(id, 'deactivated');
-    const status = this.contextGraphSubscriptionRehydrationStatus;
-    if (!status) return;
-    const hostedActivatedIds = [...(status.hostedActivatedIds ?? [])];
-    const removeFrom = (ids: string[], id: string): boolean => {
-      const index = ids.indexOf(id);
-      if (index < 0) return false;
-      ids.splice(index, 1);
-      return true;
-    };
-    let persistedTotal = status.persistedTotal;
-    let activated = status.activated;
-
-    for (const id of clearedSet) {
-      if (systemContextGraphs.has(id)) continue;
-      this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-      releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, id, 'clear');
-      const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
-      const wasDormant = previousDormancy.has(id);
-      removeFrom(hostedActivatedIds, id);
-      if (!wasAccounted) continue;
-      persistedTotal = Math.max(0, persistedTotal - 1);
-      if (!wasDormant) {
-        activated = Math.max(0, activated - 1);
-      }
-    }
-    for (const id of deactivatedSet) {
-      if (systemContextGraphs.has(id) || clearedSet.has(id)) continue;
-      this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-      releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, id, 'clear');
-      if (!this.contextGraphSubscriptionRehydrationAccountedIds.has(id)) continue;
-      removeFrom(hostedActivatedIds, id);
-      if (!previousDormancy.has(id)) {
-        activated = Math.max(0, activated - 1);
-      }
-    }
-
-    this.contextGraphSubscriptionRehydrationStatus = {
-      ...status,
-      persistedTotal,
-      hostedActivated: hostedActivatedIds.length,
-      hostedActivatedIds,
-      activated,
-      updatedAt: Date.now(),
-    };
-    for (const id of clearedSet) {
-      this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(id);
-    }
+    const systemIds = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+    const changes = new Map<string, ContextGraphDormancyReason | undefined>();
+    for (const id of deactivatedIds) if (!systemIds.has(id)) changes.set(id, 'deactivated');
+    for (const id of clearedIds) if (!systemIds.has(id)) changes.set(id, undefined);
+    this.contextGraphSubscriptionActivations.transitionBatch(this.contextGraphSubscriptionDormancyById, changes,
+      transitions => this.accountContextGraphSubscriptionTransitions(transitions.map(dormancy => ({
+        dormancy, kind: dormancy.after === 'deactivated' ? 'deactivated' : 'cleared',
+      }))));
   }
 
   deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
@@ -8989,7 +8915,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       subscribedContextGraphs: this.subscribedContextGraphs,
       contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
       contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
-      updateContextGraphSubscriptionRehydrationStatusAfterPersist: this.updateContextGraphSubscriptionRehydrationStatusAfterPersist.bind(this),
+      accountContextGraphSubscriptionTransitions: this.accountContextGraphSubscriptionTransitions.bind(this),
       completeActivation: (id, row, finalize) => this.contextGraphSubscriptionActivations.complete(id, row, this.contextGraphSubscriptionDormancyById, finalize),
     }, contextGraphId, claimRollingSlot,
       id => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }));

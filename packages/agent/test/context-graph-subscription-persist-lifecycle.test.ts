@@ -80,7 +80,7 @@ function persistenceAgent(config: Record<string, unknown> = {}): any {
     subscribedContextGraphs: new Map<string, ContextGraphSub>(),
     log: { warn: vi.fn(), info: vi.fn() },
     invalidateListContextGraphsCache: vi.fn(),
-    updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn(),
+    accountContextGraphSubscriptionTransitions: vi.fn(),
   });
   return agent;
 }
@@ -221,7 +221,7 @@ describe('persistContextGraphSubscription revision semantics', () => {
     held.open();
     await Promise.all([newest, stale]);
     expect(saves).toHaveLength(2);
-    expect(agent.updateContextGraphSubscriptionRehydrationStatusAfterPersist).toHaveBeenCalledTimes(1);
+    expect(agent.accountContextGraphSubscriptionTransitions).toHaveBeenCalledTimes(1);
   });
 
   it('a cancel that lands before a write settles drops its callback but not the durable write', async () => {
@@ -232,7 +232,7 @@ describe('persistContextGraphSubscription revision semantics', () => {
     held.open();
     await write;
     expect(saves).toHaveLength(1);
-    expect(agent.updateContextGraphSubscriptionRehydrationStatusAfterPersist).not.toHaveBeenCalled();
+    expect(agent.accountContextGraphSubscriptionTransitions).not.toHaveBeenCalled();
   });
 
   it('a superseded row is cleared from revision state after its last write and pending revision', async () => {

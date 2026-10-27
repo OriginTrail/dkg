@@ -70,9 +70,9 @@ export function createRollingPromotionFixture(
     touchStatus: vi.fn(),
     activated: vi.fn<(id: string) => void>(),
     transitionDormancy: (id: string, reason: ContextGraphDormancyReason | undefined) => { if (reason === undefined) host.contextGraphSubscriptionDormancyById.delete(id); else host.contextGraphSubscriptionDormancyById.set(id, reason); },
-    finalizeActivation: (id: string) => finalizePersistedSubscriptionActivation({ ...host, completeActivation: (key: string, _row: ContextGraphSub, finalize: () => void) => { finalize(); host.contextGraphSubscriptionDormancyById.delete(key); return true; } }, id, true, host.activated),
+    finalizeActivation: (id: string) => finalizePersistedSubscriptionActivation({ ...host, completeActivation: (key, _row, account) => { const before = host.contextGraphSubscriptionDormancyById.get(key); host.contextGraphSubscriptionDormancyById.delete(key); account({ id: key, before, after: undefined }); return true; } }, id, true, host.activated),
     recordContextGraphSubscriptionClear: vi.fn<RollingSubscriptionPromotionPorts['recordContextGraphSubscriptionClear']>(),
-    updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn<PersistedSubscriptionFinalizationPorts['updateContextGraphSubscriptionRehydrationStatusAfterPersist']>(),
+    accountContextGraphSubscriptionTransitions: vi.fn<PersistedSubscriptionFinalizationPorts['accountContextGraphSubscriptionTransitions']>(),
     persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionActivationPorts['persistBinding']>(async () => undefined),
     reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationPorts['reconcile']>(async () => undefined),
     resolveContextGraphSubscriptionBootstrapAuthority: vi.fn<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>(options.answer ?? (async () => options.authority === 'unavailable'

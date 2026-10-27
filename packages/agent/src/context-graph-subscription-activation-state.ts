@@ -5,6 +5,16 @@ import type { ContextGraphDormancyReason } from './context-graph-subscription-do
 import { contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 
 type Dormancy = ReadonlyMap<string, ContextGraphDormancyReason>;
+export type SubscriptionDormancyTransition = Readonly<{
+  id: string;
+  before: ContextGraphDormancyReason | undefined;
+  after: ContextGraphDormancyReason | undefined;
+}>;
+function applyDormancy(dormancy: Map<string, ContextGraphDormancyReason>, id: string, after: ContextGraphDormancyReason | undefined): SubscriptionDormancyTransition {
+  const transition = Object.freeze({ id, before: dormancy.get(id), after });
+  if (after === undefined) dormancy.delete(id); else dormancy.set(id, after);
+  return transition;
+}
 const changed = () => new Error('Subscription activation ownership changed');
 export function isCommittedSubscription(
   subscriptions: ReadonlyMap<string, ContextGraphSub>, dormancy: Dormancy, id: string,
@@ -64,9 +74,16 @@ export class ContextGraphSubscriptionActivations {
     if (attempt) this.settle(attempt, { kind: 'cancelled' });
   }
   /** One explicit transition updates both dormancy and pending ownership. */
-  transition(dormancy: Map<string, ContextGraphDormancyReason>, id: string, reason: ContextGraphDormancyReason | undefined): void {
-    if (reason === undefined) dormancy.delete(id); else dormancy.set(id, reason);
-    if (reason !== 'authorityUnavailable' && reason !== 'activationCap') this.cancel(id);
+  transition(dormancy: Map<string, ContextGraphDormancyReason>, id: string, reason: ContextGraphDormancyReason | undefined, account: (transition: SubscriptionDormancyTransition) => void = () => {}): void {
+    this.transitionBatch(dormancy, [[id, reason]], transitions => account(transitions[0]));
+  }
+  /** Apply the entire change and its accounting before notifying any waiters. */
+  transitionBatch(dormancy: Map<string, ContextGraphDormancyReason>, changes: Iterable<readonly [string, ContextGraphDormancyReason | undefined]>, account: (transitions: readonly SubscriptionDormancyTransition[]) => void): void {
+    const transitions = [...new Map(changes)].map(([id, reason]) => applyDormancy(dormancy, id, reason));
+    account(transitions);
+    for (const { id, after } of transitions) {
+      if (after !== 'authorityUnavailable' && after !== 'activationCap') this.cancel(id);
+    }
   }
   private owned(handle: ActivationHandle): ActivationAttempt {
     const attempt = this.pending.get(handle.id);
@@ -85,13 +102,11 @@ export class ContextGraphSubscriptionActivations {
       && sameIntent(attempt.intent, row) && isContextGraphSubscriptionStoredAgain(phase.subscription, live))
       attempt.repaired = { ...row };
   }
-  complete(id: string, live: ContextGraphSub, dormancy: Map<string, ContextGraphDormancyReason>, finalize: () => void): boolean {
+  complete(id: string, live: ContextGraphSub, dormancy: Map<string, ContextGraphDormancyReason>, account: (transition: SubscriptionDormancyTransition) => void): boolean {
     const attempt = this.pending.get(id), phase = attempt?.phase;
     if (!attempt || phase?.kind !== 'ready' || !isContextGraphSubscriptionStoredAgain(phase.subscription, live)
       || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live)) return false;
-    // Reporting sees the previous dormancy; listeners see the committed transition.
-    finalize();
-    dormancy.delete(id);
+    account(applyDormancy(dormancy, id, undefined));
     this.settle(attempt, { kind: 'committed', subscription: live });
     return true;
   }
