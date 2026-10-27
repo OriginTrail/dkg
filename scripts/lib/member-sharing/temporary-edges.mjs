@@ -31,6 +31,9 @@ const DEAD_DIRECT_ADDRESS = '/ip4/127.0.0.1/tcp/9';
 const OWN_MARK = '.issue-3251-member-sharing';
 
 export class TemporaryEdges {
+  // idle: may start; ready: author; needs-stop: permanent owner fallback with
+  // unresolved shutdown; fallback: no feeder work may be started again.
+  #feederState = 'idle';
   /** `log` is { say, note } of the report. */
   constructor(devnet, { stamp, log }) {
     this.devnet = devnet;
@@ -40,12 +43,6 @@ export class TemporaryEdges {
     this.member1 = null;
     this.member2 = null;
     this.feeder = null;
-    // Whether the feeder's process runs (from its start until a stop that
-    // succeeded), and whether it is the author of the next large graph (from
-    // member 2's dial until it is stopped).
-    this.feederRunning = false;
-    this.feederUp = false;
-    this.feederFailed = false;
     // Every node this run added: the cleanup stops and removes these only.
     this.started = [];
     // The starts still running, each with what cancels it.
@@ -55,7 +52,9 @@ export class TemporaryEdges {
   get nodes() { return [this.owner, this.member1, this.member2]; }
   get members() { return [this.member1, this.member2]; }
   /** The node that writes case 6's next large graph: the feeder while it runs, else the owner. */
-  get largeAuthor() { return this.feederUp && !this.feederFailed ? this.feeder : this.owner; }
+  get largeAuthor() { return this.#feederState === 'ready' ? this.feeder : this.owner; }
+  get feederUp() { return this.#feederState === 'ready'; }
+  get feederRunning() { return this.#feederState === 'ready' || this.#feederState === 'needs-stop'; }
   /** Whether a node number is one of the temporary nodes. */
   isTemporary(number) { return [...this.nodes, this.feeder].some(node => node?.number === number); }
 
@@ -168,41 +167,32 @@ export class TemporaryEdges {
    * feeder member 2 cannot dial is stopped again (feederRunning says whether
    * that worked); the cleanup removes it either way.
    */
-  async startFeeder() {
+  async #startFeeder() {
     try {
       await this.start(this.feeder);
-      this.feederRunning = true;
+      this.#feederState = 'needs-stop';
       await this.dial(this.member2, this.feeder);
-      this.feederUp = true;
+      this.#feederState = 'ready';
     } catch (error) {
       // addnode can launch the daemon before readiness or identity fails.
       // Only our current claim permits rollback; a competing suite stays untouched.
-      this.feederRunning = this.claims(this.feeder);
-      this.feederUp = false;
-      await this.stopFeeder().catch(() => {});
+      this.#feederState = this.claims(this.feeder) ? 'needs-stop' : 'fallback';
+      await this.#stopFeeder().catch(() => {});
       throw error;
     }
   }
 
-  /** Report uncertain or active public participation before its evidence is removed. */
-  async auditFeederIsolation(publicGraph, when, { following, fail }) {
-    const fed = await following(this.feeder, publicGraph);
-    if (fed.state === 'following') fail(2, `${when} the feeder ${this.feeder.label} follows the public graph: its gossip may have carried writes`);
-    else if (fed.state !== 'not-following') fail(2, `${when} it is not known whether the feeder ${this.feeder.label} follows the public graph (${fed.reason ?? fed.state})`);
-  }
-
   /** Own the retry lifecycle and return the author; failed activation is never reused. */
   async prepareLargeGraphAuthor(attempt, beforeRelease) {
-    if (attempt === 1 || !this.feeder || this.feederFailed) return this.owner;
+    if (attempt === 1 || !this.feeder || ['needs-stop', 'fallback'].includes(this.#feederState)) return this.owner;
     try {
       if (this.feederRunning) {
         await beforeRelease();
-        await this.renewFeeder();
-      } else await this.startFeeder();
+        await this.#renewFeeder();
+      } else await this.#startFeeder();
       return this.feeder;
     } catch (error) {
-      this.feederFailed = true;
-      this.feederUp = false;
+      this.#feederState = this.feederRunning ? 'needs-stop' : 'fallback';
       this.log.note(`the feeder could not be set up (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts`);
       return this.owner;
     }
@@ -214,7 +204,7 @@ export class TemporaryEdges {
     try {
       await beforeRelease();
     } finally {
-      const error = await this.stopFeeder().catch(() => this.stopFeeder()).then(() => null, cause => cause);
+      const error = await this.#stopFeeder().catch(() => this.#stopFeeder()).then(() => null, cause => cause);
       if (error) failed(error);
     }
   }
@@ -231,13 +221,13 @@ export class TemporaryEdges {
    * gets a feeder that holds nothing yet. Throws when it cannot be removed or
    * started.
    */
-  async renewFeeder() {
+  async #renewFeeder() {
     const { feeder } = this;
-    await this.stopFeeder();
+    await this.#stopFeeder();
     if (existsSync(this.devnet.nodeDir(feeder.number))) {
       if (!this.claims(feeder)) throw new Error(`node${feeder.number} is no longer this run's; it is left as it is`);
       const problem = this.removeOwnNode(feeder.number);
-      if (problem) throw new Error(problem);
+      if (problem) { this.#feederState = 'needs-stop'; throw new Error(problem); }
     }
     // Without its folder the number is free again: another suite may take it
     // before the new feeder's addnode does, and the cleanup must not remove
@@ -246,7 +236,7 @@ export class TemporaryEdges {
     this.started = this.started.filter(node => node !== feeder);
     feeder.peerId = null;
     feeder.agentAddress = null;
-    await this.startFeeder();
+    await this.#startFeeder();
   }
 
   /**
@@ -254,16 +244,19 @@ export class TemporaryEdges {
    * and the members alone. A stop that fails leaves it marked running, and
    * stopFeeder may be called again.
    */
-  async stopFeeder() {
+  async #stopFeeder() {
     if (!this.feederRunning) return;
+    this.#feederState = 'needs-stop';
     if (!this.claims(this.feeder)) {
-      this.feederRunning = false;
-      this.feederUp = false;
       throw new Error(`node${this.feeder.number} is no longer this run's; it is left as it is`);
     }
     await this.stop(this.feeder);
-    this.feederRunning = false;
-    this.feederUp = false;
+    const stopped = await waitFor(async () => {
+      const busy = this.devnet.nodePorts(this.feeder.number).filter(this.devnet.listening);
+      return { ok: busy.length === 0, busy };
+    }, 30_000);
+    if (!stopped.ok) throw new Error(`node${this.feeder.number} still listens on port(s) ${stopped.busy.join(', ')} after it was stopped`);
+    this.#feederState = 'fallback';
   }
 
   /**

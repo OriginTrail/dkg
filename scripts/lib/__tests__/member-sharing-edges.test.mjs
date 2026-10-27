@@ -67,10 +67,10 @@ test('a fourth free node number is kept for the feeder of case 6\'s later attemp
   assert.equal(edges.largeAuthor, edges.owner);
   for (const node of edges.nodes) await edges.start(node);
   assert.ok(!devnet.calls.includes('addnode 10 edge'));
-  await edges.startFeeder();
+  await edges.prepareLargeGraphAuthor(2, async () => {});
   assert.ok(devnet.calls.includes('addnode 10 edge') && edges.feederUp);
   assert.equal(edges.largeAuthor, edges.feeder);
-  await edges.stopFeeder();
+  await edges.finishFeeder(async () => {}, error => { throw error; });
   assert.ok(devnet.calls.includes('stop-node 10') && !edges.feederUp);
   assert.equal(edges.largeAuthor, edges.owner);
   // The cleanup removes it with the others.
@@ -94,14 +94,14 @@ test('a fourth free node number is kept for the feeder of case 6\'s later attemp
   const failing = fakeDevnet(t, { readiness: number => (number === 10 ? 'failed' : 'ready') });
   const fallback = new TemporaryEdges(failing, { stamp: 'S', log });
   fallback.allocate({ relay1: 'r1', relay2: 'r2' });
-  await assert.rejects(fallback.startFeeder(), /temporary node 10 could not be added/);
+  assert.equal(await fallback.prepareLargeGraphAuthor(2, async () => {}), fallback.owner);
   assert.equal(fallback.largeAuthor, fallback.owner);
   // One that started but that member 2 cannot dial is stopped again.
   const undialable = fakeDevnet(t);
   const dialFails = new TemporaryEdges(undialable, { stamp: 'S', log });
   dialFails.allocate({ relay1: 'r1', relay2: 'r2' });
   dialFails.dial = async () => { throw new Error('node9 (member2) could not dial the feeder through the relay: HTTP 0 refused'); };
-  await assert.rejects(dialFails.startFeeder(), /could not dial the feeder/);
+  assert.equal(await dialFails.prepareLargeGraphAuthor(2, async () => {}), dialFails.owner);
   assert.ok(undialable.calls.includes('stop-node 10') && !dialFails.feederUp && !dialFails.feederRunning);
   assert.equal(dialFails.largeAuthor, dialFails.owner);
   // A stop that fails leaves the feeder marked running, and a second stopFeeder stops it.
@@ -109,10 +109,8 @@ test('a fourth free node number is kept for the feeder of case 6\'s later attemp
   const stubborn = fakeDevnet(t, { stopStatus: number => (number === 10 && ++stops === 1 ? 1 : 0) });
   const once = new TemporaryEdges(stubborn, { stamp: 'S', log });
   once.allocate({ relay1: 'r1', relay2: 'r2' });
-  await once.startFeeder();
-  await assert.rejects(once.stopFeeder(), /the feeder could not be stopped/);
-  assert.ok(once.feederRunning && once.feederUp);
-  await once.stopFeeder();
+  await once.prepareLargeGraphAuthor(2, async () => {});
+  await once.finishFeeder(async () => {}, error => { throw error; });
   assert.deepEqual(stubborn.calls.filter(call => call === 'stop-node 10'), ['stop-node 10', 'stop-node 10']);
   assert.ok(!once.feederRunning && !once.feederUp);
   assert.equal(once.largeAuthor, once.owner);
@@ -132,9 +130,9 @@ test('each later attempt of case 6 gets a fresh feeder: the one that ran is stop
   const devnet = fakeDevnet(t);
   const edges = new TemporaryEdges(devnet, { stamp: 'S', log });
   edges.allocate({ relay1: 'r1', relay2: 'r2' });
-  await edges.startFeeder();
+  await edges.prepareLargeGraphAuthor(2, async () => {});
   writeFileSync(join(devnet.nodeDir(10), 'held-large-graph'), 'the large graph of the attempt before');
-  await edges.renewFeeder();
+  assert.equal(await edges.prepareLargeGraphAuthor(3, async () => {}), edges.feeder);
   assert.deepEqual(devnet.calls.filter(call => /^(addnode|stop-node) 10/.test(call)), ['addnode 10 edge', 'stop-node 10', 'stop-node 10', 'addnode 10 edge']);
   assert.ok(!existsSync(join(devnet.nodeDir(10), 'held-large-graph')), 'the new feeder holds nothing of the old one');
   assert.ok(edges.feederRunning && edges.feederUp && edges.feeder.peerId === 'peer-10');
@@ -144,8 +142,8 @@ test('each later attempt of case 6 gets a fresh feeder: the one that ran is stop
   const stuck = fakeDevnet(t, { stopStatus: () => (++stops >= 1 ? 1 : 0) });
   const stubborn = new TemporaryEdges(stuck, { stamp: 'S', log });
   stubborn.allocate({ relay1: 'r1', relay2: 'r2' });
-  await stubborn.startFeeder();
-  await assert.rejects(stubborn.renewFeeder(), /the feeder could not be stopped/);
+  await stubborn.prepareLargeGraphAuthor(2, async () => {});
+  assert.equal(await stubborn.prepareLargeGraphAuthor(3, async () => {}), stubborn.owner);
   assert.equal(stuck.calls.filter(call => call === 'addnode 10 edge').length, 1);
   assert.ok(stubborn.feederRunning);
 });
@@ -158,8 +156,8 @@ test('a number another suite took while the feeder was replaced is left to that 
   const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say: line => says.push(line), note() {} } });
   edges.allocate({ relay1: 'r1', relay2: 'r2' });
   for (const node of edges.nodes) await edges.start(node);
-  await edges.startFeeder();
-  await assert.rejects(edges.renewFeeder(), /temporary node 10 could not be added \(its folder, if any, is left as it is\): \[devnet\] node10 already exists/);
+  await edges.prepareLargeGraphAuthor(2, async () => {});
+  assert.equal(await edges.prepareLargeGraphAuthor(3, async () => {}), edges.owner);
   assert.ok(!edges.started.includes(edges.feeder) && !edges.feederRunning && !edges.feederUp);
   assert.equal(edges.largeAuthor, edges.owner);
   // Nor does the cleanup take a folder for this run's that lost its claim some other way (removed from outside, and taken).
@@ -352,10 +350,14 @@ for (const state of ['following', 'unknown', 'not-following']) {
     const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
     edges.allocate({ relay1: 'r1', relay2: 'r2' });
     const failures = [];
-    const audit = () => edges.auditFeederIsolation('public', 'before removal', {
-      following: async () => { devnet.calls.push('audit'); return { state }; },
-      fail: (id, message) => { failures.push([id, message]); devnet.calls.push('verdict'); },
-    });
+    // Execute the actual scenario audit without starting the devnet CLI.
+    const runner = readFileSync(new URL('../../devnet-test-issue-3251-member-sharing.mjs', import.meta.url), 'utf8');
+    const source = runner.match(/async function feederOutOf\([^)]*\) \{[\s\S]*?\n\}/)?.[0];
+    assert.ok(source, 'scenario owns the feeder isolation audit');
+    const feederOutOf = new Function('edges', 'graphs', 'fail', `return (${source});`)(edges,
+      { following: async () => { devnet.calls.push('audit'); return { state }; } },
+      (id, message) => { failures.push([id, message]); devnet.calls.push('verdict'); });
+    const audit = () => feederOutOf('public', 'before removal');
     await edges.prepareLargeGraphAuthor(2, audit);
     await edges.prepareLargeGraphAuthor(3, audit);
     assert.ok(devnet.calls.indexOf('audit') < devnet.calls.indexOf('stop-node 10'));
@@ -366,3 +368,43 @@ for (const state of ['following', 'unknown', 'not-following']) {
     assert.equal(edges.feederRunning, false);
   });
 }
+
+for (const recovers of [false, true]) test(`zero stop status with busy ports retains shutdown ownership (recovers=${recovers})`, async t => {
+  const devnet = fakeDevnet(t);
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  await edges.prepareLargeGraphAuthor(2, async () => {});
+  let busy = true, now = 0;
+  devnet.nodePorts = () => [12345]; devnet.listening = () => busy;
+  t.mock.method(Date, 'now', () => now += 30_000);
+  assert.equal(await edges.prepareLargeGraphAuthor(3, async () => {}), edges.owner);
+  assert.equal(edges.feederRunning, true);
+  assert.equal(edges.feederUp, false);
+  busy = !recovers;
+  const failures = [], audits = [];
+  await edges.finishFeeder(async () => { audits.push('audit'); }, error => failures.push(error.message));
+  assert.equal(audits.length, 1);
+  assert.equal(failures.length, recovers ? 0 : 1);
+  assert.equal(edges.feederRunning, !recovers);
+  assert.equal(await edges.prepareLargeGraphAuthor(4, async () => {}), edges.owner);
+  assert.equal(devnet.calls.filter(call => call === 'stop-node 10').length, recovers ? 2 : 3);
+});
+
+test('a busy-port removal after a successful stop stays eligible for final shutdown', async t => {
+  const devnet = fakeDevnet(t);
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  await edges.prepareLargeGraphAuthor(2, async () => {});
+  let busy = false, now = 0;
+  devnet.nodePorts = () => [12345]; devnet.listening = () => busy;
+  t.mock.method(Date, 'now', () => now += 30_000);
+  const sync = devnet.devnetShSync;
+  devnet.devnetShSync = (...args) => { busy = true; return sync(...args); };
+  assert.equal(await edges.prepareLargeGraphAuthor(3, async () => {}), edges.owner);
+  assert.equal(edges.feederRunning, true);
+  const failures = [];
+  await edges.finishFeeder(async () => {}, error => failures.push(error.message));
+  assert.equal(failures.length, 1);
+  assert.match(failures[0], /still listens/);
+  assert.equal(devnet.calls.filter(call => call === 'stop-node 10').length, 4);
+});
