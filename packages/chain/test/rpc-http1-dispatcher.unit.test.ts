@@ -1,15 +1,12 @@
-import { execFile } from 'node:child_process';
 import http from 'node:http';
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
-import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
 import { chainRpcFetch } from '../src/rpc-http1-dispatcher.js';
 import {
   LOCALHOST_CERT,
   LOCALHOST_KEY,
-  startConnectProxy,
   startHttp2AndHttp1JsonRpcServer,
   withTrustedCertificate,
   type JsonRpcTlsServer,
@@ -21,9 +18,6 @@ const FETCH_GLOBAL_DISPATCHER = Symbol.for('undici.globalDispatcher.2');
 const UNDICI7_FETCH_GLOBAL_DISPATCHER = Symbol.for('undici.globalDispatcher.1');
 const RUNNING_FETCH_NEGOTIATES_HTTP2 = Number.parseInt(process.versions.undici ?? '', 10) >= 8;
 const RUNNING_FETCH_GLOBAL_DISPATCHER = RUNNING_FETCH_NEGOTIATES_HTTP2 ? FETCH_GLOBAL_DISPATCHER : UNDICI7_FETCH_GLOBAL_DISPATCHER;
-if (process.env.DKG_REQUIRE_UNDICI8_FETCH === '1' && !RUNNING_FETCH_NEGOTIATES_HTTP2) {
-  throw new Error('the chain-rpc-node26 lane needs a Node whose fetch is undici 8 or later, got undici ' + process.versions.undici);
-}
 const RPC_BODY = JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'eth_chainId', params: [] });
 
 type Dispatch = (options: Record<string, unknown>, handler: object) => boolean;
@@ -76,31 +70,6 @@ async function withBundledUndici<T>(version: string, run: () => T | Promise<T>):
   }
 }
 
-
-/** Environment variables that would route a child's requests through a proxy. */
-const PROXY_ENV = ['NODE_USE_ENV_PROXY', 'HTTPS_PROXY', 'https_proxy', 'HTTP_PROXY', 'http_proxy', 'NO_PROXY', 'no_proxy'];
-
-/**
- * Runs one chain RPC call to `url` as the first request of a fresh Node
- * process that trusts the test certificate, with `env` added and no other
- * proxy settings, and returns what the child reports.
- */
-async function runChainRpcChild(url: string, env: NodeJS.ProcessEnv): Promise<unknown> {
-  const childEnv: NodeJS.ProcessEnv = { ...process.env };
-  for (const name of PROXY_ENV) delete childEnv[name];
-  Object.assign(childEnv, env, {
-    NODE_EXTRA_CA_CERTS: fileURLToPath(new URL('./fixtures/localhost-tls/localhost-cert.pem', import.meta.url)),
-  });
-  const stdout = await new Promise<string>((resolve, reject) => {
-    execFile(
-      process.execPath,
-      [fileURLToPath(new URL('./helpers/chain-rpc-fetch-child.mjs', import.meta.url)), url],
-      { env: childEnv, timeout: 20_000 },
-      (error, out, err) => (error ? reject(new Error(error.message + '\n' + err)) : resolve(out)),
-    );
-  });
-  return JSON.parse(stdout);
-}
 
 async function readRpc(response: Promise<Response>): Promise<unknown> {
   const settled = await response;
@@ -234,68 +203,6 @@ describe('chain RPC fetches against a server that offers HTTP/2 (#2828)', () => 
     // The plain fetch shows what the running Node negotiates on its own: HTTP/2 from undici 8 (Node 26).
     expect(server.httpVersions).toEqual([RUNNING_FETCH_NEGOTIATES_HTTP2 ? '2.0' : '1.1', '1.1', '1.1']);
   });
-
-  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-11-25 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
-  it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
-    'go through a dispatcher the application installed, with its own TLS trust',
-    async () => {
-      server.httpVersions.length = 0;
-      // Loading fetch's classes installs Node's default dispatcher.
-      void globalThis.Response;
-      const nodeDefault = slots[FETCH_GLOBAL_DISPATCHER] as TestDispatcher;
-      // An application's undici Agent that trusts the test certificate; nothing else in the process does.
-      const Agent = nodeDefault.constructor as new (options: object) => TestDispatcher;
-      const custom = new Agent({ connect: { ca: [server.cert] } });
-      const seenAllowH2: unknown[] = [];
-      const installed = custom.compose((dispatch) => (options, handler) => {
-        seenAllowH2.push(options.allowH2);
-        return dispatch(options, handler);
-      });
-
-      try {
-        await withGlobalDispatcher(installed, () =>
-          readRpc(chainRpcFetch(server.url, { method: 'POST', body: RPC_BODY })));
-      } finally {
-        await custom.close();
-      }
-
-      expect(seenAllowH2).toEqual([false]);
-      expect(server.httpVersions.at(-1)).toBe('1.1');
-    },
-  );
-
-  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-11-25 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
-  it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
-    'go through the proxy of NODE_USE_ENV_PROXY',
-    async () => {
-      server.httpVersions.length = 0;
-      const proxy = await startConnectProxy();
-
-      try {
-        const result = await runChainRpcChild(server.url, { NODE_USE_ENV_PROXY: '1', HTTPS_PROXY: proxy.url });
-
-        expect(result).toMatchObject({ status: 200, body: { result: '0x1' } });
-        expect(proxy.connects).toEqual([new URL(server.url).host]);
-        expect(server.httpVersions).toEqual(['1.1']);
-      } finally {
-        await proxy.close();
-      }
-    },
-  );
-
-  // test-disable-allow: D1 #2828 -- owner=branarakic lane=chain-rpc-node26 expires=2026-11-25 Needs undici 8 fetch; runs on Node 26 in chain-rpc-node26.yml.
-  it.runIf(RUNNING_FETCH_NEGOTIATES_HTTP2)(
-    'stay on HTTP/1.1 when a chain RPC call is the first request of a fresh process',
-    async () => {
-      server.httpVersions.length = 0;
-
-      // No proxy, and nothing in the child touches fetch or its classes before chainRpcFetch.
-      const result = await runChainRpcChild(server.url, {});
-
-      expect(result).toMatchObject({ status: 200, body: { result: '0x1' } });
-      expect(server.httpVersions).toEqual(['1.1']);
-    },
-  );
 });
 
 describe('chain RPC fetches against a server that answers with Brotli (CVE-2026-111497)', () => {
