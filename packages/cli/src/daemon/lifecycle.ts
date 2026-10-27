@@ -473,6 +473,7 @@ import {
 
 import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
+import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
@@ -1316,6 +1317,7 @@ async function runDaemonInnerWithStartupOwnership(
     warn: log,
   });
   logStoreControlPathGeometry({ info: log, warn: log });
+  const writePreflightCoalescing = configureWritePreflightCoalescing(process.env, { info: log, warn: log });
 
   const startupLogRotationMessage = startupLogRotation
     && describeDaemonLogRotation(startupLogRotation, 'during startup');
@@ -1918,6 +1920,8 @@ async function runDaemonInnerWithStartupOwnership(
     // Forward the operator retry budget to publishAsync producers (#1836).
     publisherMaxRetries: config.publisher?.maxRetries,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
+    // The agent's write-preflight policy: how long sharing stays off after a policy write of unknown outcome (0 = strict).
+    writePreflightUnresolvedWriteWindowMs: writePreflightCoalescing.unresolvedWriteWindowMs,
     queryAccess: config.queryAccess,
     chainAdapter: mockChainAdapter,
     // Only forward chain to the agent when both required fields resolved.

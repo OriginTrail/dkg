@@ -1703,15 +1703,19 @@ test('run refuses a rung that does not fit the stream, flags that belong to anot
   fails(['--queue', 'lift', '--rung', 'PSTAR', '--seed-file', '/nope'], /--seed-file seeds the share queue/);
   fails(['--queue', 'lift', '--rung', 'PSTAR', '--lift-history', 'lots'], /--lift-history: not a count: lots/);
   // each stream has its own paged call: a lift-only run is refused for the publisher's, not for the share queue's,
-  // which it never polls; a mixed run needs both
+  // which it never polls; a mixed run needs both. The share queue's exists since P8a, so a mixed run is now refused for
+  // the publisher's alone and a share run takes the paged observer
   fails(
     ['--queue', 'lift', '--rung', 'PSTAR', '--observer', 'paged'],
     /^the publisher's paged listing is not available in this build \(needs P9a\/P9b\)/,
   );
   fails(
     ['--queue', 'both', '--rung', 'MIX', '--observer', 'paged'],
-    /^the share queue's paged listing is not available in this build \(needs P8a\/P9b\)/,
+    /^the publisher's paged listing is not available in this build \(needs P9a\/P9b\)/,
   );
+  const sharePaged = dry('--queue', 'share', '--rung', 'L3', '--observer', 'paged');
+  assert.equal(sharePaged.status, 0, sharePaged.stderr);
+  assert.equal(sharePaged.config.observer, 'paged');
   fails(['--rung', 'L3', '--seed-base', 'x'], /--seed-base must be an integer >= 0/);
 });
 

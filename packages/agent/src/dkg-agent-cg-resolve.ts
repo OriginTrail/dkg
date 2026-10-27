@@ -7,7 +7,8 @@
  * listContextGraphs enumeration. 1:1 move; methods take `this: DKGAgent` so
  * cross-calls resolve against the composed class.
  */
-import { probeContextGraphWritePreflight } from './context-graph-write-preflight.js';
+
+import { probeContextGraphWritePreflight, type WritePreflightProbeOptions } from './context-graph-write-preflight.js';
 import { throwIfOperationAborted } from './bounded-operation.js';
 import { resolveContextGraphNameBindingTarget, type ContextGraphNameHashBindingTarget } from './context-graph-name-binding-target.js';
 import { readAgentPeerPage } from './agent-peer-discovery.js';
@@ -690,7 +691,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     );
   }
 
-  probeContextGraphWritePreflight(this: DKGAgent, contextGraphId: string, opts?: { callerAgentAddress?: string | null }): Promise<ContextGraphWritePreflightProbe> {
+  probeContextGraphWritePreflight(this: DKGAgent, contextGraphId: string, opts?: WritePreflightProbeOptions): Promise<ContextGraphWritePreflightProbe> {
     return probeContextGraphWritePreflight(this, { locallyCreated: this.localContextGraphProvenance.hasLocalCreate(contextGraphId),
       store: this.config.contextGraphSubscriptionStore,
       current: id => this.subscribedContextGraphs.get(id) }, contextGraphId, opts);
