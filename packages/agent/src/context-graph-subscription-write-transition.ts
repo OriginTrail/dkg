@@ -10,17 +10,12 @@ export type ContextGraphSubscriptionWriteOptions = Readonly<{
   rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
   retireNamePlaceholder?: boolean;
 }>;
-type WireSource = Readonly<{ localId: string; subscription: ContextGraphSub }>;
 
 /** Internal data shared by the effects of one synchronous canonical write. */
 export type ContextGraphSubscriptionWriteTransition = Readonly<{
   contextGraphId: string;
   source: ContextGraphSub | undefined;
-  wireSource: WireSource | undefined;
   subscription: ContextGraphSub;
   adoptedWire: Readonly<Pick<ContextGraphSubscriptionRecord, 'id' | 'onChainId' | 'onChainHash' | 'coreHosted'>> | undefined;
-  localWireId: string;
-  previousWireId: string;
-  nextWireId: string;
   options: ContextGraphSubscriptionWriteOptions;
 }>;

@@ -1536,6 +1536,8 @@ export class DKGAgentBase {
     contextGraphSubscriptionRehydrationAccountedIds: this.contextGraphSubscriptionRehydrationAccountedIds,
     getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
     setStatus: status => { this.contextGraphSubscriptionRehydrationStatus = status; },
+    slotReleased: () => this.contextGraphSubscriptionRehydrationPromotionRuntime?.request(),
+    clearPersistRevision: id => (this as unknown as DKGAgent).clearContextGraphSubscriptionPersistRevisionStateIfIdle(id),
     publish: id => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }),
   });
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();

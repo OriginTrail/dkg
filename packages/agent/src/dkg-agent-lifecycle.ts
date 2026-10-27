@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
-import { accountSubscriptionChanges, type SubscriptionAccountingChange } from './context-graph-subscription-accounting.js';
 import { isCommittedSubscription, waitForSubscriptionActivation } from './context-graph-subscription-activation-state.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
@@ -7876,8 +7875,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const adoptedWire = adoptsWireOnlySubscription
       ? { ...wireOnlySubscription!.subscription, id: wireOnlySubscription!.localId } : undefined;
     const transition: ContextGraphSubscriptionWriteTransition = {
-      contextGraphId, source: previous, wireSource: wireOnlySubscription ?? undefined,
-      subscription: canonicalNext, adoptedWire, localWireId, previousWireId, nextWireId, options: options ?? {},
+      contextGraphId, source: previous, subscription: canonicalNext, adoptedWire, options: options ?? {},
     };
     const currentWire = this.resolveWireOnlyContextGraphSubscription(contextGraphId);
     if (this.subscribedContextGraphs.get(contextGraphId) !== previous
@@ -7931,19 +7929,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   retireContextGraphSubscriptionPredecessors(this: DKGAgent, transition: ContextGraphSubscriptionWriteTransition): void {
-    const { contextGraphId, wireSource: wireOnlySubscription, adoptedWire, localWireId, options } = transition;
+    const { contextGraphId, adoptedWire, options } = transition;
     this.invalidateListContextGraphsCache();
     if (options?.retireNamePlaceholder === true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     if (adoptedWire) {
       // Retire the authenticated placeholder before publishing its canonical
       // row so no RFC-64 responsibility, binding or receiver stays wire-keyed.
-      this.deleteContextGraphSubscription(wireOnlySubscription!.localId);
-      if (this.wireIdToLocalCgId.get(localWireId) === wireOnlySubscription!.localId) {
-        this.wireIdToLocalCgId.delete(localWireId);
+      this.deleteContextGraphSubscription(adoptedWire.id);
+      if (this.wireIdToLocalCgId.get(adoptedWire.id) === adoptedWire.id) {
+        this.wireIdToLocalCgId.delete(adoptedWire.id);
       }
       this.log.info(
         createOperationContext('system'),
-        `Promoted wire-only Context Graph ${localWireId.slice(0, 18)}… to local identity "${contextGraphId}"`,
+        `Promoted wire-only Context Graph ${adoptedWire.id.slice(0, 18)}… to local identity "${contextGraphId}"`,
       );
     }
   }
@@ -8174,27 +8172,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ? this.contextGraphSubscriptionDormancyById.get(contextGraphId)
         ?? (this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled')
       : undefined;
-    this.contextGraphSubscriptionActivations.transition(contextGraphId, reason,
-      dormancy => this.accountContextGraphSubscriptionTransitions([{ dormancy, kind: 'saved',
-        persisted: isPersisted, active: isActive, hosted: live?.coreHosted === true }]));
-  }
-
-  /** All lifecycle accounting consumes captured transitions after map mutation, before notification. */
-  accountContextGraphSubscriptionTransitions(this: DKGAgent, changes: readonly SubscriptionAccountingChange[]): void {
-    const systemIds = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-    const relevant = changes.filter(change => !systemIds.has(change.dormancy.id));
-    for (const change of relevant) {
-      if (change.kind === 'saved') continue;
-      const { id } = change.dormancy;
-      this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-      releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, id, 'clear');
-    }
-    const status = this.contextGraphSubscriptionRehydrationStatus;
-    if (status) this.contextGraphSubscriptionRehydrationStatus = accountSubscriptionChanges(
-      status, this.contextGraphSubscriptionRehydrationAccountedIds, relevant);
-    for (const change of relevant) {
-      if (change.kind === 'cleared') this.clearContextGraphSubscriptionPersistRevisionStateIfIdle(change.dormancy.id);
-    }
+    this.contextGraphSubscriptionActivations.transition({ id: contextGraphId, reason, kind: 'saved',
+      persisted: isPersisted, active: isActive, hosted: live?.coreHosted === true });
   }
 
   recordContextGraphSubscriptionClear(this: DKGAgent,
@@ -8205,10 +8184,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const changes = new Map<string, ContextGraphDormancyReason | undefined>();
     for (const id of deactivatedIds) if (!systemIds.has(id)) changes.set(id, 'deactivated');
     for (const id of clearedIds) if (!systemIds.has(id)) changes.set(id, undefined);
-    this.contextGraphSubscriptionActivations.transitionBatch(changes,
-      transitions => this.accountContextGraphSubscriptionTransitions(transitions.map(dormancy => ({
-        dormancy, kind: dormancy.after === 'deactivated' ? 'deactivated' : 'cleared',
-      }))));
+    this.contextGraphSubscriptionActivations.transitionBatch([...changes].map(([id, reason]) => ({
+      id, kind: reason === 'deactivated' ? 'deactivated' : 'cleared',
+    })));
   }
 
   deleteContextGraphSubscription(this: DKGAgent, contextGraphId: string): boolean {
@@ -8867,7 +8845,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /** Operational dormancy and activation ownership change together; status is only reporting. */
   transitionContextGraphSubscriptionDormancy(this: DKGAgent, id: string, reason: ContextGraphDormancyReason | undefined): void {
-    this.contextGraphSubscriptionActivations.transition(id, reason);
+    this.contextGraphSubscriptionActivations.transition({ id, reason, kind: 'dormancy' });
   }
 
   /** A provisional subscribed row is not a committed activation. */
@@ -9155,9 +9133,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // the sync scope keeps resolving to the cleartext id.
       this.recordPersistedContextGraphIdAliases(persistedRows);
       this.rewriteContextGraphSyncScopeAliases();
-      let rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id) && (r.subscribed || r.coreHosted));
-      const namePlaceholders = partitionSupersededContextGraphNamePlaceholders(rows);
-      rows = namePlaceholders.active;
+      const nonSystemRows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
+      // Inactive canonical intent still supersedes its older hash alias.
+      // Resolve that identity before selecting rows eligible for activation.
+      const namePlaceholders = partitionSupersededContextGraphNamePlaceholders(nonSystemRows);
+      const rows = namePlaceholders.active.filter((r) => r.subscribed || r.coreHosted);
       this.contextGraphSubscriptionActivations.reset(rows);
       // The operator kill-switch below promises not to touch durable state.
       if (this.config.contextGraphSubscriptionRehydrationEnabled) {
@@ -9213,7 +9193,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.contextGraphSubscriptionRehydrationStatus = {
           rehydrationEnabled: false,
           persistedTotal: rows.length,
-          systemExcluded: persistedRows.length - rows.length - namePlaceholders.superseded.length,
+          systemExcluded: persistedRows.length - nonSystemRows.length,
           hostedActivated: 0,
           hostedActivatedIds: [],
           activated: 0,
@@ -9496,7 +9476,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.contextGraphSubscriptionRehydrationStatus = {
         rehydrationEnabled: true,
         persistedTotal: rows.length,
-        systemExcluded: persistedRows.length - rows.length - namePlaceholders.superseded.length,
+        systemExcluded: persistedRows.length - nonSystemRows.length,
         hostedActivated: activatedRows.filter((r) => r.coreHosted).length,
         hostedActivatedIds: activatedRows.filter((r) => r.coreHosted).map((r) => r.id),
         activated: activatedRows.length,

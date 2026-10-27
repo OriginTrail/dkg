@@ -15,6 +15,8 @@ export function createTestSubscriptionActivations(host: any): ContextGraphSubscr
     contextGraphSubscriptionRehydrationAccountedIds: host.contextGraphSubscriptionRehydrationAccountedIds,
     getStatus: () => host.contextGraphSubscriptionRehydrationStatus ?? null,
     setStatus: status => { host.contextGraphSubscriptionRehydrationStatus = status; },
+    slotReleased: () => host.contextGraphSubscriptionRehydrationPromotionRuntime?.request(),
+    clearPersistRevision: id => host.clearContextGraphSubscriptionPersistRevisionStateIfIdle?.(id),
     publish: id => { host.eventBus?.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }); host.activated?.(id); },
   });
 }

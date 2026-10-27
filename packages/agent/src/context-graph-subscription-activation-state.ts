@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
-import { accountSubscriptionChanges } from './context-graph-subscription-accounting.js';
+import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { accountSubscriptionChanges, type SubscriptionAccountingChange } from './context-graph-subscription-accounting.js';
 import { rehydratedSubscriptionReachedSafeState, type PersistedContextGraphSubscriptionActivationOptions, type PersistedContextGraphSubscriptionActivationPorts } from './context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord, ContextGraphSubscriptionRehydrationInternalStatus } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
@@ -45,6 +46,14 @@ interface ActivationAttempt {
   readonly listeners: Set<() => void>;
 }
 
+export type SubscriptionLifecycleEvent = Readonly<{ id: string } & (
+  | { kind: 'dormancy'; reason: ContextGraphDormancyReason | undefined }
+  | { kind: 'saved'; reason: ContextGraphDormancyReason | undefined; persisted: boolean; active: boolean; hosted: boolean }
+  | { kind: 'cleared' | 'deactivated' }
+)>;
+
+type SubscriptionActivationCommit = Readonly<{ id: string; kind: 'activated'; subscription: ContextGraphSub; claimRollingSlot: boolean }>;
+
 export interface SubscriptionActivationPorts {
   readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
   readonly contextGraphSubscriptionDormancyById: Map<string, ContextGraphDormancyReason>;
@@ -53,6 +62,8 @@ export interface SubscriptionActivationPorts {
   readonly contextGraphSubscriptionRehydrationAccountedIds: Set<string>;
   getStatus(): ContextGraphSubscriptionRehydrationInternalStatus | null;
   setStatus(status: ContextGraphSubscriptionRehydrationInternalStatus): void;
+  slotReleased(): void;
+  clearPersistRevision(id: string): void;
   publish(id: string): void;
 }
 
@@ -87,17 +98,45 @@ export class ContextGraphSubscriptionActivations {
     const attempt = this.pending.get(id);
     if (attempt) this.settle(attempt, { kind: 'cancelled' });
   }
-  /** One explicit transition updates both dormancy and pending ownership. */
-  transition(id: string, reason: ContextGraphDormancyReason | undefined, account: (transition: SubscriptionDormancyTransition) => void = () => {}): void {
-    this.transitionBatch([[id, reason]], transitions => account(transitions[0]));
-  }
-  /** Apply the entire change and its accounting before notifying any waiters. */
-  transitionBatch(changes: Iterable<readonly [string, ContextGraphDormancyReason | undefined]>, account: (transitions: readonly SubscriptionDormancyTransition[]) => void): void {
-    const transitions = [...new Map(changes)].map(([id, reason]) => applyDormancy(this.ports.contextGraphSubscriptionDormancyById, id, reason));
-    account(transitions);
-    for (const { id, after } of transitions) {
+  /** Explicit lifecycle facts use the same bookkeeping operation as activation. */
+  transition(event: SubscriptionLifecycleEvent): void { this.transitionBatch([event]); }
+  /** Apply the entire batch and its accounting before cancelling any waiters. */
+  transitionBatch(events: Iterable<SubscriptionLifecycleEvent>): void {
+    for (const { id, after } of this.apply(events)) {
       if (after !== 'authorityUnavailable' && after !== 'activationCap') this.cancel(id);
     }
+  }
+  private apply(events: Iterable<SubscriptionLifecycleEvent | SubscriptionActivationCommit>): SubscriptionDormancyTransition[] {
+    const ports = this.ports;
+    const changes: SubscriptionAccountingChange[] = [];
+    const cleanup: string[] = [];
+    let released = false;
+    const transitions = [...new Map([...events].map(event => [event.id, event])).values()].map(event => {
+      const { id, kind } = event;
+      const reason = kind === 'saved' || kind === 'dormancy' ? event.reason
+        : kind === 'deactivated' ? 'deactivated' : undefined;
+      const dormancy = applyDormancy(ports.contextGraphSubscriptionDormancyById, id, reason);
+      if (kind === 'dormancy' || (kind !== 'activated' && (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id))) return dormancy;
+      if (kind === 'activated') {
+        ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+        if (event.claimRollingSlot && !event.subscription.coreHosted && !rehydratedSubscriptionReachedSafeState(event.subscription))
+          ports.contextGraphSubscriptionRehydrationSlotIds.add(id);
+        changes.push({ dormancy, kind: 'saved', persisted: true, active: true, hosted: event.subscription.coreHosted === true });
+      } else if (kind === 'saved') {
+        changes.push({ dormancy, kind, persisted: event.persisted, active: event.active, hosted: event.hosted });
+      } else {
+        ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+        released = ports.contextGraphSubscriptionRehydrationSlotIds.delete(id) || released;
+        changes.push({ dormancy, kind });
+        if (kind === 'cleared') cleanup.push(id);
+      }
+      return dormancy;
+    });
+    const status = ports.getStatus();
+    if (status && changes.length) ports.setStatus(accountSubscriptionChanges(status, ports.contextGraphSubscriptionRehydrationAccountedIds, changes));
+    for (const id of cleanup) ports.clearPersistRevision(id);
+    if (released) ports.slotReleased();
+    return transitions;
   }
   private owned(handle: ActivationHandle): ActivationAttempt {
     const attempt = this.pending.get(handle.id);
@@ -174,13 +213,7 @@ export class ContextGraphSubscriptionActivations {
     // verified Core hosting. The canonical write returns its committed row.
     if (this.pending.get(id) !== attempt || ports.subscribedContextGraphs.get(id) !== live
       || (!live.subscribed && !live.coreHosted)) throw changed();
-    const dormancy = applyDormancy(ports.contextGraphSubscriptionDormancyById, id, undefined);
-    ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-    if (claimRollingSlot && !live.coreHosted && !rehydratedSubscriptionReachedSafeState(live))
-      ports.contextGraphSubscriptionRehydrationSlotIds.add(id);
-    const status = ports.getStatus();
-    if (status) ports.setStatus(accountSubscriptionChanges(status, ports.contextGraphSubscriptionRehydrationAccountedIds,
-      [{ dormancy, kind: 'saved', persisted: true, active: true, hosted: live.coreHosted === true }]));
+    this.apply([{ id, kind: 'activated', subscription: live, claimRollingSlot }]);
     this.settle(attempt, { kind: 'committed', subscription: live });
     ports.publish(id);
     return live;

@@ -19,7 +19,7 @@ interface State {
   enqueueContextGraphSubscriptionPersistWrite(id: string, write: () => Promise<void>): Promise<void>;
   persistContextGraphSubscription(id: string): Promise<void>;
   cancelContextGraphSubscriptionPersistRevisions(id: string): void;
-  accountContextGraphSubscriptionTransitions: DKGAgent['accountContextGraphSubscriptionTransitions'];
+  recordContextGraphSubscriptionPersistence: DKGAgent['recordContextGraphSubscriptionPersistence'];
 }
 function deferred() {
   let resolve!: () => void;
@@ -335,7 +335,7 @@ describe('passive discovery while explicit unsubscribe is queued', () => {
   });
   it('keeps both queued durable snapshots when only their status callbacks are canceled', async () => {
     const f = await fixture(); const gate = await hold(f, 'before-lane');
-    const status = vi.spyOn(f.state, 'accountContextGraphSubscriptionTransitions');
+    const status = vi.spyOn(f.state, 'recordContextGraphSubscriptionPersistence');
     f.state.setContextGraphSubscription(LOCAL, {
       ...f.state.subscribedContextGraphs.get(LOCAL)!, subscribed: true, synced: false,
     });
