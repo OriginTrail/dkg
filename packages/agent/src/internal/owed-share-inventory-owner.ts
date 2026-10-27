@@ -120,7 +120,7 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
   async #runPass(signal: AbortSignal): Promise<'rearm' | 'idle'> {
     const markers = this.#dependencies.list();
     const kept = new Set(markers.map(markerIdentity));
-    const keptGraphs = new Set(markers.map(marker => marker.contextGraphId));
+    const keptGraphs = new Set<string>(markers.map(marker => marker.contextGraphId));
     for (const identity of this.#failed.keys()) {
       if (!kept.has(identity)) this.#failed.delete(identity);
     }
