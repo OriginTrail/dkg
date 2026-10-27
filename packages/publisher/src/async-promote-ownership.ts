@@ -15,7 +15,7 @@ export const FIND_ACTIVE_CONFLICT_SOURCE = 'publisher.asyncPromote.findActiveCon
  * The lock-free lifecycle reader reads outside the queue's mutex, so it is not share control work (OT-RFC-73 S1): its own source,
  * no control options, and the lane of its caller.
  */
-const OWNERSHIP_READER_OPTIONS: QueryOptions = { source: 'publisher.asyncPromote.ownershipReader' };
+const OWNERSHIP_READER_OPTIONS: QueryOptions = Object.freeze({ source: 'publisher.asyncPromote.ownershipReader' });
 
 /** Explicit scope: constructing another queue never changes this reader's authority. */
 export function createPromoteOwnershipReader(store: TripleStore,
@@ -90,11 +90,12 @@ export function buildPromoteOwnershipCandidateQuery(graph: string, lookup: Promo
 }
 
 /**
- * One trusted queue reader for admission conflicts and lifecycle ownership. `options` is the caller's: the queue's in-lock check passes the
- * share control options, the lifecycle reader its own source and nothing else. Without them the read keeps the conflict-check source on the caller's lane.
+ * One trusted queue reader for admission conflicts and lifecycle ownership. `options` is the caller's and is REQUIRED: the queue's in-lock check
+ * passes the share control options, the lifecycle reader its own source and nothing else. There is no default, so a caller can never make an
+ * untagged read of the control graph under the in-lock check's label by leaving it out.
  */
 export async function readPromoteOwnershipCandidates(store: TripleStore, graph: string,
-  lookup: PromoteConflictLookup, options: QueryOptions = { source: FIND_ACTIVE_CONFLICT_SOURCE }): Promise<PromoteJob[]> {
+  lookup: PromoteConflictLookup, options: QueryOptions): Promise<PromoteJob[]> {
   const rows = expectBindings(await store.query(buildPromoteOwnershipCandidateQuery(graph, lookup), options));
   const seen = new Set<string>();      // a job is a candidate once, however many branches / entries the engine matched it through (see the builder)
   return rows.filter(row => (seen.has(row.payload) ? false : (seen.add(row.payload), true))).map(row => {
