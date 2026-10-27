@@ -8758,6 +8758,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         syncMode: 'always-on',
       }),
       persistMembership: (id) => this.persistLocalNodeMembership(id, 'rehydrated-subscription'),
+      persistBinding: (id, subscription, syncScoped, isCurrent) =>
+        this.persistContextGraphSubscriptionStrict(id, subscription, syncScoped, isCurrent),
       commit: (id) => {
         const { subscription, adoptedWire } = this.writeContextGraphSubscription(id, this.subscribedContextGraphs.get(id)!, {
           persist: false, preserveAdmittedWireBinding: true, retireNamePlaceholder: true,
@@ -8827,17 +8829,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
           onChainId,
           updateRehydrationStatus: false,
-          prepare: async (subscription, acknowledgeRepair) => {
+          prepare: async (subscription, persistRepair) => {
             // Cold registration discovery is the binding proof. Make RFC-64
             // responsibility and the healed durable row visible atomically
             // before any sync or gossip side effect is restored.
             await this.reconcileRfc64CatalogResponsibilityV1(row.id);
             if (!isCurrentRetry()) throw new Error('Authority recovery retired');
-            const acknowledged = await this.persistContextGraphSubscriptionStrict(
-              row.id,
-              subscription,
-              row.syncScoped,
-              () => (
+            await persistRepair(() => (
                 isCurrentRetry()
                 && this.subscribedContextGraphs.get(row.id) === subscription
                 && this.contextGraphSubscriptionDormancyById.get(row.id)
@@ -8846,7 +8844,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   === revision
               ),
             );
-            if (acknowledged) acknowledgeRepair(acknowledged);
           },
           isCurrent: (subscription) => (
             isCurrentRetry()
@@ -8899,7 +8896,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }),
       activate: (row, onChainId, isCurrent) => activateRollingSubscriptionPromotion({
         activate: this.activatePersistedContextGraphSubscriptionRecord.bind(this),
-        persistBinding: this.persistContextGraphSubscriptionStrict.bind(this),
         reconcile: this.reconcileRfc64CatalogResponsibilityV1.bind(this),
       }, row, onChainId, isCurrent),
       wakeAuthorityRecovery: () => wakeDeferredContextGraphSubscriptionAuthorityRecovery(this.contextGraphSubscriptionAuthorityRecoveryRuntime),
@@ -9282,14 +9278,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 // Persist a strict finalized-index repair before restoring any
                 // sync or gossip side effect. A crash can therefore never
                 // reactivate the same malformed/unbound durable id.
-                prepare: async (subscription, acknowledgeRepair) => {
-                  const acknowledged = await this.persistContextGraphSubscriptionStrict(
-                    row.id,
-                    subscription,
-                    row.syncScoped,
-                  );
-                  if (acknowledged) acknowledgeRepair(acknowledged);
-                },
+                prepare: async (_subscription, persistRepair) => { await persistRepair(); },
               }
             : {}),
         });

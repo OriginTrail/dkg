@@ -3,7 +3,7 @@ import { createTestSubscriptionActivations } from './subscription-activation-own
 // Shared by the Hardhat fence suite and the hermetic request-lane suite.
 import { vi } from 'vitest';
 import { RollingSubscriptionChecks } from '../../src/context-graph-subscription-rolling-checks.js';
-import type { RollingSubscriptionPromotionPorts } from '../../src/context-graph-subscription-authority-recovery.js';
+import type { RollingSubscriptionPromotionPorts, PersistedContextGraphSubscriptionActivationPorts } from '../../src/context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord, DurableContextGraphSubscriptionBinding } from '../../src/dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from '../../src/context-graph-subscription-dormancy.js';
 import { activateRollingSubscriptionPromotion, type RollingSubscriptionActivationPorts } from '../../src/context-graph-subscription-authority-recovery.js';
@@ -51,7 +51,6 @@ export function createRollingPromotionFixture(
     }),
     activate: (row: ContextGraphSubscriptionRecord, onChainId: string | undefined, isCurrent: (subscription: ContextGraphSub) => boolean) => activateRollingSubscriptionPromotion({
       activate: host.activatePersistedContextGraphSubscriptionRecord,
-      persistBinding: host.persistContextGraphSubscriptionStrict,
       reconcile: host.reconcileRfc64CatalogResponsibilityV1,
     }, row, onChainId, isCurrent),
     wakeAuthorityRecovery: () => wakeDeferredContextGraphSubscriptionAuthorityRecovery(host.contextGraphSubscriptionAuthorityRecoveryRuntime),
@@ -71,7 +70,7 @@ export function createRollingPromotionFixture(
     activated: vi.fn<(id: string) => void>(),
     transitionDormancy: (id: string, reason: ContextGraphDormancyReason | undefined) => { if (reason === undefined) host.contextGraphSubscriptionDormancyById.delete(id); else host.contextGraphSubscriptionDormancyById.set(id, reason); },
     recordContextGraphSubscriptionClear: vi.fn<RollingSubscriptionPromotionPorts['recordContextGraphSubscriptionClear']>(),
-    persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionActivationPorts['persistBinding']>(async () => undefined),
+    persistContextGraphSubscriptionStrict: vi.fn<PersistedContextGraphSubscriptionActivationPorts['persistBinding']>(async () => undefined),
     reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationPorts['reconcile']>(async () => undefined),
     resolveContextGraphSubscriptionBootstrapAuthority: vi.fn<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>(options.answer ?? (async () => options.authority === 'unavailable'
       ? { outcome: 'unavailable', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible', dependency: 'unknown' }
@@ -87,7 +86,7 @@ export function createRollingPromotionFixture(
           install: () => live,
           remove: id => { host.subscribedContextGraphs.delete(id); },
           rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
-          commit: () => live,
+          commit: () => live, persistBinding: host.persistContextGraphSubscriptionStrict,
         }, { claimRollingSlot: activationOptions.claimRollingSlot });
       }
     }),

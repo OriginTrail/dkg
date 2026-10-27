@@ -170,6 +170,7 @@ describe('Context Graph subscription authority retry', () => {
         if (failSubscribe) throw new Error('gossip topic install failed');
       },
       persistMembership: () => undefined,
+      persistBinding: async () => undefined,
       commit: (id: string) => subscriptions.get(id),
     };
 

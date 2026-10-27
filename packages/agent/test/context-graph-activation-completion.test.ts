@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGEvent } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
+import type { PersistSubscriptionActivationRepair } from '../src/context-graph-subscription-authority-recovery.js';
 
 let agent: DKGAgent | undefined;
 afterEach(async () => { await agent?.stop(); vi.restoreAllMocks(); });
@@ -55,23 +56,33 @@ it.each(['cancelled', 'prepare', 'subscribe'] as const)('never publishes a %s ac
   expect(a.getSubscribedContextGraphs().get(id)?.subscribed).not.toBe(true);
 });
 
-it('keeps repaired intent and waiters across rollback while retiring the failed retry acknowledgement', async () => {
+it.each(['prepare', 'subscribe'] as const)('persists repaired intent and retains waiters across %s failure, retiring the failed retry capability', async failure => {
   const { a, id, row, events } = await fixture();
-  const owner = a.contextGraphSubscriptionActivations;
-  const wait = owner.wait(id, new AbortController().signal);
-  let settled = false, acknowledge!: (record: typeof row) => void;
+  const rows = new Map([[id, row]]);
+  const save = vi.fn(async (record: typeof row) => { rows.set(record.id, { ...record }); });
+  a.config.contextGraphSubscriptionStore = { load: async (key: string) => rows.get(key) ?? null,
+    loadAll: async () => [...rows.values()], save, delete: async (key: string) => { rows.delete(key); } };
+  const wait = a.contextGraphSubscriptionActivations.wait(id, new AbortController().signal);
+  let settled = false, persistRepair!: PersistSubscriptionActivationRepair;
   void wait.then(() => { settled = true; });
-  const repaired = { ...row, onChainId: '8' };
+  if (failure === 'subscribe') vi.spyOn(a, 'subscribeToContextGraph').mockImplementationOnce(() => { throw new Error('retryable network failure'); });
   await expect(a.activatePersistedContextGraphSubscriptionRecord(row, {
-    prepare: async (_sub: unknown, ack: typeof acknowledge) => {
-      acknowledge = ack; ack(repaired); throw new Error('retryable preparation failure');
+    onChainId: '8',
+    prepare: async (_sub: unknown, persist: PersistSubscriptionActivationRepair) => {
+      persistRepair = persist;
+      await persist();
+      if (failure === 'prepare') throw new Error('retryable preparation failure');
     },
-  })).rejects.toThrow('retryable preparation failure');
+  })).rejects.toThrow(failure === 'prepare' ? 'retryable preparation failure' : 'retryable network failure');
+  expect(rows.get(id)?.onChainId).toBe('8');
   expect(settled).toBe(false); expect(events).toEqual([]);
-  expect(() => acknowledge(repaired)).toThrow('ownership changed');
-  await a.activatePersistedContextGraphSubscriptionRecord(repaired, {
+  const writes = save.mock.calls.length;
+  await expect(persistRepair()).rejects.toThrow('ownership changed');
+  expect(save).toHaveBeenCalledTimes(writes);
+  await a.activatePersistedContextGraphSubscriptionRecord(rows.get(id)!, {
     prepare: async () => {
-          expect(() => acknowledge(repaired)).toThrow('ownership changed');
+      await expect(persistRepair()).rejects.toThrow('ownership changed');
+      expect(save).toHaveBeenCalledTimes(writes);
     },
   });
   await expect(wait).resolves.toMatchObject({ kind: 'committed', subscription: { onChainId: '8' } });

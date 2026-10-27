@@ -1414,7 +1414,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         .mockImplementation(async (row: any, options: any) => {
           const subscription = promotionSubscription({ subscribed: true, onChainId: options.onChainId });
           staleDuringRepair.agent.subscribedContextGraphs.set(row.id, subscription);
-          await options.prepare(subscription, vi.fn());
+          await options.prepare(subscription, (isCurrent: () => boolean) =>
+            staleDuringRepair.agent.persistContextGraphSubscriptionStrict(row.id, subscription, row.syncScoped, isCurrent));
           if (!options.isCurrent(subscription)) throw new Error('stale activation');
           staleDuringRepairNetworkEffects();
           return subscription;

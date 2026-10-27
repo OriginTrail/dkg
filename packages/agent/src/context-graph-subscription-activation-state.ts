@@ -150,7 +150,7 @@ export class ContextGraphSubscriptionActivations {
     attempt.phase = { kind: 'installing', subscription };
     let networkEffectsStarted = false;
     try {
-      await options.prepare?.(subscription, record => this.repaired(attempt, subscription, record));
+      await options.prepare?.(subscription, isCurrent => this.persistRepair(attempt, subscription, ports, isCurrent));
       this.assertInstalled(attempt);
       if (options.isCurrent && !options.isCurrent(subscription)) {
         throw new Error(`Persisted subscription activation for "${row.id}" became stale`);
@@ -179,23 +179,34 @@ export class ContextGraphSubscriptionActivations {
       throw error;
     }
   }
-  /** Mandatory generation fence after asynchronous preparation and before commit. */
-  private assertInstalled(attempt: ActivationAttempt): void {
-    this.assertOwned(attempt);
+  private isInstalled(attempt: ActivationAttempt): boolean {
     const phase = attempt.phase;
     const live = this.ports.subscribedContextGraphs.get(attempt.intent.id);
-    if (!live || (!live.subscribed && !live.coreHosted) || phase.kind !== 'installing'
-      || !isContextGraphSubscriptionStoredAgain(phase.subscription, live)
-      || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live)) throw changed();
+    return this.pending.get(attempt.intent.id) === attempt && live !== undefined
+      && (live.subscribed || live.coreHosted === true) && phase.kind === 'installing'
+      && isContextGraphSubscriptionStoredAgain(phase.subscription, live)
+      && contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live);
   }
-  /** Activation preparation explicitly reports its acknowledged durable repair. */
-  private repaired(attempt: ActivationAttempt, subscription: ContextGraphSub, row: ContextGraphSubscriptionRecord): void {
-    this.assertOwned(attempt);
-    if (attempt.phase.kind !== 'installing' || attempt.phase.subscription !== subscription) throw changed();
+  /** Mandatory generation fence after asynchronous preparation and before commit. */
+  private assertInstalled(attempt: ActivationAttempt): void {
+    if (!this.isInstalled(attempt)) throw changed();
+  }
+  /** The installing retry owns both strict persistence and acknowledgement. */
+  private async persistRepair(attempt: ActivationAttempt, subscription: ContextGraphSub,
+    ports: PersistedContextGraphSubscriptionActivationPorts, isCurrent: () => boolean = () => true): Promise<void> {
+    const isRetryCurrent = () => this.isInstalled(attempt)
+      && attempt.phase.kind === 'installing' && attempt.phase.subscription === subscription;
+    const assertRetry = () => { if (!isRetryCurrent()) throw changed(); };
+    assertRetry();
+    // The strict writer owns the queued write's typed cancellation error.
+    const record = await ports.persistBinding(attempt.intent.id, subscription, attempt.intent.syncScoped,
+      () => isRetryCurrent() && isCurrent());
+    assertRetry();
+    if (!record) return;
     // Preserving independent Core custody can add hosting to the saved row.
     // That is not a binding repair of this attempt's member intent; canonical
     // commit still validates the custody transfer before applying it.
-    if (sameIntent(attempt.intent, row)) attempt.repaired = { ...row };
+    if (sameIntent(attempt.intent, record)) attempt.repaired = { ...record };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
   private commit(attempt: ActivationAttempt, write: (id: string) => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {
