@@ -10,6 +10,7 @@ import { estimateStringRowHeapBytes } from '../memory-telemetry.js';
 import { compareRows } from './row-serialization.js';
 import { exactGraphCursorFilter, hasUnsupportedExactGraphCursorTerm } from './exact-graph-cursor-filter.js';
 import { raceAgainstAbort, throwIfAborted, type RowListCache } from './responder-row-page.js';
+import { exactGraphSnapshotBatchWidth, readExactGraphSnapshotBatch } from './exact-graph-snapshot-batch.js';
 const DKG = 'http://dkg.io/ontology/';
 const DKG_CONTENT_SCOPE_VERSION = `${DKG}contentScopeVersion`;
 const DKG_KA_UAL = `${DKG}kaUal`;
@@ -559,8 +560,25 @@ export async function readExactGraphPlanSnapshot(
   }
   const rows: SyncRow[] = [];
   let bytesEstimate = 0;
-  for (const entry of plan.entries) {
-    const graphRows = await loadExactGraphRowsSnapshot(store, plan, entry, limits);
+  for (let index = 0; index < plan.entries.length;) {
+    const entry = plan.entries[index]!;
+    const width = plan.activeGraphRows?.graph === entry.graph || plan.activeGraphRowsLoad?.graph === entry.graph
+      ? 1
+      : exactGraphSnapshotBatchWidth(store, plan.entries, index, limits.maxRows - rows.length, plan.pagedGraphs);
+    let graphRows: readonly SyncRow[] | null;
+    try {
+      graphRows = width === 1
+        ? await loadExactGraphRowsSnapshot(store, plan, entry, limits)
+        : await readExactGraphSnapshotBatch(store, plan.entries.slice(index, index + width),
+          snapshotResponseByteLimit(limits.maxBytesEstimate - bytesEstimate));
+    } catch (error) {
+      if (!(error instanceof StoreResponseTooLargeError)) throw error;
+      throw snapshotBudgetError({
+        key: cache.key, reason: 'snapshot_bytes', rows: rows.length,
+        bytesEstimate: bytesEstimate + storeResponseActualBytes(error), limit: limits.maxBytesEstimate,
+      });
+    }
+    index += width;
     if (!graphRows) {
       throw snapshotBudgetError({
         key: cache.key,

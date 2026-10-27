@@ -973,7 +973,7 @@ describe('sync responder pagination interleaving', () => {
     expect(lineGraphsFromNquads(out)).toEqual(new Set([cgPrefix, fallbackGraph]));
   });
 
-  it('builds a reusable durable-data snapshot from bounded unordered exact-graph reads', async () => {
+  it('builds a reusable durable-data snapshot from a bounded unordered exact-graph batch', async () => {
     const store = new OxigraphStore();
     const cgId = 'single-query-durable-fallback';
     const cgPrefix = `did:dkg:context-graph:${cgId}`;
@@ -1001,8 +1001,8 @@ describe('sync responder pagination interleaving', () => {
         throw new Error(`durable fallback must not globally sort graph rows: ${normalized}`);
       }
       if (
-        /^SELECT \?s \?p \?o WHERE \{/.test(normalized) &&
-        (normalized.includes(`GRAPH <${cgPrefix}>`) || normalized.includes(`GRAPH <${fallbackGraph}>`))
+        /^SELECT \?g \?s \?p \?o WHERE \{/.test(normalized) &&
+        normalized.includes(`VALUES ?g { <${cgPrefix}> <${fallbackGraph}>`)
       ) {
         exactGraphRowLoads++;
         expect(normalized).not.toContain('ORDER BY');
@@ -1031,7 +1031,7 @@ describe('sync responder pagination interleaving', () => {
     });
 
     expect(exactGraphCounts).toBe(2);
-    expect(exactGraphRowLoads).toBe(2);
+    expect(exactGraphRowLoads).toBe(1);
     expect(first).toContain('"row-000"');
     expect(first).not.toContain('"row-001"');
     expect(second).toContain('"row-001"');

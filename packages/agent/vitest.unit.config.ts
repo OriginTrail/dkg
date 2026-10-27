@@ -238,6 +238,7 @@ export default defineConfig({
       "test/oversize-filter.test.ts",
       "test/cg-registration-oversize-guard.test.ts",
       "test/sync-responder-concurrent-interleaving.test.ts",
+      "test/exact-graph-snapshot-batch.test.ts",
       "test/durable-meta-admission.test.ts",
       "test/sync-responder-log-volume.test.ts",
       "test/sync-responder-snapshot-cache.test.ts",
