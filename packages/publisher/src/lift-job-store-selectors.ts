@@ -17,6 +17,7 @@ import {
   projectListedLiftJobs,
 } from './async-lift-publisher-utils.js';
 import { decodeLiftJobPayload, decodedLiftJobOrThrow } from './lift-job-payload-codec.js';
+import { LiftJobPayloadUnreadableError } from './lift-job-payload-unreadable.js';
 import { LiftLegacyScanMemo } from './lift-legacy-scan-memo.js';
 
 /**
@@ -134,7 +135,7 @@ export class LiftJobStoreSelectors {
       if (row['indexed'] === undefined) continue;
       const job = decodedLiftJobOrThrow(decodeLiftJobPayload(row['payload']));
       if (job !== null && lifecycleKeyOfJob(job) !== lifecycleKey) {
-        throw new Error(`Malformed persisted LiftJob payload: lifecycle index does not match ${lifecycleKey}`);
+        throw new LiftJobPayloadUnreadableError(`Malformed persisted LiftJob payload: lifecycle index does not match ${lifecycleKey}`);
       }
       // Preserve list membership while still checking every indexed payload strictly above.
       if (job !== null && row['status'] !== undefined) jobs.set(job.jobId, job);

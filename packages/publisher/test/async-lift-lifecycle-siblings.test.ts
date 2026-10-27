@@ -7,10 +7,13 @@ import { beforeAll, describe, expect, it } from 'vitest';
 import type { LiftJob, PersistedLiftJob } from '../src/lift-job.js';
 import { lifecycleKeyOfJob } from '../src/lift-job-store-selectors.js';
 import {
-  bindingJobIds, bindingUnchanged, bulkClearKeepsBinding, planKeyDeletion, recordsOfKey, removalPromotesSibling,
+  bindingJobIds, bindingUnchanged, bulkClearKeepsBinding, isUndecodableSiblingError, planKeyDeletion, recordsOfKey, removalPromotesSibling,
 } from '../src/async-lift-lifecycle-siblings.js';
 import { judgeFinalizedRecord } from '../src/async-lift-retention-policy.js';
-import { DAY, NOW, WINDOW, at, createRetentionTemplates, fin, stampKeyed, type KeyedSpec, type RetentionTemplates } from './_helpers/lift-retention-fixtures.js';
+import { CONTROL_PAYLOAD } from '../src/async-lift-control-plane.js';
+import { decodeLiftJobPayload, decodedLiftJobOrThrow } from '../src/lift-job-payload-codec.js';
+import { LiftJobPayloadUnreadableError } from '../src/lift-job-payload-unreadable.js';
+import { DAY, NOW, WINDOW, at, createRetentionTemplates, fin, keyedQuads, stampKeyed, type KeyedSpec, type RetentionTemplates } from './_helpers/lift-retention-fixtures.js';
 
 let templates: RetentionTemplates;
 beforeAll(async () => { templates = await createRetentionTemplates(); });
@@ -164,5 +167,29 @@ describe('bulkClearKeepsBinding', () => {
   it('has nothing to say about a job without a lifecycle key', () => {
     const [raw, sibling] = jobs({ ...fin('raw', 'k', 5), kind: 'raw' }, at('x', 'k', 'retryable', 1));
     expect(bulkClearKeepsBinding([raw!, sibling!], raw as LiftJob as PersistedLiftJob)).toBe(true);
+  });
+});
+
+describe('isUndecodableSiblingError: an unreadable record is told from a store failure by the error type, not by the message (online review 4394031883)', () => {
+  const thrown = (work: () => unknown): unknown => { try { work(); } catch (cause) { return cause; } return undefined; };
+
+  it('is true for what the decoder throws for a payload it cannot read or a state it does not know, with the messages unchanged', () => {
+    const payload = keyedQuads(templates, fin('f', 'k', 10)).find((quad) => quad.predicate === CONTROL_PAYLOAD)!.object;
+    const malformed = thrown(() => decodedLiftJobOrThrow(decodeLiftJobPayload('"not json at all"')));
+    const unknown = thrown(() => decodedLiftJobOrThrow(decodeLiftJobPayload(payload.replace('\\"status\\":\\"finalized\\"', '\\"status\\":\\"archived\\"'))));
+    for (const cause of [malformed, unknown]) {
+      expect(cause).toBeInstanceOf(LiftJobPayloadUnreadableError);
+      expect(isUndecodableSiblingError(cause)).toBe(true);
+    }
+    expect((malformed as Error).message).toMatch(/^Malformed persisted LiftJob payload: /);
+    expect((unknown as Error).message).toBe('Malformed persisted LiftJob payload: Unsupported LiftJob status: archived');
+  });
+
+  it('is false for any other error, even a store failure whose message starts the same way, and for what is not an error', () => {
+    expect(isUndecodableSiblingError(new Error('Malformed persisted LiftJob payload: the store answered garbage'))).toBe(false);
+    expect(isUndecodableSiblingError(new Error('store down'))).toBe(false);
+    expect(isUndecodableSiblingError('Malformed persisted LiftJob payload')).toBe(false);
+    expect(isUndecodableSiblingError(undefined)).toBe(false);
+    expect(isUndecodableSiblingError(new LiftJobPayloadUnreadableError('any wording at all'))).toBe(true);
   });
 });

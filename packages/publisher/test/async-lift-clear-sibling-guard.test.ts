@@ -139,6 +139,13 @@ describe('a key it cannot read', () => {
     await expect(t.publisher.clear('finalized')).rejects.toThrow('store down');
     expect(await present(t.raw, 'f1')).not.toBe('');
   });
+
+  it('passes on a store failure whose message reads like an undecodable record\'s too: only the error type marks a key unreadable (online review 4394031883)', async () => {
+    const message = 'Malformed persisted LiftJob payload: the store answered garbage';
+    const t = await setup([fin('f1', 'k', 10), fin('g1', 'g', 20)], { before: (entry) => { if (entry.source === CLEAR_SIBLINGS) throw new Error(message); } });
+    await expect(t.publisher.clear('finalized')).rejects.toThrow(message);
+    expect(await present(t.raw, 'f1')).not.toBe('');
+  });
 });
 
 describe('the targeted clear is the deliberate override and is not guarded', () => {

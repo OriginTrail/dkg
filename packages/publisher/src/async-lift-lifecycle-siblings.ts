@@ -27,12 +27,14 @@ import type { PersistedLiftJob } from './lift-job.js';
 import { compareAcceptedJobs, isFailedJob } from './async-lift-publisher-utils.js';
 import { selectLifecycleBindingJobs } from './async-lift-retry-disposition.js';
 import { lifecycleKeyOfJob } from './lift-job-store-selectors.js';
+import { LiftJobPayloadUnreadableError } from './lift-job-payload-unreadable.js';
 
 /**
- * The sibling read throws this for a record it cannot decode, exactly as admission's read does (the key is unreadable for admission too); any other error is a store failure.
- * Callers keep the records they were about to remove from such a key and carry on, never abort a whole sweep or clear on one poisoned key.
+ * The sibling read throws a `LiftJobPayloadUnreadableError` for a record it cannot decode, exactly as admission's read does (the key is unreadable for admission too); any other
+ * error is a store failure, whatever its message says. Callers keep the records they were about to remove from such a key and carry on, never abort a whole sweep or clear on one
+ * poisoned key. The test is the error's type, not its wording.
  */
-export const isUndecodableSiblingError = (cause: unknown): boolean => cause instanceof Error && cause.message.startsWith('Malformed persisted LiftJob payload');
+export const isUndecodableSiblingError = (cause: unknown): boolean => cause instanceof LiftJobPayloadUnreadableError;
 
 /** The records of `key` among `candidates`, oldest first (the order that makes the last one the key's newest). */
 export function recordsOfKey(candidates: readonly PersistedLiftJob[], key: string): PersistedLiftJob[] {

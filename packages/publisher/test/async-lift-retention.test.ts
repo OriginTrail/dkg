@@ -15,8 +15,10 @@ import {
   CONTROL_FINALIZED_AT, CONTROL_LIFECYCLE_KEY, CONTROL_PAYLOAD, CONTROL_STATUS, DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI, jobSubject,
 } from '../src/async-lift-control-plane.js';
 import { LiftLegacyScanMemo } from '../src/lift-legacy-scan-memo.js';
+import { LiftJobPayloadUnreadableError } from '../src/lift-job-payload-unreadable.js';
+import { lifecycleKeyOfJob } from '../src/lift-job-store-selectors.js';
 import {
-  DAY, NOW, WINDOW, at, bySource, createRetentionTemplates, fin, graphFingerprint, keyedQuads, present, seedKeyed, seedWalletLock, spyStore, type KeyedSpec, type RetentionTemplates,
+  DAY, NOW, WINDOW, at, bySource, createRetentionTemplates, fin, graphFingerprint, keyedQuads, present, seedKeyed, seedWalletLock, spyStore, stampKeyed, type KeyedSpec, type RetentionTemplates,
 } from './_helpers/lift-retention-fixtures.js';
 import { RETENTION, captureLogger, drain, newRetention, verifiedSubjects } from './_helpers/lift-retention-sweep.js';
 
@@ -603,6 +605,40 @@ describe('failures', () => {
     expect(deletedIds(results)).toEqual(['good']);
     expect(kept(results)).toEqual({ siblings_unreadable: 1 });
     expect(await present(store, 'victim')).not.toBe('');
+  });
+
+  it('keeps the candidates of a key one of whose records is stored under it with a payload of another key: the read refuses that key with the same error type, the sweep goes on', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedKeyed(store, templates, [fin('good', 'good', 10), fin('victim', 'bad', 10)]);
+    const badKey = keyedQuads(templates, fin('victim', 'bad', 10)).find((quad) => quad.predicate === CONTROL_LIFECYCLE_KEY)!.object;
+    await store.insert(keyedQuads(templates, at('stray', 'elsewhere', 'accepted', 5)).map((quad) => (quad.predicate === CONTROL_LIFECYCLE_KEY ? { ...quad, object: badKey } : quad)));
+    const publisher = publisherOver(store);
+    const key = lifecycleKeyOfJob(stampKeyed(templates, fin('victim', 'bad', 10)))!;
+    const refusal = await publisher.retentionAccess().runClaimTransaction((tx) => tx.siblings(key)).then(() => undefined, (cause: unknown) => cause);
+    expect(refusal).toBeInstanceOf(LiftJobPayloadUnreadableError);
+    expect((refusal as Error).message).toBe(`Malformed persisted LiftJob payload: lifecycle index does not match ${key}`);
+    const results = await drain(newRetention(publisher));
+    expect(results.every((r) => r.error === undefined)).toBe(true);
+    expect(deletedIds(results)).toEqual(['good']);
+    expect(kept(results)).toEqual({ siblings_unreadable: 1 });
+    expect(await present(store, 'victim')).not.toBe('');
+  });
+
+  it('ends the batch on a store failure of the sibling read even when its message reads like an undecodable record\'s: only the error type says a key is unreadable', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedKeyed(store, templates, [fin('a', 'a', 10)]);
+    let fail = true;
+    const message = 'Malformed persisted LiftJob payload: the store answered garbage';
+    const spy = spyStore(store, { before: (entry) => { if (fail && entry.source === `${RETENTION}siblings`) throw new Error(message); } });
+    const retention = newRetention(publisherOver(spy.store));
+    const failed = await retention.runBatch();
+    expect(failed.error).toEqual({ phase: 'verify', message });
+    expect(failed.kept.siblings_unreadable).toBe(0);
+    expect(await present(store, 'a')).not.toBe('');
+    fail = false;
+    expect(deletedIds(await drain(retention))).toEqual(['a']);
   });
 });
 
