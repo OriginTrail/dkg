@@ -1,6 +1,7 @@
 /**
  * OT-RFC-73 P11: the retention sweep under test, as the retention tests drive it, and the log reads that name what it did.
  */
+import { expect } from 'vitest';
 import type { TripleStoreAsyncLiftPublisher } from '../../src/index.js';
 import {
   createPublisherRetention, type PublisherRetention, type PublisherRetentionBatchResult, type PublisherRetentionConfig, type PublisherRetentionLogger,
@@ -40,6 +41,16 @@ export async function drain(
   return results;
 }
 
+/**
+ * The suffix rule of one key, asserted: `order` is the key's records oldest first, `left` the job ids still stored. What is left of the key is a suffix of its order
+ * (nothing went ahead of an older record that stays), so its newest record is there until the last one goes.
+ */
+export function expectKeySuffix(left: Iterable<string>, order: readonly string[], when: string): void {
+  const stored = new Set(left);
+  const remaining = order.filter((id) => stored.has(id));
+  expect(remaining, `${when}: what is left of the key is a suffix of its order`).toEqual(order.slice(order.length - remaining.length));
+  if (remaining.length > 0) expect(stored.has(order.at(-1)!), `${when}: the newest record is still there`).toBe(true);
+}
 
 /** The subjects a retention verify read asked for. */
 export const verifiedSubjects = (log: readonly Logged[]): string[] =>

@@ -14,7 +14,7 @@ import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import {
   DAY, NOW, at, bySource, createRetentionTemplates, fin, keyedQuads, present, seedKeyed, spyStore, type KeyedSpec, type RetentionTemplates, type SpyHooks,
 } from './_helpers/lift-retention-fixtures.js';
-import { RETENTION, captureLogger, drain, newRetention, removedJobIds, verifiedSubjects } from './_helpers/lift-retention-sweep.js';
+import { RETENTION, captureLogger, drain, expectKeySuffix, newRetention, removedJobIds, verifiedSubjects } from './_helpers/lift-retention-sweep.js';
 
 let templates: RetentionTemplates;
 beforeAll(async () => { templates = await createRetentionTemplates(); });
@@ -184,6 +184,41 @@ describe('the last line before a delete', () => {
       await t.raw.close();
       stores.splice(stores.indexOf(t.raw), 1);
     }
+  });
+
+  it('keeps the records behind a changed one in later batches too, when its finish time moved earlier, behind the cursor, where the scan does not meet it again', async () => {
+    // One row per batch. Batch 1 judges f1 alone, and its removal finds the finish time changed: still old enough, but EARLIER than the one the scan judged, so behind
+    // the cursor. The holds of the later batches do not have f1 among their candidates, and the plan of the key reads it as an old finalized record in front of f2
+    // and f3: only the mark the changed record left on its key keeps f2 and f3 (the key's newest) from going while f1 stays. The next pass meets f1 first.
+    let touched = false;
+    let raw!: OxigraphStore;
+    let clock = NOW;
+    const order = ['f1', 'f2', 'f3'];
+    const t = await setup([fin('f1', 'k', 10), fin('f2', 'k', 20), fin('f3', 'k', 30)], {
+      before: async (entry) => {
+        if (!touched && entry.source === 'publisher.asyncLift.getStatus') {
+          touched = true;
+          await raw.deleteByPattern({ subject: jobSubject('f1'), graph: DEFAULT_CONTROL_GRAPH_URI });
+          await raw.insert(keyedQuads(templates, fin('f1', 'k', 10, 10.05)));
+        }
+      },
+    });
+    raw = t.raw;
+    const left = async (): Promise<string[]> => (await t.other.list()).map((job) => job.jobId);
+    const retention = newRetention(t.publisher, { batchSize: 1, now: () => clock, rescanIntervalMs: DAY });
+    let batch = 0;
+    const suffixAfterEach = (pass: string) => async (res: { error?: unknown }) => {
+      expect(res.error, `${pass} batch ${batch}`).toBeUndefined();
+      expectKeySuffix(await left(), order, `${pass} batch ${batch++}`);
+    };
+    const first = await drain(retention, 50, suffixAfterEach('pass 1'));
+    expect(touched).toBe(true);
+    expect(ids(first)).toEqual([]);
+    expect(kept(first)).toEqual({ index_mismatch: 1, older_sibling_pending: 2 });           // f1 changed under the job lock; f2 and f3, a batch each, wait
+    expect((await left()).sort()).toEqual(['f1', 'f2', 'f3']);
+    clock = NOW + 2 * DAY;
+    batch = 0;
+    expect(ids(await drain(retention, 50, suffixAfterEach('pass 2')))).toEqual(['f1', 'f2', 'f3']);
   });
 });
 
