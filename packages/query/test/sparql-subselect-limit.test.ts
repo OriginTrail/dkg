@@ -1,3 +1,4 @@
+import { prepareGraphScope, wrapWithGraphValues, wrapWithDeduplicatedGraphValues } from '../src/sparql-graph-scope.js';
 import {describe,it,expect} from 'vitest';
 import {prepareSparql,prepareSparqlQuery} from '@origintrail-official/dkg-rdf-utils/sparql';
 import {graphSubselectLimit} from '../src/sparql-subselect-limit.js';
@@ -49,3 +50,35 @@ describe('safe inner graph-query LIMIT',()=>{
     }finally{await store.close();}
   });
 });
+
+for (const rewrite of [wrapWithGraphValues, wrapWithDeduplicatedGraphValues]) {
+  describe(rewrite.name, () => {
+    function rewritten(query: string) {
+      const prepared = prepareSparql(query);
+      if (prepared.status !== 'valid') throw new Error('invalid fixture');
+      const result = rewrite(prepareGraphScope(prepared), ['urn:g1', 'urn:g2']);
+      if (result.kind !== 'ready') throw new Error(`rewrite declined: ${result.reason}`);
+      return result.value.source;
+    }
+    it('inserts the inner LIMIT through the production rewrite', () => {
+      const query = rewritten('SELECT ?s WHERE { ?s ?p ?o } LIMIT 3');
+      expect(query).toMatch(/\} LIMIT 3 \}\s*\} LIMIT 3$/);
+      expect(query.match(/LIMIT 3/g)).toHaveLength(2);
+      expect(query).toContain('<urn:g1>');
+      expect(query).toContain('<urn:g2>');
+    });
+    it.each([
+      'SELECT DISTINCT ?s WHERE { ?s ?p ?o } LIMIT 3',
+      'SELECT REDUCED ?s WHERE { ?s ?p ?o } LIMIT 3',
+      'SELECT (COUNT(*) AS ?n) WHERE { ?s ?p ?o } LIMIT 3',
+      'SELECT (?o+1 AS ?n) WHERE { ?s ?p ?o } LIMIT 3',
+      'SELECT ?s WHERE { ?s ?p ?o } ORDER BY ?s LIMIT 3',
+      'SELECT ?s WHERE { ?s ?p ?o } LIMIT 3 OFFSET 1',
+      'SELECT ?s WHERE { ?s ?p ?o } LIMIT 3 VALUES ?s { <urn:a> }',
+    ])('does not add an inner limit for excluded shape: %s', source => {
+      const query = rewritten(source);
+      expect(query.match(/LIMIT 3/g)).toHaveLength(1);
+      expect(query).not.toMatch(/\} LIMIT 3 \}/);
+    });
+  });
+}
