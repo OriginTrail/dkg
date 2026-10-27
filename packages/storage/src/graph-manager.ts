@@ -216,11 +216,12 @@ async function listDeclaredSlashContextGraphs(
   for (let offset = 0; offset < candidateUris.length; offset += MAX_CONTEXT_GRAPH_DECLARATION_BATCH) {
     const values = candidateUris
       .slice(offset, offset + MAX_CONTEXT_GRAPH_DECLARATION_BATCH)
-      .map((uri) => `<${uri}>`)
+      // Bind metadata before lookup; late string filters also visit unrelated graphs.
+      .map((uri) => `(<${uri}> <${uri}/_meta>)`)
       .join(' ');
     const result = await store.query(
       `SELECT DISTINCT ?ctxGraph WHERE {
-        VALUES ?ctxGraph { ${values} }
+        VALUES (?ctxGraph ?metaGraph) { ${values} }
         VALUES ?rootType { ${rootTypes} }
         {
           GRAPH <${SYSTEM_ONTOLOGY_GRAPH}> {
@@ -238,7 +239,6 @@ async function listDeclaredSlashContextGraphs(
           GRAPH ?metaGraph {
             ?ctxGraph <${RDF_TYPE}> ?rootType .
           }
-          FILTER(STR(?metaGraph) = CONCAT(STR(?ctxGraph), "/_meta"))
         }
       }`,
       options,
