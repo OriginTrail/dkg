@@ -15,7 +15,6 @@ import {
 import { OxigraphStore, StoreOperationTimeoutError, type Quad, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
 import {
-  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS,
   WritePreflightGeneration,
   WritePreflightIdentityMethods,
   attachWritePreflightGeneration,
@@ -371,18 +370,22 @@ describe.each([
     await backend.commit();
     expect(seam.declarationReads()).toBe(1);
 
-    // Inside the window every caller reads the store itself.
-    clock += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1;
+    // Inside the two-minute window every caller reads the store itself (the offsets are spelled out, not
+    // taken from the production constant, so that a shorter window fails here).
+    clock = 64_000;
     await Promise.all([seam.resolve(), seam.resolve()]);
     expect(seam.declarationReads()).toBe(3);
+    clock = 119_999;
+    await Promise.all([seam.resolve(), seam.resolve()]);
+    expect(seam.declarationReads()).toBe(5);
 
     // Past it, callers that arrive together share one probe again, and a fast accept is cached as before.
-    clock += 1;
+    clock = 120_000;
     const [first, second] = await Promise.all([seam.resolve(ALLOWED), seam.resolve(ALLOWED)]);
     expect([first.id, second.id]).toEqual([CG, CG]);
-    expect(seam.declarationReads()).toBe(4);
+    expect(seam.declarationReads()).toBe(6);
     const cached = getWritePreflightCoalescingConfig().cacheTtlMs > 0;
     expect((await seam.resolve(ALLOWED)).id).toBe(CG);
-    expect(seam.declarationReads()).toBe(cached ? 4 : 5);
+    expect(seam.declarationReads()).toBe(cached ? 6 : 7);
   });
 });

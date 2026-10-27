@@ -6,10 +6,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import {
-  DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS,
   OxigraphStore,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
+  maxAbandonedStoreOperationMs,
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import {
@@ -283,7 +283,13 @@ describe('what makes two probe calls interchangeable', () => {
 });
 
 describe('a policy write whose outcome is unknown', () => {
-  // The agent's own registry and a clock the test moves.
+  // The protection is two minutes: the longest a store keeps working on a write its caller gave up on (the
+  // Blazegraph adapter's server-side deadline, four times its 30 s client deadline). Every offset below is
+  // spelled out in milliseconds, never derived from the production constant, so that shortening the window
+  // fails these tests instead of moving them along with it.
+  const TWO_MINUTES_MS = 120_000;
+
+  // The agent's own registry and a clock the test moves, under the generation's default window.
   function sharing() {
     const clock = { now: 0 };
     const generation = new WritePreflightGeneration({ now: () => clock.now });
@@ -296,22 +302,41 @@ describe('a policy write whose outcome is unknown', () => {
     return { clock, generation, identity, settle };
   }
 
-  it('waits at least as long as a store keeps working on a request its caller gave up on', () => {
-    expect(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS).toBeGreaterThan(DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS);
+  it('is exactly the two minutes a store keeps working on a write its caller gave up on', () => {
+    expect(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS).toBe(TWO_MINUTES_MS);
+    // The storage package states that bound; the agent only takes it.
+    expect(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS).toBe(maxAbandonedStoreOperationMs());
   });
 
-  it('hands out no identity until the window has passed, so nothing begun meanwhile can be joined or kept', () => {
+  it('hands out no identity until two minutes have passed, so nothing begun meanwhile can be joined or kept', () => {
     const { clock, identity, settle } = sharing();
     const before = identity()!;
     settle('indeterminate');
     expect(identity()).toBeUndefined();
-    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1;
+    // A probe begun at 64 s reads the policy a late commit may still change (a one-minute window would let it share).
+    clock.now = 64_000;
+    expect(identity()).toBeUndefined();
+    clock.now = 119_999;
     expect(identity()).toBeUndefined();
     expect(identity('0x2222222222222222222222222222222222222222')).toBeUndefined();
-    clock.now += 1;
+    clock.now = 120_000;
     const after = identity()!;
     expect(after.key).toBe(before.key);
     expect(after.stamp).not.toBe(before.stamp);
+  });
+
+  it.each([1, 30_000, 60_000, 64_000, 90_000, 119_999])('is still off %i ms after an unknown outcome', (elapsedMs) => {
+    const { clock, identity, settle } = sharing();
+    settle('indeterminate');
+    clock.now = elapsedMs;
+    expect(identity()).toBeUndefined();
+  });
+
+  it.each([120_000, 120_001, 600_000])('has resumed %i ms after an unknown outcome', (elapsedMs) => {
+    const { clock, identity, settle } = sharing();
+    settle('indeterminate');
+    clock.now = elapsedMs;
+    expect(identity()).toBeDefined();
   });
 
   it('resumes under a generation that is neither the one before the write nor the one at its report', () => {
@@ -320,7 +345,7 @@ describe('a policy write whose outcome is unknown', () => {
     settle('indeterminate');
     const reported = generation.current;
     expect(reported).toBe(before + 1);
-    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS;
+    clock.now = 120_000;
     expect(identity()).toBeDefined();
     expect(generation.current).toBe(reported + 1);
     // The resumption is counted once; ordinary sharing goes on from there.
@@ -332,21 +357,23 @@ describe('a policy write whose outcome is unknown', () => {
   it('is extended by a further unknown outcome, and resumes only after the last window', () => {
     const { clock, identity, settle } = sharing();
     settle('indeterminate');
-    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1_000;
-    settle('indeterminate');
-    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1_000;
+    clock.now = 119_000;
+    settle('indeterminate'); // its window runs to 239 s
+    clock.now = 238_999;
     expect(identity()).toBeUndefined();
-    clock.now += 1_000;
+    clock.now = 239_000;
     expect(identity()).toBeDefined();
   });
 
   it('is not shortened by an earlier write that is reported later', () => {
     const { clock, identity, settle } = sharing();
     settle('indeterminate');
-    clock.now += 10;
-    settle('indeterminate');
-    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1;
+    clock.now = 10;
+    settle('indeterminate'); // its window runs to 120.010 s
+    clock.now = 120_009;
     expect(identity()).toBeUndefined();
+    clock.now = 120_010;
+    expect(identity()).toBeDefined();
   });
 
   it.each<[string, StoreMutationOutcome, StoreMutation]>([
@@ -386,7 +413,9 @@ describe('a policy write whose outcome is unknown', () => {
       await expect(store.insert([quad(META)])).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
       expect(identity()).toBeUndefined();
 
-      now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS;
+      now = 64_000;
+      expect(identity()).toBeUndefined();
+      now = 120_000;
       expect(identity()).toBeDefined();
       // A write that is confirmed afterwards moves the generation but does not stop sharing.
       await store.insert([quad(META)]);

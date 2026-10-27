@@ -38,7 +38,7 @@
  */
 
 import { SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, isSafeIri } from '@origintrail-official/dkg-core';
-import { DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS } from '@origintrail-official/dkg-storage';
+import { maxAbandonedStoreOperationMs } from '@origintrail-official/dkg-storage';
 import { normalizeWritePreflightCaller } from './context-graph-write-preflight.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -84,11 +84,12 @@ export function mutationMayChangeWritePreflight(mutation: StoreMutation): boolea
 /**
  * How long sharing stays off after a policy write ended with an unknown outcome. A store gives no sign when it
  * applies a write late, and no adapter promises an end for the work on an abandoned write, so this is the
- * longest bound any adapter puts on work its caller gave up on: the Blazegraph adapter's server-side deadline,
- * four times its 30 s operation deadline. A late commit is expected to fall inside it; one that falls outside
- * it is not covered.
+ * longest bound any adapter puts on work its caller gave up on. That bound is the storage package's to state
+ * (`maxAbandonedStoreOperationMs`, the Blazegraph adapter's server-side deadline derived from its client
+ * deadline, 120 s for the default 30 s), so the agent holds no deadline policy of its own. A late commit is
+ * expected to fall inside it; one that falls outside it is not covered.
  */
-export const WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS = 4 * DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS;
+export const WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS = maxAbandonedStoreOperationMs();
 
 export interface WritePreflightGenerationOptions {
   /** Defaults to `WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS`. */

@@ -4,7 +4,8 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { performance } from 'node:perf_hooks';
-import { BlazegraphStore } from '../src/adapters/blazegraph.js';
+import { BlazegraphStore, DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS } from '../src/adapters/blazegraph.js';
+import { maxAbandonedStoreOperationMs } from '../src/adapters/blazegraph-deadline-policy.js';
 import {
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
@@ -300,6 +301,28 @@ describe('BlazegraphStore (mocked HTTP)', () => {
     const headers = fetchCalls[0][1]?.headers as Record<string, string>;
     expect(Number(headers['X-BIGDATA-MAX-QUERY-MILLIS']))
       .toBe(20_000);
+  });
+
+  it('exports the longest an abandoned operation can live as the very deadline the adapter sends', async () => {
+    // The agent's write preflight keeps sharing off for this long after a policy write whose outcome is
+    // unknown. It reads the bound from here instead of re-deriving it, so the number a caller relies on
+    // can only be the number on the wire.
+    vi.stubEnv('DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS', '');
+    try {
+      expect(DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS).toBe(30_000);
+      expect(maxAbandonedStoreOperationMs()).toBe(120_000);
+      expect(maxAbandonedStoreOperationMs(DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS)).toBe(120_000);
+      for (const timeout of [undefined, 5_000, 30_000, 45_000]) {
+        fetchCalls.length = 0;
+        setFetch(async () => blazeSelectResponse());
+        const store = new BlazegraphStore(baseUrl, timeout === undefined ? {} : { timeout });
+        await store.query('SELECT ?s WHERE { ?s ?p ?o }');
+        const headers = fetchCalls[0][1]?.headers as Record<string, string>;
+        expect(Number(headers['X-BIGDATA-MAX-QUERY-MILLIS'])).toBe(maxAbandonedStoreOperationMs(timeout));
+      }
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 
   it('rejects a CONSTRUCT body truncated by an engine error instead of parsing it as partial data', async () => {

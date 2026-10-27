@@ -280,6 +280,7 @@ export {
   DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS,
   type BlazegraphStoreOptions,
 } from './adapters/blazegraph.js';
+export { maxAbandonedStoreOperationMs } from './adapters/blazegraph-deadline-policy.js';
 export {
   createManagedOxigraphSparqlStoreV1,
   SparqlHttpStore,
