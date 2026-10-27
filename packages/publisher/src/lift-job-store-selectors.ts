@@ -106,6 +106,11 @@ export class LiftJobStoreSelectors {
    * every node owns its store, so it does not arise in practice.
    */
   async vmPublishAdmissionCandidates(lifecycleKey: string): Promise<PersistedLiftJob[]> {
+    return this.vmPublishCandidates(lifecycleKey, controlStoreOptions('publisher', 'publisher.asyncLift.findActiveVmPublish'));
+  }
+
+  /** The same read with the caller's options, so a sweep can label its own reads (OT-RFC-73 P11). Admission calls the one-argument method above: it has no policy argument. */
+  async vmPublishCandidates(lifecycleKey: string, options: QueryOptions): Promise<PersistedLiftJob[]> {
     const scanLegacy = this.legacyScan.scanRequired();
     const indexedBranch = `{
           ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(lifecycleKey)} ; <${CONTROL_PAYLOAD}> ?payload .
@@ -120,7 +125,7 @@ export class LiftJobStoreSelectors {
       `SELECT ?payload ?status ?indexed WHERE { GRAPH <${this.graphUri}> {
         ${scanLegacy ? `${indexedBranch} UNION ${legacyBranch}` : indexedBranch}
       } }`,
-      controlStoreOptions('publisher', 'publisher.asyncLift.findActiveVmPublish'),
+      options,
     );
     const rows = expectBindings(result);
     const jobs = new Map<string, PersistedLiftJob>();

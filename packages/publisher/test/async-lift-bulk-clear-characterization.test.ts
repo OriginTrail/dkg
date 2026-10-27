@@ -1,11 +1,10 @@
 /**
- * OT-RFC-73 P11, characterization: what the publisher queue's bulk `clear(status)` does TODAY.
+ * OT-RFC-73 P11: the publisher queue's bulk `clear(status)`, before and after the sibling guard.
  *
- * P11 puts a sibling guard on `clear(status)` (a finalized record is not deleted while an older failed sibling of its
- * lifecycle key is kept, and no removal promotes a sibling to bind the key). These tests were written and passed
- * BEFORE that change; they pin the behaviour it keeps (age-blind, status-wide, oldest first, the journal untouched, held and
- * recovery-lane jobs left alone, a failure mid-pass leaves earlier removals done) and the two behaviours it changes
- * (marked `P11 CHANGES THIS`), each as a binding decision a caller can observe: the intent lookup that admission shares.
+ * These tests were written and passed BEFORE the guard (they are the characterization the plan asks for first); the commit that adds the guard changes exactly the tests
+ * marked `P11 CHANGED THIS`, so the diff of this file is the list of what changes. What stays the same is pinned too: age-blind and status-wide, oldest first, the
+ * journal untouched, held and recovery-lane jobs left alone, a failure mid-pass leaves the earlier removals done. Each behavior is read as a binding decision a caller can
+ * observe: the intent lookup that admission shares.
  */
 import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -95,17 +94,20 @@ describe('publisher bulk clear(status): today', () => {
 
   describe('what the key does when its records go (the binding decision admission and job-by-intent share)', () => {
     // [older failed retryable X, newer finalized F] of one key: F is the key's newest record, so X is history and binds nothing.
-    it('P11 CHANGES THIS: clear(finalized) deletes the newest record and the older failed sibling binds the key again', async () => {
+    it('P11 CHANGED THIS: clear(finalized) keeps the newest record while an older failed sibling is kept, so that sibling does not bind the key again', async () => {
       await seed(at('x', 'k', 'retryable', 10), fin('f', 'k', 20));
       const publisher = publisherOver();
       expect(await lookup(publisher, 'k')).toMatchObject({ kind: 'superseded' });
 
-      expect(await publisher.clear('finalized')).toBe(1);
+      // before P11: expect(await publisher.clear('finalized')).toBe(1), and the lookup then answered { kind: 'active', job: { jobId: 'x' } } (a resurrected job)
+      expect(await publisher.clear('finalized')).toBe(0);
 
-      // The failed job is the key's newest record now, and a retryable failed job binds: a resurrected job.
-      expect(await lookup(publisher, 'k')).toMatchObject({ kind: 'active', job: { jobId: 'x' } });
-      // So a re-submit of the same publish reaccepts the old failed job instead of minting a job for the finalized lifecycle.
-      expect(await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'k' }))).toBe('x');
+      expect(await publisher.getStatus('f')).not.toBeNull();
+      expect(await lookup(publisher, 'k')).toMatchObject({ kind: 'superseded' });
+      // so a re-submit starts a new job for the finalized lifecycle (before P11 it reaccepted the old failed job 'x')
+      const id = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'k' }));
+      expect(id).not.toBe('x');
+      expect((await publisher.getStatus('x'))?.status).toBe('failed');
     });
 
     it('clear(finalized) of a key with several finalized records and no failed sibling leaves the key vacant, as it was', async () => {
@@ -117,24 +119,27 @@ describe('publisher bulk clear(status): today', () => {
     });
 
     // [older recovery-lane X (retryable, resolution retry_recovery: clear leaves it), newer terminal T (clear takes it)].
-    it('P11 CHANGES THIS: clear(failed) deletes the newer failed record and the older one it keeps binds the key again', async () => {
+    it('P11 CHANGED THIS: clear(failed) keeps the newer failed record whose removal would make the older one it keeps bind the key', async () => {
       await seed(at('x', 'k', 'recovery', 10), at('t', 'k', 'terminal', 20));
       const publisher = publisherOver();
       expect(await lookup(publisher, 'k')).toMatchObject({ kind: 'superseded' });
 
-      expect(await publisher.clear('failed')).toBe(1);
+      // before P11: expect(await publisher.clear('failed')).toBe(1), t was gone and the lookup answered { kind: 'active', job: { jobId: 'x' } }
+      expect(await publisher.clear('failed')).toBe(0);
 
-      expect(await publisher.getStatus('t')).toBeNull();
-      expect(await lookup(publisher, 'k')).toMatchObject({ kind: 'active', job: { jobId: 'x' } });
+      expect(await publisher.getStatus('t')).not.toBeNull();
+      expect(await lookup(publisher, 'k')).toMatchObject({ kind: 'superseded' });
     });
 
-    it('a held failed job binds the key whatever clear does around it, and clear never takes it', async () => {
+    it('P11 CHANGED THIS: a held failed job older than a finalized record keeps that record too (the rule is any older failed sibling), and still binds the key', async () => {
       await seed(at('h', 'k', 'held', 10), fin('f', 'k', 20));
       const publisher = publisherOver();
       expect(await lookup(publisher, 'k')).toMatchObject({ kind: 'active', job: { jobId: 'h' } });
-      expect(await publisher.clear('finalized')).toBe(1);
+      // before P11: expect(await publisher.clear('finalized')).toBe(1)
+      expect(await publisher.clear('finalized')).toBe(0);
       expect(await publisher.clear('failed')).toBe(0);
       expect(await lookup(publisher, 'k')).toMatchObject({ kind: 'active', job: { jobId: 'h' } });
+      expect(await publisher.getStatus('f')).not.toBeNull();
     });
   });
 });

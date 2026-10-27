@@ -172,6 +172,12 @@ const QUEUE_FILES: Readonly<Record<string, QueueFile>> = {
     storeCalls: ['query'],
     note: 'P9a: the bounded page (one query) and the stats COUNT (issued through the shared countByState helper); both keep the caller\'s lane',
   },
+  'packages/publisher/src/async-lift-guarded-clear.ts': {
+    role: 'sites',
+    labels: [L('clear.siblings')],
+    storeCalls: [],
+    note: 'P11: bulk clear\'s sibling read; the label is issued through the selectors by the publisher (no store call of its own)',
+  },
   'packages/publisher/src/job-record-atomic-write.ts': {
     role: 'sites',
     labels: [L('writeJob'), L('writeJobRequest')].sort(),

@@ -14,10 +14,13 @@
  *   recovery   a failed job in the recovery lane (`recovery_chain_unavailable`): retryable, no evidence, and, unlike
  *              `retryable`, not removable by bulk `clear` (its resolution is `retry_recovery`).
  */
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { createLiftJobFailureMetadata } from '../../src/lift-job.js';
 import type { LiftJob, PersistedLiftJob } from '../../src/lift-job.js';
-import { DEFAULT_CONTROL_GRAPH_URI, jobSubject, serializeJob } from '../../src/async-lift-control-plane.js';
+import {
+  DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI, jobSubject, requestSubject, serializeJob, serializeWalletLock,
+} from '../../src/async-lift-control-plane.js';
+import { createRawLiftJobRequest } from '../../src/async-lift-publisher-utils.js';
 import { createJobTemplates, type JobTemplates } from './lift-job-inventory.js';
 
 export const DAY = 24 * 60 * 60 * 1000;
@@ -38,6 +41,8 @@ export interface KeyedSpec {
   readonly finalizedAt?: number;
   /** Defaults to the finish time (finalizedAt, failedAt) or `acceptedAt`. */
   readonly updatedAt?: number;
+  /** `raw` is a raw-lift job: it has no lifecycle key, so no sibling. Default `vm`. */
+  readonly kind?: 'vm' | 'raw';
 }
 
 export interface RetentionTemplates {
@@ -74,20 +79,36 @@ export function stampKeyed(templates: RetentionTemplates, spec: KeyedSpec): Lift
   const timestamps: Record<string, number | undefined> = { ...template.timestamps, acceptedAt: spec.acceptedAt, updatedAt };
   if (finalizedAt !== undefined) timestamps['finalizedAt'] = finalizedAt;
   if (template.status === 'failed') timestamps['failedAt'] = finish;
+  const request = spec.kind === 'raw'
+    ? createRawLiftJobRequest({
+      contextGraphId: 'music-social', swmId: `swm-${spec.id}`, shareOperationId: `op-${spec.id}`, roots: [`urn:test:root:${spec.id}`],
+      namespace: 'ns', scope: 'root', transitionType: 'CREATE', authority: { type: 'owner', proofRef: `proof-${spec.id}` },
+    })
+    : { ...template.request, knowledgeAssetVmPublish: { ...publish, name: spec.key, shareOperationId: `op-${spec.id}` } };
   return {
     ...template,
     jobId: spec.id,
     jobSlug: spec.id,
-    request: { ...template.request, knowledgeAssetVmPublish: { ...publish, name: spec.key, shareOperationId: `op-${spec.id}` } },
+    request,
     timestamps,
     controlPlane: { jobRef: jobSubject(spec.id) },
-  } as LiftJob;
+  } as unknown as LiftJob;
+}
+
+/** The quads the production serializer writes for a spec (a test may corrupt them before they are inserted). */
+export function keyedQuads(templates: RetentionTemplates, spec: KeyedSpec, graph = DEFAULT_CONTROL_GRAPH_URI): Quad[] {
+  return serializeJob(stampKeyed(templates, spec), graph);
 }
 
 export async function seedKeyed(store: TripleStore, templates: RetentionTemplates, specs: readonly KeyedSpec[], graph = DEFAULT_CONTROL_GRAPH_URI): Promise<void> {
   await store.createGraph(graph);
-  const quads = specs.flatMap((spec) => serializeJob(stampKeyed(templates, spec), graph));
+  const quads = specs.flatMap((spec) => keyedQuads(templates, spec, graph));
   if (quads.length > 0) await store.insert(quads);
+}
+
+/** A wallet lock record naming a job, the way the claim coordinator writes one. */
+export async function seedWalletLock(store: TripleStore, jobId: string, walletId = 'wallet-1', status: 'active' | 'expired' | 'released' = 'released'): Promise<void> {
+  await store.insert(serializeWalletLock({ walletId, jobId, acquiredAt: 1, expiresAt: 2, status }, DEFAULT_WALLET_LOCK_GRAPH_URI));
 }
 
 /** A population of jobs for a list of one-key histories: `finalized` shorthand takes the day the job finished. */
@@ -116,3 +137,70 @@ export function faultyStore<T extends TripleStore>(inner: T, fault: StoreFault):
     },
   }) as T;
 }
+
+// ---- what the tests read back
+
+/** Every `?p ?o` of the job and request subjects of a job, as sorted lines: empty once the job is gone completely. */
+export async function present(store: TripleStore, jobId: string, graph = DEFAULT_CONTROL_GRAPH_URI): Promise<string> {
+  const lines: string[] = [];
+  for (const subject of [jobSubject(jobId), requestSubject(jobId)]) {
+    const r = await store.query(`SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subject}> ?p ?o } }`);
+    if (r.type === 'bindings') lines.push(...r.bindings.map((b) => `${subject} ${b['p']} ${b['o']}`));
+  }
+  return lines.sort().join('\n');
+}
+
+/** Every `?s ?p ?o` of a graph, as sorted lines: a whole-graph fingerprint. */
+export async function graphFingerprint(store: TripleStore, graph: string): Promise<string> {
+  const r = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+  return r.type === 'bindings' ? r.bindings.map((b) => `${b['s']} ${b['p']} ${b['o']}`).sort().join('\n') : '';
+}
+
+export function rng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => { a = (a + 0x6D2B79F5) >>> 0; let x = a; x = Math.imul(x ^ (x >>> 15), x | 1); x ^= x + Math.imul(x ^ (x >>> 7), x | 61); return ((x ^ (x >>> 14)) >>> 0) / 4294967296; };
+}
+export const pick = <T,>(r: () => number, xs: readonly T[]): T => xs[Math.floor(r() * xs.length)]!;
+
+// ---- a store that records every call and may delay, fail or rewrite one
+
+export interface Logged {
+  readonly kind: string;
+  readonly source: string | undefined;
+  /** A query's text, or the JSON of the first argument of any other call. */
+  readonly text: string;
+  readonly options: Record<string, unknown> | undefined;
+  readonly at: number;
+}
+type QueryAnswer = Awaited<ReturnType<TripleStore['query']>>;
+export interface SpyHooks {
+  /** Runs before the call reaches the store; may throw (a failure) or wait (an interleaving). */
+  readonly before?: (entry: Logged) => Promise<void> | void;
+  readonly after?: (entry: Logged) => Promise<void> | void;
+  /** May replace the answer of a query. */
+  readonly rewrite?: (entry: Logged, run: () => Promise<QueryAnswer>) => Promise<QueryAnswer>;
+}
+const OPTIONS_AT: Readonly<Record<string, number>> = { query: 1, update: 1, insert: 1, delete: 1, deleteByPattern: 1, deleteByPatternWithoutCount: 1, replaceSubject: 3, replaceSubjectAndInsert: 4, flush: 0 };
+
+export function spyStore<T extends TripleStore>(inner: T, hooks: SpyHooks = {}): { store: T; log: Logged[] } {
+  const log: Logged[] = [];
+  const store = new Proxy(inner, {
+    get(target, prop) {
+      const value: unknown = Reflect.get(target, prop, target);
+      if (typeof value !== 'function' || typeof prop !== 'string' || !(prop in OPTIONS_AT)) return typeof value === 'function' ? value.bind(target) : value;
+      return async (...args: unknown[]) => {
+        const options = prop === 'flush' ? undefined : args[OPTIONS_AT[prop]!] as Record<string, unknown> | undefined;
+        const entry: Logged = { kind: prop, source: options?.['source'] as string | undefined, text: typeof args[0] === 'string' ? args[0] : JSON.stringify(args[0] ?? ''), options, at: log.length };
+        log.push(entry);
+        await hooks.before?.(entry);
+        const run = () => (value as (...a: unknown[]) => Promise<unknown>).apply(target, args);
+        const out = prop === 'query' && hooks.rewrite ? await hooks.rewrite(entry, run as () => Promise<QueryAnswer>) : await run();
+        await hooks.after?.(entry);
+        return out;
+      };
+    },
+  }) as T;
+  return { store, log };
+}
+
+export const bySource = (log: readonly Logged[], source: string): Logged[] => log.filter((entry) => entry.source === source);
