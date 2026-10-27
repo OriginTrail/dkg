@@ -166,6 +166,7 @@ import { jobRow, publishSummary } from './async-queue-contention/pickup.mjs';
 import {
   LOAD_DEFAULTS,
   PROBE_DRAIN_MS,
+  loadEvidence,
   probeAckSummary,
   startAckLoad,
   startProbeLoad,
@@ -801,8 +802,9 @@ async function runOnce(c, dist, endpoint, outDir) {
           await liftObserver.drain(1000);
           // a status probe's CALLER answers within its 5 s wait by construction, but its ASK is never aborted and
           // neither is the COUNT (like the daemon's), so the drain waits for those store queries too, up to
-          // PROBE_DRAIN_MS: one still running then is reported (stillInflightAtDrain). An ACK still running at its
-          // own drain is recorded as censored at that moment and fails the acksFinished check
+          // PROBE_DRAIN_MS: one still running then is reported (stillInflightAtDrain). A metrics probe still running
+          // at that drain and an ACK still running at its own are recorded as censored at that moment and fail the
+          // probesFinished / acksFinished checks
           const probesStillInflight = probeLoad ? await probeLoad.drain(PROBE_DRAIN_MS) : 0;
           await ackLoad?.drain(10_000);
           worker?.freeze(); // jobs cut short by the shutdown are not worker contract breaks
@@ -939,18 +941,7 @@ async function runOnce(c, dist, endpoint, outDir) {
                   },
                 }
               : {}),
-            ...(lf.probes || lf.ack
-              ? {
-                  load: {
-                    probes: lf.probes,
-                    ack: lf.ack,
-                    statusProbes: pa.probes.nStatus,
-                    metricsProbes: pa.probes.nMetrics,
-                    acksStarted: pa.ack.acksStarted,
-                    acksUnfinished: pa.ack.acksUnfinished,
-                  },
-                }
-              : {}),
+            ...(lf.probes || lf.ack ? { load: loadEvidence(lf, pa) } : {}),
           });
           const summary = {
             schema: 2,

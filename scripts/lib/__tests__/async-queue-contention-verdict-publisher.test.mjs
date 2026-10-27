@@ -314,6 +314,35 @@ test('a publisher run whose claimed jobs never finish is invalid although no run
   assert.ok(['publisherFinalized', 'publisherBodyReplayed'].every((k) => rec.failedChecks.includes(k)));
 });
 
+test('a run whose drain left a metrics probe unfinished has incomplete probe evidence and is invalid', () => {
+  const run = (load) => validity({ ...base, queue: 'both', publisher, worker: shareWorker, load });
+  const probes = { probes: true, ack: false, statusProbes: 18, metricsProbes: 6 };
+  assert.deepEqual(
+    [run({ ...probes, probesUnfinished: 0 }).probesFinished, run({ ...probes, probesUnfinished: 0 }).ok],
+    [true, true],
+  );
+  // the slowest metrics probe was still waiting on the store at the drain: its latency is a lower bound only
+  const unfinished = run({ ...probes, probesUnfinished: 1 });
+  assert.deepEqual(
+    [unfinished.probesRan, unfinished.probesFinished, unfinished.ok],
+    [true, false, false],
+    'it started, so the probes ran, but one did not finish',
+  );
+  assert.equal(run(probes).probesFinished, false, 'a missing count fails');
+  assert.equal(run({ ...probes, probesUnfinished: undefined }).ok, false);
+  assert.equal('probesFinished' in run({ probes: false, ack: true, acksStarted: 1, acksUnfinished: 0 }), false);
+  assert.equal('probesFinished' in run(null), false);
+  // the record: such a run never reaches a verdict
+  const rec = extractRecord({
+    meta: { cell: { queue: 'lift', repeat: 1, mu: 0.4 } },
+    validity: unfinished,
+    submission: { F: 0, latencyMs: { p95: 1 } },
+    publish: { F: 0, latencyMs: { p95: 1 }, pickup: { p50: 1 } },
+  });
+  assert.equal(rec.valid, false);
+  assert.ok(rec.failedChecks.includes('probesFinished'));
+});
+
 test('the probes and ACKs that were switched on must have run, and a lift seed file must hash as its manifest says', () => {
   const run = (load, extra = {}) =>
     validity({
@@ -330,6 +359,7 @@ test('the probes and ACKs that were switched on must have run, and a lift seed f
       ack: true,
       statusProbes: 18,
       metricsProbes: 6,
+      probesUnfinished: 0,
       acksStarted: 45,
       acksUnfinished: 0,
     }).ok,
@@ -341,6 +371,7 @@ test('the probes and ACKs that were switched on must have run, and a lift seed f
     ack: true,
     statusProbes: 18,
     metricsProbes: 6,
+    probesUnfinished: 0,
     acksStarted: 45,
     acksUnfinished: 1,
   });
@@ -350,11 +381,15 @@ test('the probes and ACKs that were switched on must have run, and a lift seed f
     'it started, so the ACKs ran, but one did not finish',
   );
   assert.equal(
-    run({ probes: true, ack: true, statusProbes: 18, metricsProbes: 6, acksStarted: 45 }).acksFinished,
+    run({ probes: true, ack: true, statusProbes: 18, metricsProbes: 6, probesUnfinished: 0, acksStarted: 45 })
+      .acksFinished,
     false,
     'missing evidence fails',
   );
-  assert.equal('acksFinished' in run({ probes: true, ack: false, statusProbes: 1, metricsProbes: 1 }), false);
+  assert.equal(
+    'acksFinished' in run({ probes: true, ack: false, statusProbes: 1, metricsProbes: 1, probesUnfinished: 0 }),
+    false,
+  );
   assert.deepEqual(
     [
       run({ probes: true, ack: false, statusProbes: 0, metricsProbes: 6 }).probesRan,
@@ -364,7 +399,7 @@ test('the probes and ACKs that were switched on must have run, and a lift seed f
   );
   // the check counts probes STARTED in the window whatever their result (no-answer ones included), so its name says
   // that they ran, not that they were answered
-  const ran = run({ probes: true, ack: false, statusProbes: 1, metricsProbes: 1 });
+  const ran = run({ probes: true, ack: false, statusProbes: 1, metricsProbes: 1, probesUnfinished: 0 });
   assert.deepEqual([ran.probesRan, 'probesAnswered' in ran, ran.ok], [true, false, true]);
   const noAck = run({ probes: false, ack: true, acksStarted: 0 });
   assert.deepEqual([noAck.acksRan, noAck.ok, 'probesRan' in noAck], [false, false, false]);

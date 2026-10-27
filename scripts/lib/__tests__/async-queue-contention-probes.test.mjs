@@ -17,6 +17,7 @@ import {
   STATUS_SOURCE,
   ackOnce,
   fixedSchedule,
+  loadEvidence,
   makeMetricsQuery,
   probeAckSummary,
   startAckLoad,
@@ -24,6 +25,7 @@ import {
   withTrackedCount,
   withTrackedQueries,
 } from '../../repro/async-queue-contention/probes.mjs';
+import { validity } from '../../repro/async-queue-contention/verdict.mjs';
 import { beginEpoch } from '../../repro/async-queue-contention/workload.mjs';
 
 let deps;
@@ -187,6 +189,8 @@ test('the probe load issues the daemon health-lane calls through the product fun
   const summary = probeAckSummary({ probeState: load.state, from: 0, to: 1e9 });
   assert.equal(summary.probes.noAnswer, 0);
   assert.equal(summary.probes.nStatus, kinds('status').length);
+  assert.equal(summary.probes.metricsUnfinished, 0, 'every metrics probe finished inside the drain');
+  assert.ok(load.state.events.every((e) => !e.unfinished));
 });
 
 test('a probe cadence of 0 switches that probe off', async () => {
@@ -271,6 +275,139 @@ test('a metrics sample is the store\'s answer once it queried the store, whateve
   const summary = probeAckSummary({ probeState: state, from: 0, to: 1e9 });
   assert.equal(summary.probes.nMetricsReconciled, 1);
   assert.equal(summary.probes.metricsLatencyMs.n, results.length - 1);
+});
+
+/**
+ * A store that answers everything at once, except the health-lane ASKs from number `from` on (0-based; the reconcile of
+ * the first read is answered locally and is none of them), which answer when the test says so.
+ */
+function storeWithGatedHealth(from = 0) {
+  const gate = { health: 0 };
+  const answered = new Promise((resolve) => {
+    gate.release = () => resolve({ type: 'boolean', value: true });
+  });
+  gate.store = {
+    query: async (_sparql, options) => {
+      if (options?.source === 'daemon.metrics.storeHealth' && gate.health++ >= from) return answered;
+      return { type: 'boolean', value: true };
+    },
+  };
+  return gate;
+}
+
+/**
+ * A metrics-only probe load over `gate`'s store: two samples (5 ms and 65 ms after the epoch). Returns, stopped, once
+ * both have asked the store: with storeWithGatedHealth(1) the second is then blocked in its health query.
+ */
+async function startTwoSampleMetricsLoad(gate) {
+  const world = await epochOn(gate.store);
+  const load = await startProbeLoad(world, deps, {
+    statusMs: 0,
+    metricsMs: 60,
+    metricsPhaseMs: 5,
+    countMs: 0,
+    horizonMs: 100,
+  });
+  for (let i = 0; i < 400 && gate.health < 2; i++) await sleep(5);
+  assert.equal(gate.health, 2, 'both samples asked the store');
+  load.stop();
+  return { world, load };
+}
+
+test('a metrics query still running when the drain gives up is in the results, censored at the drain, and recorded once', async () => {
+  const gate = storeWithGatedHealth(1);
+  const { world, load } = await startTwoSampleMetricsLoad(gate);
+  const left = await load.drain(100);
+  const cutAt = performance.now() - world.t0;
+  assert.equal(left, 1, 'the drain reports the work it left running');
+  const { events } = load.state;
+  assert.deepEqual(
+    events.map((e) => [e.kind, e.result, Boolean(e.unfinished)]),
+    [
+      ['metrics', 'ok', false],
+      ['metrics', 'unfinished', true],
+    ],
+    'the answered sample and the unfinished one, which is no longer missing',
+  );
+  const stuck = events[1];
+  assert.equal(stuck.err, 'UNFINISHED_AT_DRAIN');
+  assert.ok(stuck.ms >= 100, `it ran at least as long as the drain waited (${Math.round(stuck.ms)} ms)`);
+  assert.ok(Math.abs(stuck.t + stuck.ms - cutAt) < 15, 'its duration is censored at the moment the drain gave up');
+
+  const s = probeAckSummary({ probeState: load.state, from: 0, to: 1e9 });
+  assert.deepEqual(
+    [s.probes.nMetrics, s.probes.metricsUnfinished, s.probes.noAnswerMetrics, s.probes.metricsLatencyMs.n],
+    [2, 1, 1, 2],
+    'counted, unfinished, a no-answer, and in the latency',
+  );
+  assert.ok(s.probes.metricsLatencyMs.max >= 100, 'and it is the slowest');
+  assert.ok(s.probes.latencyMs.max >= 100);
+  assert.deepEqual(s.probes.metricsResults, { ok: 1, unfinished: 1 });
+
+  // the store answering after the cut-off is not recorded a second time
+  gate.release();
+  await sleep(60);
+  assert.equal(load.state.events.length, 2, 'no second event for the same probe');
+  assert.deepEqual(
+    load.state.events.map((e) => e.result),
+    ['ok', 'unfinished'],
+  );
+  assert.equal(probeAckSummary({ probeState: load.state, from: 0, to: 1e9 }).probes.metricsUnfinished, 1);
+  assert.equal(await load.drain(100), 0, 'nothing is left running now');
+  assert.equal(load.state.events.length, 2, 'and a second drain records nothing either');
+});
+
+test('a metrics query that settles inside the drain is recorded as it answered, not as unfinished', async () => {
+  const gate = storeWithGatedHealth(1);
+  const { load } = await startTwoSampleMetricsLoad(gate);
+  const drained = load.drain(10_000);
+  await sleep(50);
+  gate.release();
+  assert.equal(await drained, 0);
+  assert.deepEqual(
+    load.state.events.map((e) => [e.result, Boolean(e.unfinished)]),
+    [
+      ['ok', false],
+      ['ok', false],
+    ],
+  );
+  const s = probeAckSummary({ probeState: load.state, from: 0, to: 1e9 });
+  assert.deepEqual([s.probes.nMetrics, s.probes.metricsUnfinished], [2, 0]);
+});
+
+test('a drain that gives up on a metrics probe makes the run fail the probesFinished check', async () => {
+  const run = async (gate, drainMs) => {
+    const { load } = await startTwoSampleMetricsLoad(gate);
+    await load.drain(drainMs);
+    const pa = probeAckSummary({ probeState: load.state, from: 0, to: 1e9 });
+    return validity({
+      lambda: 1,
+      measureMs: 1000,
+      measured: 1,
+      stillInflight: 0,
+      load: loadEvidence({ probes: true, ack: false }, pa),
+    });
+  };
+  const stuck = await run(storeWithGatedHealth(1), 60);
+  assert.equal(stuck.probesFinished, false, 'the censored probe reaches the check through the summary and loadEvidence');
+  const fine = await run(storeWithGatedHealth(Infinity), 60);
+  assert.equal(fine.probesFinished, true);
+});
+
+test('loadEvidence hands validity the switches and the counts of the run, the unfinished ones included', () => {
+  const pa = {
+    probes: { nStatus: 18, nMetrics: 6, metricsUnfinished: 2 },
+    ack: { acksStarted: 45, acksUnfinished: 1 },
+  };
+  assert.deepEqual(loadEvidence({ probes: true, ack: false }, pa), {
+    probes: true,
+    ack: false,
+    statusProbes: 18,
+    metricsProbes: 6,
+    probesUnfinished: 2,
+    acksStarted: 45,
+    acksUnfinished: 1,
+  });
 });
 
 /** A store that answers everything at once except the full-store COUNT, which settles when the test says so. */
@@ -394,6 +531,12 @@ test('drain does not report the probes as finished while the ASK of a status pro
   assert.equal(await load.drain(150), 1, 'the status ASK is reported as still running at the cap');
   const waited = performance.now() - t0;
   assert.ok(waited >= 120 && waited < 2000, `the wait is bounded by the cap (${Math.round(waited)} ms)`);
+  assert.deepEqual(
+    load.state.events.map((e) => [e.kind, e.result]),
+    [['status', 'no-answer']],
+    'the status probe was answered (no-answer) by its caller: only a metrics probe still running is censored',
+  );
+  assert.equal(probeAckSummary({ probeState: load.state, from: 0, to: 1e9 }).probes.metricsUnfinished, 0);
   gate.release();
   await sleep(10);
   assert.equal(await load.drain(150), 0, 'nothing is left running once the ASK answered');
@@ -752,6 +895,26 @@ test('probeAckSummary counts the window only and calls a slow or rejected probe 
     [false, 0, 0, false, 0],
   );
   assert.deepEqual(off.probes.latencyMs, { n: 0 });
+});
+
+test('probeAckSummary counts an unfinished metrics probe as a no-answer and in the latency, and run-wide as unfinished', () => {
+  const probeState = {
+    events: [
+      { kind: 'metrics', t: 100, ms: 30, result: 'ok' },
+      // censored at the drain after 200 ms (a lower bound well under the 5 s wait): it still got no answer
+      { kind: 'metrics', t: 300, ms: 200, result: 'unfinished', err: 'UNFINISHED_AT_DRAIN', unfinished: true },
+      // began after the window: not in its counts, but the run has it unfinished all the same
+      { kind: 'metrics', t: 5000, ms: 40_000, result: 'unfinished', err: 'UNFINISHED_AT_DRAIN', unfinished: true },
+    ],
+  };
+  const s = probeAckSummary({ probeState, from: 0, to: 1000 });
+  assert.deepEqual([s.probes.n, s.probes.nMetrics, s.probes.nMetricsReconciled], [2, 2, 0]);
+  assert.deepEqual([s.probes.noAnswerMetrics, s.probes.noAnswer], [1, 1]);
+  assert.deepEqual(s.probes.metricsResults, { ok: 1, unfinished: 1 });
+  assert.equal(s.probes.metricsLatencyMs.n, 2);
+  assert.equal(s.probes.metricsLatencyMs.max, 200, 'the censored duration is in the latency, as a lower bound');
+  assert.equal(s.probes.metricsUnfinished, 2, 'unfinished is a fact about the run, whatever window it began in');
+  assert.equal(probeAckSummary({ from: 0, to: 1000 }).probes.metricsUnfinished, 0, 'no probe load, none unfinished');
 });
 
 test('probeAckSummary keeps a locally answered metrics sample out of the latencies and the no-answers', () => {

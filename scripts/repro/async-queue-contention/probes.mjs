@@ -21,7 +21,9 @@
 //                                answered locally and counted: it is not a health-lane call. A health query that fails
 //                                drops the product's reconciled snapshot, so the NEXT read reconciles again, and that
 //                                answer is local too: a sample that issued no query to the store is recorded as
-//                                'reconciled', never as an answer of the store, and is left out of the latency.
+//                                'reconciled', never as an answer of the store, and is left out of the latency. The
+//                                metrics module gives the caller no wait bound, so a sample can outlive the run: the
+//                                drain records it as 'unfinished' (see startProbeLoad).
 //   `agent` is { store }: the product functions read agent.store only, so the calls reach the scheduler as in the daemon.
 // Cadences (the harness's D30a proposal): status every 10 s, metrics every 30 s, COUNT request every 60 s, on fixed
 // schedules offset 5 s / 15 s / 20 s from the epoch so no event sits on a window edge.
@@ -155,6 +157,11 @@ export const withTrackedCount = (store, track) => withTrackedQueries(store, [COU
  * locally, no query reached the store). drain(capMs) waits for the probes in flight and for the store queries behind
  * them that outlive their callers, the status ASK and the COUNT (see withTrackedQueries), for at most capMs in all, and
  * returns how many were still running then.
+ * A metrics probe has no event until its health query settles, so one still running at the cap would be the slowest
+ * probe of the run and missing from it. The drain gives it one: it is recorded as CENSORED at the moment the drain gave
+ * up (ms = how long it had run, a lower bound; result 'unfinished', err 'UNFINISHED_AT_DRAIN', unfinished true), and the
+ * store answering later records nothing, so a probe is counted once. (A status probe cannot be left: its caller is
+ * answered within NO_ANSWER_MS by the product, which PROBE_DRAIN_MS outlasts.)
  */
 export async function startProbeLoad(world, deps, cfg) {
   const { store } = world;
@@ -190,8 +197,13 @@ export async function startProbeLoad(world, deps, cfg) {
       err,
     });
   };
+  // the metrics probes started and not yet recorded: the drain records the ones left at its cap (censored), and a probe
+  // that finds itself gone from here when it settles was recorded then and adds nothing
+  const metricsRunning = new Set();
   const metricsOnce = async () => {
     const t0 = performance.now();
+    const probe = { t0 };
+    metricsRunning.add(probe);
     let result = 'ok';
     let err;
     const sample = { storeQueries: 0 };
@@ -204,6 +216,7 @@ export async function startProbeLoad(world, deps, cfg) {
       result = e?.code === 'STORE_SCHEDULER_BUSY' ? 'busy' : 'error';
       err = e?.code ?? e?.name;
     }
+    if (!metricsRunning.delete(probe)) return; // the drain gave up on it and recorded it as unfinished
     events.push({
       kind: 'metrics',
       t: t0 - world.t0,
@@ -260,6 +273,18 @@ export async function startProbeLoad(world, deps, cfg) {
       const deadline = performance.now() + capMs;
       for (let left = capMs; inflight.size > 0 && left > 0; left = deadline - performance.now())
         await within(Promise.allSettled(inflight), left);
+      // a metrics probe still running now is the slowest of the run and has no event of its own: censor it here
+      const at = performance.now();
+      for (const probe of metricsRunning)
+        events.push({
+          kind: 'metrics',
+          t: probe.t0 - world.t0,
+          ms: at - probe.t0,
+          result: 'unfinished',
+          err: 'UNFINISHED_AT_DRAIN',
+          unfinished: true,
+        });
+      metricsRunning.clear();
       return inflight.size;
     },
   };
@@ -443,8 +468,13 @@ export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
  *                      those that started in the window (a status probe is capped at the product's 5 s wait by
  *                      construction). A metrics sample the product answered locally (result 'reconciled', see the top)
  *                      never reached the store: it is counted in nMetrics and nMetricsReconciled and is in no latency
- *                      and no noAnswer
- *   probes.noAnswer    status probes answered 'no-answer' plus metrics probes that took over 5 s or were rejected busy
+ *                      and no noAnswer. A metrics probe the drain left running (startProbeLoad censors it) is in the
+ *                      latency with its censored duration, a lower bound
+ *   probes.noAnswer    status probes answered 'no-answer' plus metrics probes that took over 5 s, were rejected busy or
+ *                      were still unanswered when the drain gave up
+ *   probes.metricsUnfinished  the metrics probes the drain left running, WHATEVER window they started in: the ones that
+ *                      started in the window are in nMetrics, the latencies and noAnswer. Their latency is only a lower
+ *                      bound, so a run with any has incomplete probe evidence (verdict.mjs probesFinished)
  *   ack.opMs           caller-visible duration of every ACK operation that started in the window (queue wait included);
  *                      an operation is in the window by its OWN start, whichever window its ACK started in
  *   ack.acksStarted    ACKs started in the window; ackMs their whole-sequence duration
@@ -461,7 +491,7 @@ export function probeAckSummary({ probeState, ackState, from, to }) {
   const reconciled = metrics.filter((e) => e.result === 'reconciled');
   const storeMetrics = metrics.filter((e) => e.result !== 'reconciled');
   const noAnswerStatus = status.filter((e) => e.result === 'no-answer').length;
-  const noAnswerMetrics = storeMetrics.filter((e) => e.ms > NO_ANSWER_MS || e.result === 'busy').length;
+  const noAnswerMetrics = storeMetrics.filter((e) => e.unfinished || e.ms > NO_ANSWER_MS || e.result === 'busy').length;
   const counts = (events) => events.reduce((acc, e) => ({ ...acc, [e.result]: (acc[e.result] ?? 0) + 1 }), {});
   const acks = (ackState?.events ?? []).filter((e) => inWindow(e.t));
   const ackOps = (ackState?.opEvents ?? []).filter((e) => inWindow(e.t));
@@ -479,6 +509,7 @@ export function probeAckSummary({ probeState, ackState, from, to }) {
       noAnswer: noAnswerStatus + noAnswerMetrics,
       noAnswerStatus,
       noAnswerMetrics,
+      metricsUnfinished: (probeState?.events ?? []).filter((e) => e.kind === 'metrics' && e.unfinished).length,
       statusResults: counts(status),
       metricsResults: counts(metrics),
       reconcilesStubbed: probeState?.counters?.reconcilesStubbed ?? null,
@@ -496,5 +527,22 @@ export function probeAckSummary({ probeState, ackState, from, to }) {
       opMs: summarize(ackOps.map((e) => e.ms)),
       bySource: ackOps.reduce((acc, e) => ({ ...acc, [e.source]: (acc[e.source] ?? 0) + 1 }), {}),
     },
+  };
+}
+
+/**
+ * What validity() (verdict.mjs) is given of the background load: which of the two loads the run switched on
+ * (`loadFactors`), and the counts probeAckSummary made of them (`pa` = its result). The runner builds `load` here, so
+ * a count the checks need cannot be left out of it unnoticed.
+ */
+export function loadEvidence(loadFactors, pa) {
+  return {
+    probes: loadFactors.probes,
+    ack: loadFactors.ack,
+    statusProbes: pa.probes.nStatus,
+    metricsProbes: pa.probes.nMetrics,
+    probesUnfinished: pa.probes.metricsUnfinished,
+    acksStarted: pa.ack.acksStarted,
+    acksUnfinished: pa.ack.acksUnfinished,
   };
 }
