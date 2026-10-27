@@ -8,7 +8,7 @@
  *
  * One `runBatch()` is one tick of the sweep:
  *  1. the clock guard: the tick is skipped when the wall clock is behind the start of the last tick that RAN, or has run ahead of the monotonic clock by more
- *     than the tolerance since then (a skipped tick is not a sweep start: a leapt clock stays skipped, see clockVerdict);
+ *     than the tolerance since then (a skipped tick is not a sweep start: a leapt clock stays skipped, see RetentionClockGuard in retention-sweep-core.ts);
  *  2. one index scan per class WITHOUT the queue lock, on the background lane, reads up to `batchSize` terminal jobs that look old enough after the class's
  *     keyset cursor (async-promote-retention-scan.ts);
  *  3. the candidates are processed in SLICES of at most `sliceSize` jobs. For each slice the queue's own per-graph mutation lock (promote-control-lock.ts) is
@@ -37,7 +37,6 @@
  * excluded: retention belongs in the daemon's admission instance only (P10b refuses to start it elsewhere).
  */
 import { controlStoreOptions, deleteByPatternWithoutCount, type TripleStore } from '@origintrail-official/dkg-storage';
-import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import { PromoteAdmissionCoordinator } from './promote-admission.js';
 import { withPromoteControlLock } from './promote-control-lock.js';
 import { isSafeJobId } from './job-id.js';
@@ -50,36 +49,21 @@ import {
   JOB_SUBJECT_PREFIX, RetentionScanState, buildRetentionVerifyQuery, planScan,
   type PromoteRetentionScanClass, type ScanCandidate, type ScanContext, type ScanPlan,
 } from './async-promote-retention-scan.js';
+import {
+  HoldBudget, RETENTION_SKIPS, RETENTION_SWEEP_DEFAULTS, RetentionClockGuard, ageWindowMs, boundedInteger, claimBatch, errorMessage as message, lazyRetentionLogger, positiveFinite, sumInto as sum,
+  type RetentionLogger, type RetentionSkip,
+} from './retention-sweep-core.js';
 
 export { SHARE_RETENTION_MODES, SHARE_RETENTION_WINDOW_MS, type ShareRetentionMode } from './async-promote-retention-policy.js';
 
 const VERIFY_SOURCE = 'publisher.asyncPromote.retention.verify';
 const DELETE_SOURCE = 'publisher.asyncPromote.retention.delete';
 
-export const SHARE_RETENTION_DEFAULTS = Object.freeze({
-  /** Most candidate rows one batch judges. */
-  batchSize: 100,
-  /** The hard maximum of `batchSize`: one scan reads, and one pass of holds judges, at most this many rows. */
-  maxBatchSize: 1000,
-  /** Most jobs verified and deleted under ONE hold of the queue mutation lock (the lock is released between slices). */
-  sliceSize: 10,
-  /** The time one hold of the lock may take: the slice size adapts to it, and no delete starts that would take the hold past it. */
-  holdBudgetMs: 50,
-  /** The hard maximum of the hold budget and of the slice size. */
-  maxHoldBudgetMs: 50,
-  maxSliceSize: 100,
-  /** The floor of `succeededMaxAgeMs` and `benignFailedMaxAgeMs` (24 h): a misconfiguration cannot shrink the D-6 window of 7 days to minutes. */
-  minWindowMs: 24 * 60 * 60 * 1000,
-  /** Safety net: every this many ms (once a pass has reached the end) the scan restarts from the oldest row. */
-  rescanIntervalMs: 3_600_000,
-  /** A tick is skipped when the wall clock has run ahead of the monotonic clock by more than this many intervals since the last tick that ran. */
-  clockGuardFactor: 3,
-});
+export const SHARE_RETENTION_DEFAULTS = RETENTION_SWEEP_DEFAULTS;
 
-export type ShareRetentionSkip = 'off' | 'overlap' | 'clock_invalid' | 'clock_backwards' | 'clock_jump';
-const SKIPS: readonly ShareRetentionSkip[] = ['off', 'overlap', 'clock_invalid', 'clock_backwards', 'clock_jump'];
+export type ShareRetentionSkip = RetentionSkip;
 
-export interface ShareRetentionLogger { info(message: string): void; warn(message: string): void }
+export type ShareRetentionLogger = RetentionLogger;
 
 /**
  * Thrown when a sweep in the mode `report` or `delete` is created for a store object and graph the queue was never built with (and no coordinator was passed):
@@ -208,52 +192,28 @@ function resolveConfig(config: ShareRetentionConfig): ResolvedConfig {
   const d = SHARE_RETENTION_DEFAULTS;
   const mode = config.mode ?? 'off';
   if (!(SHARE_RETENTION_MODES as readonly string[]).includes(mode)) throw new Error(`mode must be one of ${SHARE_RETENTION_MODES.join(', ')}`);
-  const positive = (value: unknown, name: string): number => {
-    if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) throw new Error(`${name} must be a positive finite number`);
-    return value;
-  };
-  const integer = (value: unknown, name: string, max: number): number => {
-    if (!Number.isSafeInteger(value) || (value as number) <= 0 || (value as number) > max) throw new Error(`${name} must be a positive integer of at most ${max}`);
-    return value as number;
-  };
   const graphUri = config.graphUri ?? DEFAULT_PROMOTE_CONTROL_GRAPH_URI;
   if (typeof graphUri !== 'string' || graphUri === '' || /[<>"{}|^`\\\s]/.test(graphUri)) throw new Error('graphUri must be a bare IRI');
-  const ageWindow = (value: unknown, name: string): number => {
-    const ms = positive(value, name);
-    if (ms < d.minWindowMs) throw new Error(`${name} must be at least ${d.minWindowMs} ms (24 hours)`);
-    return ms;
-  };
-  const succeededMaxAgeMs = ageWindow(config.succeededMaxAgeMs ?? SHARE_RETENTION_WINDOW_MS, 'succeededMaxAgeMs');
+  const succeededMaxAgeMs = ageWindowMs(config.succeededMaxAgeMs ?? SHARE_RETENTION_WINDOW_MS, 'succeededMaxAgeMs');
   const benign = config.benignFailedMaxAgeMs === undefined ? SHARE_RETENTION_WINDOW_MS : config.benignFailedMaxAgeMs;
   const rescanIntervalMs = config.rescanIntervalMs ?? d.rescanIntervalMs;
   if (typeof rescanIntervalMs !== 'number' || Number.isNaN(rescanIntervalMs) || rescanIntervalMs <= 0) throw new Error('rescanIntervalMs must be a positive number (Infinity = never)');
-  const holdBudgetMs = positive(config.holdBudgetMs ?? d.holdBudgetMs, 'holdBudgetMs');
+  const holdBudgetMs = positiveFinite(config.holdBudgetMs ?? d.holdBudgetMs, 'holdBudgetMs');
   if (holdBudgetMs > d.maxHoldBudgetMs) throw new Error(`holdBudgetMs must be at most ${d.maxHoldBudgetMs}`);
-  const clockGuardFactor = positive(config.clockGuardFactor ?? d.clockGuardFactor, 'clockGuardFactor');
+  const clockGuardFactor = positiveFinite(config.clockGuardFactor ?? d.clockGuardFactor, 'clockGuardFactor');
   if (clockGuardFactor < 1) throw new Error('clockGuardFactor must be at least 1');
   return {
-    mode, intervalMs: positive(config.intervalMs, 'intervalMs'), graphUri,
-    policy: benign === null ? { succeededMaxAgeMs } : { succeededMaxAgeMs, benignFailedMaxAgeMs: ageWindow(benign, 'benignFailedMaxAgeMs') },
-    batchSize: integer(config.batchSize ?? d.batchSize, 'batchSize', d.maxBatchSize),
-    sliceSize: integer(config.sliceSize ?? d.sliceSize, 'sliceSize', d.maxSliceSize),
+    mode, intervalMs: positiveFinite(config.intervalMs, 'intervalMs'), graphUri,
+    policy: benign === null ? { succeededMaxAgeMs } : { succeededMaxAgeMs, benignFailedMaxAgeMs: ageWindowMs(benign, 'benignFailedMaxAgeMs') },
+    batchSize: boundedInteger(config.batchSize ?? d.batchSize, 'batchSize', d.maxBatchSize),
+    sliceSize: boundedInteger(config.sliceSize ?? d.sliceSize, 'sliceSize', d.maxSliceSize),
     holdBudgetMs, rescanIntervalMs, clockGuardFactor,
   };
 }
 
-let defaultLogger: ShareRetentionLogger | undefined;
-function logger(): ShareRetentionLogger {
-  return defaultLogger ??= (() => {
-    const log = new Logger('AsyncPromoteRetention');
-    return { info: (message: string) => log.info(createOperationContext('system'), message), warn: (message: string) => log.warn(createOperationContext('system'), message) };
-  })();
-}
+const logger = lazyRetentionLogger('AsyncPromoteRetention');
 
 const termString = (term: string | undefined): string | undefined => { try { const v: unknown = JSON.parse(String(term)); return typeof v === 'string' ? v : undefined; } catch { return undefined; } };
-const message = (cause: unknown): string => String((cause as Error)?.message ?? cause).slice(0, 200);
-const sum = <K extends string>(into: Record<K, number>, from: Readonly<Partial<Record<K, number>>>): void => { for (const key of Object.keys(from) as K[]) into[key] += from[key] ?? 0; };
-
-/** Batches of one store and graph never overlap, even across two sweep objects: their cursors and the lock holds would otherwise interleave. */
-const activeBatches = new WeakMap<TripleStore, Set<string>>();
 
 interface PassTally {
   /**
@@ -288,15 +248,14 @@ class ShareRetentionImpl implements ShareRetention {
   private readonly clock: () => number;
   private readonly mono: () => number;
   private readonly log: ShareRetentionLogger | undefined;
-  private sliceNow: number;
-  /** Wall clock of the last tick that ran, and its wall-minus-monotonic offset: the baseline of the clock guard. Only a tick that RAN moves it. */
-  private lastStart: number | undefined;
-  private lastOffset: number | undefined;
+  private readonly budget: HoldBudget;
+  /** The clock guard's baseline is the last tick that RAN: only such a tick moves it. */
+  private readonly guard: RetentionClockGuard;
   private pass = newPass(true);
   private lastCompletePass: ShareRetentionPassSummary | undefined;
   private readonly totals = {
     batches: 0, anomalies: 0, scanned: 0, holds: 0, holdBudgetExceeded: 0, maxHoldMs: 0,
-    skipped: Object.fromEntries(SKIPS.map(reason => [reason, 0])) as Record<ShareRetentionSkip, number>,
+    skipped: Object.fromEntries(RETENTION_SKIPS.map(reason => [reason, 0])) as Record<ShareRetentionSkip, number>,
     errors: { scan: 0, verify: 0, delete: 0 },
     deleted: emptyClassCounts(), kept: emptyKeptCounts(),
   };
@@ -312,56 +271,35 @@ class ShareRetentionImpl implements ShareRetention {
     this.clock = config.now ?? (() => Date.now());
     this.mono = config.monotonicNow ?? (() => performance.now());
     this.log = config.logger;
-    this.sliceNow = this.cfg.sliceSize;
+    this.budget = new HoldBudget(this.cfg.sliceSize, this.cfg.holdBudgetMs);
+    this.guard = new RetentionClockGuard(this.cfg.intervalMs, this.cfg.clockGuardFactor);
   }
 
   counters(): ShareRetentionCounters {
     const t = this.totals;
     return {
       mode: this.mode, batches: t.batches, skipped: { ...t.skipped }, errors: { ...t.errors }, anomalies: t.anomalies, scanned: t.scanned,
-      deleted: { ...t.deleted }, kept: { ...t.kept }, holds: t.holds, holdBudgetExceeded: t.holdBudgetExceeded, maxHoldMs: t.maxHoldMs, sliceSize: this.sliceNow,
+      deleted: { ...t.deleted }, kept: { ...t.kept }, holds: t.holds, holdBudgetExceeded: t.holdBudgetExceeded, maxHoldMs: t.maxHoldMs, sliceSize: this.budget.sliceNow,
       ...(this.lastCompletePass ? { lastCompletePass: this.lastCompletePass } : {}),
     };
   }
 
   async runBatch(): Promise<ShareRetentionBatchResult> {
     if (this.mode === 'off') return this.skip('off');
-    const running = activeBatches.get(this.config.store) ?? activeBatches.set(this.config.store, new Set()).get(this.config.store)!;
-    if (running.has(this.cfg.graphUri)) return this.skip('overlap');
-    running.add(this.cfg.graphUri);
+    const release = claimBatch(this.config.store, this.cfg.graphUri);
+    if (release === undefined) return this.skip('overlap');
     try {
       const now = this.clock(), mono = this.mono();
-      const verdict = this.clockVerdict(now, mono);
+      const verdict = this.guard.verdict(now, mono);
       if (verdict) {
         this.warn(`async_promote_retention skipped=${verdict} mode=${this.mode} now=${now}`);
         return this.skip(verdict);                                               // a skipped tick is not a sweep start: it never moves the baseline
       }
-      this.lastStart = now; this.lastOffset = now - mono;
+      this.guard.started(now, mono);
       return await this.batch(now);
     } finally {
-      running.delete(this.cfg.graphUri);
+      release();
     }
-  }
-
-  // ---- clock guard ----------------------------------------------------------------------------------------------------------------------
-
-  /**
-   * The wall clock decides which jobs are old enough, so a clock that stepped back or leapt forward must not be trusted for a tick. Skip when
-   *  - `now` is earlier than the start of the last tick that ran (`clock_backwards`), or
-   *  - the wall clock has run ahead of the monotonic clock by more than `clockGuardFactor` intervals since the last tick that ran (`clock_jump`): wall minus monotonic
-   *    is constant while the clock is sound, so a late timer or a slow batch (both advance the two clocks alike) never trips it.
-   * Only a tick that ran moves the baseline: a skipped tick is not a sweep start. A far-future clock therefore stays skipped on every later tick until it comes
-   * back, and a clock stepped back resumes once it has caught up with the last sweep start (or when it returns). The price is that a real clock step forward (NTP,
-   * a resumed VM) keeps retention off until the process restarts: the warn line and the `skipped.clock_jump` counter make that visible, and the rows just stay
-   * (when in doubt, keep). The guard bounds a STEP; it is no defence against a clock that runs fast tick after tick, and the first tick of a process has no baseline
-   * to compare with (a caller that starts the timer should do so once the host clock is synchronised).
-   */
-  private clockVerdict(now: number, mono: number): ShareRetentionSkip | undefined {
-    if (!Number.isFinite(now) || !Number.isFinite(mono)) return 'clock_invalid';
-    if (this.lastStart === undefined || this.lastOffset === undefined) return undefined;
-    if (now < this.lastStart) return 'clock_backwards';
-    if (now - mono - this.lastOffset > this.cfg.clockGuardFactor * this.cfg.intervalMs) return 'clock_jump';
-    return undefined;
   }
 
   private skip(reason: ShareRetentionSkip): ShareRetentionBatchResult {
@@ -401,7 +339,7 @@ class ShareRetentionImpl implements ShareRetention {
       else this.keep(b, c, 'unreadable', now);                                    // never interpolate an id the job-id grammar does not allow
     }
     while (pending.length > 0) {
-      const slice = pending.slice(0, this.sliceNow);
+      const slice = pending.slice(0, this.budget.sliceNow);
       try {
         const deferred = await this.hold(slice, b, now);
         pending = [...deferred, ...pending.slice(slice.length)];
@@ -466,7 +404,7 @@ class ShareRetentionImpl implements ShareRetention {
           let lastOpMs = 0;
           for (let i = 0; i < doomed.length; i++) {
             const d = doomed[i]!;
-            if (i > 0 && (this.mono() - startedAt) + lastOpMs > this.cfg.holdBudgetMs) { deferred.push(...doomed.slice(i).map(x => x.row)); break; }
+            if (i > 0 && this.budget.wouldExceed(this.mono() - startedAt, lastOpMs)) { deferred.push(...doomed.slice(i).map(x => x.row)); break; }
             if (!(d.entry.updatedAt <= now)) { this.keep(b, d.row, 'future_dated', now); continue; }   // the invariant, once more at the last line: never a row dated after now
             const opStartedAt = this.mono();
             admissions.invalidate(d.row.jobId);
@@ -499,10 +437,8 @@ class ShareRetentionImpl implements ShareRetention {
   private noteHold(b: BatchState, elapsedMs: number, sliceLength: number, fittedInBudget: number | undefined): void {
     b.holds += 1; this.totals.holds += 1;
     b.maxHoldMs = Math.max(b.maxHoldMs, elapsedMs); this.totals.maxHoldMs = Math.max(this.totals.maxHoldMs, elapsedMs);
-    if (elapsedMs > this.cfg.holdBudgetMs) { b.holdBudgetExceeded += 1; this.totals.holdBudgetExceeded += 1; }
-    if (fittedInBudget !== undefined) this.sliceNow = Math.max(1, Math.min(this.sliceNow, fittedInBudget));
-    else if (elapsedMs > this.cfg.holdBudgetMs) this.sliceNow = Math.max(1, Math.floor(this.sliceNow / 2));
-    else if (elapsedMs <= this.cfg.holdBudgetMs / 2 && sliceLength >= this.sliceNow && this.sliceNow < this.cfg.sliceSize) this.sliceNow += 1;
+    if (this.budget.exceeded(elapsedMs)) { b.holdBudgetExceeded += 1; this.totals.holdBudgetExceeded += 1; }
+    this.budget.adapt(elapsedMs, sliceLength, fittedInBudget);
   }
 
   // ---- result, counters, log ------------------------------------------------------------------------------------------------------------
