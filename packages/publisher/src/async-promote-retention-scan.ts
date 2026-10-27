@@ -1,29 +1,49 @@
 /**
  * The candidate scan of share-queue retention: query shapes, the keyset cursor, and the per-sweep scan state.
  *
- * SCAN PROGRESS (why a batch can never be starved by rows that cannot be deleted). The candidates of a batch come from a KEYSET CURSOR over the stored
- * `updatedAt` index triple, one cursor per scanned class (`succeeded`, and `failed` when the benign window is on): each scan reads the rows of its class
- * AFTER the cursor, oldest first (`ORDER BY ?updatedAt`), at most `batchSize` of them per call, judges them, and moves the cursor past every row it judged -
- * whatever the verdict. A row that cannot be deleted (fatal / retained `failed`, unreadable, unknown state, newer format, bound obligation, orphan index row, ...)
- * is therefore looked at ONCE per pass instead of in front of every later batch, so the number of such rows is irrelevant: a pass over M old rows takes
- * about ceil(M / batchSize) calls (a group of rows sharing one `updatedAt` that straddles a batch boundary is judged in the next call), every deletable row is
- * reached within it, and nothing is remembered per row (the state is a handful of numbers per class, whatever M is). When a scan
- * reaches the end of the old-enough region the cursor PARKS there: later calls only read the rows that have become old enough since (a range that is empty
- * most of the time), they do not walk the undeletable rows again. A class is re-walked from a rewound position only (a) from the oldest row kept for a TRANSIENT
- * reason (an in-process pending admission, a payload younger than its index triple), once the earliest moment it can change has passed (delete mode only: a
- * report pass never judges a row twice, so its would-delete tally needs no de-duplication), and (b) from the start every `rescanIntervalMs` (default one
- * hour) as a safety net for rows written behind the cursor (back-dated clocks, restores) - that restart begins a new pass. Many rows with ONE `updatedAt`
- * are walked in key order through a second cursor component (`tie`), so even a group larger than a batch is covered. The scan relies on the engine
- * honouring ORDER BY / LIMIT; the result is checked (sorted, after the cursor, within the cutoff) and a violation is reported in `anomalies` and never advances
- * the cursor (a batch then still deletes what it judges, but may starve exactly like an unordered scan: it is a tripwire for a non-conforming engine).
- * ONLY EXACT INTEGER TERMS ARE CANDIDATES. The cursor holds a JS number and the engine compares terms exactly, so a term a double cannot represent reads back as a
- * number the engine does not consider equal to it: `"100.0000000000000001"^^xsd:decimal` reads as 100, the tie walk at 100 does not return it (it is not equal to
- * 100) and the range scan `> 100` does (it is greater), so the cursor would never leave it. Both queries therefore select `xsd:integer` terms in [0, cutoff] (the queue
- * writes nothing else, and an integer in that range is exact in a double): the number the cursor holds IS the term. A subject whose `updatedAt` is anything else (a
- * decimal, a double, a plain literal, a negative number) is never a candidate: it is not judged, so it is kept.
- * One subject can still come back as SEVERAL rows: an engine that keeps two integer lexical forms of one value (`"100"`, `"0100"`) apart answers it once per term, and
- * both match. That is a conforming answer, not a reordering: the rows of a subject are collapsed to one judged row, a window of limit + 1 ROWS counts as full however few
- * subjects the repeats left in it, and the walk goes on after the last subject judged, so repeats cost calls and never stall.
+ * SCAN PROGRESS (why rows that cannot be deleted do not starve the rows that can). The candidates of a batch come from a KEYSET CURSOR over the stored `updatedAt`
+ * index triple, one cursor per scanned class (`succeeded`, and `failed` when the benign window is on): each scan reads the CANDIDATE rows of its class (next
+ * section) AFTER the cursor, oldest first (`ORDER BY ?updatedAt`), at most `batchSize` of them per call (the two classes share that budget), judges them, and
+ * moves the cursor past every row it judged - whatever the verdict. A row that cannot be deleted (fatal / retained `failed`, unreadable, unknown state, newer
+ * format, bound obligation, orphan index row, ...) is therefore looked at ONCE per pass instead of in front of every later batch. How many such rows there are
+ * decides only how many calls a pass takes - about ceil(M / batchSize) for M candidate rows, a group sharing one `updatedAt` that straddles a batch boundary
+ * being judged in the next call - and every deletable candidate is reached within it, provided the engine conforms (limit 2). Nothing is remembered per row: the
+ * state is a handful of numbers per class, whatever M is. When a scan reaches the end of the old-enough region the cursor PARKS there: later calls only read the
+ * rows that have become old enough since (a range that is empty most of the time), they do not walk the undeletable rows again. A class is re-walked from a
+ * rewound position only (a) from the oldest row kept for a TRANSIENT reason (an in-process pending admission, a payload younger than its index triple), once
+ * the earliest moment it can change has passed (delete mode only: a report pass never judges a row twice, so its would-delete tally needs no de-duplication),
+ * and (b) from the start every `rescanIntervalMs` (default one hour) as a safety net for rows written behind the cursor (back-dated clocks, restores) - that
+ * restart begins a new pass. Many rows with ONE `updatedAt` are walked in key order (`ORDER BY STR(?job)`, the subject IRI) through a second cursor component
+ * (`tie`), so even a group larger than a batch is covered.
+ *
+ * CANDIDATES. A subject is read only if the query itself says all of the following (both scan queries carry the same filters, so they select the same rows):
+ *  - it is an IRI under the queue's job prefix (`isIRI`, `STRSTARTS`). A blank node has no `STR`, so `ORDER BY STR(?job)` leaves its rows in engine order and the
+ *    key check of the tie walk rejects them: an anomaly on every call, the class never advances. An IRI outside the prefix is no job and could only be kept; an
+ *    ASCII one was harmless, but one that mixes astral and high BMP characters stalls the tie walk in the same way (limit 3);
+ *  - its stored `state` is the scanned class;
+ *  - its `updatedAt` is an `xsd:integer` term in [0, cutoff]. The cursor holds a JS number and the engine compares terms exactly, so a term a double cannot represent
+ *    reads back as a number the engine does not consider equal to it: `"100.0000000000000001"^^xsd:decimal` reads as 100, the tie walk at 100 does not return it (it
+ *    is not equal to 100) and the range scan `> 100` does (it is greater), so the cursor would never leave it. An integer in that range is exact in a double, so
+ *    the number the cursor holds IS the term (the queue writes nothing else).
+ * A subject that is none of these (a blank node, an IRI elsewhere, a decimal, a double, a plain literal, a negative number, an integer after the cutoff) is not a
+ * candidate: it is never read, judged, counted or deleted, so it is kept, and it stays in the graph until something else removes it.
+ *
+ * REPEATED ROWS. One subject can still come back as SEVERAL rows: an engine that keeps two integer lexical forms of one value (`"100"`, `"0100"`) apart answers it
+ * once per term, and both match. That is a conforming answer, not a reordering: the rows of a subject are collapsed to one judged row, a window of limit + 1 ROWS
+ * counts as full however few subjects the repeats left in it, and the walk goes on after the last subject judged, so repeats cost calls and never stall.
+ *
+ * DOCUMENTED LIMITS (each fails closed: the scan keeps what it cannot read, and no row is deleted on the strength of a bad answer).
+ *  1. A subject that is not a candidate (above) is never reclaimed by this sweep.
+ *  2. The scan relies on the engine honouring ORDER BY, LIMIT and FILTER. The result is checked (sorted, after the cursor, within the cutoff, at most limit + 1 rows)
+ *     and a violation is counted in `anomalies` and never moves a cursor: the call still deletes the rows it judged (each is verified under the lock first), the
+ *     pass that met it is never reported complete (its tally may count a re-judged row twice), and a batch may starve exactly like an unordered scan. It is a
+ *     tripwire for a non-conforming engine, not a recovery.
+ *  3. The key check of the tie walk compares ids as JavaScript strings, that is by UTF-16 code unit. An engine that orders by code point (Oxigraph does) answers in
+ *     another order exactly when two ids first differ at a supplementary-plane character against a BMP character at or above U+E000. The queue's ids are ASCII
+ *     (`isSafeJobId`), so only a foreign writer that stores such an id under the job prefix can cause it; the result is limit 2's: an anomaly on every call that
+ *     meets the pair, and the class does not advance past it. (Out-of-prefix IRIs are not read, so they cannot cause it.)
+ *  4. A subject whose index holds two DISTINCT integer `updatedAt` values (the queue never writes that) is a candidate at each of them: report mode judges it at
+ *     both, delete mode removes it at the first.
  *
  * The scan runs outside the queue lock, on the background lane (OT-RFC-73 §5.1 tagging table: it is not queue control work). It reads only the two stored
  * index triples; the payload is judged later, under the lock.
