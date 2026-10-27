@@ -16,7 +16,7 @@ vi.mock('@origintrail-official/dkg-agent', () => import('../../agent/src/index.j
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
 import { computeCanonicalGraphScopedAuthorSealDigestV1, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, StoreOperationTimeoutError, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
-import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, CuratorUnconfirmedError, PromoteAdmissionUncertainError,
+import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, CuratorUnconfirmedError, PromoteAdmissionUncertainError, PromoteStaleAdmissionError,
   computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, skolemizeKnowledgeAssetParts } from '@origintrail-official/dkg-publisher';
 import { createPromotionAgentForTest } from '../../agent/test/_helpers/promotion-agent.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
@@ -1162,7 +1162,7 @@ describe('durable synchronous share ownership', () => {
       expect(jobs).toHaveLength(1);
       expect(body).toMatchObject({ code: 'SHARE_ADMISSION_STALE', retryable: false });
       expect(lookup).toHaveBeenCalledTimes(1);
-      expect(lookup).toHaveBeenCalledWith(expect.objectContaining({ contextGraphId: CG, assertionName: NAME, agentAddress: jobs[0].request.agentAddress }));
+      expect(lookup).toHaveBeenCalledWith(expect.objectContaining({ contextGraphId: CG, assertionName: NAME, agentAddress: jobs[0].request.agentAddress, subGraphName: undefined }));
       expect(wide).not.toHaveBeenCalled();
       if (readable) expect(body).toMatchObject({ recoveryState: 'completed', recoveryJobId: jobs[0].jobId });
       else expect(body).not.toHaveProperty('recoveryJobId');
@@ -1534,4 +1534,61 @@ describe('durable synchronous share ownership', () => {
     await store.close();
   });
 
+});
+
+/**
+ * OT-RFC-73 P8a: the winner of a stale prepared admission is found under the selector's own uniqueness key. A selector names the sub-graph too, so a
+ * share into a sub-graph looks its owner up under that sub-graph and not under the context graph's default. A queue without the key-scoped lookup falls
+ * back to the context-graph listing. The queue here is a stand-in that records what the route asks of it, so each branch runs.
+ */
+describe('durable synchronous share: finding the winner of a stale admission', () => {
+  const SUB = 'sg-1', OPERATION = 'op-winner';
+  const ownerJob = (jobId: string, subGraphName: string | undefined, operationId = OPERATION) => ({
+    jobId, state: 'succeeded',
+    request: { contextGraphId: CG, assertionName: NAME, agentAddress: AUTHOR, subGraphName, recoveryBinding: { intent: { operationId } } },
+  });
+  function lostRace(queue: Record<string, unknown>) {
+    daemonState.promoteWorkerAvailable = true;
+    const prepared = { agentAddress: AUTHOR, recoveryBinding: { intent: { operationId: 'op-stale' } } };
+    const agent = {
+      promoteQueue: { enqueueAndClaim: vi.fn(), effectiveLeaseMs: 60_000, getStatus: vi.fn(async (jobId: string) => (jobId === 'winner' ? ownerJob('winner', SUB) : null)), ...queue },
+      assertion: { prepareDurableShare: vi.fn(async () => prepared), admitDurableShare: vi.fn(async () => { throw new PromoteStaleAdmissionError(OPERATION); }) },
+    };
+    return agent as unknown as Parameters<typeof durableSynchronousShare>[0] & { promoteQueue: Record<string, ReturnType<typeof vi.fn>> };
+  }
+
+  it('reads the owner of a share into a sub-graph under that sub-graph, and picks the job of the winning operation in it', async () => {
+    const listForSelector = vi.fn(async () => [ownerJob('decoy-default', undefined), ownerJob('decoy-operation', SUB, 'op-other'), ownerJob('winner', SUB)]);
+    const list = vi.fn(async () => []);
+    const agent = lostRace({ listForSelector, list });
+    const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, subGraphName: SUB }).catch(e => e);
+    expect(failure).toBeInstanceOf(DurableShareFailure);
+    expect(failure.observation).toEqual({ state: 'completed', jobId: 'winner' });
+    expect(listForSelector).toHaveBeenCalledTimes(1);
+    expect(listForSelector).toHaveBeenCalledWith({ contextGraphId: CG, assertionName: NAME, agentAddress: AUTHOR, subGraphName: SUB });
+    expect(list).not.toHaveBeenCalled();
+  });
+
+  it('does not take a winner stored under the default sub-graph for the owner of a sub-graph share', async () => {
+    const agent = lostRace({ listForSelector: vi.fn(async () => [ownerJob('winner', undefined)]) });
+    const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, subGraphName: SUB }).catch(e => e);
+    expect(failure).toBeInstanceOf(PromoteStaleAdmissionError);
+  });
+
+  it('falls back to the context-graph listing for a queue without the key-scoped lookup, and still matches on the sub-graph', async () => {
+    const list = vi.fn(async () => [ownerJob('decoy-default', undefined), ownerJob('winner', SUB)]);
+    const agent = lostRace({ list });
+    expect(agent.promoteQueue['listForSelector']).toBeUndefined();
+    const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, subGraphName: SUB }).catch(e => e);
+    expect(failure).toBeInstanceOf(DurableShareFailure);
+    expect(failure.observation).toEqual({ state: 'completed', jobId: 'winner' });
+    expect(list).toHaveBeenCalledTimes(1);
+    expect(list).toHaveBeenCalledWith({ contextGraphId: CG });
+  });
+
+  it.each(['listForSelector', 'list'])('reports the stale admission as it is when the owner cannot be read (%s)', async (reader) => {
+    const agent = lostRace({ [reader]: vi.fn(async () => { throw new Error('queue observation unavailable'); }) });
+    const failure = await durableSynchronousShare(agent, CG, NAME, { agentAddress: AUTHOR, subGraphName: SUB }).catch(e => e);
+    expect(failure).toBeInstanceOf(PromoteStaleAdmissionError);
+  });
 });
