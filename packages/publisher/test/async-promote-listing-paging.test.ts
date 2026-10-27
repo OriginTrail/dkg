@@ -18,7 +18,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
-import { PromoteListRequestError } from '../src/promote-list-cursor.js';
+import { PromoteListRequestError, PromoteListStoredRowError } from '../src/promote-list-cursor.js';
 import {
   PromoteJobConflictError, type AsyncPromoteQueueConfig, type PromoteJob, type PromoteJobPage, type PromoteJobState, type PromoteListFilter,
 } from '../src/async-promote-queue-types.js';
@@ -141,6 +141,8 @@ describe('the keyset page, static', () => {
       if (pages instanceof Error) {
         // A page made only of rows that are not share jobs has no place to continue from, and the walk says so instead of looping.
         expect(pageSize).toBe(1);
+        expect(pages).toBeInstanceOf(PromoteListStoredRowError);
+        expect(pages).toMatchObject({ name: 'PromoteListStoredRowError', code: 'unresumable_page' });
         expect(pages.message).toMatch(/held no share job to continue from/);
       } else expect(walked(pages as PromoteJobPage[]), `page size ${pageSize}`).toEqual(['a', 'b', 'c']);
     }
@@ -265,7 +267,9 @@ describe('the page queries', () => {
   it('fails closed when a store returns the keys in another order, or ignores the cursor, instead of skipping or repeating a job', async () => {
     const reverse = tapStore(openStore(), { after: (call, result) => (call.source === 'publisher.asyncPromote.list' && result.type === 'bindings' ? { ...result, bindings: [...result.bindings].reverse() } : result) });
     await seedShareRows(reverse.store, rows.slice(0, 6));
-    await expect(queueOver(reverse.store).queue.listPage({}, { pageSize: 5 })).rejects.toThrow(/out of order/);
+    const reversed = await queueOver(reverse.store).queue.listPage({}, { pageSize: 5 }).catch((error: unknown) => error);
+    expect(reversed).toBeInstanceOf(PromoteListStoredRowError);
+    expect(reversed).toMatchObject({ code: 'unordered_page', message: expect.stringMatching(/^Share job listing: .*out of order/) });
 
     let firstKeys: unknown;
     const stuck = tapStore(openStore(), { after: (call, result) => {
@@ -276,7 +280,9 @@ describe('the page queries', () => {
     await seedShareRows(stuck.store, rows.slice(0, 6));
     const { queue } = queueOver(stuck.store);
     const first = await queue.listPage({}, { pageSize: 2 });
-    await expect(queue.listPage({}, { pageSize: 2, cursor: first.nextCursor })).rejects.toThrow(/out of order or at\/before the cursor/);
+    const ignored = await queue.listPage({}, { pageSize: 2, cursor: first.nextCursor }).catch((error: unknown) => error);
+    expect(ignored).toBeInstanceOf(PromoteListStoredRowError);
+    expect(ignored).toMatchObject({ code: 'unordered_page', message: expect.stringMatching(/out of order or at\/before the cursor/) });
   });
 });
 
@@ -318,7 +324,9 @@ describe('a record with two state triples is listed once (corruption only; the q
       return { ...result, bindings: [second!, first!, ...rest] };
     } });
     await seedShareRows(reorder.store, specs);
-    await expect(queueOver(reorder.store).queue.listPage({}, { pageSize: 4 })).rejects.toThrow(/out of order or at\/before the cursor/);
+    await expect(queueOver(reorder.store).queue.listPage({}, { pageSize: 4 })).rejects.toMatchObject({
+      name: 'PromoteListStoredRowError', code: 'unordered_page', message: expect.stringMatching(/out of order or at\/before the cursor/),
+    });
   });
 });
 
@@ -592,6 +600,8 @@ describe('the complete listing releases the mutex between its key reads and its 
     const failure = await queue.listPage({}, { pageSize: 1 }).catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(Error);
     expect(failure).not.toBeInstanceOf(PromoteListRequestError);
+    expect(failure).toBeInstanceOf(PromoteListStoredRowError);
+    expect(failure).toMatchObject({ code: 'unreadable_row' });
     expect((failure as Error).message).toMatch(/cannot be encoded as a cursor/);
     // A page that does not end on it, and the complete listing (which never encodes a cursor), are unaffected.
     expect(ids((await queue.listPage({}, { pageSize: 2 })).jobs)).toEqual(['neg', 'later']);
