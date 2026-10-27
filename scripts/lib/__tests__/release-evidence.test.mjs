@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs';
+import path from 'node:path';
+import { prepareReleaseEvidence } from '../release-evidence.mjs';
 import { fixture } from './release-evidence-fixture.mjs';
 test('complete evidence binds package bytes, source, harness and authenticated nightly', t => {
   assert.equal(fixture(t).verify().outcome, 'PASS');
@@ -157,5 +160,64 @@ for (const [field, reason] of [['dkgCommit', /step tested a different product/],
     f.state.steps['overlap:share-publish'][field] = 'f'.repeat(40);
     f.decision.harness.attempts[0].receipt = f.write('suite.json', f.state);
     assert.throws(f.verify, reason);
+  });
+}
+
+test('qualification parses the same artifact bytes that passed the digest check', t => {
+  const f = fixture(t), passing = Buffer.from(JSON.stringify(f.nightly));
+  f.nightly.status = 'failed';
+  const failed = Buffer.from(JSON.stringify(f.nightly));
+  f.decision.nightly.receipt = f.write('nightly.json', f.nightly);
+  f.options.readNightly = () => failed;
+  const read = fs.readFileSync, artifact = path.join(path.dirname(f.options.evidenceFile), 'nightly.json');
+  let reads = 0;
+  t.mock.method(fs, 'readFileSync', (file, ...options) => {
+    if (String(file) === artifact && ++reads > 1) {
+      return options[0] === 'utf8' ? passing.toString('utf8') : passing;
+    }
+    return read(file, ...options);
+  });
+  assert.throws(f.verify, /nightly receipt did not pass/);
+  assert.equal(reads, 1);
+});
+
+for (const [name, damage] of [
+  ['missing ci', d => { delete d.ci; }],
+  ['null ci', d => { d.ci = null; }],
+  ['bad run ID', d => { d.ci.runId = '../other'; }],
+  ['bad attempt', d => { d.ci.attempt = 0; }],
+  ['unsafe attempt', d => { d.ci.attempt = Number.MAX_SAFE_INTEGER + 1; }],
+  ['missing nightly', d => { delete d.nightly; }],
+  ['missing nightly receipt', d => { delete d.nightly.receipt; }],
+  ['unsafe receipt path', d => { d.nightly.receipt.file = '../outside.json'; }],
+  ['bad receipt hash', d => { d.nightly.receipt.sha256 = 'bad'; }],
+  ['non-string receipt hash', d => { d.nightly.receipt.sha256 = 12; }],
+  ['missing harness', d => { delete d.harness; }],
+  ['non-array attempts', d => { d.harness.attempts = {}; }],
+  ['null attempt', d => { d.harness.attempts = [null]; }],
+  ['missing attempt receipt', d => { delete d.harness.attempts[0].receipt; }],
+  ['non-array failures', d => { d.priorCiFailures = {}; }],
+  ['null failed run', d => { d.priorCiFailures = [null]; }],
+]) test(`malformed decision fails before remote acquisition: ${name}`, t => {
+  const f = fixture(t); damage(f.decision);
+  let calls = 0;
+  for (const key of ['readRun', 'readRunAttempts', 'readNightly']) f.options[key] = () => { calls++; assert.fail('remote acquisition'); };
+  assert.throws(f.verify, { name: 'AssertionError' });
+  assert.equal(calls, 0);
+});
+for (const file of ['decision.json', 'nightly.json', 'suite.json']) {
+  test(`local integrity check rejects changed ${file} without remote acquisition`, t => {
+    const f = fixture(t); f.verify();
+    let calls = 0;
+    for (const key of ['readRun', 'readRunAttempts', 'readNightly']) {
+      const original = f.options[key];
+      f.options[key] = (...args) => { calls++; return original(...args); };
+    }
+    const prepared = prepareReleaseEvidence(f.options);
+    assert.equal(prepared.result.outcome, 'PASS');
+    calls = 0; prepared.recheckLocalIntegrity(); assert.equal(calls, 0);
+    f.write(file, {});
+    assert.throws(prepared.recheckLocalIntegrity, /changed/);
+    assert.equal(calls, 0);
   });
 }

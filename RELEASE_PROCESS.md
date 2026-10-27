@@ -230,6 +230,8 @@ pnpm release:verify-evidence --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.
   --evidence "$EVIDENCE/decision.json"
 ```
 
+Promotion completes fresh authenticated CI history and artifact acquisition before asking for an OTP. Immediately after the prompt, it rechecks the installed-package certificate, decision bytes and every local evidence receipt against that qualified snapshot before the first registry write. This local check performs no GitHub requests; changed evidence requires a new qualification. CI history is qualified as of the pre-prompt acquisition, not continuously monitored while the maintainer enters a code.
+
 The version-1 decision has these fields (full object IDs and SHA-256 file hashes
 are required; placeholders below are explanatory and cannot certify):
 

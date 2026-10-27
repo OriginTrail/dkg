@@ -49,11 +49,57 @@ function verifyHarness(state, candidate, harness) {
   for (const name of HARNESS_SCENARIOS) assert.equal(state.steps['functional:six'].scenarios?.[name]?.outcome,
     'PASS', `missing/failed scenario: ${name}`);
 }
+function object(value, label) {
+  assert.ok(value && typeof value === 'object' && !Array.isArray(value), `${label} must be an object`);
+}
+function runDescriptor(value, label) {
+  object(value, label);
+  assert.ok((typeof value.runId === 'string' && /^[1-9]\d*$/.test(value.runId))
+    || (Number.isSafeInteger(value.runId) && value.runId > 0), `${label} requires a positive run ID`);
+  assert.ok(Number.isSafeInteger(value.attempt) && value.attempt > 0, `${label} requires a positive run attempt`);
+}
+function receiptDescriptor(value, label) {
+  object(value, label);
+  assert.ok(typeof value.sha256 === 'string' && /^[a-f0-9]{64}$/.test(value.sha256), `${label} requires an artifact digest`);
+  assert.ok(typeof value.file === 'string' && value.file && !value.file.includes('\\')
+    && !value.file.startsWith('/') && value.file.split('/').every(part => part && part !== '.' && part !== '..'),
+  `${label} requires a safe relative artifact path`);
+}
+function validateDecisionShape(decision) {
+  object(decision, 'release decision');
+  runDescriptor(decision.ci, 'ci');
+  runDescriptor(decision.nightly, 'nightly');
+  receiptDescriptor(decision.nightly.receipt, 'nightly receipt');
+  object(decision.harness, 'harness');
+  assert.ok(Array.isArray(decision.harness.attempts) && decision.harness.attempts.length, 'missing harness attempts');
+  const ids = new Set();
+  for (const attempt of decision.harness.attempts) {
+    object(attempt, 'harness attempt');
+    assert.ok(typeof attempt.id === 'string' && attempt.id && !ids.has(attempt.id), 'missing/duplicate attempt');
+    ids.add(attempt.id);
+    receiptDescriptor(attempt.receipt, 'harness receipt');
+    if (attempt.resolution !== undefined) {
+      object(attempt.resolution, 'harness resolution');
+      for (const field of ['classification', 'issue', 'supersededBy'])
+        assert.ok(typeof attempt.resolution[field] === 'string' && attempt.resolution[field], `missing harness resolution ${field}`);
+    }
+  }
+  assert.ok(Array.isArray(decision.priorCiFailures), 'prior CI failure inventory is required (may be empty)');
+  for (const failure of decision.priorCiFailures) {
+    runDescriptor(failure, 'prior CI failure');
+    assert.ok(typeof failure.classification === 'string', 'CI failure lacks classification');
+    assert.ok(typeof failure.issue === 'string', 'CI failure needs an owning issue');
+    runDescriptor(failure.supersededBy, 'replacement CI');
+  }
+  assert.equal(new Set(decision.priorCiFailures.map(row => `${row.runId}/${row.attempt}`)).size,
+    decision.priorCiFailures.length, 'duplicate prior CI failure');
+}
 export function validateReleaseDecision(decision, { expected, manifest, tree }) {
+  validateDecisionShape(decision);
   assert.equal(decision.schemaVersion, 1, 'release decision schema');
   assert.deepEqual(decision.candidate, { commit: expected.commit, tree: tree, version: expected.version,
     sourceInputsDigest: expected.sourceInputsDigest, packageSetDigest: manifest.packageSetDigest }, 'stale candidate/package identity');
-  assert.match(decision.harness?.commit ?? '', /^[a-f0-9]{40}$/, 'full harness commit required');
+  assert.ok(typeof decision.harness.commit === 'string' && /^[a-f0-9]{40}$/.test(decision.harness.commit), 'full harness commit required');
   assert.equal(decision.harness.profile, HARNESS_PROFILE, 'wrong harness profile');
 }
 function qualifyNightly({ decision, expected, runs, nightly, authenticatedNightlyDigest }) {
@@ -76,11 +122,7 @@ function qualifyHarnessHistory({ decision, harnessReceipts }) {
   // Every recorded attempt is retained. A superseding attempt must be later,
   // complete, and bound to the same candidate and harness; classification alone
   // cannot dismiss a failed run. This is not a claim of exhaustive external history.
-  assert.ok(Array.isArray(decision.harness.attempts) && decision.harness.attempts.length, 'missing harness attempts');
-  const ids = new Set();
   const attempts = decision.harness.attempts.map((attempt, index) => {
-    assert.ok(typeof attempt.id === 'string' && attempt.id && !ids.has(attempt.id), 'missing/duplicate attempt');
-    ids.add(attempt.id);
     const state = harnessReceipts[index];
     let validationError = null;
     try { verifyHarness(state, decision.candidate, decision.harness); } catch (error) {
@@ -102,11 +144,9 @@ function qualifyHarnessHistory({ decision, harnessReceipts }) {
   }
 }
 function qualifyCiHistory({ decision, expected, runs, history }) {
-  assert.ok(Array.isArray(decision.priorCiFailures), 'prior CI failure inventory is required (may be empty)');
   const historicalFailures = history.filter(isFailedRun);
   for (const run of historicalFailures) assert.ok(decision.priorCiFailures.some(row => String(row.runId) === String(run.id)
     && row.attempt === run.run_attempt), `omitted failed CI attempt: ${run.id}/${run.run_attempt}`);
-  assert.equal(new Set(decision.priorCiFailures.map(row => `${row.runId}/${row.attempt}`)).size, decision.priorCiFailures.length, 'duplicate prior CI failure');
   for (const failure of decision.priorCiFailures) {
     const actual = runs.get(`${failure.runId}/${failure.attempt}`);
     validateRunIdentity(actual, failure, expected.commit);

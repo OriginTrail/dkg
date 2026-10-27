@@ -18,7 +18,7 @@ export function releaseGitFixture(expected) {
   ]);
   // Publication-unit fixtures isolate registry/tag behavior. The decision verifier
   // and its CLI requirement have independent integration and refusal tests.
-  return { tag, evidenceFile: 'fixture-decision.json', verifyEvidence: () => ({ outcome: 'PASS' }), gitRunner: (command, args) => {
+  return { tag, evidenceFile: 'fixture-decision.json', prepareEvidence: () => ({ recheckLocalIntegrity: () => {} }), gitRunner: (command, args) => {
     assert.equal(command, 'git');
     assert.ok(responses.has(args.join(' ')), `unexpected git operation: ${args.join(' ')}`);
     return responses.get(args.join(' '));

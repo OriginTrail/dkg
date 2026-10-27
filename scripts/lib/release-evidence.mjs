@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { fileIdentity, readJson, relativeFile, hash } from './package-certification/bundle.mjs';
+import { relativeFile, hash } from './package-certification/bundle.mjs';
 import { validateReleaseDecision, qualifyReleaseEvidence } from './release-evidence-qualification.mjs';
 export { HARNESS_PROFILE, HARNESS_STEPS, HARNESS_SCENARIOS } from './release-evidence-qualification.mjs';
 export function githubRun(runId, attempt) {
@@ -38,29 +38,28 @@ export function githubNightlyReceipt(runId, attempt) {
     return fs.readFileSync(path.join(dir, 'nightly-profile-summary.json'));
   } finally { fs.rmSync(dir, { recursive: true, force: true }); }
 }
-function artifact(root, descriptor) {
-  assert.match(descriptor?.sha256 ?? '', /^[a-f0-9]{64}$/, 'missing artifact digest');
+function artifactBytes(root, descriptor) {
   const file = relativeFile(root, descriptor.file);
-  assert.equal(fileIdentity(file).sha256, descriptor.sha256, `changed evidence: ${descriptor.file}`);
-  return readJson(file);
+  const bytes = fs.readFileSync(file);
+  assert.equal(hash(bytes), descriptor.sha256, `changed evidence: ${descriptor.file}`);
+  return bytes;
 }
 function acquireEvidence({ decision, root, expected, readRun, readRunAttempts, readNightly, decisionSha256 }) {
   const history = readRunAttempts(expected.commit);
   const runs = new Map(history.map(run => [`${run.id}/${run.run_attempt}`, run]));
   const descriptors = [decision.ci, decision.nightly,
-    ...(Array.isArray(decision.priorCiFailures) ? decision.priorCiFailures : [])];
+    ...decision.priorCiFailures];
   for (const descriptor of descriptors) {
     const key = `${descriptor.runId}/${descriptor.attempt}`;
     if (!runs.has(key)) runs.set(key, readRun(descriptor.runId, descriptor.attempt));
   }
-  const nightly = artifact(root, decision.nightly.receipt);
+  const nightly = JSON.parse(artifactBytes(root, decision.nightly.receipt).toString('utf8'));
   const authenticatedNightlyDigest = hash(readNightly(decision.nightly.runId, decision.nightly.attempt));
-  const harnessReceipts = Array.isArray(decision.harness.attempts)
-    ? decision.harness.attempts.map(attempt => artifact(root, attempt.receipt)) : [];
+  const harnessReceipts = decision.harness.attempts.map(attempt => JSON.parse(artifactBytes(root, attempt.receipt).toString('utf8')));
   return { decision, expected, history, runs, nightly, authenticatedNightlyDigest, harnessReceipts, decisionSha256 };
 }
 
-export function verifyReleaseEvidence({ evidenceFile, expected, manifest, rootDir, readRun = githubRun,
+export function prepareReleaseEvidence({ evidenceFile, expected, manifest, rootDir, readRun = githubRun,
   readNightly = githubNightlyReceipt, readRunAttempts = githubRunAttempts,
   readTree = commit => execFileSync('git', ['rev-parse', `${commit}^{tree}`], { cwd: rootDir, encoding: 'utf8' }).trim(),
 }) {
@@ -69,5 +68,15 @@ export function verifyReleaseEvidence({ evidenceFile, expected, manifest, rootDi
   validateReleaseDecision(decision, { expected, manifest, tree: readTree(expected.commit) });
   const snapshot = acquireEvidence({ decision, root: path.dirname(evidenceFile), expected,
     readRun, readRunAttempts, readNightly, decisionSha256: hash(bytes) });
-  return qualifyReleaseEvidence(snapshot);
+  const result = qualifyReleaseEvidence(snapshot);
+  // This closure checks only local bytes captured by this qualification. It is
+  // safe after OTP entry: all GitHub acquisition completed before the prompt.
+  return { result, recheckLocalIntegrity() {
+    assert.equal(hash(fs.readFileSync(evidenceFile)), snapshot.decisionSha256, 'release decision changed after qualification');
+    artifactBytes(path.dirname(evidenceFile), decision.nightly.receipt);
+    for (const attempt of decision.harness.attempts) artifactBytes(path.dirname(evidenceFile), attempt.receipt);
+  } };
+}
+export function verifyReleaseEvidence(options) {
+  return prepareReleaseEvidence(options).result;
 }

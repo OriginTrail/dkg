@@ -291,7 +291,7 @@ test('promotion and direct stable publication cannot omit the decision or mutate
     const options = releaseOptions(f, { ...extra, evidenceFile: undefined, runner: () => assert.fail('mutated without decision') });
     await assert.rejects(preparedRelease(options), /decision file is required/);
     options.evidenceFile = 'decision.json';
-    options.verifyEvidence = () => { throw new Error('decision invalid'); };
+    options.prepareEvidence = () => { throw new Error('decision invalid'); };
     await assert.rejects(preparedRelease(options), /decision invalid/);
   }
 });
@@ -300,7 +300,7 @@ for (const dryRun of [false, true]) test(`evidence invalidated during registry a
   const f = fixture(t);
   let verified = 0, acquired = 0, mutations = 0, valid = true;
   const options = releaseOptions(f, { mode: 'promote', tags: ['mainnet'], dryRun, evidenceFile: 'decision.json',
-    verifyEvidence: () => { verified++; assert.ok(valid, 'qualification changed during acquisition'); },
+    prepareEvidence: () => { verified++; assert.ok(valid, 'qualification changed during acquisition'); },
     readTags: async () => ({}), askOtp: null, settle: 0,
     readDist: pkg => { acquired++; valid = false; return { integrity: pkg.integrity }; },
     runner: () => { mutations++; },
