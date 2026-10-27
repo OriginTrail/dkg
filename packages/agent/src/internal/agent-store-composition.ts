@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { asStoreRecoveryGenerationReader, type TripleStore } from '@origintrail-official/dkg-storage';
+import { storageAckCopiesDischargeUpdate, type StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import { createPublishedNamedKaVmLifecycleWriter } from '../named-ka-vm-lifecycle.js';
 import { createMutationObservedStore } from './context-graph-cache-invalidating-store.js';
 import { createObservedStoreMutation } from './observed-store-mutation.js';
@@ -24,6 +25,15 @@ export function createAgentStoreComposition(
   const store = createMutationObservedStore(raw, executeMutation);
   return {
     store, heldContent,
+    // This canonical writer removes operation subjects only in the named SWM
+    // metadata graph. Observe that scope before dispatch, including failures.
+    storageAckCopyCleanupWriter: (async input => {
+      if (input.cleanedOperations.length === 0) return;
+      const update = storageAckCopiesDischargeUpdate(input);
+      if (!raw.update) throw new Error('Storage ACK cleanup requires store.update');
+      await executeMutation(() => raw.update!(update, { source: 'publisher.storageAckCopyCleanup', touchedGraphs: [input.metaGraph] }),
+        () => true, { removals: [{ graph: input.metaGraph }] }, 'update');
+    }) satisfies StorageAckCopyCleanupWriter,
     publishedLifecycleWriter: createPublishedNamedKaVmLifecycleWriter({
       updateStore: raw, fallbackStore: store, executeMutation,
     }),

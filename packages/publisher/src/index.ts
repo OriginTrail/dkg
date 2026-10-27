@@ -573,3 +573,5 @@ export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvi
 export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
 
 export { readShareQueueDepth, readLiftQueueDepth, readLiftJournalEntryCount, type AsyncQueueDepthOptions } from './async-queue-depth.js';
+
+export { storageAckCopiesDischargeUpdate, type StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';

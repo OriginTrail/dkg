@@ -1503,7 +1503,7 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    const { store: agentStore, publishedLifecycleWriter, ledgerTimestampWriter, heldContent } = createAgentStoreComposition(
+    const { store: agentStore, publishedLifecycleWriter, ledgerTimestampWriter, heldContent, storageAckCopyCleanupWriter } = createAgentStoreComposition(
       store, () => agentRef?.invalidateListContextGraphsCache(),
       createProjectionMutationObserver(() => agentRef?.contextGraphMetaProjection),
     );
@@ -1513,7 +1513,7 @@ export class DKGAgent extends DKGAgentBase {
       : createPublicSnapshotStore(config.dataDir, config.sharedMemoryPublicSnapshotStorage, agentStore));
 
     const publisher = new DKGPublisher({
-      store: agentStore,
+      store: agentStore, storageAckCopyCleanupWriter,
       promoteOwnershipReader: request => TripleStoreAsyncPromoteQueue.ownershipReader(
         agentStore, agentRef?._promoteQueueConfig)(request),
       chain,

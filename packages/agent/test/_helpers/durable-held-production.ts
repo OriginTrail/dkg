@@ -14,14 +14,20 @@ const agents: DKGAgent[] = [];
 export async function stopHeldProductionAgents() { for (const agent of agents.splice(0)) await agent.stop(); }
 export function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
 
-export async function createHeldProductionHarness(options: { unbound?: boolean; failBindingSave?: boolean } = {}) {
+export async function createHeldProductionHarness(options: { finalizedCleanup?: boolean; unbound?: boolean; failBindingSave?: boolean } = {}) {
   const chain = new MockChainAdapter('hardhat:31337');
   const savedBindings: string[] = [];
   const save = vi.fn(async (record: { onChainId?: string }) => {
     if (record.onChainId && options.failBindingSave) throw new Error('subscription persistence failed');
     if (record.onChainId) savedBindings.push(record.onChainId);
   });
+  const markPublished = vi.fn(async () => {});
   const agent = await DKGAgent.create({ name: 'HeldProduction', listenHost: '127.0.0.1', chainAdapter: chain,
+    ...(options.finalizedCleanup ? { publicSnapshotStore: {
+      putSnapshot: async () => { throw new Error('no snapshot writes expected'); }, getSnapshot: async () => null,
+      lifecycle: { finalizedCleanupEnabled: true as const, operationLease: async () => () => {},
+        snapshotExists: async () => true, markPublished },
+    } } : {}),
     contextGraphSubscriptionStore: { loadAll: async () => [], save, delete: async () => {} },
     rfc64CatalogActivation: { enabled: true, rollout: { killSwitch: true, defaultMode: 'legacy', contextGraphModes: { [CG]: 'legacy' } } } });
   agents.push(agent);
@@ -62,6 +68,7 @@ export async function createHeldProductionHarness(options: { unbound?: boolean; 
       row(head, 'contentScopeVersion', integer(GRAPH_KA_CONTENT_SCOPE_VERSION)), row(head, 'kaUal', ual),
       row(head, 'assertionVersion', integer(version)), row(head, 'assertionGraph', swmGraph),
       row(head, 'shareOperationId', '"held-twin"'),
+      { subject: operation, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: ns + 'WorkspaceOperation', graph: swmMeta },
       row(operation, 'shareOperationId', '"held-twin"'), row(operation, 'kaUal', ual),
       row(operation, 'assertionVersion', integer(version)),
       row(operation, 'publicQuadsDigest', `"${workspacePublicQuadsDigest(data)}"`),
@@ -94,7 +101,7 @@ export async function createHeldProductionHarness(options: { unbound?: boolean; 
   const run = () => agent.syncDurableRecoveryContextGraph(CG, {
     candidatePeerIds: [PEER], restrictToCandidatePeerIds: true, candidatesAreSyncCapable: true,
   });
-  return { agent, internal, chain, savedBindings, persist, subscription, ual, graph, data, meta, swmGraph, retire,
+  return { agent, internal, chain, markPublished, savedBindings, persist, subscription, ual, graph, data, meta, swmGraph, retire,
     seedSwmTwin, entered, release, run, dataRequests: () => dataRequests,
     pause: (at: 'chain' | 'worker') => { phase = at; }, fetchMissingData: () => { fetchData = true; } };
 }

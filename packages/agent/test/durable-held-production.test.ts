@@ -92,3 +92,16 @@ it.each(['chain', 'worker'].flatMap(phase =>
     if (change === 'drop-graph' || change === 'remove-subgraph') expect(await internal.store.countQuads(graph)).toBe(0);
   }, 15_000,
 );
+
+it('settles held VM recovery on the first run with finalized snapshot cleanup enabled', async () => {
+  const h = await createHeldProductionHarness({ finalizedCleanup: true });
+  await h.seedSwmTwin('1');
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(h.dataRequests()).toBe(0);
+  expect(h.retire).toHaveBeenCalledOnce();
+  expect(await h.internal.store.countQuads(h.swmGraph)).toBe(0);
+  expect(h.markPublished).toHaveBeenCalled();
+  expect(h.internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).toBe(true);
+}, 15_000);

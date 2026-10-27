@@ -416,6 +416,7 @@ export interface DurableRootPromotionAtomicCompanionResolver {
 }
 
 export interface DKGPublisherConfig {
+  storageAckCopyCleanupWriter?: import('./storage-ack-copy-cleanup.js').StorageAckCopyCleanupWriter;
   store: TripleStore;
   /** Trusted queue ownership scope, explicitly supplied by the composing agent. */
   promoteOwnershipReader?: PromoteOwnershipReader;
@@ -448,7 +449,6 @@ export interface DKGPublisherConfig {
   workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
   /** Encrypts private/agent-gated SWM gossip with the node's Sender Key epoch state. */
   workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
-  /** Optional out-of-Oxigraph store for immutable public SWM operation snapshots. */
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /**
    * OT-RFC-43 Option 1 — when present, the publisher allocates a deterministic
@@ -1094,7 +1094,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
-    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle, config.storageAckCopyCleanupWriter);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
