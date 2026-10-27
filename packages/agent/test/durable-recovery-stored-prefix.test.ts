@@ -293,7 +293,8 @@ it('preserves a verified prefix when a resumed round is cancelled during verific
   const cancelled = await core.round(checkpoints, PEER, {});
   expect(cancelled.result.complete).toBe(false);
   expect(core.writes).toHaveLength(writes);
-  expect(checkpoints.get(dataKey)).toMatchObject({ offset: data!.offset, manifestDigest: data!.manifestDigest, manifestPrefixDigest: data!.manifestPrefixDigest });
+  expect(checkpoints.get(dataKey)).toMatchObject({ offset: data!.offset, manifestDigest: data!.manifestDigest,
+    manifestPrefixDigest: data!.manifestPrefixDigest, responderSessionOffset: data!.responderSessionOffset });
   expect(checkpoints.get(dataKey)?.terminal).not.toBe(true);
   controller = undefined; cancel = false;
   expect((await core.round(checkpoints, PEER, {})).result.complete).toBe(true);

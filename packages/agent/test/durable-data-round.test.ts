@@ -296,8 +296,10 @@ describe('full-graph durable data round boundary', () => {
     expect(planned?.safeNextOffset).toBe(largeRows);
     expect(planned?.completedGraphCount).toBe(1);
 
+    // Fetch has retained the token without advancing its durable cursor.
+    expect(checkpointStore.get(first.checkpointKey)).toMatchObject({ offset: 0, responderSessionOffset: 0 });
     // The next round continues after the asset: the durable layer checkpoints its
-    // boundary and rewinds the held responder session to it.
+    // boundary and advances the held responder session to it.
     checkpointStore.setManifestBoundOffset(
       getSyncCheckpointKey(remotePeerId, CG_ID, false, 'data'), largeRows, DIGEST, Date.now(), PREFIX, false, largeRows,
     );
@@ -352,6 +354,46 @@ describe('full-graph durable data round boundary', () => {
     expect(responder.requests.at(-1)!.offset + responder.requests.at(-1)!.limit)
       .toBeLessThan(manifest.manifestRowCount);
   });
+
+  it.each(['complete', 'bounded', 'transport', 'abort', 'parse'] as const)(
+    'retains the verified raw cursor before settlement after %s fetch', async (ending) => {
+      const responder = syntheticResponder(syntheticManifest(6, 5));
+      const checkpointStore = new MemorySyncCheckpointStore();
+      const remotePeerId = `${PEER}-unsettled-${ending}`;
+      const key = getSyncCheckpointKey(remotePeerId, CG_ID, false, 'data');
+      checkpointStore.setManifestBoundOffset(key, 5, DIGEST, Date.now(), PREFIX);
+      checkpointStore.setResponderSession(key, 'stored-session', Date.now() + 60_000,
+        Date.now(), DIGEST, PREFIX, 7);
+      const controller = new AbortController();
+      let calls = 0;
+      const pending = fetchSyncPages(dataFetchParams(responder, {
+        remotePeerId, checkpointStore, manifestDigest: DIGEST,
+        manifestPrefixDigestAtOffset: () => PREFIX, syncPageSize: 5, signal: controller.signal,
+        shouldStopAfterPage: ending === 'bounded' ? () => true : undefined,
+        send: async (...args) => {
+          if (++calls === 2) {
+            if (ending === 'transport') throw new Error('stream reset');
+            if (ending === 'abort') { controller.abort(new Error('caller cancelled')); throw controller.signal.reason; }
+          }
+          return responder.send(...args);
+        },
+        parseAndFilter: async (text) => {
+          if (calls === 2 && ending === 'parse') throw new Error('invalid page');
+          return responder.parseAndFilter(text);
+        },
+      }));
+      if (ending === 'abort' || ending === 'parse') await expect(pending).rejects.toThrow();
+      else {
+        const result = await pending;
+        expect(result.resumedFromOffset).toBe(5);
+        expect(result.rawResumedFromOffset).toBe(7);
+        expect(result.rawNextOffset).toBeGreaterThan(7);
+        expect(result.completed).toBe(ending === 'complete');
+      }
+      expect(checkpointStore.get(key)).toMatchObject({ offset: 5, responderSessionOffset: 7,
+        manifestDigest: DIGEST, manifestPrefixDigest: PREFIX, responderSessionId: 'stored-session' });
+    },
+  );
 
   it('primes a fresh responder session to a proven boundary whose token is gone', async () => {
     const rowsPerGraph = 5;
