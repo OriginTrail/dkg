@@ -184,6 +184,7 @@ export default defineConfig({
       "test/changelog-requester.test.ts",
       "test/durable-sync-since-threading.test.ts",
       "test/durable-sync-budget.test.ts",
+      "test/durable-requester-fanout.test.ts",
       "test/durable-sync-graph-scoped-materialization.test.ts",
       "test/finalized-swm-twin-reconciliation.test.ts",
       "test/durable-sync-lifecycle-binding.test.ts",
