@@ -306,7 +306,7 @@ async_admission_usage interval_s=300 store_rejections=store/background/publisher
 | `preflight_flights` | cumulative | Write preflight probes started for a request that could share one: the probes the store was actually asked for. The second pass of a write that waited for its graph starts one too |
 | `preflight_joins` | cumulative | Requests that joined a probe already in flight instead of starting one |
 | `preflight_cache_hits`, `preflight_cache_stores` | cumulative | Requests served from the fast-accept result cache, and probes kept in it (one probe shared by several requests is kept once). Both stay `0` while the cache is off, which is the default |
-| `preflight_direct` | cumulative | Requests probed outright: coalescing is switched off, or the agent gives no identity to share by (including the two minutes after a policy write ended with an unknown outcome) |
+| `preflight_direct` | cumulative | Requests probed outright: coalescing is switched off, or the agent gives no identity to share by (including the unresolved-write window after a policy write ended with an unknown outcome: two minutes by default, the rest of the process when `DKG_WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS=0`; see [Write preflight coalescing](./write-preflight-coalescing.md#a-policy-write-whose-outcome-is-unknown)) |
 
 
 ### Write preflight coalescing

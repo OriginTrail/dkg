@@ -50,17 +50,43 @@ request arriving after the commit would be given its answer.
 So while such an outcome is unresolved, **nothing is shared**: every preflight
 probes the store itself, exactly as with coalescing off. A request is never
 joined to another probe, never served from the result cache and never leaves a
-result in it. This holds for two minutes after the outcome is reported (four
-times the 30 s store deadline, the longest bound any store adapter puts on work
-its caller gave up on); a further unknown outcome extends it. Sharing then
-resumes with a fresh generation, so no probe that began inside the window can be
-joined. A store that applies an abandoned write later than that is not covered. A write that is confirmed, or that provably changed
-nothing, never stops sharing. A subscription change is made in memory and has no
-unknown outcome.
+result in it. This holds for the **unresolved-write window** after the outcome is
+reported: two minutes (120000 ms) unless `DKG_WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS`
+says otherwise. A further unknown outcome extends it. Sharing then resumes with a
+fresh generation, so no probe that began inside the window can be joined. A write
+that is confirmed, or that provably changed nothing, never stops sharing. A
+subscription change is made in memory and has no unknown outcome.
 
 While the window is open the requests are counted as `preflight_direct`. A store
 that is slow enough to time out policy writes is slow for the probe reads too,
 so the cost is that of coalescing off, for a short time.
+
+#### The window is a policy, not a guarantee
+
+The window is the node's own setting for the write preflight. It is **not**
+derived from any store's deadline and does not change when a store's timeout
+settings change. No store promises when it stops working on a write that its
+caller gave up on: a read can be given a server-side deadline, but an insert or
+an update is sent without one, so nothing bounds how late an abandoned write may
+land. Two minutes is a best-effort estimate of that delay.
+
+**What can still be missed.** If the store applies an abandoned policy write
+*later* than the window, a request that arrives after the commit can still join a
+probe that began before it landed, and be given the policy as it was. This lasts
+for at most one probe's join lifetime after the commit, which is 10 seconds
+(a probe in flight that long is not joined, and the result cache counts its TTL,
+10 seconds at most, from the start of the probe). Probes that begin after the
+commit read the new policy. Requests that were already waiting on an older probe
+keep their answer in every case.
+
+**Strict mode.** An operator who needs a guarantee instead of an estimate sets
+`DKG_WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS=0`. After any policy write with an
+unknown outcome, sharing then stays off **for the rest of the process**: no join,
+no cache hit and no cache store, whenever the late commit lands. The cost is that
+from then on every preflight probes the store itself until the daemon is
+restarted. A write that is confirmed does not bring sharing back, and the
+ordinary rules apply until the first unknown outcome, so a node whose policy
+writes are all confirmed loses nothing.
 
 Some of the probe's reads are **not** watched: whether the graph exists
 (`contextGraphExists`), whether it holds content yet, the persisted subscription
@@ -85,19 +111,23 @@ each with the error it would have had, and the next request starts again.
 
 Set before the daemon starts; a change needs a restart. The daemon logs the
 effective setting once at start (`Write preflight coalescing: on, result cache:
-off`).
+off, unresolved-write window: 120000 ms`; `unresolved-write window: strict` for
+`0`).
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `DKG_WRITE_PREFLIGHT_COALESCING` | on | `0`, `false`, `no` or `off` turns coalescing off: every preflight probes, exactly as before. |
 | `DKG_WRITE_PREFLIGHT_CACHE` | off | `1`, `true`, `yes` or `on` keeps a fast-accepted probe for a short time (below). Needs coalescing. |
 | `DKG_WRITE_PREFLIGHT_CACHE_TTL_MS` | `2000` | How long the cache keeps it, 100 to 10000 ms. Used only when the cache is on. |
+| `DKG_WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS` | `120000` | How long sharing stays off after a policy write whose outcome is unknown, in whole milliseconds. `0` is **strict**: sharing stays off for the rest of the process after such a write. A best-effort window, not a guarantee of the store (see above). Read whether or not coalescing is on. |
 
 A value that is not recognized never turns a feature on by accident: a
 mistyped `DKG_WRITE_PREFLIGHT_COALESCING` leaves coalescing **off**, a mistyped
 `DKG_WRITE_PREFLIGHT_CACHE` leaves the cache off, and both are warned in the
 daemon log. A TTL outside its range is clamped, and one that is not a number
-falls back to the default, each with a warning.
+falls back to the default, each with a warning. A window that is not a whole
+number of milliseconds (`soon`, `-5`, `1.5`, `1e3`) falls back to 120000, with a
+warning: to be strict, write `0` exactly, and check the startup line.
 
 To roll back, set `DKG_WRITE_PREFLIGHT_COALESCING=0` and restart.
 
@@ -128,7 +158,7 @@ be stale in a way the daemon does not see:
   allowlist names an on-chain identity ID: it can change without any local write;
 - dropped by any change that would stop a probe from being joined (above), and
   by the TTL, which counts from the start of the probe;
-- neither read nor written while a policy write's outcome is unknown (above);
+- neither read nor written while a policy write's outcome is unknown (above), which with a strict window is for the rest of the process;
 - at most 256 entries, the oldest first.
 
 Enabling it needs a staleness review first (OT-RFC-73 decision D-10). What the

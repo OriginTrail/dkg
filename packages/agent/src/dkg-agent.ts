@@ -1502,7 +1502,7 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    const writePreflightGeneration = new WritePreflightGeneration();
+    const writePreflightGeneration = new WritePreflightGeneration({ unresolvedWindowMs: config.writePreflightUnresolvedWriteWindowMs });
     const executeMutation = createObservedStoreMutation(
       () => { agentRef?.invalidateListContextGraphsCache(); },
       withWritePreflightGeneration(createProjectionMutationObserver(() => agentRef?.contextGraphMetaProjection), writePreflightGeneration),

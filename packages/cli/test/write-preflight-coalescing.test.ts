@@ -22,6 +22,7 @@ import {
   WRITE_PREFLIGHT_CACHE_TTL_ENV,
   WRITE_PREFLIGHT_COALESCING_ENV,
   WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS,
+  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV,
   configureWritePreflightCoalescing,
   canProbeWritePreflight,
   getWritePreflightCoalescingConfig,
@@ -577,10 +578,14 @@ describe('the switches', () => {
     const messages: string[] = [];
     return { messages, logger: { warn: (message: string) => { messages.push(message); } } };
   };
+  // The unresolved-write window is two minutes unless the variable says otherwise; spelled out, not imported.
+  const DEFAULT_WINDOW_MS = 120_000;
+  const config = (overrides: Partial<ReturnType<typeof resolveWritePreflightCoalescingConfig>> = {}) =>
+    ({ coalescing: true, cacheTtlMs: 0, unresolvedWriteWindowMs: DEFAULT_WINDOW_MS, ...overrides });
 
   it('defaults to coalescing on and the cache off', () => {
-    expect(resolveWritePreflightCoalescingConfig({})).toEqual({ coalescing: true, cacheTtlMs: 0 });
-    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_COALESCING_ENV]: '  ' })).toEqual({ coalescing: true, cacheTtlMs: 0 });
+    expect(resolveWritePreflightCoalescingConfig({})).toEqual(config());
+    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_COALESCING_ENV]: '  ' })).toEqual(config());
   });
 
   it.each(['1', 'true', 'yes', 'on', 'ON'])('reads %s as on', (value) => {
@@ -589,13 +594,13 @@ describe('the switches', () => {
   });
 
   it.each(['0', 'false', 'no', 'off'])('reads %s as off', (value) => {
-    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_COALESCING_ENV]: value })).toEqual({ coalescing: false, cacheTtlMs: 0 });
-    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_CACHE_ENV]: value })).toEqual({ coalescing: true, cacheTtlMs: 0 });
+    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_COALESCING_ENV]: value })).toEqual(config({ coalescing: false }));
+    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_CACHE_ENV]: value })).toEqual(config());
   });
 
   it('turns a mistyped coalescing value off, with a warning, so a failed rollback never leaves it on', () => {
     const { messages, logger } = warnings();
-    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_COALESCING_ENV]: 'flase' }, logger)).toEqual({ coalescing: false, cacheTtlMs: 0 });
+    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_COALESCING_ENV]: 'flase' }, logger)).toEqual(config({ coalescing: false }));
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain(WRITE_PREFLIGHT_COALESCING_ENV);
     expect(messages[0]).toContain('"flase"');
@@ -603,7 +608,7 @@ describe('the switches', () => {
 
   it('keeps the cache off for a mistyped value, with a warning', () => {
     const { messages, logger } = warnings();
-    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_CACHE_ENV]: 'maybe' }, logger)).toEqual({ coalescing: true, cacheTtlMs: 0 });
+    expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_CACHE_ENV]: 'maybe' }, logger)).toEqual(config());
     expect(messages).toHaveLength(1);
     expect(messages[0]).toContain(WRITE_PREFLIGHT_CACHE_ENV);
   });
@@ -612,7 +617,7 @@ describe('the switches', () => {
     const { messages, logger } = warnings();
     expect(resolveWritePreflightCoalescingConfig({
       [WRITE_PREFLIGHT_COALESCING_ENV]: 'off', [WRITE_PREFLIGHT_CACHE_ENV]: 'on',
-    }, logger)).toEqual({ coalescing: false, cacheTtlMs: 0 });
+    }, logger)).toEqual(config({ coalescing: false }));
     expect(messages).toEqual([expect.stringContaining('ignored while write preflight coalescing is off')]);
   });
 
@@ -633,10 +638,89 @@ describe('the switches', () => {
     }
   });
 
+  describe('the unresolved-write window', () => {
+    const windowOf = (value: string | undefined, logger?: { warn(message: string): void }) =>
+      resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV]: value }, logger).unresolvedWriteWindowMs;
+
+    it('is exactly 120000 ms when the variable is unset or blank, without a warning', () => {
+      const { messages, logger } = warnings();
+      expect(windowOf(undefined, logger)).toBe(120_000);
+      expect(windowOf('', logger)).toBe(120_000);
+      expect(windowOf('   ', logger)).toBe(120_000);
+      expect(messages).toEqual([]);
+    });
+
+    it('is named for what it sets', () => {
+      expect(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV).toBe('DKG_WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS');
+    });
+
+    it.each([['1', 1], ['30000', 30_000], [' 45000 ', 45_000], ['120000', 120_000], ['3600000', 3_600_000]])(
+      'takes %j as %i ms, without a warning',
+      (value, expected) => {
+        const { messages, logger } = warnings();
+        expect(windowOf(value, logger)).toBe(expected);
+        expect(messages).toEqual([]);
+      },
+    );
+
+    it('reads 0 as strict, without a warning', () => {
+      const { messages, logger } = warnings();
+      expect(windowOf('0', logger)).toBe(0);
+      expect(windowOf('000', logger)).toBe(0);
+      expect(messages).toEqual([]);
+    });
+
+    it.each(['soon', '-5', '1.5', '1e3', '0x10', '12 s', 'NaN', '99999999999999999999'])(
+      'falls back to the default for %j, with one warning that names the variable',
+      (bad) => {
+        const { messages, logger } = warnings();
+        expect(windowOf(bad, logger)).toBe(120_000);
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV);
+        expect(messages[0]).toContain(JSON.stringify(bad));
+        expect(messages[0]).toContain('Using 120000');
+      },
+    );
+
+    it('is read whatever the coalescing and cache switches say, and changes neither', () => {
+      const env = { [WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV]: '0' };
+      expect(resolveWritePreflightCoalescingConfig(env)).toEqual(config({ unresolvedWriteWindowMs: 0 }));
+      expect(resolveWritePreflightCoalescingConfig({ ...env, [WRITE_PREFLIGHT_COALESCING_ENV]: 'off' }))
+        .toEqual(config({ coalescing: false, unresolvedWriteWindowMs: 0 }));
+      expect(resolveWritePreflightCoalescingConfig({ ...env, [WRITE_PREFLIGHT_CACHE_ENV]: 'on' }))
+        .toEqual(config({ cacheTtlMs: WRITE_PREFLIGHT_CACHE_DEFAULT_TTL_MS, unresolvedWriteWindowMs: 0 }));
+      expect(resolveWritePreflightCoalescingConfig({ [WRITE_PREFLIGHT_COALESCING_ENV]: 'flase', ...env }))
+        .toEqual(config({ coalescing: false, unresolvedWriteWindowMs: 0 }));
+    });
+
+    it('is not touched by a store\'s timeout configuration in the same environment', () => {
+      for (const timeout of ['1000', '30000', '600000']) {
+        expect(resolveWritePreflightCoalescingConfig({ DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS: timeout }).unresolvedWriteWindowMs)
+          .toBe(120_000);
+      }
+    });
+
+    it('is logged once at start, with the strict value spelled out', () => {
+      const info: string[] = [];
+      const logger = { info: (m: string) => info.push(m), warn: () => {} };
+      configureWritePreflightCoalescing({}, logger);
+      expect(getWritePreflightCoalescingConfig().unresolvedWriteWindowMs).toBe(120_000);
+      expect(info[0]).toContain('unresolved-write window: 120000 ms');
+      expect(info[0]).toContain(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV);
+      configureWritePreflightCoalescing({ [WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV]: '45000' }, logger);
+      expect(getWritePreflightCoalescingConfig().unresolvedWriteWindowMs).toBe(45_000);
+      expect(info[1]).toContain('unresolved-write window: 45000 ms');
+      configureWritePreflightCoalescing({ [WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV]: '0' }, logger);
+      expect(getWritePreflightCoalescingConfig().unresolvedWriteWindowMs).toBe(0);
+      expect(info[2]).toContain('unresolved-write window: strict');
+      expect(info[2]).not.toContain('0 ms');
+    });
+  });
+
   it('logs the effective setting once at start', () => {
     const info: string[] = [];
     configureWritePreflightCoalescing({ [WRITE_PREFLIGHT_CACHE_ENV]: '1', [WRITE_PREFLIGHT_CACHE_TTL_ENV]: '500' }, { info: (m) => info.push(m), warn: () => {} });
-    expect(getWritePreflightCoalescingConfig()).toEqual({ coalescing: true, cacheTtlMs: 500 });
+    expect(getWritePreflightCoalescingConfig()).toEqual(config({ cacheTtlMs: 500 }));
     expect(info).toEqual([expect.stringContaining('coalescing: on, result cache: on (500 ms)')]);
     configureWritePreflightCoalescing({ [WRITE_PREFLIGHT_COALESCING_ENV]: '0' }, { info: (m) => info.push(m), warn: () => {} });
     expect(info[1]).toContain('coalescing: off, result cache: off');

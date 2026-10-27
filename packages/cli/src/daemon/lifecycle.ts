@@ -1309,7 +1309,7 @@ async function runDaemonInnerWithStartupOwnership(
     info: log,
     warn: log,
   });
-  configureWritePreflightCoalescing(process.env, { info: log, warn: log });
+  const writePreflightCoalescing = configureWritePreflightCoalescing(process.env, { info: log, warn: log });
 
   const startupLogRotationMessage = startupLogRotation
     && describeDaemonLogRotation(startupLogRotation, 'during startup');
@@ -1912,6 +1912,8 @@ async function runDaemonInnerWithStartupOwnership(
     // Forward the operator retry budget to publishAsync producers (#1836).
     publisherMaxRetries: config.publisher?.maxRetries,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
+    // The agent's write-preflight policy: how long sharing stays off after a policy write of unknown outcome (0 = strict).
+    writePreflightUnresolvedWriteWindowMs: writePreflightCoalescing.unresolvedWriteWindowMs,
     queryAccess: config.queryAccess,
     chainAdapter: mockChainAdapter,
     // Only forward chain to the agent when both required fields resolved.

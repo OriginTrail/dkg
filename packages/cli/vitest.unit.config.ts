@@ -349,6 +349,8 @@ export default defineConfig({
           // probe, store observer and resolver. Neither needs hardhat.
           'test/write-preflight-coalescing.test.ts',
           'test/write-preflight-coalescing-seam.test.ts',
+          // The operator's unresolved-write window reaches DKGAgent.create from runDaemonInner.
+          'test/daemon-write-preflight-window-wiring.test.ts',
           // A store-busy refusal in the preflight's follow-up reads answers 503
           // at both async admission routes.
           'test/write-preflight-store-busy-route.test.ts',

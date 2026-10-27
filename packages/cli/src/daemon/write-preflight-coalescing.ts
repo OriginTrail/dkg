@@ -1,4 +1,8 @@
 import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
+import {
+  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS,
+  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_STRICT,
+} from '@origintrail-official/dkg-agent/write-preflight-unresolved-window';
 
 /**
  * Concurrent writes into one context graph share a single write-preflight probe (OT-RFC-73 S4a).
@@ -12,7 +16,9 @@ import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-
  * caller starts its own. An agent without an identity, or the switch turned off, is probed directly,
  * exactly as before. The agent gives no identity while a write to a policy source has an unknown outcome
  * (a store deadline: the store may still apply it later), so nothing is joined, read from the cache or kept
- * in it for that time (see the agent's `dkg-agent-write-preflight.ts`).
+ * in it for that time. How long that time is, is the agent's write-preflight policy, set here from
+ * `DKG_WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS` (default 120 s, 0 for strict); it is a best-effort window,
+ * not a guarantee of any store, and its residual risk is stated in the agent's `dkg-agent-write-preflight.ts`.
  *
  * Optionally (off by default) a probe that ended in a fast accept is kept for a short time and
  * served to the same caller again. It is never kept when it could be stale in a way the stamp does
@@ -27,6 +33,11 @@ export const WRITE_PREFLIGHT_COALESCING_ENV = 'DKG_WRITE_PREFLIGHT_COALESCING';
 export const WRITE_PREFLIGHT_CACHE_ENV = 'DKG_WRITE_PREFLIGHT_CACHE';
 /** How long the result cache keeps a fast accept, in milliseconds. */
 export const WRITE_PREFLIGHT_CACHE_TTL_ENV = 'DKG_WRITE_PREFLIGHT_CACHE_TTL_MS';
+/**
+ * How long sharing stays off after a policy write ended with an unknown outcome, in whole milliseconds; `0` is
+ * strict (it stays off for the rest of the process). The agent's write-preflight policy, not a store guarantee.
+ */
+export const WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV = 'DKG_WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS';
 
 export const WRITE_PREFLIGHT_CACHE_DEFAULT_TTL_MS = 2_000;
 export const WRITE_PREFLIGHT_CACHE_MIN_TTL_MS = 100;
@@ -40,6 +51,8 @@ export interface WritePreflightCoalescingConfig {
   readonly coalescing: boolean;
   /** 0 when the result cache is off. */
   readonly cacheTtlMs: number;
+  /** Handed to the agent: the unresolved-write window in ms; 0 is strict. Read whatever the two switches say. */
+  readonly unresolvedWriteWindowMs: number;
 }
 
 export interface WritePreflightCoalescingLogger {
@@ -62,9 +75,29 @@ function printable(raw: string | undefined): string {
 }
 
 /**
- * Reads the three variables. A value that is not recognized leaves its feature off, with a warning,
+ * The unresolved-write window: unset or blank is the agent's default, a whole number of milliseconds is taken
+ * as it is (`0` is strict), and anything else falls back to the default, with a warning.
+ */
+function readUnresolvedWriteWindowMs(
+  env: Readonly<Record<string, string | undefined>>,
+  logger?: Pick<WritePreflightCoalescingLogger, 'warn'>,
+): number {
+  const raw = env[WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV]?.trim();
+  if (!raw) return WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS;
+  const parsed = /^\d+$/.test(raw) ? Number(raw) : Number.NaN;
+  if (Number.isSafeInteger(parsed)) return parsed;
+  logger?.warn(
+    `Invalid ${WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV}=${printable(raw)}; expected whole milliseconds ` +
+    `(0 for strict). Using ${WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS}.`,
+  );
+  return WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS;
+}
+
+/**
+ * Reads the four variables. A value that is not recognized leaves its feature off, with a warning,
  * so that a mistyped rollback can never leave coalescing on and a mistyped opt-in never turns the
- * cache on. A TTL is clamped to its range, or falls back to the default when it is not a number.
+ * cache on. A TTL is clamped to its range, or falls back to the default when it is not a number, and so
+ * does the unresolved-write window.
  */
 export function resolveWritePreflightCoalescingConfig(
   env: Readonly<Record<string, string | undefined>>,
@@ -78,6 +111,7 @@ export function resolveWritePreflightCoalescingConfig(
     );
   }
   const coalescing = coalescingSwitch === 'unset' || coalescingSwitch === 'on';
+  const unresolvedWriteWindowMs = readUnresolvedWriteWindowMs(env, logger);
 
   const cacheSwitch = readSwitch(env[WRITE_PREFLIGHT_CACHE_ENV]);
   if (cacheSwitch === 'invalid') {
@@ -90,7 +124,7 @@ export function resolveWritePreflightCoalescingConfig(
     if (cacheSwitch === 'on') {
       logger?.warn(`${WRITE_PREFLIGHT_CACHE_ENV} is ignored while write preflight coalescing is off.`);
     }
-    return { coalescing, cacheTtlMs: 0 };
+    return { coalescing, cacheTtlMs: 0, unresolvedWriteWindowMs };
   }
 
   const rawTtl = env[WRITE_PREFLIGHT_CACHE_TTL_ENV]?.trim();
@@ -112,10 +146,18 @@ export function resolveWritePreflightCoalescingConfig(
       }
     }
   }
-  return { coalescing, cacheTtlMs };
+  return { coalescing, cacheTtlMs, unresolvedWriteWindowMs };
 }
 
-let effectiveConfig: WritePreflightCoalescingConfig = { coalescing: true, cacheTtlMs: 0 };
+let effectiveConfig: WritePreflightCoalescingConfig = {
+  coalescing: true, cacheTtlMs: 0, unresolvedWriteWindowMs: WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS,
+};
+
+function describeUnresolvedWriteWindow(windowMs: number): string {
+  return windowMs === WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_STRICT
+    ? 'strict (no sharing for the rest of the process after an unknown policy write)'
+    : `${windowMs} ms`;
+}
 
 /** Resolves the switches and logs the outcome once, at daemon start (which also zeroes the counters); a change needs a restart. */
 export function configureWritePreflightCoalescing(
@@ -127,8 +169,10 @@ export function configureWritePreflightCoalescing(
   Object.assign(counters, { flights: 0, joins: 0, cacheHits: 0, cacheStores: 0, direct: 0 });
   logger.info(
     `Write preflight coalescing: ${effectiveConfig.coalescing ? 'on' : 'off'}, ` +
-    `result cache: ${effectiveConfig.cacheTtlMs > 0 ? `on (${effectiveConfig.cacheTtlMs} ms)` : 'off'} ` +
-    `(${WRITE_PREFLIGHT_COALESCING_ENV}, ${WRITE_PREFLIGHT_CACHE_ENV}; effective until daemon restart)`,
+    `result cache: ${effectiveConfig.cacheTtlMs > 0 ? `on (${effectiveConfig.cacheTtlMs} ms)` : 'off'}, ` +
+    `unresolved-write window: ${describeUnresolvedWriteWindow(effectiveConfig.unresolvedWriteWindowMs)} ` +
+    `(${WRITE_PREFLIGHT_COALESCING_ENV}, ${WRITE_PREFLIGHT_CACHE_ENV}, ${WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV}; ` +
+    'effective until daemon restart)',
   );
   return effectiveConfig;
 }

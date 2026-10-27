@@ -53,10 +53,6 @@ import {
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
-import {
-  DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS,
-  maxAbandonedStoreOperationMs,
-} from './blazegraph-deadline-policy.js';
 import { isReadOnlyStoreOperation, type StoreOperation, type StoreOperationOutcome } from '../store-operation-outcome.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
@@ -64,12 +60,12 @@ import {
   type Rfc64HttpProjectionRequestV1,
 } from '../rfc64-http-shared-projection-runner.js';
 
-export { DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS };
-
 /** Every SPARQL statement this adapter builds by interpolation. */
 const statements = sparqlStatements('blazegraph');
 // Stock Blazegraph 2.1.5 recognizes this MIME type for both native write paths.
 const NQUADS_CONTENT_TYPE = 'text/x-nquads';
+
+export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
 /**
  * Blazegraph's per-request server-side query deadline. The deployed 2.1.x
@@ -78,6 +74,36 @@ const NQUADS_CONTENT_TYPE = 'text/x-nquads';
  * global equivalent and ships as `0` — unbounded.
  */
 const MAX_QUERY_MILLIS_HEADER = 'X-BIGDATA-MAX-QUERY-MILLIS';
+
+/**
+ * Multiplier applied to the client deadline to derive the server-side bound.
+ *
+ * This is deliberately > 1: the server deadline must be WIDER than the
+ * client's, never tighter. Two reasons, and the second is a correctness trap:
+ *
+ * 1. The problem being solved is *abandoned* work. When the client aborts at
+ *    its deadline the HTTP connection goes away but Blazegraph keeps executing
+ *    the query — observed on mainnet running 10-32+ minutes past a 30s client
+ *    abort, with `queryErrorCount = 0` across 20,953 queries confirming the
+ *    server never cancelled anything. A handful of these saturate a core. Any
+ *    finite server bound fixes that; it does not need to be tight.
+ *
+ * 2. A tight bound introduces silent data loss. Blazegraph commits `200 OK`
+ *    and begins streaming before the deadline fires, then appends its error
+ *    into the already-committed body. A CONSTRUCT killed mid-stream therefore
+ *    returns a SHORT BUT STRUCTURALLY VALID n-quads document. Since the client
+ *    is still reading at that point, it parses the truncated result as a
+ *    complete one — a sync page that looks whole and is not. Keeping the
+ *    server bound comfortably above the client deadline means the client
+ *    always aborts first, so no caller is ever parsing a truncated body.
+ *    ({@link parseBlazegraphConstructNQuads} is the belt-and-braces guard for the
+ *    residual case.)
+ *
+ * With the 30s default this yields a 120s server bound: orphan lifetime drops
+ * from unbounded to at most 2 minutes, while the truncation path stays
+ * unreachable.
+ */
+const SERVER_QUERY_DEADLINE_FACTOR = 4;
 
 export interface BlazegraphStoreOptions {
   /** End-to-end timeout including scheduler wait, HTTP work, and response decoding. */
@@ -633,11 +659,11 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
 
   /**
    * Server-side query bound sent with every read. See
-   * {@link maxAbandonedStoreOperationMs} for why this is wider than the
+   * {@link SERVER_QUERY_DEADLINE_FACTOR} for why this is wider than the
    * client deadline rather than tighter.
    */
   private serverQueryDeadlineMs(): number {
-    return maxAbandonedStoreOperationMs(this.operationTimeoutMs);
+    return this.operationTimeoutMs * SERVER_QUERY_DEADLINE_FACTOR;
   }
 
   /**

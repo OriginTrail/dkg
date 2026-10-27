@@ -26,6 +26,7 @@ import { VersionedSubscriptionRegistry } from '../../agent/src/internal/versione
 import { resolveRequiredWriteContextGraphId } from '../src/daemon/http-utils.js';
 import {
   WRITE_PREFLIGHT_CACHE_ENV,
+  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV,
   configureWritePreflightCoalescing,
   getWritePreflightCoalescingConfig,
 } from '../src/daemon/write-preflight-coalescing.js';
@@ -55,7 +56,7 @@ function captureRes(): { res: ServerResponse; out: { status?: number; body?: any
 }
 
 /** A public context graph with local content, held by a real in-process store the agent's observer watches. */
-async function seamAgent(options: { now?: () => number } = {}) {
+async function seamAgent(options: { now?: () => number; unresolvedWindowMs?: number } = {}) {
   const raw = new OxigraphStore();
   const ontology = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
   await raw.insert([
@@ -63,7 +64,7 @@ async function seamAgent(options: { now?: () => number } = {}) {
     policyQuad('public', ontology),
     { subject: 'urn:task:1', predicate: 'urn:p', object: '"task"', graph: `${contextGraphDataGraphUri(CG)}/tasks` },
   ]);
-  const generation = new WritePreflightGeneration({ now: options.now });
+  const generation = new WritePreflightGeneration({ now: options.now, unresolvedWindowMs: options.unresolvedWindowMs });
   const store = createMutationObservedStore(raw, createObservedStoreMutation(
     () => {},
     withWritePreflightGeneration({ begin: () => () => {} }, generation),
@@ -387,5 +388,55 @@ describe.each([
     const cached = getWritePreflightCoalescingConfig().cacheTtlMs > 0;
     expect((await seam.resolve(ALLOWED)).id).toBe(CG);
     expect(seam.declarationReads()).toBe(cached ? 6 : 7);
+  });
+});
+
+describe.each([
+  ['off', {}],
+  ['on', { [WRITE_PREFLIGHT_CACHE_ENV]: '1' }],
+])('the strict unresolved-write window set through the daemon config, with the result cache %s', (_cache, cacheEnv) => {
+  // The daemon reads the variable once and hands the window to the agent: the same path here.
+  const strictAgent = async (now: () => number) => {
+    const config = configureWritePreflightCoalescing(
+      { ...cacheEnv, [WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_ENV]: '0' }, silent,
+    );
+    expect(config.unresolvedWriteWindowMs).toBe(0);
+    return seamAgent({ now, unresolvedWindowMs: config.unresolvedWriteWindowMs });
+  };
+
+  it('never shares again after a policy write of unknown outcome, however much time has passed', async () => {
+    let clock = 0;
+    const seam = await strictAgent(() => clock);
+    seam.release(); // nothing is held in this scenario
+    const backend = loseNextPolicyInsert(seam.raw);
+    await expect(seam.store.insert([policyQuad('private', contextGraphMetaGraphUri(CG))]))
+      .rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
+    await backend.commit();
+
+    // The default window would have ended at 120 s; strict does not end. Every caller reads the store itself.
+    for (const at of [0, 119_999, 120_000, 3_600_000, 10 ** 12]) {
+      clock = at;
+      const reads = seam.declarationReads();
+      const [first, second] = await Promise.all([seam.resolve(ALLOWED), seam.resolve(ALLOWED)]);
+      expect([first.id, second.id]).toEqual([CG, CG]);
+      expect(seam.declarationReads()).toBe(reads + 2);
+    }
+    // A policy write that is confirmed afterwards does not bring sharing back.
+    await seam.store.insert([policyQuad('private', contextGraphMetaGraphUri(CG))]);
+    const reads = seam.declarationReads();
+    await Promise.all([seam.resolve(ALLOWED), seam.resolve(ALLOWED)]);
+    expect(seam.declarationReads()).toBe(reads + 2);
+  });
+
+  it('keeps ordinary coalescing while every policy write is confirmed', async () => {
+    const seam = await strictAgent(() => 0);
+    // A confirmed policy write moves the stamp and does not suspend sharing.
+    await seam.store.insert([policyQuad('public', contextGraphMetaGraphUri(CG))]);
+    const joined = [seam.resolve(ALLOWED), seam.resolve(ALLOWED), seam.resolve(ALLOWED)];
+    await seam.reached;
+    expect(seam.declarationReads()).toBe(1);
+    seam.release();
+    expect((await Promise.all(joined)).map(({ id }) => id)).toEqual([CG, CG, CG]);
+    expect(seam.declarationReads()).toBe(1);
   });
 });

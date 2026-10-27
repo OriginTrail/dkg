@@ -3,24 +3,28 @@
  * (OT-RFC-73 S4a): a context graph created through the agent moves the stamp, a probe of another graph
  * keeps its own key, and an agent not built by `create` hands out no identity.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Wallet } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
+import { OxigraphStore, StoreOperationTimeoutError } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 
 const agents: DKGAgent[] = [];
-afterEach(async () => { await Promise.all(agents.splice(0).map((agent) => agent.stop())); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(agents.splice(0).map((agent) => agent.stop()));
+});
 
-async function createAgent(): Promise<DKGAgent> {
+async function createAgent(extra: Partial<Parameters<typeof DKGAgent.create>[0]> = {}): Promise<DKGAgent> {
   const wallet = Wallet.createRandom();
   const chain = new MockChainAdapter('mock:31337', wallet.address);
   chain.setMockACKSigner(wallet);
   const agent = await DKGAgent.create({
     name: 'PreflightIdentity', listenHost: '127.0.0.1', listenPort: 0, nodeRole: 'edge',
     chainAdapter: chain, kaNumberAllocator: makeTestKaNumberAllocator(),
-    rfc64CatalogActivation: { enabled: false },
+    rfc64CatalogActivation: { enabled: false }, ...extra,
   });
   agents.push(agent);
   await agent.start();
@@ -99,5 +103,53 @@ describe('the write-preflight identity of a real agent', () => {
   it('is absent from an agent whose store observer was not built by create', () => {
     const unattached = Object.create(DKGAgent.prototype) as DKGAgent;
     expect(unattached.writePreflightIdentity('identity-cg', null)).toBeUndefined();
+  });
+});
+
+describe('the unresolved-write window of a real agent', () => {
+  // The agent's store, under a clock the test can push forward (the generation reads `performance.now`).
+  async function withLostPolicyWrite(window: { writePreflightUnresolvedWriteWindowMs?: number }) {
+    const raw = new OxigraphStore();
+    const agent = await createAgent({ store: raw, ...window });
+    const caller = Wallet.createRandom().address;
+    const realNow = performance.now.bind(performance);
+    let skewMs = 0;
+    vi.spyOn(performance, 'now').mockImplementation(() => realNow() + skewMs);
+    expect(agent.writePreflightIdentity('window-cg', caller)).toBeDefined();
+    vi.spyOn(raw, 'insert').mockRejectedValueOnce(
+      new StoreOperationTimeoutError({ backend: 'controlled', operation: 'insert', storeOperation: 'insert', timeoutMs: 30_000 }),
+    );
+    await expect(agent.store.insert([{
+      subject: 'did:dkg:context-graph:window-cg', predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"private"',
+      graph: contextGraphMetaGraphUri('window-cg'),
+    }])).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
+    return {
+      shared: () => agent.writePreflightIdentity('window-cg', caller) !== undefined,
+      passMs: (ms: number) => { skewMs = ms; },
+    };
+  }
+
+  it('is two minutes when the daemon sets nothing', async () => {
+    const lost = await withLostPolicyWrite({});
+    expect(lost.shared()).toBe(false);
+    lost.passMs(118_000);
+    expect(lost.shared()).toBe(false);
+    lost.passMs(122_000);
+    expect(lost.shared()).toBe(true);
+  });
+
+  it('is the window the daemon sets in the agent config', async () => {
+    const lost = await withLostPolicyWrite({ writePreflightUnresolvedWriteWindowMs: 10_000 });
+    lost.passMs(8_000);
+    expect(lost.shared()).toBe(false);
+    lost.passMs(12_000);
+    expect(lost.shared()).toBe(true);
+  });
+
+  it('never ends when the daemon sets 0 (strict)', async () => {
+    const lost = await withLostPolicyWrite({ writePreflightUnresolvedWriteWindowMs: 0 });
+    expect(lost.shared()).toBe(false);
+    lost.passMs(10 ** 12);
+    expect(lost.shared()).toBe(false);
   });
 });

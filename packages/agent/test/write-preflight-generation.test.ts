@@ -3,17 +3,19 @@
  * what makes two probe calls interchangeable, and the probe's chain-lookup hook. The daemon's side (joining
  * a probe in flight, the result cache) is in the CLI package's `write-preflight-coalescing.test.ts`.
  */
-import { describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import {
+  BlazegraphStore,
   OxigraphStore,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
-  maxAbandonedStoreOperationMs,
   type Quad,
 } from '@origintrail-official/dkg-storage';
 import {
   WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS,
+  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_STRICT,
   WritePreflightGeneration,
   WritePreflightIdentityMethods,
   attachWritePreflightGeneration,
@@ -283,16 +285,16 @@ describe('what makes two probe calls interchangeable', () => {
 });
 
 describe('a policy write whose outcome is unknown', () => {
-  // The protection is two minutes: the longest a store keeps working on a write its caller gave up on (the
-  // Blazegraph adapter's server-side deadline, four times its 30 s client deadline). Every offset below is
-  // spelled out in milliseconds, never derived from the production constant, so that shortening the window
-  // fails these tests instead of moving them along with it.
+  // The protection is the agent's own policy: two minutes, a best-effort estimate of how long a remote store
+  // takes to apply a write its caller gave up on. Every offset below is spelled out in milliseconds, never
+  // derived from the production constant, so that shortening the window fails these tests instead of moving
+  // them along with it.
   const TWO_MINUTES_MS = 120_000;
 
-  // The agent's own registry and a clock the test moves, under the generation's default window.
-  function sharing() {
+  // The agent's own registry and a clock the test moves, under the generation's default window unless told.
+  function sharing(options: { unresolvedWindowMs?: number } = {}) {
     const clock = { now: 0 };
-    const generation = new WritePreflightGeneration({ now: () => clock.now });
+    const generation = new WritePreflightGeneration({ now: () => clock.now, ...options });
     const agent = { subscribedContextGraphs: new VersionedSubscriptionRegistry() } as never;
     attachWritePreflightGeneration(agent, generation);
     const identity = (caller: string = CHECKSUM) =>
@@ -302,10 +304,12 @@ describe('a policy write whose outcome is unknown', () => {
     return { clock, generation, identity, settle };
   }
 
-  it('is exactly the two minutes a store keeps working on a write its caller gave up on', () => {
+  it('is exactly two minutes by default, as a named policy of the preflight', () => {
     expect(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS).toBe(TWO_MINUTES_MS);
-    // The storage package states that bound; the agent only takes it.
-    expect(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS).toBe(maxAbandonedStoreOperationMs());
+    expect(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_STRICT).toBe(0);
+    expect(new WritePreflightGeneration().unresolvedWindowMs).toBe(TWO_MINUTES_MS);
+    expect(new WritePreflightGeneration().strict).toBe(false);
+    expect(new WritePreflightGeneration({ unresolvedWindowMs: 0 }).strict).toBe(true);
   });
 
   it('hands out no identity until two minutes have passed, so nothing begun meanwhile can be joined or kept', () => {
@@ -393,6 +397,92 @@ describe('a policy write whose outcome is unknown', () => {
     expect(identity()).toBeUndefined();
   });
 
+  describe('with another window set by the daemon', () => {
+    it('resumes exactly when that window has passed', () => {
+      const { clock, identity, settle } = sharing({ unresolvedWindowMs: 5_000 });
+      settle('indeterminate');
+      clock.now = 4_999;
+      expect(identity()).toBeUndefined();
+      clock.now = 5_000;
+      expect(identity()).toBeDefined();
+    });
+
+    it.each([-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1, '120000' as unknown as number])(
+      'refuses %s: a safety bound is not guessed at',
+      (unresolvedWindowMs) => {
+        expect(() => new WritePreflightGeneration({ unresolvedWindowMs })).toThrow(RangeError);
+      },
+    );
+  });
+
+  describe('with the strict window (0)', () => {
+    const FAR_FUTURE_MS = 10 ** 12;
+
+    it('never shares again after an unknown outcome, however long it has been', () => {
+      const { clock, generation, identity, settle } = sharing({ unresolvedWindowMs: 0 });
+      expect(identity()).toBeDefined();
+      settle('indeterminate');
+      expect(generation.strict).toBe(true);
+      for (const elapsedMs of [0, 1, 119_999, 120_000, 600_000, 24 * 3_600_000, FAR_FUTURE_MS]) {
+        clock.now = elapsedMs;
+        expect(identity()).toBeUndefined();
+        expect(identity('0x2222222222222222222222222222222222222222')).toBeUndefined();
+      }
+    });
+
+    it('is not ended by a write that is confirmed afterwards, nor by a further unknown outcome', () => {
+      const { clock, identity, settle } = sharing({ unresolvedWindowMs: 0 });
+      settle('indeterminate');
+      settle('changed');
+      settle('unchanged');
+      settle('indeterminate');
+      clock.now = FAR_FUTURE_MS;
+      expect(identity()).toBeUndefined();
+    });
+
+    it('keeps the ordinary rules while no policy write has an unknown outcome', () => {
+      const { clock, generation, identity, settle } = sharing({ unresolvedWindowMs: 0 });
+      const first = identity()!;
+      expect(identity()!.stamp).toBe(first.stamp);
+      // Confirmed policy writes move the stamp and never suspend sharing.
+      settle('changed');
+      const afterChange = identity()!;
+      expect(afterChange.stamp).not.toBe(first.stamp);
+      settle('unchanged');
+      expect(identity()!.stamp).toBe(afterChange.stamp);
+      // An unknown outcome of a write that is no policy source does not suspend it either.
+      settle('indeterminate', { quads: [quad(contextGraphDataGraphUri(CG))] });
+      clock.now = FAR_FUTURE_MS;
+      expect(identity()!.stamp).toBe(afterChange.stamp);
+      expect(generation.current).toBe(1);
+    });
+  });
+
+  describe('as a policy of the preflight, not of any store', () => {
+    afterEach(() => { vi.unstubAllEnvs(); vi.resetModules(); });
+
+    it('takes no part of its value from a store\'s timeout configuration', async () => {
+      const defaultWindow = new WritePreflightGeneration().unresolvedWindowMs;
+      for (const configured of ['1000', '5000', '90000', '600000']) {
+        vi.stubEnv('DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS', configured);
+        // A store configured with another deadline, as the daemon might build it.
+        new BlazegraphStore('http://127.0.0.1:9999/blazegraph/namespace/kb/sparql', { timeout: Number(configured) });
+        vi.resetModules();
+        const fresh = await import('../src/dkg-agent-write-preflight.js');
+        expect(fresh.WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS).toBe(TWO_MINUTES_MS);
+        expect(new fresh.WritePreflightGeneration().unresolvedWindowMs).toBe(defaultWindow);
+      }
+    });
+
+    it('does not import from the storage package, so no deadline of a store can reach it', () => {
+      for (const file of ['dkg-agent-write-preflight.ts', 'write-preflight-unresolved-window.ts']) {
+        const source = readFileSync(new URL(`../src/${file}`, import.meta.url), 'utf8');
+        expect(source, file).not.toMatch(/dkg-storage/);
+        expect(source, file).not.toMatch(/blazegraph/i);
+      }
+    });
+  });
+
   describe('through the agent store wrapper and a store that loses the response', () => {
     it('gives no identity after a policy insert times out, and one again after the window', async () => {
       const raw = new OxigraphStore();
@@ -420,6 +510,28 @@ describe('a policy write whose outcome is unknown', () => {
       // A write that is confirmed afterwards moves the generation but does not stop sharing.
       await store.insert([quad(META)]);
       expect(identity()).toBeDefined();
+    });
+
+    it('gives no identity again for the rest of the process after a policy insert times out, when strict', async () => {
+      const raw = new OxigraphStore();
+      let now = 0;
+      const generation = new WritePreflightGeneration({ now: () => now, unresolvedWindowMs: 0 });
+      const store = createMutationObservedStore(raw, createObservedStoreMutation(
+        () => {},
+        withWritePreflightGeneration({ begin: () => () => {} }, generation),
+      ));
+      const agent = { subscribedContextGraphs: new VersionedSubscriptionRegistry() } as never;
+      attachWritePreflightGeneration(agent, generation);
+      const identity = () => WritePreflightIdentityMethods.prototype.writePreflightIdentity.call(agent, CG, CHECKSUM);
+
+      vi.spyOn(raw, 'insert').mockRejectedValueOnce(
+        new StoreOperationTimeoutError({ backend: 'controlled', operation: 'insert', storeOperation: 'insert', timeoutMs: 30_000 }),
+      );
+      await expect(store.insert([quad(META)])).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
+      now = 10 ** 12;
+      expect(identity()).toBeUndefined();
+      await store.insert([quad(META)]);
+      expect(identity()).toBeUndefined();
     });
   });
 });

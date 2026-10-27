@@ -22,10 +22,23 @@
  * has read the old policy, and would be shared with a caller that arrives after the commit. So sharing is
  * off, not merely re-stamped, while an unknown outcome is unresolved: `writePreflightIdentity` hands out no
  * identity, every preflight probes directly (no join, no cache hit, no cache store), and sharing resumes
- * after `WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS`, the longest bound an adapter puts on work its caller gave
- * up on, under a generation moved once more so that nothing begun in the window can be joined.
+ * once the unresolved-write window (`WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS`) has passed, under a
+ * generation moved once more so that nothing begun in the window can be joined.
  * A confirmed write (`changed`, or `unchanged`) never suspends sharing. A write to the subscription registry
  * is synchronous and in memory, so it has no unknown outcome.
+ *
+ * THE WINDOW IS A POLICY, NOT A GUARANTEE. It is this module's own setting: 120 s unless the daemon passes
+ * another (`DKG_WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS`), and it is derived from nothing a store does.
+ * No store promises when it stops working on a write its caller abandoned: a read can be given a server
+ * deadline, but an insert or an update is sent with none, so no time bound is known for a write, and the
+ * window is a best-effort estimate of how long a late commit takes. RESIDUAL RISK: a policy write that the
+ * agent abandoned and that the backend applies later than the window can be missed by a caller that joins (or,
+ * with the result cache on, is served from) a probe that began before the write landed. That lasts at most
+ * one probe's join lifetime after the commit: the daemon joins a probe for 10 s from its start
+ * (`WRITE_PREFLIGHT_FLIGHT_MAX_JOIN_MS`), and the cache TTL, 10 s at most, counts from the probe's start too.
+ * An operator who needs a strict guarantee sets the window to 0 (`WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_STRICT`):
+ * after any unknown outcome of a policy write sharing then stays off for the rest of the process, at the cost
+ * of every preflight probing the store itself from then on.
  *
  * The probe's other reads do NOT move the stamp: whether the graph exists (`contextGraphExists`), whether it
  * has local content, the persisted subscription row and on-chain identity IDs. Nothing marks a probe that
@@ -38,13 +51,18 @@
  */
 
 import { SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, isSafeIri } from '@origintrail-official/dkg-core';
-import { maxAbandonedStoreOperationMs } from '@origintrail-official/dkg-storage';
 import { normalizeWritePreflightCaller } from './context-graph-write-preflight.js';
+import {
+  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS,
+  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_STRICT,
+} from './write-preflight-unresolved-window.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { ContextGraphSub } from './dkg-agent-types.js';
 import type { StoreMutation, StoreMutationObserver } from './internal/store-mutation.js';
 import { VersionedSubscriptionRegistry } from './internal/versioned-subscription-registry.js';
+
+export { WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS, WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_STRICT };
 
 const CONTEXT_GRAPH_PREFIX = 'did:dkg:context-graph:';
 const ONTOLOGY_GRAPH = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -81,18 +99,11 @@ export function mutationMayChangeWritePreflight(mutation: StoreMutation): boolea
   }
 }
 
-/**
- * How long sharing stays off after a policy write ended with an unknown outcome. A store gives no sign when it
- * applies a write late, and no adapter promises an end for the work on an abandoned write, so this is the
- * longest bound any adapter puts on work its caller gave up on. That bound is the storage package's to state
- * (`maxAbandonedStoreOperationMs`, the Blazegraph adapter's server-side deadline derived from its client
- * deadline, 120 s for the default 30 s), so the agent holds no deadline policy of its own. A late commit is
- * expected to fall inside it; one that falls outside it is not covered.
- */
-export const WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS = maxAbandonedStoreOperationMs();
-
 export interface WritePreflightGenerationOptions {
-  /** Defaults to `WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS`. */
+  /**
+   * Whole milliseconds; defaults to `WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS`.
+   * `WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_STRICT` (0) means strict: sharing never resumes after an unknown outcome.
+   */
   readonly unresolvedWindowMs?: number;
   /** A monotonic clock in milliseconds; defaults to `performance.now`. */
   readonly now?: () => number;
@@ -101,14 +112,25 @@ export interface WritePreflightGenerationOptions {
 /** Moves whenever a write that settles may have changed what a write preflight reads. */
 export class WritePreflightGeneration {
   private value = 0;
-  /** While a policy write has an unknown outcome: when its window ends (the latest of them). */
+  /** While a policy write has an unknown outcome: when its window ends (the latest of them); infinite when strict. */
   private unresolvedUntil: number | undefined;
-  private readonly unresolvedWindowMs: number;
+  /** The window in force: whole milliseconds, 0 when strict. */
+  readonly unresolvedWindowMs: number;
   private readonly now: () => number;
 
   constructor(options: WritePreflightGenerationOptions = {}) {
-    this.unresolvedWindowMs = options.unresolvedWindowMs ?? WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS;
+    const window = options.unresolvedWindowMs ?? WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS;
+    // A safety bound is never guessed at: a value that is not a whole, non-negative number of milliseconds is a mistake of the caller.
+    if (!Number.isSafeInteger(window) || window < 0) {
+      throw new RangeError(`The write preflight unresolved-write window must be a whole number of milliseconds, 0 or more (got ${String(window)}).`);
+    }
+    this.unresolvedWindowMs = window;
     this.now = options.now ?? (() => performance.now());
+  }
+
+  /** Whether sharing, once suspended by an unknown outcome, stays off for the rest of the process. */
+  get strict(): boolean {
+    return this.unresolvedWindowMs === WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_STRICT;
   }
 
   get current(): number {
@@ -121,18 +143,20 @@ export class WritePreflightGeneration {
 
   /**
    * A policy write ended with an unknown outcome: it may be applied later, with nothing to say so. Moves the
-   * generation, and keeps sharing off until the window has passed (a further unknown outcome extends it).
+   * generation, and keeps sharing off until the window has passed (a further unknown outcome extends it), or
+   * for the rest of the process when the window is strict.
    */
   bumpUnresolved(): void {
     // The window is set first, so that a bump that cannot run still leaves sharing off.
-    const until = this.now() + this.unresolvedWindowMs;
+    const until = this.strict ? Number.POSITIVE_INFINITY : this.now() + this.unresolvedWindowMs;
     if (this.unresolvedUntil === undefined || until > this.unresolvedUntil) this.unresolvedUntil = until;
     this.bump();
   }
 
   /**
-   * Whether probes may be shared now: false while a policy write has an unknown outcome. The first call after
-   * the window has passed moves the generation once more, so that no probe begun inside the window is joinable.
+   * Whether probes may be shared now: false while a policy write has an unknown outcome (for good, when strict).
+   * The first call after the window has passed moves the generation once more, so that no probe begun inside the
+   * window is joinable.
    */
   sharingAllowed(): boolean {
     if (this.unresolvedUntil === undefined) return true;
@@ -147,7 +171,7 @@ export class WritePreflightGeneration {
  * Wraps the store's mutation observer: a write that may change a policy source bumps `generation`
  * when it settles, unless it provably changed nothing. An indeterminate outcome (a timeout, a lost
  * response) bumps too, because the write may still have committed, and also keeps sharing off until
- * the window for a late commit has passed (see the header).
+ * the unresolved-write window has passed, or for good when it is strict (see the header).
  */
 export function withWritePreflightGeneration(
   inner: StoreMutationObserver,
