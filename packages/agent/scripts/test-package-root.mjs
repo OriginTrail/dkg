@@ -398,7 +398,6 @@ const blockedRfc64Modules = [
   'registered-private-empty-vm-proof-v1.js',
   'catalog-runtime-v1.js',
   'background-work-dispatcher-v1.js',
-  'scheduled-responsibility-state-v1.js',
   'supervisor-status-v1.js',
   'catalog-shadow-observability-v1.js',
   'serialized-scope-runtime-v1.js',

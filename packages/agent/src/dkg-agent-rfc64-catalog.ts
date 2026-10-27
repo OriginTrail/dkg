@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { rfc64ScheduledResponsibilityStateForV1, type Rfc64ScheduledFinalizedAbsenceRetryV1 } from './rfc64/scheduled-responsibility-state-v1.js';
+import { waitForRfc64ScheduledResponsibilityDelayV1 } from './rfc64/abort-v1.js';
 
 /**
  * RFC-64 Gate 1 public author-catalog wiring, extracted as a DKGAgent mixin
@@ -512,6 +512,45 @@ const rfc64DirectAcceptedCompatibilityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64JoinDerivedAcceptedAuthorityV1 = new WeakMap<DKGAgent, Set<string>>();
 const rfc64ResponsibilityAuthorityBatchRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64FinalizedAuthoritySnapshotBatchRuntimeV1>();
+interface Rfc64ScheduledFinalizedAbsenceRetryV1 {
+  readonly contextGraphId: string;
+  readonly revision: number;
+  readonly attempt: number;
+  readonly delayMs: number;
+  /** Unique ownership key; attempt identity must never be reconstructed by callers. */
+  readonly key: string;
+}
+interface Rfc64ScheduledResponsibilityStateV1 {
+  readonly targets: Map<string, number>;
+  readonly activeTargets: Set<string>;
+  readonly retryTimers: Set<string>;
+  readonly finalizedAbsenceRetries: Map<
+    string,
+    Readonly<Rfc64ScheduledFinalizedAbsenceRetryV1>
+  >;
+  activityRevision: number;
+  producerHolds: number;
+}
+const rfc64ScheduledResponsibilityStatesV1 =
+  new WeakMap<DKGAgent, Rfc64ScheduledResponsibilityStateV1>();
+function rfc64ScheduledResponsibilityStateForV1(
+  agent: DKGAgent,
+): Rfc64ScheduledResponsibilityStateV1 {
+  let state = rfc64ScheduledResponsibilityStatesV1.get(agent);
+  if (state === undefined) {
+    state = {
+      targets: new Map(),
+      activeTargets: new Set(),
+      retryTimers: new Set(),
+      finalizedAbsenceRetries: new Map(),
+      activityRevision: 0,
+      producerHolds: 0,
+    };
+    rfc64ScheduledResponsibilityStatesV1.set(agent, state);
+  }
+  return state;
+}
+
 const rfc64SystemContextGraphIdsV1 = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS));
 const RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1 = 'responsibility-batch';
 const RFC64_SCHEDULED_FINALIZED_ABSENCE_RETRY_KEY_PREFIX_V1 =
@@ -842,30 +881,6 @@ function isCurrentRfc64CatalogResponsibilityRevisionV1(
   revision: number,
 ): boolean {
   return rfc64CatalogResponsibilityRevisionsV1.get(agent)?.get(contextGraphId) === revision;
-}
-
-function waitForRfc64ScheduledResponsibilityDelayV1(
-  signal: AbortSignal,
-  delayMs: number,
-): Promise<void> {
-  signal.throwIfAborted();
-  return new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      signal.removeEventListener('abort', onAbort);
-      resolve();
-    }, delayMs);
-    timer.unref?.();
-    const onAbort = () => {
-      clearTimeout(timer);
-      signal.removeEventListener('abort', onAbort);
-      reject(signal.reason ?? new DOMException(
-        'RFC-64 scheduled responsibility retry aborted',
-        'AbortError',
-      ));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    if (signal.aborted) onAbort();
-  });
 }
 
 function setRfc64CatalogAuthorityProgressV1(
@@ -2460,8 +2475,9 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     const targets = state.targets;
     // Retry nudges do not invalidate evidence already being read. Real lifecycle
     // changes use the default path and still advance the revision immediately.
+    const retry = state.finalizedAbsenceRetries.get(contextGraphId);
     if (options.coalesceExisting && (targets.has(contextGraphId)
-      || state.activeTargets.has(contextGraphId) || state.finalizedAbsenceRetries.has(contextGraphId))) return true;
+      || state.activeTargets.has(contextGraphId) || (retry && state.retryTimers.has(retry.key)))) return true;
     const revision = nextRfc64CatalogResponsibilityRevisionV1(this, contextGraphId);
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
     const pendingWireIdentity = subscription !== undefined
@@ -2585,51 +2601,55 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     );
     if (retry === null) return;
     state.finalizedAbsenceRetries.set(contextGraphId, retry);
+    state.retryTimers.add(retry.key);
     const scheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
       retry.key,
       async (signal) => {
-        await waitForRfc64ScheduledResponsibilityDelayV1(signal, retry.delayMs);
-        signal.throwIfAborted();
-        if (state.finalizedAbsenceRetries.get(contextGraphId) !== retry) return;
-        if (!isCurrentRfc64CatalogResponsibilityRevisionV1(
-          this,
-          contextGraphId,
-          retry.revision,
-        )) {
-          this.clearRfc64ScheduledFinalizedAbsenceRetryV1(
+        try {
+          await waitForRfc64ScheduledResponsibilityDelayV1(signal, retry.delayMs);
+          signal.throwIfAborted();
+          if (state.finalizedAbsenceRetries.get(contextGraphId) !== retry) return;
+          if (!isCurrentRfc64CatalogResponsibilityRevisionV1(
+            this,
             contextGraphId,
             retry.revision,
+          )) {
+            this.clearRfc64ScheduledFinalizedAbsenceRetryV1(
+              contextGraphId,
+              retry.revision,
+            );
+            return;
+          }
+          const currentSubscription = this.subscribedContextGraphs.get(contextGraphId);
+          if (
+            !isRfc64ActiveRegisteredSubscriptionV1(currentSubscription)
+            && !isRfc64LocalJoinIntentUnregisteredSubscriptionV1(
+              this.localApprovedAgentByCG.has(contextGraphId),
+              currentSubscription,
+            )
+          ) {
+            this.clearRfc64ScheduledFinalizedAbsenceRetryV1(
+              contextGraphId,
+              retry.revision,
+            );
+            return;
+          }
+          if (!state.targets.has(contextGraphId)) {
+            state.targets.set(contextGraphId, retry.revision);
+            state.activityRevision += 1;
+          }
+          const batchScheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
+            RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1,
+            (ownerSignal) => this.runRfc64ScheduledCatalogResponsibilityBatchV1(ownerSignal),
           );
-          return;
-        }
-        const currentSubscription = this.subscribedContextGraphs.get(contextGraphId);
-        if (
-          !isRfc64ActiveRegisteredSubscriptionV1(currentSubscription)
-          && !isRfc64LocalJoinIntentUnregisteredSubscriptionV1(
-            this.localApprovedAgentByCG.has(contextGraphId),
-            currentSubscription,
-          )
-        ) {
-          this.clearRfc64ScheduledFinalizedAbsenceRetryV1(
-            contextGraphId,
-            retry.revision,
-          );
-          return;
-        }
-        if (!state.targets.has(contextGraphId)) {
-          state.targets.set(contextGraphId, retry.revision);
-          state.activityRevision += 1;
-        }
-        const batchScheduled = this.rfc64BackgroundWorkDispatcherV1.scheduleKeyed(
-          RFC64_SCHEDULED_RESPONSIBILITY_BATCH_KEY_V1,
-          (ownerSignal) => this.runRfc64ScheduledCatalogResponsibilityBatchV1(ownerSignal),
-        );
-        if (!batchScheduled && state.targets.get(contextGraphId) === retry.revision) {
-          state.targets.delete(contextGraphId);
-        }
+          if (!batchScheduled && state.targets.get(contextGraphId) === retry.revision) {
+            state.targets.delete(contextGraphId);
+          }
+        } finally { state.retryTimers.delete(retry.key); }
       },
     );
     if (!scheduled) {
+      state.retryTimers.delete(retry.key);
       this.clearRfc64ScheduledFinalizedAbsenceRetryV1(contextGraphId, retry.revision);
     }
   }
