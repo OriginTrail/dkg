@@ -14,8 +14,9 @@ import type { PromoteJob } from '../../src/async-promote-queue-types.js';
 
 export { GRAPH };
 export const NOW = 1_900_000_000_000;
-/** The windows the tests use (short, so ages stay readable): succeeded jobs, and the two benign failed classes. */
-export const W = 60_000, WF = 90_000;
+const DAY = 24 * 3_600_000;
+/** The windows the tests use (the shortest the sweep accepts is one day): succeeded jobs, and the two benign failed classes. */
+export const W = 2 * DAY, WF = 3 * DAY;
 export const AG = '0x1234567890abcdef1234567890abcdef12345678';
 export const policy: PromoteRetentionPolicy = { succeededMaxAgeMs: W, benignFailedMaxAgeMs: WF };
 export const noPending = (_id: string) => false;
@@ -130,10 +131,19 @@ export function captureLogger(): CapturedLog {
  * interval too long to interfere with a test that moves the clock, and a silent logger. `over` replaces any of it.
  */
 export function newRetention(store: TripleStore, over: Partial<ShareRetentionConfig> = {}): ShareRetention {
+  if (over.admissions === undefined) standInForTheQueue(store, over.graphUri);
   return createShareRetention({
     store, mode: 'delete', intervalMs: 365 * 24 * 3_600_000, succeededMaxAgeMs: W, benignFailedMaxAgeMs: WF,
     now: () => NOW, monotonicNow: () => 0, logger: captureLogger(), ...over,
   });
+}
+
+/**
+ * The queue's constructor creates the admission coordinator of its store object and graph, and a sweep refuses to exist without one. A test that builds no
+ * queue calls this to make the same coordinator (idempotent: a queue built over the store object, before or after, shares it).
+ */
+export function standInForTheQueue(store: TripleStore, graph = GRAPH): PromoteAdmissionCoordinator {
+  return PromoteAdmissionCoordinator.for(store, graph);
 }
 
 /** Call `runBatch()` until the pass is over (nothing left to judge) or `max` calls were made; returns every result. */

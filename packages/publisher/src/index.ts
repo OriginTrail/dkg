@@ -567,7 +567,7 @@ export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissio
 
 // Share-queue retention core (OT-RFC-73 P10a). Passive: the mode, the timer and the config that drive it are the daemon's (P10b); the mode defaults to off.
 export {
-  createShareRetention, SHARE_RETENTION_DEFAULTS, SHARE_RETENTION_MODES, SHARE_RETENTION_WINDOW_MS,
+  createShareRetention, ShareRetentionAdmissionUnavailableError, SHARE_RETENTION_DEFAULTS, SHARE_RETENTION_MODES, SHARE_RETENTION_WINDOW_MS,
   type ShareRetention, type ShareRetentionBatchResult, type ShareRetentionConfig, type ShareRetentionCounters, type ShareRetentionJob,
   type ShareRetentionLogger, type ShareRetentionMode, type ShareRetentionPassSummary, type ShareRetentionSkip,
 } from './async-promote-retention.js';

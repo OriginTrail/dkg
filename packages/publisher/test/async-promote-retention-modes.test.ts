@@ -7,7 +7,7 @@ import { OxigraphStore, StoreSchedulerBusyError, type TripleStore } from '@origi
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import { PromoteAdmissionAttempt, PromoteAdmissionCoordinator } from '../src/promote-admission.js';
 import { jobSubject } from '../src/async-promote-queue-utils.js';
-import { createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
+import { ShareRetentionAdmissionUnavailableError, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import { emptyClassCounts } from '../src/async-promote-retention-policy.js';
 import {
   AG, GRAPH, NOW, W, WF, DELETABLE_KINDS, captureLogger, drain, genPopulation, graphFingerprint, insertQuads, mk, newRetention, pick, present, put,
@@ -534,7 +534,11 @@ describe('the admission coordinator the sweep consults is the queue\'s own', () 
     expect(coordinator.hasPendingJob('j')).toBe(false);
   });
 
-  it('an admission still pending through the queue protects its job from the sweep built over the same store object, until a durable read settles it', async () => {
+  /**
+   * A real queue whose first admission commits and then loses its reply: job `lost-ack-1` stays a pending (indeterminate) admission in the queue's own coordinator.
+   * The job has since finished, long ago, as far as the store is concerned (written behind the queue's back: nothing observed it).
+   */
+  async function lostAckQueue() {
     const raw = new OxigraphStore();
     let armed = true;
     // the write commits, then the response is lost: the queue keeps the admission pending with the job ID (an indeterminate admission)
@@ -550,10 +554,17 @@ describe('the admission coordinator the sweep consults is the queue\'s own', () 
     const queue = new TripleStoreAsyncPromoteQueue(store, { now: () => NOW, idGenerator: () => 'lost-ack-1', admissionTimeoutMs: 1000 });
     const admission = await queue.enqueue({ contextGraphId: 'cg', assertionName: 'lost', agentAddress: AG, entities: 'all' }).then(() => undefined, (e: unknown) => e) as { admissionOutcome?: string; jobId?: string };
     expect(admission).toMatchObject({ admissionOutcome: 'indeterminate', jobId: 'lost-ack-1' });
-    // the job has since finished, long ago, as far as the store is concerned (written behind the queue's back: nothing observed it)
     await raw.deleteByPattern({ subject: jobSubject('lost-ack-1'), graph: GRAPH });
     await put(raw, mk('lost-ack-1', 'succeeded', {}, 10 * W));
+    return { raw, store, queue };
+  }
+  /** Another object over the same data: the coordinator of the queue's store object is not its coordinator. */
+  const anotherObjectOver = (raw: TripleStore) => new Proxy(raw, { get(t, p) { const v = Reflect.get(t, p, t); return typeof v === 'function' ? v.bind(t) : v; } }) as TripleStore;
+  const direct = (store: TripleStore, over: Record<string, unknown> = {}) =>
+    createShareRetention({ store, mode: 'delete', intervalMs: 60_000, now: () => NOW, monotonicNow: () => 0, logger: captureLogger(), batchSize: 10, ...over });
 
+  it('an admission still pending through the queue protects its job from the sweep built over the same store object, until a durable read settles it', async () => {
+    const { raw, store, queue } = await lostAckQueue();
     const retention = newRetention(store, { batchSize: 10 });
     expect(PromoteAdmissionCoordinator.for(store, GRAPH).hasPendingJob('lost-ack-1')).toBe(true);
     const res = await retention.runBatch();
@@ -561,7 +572,7 @@ describe('the admission coordinator the sweep consults is the queue\'s own', () 
     expect(await present(raw, 'lost-ack-1')).not.toBe('');
 
     // a sweep that holds the queue's coordinator explicitly is protected too, over any store object
-    const viaWrapper = new Proxy(raw, { get(t, p) { const v = Reflect.get(t, p, t); return typeof v === 'function' ? v.bind(t) : v; } }) as TripleStore;
+    const viaWrapper = anotherObjectOver(raw);
     expect(PromoteAdmissionCoordinator.for(viaWrapper, GRAPH)).not.toBe(PromoteAdmissionCoordinator.for(store, GRAPH));     // a different store object has a different coordinator
     const explicit = newRetention(viaWrapper, { admissions: PromoteAdmissionCoordinator.for(store, GRAPH), batchSize: 10 });
     expect(await explicit.runBatch()).toMatchObject({ deleted: 0, kept: { pending_admission: 1 } });
@@ -572,6 +583,53 @@ describe('the admission coordinator the sweep consults is the queue\'s own', () 
     const later = newRetention(store, { batchSize: 10 });
     expect(await later.runBatch()).toMatchObject({ deleted: 1 });
     expect(await present(raw, 'lost-ack-1')).toBe('');
+  });
+
+  it('a sweep over the queue\'s own store object, with nothing standing in for the queue, keeps the pending admission (pending_admission) in both active modes', async () => {
+    const { raw, store } = await lostAckQueue();
+    for (const mode of ['delete', 'report'] as const) {
+      expect(await direct(store, { mode }).runBatch()).toMatchObject({ deleted: 0, wouldDelete: 0, kept: { pending_admission: 1 } });
+    }
+    expect(await present(raw, 'lost-ack-1')).not.toBe('');
+  });
+
+  it('refuses to be created for a store object the queue was never built with: a typed error, not one store call, not one delete, and no coordinator made on the side', async () => {
+    const { raw, store } = await lostAckQueue();
+    const other = anotherObjectOver(raw);                                                 // the same data, but not the queue's store object
+    const { store: spied, log } = spy(other);
+    const before = await graphFingerprint(raw);
+    for (const mode of ['delete', 'report'] as const) {
+      let error: unknown;
+      try { direct(spied, { mode }); } catch (cause) { error = cause; }
+      expect(error, mode).toBeInstanceOf(ShareRetentionAdmissionUnavailableError);
+      expect(error).toMatchObject({ name: 'ShareRetentionAdmissionUnavailableError', code: 'SHARE_RETENTION_ADMISSION_UNAVAILABLE', graphUri: GRAPH });
+    }
+    expect(log).toEqual([]);                                                              // it refused before any store call
+    expect(await graphFingerprint(raw)).toBe(before);                                     // so the pending job is still there
+    expect(await present(raw, 'lost-ack-1')).not.toBe('');
+    expect(PromoteAdmissionCoordinator.existing(spied, GRAPH)).toBeUndefined();           // the refusal made no coordinator (a made one would be empty)
+    expect(PromoteAdmissionCoordinator.existing(other, GRAPH)).toBeUndefined();
+    // a graph the queue was not built with is refused the same way, over the queue's own store object
+    expect(() => direct(store, { graphUri: 'urn:test:other-control' })).toThrow(ShareRetentionAdmissionUnavailableError);
+    expect(PromoteAdmissionCoordinator.existing(store, 'urn:test:other-control')).toBeUndefined();
+    // the queue's own store object, and the queue's coordinator passed in, are accepted
+    expect(() => direct(store)).not.toThrow();
+    expect(() => direct(other, { admissions: PromoteAdmissionCoordinator.existing(store, GRAPH) })).not.toThrow();
+  });
+
+  it('the non-creating lookup finds exactly the coordinator the queue made, and mode off needs none (it never judges a job)', async () => {
+    const raw = new OxigraphStore();
+    expect(PromoteAdmissionCoordinator.existing(raw, GRAPH)).toBeUndefined();
+    const { store: spied, log } = spy(raw);
+    const off = createShareRetention({ store: spied, intervalMs: 60_000, now: () => NOW, logger: captureLogger() });      // no mode: off
+    expect(off.mode).toBe('off');
+    expect(await off.runBatch()).toMatchObject({ skipped: 'off' });
+    expect(log).toEqual([]);
+    expect(PromoteAdmissionCoordinator.existing(spied, GRAPH)).toBeUndefined();            // creating a sweep (off, or refused) never creates a coordinator
+    const queued = new TripleStoreAsyncPromoteQueue(raw, { now: () => NOW });
+    expect(queued).toBeDefined();
+    expect(PromoteAdmissionCoordinator.existing(raw, GRAPH)).toBe(PromoteAdmissionCoordinator.for(raw, GRAPH));
+    expect(() => direct(raw)).not.toThrow();                                               // built after the queue: accepted
   });
 
   it('a delete invalidates the coordinator\'s observation of the job it removed', async () => {

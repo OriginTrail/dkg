@@ -3,11 +3,11 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
 import { PROMOTE_STATE, PROMOTE_UPDATED_AT, PROMOTE_PAYLOAD, jobSubject, literal, integer } from '../src/async-promote-queue-utils.js';
 import { buildRetentionScanQuery, buildRetentionTieQuery, buildRetentionVerifyQuery } from '../src/async-promote-retention-scan.js';
-import { createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
+import { SHARE_RETENTION_DEFAULTS, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import {
   AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, W, WF,
   decide, deletedSubjects, drain, insertQuads, mk, newRetention, pick, present, put, registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, from,
-  captureLogger, policy, type Kind, type Quads, type QueryResult,
+  captureLogger, policy, standInForTheQueue, type Kind, type Quads, type QueryResult,
 } from './_helpers/share-retention-fixtures.js';
 
 // Share-queue retention, the proofs the measured prototype carried (OT-RFC-73 P10a, AC7) on the production API. They pin (1) the exclusion list job by job,
@@ -228,6 +228,32 @@ describe('retention batch against the real queue', () => {
     expect(await present(store, 'revived')).not.toBe('');
   });
 
+  it('caps the batch size at 1000 and floors both windows at 24 hours, so a misconfiguration cannot make one scan huge or shrink the 7-day D-6 window to minutes', () => {
+    const DAY = 24 * 3_600_000;
+    const store = new OxigraphStore();
+    standInForTheQueue(store);
+    const base = { store, mode: 'delete' as const, intervalMs: 60_000 };
+    expect(SHARE_RETENTION_DEFAULTS).toMatchObject({ batchSize: 100, maxBatchSize: 1000, minWindowMs: DAY });
+    for (const batchSize of [1001, 5000, 100_000, Number.MAX_SAFE_INTEGER]) expect(() => createShareRetention({ ...base, batchSize }), `batchSize ${batchSize}`).toThrow(/batchSize must be a positive integer of at most 1000/);
+    for (const batchSize of [1, 100, 999, 1000]) expect(() => createShareRetention({ ...base, batchSize }), `batchSize ${batchSize}`).not.toThrow();
+    for (const ms of [1, 1000, 60_000, 3_600_000, DAY - 1]) {
+      expect(() => createShareRetention({ ...base, succeededMaxAgeMs: ms }), `succeeded ${ms}`).toThrow(/succeededMaxAgeMs must be at least 86400000 ms/);
+      expect(() => createShareRetention({ ...base, benignFailedMaxAgeMs: ms }), `benign ${ms}`).toThrow(/benignFailedMaxAgeMs must be at least 86400000 ms/);
+    }
+    for (const ms of [DAY, DAY + 1, 7 * DAY, 30 * DAY]) expect(() => createShareRetention({ ...base, succeededMaxAgeMs: ms, benignFailedMaxAgeMs: ms }), `window ${ms}`).not.toThrow();
+    expect(() => createShareRetention({ ...base, benignFailedMaxAgeMs: null })).not.toThrow();              // failed classes switched off: no window to floor
+    expect(() => createShareRetention({ ...base, mode: 'report', succeededMaxAgeMs: 60_000 })).toThrow('succeededMaxAgeMs');   // the floors hold in every active mode
+    expect(() => createShareRetention({ ...base, mode: 'report', batchSize: 1001 })).toThrow('batchSize');
+  });
+
+  it('a window at the floor behaves as configured: a succeeded job just over 24 hours old goes, one just under stays', async () => {
+    const DAY = 24 * 3_600_000;
+    const store = new OxigraphStore();
+    await put(store, mk('over', 'succeeded', {}, DAY + 1), mk('exact', 'succeeded', {}, DAY), mk('under', 'succeeded', {}, DAY - 1), mk('cancelled-over', 'failed', { reason: 'cancelled' }, DAY + 1), mk('cancelled-under', 'failed', { reason: 'cancelled' }, DAY - 1));
+    await drain(newRetention(store, { succeededMaxAgeMs: DAY, benignFailedMaxAgeMs: DAY, batchSize: 10 }));
+    expect([...(await storedIds(store))].sort()).toEqual(['cancelled-under', 'under']);
+  });
+
   it('rejects invalid configuration and reports a store failure as data, never as a throw', async () => {
     const store = new OxigraphStore();
     const base = { store, mode: 'delete' as const, intervalMs: 60_000 };
@@ -384,11 +410,11 @@ describe('retention scan progress (keyset cursor): rows that cannot be deleted n
     const { store: spied, log } = spy(store);
     await insertQuads(store, [...Array.from({ length: 50 }, (_, i) => rowOf('fatal', `f-${i}`, 20 * W + i)), ...rowOf('succeeded', 'a', 15 * W)].flat());
     let t = NOW;
-    const retention = newRetention(spied, { now: () => t, batchSize: 40 });
+    const retention = newRetention(spied, { now: () => t, batchSize: 40, rescanIntervalMs: Infinity });      // the clock jumps by days below: no safety rescan may restart the walk
     for (let i = 0; i < 3; i++) await retention.runBatch();
     await insertQuads(store, [...rowOf('succeeded', 'b', 30 * 1000), ...rowOf('succeeded', 'c', 10 * 1000)]);      // 30 s and 10 s old: not eligible yet
     expect((await retention.runBatch()).deleted).toBe(0);
-    t += W - 20_000;                                                                              // b is now 30 s + 40 s = 70 s old, c is 50 s old
+    t += W - 20_000;                                                                              // b is now W + 10 s old, c is W - 10 s old
     const mark = verifiedSubjects(log).length;
     expect((await retention.runBatch()).deletedJobs.map(d => d.jobId)).toEqual(['b']);
     t += 20_000;
@@ -403,15 +429,15 @@ describe('retention scan progress (keyset cursor): rows that cannot be deleted n
     await store.deleteByPattern({ subject: jobSubject('skewed'), predicate: PROMOTE_UPDATED_AT, graph: GRAPH });
     await store.insert([{ subject: jobSubject('skewed'), predicate: PROMOTE_UPDATED_AT, object: integer(NOW - 5 * W), graph: GRAPH }]);       // index: old; payload: 10 s old
     let t = NOW;
-    const retention = newRetention(spied, { now: () => t, batchSize: 100 });
+    const retention = newRetention(spied, { now: () => t, batchSize: 100, rescanIntervalMs: Infinity });     // the clock jumps by days below: no safety rescan may restart the walk
     const first = await retention.runBatch();
     expect(first.kept.too_recent).toBe(1);
     expect(await present(store, 'skewed')).not.toBe('');
-    t += 30_000;
-    await retention.runBatch();                                                                   // not due yet (the payload is 40 s old < the 60 s window)
+    t += W / 2;
+    await retention.runBatch();                                                                   // not due yet (the payload is W / 2 + 10 s old < the window)
     expect(await present(store, 'skewed')).not.toBe('');
     const mark = verifiedSubjects(log).length;
-    t += 30_000;                                                                                  // 70 s old now
+    t += W / 2;                                                                                   // W + 10 s old now
     await retention.runBatch();
     expect(await present(store, 'skewed')).toBe('');
     expect(verifiedSubjects(log).length - mark).toBe(1);                                         // the 20 older newer-format rows sit BEFORE the skewed row: they are not re-judged
@@ -577,6 +603,7 @@ describe('keep rules the policy adds to the prototype', () => {
     const day = 24 * 3_600_000;
     await put(store, mk('s6', 'succeeded', {}, 6 * day), mk('s7', 'succeeded', {}, 7 * day), mk('c6', 'failed', { reason: 'cancelled' }, 6 * day), mk('c7', 'failed', { reason: 'cancelled' }, 7 * day),
       mk('r7', 'failed', {}, 30 * day));
+    standInForTheQueue(store);                                                                    // no queue is built here; the sweep needs the coordinator its constructor makes
     const retention = createShareRetention({ store, mode: 'delete', intervalMs: 60_000, now: () => NOW, monotonicNow: () => 0, logger: captureLogger() });
     await drain(retention);
     expect([...(await storedIds(store))].sort()).toEqual(['c6', 'r7', 's6']);

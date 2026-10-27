@@ -16,17 +16,21 @@
  *     admission coordinator answering the pending-admission question; in `delete` mode the surviving jobs are removed ONE SUBJECT AT A TIME (no bulk update)
  *     on the control path; the lock is released between slices so admissions and claims interleave. A hold has a time budget (default 50 ms): no further
  *     delete starts once the next one would exceed it (the rest of the slice goes back for a fresh verification in a later hold), and the slice size adapts to
- *     what fits;
+ *     what fits. The store flush (a full snapshot on a file-backed store) is NOT part of the hold: it runs after the lock is released, so it neither delays
+ *     admissions and claims nor shrinks the slice (a crash before it only resurrects rows that are deleted again by a later pass);
  *  4. only after every slice succeeded do the cursors move past the judged rows.
  * `report` mode runs steps 1 to 3 unchanged and removes nothing: the rows it counts as `wouldDelete` are exactly the rows `delete` would remove from the same
  * snapshot. It never throws for a store failure: the result carries the phase that failed and what completed before it (no cursor moves, so the next call
- * judges the same rows again - deleted ones are gone). Throws only for invalid configuration.
+ * judges the same rows again - deleted ones are gone). Throws only for invalid configuration, and when the queue's admission coordinator cannot be found (below).
  *
  * What a deletion costs a caller: `getStatus(jobId)` of a deleted job becomes `null`, a retained-job reconciliation reports `absent_or_pruned` (see
  * docs/api/share-reconciliation.md), and a client that lost every reply and retries the same selector after the window is admitted again. The journal of the
  * publisher queue is not touched, and no job of any other graph.
  *
- * The sweep must see the queue's own coordinator: pass the store object the queue was built with (the coordinator is keyed on it), or the queue's coordinator.
+ * The sweep must see the queue's own admission coordinator, and it never makes one: a coordinator created for a store object the queue was never built with is
+ * empty, so no pending admission would ever protect a job and the loss would be silent. Build the sweep over the store object the queue was built with (the
+ * coordinator is keyed on that object and the graph), after the queue, or pass the queue's coordinator as `admissions`. In a mode other than `off` a sweep
+ * for which no coordinator exists refuses to be created (`ShareRetentionAdmissionUnavailableError`) and so deletes nothing.
  *
  * Exclusion between the verify and the delete is the in-process queue lock. A delete is a plain subject-scoped removal (a guarded bulk SPARQL update would be an
  * "everything" mutation to the observed store and would move the recipient key/route fence), so a second writer PROCESS that revives a job between the two is not
@@ -55,6 +59,8 @@ const DELETE_SOURCE = 'publisher.asyncPromote.retention.delete';
 export const SHARE_RETENTION_DEFAULTS = Object.freeze({
   /** Most candidate rows one batch judges. */
   batchSize: 100,
+  /** The hard maximum of `batchSize`: one scan reads, and one pass of holds judges, at most this many rows. */
+  maxBatchSize: 1000,
   /** Most jobs verified and deleted under ONE hold of the queue mutation lock (the lock is released between slices). */
   sliceSize: 10,
   /** The time one hold of the lock may take: the slice size adapts to it, and no delete starts that would take the hold past it. */
@@ -62,6 +68,8 @@ export const SHARE_RETENTION_DEFAULTS = Object.freeze({
   /** The hard maximum of the hold budget and of the slice size. */
   maxHoldBudgetMs: 50,
   maxSliceSize: 100,
+  /** The floor of `succeededMaxAgeMs` and `benignFailedMaxAgeMs` (24 h): a misconfiguration cannot shrink the D-6 window of 7 days to minutes. */
+  minWindowMs: 24 * 60 * 60 * 1000,
   /** Safety net: every this many ms (once a pass has reached the end) the scan restarts from the oldest row. */
   rescanIntervalMs: 3_600_000,
   /** A tick is skipped when the wall clock has run ahead of the monotonic clock by more than this many intervals since the last tick that ran. */
@@ -73,6 +81,19 @@ const SKIPS: readonly ShareRetentionSkip[] = ['off', 'overlap', 'clock_invalid',
 
 export interface ShareRetentionLogger { info(message: string): void; warn(message: string): void }
 
+/**
+ * Thrown when a sweep in the mode `report` or `delete` is created for a store object and graph the queue was never built with (and no coordinator was passed):
+ * the queue's admission coordinator is what protects a job whose admission outcome is uncertain, and one made on the spot would be empty. Nothing was deleted.
+ */
+export class ShareRetentionAdmissionUnavailableError extends Error {
+  readonly code = 'SHARE_RETENTION_ADMISSION_UNAVAILABLE';
+  constructor(readonly graphUri: string) {
+    super(`share retention refuses to run: no admission coordinator exists for this store object and graph <${graphUri}>. Create the sweep over the store object `
+      + 'the queue was built with, after the queue, or pass the queue\'s coordinator as `admissions`');
+    this.name = 'ShareRetentionAdmissionUnavailableError';
+  }
+}
+
 export interface ShareRetentionConfig {
   /** The store object the queue was built with: its admission coordinator is the one that knows the pending admissions. */
   readonly store: TripleStore;
@@ -81,16 +102,20 @@ export interface ShareRetentionConfig {
   /** The pause between two `runBatch()` calls the caller schedules (ms). The clock guard's tolerance is `clockGuardFactor` times it. */
   readonly intervalMs: number;
   readonly graphUri?: string;
-  /** Default 7 days (D-6). */
+  /** Default 7 days (D-6); at least `SHARE_RETENTION_DEFAULTS.minWindowMs` (24 h). */
   readonly succeededMaxAgeMs?: number;
-  /** Default 7 days (D-6). `null`: the harmless failed classes are kept too. */
+  /** Default 7 days (D-6); at least `SHARE_RETENTION_DEFAULTS.minWindowMs` (24 h). `null`: the harmless failed classes are kept too. */
   readonly benignFailedMaxAgeMs?: number | null;
+  /** Most candidate rows one batch judges: a positive integer of at most `SHARE_RETENTION_DEFAULTS.maxBatchSize` (1000). */
   readonly batchSize?: number;
   readonly sliceSize?: number;
   readonly holdBudgetMs?: number;
   readonly rescanIntervalMs?: number;
   readonly clockGuardFactor?: number;
-  /** The queue's coordinator, when it is not the one of `store` and `graphUri`. */
+  /**
+   * The queue's coordinator, when it is not the one of `store` and `graphUri`. Without it the sweep looks up the coordinator the queue of `store` and `graphUri`
+   * created, and refuses to be created when there is none. Not needed (and not looked up) in mode `off`.
+   */
   readonly admissions?: PromoteAdmissionCoordinator;
   /** Wall clock (ms); defaults to `Date.now`. */
   readonly now?: () => number;
@@ -193,7 +218,12 @@ function resolveConfig(config: ShareRetentionConfig): ResolvedConfig {
   };
   const graphUri = config.graphUri ?? DEFAULT_PROMOTE_CONTROL_GRAPH_URI;
   if (typeof graphUri !== 'string' || graphUri === '' || /[<>"{}|^`\\\s]/.test(graphUri)) throw new Error('graphUri must be a bare IRI');
-  const succeededMaxAgeMs = positive(config.succeededMaxAgeMs ?? SHARE_RETENTION_WINDOW_MS, 'succeededMaxAgeMs');
+  const ageWindow = (value: unknown, name: string): number => {
+    const ms = positive(value, name);
+    if (ms < d.minWindowMs) throw new Error(`${name} must be at least ${d.minWindowMs} ms (24 hours)`);
+    return ms;
+  };
+  const succeededMaxAgeMs = ageWindow(config.succeededMaxAgeMs ?? SHARE_RETENTION_WINDOW_MS, 'succeededMaxAgeMs');
   const benign = config.benignFailedMaxAgeMs === undefined ? SHARE_RETENTION_WINDOW_MS : config.benignFailedMaxAgeMs;
   const rescanIntervalMs = config.rescanIntervalMs ?? d.rescanIntervalMs;
   if (typeof rescanIntervalMs !== 'number' || Number.isNaN(rescanIntervalMs) || rescanIntervalMs <= 0) throw new Error('rescanIntervalMs must be a positive number (Infinity = never)');
@@ -203,8 +233,8 @@ function resolveConfig(config: ShareRetentionConfig): ResolvedConfig {
   if (clockGuardFactor < 1) throw new Error('clockGuardFactor must be at least 1');
   return {
     mode, intervalMs: positive(config.intervalMs, 'intervalMs'), graphUri,
-    policy: benign === null ? { succeededMaxAgeMs } : { succeededMaxAgeMs, benignFailedMaxAgeMs: positive(benign, 'benignFailedMaxAgeMs') },
-    batchSize: integer(config.batchSize ?? d.batchSize, 'batchSize', Number.MAX_SAFE_INTEGER),
+    policy: benign === null ? { succeededMaxAgeMs } : { succeededMaxAgeMs, benignFailedMaxAgeMs: ageWindow(benign, 'benignFailedMaxAgeMs') },
+    batchSize: integer(config.batchSize ?? d.batchSize, 'batchSize', d.maxBatchSize),
     sliceSize: integer(config.sliceSize ?? d.sliceSize, 'sliceSize', d.maxSliceSize),
     holdBudgetMs, rescanIntervalMs, clockGuardFactor,
   };
@@ -251,7 +281,8 @@ class ShareRetentionImpl implements ShareRetention {
   readonly mode: ShareRetentionMode;
   private readonly cfg: ResolvedConfig;
   private readonly ctx: ScanContext;
-  private readonly admissions: PromoteAdmissionCoordinator;
+  /** The queue's coordinator; undefined only in mode `off`, which never judges a job. */
+  private readonly admissions: PromoteAdmissionCoordinator | undefined;
   private readonly scan: RetentionScanState;
   private readonly active: readonly PromoteRetentionScanClass[];
   private readonly clock: () => number;
@@ -274,7 +305,8 @@ class ShareRetentionImpl implements ShareRetention {
     this.cfg = resolveConfig(config);
     this.mode = this.cfg.mode;
     this.ctx = { store: config.store, graphUri: this.cfg.graphUri };
-    this.admissions = config.admissions ?? PromoteAdmissionCoordinator.for(config.store, this.cfg.graphUri);
+    this.admissions = this.mode === 'off' ? undefined : config.admissions ?? PromoteAdmissionCoordinator.existing(config.store, this.cfg.graphUri);
+    if (this.mode !== 'off' && this.admissions === undefined) throw new ShareRetentionAdmissionUnavailableError(this.cfg.graphUri);
     this.active = this.cfg.policy.benignFailedMaxAgeMs === undefined ? ['succeeded'] : ['succeeded', 'failed'];
     this.scan = new RetentionScanState(this.active, this.cfg.rescanIntervalMs, this.mode === 'delete');
     this.clock = config.now ?? (() => Date.now());
@@ -390,9 +422,11 @@ class ShareRetentionImpl implements ShareRetention {
 
   /**
    * One hold of the queue mutation lock: re-read the slice, judge every row again from the payload, and (delete mode) remove the surviving jobs one subject at a
-   * time. Returns the rows it did not get to because the hold budget was used up; they are verified again under a later hold.
+   * time. Returns the rows it did not get to because the hold budget was used up; they are verified again under a later hold. When the hold deleted anything the
+   * store is flushed once the lock is released.
    */
   private async hold(slice: readonly SliceRow[], b: BatchState, now: number): Promise<SliceRow[]> {
+    const admissions = this.requireAdmissions();
     const deferred: SliceRow[] = [];
     const entries: ShareRetentionJob[] = [];                                      // logged after the hold, deleted or (report) would-delete
     try {
@@ -415,7 +449,7 @@ class ShareRetentionImpl implements ShareRetention {
           const stored = states.get(c.iri);
           if (stored === undefined || stored.size !== 1 || termString([...stored][0]) !== parsed.job.state) { this.keep(b, c, 'index_mismatch', now); continue; }
           let decision;
-          try { decision = decidePromoteRetention(parsed.job, now, this.cfg.policy, id => this.admissions.hasPendingJob(id)); }
+          try { decision = decidePromoteRetention(parsed.job, now, this.cfg.policy, id => admissions.hasPendingJob(id)); }
           catch { this.keep(b, c, 'unreadable', now); continue; }
           if (!decision.delete) {
             const ageable = decision.reason === 'too_recent' || decision.reason === 'future_dated';
@@ -435,7 +469,7 @@ class ShareRetentionImpl implements ShareRetention {
             if (i > 0 && (this.mono() - startedAt) + lastOpMs > this.cfg.holdBudgetMs) { deferred.push(...doomed.slice(i).map(x => x.row)); break; }
             if (!(d.entry.updatedAt <= now)) { this.keep(b, d.row, 'future_dated', now); continue; }   // the invariant, once more at the last line: never a row dated after now
             const opStartedAt = this.mono();
-            this.admissions.invalidate(d.row.jobId);
+            admissions.invalidate(d.row.jobId);
             b.indeterminate = d.row.jobId;
             await deleteByPatternWithoutCount(this.ctx.store, { subject: jobSubject(d.row.jobId), graph: this.cfg.graphUri }, controlStoreOptions('share', DELETE_SOURCE));
             b.indeterminate = undefined;
@@ -443,14 +477,22 @@ class ShareRetentionImpl implements ShareRetention {
             b.deleted.push(d.entry); entries.push(d.entry);
             this.totals.deleted[d.entry.jobClass] += 1; this.pass.deleted[d.entry.jobClass] += 1;
           }
-          if (entries.length > 0) await this.ctx.store.flush?.();
         }
         this.noteHold(b, this.mono() - startedAt, slice.length, deferred.length > 0 ? entries.length : undefined);
       });
     } finally {
       this.logJobs(entries, now);
     }
+    // Durability, outside the hold: the lock is released, so a flush (a full snapshot on a file-backed store) delays no admission or claim and is not part of the
+    // hold's measured time or of the budget the next delete is predicted against. A crash before it only resurrects rows a later pass deletes again.
+    if (this.mode === 'delete' && entries.length > 0) await this.ctx.store.flush?.();
     return deferred;
+  }
+
+  /** The queue's coordinator. Only mode `off` has none, and it never reaches a hold; this is the last line of defence against judging a job without it. */
+  private requireAdmissions(): PromoteAdmissionCoordinator {
+    if (this.admissions === undefined) throw new ShareRetentionAdmissionUnavailableError(this.cfg.graphUri);
+    return this.admissions;
   }
 
   /** Time the hold and adapt the slice size: halve after a hold past the budget, fit the budget after a deferral, creep back up while holds are cheap. */

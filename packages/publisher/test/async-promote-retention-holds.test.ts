@@ -148,6 +148,58 @@ describe('the mutex is released between slices', () => {
   });
 });
 
+/**
+ * From inside a store call: can the queue's mutex be taken right now? `free` is false when someone holds it (the probe gives up waiting after `waitMs`);
+ * `settled` resolves once the probe's own turn at the mutex is over, which for a held mutex is after the holder let go.
+ */
+async function mutexFree(waitMs = 30) {
+  let got = false;
+  const settled = withPromoteControlLock(GRAPH, async () => { got = true; });
+  await Promise.race([settled, new Promise<void>(resolve => setTimeout(resolve, waitMs))]);
+  return { free: got, settled };
+}
+const kinds = (log: Logged[]) => log.map(l => (l.kind === 'flush' ? 'F' : l.source === `${RETENTION}verify` ? 'V' : l.source === `${RETENTION}delete` ? 'd' : '')).join('');
+
+describe('the store flush runs after the hold, outside the mutex and outside the hold budget', () => {
+  it('flushes once per hold that deleted, after the hold released the mutex: the order is verify, deletes, flush, and the mutex is free during the flush', async () => {
+    const store = new OxigraphStore();
+    await put(store, ...oldJobs(5));
+    const probes: Array<Awaited<ReturnType<typeof mutexFree>>> = [];
+    const { store: spied, log } = spy(store, undefined, { before: async (entry) => { if (entry.kind === 'flush') probes.push(await mutexFree()); } });
+    const res = await newRetention(spied, { batchSize: 100, sliceSize: 2 }).runBatch();
+    await Promise.all(probes.map(p => p.settled));
+    expect(res).toMatchObject({ scanned: 5, deleted: 5, holds: 3 });
+    expect(res.error).toBeUndefined();
+    expect(kinds(log)).toBe('VddFVddFVdF');                                                // a flush follows each hold's last delete and precedes the next verify
+    expect(probes.map(p => p.free)).toEqual([true, true, true]);                           // the hold had let go of the mutex before it flushed
+  });
+
+  it('a slow flush is no part of a hold: the slice does not shrink, no hold ends past the budget, and nothing is deferred because of it', async () => {
+    const clock = { t: 0 };
+    const inner = new OxigraphStore();
+    const { store: spied, log } = spy(inner, undefined, { after: (entry) => {
+      if (entry.kind === 'flush') clock.t += 500;                                          // a full-store snapshot on a file-backed store
+      else if (entry.source === `${RETENTION}verify` || entry.source === `${RETENTION}delete`) clock.t += 1;
+    } });
+    await put(inner, ...oldJobs(25));
+    const retention = newRetention(spied, { batchSize: 100, monotonicNow: () => clock.t });
+    const res = await retention.runBatch();
+    expect(res).toMatchObject({ scanned: 25, deleted: 25, holds: 3, holdBudgetExceeded: 0, maxHoldMs: 11 });   // verify 1 + ten deletes of 1 ms; the 500 ms flushes are not in it
+    expect(verifySizes(log)).toEqual([10, 10, 5]);
+    expect(log.filter(l => l.kind === 'flush')).toHaveLength(3);
+    expect(retention.counters()).toMatchObject({ sliceSize: 10, holdBudgetExceeded: 0, maxHoldMs: 11 });
+  });
+
+  it('a hold that deleted nothing flushes nothing', async () => {
+    const store = new OxigraphStore();
+    await put(store, ...Array.from({ length: 4 }, (_, i) => mk(`fatal-${i}`, 'failed', {}, 10 * W + i)));
+    const { store: spied, log } = spy(store);
+    const res = await newRetention(spied, { batchSize: 100 }).runBatch();
+    expect(res).toMatchObject({ deleted: 0, scanned: 4, kept: { failed_retained: 4 } });
+    expect(log.filter(l => l.kind === 'flush')).toEqual([]);
+  });
+});
+
 describe('the hold budget', () => {
   /** A store whose every verify and delete takes `cost.ms` on a fake monotonic clock; the retention reads that clock. */
   function timed(cost: { ms: number }) {
