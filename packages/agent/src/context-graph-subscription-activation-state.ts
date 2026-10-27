@@ -228,28 +228,41 @@ export class ContextGraphSubscriptionActivations {
   }
 }
 
+/** The lifecycle owns the invariant across every consumer await. */
+export type OwnedSubscriptionActivation = Readonly<{
+  subscription: ContextGraphSub;
+  assertCurrent(): void;
+}>;
+
 /** Await the lifecycle's existing activation within the caller's original lifetime.
  * Denied, disabled and capped subscriptions retain their existing inactive behavior. */
 export function waitForSubscriptionActivation(
   workLifetime: AgentWorkLifetime, isStarted: () => boolean,
   subscriptions: ReadonlyMap<string, ContextGraphSub>, dormancy: Dormancy,
   id: string, caller: AbortSignal, activations: ContextGraphSubscriptionActivations,
-): Promise<ContextGraphSub> | undefined {
+): Promise<OwnedSubscriptionActivation> | undefined {
   if (dormancy.get(id) !== 'authorityUnavailable') return;
   const generation = workLifetime.generation;
   const signal = AbortSignal.any([caller, workLifetime.signal]);
-  const assertCurrent = () => {
+  const assertLifetime = () => {
     if (signal.aborted || generation !== workLifetime.generation || !isStarted()) throw changed();
   };
-  assertCurrent();
+  assertLifetime();
   return workLifetime.track(activations.wait(id, signal)).then(outcome => {
-    assertCurrent();
+    assertLifetime();
     const live = subscriptions.get(id);
     // Preserve the caller's inactive-subscription error after an explicit unsubscribe.
-    if (live && !live.subscribed && !live.coreHosted && dormancy.get(id) !== 'authorityUnavailable') return live;
-    if (outcome.kind !== 'committed' || !live || dormancy.has(id)
-      || !isContextGraphSubscriptionStoredAgain(outcome.subscription, live)
-      || !contextGraphSubscriptionAdmissionPremisesEqual(outcome.subscription, live)) throw changed();
-    return live;
+    const inactive = live && !live.subscribed && !live.coreHosted && dormancy.get(id) !== 'authorityUnavailable';
+    const captured = inactive ? live : outcome.kind === 'committed' ? outcome.subscription : undefined;
+    if (!captured) throw changed();
+    const assertCurrent = () => {
+      assertLifetime();
+      const current = subscriptions.get(id);
+      if (!isContextGraphSubscriptionStoredAgain(captured, current)
+        || !contextGraphSubscriptionAdmissionPremisesEqual(captured, current)
+        || ((captured.subscribed || captured.coreHosted) && dormancy.has(id))) throw changed();
+    };
+    assertCurrent();
+    return { subscription: live!, assertCurrent };
   });
 }

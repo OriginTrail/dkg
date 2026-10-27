@@ -113,14 +113,9 @@ export class PublicSnapshotMethods extends DKGAgentBase {
       try {
         const activation = this.waitForContextGraphSubscriptionActivation(contextGraphId, signal);
         if (activation) {
-          const committed = await activation;
-          const current = this.subscribedContextGraphs.get(contextGraphId);
-          // The wait's continuation and this one are separate microtasks. Keep
-          // the committed owner across the await instead of adopting a new row.
-          if (!isContextGraphSubscriptionStoredAgain(committed, current)
-            || !contextGraphSubscriptionAdmissionPremisesEqual(committed, current)
-            || ((committed.subscribed || committed.coreHosted) && this.contextGraphSubscriptionDormancyById.has(contextGraphId)))
-            throw new Error('Subscription activation ownership changed');
+          const owned = await activation;
+          // Separate microtasks can replace the row after the wait resolves.
+          owned.assertCurrent();
         }
       }
       catch (cause) { throw new Error('Snapshot job ownership changed', { cause }); }

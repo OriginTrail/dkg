@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
-import { isCommittedSubscription, waitForSubscriptionActivation } from './context-graph-subscription-activation-state.js';
+import { isCommittedSubscription, waitForSubscriptionActivation, type OwnedSubscriptionActivation } from './context-graph-subscription-activation-state.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -503,7 +503,7 @@ import { runCuratorMetaRefreshFromPeer } from './curator-meta-refresh.js';
 import { ensureCoreHostedDefinition, noteCoreHostedOwnerShare, refreshCoreHostedDefinitionBeforeServing } from './core-hosted-definition.js';
 import { isCanonicalAuthoritativeContextGraphId } from
   './context-graph-binding-state.js';
-import { writeContextGraphSubscription, type ContextGraphSubscriptionWriteOptions, type SubscriptionWriteResult } from './context-graph-subscription-writer.js';
+import { projectContextGraphSubscriptionWrite, type ContextGraphSubscriptionWriteOptions, type SubscriptionWriteResult } from './context-graph-subscription-writer.js';
 import { projectDormantContextGraphIdentities } from './context-graph-dormant-identity.js';
 import {
   normalizeAgentDid,
@@ -540,6 +540,7 @@ import {
   type DeferredContextGraphSubscriptionAuthorityRecoveryCursor,
   type PersistedContextGraphSubscriptionActivationOptions,
   releaseRollingSubscriptionSlot,
+  rehydratedSubscriptionReachedSafeState,
   promoteDormantContextGraphSubscriptions,
   wakeDeferredContextGraphSubscriptionAuthorityRecovery,
 } from './context-graph-subscription-authority-recovery.js';
@@ -7827,38 +7828,80 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     return this.writeContextGraphSubscription(contextGraphId, next, options).subscription;
   }
 
-  /** The writer keeps every synchronous phase behind this complete operation. */
+  /** Project once, then apply all effects synchronously through their existing owners. */
   writeContextGraphSubscription(this: DKGAgent,
     contextGraphId: string, next: ContextGraphSubInput, options?: ContextGraphSubscriptionWriteOptions,
   ): SubscriptionWriteResult {
-    return writeContextGraphSubscription({
-      subscriptions: this.subscribedContextGraphs, wireOwners: this.wireIdToLocalCgId,
-      accountedIds: this.contextGraphSubscriptionRehydrationAccountedIds,
-      slots: this.contextGraphSubscriptionRehydrationSlotIds,
-      nameCommitment: id => this.contextGraphNameCommitment(id), wireId: hash => this.contextGraphWireId(hash),
-      wirePredecessor: id => this.resolveWireOnlyContextGraphSubscription(id),
-      applyBinding: (id, previous, row, wire) => this.contextGraphBindingState.applySubscriptionTransition(id, previous, row, wire),
-      requestNameResolution: id => this.requestContextGraphNameResolutionFor(id),
-      invalidateLists: () => this.invalidateListContextGraphsCache(),
-      retireNamePlaceholder: id => this.retireLiveContextGraphNamePlaceholderFor(id),
-      deleteSubscription: id => this.deleteContextGraphSubscription(id),
-      info: (phase, message) => this.log.info(createOperationContext(phase), message),
-      rehydrationStatus: () => this.contextGraphSubscriptionRehydrationStatus,
-      releaseSlot: (id, reason) => releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds,
-        this.contextGraphSubscriptionRehydrationPromotionRuntime, id, reason),
-      receiverSelected: id => this.config.rfc64CatalogExecutionPlan.selectedAuthority[id] !== undefined,
-      isEdge: () => (this.config.nodeRole ?? 'edge') === 'edge',
-      receiverSelectionChanged: (id, change) => this.handleRfc64CatalogReceiverSelectionTransitionV1(id, change),
-      reconcileResponsibility: id => this.scheduleRfc64CatalogResponsibilityReconciliationV1(id),
-      forceClearVmState: id => this.forceClearVmReconcileStateForContextGraph(id),
-      clearVmState: id => this.clearVmReconcileStateForContextGraph(id),
-      syncScoped: id => (this.config.syncContextGraphs ?? []).includes(id),
-      hasStore: () => !!this.config.contextGraphSubscriptionStore,
-      nextPersistRevision: id => this.nextContextGraphSubscriptionPersistRevision(id),
-      persist: (id, persistOptions) => this.persistContextGraphSubscription(id, persistOptions),
-      persistMembership: id => this.persistLocalNodeMembership(id),
-      removeMembership: id => { this.deleteContextGraphMember(id, 'node', this.peerId); },
-    }, contextGraphId, next, options);
+    const previous = this.subscribedContextGraphs.get(contextGraphId);
+    const wireOnlySubscription = this.resolveWireOnlyContextGraphSubscription(contextGraphId);
+    const plan = projectContextGraphSubscriptionWrite({ contextGraphId, previous, next, wireOnlySubscription,
+      localWireId: this.contextGraphNameCommitment(contextGraphId),
+      normalizeWireId: hash => this.contextGraphWireId(hash),
+      syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId), options });
+    const { subscription: canonicalNext, adoptedWire, previousWireId, nextWireId, retainsInactiveBinding } = plan;
+    const currentWire = this.resolveWireOnlyContextGraphSubscription(contextGraphId);
+    if (this.subscribedContextGraphs.get(contextGraphId) !== previous
+      || currentWire?.localId !== wireOnlySubscription?.localId
+      || currentWire?.subscription !== wireOnlySubscription?.subscription)
+      throw new Error('Subscription source changed during write');
+
+    this.invalidateListContextGraphsCache();
+    if (options?.retireNamePlaceholder === true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
+    if (adoptedWire) {
+      // Retire authenticated wire custody before installing the canonical binding.
+      this.deleteContextGraphSubscription(adoptedWire.id);
+      if (this.wireIdToLocalCgId.get(adoptedWire.id) === adoptedWire.id) this.wireIdToLocalCgId.delete(adoptedWire.id);
+      this.log.info(createOperationContext('system'),
+        `Promoted wire-only Context Graph ${adoptedWire.id.slice(0, 18)}… to local identity "${contextGraphId}"`);
+    }
+    if (plan.continuesLine) continueContextGraphSubscriptionLine(previous!, canonicalNext);
+    const bindingFacts = this.contextGraphBindingState.applySubscriptionTransition(contextGraphId, previous, canonicalNext, nextWireId);
+    if (previousWireId !== nextWireId && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId)
+      this.wireIdToLocalCgId.delete(previousWireId);
+    this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
+    const wireOwnerId = this.wireIdToLocalCgId.get(nextWireId);
+    const wireOwner = wireOwnerId === undefined ? undefined : this.subscribedContextGraphs.get(wireOwnerId);
+    const preserveWireOwner = options?.deferWireAdoption === true || (
+      (options?.preserveAdmittedWireBinding === true || retainsInactiveBinding)
+      && wireOwnerId !== contextGraphId && (wireOwner?.subscribed === true || wireOwner?.coreHosted === true)
+      && (retainsInactiveBinding || wireOwner.onChainId !== canonicalNext.onChainId));
+    if (!preserveWireOwner) this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
+    if (plan.requestsNameResolution) this.requestContextGraphNameResolutionFor(contextGraphId);
+
+    const status = this.contextGraphSubscriptionRehydrationStatus;
+    if (status?.rehydrationEnabled === true && status.activationCap > 0
+      && this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)
+      && canonicalNext.coreHosted !== true && canonicalNext.subscribed === true) {
+      if (rehydratedSubscriptionReachedSafeState(canonicalNext)) {
+        if (releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds,
+          this.contextGraphSubscriptionRehydrationPromotionRuntime, contextGraphId, 'readiness'))
+          this.log.info(createOperationContext('init'),
+            `Rehydrated context-graph subscription "${contextGraphId}" reached a safe state; rolling activation slot released`);
+      } else this.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
+    } else releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds,
+      this.contextGraphSubscriptionRehydrationPromotionRuntime, contextGraphId, options?.rollbackSlotRelease ?? 'deactivation');
+
+    if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined
+      && (this.config.nodeRole ?? 'edge') === 'edge') {
+      this.handleRfc64CatalogReceiverSelectionTransitionV1(contextGraphId, { kind: 'subscription',
+        previousSubscribed: previous?.subscribed === true, nextSubscribed: canonicalNext.subscribed === true });
+    }
+    if (plan.reconcilesResponsibility) this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
+    if (bindingFacts.reverseCandidateCleared) this.forceClearVmReconcileStateForContextGraph(contextGraphId);
+    else if (!bindingFacts.admitted) this.clearVmReconcileStateForContextGraph(contextGraphId);
+
+    const { persistence } = plan;
+    if (options?.persist !== false && persistence.action !== 'skip') {
+      if (this.config.contextGraphSubscriptionStore) {
+        const revision = this.nextContextGraphSubscriptionPersistRevision(contextGraphId);
+        this.persistContextGraphSubscription(contextGraphId, { revision,
+          preserveDormantHosting: previous?.coreHosted !== true || canonicalNext.coreHosted === true,
+          retiredNamePredecessor: adoptedWire, updateRehydrationStatus: options?.updateRehydrationStatus !== false });
+      }
+      if (persistence.persistMemberIntent && canonicalNext.subscribed) this.persistLocalNodeMembership(contextGraphId);
+      else if (persistence.persistMemberIntent) this.deleteContextGraphMember(contextGraphId, 'node', this.peerId);
+    }
+    return { subscription: canonicalNext, adoptedWire };
   }
 
   /**
@@ -8669,7 +8712,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /** Await an in-flight authority activation within the caller's existing lifetime. */
-  waitForContextGraphSubscriptionActivation(this: DKGAgent, id: string, signal: AbortSignal): Promise<ContextGraphSub> | undefined {
+  waitForContextGraphSubscriptionActivation(this: DKGAgent, id: string, signal: AbortSignal): Promise<OwnedSubscriptionActivation> | undefined {
     return waitForSubscriptionActivation(this.workLifetime, () => this.started, this.subscribedContextGraphs, this.contextGraphSubscriptionDormancyById, id, signal, this.contextGraphSubscriptionActivations);
   }
 
