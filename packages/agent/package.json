@@ -28,6 +28,11 @@
       "import": "./dist/write-preflight-attribution.js",
       "default": "./dist/write-preflight-attribution.js"
     },
+    "./write-preflight-unresolved-window": {
+      "types": "./dist/write-preflight-unresolved-window.d.ts",
+      "import": "./dist/write-preflight-unresolved-window.js",
+      "default": "./dist/write-preflight-unresolved-window.js"
+    },
     "./chain-authority-read-budgets": {
       "types": "./dist/chain-authority-read-budgets.d.ts",
       "import": "./dist/chain-authority-read-budgets.js",
