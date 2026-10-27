@@ -79,15 +79,16 @@ What a walk guarantees, while jobs are being added and changed:
 - A page can hold fewer jobs than `pageSize` while `nextCursor` is set (a job that no longer matched when its page was read is left out, and a row that cannot be decoded is skipped), and an empty page can carry a `nextCursor`. Stop on `complete`, not on a short page.
 - A page is ordered by the time the job was admitted (`enqueuedAt` for share jobs, `acceptedAt` for publish jobs), then by job ID by code point. The complete share list keeps its order by ready time (`nextRetryAt` when a retry is scheduled), and the complete publish list orders jobs admitted in the same millisecond by `localeCompare` of the job ID. The orders differ only for those ties and for retry times.
 
-Request errors are `400` with a stable `code` and a message that never repeats the input:
+Paging errors carry a stable `code`. A request error is a `400` with a message that never repeats the input:
 
-| Code | When |
-|---|---|
-| `PROMOTE_LIST_CURSOR_INVALID` / `PUBLISHER_LIST_CURSOR_INVALID` | `cursor` is empty, repeated, not one a page of that list returned (a cursor of the other list included) or was edited. |
-| `PROMOTE_LIST_PAGE_SIZE_INVALID` / `PUBLISHER_LIST_PAGE_SIZE_INVALID` | `pageSize` is repeated or not an integer from 1 to 1,000. |
-| `LIST_PAGING_LIMIT_CONFLICT` | `limit` was sent with `cursor` or `pageSize`. |
-| `PUBLISHER_LIST_STATUS_INVALID` | The publisher route's `status` is not one of `accepted`, `claimed`, `validated`, `broadcast`, `included`, `finalized`, `failed` (in both modes; an empty `status` is no filter). It used to answer an empty list. |
+| Status | Code | When |
+|---|---|---|
+| `400` | `PROMOTE_LIST_CURSOR_INVALID` / `PUBLISHER_LIST_CURSOR_INVALID` | `cursor` is empty, repeated, not one a page of that list returned (a cursor of the other list included) or was edited. |
+| `400` | `PROMOTE_LIST_PAGE_SIZE_INVALID` / `PUBLISHER_LIST_PAGE_SIZE_INVALID` | `pageSize` is repeated or not an integer from 1 to 1,000. |
+| `400` | `LIST_PAGING_LIMIT_CONFLICT` | `limit` was sent with `cursor` or `pageSize`. |
+| `400` | `PUBLISHER_LIST_STATUS_INVALID` | The publisher route's `status` is not one of `accepted`, `claimed`, `validated`, `broadcast`, `included`, `finalized`, `failed` (in both modes; an empty `status` is no filter). It used to answer an empty list. |
+| `501` | `PROMOTE_LIST_PAGING_UNSUPPORTED` | The share route was asked for a page (`cursor` or `pageSize`) and this node's share queue cannot page. A node built from this repository always can, so this is not expected in production; list without `cursor` and `pageSize` instead, which every queue answers. |
 
-Store pressure keeps its usual answer: `503` with `code: "STORE_SCHEDULER_BUSY"` (or `STORE_OPERATION_TIMEOUT`), `retryable: true` and `Retry-After: 1`; retry the same request, the cursor stays valid. A stored job that cannot be placed in the page order is a `500`; the complete list still answers.
+Store pressure keeps its usual answer: `503` with `code: "STORE_SCHEDULER_BUSY"` (or `STORE_OPERATION_TIMEOUT`), `retryable: true` and `Retry-After: 1`; retry the same request, the cursor stays valid. A stored job that cannot be read or placed in the page order is a `500` with the fixed message `The job list cannot be paged: a stored job row is unreadable or out of order (see the node log)`: it names no job, and the node logs one `[list-paging] ... answering 500` warn line (no job ID) for each such request. The complete list still answers.
 
 The CLI wraps both lists: [`dkg ka share-jobs` and `dkg publisher jobs`](cli.md) take `--page-size`, `--cursor` and `--all`.

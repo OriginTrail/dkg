@@ -10,8 +10,10 @@
 // since. A page can hold fewer jobs than `pageSize` while `nextCursor` is set (a row that no longer decodes is skipped).
 //
 // A malformed cursor (including a cursor of the share queue), a bad page size and an unknown status are `400` with a stable
-// code. The queue's `unreadable_row` and `unordered_page` are faults of the stored rows, not of the request: they are rethrown
-// with everything else, store pressure included, for the daemon's one error mapping (`503` for the scheduler, `500` otherwise).
+// code. The queue's `unreadable_row` and `unordered_page` are faults of the stored rows, not of the request: they are logged
+// (one warn line) and rethrown with a fixed message, because the queue's own message can name a job subject (`list-page-fault.ts`).
+// Everything else, store pressure included, is rethrown as it is for the daemon's one error mapping (`503` for the scheduler,
+// `500` otherwise).
 
 import type { ServerResponse } from 'node:http';
 import {
@@ -20,6 +22,7 @@ import {
   type LiftJobState,
   type VmPublisherControl,
 } from '@origintrail-official/dkg-publisher';
+import { failPageFault } from './list-page-fault.js';
 import { parseListPaging, type ListPaging } from './list-paging-query.js';
 import { jsonResponse } from '../http-utils.js';
 
@@ -62,6 +65,7 @@ export async function respondPublisherJobs(
   } catch (err) {
     const rejected = err instanceof LiftJobPageError ? REQUEST_ERRORS[err.code as keyof typeof REQUEST_ERRORS] : undefined;
     if (rejected) return jsonResponse(res, 400, rejected);
+    if (err instanceof LiftJobPageError) failPageFault('GET /api/publisher/jobs', err.code, err);
     throw err;
   }
 }

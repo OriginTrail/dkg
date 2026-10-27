@@ -8,7 +8,8 @@
  *   - the default (no `cursor`, no `pageSize`) is the complete listing, byte for byte what the queue's `list()` returns;
  *   - the first page, a walk that follows `nextCursor` to `complete` (each job once), and the filters on a walk;
  *   - every request error is `400` with a stable code, a cursor of the other queue included, and an unknown publisher
- *     status is `400` in both modes; store pressure stays `503` and a fault in the stored rows is `5xx`, never `400`;
+ *     status is `400` in both modes; store pressure stays `503` and a fault in the stored rows is a `500`, never `400`,
+ *     which logs one warn line and answers a fixed message that names no job;
  *   - the read authority gate runs before any page is read;
  *   - `dkg ka share-jobs` and `dkg publisher jobs` walk those routes with --page-size, --cursor and --all.
  */
@@ -56,6 +57,8 @@ let publisher: TripleStoreAsyncLiftPublisher;
 let authentication = requestAuthentication({ kind: 'nodeOperator' });
 let authority = vi.fn(async (..._args: unknown[]): Promise<Json> => allowed);
 let busy = false;
+/** Rewrites the bindings of every query the store answers, to put a fault in the rows a page reads. */
+let tamper: ((bindings: Array<Record<string, string>>) => Array<Record<string, string>>) | undefined;
 let clock = 0;
 let shareSeq = 0;
 let liftSeq = 0;
@@ -93,13 +96,15 @@ beforeEach(async () => {
   authentication = requestAuthentication({ kind: 'nodeOperator' });
   authority = vi.fn(async () => allowed);
   busy = false;
+  tamper = undefined;
   shareSeq = 0;
   liftSeq = 0;
   store = new OxigraphStore();
   const query = store.query.bind(store);
   store.query = (async (...args: Parameters<typeof query>) => {
     if (busy) throw new StoreSchedulerBusyError('queue_full', 'control', 'test.listing');
-    return query(...args);
+    const result = await query(...args);
+    return tamper && result.type === 'bindings' ? { ...result, bindings: tamper(result.bindings) } : result;
   }) as typeof store.query;
   queue = new TripleStoreAsyncPromoteQueue(store, { now: () => clock, idGenerator: () => jobId('job', ++shareSeq) });
   publisher = new TripleStoreAsyncLiftPublisher(store, { now: () => clock, idGenerator: () => jobId('lj', ++liftSeq) });
@@ -258,11 +263,37 @@ describe('GET /api/knowledge-assets/swm/share-jobs', () => {
     expect(response.body).toMatchObject({ code: 'STORE_SCHEDULER_BUSY', retryable: true, outcome: 'not_started', priority: 'control' });
   });
 
-  it('answers a fault in the stored rows with 500, not 400', async () => {
-    vi.spyOn(queue, 'listPage').mockRejectedValue(new Error('Share job listing: the page is out of order'));
+  it('answers a fault in the stored rows with 500, not 400: one warn line, a fixed message, no job named', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    tamper = rows => [...rows].reverse();
+    await expect(queue.listPage({}, { pageSize: 5 })).rejects.toThrow(/^Share job listing: the store returned job keys out of order/);
     const response = await get(`${SHARE}?pageSize=5`);
     expect(response.status).toBe(500);
-    expect(response.body.code).toBeUndefined();
+    expect(response.body).toEqual({ error: expect.stringMatching(/^The job list cannot be paged: a stored job row is unreadable or out of order/) });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(/^\[list-paging\] GET \/api\/knowledge-assets\/swm\/share-jobs: .*\(stored_rows\); answering 500$/);
+    tamper = undefined;
+    expect((await get(SHARE)).status).toBe(200);
+  });
+
+  it('keeps the queue\'s own message, which may name a job, out of the 500 body and the warn line', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const subject = 'urn:dkg:promote-queue:job:job-07';
+    vi.spyOn(queue, 'listPage').mockRejectedValue(new Error(`Share job listing: ${subject} cannot be placed in the page order`));
+    const response = await get(`${SHARE}?pageSize=5`);
+    expect(response.status).toBe(500);
+    expect(JSON.stringify(response.body)).not.toMatch(/job-07|urn:dkg/);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).not.toMatch(/job-07|urn:dkg/);
+  });
+
+  it('does not log or rewrite any other fault: an error of another kind keeps the daemon\'s own 500', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(queue, 'listPage').mockRejectedValue(new Error('boom'));
+    const response = await get(`${SHARE}?pageSize=5`);
+    expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: 'boom' });
+    expect(warn).not.toHaveBeenCalled();
   });
 
   it('answers 501 for a queue that cannot page', async () => {
@@ -424,12 +455,34 @@ describe('GET /api/publisher/jobs', () => {
     expect(response.body).toMatchObject({ code: 'STORE_SCHEDULER_BUSY', retryable: true, outcome: 'not_started' });
   });
 
-  it.each(['unreadable_row', 'unordered_page'] as const)('answers %s, a fault in the stored rows, with 500 and not 400', async code => {
+  it.each(['unreadable_row', 'unordered_page'] as const)('answers %s, a fault in the stored rows, with 500 and not 400: one warn line, a fixed message', async code => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     vi.spyOn(publisher, 'listPage').mockRejectedValue(new LiftJobPageError(code, 'the stored rows cannot be paged'));
     const response = await get(`${PUBLISHER}?pageSize=5`);
     expect(response.status).toBe(500);
+    expect(response.body).toEqual({ error: expect.stringMatching(/^The job list cannot be paged: a stored job row is unreadable or out of order/) });
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toMatch(new RegExp(`^\\[list-paging\\] GET /api/publisher/jobs: .*\\(${code}\\); answering 500$`));
+  });
+
+  it.each([
+    ['unreadable_row', (rows: Array<Record<string, string>>) => rows.map((row, i) => (i === 0 ? { ...row, acceptedAt: '"soon"' } : row))],
+    ['unordered_page', (rows: Array<Record<string, string>>) => [...rows].reverse()],
+  ] as const)('keeps the job a real %s names out of the 500 body and the warn line', async (code, fault) => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    tamper = fault;
+    // The queue's own error does name a job (its subject or its id), which is why the route must not pass its message on.
+    await expect(publisher.listPage({ limit: 5 })).rejects.toThrow(/lj-\d\d/);
+    await expect(publisher.listPage({ limit: 5 })).rejects.toMatchObject({ name: 'LiftJobPageError', code });
+    const response = await get(`${PUBLISHER}?pageSize=5`);
+    expect(response.status).toBe(500);
     expect(response.body.code).toBeUndefined();
-    expect(response.body.error).toBe('the stored rows cannot be paged');
+    expect(JSON.stringify(response.body)).not.toMatch(/lj-\d\d|urn:dkg/);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0]![0])).toContain(`(${code})`);
+    expect(String(warn.mock.calls[0]![0])).not.toMatch(/lj-\d\d|urn:dkg/);
+    tamper = undefined;
+    expect((await get(PUBLISHER)).status).toBe(200);
   });
 
   it('checks the read authority before it reads a page, as the complete listing does', async () => {
