@@ -112,11 +112,19 @@ describe('the cursor codec', () => {
     expect(found).toBeGreaterThan(0);
   });
 
-  it('refuses to encode a position the queue could not have produced', () => {
+  it('refuses to encode a position the queue could not have produced, with an internal error and not the client\'s', () => {
+    // A cursor is encoded from a row the SERVER read, so a row that cannot be encoded is a fault of the stored data. The typed
+    // PromoteListRequestError is what a route answers with 400; it must not be what a corrupt row produces.
     for (const cursor of [
       { enqueuedAt: -1, jobId: 'a' }, { enqueuedAt: 1.5, jobId: 'a' }, { enqueuedAt: Number.NaN, jobId: 'a' },
       { enqueuedAt: Number.MAX_SAFE_INTEGER + 2, jobId: 'a' }, { enqueuedAt: 1, jobId: '' }, { enqueuedAt: 1, jobId: 'a b' },
-    ]) expect(() => encodePromoteJobCursor(cursor)).toThrowError(PromoteListRequestError);
+    ]) {
+      const error = (() => { try { encodePromoteJobCursor(cursor); } catch (e) { return e; } })();
+      expect(error, JSON.stringify(cursor)).toBeInstanceOf(Error);
+      expect(error, JSON.stringify(cursor)).not.toBeInstanceOf(PromoteListRequestError);
+      expect((error as Error).message).toMatch(/cannot be encoded as a cursor/);
+      expect((error as Error).message).not.toContain('a b');
+    }
   });
 
   it('never echoes the rejected input in the error', () => {

@@ -15,10 +15,11 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Logger } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
+import { PromoteListRequestError } from '../src/promote-list-cursor.js';
 import {
   PromoteJobConflictError, type AsyncPromoteQueueConfig, type PromoteJob, type PromoteJobPage, type PromoteJobState, type PromoteListFilter,
 } from '../src/async-promote-queue-types.js';
-import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, comparePromoteJobs, uniquenessLookupKeys } from '../src/async-promote-queue-utils.js';
+import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_STATE, comparePromoteJobs, jobSubject, uniquenessLookupKeys } from '../src/async-promote-queue-utils.js';
 import { isAutomaticallyRecoverablePostCommitFailure } from '../src/async-promote-recovery-policy.js';
 import { POST_COMMIT_MARKERS } from '../src/promote-post-commit-sweep.js';
 import { PROMOTE_POST_COMMIT_FAILURE_MESSAGE } from '../src/promote-replay-safety.js';
@@ -244,6 +245,48 @@ describe('the page queries', () => {
   });
 });
 
+describe('a record with two state triples is listed once (corruption only; the queue never writes one)', () => {
+  const specs: ShareRowSpec[] = [
+    { id: 'a', state: 'queued', enqueuedAt: NOW }, { id: 'dup', state: 'queued', enqueuedAt: NOW + 1 },
+    { id: 'c', state: 'running', enqueuedAt: NOW + 2 }, { id: 'd', state: 'queued', enqueuedAt: NOW + 3 }, { id: 'e', state: 'failed', enqueuedAt: NOW + 4 },
+  ];
+  async function withDuplicateState() {
+    const fixture = await seeded(specs, { listPageSize: 2 });
+    // The same job under a second state: the key read joins both triples and used to return the job's key twice.
+    await fixture.store.insert([{ subject: jobSubject('dup'), predicate: PROMOTE_STATE, object: JSON.stringify('running'), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI }]);
+    return fixture;
+  }
+
+  it.each([1, 2, 3, 100])('walks every job once, the duplicated one included, at page size %i', async (pageSize) => {
+    const { queue } = await withDuplicateState();
+    expect(walked(await walkPages(queue, {}, pageSize))).toEqual(['a', 'dup', 'c', 'd', 'e']);
+  });
+
+  it('lists it once under a filter that matches both of its states, and by the state its payload says', async () => {
+    const { queue } = await withDuplicateState();
+    expect(walked(await walkPages(queue, { state: ['queued', 'running'] }, 2))).toEqual(['a', 'dup', 'c', 'd']);
+    expect(walked(await walkPages(queue, { state: ['running'] }, 2))).toEqual(['c']); // 'dup' matches the key read as running; its payload says queued
+    expect(walked(await walkPages(queue, { state: ['queued'] }, 2))).toEqual(['a', 'dup', 'd']);
+  });
+
+  it('serves the complete listing and the post-commit sweep over it', async () => {
+    const { queue } = await withDuplicateState();
+    expect(ids(await queue.list())).toEqual(['a', 'dup', 'c', 'd', 'e']);
+    expect(ids(await queue.list({ limit: 3 }))).toEqual(['a', 'dup', 'c']);
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+  });
+
+  it('still fails closed on a genuine reordering, which is a different fault from a repeated key', async () => {
+    const reorder = tapStore(openStore(), { after: (call, result) => {
+      if (call.source !== 'publisher.asyncPromote.list' || result.type !== 'bindings' || result.bindings.length < 3) return result;
+      const [first, second, ...rest] = result.bindings;
+      return { ...result, bindings: [second!, first!, ...rest] };
+    } });
+    await seedShareRows(reorder.store, specs);
+    await expect(queueOver(reorder.store).queue.listPage({}, { pageSize: 4 })).rejects.toThrow(/out of order or at\/before the cursor/);
+  });
+});
+
 describe('interleaved mutations between pages (AC6)', () => {
   const at = (n: number) => NOW + n;
 
@@ -461,6 +504,25 @@ describe('the complete listing is a loop of pages that each release the mutex', 
     for (const listPageSize of [0, -1, 1_001, 2.5, Number.NaN]) {
       expect(() => new TripleStoreAsyncPromoteQueue(openStore(), { listPageSize })).toThrow(/listPageSize must be an integer from 1 to 1000/);
     }
+  });
+
+  it('refuses a warning threshold that is not a finite number of at least one, which would silence the warning or fire it on every listing', () => {
+    for (const listWarnRows of [Number.NaN, 0, -1, 0.5, Number.NEGATIVE_INFINITY, Number.POSITIVE_INFINITY, '5000' as never]) {
+      expect(() => new TripleStoreAsyncPromoteQueue(openStore(), { listWarnRows }), String(listWarnRows)).toThrow(/listWarnRows must be a finite number of at least 1/);
+    }
+    for (const listWarnRows of [1, 10, 5_000, 1e9]) expect(() => new TripleStoreAsyncPromoteQueue(openStore(), { listWarnRows })).not.toThrow();
+  });
+
+  it('answers a stored row that cannot be put in a cursor with an internal error, not the client\'s typed request error', async () => {
+    // A record the queue could not have written (a negative enqueue time): the page that ends on it cannot name its cursor. The caller did nothing wrong.
+    const { queue } = await seeded([{ id: 'neg', state: 'queued', enqueuedAt: -5 }, { id: 'later', state: 'queued', enqueuedAt: NOW }]);
+    const failure = await queue.listPage({}, { pageSize: 1 }).catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(Error);
+    expect(failure).not.toBeInstanceOf(PromoteListRequestError);
+    expect((failure as Error).message).toMatch(/cannot be encoded as a cursor/);
+    // A page that does not end on it, and the complete listing (which never encodes a cursor), are unaffected.
+    expect(ids((await queue.listPage({}, { pageSize: 2 })).jobs)).toEqual(['neg', 'later']);
+    expect(ids(await queue.list())).toEqual(['neg', 'later']);
   });
 
   it('shows the admission coordinator the jobs of a page and only those', async () => {

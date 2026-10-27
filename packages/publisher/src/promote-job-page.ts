@@ -76,7 +76,9 @@ export function buildPromoteJobPageQuery(
     where.push(`FILTER (?enq >= ${at})`, `FILTER (?enq > ${at} || STR(?job) > ${literal(jobSubject(read.cursor.jobId))})`);
   }
   if (!Number.isSafeInteger(read.pageSize) || read.pageSize < 1) throw new RangeError('page size must be a positive integer');
-  return `SELECT ?job ?enq${contains ? ' ?payload' : ''} WHERE { GRAPH <${graphUri}> { ${where.join(' ')} } } ORDER BY ?enq ?job LIMIT ${read.pageSize + 1}`;
+  // DISTINCT: a record with a second state triple (corruption, the queue never writes one) would otherwise come back once per triple, and a repeated key
+  // is indistinguishable here from a store that ignores the cursor, so every walk of an unfiltered queue would fail. A real reordering still does.
+  return `SELECT DISTINCT ?job ?enq${contains ? ' ?payload' : ''} WHERE { GRAPH <${graphUri}> { ${where.join(' ')} } } ORDER BY ?enq ?job LIMIT ${read.pageSize + 1}`;
 }
 
 function buildPayloadQuery(graphUri: string, jobIds: readonly string[]): string {

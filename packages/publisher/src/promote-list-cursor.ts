@@ -37,15 +37,19 @@ export class PromoteListRequestError extends Error {
   }
 }
 
-function assertCursor(cursor: { enqueuedAt: unknown; jobId: unknown }): asserts cursor is PromoteJobCursor {
-  if (typeof cursor.enqueuedAt !== 'number' || !Number.isSafeInteger(cursor.enqueuedAt) || cursor.enqueuedAt < 0
-    || typeof cursor.jobId !== 'string' || !isSafeJobId(cursor.jobId)) throw new PromoteListRequestError('PROMOTE_LIST_CURSOR_INVALID');
+function isCursor(cursor: { enqueuedAt: unknown; jobId: unknown }): cursor is PromoteJobCursor {
+  return typeof cursor.enqueuedAt === 'number' && Number.isSafeInteger(cursor.enqueuedAt) && cursor.enqueuedAt >= 0
+    && typeof cursor.jobId === 'string' && isSafeJobId(cursor.jobId);
 }
 
 const canonicalBody = (cursor: PromoteJobCursor): string => JSON.stringify({ t: cursor.enqueuedAt, j: cursor.jobId });
 
+/**
+ * The cursor of a position the SERVER read, so a position that cannot be encoded (a stored row with a negative enqueue time, a job id the
+ * grammar refuses) is a fault of the stored data and an ordinary `Error`, never the `PromoteListRequestError` a route answers with `400`.
+ */
 export function encodePromoteJobCursor(cursor: PromoteJobCursor): string {
-  assertCursor(cursor);
+  if (!isCursor(cursor)) throw new Error('Share job listing: the position of the last row of the page cannot be encoded as a cursor');
   return CURSOR_PREFIX + Buffer.from(canonicalBody(cursor), 'utf8').toString('base64url');
 }
 
@@ -61,7 +65,7 @@ export function decodePromoteJobCursor(value: unknown): PromoteJobCursor {
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) throw invalid();
   const { t, j } = parsed as Record<string, unknown>;
   const cursor = { enqueuedAt: t, jobId: j };
-  assertCursor(cursor);
+  if (!isCursor(cursor)) throw invalid();
   // One textual form per cursor: no extra keys, no whitespace, no alternative base64 spelling.
   if (canonicalBody(cursor) !== text || encodePromoteJobCursor(cursor) !== value) throw invalid();
   return cursor;

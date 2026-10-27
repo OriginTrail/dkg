@@ -35,7 +35,10 @@ export function promoteListingTuning(config: Pick<AsyncPromoteQueueConfig, 'list
   if (!Number.isSafeInteger(listPageSize) || listPageSize < 1 || listPageSize > PROMOTE_LIST_MAX_PAGE_SIZE) {
     throw new Error(`listPageSize must be an integer from 1 to ${PROMOTE_LIST_MAX_PAGE_SIZE}`);
   }
-  return { listPageSize, listWarnRows: config.listWarnRows ?? PROMOTE_LIST_WARN_ROWS };
+  const listWarnRows = config.listWarnRows ?? PROMOTE_LIST_WARN_ROWS;
+  // NaN would silence the warning for good and a value below one would fire it on every listing, so neither is a setting.
+  if (typeof listWarnRows !== 'number' || !Number.isFinite(listWarnRows) || listWarnRows < 1) throw new Error('listWarnRows must be a finite number of at least 1');
+  return { listPageSize, listWarnRows };
 }
 
 const lastWarnedAt = new Map<string, number>();
