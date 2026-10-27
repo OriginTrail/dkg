@@ -12,9 +12,10 @@ import {
   contextGraphDataGraphUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore, type Quad, type QueryOptions } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, StoreOperationTimeoutError, type Quad, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { ContextGraphResolveMethods } from '../../agent/src/dkg-agent-cg-resolve.js';
 import {
+  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS,
   WritePreflightGeneration,
   WritePreflightIdentityMethods,
   attachWritePreflightGeneration,
@@ -24,7 +25,11 @@ import { createMutationObservedStore } from '../../agent/src/internal/context-gr
 import { createObservedStoreMutation } from '../../agent/src/internal/observed-store-mutation.js';
 import { VersionedSubscriptionRegistry } from '../../agent/src/internal/versioned-subscription-registry.js';
 import { resolveRequiredWriteContextGraphId } from '../src/daemon/http-utils.js';
-import { WRITE_PREFLIGHT_CACHE_ENV, configureWritePreflightCoalescing } from '../src/daemon/write-preflight-coalescing.js';
+import {
+  WRITE_PREFLIGHT_CACHE_ENV,
+  configureWritePreflightCoalescing,
+  getWritePreflightCoalescingConfig,
+} from '../src/daemon/write-preflight-coalescing.js';
 
 const CG = '0x1111111111111111111111111111111111111111/seam-cg';
 const CG_URI = `did:dkg:context-graph:${CG}`;
@@ -51,7 +56,7 @@ function captureRes(): { res: ServerResponse; out: { status?: number; body?: any
 }
 
 /** A public context graph with local content, held by a real in-process store the agent's observer watches. */
-async function seamAgent() {
+async function seamAgent(options: { now?: () => number } = {}) {
   const raw = new OxigraphStore();
   const ontology = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
   await raw.insert([
@@ -59,7 +64,7 @@ async function seamAgent() {
     policyQuad('public', ontology),
     { subject: 'urn:task:1', predicate: 'urn:p', object: '"task"', graph: `${contextGraphDataGraphUri(CG)}/tasks` },
   ]);
-  const generation = new WritePreflightGeneration();
+  const generation = new WritePreflightGeneration({ now: options.now });
   const store = createMutationObservedStore(raw, createObservedStoreMutation(
     () => {},
     withWritePreflightGeneration({ begin: () => () => {} }, generation),
@@ -90,12 +95,18 @@ async function seamAgent() {
   const reachedGate = new Promise<void>((resolve) => { reached = resolve; });
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });
+  // Later declaration reads can be held too, one hold per read, in the order they are asked for.
+  const laterHolds: Array<{ reached: () => void; gate: Promise<void> }> = [];
   const query = store.query.bind(store);
   store.query = async (sparql: string, options?: QueryOptions) => {
     const answer = await query(sparql, options);
     if (options?.source === DECLARATION_SOURCE) {
       declarationReads += 1;
       if (declarationReads === 1) { reached(); await gate; }
+      else {
+        const hold = laterHolds.shift();
+        if (hold) { hold.reached(); await hold.gate; }
+      }
     }
     return answer;
   };
@@ -109,6 +120,15 @@ async function seamAgent() {
   return {
     raw, store, subs, generation, provider, release, reached: reachedGate,
     declarationReads: () => declarationReads,
+    /** Holds the next declaration read that is not the first, after it has read the graph as it then is. */
+    holdNext: () => {
+      let reachedNext!: () => void;
+      const reachedPromise = new Promise<void>((resolve) => { reachedNext = resolve; });
+      let releaseNext!: () => void;
+      const nextGate = new Promise<void>((resolve) => { releaseNext = resolve; });
+      laterHolds.push({ reached: reachedNext, gate: nextGate });
+      return { reached: reachedPromise, release: releaseNext };
+    },
     resolve: async (caller: typeof SCOPED = SCOPED) => {
       const { res, out } = captureRes();
       const id = await resolveRequiredWriteContextGraphId(provider as never, CG, res, caller);
@@ -257,5 +277,112 @@ describe('a ratchet commit during an in-flight probe', () => {
     const after = await seam.resolve();
     expect(after.id).toBeNull();
     expect(seam.declarationReads()).toBe(2);
+  });
+});
+
+/**
+ * A backend that reports a lost response for the next policy insert (a store deadline: the write may still
+ * have committed) without applying it, and applies it when `commit` is called: the late commit of a remote
+ * store, which no settle of the agent's observer follows.
+ */
+function loseNextPolicyInsert(raw: OxigraphStore) {
+  const insert = raw.insert.bind(raw);
+  let lost: Quad[] | undefined;
+  raw.insert = async (quads, options) => {
+    if (lost === undefined && quads.some(({ graph }) => graph === contextGraphMetaGraphUri(CG))) {
+      lost = [...quads];
+      throw new StoreOperationTimeoutError({ backend: 'controlled', operation: 'insert', storeOperation: 'insert', timeoutMs: 30_000 });
+    }
+    return insert(quads, options);
+  };
+  return { commit: () => insert(lost!) };
+}
+
+const silent = { info: () => {}, warn: () => {} };
+
+describe.each([
+  ['off', {}],
+  ['on', { [WRITE_PREFLIGHT_CACHE_ENV]: '1' }],
+])('a policy write whose outcome is unknown, with the result cache %s', (_cache, env) => {
+  beforeEach(() => { configureWritePreflightCoalescing(env, silent); });
+
+  it('is not shared with a caller that arrives after the late commit; the callers that joined earlier keep what they read', async () => {
+    const seam = await seamAgent();
+    const backend = loseNextPolicyInsert(seam.raw);
+
+    // Two callers share a probe that began before the write and is held at its declaration read.
+    const joinedBefore = seam.resolve();
+    const alsoJoinedBefore = seam.resolve();
+    await seam.reached;
+    expect(seam.declarationReads()).toBe(1);
+
+    // The response to the ratchet is lost: the agent cannot tell whether the graph is private now.
+    await expect(seam.store.insert([policyQuad('private', contextGraphMetaGraphUri(CG))]))
+      .rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
+
+    // A caller arriving meanwhile reads the graph as it still is, and its probe is held before the store commits.
+    const hold = seam.holdNext();
+    const duringTheUnknown = seam.resolve();
+    await hold.reached;
+    expect(seam.declarationReads()).toBe(2);
+
+    // The store applies the ratchet late. Nothing in the agent hears of it.
+    await backend.commit();
+
+    // A caller that arrives now must be judged on the committed policy, not given the answer read before it.
+    const after = await whileHeld(seam.resolve());
+    expect(seam.declarationReads()).toBe(3);
+    expect(after.id).toBeNull();
+    expect(after.out).toMatchObject({ status: 400, body: { code: 'CONTEXT_GRAPH_NOT_FOUND' } });
+
+    // The callers that were already waiting on the older probes keep the answers they read.
+    hold.release();
+    seam.release();
+    expect((await duringTheUnknown).id).toBe(CG);
+    expect((await joinedBefore).id).toBe(CG);
+    expect((await alsoJoinedBefore).id).toBe(CG);
+  });
+
+  it('is not served from the cache after the late commit', async () => {
+    const seam = await seamAgent();
+    seam.release(); // nothing is held in this scenario
+    const backend = loseNextPolicyInsert(seam.raw);
+    await expect(seam.store.insert([policyQuad('private', contextGraphMetaGraphUri(CG))]))
+      .rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
+
+    // The graph still reads public; the caller is accepted, which a cache would keep.
+    expect((await seam.resolve()).id).toBe(CG);
+    await backend.commit();
+
+    const after = await seam.resolve();
+    expect(after.id).toBeNull();
+    expect(after.out).toMatchObject({ status: 400, body: { code: 'CONTEXT_GRAPH_NOT_FOUND' } });
+    expect(seam.declarationReads()).toBe(2);
+  });
+
+  it('shares and caches again once the window of the unknown has passed, under a stamp nothing from before has', async () => {
+    let clock = 0;
+    const seam = await seamAgent({ now: () => clock });
+    seam.release(); // nothing is held in this scenario
+    const backend = loseNextPolicyInsert(seam.raw);
+    await expect(seam.store.insert([policyQuad('private', contextGraphMetaGraphUri(CG))]))
+      .rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
+    await seam.resolve();
+    await backend.commit();
+    expect(seam.declarationReads()).toBe(1);
+
+    // Inside the window every caller reads the store itself.
+    clock += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1;
+    await Promise.all([seam.resolve(), seam.resolve()]);
+    expect(seam.declarationReads()).toBe(3);
+
+    // Past it, callers that arrive together share one probe again, and a fast accept is cached as before.
+    clock += 1;
+    const [first, second] = await Promise.all([seam.resolve(ALLOWED), seam.resolve(ALLOWED)]);
+    expect([first.id, second.id]).toEqual([CG, CG]);
+    expect(seam.declarationReads()).toBe(4);
+    const cached = getWritePreflightCoalescingConfig().cacheTtlMs > 0;
+    expect((await seam.resolve(ALLOWED)).id).toBe(CG);
+    expect(seam.declarationReads()).toBe(cached ? 4 : 5);
   });
 });

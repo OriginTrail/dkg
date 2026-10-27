@@ -16,6 +16,17 @@
  *    a `clear` moves that entry's version, even to an equal row), so a change that is reverted before the
  *    next caller arrives is still seen; the entry's value is compared as well, for a row edited in place.
  *
+ * A policy write that ends with an UNKNOWN outcome (a store deadline, a lost response) may still be applied
+ * by a remote store after the agent stopped waiting, and nothing then tells the agent that it was. The
+ * generation moves when the outcome is reported, but a probe that begins after that and before the late commit
+ * has read the old policy, and would be shared with a caller that arrives after the commit. So sharing is
+ * off, not merely re-stamped, while an unknown outcome is unresolved: `writePreflightIdentity` hands out no
+ * identity, every preflight probes directly (no join, no cache hit, no cache store), and sharing resumes
+ * after `WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS`, the longest bound an adapter puts on work its caller gave
+ * up on, under a generation moved once more so that nothing begun in the window can be joined.
+ * A confirmed write (`changed`, or `unchanged`) never suspends sharing. A write to the subscription registry
+ * is synchronous and in memory, so it has no unknown outcome.
+ *
  * The probe's other reads do NOT move the stamp: whether the graph exists (`contextGraphExists`), whether it
  * has local content, the persisted subscription row and on-chain identity IDs. Nothing marks a probe that
  * began before one of these changed as outdated, so a caller that learned of the change before it called may
@@ -27,6 +38,7 @@
  */
 
 import { SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, isSafeIri } from '@origintrail-official/dkg-core';
+import { DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS } from '@origintrail-official/dkg-storage';
 import { normalizeWritePreflightCaller } from './context-graph-write-preflight.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -69,9 +81,34 @@ export function mutationMayChangeWritePreflight(mutation: StoreMutation): boolea
   }
 }
 
+/**
+ * How long sharing stays off after a policy write ended with an unknown outcome. A store gives no sign when it
+ * applies a write late, and no adapter promises an end for the work on an abandoned write, so this is the
+ * longest bound any adapter puts on work its caller gave up on: the Blazegraph adapter's server-side deadline,
+ * four times its 30 s operation deadline. A late commit is expected to fall inside it; one that falls outside
+ * it is not covered.
+ */
+export const WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS = 4 * DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS;
+
+export interface WritePreflightGenerationOptions {
+  /** Defaults to `WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS`. */
+  readonly unresolvedWindowMs?: number;
+  /** A monotonic clock in milliseconds; defaults to `performance.now`. */
+  readonly now?: () => number;
+}
+
 /** Moves whenever a write that settles may have changed what a write preflight reads. */
 export class WritePreflightGeneration {
   private value = 0;
+  /** While a policy write has an unknown outcome: when its window ends (the latest of them). */
+  private unresolvedUntil: number | undefined;
+  private readonly unresolvedWindowMs: number;
+  private readonly now: () => number;
+
+  constructor(options: WritePreflightGenerationOptions = {}) {
+    this.unresolvedWindowMs = options.unresolvedWindowMs ?? WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS;
+    this.now = options.now ?? (() => performance.now());
+  }
 
   get current(): number {
     return this.value;
@@ -80,12 +117,36 @@ export class WritePreflightGeneration {
   bump(): void {
     this.value += 1;
   }
+
+  /**
+   * A policy write ended with an unknown outcome: it may be applied later, with nothing to say so. Moves the
+   * generation, and keeps sharing off until the window has passed (a further unknown outcome extends it).
+   */
+  bumpUnresolved(): void {
+    // The window is set first, so that a bump that cannot run still leaves sharing off.
+    const until = this.now() + this.unresolvedWindowMs;
+    if (this.unresolvedUntil === undefined || until > this.unresolvedUntil) this.unresolvedUntil = until;
+    this.bump();
+  }
+
+  /**
+   * Whether probes may be shared now: false while a policy write has an unknown outcome. The first call after
+   * the window has passed moves the generation once more, so that no probe begun inside the window is joinable.
+   */
+  sharingAllowed(): boolean {
+    if (this.unresolvedUntil === undefined) return true;
+    if (this.now() < this.unresolvedUntil) return false;
+    this.unresolvedUntil = undefined;
+    this.bump();
+    return true;
+  }
 }
 
 /**
  * Wraps the store's mutation observer: a write that may change a policy source bumps `generation`
  * when it settles, unless it provably changed nothing. An indeterminate outcome (a timeout, a lost
- * response) bumps too, because the write may still have committed.
+ * response) bumps too, because the write may still have committed, and also keeps sharing off until
+ * the window for a late commit has passed (see the header).
  */
 export function withWritePreflightGeneration(
   inner: StoreMutationObserver,
@@ -97,7 +158,8 @@ export function withWritePreflightGeneration(
       const settle = inner.begin(mutation);
       return (outcome) => {
         try {
-          if (relevant && outcome !== 'unchanged') generation.bump();
+          if (relevant && outcome === 'indeterminate') generation.bumpUnresolved();
+          else if (relevant && outcome !== 'unchanged') generation.bump();
         } finally {
           settle(outcome);
         }
@@ -133,8 +195,8 @@ export class WritePreflightIdentityMethods extends DKGAgentBase {
   /**
    * Two probe calls with an equal key and an equal stamp read the same answer, so the second may use the
    * first's result while the stamp holds. Undefined when this agent's store observer does not feed the
-   * generation (an agent not built by `DKGAgent.create`), or when its subscription registry does not count
-   * its writes: nothing may then be shared.
+   * generation (an agent not built by `DKGAgent.create`), when its subscription registry does not count
+   * its writes, or while a policy write has an unknown outcome: nothing may then be shared.
    */
   writePreflightIdentity(
     this: DKGAgent,
@@ -144,6 +206,7 @@ export class WritePreflightIdentityMethods extends DKGAgentBase {
     const generation = generations.get(this);
     const registry = this.subscribedContextGraphs;
     if (!generation || !(registry instanceof VersionedSubscriptionRegistry)) return undefined;
+    if (!generation.sharingAllowed()) return undefined;
     return {
       key: `${normalizeWritePreflightCaller(callerAgentAddress) ?? '-'}\n${contextGraphId}`,
       stamp: `${generation.current}:${registry.versionOf(contextGraphId)}:${subscriptionStamp(registry.get(contextGraphId))}`,

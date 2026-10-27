@@ -10,7 +10,9 @@ import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-
  * is equal, so a call never joins a probe that began before a write to a policy source or a change of
  * the graph's subscription: that probe stays with the callers that already joined it, and the new
  * caller starts its own. An agent without an identity, or the switch turned off, is probed directly,
- * exactly as before.
+ * exactly as before. The agent gives no identity while a write to a policy source has an unknown outcome
+ * (a store deadline: the store may still apply it later), so nothing is joined, read from the cache or kept
+ * in it for that time (see the agent's `dkg-agent-write-preflight.ts`).
  *
  * Optionally (off by default) a probe that ended in a fast accept is kept for a short time and
  * served to the same caller again. It is never kept when it could be stale in a way the stamp does
@@ -150,7 +152,7 @@ export interface WritePreflightCoalescingCounters {
   cacheHits: number;
   /** Fast-accepted probes kept in the result cache (a probe shared by several callers is kept once). */
   cacheStores: number;
-  /** Calls probed outright: coalescing off, or the agent gave no identity. */
+  /** Calls probed outright: coalescing off, or the agent gave no identity (also while a policy write's outcome is unknown). */
   direct: number;
 }
 

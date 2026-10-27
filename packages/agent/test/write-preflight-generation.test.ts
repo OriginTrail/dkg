@@ -5,8 +5,15 @@
  */
 import { describe, expect, it, vi } from 'vitest';
 import { DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
-import { OxigraphStore, StoreSchedulerBusyError, type Quad } from '@origintrail-official/dkg-storage';
 import {
+  DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS,
+  OxigraphStore,
+  StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
+  type Quad,
+} from '@origintrail-official/dkg-storage';
+import {
+  WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS,
   WritePreflightGeneration,
   WritePreflightIdentityMethods,
   attachWritePreflightGeneration,
@@ -272,6 +279,119 @@ describe('what makes two probe calls interchangeable', () => {
     const agent = { subscribedContextGraphs: new Map() } as never;
     attachWritePreflightGeneration(agent, generation);
     expect(WritePreflightIdentityMethods.prototype.writePreflightIdentity.call(agent, CG, CHECKSUM)).toBeUndefined();
+  });
+});
+
+describe('a policy write whose outcome is unknown', () => {
+  // The agent's own registry and a clock the test moves.
+  function sharing() {
+    const clock = { now: 0 };
+    const generation = new WritePreflightGeneration({ now: () => clock.now });
+    const agent = { subscribedContextGraphs: new VersionedSubscriptionRegistry() } as never;
+    attachWritePreflightGeneration(agent, generation);
+    const identity = (caller: string = CHECKSUM) =>
+      WritePreflightIdentityMethods.prototype.writePreflightIdentity.call(agent, CG, caller);
+    const settle = (outcome: StoreMutationOutcome, mutation: StoreMutation = { quads: [quad(META)] }) =>
+      withWritePreflightGeneration({ begin: () => () => {} }, generation).begin(mutation)(outcome);
+    return { clock, generation, identity, settle };
+  }
+
+  it('waits at least as long as a store keeps working on a request its caller gave up on', () => {
+    expect(WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS).toBeGreaterThan(DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS);
+  });
+
+  it('hands out no identity until the window has passed, so nothing begun meanwhile can be joined or kept', () => {
+    const { clock, identity, settle } = sharing();
+    const before = identity()!;
+    settle('indeterminate');
+    expect(identity()).toBeUndefined();
+    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1;
+    expect(identity()).toBeUndefined();
+    expect(identity('0x2222222222222222222222222222222222222222')).toBeUndefined();
+    clock.now += 1;
+    const after = identity()!;
+    expect(after.key).toBe(before.key);
+    expect(after.stamp).not.toBe(before.stamp);
+  });
+
+  it('resumes under a generation that is neither the one before the write nor the one at its report', () => {
+    const { clock, generation, identity, settle } = sharing();
+    const before = generation.current;
+    settle('indeterminate');
+    const reported = generation.current;
+    expect(reported).toBe(before + 1);
+    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS;
+    expect(identity()).toBeDefined();
+    expect(generation.current).toBe(reported + 1);
+    // The resumption is counted once; ordinary sharing goes on from there.
+    const stamp = identity()!.stamp;
+    expect(identity()!.stamp).toBe(stamp);
+    expect(generation.current).toBe(reported + 1);
+  });
+
+  it('is extended by a further unknown outcome, and resumes only after the last window', () => {
+    const { clock, identity, settle } = sharing();
+    settle('indeterminate');
+    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1_000;
+    settle('indeterminate');
+    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1_000;
+    expect(identity()).toBeUndefined();
+    clock.now += 1_000;
+    expect(identity()).toBeDefined();
+  });
+
+  it('is not shortened by an earlier write that is reported later', () => {
+    const { clock, identity, settle } = sharing();
+    settle('indeterminate');
+    clock.now += 10;
+    settle('indeterminate');
+    clock.now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS - 1;
+    expect(identity()).toBeUndefined();
+  });
+
+  it.each<[string, StoreMutationOutcome, StoreMutation]>([
+    ['a policy write that was confirmed', 'changed', { quads: [quad(META)] }],
+    ['a policy write that provably changed nothing', 'unchanged', { quads: [quad(META)] }],
+    ['an unknown outcome of a write that is no policy source', 'indeterminate', { quads: [quad(contextGraphDataGraphUri(CG))] }],
+  ])('does not stop sharing for %s', (_label, outcome, mutation) => {
+    const { identity, settle } = sharing();
+    settle(outcome, mutation);
+    expect(identity()).toBeDefined();
+  });
+
+  it('keeps sharing off when the generation cannot be moved', () => {
+    const { generation, identity, settle } = sharing();
+    vi.spyOn(generation, 'bump').mockImplementation(() => { throw new Error('bump failed'); });
+    expect(() => settle('indeterminate')).toThrow('bump failed');
+    expect(identity()).toBeUndefined();
+  });
+
+  describe('through the agent store wrapper and a store that loses the response', () => {
+    it('gives no identity after a policy insert times out, and one again after the window', async () => {
+      const raw = new OxigraphStore();
+      let now = 0;
+      const generation = new WritePreflightGeneration({ now: () => now });
+      const store = createMutationObservedStore(raw, createObservedStoreMutation(
+        () => {},
+        withWritePreflightGeneration({ begin: () => () => {} }, generation),
+      ));
+      const agent = { subscribedContextGraphs: new VersionedSubscriptionRegistry() } as never;
+      attachWritePreflightGeneration(agent, generation);
+      const identity = () => WritePreflightIdentityMethods.prototype.writePreflightIdentity.call(agent, CG, CHECKSUM);
+      expect(identity()).toBeDefined();
+
+      vi.spyOn(raw, 'insert').mockRejectedValueOnce(
+        new StoreOperationTimeoutError({ backend: 'controlled', operation: 'insert', storeOperation: 'insert', timeoutMs: 30_000 }),
+      );
+      await expect(store.insert([quad(META)])).rejects.toMatchObject({ code: 'STORE_OPERATION_TIMEOUT' });
+      expect(identity()).toBeUndefined();
+
+      now += WRITE_PREFLIGHT_UNRESOLVED_WRITE_WINDOW_MS;
+      expect(identity()).toBeDefined();
+      // A write that is confirmed afterwards moves the generation but does not stop sharing.
+      await store.insert([quad(META)]);
+      expect(identity()).toBeDefined();
+    });
   });
 });
 

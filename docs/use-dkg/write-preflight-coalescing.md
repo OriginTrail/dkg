@@ -39,6 +39,29 @@ A request that arrives after such a change starts its own probe and never gets
 the answer read before it. The callers that had already joined keep the earlier
 answer: their requests were in flight when the change landed.
 
+### A policy write whose outcome is unknown
+
+A write to a policy source can end without telling the node whether it took
+effect: the store's deadline passes, or the response is lost. A remote store may
+still apply it afterwards, and nothing then reports that it did. A probe that
+began between the timeout and that late commit has read the old policy, and a
+request arriving after the commit would be given its answer.
+
+So while such an outcome is unresolved, **nothing is shared**: every preflight
+probes the store itself, exactly as with coalescing off. A request is never
+joined to another probe, never served from the result cache and never leaves a
+result in it. This holds for two minutes after the outcome is reported (four
+times the 30 s store deadline, the longest bound any store adapter puts on work
+its caller gave up on); a further unknown outcome extends it. Sharing then
+resumes with a fresh generation, so no probe that began inside the window can be
+joined. A store that applies an abandoned write later than that is not covered. A write that is confirmed, or that provably changed
+nothing, never stops sharing. A subscription change is made in memory and has no
+unknown outcome.
+
+While the window is open the requests are counted as `preflight_direct`. A store
+that is slow enough to time out policy writes is slow for the probe reads too,
+so the cost is that of coalescing off, for a short time.
+
 Some of the probe's reads are **not** watched: whether the graph exists
 (`contextGraphExists`), whether it holds content yet, the persisted subscription
 row, and an on-chain identity lookup. A change to one of these does not end a
@@ -105,6 +128,7 @@ be stale in a way the daemon does not see:
   allowlist names an on-chain identity ID: it can change without any local write;
 - dropped by any change that would stop a probe from being joined (above), and
   by the TTL, which counts from the start of the probe;
+- neither read nor written while a policy write's outcome is unknown (above);
 - at most 256 entries, the oldest first.
 
 Enabling it needs a staleness review first (OT-RFC-73 decision D-10). What the
