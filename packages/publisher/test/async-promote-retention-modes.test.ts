@@ -274,7 +274,7 @@ describe('counters', () => {
   });
 });
 
-describe('every deletion batch is logged at info with job ids, class, updatedAt and age', () => {
+describe('delete mode logs every deletion hold at info with job ids, class, updatedAt and age; report mode logs one line per completed pass', () => {
   it('writes one line per hold that deleted, listing exactly the jobs deleted in it', async () => {
     const store = new OxigraphStore();
     await standardStore(store);
@@ -297,17 +297,49 @@ describe('every deletion batch is logged at info with job ids, class, updatedAt 
     expect(logger.warns).toEqual([]);
   });
 
-  it('logs a report batch as would_delete, never as deleted, and one line per completed pass', async () => {
+  it('report mode writes ONE summary line per completed pass and nothing per hold or per job: no job id, no would_delete line, however many holds and passes', async () => {
     const store = new OxigraphStore();
     await standardStore(store);
     const logger = captureLogger();
-    await drain(newRetention(store, { mode: 'report', logger, batchSize: 3, sliceSize: 5 }));
+    let t = NOW;
+    const retention = newRetention(store, { mode: 'report', logger, now: () => t, batchSize: 3, sliceSize: 2, rescanIntervalMs: 1000 });
+    const first = await drain(retention);
+    expect(first.reduce((n, r) => n + r.holds, 0)).toBeGreaterThanOrEqual(4);                  // 7 would-delete jobs in holds of 2, in batches of 3: many holds, many batches
+    expect(first.length).toBeGreaterThanOrEqual(3);
+    expect(lines(logger.infos, 'would_delete')).toEqual([]);
     expect(lines(logger.infos, 'deleted')).toEqual([]);
-    expect(lines(logger.infos, 'would_delete').flatMap(jobsOf).map(j => j.jobId).sort()).toEqual(['c1', 'c2', 'r1', 'r2', 's1', 's2', 's3']);
+    expect(logger.infos).toHaveLength(1);                                                       // the pass summary and nothing else
+    const [summary] = logger.infos;
+    const gauge = retention.counters().lastCompletePass!;
+    expect(summary).toMatch(/^async_promote_retention_pass mode=report scanned=\d+ wouldDelete=\{[^}]*\} deleted=\{[^}]*\} kept=\{[^}]*\}$/);
+    expect(summary).not.toMatch(/jobs=|jobId|updatedAt|ageMs/);
+    for (const id of ['s1', 's2', 's3', 'c1', 'c2', 'r1', 'r2', 'fatal-1', 'bound-1', 'young-1', 'queued-1']) expect(summary, id).not.toContain(`"${id}"`);
+    const field = (name: string) => JSON.parse(new RegExp(` ${name}=(\\{[^}]*\\})`).exec(summary!)![1]!) as Record<string, number>;
+    expect(field('wouldDelete')).toEqual({ succeeded: 3, cancelled: 2, retired_no_effect: 2 });   // the gauge of the pass, by class
+    expect(field('wouldDelete')).toEqual(gauge.wouldDelete);
+    expect(field('deleted')).toEqual({ succeeded: 0, cancelled: 0, retired_no_effect: 0 });
+    expect(field('kept')).toEqual(gauge.kept);                                                  // counts by reason
+    expect(field('kept')).toMatchObject({ failed_retained: 2, unfinished_bound_obligation: 1, too_recent: 0 });
+    expect(Number(/ scanned=(\d+)/.exec(summary!)![1])).toBe(gauge.scanned);
+    // a second pass is one more summary line, still no per-job lines
+    t += 5000;
+    await drain(retention);
+    expect(logger.infos.filter(l => l.startsWith('async_promote_retention_pass '))).toHaveLength(2);
+    expect(logger.infos).toHaveLength(2);
+    expect(logger.warns).toEqual([]);
+  });
+
+  it('delete mode keeps its per-hold audit line with job ids, and still writes one summary line per completed pass', async () => {
+    const store = new OxigraphStore();
+    await standardStore(store);
+    const logger = captureLogger();
+    await drain(newRetention(store, { logger, batchSize: 100, sliceSize: 3 }));
+    expect(lines(logger.infos, 'deleted').flatMap(jobsOf).map(j => j.jobId).sort()).toEqual(['c1', 'c2', 'r1', 'r2', 's1', 's2', 's3']);
+    expect(lines(logger.infos, 'would_delete')).toEqual([]);
     const pass = logger.infos.filter(l => l.startsWith('async_promote_retention_pass '));
     expect(pass).toHaveLength(1);
-    expect(pass[0]).toContain('mode=report');
-    expect(pass[0]).toContain('wouldDelete={"succeeded":3,"cancelled":2,"retired_no_effect":2}');
+    expect(pass[0]).toContain('mode=delete');
+    expect(pass[0]).toContain('deleted={"succeeded":3,"cancelled":2,"retired_no_effect":2}');
   });
 
   it('logs nothing for a hold that deleted nothing, and a failed logger never alters the sweep', async () => {

@@ -428,7 +428,7 @@ class ShareRetentionImpl implements ShareRetention {
   private async hold(slice: readonly SliceRow[], b: BatchState, now: number): Promise<SliceRow[]> {
     const admissions = this.requireAdmissions();
     const deferred: SliceRow[] = [];
-    const entries: ShareRetentionJob[] = [];                                      // logged after the hold, deleted or (report) would-delete
+    const entries: ShareRetentionJob[] = [];                                      // the jobs this hold deleted (delete mode only): logged once it ends
     try {
       await withPromoteControlLock(this.cfg.graphUri, async () => {
         const startedAt = this.mono();
@@ -460,7 +460,7 @@ class ShareRetentionImpl implements ShareRetention {
         }
 
         if (this.mode !== 'delete') {
-          for (const d of doomed) { b.wouldDelete.push(d.entry); entries.push(d.entry); }
+          for (const d of doomed) b.wouldDelete.push(d.entry);                     // report mode: counted, never logged job by job (the pass summary carries the numbers)
         } else if (doomed.length > 0) {
           b.phase = 'delete';
           let lastOpMs = 0;
@@ -539,13 +539,16 @@ class ShareRetentionImpl implements ShareRetention {
     };
   }
 
-  /** One info line per hold that deleted (or, in report mode, would delete) jobs: the audit trail of every batch. */
+  /**
+   * One info line per hold that deleted jobs: the audit trail of every deletion batch (plan section 5.3). Report mode writes none: a node left in `report` for the
+   * 14 days of the delete gate would otherwise log every would-delete job again on every pass; its numbers are in the pass summary line.
+   */
   private logJobs(entries: readonly ShareRetentionJob[], now: number): void {
-    if (entries.length === 0) return;
+    if (this.mode !== 'delete' || entries.length === 0) return;
     const classes = emptyClassCounts();
     for (const e of entries) classes[e.jobClass] += 1;
     const jobs = entries.map(e => ({ jobId: e.jobId, class: e.jobClass, updatedAt: e.updatedAt, ageMs: e.ageMs }));
-    this.info(`async_promote_retention action=${this.mode === 'delete' ? 'deleted' : 'would_delete'} mode=${this.mode} count=${entries.length} classes=${JSON.stringify(classes)} now=${now} jobs=${JSON.stringify(jobs)}`);
+    this.info(`async_promote_retention action=deleted mode=${this.mode} count=${entries.length} classes=${JSON.stringify(classes)} now=${now} jobs=${JSON.stringify(jobs)}`);
   }
 
   private info(line: string): void { try { (this.log ?? logger()).info(line); } catch { /* observation never alters the sweep */ } }
