@@ -1,4 +1,4 @@
-import { tryReplaceSubjectAtomically, type TripleStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, tryReplaceSubjectAtomically, type TripleStore } from '@origintrail-official/dkg-storage';
 import { validatePromoteRecoveryBinding } from './promote-recovery-binding.js';
 import { isBoundPromoteRequest } from './bound-promote-request.js';
 import type { BoundPromoteJob, PromoteJob, PromoteRequest } from './async-promote-queue-types.js';
@@ -36,13 +36,13 @@ export function claimPromoteJob(job: PromoteJob, workerId: string, now: number, 
 /** A recovery owner must never disappear in a DELETE/INSERT crash window. */
 export async function persistPromoteJob(store: TripleStore, graphUri: string, job: PromoteJob): Promise<void> {
   const { jobRef, jobQuads } = serializeJobRecord(job, graphUri);
-  const source = 'publisher.asyncPromote.writeJob';
+  const options = controlStoreOptions('share', 'publisher.asyncPromote.writeJob');
   if (job.request.recoveryBinding !== undefined) {
     if (!isBoundPromoteJob(job)) throw new Error('Invalid bound promote job');
-    if (!await tryReplaceSubjectAtomically(store, graphUri, jobRef, jobQuads, { source })) {
+    if (!await tryReplaceSubjectAtomically(store, graphUri, jobRef, jobQuads, options)) {
       throw new Error('Durable synchronous sharing requires atomic queue record replacement');
     }
   } else {
-    await replaceSubjectAtomicallyOrFallback(store, graphUri, jobRef, jobQuads, source);
+    await replaceSubjectAtomicallyOrFallback(store, graphUri, jobRef, jobQuads, options);
   }
 }
