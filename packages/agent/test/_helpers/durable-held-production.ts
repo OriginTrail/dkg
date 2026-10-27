@@ -1,10 +1,12 @@
+import { partitionVerifiedGraphScopedAssets } from '../../src/sync/requester/verified-asset-preparation.js';
+import { materializeVerifiedGraphScopedAsset } from '../../src/sync/requester/graph-scoped-materialization.js';
 import { readHeldGraphScopedAssets } from '../../src/sync/requester/stored-graph-assets.js';
 import { createGraphScopedDurableManifestPlan } from '../../src/sync/durable-integrity.js';
 import { expect, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer, GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
-import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
-import type { Quad } from '@origintrail-official/dkg-storage';
+import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, workspacePublicQuadsDigest, replaceLocallyTrustedKnowledgeAssetControlEnvelope, overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from '@origintrail-official/dkg-publisher';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../../src/dkg-agent.js';
 import { getSyncCheckpointKey } from '../../src/sync/checkpoint/state.js';
 import { stubLifecycleFetch } from './sync-fetch-coalescing.js';
@@ -14,7 +16,7 @@ const agents: DKGAgent[] = [];
 export async function stopHeldProductionAgents() { for (const agent of agents.splice(0)) await agent.stop(); }
 export function deferred() { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; }
 
-export async function createHeldProductionHarness(options: { finalizedCleanup?: boolean; unbound?: boolean; failBindingSave?: boolean } = {}) {
+export async function createHeldProductionHarness(options: { finalizedCleanup?: boolean; unbound?: boolean; failBindingSave?: boolean; localAccessPolicy?: 'public' | 'ownerOnly' } = {}) {
   const chain = new MockChainAdapter('hardhat:31337');
   const savedBindings: string[] = [];
   const save = vi.fn(async (record: { onChainId?: string }) => {
@@ -52,7 +54,13 @@ export async function createHeldProductionHarness(options: { finalizedCleanup?: 
   }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
     batchId: 0n, materializedVersion: { blockNumber: 1, txIndex: 0 },
   } } });
-  await internal.store.insert([...data, ...meta]);
+  // Seed the local owner's controls separately, as real publication does.
+  await replaceLocallyTrustedKnowledgeAssetControlEnvelope(internal.store, ual,
+    { assertionVersion: '1', merkleRoot: root },
+    { accessPolicy: options.localAccessPolicy ?? 'public', publisherPeerId: 'publisher-peer', allowedPeers: [] });
+  await internal.store.insert([...data, ...meta.filter(q => q.predicate !== 'http://www.w3.org/ns/prov#wasAttributedTo')
+    .map(q => q.predicate === 'http://dkg.io/ontology/accessPolicy'
+      ? { ...q, object: JSON.stringify(options.localAccessPolicy ?? 'public') } : q)]);
   expect(internal.store).not.toHaveProperty('mutationOwner');
   expect(await readHeldGraphScopedAssets(internal.store, { contextGraphId: CG, descriptors: createGraphScopedDurableManifestPlan(meta, CG)!.descriptors })).toEqual(new Set([ual]));
   const swmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, createGraphKnowledgeAssetScope(ual, '1'), 'reports');
@@ -106,7 +114,16 @@ export async function createHeldProductionHarness(options: { finalizedCleanup?: 
   const run = () => agent.syncDurableRecoveryContextGraph(CG, {
     candidatePeerIds: [PEER], restrictToCandidatePeerIds: true, candidatesAreSyncCapable: true,
   });
-  return { agent, internal, chain, markPublished, savedBindings, persist, subscription, ual, graph, data, meta, swmGraph, retire,
+  return { agent, internal, chain, markPublished, savedBindings, persist, subscription, ual, graph, data, meta, root, swmGraph, retire,
     seedSwmTwin, entered, release, run, dataRequests: () => dataRequests,
     pause: (at: 'chain' | 'worker' | 'reconcile') => { phase = at; }, fetchMissingData: () => { fetchData = true; } };
+}
+
+/** Seed a previously authenticated replica through the normal publication path. */
+export async function storeConfirmedPrefix(store: TripleStore, contextGraphId: string, data: Quad[], meta: Quad[]): Promise<void> {
+  const asset = partitionVerifiedGraphScopedAssets(contextGraphId, data, meta, [data[0]!.graph]).assets[0]!;
+  const metadataQuads = overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(asset.metadataQuads,
+    { ual: asset.ual, metaGraph: asset.metaGraph, subGraphName: asset.subGraphName, receivedAt: new Date(0) },
+    { status: 'confirmed', materializedVersion: { blockNumber: 1, txIndex: 0 }, confirmation: { kind: 'finalized-materialization' } });
+  expect(await materializeVerifiedGraphScopedAsset({ store, asset: { ...asset, metadataQuads } })).toBe('applied');
 }
