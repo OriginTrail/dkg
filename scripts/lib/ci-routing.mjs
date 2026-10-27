@@ -480,6 +480,18 @@ export const PATH_TRIGGERS = Object.freeze([
     evmScopes: [],
     reason: 'the chain RPC-site census asserts their authority call sites',
   },
+  {
+    // packages/publisher/test/async-lift-queue-graph-coverage.test.ts scans every package's src for the publisher
+    // queue graphs and names the one reference outside the publisher package; it also reads the storage routing
+    // test to keep its list of routing-covered store methods in step.
+    patterns: [
+      /^packages\/cli\/src\/daemon\/chain-reset-wipe\.ts$/,
+      /^packages\/storage\/test\/store-control-routing\.test\.ts$/,
+    ],
+    lanes: ['tornado_publisher'],
+    evmScopes: [],
+    reason: 'the publisher queue graph coverage test asserts the chain-reset wipe reference and reads the storage routing test',
+  },
 ]);
 
 // Repository areas outside the package workspaces, in first-match order. An
