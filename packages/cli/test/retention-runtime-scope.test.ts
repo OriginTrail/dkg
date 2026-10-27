@@ -121,4 +121,15 @@ describe('how the daemon wires it', () => {
     expect(config.match(/retention-config/g)).toHaveLength(1);
     expect(config).toContain("queueRetention?: import('./retention-config.js').RetentionConfigInput;");
   });
+
+  it('config.ts stays at the canary budget: the one field line is offset inside the file, and the budget file is not raised for it', () => {
+    // The file-size budgets are a one-way ratchet (scripts/audit-file-size.mjs, plan section 4 and 6.2). The canary lowered this budget to the file's
+    // exact size (c84fd8b10d), so P10b's single field line has to be offset by a line-neutral rewrite elsewhere in config.ts, not budgeted. Lower this
+    // constant when the canary lowers the budget; never raise it. The audit alone cannot catch a hand-edited baseline, it compares to that same file.
+    const CANARY_CONFIG_BUDGET = 2688;
+    const lines = read('packages/cli/src/config.ts').replace(/\n$/, '').split('\n').length;
+    const budget = (JSON.parse(read('scripts/file-size-baseline.json')) as { files: Record<string, number> }).files['packages/cli/src/config.ts'];
+    expect(lines).toBeLessThanOrEqual(CANARY_CONFIG_BUDGET);
+    expect(budget).toBeLessThanOrEqual(CANARY_CONFIG_BUDGET);
+  });
 });

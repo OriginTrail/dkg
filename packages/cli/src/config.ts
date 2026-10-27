@@ -53,8 +53,7 @@ import {
   DEFAULT_REPLENISH_TARGET_MULTIPLE,
   resolveRpcRequestGovernorPolicy,
   resolveContextGraphAuthorityIndexTickMs,
-  resolveFinalityConfirmations,
-  resolveReceiptTimeoutMs,
+  resolveFinalityConfirmations, resolveReceiptTimeoutMs,
   type ApprovalPolicy, type ChainSignerSettings,
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
