@@ -1,3 +1,4 @@
+import { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES } from './graph-knowledge-asset-controls.js';
 import { parseConfirmedGraphKnowledgeAssetMetadataEnvelope, rdfLiteralLexicalValue,
   type ConfirmedGraphKnowledgeAssetMetadataRead } from './graph-metadata-envelope.js';
 export { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseConfirmedGraphKnowledgeAssetMetadataEnvelope,
@@ -51,11 +52,7 @@ const DKG = 'http://dkg.io/ontology/';
 const PROV = 'http://www.w3.org/ns/prov#';
 const XSD = 'http://www.w3.org/2001/XMLSchema#';
 const MATERIALIZED_VERSION_PRED = `${DKG}materializedVersion`;
-const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set([
-  `${DKG}accessPolicy`,
-  `${DKG}allowedPeer`,
-  `${DKG}publisherPeerId`,
-]);
+const LOCAL_TRUSTED_KA_CONTROL_PREDICATES = new Set(GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES);
 const LOCAL_TRUSTED_KA_ANCHOR_PREDICATES = new Set([
   `${DKG}assertionVersion`,
   `${DKG}merkleRoot`,

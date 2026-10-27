@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri, DEFAULT_MAX_READ_BYTES } from '@origintrail-official/dkg-core';
-import { workspacePublicQuadsDigest, GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
-import { HELD_REPLAY_CONTROL_PREDICATES, heldMetadataControlsMatchReplay } from './held-metadata-controls.js';
+import { workspacePublicQuadsDigest, GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
+import { heldMetadataControlsMatchReplay } from './held-metadata-controls.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
@@ -35,7 +35,7 @@ export async function readHeldGraphScopedAssets(
 
 ): Promise<Set<string>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
-  const predicates = [...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...HELD_REPLAY_CONTROL_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `http://dkg.io/ontology/${name}`)].map((predicate) => `<${predicate}>`).join(' ');
+  const predicates = [...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `http://dkg.io/ontology/${name}`)].map((predicate) => `<${predicate}>`).join(' ');
   const options = { priority: 'background' as const, signal: request.signal };
   const held = new Set<string>();
   for (let start = 0; start < request.descriptors.length; start += chunkSize) {
