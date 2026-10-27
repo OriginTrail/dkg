@@ -252,6 +252,9 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
 
+      - name: Verify release workspace versions
+        run: node scripts/release-packages.mjs verify-versions --version "$(node -p "require('./package.json').version")"
+
       # Cheap (~300 ms) audit that bans `Wallet.createRandom()` outside a
       # small allowlist of intentional call sites. See
       # `scripts/audit-create-random.mjs` for the incident this prevents
