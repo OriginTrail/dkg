@@ -1,4 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { OperationContext } from '@origintrail-official/dkg-core';
+import type { DurableRecoveryHost } from './durable-recovery-host.js';
+import type { DurableRecoveryOptions } from './durable-recovery-types.js';
+import { DurableSyncAdmissionBoundary } from './sync/requester/admission-boundary.js';
+import { createDurableSyncFetchTimeoutMs } from './sync/requester/durable-sync-budget.js';
 import { createAbortError as asSyncFetchAbortError } from './bounded-operation.js';
 import type { ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { DURABLE_SYNC_SETTLEMENT_HEADROOM_MS, EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS, normalizeDurableSyncTimeoutMs } from './sync/requester/durable-sync-budget.js';
@@ -165,3 +170,32 @@ export function durableSyncSingleFlightKey(params: {
 
 export const DURABLE_RECOVERY_HARD_TIMEOUT_MS =
   EXACT_RECOVERY_DURABLE_TRANSFER_TIMEOUT_MS + DURABLE_SYNC_SETTLEMENT_HEADROOM_MS;
+
+/** Shared physical scheduling for ordinary fanout and a single graph owner. */
+export function createDurableGraphScheduler(input: {
+  host: DurableRecoveryHost; ctx: OperationContext; remotePeerId: string;
+  options: DurableRecoveryOptions | undefined;
+  exactRecovery: boolean; extendedRecovery: boolean; maximumTimeoutMs?: number;
+}) {
+  const { host, ctx, remotePeerId, options } = input;
+  const operation = createDurableSyncOperationBoundary({ totalTimeoutMs: options?.totalTimeoutMs,
+    maximumTimeoutMs: input.maximumTimeoutMs, signal: options?.signal });
+  const admission = new DurableSyncAdmissionBoundary(options?.onWorkStarted);
+  const graphOptions = {
+    stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
+    onAtomicCommitStarted: options?.onAtomicCommitStarted, isCurrent: options?.isCurrent,
+    fetchTimeoutMs: createDurableSyncFetchTimeoutMs({ totalTimeoutMs: options?.totalTimeoutMs,
+      exactRecovery: input.exactRecovery, extendedRecovery: input.extendedRecovery }),
+    authenticationTimeoutMs: normalizeDurableSyncTimeoutMs(options?.totalTimeoutMs),
+    operationFetchDeadline: operation.fetchDeadline, operationDeadline: operation.deadline,
+    settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs, signal: operation.signal,
+  };
+  const runGraph = <T>(contextGraphId: string, work: () => Promise<T>): Promise<T> =>
+    runSerializedDurableContextGraphSync(host.owner, remotePeerId, contextGraphId,
+      () => host.admission.run({ ctx, contextGraphId, lane: 'durable',
+        label: `durable:${contextGraphId}:${remotePeerId.slice(-8)}`, work,
+        priorityOverride: options?.priority, operationSignal: operation.signal,
+        source: options?.source, onWorkStarted: admission.startWork,
+      }), operation.signal);
+  return { operation, admission, graphOptions, runGraph };
+}
