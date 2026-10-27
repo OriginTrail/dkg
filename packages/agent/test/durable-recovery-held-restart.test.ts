@@ -229,7 +229,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
     expect(behind.served.dataRows).toBe(0);
     expect(current.served.dataRows).toBe(asset(3, '2').payload.length);
     expect(core.writes).toEqual([asset(3, '2').ual]);
-    expect(core.info).toContainEqual(expect.stringContaining('is behind the chain'));
+    expect(core.info).toContainEqual(expect.stringContaining('is not current on chain'));
   });
 
   it('transfers only the updated asset when one asset has a new version', async () => {

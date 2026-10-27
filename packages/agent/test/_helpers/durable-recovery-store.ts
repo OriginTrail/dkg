@@ -1,3 +1,4 @@
+import type { StoreRecoveryGenerationReader } from '@origintrail-official/dkg-storage';
 import { createDurableHeldStore, createStoredPrefixAcquirer } from '../../src/durable-recovery-held-store.js';
 import { runAdmittedDurableGraph } from '../../src/durable-recovery-graph.js';
 import type { DurableRecoveryHost } from '../../src/durable-recovery-host.js';
@@ -163,7 +164,7 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 export function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: () => number | undefined; holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
+  options: { signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: StoreRecoveryGenerationReader; holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
   const chain = options.chain ?? (() => Object.values(peers)[0]!.current());

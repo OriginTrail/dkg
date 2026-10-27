@@ -1,18 +1,19 @@
 import { findTripleStoreCapability } from './triple-store.js';
 
-/** A newer stable generation certifies that all work in older backend processes has stopped.
- * It says nothing about content correctness: callers must read and authenticate it again.
- * Undefined means recovery is unconfirmed or admission is closed. */
-export interface StoreRecoveryGenerationReader {
-  (): number | undefined;
-  /** Supervised epoch even during recovery; never grants permission to read. */
-  readonly epoch?: () => number | undefined;
+/** One observation of a supervised backend. A newer ready generation certifies
+ * termination of older backend work, not content correctness. An unready epoch
+ * may label uncertain writes but cannot grant a content proof. */
+export interface StoreRecoveryState {
+  readonly generation: number;
+  readonly ready: boolean;
 }
+/** Undefined means no supervised state is currently available. */
+export type StoreRecoveryGenerationReader = () => StoreRecoveryState | undefined;
 const readers = new WeakMap<object, StoreRecoveryGenerationReader>();
 
 /** Internal adapter registration; generic endpoint options cannot grant this capability. */
-export function registerStoreRecoveryGeneration(store: object, read: StoreRecoveryGenerationReader, epoch?: () => number | undefined): void {
-  readers.set(store, Object.assign(read, { epoch }));
+export function registerStoreRecoveryGeneration(store: object, read: StoreRecoveryGenerationReader): void {
+  readers.set(store, read);
 }
 
 export function asStoreRecoveryGenerationReader(store: unknown): StoreRecoveryGenerationReader | undefined {

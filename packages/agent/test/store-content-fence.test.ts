@@ -130,7 +130,7 @@ it.each([{ everything: true }, { removals: [{}] }, { quads: [{ ...quad, graph: '
 
 it('reopens uncertain scopes only after confirmed backend replacement and invalidates old proofs', () => {
   let generation: number | undefined = 0;
-  const fence = new StoreContentFence(() => generation);
+  const fence = new StoreContentFence(() => generation === undefined ? undefined : { generation, ready: true });
   const before = fence.openScope(scope)!;
   fence.begin({ everything: true })('indeterminate');
   expect(before.assertCurrent).toThrow();
@@ -150,7 +150,7 @@ it('reopens uncertain scopes only after confirmed backend replacement and invali
 
 it('retains a delayed indeterminate outcome until a replacement after settlement', () => {
   let generation = 0;
-  const fence = new StoreContentFence(() => generation);
+  const fence = new StoreContentFence(() => generation === undefined ? undefined : { generation, ready: true });
   const old = fence.begin({ everything: true });
   generation = 1;
   expect(fence.openScope(scope)).toBeUndefined(); // An old client operation could still dispatch more work.
@@ -187,7 +187,7 @@ it('fences a queued write dispatched on the replacement backend after its respon
   let admit!: () => void;
   const queue = new Promise<void>(resolve => { admit = resolve; });
   const raw = new OxigraphStore();
-  const fence = new StoreContentFence(() => generation);
+  const fence = new StoreContentFence(() => generation === undefined ? undefined : { generation, ready: true });
   const store = createMutationObservedStore(raw, createObservedStoreMutation(() => {}, fence));
   vi.spyOn(raw, 'insert').mockImplementationOnce(async () => {
     await queue; dispatchedOn = generation; throw new Error('response lost after dispatch');
@@ -224,4 +224,19 @@ it('retires writes that fail during supervised replacement only after a later st
     const proof = composed.heldContent.openScope(scope)!;
     expect(proof).toBeDefined(); proof.assertCurrent(); proof.close();
   } finally { await raw.close(); }
+});
+
+
+it('revokes a live proof when readiness closes within the same supervised epoch', () => {
+  let ready = true;
+  const read = vi.fn(() => ({ generation: 7, ready }));
+  const fence = new StoreContentFence(read);
+  const proof = fence.openScope(scope)!;
+  expect(read).toHaveBeenCalledTimes(1);
+  proof.assertCurrent();
+  expect(read).toHaveBeenCalledTimes(2);
+  ready = false;
+  expect(proof.assertCurrent).toThrow('Held assertion content changed');
+  expect(fence.openScope(scope)).toBeUndefined();
+  proof.close();
 });
