@@ -13,16 +13,33 @@ export interface StoreContentScope {
 type GraphEffect = { kind: 'graph' } | { kind: 'subjects'; subjects: Set<string> };
 type ContentEffect = { kind: 'global' } | { kind: 'graphs'; graphs: Map<string, GraphEffect> };
 
+// As with RecipientKeyRouteFence, overflowing retained detail disables the shortcut.
+export const STORE_CONTENT_EFFECT_MAX_GRAPHS = 256;
+export const STORE_CONTENT_EFFECT_MAX_SUBJECTS_PER_GRAPH = 256;
+
+/** False means even graph-level detail overflowed: the caller must use a global effect. */
+function addEffect(graphs: Map<string, GraphEffect>, graph: string, subject?: string): boolean {
+  if (!graphs.has(graph) && graphs.size >= STORE_CONTENT_EFFECT_MAX_GRAPHS) return false;
+  const old = graphs.get(graph);
+  if (old?.kind === 'graph') return true;
+  if (!subject || subject.startsWith('_:')) { graphs.set(graph, { kind: 'graph' }); return true; }
+  const subjects = old?.subjects ?? new Set<string>();
+  if (!subjects.has(subject) && subjects.size >= STORE_CONTENT_EFFECT_MAX_SUBJECTS_PER_GRAPH) {
+    graphs.set(graph, { kind: 'graph' });
+  } else {
+    subjects.add(subject); graphs.set(graph, { kind: 'subjects', subjects });
+  }
+  return true;
+}
+
 function mutationEffect(mutation: StoreMutation): ContentEffect {
   if (mutation.everything) return { kind: 'global' };
   const graphs = new Map<string, GraphEffect>();
-  for (const { graph, subject } of [...mutation.quads ?? [], ...mutation.removals ?? []]) {
-    if (!graph || !isSafeIri(graph)) return { kind: 'global' };
-    if (!subject || subject.startsWith('_:')) { graphs.set(graph, { kind: 'graph' }); continue; }
-    const effect = graphs.get(graph);
-    if (effect?.kind === 'graph') continue;
-    const subjects = effect?.subjects ?? new Set<string>();
-    subjects.add(subject); graphs.set(graph, { kind: 'subjects', subjects });
+  // Walk the caller's batches directly; a large write must not allocate a second row array.
+  for (const entries of [mutation.quads ?? [], mutation.removals ?? []]) {
+    for (const { graph, subject } of entries) {
+      if (!graph || !isSafeIri(graph) || !addEffect(graphs, graph, subject)) return { kind: 'global' };
+    }
   }
   return { kind: 'graphs', graphs };
 }
@@ -47,9 +64,11 @@ function overlaps(left: ContentEffect, right: ContentEffect): boolean {
 function combine(left: ContentEffect, right: ContentEffect): ContentEffect {
   if (left.kind === 'global' || right.kind === 'global') return { kind: 'global' };
   for (const [graph, effect] of right.graphs) {
-    const old = left.graphs.get(graph);
-    if (!old || effect.kind === 'graph') left.graphs.set(graph, effect);
-    else if (old.kind === 'subjects') for (const subject of effect.subjects) old.subjects.add(subject);
+    if (effect.kind === 'graph') {
+      if (!addEffect(left.graphs, graph)) return { kind: 'global' };
+    } else for (const subject of effect.subjects) {
+      if (!addEffect(left.graphs, graph, subject)) return { kind: 'global' };
+    }
   }
   return left;
 }
@@ -60,7 +79,9 @@ function combine(left: ContentEffect, right: ContentEffect): ContentEffect {
 export class StoreContentFence implements StoreMutationObserver {
   private readonly pending = new Set<ContentEffect>();
   private readonly watches = new Set<{ effect: ContentEffect; valid: boolean }>();
-  private readonly uncertain = new Map<number | undefined, ContentEffect>();
+  private unboundUncertainty?: ContentEffect;
+  // Coalescing numeric epochs under the newest one may delay reuse, never permit it early.
+  private supervisedUncertainty?: { generation: number; effect: ContentEffect };
 
   constructor(private readonly recoveryGeneration?: StoreRecoveryGenerationReader) {}
 
@@ -74,11 +95,28 @@ export class StoreContentFence implements StoreMutationObserver {
         // A posted worker operation carries its actual backend generation. A
         // queued/opaque failure has no such evidence and may have executed on
         // the replacement, so conservatively label it at settlement instead.
-        const generation = execution?.generation ?? this.recoveryGeneration?.()?.generation;
-        this.uncertain.set(generation,
-          combine(this.uncertain.get(generation) ?? { kind: 'graphs', graphs: new Map() }, pending));
+        const state = this.recoveryGeneration?.();
+        this.retireUncertainty(state);
+        const generation = execution?.generation ?? state?.generation;
+        if (generation === undefined) this.unboundUncertainty = combine(
+          this.unboundUncertainty ?? { kind: 'graphs', graphs: new Map() }, pending);
+        else if (!state?.ready || generation >= state.generation) {
+          const previous = this.supervisedUncertainty;
+          this.supervisedUncertainty = {
+            generation: Math.max(generation, previous?.generation ?? generation),
+            effect: combine(previous?.effect ?? { kind: 'graphs', graphs: new Map() }, pending),
+          };
+        }
       }
     };
+  }
+
+  private retireUncertainty(state: ReturnType<StoreRecoveryGenerationReader>): void {
+    // Unbound outcomes never retire. Only a ready replacement beyond every
+    // coalesced execution epoch proves those supervised operations terminated.
+    if (state?.ready && this.supervisedUncertainty && this.supervisedUncertainty.generation < state.generation) {
+      this.supervisedUncertainty = undefined;
+    }
   }
 
   openScope(scope: StoreContentScope): { assertCurrent(): void; close(): void } | undefined {
@@ -86,12 +124,9 @@ export class StoreContentFence implements StoreMutationObserver {
     if (this.recoveryGeneration && !state?.ready) return undefined;
     const generation = state?.generation;
     const effect = scopeEffect(scope);
-    for (const [epoch, uncertain] of this.uncertain) {
-      // Unbound epochs stay fail-closed. Active client operations can span a
-      // restart, so only settled indeterminate outcomes may be retired.
-      if (epoch !== undefined && generation !== undefined && epoch < generation) this.uncertain.delete(epoch);
-      else if (overlaps(effect, uncertain)) return undefined;
-    }
+    this.retireUncertainty(state);
+    if ((this.unboundUncertainty && overlaps(effect, this.unboundUncertainty))
+      || (this.supervisedUncertainty && overlaps(effect, this.supervisedUncertainty.effect))) return undefined;
     for (const pending of this.pending) if (overlaps(effect, pending)) return undefined;
     const watch = { effect, valid: true };
     this.watches.add(watch);
