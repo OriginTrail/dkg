@@ -10,6 +10,7 @@ import { DKGQueryEngine } from '@origintrail-official/dkg-query';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { SemanticRuntimeStore, type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
 import { ethers } from 'ethers';
+import Database from 'better-sqlite3';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createRequestActor } from '../src/daemon/routes/context.js';
@@ -69,6 +70,22 @@ function node(agent: any, configured: SemanticRuntimeConfig = {}): Node {
       return n.runtime;
     } };
   return n;
+}
+/** Reopen the same durable home; boot alone intentionally reuses a live runtime. */
+async function restartNode(n: Node) {
+  const previous = n.runtime!;
+  const databasePath = previous.store.databasePath;
+  await previous.stop();
+  runtimes.delete(previous);
+  n.runtime = null;
+  const reopened = (await n.boot())!;
+  expect(reopened).not.toBe(previous);
+  expect(reopened.store).not.toBe(previous.store);
+  expect(reopened.host).not.toBe(previous.host);
+  expect(reopened.configuration).not.toBe(previous.configuration);
+  expect(reopened.typescript).not.toBe(previous.typescript);
+  expect(reopened.store.databasePath).toBe(databasePath);
+  return reopened;
 }
 async function request(n: Node, identity: Identity, method: string, path: string, body?: unknown, signing?: { wallet: ethers.Wallet; operator?: boolean; headers?: Record<string, string> }, localAgent?: string) {
   let auth = identity === 'anonymous' || identity === 'disabled-anonymous'
@@ -210,6 +227,102 @@ async function toolFixture(text: string, permissions: any = { graphId: graph, sp
     allowedCallers: [caller], typescript: { children: [] }, ...overrides });
   return { ...f, manager, client, program, operation, approve, permissions };
 }
+
+type ReceiptLayer = 'wm' | 'swm' | 'vm';
+type AuthorityChange = 'revoke' | 'expire' | 'epoch';
+const receiptStages = (layer: ReceiptLayer) => ['create', 'write', 'finalize',
+  ...(layer === 'wm' ? [] : ['promote']), ...(layer === 'vm' ? ['publish'] : [])];
+const receiptMutationCounts = (agent: any) => Object.fromEntries(receiptStages('vm').map(stage => [stage,
+  (stage === 'publish' ? agent.publishFromFinalizedAssertion : agent.assertion[stage]).mock.calls
+    .filter(([, name]: any) => name.startsWith('semantic-execution-')).length]));
+async function capabilityFixture(language: 'sexpr' | 'typescript', layer: ReceiptLayer) {
+  const permissions = { graphId: graph, executionLayer: layer, assetCreation: { toolIri: createTool } };
+  const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+    export function run() { return invoke_tool('${createTool}', ${JSON.stringify(assetInput)}); }`, permissions, [createTool]);
+  if (language === 'sexpr') {
+    const program = await f.manager.programs.upload({ graphId: sourceGraph, language: 'sexpr-v1', requiredTools: [createTool],
+      source: `(strategy test/capability (version "1.0.0") (scope graph:${graph}) (goal record)
+        (supervise one-for-one (max-restarts 1) (window-ms 60000)
+          (delegate recorder (grant dkg.asset.create) (call dkg/asset-create@1 ${JSON.stringify(JSON.stringify(assetInput))}))))` });
+    await f.approve({ program, typescript: undefined });
+  } else await f.approve();
+  const id = randomUUID();
+  const invoke = () => request(f.target, 'caller', 'POST', '/api/programs/execute', {
+    contextGraphId: graph, operationIri: f.operation.operationIri, invocationId: id,
+  });
+  return { ...f, id, invoke };
+}
+function invalidateExecutionCapability(n: Node, id: string, change: AuthorityChange) {
+  const capabilityId = `urn:sr:capability:${id}`;
+  if (change === 'revoke') {
+    expect(n.runtime!.store.revokeCapability(capabilityId, Date.now())).toBe(true);
+    return;
+  }
+  // Public revocation uses the real store API. Seed the other immutable grant
+  // fields through a separate SQLite connection so restart also observes them.
+  const db = new Database(n.runtime!.store.databasePath);
+  try {
+    const assignment = change === 'expire' ? 'expires_at = 0' : 'policy_epoch = policy_epoch + 1';
+    expect(db.prepare(`UPDATE capability_ref SET ${assignment} WHERE capability_id = ?`).run(capabilityId).changes).toBe(1);
+  } finally { db.close(); }
+}
+const authorityCases = (['sexpr', 'typescript'] as const).flatMap(language =>
+  (['wm', 'swm', 'vm'] as const).flatMap(layer =>
+    (['revoke', 'expire', 'epoch'] as const).map(change => ({ language, layer, change }))));
+describe('bound durable execution capability authority', () => {
+  it.each(authorityCases.flatMap(test => receiptStages(test.layer).map(phase => ({ ...test, phase }))))(
+    'withholds $language $layer results after $change during $phase, including real restart', async ({ language, layer, change, phase }) => {
+      const f = await capabilityFixture(language, layer);
+      const mutation = phase === 'publish' ? f.agent.publishFromFinalizedAssertion : f.agent.assertion[phase];
+      const complete = mutation.getMockImplementation();
+      let interrupted = false;
+      mutation.mockImplementation(async (...args: any[]) => {
+        const result = await complete(...args);
+        if (!interrupted && args[1].startsWith('semantic-execution-')) {
+          interrupted = true;
+          invalidateExecutionCapability(f.target, f.id, change);
+        }
+        return result;
+      });
+      const result = await f.invoke();
+      expect(interrupted).toBe(true);
+      expect(result.status).toBe(403);
+      expect(result.body).toMatchObject({ code: 'PROGRAM_AUTHORITY_REVOKED' });
+      expect(result.body.outputs).toBeUndefined();
+      expect(result.body.trace).toBeUndefined();
+      for (const later of receiptStages(layer).slice(receiptStages(layer).indexOf(phase) + 1)) {
+        expect(receiptMutationCounts(f.agent)[later]).toBe(0);
+      }
+      const mutations = receiptMutationCounts(f.agent);
+      const reopened = await restartNode(f.target);
+      const guest = language === 'typescript' ? vi.spyOn(reopened.typescript!, 'execute') : vi.spyOn(reopened.host, 'applyPlan');
+      expect((await f.invoke()).body).toMatchObject({ code: 'PROGRAM_AUTHORITY_REVOKED' });
+      expect(receiptMutationCounts(f.agent)).toEqual(mutations);
+      expect(guest).not.toHaveBeenCalled();
+      expect(f.agent.assertion.create.mock.calls.filter(([, name]: any) => name.startsWith('program-asset-'))).toHaveLength(1);
+      expect(reopened.store.effectsForExecution(`urn:sr:execution:${f.id}`)).toHaveLength(1);
+    });
+  it.each(authorityCases)('checks current authority for completed $language $layer replay after $change and real restart', async ({ language, layer, change }) => {
+    const f = await capabilityFixture(language, layer);
+    const first = await f.invoke();
+    expect(first.status).toBe(200);
+    expect(first.body).toMatchObject({ persisted: true, executionLayer: layer });
+    const mutations = receiptMutationCounts(f.agent);
+    await restartNode(f.target);
+    expect((await f.invoke()).body.outputs).toEqual(first.body.outputs);
+    invalidateExecutionCapability(f.target, f.id, change);
+    expect((await f.invoke()).body).toMatchObject({ code: 'PROGRAM_AUTHORITY_REVOKED' });
+    const reopened = await restartNode(f.target);
+    const guest = language === 'typescript' ? vi.spyOn(reopened.typescript!, 'execute') : vi.spyOn(reopened.host, 'applyPlan');
+    const denied = await f.invoke();
+    expect(denied.status).toBe(403);
+    expect(denied.body.outputs).toBeUndefined();
+    expect(denied.body.trace).toBeUndefined();
+    expect(guest).not.toHaveBeenCalled();
+    expect(receiptMutationCounts(f.agent)).toEqual(mutations);
+    expect(f.agent.assertion.create.mock.calls.filter(([, name]: any) => name.startsWith('program-asset-'))).toHaveLength(1);
+  });
+});
 
 describe('TypeScript direct tools through shared authorization and effects', () => {
   it('keeps separately constructed semantic runtimes bound to their own provider', async () => {
@@ -359,6 +472,10 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     const retry = await f.manager.programs.invoke(input).catch(e => e);
     expect(retry.code).toBe('INVOCATION_NOT_RETRYABLE'); expect(retry.trace).toEqual(failure.trace);
     expect(f.target.runtime!.store.effectsForExecution(`urn:sr:execution:${input.invocationId}`)).toHaveLength(0);
+    f.target.runtime!.store.revokeCapability(`urn:sr:capability:${input.invocationId}`, Date.now());
+    const revoked = await f.manager.programs.invoke(input).catch(e => e);
+    expect(revoked.status).toBe(403);
+    expect(revoked.trace).toBeUndefined();
   });
 
   it('traces child Programs with their execution reference', async () => {
@@ -487,7 +604,7 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     expect(first.status).toBe(422);
     expect(injected).toBe(true);
     expect(f.target.runtime!.store.execution(`urn:sr:execution:${id}`)?.status).toBe('active');
-    await f.target.boot();
+    await restartNode(f.target);
     const execute = vi.spyOn(f.target.runtime!.typescript!, 'execute');
     const recovered = await invoke();
     expect(recovered.status).toBe(200);
@@ -525,8 +642,10 @@ describe('TypeScript direct tools through shared authorization and effects', () 
       const next = later === 'publish' ? f.agent.publishFromFinalizedAssertion : f.agent.assertion[later];
       expect(next.mock.calls.filter(([, name]: any) => name.startsWith('semantic-execution-'))).toHaveLength(0);
     }
-    await f.target.boot();
+    await restartNode(f.target);
+    const execute = vi.spyOn(f.target.runtime!.typescript!, 'execute');
     expect((await invoke()).status).toBe(403);
+    expect(execute).not.toHaveBeenCalled();
   });
 
   it('stops on uncertain writes even when guest code catches the error', async () => {

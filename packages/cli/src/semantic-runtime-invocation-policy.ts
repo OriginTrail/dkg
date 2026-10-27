@@ -1,6 +1,6 @@
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import { sparqlIri } from '@origintrail-official/dkg-core';
-import { type SemanticRuntimeConfig } from '@origintrail-official/dkg-semantic-runtime';
+import { type SemanticRuntimeConfig, type ExecutionStatus } from '@origintrail-official/dkg-semantic-runtime';
 import { validateSemanticProgramPolicy } from './semantic-runtime-program-policy.js';
 import { ConfiguredSemanticRuntimeService, SemanticProgramError, StoredSemanticProgram } from './semantic-runtime-types.js';
 import { RDF_TYPE, SR, hashParts, iriValue, isOperatorVmGraph, literalValue, queryOptions, resultRows, sourceHashOf } from './semantic-runtime-values.js';
@@ -14,6 +14,22 @@ export function validateProgramPin(config: SemanticRuntimeConfig, program: Store
   if (!policy.contextGraphIds.includes(program.contextGraphId) || !pin || pin.sourceHash !== actualHash
     || (expectedSourceHash !== undefined && expectedSourceHash !== actualHash)) {
     throw new SemanticProgramError('PROGRAM_NOT_PINNED', 'Program source or graph does not match the operator binding', 403);
+  }
+}
+
+/** Durable authority shared by direct, pinned and both bound language paths. */
+export function assertExecutionCapabilityAuthorized(
+  runtime: ConfiguredSemanticRuntimeService, executionId: string, expectedStatus: ExecutionStatus = 'active',
+): void {
+  const execution = runtime.store.execution(executionId);
+  const capabilityId = executionId.replace('urn:sr:execution:', 'urn:sr:capability:');
+  const capability = runtime.store.capability(capabilityId);
+  const now = Date.now();
+  if (!execution || execution.status !== expectedStatus || !capability
+    || capability.executionId !== executionId || capability.revokedAt !== null
+    || capability.policyEpoch !== execution.policyEpoch
+    || now < capability.notBefore || now >= capability.expiresAt) {
+    throw new SemanticProgramError('PROGRAM_AUTHORITY_REVOKED', 'Program invocation authority is no longer active', 403);
   }
 }
 
@@ -32,19 +48,7 @@ export async function assertProgramInvocationAuthorized(input: {
   allowCompletedReceipt?: boolean;
 }): Promise<void> {
   const { agent, runtime, executionId, config, contextGraphId, program, originalCaller, operatorAddress } = input;
-  const assertActiveCapability = () => {
-    const execution = runtime.store.execution(executionId);
-    const capabilityId = executionId.replace('urn:sr:execution:', 'urn:sr:capability:');
-    const capability = runtime.store.capability(capabilityId);
-    const now = Date.now();
-    if (!execution || !(execution.status === 'active' || input.allowCompletedReceipt && execution.status === 'completed') || !capability
-      || capability.executionId !== executionId || capability.revokedAt !== null
-      || capability.policyEpoch !== execution.policyEpoch
-      || now < capability.notBefore || now >= capability.expiresAt) {
-      throw new SemanticProgramError('PROGRAM_AUTHORITY_REVOKED', 'Program invocation authority is no longer active', 403);
-    }
-  };
-  assertActiveCapability();
+  assertExecutionCapabilityAuthorized(runtime, executionId, input.allowCompletedReceipt ? 'completed' : 'active');
   if (!await agent.canReadContextGraph(contextGraphId, { callerAgentAddress: originalCaller })) {
     throw new SemanticProgramError('PROGRAM_CALLER_ACCESS_DENIED', 'Original caller can no longer read the Context Graph', 403);
   }
@@ -77,5 +81,5 @@ export async function assertProgramInvocationAuthorized(input: {
   if (rows.length === 0 || versions.size !== 1 || graphs.size !== 1 || hash !== input.policyHashHex) {
     throw new SemanticProgramError('PROGRAM_POLICY_CHANGED', 'Operator policy changed during Program execution', 403);
   }
-  assertActiveCapability();
+  assertExecutionCapabilityAuthorized(runtime, executionId, input.allowCompletedReceipt ? 'completed' : 'active');
 }

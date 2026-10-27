@@ -7,7 +7,6 @@
  * listContextGraphs enumeration. 1:1 move; methods take `this: DKGAgent` so
  * cross-calls resolve against the composed class.
  */
-
 import { probeContextGraphWritePreflight, type WritePreflightProbeOptions } from './context-graph-write-preflight.js';
 import { throwIfOperationAborted } from './bounded-operation.js';
 import { resolveContextGraphNameBindingTarget, type ContextGraphNameHashBindingTarget } from './context-graph-name-binding-target.js';

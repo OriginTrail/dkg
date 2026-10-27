@@ -11,7 +11,7 @@ import { BoundProgramInvocation, ConfiguredSemanticRuntimeService, InternalResol
 import { invokeTypeScriptProgram } from './semantic-runtime-typescript-execution.js';
 import { assertBoundQueryDefinition, resolveInternal } from './semantic-runtime-resolution.js';
 import { bytesEqual, checksumAgentAddress, hashParts, historyIsAtLayer, programPolicyHash, safeMessage, semanticLayerLabel, sourceHashOf, toHex, validateSemanticMemoryLayer } from './semantic-runtime-values.js';
-import { assertProgramInvocationAuthorized } from './semantic-runtime-invocation-policy.js';
+import { assertExecutionCapabilityAuthorized, assertProgramInvocationAuthorized } from './semantic-runtime-invocation-policy.js';
 import { buildExecutionQuads, loadExecutionOutputs, persistExecutionKnowledgeAsset } from './semantic-runtime-execution-persistence.js';
 
 /** Invoke-only access to one tenant-approved, immutable Program/query pair. */
@@ -95,6 +95,7 @@ export async function invokeBoundSemanticProgram(
     catch { throw new SemanticProgramError('PROGRAM_OUTPUT_REJECTED', 'Program output does not match the approved query contract', 409); }
   }
   await assertAuthorized();
+  assertExecutionCapabilityAuthorized(runtime, result.executionIri, 'completed');
   return result;
 }
 
@@ -319,7 +320,11 @@ export async function invokeResolved(
   };
   const assertAuthorized = async () => {
     await scope.assertAncestors?.();
-    if (bound) { await bound.assertAuthorized(); return; }
+    if (bound) {
+      await bound.assertAuthorized();
+      assertExecutionCapabilityAuthorized(runtime, `urn:sr:execution:${invocationId}`, readingCompletedReceipt ? 'completed' : 'active');
+      return;
+    }
     assertCurrentPolicy();
     await assertProgramInvocationAuthorized({
       agent, runtime, executionId: `urn:sr:execution:${invocationId}`, config: config!, contextGraphId,
