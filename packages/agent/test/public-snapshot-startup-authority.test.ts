@@ -1,3 +1,4 @@
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
@@ -17,6 +18,7 @@ function fixture() {
     started: true, workLifetime: new AgentWorkLifetime(),
     subscribedContextGraphs: new Map([[graph, active()]]),
     contextGraphSubscriptionDormancyById: new Map([[graph, 'authorityUnavailable']]),
+    waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
     contextGraphBindingState: { capture: () => 0, isGenerationCurrent: (_: string, generation: number) => generation === 0 },
     chain: { chainId: 'evm:31337', deploymentId: 'test', readPublicGraphSnapshot: vi.fn(async () => snapshot()) },
     router: { send: vi.fn(async () => Buffer.from(JSON.stringify(snapshot()))) },

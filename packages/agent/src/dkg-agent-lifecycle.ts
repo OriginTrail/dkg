@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { finalizePersistedSubscriptionActivation } from './context-graph-subscription-activation-finalization.js';
+import { isCommittedSubscription, waitForSubscriptionActivation } from './context-graph-subscription-activation-state.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -8896,6 +8897,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       dormant: dormancy.dormantIds.length,
       ...dormancy,
     };
+  }
+
+  /** A provisional subscribed row is not a committed activation. */
+  isContextGraphSubscriptionCommitted(this: DKGAgent, id: string): boolean {
+    return isCommittedSubscription(this.subscribedContextGraphs, this.contextGraphSubscriptionDormancyById, id);
+  }
+
+  /** Await an in-flight authority activation within the caller's existing lifetime. */
+  waitForContextGraphSubscriptionActivation(this: DKGAgent, id: string, signal: AbortSignal): Promise<void> {
+    return waitForSubscriptionActivation(this.workLifetime, () => this.started, this.contextGraphSubscriptionDormancyById, id, signal);
   }
 
   /** Commit the activation transaction; its owner finalizes bookkeeping and publication. */

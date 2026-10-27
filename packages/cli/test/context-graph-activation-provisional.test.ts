@@ -12,8 +12,11 @@ it('starts no catch-up from a provisional authority-recovery row, but catches up
   const member = memberEdge();
   const row = { subscribed: true, synced: false, sharedMemorySynced: false, metaSynced: true, syncMode: 'always-on' };
   member.restore(row);
-  let dormant = true;
-  Object.assign(member.agent, { getContextGraphSubscriptionRehydrationStatus: () => ({ dormantIds: dormant ? [CG] : [] }) });
+  const dormancy = (member.agent as any).contextGraphSubscriptionDormancyById as Map<string, string>;
+  dormancy.set(CG, 'authorityUnavailable');
+  Object.assign(member.agent, { getContextGraphSubscriptionRehydrationStatus: () => {
+    throw new Error('Catch-up must query committed activation, not diagnostic projections');
+  } });
   const runs: string[] = [];
   daemonState.catchupRunner = { run: async request => { runs.push(request.contextGraphId); return cleanEmptyRound(); }, close: async () => {} };
   const stop = startActivationCatchups({ agent: member.agent, store: member.store,
@@ -27,7 +30,7 @@ it('starts no catch-up from a provisional authority-recovery row, but catches up
     member.restore({ ...row, subscribed: false });
     await new Promise(resolve => setTimeout(resolve, 20));
     expect(runs).toEqual([]);
-    member.restore(row); dormant = false;
+    member.restore(row); dormancy.delete(CG);
     member.agent.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: CG });
     await waitUntil(() => member.subscription()?.synced === true ? true : undefined, 'committed activation catch-up');
     expect(runs).toEqual([CG]);

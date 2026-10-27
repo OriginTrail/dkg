@@ -1,13 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as execution from '../src/exact-recovery-execution.js';
-import { recoverPublicSnapshotParallelExact } from '../src/public-snapshot-parallel-exact.js';
+import { recoverPublicSnapshotExact } from '../src/public-snapshot-exact.js';
 import { createCoreChainCacheContentPeers } from '../src/core-chain-cache-peers.js';
 import { exactAssetUalsForSelection } from '../src/sync/exact-assets.js';
 import { createDurableSyncAccumulator, finalizeDurableSyncCompletion } from '../src/sync/durable-progress.js';
 
 const host = { log: { info() {} } } as never;
 const uals = Array.from({ length: 31 }, (_, i) => `did:dkg:evm:31337/0x${'ab'.repeat(20)}/${i + 1}`);
-const options = () => ({ contextGraphId: 'parallel-snapshot', uals, evidence: {} as never,
+const options = () => ({ maxLanes: 2 as const, contextGraphId: 'parallel-snapshot', uals, evidence: {} as never,
   deadline: Date.now() + 3_600_000, signal: new AbortController().signal, assertCurrent() {},
   peerBatches: async function* () { yield ['core-a', 'core-b']; } });
 const selected = (r: Parameters<typeof execution.runExactRecovery>[0]) => exactAssetUalsForSelection(r.policy.selection);
@@ -30,7 +30,7 @@ describe('bounded snapshot recovery overlap', () => {
       active--; return success(selected(request));
     });
     const holds = vi.fn(async () => false);
-    const job = recoverPublicSnapshotParallelExact(host, { ...options(), holds });
+    const job = recoverPublicSnapshotExact(host, { ...options(), holds });
     await entered.promise;
     expect(calls.map(c => c.peer)).toEqual(['core-a', 'core-b']);
     expect(active).toBe(2); gates.forEach(g => g.resolve());
@@ -53,7 +53,7 @@ describe('bounded snapshot recovery overlap', () => {
       expect(request.options.signal?.aborted).toBe(true);
       return success(selected(request));
     });
-    const job = recoverPublicSnapshotParallelExact(host, options());
+    const job = recoverPublicSnapshotExact(host, options());
     job.then(() => { settled = true; }, () => { settled = true; });
     const rejection = expect(job).rejects.toThrow('first lane failed');
     await both.promise; await Promise.resolve(); await Promise.resolve();
@@ -75,7 +75,7 @@ describe('bounded snapshot recovery overlap', () => {
       return success(selection);
     });
     const holds = vi.fn(async (ual: string) => ual === assets[10]);
-    await expect(recoverPublicSnapshotParallelExact(host, { ...options(), uals: assets, holds }))
+    await expect(recoverPublicSnapshotExact(host, { ...options(), uals: assets, holds }))
       .rejects.toThrow('Snapshot recovery incomplete: 12/21 committed');
     expect(holds).toHaveBeenCalledTimes(assets.length);
   });
@@ -83,8 +83,8 @@ describe('bounded snapshot recovery overlap', () => {
   it('does not start work after cancellation or the original deadline', async () => {
     const run = vi.spyOn(execution, 'runExactRecovery');
     const caller = new AbortController(); caller.abort(new Error('cancelled'));
-    await expect(recoverPublicSnapshotParallelExact(host, { ...options(), signal: caller.signal })).rejects.toThrow('cancelled');
-    await expect(recoverPublicSnapshotParallelExact(host, { ...options(), deadline: Date.now() })).rejects.toThrow('job time limit');
+    await expect(recoverPublicSnapshotExact(host, { ...options(), signal: caller.signal })).rejects.toThrow('cancelled');
+    await expect(recoverPublicSnapshotExact(host, { ...options(), deadline: Date.now() })).rejects.toThrow('job time limit');
     expect(run).not.toHaveBeenCalled();
   });
 
@@ -108,7 +108,7 @@ describe('bounded snapshot recovery overlap', () => {
       if (askedAt.length === 1) return { ...success([]), disposition: 'incomplete', streamOutcome: 'responder-busy' };
       return success(selected(request));
     });
-    const job = recoverPublicSnapshotParallelExact(host, options());
+    const job = recoverPublicSnapshotExact(host, options());
     await vi.runAllTimersAsync();
     expect((await job).committed).toEqual(new Set(uals));
     expect(askedAt.length).toBeGreaterThan(1);

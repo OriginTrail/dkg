@@ -5,11 +5,9 @@ import { createPublicSnapshotSourcePlan } from './public-snapshot-source-plan.js
 import { recoverPublicSnapshotToCurrent } from './public-snapshot-catch-up.js';
 import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
-import { recoverPublicSnapshotParallelExact } from './public-snapshot-parallel-exact.js';
+import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
 import { createPublicSnapshotHeldAssetCheck } from './public-snapshot-held-assets.js';
 import { isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
-import { vmRecoveryRetryDelay } from './vm-recovery-pass-authority.js';
-import { PUBLIC_SNAPSHOT_RETRY_MS } from './public-snapshot-exact-pacing.js';
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { createPublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
@@ -110,21 +108,10 @@ export class PublicSnapshotMethods extends DKGAgentBase {
     ]);
     const { signal } = lifecycle;
     try {
-      // Authority recovery installs a provisional row before its asynchronous
-      // prepare/persistence can commit or roll back. Capture no snapshot owner
-      // from that row. The existing recovery runtime owns its retries; this
-      // local wait issues no RPC and consumes the original job deadline.
-      const assertWaitingCurrent = () => {
-        if (signal.aborted || lifetime !== this.workLifetime.generation || !this.started)
-          throw new Error('Snapshot job ownership changed');
-      };
-      if (this.contextGraphSubscriptionDormancyById?.get(contextGraphId) === 'authorityUnavailable') await this.workLifetime.track((async () => {
-        while (this.contextGraphSubscriptionDormancyById?.get(contextGraphId) === 'authorityUnavailable') {
-          assertWaitingCurrent();
-          await vmRecoveryRetryDelay(PUBLIC_SNAPSHOT_RETRY_MS, signal);
-        }
-        assertWaitingCurrent();
-      })());
+      // Subscription lifecycle owns provisional state and the abortable wait.
+      // Its wait consumes this job's original deadline and issues no RPC.
+      try { await this.waitForContextGraphSubscriptionActivation(contextGraphId, signal); }
+      catch (cause) { throw new Error('Snapshot job ownership changed', { cause }); }
       const subscription = this.subscribedContextGraphs.get(contextGraphId);
       if (subscription && (!subscription.subscribed && !subscription.coreHosted))
         throw new Error("Graph subscription is inactive");
@@ -211,8 +198,8 @@ export class PublicSnapshotMethods extends DKGAgentBase {
                   log: message => this.log.info(createOperationContext('sync'), message),
                 });
               }
-              return recoverPublicSnapshotParallelExact(DKGAgentBase.createDurableRecoveryCapabilities(this), {
-                ...recovery, deadline: startedAt + 3_600_000,
+              return recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), {
+                ...recovery, deadline: startedAt + 3_600_000, maxLanes: 2,
                 canAdmit: () => this.vmRecoverySyncAdmissionAvailable(contextGraphId),
                 holds: createPublicSnapshotHeldAssetCheck(this.store, evidence),
               });

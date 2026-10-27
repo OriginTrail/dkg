@@ -1,3 +1,4 @@
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { exactAssetUalsForSelection } from '../src/sync/exact-assets.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
 
@@ -39,6 +40,8 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only', last:'missin
     log:{info:vi.fn(),warn:vi.fn(),debug:vi.fn()},
 
     subscribedContextGraphs:new Map(),store,
+    contextGraphSubscriptionDormancyById: new Map(),
+    waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
     getSubscribedContextGraphs: () => a.subscribedContextGraphs,
     contextGraphBindingState:{capture:()=>generation,isGenerationCurrent:(_:string,g:number)=>g===generation},
     chain:{chainId:'evm:31337',deploymentId:'test',readPublicGraphSnapshot:async()=>snapshot},

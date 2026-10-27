@@ -15,6 +15,8 @@ export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecove
   readonly canAdmit?: () => boolean;
   /** Whether the asset is already stored as the snapshot pins it. */
   readonly holds?: (ual: string) => Promise<boolean>;
+  /** One lane by default; two still require multiple admitted suppliers. */
+  readonly maxLanes?: 1 | 2;
 }
 
 type ExactTransport = 'stream-preferred' | 'legacy';
@@ -33,12 +35,12 @@ type SelectionPass = { kind: 'complete' | 'answered' }
  * the job. Assets already stored as the snapshot pins them are not fetched.
  */
 export async function recoverPublicSnapshotExact(
-  host: DurableRecoveryHost, options: PublicSnapshotExactRecoveryOptions, maxLanes: 1 | 2 = 1,
+  host: DurableRecoveryHost, options: PublicSnapshotExactRecoveryOptions,
 ): Promise<PublicSnapshotRecoveryResult> {
   const job = new PublicSnapshotExactJob(options);
   job.assertActive();
   let lanes = 1;
-  if (maxLanes === 2 && options.uals.length > 10) {
+  if (options.maxLanes === 2 && options.uals.length > 10) {
     const discovery = options.peerBatches()[Symbol.asyncIterator]();
     try {
       const first = await discovery.next();
