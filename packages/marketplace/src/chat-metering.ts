@@ -146,12 +146,69 @@ export function chatPromptUpperBound(
   return BigInt(bytes) + BigInt(utf8Length(toolEnvelopeText(messages, options)));
 }
 
+/** Texts up to this many code points take the reference search directly (it decides GV-7). */
+const BOUND_SEGMENT_CODE_POINTS = 4096;
+const LETTER = /\p{L}/u;
+
+/**
+ * The first cut at or after code point `from`: a space between two letters.
+ * Cutting just before such a space splits every engine's count additively —
+ * the o200k/Qwen pre-tokenizers end a letter run there and start the next
+ * piece with that space, and stub-words splits words there.
+ */
+function nextSegmentCut(chars: readonly string[], from: number): number {
+  for (let k = Math.max(1, from); k < chars.length - 1; k++) {
+    if (chars[k] === ' ' && LETTER.test(chars[k - 1]) && LETTER.test(chars[k + 1])) return k;
+  }
+  return chars.length;
+}
+
+/**
+ * Long-text fast path: count ~`BOUND_SEGMENT_CODE_POINTS` segments once, find
+ * the segment where the running count passes the cap, and binary-search only
+ * inside it. About one full count instead of log2(n) of them. `undefined`
+ * when the segment counts never pass the cap (a non-additive text).
+ */
+function boundBySegments(
+  engine: Pick<TokenCountEngine, 'encodeCount'>,
+  text: string,
+  chars: readonly string[],
+  offsets: Uint32Array,
+  cap: number,
+): number | undefined {
+  let base = 0; // count(prefix(start)) under additivity
+  for (let start = 0; start < chars.length;) {
+    const end = nextSegmentCut(chars, start + BOUND_SEGMENT_CODE_POINTS);
+    const segment = engine.encodeCount(text.slice(offsets[start], offsets[end]));
+    if (base + segment > cap) {
+      const count = (k: number): number => base + engine.encodeCount(text.slice(offsets[start], offsets[k]));
+      let lo = start;
+      let hi = end; // invariant: count(lo) ≤ cap
+      while (lo < hi) {
+        const mid = Math.ceil((lo + hi) / 2);
+        if (count(mid) <= cap) lo = mid;
+        else hi = mid - 1;
+      }
+      return lo;
+    }
+    base += segment;
+    start = end;
+  }
+  return undefined;
+}
+
 /**
  * Bound a delivered completion to at most `maxUnits` as counted by the
- * billing engine (fork `boundCompletion`, verbatim algorithm). The result is
- * a code-point prefix — never a split surrogate pair — found by binary search
- * for the longest prefix whose count fits, so the engine that bills it is the
- * one that bounded it. A cap ≤ 0 delivers nothing.
+ * billing engine. The result is a code-point prefix — never a split surrogate
+ * pair — found by binary search for the longest prefix whose count fits (fork
+ * `boundCompletion`), so the engine that bills it is the one that bounded it.
+ * A cap ≤ 0 delivers nothing.
+ *
+ * Cost: the fork's search runs ~log2(n) full counts, which stalls a seller
+ * for seconds on a long upstream reply with a cap near its full count. A text
+ * over `BOUND_SEGMENT_CODE_POINTS` code points first takes the segment fast
+ * path; its answer is VERIFIED with one full count, and only a text where
+ * that fails (no additive cut points) falls back to the reference search.
  */
 export function boundCompletion(
   engine: Pick<TokenCountEngine, 'encodeCount'>,
@@ -162,7 +219,15 @@ export function boundCompletion(
   if (cap === 0) return { text: '', truncated: text.length > 0 };
   if (engine.encodeCount(text) <= cap) return { text, truncated: false };
   const chars = Array.from(text);
-  const count = (k: number): number => engine.encodeCount(chars.slice(0, k).join(''));
+  // UTF-16 offset of every code point boundary: prefixes are slices, never re-joined arrays.
+  const offsets = new Uint32Array(chars.length + 1);
+  for (let k = 0; k < chars.length; k++) offsets[k + 1] = offsets[k] + chars[k].length;
+  const prefix = (k: number): string => text.slice(0, offsets[k]);
+  const count = (k: number): number => engine.encodeCount(prefix(k));
+  if (chars.length > BOUND_SEGMENT_CODE_POINTS) {
+    const fast = boundBySegments(engine, text, chars, offsets, cap);
+    if (fast !== undefined && count(fast) <= cap) return { text: prefix(fast), truncated: true };
+  }
   let lo = 0;
   let hi = chars.length; // invariant: count(lo) ≤ cap
   while (lo < hi) {
@@ -171,5 +236,5 @@ export function boundCompletion(
     else hi = mid - 1;
   }
   while (lo > 0 && count(lo) > cap) lo--; // BPE counts are not strictly monotonic in prefix length
-  return { text: chars.slice(0, lo).join(''), truncated: true };
+  return { text: prefix(lo), truncated: true };
 }

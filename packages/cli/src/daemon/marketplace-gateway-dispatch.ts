@@ -29,7 +29,7 @@ import {
   type MarketplaceGatewayAgent,
   type MarketplaceGatewayState,
 } from './routes/marketplace-gateway.js';
-import { INTERNAL_ERROR_REPLY, gatewayErrorBody } from './routes/marketplace-gateway-errors.js';
+import { INTERNAL_ERROR_REPLY, gatewayErrorBody, gatewayRetryHeader } from './routes/marketplace-gateway-errors.js';
 
 export const MARKETPLACE_GATEWAY_BASE_PATH = '/api/marketplace/gateway/v1';
 
@@ -45,8 +45,16 @@ export interface MarketplaceGatewayDispatch {
   readonly store: MarketplaceGatewayKeyStore;
 }
 
-/** Body read deadline: a slow sender must not hold one of the few concurrency slots. */
+/**
+ * Body read deadline. A slow sender holds only one of its OWN key's slots
+ * meanwhile: the gateway-wide slot is taken after the body is read.
+ */
 const GATEWAY_BODY_TIMEOUT_MS = 30_000;
+
+/** One key's in-flight cap: half the gateway (at least 1), so no single key can hold every slot. */
+export function gatewayMaxConcurrentPerKey(maxConcurrent: number): number {
+  return Math.max(1, Math.ceil(maxConcurrent / 2));
+}
 
 /** `undefined` ⇔ gateway disabled (marketplace off, or `marketplace.buyer.gateway.enabled === false`). */
 export function createMarketplaceGatewayDispatch(input: {
@@ -67,6 +75,8 @@ export function createMarketplaceGatewayDispatch(input: {
     config: input.gateway,
     limiter: new SlidingWindowRateLimiter({ windowMs: 1000, maxKeys: 10_000 }),
     inFlight: { count: 0 },
+    perKeyInFlight: new Map(),
+    maxConcurrentPerKey: gatewayMaxConcurrentPerKey(input.gateway.maxConcurrent),
     log: input.log,
     nowMs: input.nowMs ?? Date.now,
     bodyTimeoutMs: input.bodyTimeoutMs ?? GATEWAY_BODY_TIMEOUT_MS,
@@ -89,11 +99,13 @@ export function createMarketplaceGatewayDispatch(input: {
       } catch (err) {
         state.log(`[marketplace-gateway] dispatch fault: ${(err as Error)?.name ?? 'Error'}: ${String((err as Error)?.message ?? err).slice(0, 200)}`);
         if (!res.headersSent && !res.destroyed) {
-          const text = JSON.stringify(gatewayErrorBody(INTERNAL_ERROR_REPLY));
+          const body = gatewayErrorBody(INTERNAL_ERROR_REPLY);
+          const text = JSON.stringify(body);
           res.writeHead(500, {
             'Content-Type': 'application/json; charset=utf-8',
             'Content-Length': String(Buffer.byteLength(text)),
             Connection: 'close',
+            ...gatewayRetryHeader(body),
             ...corsHeaders(corsOrigin),
           });
           res.end(text);

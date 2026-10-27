@@ -5,6 +5,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { connect, type Socket } from 'node:net';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { mapGatewayError } from '../src/daemon/routes/marketplace-gateway-errors.js';
@@ -264,6 +265,8 @@ describe('§9.6 error mapping (one case per row)', () => {
     if (code === 'key_budget_exceeded' || code === 'underfunded' || code === 'soft_ceiling') {
       expect(res.headers.get('retry-after')).toBeNull();
     }
+    // OpenAI SDKs obey x-should-retry before their status rule (they retry 429/≥500 by default).
+    expect(res.headers.get('x-should-retry')).toBe(res.json.error.dkg.retryable ? 'true' : 'false');
   });
 
   it('the query route names max_rows for an over-cap route', () => {
@@ -361,6 +364,60 @@ describe('spend guard → key ledger (§10.3) and charged_wei', () => {
     expect(server.store.ledger().get(keyId)!.usage).toMatchObject({ spentWei: 0n, reservedWei: 0n });
   });
 
+  it('an internal error after a settle reports the settled charge in the body and the log (GAT-2)', async () => {
+    const { server: s, plaintext, keyId } = await withKey({
+      marketplaceChatCompletion: async (input: any) => {
+        input.spendGuard.admit(WORST_CASE_WEI);
+        input.spendGuard.settle({ costWei: WORST_CASE_WEI, servedUnits: 0n, delivery: 'ambiguous' });
+        throw new SyntaxError('Cannot convert x to a BigInt');
+      },
+    });
+    const res = await chat(s, plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
+    expect(res.status).toBe(500);
+    expect(res.json.error).toMatchObject({ code: 'internal_error', dkg: { charged_wei: WORST_CASE_WEI.toString(), retryable: false } });
+    expect(res.headers.get('x-should-retry')).toBe('false');
+    expect(s.store.ledger().get(keyId)!.usage.spentWei).toBe(WORST_CASE_WEI);
+    expect(s.logs.join('\n')).toContain(`charged_wei=${WORST_CASE_WEI}`);
+    expect(res.text).not.toContain('BigInt');
+  });
+
+  it('a charged failure is never retryable: x-should-retry false and no Retry-After, whatever its code (GAT-3)', async () => {
+    const cases: Array<[string, () => Error, bigint]> = [
+      ['delivery unknown', () => namedError('MarketplaceInvokeError', 'timeout', { code: 'DELIVERY_UNKNOWN', delivery: 'ambiguous' }), WORST_CASE_WEI],
+      ['bad receipt', () => namedError('MarketplaceInvokeError', 'bad', { code: 'BAD_RECEIPT', delivery: 'served' }), WORST_CASE_WEI],
+      ['invalid tool response', () => namedError('MarketplaceInvalidToolResponseError', 'tool not offered'), RECEIPT_WEI],
+      // A retryable code that nonetheless carries a charge loses its retry hint.
+      ['charged upstream error', () => namedError('MarketplaceInvokeError', 'x', { code: 'UPSTREAM_RATE_LIMITED', delivery: 'served' }), RECEIPT_WEI],
+    ];
+    for (const [label, makeError, settled] of cases) {
+      const { server: s, plaintext } = await withKey({
+        marketplaceChatCompletion: async (input: any) => {
+          input.spendGuard.admit(WORST_CASE_WEI);
+          input.spendGuard.settle({ costWei: settled, servedUnits: 22n, delivery: 'served' });
+          throw makeError();
+        },
+      });
+      const res = await chat(s, plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
+      expect(res.json.error.dkg, label).toMatchObject({ charged_wei: settled.toString(), retryable: false });
+      expect(res.headers.get('x-should-retry'), label).toBe('false');
+      expect(res.headers.get('retry-after'), label).toBeNull();
+      await server!.close();
+      server = undefined;
+    }
+    // An uncharged, retryable refusal keeps both hints.
+    const { server: s, plaintext } = await withKey({
+      marketplaceChatCompletion: async () => { throw namedError('MarketplaceInvokeError', 'x', { code: 'UPSTREAM_RATE_LIMITED', delivery: 'not-served' }); },
+    });
+    const ok = await chat(s, plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
+    expect(ok.status).toBe(429);
+    expect(ok.headers.get('x-should-retry')).toBe('true');
+    expect(ok.headers.get('retry-after')).toBe('1');
+    // Pre-body rejections carry it too.
+    const unauthorized = await getJson(`${s.base}/models`, bearer('dkg_gw_00000000_' + 'A'.repeat(43)));
+    expect(unauthorized.status).toBe(401);
+    expect(unauthorized.headers.get('x-should-retry')).toBe('false');
+  });
+
   it('a hold the agent never settles is released (defensive)', async () => {
     const { server: s, plaintext, keyId } = await withKey({
       marketplaceChatCompletion: async (input: any) => {
@@ -437,7 +494,7 @@ describe('per-key rps and the concurrency cap', () => {
     expect(limited.headers.get('connection')).toBe('close');
   });
 
-  it('concurrency: requests beyond maxConcurrent are 503 gateway_busy; slots free on completion', async () => {
+  it('concurrency: beyond maxConcurrent another key gets 503 gateway_busy (after its body); slots free on completion', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     const fake = makeFakeAgent({
@@ -449,20 +506,108 @@ describe('per-key rps and the concurrency cap', () => {
       },
     });
     server = await startGatewayServer({ agent: fake.agent, config: { maxConcurrent: 1 } });
-    const { plaintext } = await mintKey(server.store);
-    const first = chat(server, plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
+    const holder = await mintKey(server.store);
+    const other = await mintKey(server.store);
+    const first = chat(server, holder.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
     await new Promise((resolve) => setTimeout(resolve, 100));
-    const busy = await chat(server, plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
+    const busy = await chat(server, other.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
     expect(busy.status).toBe(503);
     expect(busy.json.error).toMatchObject({ type: 'api_error', code: 'gateway_busy' });
     expect(busy.headers.get('retry-after')).toBe('1');
+    expect(busy.headers.get('x-should-retry')).toBe('true');
+    // The holding key is at its own cap (ceil(1/2) = 1): refused BEFORE its body is read.
+    const own = await chat(server, holder.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
+    expect(own.status).toBe(429);
+    expect(own.json.error).toMatchObject({ type: 'rate_limit_error', code: 'rate_limit_exceeded' });
+    expect(own.headers.get('connection')).toBe('close');
     release();
     expect((await first).status).toBe(200);
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect((await chat(server, plaintext, { model: 'stub-chat', messages: GV2_MESSAGES })).status).toBe(200);
+    expect((await chat(server, other.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES })).status).toBe(200);
+    expect((await chat(server, holder.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES })).status).toBe(200);
   });
 
-  it('a client that disconnects mid-call keeps its slot until the agent call completes (no cap bypass)', async () => {
+  it('one key holds at most ceil(maxConcurrent/2) calls: its next call is 429, another key still gets a slot', async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const fake = makeFakeAgent({
+      marketplaceChatCompletion: async (input: any) => {
+        input.spendGuard.admit(WORST_CASE_WEI);
+        await gate;
+        input.spendGuard.settle({ costWei: RECEIPT_WEI, servedUnits: 22n, delivery: 'served' });
+        return fakeChatResult();
+      },
+    });
+    server = await startGatewayServer({ agent: fake.agent, config: { maxConcurrent: 4 } });
+    const greedy = await mintKey(server.store);
+    const polite = await mintKey(server.store);
+    const held = [
+      chat(server, greedy.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES }),
+      chat(server, greedy.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES }),
+    ];
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    const third = await chat(server, greedy.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
+    expect(third.status).toBe(429);
+    expect(third.json.error).toMatchObject({ code: 'rate_limit_exceeded', dkg: { retryable: true, charged_wei: '0' } });
+    expect(third.json.error.message).toContain('2 requests in flight');
+    expect(third.headers.get('retry-after')).toBe('1');
+    expect(third.headers.get('x-should-retry')).toBe('true');
+    const theirs = chat(server, polite.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    release();
+    expect((await theirs).status).toBe(200);
+    for (const call of held) expect((await call).status).toBe(200);
+  });
+
+  it('a slow body holds only its own key: a no-scope key trickling bodies cannot starve another key (GAT-1)', async () => {
+    const fake = makeFakeAgent();
+    server = await startGatewayServer({ agent: fake.agent, config: { maxConcurrent: 2 } });
+    const attacker = await mintKey(server.store, { modelAllowlist: [], allowQuery: false, budgetWei: 1n });
+    const victim = await mintKey(server.store);
+    const port = Number(new URL(server.url).port);
+    const head = (key: string) => [
+      'POST /api/marketplace/gateway/v1/chat/completions HTTP/1.1',
+      'Host: 127.0.0.1',
+      `Authorization: Bearer ${key}`,
+      'Content-Type: application/json',
+      'Content-Length: 100',
+      '', '{',
+    ].join('\r\n');
+    const sockets: Socket[] = [];
+    const replies: string[] = [];
+    try {
+      // More trickling requests than the whole gateway cap (2): one holds the
+      // attacker's own slot; the rest are refused before any body byte.
+      for (let i = 0; i < 3; i += 1) {
+        const socket = connect(port, '127.0.0.1');
+        sockets.push(socket);
+        const index = i;
+        replies[index] = '';
+        socket.on('data', (chunk) => { replies[index] += chunk.toString('utf8'); });
+        socket.on('error', () => {});
+        await new Promise<void>((resolve) => socket.once('connect', () => resolve()));
+        socket.write(head(attacker.plaintext));
+        await new Promise((resolve) => setTimeout(resolve, 80));
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(replies[0], 'the first trickle is still reading its body').toBe('');
+      for (const reply of replies.slice(1)) {
+        expect(reply).toMatch(/^HTTP\/1\.1 429 /);
+        expect(reply.toLowerCase()).toContain('connection: close');
+        expect(reply).toContain('"rate_limit_exceeded"');
+      }
+      // The victim is unaffected: the gateway-wide slots were never taken.
+      const models = await getJson(`${server.base}/models`, bearer(victim.plaintext));
+      expect(models.status).toBe(200);
+      const answer = await chat(server, victim.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES });
+      expect(answer.status).toBe(200);
+      expect(fake.calls.filter((c) => c.method === 'chat')).toHaveLength(1);
+    } finally {
+      for (const socket of sockets) socket.destroy();
+    }
+  });
+
+  it('a client that disconnects mid-call keeps its slots until the agent call completes (no cap bypass)', async () => {
     let release!: () => void;
     const gate = new Promise<void>((resolve) => { release = resolve; });
     let finished = 0;
@@ -477,6 +622,7 @@ describe('per-key rps and the concurrency cap', () => {
     });
     server = await startGatewayServer({ agent: fake.agent, config: { maxConcurrent: 1 } });
     const { plaintext, keyId } = await mintKey(server.store);
+    const other = await mintKey(server.store);
     const abort = new AbortController();
     const first = fetch(`${server.base}/chat/completions`, {
       method: 'POST',
@@ -488,7 +634,9 @@ describe('per-key rps and the concurrency cap', () => {
     abort.abort();
     await first;
     await new Promise((resolve) => setTimeout(resolve, 50));
-    expect((await chat(server, plaintext, { model: 'stub-chat', messages: GV2_MESSAGES })).status).toBe(503);
+    // Both the gateway-wide slot and the key's own slot stay held.
+    expect((await chat(server, other.plaintext, { model: 'stub-chat', messages: GV2_MESSAGES })).status).toBe(503);
+    expect((await chat(server, plaintext, { model: 'stub-chat', messages: GV2_MESSAGES })).status).toBe(429);
     release();
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(finished).toBe(1);

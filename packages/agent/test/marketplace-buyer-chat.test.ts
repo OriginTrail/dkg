@@ -27,6 +27,7 @@ import {
   PROTOCOL_MARKETPLACE_SERVE,
   decodeMarketplaceServeResponse,
   encodeMarketplaceServeRequest,
+  encodeMarketplaceServeResponse,
   type ProtocolRouter,
 } from '@origintrail-official/dkg-core';
 import { MOCK_MARKETPLACE_ADDRESS, MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -170,7 +171,13 @@ const pinOf = (engine: TokenCountEngine): OfferMetering => ({
 const cleanups: Array<() => void> = [];
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); });
 
-function createWorld(specs: SellerSpec[], opts: { authTtlSeconds?: number; tokenizerFiles?: Array<{ kind: 'hf-bpe-v1'; path: string }>; dataDir?: string } = {}) {
+function createWorld(specs: SellerSpec[], opts: {
+  authTtlSeconds?: number;
+  tokenizerFiles?: Array<{ kind: 'hf-bpe-v1'; path: string }>;
+  dataDir?: string;
+  /** Rewrites every serve response on its way back to the buyer (a dishonest or broken seller). */
+  tamperServeResponse?: (response: Uint8Array) => Uint8Array;
+} = {}) {
   const net = makeNetwork();
   const buyerWallet = new ethers.Wallet(ethers.hexlify(randomBytes(32)));
   const buyerChain = new MockChainAdapter('mock:31337', buyerWallet.address);
@@ -237,9 +244,12 @@ function createWorld(specs: SellerSpec[], opts: { authTtlSeconds?: number; token
   const recordingMessenger: MarketplaceMessenger = {
     register: (p, h) => buyerMessenger.register(p, h),
     sendReliable: (peer, p, payload, o) => buyerMessenger.sendReliable(peer, p, payload, o),
-    sendRequestOwned: (peer, p, payload, o) => {
+    sendRequestOwned: async (peer, p, payload, o) => {
       if (p.includes('serve')) serveTimeouts.push(o?.timeoutMs);
-      return buyerMessenger.sendRequestOwned(peer, p, payload, o);
+      const sent = await buyerMessenger.sendRequestOwned(peer, p, payload, o);
+      return p.includes('serve') && opts.tamperServeResponse && sent.delivered
+        ? { ...sent, response: opts.tamperServeResponse(sent.response) }
+        : sent;
     },
   };
   const makeBuyer = () => new MarketplaceBuyerService({
@@ -460,6 +470,76 @@ describe('buyer chat completion over the marketplace', () => {
     expect(error).toMatchObject({ code: 'MALFORMED_RESULT', delivery: 'served' });
     expect(calls.at(-1)).toEqual({ kind: 'settle', costWei: 5n * ASK_A, servedUnits: 5n, delivery: 'served' });
     expect(w.buyer.recountSnapshot()[0]).toMatchObject({ sellerIdentityId: '7', mismatches: 1 });
+  });
+
+  it('unparseable result bytes under the authorized seller\'s verified receipt count against it: deprioritized, then denied (MET-1)', async () => {
+    // A dishonest seller signs servedUnits = maxUnits over JSON + one stray byte.
+    const garbage = (): MarketplaceExecutor => ({
+      kind: 'inference',
+      async execute(_payload, bounds) {
+        return { resultBytes: new TextEncoder().encode('{"schema":"openai-chat-result/v1"}x'), unitsServed: bounds.maxUnits };
+      },
+    });
+    const w = createWorld([{ ...A, executor: garbage }, { ...B }]);
+    await w.subscribe();
+    const { guard, calls } = recordingGuard();
+    const error = await runChatCompletion(w.deps(), { model: 'stub-chat', messages: GV2, spendGuard: guard }).catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(MarketplaceInvokeError);
+    expect(error).toMatchObject({ code: 'MALFORMED_RESULT', delivery: 'served' });
+    // §8.5: unparseable bytes settle the worst case (the seller holds a claimable receipt).
+    expect(calls.at(-1)).toEqual({ kind: 'settle', costWei: 273n * ASK_A, servedUnits: 0n, delivery: 'served' });
+    expect(w.buyer.recountSnapshot().find((r) => r.sellerIdentityId === '7')).toMatchObject({ mismatches: 1, standing: 'deprioritized' });
+    // Deprioritized: the honest (pricier) seller now wins the route.
+    const next = await runChatCompletion(w.deps(), { model: 'stub-chat', messages: GV2 });
+    expect(next.invoke.seller.identityId).toBe(9n);
+    // Forced back to the dishonest seller, it is denied after three faults.
+    await w.subscribe(w.buyer, { sellerAllow: [7n] });
+    for (let i = 0; i < 2; i += 1) {
+      await expect(runChatCompletion(w.deps(), { model: 'stub-chat', messages: GV2 })).rejects.toMatchObject({ code: 'MALFORMED_RESULT' });
+    }
+    const denied = await runChatCompletion(w.deps(), { model: 'stub-chat', messages: GV2 }).catch((e: unknown) => e);
+    expect(denied).toBeInstanceOf(MarketplaceRouteError);
+    expect(chatReasons(denied)).toContain('recount-denied');
+    expect(w.buyer.recountSnapshot().find((r) => r.sellerIdentityId === '7')).toMatchObject({ mismatches: 3, standing: 'denied' });
+  });
+
+  it('a receipt the authorized seller signed over different bytes is BAD_RECEIPT and a bad-receipt mismatch (MET-1)', async () => {
+    const w = createWorld([A], {
+      tamperServeResponse: (bytes) => {
+        const response = decodeMarketplaceServeResponse(bytes);
+        if (!response.ok || !response.result) return bytes;
+        // The seller's signature stays valid; its commitment no longer matches the delivered bytes.
+        return encodeMarketplaceServeResponse({ ...response, result: new Uint8Array([...response.result, 0x20]) });
+      },
+    });
+    await w.subscribe();
+    const error = await runChatCompletion(w.deps(), { model: 'stub-chat', messages: GV2 }).catch((e: unknown) => e);
+    expect(error).toMatchObject({ name: 'MarketplaceInvokeError', code: 'BAD_RECEIPT', delivery: 'served' });
+    expect((error as Error).message).toMatch(/resultCommitment does not match/);
+    expect((error as MarketplaceInvokeError).sellerFault).toMatchObject({ verdict: 'mismatch', reason: 'bad-receipt' });
+    expect(w.buyer.recountSnapshot()).toMatchObject([{ sellerIdentityId: '7', mismatches: 1, standing: 'deprioritized' }]);
+  });
+
+  it('undecodable or unparseable serve responses are typed MALFORMED_RECEIPT (ambiguous / served), never a generic error (GAT-2)', async () => {
+    const junk = createWorld([A], { tamperServeResponse: () => new Uint8Array([0xff, 0xff, 0xff, 0xff]) });
+    await junk.subscribe();
+    const { guard, calls } = recordingGuard();
+    const undecodable = await runChatCompletion(junk.deps(), { model: 'stub-chat', messages: GV2, spendGuard: guard }).catch((e: unknown) => e);
+    expect(undecodable).toMatchObject({ name: 'MarketplaceInvokeError', code: 'MALFORMED_RECEIPT', delivery: 'ambiguous' });
+    expect(calls.at(-1)).toEqual({ kind: 'settle', costWei: 273n * ASK_A, servedUnits: 0n, delivery: 'ambiguous' });
+    // Not attributable to the authorized seller: nothing reaches the standing book.
+    expect(junk.buyer.recountSnapshot()).toEqual([]);
+
+    const badValue = createWorld([A], {
+      tamperServeResponse: (bytes) => {
+        const response = decodeMarketplaceServeResponse(bytes);
+        return response.ok ? encodeMarketplaceServeResponse({ ...response, receiptValueWei: 'x' }) : bytes;
+      },
+    });
+    await badValue.subscribe();
+    const unparseable = await runChatCompletion(badValue.deps(), { model: 'stub-chat', messages: GV2 }).catch((e: unknown) => e);
+    expect(unparseable).toMatchObject({ name: 'MarketplaceInvokeError', code: 'MALFORMED_RECEIPT', delivery: 'served' });
+    expect(badValue.buyer.meterState()?.totalSettledWei).toBe(273n * ASK_A);
   });
 
   it('a guard admit refusal propagates the SAME error, reserves nothing and records nothing', async () => {

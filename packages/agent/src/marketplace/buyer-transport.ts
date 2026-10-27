@@ -29,6 +29,7 @@ import {
   type MarketplaceOffer,
   type MarketplaceQuote,
   type QueryInferenceReceipt,
+  type RecountVerdict,
 } from '@origintrail-official/dkg-marketplace';
 import { rememberBounded } from '../bounded-map.js';
 import type { MarketplaceLogger, MarketplaceMessenger } from './seller-service.js';
@@ -53,11 +54,23 @@ export class MarketplaceInvokeError extends Error {
     readonly code: string,
     detail: string,
     readonly delivery: MarketplaceDeliveryState = 'not-served',
+    /**
+     * A `mismatch` to record against the AUTHORIZED seller: set only when that
+     * seller's own receipt signature attributes the fault (it holds a
+     * claimable receipt for bytes that do not conform), so a served-class
+     * failure can never dodge the recount standing.
+     */
+    readonly sellerFault?: RecountVerdict,
   ) {
     super(`marketplace: invoke failed (${code}): ${detail}`);
     this.name = 'MarketplaceInvokeError';
   }
 }
+
+const sellerFault = (reason: 'malformed-result' | 'bad-receipt', servedUnits: bigint): RecountVerdict =>
+  ({ verdict: 'mismatch', reason, servedUnits });
+
+const messageOf = (error: unknown): string => (error instanceof Error ? error.message : String(error));
 
 /**
  * Transport errors that PROVE the request never reached the seller (dial /
@@ -218,7 +231,13 @@ export class BuyerTransport {
       // another attempt owns the wire, so the outcome is unknown here.
       throw new MarketplaceInvokeError('DELIVERY_UNKNOWN', sent.error ?? 'serve request state unknown', 'ambiguous');
     }
-    const response = decodeMarketplaceServeResponse(sent.response);
+    let response: ReturnType<typeof decodeMarketplaceServeResponse>;
+    try {
+      response = decodeMarketplaceServeResponse(sent.response);
+    } catch (error) {
+      // Undecodable bytes: whether the seller served (and can claim) is unknown.
+      throw new MarketplaceInvokeError('MALFORMED_RECEIPT', `serve response does not decode: ${messageOf(error)}`, 'ambiguous');
+    }
     if (!response.ok) {
       // An explicit refusal: the seller rejected BEFORE serving — no claim exists.
       throw new MarketplaceInvokeError(
@@ -235,13 +254,18 @@ export class BuyerTransport {
     ) {
       throw new MarketplaceInvokeError('MALFORMED_RECEIPT', 'serve response is missing receipt fields', 'served');
     }
-    const receipt: QueryInferenceReceipt = {
-      authDigest: ethers.hexlify(response.authDigest),
-      servedUnits: BigInt((response.servedUnits ?? 0).toString()),
-      receiptValueWei: BigInt(response.receiptValueWei),
-      resultCommitment: ethers.hexlify(response.resultCommitment),
-      sellerSig: ethers.hexlify(response.sellerSignature),
-    };
+    let receipt: QueryInferenceReceipt;
+    try {
+      receipt = {
+        authDigest: ethers.hexlify(response.authDigest),
+        servedUnits: BigInt((response.servedUnits ?? 0).toString()),
+        receiptValueWei: BigInt(response.receiptValueWei),
+        resultCommitment: ethers.hexlify(response.resultCommitment),
+        sellerSig: ethers.hexlify(response.sellerSignature),
+      };
+    } catch (error) {
+      throw new MarketplaceInvokeError('MALFORMED_RECEIPT', `receipt fields do not parse: ${messageOf(error)}`, 'served');
+    }
     if (receipt.authDigest !== authorization.authDigest) {
       throw new MarketplaceInvokeError('MALFORMED_RECEIPT', 'receipt settles a different authorization', 'served');
     }
@@ -260,7 +284,14 @@ export class BuyerTransport {
       resultBytes: response.result,
     });
     if (!verification.ok) {
-      throw new MarketplaceInvokeError('BAD_RECEIPT', verification.errors.join('; '), 'served');
+      // Attributable only when the AUTHORIZED seller signed it (never on the
+      // say-so of the peer that answered: it could name another identity).
+      const signedByAuthorized = await this.#resolveSignerIdentity(signerAddress)
+        .then((id) => id === authorization.sellerIdentityId, () => false);
+      throw new MarketplaceInvokeError(
+        'BAD_RECEIPT', verification.errors.join('; '), 'served',
+        signedByAuthorized ? sellerFault('bad-receipt', receipt.servedUnits) : undefined,
+      );
     }
     const signerIdentityId = await this.#resolveSignerIdentity(signerAddress);
     if (signerIdentityId !== authorization.sellerIdentityId) {
@@ -275,7 +306,10 @@ export class BuyerTransport {
     try {
       result = JSON.parse(new TextDecoder().decode(response.result));
     } catch {
-      throw new MarketplaceInvokeError('MALFORMED_RESULT', 'result bytes are not valid JSON', 'served');
+      // The receipt verified against the authorized seller: its signed bytes are garbage.
+      throw new MarketplaceInvokeError(
+        'MALFORMED_RESULT', 'result bytes are not valid JSON', 'served', sellerFault('malformed-result', receipt.servedUnits),
+      );
     }
     return {
       result,

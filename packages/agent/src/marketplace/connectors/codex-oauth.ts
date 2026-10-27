@@ -13,8 +13,17 @@
  * the access-token JWT expires within 5 minutes and once on an upstream
  * 401/403. Refresh is SINGLE-FLIGHT per auth file: refresh tokens rotate
  * (single use), so two parallel refreshes would burn the token family. The
- * refreshed store is written back atomically (0600). Failure details redact
- * every token value before truncation.
+ * refreshed store is written back atomically (0600); mount refuses an auth
+ * file whose directory the node cannot write, and a write that still fails
+ * keeps the rotated set in memory (the file then holds a spent token).
+ * Failure details redact every token value before truncation.
+ *
+ * One deadline (`timeoutMs`, default 180 s) bounds the WHOLE call — refreshes,
+ * the 401 retry and the streamed body — so it stays under the buyer's 200 s
+ * chat serve timeout. A stream must end in `response.completed` or
+ * `response.incomplete`; a stream that closes without one (or reports an
+ * `error` event) is `UPSTREAM_ERROR`, never a partial reply. The Responses
+ * API has no `stop`, so the caller's stop sequences are applied here.
  *
  * Metering never trusts upstream usage (reasoning tokens are invisible in the
  * delivered bytes): the executor counts the delivered text with the pinned
@@ -22,10 +31,11 @@
  * backend rejects `max_output_tokens`, so none is sent.
  */
 import { randomUUID } from 'node:crypto';
-import { readFileSync } from 'node:fs';
-import { isAbsolute } from 'node:path';
+import { accessSync, constants as fsConstants, readFileSync } from 'node:fs';
+import { dirname, isAbsolute } from 'node:path';
 import { writeFileAtomic0600 } from '../atomic-file.js';
 import type { MarketplaceConnectorConfig } from '../config.js';
+import type { MarketplaceLogger } from '../seller-service.js';
 import { CODEX_DEFAULT_BASE, CODEX_OAUTH_CLIENT_ID, CODEX_TOKEN_URL, defaultCodexAuthFile } from './codex-constants.js';
 import {
   classifyStatus,
@@ -35,6 +45,7 @@ import {
   readCappedText,
   redactThenTruncate,
   resolveTimeoutMs,
+  untilAborted,
   upstreamFetch,
   UPSTREAM_BODY_CAP_BYTES,
 } from './http.js';
@@ -96,14 +107,55 @@ function jwtExp(token: string): number | null {
 /** In-process single-flight refresh per auth file. */
 const refreshInFlight = new Map<string, Promise<AuthStore>>();
 
+/**
+ * Refreshed token sets that could not be written back. The refresh already
+ * rotated the refresh token upstream, so the file holds a SPENT one
+ * (`diskRefreshToken`): the in-memory set wins until a write-back succeeds or
+ * the file changes underneath (a new login).
+ */
+const unpersisted = new Map<string, { store: AuthStore; diskRefreshToken: string }>();
+
 interface RefreshDeps {
   fetchImpl: typeof fetch;
   tokenUrl: string;
   now: () => number;
+  log?: MarketplaceLogger;
+}
+
+/** Atomic 0600 write-back; the failure's code (never content) when it fails. */
+function persistAuth(authFile: string, store: AuthStore): string | undefined {
+  try {
+    writeFileAtomic0600(authFile, `${JSON.stringify(store, null, 2)}\n`, { dirMode: 0o700 });
+    return undefined;
+  } catch (error) {
+    return String((error as { code?: unknown }).code ?? (error as Error).name ?? 'write failed');
+  }
+}
+
+/** The current token set: the file, or the in-memory set while the file holds a spent refresh token. */
+function loadAuth(authFile: string, log?: MarketplaceLogger): AuthStore {
+  const held = unpersisted.get(authFile);
+  if (!held) return readAuth(authFile);
+  let onDisk: AuthStore | undefined;
+  try {
+    onDisk = readAuth(authFile);
+  } catch {
+    // Missing or unreadable: the held set stands in (and is written back below).
+  }
+  if (onDisk && onDisk.tokens.refresh_token !== held.diskRefreshToken) {
+    unpersisted.delete(authFile); // a new login replaced the file
+    return onDisk;
+  }
+  if (persistAuth(authFile, held.store) === undefined) {
+    unpersisted.delete(authFile);
+    log?.info(`[marketplace] codex-oauth: the refreshed tokens held in memory are now written back to ${authFile}`);
+  }
+  return held.store;
 }
 
 async function performRefresh(authFile: string, deps: RefreshDeps): Promise<AuthStore> {
-  const current = readAuth(authFile);
+  const current = loadAuth(authFile, deps.log);
+  const diskRefreshToken = unpersisted.get(authFile)?.diskRefreshToken ?? current.tokens.refresh_token;
   const res = await upstreamFetch(deps.fetchImpl, deps.tokenUrl, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
@@ -136,7 +188,17 @@ async function performRefresh(authFile: string, deps: RefreshDeps): Promise<Auth
     },
     last_refresh: new Date(deps.now()).toISOString(),
   };
-  writeFileAtomic0600(authFile, `${JSON.stringify(updated, null, 2)}\n`, { dirMode: 0o700 });
+  const writeFault = persistAuth(authFile, updated);
+  if (writeFault === undefined) {
+    unpersisted.delete(authFile);
+  } else {
+    // Never drop the rotated set: the old refresh token is already spent upstream.
+    unpersisted.set(authFile, { store: updated, diskRefreshToken });
+    deps.log?.warn(
+      `[marketplace] codex-oauth: refreshed tokens could not be written back to ${authFile} (${writeFault}); `
+      + 'serving from memory — the file now holds a spent refresh token: fix the write fault (or re-run the login) before this node restarts',
+    );
+  }
   return updated;
 }
 
@@ -148,7 +210,7 @@ async function performRefresh(authFile: string, deps: RefreshDeps): Promise<Auth
 async function refreshOnce(authFile: string, usedAccessToken: string | undefined, deps: RefreshDeps): Promise<AuthStore> {
   const pending = refreshInFlight.get(authFile);
   if (pending) return pending;
-  const onDisk = readAuth(authFile);
+  const onDisk = loadAuth(authFile, deps.log);
   if (usedAccessToken !== undefined && onDisk.tokens.access_token !== usedAccessToken) return onDisk;
   const promise = performRefresh(authFile, deps).finally(() => refreshInFlight.delete(authFile));
   refreshInFlight.set(authFile, promise);
@@ -158,7 +220,7 @@ async function refreshOnce(authFile: string, usedAccessToken: string | undefined
 async function freshAuth(authFile: string, deps: RefreshDeps): Promise<AuthStore> {
   const pending = refreshInFlight.get(authFile);
   if (pending) return pending;
-  const auth = readAuth(authFile);
+  const auth = loadAuth(authFile, deps.log);
   const exp = jwtExp(auth.tokens.access_token);
   if (exp !== null && exp * 1000 < deps.now() + REFRESH_AHEAD_MS) return refreshOnce(authFile, auth.tokens.access_token, deps);
   return auth;
@@ -169,12 +231,15 @@ interface StreamAccumulation {
   finishReason: string;
   usage?: { promptTokens: number; completionTokens: number };
   failed?: string;
+  /** A `response.completed` / `response.incomplete` arrived: the reply is whole. */
+  terminated: boolean;
 }
 
 function applyEvent(acc: StreamAccumulation, event: Record<string, unknown>): void {
   const type = String(event.type ?? '');
   if (type === 'response.output_text.delta' && typeof event.delta === 'string') acc.text += event.delta;
   if (type === 'response.completed' || type === 'response.incomplete') {
+    acc.terminated = true;
     const response = event.response as {
       usage?: { input_tokens?: unknown; output_tokens?: unknown };
       output?: Array<{ content?: Array<{ type?: unknown; text?: unknown }> }>;
@@ -198,11 +263,26 @@ function applyEvent(acc: StreamAccumulation, event: Record<string, unknown>): vo
     const error = (event.response as { error?: unknown } | undefined)?.error;
     acc.failed = `upstream stream reported response.failed: ${JSON.stringify(error ?? '')}`;
   }
+  if (type === 'error') {
+    // The Responses stream's mid-stream error event: the reply is not whole.
+    acc.failed = `upstream stream reported error: ${JSON.stringify({ code: event.code ?? null, message: event.message ?? null })}`;
+  }
+}
+
+/** Cut at the earliest occurrence of any (non-empty) stop sequence, which is excluded — as upstreams do. */
+function cutAtStop(text: string, stop: readonly string[] | undefined): { text: string; stopped: boolean } {
+  let cut = -1;
+  for (const sequence of stop ?? []) {
+    if (!sequence) continue;
+    const index = text.indexOf(sequence);
+    if (index >= 0 && (cut < 0 || index < cut)) cut = index;
+  }
+  return cut < 0 ? { text, stopped: false } : { text: text.slice(0, cut), stopped: true };
 }
 
 /** Accumulate the Responses-API SSE stream (bounded to 8 MiB). */
 async function accumulateStream(res: Response): Promise<StreamAccumulation> {
-  const acc: StreamAccumulation = { text: '', finishReason: 'stop' };
+  const acc: StreamAccumulation = { text: '', finishReason: 'stop', terminated: false };
   if (!res.body) return acc;
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
@@ -243,7 +323,7 @@ async function accumulateStream(res: Response): Promise<StreamAccumulation> {
 
 export function mountCodexOAuthConnector(
   config: CodexConfig,
-  deps: { dataDir?: string; fetch?: typeof fetch; now?: () => number; codexTokenUrl?: string },
+  deps: { dataDir?: string; fetch?: typeof fetch; now?: () => number; codexTokenUrl?: string; log?: MarketplaceLogger },
 ): ChatConnector {
   const label = 'connector(codex-oauth)';
   if ((config as { acknowledgeSubscriptionScope?: unknown }).acknowledgeSubscriptionScope !== true) {
@@ -270,11 +350,23 @@ export function mountCodexOAuthConnector(
   } catch (error) {
     throw new MarketplaceConnectorMountError('CONNECTOR_AUTH_ABSENT', `${label}: ${(error as Error).message}`);
   }
+  try {
+    accessSync(dirname(authFile), fsConstants.W_OK);
+  } catch {
+    // Refresh tokens rotate on every refresh: a token set that cannot be
+    // written back is lost at the next restart (a read-only secret mount).
+    throw new MarketplaceConnectorMountError(
+      'CONNECTOR_CONFIG',
+      `${label}: the auth file's directory is not writable by the node (refreshed tokens must be written back)`,
+    );
+  }
   const fetchImpl = deps.fetch ?? fetch;
   const now = deps.now ?? Date.now;
-  const refreshDeps: RefreshDeps = { fetchImpl, tokenUrl: deps.codexTokenUrl ?? CODEX_TOKEN_URL, now };
+  const refreshDeps: RefreshDeps = {
+    fetchImpl, tokenUrl: deps.codexTokenUrl ?? CODEX_TOKEN_URL, now, ...(deps.log ? { log: deps.log } : {}),
+  };
 
-  const send = async (request: ConnectorChatRequest, auth: AuthStore): Promise<Response> =>
+  const send = async (request: ConnectorChatRequest, auth: AuthStore, deadline: AbortSignal): Promise<Response> =>
     upstreamFetch(fetchImpl, `${base}/responses`, {
       method: 'POST',
       headers: {
@@ -300,6 +392,7 @@ export function mountCodexOAuthConnector(
         reasoning: { effort: reasoningEffort },
       }),
       timeoutMs,
+      signal: deadline,
     });
 
   return {
@@ -313,24 +406,29 @@ export function mountCodexOAuthConnector(
     },
 
     async complete(request: ConnectorChatRequest): Promise<ConnectorChatOutcome> {
+      // ONE budget for the whole call (refreshes, the 401 retry, the stream).
+      // A shared refresh keeps running for its other waiters past this deadline.
+      const deadline = AbortSignal.timeout(timeoutMs);
       let auth: AuthStore;
       try {
-        auth = await freshAuth(authFile, refreshDeps);
+        auth = await untilAborted(freshAuth(authFile, refreshDeps), deadline);
       } catch (error) {
+        if (deadline.aborted) return classifyTransportError(deadline.reason);
         return failure('UPSTREAM_AUTH', 0, `auth store unusable: ${(error as Error).message}`);
       }
       let res: Response;
       try {
-        res = await send(request, auth);
+        res = await send(request, auth, deadline);
         if (res.status === 401 || res.status === 403) {
           await res.body?.cancel().catch(() => {});
           const status = res.status;
           try {
-            auth = await refreshOnce(authFile, auth.tokens.access_token, refreshDeps);
+            auth = await untilAborted(refreshOnce(authFile, auth.tokens.access_token, refreshDeps), deadline);
           } catch (error) {
+            if (deadline.aborted) return classifyTransportError(deadline.reason);
             return failure('UPSTREAM_AUTH', status, `upstream HTTP ${status}; token refresh failed: ${(error as Error).message}`);
           }
-          res = await send(request, auth);
+          res = await send(request, auth, deadline);
         }
       } catch (error) {
         return classifyTransportError(error);
@@ -348,11 +446,14 @@ export function mountCodexOAuthConnector(
         return classifyTransportError(error);
       }
       if (acc.failed) return failure('UPSTREAM_ERROR', 502, redactThenTruncate(acc.failed, tokenValues(auth), 200));
+      // A partial reply is never billed as complete (no receipt for an upstream fault).
+      if (!acc.terminated) return failure('UPSTREAM_ERROR', 502, 'upstream stream closed before response.completed');
       if (!acc.text) return failure('UPSTREAM_ERROR', 502, 'upstream stream completed with no output_text');
+      const bounded = cutAtStop(acc.text, request.stop);
       return {
         ok: true,
-        content: acc.text,
-        finishReason: acc.finishReason,
+        content: bounded.text,
+        finishReason: bounded.stopped ? 'stop' : acc.finishReason,
         ...(acc.usage ? { providerUsage: acc.usage } : {}),
       };
     },

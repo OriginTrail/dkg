@@ -6,10 +6,14 @@
 // BEFORE any body byte is read and before any agent call.
 //
 // Order per request (spec §9.2): key → per-key rps → route (404/405 only
-// after the key verified) → gateway concurrency → body (size + time capped)
-// → field checks → key scope → agent call under a key spend guard → JSON or
-// buffered SSE. Every rejection sent before the body is read carries
-// `Connection: close`, so an unread body cannot pin the socket.
+// after the key verified) → per-key in-flight cap → body (size + time capped)
+// → field checks → key scope → gateway-wide concurrency slot → agent call
+// under a key spend guard → JSON or buffered SSE. The gateway-wide slot is
+// taken only AFTER the body is read and the scope checked, so a key's slow
+// senders (or a key with no scope at all) hold only that key's own slots and
+// can never starve other keys. Every rejection sent before the body is read
+// carries `Connection: close`, so an unread body cannot pin the socket. Every
+// error carries `x-should-retry` mirroring `dkg.retryable` (false once charged).
 //
 // Logs carry the keyId and a call/request id only — never the Authorization
 // header, a key, a prompt or a completion. Value imports come from the
@@ -37,9 +41,11 @@ import { corsHeaders } from '../http-utils.js';
 import type { MarketplaceGatewayKeyStore } from '../../marketplace-gateway-key-store.js';
 import type { ResolvedMarketplaceGatewayConfig } from '../../marketplace-config.js';
 import {
+  GATEWAY_BUSY_REPLY,
   INTERNAL_ERROR_REPLY,
   MARKETPLACE_UNAVAILABLE_REPLY,
   gatewayErrorBody,
+  gatewayRetryHeader,
   mapGatewayError,
   type GatewayErrorReply,
 } from './marketplace-gateway-errors.js';
@@ -60,8 +66,12 @@ export interface MarketplaceGatewayState {
   store: MarketplaceGatewayKeyStore;
   config: ResolvedMarketplaceGatewayConfig;
   limiter: SlidingWindowRateLimiter;
-  /** Gateway requests currently admitted past the concurrency cap. */
+  /** Gateway requests holding a gateway-wide slot (agent work, after body + scope). */
   inFlight: { count: number };
+  /** Requests per key past routing (body read + work); an entry is deleted at 0. */
+  perKeyInFlight: Map<string, number>;
+  /** One key's cap on `perKeyInFlight` (below `maxConcurrent`, so one key cannot hold every slot). */
+  maxConcurrentPerKey: number;
   log: (line: string) => void;
   nowMs: () => number;
   /** Body read deadline (ms). */
@@ -114,6 +124,17 @@ function sendJson(res: ServerResponse, status: number, body: unknown, corsOrigin
   send(res, status, 'application/json; charset=utf-8', jsonText(body), corsOrigin, extra);
 }
 
+/** Every gateway error: the §9.6 envelope plus `x-should-retry` mirroring `dkg.retryable`. */
+function sendError(
+  res: ServerResponse,
+  reply: GatewayErrorReply,
+  corsOrigin: string | null,
+  opts: { chargedWei?: bigint; extra?: Record<string, string> } = {},
+): void {
+  const body = gatewayErrorBody(reply, opts.chargedWei);
+  sendJson(res, reply.status, body, corsOrigin, { ...gatewayRetryHeader(body), ...opts.extra });
+}
+
 /** An error before the body was read: the socket closes after the reply. */
 function sendEarlyError(
   res: ServerResponse,
@@ -121,7 +142,7 @@ function sendEarlyError(
   corsOrigin: string | null,
   extra: Record<string, string> = {},
 ): void {
-  sendJson(res, reply.status, gatewayErrorBody(reply), corsOrigin, { Connection: 'close', ...extra });
+  sendError(res, reply, corsOrigin, { extra: { Connection: 'close', ...extra } });
 }
 
 /**
@@ -516,14 +537,32 @@ async function readJsonBody(
   try {
     parsed = JSON.parse(body.text);
   } catch {
-    sendJson(res, 400, gatewayErrorBody(badRequest('invalid_json', 'request body is not valid JSON', null)), cors);
+    sendError(res, badRequest('invalid_json', 'request body is not valid JSON', null), cors);
     return undefined;
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    sendJson(res, 400, gatewayErrorBody(badRequest('invalid_json', 'request body must be a JSON object', null)), cors);
+    sendError(res, badRequest('invalid_json', 'request body must be a JSON object', null), cors);
     return undefined;
   }
   return parsed as Record<string, unknown>;
+}
+
+/**
+ * Run `work` under one gateway-wide slot, or answer 503 `gateway_busy`. The
+ * slot is held until the WORK completes, not until the client goes away: a
+ * disconnect does not cancel the p2p call (§9.4), so releasing on `close`
+ * would let a disconnecting client exceed the cap.
+ */
+async function withGatewaySlot(state: MarketplaceGatewayState, res: ServerResponse, cors: string | null, work: () => Promise<void>): Promise<void> {
+  if (state.inFlight.count >= state.config.maxConcurrent) {
+    return sendError(res, GATEWAY_BUSY_REPLY, cors, { extra: { 'Retry-After': '1' } });
+  }
+  state.inFlight.count += 1;
+  try {
+    await work();
+  } finally {
+    state.inFlight.count -= 1;
+  }
 }
 
 function respondAgentError(
@@ -533,24 +572,25 @@ function respondAgentError(
   guard: KeySpendGuard,
   ctx: { keyId: string; requestId: string; unitsParam: 'max_tokens' | 'max_rows'; cors: string | null },
 ): void {
-  const reply = mapGatewayError(err, ctx.unitsParam);
+  const mapped = mapGatewayError(err, ctx.unitsParam);
   const callId = (err as { invoke?: { authorization?: { callId?: string } } })?.invoke?.authorization?.callId;
-  if (reply === INTERNAL_ERROR_REPLY) {
+  // charged_wei is ALWAYS what this call's guard settled — on the generic 500 too.
+  const charged = guard.settled?.costWei ?? 0n;
+  const chargedLog = `${callId ? ` call=${callId}` : ''} charged_wei=${charged}`;
+  let reply = mapped;
+  if (mapped === INTERNAL_ERROR_REPLY) {
     const e = err as { name?: unknown; message?: unknown };
     state.log(
-      `[marketplace-gateway] internal error key=${ctx.keyId} request=${ctx.requestId}`
-      + `${callId ? ` call=${callId}` : ''}: ${String(e?.name ?? 'Error')}: ${String(e?.message ?? err).slice(0, 200)}`,
+      `[marketplace-gateway] internal error key=${ctx.keyId} request=${ctx.requestId}${chargedLog}: `
+      + `${String(e?.name ?? 'Error')}: ${String(e?.message ?? err).slice(0, 200)}`,
     );
-    sendJson(res, 500, gatewayErrorBody({ ...reply, message: `${reply.message} (request ${ctx.requestId})` }), ctx.cors);
-    return;
+    reply = { ...mapped, message: `${mapped.message} (request ${ctx.requestId})` };
+  } else if (charged > 0n) {
+    state.log(`[marketplace-gateway] charged failure key=${ctx.keyId} request=${ctx.requestId}${chargedLog} code=${reply.code}`);
   }
-  const charged = guard.settled?.costWei ?? 0n;
-  if (charged > 0n) {
-    state.log(`[marketplace-gateway] charged failure key=${ctx.keyId} request=${ctx.requestId}${callId ? ` call=${callId}` : ''} code=${reply.code} charged_wei=${charged}`);
-  }
-  // A retry hint only where retrying can help (not for an exhausted budget or quota).
-  const extra: Record<string, string> = reply.retryable && (reply.status === 429 || reply.status === 503) ? { 'Retry-After': '1' } : {};
-  sendJson(res, reply.status, gatewayErrorBody(reply, charged), ctx.cors, extra);
+  // A retry hint only where retrying can help (never once charged, an exhausted budget or quota).
+  const retryAfter = reply.retryable && charged === 0n && (reply.status === 429 || reply.status === 503);
+  sendError(res, reply, ctx.cors, { chargedWei: charged, extra: retryAfter ? { 'Retry-After': '1' } : {} });
 }
 
 async function handleChat(
@@ -563,15 +603,25 @@ async function handleChat(
   const body = await readJsonBody(state, req, res, ctx.cors);
   if (!body) return;
   const parsed = parseChatRequest(body, state.config.defaultMaxTokens);
-  if (isReply(parsed)) return sendJson(res, parsed.status, gatewayErrorBody(parsed), ctx.cors);
+  if (isReply(parsed)) return sendError(res, parsed, ctx.cors);
   // A copy taken at authentication: a revocation lands on the NEXT call.
   const scope = state.store.ledger().checkScope(record, { kind: 'inference', modelId: parsed.model });
   if (!scope.ok) {
-    return sendJson(res, 403, gatewayErrorBody({
+    return sendError(res, {
       status: 403, type: 'permission_error', code: 'model_not_allowed', param: 'model',
       message: `this gateway key may not call model ${parsed.model}`,
-    }), ctx.cors);
+    }, ctx.cors);
   }
+  return withGatewaySlot(state, res, ctx.cors, () => runChat(state, res, record, parsed, ctx));
+}
+
+async function runChat(
+  state: MarketplaceGatewayState,
+  res: ServerResponse,
+  record: GatewayKeyRecord,
+  parsed: ChatRequest,
+  ctx: { requestId: string; cors: string | null },
+): Promise<void> {
   const guard = keySpendGuard(state, record.keyId, 'inference');
   let result: MarketplaceChatCompletionResult;
   try {
@@ -610,14 +660,24 @@ async function handleQuery(
   const body = await readJsonBody(state, req, res, ctx.cors);
   if (!body) return;
   const parsed = parseQueryRequest(body);
-  if (isReply(parsed)) return sendJson(res, parsed.status, gatewayErrorBody(parsed), ctx.cors);
+  if (isReply(parsed)) return sendError(res, parsed, ctx.cors);
   const scope = state.store.ledger().checkScope(record, { kind: 'query' });
   if (!scope.ok) {
-    return sendJson(res, 403, gatewayErrorBody({
+    return sendError(res, {
       status: 403, type: 'permission_error', code: 'query_not_allowed',
       message: 'this gateway key may not run SPARQL queries',
-    }), ctx.cors);
+    }, ctx.cors);
   }
+  return withGatewaySlot(state, res, ctx.cors, () => runQuery(state, res, record, parsed, ctx));
+}
+
+async function runQuery(
+  state: MarketplaceGatewayState,
+  res: ServerResponse,
+  record: GatewayKeyRecord,
+  parsed: { sparql: string; maxRows?: number },
+  ctx: { requestId: string; cors: string | null },
+): Promise<void> {
   const guard = keySpendGuard(state, record.keyId, 'query');
   let result: MarketplaceGatewayQueryResult;
   try {
@@ -675,19 +735,19 @@ export async function handleMarketplaceGatewayRequest(
       message: `${subpath} accepts ${route.method} only`,
     }, cors, { Allow: route.method });
   }
-  if (state.inFlight.count >= state.config.maxConcurrent) {
+  // Per-key in-flight cap BEFORE any body byte: it bounds one key's slow
+  // senders and long calls to that key's own share, whatever its scope.
+  const held = state.perKeyInFlight.get(record.keyId) ?? 0;
+  if (held >= state.maxConcurrentPerKey) {
     return sendEarlyError(res, {
-      status: 503, type: 'api_error', code: 'gateway_busy', retryable: true,
-      message: 'the gateway is at its concurrency limit; retry shortly',
+      status: 429, type: 'rate_limit_error', code: 'rate_limit_exceeded', retryable: true,
+      message: `gateway key ${record.keyId} already has ${held} requests in flight (limit ${state.maxConcurrentPerKey})`,
     }, cors, { 'Retry-After': '1' });
   }
-  // The slot is held until this request's WORK completes, not until the
-  // client goes away: a disconnect does not cancel the p2p call (§9.4), so
-  // releasing on `close` would let a disconnecting client exceed the cap.
-  state.inFlight.count += 1;
+  state.perKeyInFlight.set(record.keyId, held + 1);
   const ctx = { requestId: `gwreq_${randomBytes(8).toString('hex')}`, cors };
   try {
-    if (route.key === 'models') await handleModels(state, res, record, cors);
+    if (route.key === 'models') await withGatewaySlot(state, res, cors, () => handleModels(state, res, record, cors));
     else if (route.key === 'chat') await handleChat(state, req, res, record, ctx);
     else await handleQuery(state, req, res, record, ctx);
   } catch (err) {
@@ -696,11 +756,13 @@ export async function handleMarketplaceGatewayRequest(
     if (reply === INTERNAL_ERROR_REPLY) {
       const e = err as { name?: unknown; message?: unknown };
       state.log(`[marketplace-gateway] internal error key=${record.keyId} request=${ctx.requestId}: ${String(e?.name ?? 'Error')}: ${String(e?.message ?? err).slice(0, 200)}`);
-      sendJson(res, 500, gatewayErrorBody({ ...reply, message: `${reply.message} (request ${ctx.requestId})` }), cors);
+      sendError(res, { ...reply, message: `${reply.message} (request ${ctx.requestId})` }, cors);
     } else {
-      sendJson(res, reply.status, gatewayErrorBody(reply), cors);
+      sendError(res, reply, cors);
     }
   } finally {
-    state.inFlight.count -= 1;
+    const left = (state.perKeyInFlight.get(record.keyId) ?? 1) - 1;
+    if (left > 0) state.perKeyInFlight.set(record.keyId, left);
+    else state.perKeyInFlight.delete(record.keyId);
   }
 }

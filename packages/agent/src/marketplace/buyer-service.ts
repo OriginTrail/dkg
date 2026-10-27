@@ -442,6 +442,9 @@ export class MarketplaceBuyerService {
         const delivery: MarketplaceDeliveryState = error instanceof MarketplaceInvokeError ? error.delivery : 'ambiguous';
         const code = error instanceof MarketplaceInvokeError ? error.code : undefined;
         if (!code || !MARKETPLACE_CALLER_FAULT_CODES.has(code)) this.#recordDelivery(offer.sellerIdentityId, false);
+        // The authorized seller signed a receipt over non-conforming bytes: it
+        // can claim this authorization, so the fault counts against its standing.
+        if (error instanceof MarketplaceInvokeError && error.sellerFault) this.#recordStanding(offer.sellerIdentityId, error.sellerFault);
         this.#resolveFailedReservation(plan.meter, callId, decision.worstCaseCostWei, authorization.expiry, error);
         guard.settle(delivery === 'not-served' ? 0n : decision.worstCaseCostWei, 0n, delivery);
         throw error;
@@ -493,14 +496,18 @@ export class MarketplaceBuyerService {
       this.#deps.log.warn(`[marketplace] recount failed for seller ${offer.sellerIdentityId}: ${(error as Error).message}`);
       verdict = NOT_METERED(served.servedUnits);
     }
-    const standing = this.#standing.record(offer.sellerIdentityId, verdict, this.#nowSeconds());
+    this.#recordStanding(offer.sellerIdentityId, verdict);
+    return verdict;
+  }
+
+  #recordStanding(sellerIdentityId: bigint, verdict: RecountVerdict): void {
+    const standing = this.#standing.record(sellerIdentityId, verdict, this.#nowSeconds());
     if (verdict.verdict === 'mismatch') {
       this.#deps.log.warn(
-        `[marketplace] recount mismatch for seller ${offer.sellerIdentityId}: receipt ${verdict.servedUnits} units, `
+        `[marketplace] recount mismatch for seller ${sellerIdentityId}: receipt ${verdict.servedUnits} units, `
         + `recount ${verdict.recountUnits ?? 'n/a'} (${verdict.reason ?? 'unknown'}); standing now ${standing}`,
       );
     }
-    return verdict;
   }
 
   /** Operator override: forget a seller's recount history. */

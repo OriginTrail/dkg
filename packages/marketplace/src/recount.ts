@@ -11,7 +11,9 @@
  * A malformed result from an offer advertising `apiShape`/`queryCost` is a
  * `mismatch` (`malformed-result`), never `unverifiable`: otherwise a
  * dishonest seller could dodge every recount by emitting slightly malformed
- * results.
+ * results. For the same reason the buyer runtime records a `mismatch` when
+ * the authorized seller's own signed receipt carries unparseable result bytes
+ * (`malformed-result`) or fails verification (`bad-receipt`).
  */
 import { CHAT_TEMPLATE_OPENAI_COUNT_V1_DIGEST, meterChat } from './chat-metering.js';
 import type { ChatMessage, ChatToolOptions } from './chat-messages.js';
@@ -39,7 +41,13 @@ export type RecountReason =
   | 'schedule-drift'
   | 'malformed-result'
   | 'units-differ'
-  | 'metering-block-differs';
+  | 'metering-block-differs'
+  /**
+   * The AUTHORIZED seller signed a receipt that fails verification (its
+   * commitment, units or value do not match). Recorded by the buyer runtime,
+   * never by a recount function: the call fails, the receipt stays claimable.
+   */
+  | 'bad-receipt';
 
 export interface RecountVerdict {
   verdict: RecountVerdictKind;

@@ -437,6 +437,10 @@ describe('C — receipt signer identity resolved on-chain', () => {
       const meter = h.buyer.meterState();
       expect(meter?.totalReservedWei).toBe(0n);
       expect(meter?.totalSettledWei).toBe(100n * INFERENCE_ASK);
+      // A signature that does not resolve to the AUTHORIZED identity never
+      // reaches that identity's standing (no framing by whoever answered).
+      expect(error.sellerFault).toBeUndefined();
+      expect(h.buyer.recountSnapshot()).toEqual([]);
     } finally {
       h.cleanup();
     }

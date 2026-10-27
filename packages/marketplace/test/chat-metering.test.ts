@@ -157,6 +157,74 @@ describe('boundCompletion', () => {
     expect(boundCompletion(stub, 'short', 10n ** 30n)).toEqual({ text: 'short', truncated: false });
   });
 
+  // The fork's search, verbatim: the reference the long-text fast path must agree with.
+  const referenceBound = (engine: typeof stub, text: string, cap: number): string => {
+    if (engine.encodeCount(text) <= cap) return text;
+    const chars = Array.from(text);
+    const count = (k: number): number => engine.encodeCount(chars.slice(0, k).join(''));
+    let lo = 0;
+    let hi = chars.length;
+    while (lo < hi) {
+      const mid = Math.ceil((lo + hi) / 2);
+      if (count(mid) <= cap) lo = mid;
+      else hi = mid - 1;
+    }
+    while (lo > 0 && count(lo) > cap) lo--;
+    return chars.slice(0, lo).join('');
+  };
+  const longText = (codeUnits: number): string => {
+    let seed = 7;
+    const next = (n: number): number => {
+      seed = (Math.imul(seed, 1103515245) + 12345) >>> 0;
+      return (seed >>> 16) % n;
+    };
+    const pieces = ['abc', 'ab', 'a', 'cab', 'Bca', 'xyz', 'héllo', 'wörld', '👋', '12', '345', ',', '.', "it's", "don't"];
+    const gaps = ['\n', '  ', '\n\n', '', ' ', ' ', ' ', ' '];
+    let out = '';
+    while (out.length < codeUnits) out += pieces[next(pieces.length)] + gaps[next(gaps.length)];
+    return out;
+  };
+
+  it('long texts take the segment fast path and land on the reference answer, for every engine (MET-3)', () => {
+    const text = longText(20_000);
+    for (const engine of [stub, hf, tk]) {
+      const full = engine.encodeCount(text);
+      for (const cap of [1, 97, Math.floor(full / 3), Math.floor(full / 2), full - 50, full - 2, full - 1]) {
+        const bounded = boundCompletion(engine, text, BigInt(cap));
+        expect(bounded.truncated).toBe(true);
+        expect(engine.encodeCount(bounded.text), `${engine.kind} cap ${cap}`).toBeLessThanOrEqual(cap);
+        expect(bounded.text, `${engine.kind} cap ${cap}`).toBe(referenceBound(engine, text, cap));
+        expect(isWellFormedText(bounded.text)).toBe(true);
+      }
+    }
+  });
+
+  it('a near-full cap on a 200 K reply costs a few counts, not log2(n) of them (MET-3)', () => {
+    const text = longText(200_000);
+    for (const engine of [hf, tk]) {
+      let started = performance.now();
+      const full = engine.encodeCount(text);
+      const single = performance.now() - started;
+      started = performance.now();
+      const bounded = boundCompletion(engine, text, BigInt(full - 1));
+      const elapsed = performance.now() - started;
+      expect(engine.encodeCount(bounded.text)).toBe(full - 1);
+      // The fork's search needs ~log2(200 K) ≈ 18 full counts here; the fast path ~4.
+      expect(elapsed, `${engine.kind}: ${elapsed.toFixed(0)} ms vs one count ${single.toFixed(0)} ms`).toBeLessThan(12 * single + 200);
+    }
+  });
+
+  it('a long text with no additive cut point still bounds correctly (reference fallback)', () => {
+    const text = 'abc'.repeat(3_000); // one letter run: no space between letters anywhere
+    for (const engine of [stub, hf, tk]) {
+      const full = engine.encodeCount(text);
+      const cap = Math.max(1, full - 3);
+      const bounded = boundCompletion(engine, text, BigInt(cap));
+      expect(engine.encodeCount(bounded.text)).toBeLessThanOrEqual(cap);
+      expect(bounded.text).toBe(referenceBound(engine, text, cap));
+    }
+  });
+
   it('never splits a surrogate pair, for every engine', () => {
     const text = 'héllo wörld 👋 ünïcode abc 12 '.repeat(40);
     for (const engine of [stub, hf, tk]) {

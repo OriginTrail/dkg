@@ -90,16 +90,32 @@ export interface UpstreamRequestInit {
   headers?: Record<string, string>;
   body?: string;
   timeoutMs: number;
+  /** A caller-wide deadline (one budget across several requests); the earlier of the two aborts. */
+  signal?: AbortSignal;
 }
 
 /** One upstream call with the connector-wide fetch options. Throws transport faults (classify them). */
 export async function upstreamFetch(fetchImpl: typeof fetch, url: string, init: UpstreamRequestInit): Promise<Response> {
+  const timeout = AbortSignal.timeout(init.timeoutMs);
   return fetchImpl(url, {
     method: init.method,
     headers: init.headers,
     ...(init.body !== undefined ? { body: init.body } : {}),
     redirect: 'error',
-    signal: AbortSignal.timeout(init.timeoutMs),
+    signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
+  });
+}
+
+/** Await `promise`, or reject with the signal's reason once it aborts (the promise itself runs on). */
+export function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => { signal.removeEventListener('abort', onAbort); resolve(value); },
+      (error) => { signal.removeEventListener('abort', onAbort); reject(error); },
+    );
   });
 }
 

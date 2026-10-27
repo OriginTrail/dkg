@@ -3,9 +3,11 @@
  * port 0: openai-compatible (call-time secret, redaction, classification,
  * sampler/max-tokens fields, vLLM `tool_calls: []`), llama.cpp (loopback rule,
  * GGUF digest cache, health, context overflow, boot retry) and codex-oauth
- * (Responses SSE, single-flight refresh, atomic 0600 rewrite, scope gate).
+ * (Responses SSE, single-flight refresh, atomic 0600 rewrite, scope gate,
+ * terminal-event rule, caller stop sequences, one call-wide deadline, and
+ * rotated tokens kept in memory when the write-back fails).
  */
-import { chmodSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { accessSync, chmodSync, constants as fsConstants, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
@@ -438,5 +440,128 @@ describe('codex-oauth connector', () => {
     const mounted = await mountConnectorOffering({ ...offering, allowedBuyers: ['0x00000000000000000000000000000000000000AA'] }, deps);
     expect(mounted.offering).toMatchObject({ access: 'restricted', toolTransport: 'prompt', metering: { basis: 'pinned' } });
     expect([...mounted.offering.allowedBuyers!]).toEqual(['0x00000000000000000000000000000000000000aa']);
+  });
+  it('a stream that closes without response.completed, or reports an error event, is UPSTREAM_ERROR, never a partial reply (CON-1)', async () => {
+    const dir = tmp();
+    const authFile = join(dir, 'codex-auth.json');
+    const access = jwt(Math.floor(Date.now() / 1000) + 3_600);
+    writeAuth(authFile, access);
+    const deltas = [
+      { type: 'response.output_text.delta', delta: 'The answer is ' },
+      { type: 'response.output_text.delta', delta: 'forty' },
+    ];
+    for (const [label, stream] of [
+      ['no terminal event', deltas],
+      ['error event', [...deltas, { type: 'error', code: 'server_error', message: `stream broke near ${access}` }]],
+    ] as const) {
+      const up = await codexUpstream({ stream: [...stream] });
+      const connector = await mountChatConnector(codexConfig(up.base, authFile), { log });
+      const outcome = await connector.complete(request);
+      expect(outcome, label).toMatchObject({ ok: false, code: 'UPSTREAM_ERROR', status: 502 });
+      if (!outcome.ok) expect(outcome.detail, label).not.toContain(access);
+    }
+    // response.incomplete is a whole (length-capped) reply.
+    const up = await codexUpstream({ stream: [...deltas, { type: 'response.incomplete', response: {} }] });
+    const connector = await mountChatConnector(codexConfig(up.base, authFile), { log });
+    expect(await connector.complete(request)).toEqual({ ok: true, content: 'The answer is forty', finishReason: 'length' });
+  });
+
+  it("applies the caller's stop sequences (the Responses API has none): cut at the earliest, excluded, finish stop (CON-2)", async () => {
+    const up = await codexUpstream({ stream: [
+      { type: 'response.output_text.delta', delta: 'Thought: look it up\nAction: search' },
+      { type: 'response.output_text.delta', delta: '\nObservation: 42\nThought: done' },
+      { type: 'response.incomplete', response: {} },
+    ] });
+    const dir = tmp();
+    const authFile = join(dir, 'codex-auth.json');
+    writeAuth(authFile, jwt(Math.floor(Date.now() / 1000) + 3_600));
+    const connector = await mountChatConnector(codexConfig(up.base, authFile), { log });
+    expect(await connector.complete({ ...request, stop: ['\nThought: done', '\nObservation:'] }))
+      .toEqual({ ok: true, content: 'Thought: look it up\nAction: search', finishReason: 'stop' });
+    expect(JSON.parse(up.requests.at(-1)!.body)).not.toHaveProperty('stop');
+    expect(await connector.complete({ ...request, stop: ['never-there', ''] }))
+      .toMatchObject({ ok: true, content: 'Thought: look it up\nAction: search\nObservation: 42\nThought: done', finishReason: 'length' });
+  });
+
+  it('one deadline bounds the whole call: a slow refresh plus a slow reply is UPSTREAM_TIMEOUT within timeoutMs (CON-5)', async () => {
+    const up = await upstream(async (req, _body, res) => {
+      await new Promise((r) => setTimeout(r, 600));
+      if (req.url === '/oauth/token') return json(res, 200, { access_token: jwt(Math.floor(Date.now() / 1000) + 3_600), refresh_token: 'rt-2' });
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(sse([{ type: 'response.output_text.delta', delta: 'late' }, { type: 'response.completed', response: {} }]));
+    });
+    const dir = tmp();
+    const authFile = join(dir, 'codex-auth.json');
+    writeAuth(authFile, jwt(Math.floor(Date.now() / 1000) + 60)); // expires within 5 minutes → proactive refresh
+    const connector = await mountChatConnector(
+      { ...codexConfig(up.base, authFile), timeoutMs: 1_000 },
+      { log, codexTokenUrl: `${up.base}/oauth/token` },
+    );
+    const started = Date.now();
+    const outcome = await connector.complete(request);
+    const elapsed = Date.now() - started;
+    expect(outcome).toMatchObject({ ok: false, code: 'UPSTREAM_TIMEOUT' });
+    expect(elapsed).toBeLessThan(1_400);
+    // The shared refresh itself was not cut short: the rotated set landed on disk.
+    await new Promise((r) => setTimeout(r, 300));
+    expect(JSON.parse(readFileSync(authFile, 'utf8')).tokens.refresh_token).toBe('rt-2');
+  });
+
+  it('keeps the rotated token set in memory when the write-back fails, and refreshes with it next time (CON-4)', async () => {
+    const spent = new Set<string>();
+    const used: string[] = [];
+    let issued = 1;
+    const up = await upstream((req, body, res) => {
+      if (req.url === '/oauth/token') {
+        const presented = String((JSON.parse(body) as { refresh_token?: unknown }).refresh_token);
+        used.push(presented);
+        if (spent.has(presented)) return json(res, 400, { error: 'invalid_grant' });
+        spent.add(presented);
+        issued += 1;
+        // Short-lived access tokens: every call refreshes.
+        return json(res, 200, { access_token: jwt(Math.floor(Date.now() / 1000) + 60), refresh_token: `rt-${issued}` });
+      }
+      res.writeHead(200, { 'content-type': 'text/event-stream' });
+      res.end(sse([{ type: 'response.output_text.delta', delta: 'ok' }, { type: 'response.completed', response: {} }]));
+    });
+    const dir = tmp();
+    // A name whose atomic-write tmp sibling exceeds NAME_MAX: every write-back fails (ENAMETOOLONG).
+    const authFile = join(dir, `${'a'.repeat(236)}.json`);
+    writeAuth(authFile, jwt(Math.floor(Date.now() / 1000) + 60));
+    const warnings: string[] = [];
+    const connector = await mountChatConnector(codexConfig(up.base, authFile), {
+      log: { info: () => {}, warn: (line: string) => warnings.push(line) },
+      codexTokenUrl: `${up.base}/oauth/token`,
+    });
+    expect(await connector.complete(request)).toMatchObject({ ok: true, content: 'ok' });
+    expect(await connector.complete(request)).toMatchObject({ ok: true, content: 'ok' });
+    // The second refresh used the ROTATED token, never the spent one still on disk.
+    expect(used).toEqual(['rt-1', 'rt-2']);
+    expect(JSON.parse(readFileSync(authFile, 'utf8')).tokens.refresh_token).toBe('rt-1');
+    expect(warnings.some((line) => /could not be written back/.test(line) && /ENAMETOOLONG/.test(line))).toBe(true);
+    expect(warnings.join('\n')).not.toContain('rt-2');
+    // A new login replaces the file: its tokens win over the held set.
+    writeFileSync(authFile, JSON.stringify({ tokens: { access_token: jwt(Math.floor(Date.now() / 1000) + 60), refresh_token: 'rt-login', account_id: 'acct-1' } }));
+    expect(await connector.complete(request)).toMatchObject({ ok: true });
+    expect(used.at(-1)).toBe('rt-login');
+  });
+
+  it('refuses to mount an auth file whose directory the node cannot write (CON-4)', async () => {
+    const dir = tmp();
+    const secrets = join(dir, 'ro');
+    const authFile = join(secrets, 'codex-auth.json');
+    writeAuth(authFile, jwt(Math.floor(Date.now() / 1000) + 3_600));
+    chmodSync(secrets, 0o500);
+    cleanups.push(() => chmodSync(secrets, 0o700));
+    const mounting = mountChatConnector(codexConfig('http://127.0.0.1:9', authFile), { log });
+    let writable = true;
+    try {
+      accessSync(secrets, fsConstants.W_OK);
+    } catch {
+      writable = false;
+    }
+    // The kernel grants root write access whatever the mode; every other user is refused.
+    if (writable) await expect(mounting).resolves.toBeDefined();
+    else await expect(mounting).rejects.toMatchObject({ code: 'CONNECTOR_CONFIG', message: expect.stringMatching(/not writable/) });
   });
 });

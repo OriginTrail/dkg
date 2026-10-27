@@ -33,6 +33,10 @@ export interface GatewayErrorReply {
   retryable?: boolean;
 }
 
+/**
+ * The error envelope. A call that was charged is never `retryable`: a retry is
+ * a NEW routed call with a new authorization and a new charge.
+ */
 export function gatewayErrorBody(reply: GatewayErrorReply, chargedWei: bigint = 0n): GatewayErrorBody {
   return {
     error: {
@@ -44,10 +48,19 @@ export function gatewayErrorBody(reply: GatewayErrorReply, chargedWei: bigint = 
         ...(reply.reason !== undefined ? { reason: reply.reason } : {}),
         ...(reply.rejections !== undefined ? { rejections: reply.rejections } : {}),
         charged_wei: chargedWei.toString(),
-        retryable: reply.retryable ?? false,
+        retryable: (reply.retryable ?? false) && chargedWei === 0n,
       },
     },
   };
+}
+
+/**
+ * The retry header OpenAI SDKs honor BEFORE their status rule (openai-node /
+ * openai-python retry 408/409/429/≥500 by default and never read the body):
+ * it mirrors `dkg.retryable`, so a charged 5xx is never silently re-sent.
+ */
+export function gatewayRetryHeader(body: GatewayErrorBody): { 'x-should-retry': 'true' | 'false' } {
+  return { 'x-should-retry': body.error.dkg.retryable ? 'true' : 'false' };
 }
 
 /** The generic 500 — details stay in the log (callId + keyId only), never in the body. */
@@ -56,6 +69,15 @@ export const INTERNAL_ERROR_REPLY: GatewayErrorReply = {
   type: 'api_error',
   code: 'internal_error',
   message: 'The gateway hit an internal error; the node log has the call id.',
+};
+
+/** The gateway-wide concurrency cap (taken only after the body is read and the key's scope checked). */
+export const GATEWAY_BUSY_REPLY: GatewayErrorReply = {
+  status: 503,
+  type: 'api_error',
+  code: 'gateway_busy',
+  message: 'the gateway is at its concurrency limit; retry shortly',
+  retryable: true,
 };
 
 export const MARKETPLACE_UNAVAILABLE_REPLY: GatewayErrorReply = {
