@@ -407,9 +407,11 @@ class PublisherRetentionImpl implements PublisherRetention {
       if (job.status !== 'finalized') { keep('not_terminal'); continue; }
       const key = lifecycleKeyOfJob(job);
       const states = column(row.iri, 'state'), finishes = column(row.iri, 'finalizedAt'), keys = column(row.iri, 'key');
+      // The stored lifecycle key is not compared with the payload's here: the key's records are read by that very triple (planDeletions), so a record whose triple names another key is
+      // not among them and is kept there. A job that has no key must have no key triple at all.
       const indexed = states.size === 1 && termString([...states][0]) === 'finalized'
         && finishes.size === 1 && termNumber([...finishes][0]) === job.timestamps.finalizedAt
-        && (keys.size === 0 || (key !== null && keys.size === 1 && termString([...keys][0]) === key));
+        && (key !== null || keys.size === 0);
       if (!indexed) { keep('index_mismatch'); this.block(key, job); continue; }
       if (bound.has(row.iri)) { keep('bound_obligation'); this.block(key, job); continue; }
       const own = judgeFinalizedRecord(job, now, this.cfg.policy);

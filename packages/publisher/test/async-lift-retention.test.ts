@@ -209,6 +209,16 @@ describe('what is deleted: one record at a time', () => {
       }
     });
 
+    it('a job with no lifecycle key that carries a lifecycle-key index triple (an index nothing explains)', async () => {
+      const { results, unchanged, kept: keptReasons } = await sweepCorrupted(
+        (quads) => [...quads, { subject: jobSubject('f'), predicate: CONTROL_LIFECYCLE_KEY, object: '"music-social\\u001fsomewhere\\u001f\\u001f"', graph: DEFAULT_CONTROL_GRAPH_URI }],
+        { ...fin('f', 'k', 10), kind: 'raw' },
+      );
+      expect(deletedIds(results)).toEqual([]);
+      expect(unchanged).toBe(true);
+      expect(keptReasons).toEqual({ index_mismatch: 1 });
+    });
+
     it('a record dated after now: updated in the future (kept as future_dated), finished in the future (never even scanned)', async () => {
       const updated = await sweepCorrupted((quads) => quads, { ...fin('f', 'k', 10), updatedAt: NOW + DAY });
       expect(deletedIds(updated.results)).toEqual([]);
