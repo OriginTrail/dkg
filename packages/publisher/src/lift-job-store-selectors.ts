@@ -1,4 +1,4 @@
-import type { QueryResult, TripleStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, type QueryOptions, type QueryResult, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { LiftJobAccepted, LiftJobState, PersistedLiftJob } from './lift-job.js';
 import {
   CONTROL_ACCEPTED_AT,
@@ -22,6 +22,11 @@ import { LiftLegacyScanMemo } from './lift-legacy-scan-memo.js';
  * Read-only queue candidate selection. These snapshots never authorize a transition: callers
  * re-read under the appropriate durable ownership lock before acting. Malformed inventory rows
  * are skipped while exact job reads and admission checks retain their strict decoder.
+ *
+ * OT-RFC-73 S1: a read that runs under the global claim lock (the admission duplicate check, claim candidate
+ * selection, and a bulk retry's list when its caller passes the control options) is tagged for the publisher's
+ * control path. The unlocked full-history reads (`list()`, `reconciliationInventory`, the boot backfill) keep the
+ * caller's lane until S3 bounds them.
  */
 export class LiftJobStoreSelectors {
   constructor(
@@ -31,11 +36,14 @@ export class LiftJobStoreSelectors {
     private readonly legacyScan = new LiftLegacyScanMemo(store, graphUri),
   ) {}
 
-  async list(filter: { status?: LiftJobState; contextGraphId?: string } = {}): Promise<PersistedLiftJob[]> {
+  async list(
+    filter: { status?: LiftJobState; contextGraphId?: string } = {},
+    options: QueryOptions = { source: 'publisher.asyncLift.list' },
+  ): Promise<PersistedLiftJob[]> {
     const statusFilter = filter.status ? `FILTER (?status = ${literal(filter.status)})` : '';
     const result = await this.store.query(
       `SELECT ?payload ?status WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_PAYLOAD}> ?payload . ${statusFilter} } }`,
-      { source: 'publisher.asyncLift.list' },
+      options,
     );
     return this.projectInventory(result, filter.contextGraphId);
   }
@@ -92,7 +100,7 @@ export class LiftJobStoreSelectors {
       `SELECT ?payload ?status ?indexed WHERE { GRAPH <${this.graphUri}> {
         ${scanLegacy ? `${indexedBranch} UNION ${legacyBranch}` : indexedBranch}
       } }`,
-      { source: 'publisher.asyncLift.findActiveVmPublish' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.findActiveVmPublish'),
     );
     const rows = expectBindings(result);
     const jobs = new Map<string, PersistedLiftJob>();
@@ -144,7 +152,7 @@ export class LiftJobStoreSelectors {
   async nextAccepted(): Promise<LiftJobAccepted | undefined> {
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${CONTROL_STATUS}> ${literal('accepted')} ; <${CONTROL_ACCEPTED_AT}> ?acceptedAt ; <${CONTROL_PAYLOAD}> ?payload } }`,
-      { source: 'publisher.asyncLift.nextAccepted' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.nextAccepted'),
     );
     return selectAccepted(expectBindings(result));
   }
@@ -166,7 +174,7 @@ export class LiftJobStoreSelectors {
             <${CONTROL_ACCEPTED_AT}> ?acceptedAt ; <${CONTROL_PAYLOAD}> ?payload .
         }
       } }`,
-      { source: 'publisher.asyncLift.claimCandidates' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.claimCandidates'),
     );
     const rows = expectBindings(result);
     return {

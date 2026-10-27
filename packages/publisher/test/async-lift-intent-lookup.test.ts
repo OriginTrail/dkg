@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, controlStoreOptions } from '@origintrail-official/dkg-storage';
 import {
   QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
@@ -561,7 +561,7 @@ describe('#1828 async lift intent lookup', () => {
     expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(targetId);
     expect(transferredPayloads).toBe(1);
     expect(queries).toHaveLength(1);
-    expect(queries[0]?.[1]).toEqual({ source: 'publisher.asyncLift.findActiveVmPublish' });
+    expect(queries[0]?.[1]).toEqual(controlStoreOptions('publisher', 'publisher.asyncLift.findActiveVmPublish'));
     expect(queries[0]?.[0]).toContain('UNION');
     // That scan found no un-indexed VM-publish row, so the next admission is bound by the lifecycle key alone.
     queries.length = 0;
@@ -569,7 +569,7 @@ describe('#1828 async lift intent lookup', () => {
     expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(targetId);
     expect(transferredPayloads).toBe(1);
     expect(queries).toHaveLength(1);
-    expect(queries[0]?.[1]).toEqual({ source: 'publisher.asyncLift.findActiveVmPublish' });
+    expect(queries[0]?.[1]).toEqual(controlStoreOptions('publisher', 'publisher.asyncLift.findActiveVmPublish'));
     expect(queries[0]?.[0]).not.toContain('UNION');
     expect(queries[0]?.[0]).not.toContain('NOT EXISTS');
   });
