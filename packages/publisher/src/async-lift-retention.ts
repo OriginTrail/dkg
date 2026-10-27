@@ -492,7 +492,8 @@ class PublisherRetentionImpl implements PublisherRetention {
     const toRead = new Map<string, PersistedLiftJob>();                                 // subject -> sibling
     for (const record of recordsOfKey(siblings, key)) {
       if (compareAcceptedJobs(record, youngest) >= 0) break;
-      if (candidates.has(record.jobId) || record.status !== 'finalized') continue;      // anything else ends the prefix by itself
+      if (candidates.has(record.jobId)) continue;                                      // judged already, from its own payload
+      if (record.status !== 'finalized') break;                                         // ends the plan's prefix by itself: no record behind it is judged, so none of them is read
       if (isSafeJobId(record.jobId)) toRead.set(jobSubject(record.jobId), record);
       else refused.add(record.jobId);                                                  // never interpolate an id the job-id grammar does not allow
     }
