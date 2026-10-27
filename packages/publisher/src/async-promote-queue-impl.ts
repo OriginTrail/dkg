@@ -6,13 +6,14 @@ import { promoteSuccessTransition } from './async-promote-success.js';
 import { persistPromoteJobWithEvidence, type PromotePersistenceResult } from './promote-admission-persistence.js';
 import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionAttempt } from './promote-admission.js';
 import { recordUnstartedPromoteAttempt, isRetiredBoundRejection } from './promote-no-effect-rejection.js';
-import { createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
+import { FIND_ACTIVE_CONFLICT_SOURCE, createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
+import { withPromoteControlLock } from './promote-control-lock.js';
 import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob } from './bound-promote-job.js';
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { countLeaseRecovery, isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
 /** RDF queue: immutable bound replay or conservative legacy recovery; one owner per assertion. */
 
-import { deleteByPatternWithoutCount, type TripleStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, deleteByPatternWithoutCount, withoutDefaultStoreWorkPriority, type TripleStore } from '@origintrail-official/dkg-storage';
 import { type TerminalJobClearOutcome } from './terminal-job-clear.js';
 import { isSafeJobId } from './job-id.js';
 import {
@@ -65,13 +66,6 @@ type ActivationConflict = { kind: 'pending'; error: PromoteAdmissionError }
   | { kind: 'durable'; job: PromoteJob; error: PromoteJobConflictError };
 
 export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteTerminalJobClearer {
-  /**
-   * Per-graph-URI mutex map. Serialises uniqueness-affecting mutations
-   * callers can't both observe stale state and then persist conflicting
-   * rows. Mirrors `AsyncLiftPublisher.claimQueues` but keyed on the
-   * control-graph URI instead of walletId.
-   */
-  private static readonly mutationQueues = new Map<string, Promise<void>>();
   // A managed-store recovery can legitimately reject every heartbeat and
   // bookkeeping write for several minutes. Keep the lease longer than the
   // worker's bounded bookkeeping-retry window so an in-process worker is not
@@ -204,8 +198,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
   private async listUnlocked(
-    filter: PromoteListFilter = {},
-    source = 'publisher.asyncPromote.list',
+    filter: PromoteListFilter,
+    source: string,
   ): Promise<PromoteJob[]> {
     const filters: string[] = [];
     if (filter.state && filter.state.length > 0) {
@@ -217,7 +211,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     }
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { ?job <${PROMOTE_STATE}> ?state ; <${PROMOTE_PAYLOAD}> ?payload . ${filters.join(' ')} } }`,
-      { source },
+      controlStoreOptions('share', source),
     );
     const sorted = expectBindings(result)
       .map((row) => parseJobPayload(row['payload']))
@@ -606,7 +600,9 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private notifyWorkAvailable(): void {
     this.nextIdleClaimAt = 0;
     try {
-      this.workScheduler?.onWorkAvailable();
+      // Issued with no lane scope: the worker tick this starts synchronously (often from inside the mutex) inherits
+      // no ambient lane from the caller, so its data-plane work stays on the shared scheduler's default lane.
+      withoutDefaultStoreWorkPriority(() => this.workScheduler?.onWorkAvailable());
     } catch {
       // Queue persistence has already committed. A best-effort in-process
       // wake must never change the enqueue/recover result; periodic polling
@@ -673,7 +669,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private async readJob(jobId: string): Promise<PromoteJob | null> {
     const result = await this.store.query(
       `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PROMOTE_PAYLOAD}> ?payload } }`,
-      { source: 'publisher.asyncPromote.readJob' },
+      controlStoreOptions('share', 'publisher.asyncPromote.readJob'),
     );
     const rows = expectBindings(result);
     if (rows.length === 0) { this.admissions.invalidate(jobId); return null; }
@@ -706,7 +702,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   // graph, so this provably cannot touch another job or another graph.
   private async deleteJob(jobId: string): Promise<void> {
     this.admissions.invalidate(jobId);
-    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri }, { source: 'publisher.asyncPromote.deleteJob' });
+    await deleteByPatternWithoutCount(this.store, { subject: jobSubject(jobId), graph: this.graphUri }, controlStoreOptions('share', 'publisher.asyncPromote.deleteJob'));
     await this.store.flush?.();
   }
 
@@ -729,7 +725,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
       const rows = expectBindings(
         await this.store.query(
           `SELECT ?payload WHERE { GRAPH <${this.graphUri}> { <${jobSubject(jobId)}> <${PROMOTE_PAYLOAD}> ?payload } }`,
-          { source: 'publisher.asyncPromote.clearTerminalJob' },
+          controlStoreOptions('share', 'publisher.asyncPromote.clearTerminalJob'),
         ),
       );
       const parsed = classifyJobPayload(rows[0]?.['payload']);
@@ -791,7 +787,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   ): Promise<ActivationConflict | null> {
     const pending = this.admissions.findPendingConflict(lookup.laneScope, excludeJobId, excludeAttempt);
     if (pending) return { kind: 'pending', error: pending };
-    const jobs = await readPromoteOwnershipCandidates(this.store, this.graphUri, lookup);
+    const jobs = await readPromoteOwnershipCandidates(this.store, this.graphUri, lookup, controlStoreOptions('share', FIND_ACTIVE_CONFLICT_SOURCE));
     for (const job of jobs) this.admissions.observe(job);
     const job = jobs.find(job => job.jobId !== excludeJobId
       && (ACTIVE_PROMOTE_STATES.includes(job.state) || hasUnfinishedBoundObligation(job)));
@@ -872,23 +868,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   }
 
 
-  /** Serializes control-graph mutations and consistent reads, including fallback replacements. */
-  private async withMutationLock<T>(fn: () => Promise<T>): Promise<T> {
-    const previous = TripleStoreAsyncPromoteQueue.mutationQueues.get(this.graphUri) ?? Promise.resolve();
-    let release!: () => void;
-    const next = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    TripleStoreAsyncPromoteQueue.mutationQueues.set(this.graphUri, next);
-
-    await previous;
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (TripleStoreAsyncPromoteQueue.mutationQueues.get(this.graphUri) === next) {
-        TripleStoreAsyncPromoteQueue.mutationQueues.delete(this.graphUri);
-      }
-    }
+  /** Per-control-graph FIFO mutex (promote-control-lock.ts): every store call made inside carries the share control options. */
+  private withMutationLock<T>(fn: () => Promise<T>): Promise<T> {
+    return withPromoteControlLock(this.graphUri, fn);
   }
 }

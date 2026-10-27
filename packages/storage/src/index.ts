@@ -107,6 +107,7 @@ export {
   externalStorePriorityScheduler,
   getExternalStorePrioritySchedulerSnapshot,
   withDefaultStoreWorkPriority,
+  withoutDefaultStoreWorkPriority,
   activeDefaultStoreWorkPriority,
   storeLaneInflightLimit,
   DEFAULT_STORE_QUEUE_LIMIT,
