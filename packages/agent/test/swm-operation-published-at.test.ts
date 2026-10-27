@@ -19,7 +19,7 @@ import { createOperationContext, type OperationContext } from '@origintrail-offi
 import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
-import { parseGraphScopedSwmRecoveryDescriptorsSettingAside } from '../src/sync/graph-scoped-swm-set-aside.js';
+import { parseGraphScopedSwmRecoveryHeadResults } from '../src/sync/graph-scoped-swm-recovery.js';
 import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
 import { insertKeepingOnePublishedAt, planOperationPublishedAt } from '../src/sync/swm-operation-published-at.js';
 import { createSwmRecoveryMutationRuntimeV1 } from '../src/sync/requester/swm-recovery-apply.js';
@@ -249,33 +249,33 @@ describe('planOperationPublishedAt', () => {
       new Map([[key, [stamp(LOCAL), stamp(LATEST)]]]),
     )).toEqual({
       rows: [typeRow, row(stamp(PEER))],
-      retire: [row(stamp(LOCAL)), row(stamp(LATEST))],
+      retirements: [{ rows: [row(stamp(LOCAL)), row(stamp(LATEST))], requiredReplacement: row(stamp(PEER)) }],
     });
     expect(planOperationPublishedAt(
       [typeRow, row(stamp(LATER))],
       new Map([[key, [stamp(LOCAL), stamp(LATEST)]]]),
-    )).toEqual({ rows: [typeRow], retire: [row(stamp(LATEST))] });
+    )).toEqual({ rows: [typeRow], retirements: [{ rows: [row(stamp(LATEST))] }] });
   });
 
   it('keeps the stored stamp for the same instant in another lexical form', () => {
     expect(planOperationPublishedAt(
       [row(stamp(LOCAL))],
       new Map([[key, [stamp(LOCAL.replace('.000Z', 'Z'))]]]),
-    )).toEqual({ rows: [], retire: [] });
+    )).toEqual({ rows: [], retirements: [] });
   });
 
   it('prefers a stamp the head resolver accepts over an earlier unusable one', () => {
     expect(planOperationPublishedAt([row(stamp(LOCAL))], new Map([[key, ['"not-a-date"']]])))
-      .toEqual({ rows: [row(stamp(LOCAL))], retire: [row('"not-a-date"')] });
+      .toEqual({ rows: [row(stamp(LOCAL))], retirements: [{ rows: [row('"not-a-date"')], requiredReplacement: row(stamp(LOCAL)) }] });
     expect(planOperationPublishedAt([row(stamp('1960-01-01T00:00:00.000Z'))], new Map([[key, [stamp(LOCAL)]]])))
-      .toEqual({ rows: [], retire: [] });
+      .toEqual({ rows: [], retirements: [] });
   });
 
   it('leaves stamps outside share operations in metadata graphs alone', () => {
     const slice = row(stamp(LATER), WS_META, `urn:dkg:public-stage:${CG}:_:op:urn%3Aroot`);
     const data = row(stamp(LATER), `did:dkg:context-graph:${CG}/_shared_memory`);
     expect(planOperationPublishedAt([slice, data], new Map([[key, [stamp(LOCAL)]]])))
-      .toEqual({ rows: [slice, data], retire: [] });
+      .toEqual({ rows: [slice, data], retirements: [] });
   });
 });
 
@@ -327,7 +327,7 @@ describe('a defective head is set aside, not its whole graph', () => {
     const metaQuads = [...valid.meta, ...bad.meta];
     expect(() => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads }))
       .toThrow('ambiguous publisherPeerId');
-    const { descriptors, setAside } = parseGraphScopedSwmRecoveryDescriptorsSettingAside({ contextGraphId: CG, metaQuads });
+    const { descriptors, setAside } = parseGraphScopedSwmRecoveryHeadResults({ contextGraphId: CG, metaQuads });
     expect(descriptors.map((descriptor) => descriptor.kaUal)).toEqual([`did:dkg:hardhat:31337/${ADDRESS}/1`]);
     expect(setAside).toEqual([expect.objectContaining({
       metaGraph: WS_META,
@@ -339,7 +339,7 @@ describe('a defective head is set aside, not its whole graph', () => {
 
   it('a head naming no operation is set aside with no operation subjects', () => {
     const bad = defective('bad');
-    const { setAside } = parseGraphScopedSwmRecoveryDescriptorsSettingAside({
+    const { setAside } = parseGraphScopedSwmRecoveryHeadResults({
       contextGraphId: CG,
       metaQuads: [...valid.meta, ...bad.meta.filter((quad) => quad.predicate !== `${DKG}shareOperationId`)],
     });
@@ -350,7 +350,7 @@ describe('a defective head is set aside, not its whole graph', () => {
     // The SWM graph is keyed by agent address and number, not by chain.
     const twin = fx.share({ version: 1, operationId: 'op-twin', marker: 'twin', ual: `did:dkg:base:8453/${ADDRESS}/1` });
     expect(twin.assertionGraph).toBe(valid.assertionGraph);
-    expect(() => parseGraphScopedSwmRecoveryDescriptorsSettingAside({
+    expect(() => parseGraphScopedSwmRecoveryHeadResults({
       contextGraphId: CG,
       metaQuads: [...valid.meta, ...twin.meta, ...defective('bad').meta],
     })).toThrow(/multiple UAL owners/);
@@ -410,6 +410,24 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
     await insertKeepingOnePublishedAt(store, [row(`"${' '.repeat(60_001)}${EARLY}"`)],
       rows => insertWithOversizeGuard(kept => store.insert(kept), rows, { recordDrops: () => {} }, 'test'), 'test');
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
+  });
+  it('retires each operation only when its own replacement is persisted', async () => {
+    const store = newStore();
+    const filtered = `${ack.operationSubject}-filtered`;
+    const held = `${ack.operationSubject}-held`;
+    await store.insert([row(stamp(LOCAL)),
+      { ...row(stamp(LOCAL)), subject: filtered },
+      { ...row(stamp(LOCAL)), subject: held }, { ...row(stamp(LATER)), subject: held }]);
+    await insertKeepingOnePublishedAt(store, [row(stamp(PEER)),
+      { ...row(stamp(PEER)), subject: filtered }, { ...row(stamp(LATEST)), subject: held }], async rows => {
+      // Successful writes may return fresh quad objects and filter one operation.
+      const inserted = rows.filter(quad => quad.subject !== filtered).map(quad => ({ ...quad }));
+      await store.insert(inserted);
+      return inserted;
+    }, 'test');
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER]);
+    expect(await publishedAtOf(store, filtered)).toEqual([LOCAL]);
+    expect(await publishedAtOf(store, held)).toEqual([LOCAL]);
   });
   it('does not retire stored evidence after a failed insert', async () => {
     const store = newStore(); await store.insert([row(stamp(LOCAL))]);

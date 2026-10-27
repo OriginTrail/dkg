@@ -17,6 +17,7 @@
  * only the earliest when they add a copy to a store that already holds one.
  */
 
+import { canonicalQuadKey } from './requester/quad-key.js';
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { decodeWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
@@ -42,8 +43,11 @@ export function operationPublishedAtMs(rows: readonly Quad[], operationSubject: 
 export interface OperationPublishedAtPlan {
   /** The rows to write: the input without the incoming stamps that lose. */
   readonly rows: Quad[];
-  /** Stored stamps that lose. Delete them only after `rows` are written. */
-  readonly retire: Quad[];
+  /** Each group's stored losers and the incoming winner required before retiring them. */
+  readonly retirements: readonly {
+    readonly rows: readonly Quad[];
+    readonly requiredReplacement?: Quad;
+  }[];
 }
 
 /**
@@ -65,7 +69,7 @@ export function planOperationPublishedAt(
     incoming.set(key, [...(incoming.get(key) ?? []), row]);
   }
   const kept = new Set<Quad>();
-  const retire: Quad[] = [];
+  const retirements: OperationPublishedAtPlan['retirements'][number][] = [];
   for (const [key, stamps] of incoming) {
     const { graph, subject } = stamps[0]!;
     const storedObjects = stored.get(key) ?? [];
@@ -74,15 +78,19 @@ export function planOperationPublishedAt(
       ...stamps.map((row): StampCandidate => ({ object: row.object, row })),
     ].reduce((best, candidate) => (compareStamps(candidate, best) < 0 ? candidate : best));
     if (winner.row) kept.add(winner.row);
+    const retiring: Quad[] = [];
     for (const object of storedObjects) {
       if (winner.row || object !== winner.object) {
-        retire.push({ subject, predicate: PUBLISHED_AT, object, graph });
+        retiring.push({ subject, predicate: PUBLISHED_AT, object, graph });
       }
+    }
+    if (retiring.length > 0) {
+      retirements.push({ rows: retiring, ...(winner.row ? { requiredReplacement: winner.row } : {}) });
     }
   }
   return {
     rows: rows.filter((row) => !isOperationPublishedAtRow(row) || kept.has(row)),
-    retire,
+    retirements,
   };
 }
 
@@ -131,15 +139,10 @@ export async function insertKeepingOnePublishedAt(
   }
   const plan = planOperationPublishedAt(rows, stored);
   const inserted = plan.rows.length > 0 ? await insert(plan.rows) : [];
-  const key = (row: Quad) => `${row.graph}\u0000${row.subject}`;
-  const rowKey = (row: Quad) => JSON.stringify([row.graph, row.subject, row.predicate, row.object]);
-  const replacements = new Map(plan.rows.filter(isOperationPublishedAtRow).map(row => [key(row), rowKey(row)]));
-  const written = new Set(inserted.map(rowKey));
+  const written = new Set(inserted.map(canonicalQuadKey));
   // A filtering insert can succeed without persisting its proposed winner.
-  const retire = plan.retire.filter(row => {
-    const replacement = replacements.get(key(row));
-    return replacement === undefined || written.has(replacement);
-  });
+  const retire = plan.retirements.flatMap(({ rows: losingRows, requiredReplacement }) =>
+    requiredReplacement === undefined || written.has(canonicalQuadKey(requiredReplacement)) ? [...losingRows] : []);
   if (retire.length > 0) {
     await store.delete(retire, { priority: 'background', source: `${source}.retirePublishedAt` });
   }

@@ -51,8 +51,10 @@ import {
   canonicalizeGraphScopedSwmHeadRows,
   materializeGraphScopedSwmRecoveryAsset,
   type GraphScopedSwmRecoveryDescriptor,
+  parseGraphScopedSwmRecoveryHeadResults,
 } from '../graph-scoped-swm-recovery.js';
-import { SetAsideGraphScopedSwmHeads } from '../graph-scoped-swm-set-aside.js';
+import { setAsideHeadsMayOwnRef } from '../graph-scoped-swm-set-aside.js';
+import type { SetAsideGraphScopedSwmHead } from '../graph-scoped-swm-head-parser.js';
 import { admitServedSubGraphNames } from './served-sub-graph-admission.js';
 import { fetchPublicSwmDataPhase } from './public-swm-data-phase.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
@@ -780,21 +782,13 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       const graphBackedDescriptors: GraphScopedSwmRecoveryDescriptor[] = [];
       let verifiedMetaForInsert = processed.verifiedMeta;
       let snapshotManifestMeta = processed.verifiedMeta;
-      // Whether the descriptor map is an AUTHORITATIVE statement about this
-      // round's metadata, i.e. whether "this ref has no descriptor" may be read
-      // as "this ref has nothing to materialize".
-      //
-      // `manifestComplete` cannot answer that. The parse below runs INSIDE a
-      // block whose entry condition is `wsMetaResult.completed`, so on the
-      // failure path `manifestComplete` is guaranteed true exactly where the map
-      // is guaranteed empty-for-the-wrong-reason. Manifest complete AND
-      // descriptors never parsed is a third state, distinct both from a
-      // truncated meta phase and from a genuine entity-share manifest that has
-      // no head rows to describe.
-      const setAsideHeads = new SetAsideGraphScopedSwmHeads((message) => logWarn(ctx, message));
+      // Complete metadata is not sufficient for authoritative descriptors:
+      // parsing can still fail or set aside a defective head. In either case,
+      // an empty descriptor list must not certify a snapshot by vacuity.
+      let setAsideHeads: readonly SetAsideGraphScopedSwmHead[] = [];
       if (snapshotMaterializer && wsMetaResult.completed) {
         try {
-          const descriptors = setAsideHeads.parse({
+          const { descriptors, setAside } = parseGraphScopedSwmRecoveryHeadResults({
             contextGraphId: pid,
             metaQuads: processed.verifiedMeta,
             // Without the subgraph admission context every KA under a
@@ -808,7 +802,13 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
             ...(excludedSubGraphNames ? { excludedSubGraphNames } : {}),
           });
           // A defective head is set aside alone, and nothing may certify it.
-          if (setAsideHeads.any) descriptorsAuthoritativeForCg = false;
+          setAsideHeads = setAside;
+          const [firstSetAside] = setAside;
+          if (firstSetAside) {
+            descriptorsAuthoritativeForCg = false;
+            logWarn(ctx, `SWM sync set aside ${setAside.length} graph-scoped head(s) for "${pid}" `
+              + `and kept ${descriptors.length}: ${firstSetAside.headSubject}: ${firstSetAside.error.message}`);
+          }
           verifiedMetaForInsert = canonicalizeGraphScopedSwmHeadRows({
             metaQuads: processed.verifiedMeta,
             descriptors,
@@ -1438,7 +1438,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         // that fetched and then failed to write is not resolved, which is what
         // stops an all-cached round whose writes all failed from reporting
         // maximal coverage and silently ending the continuation.
-        if (refMaterialized && !setAsideHeads.mayOwn(snapshotRef, manifest.sourceSubjectsByRef)) {
+        if (refMaterialized && !setAsideHeadsMayOwnRef(setAsideHeads, snapshotRef, manifest.sourceSubjectsByRef)) {
           materializedRefs.add(snapshotRef);
           materializedRefsForCg = materializedRefs.size;
         }

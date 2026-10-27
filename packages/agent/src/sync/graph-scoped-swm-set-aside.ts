@@ -18,45 +18,15 @@
  * unresolved, because a resolved ref is not walked again.
  */
 
-import { parseGraphScopedSwmRecoveryHeadResults, type GraphScopedSwmRecoveryParseInput,
-  type GraphScopedSwmRecoveryDescriptor } from './graph-scoped-swm-recovery.js';
 import type { SetAsideGraphScopedSwmHead } from './graph-scoped-swm-head-parser.js';
-export type { SetAsideGraphScopedSwmHead } from './graph-scoped-swm-head-parser.js';
 
-type ParseParams = GraphScopedSwmRecoveryParseInput;
-export const parseGraphScopedSwmRecoveryDescriptorsSettingAside = parseGraphScopedSwmRecoveryHeadResults;
-
-/** One round's set-aside heads, and the snapshot refs they may own. */
-export class SetAsideGraphScopedSwmHeads {
-  #heads: readonly SetAsideGraphScopedSwmHead[] = [];
-
-  constructor(private readonly warn: (message: string) => void) {}
-
-  /** Parse, setting each defective head aside with a warning. */
-  parse(params: ParseParams): GraphScopedSwmRecoveryDescriptor[] {
-    const { descriptors, setAside } = parseGraphScopedSwmRecoveryDescriptorsSettingAside(params);
-    this.#heads = setAside;
-    const [first] = setAside;
-    if (first) {
-      this.warn(`SWM sync set aside ${setAside.length} graph-scoped head(s) for "${params.contextGraphId}" `
-        + `and kept ${descriptors.length}: ${first.headSubject}: ${first.error.message}`);
-    }
-    return descriptors;
-  }
-
-  /** Whether the last parse set any head aside. */
-  get any(): boolean {
-    return this.#heads.length > 0;
-  }
-
-  /**
-   * Whether `ref` may hold a set-aside asset: a set-aside head names an
-   * operation it was read from, or names no operation at all.
-   */
-  mayOwn(ref: string, sourceSubjectsByRef: ReadonlyMap<string, ReadonlySet<string>>): boolean {
-    const sources = sourceSubjectsByRef.get(ref);
-    return this.#heads.some(({ operationSubjects }) => operationSubjects.length === 0
-      || operationSubjects.some((subject) => sources?.has(subject)));
-  }
+/** A head with no operation may own any ref; otherwise match its source operation. */
+export function setAsideHeadsMayOwnRef(
+  heads: readonly SetAsideGraphScopedSwmHead[],
+  ref: string,
+  sourceSubjectsByRef: ReadonlyMap<string, ReadonlySet<string>>,
+): boolean {
+  const sources = sourceSubjectsByRef.get(ref);
+  return heads.some(({ operationSubjects }) => operationSubjects.length === 0
+    || operationSubjects.some((subject) => sources?.has(subject)));
 }
-
