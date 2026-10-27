@@ -16,7 +16,7 @@ import { MAX_EXACT_SYNC_ASSETS } from '../exact-assets.js';
 import { mapWithConcurrencyDrained } from '../../map-with-concurrency.js';
 import { DEFAULT_DURABLE_DATA_ROUND_BUDGET, type DurableDataRoundBudget } from './durable-data-round.js';
 import type { DurableSyncContext } from './durable-sync.js';
-import type { AuthenticateHeldAsset } from './held-assets-contracts.js';
+import type { AuthenticateHeldAsset, HeldAssetMembership } from './held-assets-contracts.js';
 import type { GraphScopedChainEvidence } from './graph-scoped-chain-views.js';
 
 /** An asset of a verified generation that this node does not hold at that version. */
@@ -41,15 +41,15 @@ export interface DurableHoldingsOptions {
   readonly confirmedHeldCopies?: Set<string>;
 }
 
-export type DurableHoldingsPlan =
-  | { readonly kind: 'held'; readonly assets: number }
-  | {
+export type DurableDataStrategy<HeldEvidence = unknown, FullEvidence = unknown> =
+  | ({ readonly kind: 'held'; readonly assets: number } & HeldEvidence)
+  | ({
       readonly kind: 'fetch-missing';
       readonly held: number;
       readonly batches: readonly (readonly MissingDurableAsset[])[];
       readonly rows: number;
-    }
-  | { readonly kind: 'full'; readonly held: number };
+    } & HeldEvidence)
+  | ({ readonly kind: 'full'; readonly held: number } & FullEvidence);
 
 /** A peer's generation cannot be settled from holdings: its round fails, and the owner tries another peer. */
 export class HeldGenerationNotCurrentError extends Error {
@@ -81,7 +81,7 @@ export const HELD_CHAIN_CHECK_BUDGET_MS = 120_000;
  */
 export type ConfirmHeldAssetsCurrent = (
   request: HeldGraphScopedAssetsRequest,
-  held: ReadonlySet<string>,
+  held: HeldAssetMembership,
   confirmed?: Set<string>,
 ) => Promise<void>;
 
@@ -147,10 +147,10 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
  */
 export function planDurableDataFromHoldings(
   manifest: GraphScopedDurableManifestPlan,
-  held: ReadonlySet<string>,
+  held: HeldAssetMembership,
   ownerFetchesMissingAssets: boolean,
   budget: DurableDataRoundBudget = DEFAULT_DURABLE_DATA_ROUND_BUDGET,
-): DurableHoldingsPlan {
+): DurableDataStrategy {
   const missing = manifest.descriptors.filter((descriptor) => !held.has(descriptor.ual));
   if (missing.length === 0) return { kind: 'held', assets: manifest.descriptors.length };
   const heldAssets = manifest.descriptors.length - missing.length;
@@ -193,14 +193,14 @@ export async function planDurableDataFromLocalHoldings(input: {
   readonly contextGraphId: string;
   readonly manifest: GraphScopedDurableManifestPlan;
   readonly options: DurableHoldingsOptions;
-  readonly held: ReadonlySet<string>;
+  readonly held: HeldAssetMembership;
   readonly confirmCurrent: ConfirmHeldAssetsCurrent;
   readonly signal?: AbortSignal;
   readonly logWarn: (message: string) => void;
-}): Promise<DurableHoldingsPlan & { continuation: 'full-graph' | 'reconsider-holdings' }> {
+}): Promise<DurableDataStrategy<unknown, { continuation: 'full-graph' | 'reconsider-holdings' }>> {
   const { contextGraphId, manifest, options, held, confirmCurrent } = input;
   const request = { contextGraphId, descriptors: manifest.descriptors, signal: input.signal };
-  let plan: DurableHoldingsPlan;
+  let plan: DurableDataStrategy;
   try {
     input.signal?.throwIfAborted();
     plan = planDurableDataFromHoldings(manifest, held, options.ownerFetchesMissingAssets === true);
@@ -215,7 +215,7 @@ export async function planDurableDataFromLocalHoldings(input: {
     );
     return { kind: 'full', held: 0, continuation: 'reconsider-holdings' };
   }
-  return { ...plan, continuation: plan.kind === 'full' ? 'full-graph' : 'reconsider-holdings' };
+  return plan.kind === 'full' ? { ...plan, continuation: 'full-graph' } : plan;
 }
 
 /**
@@ -256,7 +256,7 @@ export function settleHeldDurableData(input: {
  * owner fetches what it left. Returns the round's log line.
  */
 export function settleDurableDataFromHoldings(input: Parameters<typeof settleHeldDurableData>[0] & {
-  readonly plan: Exclude<DurableHoldingsPlan, { kind: 'full' }>;
+  readonly plan: Exclude<DurableDataStrategy, { kind: 'full' }>;
 }): string {
   const { plan, accumulator } = input;
   if (plan.kind === 'held') settleHeldDurableData(input);
@@ -267,7 +267,7 @@ export function settleDurableDataFromHoldings(input: Parameters<typeof settleHel
 export function describeDurableHoldingsPlan(
   contextGraphId: string,
   manifest: GraphScopedDurableManifestPlan,
-  plan: Exclude<DurableHoldingsPlan, { kind: 'full' }>,
+  plan: Exclude<DurableDataStrategy, { kind: 'full' }>,
 ): string {
   return plan.kind === 'held'
     ? `Durable data for "${contextGraphId}" is already held at this META generation `

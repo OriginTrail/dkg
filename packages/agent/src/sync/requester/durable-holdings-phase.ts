@@ -1,20 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { GraphScopedDurableManifestPlan, GraphScopedDescriptor } from '../durable-integrity.js';
+import type { VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
 import type { GraphOwnedRecoveryContext } from './graph-owned-recovery.js';
 import type { DurableGraphSettlementGuard } from './durable-prefix-proof.js';
 import type { DurableSyncContext } from './durable-sync.js';
-import { planDurableDataFromLocalHoldings, type DurableHoldingsPlan } from './durable-data-holdings.js';
+import { planDurableDataFromLocalHoldings, type DurableDataStrategy } from './durable-data-holdings.js';
 
 type HoldingsPhaseContext = Pick<DurableSyncContext, 'ctx' | 'signal' | 'logWarn'>;
 
-export interface PreparedHoldingsSettlement {
+export type PreparedDurableDataStrategy = DurableDataStrategy<{
   readonly manifest: GraphScopedDurableManifestPlan;
-  readonly plan: Exclude<DurableHoldingsPlan, { kind: 'full' }>;
   readonly descriptors: readonly GraphScopedDescriptor[];
-}
-type PreparedHoldingsPhase =
-  | { readonly kind: 'fetch'; readonly continuation: 'full-graph' | 'reconsider-holdings' }
-  | { readonly kind: 'metadata'; readonly settlement: PreparedHoldingsSettlement };
+}, {
+  readonly continuation: 'full-graph' | 'reconsider-holdings';
+  readonly boundary?: VerifiedDurableBoundary;
+}>;
 
 /** Select a DATA plan using evidence borrowed from the graph settlement scope. */
 export async function prepareDurableHoldingsPhase(input: {
@@ -23,8 +23,8 @@ export async function prepareDurableHoldingsPhase(input: {
   readonly manifest: GraphScopedDurableManifestPlan | null;
   readonly recovery: GraphOwnedRecoveryContext;
   readonly settlement: Pick<DurableGraphSettlementGuard, 'proveHoldings' | 'assertCurrent'>;
-}): Promise<PreparedHoldingsPhase> {
-  const fetch = (continuation: 'full-graph' | 'reconsider-holdings'): PreparedHoldingsPhase => ({ kind: 'fetch', continuation });
+}): Promise<PreparedDurableDataStrategy> {
+  const fetch = (continuation: 'full-graph' | 'reconsider-holdings'): PreparedDurableDataStrategy => ({ kind: 'full', held: 0, continuation });
   const { context, contextGraphId, manifest, recovery, settlement } = input;
   const held = recovery.held;
   if (!manifest || !held) return fetch('full-graph');
@@ -42,7 +42,7 @@ export async function prepareDurableHoldingsPhase(input: {
     signal: context.signal, logWarn: message => context.logWarn(context.ctx, message),
   });
   settlement.assertCurrent();
-  if (plan.kind === 'full') return fetch(plan.continuation);
+  if (plan.kind === 'full') return plan;
   try { await proof.reconcile?.(context.ctx); }
   catch (error) {
     context.signal?.throwIfAborted(); settlement.assertCurrent();
@@ -52,5 +52,5 @@ export async function prepareDurableHoldingsPhase(input: {
   }
   settlement.assertCurrent();
   const descriptors = manifest.descriptors.filter(copy => proof.held.has(copy.ual));
-  return { kind: 'metadata', settlement: { manifest, plan, descriptors } };
+  return { ...plan, manifest, descriptors };
 }

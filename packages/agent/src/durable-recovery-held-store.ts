@@ -24,21 +24,20 @@ export function createDurableHeldStore(
       if (!proof) return undefined;
       try {
         request.signal?.throwIfAborted();
-        let commitments: FinalizedVmAssetCommitment[] = [];
-        const held = await readHeldGraphScopedAssets(store, request, undefined, evidence => commitments.push(evidence), confirmation());
+        const held = await readHeldGraphScopedAssets(store, request, undefined, confirmation());
         proof.assertCurrent(); request.signal?.throwIfAborted();
         return { held, assertCurrent: proof.assertCurrent, close: proof.close,
           retain: uals => {
             proof.assertCurrent();
             if ([...uals].some(ual => !held.has(ual))) throw new Error('Cannot retain an unproven held asset');
             proof.restrict(scopeOf(request.descriptors.filter(descriptor => uals.has(descriptor.ual))));
-            for (const ual of held) if (!uals.has(ual)) held.delete(ual);
-            commitments = commitments.filter(commitment => uals.has(commitment.ual));
+            for (const ual of held.keys()) if (!uals.has(ual)) held.delete(ual);
           },
           reconcile: async ctx => {
-            for (const commitment of commitments) {
+            for (const evidence of held.values()) {
+              if (evidence.kind !== 'confirmed') continue;
               request.signal?.throwIfAborted(); proof.assertCurrent();
-              await reconcile(commitment, ctx);
+              await reconcile(evidence.commitment, ctx);
               request.signal?.throwIfAborted(); proof.assertCurrent();
             }
           } };

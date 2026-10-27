@@ -8,6 +8,10 @@ import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
 import { commitmentFromDescriptor, type FinalizedVmAssetCommitment } from './finalized-vm-asset-commitment.js';
 
+export type HeldGraphScopedAssetEvidence =
+  | { readonly kind: 'confirmed'; readonly commitment: FinalizedVmAssetCommitment }
+  | { readonly kind: 'integrity-only' };
+
 /** Assets per store read: one VALUES list of exact metadata subjects. */
 const HOLDINGS_READ_CHUNK = 200;
 const AUTHENTICATED_SUB_GRAPH = 'http://dkg.io/ontology/authenticatedSubGraphName';
@@ -32,14 +36,13 @@ export async function readHeldGraphScopedAssets(
   store: TripleStore,
   request: HeldGraphScopedAssetsRequest,
   chunkSize = HOLDINGS_READ_CHUNK,
-  onVerified?: (commitment: FinalizedVmAssetCommitment) => void,
   confirmation: 'confirmed' | 'integrity-only' = 'confirmed',
 
-): Promise<Set<string>> {
+): Promise<Map<string, HeldGraphScopedAssetEvidence>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
   const predicates = [AUTHENTICATED_SUB_GRAPH, ...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `http://dkg.io/ontology/${name}`)].map((predicate) => `<${predicate}>`).join(' ');
   const options = { priority: 'background' as const, signal: request.signal };
-  const held = new Set<string>();
+  const held = new Map<string, HeldGraphScopedAssetEvidence>();
   for (let start = 0; start < request.descriptors.length; start += chunkSize) {
     const chunk = request.descriptors.slice(start, start + chunkSize);
     const subjects = chunk.map((descriptor) => `<${assertSafeIri(descriptor.ual)}>`).join(' ');
@@ -90,10 +93,10 @@ export async function readHeldGraphScopedAssets(
         source: 'agent.durableSync.heldAssetContent', queryOptions: options,
       });
       if (content.status !== 'verified') continue;
-      held.add(descriptor.ual);
-      // No-chain tentative content can prove a prefix, but cannot authorize finalized cleanup.
-      if (confirmed.has(descriptor.ual)) onVerified?.(commitmentFromDescriptor(
-        descriptor, workspacePublicQuadsDigest(content.quads)));
+      // Membership and cleanup authority are one result, including tentative no-chain copies.
+      held.set(descriptor.ual, confirmed.has(descriptor.ual)
+        ? { kind: 'confirmed', commitment: commitmentFromDescriptor(descriptor, workspacePublicQuadsDigest(content.quads)) }
+        : { kind: 'integrity-only' });
     }
   }
   return held;
@@ -104,7 +107,7 @@ export function heldGraphScopedAssetsReader(
   store: TripleStore,
   confirmation: () => 'confirmed' | 'integrity-only' = () => 'confirmed',
 ): (request: HeldGraphScopedAssetsRequest) => Promise<Set<string>> {
-  return (request) => readHeldGraphScopedAssets(store, request, undefined, undefined, confirmation());
+  return async (request) => new Set((await readHeldGraphScopedAssets(store, request, undefined, confirmation())).keys());
 }
 
 function holdsDescriptor(

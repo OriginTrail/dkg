@@ -1,7 +1,12 @@
+import { readHeldGraphScopedAssets as readHeldEvidence } from '../src/sync/requester/stored-graph-assets.js';
+import { createDurableHeldStore } from '../src/durable-recovery-held-store.js';
+import { StoreContentFence } from '../src/internal/store-content-fence.js';
+import { readHeldGraphScopedAssets } from './_helpers/held-asset-membership.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/internal/context-graph-cache-invalidating-store.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer,
+  createOperationContext,
   createGraphKnowledgeAssetScope,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
@@ -26,7 +31,6 @@ import {
   currentHeldGraphScopedAssetsConfirmer,
   HELD_CHAIN_CHECK_BUDGET_MS,
   HeldGenerationNotCurrentError,
-  readHeldGraphScopedAssets,
   settleDurableDataFromHoldings,
   settleHeldDurableData,
   type DurableHoldingsOptions,
@@ -549,4 +553,41 @@ describe('holding a copy only while it is current on chain', () => {
     const budget = { createGraphScopedAuthenticationDeadline: () => 42 };
     expect(currentHeldGraphScopedAssetsConfirmer({ budget })).toBeUndefined();
   });
+});
+
+
+it('retains one keyed evidence collection with confirmed-only reconciliation', async () => {
+  const local = store();
+  const confirmed = asset(101), privateOnly = asset(102, { privateOnly: true }), tentative = asset(103);
+  await storeConfirmed(local, confirmed); await storeConfirmed(local, privateOnly);
+  const verified = partitionVerifiedGraphScopedAssets(CG, tentative.payload, tentative.meta, [tentative.graph]).assets[0]!;
+  const metadataQuads = overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(verified.metadataQuads,
+    { ual: verified.ual, metaGraph: verified.metaGraph, receivedAt: new Date(0) }, { status: 'tentative' });
+  await materializeVerifiedGraphScopedAsset({ store: local, asset: { ...verified, metadataQuads } });
+  const request = { contextGraphId: CG, descriptors: manifestOf([confirmed, privateOnly, tentative]).descriptors };
+  const evidence = await readHeldEvidence(local, request, undefined, 'integrity-only');
+  expect([...evidence.keys()].sort()).toEqual([confirmed.ual, privateOnly.ual, tentative.ual].sort());
+  expect(evidence.get(confirmed.ual)).toMatchObject({ kind: 'confirmed', commitment: { ual: confirmed.ual } });
+  expect(evidence.get(privateOnly.ual)).toMatchObject({ kind: 'confirmed', commitment: {
+    ual: privateOnly.ual, publicTripleCount: 0, privateTripleCount: 1, privateMerkleRoot: '66'.repeat(32),
+  } });
+  expect(evidence.get(tentative.ual)).toEqual({ kind: 'integrity-only' });
+  const reconcile = vi.fn(async () => {});
+  const owner = createDurableHeldStore(local, new StoreContentFence(), reconcile, () => 'integrity-only')!;
+  const proof = (await owner.prove(request))!;
+  const query = vi.spyOn(local, 'query');
+  try {
+    proof.retain(new Set([privateOnly.ual, tentative.ual]));
+    expect(proof.held.has(confirmed.ual)).toBe(false);
+    expect(proof.held.has(privateOnly.ual)).toBe(true);
+    expect(proof.held.has(tentative.ual)).toBe(true);
+    await proof.reconcile!(createOperationContext('sync'));
+    expect(reconcile).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ ual: privateOnly.ual }), expect.anything());
+    proof.retain(new Set([tentative.ual]));
+    reconcile.mockClear();
+    await proof.reconcile!(createOperationContext('sync'));
+    expect(reconcile).not.toHaveBeenCalled();
+    expect(() => proof.retain(new Set([confirmed.ual]))).toThrow('unproven held asset');
+    expect(query).not.toHaveBeenCalled();
+  } finally { proof.close(); }
 });

@@ -1,3 +1,4 @@
+import { readHeldGraphScopedAssets } from './_helpers/held-asset-membership.js';
 import * as contentVerifier from '../src/exact-graph-content-verifier.js';
 import { createAdmittedGraphHarness } from './_helpers/durable-recovery-admitted-graph.js';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -11,7 +12,6 @@ import type { ContextGraphSub } from '../src/dkg-agent-types.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
 import { classifyDurableProgress } from '../src/sync/durable-progress.js';
-import { readHeldGraphScopedAssets } from '../src/sync/requester/stored-graph-assets.js';
 import { CG, PEER, SECOND_PEER, asset, servingPeer, createRequesterHarness, generation, rowsOf } from './_helpers/durable-recovery-store.js';
 
 import { deleteSyncPageCheckpoint } from '../src/sync/requester/page-fetch.js';
@@ -234,7 +234,7 @@ it('finishes bounded no-chain recovery while retaining tentative status', async 
   expect(core.writes).toEqual(fixtures.map(f => f.ual));
   const request = { contextGraphId: CG, descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors };
   expect(await readHeldGraphScopedAssets(core.store, request)).toEqual(new Set());
-  expect(await readHeldGraphScopedAssets(core.store, request, undefined, undefined, 'integrity-only')).toEqual(new Set(fixtures.map(f => f.ual)));
+  expect(await readHeldGraphScopedAssets(core.store, request, undefined, 'integrity-only')).toEqual(new Set(fixtures.map(f => f.ual)));
   for (const f of fixtures) expect(await core.store.query(`ASK { GRAPH <${f.meta[0]!.graph}> { <${f.ual}> <http://dkg.io/ontology/status> "tentative" } }`)).toEqual({ type: 'boolean', value: true });
 });
 

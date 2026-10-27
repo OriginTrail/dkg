@@ -3,7 +3,7 @@ import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { recordDurableSyncDiagnostics, type DurableSyncAccumulator } from '../durable-progress.js';
 import type { DurableSyncContext } from './durable-sync.js';
-import type { PreparedHoldingsSettlement } from './durable-holdings-phase.js';
+import type { PreparedDurableDataStrategy } from './durable-holdings-phase.js';
 import type { SyncPageResult } from './page-fetch.js';
 import { assertNoLegacyRfc64ControlGraphs, partitionVerifiedGraphScopedAssets } from './verified-asset-preparation.js';
 
@@ -15,7 +15,7 @@ interface VerificationInput {
 export type PreparedDurableVerificationInput = VerificationInput & (
   | { readonly kind: 'held'; readonly data: [];
       readonly mode: Extract<DurableBatchVerificationMode, { kind: 'heldMetadata' }>;
-      readonly holdings: Pick<PreparedHoldingsSettlement, 'manifest' | 'plan'> }
+      readonly holdings: Exclude<PreparedDurableDataStrategy, { kind: 'full' }> }
   | { readonly kind: 'fetched'; readonly data: Quad[];
       readonly mode: Exclude<DurableBatchVerificationMode, { kind: 'heldMetadata' }>;
       readonly rawDataResult: SyncPageResult;

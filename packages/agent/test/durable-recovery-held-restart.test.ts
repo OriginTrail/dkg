@@ -1,3 +1,4 @@
+import { readHeldGraphScopedAssets } from './_helpers/held-asset-membership.js';
 import { describe, expect, it } from 'vitest';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { ContextGraphSub } from '../src/dkg-agent-types.js';
@@ -5,7 +6,6 @@ import { continueContextGraphSubscriptionLine } from '../src/context-graph-subsc
 import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
 import { classifyDurableProgress } from '../src/sync/durable-progress.js';
-import { readHeldGraphScopedAssets } from '../src/sync/requester/stored-graph-assets.js';
 import { CG, PEER, SECOND_PEER, asset, servingPeer, createRequesterHarness, generation, rowsOf } from './_helpers/durable-recovery-store.js';
 
 describe('a recovery whose rounds outlast their slices', () => {

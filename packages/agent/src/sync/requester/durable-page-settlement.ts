@@ -121,7 +121,7 @@ export async function settleDurableVerifiedPage(
   const emptyPhase = empty && processed.emptyResponses > 0;
   recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: countMetaProgress, emptyPhase });
   if (input.kind === 'held') {
-    logInfo(ctx, settleDurableDataFromHoldings({ plan: input.holdings.plan, remotePeerId, contextGraphId,
+    logInfo(ctx, settleDurableDataFromHoldings({ plan: input.holdings, remotePeerId, contextGraphId,
       manifest: input.holdings.manifest, accumulator, deleteCheckpoint, setCheckpoint }));
     return { kind: 'settled', timedOut: false };
   }

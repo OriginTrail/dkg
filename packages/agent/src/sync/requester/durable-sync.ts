@@ -55,8 +55,8 @@ import {
 } from './verified-asset-preparation.js';
 import type { DurableSyncBudget } from './durable-sync-budget.js';
 import { createDurableDataRoundBoundary } from './durable-data-round.js';
-import { prepareDurableHoldingsPhase, type PreparedHoldingsSettlement } from './durable-holdings-phase.js';
-import { type DurableHoldingsPlan } from './durable-data-holdings.js';
+import { prepareDurableHoldingsPhase, type PreparedDurableDataStrategy } from './durable-holdings-phase.js';
+import { type DurableDataStrategy } from './durable-data-holdings.js';
 import {
   normalizeDurableSyncContext,
   type LegacyDurableSyncContext, type NormalizedDurableSyncContext,
@@ -381,13 +381,9 @@ interface InternalDetailedDurableSyncResult extends DetailedDurableSyncResult {
   readonly authenticatedExactAssets?: readonly ChallengePinnedGraphScopedAsset[];
 }
 
-type DurableDataPlan =
-  | { readonly kind: 'fetch'; readonly boundary?: VerifiedDurableBoundary;
-      readonly continuation?: 'full-graph' | 'reconsider-holdings' }
-  | { readonly kind: 'metadata'; readonly settlement: PreparedHoldingsSettlement };
 interface DurableDataPolicy {
   readonly metaContinuation?: DurableMetaContinuation;
-  selectDataPlan(meta: PreparedDurableMeta, settlement: DurableGraphSettlementGuard): Promise<DurableDataPlan>;
+  selectDataPlan(meta: PreparedDurableMeta, settlement: DurableGraphSettlementGuard): Promise<PreparedDurableDataStrategy>;
 }
 
 /** Bind durable writes at the ordinary/owned boundary, including lazy legacy failure. */
@@ -417,16 +413,11 @@ function materializingSyncContext(context: DurableSyncContext | LegacyDurableSyn
     selectAssetExecution: materializingAssetExecution(normalized, exactAssetFetchPolicyFor) };
 }
 
-/** Physical DATA outcome; only the owned entry translates it into an owner decision. */
-type DurableGraphSettlement =
-  | { readonly kind: 'not-started' }
-  | { readonly kind: 'fetch'; readonly graphScoped: boolean;
-      readonly continuation: 'full-graph' | 'reconsider-holdings' }
-  | { readonly kind: 'metadata'; readonly plan: Exclude<DurableHoldingsPlan, { kind: 'full' }> };
 interface DurableGraphExecutionResult extends Omit<InternalDetailedDurableSyncResult, 'result'> {
   /** Unfinalized physical counters and terminal boundaries fold without losing evidence. */
   readonly progress: DurableSyncAccumulator;
-  readonly settlement: DurableGraphSettlement;
+  readonly dataStrategy?: DurableDataStrategy<unknown, {
+    readonly graphScoped: boolean; readonly continuation: 'full-graph' | 'reconsider-holdings' }>;
   readonly rejectedResumeOffset?: number;
   readonly continueFanout: boolean;
 }
@@ -471,19 +462,15 @@ export async function runGraphOwnedDurableSyncDetailed(
       selectDataPlan: async (preparedMeta, settlement) => {
         const prepared = await prepareDurableHoldingsPhase({ context: sharedContext, contextGraphId,
           manifest: preparedMeta.manifestPlan, recovery, settlement });
-        return prepared.kind === 'metadata' ? prepared
-          : { ...prepared, boundary: recovery.boundary };
+        return prepared.kind === 'full' ? { ...prepared, boundary: recovery.boundary } : prepared;
       },
     });
-  const settlement = graph.settlement;
-  let decision: DurableRecoveryRoundDecision;
-  switch (settlement.kind) {
-    case 'not-started': decision = { strategy: 'not-started' }; break;
-    case 'fetch': decision = settlement.graphScoped
-      ? { strategy: 'full', continuation: settlement.continuation } : { strategy: 'legacy' }; break;
-    case 'metadata': decision = settlement.plan.kind === 'held'
-      ? { strategy: 'held' } : { strategy: 'exact-missing', batches: settlement.plan.batches }; break;
-  }
+  const strategy = graph.dataStrategy;
+  const decision: DurableRecoveryRoundDecision = !strategy ? { strategy: 'not-started' }
+    : strategy.kind === 'full' ? (strategy.graphScoped
+      ? { strategy: 'full', continuation: strategy.continuation } : { strategy: 'legacy' })
+    : strategy.kind === 'held' ? { strategy: 'held' }
+    : { strategy: 'exact-missing', batches: strategy.batches };
   return { result: finishDurableSync(sharedContext, graph.progress),
     decision: graph.rejectedResumeOffset === undefined ? decision
       : { ...decision, rejectedResumeOffset: graph.rejectedResumeOffset } };
@@ -702,7 +689,7 @@ async function executeDurableGraph(
     if (signal?.aborted) throw normalizeDurableSyncAbortReason(signal.reason);
   }, context.contentProofs);
   let rejectedResumeOffset: number | undefined;
-  let graphSettlement: DurableGraphSettlement = { kind: 'not-started' };
+  let graphDataStrategy: DurableGraphExecutionResult['dataStrategy'];
   let activePhase: 'fetch' | 'verify' | 'store' | undefined;
   let peerRespondedForContextGraph = false;
   const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
@@ -716,7 +703,7 @@ async function executeDurableGraph(
   };
 
   const finishGraph = (continueFanout = true): DurableGraphExecutionResult => ({
-    progress: accumulator, settlement: graphSettlement, rejectedResumeOffset, continueFanout,
+    progress: accumulator, dataStrategy: graphDataStrategy, rejectedResumeOffset, continueFanout,
     ...(exactFetchDisposition ? { exactFetchDisposition, committedExactAssetUals: Object.freeze([...committedExactAssetUals]) } : {}),
     ...(exactResponderCapability ? { exactResponderCapability } : {}),
     ...(authenticatedExactAssets.length === 0 ? {} : { authenticatedExactAssets: Object.freeze([...authenticatedExactAssets]) }),
@@ -832,18 +819,16 @@ async function executeDurableGraph(
         { code: 'SYNC_META_CONTINUATION_PENDING' });
     }
     const { preparedMeta, metaResult } = metaPhase;
-    const dataPlan = await dataPolicy?.selectDataPlan(preparedMeta, settlement) ?? { kind: 'fetch' as const };
+    const dataPlan = await dataPolicy?.selectDataPlan(preparedMeta, settlement) ?? { kind: 'full' as const, held: 0, continuation: 'full-graph' as const };
     const graphScopedManifest = preparedMeta.manifestPlan;
     let verificationInput: PreparedDurableVerificationInput;
-    if (dataPlan.kind === 'metadata') {
-      const held = dataPlan.settlement;
+    if (dataPlan.kind !== 'full') {
       settlement.assertCurrent();
       verificationInput = { kind: 'held', data: [], metaResult,
-        mode: { kind: 'heldMetadata', descriptors: held.descriptors },
-        holdings: { manifest: held.manifest, plan: held.plan } };
+        mode: { kind: 'heldMetadata', descriptors: dataPlan.descriptors },
+        holdings: dataPlan };
     } else {
-      graphSettlement = { kind: 'fetch', graphScoped: preparedMeta.manifestPlan !== null,
-        continuation: dataPlan.continuation ?? 'full-graph' };
+      graphDataStrategy = { ...dataPlan, graphScoped: preparedMeta.manifestPlan !== null };
       const fetchPhase = createPhaseFetcher(undefined, dataPlan.boundary);
       const rawDataResult = await fetchPhase(
         'data',
@@ -1067,7 +1052,7 @@ async function executeDurableGraph(
         settlement, contextGraphBudget, deadline, settlementSliceDeadline });
     endPhase();
     if (outcome.kind === 'yielded') return finishGraph(false);
-    if (verificationInput.kind === 'held') graphSettlement = { kind: 'metadata', plan: verificationInput.holdings.plan };
+    if (verificationInput.kind === 'held') graphDataStrategy = verificationInput.holdings;
     if (outcome.exactDisposition !== undefined) {
       exactFetchDisposition = outcome.exactDisposition;
       exactResponderCapability = outcome.exactCapability;
