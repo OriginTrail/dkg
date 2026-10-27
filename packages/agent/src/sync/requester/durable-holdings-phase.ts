@@ -51,7 +51,7 @@ export async function prepareDurableHoldingsPhase(input: {
     assertCurrent();
     try {
       context.signal?.throwIfAborted();
-      await held.reconcile?.({ contextGraphId, descriptors: manifest.descriptors, signal: context.signal }, proof.held);
+      await held.reconcile?.({ contextGraphId, descriptors: manifest.descriptors, signal: context.signal }, proof);
     } catch (error) {
       context.signal?.throwIfAborted();
       assertCurrent();

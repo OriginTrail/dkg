@@ -43,3 +43,12 @@ void runGraphOwnedDurableSyncDetailed({ ...ownedRequester, exactAssetFetchPolicy
 void runGraphOwnedDurableSyncDetailed({ ...ownedRequester, onVerifiedFullSnapshot: async () => {} });
 // @ts-expect-error Owned recovery is full-graph and cannot use delta watermarks.
 void runGraphOwnedDurableSyncDetailed({ ...ownedRequester, sinceBatchIdFor: () => '1' });
+
+import { runAdmittedGraphOwnedDurableGraph, type OwnedDurableGraphRequest } from '../src/durable-recovery-graph.js';
+declare const admittedOwned: OwnedDurableGraphRequest;
+// @ts-expect-error Owned assembly cannot capture ordinary exact-selection policy in transport.
+void runAdmittedGraphOwnedDurableGraph({ ...admittedOwned, options: { ...admittedOwned.options, exactAssetFetchPolicy: undefined } });
+// @ts-expect-error Snapshot consumers enter through the ordinary requester mode.
+void runAdmittedGraphOwnedDurableGraph({ ...admittedOwned, options: { ...admittedOwned.options, onVerifiedFullSnapshot: async () => {} } });
+// @ts-expect-error Owned assembly has no delta watermark resolver.
+void runAdmittedGraphOwnedDurableGraph({ ...admittedOwned, options: { ...admittedOwned.options, sinceBatchIdFor: () => '1' } });

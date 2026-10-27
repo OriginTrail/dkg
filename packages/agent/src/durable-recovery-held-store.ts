@@ -1,18 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import type { FinalizedVmAssetCommitment } from './sync/requester/finalized-vm-asset-commitment.js';
+import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { ProveHeldAssets } from './sync/requester/held-assets-contracts.js';
 import { graphScopedDurableManifestPrefixAtOffset } from './sync/durable-integrity.js';
 import type { StoredDurablePrefix } from './sync/requester/durable-prefix-proof.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { StoreContentFence } from './internal/store-content-fence.js';
-import { heldGraphScopedAssetsReader, readHeldGraphScopedAssets } from './sync/requester/stored-graph-assets.js';
+import { readHeldGraphScopedAssets } from './sync/requester/stored-graph-assets.js';
 
 /** Bind private content ownership and existing SWM housekeeping at composition. */
 export function createDurableHeldStore(
   store: TripleStore,
   fence: StoreContentFence | undefined,
-  reconcile: DurableRecoveryHost['reconcile'],
+  reconcile: (commitment: FinalizedVmAssetCommitment, ctx: OperationContext) => Promise<void>,
   confirmation: () => 'confirmed' | 'integrity-only' = () => 'confirmed',
 ): DurableRecoveryHost['heldStore'] {
   if (!fence) return undefined;
@@ -23,17 +25,18 @@ export function createDurableHeldStore(
       if (!proof) return undefined;
       try {
         request.signal?.throwIfAborted();
-        const held = await heldGraphScopedAssetsReader(store, confirmation)(request);
+        const commitments: FinalizedVmAssetCommitment[] = [];
+        const held = await readHeldGraphScopedAssets(store, request, undefined, evidence => commitments.push(evidence), confirmation());
         proof.assertCurrent(); request.signal?.throwIfAborted();
-        return { held, assertCurrent: proof.assertCurrent, close: proof.close };
+        return { held, commitments: Object.freeze(commitments), assertCurrent: proof.assertCurrent, close: proof.close };
       } catch (error) { proof.close(); throw error; }
     },
-    reconcile: async (request, held, ctx) => {
-      // Re-read one copy at a time rather than retain an entire generation's payload.
-      // Canonical reconciliation rechecks VM and SWM under the publisher lock.
-      await readHeldGraphScopedAssets(store, {
-        ...request, descriptors: request.descriptors.filter(descriptor => held.has(descriptor.ual)),
-      }, undefined, asset => reconcile(asset, ctx));
+    reconcile: async (request, proof, ctx) => {
+      for (const commitment of proof.commitments) {
+        request.signal?.throwIfAborted(); proof.assertCurrent();
+        await reconcile(commitment, ctx);
+        request.signal?.throwIfAborted(); proof.assertCurrent();
+      }
     },
   };
 }

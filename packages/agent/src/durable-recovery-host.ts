@@ -4,7 +4,7 @@ import type { SyncAdmissionSource, SyncContextGraphPriorityConfig } from './sync
 import type { SyncOperationLane } from './sync/attempt-telemetry.js';
 import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
 import type { DurableSyncContext, DurableSyncFetchRequest } from './sync/requester/durable-sync.js';
-import type { ProveHeldAssets } from './sync/requester/held-assets-contracts.js';
+import type { HeldAssetsProof, ProveHeldAssets } from './sync/requester/held-assets-contracts.js';
 import type { HeldGraphScopedAssetsRequest } from './sync/requester/stored-graph-assets.js';
 import type { ExactBatchStreamDriverPorts } from './sync/requester/exact-batch-stream-driver.js';
 import type { DurableRecoveryAuthority, DurableRecoveryInput } from './durable-recovery-authority.js';
@@ -57,7 +57,7 @@ export interface DurableRecoveryHost {
   /** Which assets of a verified generation the store holds; a graph-owned round skips their DATA. */
   readonly heldStore?: {
     readonly prove: ProveHeldAssets;
-    reconcile?(request: HeldGraphScopedAssetsRequest, held: ReadonlySet<string>, ctx: OperationContext): Promise<void>;
+    reconcile?(request: HeldGraphScopedAssetsRequest, proof: HeldAssetsProof, ctx: OperationContext): Promise<void>;
   };
   materialization(scope: RecoveryMaterializationScope): RecoveryMaterialization;
   resolveOrdinaryAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;

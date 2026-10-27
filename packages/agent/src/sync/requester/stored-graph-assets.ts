@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri, DEFAULT_MAX_READ_BYTES } from '@origintrail-official/dkg-core';
-import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
+import { workspacePublicQuadsDigest, GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
-import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
+import type { FinalizedVmAssetCommitment } from './finalized-vm-asset-commitment.js';
 
 /** Assets per store read: one VALUES list of exact metadata subjects. */
 const HOLDINGS_READ_CHUNK = 200;
@@ -29,7 +29,7 @@ export async function readHeldGraphScopedAssets(
   store: TripleStore,
   request: HeldGraphScopedAssetsRequest,
   chunkSize = HOLDINGS_READ_CHUNK,
-  onVerified?: (asset: VerifiedGraphScopedAsset) => Promise<void>,
+  onVerified?: (commitment: FinalizedVmAssetCommitment) => void,
   confirmation: 'confirmed' | 'integrity-only' = 'confirmed',
 
 ): Promise<Set<string>> {
@@ -55,11 +55,13 @@ export async function readHeldGraphScopedAssets(
       rows.push({ predicate, object });
       rowsBySubject.set(ual, rows);
     }
+    const confirmed = new Set<string>();
     const eligible = chunk.filter(descriptor => {
       const rows = rowsBySubject.get(descriptor.ual) ?? [];
-      return holdsDescriptor(descriptor, parseGraphKnowledgeAssetMetadataEnvelope(
-        rows.map(row => ({ ...row, graph: metaGraph })),
-        { contextGraphId: request.contextGraphId, ual: descriptor.ual }, 'stored-context'), confirmation);
+      const stored = parseGraphKnowledgeAssetMetadataEnvelope(rows.map(row => ({ ...row, graph: metaGraph })),
+        { contextGraphId: request.contextGraphId, ual: descriptor.ual }, 'stored-context');
+      if (stored.state === 'confirmed') confirmed.add(descriptor.ual);
+      return holdsDescriptor(descriptor, stored, confirmation);
     });
     for (const descriptor of eligible) {
       request.signal?.throwIfAborted();
@@ -77,14 +79,14 @@ export async function readHeldGraphScopedAssets(
       });
       if (content.status !== 'verified') continue;
       held.add(descriptor.ual);
-      await onVerified?.({
+      // No-chain tentative content can prove a prefix, but cannot authorize finalized cleanup.
+      if (confirmed.has(descriptor.ual)) onVerified?.({
         contextGraphId: request.contextGraphId, ual: descriptor.ual,
         assertionVersion: BigInt(descriptor.assertionVersion), assertionGraph: descriptor.assertionGraph,
         subGraphName: descriptor.subGraphName, merkleRootHex: descriptor.claimedRootHex,
-        metaGraph, dataQuads: content.quads,
-        metadataQuads: (rowsBySubject.get(descriptor.ual) ?? []).map(row => ({
-          ...row, subject: descriptor.ual, graph: metaGraph,
-        })),
+        metaGraph, publicQuadsDigest: workspacePublicQuadsDigest(content.quads),
+        publicTripleCount: descriptor.publicTripleCount, privateTripleCount: descriptor.privateTripleCount,
+        privateMerkleRoot: descriptor.privateRootHex,
       });
     }
   }

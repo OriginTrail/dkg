@@ -1,11 +1,25 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
+import * as contentVerifier from '../src/exact-graph-content-verifier.js';
 import { classifyDurableProgress } from '../src/sync/durable-progress.js';
 import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
 import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 import { CG, PEER, createHeldProductionHarness, stopHeldProductionAgents } from './_helpers/durable-held-production.js';
 
 afterEach(async () => { await stopHeldProductionAgents(); vi.restoreAllMocks(); });
+
+it('verifies unchanged held content once and skips payload reconciliation without an SWM head', async () => {
+  const h = await createHeldProductionHarness();
+  const verify = vi.spyOn(contentVerifier, 'verifyExactGraphContent');
+  const query = vi.spyOn(h.internal.store, 'query');
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets).toBe(1);
+  expect(verify).toHaveBeenCalledOnce();
+  expect(query.mock.calls.some(([, options]) =>
+    (options as { source?: string })?.source === 'agent.durableSync.finalizedSwmTwin.readGraph')).toBe(false);
+  expect(h.dataRequests()).toBe(0);
+}, 15_000);
 
 it('preserves a held META write during cancellation without publishing terminal readiness', async () => {
   const h = await createHeldProductionHarness();

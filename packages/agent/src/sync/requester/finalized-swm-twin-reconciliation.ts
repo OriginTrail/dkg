@@ -1,3 +1,5 @@
+import { commitmentFromVmAsset, type FinalizedVmAssetCommitment } from './finalized-vm-asset-commitment.js';
+import { parseInteger, parseSafeCount, literalValue, normalizeHex32, optionalHex32 } from './finalized-swm-twin-terms.js';
 import {
   MemoryLayer,
   assertSafeIri,
@@ -199,13 +201,23 @@ export async function reconcileFinalizedSwmTwin(params: {
   readonly asset: VerifiedGraphScopedAsset;
   readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
 }): Promise<FinalizedSwmTwinReconciliationOutcome> {
-  const evidence = evidenceFromVmAsset(params.asset);
+  const evidence = evidenceFromVmCommitment(commitmentFromVmAsset(params.asset));
   return reconcileFinalizedSwmTwinEvidence({
     store: params.store,
     writeLocks: params.writeLocks,
     evidence,
     retire: params.retire,
   });
+}
+
+/** Held recovery retains this compact evidence under its live content fence. */
+export async function reconcileFinalizedSwmTwinFromCommitment(params: {
+  readonly store: TripleStore;
+  readonly writeLocks: Map<string, Promise<void>>;
+  readonly commitment: FinalizedVmAssetCommitment;
+  readonly retire: (retirement: FinalizedSwmTwinRetirement) => Promise<void>;
+}): Promise<FinalizedSwmTwinReconciliationOutcome> {
+  return reconcileFinalizedSwmTwinEvidence({ ...params, evidence: evidenceFromVmCommitment(params.commitment) });
 }
 
 /**
@@ -380,9 +392,9 @@ async function retireAndInvalidate(
   }).catch(() => {});
 }
 
-function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): VmArrivalFinalizedSwmTwinEvidence {
+function evidenceFromVmCommitment(asset: FinalizedVmAssetCommitment): VmArrivalFinalizedSwmTwinEvidence {
   const scope = createGraphKnowledgeAssetScope(asset.ual, asset.assertionVersion);
-  const subGraphName = optionalMetadataLiteral(asset, `${DKG}subGraphName`);
+  const subGraphName = asset.subGraphName;
   if (subGraphName !== undefined) {
     const validation = validateSubGraphName(subGraphName);
     if (!validation.valid) throw new Error(`Authenticated VM graph has invalid subgraph: ${validation.reason}`);
@@ -405,16 +417,13 @@ function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): VmArrivalFinalize
     subGraphName,
   );
   const swmMetaGraph = contextGraphSharedMemoryMetaUri(asset.contextGraphId, subGraphName);
-  const expectedPublicQuadsCount = requiredMetadataCount(asset, `${DKG}publicTripleCount`);
-  const privateTripleCount = requiredMetadataCount(asset, `${DKG}privateTripleCount`);
-  const privateMerkleRoot = optionalMetadataHex32(asset, `${DKG}privateMerkleRoot`);
+  const expectedPublicQuadsCount = asset.publicTripleCount;
+  const privateTripleCount = asset.privateTripleCount;
+  const privateMerkleRoot = asset.privateMerkleRoot === undefined ? undefined : normalizeHex32(asset.privateMerkleRoot);
   if ((privateTripleCount > 0) !== (privateMerkleRoot !== undefined)) {
     throw new Error('Authenticated VM metadata has an inconsistent private commitment');
   }
-  const expectedMerkleRoot = requiredMetadataHex32(asset, `${DKG}merkleRoot`);
-  if (optionalMetadataLiteral(asset, `${DKG}status`) !== 'confirmed') {
-    throw new Error('Authenticated VM metadata is not confirmed');
-  }
+  const expectedMerkleRoot = normalizeHex32(asset.merkleRootHex);
   return {
     arrival: 'vm',
     contextGraphId: asset.contextGraphId,
@@ -426,7 +435,7 @@ function evidenceFromVmAsset(asset: VerifiedGraphScopedAsset): VmArrivalFinalize
     swmGraph,
     swmMetaGraph,
     headSubject: `${asset.ual}#dkg-swm-head`,
-    expectedVmDigest: workspacePublicQuadsDigest(asset.dataQuads),
+    expectedVmDigest: asset.publicQuadsDigest,
     expectedPublicQuadsCount,
     privateTripleCount,
     ...(privateMerkleRoot === undefined ? {} : { privateMerkleRoot }),
@@ -673,48 +682,6 @@ function swmCommitmentMatchesEvidence(
     && commitment.privateMerkleRoot === evidence.privateMerkleRoot;
 }
 
-function metadataObjects(asset: VerifiedGraphScopedAsset, predicate: string): string[] {
-  return asset.metadataQuads
-    .filter((quad) => (
-      quad.graph === asset.metaGraph
-      && quad.subject === asset.ual
-      && quad.predicate === predicate
-    ))
-    .map((quad) => quad.object);
-}
-
-function optionalMetadataLiteral(
-  asset: VerifiedGraphScopedAsset,
-  predicate: string,
-): string | undefined {
-  const values = metadataObjects(asset, predicate);
-  if (values.length > 1) throw new Error(`Authenticated VM metadata has ambiguous ${predicate}`);
-  return values[0] === undefined ? undefined : literalValue(values[0]);
-}
-
-function requiredMetadataCount(asset: VerifiedGraphScopedAsset, predicate: string): number {
-  const values = metadataObjects(asset, predicate);
-  if (values.length !== 1) throw new Error(`Authenticated VM metadata has non-unique ${predicate}`);
-  const value = parseSafeCount(values[0]);
-  if (value === null) throw new Error(`Authenticated VM metadata has invalid ${predicate}`);
-  return value;
-}
-
-function optionalMetadataHex32(
-  asset: VerifiedGraphScopedAsset,
-  predicate: string,
-): string | undefined {
-  const values = metadataObjects(asset, predicate);
-  if (values.length > 1) throw new Error(`Authenticated VM metadata has ambiguous ${predicate}`);
-  return optionalHex32(values[0]);
-}
-
-function requiredMetadataHex32(asset: VerifiedGraphScopedAsset, predicate: string): string {
-  const value = optionalMetadataHex32(asset, predicate);
-  if (value === undefined) throw new Error(`Authenticated VM metadata has invalid ${predicate}`);
-  return value;
-}
-
 async function readExactGraph(store: TripleStore, graph: string): Promise<Quad[]> {
   const result = await store.query(
     `CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${assertSafeIri(graph)}> { ?s ?p ?o } }`,
@@ -756,42 +723,4 @@ async function readExactSwmHead(
   const shareOperationId = literalValue(row['shareOperationId'])?.trim();
   if (version === null || !kaUal || !assertionGraph || !shareOperationId) return null;
   return { version, kaUal, assertionGraph, shareOperationId };
-}
-
-function parseInteger(value: string | undefined): bigint | null {
-  if (!value) return null;
-  const match = /^"?([0-9]+)"?(?:\^\^<[^>]+>)?$/.exec(value);
-  if (!match?.[1]) return null;
-  try {
-    return BigInt(match[1]);
-  } catch {
-    return null;
-  }
-}
-
-function parseSafeCount(value: string | undefined): number | null {
-  const parsed = parseInteger(value);
-  if (parsed === null || parsed < 0n || parsed > BigInt(Number.MAX_SAFE_INTEGER)) return null;
-  return Number(parsed);
-}
-
-function literalValue(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  const match = /^"([^"\\]*(?:\\.[^"\\]*)*)"(?:\^\^<[^>]+>|@[A-Za-z0-9-]+)?$/.exec(value);
-  return match?.[1] ?? value;
-}
-
-function normalizeHex32(value: string): string {
-  const raw = literalValue(value)?.trim().replace(/^0x/i, '').toLowerCase();
-  if (!raw || !/^[0-9a-f]{64}$/.test(raw)) throw new Error('Expected a 32-byte hexadecimal value');
-  return `0x${raw}`;
-}
-
-function optionalHex32(value: string | undefined): string | undefined {
-  if (value === undefined) return undefined;
-  try {
-    return normalizeHex32(value);
-  } catch {
-    return undefined;
-  }
 }

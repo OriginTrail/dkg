@@ -95,7 +95,7 @@ function manifest(meta: readonly Quad[]) {
 
 /** The fixture's previously materialized copies, independent of this round's writes. */
 function storedPrefix(fixtures: readonly AssetFixture[]) {
-  return createStoredPrefixAcquirer(async () => ({ held: new Set(fixtures.map(f => f.ual)),
+  return createStoredPrefixAcquirer(async () => ({ held: new Set(fixtures.map(f => f.ual)), commitments: [],
     assertCurrent() {}, close() {} }), CONTEXT_GRAPH_ID, () => {});
 }
 

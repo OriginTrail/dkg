@@ -256,10 +256,9 @@ function prepareDurableVerificationPayload(input: {
   };
 }
 
-export interface DurableSyncContext {
+export interface DurableSyncCommonPorts {
   ctx: OperationContext;
   remotePeerId: string;
-  contextGraphIds: string[];
   onPhase?: PhaseCallback;
   /**
    * Invoked with the specific `contextGraphId` that was denied by the
@@ -280,19 +279,6 @@ export interface DurableSyncContext {
   settlementSliceDeadline?: number;
   /** Whole-operation cancellation propagated by bounded foreground callers. */
   signal?: AbortSignal;
-  fetchSyncPages: (request: DurableSyncFetchRequest) => Promise<SyncPageResult>;
-  /**
-   * Phase C — optional, gap-safe per-CG delta high-water mark resolver. When it
-   * returns a value for a CG, the durable DATA fetch carries `sinceBatchId` and
-   * the responder returns only KAs with `dkg:batchId` greater than it. MUST be
-   * backed by a CONTIGUOUS watermark. Undefined ⇒ full scan (default today).
-   */
-  sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
-  /** Atomic exact selection for durable VM recovery; undefined retains normal full/delta sync. */
-  exactAssetSelectionFor?: (
-    contextGraphId: string,
-  ) => UalOnlyExactAssetSelection | undefined;
-  exactAssetFetchPolicyFor?: (contextGraphId: string) => Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }> | undefined;
   storedPrefix?: StoredDurablePrefix;
   stopOnBackoffWorthyFailure?: boolean;
   processDurableBatchInWorker: (
@@ -323,39 +309,59 @@ export interface DurableSyncContext {
   storeInsert: (request: DurableSyncStoreInsertRequest) => Promise<void>;
   /** The recovery policy admits the entire verified page before its first commit. */
   admitVerifiedPage?: (page: ReturnType<typeof partitionVerifiedGraphScopedAssets>) => void;
-  /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
-  storeGraphScopedAsset?: (
-    request: DurableSyncGraphScopedStoreRequest,
-  ) => Promise<GraphScopedMaterializationOutcome>;
-  /** Runs after verified snapshot writes and before phase checkpoints advance. */
-  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
-  deleteCheckpoint: (key: string) => void;
-  setCheckpoint: (key: string, checkpoint: DurableSyncCheckpointWrite) => void;
   logInfo: (ctx: OperationContext, message: string) => void;
   logWarn: (ctx: OperationContext, message: string) => void;
   logDebug: (ctx: OperationContext, message: string) => void;
 }
 
-/** One graph's owned full recovery. Selection, delta and full-snapshot modes use other entries. */
-export interface GraphOwnedDurableSyncContext extends Omit<DurableSyncContext,
-  'contextGraphIds' | 'sinceBatchIdFor' | 'exactAssetSelectionFor' | 'exactAssetFetchPolicyFor' | 'onVerifiedFullSnapshot'
-> {
+export interface DurableSyncPageTransport {
+  fetchSyncPages: (request: DurableSyncFetchRequest) => Promise<SyncPageResult>;
+}
+export interface DurableSyncCheckpointPorts {
+  deleteCheckpoint: (key: string) => void;
+  setCheckpoint: (key: string, checkpoint: DurableSyncCheckpointWrite) => void;
+}
+export interface DurableSyncMaterializationPorts {
+  /** Exact replacement path for verified V2 KAs; absent capability fails closed. */
+  storeGraphScopedAsset?: (
+    request: DurableSyncGraphScopedStoreRequest,
+  ) => Promise<GraphScopedMaterializationOutcome>;
+}
+interface DurableGraphScanOptions {
+  /**
+   * Phase C — optional, gap-safe per-CG delta high-water mark resolver. When it
+   * returns a value for a CG, the durable DATA fetch carries `sinceBatchId` and
+   * the responder returns only KAs with `dkg:batchId` greater than it. MUST be
+   * backed by a CONTIGUOUS watermark. Undefined ⇒ full scan (default today).
+   */
+  sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
+  /** Runs after verified snapshot writes and before phase checkpoints advance. */
+  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
+}
+
+/** Ordinary fanout adds selection and durable materialization to the shared physical ports. */
+export interface DurableSyncContext extends DurableSyncCommonPorts, DurableSyncPageTransport,
+  DurableSyncCheckpointPorts, DurableSyncMaterializationPorts, DurableGraphScanOptions {
+  contextGraphIds: string[];
+  /** Atomic exact selection for durable VM recovery; undefined retains normal full/delta sync. */
+  exactAssetSelectionFor?: (
+    contextGraphId: string,
+  ) => UalOnlyExactAssetSelection | undefined;
+  exactAssetFetchPolicyFor?: (contextGraphId: string) => Exclude<ExactAssetFetchSessionPolicy, { kind: 'ephemeral-challenge' }> | undefined;
+}
+
+/** One graph's owned full recovery has no selection, delta or snapshot consumer. */
+export interface GraphOwnedDurableSyncContext extends DurableSyncCommonPorts, DurableSyncPageTransport,
+  DurableSyncCheckpointPorts, DurableSyncMaterializationPorts {
   readonly contextGraphId: string;
   readonly recovery: GraphOwnedRecoveryContext;
 }
 
-/**
- * Proof-only exact retrieval deliberately has no durable store or checkpoint
- * capability. Every invocation starts fresh and returns all authenticated
- * bytes to its caller as one ephemeral result.
- */
-export interface ChallengeExactAssetFetchContext extends Omit<
-  DurableSyncContext,
-  'exactAssetSelectionFor' | 'exactAssetFetchPolicyFor' | 'storeGraphScopedAsset' | 'deleteCheckpoint' | 'setCheckpoint'
-> {
-  challengeSelectionFor: (
-    contextGraphId: string,
-  ) => ChallengePinnedExactAssetSelection;
+/** Challenge retrieval adds its authentication consumer and never receives durable checkpoints. */
+export interface ChallengeExactAssetFetchContext extends DurableSyncCommonPorts, DurableSyncPageTransport,
+  DurableGraphScanOptions {
+  contextGraphIds: string[];
+  challengeSelectionFor: (contextGraphId: string) => ChallengePinnedExactAssetSelection;
   authenticateChallengePinnedAsset: (
     request: DurableSyncChallengePinnedAuthenticationRequest,
   ) => Promise<ChallengePinnedGraphScopedAsset>;

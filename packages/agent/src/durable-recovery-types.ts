@@ -113,22 +113,25 @@ export type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
   readonly admission: DurableSyncAdmissionOutcome;
 };
 
-export type DurableGraphOptions = {
+export interface DurableGraphCommonOptions {
   onPhase?: PhaseCallback;
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   onAccessDenied?: (contextGraphId: string) => void;
-  sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
   stopOnBackoffWorthyFailure?: boolean;
-  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
-  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
   settlementSliceTimeoutMs?: number;
   signal?: AbortSignal;
   isCurrent?: () => boolean;
+}
+
+export interface DurableGraphOptions extends DurableGraphCommonOptions {
+  sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
+  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
+  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-};
+}
 
 export type LegacyDurableContextGraphOptions = DurableRecoveryInput & DurableGraphOptions & LegacyExactAssetFetchOptions;

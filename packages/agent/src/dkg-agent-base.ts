@@ -1,6 +1,6 @@
 import type { StoreContentFence } from './internal/store-content-fence.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
-import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
+import { reconcileAfterMaterialization, reconcileAfterHeldAsset } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
@@ -584,7 +584,7 @@ export class DKGAgentBase {
       retireLegacySwmAfterVerifiedVmTwin: params => agent.retireLegacySwmAfterVerifiedVmTwin(params),
     };
     const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) => reconcileAfterMaterialization(cleanup, asset, ctx);
-    const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, reconcile, () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
+    const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, (commitment, ctx) => reconcileAfterHeldAsset(cleanup, commitment, ctx), () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
     const materialization = new RecoveryMaterializationOwner({
       chain: () => agent.chain, store: () => agent.store,
       isClosed: () => agent.graphScopedStoreClosed,
