@@ -40,11 +40,9 @@ import type {
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
-import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
-import {
-  externalStorePriorityScheduler,
-  type StorePriorityScheduler,
-} from '../store-priority-scheduler.js';
+import { decodeSparqlHttpQueryResponse, sparqlQueryResponseAccept } from './sparql-query-response.js';
+import { externalStorePriorityScheduler, type StorePriorityScheduler } from '../store-priority-scheduler.js';
+import { selectStoreScheduler } from '../store-control-path.js';
 import {
   GraphWriteGenTracker,
   type GraphWriteLifecycle,
@@ -451,7 +449,7 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
     return this.workLifecycle.run(
       options?.signal,
       (signal, context) => {
-        return this.scheduler.run(
+        return selectStoreScheduler(this.scheduler, options).run(
           options?.priority,
           options?.source ?? `sparql-http.${operation}`,
           () => work(signal, context),
@@ -1098,30 +1096,18 @@ export class SparqlHttpStore implements TripleStore, BoundedQueryResponseCapabil
           );
         }
 
+        const mode = isAsk ? 'ask-json' : this.managedOxigraph ? 'select-tsv' : 'select-json';
         return await this.postQuery(
           trimmed,
-          'application/sparql-results+json',
+          sparqlQueryResponseAccept(mode),
           'query',
           canonicalOperation,
           effectiveOptions,
-          async (res) => {
-            if (!res.ok) {
-              const text = await readSparqlResponseText(res, {
-                maxResponseBytes: effectiveOptions.maxResponseBytes,
-                managedOxigraph: this.managedOxigraph,
-                operation: canonicalOperation,
-                tolerateReadFailure: true,
-              });
-              throw new SparqlHttpResponseError('query', res.status, text.slice(0, 300));
-            }
-
-            const text = await readSparqlResponseText(res, {
-              maxResponseBytes: effectiveOptions.maxResponseBytes,
-              managedOxigraph: this.managedOxigraph,
-              operation: canonicalOperation,
-            });
-            return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
-          },
+          (res) => decodeSparqlHttpQueryResponse(res, {
+            mode, operation: canonicalOperation,
+            maxResponseBytes: effectiveOptions.maxResponseBytes,
+            managedOxigraph: this.managedOxigraph,
+          }),
           readPolicy,
         );
       } finally {

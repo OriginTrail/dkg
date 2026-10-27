@@ -1,3 +1,5 @@
+import type { ShareReconciliationInput, ShareReconciliationResult } from './share-reconciliation.js';
+import type { ShareCompletionEvidence } from './share-completion-evidence.js';
 import type { PromoteNoEffectProof } from './promote-no-effect-rejection.js';
 import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 /**
@@ -87,7 +89,7 @@ export interface OrdinaryPromoteRequest extends PromoteRequestScope {
   entities: readonly string[] | 'all';
 }
 
-/** Internal immutable synchronous-recovery authority; never client supplied. */
+/** Internal immutable share-recovery authority; never client supplied. */
 export interface BoundPromoteRequest extends PromoteRequestScope {
   recoveryBinding: PromoteRecoveryBinding;
   entities: 'all';
@@ -124,6 +126,12 @@ export interface PromoteAttemptError {
    * never reach the queue row. The recovery sweep keys on it.
    */
   diagnosticCode?: string;
+  /**
+   * The context-graph authority reason behind a retryable prerequisite failure,
+   * when the worker recognized one from its closed set (for example
+   * `approved-member-metadata-pending`). Never free text.
+   */
+  authorityReason?: string;
   /** Producer certificate; only the fenced first failed attempt may retire its owner. */
   noEffectProof?: PromoteNoEffectProof;
 }
@@ -136,6 +144,8 @@ export interface PromoteAttemptState {
 }
 
 export interface PromoteResult {
+  /** Additive versioned observation; not queue replay authority. */
+  shareEvidence?: ShareCompletionEvidence;
   promotedCount: number;
   succeededAt: number;
   /** Informational only — populated when the worker observed the gossip payload size. */
@@ -176,6 +186,8 @@ export interface PromoteJob {
   lease?: PromoteLease;
   attempt: PromoteAttemptState;
   result?: PromoteResult;
+  /** Contiguous initial attempts proven to have failed before promotion started. */
+  preparationAttempts?: number;
   commitMarker?: PromoteCommitMarker;
   /**
    * Stable string describing why a job is currently in its state when
@@ -199,6 +211,28 @@ export interface PromoteListFilter {
   contextGraphId?: string;
   limit?: number;
 }
+
+/** A paged listing request (OT-RFC-73 P8a). Every call that goes through `listPage` is paged; `list` is the complete read. */
+export interface PromoteListPageRequest {
+  /** The `nextCursor` of the previous page, unchanged; absent for the first page. A malformed one is a `PromoteListRequestError`. */
+  cursor?: string;
+  /** Rows per page: 100 when absent, at most 1,000. */
+  pageSize?: number;
+}
+
+/**
+ * One page of the keyset listing, oldest `enqueuedAt` first and then `jobId` by code point (not the ready-time order of `list`).
+ * `complete` means no row followed this page at the time it was read, never proof that nothing was added since.
+ */
+export interface PromoteJobPage {
+  jobs: PromoteJob[];
+  /** Present exactly when `complete` is false. */
+  nextCursor?: string;
+  complete: boolean;
+}
+
+/** The fields that name a share's selector: the uniqueness key a job is stored under. */
+export type PromoteSelector = Pick<PromoteRequest, 'contextGraphId' | 'subGraphName' | 'assertionName' | 'agentAddress'>;
 
 /**
  * Result of a startup recovery sweep. See RFC §4.4.
@@ -257,10 +291,17 @@ export interface AsyncPromoteQueue {
   enqueue(request: PromoteRequest): Promise<string>;
   /** Persist ownership and the inline lease together, before content mutation. */
   enqueueAndClaim?(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob>;
+  /** Bind a claimed, unstarted job under the publisher lifecycle fence. Never HTTP supplied. */
+  bindRecovery?(jobId: string, claimToken: string, binding: PromoteRecoveryBinding): Promise<BoundPromoteJob>;
   // RFC §3.2
   getStatus(jobId: string): Promise<PromoteJob | null>;
   // RFC §3.3
   list(filter?: PromoteListFilter): Promise<PromoteJob[]>;
+  /** One bounded page of the listing (cursor + page size), in the keyset order of `PromoteJobPage`. */
+  listPage?(filter?: Omit<PromoteListFilter, 'limit'>, request?: PromoteListPageRequest): Promise<PromoteJobPage>;
+  /** Every job stored under the selector's uniqueness key, in any state, in `list` order. */
+  listForSelector?(selector: PromoteSelector): Promise<PromoteJob[]>;
+  reconcileShare?(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
   // RFC §3.4
   cancel(jobId: string): Promise<void>;
   recover(jobId: string): Promise<void>;
@@ -295,6 +336,11 @@ export interface AsyncPromoteQueue {
   readonly workScheduling?: {
     attachScheduler(scheduler: { onWorkAvailable(): void }): () => void;
   };
+}
+
+/** Required on agent-owned queues that expose the reconciliation read API. */
+export interface PromoteShareReconciler {
+  reconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
 }
 
 /**
@@ -334,6 +380,12 @@ export interface AsyncPromoteQueueConfig {
   backoff?: (attemptCount: number) => number;
   /** Random source of the default backoff's jitter, in [0, 1). Defaults to `Math.random`. */
   rand?: () => number;
+  /** Payloads read per hold of the queue's mutex by a complete listing (`list`); defaults to 1,000 (the paged maximum). */
+  listPageSize?: number;
+  /** Keys read per hold, and per ordered scan, by a complete listing; defaults to 10,000, at most 100,000. */
+  listKeyPageSize?: number;
+  /** A complete listing of more rows than this logs a warning that points at cursor paging; defaults to 5,000. */
+  listWarnRows?: number;
 }
 
 /**

@@ -24,6 +24,7 @@ import type { AsyncPreparedPublishPayload, LiftResolvedPublishSlice } from './as
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import type { PublishTransactionObservation } from '@origintrail-official/dkg-chain';
 import type { TargetedLiftJobClearOptions, TerminalJobClearOutcome } from './terminal-job-clear.js';
+import type { VmPublishJobPager } from './lift-job-page.js';
 
 export class AsyncLiftJobConflictError extends Error {
   readonly code = 'ASYNC_LIFT_JOB_CONFLICT';
@@ -293,6 +294,8 @@ export interface AsyncLiftPublisher {
     recover(): Promise<{ reconciled: number; pendingWork: boolean }>;
   };
   getStats(): Promise<Record<LiftJobState, number>>;
+  /** Single admission owner; older structural publishers may omit live claim control. */
+  readonly claimControl?: import('./async-lift-claim-gate.js').AsyncLiftClaimControl;
   pause(): Promise<void>;
   resume(): Promise<void>;
   cancel(jobId: string): Promise<void>;
@@ -421,6 +424,7 @@ export interface VmPublisherControl
     VmPublishIntentIndexBackfiller,
     VmPublishAdmissionJournalReader,
     VmPublishTerminalJobClearer,
+    VmPublishJobPager,
     AsyncLiftDetailedRetrier,
     AsyncLiftRetryStateReader {}
 

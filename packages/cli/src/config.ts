@@ -6,7 +6,7 @@ import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origint
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
+import { configFileSources, parseConfigText } from './config-file-source.js';
 import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
@@ -53,8 +53,7 @@ import {
   DEFAULT_REPLENISH_TARGET_MULTIPLE,
   resolveRpcRequestGovernorPolicy,
   resolveContextGraphAuthorityIndexTickMs,
-  resolveFinalityConfirmations,
-  resolveReceiptTimeoutMs,
+  resolveFinalityConfirmations, resolveReceiptTimeoutMs,
   type ApprovalPolicy, type ChainSignerSettings,
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
@@ -635,6 +634,8 @@ export interface LoggingConfig {
 }
 
 export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
+  /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
+  DKG_Core_chain_cache?: boolean;
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -726,15 +727,15 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
    */
   preferredRelays?: string[];
   /**
-   * Transport-level network peer isolation: refuse to dial, store or accept
-   * the relays of the other bundled DKG networks and peers that failed the
-   * network-identity proof. Defaults to true. Set false (or
-   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to
-   * admission-only isolation without a new release.
+   * Transport-level network peer isolation: refuse to dial, store or accept the relays of the other bundled
+   * DKG networks and peers that failed the network-identity proof. Defaults to true. Set false (or
+   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to admission-only isolation without a new release.
    */
   networkPeerIsolationEnabled?: boolean;
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
   announceAddresses?: string[];
+  /** Keep LAN and VPN addresses in use on an Edge with public relays; see `lan-addresses.ts`. Default false. */
+  lanAddressesEnabled?: boolean;
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
@@ -1054,6 +1055,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
      */
     postCommitRecoveryIntervalMs?: number;
   };
+  queueRetention?: import('./retention-config.js').RetentionConfigInput; // async queue retention, default off; docs/promote-queue-operations.md
   /**
    * Allowed CORS origins. When unset, only the API port's loopback origins
    * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`)
@@ -2000,7 +2002,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
+export function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
   if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
 
   _bundledNetworkRegistry = loadNetworkRegistryFromRoots(runtimeAssetRoots());
@@ -2425,24 +2427,22 @@ export class DkgHomeFiles {
   get apiPortPath(): string { return join(this.home, 'api.port'); }
   get tokenPath(): string { return dkgAuthTokenPath(this.home); }
 
-  configExists(): boolean { return existsSync(this.configPath) || existsSync(this.configYamlPath); }
+  configExists(): boolean { return configFileSources(this.home).some((source) => existsSync(source.path)); }
 
   readConfigSync(): unknown {
-    if (existsSync(this.configPath)) return JSON.parse(readFileSync(this.configPath, 'utf-8'));
-    if (existsSync(this.configYamlPath)) return yaml.load(readFileSync(this.configYamlPath, 'utf-8'));
+    for (const source of configFileSources(this.home)) {
+      if (existsSync(source.path)) return parseConfigText(source, readFileSync(source.path, 'utf-8'));
+    }
     return null;
   }
 
   async loadConfig(): Promise<DkgConfig> {
-    try {
-      return mergePersistedConfig(JSON.parse(await readFile(this.configPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    try {
-      return mergePersistedConfig(yaml.load(await readFile(this.configYamlPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
+    for (const source of configFileSources(this.home)) {
+      try {
+        return mergePersistedConfig(parseConfigText(source, await readFile(source.path, 'utf-8')));
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
+      }
     }
     return { ...DEFAULT_CONFIG };
   }
@@ -2480,7 +2480,7 @@ export function logPath(): string { return join(dkgDir(), 'daemon.log'); }
 export async function ensureDkgDir(): Promise<void> { await mkdir(dkgDir(), { recursive: true }); }
 
 /** Reject a misplaced trust policy instead of silently ignoring it. */
-export function assertAuthorityIndexConfigPlacement(config: Pick<DkgConfig, 'core'>): void {
+export function assertAuthorityIndexConfigPlacement(config: { core?: unknown }): void {
   if (config.core !== null && typeof config.core === 'object'
     && Object.hasOwn(config.core, 'authorityIndex')) {
     throw new TypeError(

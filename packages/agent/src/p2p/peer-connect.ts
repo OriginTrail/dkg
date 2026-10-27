@@ -18,7 +18,7 @@ const CONNECT_WAIT_TIMEOUT_MS = 5000;
 const DEBUG_SYNC_TRACE = process.env.DKG_DEBUG_SYNC_PROGRESS === '1' || process.env.DKG_DEBUG_SYNC === '1';
 
 export async function connectToMultiaddr(
-  libp2p: Libp2pLike,
+  libp2p: Parameters<typeof connectLibp2pCandidate>[0],
   connectTarget: Libp2pConnectCandidate,
   log?: (message: string) => void,
   options?: { signal?: AbortSignal },

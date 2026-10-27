@@ -7,11 +7,7 @@ import { useVerifiableMemoryAnchors } from '../src/ui/hooks/useVerifiableMemoryA
 
 (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
 
-// Same bug class as B2 (DKG-NODE-ISSUES-FOR-RC17): buildAnchorsQuery already
-// scopes to the CG via STRSTARTS(?g, …) and enumerates EVERY sub-graph's
-// <cg>/<sg>/_shared_memory_meta partition, so the fetch MUST NOT also send
-// contextGraphId — that makes the daemon constrain GRAPH ?g to CG-direct
-// graphs only, dropping per-sub-graph anchors/attribution.
+// Server-owned partition discovery includes registered subgraphs and excludes child CGs.
 describe('useVerifiableMemoryAnchors — POST body scoping', () => {
   let root: Root;
   let container: HTMLDivElement;
@@ -35,7 +31,7 @@ describe('useVerifiableMemoryAnchors — POST body scoping', () => {
     if (originalFetch) globalThis.fetch = originalFetch;
   });
 
-  it('omits contextGraphId from the /api/query POST body so all sub-graph partitions are reached', async () => {
+  it('opts into server-scoped anchors across registered subgraphs', async () => {
     function Probe({ id }: { id: string }) {
       useVerifiableMemoryAnchors(id);
       return null;
@@ -49,9 +45,8 @@ describe('useVerifiableMemoryAnchors — POST body scoping', () => {
     expect(calls.length).toBeGreaterThan(0);
     const body = JSON.parse(String((calls[0][1] as any)?.body ?? '{}'));
     expect(body.sparql).toContain('_shared_memory_meta');
-    expect(body).not.toHaveProperty('contextGraphId');
-    // Codex review (PR #1055) — exact "<cgUri>/" prefix so a sibling CG
-    // (cg-10 / cg-1-foo) can't leak its anchors in once contextGraphId is gone.
-    expect(body.sparql).toContain('STRSTARTS(STR(?g), "did:dkg:context-graph:cg-1/")');
+    expect(body).toMatchObject({ contextGraphId: 'cg-1', includeContextGraphPartitions: true, includeSharedMemoryMeta: true });
+    expect(body.sparql).toContain('STRENDS(STR(?g), "/_shared_memory_meta")');
+    expect(body.sparql).not.toContain('STRSTARTS');
   });
 });

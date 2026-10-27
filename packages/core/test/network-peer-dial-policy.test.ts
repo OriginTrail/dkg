@@ -87,6 +87,17 @@ describe('NetworkPeerDialPolicy — other-network relays', () => {
     expect(placeholders.otherNetworkRelayCount).toBe(1);
     expect(placeholders.dialDenialReason(TESTNET_RELAY_A)).toBe('other-network-relay');
   });
+
+  it('canonicalizes static-dial exemptions without exempting them from dynamic mismatch denial', () => {
+    const shared = policy({ staticDialExemptionPeerIds: [peerIdFromString(TESTNET_RELAY_A).toCID().toString()] });
+    expect(shared.otherNetworkRelayCount).toBe(1);
+    expect(shared.connectionGater.denyDialPeer(id(TESTNET_RELAY_A))).toBe(false);
+    expect(shared.dialDenialReason(TESTNET_RELAY_B)).toBe('other-network-relay');
+    expect(shared.denyAfterNetworkMismatch(TESTNET_RELAY_A)).toBe(true);
+    expect(shared.dialDenialReason(TESTNET_RELAY_A)).toBe('network-identity-mismatch');
+    shared.clearNetworkMismatchDenial(TESTNET_RELAY_A);
+    expect(shared.dialDenialReason(TESTNET_RELAY_A)).toBeUndefined();
+  });
 });
 
 describe('NetworkPeerDialPolicy — circuit paths', () => {

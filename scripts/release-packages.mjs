@@ -1,188 +1,17 @@
 #!/usr/bin/env node
-import fs from 'node:fs';
 import path from 'node:path';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-import { cliRuntimeAssetManifest } from './copy-cli-runtime-assets.mjs';
 import { writeBuildMetadata } from './lib/build-info.mjs';
+import { run } from './lib/release-process.mjs';
+import { cliReleaseAssets, releasePackageJsonPaths, discoverPublishablePackages, findNodeSqliteEngineViolations, findNodeSqliteInstallGuardViolations, findReleaseVersionMismatches, verifyReleaseTag } from './lib/release-policy.mjs';
+export { NODE_SQLITE_SUPPORTED_RANGE, NODE_SQLITE_INSTALL_GUARD, releasePackageJsonPaths, discoverPublishablePackages, findNodeSqliteEngineViolations, findNodeSqliteInstallGuardViolations, findReleaseVersionMismatches, verifyReleaseTag } from './lib/release-policy.mjs';
 export { buildInfoPayload } from './lib/build-info.mjs';
 
 const SCRIPT_PATH = fileURLToPath(import.meta.url);
 const ROOT_DIR = path.resolve(path.dirname(SCRIPT_PATH), '..');
-export const NODE_SQLITE_SUPPORTED_RANGE = '>=22.13.0 <23.0.0 || >=23.4.0';
-export const NODE_SQLITE_INSTALL_GUARD = Object.freeze({
-  rootCommand: 'node packages/cli/scripts/verify-node-sqlite-runtime.mjs',
-  cliCommand: 'node ./scripts/verify-node-sqlite-runtime.mjs',
-  cliAsset: 'scripts/verify-node-sqlite-runtime.mjs',
-});
-
-function readJson(filePath) {
-  return JSON.parse(fs.readFileSync(filePath, 'utf8'));
-}
-
-export function releasePackageJsonPaths(rootDir = ROOT_DIR) {
-  const files = [path.join(rootDir, 'package.json')];
-  const packagesDir = path.join(rootDir, 'packages');
-  if (fs.existsSync(packagesDir)) {
-    for (const entry of fs.readdirSync(packagesDir, { withFileTypes: true })) {
-      if (!entry.isDirectory()) continue;
-      const packageJsonPath = path.join(packagesDir, entry.name, 'package.json');
-      if (fs.existsSync(packageJsonPath)) files.push(packageJsonPath);
-    }
-  }
-  return files;
-}
-
-export function discoverPublishablePackages(rootDir = ROOT_DIR) {
-  return releasePackageJsonPaths(rootDir)
-    .map((packageJsonPath) => ({ packageJsonPath, packageJson: readJson(packageJsonPath) }))
-    .filter(({ packageJson }) =>
-      packageJson.private !== true &&
-      typeof packageJson.name === 'string' &&
-      packageJson.name.startsWith('@origintrail-official/'))
-    .map(({ packageJsonPath, packageJson }) => ({
-      name: packageJson.name,
-      version: packageJson.version,
-      packageJsonPath,
-    }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-}
-
-function sourceFilesUnder(packageDir) {
-  const files = [];
-  const ignored = new Set(['node_modules', '.git', 'dist', 'test', 'tests', '__tests__']);
-  const visit = (directory) => {
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        if (!ignored.has(entry.name)) visit(path.join(directory, entry.name));
-        continue;
-      }
-      if (/\.(?:cjs|js|mjs|ts|tsx)$/.test(entry.name)) files.push(path.join(directory, entry.name));
-    }
-  };
-  visit(packageDir);
-  return files;
-}
-
-/**
- * Every publishable package that imports node:sqlite must publish the same
- * runtime floor as the shared loader. This prevents a new SQLite consumer
- * from silently widening the install contract while engines remain advisory.
- */
-export function findNodeSqliteEngineViolations(rootDir = ROOT_DIR) {
-  const violations = [];
-  for (const pkg of discoverPublishablePackages(rootDir)) {
-    const packageDir = path.dirname(pkg.packageJsonPath);
-    const importsNodeSqlite = sourceFilesUnder(packageDir).some((filePath) =>
-      fs.readFileSync(filePath, 'utf8').includes('node:sqlite'));
-    if (!importsNodeSqlite) continue;
-    const packageJson = readJson(pkg.packageJsonPath);
-    if (packageJson.engines?.node !== NODE_SQLITE_SUPPORTED_RANGE) {
-      violations.push({
-        path: path.relative(rootDir, pkg.packageJsonPath),
-        name: pkg.name,
-        actual: packageJson.engines?.node,
-        expected: NODE_SQLITE_SUPPORTED_RANGE,
-      });
-    }
-  }
-  return violations;
-}
-
-/**
- * Older active updaters cannot execute checks added to the target release.
- * Keep a target-owned install hook in both paths those updaters already run:
- * npm installs the published CLI package, while git slots run the workspace
- * root install before building and swapping the target checkout.
- */
-export function findNodeSqliteInstallGuardViolations(rootDir = ROOT_DIR) {
-  const checks = [
-    {
-      path: 'package.json',
-      expected: NODE_SQLITE_INSTALL_GUARD.rootCommand,
-    },
-    {
-      path: 'packages/cli/package.json',
-      expected: NODE_SQLITE_INSTALL_GUARD.cliCommand,
-    },
-  ];
-  const violations = [];
-  for (const check of checks) {
-    const packageJsonPath = path.join(rootDir, check.path);
-    let actual;
-    try {
-      actual = readJson(packageJsonPath).scripts?.preinstall;
-    } catch {
-      actual = '<unreadable package metadata>';
-    }
-    if (actual !== check.expected) {
-      violations.push({
-        path: check.path,
-        actual: actual ?? '<missing>',
-        expected: check.expected,
-      });
-    }
-  }
-  const assetPath = path.join(
-    rootDir,
-    'packages',
-    'cli',
-    ...NODE_SQLITE_INSTALL_GUARD.cliAsset.split('/'),
-  );
-  if (!fs.existsSync(assetPath)) {
-    violations.push({
-      path: `packages/cli/${NODE_SQLITE_INSTALL_GUARD.cliAsset}`,
-      actual: '<missing>',
-      expected: '<present>',
-    });
-  }
-  return violations;
-}
-
-export function findReleaseVersionMismatches(version, rootDir = ROOT_DIR) {
-  return releasePackageJsonPaths(rootDir)
-    .map((packageJsonPath) => ({ packageJsonPath, packageJson: readJson(packageJsonPath) }))
-    .filter(({ packageJson }) => packageJson.version !== version)
-    .map(({ packageJsonPath, packageJson }) => ({
-      path: path.relative(rootDir, packageJsonPath),
-      name: packageJson.name ?? path.basename(path.dirname(packageJsonPath)),
-      actual: packageJson.version,
-      expected: version,
-    }));
-}
-
-function runCapture(cmd, args, options = {}) {
-  const result = spawnSync(cmd, args, {
-    cwd: options.cwd ?? ROOT_DIR,
-    encoding: 'utf8',
-    stdio: 'pipe',
-    env: { ...process.env, ...(options.env ?? {}) },
-    // Needed to resolve `npm`/`npm.cmd` on Windows; harmless on POSIX.
-    shell: options.shell ?? false,
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    const details = [result.stdout, result.stderr].filter(Boolean).join('\n');
-    throw new Error(`${cmd} ${args.join(' ')} failed with exit code ${result.status}${details ? `\n${details}` : ''}`);
-  }
-  return result.stdout.trim();
-}
-
-function runInteractive(cmd, args, options = {}) {
-  const result = spawnSync(cmd, args, {
-    cwd: options.cwd ?? ROOT_DIR,
-    stdio: 'inherit',
-    env: { ...process.env, ...(options.env ?? {}) },
-  });
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
-    throw new Error(`${cmd} ${args.join(' ')} failed with exit code ${result.status}`);
-  }
-}
-
 function gitHead(rootDir) {
-  return runCapture('git', ['rev-parse', 'HEAD'], { cwd: rootDir });
+  return run('git', ['rev-parse', 'HEAD'], { cwd: rootDir });
 }
 
 export function writeBuildInfo({ rootDir = ROOT_DIR, commit, ...identity } = {}) {
@@ -228,57 +57,7 @@ function parseTags(value) {
 }
 
 function npmViewJson(args) {
-  return JSON.parse(runCapture('npm', ['view', ...args, '--json']));
-}
-
-export function verifyReleaseTag({ tag, version, bases = ['origin/main'], runner = runCapture } = {}) {
-  if (typeof tag !== 'string' || tag.length === 0) {
-    throw new Error('--tag is required (e.g. v10.0.4)');
-  }
-  const problems = [];
-  const attempt = (args) => {
-    try {
-      return { ok: true, output: runner('git', args) };
-    } catch (err) {
-      return { ok: false, output: err instanceof Error ? err.message : String(err) };
-    }
-  };
-  if (typeof version === 'string' && version.length > 0 && tag !== `v${version}`) {
-    problems.push(`tag ${tag} does not match --version ${version} (expected v${version})`);
-  }
-  const local = attempt(['rev-parse', '--verify', `refs/tags/${tag}`]);
-  if (!local.ok) {
-    problems.push(`tag ${tag} not found locally — run: git fetch --force origin --tags`);
-    return problems;
-  }
-  const objectType = attempt(['cat-file', '-t', `refs/tags/${tag}`]);
-  if (!objectType.ok || objectType.output !== 'tag') {
-    problems.push(`tag ${tag} is not an annotated tag object (got: ${objectType.output || 'nothing'}) — create it with git tag -s`);
-  } else {
-    const tagBody = attempt(['cat-file', 'tag', `refs/tags/${tag}`]);
-    if (!tagBody.ok || !/-----BEGIN (PGP|SSH) SIGNATURE-----/.test(tagBody.output)) {
-      problems.push(`tag ${tag} carries no PGP/SSH signature block — sign it with git tag -s`);
-    }
-  }
-  const isAncestorOfSomeBase = bases.some(
-    (base) => attempt(['merge-base', '--is-ancestor', `${tag}^{commit}`, base]).ok,
-  );
-  if (!isAncestorOfSomeBase) {
-    problems.push(`tag ${tag} commit is not reachable from ${bases.join(' or ')} — fetch first (git fetch origin) or retag from a release branch`);
-  }
-  const remote = attempt(['ls-remote', 'origin', `refs/tags/${tag}`]);
-  const remoteSha = remote.ok
-    ? remote.output
-        .split('\n')
-        .map((line) => line.split(/\s+/))
-        .find(([, ref]) => ref === `refs/tags/${tag}`)?.[0] ?? ''
-    : '';
-  if (remoteSha.length === 0) {
-    problems.push(`tag ${tag} is not on origin — push it: git push origin ${tag}`);
-  } else if (remoteSha !== local.output) {
-    problems.push(`local tag ${tag} (${local.output.slice(0, 12)}) differs from origin (${remoteSha.slice(0, 12)}) — the remote tag moved; do not release from it`);
-  }
-  return problems;
+  return JSON.parse(run('npm', ['view', ...args, '--json']));
 }
 
 function commandList(args) {
@@ -315,56 +94,48 @@ function commandBuildInfo(args) {
   console.log(`Wrote ${path.relative(ROOT_DIR, outputPath)} for ${payload.commitShort} (${payload.distTag}).`);
 }
 
-function commandPromote(args) {
-  const version = requireArg(args, 'version');
-  const tags = parseTags(requireArg(args, 'tags'));
-  const otp = typeof args.otp === 'string' ? args.otp : process.env.NPM_CONFIG_OTP;
-  const dryRun = Boolean(args['dry-run']);
-  if (tags.length === 0) throw new Error('--tags must include at least one dist-tag');
-  if (!dryRun && (!otp || otp.length === 0)) {
-    throw new Error('Provide --otp <code> or NPM_CONFIG_OTP for npm dist-tag promotion');
+async function packageContext(args, certificate = true) {
+  const { expectedPolicy, requireCleanSource } = await import('./lib/package-certification/source.mjs');
+  const commit = requireArg(args, 'commit');
+  if (requireCleanSource(ROOT_DIR) !== commit) {
+    throw new Error('Use the intended candidate checkout to supply the independent package policy');
   }
-  for (const pkg of discoverPublishablePackages(ROOT_DIR)) {
-    for (const tag of tags) {
-      const cmd = ['dist-tag', 'add', `${pkg.name}@${version}`, tag, ...(otp ? [`--otp=${otp}`] : [])];
-      if (dryRun) {
-        console.log(`npm ${cmd.join(' ')}`);
-      } else {
-        runInteractive('npm', cmd);
-      }
-    }
-  }
+  return {
+    rootDir: ROOT_DIR,
+    bundle: path.resolve(requireArg(args, 'bundle')),
+    ...(certificate ? { receiptFile: path.resolve(requireArg(args, 'certificate')) } : {}),
+    expected: await expectedPolicy(ROOT_DIR, { commit, version: requireArg(args, 'version'), profile: requireArg(args, 'profile') }),
+  };
 }
 
-function commandVerifyPublished(args) {
-  const version = requireArg(args, 'version');
-  const tags = parseTags(args.tags);
-  const failures = [];
-  for (const pkg of discoverPublishablePackages(ROOT_DIR)) {
-    try {
-      const publishedVersion = npmViewJson([`${pkg.name}@${version}`, 'version']);
-      if (publishedVersion !== version) {
-        failures.push(`${pkg.name}: version ${publishedVersion} !== ${version}`);
-      }
-      if (tags.length > 0) {
-        const distTags = npmViewJson([pkg.name, 'dist-tags']);
-        for (const tag of tags) {
-          if (distTags[tag] !== version) {
-            failures.push(`${pkg.name}: dist-tag ${tag}=${distTags[tag] ?? '<missing>'} !== ${version}`);
-          }
-        }
-      }
-    } catch (err) {
-      failures.push(`${pkg.name}: ${err instanceof Error ? err.message : String(err)}`);
+async function commandPreparedRelease(args, mode) {
+  const { preparedRelease } = await import('./lib/package-certification/publish.mjs');
+  const progress = await preparedRelease({
+    ...await packageContext(args), mode,
+    tag: requireArg(args, 'tag'),
+    tags: parseTags(requireArg(args, mode === 'publish' ? 'dist-tag' : 'tags')),
+    otp: typeof args.otp === 'string' ? args.otp : process.env.NPM_CONFIG_OTP,
+    registry: typeof args.registry === 'string' ? args.registry : undefined,
+    dryRun: Boolean(args['dry-run']),
+  });
+  console.log(JSON.stringify(progress, null, 2));
+}
+
+async function commandVerifyPublished(args) {
+  const { verifyBundle } = await import('./lib/package-certification/bundle.mjs');
+  const { registryDist, checkRegistrySet } = await import('./lib/package-certification/publish.mjs');
+  const context = await packageContext(args, false);
+  const manifest = verifyBundle(context.bundle, context.expected);
+  checkRegistrySet(manifest, pkg => registryDist(pkg, args.registry));
+  for (const pkg of manifest.packages) {
+    const tags = parseTags(args.tags);
+    if (!tags.length) continue;
+    const distTags = npmViewJson([pkg.name, 'dist-tags', ...(args.registry ? ['--registry', args.registry] : [])]);
+    for (const tag of tags) {
+      if (distTags[tag] !== manifest.version) throw new Error(`${pkg.name}: dist-tag ${tag} does not match ${manifest.version}`);
     }
   }
-  if (failures.length > 0) {
-    console.error('Published package verification failed:');
-    for (const failure of failures) console.error(`- ${failure}`);
-    process.exitCode = 1;
-    return;
-  }
-  console.log(`Published package verification passed for ${version}${tags.length ? ` (${tags.join(', ')})` : ''}.`);
+  console.log(`Published integrity verification passed for ${manifest.packageSetDigest}.`);
 }
 
 function commandVerifyTag(args) {
@@ -404,15 +175,11 @@ const [CLI_PACK] = SUBCOMMAND_CHILD_COMMANDS['verify-pack'];
  * dropped from the 10.0.4 publish, so this preflight hard-fails a release that
  * would ship without them.
  */
-export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture) {
+export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = run) {
   // The fail-closed manifest supplies the explicit complete pack contract:
   // copied repo-root assets plus package-local runtime helpers. build-info.json
   // is generated by `release:build-info`, so it remains a release-only extension.
-  const required = [
-    ...cliRuntimeAssetManifest({ rootDir }).requiredPackAssets,
-    'build-info.json',
-    NODE_SQLITE_INSTALL_GUARD.cliAsset,
-  ];
+  const required = cliReleaseAssets(rootDir);
   // `npm pack --dry-run --json` reports exactly what would be published,
   // running the package's `prepack` first — so this reflects the real tarball.
   const raw = runner(CLI_PACK.command, [...CLI_PACK.args], {
@@ -434,7 +201,7 @@ export function findMissingCliPackAssets(rootDir = ROOT_DIR, runner = runCapture
  * then the CLI tarball's missing runtime assets. `runner` runs its child
  * commands (SUBCOMMAND_CHILD_COMMANDS['verify-pack']).
  */
-export function verifyPack({ rootDir = ROOT_DIR, runner = runCapture } = {}) {
+export function verifyPack({ rootDir = ROOT_DIR, runner = run } = {}) {
   const installGuardViolations = findNodeSqliteInstallGuardViolations(rootDir);
   if (installGuardViolations.length > 0) return { installGuardViolations, runtimeViolations: [], missing: [] };
   const runtimeViolations = findNodeSqliteEngineViolations(rootDir);
@@ -477,8 +244,13 @@ function usage() {
   node scripts/release-packages.mjs verify-tag --tag vX.Y.Z [--version X.Y.Z] [--base origin/main]
   node scripts/release-packages.mjs verify-pack
   node scripts/release-packages.mjs build-info --dist-tag latest|rc|beta|alpha [--commit SHA] [--ci-run ID]
-  node scripts/release-packages.mjs promote --version X.Y.Z --tags mainnet,testnet --otp 123456 [--dry-run]
-  node scripts/release-packages.mjs verify-published --version X.Y.Z [--tags latest,mainnet,testnet]`);
+  node scripts/release-packages.mjs prepare-packages --version X.Y.Z --out NEW_DIRECTORY
+  node scripts/release-packages.mjs certify-install --bundle DIR --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --out NEW_ATTEMPT [--image IMAGE] [--negative-control missing-ui]
+  node scripts/release-packages.mjs verify-package-certificate --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1
+  node scripts/release-packages.mjs publish-prepared --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --dist-tag canary [--dry-run]
+  node scripts/release-packages.mjs promote --bundle DIR --certificate RECEIPT --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 --tag vX.Y.Z --tags testnet[,mainnet,latest] [--otp CODE] [--dry-run]
+    (promote asks for the npm one-time code in a terminal unless --otp or NPM_CONFIG_OTP is set)
+  node scripts/release-packages.mjs verify-published --bundle DIR --commit SHA --version X.Y.Z --profile installed-local-rdf-v1 [--tags latest,mainnet,testnet]`);
 }
 
 async function main() {
@@ -500,11 +272,33 @@ async function main() {
     case 'build-info':
       commandBuildInfo(args);
       break;
+    case 'prepare-packages': {
+      const { preparePackages } = await import('./lib/package-certification/prepare.mjs');
+      const manifest = await preparePackages({ rootDir: ROOT_DIR, output: path.resolve(requireArg(args, 'out')), version: requireArg(args, 'version') });
+      console.log(`Prepared ${manifest.packages.length} packages: ${manifest.packageSetDigest}`);
+      break;
+    }
+    case 'certify-install': {
+      const { certifyInstall } = await import('./lib/package-certification/certify.mjs');
+      await certifyInstall({ ...await packageContext(args, false), output: path.resolve(requireArg(args, 'out')), image: args.image, negativeControl: args['negative-control'] });
+      console.log('Installed package certification PASS');
+      break;
+    }
+    case 'verify-package-certificate': {
+      const { verifyCertificate } = await import('./lib/package-certification/bundle.mjs');
+      const { bundle, receiptFile, expected } = await packageContext(args);
+      verifyCertificate(bundle, receiptFile, expected);
+      console.log('Package certificate consistency verification PASS');
+      break;
+    }
+    case 'publish-prepared':
+      await commandPreparedRelease(args, 'publish');
+      break;
     case 'promote':
-      commandPromote(args);
+      await commandPreparedRelease(args, 'promote');
       break;
     case 'verify-published':
-      commandVerifyPublished(args);
+      await commandVerifyPublished(args);
       break;
     default:
       usage();

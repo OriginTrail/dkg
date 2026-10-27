@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.25",
+  "version": "10.0.26",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -17,6 +17,21 @@
       "types": "./dist/rfc64/public-catalog-activation-config-v1.d.ts",
       "import": "./dist/rfc64/public-catalog-activation-config-v1.js",
       "default": "./dist/rfc64/public-catalog-activation-config-v1.js"
+    },
+    "./rfc64/inventory-v1/rollback": {
+      "types": "./dist/rfc64/inventory-v1/rollback.d.ts",
+      "import": "./dist/rfc64/inventory-v1/rollback.js",
+      "default": "./dist/rfc64/inventory-v1/rollback.js"
+    },
+    "./write-preflight-attribution": {
+      "types": "./dist/write-preflight-attribution.d.ts",
+      "import": "./dist/write-preflight-attribution.js",
+      "default": "./dist/write-preflight-attribution.js"
+    },
+    "./write-preflight-unresolved-window": {
+      "types": "./dist/write-preflight-unresolved-window.d.ts",
+      "import": "./dist/write-preflight-unresolved-window.js",
+      "default": "./dist/write-preflight-unresolved-window.js"
     },
     "./chain-authority-read-budgets": {
       "types": "./dist/chain-authority-read-budgets.d.ts",
@@ -47,6 +62,7 @@
     "./dist/rfc64/swm-inventory-catalog-reconciler-v1.js": null,
     "./dist/rfc64/swm-catalog-durable-asset-resolver-v1.js": null,
     "./dist/rfc64/catalog-projection-discovery-v1.js": null,
+    "./dist/rfc64/private-placement-failure-state-v1.js": null,
     "./dist/rfc64/catalog-repair-diagnostics-v1.js": null,
     "./dist/rfc64/catalog-repair-retry-v1.js": null,
     "./dist/rfc64/abort-v1.js": null,
@@ -95,6 +111,7 @@
     "./dist/rfc64/catalog-applied-head-coordinator-v1.js": null,
     "./dist/rfc64/catalog-synchronization-evidence-v1.js": null,
     "./dist/rfc64/finalized-private-placement-repair-store-v1.js": null,
+    "./dist/rfc64/owed-share-inventory-store-v1.js": null,
     "./dist/rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js": null,
     "./dist/rfc64/catalog-native-scoped-read-capability-v1-internal.js": null,
     "./dist/rfc64/catalog-native-scoped-read-provider-v1.js": null,
@@ -139,6 +156,7 @@
     "./dist/rfc64/public-catalog-reconciliation-outcome-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-task-lifecycle-v1.js": null,
+    "./dist/rfc64/announced-current-head-retry-v1.js": null,
     "./dist/rfc64/public-catalog-service-v1.js": null,
     "./dist/rfc64/public-catalog-head-delivery-v1.js": null,
     "./dist/rfc64/public-catalog-head-fanout-v1.js": null,
@@ -156,7 +174,11 @@
     "./dist/rfc64/legacy-swm-boundary-codec-v1.js": null,
     "./dist/rfc64/legacy-swm-boundary-fence-v1.js": null,
     "./dist/rfc64/catalog-operational-targets-v1.js": null,
-    "./dist/rfc64/private-read-roster-v1.js": null
+    "./dist/rfc64/private-read-roster-v1.js": null,
+    "./dist/rfc64/inventory-v1/finalized-private-repair-persistence.js": null,
+    "./dist/rfc64/inventory-v1/schema-migrations.js": null,
+    "./dist/rfc64/inventory-v1/pre-migration-copy.js": null,
+    "./dist/rfc64/inventory-v1/rollback.js": null
   },
   "scripts": {
     "build": "tsc && pnpm run test:types && pnpm run test:package-root",
@@ -177,8 +199,8 @@
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
-    "@libp2p/peer-id": "^6.0.9",
-    "@multiformats/multiaddr": "^13.0.3",
+    "@libp2p/peer-id": "6.0.18",
+    "@multiformats/multiaddr": "13.0.3",
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
@@ -194,7 +216,7 @@
     "jsonld": "^8.3.3"
   },
   "devDependencies": {
-    "@libp2p/crypto": "^5.1.18",
+    "@libp2p/crypto": "5.2.0",
     "@opentelemetry/sdk-metrics": "^2.8.0",
     "@types/js-yaml": "^4.0.9",
     "@vitest/coverage-v8": "^4.0.18",

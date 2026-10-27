@@ -1,5 +1,5 @@
+import { CG, AGENT, NAME, SCHEMA, DKG, ENTITY_1, ENTITY_2, ENTITY_3, makePublisher, q, key, seedDirtyDraft, seedShared, registerSubGraph, cleanupPullFixtures } from './_helpers/assertion-pull.js';
 import { execFileSync } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NoChainAdapter } from '@origintrail-official/dkg-chain';
 import {
@@ -13,132 +13,23 @@ import {
   contextGraphMetaUri,
   contextGraphPrivateUri,
   contextGraphSubGraphPrivateUri,
-  contextGraphSubGraphUri,
   createGraphKnowledgeAssetScope,
   generateEd25519Keypair,
   knowledgeAssetLayerGraphUri,
 } from '@origintrail-official/dkg-core';
-import { BlazegraphNamespaceManager, BlazegraphStore, GraphManager, OxigraphStore, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGPublisher, TripleStoreAsyncPromoteQueue, assertionScopedGraphUri } from '../src/index.js';
 import { resolveKnowledgeAssetWorkspaceHead, storeKnowledgeAssetWorkspaceHead, storeKnowledgeAssetOperationPublicQuads } from '../src/workspace-resolution.js';
 import { finalizeRootlessAssertionForTest } from './_helpers/rootless-lifecycle.js';
 
-const CG = 'pull-from-test';
-const AGENT = '0x00000000000000000000000000000000000000a1';
-const NAME = 'meeting-notes';
 const LEGACY_SWM_GRAPH = `did:dkg:context-graph:${CG}/_shared_memory`;
 const LEGACY_DATA_GRAPH = `did:dkg:context-graph:${CG}`;
-const SCHEMA = 'http://schema.org/name';
-const DKG = 'http://dkg.io/ontology/';
-const ENTITY_1 = 'urn:e:alice';
-const ENTITY_2 = 'urn:e:bob';
-const ENTITY_3 = 'urn:e:carol';
 
-const namespaceCleanups: Array<() => Promise<void>> = [];
 afterEach(async () => {
   vi.restoreAllMocks();
-  for (const cleanup of namespaceCleanups.splice(0)) await cleanup();
+  await cleanupPullFixtures();
 });
 
-async function makePublisher() {
-  let store: OxigraphStore | BlazegraphStore = new OxigraphStore();
-  const blazegraph = process.env.DKG_PULL_RECOVERY_BLAZEGRAPH_URL;
-  if (blazegraph) {
-    const manager = new BlazegraphNamespaceManager({ namespaceApiUrl: `${blazegraph}/namespace`, requestTimeoutMs: 10_000 });
-    const handles = await manager.acquireMany([`pull-recovery-${randomUUID()}`]);
-    namespaceCleanups.push(() => manager.disposeAll(handles));
-    store = new BlazegraphStore(handles[0]!.sparqlUrl);
-  }
-  const publisher = new DKGPublisher({
-    store,
-    chain: new NoChainAdapter(),
-    eventBus: new TypedEventBus(),
-    keypair: await generateEd25519Keypair(),
-  });
-  return { publisher, store };
-}
-
-function q(subject: string, predicate: string, object: string, graph = ''): Quad {
-  return { subject, predicate, object, graph };
-}
-
-function key(quad: Quad): string {
-  return JSON.stringify([quad.subject, quad.predicate, quad.object]);
-}
-
-// Seed residue left by older create retries directly. Public writes now reject
-// active seals, but pull-from must still recover drafts persisted by 10.0.16.
-async function seedDirtyDraft(
-  publisher: DKGPublisher,
-  store: TripleStore,
-  publicQuads: Quad[],
-  privateQuads: Quad[] = [],
-): Promise<void> {
-  const wmGraph = await publisher.wmGraphUri(CG, AGENT, NAME);
-  for (const quad of publicQuads) {
-    const graph = assertionScopedGraphUri(wmGraph, quad.graph);
-    await store.createGraph(graph);
-    await store.insert([{ ...quad, graph }]);
-  }
-  if (privateQuads.length > 0) {
-    await new PrivateContentStore(store, new GraphManager(store))
-      .storeKnowledgeAssetPrivateDraftTriples(CG, AGENT, NAME, privateQuads);
-  }
-}
-
-async function seedShared(
-  publisher: DKGPublisher,
-  store: TripleStore,
-  options: {
-    publicQuads?: Quad[];
-    privateQuads?: Quad[];
-    name?: string;
-    agentAddress?: string;
-    subGraphName?: string;
-  } = {},
-) {
-  const name = options.name ?? NAME;
-  const agentAddress = options.agentAddress ?? AGENT;
-  const subGraphName = options.subGraphName;
-  const publicQuads = options.publicQuads ?? [
-    q(ENTITY_1, SCHEMA, '"Alice"'),
-    q(ENTITY_2, SCHEMA, '"Bob"'),
-  ];
-  const privateQuads = options.privateQuads ?? [];
-  await publisher.assertionCreate(CG, name, agentAddress, subGraphName);
-  if (publicQuads.length > 0) {
-    await publisher.assertionWrite(CG, name, agentAddress, publicQuads, subGraphName);
-  }
-  if (privateQuads.length > 0) {
-    await publisher.assertionWritePrivate(CG, name, agentAddress, privateQuads, subGraphName);
-  }
-  const finalized = await finalizeRootlessAssertionForTest({
-    publisher,
-    store,
-    contextGraphId: CG,
-    name,
-    agentAddress,
-    subGraphName,
-  });
-  await publisher.assertionPromote(CG, name, agentAddress, { subGraphName });
-  return finalized;
-}
-
-async function registerSubGraph(store: TripleStore, subGraphName: string): Promise<void> {
-  const metaGraph = contextGraphMetaUri(CG);
-  const subGraphUri = contextGraphSubGraphUri(CG, subGraphName);
-  await store.createGraph(metaGraph);
-  await store.insert([
-    q(
-      subGraphUri,
-      'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
-      'http://dkg.io/ontology/SubGraph',
-      metaGraph,
-    ),
-    q(subGraphUri, 'http://schema.org/name', `"${subGraphName}"`, metaGraph),
-    q(subGraphUri, `${DKG}createdBy`, 'did:dkg:agent:test-agent', metaGraph),
-  ]);
-}
 
 function legacySeal(rootEntities: string[]): Quad[] {
   return buildAssertionSealQuads({
@@ -179,6 +70,15 @@ describe('rootless assertionPullFrom', () => {
     fault.mockRestore();
   }
 
+  it('checks the exact source pin even through partial-seal recovery (#3350)', async () => {
+    const { publisher, store } = await makePublisher();
+    const source = await seedShared(publisher, store);
+    await interruptClear(publisher, store, 4);
+    await expect(publisher.assertionPullFrom(CG, NAME, AGENT, 'swm', {
+      recoverExact: { ...source, merkleRoot: `0x${'ab'.repeat(32)}` },
+    })).rejects.toMatchObject({ code: 'WM_RECOVERY_SOURCE_UNAVAILABLE' });
+  });
+
   it.each(Array.from({ length: sealPredicates.length * 2 + 1 }, (_, i) => i))(
     'recovers active-seal clear boundary %i after publisher restart (#3332)', async (boundary) => {
       const { publisher, store } = await makePublisher();
@@ -204,6 +104,8 @@ describe('rootless assertionPullFrom', () => {
       await expect(restarted.assertionPullFrom(CG, NAME, AGENT, 'swm'))
         .resolves.toMatchObject({ kaUal: finalized.kaUal, assertionVersion: finalized.assertionVersion, seededPrivate: 1 });
       expect(new Set((await restarted.assertionQuery(CG, NAME, AGENT)).map(key)))
+        .toEqual(new Set(finalized.publicQuads.map(key)));
+      expect(new Set((await restarted.assertionQuery(CG, NAME, `0x${AGENT.slice(2).toUpperCase()}`)).map(key)))
         .toEqual(new Set(finalized.publicQuads.map(key)));
       expect(new Set((await restarted.assertionQueryPrivate(CG, NAME, AGENT)).map(key)))
         .toEqual(new Set(finalized.privateQuads.map(key)));

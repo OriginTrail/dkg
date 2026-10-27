@@ -1188,7 +1188,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req);
     try {
       const parsed = JSON.parse(body);
-      const { agentName, curatorPeerId, delegation } = parsed;
+      const { agentName, curatorPeerId, delegation, reRequest } = parsed;
+      if (reRequest !== undefined && typeof reRequest !== 'boolean') {
+        return jsonResponse(res, 400, { error: '"reRequest" must be a boolean when supplied' });
+      }
       if (!delegation || !delegation.agentAddress || !delegation.signature) {
         return jsonResponse(res, 400, {
           error: 'Missing signed delegation. Expected `delegation` field with agentAddress, signature, scope, issuedAtMs and at least one of delegateePeerId / delegateeOpKey.',
@@ -1241,7 +1244,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           cause: msg,
         });
       }
-      const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId);
+      const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId, { reRequest });
+      if (result.approvedMetadataPending === true) {
+        // The curator approved this agent already and its member list is on its
+        // way: nothing was sent, and the curator is not asked to approve again.
+        return jsonResponse(res, 200, {
+          ok: true,
+          status: 'approved',
+          joinState: 'approved-metadata-pending',
+          delivered: 0,
+          alreadyMember: true,
+        });
+      }
       if (result.delivered === 0 && result.queued !== true) {
         // Surface per-peer errors so the joiner can see WHY (curator
         // rejected with a specific reason, transport timed out, etc.)

@@ -1,3 +1,8 @@
+import { classifyWritePreflightFailure } from '@origintrail-official/dkg-agent/write-preflight-attribution';
+import { recordWritePreflightUnavailable, type WritePreflightDiagnosticFailure, type WritePreflightDiagnostics, type WritePreflightRescueOutcome } from './write-preflight-diagnostics.js';
+import { evaluateExactWritePreflight, rescueWriteTargetWithoutStore } from './write-context-graph-preflight.js';
+import type { CoalescingProbeAgent } from './write-preflight-coalescing.js';
+export { WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS } from './write-context-graph-preflight.js';
 import { classifyReconcileUnavailable } from './reconcile-unavailable.js';
 export { classifyReconcileUnavailable } from './reconcile-unavailable.js';
 import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
@@ -20,15 +25,11 @@ import {
   PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   messageIndicatesNoFundedPublisherWallet,
-  Logger,
   createOperationContext,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import {
-  type DKGAgent,
-  type ContextGraphWritePreflightProbe,
-} from '@origintrail-official/dkg-agent';
+import { type DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   isStoreSchedulerBusyError,
@@ -43,6 +44,7 @@ import {
 import { enforceSignedRequestPostBody } from '../auth.js';
 import { knownNotWritableAnswer, resolveAwaitingWriteReadiness, type ContextGraphSubscriptionReader, type KnownNotWritable, type WriteReadinessOutcome } from './context-graph-write-readiness.js';
 import type { CorsAllowlist } from './state.js';
+import { admissionStep, noteAdmissionResponse } from './async-admission-trace.js';
 
 export function isPayloadTooLargeError(err: unknown): err is PayloadTooLargeError {
   if (err instanceof PayloadTooLargeError) return true;
@@ -657,6 +659,7 @@ export function sendSerializedJsonResponse(
   extraHeaders?: Record<string, string>,
 ): void {
   const origin = corsOrigin !== undefined ? corsOrigin : (((res as any).__corsOrigin as string | null) ?? null);
+  noteAdmissionResponse(res, status, body);
   res.writeHead(status, {
     "Content-Type": "application/json",
     ...corsHeaders(origin),
@@ -817,97 +820,17 @@ function rejectKnownNonWritableContextGraph(res: ServerResponse, raw: string, ou
 function contextGraphValidationUnavailable(
   res: ServerResponse,
   message: string,
+  attribution: readonly WritePreflightDiagnosticFailure[],
+  rescue: WritePreflightRescueOutcome = 'not-attempted',
+  observer?: WritePreflightDiagnostics,
 ): null {
+  const ctx = createOperationContext('resolve');
+  recordWritePreflightUnavailable(ctx, attribution, rescue, observer);
   jsonResponse(res, 503, {
     code: "CONTEXT_GRAPH_VALIDATION_UNAVAILABLE",
     error: `Failed to validate contextGraphId against known context graphs: ${message}`,
-  });
+  }, undefined, { 'x-dkg-operation-id': ctx.operationId });
   return null;
-}
-
-function hasActiveSyncedSubscription(probe: ContextGraphWritePreflightProbe): boolean {
-  return (
-    probe.inMemorySubscription?.subscribed === true &&
-    probe.inMemorySubscription.synced === true
-  );
-}
-
-function hasAnySyncedSubscription(probe: ContextGraphWritePreflightProbe): boolean {
-  return (
-    hasActiveSyncedSubscription(probe) ||
-    (probe.persistedSubscription?.subscribed === true && probe.persistedSubscription.synced === true)
-  );
-}
-
-function exactProbeIsLocallyWritable(
-  probe: ContextGraphWritePreflightProbe,
-  requireLocalWritable: boolean,
-): boolean {
-  // Typed boundary: never trust store-derived facts when the store was down.
-  // (`exists !== true` below already blocks a bare `undefined`, but gating on
-  // the required discriminant makes the "only-when-available" contract
-  // explicit and future-proofs the predicate against new fact reads.)
-  if (!probe.storeAvailable) return false;
-  // Store-derived probe facts are tri-state (`undefined` = the store read
-  // failed); only an explicit `true` counts as positive evidence here.
-  if (probe.exists !== true) return false;
-  if (!requireLocalWritable) {
-    return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true || probe.declarationFound === true;
-  }
-  return hasActiveSyncedSubscription(probe) || probe.hasLocalContent === true;
-}
-
-function exactProbeCanFastAccept(
-  probe: ContextGraphWritePreflightProbe,
-  requireLocalWritable: boolean,
-  callerAgentAddress: string | null,
-  allowLocalExactFallback: boolean,
-): boolean {
-  if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) return false;
-  if (!callerAgentAddress) {
-    // Node-admin / trusted-local routes already opt into the exact-local
-    // fallback below after listContextGraphs. When the exact probe has all of
-    // the same positive evidence up front, accept a known PRIVATE graph here
-    // instead of enumerating every context graph first. This does not broaden
-    // access: scoped agent callers never set allowLocalExactFallback, and an
-    // unavailable/unknown store cannot satisfy exactProbeIsLocallyWritable.
-    return (
-      probe.accessPolicy === "public" ||
-      (allowLocalExactFallback && probe.accessPolicy === "private")
-    );
-  }
-  return probe.callerAuthorized === true;
-}
-
-function exactProbeIsAuthoritativeBearerDeny(
-  probe: ContextGraphWritePreflightProbe,
-  callerAgentAddress: string | null,
-): boolean {
-  // An authoritative deny requires trustworthy store-derived facts
-  // (declaration + private policy + caller-not-authorized). With the store
-  // down these are UNKNOWN, so refuse to synthesize a deny from them.
-  return (
-    probe.storeAvailable &&
-    !!callerAgentAddress &&
-    probe.exists === true &&
-    probe.declarationFound === true &&
-    probe.accessPolicy === "private" &&
-    probe.callerAuthorized === false
-  );
-}
-
-function exactProbeIsStaleSubscription(probe: ContextGraphWritePreflightProbe): boolean {
-  // `!probe.exists` / `!probe.hasLocalContent` are truthy for UNKNOWN
-  // (`undefined`) facts too, so this must only run against an AVAILABLE
-  // store — otherwise a store outage would masquerade as a stale
-  // subscription and reject a live write. The required `storeAvailable`
-  // discriminant enforces that at the boundary.
-  return (
-    probe.storeAvailable &&
-    hasAnySyncedSubscription(probe) &&
-    !probe.exists &&
-    !probe.hasLocalContent
-  );
 }
 
 function rejectUnknownContextGraph(
@@ -925,199 +848,6 @@ function rejectUnknownContextGraph(
   return null;
 }
 
-const writePreflightRescueLog = new Logger('daemon-http');
-
-/** Bound for the last-resort on-chain rescue eth_call, so an RPC stack that
- *  hangs on connect cannot stall a write route that is already degraded.
- *  Exported so tests can drive the timeout branch without waiting the full
- *  production window; production callers never pass an override so the
- *  default behaviour is unchanged. */
-export const WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS = 5_000;
-
-/**
- * Track B (write-preflight resilience) — last-resort write-target acceptance
- * when BOTH validation legs failed (the exact preflight probe AND
- * listContextGraphs), i.e. the local store is unavailable and the daemon would
- * otherwise 503 every write until it recovers.
- *
- * The store-free accept DECISION lives behind the agent/preflight boundary:
- * this helper delegates to the agent's high-level
- * `validateWriteTargetDuringStoreOutage`, which OWNS the on-chain access-policy
- * semantics (registry onChainId + `isContextGraphActiveOnChain` + public
- * `getContextGraphAccessPolicy`). The daemon only bounds that call with a
- * timeout and emits the WARN log — it never assembles chain-policy meaning
- * itself.
- *
- * Why the agent requires positive PUBLIC proof (not just an in-memory
- * subscription): an active subscription proves the node HOSTS/tracks the CG,
- * but carries NO access-policy and NO per-caller authorization. The healthy
- * write-preflight denies an authenticated-but-unauthorized caller of a PRIVATE
- * CG (`exactProbeIsAuthoritativeBearerDeny`, accessPolicy `private`); that
- * verdict comes from the local `_meta` allowlist, which is exactly what's
- * unavailable while the store is down. Accepting a subscribed PRIVATE CG here
- * would silently convert that DENY into an accept for any authenticated caller.
- *
- * Anything short of that proof — chain says not-active/non-public, throws, times
- * out, or the adapter lacks a read — keeps today's fail-closed 503 verbatim.
- * This never converts an existing DENY into an accept: it runs only when the
- * exact probe was UNAVAILABLE (threw or degraded) AND the list leg threw, only
- * ever admits an id the registry ALREADY tracks (never a raw unknown candidate
- * → shadow-CG fail-closed holds), and only when that id is provably public (no
- * per-caller preflight deny exists to convert).
- */
-async function rescueWriteTargetWithoutStore(
-  agent: {
-    validateWriteTargetDuringStoreOutage?: (contextGraphId: string) => Promise<boolean>;
-  },
-  candidateId: string,
-  unavailableMessage: string,
-  timeoutMs: number = WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS,
-): Promise<boolean> {
-  if (typeof agent.validateWriteTargetDuringStoreOutage !== 'function') return false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    const activePublic = await Promise.race([
-      agent.validateWriteTargetDuringStoreOutage(candidateId),
-      new Promise<false>((resolveTimeout) => {
-        timer = setTimeout(() => resolveTimeout(false), timeoutMs);
-        // Allow the process to exit even if the chain promise never settles.
-        timer.unref?.();
-      }),
-    ]);
-    if (activePublic !== true) return false;
-  } catch {
-    // RPC failure / contract absent — keep the fail-closed 503.
-    return false;
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-  writePreflightRescueLog.warn(
-    createOperationContext('resolve'),
-    `write preflight: accepting context graph "${candidateId}" via positive on-chain proof it is an active PUBLIC context graph — local store unavailable (${unavailableMessage})`,
-  );
-  return true;
-}
-
-/**
- * The outcome of the EXACT write-preflight probe leg, as a single discriminated
- * value so the list-fallback leg branches on one result instead of a cluster of
- * distant mutable booleans (otReviewAgent #1408):
- *   - `accept`        — fast-accept; the caller returns the candidate id.
- *   - `rejectUnknown` — a definitive, store-backed deny of a non-bare id; the
- *                       caller returns 404.
- *   - canonical outcomes are fully reduced to accept/reject/unavailable here;
- *     the HTTP resolver never re-interprets raw probe fields.
- *   - the three `list*` variants are mutually exclusive: ordinary list/name
- *     resolution, an authoritative exact deny deferred for bare-name suffix
- *     resolution, or an unavailable exact probe whose list failure may use
- *     the store-free rescue.
- */
-type ExactPreflightDecision =
-  | { kind: "accept" }
-  | { kind: "rejectUnknown" }
-  | { kind: "rejectNonWritable" }
-  | { kind: "validationUnavailable"; errorMessage: string }
-  | { kind: "unavailableWithRescue"; errorMessage: string }
-  | { kind: "listFallback" }
-  | { kind: "listDeferredReject" }
-  | { kind: "listUnavailable"; errorMessage: string };
-
-/**
- * Run the exact write-preflight probe and reduce it to one {@link
- * ExactPreflightDecision}. Owns the probe interpretation (fast-accept,
- * degraded-store, authoritative deny) so `resolveRequiredWriteContextGraphId`
- * never re-synchronises availability/deferral/diagnostic flags across branches.
- * Deliberately takes no `ServerResponse` — HTTP responses stay with the caller.
- */
-async function evaluateExactWritePreflight(
-  agent: {
-    probeContextGraphWritePreflight?: (
-      contextGraphId: string,
-      opts?: { callerAgentAddress?: string | null },
-    ) => Promise<ContextGraphWritePreflightProbe>;
-  },
-  candidateId: string,
-  opts: {
-    callerAgentAddress: string | null;
-    requireLocalWritable: boolean;
-    isBareCandidateId: boolean;
-    allowLocalExactFallback: boolean;
-  },
-): Promise<ExactPreflightDecision> {
-  const {
-    callerAgentAddress,
-    requireLocalWritable,
-    isBareCandidateId,
-    allowLocalExactFallback,
-  } = opts;
-  if (!agent.probeContextGraphWritePreflight) {
-    // Compatibility for narrow providers that do not expose the exact point
-    // capability. Production agents do expose it; their canonical path below
-    // never enumerates the catalog.
-    return { kind: "listFallback" };
-  }
-  try {
-    const probe = await agent.probeContextGraphWritePreflight(candidateId, {
-      callerAgentAddress,
-    });
-    // Fast-accept wins even under a degraded store (it never rests on UNKNOWN
-    // store fields), so check it before any deny/unavailable interpretation.
-    if (exactProbeCanFastAccept(
-      probe,
-      requireLocalWritable,
-      callerAgentAddress,
-      allowLocalExactFallback,
-    )) {
-      return { kind: "accept" };
-    }
-    if (probe.storeUnavailable === true) {
-      // The probe survived a store failure and degraded its store-derived
-      // fields to UNKNOWN. Deny-ish verdicts are NOT trustworthy from unknowns
-      // (that would turn a store outage into a 400), so carry the store error
-      // for the both-legs-failed 503 and leave the verdict to the list/rescue.
-      const errorMessage = probe.storeErrorMessage ?? "local store unavailable";
-      return isBareCandidateId
-        ? { kind: "listUnavailable", errorMessage }
-        : { kind: "unavailableWithRescue", errorMessage };
-    }
-    // Store answered definitively — a deny-ish verdict is authoritative. Bare
-    // ids defer (the list leg may resolve the name); qualified ids reject now.
-    if (
-      exactProbeIsStaleSubscription(probe) ||
-      exactProbeIsAuthoritativeBearerDeny(probe, callerAgentAddress)
-    ) {
-      return isBareCandidateId
-        ? { kind: "listDeferredReject" }
-        : { kind: "rejectUnknown" };
-    }
-    if (!isBareCandidateId) {
-      if (probe.exists === false) return { kind: "rejectUnknown" };
-      if (probe.exists !== true) {
-        return {
-          kind: "validationUnavailable",
-          errorMessage: "exact context graph existence was incomplete",
-        };
-      }
-      if (!exactProbeIsLocallyWritable(probe, requireLocalWritable)) {
-        return { kind: "rejectNonWritable" };
-      }
-      return {
-        kind: "validationUnavailable",
-        errorMessage: "exact context graph metadata was incomplete",
-      };
-    }
-    return { kind: "listFallback" };
-  } catch (err) {
-    // The exact probe could not answer local existence at all (store down / read
-    // broke). The ONLY degraded case that makes the both-legs-failed rescue
-    // eligible: there is no authoritative local-miss verdict to override.
-    const errorMessage = err instanceof Error ? err.message : String(err);
-    return isBareCandidateId
-      ? { kind: "listUnavailable", errorMessage }
-      : { kind: "unavailableWithRescue", errorMessage };
-  }
-}
-
 /**
  * Resolve a write target to a known, canonical context graph id.
  *
@@ -1128,9 +858,10 @@ async function evaluateExactWritePreflight(
  * and resolved once more (`context-graph-write-readiness.ts`).
  */
 export function resolveRequiredWriteContextGraphId(...args: Parameters<typeof resolveWriteContextGraphIdOnce>): Promise<string | null> {
-  const [agent, , res] = args;
-  return resolveAwaitingWriteReadiness(agent, () => resolveWriteContextGraphIdOnce(...args),
-    (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome), res);
+  const [agent, contextGraphId, res, opts] = args;
+  return admissionStep(res, 'write_preflight', () => resolveAwaitingWriteReadiness(agent,
+    (afterWait) => resolveWriteContextGraphIdOnce(agent, contextGraphId, res, afterWait ? { ...opts, freshProbe: true } : opts),
+    (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome), res));
 }
 
 /** One pass of {@link resolveRequiredWriteContextGraphId}: a known graph that is not writable here is returned, not answered. */
@@ -1141,10 +872,9 @@ async function resolveWriteContextGraphIdOnce(
     }): Promise<ExistingContextGraphRow[]>;
     contextGraphHasLocalContent?: (contextGraphId: string) => Promise<boolean>;
     contextGraphExists?: (contextGraphId: string) => Promise<boolean>;
-    probeContextGraphWritePreflight?: (
-      contextGraphId: string,
-      opts?: { callerAgentAddress?: string | null },
-    ) => Promise<ContextGraphWritePreflightProbe>;
+    probeContextGraphWritePreflight?: CoalescingProbeAgent['probeContextGraphWritePreflight'];
+    /** Lets concurrent calls share one probe (`write-preflight-coalescing.ts`); absent, every call probes. */
+    writePreflightIdentity?: CoalescingProbeAgent['writePreflightIdentity'];
     /**
      * High-level store-outage rescue decision (owns the on-chain
      * active+public policy semantics). The daemon calls ONLY this method for
@@ -1173,6 +903,10 @@ async function resolveWriteContextGraphIdOnce(
      * window. Production callers never pass this, so the default is unchanged.
      */
     chainRescueTimeoutMs?: number;
+    /** Internal observer seam; exceptions cannot change validation outcomes. */
+    writePreflightDiagnostics?: WritePreflightDiagnostics;
+    /** Set by the re-resolve after a readiness wait: the exact probe must not share one that began before it. */
+    freshProbe?: boolean;
   } = {},
 ): Promise<string | KnownNotWritable | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
@@ -1200,6 +934,7 @@ async function resolveWriteContextGraphIdOnce(
     requireLocalWritable,
     isBareCandidateId,
     allowLocalExactFallback: opts.allowLocalExactFallback === true,
+    freshProbe: opts.freshProbe,
   });
   if (exactDecision.kind === "accept") return candidateId;
   if (exactDecision.kind === "rejectUnknown") {
@@ -1209,7 +944,7 @@ async function resolveWriteContextGraphIdOnce(
     return { notWritable: candidateId, raw };
   }
   if (exactDecision.kind === "validationUnavailable") {
-    return contextGraphValidationUnavailable(res, exactDecision.errorMessage);
+    return contextGraphValidationUnavailable(res, exactDecision.errorMessage, exactDecision.attribution, 'not-attempted', opts.writePreflightDiagnostics);
   }
   // Qualified ids are already canonical and unambiguous. Never turn their
   // point-validation into a full ONTOLOGY/AGENTS catalog scan: under store
@@ -1218,22 +953,21 @@ async function resolveWriteContextGraphIdOnce(
   // list leg below for suffix resolution and ambiguity reporting.
   if (exactDecision.kind === "unavailableWithRescue") {
     const message = `exact preflight failed: ${exactDecision.errorMessage}`;
-    if (await rescueWriteTargetWithoutStore(
+    const rescue = await rescueWriteTargetWithoutStore(
       agent,
       candidateId,
       message,
       opts.chainRescueTimeoutMs,
-    )) {
-      return candidateId;
-    }
-    return contextGraphValidationUnavailable(res, message);
+    );
+    if (rescue === 'accepted') return candidateId;
+    return contextGraphValidationUnavailable(res, message, exactDecision.attribution, rescue, opts.writePreflightDiagnostics);
   }
   if (
     exactDecision.kind !== "listFallback" &&
     exactDecision.kind !== "listDeferredReject" &&
     exactDecision.kind !== "listUnavailable"
   ) {
-    return contextGraphValidationUnavailable(res, 'exact context graph preflight was inconclusive');
+    return contextGraphValidationUnavailable(res, 'exact context graph preflight was inconclusive', [{ site: 'decision', kind: 'incomplete' }], 'not-attempted', opts.writePreflightDiagnostics);
   }
   // Immutable carry-forward for the list leg. Track B (rescue gating): the
   // store-free on-chain rescue may run ONLY on an `unavailable` verdict — the
@@ -1266,18 +1000,15 @@ async function resolveWriteContextGraphIdOnce(
     // When it runs, the rescue accepts only on positive on-chain proof the id
     // the daemon already tracks is an active PUBLIC context graph; everything
     // else keeps the legacy 503 verbatim.
-    if (
-      exactProbeUnavailable &&
-      (await rescueWriteTargetWithoutStore(
-        agent,
-        candidateId,
-        message,
-        opts.chainRescueTimeoutMs,
-      ))
-    ) {
-      return candidateId;
-    }
-    return contextGraphValidationUnavailable(res, message);
+    const rescue = exactProbeUnavailable
+      ? await rescueWriteTargetWithoutStore(agent, candidateId, message, opts.chainRescueTimeoutMs)
+      : 'not-attempted';
+    if (rescue === 'accepted') return candidateId;
+    const attribution: WritePreflightDiagnosticFailure[] = [
+      ...(exactDecision.kind === 'listUnavailable' ? exactDecision.attribution : []),
+      { site: 'list', kind: classifyWritePreflightFailure(err) },
+    ];
+    return contextGraphValidationUnavailable(res, message, attribution, rescue, opts.writePreflightDiagnostics);
   }
 
   const knownIds = contextGraphs
@@ -1294,6 +1025,7 @@ async function resolveWriteContextGraphIdOnce(
     try {
       exactWritable = await contextGraphRowIsWritable(agent, exact);
     } catch (err) {
+      if (respondIfStoreUnavailable(res, err)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local writability: ${message}`,
@@ -1367,6 +1099,7 @@ async function resolveWriteContextGraphIdOnce(
         return candidateId;
       }
     } catch (err) {
+      if (respondIfStoreUnavailable(res, err)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local existence: ${message}`,

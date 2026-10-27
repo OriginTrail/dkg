@@ -1,3 +1,5 @@
+import { handleKnowledgeAssetPullFrom } from './knowledge-asset-pull-from.js';
+import { handleShareJobCollection } from './share-job-collection.js';
 import { handlePublishedDescriptorRepair } from './published-descriptor-repair.js';
 import { promoteConflictResponse } from './promote-admission-response.js';
 import { partialDurableShareFailure, classifySynchronousShareFailure, synchronousShareFailureDecision } from './durable-share-response.js';
@@ -18,7 +20,7 @@ import { requireKnowledgeAssetRead } from './context-graph-read-authority.js';
 //   POST /api/knowledge-assets/:name/wm/write        append quads to the draft
 //   POST /api/knowledge-assets/:name/wm/finalize     seal the draft (git commit)
 //   POST /api/knowledge-assets/:name/wm/discard      throw the draft away
-//   POST /api/knowledge-assets/:name/wm/pull-from    seed draft from SWM/VM  [TODO]
+//   POST /api/knowledge-assets/:name/wm/pull-from    seed or verify draft from SWM/VM
 //   POST /api/knowledge-assets/:name/swm/share       advance the SWM pointer
 //   POST /api/knowledge-assets/:name/vm/publish      mint/update on chain
 //   POST /api/knowledge-assets/:name/vm/publish-async enqueue mint/update on chain
@@ -64,14 +66,6 @@ import {
   handleKaExtractionStatus,
 } from "./knowledge-assets-import.js";
 import {
-  handleKaShareJobsList,
-  handleKaShareJobStatus,
-  handleKaShareJobCancel,
-  handleKaShareJobClear,
-  handleKaShareJobRecover,
-} from "./knowledge-assets-async-share.js";
-import {
-  decodePromoteJobId,
   asyncPromoteUnavailable,
   authorizeAgentScopedAuthorClaim,
   buildAutoRegisterFailureBody,
@@ -85,10 +79,8 @@ import {
   isKnowledgeAssetWorkspaceHeadCorruptError,
 } from "@origintrail-official/dkg-publisher";
 import { deriveStatus } from "@origintrail-official/dkg-publisher";
-import {
-  validateAssertionName,
-  contextGraphAssertionUri,
-} from "@origintrail-official/dkg-core";
+import { validateAssertionName, contextGraphAssertionUri } from "@origintrail-official/dkg-core";
+import { admissionStep } from "../async-admission-trace.js";
 import {
   formatFinalizedPublishOptionError,
   parseHttpFinalizedPublishOptions,
@@ -637,69 +629,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
   if (method === "POST" && path === `${PREFIX}/import-artifact/read-markdown`) return handleKaImportArtifactReadMarkdown(ctx);
   if (method === "POST" && path === `${PREFIX}/semantic-enrichment/write`) return handleKaSemanticEnrichmentWrite(ctx);
 
-  // ── Async SWM-share jobs COLLECTION routes (faithful ports of the legacy
-  // `/api/assertion/promote-async*` queue routes) ──
-  //
-  // These start with `swm/share-jobs`, so `segs[0]` would be "swm" — the
-  // generic `:name` parsing below would mis-read it as an assertion name.
-  // Match them EARLY on the raw `path`, before any name logic. The per-name
-  // enqueue route (`:name/swm/share-async`) is NOT here — it has a real name
-  // segment and is handled in the SWM section alongside `swm/share`.
-  //
-  // The `/recover` suffix (#5) must be matched BEFORE the bare-`:jobId`
-  // patterns (#3/#4). jobIds are decoded via `decodePromoteJobId` on the
-  // url-encoded segment, exactly as the legacy routes did inline.
-  const SHARE_JOBS_PREFIX = `${PREFIX}/swm/share-jobs`;
-  if (path === SHARE_JOBS_PREFIX || path.startsWith(`${SHARE_JOBS_PREFIX}/`)) {
-    // GET /api/knowledge-assets/swm/share-jobs — list
-    if (method === "GET" && path === SHARE_JOBS_PREFIX) {
-      return handleKaShareJobsList(ctx);
-    }
-    // POST /api/knowledge-assets/swm/share-jobs/:jobId/recover — recover (#5)
-    if (
-      method === "POST" &&
-      path.startsWith(`${SHARE_JOBS_PREFIX}/`) &&
-      path.endsWith("/recover")
-    ) {
-      const jobId = decodePromoteJobId(
-        path.slice(`${SHARE_JOBS_PREFIX}/`.length, -"/recover".length),
-        res,
-      );
-      if (jobId === null) return;
-      return handleKaShareJobRecover(ctx, jobId);
-    }
-    // POST /api/knowledge-assets/swm/share-jobs/:jobId/clear — #1837 atomic terminal
-    // record removal (idempotent). DISTINCT from the DELETE cancellation below (which
-    // rewrites a queued job to failed+cancelled and RETAINS the row).
-    if (
-      method === "POST" &&
-      path.startsWith(`${SHARE_JOBS_PREFIX}/`) &&
-      path.endsWith("/clear")
-    ) {
-      const jobId = decodePromoteJobId(
-        path.slice(`${SHARE_JOBS_PREFIX}/`.length, -"/clear".length),
-        res,
-      );
-      if (jobId === null) return;
-      return handleKaShareJobClear(ctx, jobId);
-    }
-    // GET /api/knowledge-assets/swm/share-jobs/:jobId — status (#3)
-    if (
-      method === "GET" &&
-      path.startsWith(`${SHARE_JOBS_PREFIX}/`) &&
-      !path.endsWith("/recover")
-    ) {
-      const jobId = decodePromoteJobId(path.slice(`${SHARE_JOBS_PREFIX}/`.length), res);
-      if (jobId === null) return;
-      return handleKaShareJobStatus(ctx, jobId);
-    }
-    // DELETE /api/knowledge-assets/swm/share-jobs/:jobId — cancel (#4)
-    if (method === "DELETE" && path.startsWith(`${SHARE_JOBS_PREFIX}/`)) {
-      const jobId = decodePromoteJobId(path.slice(`${SHARE_JOBS_PREFIX}/`.length), res);
-      if (jobId === null) return;
-      return handleKaShareJobCancel(ctx, jobId);
-    }
-  }
+  if (await handleShareJobCollection(ctx)) return;
 
   // Parity with the legacy assertion routes: resolve/validate the write
   // contextGraphId against the caller's known graphs before any mutation, so a
@@ -1319,33 +1249,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         return jsonResponse(res, 200, { discarded: true });
       }
       if (verb === "pull-from") {
-        // Net-new primitive (the git-checkout equivalent): seed a fresh WM
-        // draft from the current SWM or VM state (OT-RFC-43 §10.5.3).
-        const sourceLayer = parsed.layer;
-        if (sourceLayer !== "swm" && sourceLayer !== "vm") {
-          return jsonResponse(res, 400, { error: 'pull-from requires "layer": "swm" | "vm"' });
-        }
-        const onConflict = parsed.onConflict === "replace" ? "replace" : "reject";
-        try {
-          const result = await agent.assertion.pullFrom(contextGraphId, name, sourceLayer, {
-            subGraphName,
-            onConflict,
-            ...(writePreflightCallerAgentAddress ? { agentAddress: writePreflightCallerAgentAddress } : {}),
-          });
-          return jsonResponse(res, 200, { wmDraft: "open", seededFrom: { layer: sourceLayer }, ...result });
-        } catch (e: any) {
-          if (e?.code === "WM_DRAFT_CONFLICT") {
-            return jsonResponse(res, 409, { code: "WM_DRAFT_CONFLICT", error: e.message });
-          }
-          if (
-            e?.code === "UNSEALED_PULL_FROM_BLOCKED"
-            || e?.code === "PULL_FROM_EMPTY_SOURCE"
-            || e?.code === "LEGACY_KA_READ_ONLY"
-          ) {
-            return jsonResponse(res, 409, { code: e.code, error: e.message });
-          }
-          throw e; // -> outer catch -> 500
-        }
+        return await handleKnowledgeAssetPullFrom(ctx, parsed, contextGraphId, name, subGraphName, writePreflightCallerAgentAddress);
       }
     }
 
@@ -1440,11 +1344,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         }
       }
       try {
-        const result = await agent.assertion.promoteAsync(contextGraphId, name, {
+        const result = await admissionStep(res, 'enqueue', () => agent.assertion.promoteAsync(contextGraphId, name, {
           entities: entities ?? "all",
           subGraphName,
           ...promoteStorageLane,
-        });
+        }));
         return jsonResponse(res, 200, { jobId: result.jobId, state: "queued" });
       } catch (err: any) {
         if (err instanceof PromoteJobConflictError) {
@@ -1483,7 +1387,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         const asyncSelectedAuthor = resolveSelectedAuthorAgentAddress(ctx, parsed);
         if (!asyncSelectedAuthor.ok) return;
         const publishOptions = opts;
-        const intent = await agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
+        const intent = await admissionStep(res, 'intent_resolution', () => agent.resolveFinalizedAssertionVmPublishIntent(contextGraphId, name, {
           ...(subGraphName ? { subGraphName } : {}),
           ...publishCallerHintLane(writePreflightCallerAgentAddress),
           ...(asyncSelectedAuthor.value !== undefined
@@ -1497,8 +1401,8 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
           ...(publishOptions.publisherNodeIdentityIdOverride !== undefined
             ? { publisherNodeIdentityIdOverride: publishOptions.publisherNodeIdentityIdOverride }
             : {}),
-        });
-        await agent.preflightKnowledgeAssetVmPublishSnapshot(intent);
+        }));
+        await admissionStep(res, 'snapshot_preflight', () => agent.preflightKnowledgeAssetVmPublishSnapshot(intent));
         // 🔴 3824484639 — record WHO admitted this job, for authorization only. `requestAgentAddress`
         // is always resolvable (a node-level token maps to the default owner agent), unlike the
         // author-resolution hint, which is deliberately absent for node tokens — authorizing on
@@ -1507,9 +1411,9 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // Admission travels BESIDE the request (🟡 3824743779), never inside it: the operation
         // payload that execution and recovery act on carries no authorization principal.
         enqueueStarted = true;
-        const jobId = await publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
+        const jobId = await admissionStep(res, 'enqueue', () => publisherControl.enqueueKnowledgeAssetVmPublish(intent, {
           admittedByAgentAddress: requestAgentAddress,
-        });
+        }));
         return jsonResponse(res, 202, {
           jobId,
           status: "accepted",

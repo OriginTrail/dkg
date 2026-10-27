@@ -12,6 +12,8 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/async-share-bound-recovery.test.ts',
+          'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
           'test/durable-private-payload-recovery.test.ts',
           'test/durable-gossip-signer-lookup.test.ts',
@@ -21,7 +23,9 @@ export default defineConfig({
           'test/durable-unregistered-author-process.test.ts',
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',
+          'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
+          'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
@@ -32,6 +36,14 @@ export default defineConfig({
           // #2892 — real in-memory queue and supervisor; no chain or daemon process.
           'test/async-promote-supervisor-bookkeeping.test.ts',
           'test/promote-queue-config.test.ts',
+          // OT-RFC-73 P10b — queue retention wiring: config, the one timer, the daemon-only start, the share sweep over the queue's own store object, the usage line.
+          'test/retention-config.test.ts',
+          'test/retention-timer.test.ts',
+          'test/retention-sweeps.test.ts',
+          'test/retention-share-sweep.test.ts',
+          'test/retention-runtime-scope.test.ts',
+          'test/daemon-queue-retention-live.test.ts',
+          'test/async-admission-usage-retention.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
@@ -43,10 +55,13 @@ export default defineConfig({
           // POST routes (pure handler, no hardhat). Belongs in the fast lane
           // alongside its clear-job sibling above.
           'test/publisher-admin-body-boundary.test.ts',
+          'test/publisher-live-control.test.ts',
+          'test/publisher-live-control-route.test.ts',
           // #1828 — daemon-boot intent-index backfill wiring (fail-open contract).
           'test/vm-publish-intent-backfill.test.ts',
           'test/agent-connect-routes.test.ts',
           'test/preferred-relays.test.ts',
+          'test/lan-addresses.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
           'test/config.test.ts',
@@ -87,6 +102,7 @@ export default defineConfig({
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
           'test/promote-admission-route.test.ts',
+          'test/async-share-control-busy-admission.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
           // The dashboard shell carries the operator token only for trusted
           // local requests (loopback socket and loopback Host). Pure helpers
@@ -96,6 +112,7 @@ export default defineConfig({
           // handlers plus one live daemon on the mock chain; no hardhat.
           'test/node-admin-scope-routes.test.ts',
           'test/daemon-operator-scope-live.test.ts',
+          'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
           // no hardhat/daemon spawn) instead of the daemon-http lane.
@@ -103,6 +120,9 @@ export default defineConfig({
           // Private-CG bootstrap readiness: clean-empty responses are only
           // terminal when authoritative metadata has been confirmed.
           'test/context-graph-subscribe-readiness.test.ts',
+          'test/approved-member-empty-graph-first-write.test.ts',
+          'test/context-graph-empty-vm-readiness.test.ts',
+          'test/context-graph-subscribe-empty-vm.test.ts',
           // A public graph its subscribe job left unproven gets the job again
           // (#3207). The real catch-up worker behind a fake thread; no hardhat.
           'test/context-graph-readiness-repeat.test.ts',
@@ -159,7 +179,9 @@ export default defineConfig({
           'test/auto-update-workspace-clean.test.ts',
           'test/maintenance-update-gate.test.ts',
           'test/node-runtime-preflight.test.ts',
+          'test/outbound-brotli-refusal.test.ts',
           'test/dkg-doctor.test.ts',
+          'test/doctor-command-config.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
           'test/init-command.test.ts',
@@ -196,14 +218,30 @@ export default defineConfig({
           // `/api/status` → `eventLoopDelay`: the gauge with a fake histogram
           // plus one real-histogram smoke test, and the route block shape.
           'test/event-loop-delay-monitor.test.ts',
+          // The periodic `resource_usage` line: its fields and its schedule.
+          'test/resource-usage-log.test.ts',
+          // The periodic `async_admission_usage` line, the HTTP admission trace behind it and
+          // the routes' phase labels.
+          'test/async-admission-usage-log.test.ts',
+          'test/async-admission-trace.test.ts',
+          'test/async-admission-routes.test.ts',
           'test/supervisor-liveness.test.ts',
+          'test/liveness-diagnostics.test.ts',
+          'test/liveness-supervisor-log.test.ts',
+          'test/foreground-supervisor-command.test.ts',
           'test/promote-async-routes.test.ts',
+          // OT-RFC-73 P9b — the opt-in paged mode of the two job list routes (real queues over HTTP, no hardhat).
+          'test/job-list-paging-routes.test.ts',
+          // OT-RFC-73 P9b — --cursor, --page-size and --all of the two list commands, and the client path helpers.
+          'test/job-list-paging-cli.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
           // Pure HTTP classification coverage for chain transport failures,
           // including preserving a known transaction hash on endpoint exhaustion.
           'test/chain-rpc-transport-status.test.ts',
           'test/async-promote-worker.test.ts',
+          'test/async-share-evidence-worker.test.ts',
+          'test/share-reconciliation-route.test.ts',
           // #2315 — privacy-bounded diagnostics and hostile logger isolation.
           'test/async-promote-worker-diagnostics.test.ts',
           'test/async-promote-error-classification.test.ts',
@@ -212,12 +250,14 @@ export default defineConfig({
           'test/async-promote-bookkeeping-recovery.test.ts',
           'test/async-promote-queue-e2e.test.ts',
           'test/knowledge-assets-1116-share-errors.test.ts',
+          'test/knowledge-asset-pull-recovery.test.ts',
           'test/knowledge-assets-sub-graph-refusal.test.ts',
           'test/import-artifact-routes.test.ts',
           'test/shared-memory-catchup-durable.test.ts',
           'test/skill-endpoint.test.ts',
-          // R6-B — metric COUNT getter TTL memo. Pure logic, no hardhat.
+          // Reconciled metric-count snapshot and exact-query parity. No hardhat.
           'test/metrics-queries.test.ts',
+          'test/store-count-metrics.test.ts',
           // #1066 Item 1 — metrics presence gate. Pure logic (injected clock).
           'test/metrics-presence.test.ts',
           'test/rpc-usage-log.test.ts',
@@ -317,6 +357,17 @@ export default defineConfig({
           // slow/closed. Real resolver + real agent probe + real (closed)
           // OxigraphWorkerStore; no hardhat needed.
           'test/write-preflight-resilience.test.ts',
+          // OT-RFC-73 S4a — concurrent write preflights share one probe: who may
+          // share, when a probe in flight stops being joinable, the optional
+          // result cache, the switches. Fake agent; the seam test runs the real
+          // probe, store observer and resolver. Neither needs hardhat.
+          'test/write-preflight-coalescing.test.ts',
+          'test/write-preflight-coalescing-seam.test.ts',
+          // The operator's unresolved-write window reaches DKGAgent.create from runDaemonInner.
+          'test/daemon-write-preflight-window-wiring.test.ts',
+          // A store-busy refusal in the preflight's follow-up reads answers 503
+          // at both async admission routes.
+          'test/write-preflight-store-busy-route.test.ts',
           'test/http-literal-size-validation.test.ts',
           'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.

@@ -88,15 +88,21 @@ describe('foreground supervisor restart command', () => {
       },
     );
     await started;
-    captured!.onFailure?.(2);
-    captured!.onUnresponsive();
-    captured!.onUnresponsive();
+    const observation = {
+      generation: 'test-generation',
+      probe: { outcome: 'deadline' as const, elapsedMs: 5000, connected: true, headersReceived: false },
+      consecutiveFailures: 5,
+      shutdownGrace: { state: 'not_observed' as const, elapsedMs: 0, budgetMs: 6000 },
+    };
+    const summary = { generation: observation.generation, threshold: 5, recent: [observation] };
+    captured!.onObservation?.(observation);
+    captured!.onUnresponsive(summary);
+    captured!.onUnresponsive(summary);
     expect(reads).toBe(2);
-    expect(killCalls).toBe(2);
+    expect(killCalls).toBe(1);
     expect(warnings).toEqual([
-      '[supervisor] liveness probe failed (2 in a row).',
-      '[supervisor] worker unresponsive after 5 consecutive liveness probes; SIGKILL + respawn.',
-      '[supervisor] worker unresponsive after 5 consecutive liveness probes; SIGKILL + respawn.',
+      `[supervisor] liveness probe ${JSON.stringify(observation)}`,
+      `[supervisor] liveness restart ${JSON.stringify(summary)}`,
     ]);
     stop();
   });

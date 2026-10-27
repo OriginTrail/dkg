@@ -1,3 +1,4 @@
+import type { ShareCompletionEvidence } from './share-completion-evidence.js';
 import type { PublishOptions } from './publisher.js';
 import { validatePromoteRecoveryBinding, type PromoteRecoveryBinding } from './promote-recovery-binding.js';
 import type { WorkspaceAgentRecipientResolver } from './workspace-agent-recipients.js';
@@ -17,6 +18,8 @@ export type PublisherAssertionPromoteOptions = {
   subGraphName?: string;
   publisherPeerId?: string;
   senderAgentAddress?: string;
+  /** Explicit expected seal author, checked inside the lifecycle lock before sharing. */
+  authorAgentAddress?: string;
   /** Do not encrypt or emit a network-ready payload for a local capture. */
   localOnly?: boolean;
   /** Immutable access envelope persisted with the graph-scoped share. */
@@ -42,6 +45,7 @@ export type AssertionPromoteResult = {
   gossipMessage?: Uint8Array;
   promotedAllRoots: boolean;
   shareOperationId?: string;
+  shareEvidence?: ShareCompletionEvidence;
 };
 
 /** Snapshot caller-owned collections before waiting on the lifecycle lock. */

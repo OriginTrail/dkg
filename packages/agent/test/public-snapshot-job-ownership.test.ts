@@ -143,7 +143,7 @@ describe('public snapshot job ownership', () => {
     expect(a.router.send).not.toHaveBeenCalled(); expect(a.chain.readPublicGraphSnapshot).not.toHaveBeenCalled();
   });
   it("refuses a retained inactive source and fences a source deselected during a read", async () => {
-    const {a,invalidate} = fixture(); a.config={nodeRole:'core'};
+    const {a,invalidate} = fixture(); a.config={nodeRole:'core',coreChainCacheNetworks:[]};
     let handler!: (bytes: Uint8Array, peer: { toString(): string }) => Promise<Uint8Array>;
     a.router.register=(_p:string,h: typeof handler)=>{handler=h;};
     PublicSnapshotMethods.prototype.startPublicGraphSnapshots.call(a);
@@ -164,9 +164,11 @@ describe('public snapshot job ownership', () => {
   it.each(['subscription', 'lifetime'] as const)('retires a held initial read when %s changes', async change => {
     const {a,invalidate} = fixture();
     let release!: (value: ReturnType<typeof snapshot>) => void;
-    a.chain.readPublicGraphSnapshot.mockImplementationOnce(() => new Promise(resolve => {release = resolve;}));
+    let entered!: () => void;
+    const initialReadEntered = new Promise<void>(resolve => { entered = resolve; });
+    a.chain.readPublicGraphSnapshot.mockImplementationOnce(() => new Promise(resolve => {release = resolve; entered();}));
     const job = run(a, 'rpc-only'); const rejected = expect(job).rejects.toThrow('ownership');
-    await Promise.resolve();
+    await initialReadEntered;
     expect(a.workLifetime.physicalRuns.size).toBe(1);
     if(change === 'subscription') invalidate();
     else { a.workLifetime.close(); a.workLifetime.open(); }
@@ -209,6 +211,7 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
   it.each(['caller', 'binding'] as const)('keeps physical ownership and fences later assets after %s cancellation', async change => {
     vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const f = createExactBatchHostFixture(transportCleanups), a = f.host;
+    a.router.send = vi.fn(async () => { throw new Error('RPC-only jobs must not request a core snapshot'); });
     a.started = true;
     a.subscribedContextGraphs.set(CG, { subscribed: true, onChainId: '14', onChainHash: ethers.id(CG) });
     a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;
@@ -268,6 +271,7 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
       expect(writes).toHaveBeenCalledTimes(1);
       expect(recover).toHaveBeenCalledTimes(1);
       expect(a.chain.readPublicGraphSnapshot).toHaveBeenCalledTimes(1);
+      expect(a.router.send).not.toHaveBeenCalled();
       expect(a.workLifetime.physicalRuns.size).toBe(0);
       expect(getEventListeners(caller.signal, 'abort')).toHaveLength(0);
     } finally { release(); await outcome; }
