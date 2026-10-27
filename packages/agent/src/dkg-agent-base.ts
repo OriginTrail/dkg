@@ -1,3 +1,4 @@
+import { ContextGraphSubscriptionActivations } from './context-graph-subscription-activation-state.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
@@ -1514,6 +1515,7 @@ export class DKGAgentBase {
   /** Canonical dormant classification; public status arrays are projections. */
   protected readonly contextGraphSubscriptionDormancyById =
     new Map<string, ContextGraphDormancyReason>();
+  protected readonly contextGraphSubscriptionActivations = new ContextGraphSubscriptionActivations();
   /** Detached owner for post-readiness persisted-subscription authority recovery. */
   protected contextGraphSubscriptionAuthorityRecoveryRuntime?:
     CoalescingRecurringTask;

@@ -1,101 +1,120 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
-import type { ContextGraphSub, ContextGraphSubscriptionRecord, ContextGraphSubscriptionStore } from './dkg-agent-types.js';
+import type { ContextGraphSub, ContextGraphSubscriptionRecord } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
-import { isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
-import { vmRecoveryRetryDelay } from './vm-recovery-pass-authority.js';
+import { contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 
+type Dormancy = ReadonlyMap<string, ContextGraphDormancyReason>;
+const changed = () => new Error('Subscription activation ownership changed');
 export function isCommittedSubscription(
-  subscriptions: ReadonlyMap<string, ContextGraphSub>,
-  dormancy: ReadonlyMap<string, ContextGraphDormancyReason>, id: string,
+  subscriptions: ReadonlyMap<string, ContextGraphSub>, dormancy: Dormancy, id: string,
 ): boolean {
   const row = subscriptions.get(id);
   return Boolean((row?.subscribed || row?.coreHosted) && !dormancy.has(id));
 }
 
-type Dormancy = ReadonlyMap<string, ContextGraphDormancyReason>;
-interface UnboundActivationWait {
-  id: string;
-  cancelled: boolean;
-  intent?: ContextGraphSubscriptionRecord;
-  activationIntent?: ContextGraphSubscriptionRecord;
-  activated?: ContextGraphSub;
-}
-// Only physical waits are retained. Durable intent exists before a canonical
-// live identity can be projected, and internal activation may heal its binding.
-const unboundWaits = new WeakMap<Dormancy, Set<UnboundActivationWait>>();
-
-export function cancelUnboundSubscriptionActivation(dormancy: Dormancy, id: string): void {
-  for (const wait of unboundWaits.get(dormancy) ?? []) {
-    // Once committed, ordinary readiness writes are allowed; live lineage
-    // fences deletion/recreation from then on.
-    if (wait.id === id && !wait.activated) wait.cancelled = true;
-  }
-}
-
-export function recordPersistedSubscriptionActivation(
-  dormancy: Dormancy, intent: ContextGraphSubscriptionRecord, activated: ContextGraphSub,
-): void {
-  for (const wait of unboundWaits.get(dormancy) ?? []) {
-    if (wait.id !== intent.id || wait.activated) continue;
-    wait.activationIntent = { ...intent };
-    wait.activated = activated;
-  }
-}
-
-function sameDurableIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
+function sameIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
   return left.id === right.id && left.subscribed === right.subscribed
-    && (left.coreHosted === true) === (right.coreHosted === true)
-    && left.syncScoped === right.syncScoped
-    && left.onChainId === right.onChainId && left.onChainHash === right.onChainHash;
+    && (left.coreHosted === true) === (right.coreHosted === true) && left.syncScoped === right.syncScoped;
+}
+function sameDurableIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
+  return sameIntent(left, right) && left.onChainId === right.onChainId && left.onChainHash === right.onChainHash;
+}
+class Activation {
+  readonly intent: ContextGraphSubscriptionRecord;
+  repaired?: ContextGraphSubscriptionRecord;
+  installed?: ContextGraphSub;
+  ready?: ContextGraphSub;
+  committed?: ContextGraphSub;
+  settled = false;
+  private readonly listeners = new Set<() => void>();
+  constructor(intent: ContextGraphSubscriptionRecord) { this.intent = { ...intent }; }
+  settle(): void {
+    this.settled = true;
+    for (const notify of this.listeners) notify();
+    this.listeners.clear();
+  }
+  wait(signal: AbortSignal): Promise<void> {
+    return new Promise((resolve, reject) => {
+      const finish = () => {
+        this.listeners.delete(finish); signal.removeEventListener('abort', finish);
+        if (signal.aborted) reject(changed()); else resolve();
+      };
+      if (this.settled || signal.aborted) { finish(); return; }
+      this.listeners.add(finish); signal.addEventListener('abort', finish, { once: true });
+    });
+  }
 }
 
-/** Wait only for an authority-recovery activation already owned by the lifecycle.
- * Denied, disabled and capped subscriptions retain their existing inactive behavior.
- * The caller supplies its original deadline signal; no new deadline or RPC is added. */
+/** Lifecycle-owned durable intent. Waiters never load or reinterpret the store.
+ * Only the activation transaction can attach a repaired binding and live row. */
+export class ContextGraphSubscriptionActivations {
+  private readonly pending = new Map<string, Activation>();
+  reset(rows: readonly ContextGraphSubscriptionRecord[]): void {
+    for (const id of this.pending.keys()) this.cancel(id);
+    for (const row of rows) this.observe(row);
+  }
+  observe(row: ContextGraphSubscriptionRecord): Activation {
+    const current = this.pending.get(row.id);
+    if (current && (sameDurableIntent(current.intent, row)
+      || (current.repaired && sameDurableIntent(current.repaired, row)))) return current;
+    this.cancel(row.id);
+    const activation = new Activation(row);
+    this.pending.set(row.id, activation);
+    return activation;
+  }
+  get(id: string): Activation | undefined { return this.pending.get(id); }
+  cancel(id: string): void {
+    const activation = this.pending.get(id);
+    this.pending.delete(id); activation?.settle();
+  }
+  reconcile(dormancy: Dormancy): void {
+    for (const id of this.pending.keys()) if (dormancy.get(id) !== 'authorityUnavailable') this.cancel(id);
+  }
+  install(activation: Activation, row: ContextGraphSub): void {
+    if (this.pending.get(activation.intent.id) !== activation) throw changed();
+    activation.installed = row;
+    activation.ready = undefined;
+  }
+  stage(activation: Activation, row: ContextGraphSub): void {
+    this.install(activation, row);
+    activation.ready = row;
+  }
+  repaired(row: ContextGraphSubscriptionRecord, live: ContextGraphSub): void {
+    const activation = this.pending.get(row.id);
+    if (activation?.installed && sameIntent(activation.intent, row)
+      && isContextGraphSubscriptionStoredAgain(activation.installed, live)) activation.repaired = { ...row };
+  }
+  complete(id: string, live: ContextGraphSub | undefined): void {
+    const activation = this.pending.get(id);
+    if (!activation) return;
+    if (live && activation.ready && isContextGraphSubscriptionStoredAgain(activation.ready, live)
+      && contextGraphSubscriptionAdmissionPremisesEqual(activation.ready, live)) activation.committed = live;
+    this.cancel(id);
+  }
+}
+
+/** Await the lifecycle's existing activation within the caller's original lifetime.
+ * Denied, disabled and capped subscriptions retain their existing inactive behavior. */
 export async function waitForSubscriptionActivation(
   workLifetime: AgentWorkLifetime, isStarted: () => boolean,
-  subscriptions: ReadonlyMap<string, ContextGraphSub>,
-  dormancy: Dormancy, id: string, caller: AbortSignal,
-  store?: ContextGraphSubscriptionStore,
+  subscriptions: ReadonlyMap<string, ContextGraphSub>, dormancy: Dormancy,
+  id: string, caller: AbortSignal, activations: ContextGraphSubscriptionActivations,
 ): Promise<void> {
   if (dormancy.get(id) !== 'authorityUnavailable') return;
-  const subscription = subscriptions.get(id);
-  const cold: UnboundActivationWait | undefined = subscription === undefined ? { id, cancelled: false } : undefined;
-  const generation = workLifetime.generation;
+  const activation = activations.get(id), generation = workLifetime.generation;
   const signal = AbortSignal.any([caller, workLifetime.signal]);
-  const changed = () => new Error('Subscription activation ownership changed');
   const assertCurrent = () => {
-    if (signal.aborted || generation !== workLifetime.generation || !isStarted() || cold?.cancelled) throw changed();
-    if (cold?.intent && cold.activationIntent && !sameDurableIntent(cold.intent, cold.activationIntent)) throw changed();
-    const owner = subscription ?? cold?.activated;
-    if (owner && !isContextGraphSubscriptionStoredAgain(owner, subscriptions.get(id))) throw changed();
+    if (signal.aborted || generation !== workLifetime.generation || !isStarted()) throw changed();
   };
-  if (cold) {
-    const waits = unboundWaits.get(dormancy) ?? new Set<UnboundActivationWait>();
-    waits.add(cold); unboundWaits.set(dormancy, waits);
-  }
-  try {
-    assertCurrent();
-    await workLifetime.track((async () => {
-      if (cold) {
-        const intent = store?.load ? await store.load(id) : (await store?.loadAll())?.find(row => row.id === id);
-        assertCurrent();
-        if (!intent || (!intent.subscribed && !intent.coreHosted)) throw changed();
-        cold.intent = { ...intent };
-      }
-      while (dormancy.get(id) === 'authorityUnavailable') {
-        assertCurrent();
-        await vmRecoveryRetryDelay(2_500, signal);
-      }
-      assertCurrent();
-      if (cold && !cold.activated) throw changed();
-    })());
-  } finally {
-    if (cold) {
-      const waits = unboundWaits.get(dormancy);
-      waits?.delete(cold);
-      if (waits?.size === 0) unboundWaits.delete(dormancy);
-    }
-  }
+  assertCurrent();
+  if (!activation) throw changed();
+  await workLifetime.track(activation.wait(signal));
+  assertCurrent();
+  const live = subscriptions.get(id);
+  // Preserve the caller's inactive-subscription error after an explicit unsubscribe.
+  if (live && !live.subscribed && !live.coreHosted && dormancy.get(id) !== 'authorityUnavailable') return;
+  if (!activation.committed || !live || dormancy.has(id)
+    || !isContextGraphSubscriptionStoredAgain(activation.committed, live)
+    || !contextGraphSubscriptionAdmissionPremisesEqual(activation.committed, live)) throw changed();
 }

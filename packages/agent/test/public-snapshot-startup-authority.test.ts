@@ -1,4 +1,4 @@
-import { recordPersistedSubscriptionActivation } from '../src/context-graph-subscription-activation-state.js';
+import { ContextGraphSubscriptionActivations } from '../src/context-graph-subscription-activation-state.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -18,6 +18,7 @@ function fixture() {
   }); };
   const a: any = {
     started: true, workLifetime: new AgentWorkLifetime(),
+    contextGraphSubscriptionActivations: new ContextGraphSubscriptionActivations(),
     subscribedContextGraphs: new Map([[graph, active()]]),
     contextGraphSubscriptionDormancyById: new Map([[graph, 'authorityUnavailable']]),
     waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
@@ -26,6 +27,7 @@ function fixture() {
     router: { send: vi.fn(async () => Buffer.from(JSON.stringify(snapshot()))) },
     store: { insert: vi.fn(async () => {}) },
   };
+  a.contextGraphSubscriptionActivations.observe({ id: graph, subscribed: true, syncScoped: true, synced: false, metaSynced: false, sharedMemorySynced: false, onChainId: '1', onChainHash: ethers.id(graph) });
   a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;
   const replace = (next: ReturnType<typeof active>) => {
     continueContextGraphSubscriptionLine(a.subscribedContextGraphs.get(graph), next);
@@ -36,8 +38,14 @@ function fixture() {
 function coldIntent(a: any) {
   const row = { id: graph, subscribed: true, syncScoped: true, synced: false, metaSynced: false, sharedMemorySynced: false };
   a.subscribedContextGraphs.clear();
-  a.config = { contextGraphSubscriptionStore: { load: async () => ({ ...row }) } };
+  a.contextGraphSubscriptionActivations.reset([row]);
   return row;
+}
+function finish(a: any) {
+  const owner = a.contextGraphSubscriptionActivations, row = a.subscribedContextGraphs.get(graph);
+  a.contextGraphSubscriptionDormancyById.delete(graph);
+  if (row?.subscribed) { owner.stage(owner.get(graph), row); owner.complete(graph, row); }
+  else owner.cancel(graph);
 }
 const run = (a: any, signal?: AbortSignal) => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a,
   { contextGraphId: graph, onChainId: '1', mode: 'core-cache', trustedCorePeerIds: ['core'], signal });
@@ -46,14 +54,13 @@ afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 describe('snapshot waits for persisted startup authority', () => {
   it('waits for the lifecycle to commit a legacy unbound intent before reading an inventory', async () => {
     vi.useFakeTimers();
-    const { a, active } = fixture(), intent = coldIntent(a);
+    const { a, active } = fixture(); coldIntent(a);
     const pending = run(a);
     await vi.advanceTimersByTimeAsync(2500);
     expect(a.router.send).not.toHaveBeenCalled();
     const committed = active();
     a.subscribedContextGraphs.set(graph, committed);
-    recordPersistedSubscriptionActivation(a.contextGraphSubscriptionDormancyById, intent, committed as any);
-    a.contextGraphSubscriptionDormancyById.delete(graph);
+    finish(a);
     await vi.advanceTimersByTimeAsync(2500);
     await expect(pending).resolves.toMatchObject({ assets: 0, current: true });
     expect(a.router.send).toHaveBeenCalledTimes(2);
@@ -73,9 +80,9 @@ describe('snapshot waits for persisted startup authority', () => {
     await vi.advanceTimersByTimeAsync(2500);
     expect(a.router.send).not.toHaveBeenCalled();
     replace(active());
-    a.contextGraphSubscriptionDormancyById.delete(graph);
+    finish(a);
     await vi.advanceTimersByTimeAsync(2500);
-    await expect(pending).resolves.toMatchObject({ assets: 0, current: true, elapsedMs: 5000 });
+    await expect(pending).resolves.toMatchObject({ assets: 0, current: true, elapsedMs: 2500 });
     expect(a.router.send).toHaveBeenCalledTimes(2);
     expect(a.workLifetime.physicalRuns.size).toBe(0);
   });
@@ -112,7 +119,7 @@ describe('snapshot waits for persisted startup authority', () => {
     const rejected = expect(pending).rejects.toThrow('inactive');
     await vi.advanceTimersByTimeAsync(0);
     replace({ ...active(), subscribed: false });
-    a.contextGraphSubscriptionDormancyById.delete(graph);
+    finish(a);
     await vi.advanceTimersByTimeAsync(2500);
     await rejected;
     expect(a.router.send).not.toHaveBeenCalled();

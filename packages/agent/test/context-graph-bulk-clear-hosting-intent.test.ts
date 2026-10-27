@@ -56,6 +56,64 @@ async function fixture(hosted: boolean, unbound = false) {
 }
 
 describe('bulk clear preserves independent saved Core hosting', () => {
+  it('accepts an owned binding repair even when an earlier durable load returns only after activation', async () => {
+    const f = await fixture(false, true), state = f.agent as any;
+    const delayed = deferred(); let recoveryMayRead = false;
+    const load = f.store.load!.bind(f.store);
+    vi.spyOn(f.store, 'load').mockImplementation(async id => {
+      if (!recoveryMayRead) await delayed.promise;
+      return load(id);
+    });
+    const signal = new AbortController().signal;
+    const runtime = new CoalescingRecurringTask({ retryIntervalMs: 30_000, runPass: async () => 'idle',
+      onError: error => { throw error; }, closingMessage: 'test closed' });
+    vi.spyOn(runtime, 'owns').mockImplementation(candidate => candidate === signal);
+    state.contextGraphSubscriptionAuthorityRecoveryRuntime = runtime;
+    state.started = true; vi.useFakeTimers();
+    const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, signal)
+      .then(() => 'activated', (error: Error) => error);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      recoveryMayRead = true;
+      vi.mocked(f.agent.resolveContextGraphSubscriptionBootstrapAuthority).mockResolvedValue({
+        outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 582n,
+      });
+      await f.agent.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+      expect(f.rows.get(LOCAL)?.onChainId).toBe('582');
+      expect(f.agent.isContextGraphSubscriptionCommitted(LOCAL)).toBe(true);
+      delayed.resolve(); await vi.advanceTimersByTimeAsync(2500);
+      expect(await outcome).toBe('activated');
+      expect(state.workLifetime.physicalRuns.size).toBe(0);
+    } finally { delayed.resolve(); state.started = false; vi.useRealTimers(); }
+  });
+
+  it('retains the owned durable binding repair when network activation rolls back before a later retry', async () => {
+    const f = await fixture(false, true), state = f.agent as any;
+    const signal = new AbortController().signal;
+    const runtime = new CoalescingRecurringTask({ retryIntervalMs: 30_000, runPass: async () => 'idle',
+      onError: error => { throw error; }, closingMessage: 'test closed' });
+    vi.spyOn(runtime, 'owns').mockImplementation(candidate => candidate === signal);
+    state.contextGraphSubscriptionAuthorityRecoveryRuntime = runtime;
+    state.started = true;
+    let settled = false;
+    const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, signal)
+      .then(() => { settled = true; return 'activated'; }, (error: Error) => { settled = true; return error; });
+    vi.mocked(f.agent.resolveContextGraphSubscriptionBootstrapAuthority).mockResolvedValue({
+      outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 582n,
+    });
+    vi.spyOn(f.agent, 'subscribeToContextGraph').mockImplementationOnce(() => { throw new Error('network activation failed'); });
+    try {
+      await f.agent.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+      expect(f.rows.get(LOCAL)?.onChainId).toBe('582');
+      expect(f.agent.isContextGraphSubscriptionCommitted(LOCAL)).toBe(false);
+      expect(settled).toBe(false);
+      await f.agent.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+      expect(await outcome).toBe('activated');
+      expect(f.agent.isContextGraphSubscriptionCommitted(LOCAL)).toBe(true);
+      expect(state.workLifetime.physicalRuns.size).toBe(0);
+    } finally { state.started = false; }
+  });
+
   it.each(['recover', 'clear', 'replace'] as const)('owns unbound persisted activation through %s', async action => {
     const f = await fixture(false, true), state = f.agent as any;
     expect(state.subscribedContextGraphs.has(LOCAL)).toBe(false);
@@ -91,11 +149,31 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     } finally { state.started = false; vi.useRealTimers(); }
   });
 
+  it('settles an authority wait after an explicit persisted unsubscribe', async () => {
+    const f = await fixture(false), state = f.agent as any;
+    state.started = true;
+    state.setContextGraphSubscription(LOCAL, { ...state.subscribedContextGraphs.get(LOCAL), subscribed: true }, { persist: false });
+    state.contextGraphSubscriptionDormancyById.set(LOCAL, 'authorityUnavailable');
+    state.contextGraphSubscriptionActivations.observe(f.original);
+    const caller = new AbortController();
+    const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, caller.signal)
+      .then(() => 'inactive', (error: Error) => error);
+    try {
+      f.agent.unsubscribeFromContextGraph(LOCAL);
+      await f.drain();
+      expect(state.workLifetime.physicalRuns.size).toBe(0);
+      expect(await outcome).toBe('inactive');
+      expect(state.subscribedContextGraphs.get(LOCAL)?.subscribed).toBe(false);
+      expect(state.workLifetime.physicalRuns.size).toBe(0);
+    } finally { caller.abort(); state.started = false; }
+  });
+
   it.each([false, true])('fences pending snapshot activation after real clear, recreated=%s', async recreate => {
     const f = await fixture(false);
     const state = f.agent as any;
     state.started = true;
     state.contextGraphSubscriptionDormancyById.set(LOCAL, 'authorityUnavailable');
+    state.contextGraphSubscriptionActivations.observe(f.original);
     const send = vi.fn(async () => { throw new Error('unexpected core read'); });
     state.router = { send };
     const insert = vi.spyOn(f.agent.store, 'insert');
@@ -125,6 +203,7 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     const state = f.agent as any;
     state.started = true;
     state.contextGraphSubscriptionDormancyById.set(LOCAL, 'authorityUnavailable');
+    state.contextGraphSubscriptionActivations.observe(f.original);
     vi.useFakeTimers();
     let settled = false;
     const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, new AbortController().signal)
