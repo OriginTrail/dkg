@@ -1,7 +1,7 @@
 import type { ServerResponse } from 'node:http';
-import { accumulateMetric, metricsFromOpStats, opStatsFromMetrics, ownValue } from '../simulation-metrics.js';
+import { accumulateMetric, opStatsFromMetrics, type PerTypeMetrics } from '../simulation-metrics.js';
 
-import type { CancellationResult, DoneEvent, OpEvent, OpStats, RunStatus, SimEvent, ScopedSimEvent } from '../simulation-protocol.js';
+import type { CancellationResult, DoneEvent, OpEvent, OpStats, SimOp, RunStatus, SimEvent, ScopedSimEvent } from '../simulation-protocol.js';
 
 export interface RunStats {
   total: number;
@@ -9,7 +9,7 @@ export interface RunStats {
   errors: number;
   startedAt: number;
   recentTimestamps: number[];
-  byOp: Record<string, OpStats>;
+  operations: Map<SimOp, { metrics: PerTypeMetrics; timeouts: number }>;
 }
 export interface SimulationRun {
   id: string;
@@ -49,7 +49,7 @@ export class SimulationRuns {
       return { accepted: false, error: 'Simulation run ID was completed or cancelled' };
     }
     const run: SimulationRun = { id, abort: new AbortController(), errorLogCount: 0,
-      stats: { total, completed: 0, errors: 0, startedAt: Date.now(), recentTimestamps: [], byOp: {} } };
+      stats: { total, completed: 0, errors: 0, startedAt: Date.now(), recentTimestamps: [], operations: new Map() } };
     this.runs.set(id, run);
     this.active = this.latest = run;
     return { accepted: true, run };
@@ -59,7 +59,12 @@ export class SimulationRuns {
     return { runId: run.id, running: !run.terminal, total: run.stats.total,
       completed: run.stats.completed, errors: run.stats.errors,
       elapsedMs: run.terminal?.elapsedMs ?? Date.now() - run.stats.startedAt,
-      opsPerSec: run.terminal ? 0 : Math.round(currentOpsPerSec(run.stats) * 10) / 10, byOp: run.stats.byOp };
+      opsPerSec: run.terminal ? 0 : Math.round(currentOpsPerSec(run.stats) * 10) / 10, byOp: this.snapshotOperations(run) };
+  }
+
+  private snapshotOperations(run: SimulationRun): Record<string, OpStats> {
+    return Object.fromEntries([...run.stats.operations].map(([op, { metrics, timeouts }]) =>
+      [op, opStatsFromMetrics(metrics, timeouts)]));
   }
 
   record(run: SimulationRun, event: OpEvent): boolean {
@@ -68,10 +73,11 @@ export class SimulationRuns {
     stats.completed++;
     stats.recentTimestamps.push(Date.now());
     if (!event.success) stats.errors++;
-    const previous = ownValue(stats.byOp, event.opType);
-    const metric = accumulateMetric(previous && metricsFromOpStats(previous), event);
-    const timeouts = (previous?.timeouts ?? 0) + Number(!event.success && event.detail.startsWith('timeout'));
-    stats.byOp = { ...stats.byOp, [event.opType]: opStatsFromMetrics(metric, timeouts) };
+    const previous = stats.operations.get(event.opType);
+    stats.operations.set(event.opType, {
+      metrics: accumulateMetric(previous?.metrics, event),
+      timeouts: (previous?.timeouts ?? 0) + Number(!event.success && event.detail.startsWith('timeout')),
+    });
     this.emit(run, event);
     return true;
   }
@@ -95,7 +101,7 @@ export class SimulationRuns {
     if (run.terminal) return run.terminal;
     run.terminal = { type: 'done', runId: run.id, total: run.stats.total,
       completed: run.stats.completed, errors: run.stats.errors,
-      elapsedMs: Date.now() - run.stats.startedAt, byOp: structuredClone(run.stats.byOp) };
+      elapsedMs: Date.now() - run.stats.startedAt, byOp: this.snapshotOperations(run) };
     if (this.active === run) this.active = null;
     this.publish(run.id, run.terminal);
     for (const [client, scope] of this.clients) {

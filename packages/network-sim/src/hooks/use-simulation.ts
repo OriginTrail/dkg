@@ -1,41 +1,40 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
-import type { OperationType } from '../types';
-import type { CancellationResult, DoneEvent, ScopedSimEvent } from '../simulation-protocol';
+import type { CancellationResult, DoneEvent, ScopedSimEvent, SimulationSettings } from '../simulation-protocol';
 
-interface SimStats { total: number; completed: number; errors: number; startedAt: number; finishedAt?: number }
-interface SimulationOptions {
-  name: string; opCount: number; opsPerSec: number; concurrency: number;
-  kasPerPublish: number; contextGraphId: string; enabledOps: string[];
+interface SimulationOptions extends SimulationSettings {
+  name: string; contextGraphId: string;
 }
 interface ClientRun {
   id: string;
   start: Promise<Response>;
   startAbort: AbortController;
   stream: EventSource | null;
-  stats: SimStats;
   cancelling?: boolean;
 }
 
 export function useSimulation(onComplete: () => void) {
-  const { dispatch, addBroadcast, addOperation, completeOperation } = useStore();
+  const { state, dispatch, addBroadcast, addOperation, completeOperation } = useStore();
   const active = useRef<ClientRun | null>(null);
-  const [running, setRunning] = useState(false);
+  const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [disconnected, setDisconnected] = useState(false);
   const [failure, setFailure] = useState<string | null>(null);
-  const [stats, setStats] = useState<SimStats | null>(null);
+  const storedRun = state.simulationRuns.find(run => run.id === selectedRunId);
+  const running = selectedRunId !== null && state.activeSimulationId === selectedRunId;
+  const stats = storedRun ? {
+    total: storedRun.config.opCount, completed: storedRun.metrics.total,
+    success: storedRun.metrics.success, errors: storedRun.metrics.errors,
+    startedAt: storedRun.startedAt, finishedAt: storedRun.finishedAt,
+  } : null;
 
   const finish = useCallback((run: ClientRun, result: DoneEvent | string) => {
     if (active.current !== run) return;
     active.current = null;
     run.stream?.close();
     run.startAbort.abort();
-    setRunning(false); setDisconnected(false); setFailure(typeof result === 'string' ? result : null);
-    if (typeof result === 'string') setStats(null);
+    setDisconnected(false); setFailure(typeof result === 'string' ? result : null);
+    if (typeof result === 'string') setSelectedRunId(null);
     else {
-      Object.assign(run.stats, { completed: result.completed, errors: result.errors });
-      run.stats.finishedAt = run.stats.startedAt + result.elapsedMs;
-      setStats({ ...run.stats });
       dispatch({ type: 'RECONCILE_SIMULATION', id: run.id, snapshot: result });
     }
     dispatch({ type: 'STOP_SIMULATION' });
@@ -75,7 +74,6 @@ export function useSimulation(onComplete: () => void) {
     const startAbort = new AbortController();
     const run: ClientRun = {
       id, startAbort, stream: null,
-      stats: { total: options.opCount, completed: 0, errors: 0, startedAt: Date.now() },
       start: Promise.resolve().then(() => fetch(`/sim/start?runId=${id}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: startAbort.signal,
         body: JSON.stringify({ name, ...config, contextGraph: contextGraphId }),
@@ -83,7 +81,7 @@ export function useSimulation(onComplete: () => void) {
     };
     active.current = run;
     dispatch({ type: 'START_SIMULATION', id, name, config: { ...config, contextGraphId } });
-    setStats({ ...run.stats }); setRunning(true); setDisconnected(false); setFailure(null);
+    setSelectedRunId(id); setDisconnected(false); setFailure(null);
 
     const connect = () => {
       const stream = new EventSource(`/sim/events?runId=${id}`);
@@ -106,19 +104,15 @@ export function useSimulation(onComplete: () => void) {
             return;
           }
           if (event.type === 'op') {
-            const opType = event.opType as OperationType;
+            const opType = event.opType;
             const add = opType === 'publish' || opType === 'workspace' ? addBroadcast : addOperation;
             const opId = add(opType, event.nodeId, `sim ${opType}`);
             completeOperation(opId, event.success ? 'success' : 'error', event.detail);
             dispatch({ type: 'RECORD_OP', simulationId: id, opType, success: event.success, durationMs: event.durationMs, phases: event.phases });
-            run.stats.completed++;
-            if (!event.success) run.stats.errors++;
           } else if (event.type === 'status') {
-            run.stats.completed = event.completed; run.stats.errors = event.errors;
             dispatch({ type: 'RECONCILE_SIMULATION', id, snapshot: event });
             setFailure(null);
-          } else if (event.type === 'error') run.stats.errors++;
-          setStats({ ...run.stats });
+          } else if (event.type === 'error') dispatch({ type: 'SIMULATION_ERROR', id, message: event.message });
         } catch { /* Ignore malformed stream data. */ }
       };
     };
@@ -145,5 +139,5 @@ export function useSimulation(onComplete: () => void) {
     run?.startAbort.abort();
   }, []);
 
-  return { running, disconnected, failure, stats, start, stop };
+  return { running, disconnected, failure: failure ?? storedRun?.error ?? null, stats, start, stop };
 }

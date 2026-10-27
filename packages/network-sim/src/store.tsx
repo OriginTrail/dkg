@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from 'react';
 import type { DevnetNode, Activity, GraphAnimation, DevnetConfig, OperationType } from './types';
-import type { DoneEvent, StatusEvent } from './simulation-protocol';
+import type { DoneEvent, StatusEvent, SimulationSettings } from './simulation-protocol';
 import { snapshotMetrics, recordMetric, combineMetrics, emptyMetrics } from './simulation-metrics';
 import { fetchDevnetConfig, fetchNodeStatus } from './api';
 
@@ -21,14 +21,8 @@ export interface SimulationRun {
   startedAt: number;
   finishedAt?: number;
   metrics: LiveOpMetrics;
-  config: {
-    opCount: number;
-    opsPerSec: number;
-    concurrency: number;
-    kasPerPublish: number;
-    contextGraphId: string;
-    enabledOps: string[];
-  };
+  error?: string;
+  config: SimulationSettings & { contextGraphId: string };
 }
 
 interface State {
@@ -61,6 +55,7 @@ type Action =
   | { type: 'RESET_LIVE_METRICS' }
   | { type: 'START_SIMULATION'; id: string; name: string; config: SimulationRun['config'] }
   | { type: 'RECONCILE_SIMULATION'; id: string; snapshot: DoneEvent | StatusEvent }
+  | { type: 'SIMULATION_ERROR'; id: string; message: string }
   | { type: 'STOP_SIMULATION' };
 
 const MAX_ACTIVITIES = 200;
@@ -145,10 +140,15 @@ function reducer(state: StoredState, action: Action): StoredState {
       if (action.id !== state.activeSimulationId) return state;
       const run = state.simulationRuns.find(r => r.id === action.id)!;
       const metrics = snapshotMetrics(action.snapshot, run.metrics);
-      const updated = { ...run, metrics,
+      const updated = { ...run, metrics, error: action.snapshot.type === 'status' ? undefined : run.error,
         ...(action.snapshot.type === 'done' ? { finishedAt: run.startedAt + action.snapshot.elapsedMs } : {}) };
       return { ...state,
         simulationRuns: state.simulationRuns.map(r => r.id === action.id ? updated : r) };
+    }
+    case 'SIMULATION_ERROR': {
+      if (action.id !== state.activeSimulationId) return state;
+      return { ...state, simulationRuns: state.simulationRuns.map(run => run.id === action.id
+        ? { ...run, error: action.message, metrics: { ...run.metrics, errors: run.metrics.errors + 1 } } : run) };
     }
     case 'STOP_SIMULATION': {
       const runs = state.simulationRuns.map((r) =>

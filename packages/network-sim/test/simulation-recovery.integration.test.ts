@@ -175,6 +175,34 @@ describe('simulation UI with real server recovery', () => {
     expect((await status('other-client')).running).toBe(true);
   });
 
+  it('derives panel progress from the stored snapshot and preserves cancellation totals after a dashboard reset', async () => {
+    await ui.fill('Total Ops', '4');
+    await ui.click('Play Simulation'); await accepted.promise;
+    await act(async () => vi.advanceTimersByTimeAsync(501));
+    const id = runId();
+    act(() => LocalEventSource.instances[0].disconnect());
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    const snapshot = await status(id);
+    expect(snapshot.completed).toBe(2);
+    // A canonical store update must immediately drive both consumers, without
+    // requiring a second hook-owned counter update or a synthetic SSE message.
+    act(() => store.dispatch({ type: 'RECONCILE_SIMULATION', id, snapshot: { type: 'status', ...snapshot } }));
+    expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('2/4');
+    expect(store.state.liveMetrics).toMatchObject({ total: 2, success: 2, errors: 0 });
+    act(() => store.dispatch({ type: 'RESET_LIVE_METRICS' }));
+    expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('2/4');
+    await ui.click('Stop Simulation');
+    const stopped = await status(id);
+    const run = store.state.simulationRuns[0];
+    expect(run.finishedAt! - run.startedAt).toBe(stopped.elapsedMs);
+    expect(run.metrics).toEqual(store.state.liveMetrics);
+    const summary = `Simulation complete: 2 succeeded, 0 failed in ${(stopped.elapsedMs / 1000).toFixed(1)}s`;
+    expect(ui.container.textContent).toContain(summary);
+    await act(async () => vi.advanceTimersByTimeAsync(5000));
+    expect(ui.container.textContent).toContain(summary);
+    expect(store.state.simulationRuns[0].finishedAt).toBe(run.finishedAt);
+  });
+
   it('retains progress and cancellation when switching control tabs', async () => {
     await ui.click('Play Simulation'); await accepted.promise;
     await act(async () => vi.advanceTimersByTimeAsync(501));

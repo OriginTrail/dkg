@@ -68,7 +68,7 @@ export function metricsFromOpStats(stats: OpStats): PerTypeMetrics {
 export function opStatsFromMetrics(metrics: PerTypeMetrics, timeouts: number): OpStats {
   return { ok: metrics.success, fail: metrics.errors, timeouts,
     totalMs: metrics.successDurationMs, allMs: metrics.totalDurationMs,
-    phaseTotals: metrics.phaseTotals, phaseCounts: metrics.phaseCounts };
+    phaseTotals: { ...metrics.phaseTotals }, phaseCounts: { ...metrics.phaseCounts } };
 }
 
 /** Every operation updates exactly one canonical contribution: manual work or its run. */

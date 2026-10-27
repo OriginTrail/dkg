@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SimulationRuns, type SimulationRun } from './simulation-runs.js';
-import type { OpEvent, SimEvent } from '../simulation-protocol.js';
+import { SIMULATION_OPERATIONS, isSimOp, type SimOp, type SimulationSettings, type OpEvent, type SimEvent } from '../simulation-protocol.js';
 
 const DEVNET_NUM_NODES = 6;
 const DEVNET_API_PORT_BASE = 9201;
@@ -13,14 +13,9 @@ const DEVNET_API_PORT_BASE = 9201;
 // Types
 // ---------------------------------------------------------------------------
 
-interface SimConfig {
+interface SimConfig extends SimulationSettings {
   name: string;
-  opCount: number;
-  opsPerSec: number;
-  concurrency: number;
-  kasPerPublish: number;
   contextGraph: string;
-  enabledOps: string[];
 }
 
 interface NodeInfo {
@@ -449,6 +444,13 @@ async function runSimulation(config: SimConfig, run: SimulationRun) {
     broadcast({ type: 'status', ...runs.status(run) });
   }, 500);
 
+  const executors: Record<SimOp, (node: NodeInfo) => Promise<OpEvent>> = {
+    publish: node => execPublish(node, config, signal),
+    query: node => execQuery(node, config, signal),
+    workspace: node => execWorkspace(node, config, signal),
+    chat: node => execChat(node, nodes, signal),
+  };
+
   let dispatched = 0;
   let inflight = 0;
 
@@ -477,21 +479,7 @@ async function runSimulation(config: SimConfig, run: SimulationRun) {
       inflight++;
       lastDispatchTime = Date.now();
 
-      let promise: Promise<OpEvent>;
-      switch (opType) {
-        default: // The request boundary restricts this remaining case to publish.
-          promise = execPublish(node, config, signal);
-          break;
-        case 'query':
-          promise = execQuery(node, config, signal);
-          break;
-        case 'workspace':
-          promise = execWorkspace(node, config, signal);
-          break;
-        case 'chat':
-          promise = execChat(node, nodes, signal);
-          break;
-      }
+      const promise = executors[opType](node);
 
       promise.then(onOpDone).catch(() => onOpDone({
         type: 'op', opType, nodeId: node.id, success: false, durationMs: 0,
@@ -521,10 +509,10 @@ async function runSimulation(config: SimConfig, run: SimulationRun) {
   clearInterval(statusInterval);
 
   if (!signal.aborted) {
-    if (stats.errors > 0 && Object.keys(stats.byOp).length > 0) {
-      const byOp = Object.entries(stats.byOp)
-        .filter(([, s]) => s.fail > 0)
-        .map(([op, s]) => `${op}: ${s.fail} fail`)
+    if (stats.errors > 0 && stats.operations.size > 0) {
+      const byOp = [...stats.operations]
+        .filter(([, s]) => s.metrics.errors > 0)
+        .map(([op, s]) => `${op}: ${s.metrics.errors} fail`)
         .join(', ');
       console.error(`[sim] done: ${stats.completed} ok, ${stats.errors} errors (${byOp})`);
     }
@@ -562,8 +550,8 @@ export async function handleSimRequest(req: IncomingMessage, res: ServerResponse
       return;
     }
 
-    if (!Array.isArray(config.enabledOps) || !config.enabledOps.every(op => ['publish', 'query', 'workspace', 'chat'].includes(op))) {
-      jsonResponse(res, 400, { error: 'enabledOps must be an array of supported operations: publish, query, workspace, chat' });
+    if (!Array.isArray(config.enabledOps) || !config.enabledOps.every(isSimOp)) {
+      jsonResponse(res, 400, { error: `enabledOps must be an array of supported operations: ${SIMULATION_OPERATIONS.join(', ')}` });
       return;
     }
 

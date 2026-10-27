@@ -1,11 +1,13 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import { SimulationRuns } from '../src/server/simulation-runs';
 import { combineMetrics, emptyMetrics, recordMetric, snapshotMetrics } from '../src/simulation-metrics';
-import type { OpEvent } from '../src/simulation-protocol';
+import type { OpEvent, SimOp } from '../src/simulation-protocol';
 
 afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
-it.each(['query', '__proto__', 'constructor', 'toString'])('keeps incremental and recovered metrics equivalent and immutable for %s', opType => {
+it.each(['query', '__proto__', 'constructor', 'toString'])('keeps incremental and recovered metrics equivalent and immutable for %s', rawType => {
+  // Deliberately bypass request validation to exercise defensive dictionary handling.
+  const opType = rawType as SimOp;
   vi.useFakeTimers(); vi.setSystemTime(1000);
   vi.spyOn(console, 'error').mockImplementation(() => {});
   const prototype = Object.getOwnPropertyDescriptors(Object.prototype);
@@ -38,4 +40,26 @@ it.each(['query', '__proto__', 'constructor', 'toString'])('keeps incremental an
   expect(combineMetrics(manual, incremental).byType).toEqual({ manual: manual.byType.manual, [opType]: expected });
   for (const { value, copy } of history) expect(value).toEqual(copy);
   expect(Object.getOwnPropertyDescriptors(Object.prototype)).toEqual(prototype);
+});
+
+it('isolates outgoing snapshot dictionaries from canonical accounting and future results', () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const registry = new SimulationRuns();
+  const admission = registry.admit('snapshot-isolation', 2);
+  if (!admission.accepted) throw new Error('fixture run rejected');
+  const event: OpEvent = { type: 'op', opType: 'query', nodeId: 1, success: true,
+    durationMs: 100, detail: 'ok', phases: { query: 40 } };
+  registry.record(admission.run, event);
+  const first = registry.status(admission.run);
+  const retained = structuredClone(first);
+  registry.record(admission.run, { ...event, success: false, durationMs: 50, detail: 'timeout', phases: { query: 20 } });
+  expect(first).toEqual(retained);
+  first.byOp.query.ok = 900;
+  first.byOp.query.phaseTotals.query = 900;
+  first.byOp.query.phaseCounts.query = 900;
+  const second = registry.status(admission.run);
+  expect(second.byOp.query).toEqual({ ok: 1, fail: 1, timeouts: 1, totalMs: 100, allMs: 150,
+    phaseTotals: { query: 60 }, phaseCounts: { query: 2 } });
+  second.byOp.query.phaseTotals.query = 999;
+  expect(registry.finish(admission.run).byOp.query.phaseTotals.query).toBe(60);
 });

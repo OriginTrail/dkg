@@ -5,7 +5,21 @@ import { ControlPanel } from '../src/components/ControlPanel';
 import * as api from '../src/api';
 import { makeStore, mountUi, type MountedUi } from './ui-test-support';
 vi.mock('../src/api');
-vi.mock('../src/store', () => ({ useStore: () => store }));
+const observed = vi.hoisted(() => ({ dispatch: vi.fn(), addBroadcast: vi.fn(), addOperation: vi.fn(), completeOperation: vi.fn() }));
+vi.mock('../src/store', async original => {
+  const actual = await original<typeof import('../src/store')>();
+  return { ...actual, useStore: () => {
+    const current = actual.useStore();
+    // Observe public actions while all progress updates use the real reducer.
+    observed.dispatch.mockImplementation(current.dispatch);
+    observed.addBroadcast.mockImplementation(current.addBroadcast);
+    observed.addOperation.mockImplementation(current.addOperation);
+    observed.completeOperation.mockImplementation(current.completeOperation);
+    store = { ...current, ...observed };
+    return store;
+  } };
+});
+import { StoreProvider } from '../src/store';
 let store = makeStore();
 let ui: MountedUi;
 let fetchMock: ReturnType<typeof vi.fn>;
@@ -17,7 +31,7 @@ class TestEventSource {
   close = vi.fn();
   constructor(readonly url: string) { TestEventSource.instances.push(this); }
   get runId() { return new URL(this.url, 'http://localhost').searchParams.get('runId')!; }
-  emit(event: Record<string, unknown>) { act(() => this.onmessage?.({ data: JSON.stringify({ runId: this.runId, elapsedMs: 1000, ...event }) })); }
+  emit(event: Record<string, unknown>) { act(() => this.onmessage?.({ data: JSON.stringify({ runId: this.runId, total: 500, elapsedMs: 1000, opsPerSec: 0, byOp: {}, ...event }) })); }
 }
 beforeEach(async () => {
   vi.resetAllMocks(); vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01'));
@@ -26,7 +40,11 @@ beforeEach(async () => {
   vi.stubGlobal('EventSource', TestEventSource);
   fetchMock = vi.fn(async (url: string) => Response.json(url.startsWith('/sim/start') ? { started: true } : { stopped: true, runId: new URL(url, 'http://localhost').searchParams.get('runId') })); vi.stubGlobal('fetch', fetchMock);
   vi.mocked(api.fetchContextGraphs).mockResolvedValue({ contextGraphs: [] });
-  ui = await mountUi(React.createElement(ControlPanel)); await ui.click('Simulate');
+  vi.mocked(api.fetchDevnetConfig).mockResolvedValue({ nodes: makeStore().state.nodes, contracts: {}, hubAddress: '', chainRpc: '' });
+  vi.mocked(api.fetchNodeStatus).mockResolvedValue(makeStore().state.nodes[0].status!);
+  vi.stubGlobal('requestAnimationFrame', vi.fn(() => 1));
+  vi.stubGlobal('cancelAnimationFrame', vi.fn());
+  ui = await mountUi(React.createElement(StoreProvider, null, React.createElement(ControlPanel))); await ui.click('Simulate');
 });
 afterEach(() => { ui.unmount(); vi.useRealTimers(); vi.restoreAllMocks(); vi.unstubAllGlobals(); });
 const source = () => TestEventSource.instances.at(-1)!;
@@ -176,7 +194,7 @@ describe('simulation form and streamed results', () => {
     expect(source().url).toBe(`/sim/events?runId=${runId()}`);
     source().emit({ type: 'op', opType: 'query', nodeId: 2, success: true, durationMs: 50, detail: 'query complete', phases: { query: 40 } });
     expect(store.addOperation).toHaveBeenCalledWith('query', 2, 'sim query');
-    expect(store.completeOperation).toHaveBeenCalledWith('operation', 'success', 'query complete');
+    expect(store.completeOperation).toHaveBeenCalledWith(vi.mocked(store.addOperation).mock.results[0].value, 'success', 'query complete');
     source().emit({ type: 'op', opType: 'publish', nodeId: 1, success: true, durationMs: 20, detail: 'asset' });
     expect(store.addBroadcast).toHaveBeenCalledWith('publish', 1, 'sim publish');
     await act(async () => vi.advanceTimersByTimeAsync(1000));
@@ -200,7 +218,12 @@ describe('simulation form and streamed results', () => {
     source().emit({ type: 'heartbeat' });
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('0/1');
     source().emit({ type: 'error', message: 'setup error' });
+    expect(ui.container.querySelector('[role="alert"]')?.textContent).toBe('setup error');
+    expect(store.state.liveMetrics.errors).toBe(1);
+    expect(ui.container.querySelectorAll('.sim-stat-value')[1].textContent).toBe('1');
     source().emit({ type: 'status', completed: 1, errors: 0 });
+    expect(store.state.liveMetrics.errors).toBe(0);
+    expect(ui.container.querySelector('[role="alert"]')).toBeNull();
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('1/1');
     await ui.click('Stop Simulation');
     expect(source().close).toHaveBeenCalledTimes(1);
@@ -301,7 +324,7 @@ describe('run-scoped client recovery', () => {
 
   it('uses final totals returned by cancellation when the stream missed progress', async () => {
     await ui.click('Play Simulation');
-    fetchMock.mockResolvedValueOnce(Response.json({ stopped: true, runId: runId(), snapshot: { type: 'done', runId: runId(), completed: 17, errors: 2, elapsedMs: 2000 } }));
+    fetchMock.mockResolvedValueOnce(Response.json({ stopped: true, runId: runId(), snapshot: { type: 'done', runId: runId(), total: 500, byOp: {}, completed: 17, errors: 2, elapsedMs: 2000 } }));
     await ui.click('Stop Simulation');
     expect(ui.container.textContent).toContain('Simulation complete: 15 succeeded, 2 failed in 2.0s');
   });

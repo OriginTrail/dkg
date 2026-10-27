@@ -1,6 +1,20 @@
+/** The closed set shared by the UI, request validation and executor dispatch. */
+export const SIMULATION_OPERATIONS = ['publish', 'query', 'workspace', 'chat'] as const;
+export type SimOp = typeof SIMULATION_OPERATIONS[number];
+export function isSimOp(value: unknown): value is SimOp {
+  return SIMULATION_OPERATIONS.some(op => op === value);
+}
+export interface SimulationSettings {
+  opCount: number;
+  opsPerSec: number;
+  concurrency: number;
+  kasPerPublish: number;
+  enabledOps: SimOp[];
+}
+
 export interface OpEvent {
   type: 'op';
-  opType: string;
+  opType: SimOp;
   nodeId: number;
   success: boolean;
   durationMs: number;

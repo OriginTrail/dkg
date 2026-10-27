@@ -1,3 +1,4 @@
+import { SIMULATION_OPERATIONS, type SimOp } from '../simulation-protocol';
 import { useState, useCallback, useEffect } from 'react';
 import { useStore } from '../store';
 import * as api from '../api';
@@ -21,7 +22,7 @@ const MANUAL_TABS: { id: Tab; label: string; op: OperationType }[] = [
 const SIM_TAB: { id: Tab; label: string; op: OperationType } = { id: 'simulate', label: 'Simulate', op: 'connect' };
 
 export function ControlPanel() {
-  const { state, dispatch, addOperation, completeOperation } = useStore();
+  const { state, dispatch } = useStore();
   const [activeTab, setActiveTab] = useState<Tab>('publish');
   const [simulationOpened, setSimulationOpened] = useState(false);
 
@@ -240,22 +241,10 @@ function SetupTab() {
   );
 }
 
-type SimOp = 'publish' | 'workspace' | 'query' | 'chat';
-
-const SIM_OPS: { id: SimOp; label: string }[] = [
-  { id: 'publish', label: 'Publish' },
-  { id: 'workspace', label: 'Shared Memory' },
-  { id: 'query', label: 'Query' },
-  { id: 'chat', label: 'Chat' },
-];
-
-function pickRandom<T>(arr: T[]): T {
-  return arr[Math.floor(Math.random() * arr.length)];
-}
-
-function rndId(): string {
-  return Math.random().toString(36).slice(2, 8);
-}
+const SIM_OP_LABELS: Record<SimOp, string> = {
+  publish: 'Publish', query: 'Query', workspace: 'Shared Memory', chat: 'Chat',
+};
+const SIM_OPS = SIMULATION_OPERATIONS.map(id => ({ id, label: SIM_OP_LABELS[id] }));
 
 let simCounter = 0;
 
@@ -266,7 +255,7 @@ function SimulateTab() {
   const [concurrency, setConcurrency] = useState(10);
   const [kasPerPublish, setKasPerPublish] = useState(1);
   const [contextGraphId, setContextGraphId] = useState('devnet-test');
-  const [enabledOps, setEnabledOps] = useState<Set<SimOp>>(new Set(['publish', 'workspace', 'query', 'chat']));
+  const [enabledOps, setEnabledOps] = useState<Set<SimOp>>(new Set(SIMULATION_OPERATIONS));
   const { running, disconnected, failure, stats, start, stop: stopSimulation } = useSimulation(() => setSimName(`Simulation #${++simCounter}`));
   const contextGraphIds = useContextGraphIds();
 
@@ -297,7 +286,7 @@ function SimulateTab() {
   const elapsed = stats
     ? ((stats.finishedAt ?? Date.now()) - stats.startedAt) / 1000
     : 0;
-  const succeeded = stats ? Math.max(0, stats.completed - stats.errors) : 0;
+  const succeeded = stats?.success ?? 0;
   const pct = stats ? Math.min(100, Math.round((stats.completed / stats.total) * 100)) : 0;
 
   return (

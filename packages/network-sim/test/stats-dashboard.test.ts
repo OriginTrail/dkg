@@ -121,7 +121,7 @@ describe('live operation metrics and run history', () => {
     expect(ui.container.textContent).not.toContain('overhead (HTTP + queue)');
   });
   it('selects immutable completed or active run metrics and falls back when a run is removed', async () => {
-    const config = { opCount: 10, opsPerSec: 2, concurrency: 3, kasPerPublish: 2, contextGraphId: 'team', enabledOps: ['query'] };
+    const config: SimulationRun['config'] = { opCount: 10, opsPerSec: 2, concurrency: 3, kasPerPublish: 2, contextGraphId: 'team', enabledOps: ['query'] };
     const first: SimulationRun = { id: 'finished', name: 'Finished', startedAt: Date.now() - 120000, finishedAt: Date.now() - 60000, config, metrics: live(3, 3) };
     const second: SimulationRun = { id: 'active', name: 'Current', startedAt: Date.now() - 500, config, metrics: live(2, 2) };
     store.state.simulationRuns = [first, second]; store.state.liveMetrics = live(9, 9);
