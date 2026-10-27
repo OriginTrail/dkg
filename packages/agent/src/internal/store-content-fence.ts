@@ -58,20 +58,26 @@ function combine(left: ContentEffect, right: ContentEffect): ContentEffect {
  * backend replacement confirms termination. Reading or rewriting is not proof.
  */
 export class StoreContentFence implements StoreMutationObserver {
-  private readonly pending = new Set<{ effect: ContentEffect; generation: number | undefined }>();
+  private readonly pending = new Set<ContentEffect>();
   private readonly watches = new Set<{ effect: ContentEffect; valid: boolean }>();
   private readonly uncertain = new Map<number | undefined, ContentEffect>();
 
   constructor(private readonly recoveryGeneration?: StoreRecoveryGenerationReader) {}
 
   begin(mutation: StoreMutation): (outcome: StoreMutationOutcome) => void {
-    const pending = { effect: mutationEffect(mutation), generation: this.recoveryGeneration?.() };
+    const pending = mutationEffect(mutation);
     this.pending.add(pending);
-    for (const watch of this.watches) if (overlaps(watch.effect, pending.effect)) watch.valid = false;
+    for (const watch of this.watches) if (overlaps(watch.effect, pending)) watch.valid = false;
     return outcome => {
       this.pending.delete(pending);
-      if (outcome === 'indeterminate') this.uncertain.set(pending.generation,
-        combine(this.uncertain.get(pending.generation) ?? { kind: 'graphs', graphs: new Map() }, pending.effect));
+      if (outcome === 'indeterminate') {
+        // Queue admission precedes backend dispatch. A queued write may execute
+        // on a replacement, so only a replacement AFTER its settled outcome can
+        // retire uncertainty. Unknown/in-progress generations stay fail-closed.
+        const generation = this.recoveryGeneration?.();
+        this.uncertain.set(generation,
+          combine(this.uncertain.get(generation) ?? { kind: 'graphs', graphs: new Map() }, pending));
+      }
     };
   }
 
@@ -85,7 +91,7 @@ export class StoreContentFence implements StoreMutationObserver {
       if (epoch !== undefined && generation !== undefined && epoch < generation) this.uncertain.delete(epoch);
       else if (overlaps(effect, uncertain)) return undefined;
     }
-    for (const pending of this.pending) if (overlaps(effect, pending.effect)) return undefined;
+    for (const pending of this.pending) if (overlaps(effect, pending)) return undefined;
     const watch = { effect, valid: true };
     this.watches.add(watch);
     return {

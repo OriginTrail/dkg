@@ -5,7 +5,7 @@ import { type OperationContext } from '@origintrail-official/dkg-core';
 import { exactAssetUalsForSelection } from './sync/exact-assets.js';
 import { MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
 import { createDurableSyncBudget, normalizeDurableSyncTimeoutMs } from './sync/requester/durable-sync-budget.js';
-import { runChallengeExactAssetFetch, runDurableSync, runDurableSyncDetailed, type ChallengeExactAssetFetchContext, type DurableSyncContext } from './sync/requester/durable-sync.js';
+import { runChallengeExactAssetFetch, runDurableSyncDetailed, type ChallengeExactAssetFetchContext, type DurableSyncContext } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
@@ -154,25 +154,25 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       case 'unsupported-before-start': break; // Paging uses the same stored-prefix proof as full-graph recovery.
     }
   }
-  if (exactAssetSelection !== undefined && !host.heldStore) return runDurableSyncDetailed(durableContext);
-  if (onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
-  if (!host.heldStore && !graphRecovery) return { result: await runDurableSync(durableContext) };
-  if (!host.heldStore) return runDurableSyncDetailed({ ...durableContext, graphRecovery });
-  return materialization.withHeldAssetFence(fence => {
-    const storedPrefix = host.heldStore && { prove: host.heldStore.prove, assertCurrent: fence.assertCurrent };
-    if (!graphRecovery) return runDurableSyncDetailed({ ...durableContext, storedPrefix });
-    // An unbound subscription must authenticate and persist its numeric binding
-    // through the existing materialization owner before it can skip DATA.
-    const confirmCurrent = fence.binding().onChainId === undefined ? undefined : currentHeldGraphScopedAssetsConfirmer({
-      binding: fence.binding,
-      reconcileHeld: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve(),
-      readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
-    });
+  // Resolve continuation policy once; snapshots own a fresh full walk.
+  const continuation = onVerifiedFullSnapshot ? undefined : graphRecovery;
+  const runPaging = (fence?: Parameters<Parameters<typeof materialization.withHeldAssetFence>[0]>[0]) => {
+    // An unbound subscription must persist its numeric binding before skipping DATA.
+    const confirmCurrent = continuation && fence && fence.binding().onChainId !== undefined
+      ? currentHeldGraphScopedAssetsConfirmer({
+          binding: fence.binding,
+          reconcileHeld: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve(),
+          readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
+        }) : undefined;
     return runDurableSyncDetailed({ ...durableContext,
-      storedPrefix,
-      graphRecovery: { ...graphRecovery,
-      held: confirmCurrent && host.heldStore ? { confirmCurrent, assertCurrent: fence.assertCurrent,
-        prove: host.heldStore.prove } : undefined,
-    } });
-  }, signal);
+      storedPrefix: host.heldStore && fence
+        ? { prove: host.heldStore.prove, assertCurrent: fence.assertCurrent } : undefined,
+      graphRecovery: continuation ? { ...continuation,
+        held: confirmCurrent && host.heldStore && fence
+          ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent } : undefined,
+      } : undefined,
+    });
+  };
+  return host.heldStore && !onVerifiedFullSnapshot
+    ? materialization.withHeldAssetFence(runPaging, signal) : runPaging();
 }

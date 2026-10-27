@@ -148,15 +148,15 @@ it('reopens uncertain scopes only after confirmed backend replacement and invali
   before.close(); after.close();
 });
 
-it('does not let delayed old outcomes poison a replacement or hide new-generation failures', () => {
+it('retains a delayed indeterminate outcome until a replacement after settlement', () => {
   let generation = 0;
   const fence = new StoreContentFence(() => generation);
   const old = fence.begin({ everything: true });
   generation = 1;
   expect(fence.openScope(scope)).toBeUndefined(); // An old client operation could still dispatch more work.
   old('indeterminate');
-  const fresh = fence.openScope(scope)!;
-  expect(fresh).toBeDefined(); fresh.close();
+  // Without dispatch evidence this could have executed on generation 1.
+  expect(fence.openScope(scope)).toBeUndefined();
   fence.begin({ quads: [quad] })('indeterminate');
   expect(fence.openScope(scope)).toBeUndefined();
   generation = 2;
@@ -180,4 +180,28 @@ it('wires supervised replacement through the production store composition', asyn
     const proof = composed.heldContent.openScope(scope)!;
     expect(proof).toBeDefined(); proof.close();
   } finally { await raw.close(); }
+});
+
+it('fences a queued write dispatched on the replacement backend after its response is lost', async () => {
+  let generation = 0, dispatchedOn: number | undefined;
+  let admit!: () => void;
+  const queue = new Promise<void>(resolve => { admit = resolve; });
+  const raw = new OxigraphStore();
+  const fence = new StoreContentFence(() => generation);
+  const store = createMutationObservedStore(raw, createObservedStoreMutation(() => {}, fence));
+  vi.spyOn(raw, 'insert').mockImplementationOnce(async () => {
+    await queue; dispatchedOn = generation; throw new Error('response lost after dispatch');
+  });
+  try {
+    const write = store.insert([quad]);
+    const rejected = expect(write).rejects.toThrow('response lost');
+    generation = 1; // Queue admission was on 0, actual dispatch will be on 1.
+    expect(fence.openScope(scope)).toBeUndefined();
+    admit(); await rejected;
+    expect(dispatchedOn).toBe(1);
+    expect(fence.openScope(scope)).toBeUndefined(); // The generation-1 backend may still commit.
+    generation = 2; // Confirmed termination of that backend is required.
+    const proof = fence.openScope(scope)!;
+    expect(proof).toBeDefined(); proof.assertCurrent(); proof.close();
+  } finally { admit(); await store.close(); }
 });
