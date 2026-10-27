@@ -866,8 +866,7 @@ CLI equivalents:
 
 ```bash
 dkg ka share-async <name> -c <context-graph-id>
-dkg ka share-jobs --context-graph-id <context-graph-id> --state queued,failed_retrying --limit 20
-dkg ka share-jobs --context-graph-id <context-graph-id> --all   # or --page-size 100 [--cursor <cursor>] for one page
+dkg ka share-jobs --context-graph-id <context-graph-id> --state queued,failed_retrying --limit 20   # or --all, or --page-size 100 [--cursor <c>]
 dkg ka share-job <job-id>
 dkg ka cancel-share-job <job-id>
 dkg ka recover-share-job <job-id>
