@@ -5,7 +5,7 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { PromoteAdmissionAttempt, PromoteAdmissionCoordinator } from '../../src/promote-admission.js';
 import { PROMOTE_NO_EFFECT_REJECTION_CODE } from '../../src/promote-no-effect-rejection.js';
-import { PROMOTE_STATE, DEFAULT_PROMOTE_CONTROL_GRAPH_URI as GRAPH, PROMOTE_PAYLOAD, classifyJobPayload, jobSubject, literal, promoteLaneConflictScope, serializeJobRecord } from '../../src/async-promote-queue-utils.js';
+import { PROMOTE_STATE, PROMOTE_UPDATED_AT, DEFAULT_PROMOTE_CONTROL_GRAPH_URI as GRAPH, PROMOTE_PAYLOAD, classifyJobPayload, jobSubject, literal, promoteLaneConflictScope, serializeJobRecord } from '../../src/async-promote-queue-utils.js';
 import { decidePromoteRetention, type PromoteRetentionPolicy } from '../../src/async-promote-retention-policy.js';
 import { createShareRetention, type ShareRetention, type ShareRetentionBatchResult, type ShareRetentionConfig, type ShareRetentionLogger } from '../../src/async-promote-retention.js';
 import { validatePromoteRecoveryBinding } from '../../src/promote-recovery-binding.js';
@@ -56,6 +56,17 @@ export const decide = (j: PromoteJob, p: PromoteRetentionPolicy = policy, pendin
 export type Quads = ReturnType<typeof serializeJobRecord>['jobQuads'];
 export async function insertQuads(store: TripleStore, quads: Quads) { for (let i = 0; i < quads.length; i += 4000) await store.insert(quads.slice(i, i + 4000)); }
 export async function put(store: TripleStore, ...jobs: PromoteJob[]) { for (const j of jobs) await store.insert(serializeJobRecord(j, GRAPH).jobQuads); }
+/**
+ * `put`, but each job named in `twinned` has a second `updatedAt` triple that compares equal to its first (`"100"^^xsd:integer` and `"100.0"^^xsd:decimal` are two terms):
+ * a scan that matches the subject returns it once per term.
+ */
+export async function putTwinned(store: TripleStore, twinned: ReadonlySet<string>, ...jobs: PromoteJob[]) {
+  const twin = (j: PromoteJob) => `"${j.updatedAt}.0"^^<http://www.w3.org/2001/XMLSchema#decimal>`;
+  for (const j of jobs) {
+    const quads = serializeJobRecord(j, GRAPH).jobQuads;
+    await store.insert(twinned.has(j.jobId) ? quads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? [q, { ...q, object: twin(j) }] : [q])) : quads);
+  }
+}
 export async function present(store: TripleStore, jobId: string, graph = GRAPH) {
   const r = await store.query(`SELECT ?p ?o WHERE { GRAPH <${graph}> { <${jobSubject(jobId)}> ?p ?o } }`);
   return r.type === 'bindings' ? r.bindings.map(b => `${b.p} ${b.o}`).sort().join('\n') : '';

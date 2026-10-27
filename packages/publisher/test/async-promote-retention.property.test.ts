@@ -3,7 +3,7 @@ import fc from 'fast-check';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { propertyOptions } from '../../../scripts/testing/property-options.js';
 import {
-  NOW, W, WF, POPULATION_KINDS, drain, genPopulation, graphFingerprint, newRetention, pick, present, put, registerPendingFlight, rng,
+  NOW, W, WF, POPULATION_KINDS, drain, genPopulation, graphFingerprint, newRetention, pick, present, putTwinned, registerPendingFlight, rng,
   type PopulationKind,
 } from './_helpers/share-retention-fixtures.js';
 import type { PromoteRetentionJobClass } from '../src/async-promote-retention-policy.js';
@@ -36,10 +36,11 @@ async function oneCase(seed: number, tally: Tally): Promise<void> {
   const withBenign = r() < 0.75;
   const batchSize = pick(r, [1, 2, 5, 100]), sliceSize = pick(r, [1, 3, 10]);
   const pending = new Set(population.filter(() => r() < 0.15).map(p => p.job.jobId));
+  const twinned = new Set(population.filter(() => r() < 0.25).map(p => p.job.jobId));   // a second, equal-comparing updatedAt term: the scan returns these subjects twice
 
   const store = new OxigraphStore();
   try {
-    await put(store, ...population.map(p => p.job));
+    await putTwinned(store, twinned, ...population.map(p => p.job));
     const control = await graphFingerprint(store);
     const before = new Map<string, string>();
     for (const id of jobs.keys()) before.set(id, await present(store, id));

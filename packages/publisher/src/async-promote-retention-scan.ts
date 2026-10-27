@@ -16,6 +16,9 @@
  * are walked in key order through a second cursor component (`tie`), so even a group larger than a batch is covered. The scan relies on the engine
  * honouring ORDER BY / LIMIT; the result is checked (sorted, after the cursor, within the cutoff) and a violation is reported in `anomalies` and never advances
  * the cursor (a batch then still deletes what it judges, but may starve exactly like an unordered scan: it is a tripwire for a non-conforming engine).
+ * One subject can come back as SEVERAL rows: distinct numeric terms that compare equal (`"100"^^xsd:integer` and `"100.0"^^xsd:decimal`) are separate triples, and
+ * both match a range or an equality filter. That is a conforming answer, not a reordering: the rows of a subject are collapsed to one judged row, a window of
+ * limit + 1 ROWS counts as full however few subjects the repeats left in it, and the walk goes on after the last subject judged, so repeats cost calls and never stall.
  *
  * The scan runs outside the queue lock, on the background lane (OT-RFC-73 §5.1 tagging table: it is not queue control work). It reads only the two stored
  * index triples; the payload is judged later, under the lock.
@@ -72,7 +75,7 @@ export interface ScanRow { readonly iri: string; readonly updatedAt: number }
 export interface ScanCandidate extends ScanRow { readonly cls: PromoteRetentionScanClass }
 export interface ScanPlan {
   readonly cls: PromoteRetentionScanClass;
-  /** Rows this call judges (<= the limit it was given). */
+  /** Rows this call judges: one per subject, at most the limit it was given. */
   readonly judged: readonly ScanRow[];
   /** Cursor after the judged rows; undefined = the scan result violated the contract, keep the old one. */
   readonly next: PromoteRetentionScanCursor | undefined;
@@ -82,6 +85,8 @@ export interface ScanPlan {
 
 const termNumber = (term: string | undefined): number => { const m = /^"?([^"^]*)"?(?:\^\^<[^>]*>)?$/.exec(String(term ?? '')); return m && m[1] !== '' ? Number(m[1]) : Number.NaN; };
 const byIri = (a: ScanRow, b: ScanRow) => (a.iri < b.iri ? -1 : a.iri > b.iri ? 1 : 0);
+/** One row per subject, the first of an ordered answer (the oldest): a subject whose index holds equal-comparing terms comes back once per term. */
+const distinctRows = (rows: readonly ScanRow[]): ScanRow[] => { const seen = new Set<string>(); return rows.filter(r => (seen.has(r.iri) ? false : (seen.add(r.iri), true))); };
 
 function parseScanRows(bindings: ReadonlyArray<Record<string, string>>): { rows: ScanRow[]; clean: boolean } {
   const rows: ScanRow[] = [];
@@ -101,22 +106,23 @@ export async function planScan(ctx: ScanContext, cls: PromoteRetentionScanClass,
   if (cursor.tie) {                                                                    // inside a group of more than one batch sharing one updatedAt: key order
     const { updatedAt, afterKey } = cursor.tie;
     const { rows, clean } = parseScanRows(expectBindings(await ctx.store.query(buildRetentionTieQuery(ctx.graphUri, cls, updatedAt, limit, afterKey), SCAN_OPTIONS)));
-    const ordered = clean && rows.length <= limit + 1 && rows.every((r, i) => r.updatedAt === updatedAt && (afterKey === undefined || r.iri > afterKey) && (i === 0 || rows[i - 1]!.iri < r.iri));
-    if (!ordered) return keepCursor([...rows].sort(byIri).slice(0, limit));
-    const judged = rows.slice(0, limit);
+    const ordered = clean && rows.length <= limit + 1 && rows.every((r, i) => r.updatedAt === updatedAt && (afterKey === undefined || r.iri > afterKey) && (i === 0 || rows[i - 1]!.iri <= r.iri));   // <=: a subject's own rows are adjacent
+    if (!ordered) return keepCursor(distinctRows([...rows].sort(byIri)).slice(0, limit));
+    const judged = distinctRows(rows).slice(0, limit);
+    // limit + 1 rows = a full window, which may hide more subjects even when repeats left fewer than limit + 1 of them: continue after the last subject judged
     return { plan: { cls, judged, next: rows.length <= limit ? { after: updatedAt } : { ...cursor, tie: { updatedAt, afterKey: judged[judged.length - 1]!.iri } }, caughtUp: false }, anomaly: false, queries: 1 };
   }
   const { rows, clean } = parseScanRows(expectBindings(await ctx.store.query(buildRetentionScanQuery(ctx.graphUri, cls, cutoff, limit, cursor), SCAN_OPTIONS)));
   const afterOk = (u: number) => cursor.after === undefined || (cursor.inclusive ? u >= cursor.after : u > cursor.after);
   const ordered = clean && rows.length <= limit + 1 && rows.every((r, i) => afterOk(r.updatedAt) && r.updatedAt <= cutoff && (i === 0 || rows[i - 1]!.updatedAt <= r.updatedAt));
-  if (!ordered) return keepCursor([...rows].sort((a, b) => a.updatedAt - b.updatedAt).slice(0, limit));
+  if (!ordered) return keepCursor(distinctRows([...rows].sort((a, b) => a.updatedAt - b.updatedAt)).slice(0, limit));
   if (rows.length <= limit) {                                                          // the end of the old-enough region: everything left is judged now
-    return { plan: { cls, judged: rows, next: rows.length ? { after: rows[rows.length - 1]!.updatedAt } : cursor, caughtUp: true }, anomaly: false, queries: 1 };
+    return { plan: { cls, judged: distinctRows(rows), next: rows.length ? { after: rows[rows.length - 1]!.updatedAt } : cursor, caughtUp: true }, anomaly: false, queries: 1 };
   }
   // limit + 1 rows came back: the last one may belong to a group that continues beyond the result, so judge only what is strictly older than it
   const last = rows[limit]!.updatedAt;
   const older = rows.filter(r => r.updatedAt < last);
-  if (older.length > 0) return { plan: { cls, judged: older, next: { after: older[older.length - 1]!.updatedAt }, caughtUp: false }, anomaly: false, queries: 1 };
+  if (older.length > 0) return { plan: { cls, judged: distinctRows(older), next: { after: older[older.length - 1]!.updatedAt }, caughtUp: false }, anomaly: false, queries: 1 };
   const walk = await planScan(ctx, cls, cutoff, limit, { ...cursor, tie: { updatedAt: last } });   // one group larger than a batch: walk it by key, starting now
   return { ...walk, queries: walk.queries + 1 };
 }

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
-import { PROMOTE_STATE, PROMOTE_UPDATED_AT, PROMOTE_PAYLOAD, jobSubject, literal, integer } from '../src/async-promote-queue-utils.js';
+import { PROMOTE_STATE, PROMOTE_UPDATED_AT, PROMOTE_PAYLOAD, jobSubject, literal, integer, serializeJobRecord } from '../src/async-promote-queue-utils.js';
 import { buildRetentionScanQuery, buildRetentionTieQuery, buildRetentionVerifyQuery } from '../src/async-promote-retention-scan.js';
 import { PROMOTE_NO_EFFECT_REJECTION_CODE } from '../src/promote-no-effect-rejection.js';
 import type { PromoteJob } from '../src/async-promote-queue-types.js';
@@ -711,5 +711,133 @@ describe('a commit marker flag that is not a boolean is no evidence that promote
     expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: 3, retired_no_effect: 0 });
     expect(retention.counters().kept.unreadable).toBeGreaterThanOrEqual(malformed.length);
     expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: 3 }, kept: { unreadable: malformed.length } });
+  });
+});
+
+describe('repeated rows of one subject in the scan (review of P10a: equal-comparing timestamp terms must not stall the pass)', () => {
+  const XSD = 'http://www.w3.org/2001/XMLSchema#';
+  const SCAN = 'publisher.asyncPromote.retention.scan';
+  /** The job's rows with its `updatedAt` triple replaced by one triple per term: distinct RDF terms that compare equal (`"100"^^xsd:integer`, `"100.0"^^xsd:decimal`). */
+  const withUpdatedAtTerms = (job: PromoteJob, ...terms: string[]): Quads =>
+    serializeJobRecord(job, GRAPH).jobQuads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? terms.map(object => ({ ...q, object })) : [q]));
+  const same = (n: number) => [`"${n}"^^<${XSD}integer>`, `"${n}.0"^^<${XSD}decimal>`];
+  const calls = async (retention: ReturnType<typeof newRetention>, max = 12): Promise<ShareRetentionBatchResult[]> => {
+    const results: ShareRetentionBatchResult[] = [];
+    for (let i = 0; i < max; i++) { const res = await retention.runBatch(); results.push(res); if (!res.hasMore || res.error) break; }
+    return results;
+  };
+
+  it.each(['delete', 'report'] as const)('%s mode, batch size 1: a retained job whose index holds 100 (integer) and 100.0 (decimal) stays, the cancelled job at 200 behind it is judged, the pass completes, no anomaly', async mode => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...withUpdatedAtTerms(mk('retained', 'failed', {}, NOW - 100), ...same(100)), ...serializeJobRecord(mk('eligible', 'failed', { reason: 'cancelled' }, NOW - 200), GRAPH).jobQuads]);
+    const { store: spied, log } = spy(store);
+    const retention = newRetention(spied, { mode, batchSize: 1 });
+    const results = await calls(retention);
+    expect(results.at(-1)!.hasMore, `the pass ends (${results.length} calls, anomalies ${results.map(r => r.anomalies)})`).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.filter(r => r.passCompleted)).toHaveLength(1);
+    expect(verifiedSubjects(log)).toEqual([jobSubject('retained'), jobSubject('eligible')]);             // each judged once, in order
+    expect(results.reduce((n, r) => n + r.scanned, 0)).toBe(2);
+    expect([...(await storedIds(store))].sort()).toEqual(mode === 'delete' ? ['retained'] : ['eligible', 'retained']);
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(mode === 'delete' ? 1 : 0);
+    expect(retention.counters().anomalies).toBe(0);
+    expect(retention.counters().lastCompletePass).toMatchObject(mode === 'delete'
+      ? { scanned: 2, deleted: { cancelled: 1 }, wouldDelete: { cancelled: 0 }, kept: { failed_retained: 1 } }
+      : { scanned: 2, deleted: { cancelled: 0 }, wouldDelete: { cancelled: 1 }, kept: { failed_retained: 1 } });
+  });
+
+  it('a group larger than a batch whose members carry two or three equal-comparing terms is walked by key: every subject judged once, all deleted, no anomaly', async () => {
+    const store = new OxigraphStore();
+    const T = 10 * W;
+    const terms: Record<string, string[]> = { s2: same(NOW - T), s4: same(NOW - T), s5: [...same(NOW - T), `"${NOW - T}.00"^^<${XSD}decimal>`] };
+    await insertQuads(store, ['s1', 's2', 's3', 's4', 's5', 's6'].flatMap(id => withUpdatedAtTerms(mk(id, 'succeeded', {}, T), ...(terms[id] ?? [integer(NOW - T)]))));
+    const { store: spied, log } = spy(store);
+    const results = await calls(newRetention(spied, { batchSize: 2 }), 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(verifiedSubjects(log).sort()).toEqual(['s1', 's2', 's3', 's4', 's5', 's6'].map(jobSubject));
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(6);
+    expect((await storedIds(store)).size).toBe(0);
+  });
+
+  it('the range scan collapses a subject that appears twice with equal-comparing terms: it is judged, counted and deleted once', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...withUpdatedAtTerms(mk('twice', 'failed', { reason: 'cancelled' }, NOW - 200), ...same(200)), ...serializeJobRecord(mk('once', 'succeeded', {}, NOW - 300), GRAPH).jobQuads]);
+    const { store: spied, log } = spy(store);
+    const retention = newRetention(spied, { batchSize: 10 });
+    const res = await retention.runBatch();
+    expect(res).toMatchObject({ scanned: 2, deleted: 2, anomalies: 0, hasMore: false, passCompleted: true });
+    expect(res.deletedJobs.map(j => j.jobId).sort()).toEqual(['once', 'twice']);
+    expect(verifiedSubjects(log).sort()).toEqual([jobSubject('once'), jobSubject('twice')]);
+    expect(deletedSubjects(log).sort()).toEqual([jobSubject('once'), jobSubject('twice')]);
+    expect(retention.counters().deleted).toEqual({ succeeded: 1, cancelled: 1, retired_no_effect: 0 });
+    expect(retention.counters().lastCompletePass).toMatchObject({ scanned: 2, deleted: { succeeded: 1, cancelled: 1 } });
+  });
+
+  it('the range scan collapses a repeated subject in the older part of a full window too: three subjects, the oldest with two equal-comparing terms, batch size 2', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...withUpdatedAtTerms(mk('x', 'succeeded', {}, 10 * W), ...same(NOW - 10 * W)), ...rowOf('succeeded', 'y', 9 * W), ...rowOf('succeeded', 'z', 8 * W)]);
+    const { store: spied, log } = spy(store);
+    const results = await calls(newRetention(spied, { batchSize: 2 }));
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.map(r => r.scanned)).toEqual([1, 2]);                                                                            // x alone (its twin row is dropped), then y and z
+    expect(deletedSubjects(log)).toEqual(['x', 'y', 'z'].map(jobSubject));
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(3);
+  });
+
+  it('an engine that repeats every row of a scan answer (within its LIMIT) is no obstacle: rows are judged once, the walk advances, no anomaly', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 9 }, (_, i) => rowOf('succeeded', `d-${i}`, i < 5 ? 10 * W : 10 * W + 1000 * i)).flat());   // a group of five, then four distinct rows
+    const doubling = async (sparql: string, source: string | undefined, _run: () => Promise<QueryResult>): Promise<QueryResult> => {
+      const all = await store.query(sparql.replace(/ LIMIT \d+$/, ''));                                                 // the ordered answer, every row twice, THEN the LIMIT (as an engine that repeats rows does)
+      if (source !== SCAN || all.type !== 'bindings') return all;
+      return { ...all, bindings: all.bindings.flatMap(b => [b, b]).slice(0, Number(/LIMIT (\d+)$/.exec(sparql)![1])) } as QueryResult;
+    };
+    const { store: spied, log } = spy(store, doubling);
+    const results = await calls(newRetention(spied, { batchSize: 3 }), 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(new Set(verifiedSubjects(log)).size).toBe(9);
+    expect(verifiedSubjects(log)).toHaveLength(9);
+    expect((await storedIds(store)).size).toBe(0);
+  });
+
+  it('a range answer that is out of order and repeats a subject is an anomaly, and what it judges is one row per subject', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...withUpdatedAtTerms(mk('x', 'succeeded', {}, 10 * W), ...same(NOW - 10 * W)), ...rowOf('succeeded', 'y', 9 * W), ...rowOf('succeeded', 'z', 8 * W)]);
+    const { store: spied } = spy(store, async (_sparql, source, run) => {
+      const res = await run();
+      return source === SCAN && res.type === 'bindings' ? { ...res, bindings: [...res.bindings].reverse() } as QueryResult : res;                     // newest first: x, x, y, z becomes z, y, x, x
+    });
+    const res = await newRetention(spied, { mode: 'report', batchSize: 3 }).runBatch();
+    expect(res.anomalies).toBe(1);
+    expect(res.wouldDeleteJobs.map(j => j.jobId).sort()).toEqual(['x', 'y', 'z']);
+  });
+
+  it('a real reordering of a tie walk still fails closed: it is an anomaly, the cursor does not move, and the same sweep drains once the engine conforms', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 6 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W)).flat());                      // one group, larger than the batch
+    let engine: 'descending' | 'interleaved' | 'conforming' = 'descending';
+    const reorder = async (sparql: string, source: string | undefined, run: () => Promise<QueryResult>): Promise<QueryResult> => {
+      const res = await run();
+      if (engine === 'conforming' || source !== SCAN || !sparql.includes('ORDER BY STR(?job)') || res.type !== 'bindings') return res;
+      const rows = [...res.bindings];
+      // newest key first, or a repeated subject that is not adjacent to its twin (a, b, a)
+      return { ...res, bindings: engine === 'descending' ? rows.reverse() : [rows[0]!, rows[1]!, rows[0]!].slice(0, rows.length) } as QueryResult;
+    };
+    const { store: spied } = spy(store, reorder);
+    const retention = newRetention(spied, { batchSize: 2, mode: 'report' });
+    for (const mode of ['descending', 'interleaved'] as const) {
+      engine = mode;
+      const res = await retention.runBatch();
+      expect(res.anomalies, mode).toBe(1);
+      expect(res.hasMore, mode).toBe(true);
+      expect(new Set(res.wouldDeleteJobs.map(j => j.jobId)).size, `${mode}: what an anomalous answer judges is one row per subject`).toBe(res.wouldDeleteJobs.length);
+    }
+    engine = 'conforming';
+    const results = await calls(retention, 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(retention.counters().lastCompletePass).toBeUndefined();                                                                   // the pass that met an anomaly never completes
+    expect(retention.counters().anomalies).toBe(2);
   });
 });
