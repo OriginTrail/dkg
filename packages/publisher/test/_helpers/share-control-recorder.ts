@@ -21,6 +21,7 @@ import {
 /**
  * The store methods the adapter routing test (packages/storage/test/store-control-routing.test.ts, `CALLS`) drives under
  * every ambient lane with the path on and off. A queue call to any other store method has no routing proof behind it.
+ * The oracle compares this list with the methods that test reaches (`ROUTING_DRIVEN_METHODS`, checked against its `CALLS`).
  */
 export const ROUTING_TEST_METHODS: readonly string[] = Object.freeze([
   'query', 'insert', 'delete', 'deleteByPattern', 'deleteByPatternWithoutCount', 'deleteBySubjectPrefix',

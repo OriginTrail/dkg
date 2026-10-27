@@ -102,6 +102,14 @@ describe('the share control graph census over every package\'s src/', () => {
     expect(offenders).toEqual([]);
   });
 
+  it('has no caller of the ownership read outside the queue files, and the read\'s own options parameter has no default', () => {
+    const callers = sources.filter((file) => /\breadPromoteOwnershipCandidates\(/.test(file.text)).map((file) => file.path);
+    expect(callers).toEqual([`${SRC}async-promote-ownership.ts`, `${SRC}async-promote-queue-impl.ts`]);   // its definition and the in-lock check
+    expect(callers.every((path) => path in SITE_FILES)).toBe(true);
+    const read = storeSites(site(`${SRC}async-promote-ownership.ts`)).filter((s) => s.callee === 'query');
+    expect(read.map((s) => s.options)).toEqual(['parameter']);
+  });
+
   it('finds store calls in the queue files (the scan is not vacuous)', () => {
     const control = Object.keys(SITE_FILES).flatMap((path) => storeSites(site(path))).filter((s) => s.options === 'control');
     expect(control.length).toBeGreaterThanOrEqual(8);
@@ -172,6 +180,17 @@ describe('the scanners report what they must', () => {
     expect(sharedLabels([fixture('a.ts', `a('${label}'); b('${label}');`)])).toEqual([label]);
     expect(sharedLabels([fixture('a.ts', `a('${label}');`), fixture('b.ts', `b("${label}");`)])).toEqual([label]);
     expect(sharedLabels([fixture('a.ts', `a('${label}'); b('publisher.asyncPromote.writeJob'); // '${label}'`)])).toEqual([]);
+  });
+
+  it('reports a pass-through options parameter with a default or a question mark, not only a required one', () => {
+    const text = [
+      "async function required(store, options: QueryOptions) { return store.query(sql, options); }",
+      "async function defaulted(store, options: QueryOptions = { source: 'publisher.asyncPromote.findActiveConflict' }) { return store.query(sql, options); }",
+      "async function optional(store, options?: QueryOptions) { return store.query(sql, options); }",
+      "const options = controlStoreOptions('share', 'publisher.asyncPromote.a');",
+      "async function shadowed(store) { return store.query(sql, options); }",
+    ].join('\n');
+    expect(storeSites(fixture('fixture.ts', text)).map((s) => s.options)).toEqual(['parameter', 'defaulted-parameter', 'defaulted-parameter', 'control']);
   });
 
   it('reports a store call whose options lost the control tag, or never had options', () => {

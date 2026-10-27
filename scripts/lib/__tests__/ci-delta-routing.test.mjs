@@ -1,5 +1,7 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { parse } from 'yaml';
@@ -537,6 +539,66 @@ test('the Blazegraph lane covers agent live suites and scoped query catalogs', (
     assert.equal(plan.lanes.tornado_blazegraph, true, filePath);
   }
   assert.equal(pullRequestPlan([change('packages/network-sim/src/index.ts')]).lanes.tornado_blazegraph, false);
+});
+
+// The share promote lookup differential provisions the image pinned in blazegraph-image.json. The one reader of that file is
+// packages/cli/blazegraph-image-metadata.cjs, which validates the whole contract, so the step runs the reader instead of interpreting the
+// JSON itself. The step's script runs here against a copy of the reader, a contract fixture and stub docker/curl/pnpm/sleep commands.
+function runPromoteLookupStep(t, contract, { readiness = true } = {}) {
+  const job = parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows/ci.yml'), 'utf8')).jobs['tornado-blazegraph'];
+  const step = job.steps.find(({ name = '' }) => name.startsWith('Share promote lookup live differential on the provisioned Blazegraph image'));
+  assert.ok(step, 'the Blazegraph job runs the share promote lookup differential on the provisioned image');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'promote-lookup-step-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const file of ['packages/cli/blazegraph-image-metadata.cjs', 'packages/storage/blazegraph-namespace-contract.cjs']) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.cpSync(path.join(REPO_ROOT, file), path.join(root, file));
+  }
+  fs.writeFileSync(path.join(root, 'blazegraph-image.json'), JSON.stringify(contract));
+  const bin = path.join(root, 'bin');
+  fs.mkdirSync(bin);
+  const calls = path.join(root, 'calls.log');
+  const stub = (name, body) => fs.writeFileSync(path.join(bin, name), `#!/bin/sh\n${body}\n`, { mode: 0o755 });
+  stub('docker', 'echo "docker $*" >> "$CALLS"\nif [ "$1" = port ]; then printf "0.0.0.0:49321\\n[::]:49321\\n"; fi\nexit 0');
+  stub('curl', `echo "curl $*" >> "$CALLS"\nexit ${readiness ? 0 : 22}`);
+  stub('sleep', 'exit 0');
+  stub('pnpm', 'echo "pnpm $* URL=$BLAZEGRAPH_TEST_URL REQUIRE_U001F_COLLAPSE=$BLAZEGRAPH_REQUIRE_U001F_COLLAPSE" >> "$CALLS"\nexit 0');
+  fs.writeFileSync(path.join(root, 'step.sh'), step.run);
+  const result = spawnSync('bash', ['--noprofile', '--norc', '-e', '-o', 'pipefail', 'step.sh'], {
+    cwd: root,
+    encoding: 'utf8',
+    env: { ...process.env, PATH: `${bin}${path.delimiter}${process.env.PATH}`, CALLS: calls, GITHUB_RUN_ID: '42', GITHUB_RUN_ATTEMPT: '2' },
+  });
+  return { ...result, calls: fs.existsSync(calls) ? fs.readFileSync(calls, 'utf8').trim().split('\n').filter(Boolean) : [] };
+}
+
+test('the share promote lookup step reads the pinned Blazegraph image through its canonical reader', (t) => {
+  const contract = { image: 'example.invalid/blazegraph:9@sha256:abc', containerPort: 9999, dataPath: '/data' };
+  const container = 'dkg-ci-promote-lookup-blazegraph-42-2';
+  const ok = runPromoteLookupStep(t, contract);
+  assert.equal(ok.status, 0, ok.stderr + ok.stdout);
+  assert.deepEqual(ok.calls, [
+    `docker run -d --name ${container} -p 127.0.0.1::9999 example.invalid/blazegraph:9@sha256:abc`,
+    `docker port ${container} 9999/tcp`,
+    'curl -sf -o /dev/null --max-time 2 http://127.0.0.1:49321/bigdata/status',
+    'pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts test-live/async-promote-bounded-lookup.blazegraph.test.ts'
+      + ' URL=http://127.0.0.1:49321/bigdata/namespace/kb/sparql REQUIRE_U001F_COLLAPSE=1',
+    `docker rm -f ${container}`,
+  ]);
+
+  // The reader rejects a contract it does not accept, so the step stops before any container exists; a private
+  // interpretation of the JSON would pass the string port straight to docker.
+  const invalid = runPromoteLookupStep(t, { ...contract, containerPort: '9999' });
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stderr, /containerPort must be an integer from 1 through 65535/);
+  assert.deepEqual(invalid.calls, []);
+
+  // A pinned image that never serves still fails the step with the container removed.
+  const unready = runPromoteLookupStep(t, contract, { readiness: false });
+  assert.equal(unready.status, 1);
+  assert.match(unready.stdout, /::error::Pinned Blazegraph image did not serve \/bigdata\/status within 120s/);
+  assert.equal(unready.calls.at(-1), `docker rm -f ${container}`);
+  assert.equal(unready.calls.some((call) => call.startsWith('pnpm')), false);
 });
 
 test('primary persistence integration keeps the Agent wrapper in the Agent layer', () => {

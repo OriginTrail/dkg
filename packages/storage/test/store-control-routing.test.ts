@@ -9,6 +9,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from 'vitest';
+import { ROUTING_CALL_METHODS } from './helpers/store-control-routing-calls.js';
 import { BlazegraphStore } from '../src/adapters/blazegraph.js';
 import '../src/adapters/sparql-http.js';
 import { tryReplaceSubjectAndInsertAtomically } from '../src/atomic-subject-insert.js';
@@ -437,4 +438,29 @@ describe('option-less calls', () => {
       }
     },
   );
+});
+
+describe('the call list is the one the share queue oracle reads (helpers/store-control-routing-calls.ts)', () => {
+  it('has exactly the cases that helper lists', () => {
+    expect(CALLS.map((call) => call.name).sort()).toEqual(Object.keys(ROUTING_CALL_METHODS).sort());
+  });
+
+  // A method is "reached" when the case looks it up on the store, whether or not this stack implements it (`flush?.()`), and the
+  // fallback branch is only taken where there is no atomic replace, so the lookups are collected over every stack.
+  it.each(CALLS.map((call) => [call.name, call] as const))('%s reaches exactly the methods that helper lists for it', async (name, call) => {
+    const reached = new Set<string>();
+    for (const stack of STACKS) {
+      const h = harnesses.get(stack.name)!;
+      h.inject(STORE_CONTROL_QUEUES);
+      const watched = new Proxy(h.store, {
+        get(target, prop) {
+          if (typeof prop === 'string') reached.add(prop);
+          const value = Reflect.get(target, prop, target) as unknown;
+          return typeof value === 'function' ? value.bind(target) : value;
+        },
+      });
+      await call.run(watched, controlStoreOptions('share', SOURCE));
+    }
+    expect([...reached].sort()).toEqual([...ROUTING_CALL_METHODS[name]!].sort());
+  });
 });

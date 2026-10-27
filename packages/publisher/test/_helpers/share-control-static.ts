@@ -82,24 +82,43 @@ const STORE_HELPER_OPTIONS: Readonly<Record<string, number>> = {
   replaceSubjectAtomicallyOrFallback: 4, readPromoteOwnershipCandidates: 3,
 };
 
-export type OptionsClass = 'control' | 'reader' | 'monitoring' | 'retention-scan' | 'parameter' | 'other' | 'missing';
+/**
+ * `parameter` is a REQUIRED pass-through parameter: its caller must name the options. A parameter with a default or a `?` is
+ * `defaulted-parameter` and no site file allows it, because a default would let a caller that omits the options make an
+ * untagged read of the control graph under a queue label.
+ */
+export type OptionsClass = 'control' | 'reader' | 'monitoring' | 'retention-scan' | 'parameter' | 'defaulted-parameter' | 'other' | 'missing';
 
 function isShareControlCall(expr: ts.Expression): boolean {
   return ts.isCallExpression(expr) && ts.isIdentifier(expr.expression) && expr.expression.text === 'controlStoreOptions'
     && expr.arguments.length === 2 && ts.isStringLiteralLike(expr.arguments[0]!) && expr.arguments[0].text === 'share';
 }
 
-function declarationOf(sf: ts.SourceFile, name: string): ts.VariableDeclaration | ts.ParameterDeclaration | undefined {
-  let found: ts.VariableDeclaration | ts.ParameterDeclaration | undefined;
-  visit(sf, (node) => {
-    if ((ts.isVariableDeclaration(node) || ts.isParameter(node)) && ts.isIdentifier(node.name) && node.name.text === name) found ??= node;
-  });
-  return found;
+/** The declaration `id` refers to: the nearest enclosing function's parameter, or a variable declared directly in an enclosing block or the file. */
+function declarationOf(id: ts.Identifier): ts.VariableDeclaration | ts.ParameterDeclaration | undefined {
+  for (let scope: ts.Node | undefined = id.parent; scope; scope = scope.parent) {
+    if (ts.isFunctionLike(scope)) {
+      const parameter = scope.parameters.find((p) => ts.isIdentifier(p.name) && p.name.text === id.text);
+      if (parameter) return parameter;
+    }
+    if (ts.isBlock(scope) || ts.isSourceFile(scope) || ts.isModuleBlock(scope)) {
+      for (const statement of scope.statements) {
+        if (!ts.isVariableStatement(statement)) continue;
+        const variable = statement.declarationList.declarations.find((d) => ts.isIdentifier(d.name) && d.name.text === id.text);
+        if (variable) return variable;
+      }
+    }
+  }
+  return undefined;
 }
 
-/** What the options argument of a store call is: the share control tag, the lock-free reader's own options, a pass-through parameter, or something else. */
+/** What the options argument of a store call is: the share control tag, the lock-free reader's own options, a required pass-through parameter, or something else. */
 export function classifyOptions(expr: ts.Expression | undefined, sf: ts.SourceFile, depth = 0): OptionsClass {
   if (!expr) return 'missing';
+  // `Object.freeze(x)` is `x`: the reader's module-level options are frozen.
+  if (ts.isCallExpression(expr) && expr.arguments.length === 1 && expr.expression.getText(sf) === 'Object.freeze') {
+    return classifyOptions(expr.arguments[0], sf, depth + 1);
+  }
   if (isShareControlCall(expr)) return 'control';
   // The monitoring reads build their background options with `readOptions('publisher.queueUsage.<queue>', signal)`.
   if (ts.isCallExpression(expr) && ts.isIdentifier(expr.expression) && expr.expression.text === 'readOptions'
@@ -117,9 +136,9 @@ export function classifyOptions(expr: ts.Expression | undefined, sf: ts.SourceFi
     return 'other';
   }
   if (ts.isIdentifier(expr) && depth < 4) {
-    const declaration = declarationOf(sf, expr.text);
+    const declaration = declarationOf(expr);
     if (!declaration) return 'other';
-    if (ts.isParameter(declaration)) return 'parameter';
+    if (ts.isParameter(declaration)) return declaration.initializer || declaration.questionToken ? 'defaulted-parameter' : 'parameter';
     return declaration.initializer ? classifyOptions(declaration.initializer, sf, depth + 1) : 'other';
   }
   return 'other';

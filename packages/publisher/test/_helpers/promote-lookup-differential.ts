@@ -1,6 +1,6 @@
 import { expect } from 'vitest';
 import type { OxigraphStore, Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { buildPromoteOwnershipCandidateQuery, createPromoteOwnershipReader, hasUnfinishedBoundObligation, promoteOwnershipLookup,
+import { FIND_ACTIVE_CONFLICT_SOURCE, buildPromoteOwnershipCandidateQuery, createPromoteOwnershipReader, hasUnfinishedBoundObligation, promoteOwnershipLookup,
   readPromoteOwnershipCandidates, storedPromoteLaneScope, type PromoteConflictLookup } from '../../src/async-promote-ownership.js';
 import { TripleStoreAsyncPromoteQueue } from '../../src/async-promote-queue-impl.js';
 import type { PromoteJob } from '../../src/async-promote-queue-types.js';
@@ -8,6 +8,9 @@ import { ACTIVE_PROMOTE_STATES, PROMOTE_PAYLOAD, PROMOTE_UNIQUENESS_KEY, expectB
   promoteLaneScopesConflict, serializeJobRecord, uniquenessKey } from '../../src/async-promote-queue-utils.js';
 import { validatePromoteRecoveryBinding } from '../../src/promote-recovery-binding.js';
 import { createPromoteOperationIntent } from '../../src/promote-operation-intent.js';
+
+/** The options a lookup read carries in these tests: `readPromoteOwnershipCandidates` has no default, so every caller names its own. */
+export const CONFLICT_READ_OPTIONS = Object.freeze({ source: FIND_ACTIVE_CONFLICT_SOURCE });
 
 // Shared fixtures of the bounded promote conflict lookup tests (OT-RFC-73 P6): the in-memory unit and property tests and the live Blazegraph differential
 // run the SAME generator and the SAME oracle, so a real engine is judged by exactly what the in-memory engines are.
@@ -109,8 +112,8 @@ export async function differentialCase(store: TripleStore, graph: string, r: () 
   const probe = wildcardCase ? jobs[0]! : jobs.length && r() < 0.4 ? pick(r, jobs) : null;
   const wildcard = !!probe && (probe.formatVersion ?? 0) < 3 && probe.request.agentAddress === undefined;
   const lookup = probe ? promoteOwnershipLookup(probe.request, wildcard) : promoteOwnershipLookup(req({ assertionName: pick(r, ['a', 'b']), agentAddress: pick(r, [AG, AG_MIXED, OTHER]) }));
-  const [ref, got] = [await referenceCandidates(store, graph, lookup), await readPromoteOwnershipCandidates(store, graph, lookup)];
-  const raw = expectBindings(await store.query(buildPromoteOwnershipCandidateQuery(graph, lookup), { source: 'publisher.asyncPromote.findActiveConflict' }));
+  const [ref, got] = [await referenceCandidates(store, graph, lookup), await readPromoteOwnershipCandidates(store, graph, lookup, CONFLICT_READ_OPTIONS)];
+  const raw = expectBindings(await store.query(buildPromoteOwnershipCandidateQuery(graph, lookup), CONFLICT_READ_OPTIONS));
   const repeatedRows = raw.length - new Set(raw.map(x => x.payload)).size;
   expect(got.every(g => ref.some(x => x.jobId === g.jobId))).toBe(true);
   expect(ids(ref)).toEqual([...new Set(ids(ref))]);                                // oracle sanity: the previous query returns every job once
