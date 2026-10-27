@@ -16,6 +16,7 @@ export interface SimulationRun {
   abort: AbortController;
   stats: RunStats;
   terminal?: DoneEvent & { runId: string };
+  diagnosticCount: number;
   errorLogCount: number;
 }
 export function currentOpsPerSec(stats: RunStats): number {
@@ -48,7 +49,7 @@ export class SimulationRuns {
     if (this.runs.has(id) || this.processedCancellations.has(id)) {
       return { accepted: false, error: 'Simulation run ID was completed or cancelled' };
     }
-    const run: SimulationRun = { id, abort: new AbortController(), errorLogCount: 0,
+    const run: SimulationRun = { id, abort: new AbortController(), diagnosticCount: 0, errorLogCount: 0,
       stats: { total, completed: 0, errors: 0, startedAt: Date.now(), recentTimestamps: [], operations: new Map() } };
     this.runs.set(id, run);
     this.active = this.latest = run;
@@ -57,7 +58,7 @@ export class SimulationRuns {
 
   status(run: SimulationRun): RunStatus {
     return { runId: run.id, running: !run.terminal, total: run.stats.total,
-      completed: run.stats.completed, errors: run.stats.errors,
+      completed: run.stats.completed, errors: run.stats.errors + run.diagnosticCount,
       elapsedMs: run.terminal?.elapsedMs ?? Date.now() - run.stats.startedAt,
       opsPerSec: run.terminal ? 0 : Math.round(currentOpsPerSec(run.stats) * 10) / 10, byOp: this.snapshotOperations(run) };
   }
@@ -84,7 +85,7 @@ export class SimulationRuns {
 
   fail(run: SimulationRun, error: unknown) {
     if (run.terminal) return;
-    run.stats.errors++;
+    run.diagnosticCount++;
     this.emit(run, { type: 'error', message: String(error instanceof Error ? error.message : error) });
   }
 
@@ -100,7 +101,7 @@ export class SimulationRuns {
   finish(run: SimulationRun) {
     if (run.terminal) return run.terminal;
     run.terminal = { type: 'done', runId: run.id, total: run.stats.total,
-      completed: run.stats.completed, errors: run.stats.errors,
+      completed: run.stats.completed, errors: run.stats.errors + run.diagnosticCount,
       elapsedMs: Date.now() - run.stats.startedAt, byOp: this.snapshotOperations(run) };
     if (this.active === run) this.active = null;
     this.publish(run.id, run.terminal);

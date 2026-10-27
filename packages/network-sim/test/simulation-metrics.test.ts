@@ -63,3 +63,19 @@ it('isolates outgoing snapshot dictionaries from canonical accounting and future
   second.byOp.query.phaseTotals.query = 999;
   expect(registry.finish(admission.run).byOp.query.phaseTotals.query).toBe(60);
 });
+
+
+it('keeps run diagnostics out of operation totals while preserving legacy wire counts', () => {
+  const registry = new SimulationRuns();
+  const admission = registry.admit('diagnostics', 2);
+  if (!admission.accepted) throw new Error('fixture run rejected');
+  registry.fail(admission.run, new Error('setup diagnostic'));
+  expect(snapshotMetrics({ type: 'status', ...registry.status(admission.run) }, emptyMetrics()))
+    .toEqual(emptyMetrics());
+  registry.record(admission.run, { type: 'op', opType: 'query', nodeId: 1, success: true, durationMs: 5, detail: 'ok' });
+  registry.fail(admission.run, new Error('transport diagnostic'));
+  const terminal = registry.finish(admission.run);
+  expect(terminal).toMatchObject({ completed: 1, errors: 2 });
+  expect(snapshotMetrics(terminal, emptyMetrics())).toMatchObject({ total: 1, success: 1, errors: 0 });
+  expect(admission.run.stats).toMatchObject({ completed: 1, errors: 0 });
+});

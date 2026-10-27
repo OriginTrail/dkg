@@ -23,7 +23,7 @@ export function useSimulation(onComplete: () => void) {
   const running = selectedRunId !== null && state.activeSimulationId === selectedRunId;
   const stats = storedRun ? {
     total: storedRun.config.opCount, completed: storedRun.metrics.total,
-    success: storedRun.metrics.success, errors: storedRun.metrics.errors,
+    success: storedRun.metrics.success, errors: storedRun.metrics.errors + (storedRun.diagnosticCount ?? 0),
     startedAt: storedRun.startedAt, finishedAt: storedRun.finishedAt,
   } : null;
 

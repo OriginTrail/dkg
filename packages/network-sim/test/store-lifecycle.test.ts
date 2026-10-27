@@ -243,19 +243,21 @@ describe('public store operations', () => {
   });
 });
 
-it('keeps setup errors scoped to the active run and replaces their provisional count on recovery', async () => {
+it('keeps diagnostics outside canonical operation metrics and reconciles their separate count', async () => {
   await mount();
   act(() => store.dispatch({ type: 'START_SIMULATION', id: 'current-errors', name: 'Current', config: runConfig }));
   act(() => store.dispatch({ type: 'SIMULATION_ERROR', id: 'old-run', message: 'late error' }));
   expect(store.state.liveMetrics.errors).toBe(0);
   act(() => store.dispatch({ type: 'SIMULATION_ERROR', id: 'current-errors', message: 'setup failed' }));
-  expect(store.state.liveMetrics.errors).toBe(1);
+  expect(store.state.liveMetrics).toMatchObject({ total: 0, success: 0, errors: 0, byType: {} });
+  expect(store.state.simulationRuns[0].diagnosticCount).toBe(1);
   expect(store.state.simulationRuns[0].error).toBe('setup failed');
   act(() => store.dispatch({ type: 'RECONCILE_SIMULATION', id: 'current-errors', snapshot: {
     type: 'status', total: 10, completed: 0, errors: 0, elapsedMs: 10, opsPerSec: 0, byOp: {},
   } }));
   expect(store.state.liveMetrics.errors).toBe(0);
   expect(store.state.simulationRuns[0].error).toBeUndefined();
+  expect(store.state.simulationRuns[0].diagnosticCount).toBe(0);
   act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'current-errors' }));
   const finished = store.state.simulationRuns[0];
   act(() => store.dispatch({ type: 'SIMULATION_ERROR', id: 'current-errors', message: 'late failure' }));

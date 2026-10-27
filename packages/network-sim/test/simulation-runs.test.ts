@@ -12,6 +12,8 @@ describe('run registry failure finalization', () => {
     const client = { write: vi.fn((chunk: string) => { events.push(JSON.parse(chunk.slice(6))); return true; }), end: vi.fn() };
     registry.subscribe(client as unknown as ServerResponse, admitted.run.id);
     registry.fail(admitted.run, error);
+    expect(admitted.run.stats).toMatchObject({ completed: 0, errors: 0 });
+    expect(admitted.run.diagnosticCount).toBe(1);
     const terminal = registry.finish(admitted.run);
     expect(events.map(event => event.type)).toEqual(['status', 'error', 'done']);
     expect(events[1]).toEqual({ type: 'error', runId: 'failed-run', message: error instanceof Error ? error.message : error });

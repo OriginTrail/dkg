@@ -23,6 +23,7 @@ export interface SimulationRun {
   finishedAt?: number;
   metrics: LiveOpMetrics;
   error?: string;
+  diagnosticCount?: number;
   config: SimulationSettings & { contextGraphId: string };
 }
 
@@ -141,22 +142,25 @@ function reducer(state: StoredState, action: Action): StoredState {
       if (action.id !== state.activeSimulationId) return state;
       const run = state.simulationRuns.find(r => r.id === action.id)!;
       const metrics = snapshotMetrics(action.snapshot, run.metrics);
-      const updated = { ...run, metrics, error: undefined };
+      const updated = { ...run, metrics, error: undefined, diagnosticCount: action.snapshot.errors - metrics.errors };
       return { ...state,
         simulationRuns: state.simulationRuns.map(r => r.id === action.id ? updated : r) };
     }
     case 'SIMULATION_ERROR': {
       if (action.id !== state.activeSimulationId) return state;
       return { ...state, simulationRuns: state.simulationRuns.map(run => run.id === action.id
-        ? { ...run, error: action.message, metrics: { ...run.metrics, errors: run.metrics.errors + 1 } } : run) };
+        ? { ...run, error: action.message, diagnosticCount: (run.diagnosticCount ?? 0) + 1 } : run) };
     }
     case 'COMPLETE_SIMULATION': {
       if (action.id !== state.activeSimulationId) return state;
-      const runs = state.simulationRuns.map(run => run.id === action.id ? {
-        ...run,
-        metrics: action.snapshot ? snapshotMetrics(action.snapshot, run.metrics) : run.metrics,
-        finishedAt: action.snapshot ? run.startedAt + action.snapshot.elapsedMs : Date.now(),
-      } : run);
+      const runs = state.simulationRuns.map(run => {
+        if (run.id !== action.id) return run;
+        const metrics = action.snapshot ? snapshotMetrics(action.snapshot, run.metrics) : run.metrics;
+        return { ...run, metrics,
+          diagnosticCount: action.snapshot ? action.snapshot.errors - metrics.errors : run.diagnosticCount,
+          finishedAt: action.snapshot ? run.startedAt + action.snapshot.elapsedMs : Date.now(),
+        };
+      });
       return { ...state, activeSimulationId: null, simulationRuns: runs };
     }
     default:

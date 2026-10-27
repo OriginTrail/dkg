@@ -25,8 +25,9 @@ export const emptyMetrics = (): LiveOpMetrics => ({ total: 0, success: 0, errors
 
 /** Snapshots replace observed run totals; missing operations are never invented as events. */
 export function snapshotMetrics(snapshot: DoneEvent | StatusEvent, previous: LiveOpMetrics): LiveOpMetrics {
+  const errors = Object.values(snapshot.byOp).reduce((sum, stats) => sum + stats.fail, 0);
   return {
-    total: snapshot.completed, success: Math.max(0, snapshot.completed - snapshot.errors), errors: snapshot.errors,
+    total: snapshot.completed, success: snapshot.completed - errors, errors,
     // Preserve observed timestamps, rather than manufacturing a recovery spike.
     recentTimestamps: previous.recentTimestamps,
     byType: Object.fromEntries(Object.entries(snapshot.byOp).map(([type, stats]) => [type, metricsFromOpStats(stats)])),

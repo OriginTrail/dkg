@@ -23,6 +23,9 @@ import { StoreProvider } from '../src/store';
 let store = makeStore();
 let ui: MountedUi;
 let fetchMock: ReturnType<typeof vi.fn>;
+const queryCounts = (ok: number, fail: number) => ({ query: {
+  ok, fail, timeouts: 0, totalMs: 0, allMs: 0, phaseTotals: {}, phaseCounts: {},
+} });
 class TestEventSource {
   static instances: TestEventSource[] = [];
   onmessage: ((event: { data: string }) => void) | null = null;
@@ -66,9 +69,9 @@ describe('simulation form and streamed results', () => {
     expect(ui.container.querySelector('.sim-summary')).toBeNull();
     act(() => source().onopen?.());
     expect(ui.container.querySelector('[role="status"]')).toBeNull();
-    source().emit({ type: 'status', completed: 12, errors: 1 });
+    source().emit({ type: 'status', completed: 12, errors: 1, byOp: queryCounts(11, 1) });
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('11/500');
-    source().emit({ type: 'done', completed: 500, errors: 1 });
+    source().emit({ type: 'done', completed: 500, errors: 1, byOp: queryCounts(499, 1) });
     expect(ui.container.textContent).toContain('Simulation complete: 499 succeeded, 1 failed');
     expect(source().close).toHaveBeenCalledOnce();
     expect(ui.button('Play Simulation').disabled).toBe(false);
@@ -109,7 +112,7 @@ describe('simulation form and streamed results', () => {
     let confirm!: (response: Response) => void;
     fetchMock.mockImplementationOnce(() => new Promise<Response>(resolve => { confirm = resolve; }));
     await ui.click('Stop Simulation');
-    oldSource.emit({ type: 'done', completed: 500, errors: 0 });
+    oldSource.emit({ type: 'done', completed: 500, errors: 0, byOp: queryCounts(500, 0) });
     await ui.click('Play Simulation');
     act(() => source().onerror?.());
     await act(async () => confirm(Response.json({ stopped: true, runId: oldSource.runId })));
@@ -167,15 +170,15 @@ describe('simulation form and streamed results', () => {
     await ui.click('Play Simulation');
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     if (eventType === 'op') source().emit({ type: 'op', opType: 'query', nodeId: 2, success: false, durationMs: 10, detail: 'rejected' });
-    else source().emit({ type: 'status', completed: 1, errors: 1 });
+    else source().emit({ type: 'status', completed: 1, errors: 1, byOp: queryCounts(0, 1) });
     expect((ui.container.querySelector('.sim-progress-fill') as HTMLElement).style.width).toBe('50%');
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('0/2');
     expect(ui.container.querySelectorAll('.sim-stat-value')[2].textContent).toBe('1.0');
     if (eventType === 'op') source().emit({ type: 'op', opType: 'query', nodeId: 2, success: true, durationMs: 10, detail: 'done' });
-    else source().emit({ type: 'status', completed: 2, errors: 1 });
+    else source().emit({ type: 'status', completed: 2, errors: 1, byOp: queryCounts(1, 1) });
     expect((ui.container.querySelector('.sim-progress-fill') as HTMLElement).style.width).toBe('100%');
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('1/2');
-    source().emit({ type: 'done', completed: 2, errors: 1 });
+    source().emit({ type: 'done', completed: 2, errors: 1, byOp: queryCounts(1, 1) });
     expect(ui.container.textContent).toContain('Simulation complete: 1 succeeded, 1 failed');
   });
   it('submits edited parameters, keeps at least one operation, and blocks edits during the run', async () => {
@@ -199,13 +202,13 @@ describe('simulation form and streamed results', () => {
     expect(store.addBroadcast).toHaveBeenCalledWith('publish', 1, 'sim publish');
     await act(async () => vi.advanceTimersByTimeAsync(1000));
     expect(ui.container.textContent).toContain('1.0s');
-    source().emit({ type: 'done', completed: 8, errors: 0 });
+    source().emit({ type: 'done', completed: 8, errors: 0, byOp: queryCounts(8, 0) });
     expect(source().close).toHaveBeenCalledTimes(1);
     expect(ui.container.textContent).toContain('Simulation complete: 8 succeeded, 0 failed');
     const calls = vi.mocked(store.dispatch).mock.calls.length;
     act(() => source().onerror?.()); // A disconnect after done must not dispatch a second completion.
     source().emit({ type: 'op', opType: 'query', nodeId: 1, success: true });
-    source().emit({ type: 'status', completed: 999, errors: 999 });
+    source().emit({ type: 'status', completed: 999, errors: 999, byOp: queryCounts(0, 999) });
     expect(store.dispatch).toHaveBeenCalledTimes(calls);
     expect(ui.button('Play Simulation').disabled).toBe(false);
   });
@@ -219,9 +222,10 @@ describe('simulation form and streamed results', () => {
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('0/1');
     source().emit({ type: 'error', message: 'setup error' });
     expect(ui.container.querySelector('[role="alert"]')?.textContent).toBe('setup error');
-    expect(store.state.liveMetrics.errors).toBe(1);
+    expect(store.state.liveMetrics.errors).toBe(0);
+    expect(store.state.simulationRuns.at(-1)?.diagnosticCount).toBe(1);
     expect(ui.container.querySelectorAll('.sim-stat-value')[1].textContent).toBe('1');
-    source().emit({ type: 'status', completed: 1, errors: 0 });
+    source().emit({ type: 'status', completed: 1, errors: 0, byOp: queryCounts(1, 0) });
     expect(store.state.liveMetrics.errors).toBe(0);
     expect(ui.container.querySelector('[role="alert"]')).toBeNull();
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('1/1');
@@ -249,15 +253,15 @@ describe('run-scoped client recovery', () => {
     const recorded = vi.mocked(store.dispatch).mock.calls.length;
     act(() => old.onerror?.()); act(() => old.onopen?.());
     old.emit({ type: 'op', runId: 'foreign', opType: 'query', nodeId: 2, success: true });
-    old.emit({ type: 'done', runId: 'foreign', completed: 99, errors: 0 });
+    old.emit({ type: 'done', runId: 'foreign', completed: 99, errors: 0, byOp: queryCounts(99, 0) });
     expect(store.dispatch).toHaveBeenCalledTimes(recorded);
     expect(ui.button('Stop Simulation').disabled).toBe(false);
-    old.emit({ type: 'done', completed: 500, errors: 2, elapsedMs: 2500 });
+    old.emit({ type: 'done', completed: 500, errors: 2, byOp: queryCounts(498, 2), elapsedMs: 2500 });
     expect(ui.container.textContent).toContain('Simulation complete: 498 succeeded, 2 failed in 2.5s');
     expect(old.close).toHaveBeenCalledOnce();
     const done = vi.mocked(store.dispatch).mock.calls.length;
-    old.emit({ type: 'status', completed: 999, errors: 999 });
-    old.emit({ type: 'done', completed: 999, errors: 999 });
+    old.emit({ type: 'status', completed: 999, errors: 999, byOp: queryCounts(0, 999) });
+    old.emit({ type: 'done', completed: 999, errors: 999, byOp: queryCounts(0, 999) });
     expect(store.dispatch).toHaveBeenCalledTimes(done);
   });
 
@@ -302,7 +306,7 @@ describe('run-scoped client recovery', () => {
 
   it.each(['wrong-run', 'wrong-snapshot', 'not-stopped', 'bad-json'])('does not finalize on a %s cancellation response', async mode => {
     await ui.click('Play Simulation');
-    fetchMock.mockResolvedValueOnce(mode === 'bad-json' ? new Response('invalid JSON') : Response.json({ stopped: mode !== 'not-stopped', runId: mode === 'wrong-run' ? 'foreign' : runId(), ...(mode === 'wrong-snapshot' ? { snapshot: { type: 'done', runId: 'foreign', completed: 999, errors: 0, elapsedMs: 1000 } } : {}) }));
+    fetchMock.mockResolvedValueOnce(mode === 'bad-json' ? new Response('invalid JSON') : Response.json({ stopped: mode !== 'not-stopped', runId: mode === 'wrong-run' ? 'foreign' : runId(), ...(mode === 'wrong-snapshot' ? { snapshot: { type: 'done', runId: 'foreign', completed: 999, errors: 0, byOp: queryCounts(999, 0), elapsedMs: 1000 } } : {}) }));
     await ui.click('Stop Simulation');
     expect(source().close).not.toHaveBeenCalled();
     expect(ui.button('Stop Simulation').disabled).toBe(false);
@@ -314,7 +318,7 @@ describe('run-scoped client recovery', () => {
     let reject!: (error: Error) => void;
     fetchMock.mockReturnValueOnce(new Promise<Response>((_resolve, no) => { reject = no; }));
     await ui.click('Stop Simulation');
-    source().emit({ type: 'done', completed: 500, errors: 0 });
+    source().emit({ type: 'done', completed: 500, errors: 0, byOp: queryCounts(500, 0) });
     await ui.click('Play Simulation');
     await act(async () => reject(new Error('old request timed out')));
     expect(ui.container.querySelector('[role="alert"]')).toBeNull();
@@ -324,7 +328,7 @@ describe('run-scoped client recovery', () => {
 
   it('uses final totals returned by cancellation when the stream missed progress', async () => {
     await ui.click('Play Simulation');
-    fetchMock.mockResolvedValueOnce(Response.json({ stopped: true, runId: runId(), snapshot: { type: 'done', runId: runId(), total: 500, byOp: {}, completed: 17, errors: 2, elapsedMs: 2000 } }));
+    fetchMock.mockResolvedValueOnce(Response.json({ stopped: true, runId: runId(), snapshot: { type: 'done', runId: runId(), total: 500, completed: 17, errors: 2, byOp: queryCounts(15, 2), elapsedMs: 2000 } }));
     await ui.click('Stop Simulation');
     expect(ui.container.textContent).toContain('Simulation complete: 15 succeeded, 2 failed in 2.0s');
   });
@@ -334,7 +338,7 @@ describe('run-scoped client recovery', () => {
     await ui.click('Play Simulation');
     expect(source().url).toBe(`/sim/events?runId=${runId()}`);
     expect(ui.button('Stop Simulation').disabled).toBe(false);
-    source().emit({ type: 'done', completed: 500, errors: 0 });
+    source().emit({ type: 'done', completed: 500, errors: 0, byOp: queryCounts(500, 0) });
     expect(ui.container.textContent).toContain('Simulation complete: 500 succeeded, 0 failed');
   });
 
@@ -351,7 +355,7 @@ describe('run-scoped client recovery', () => {
       expect(TestEventSource.instances).toHaveLength(0);
     } else {
       expect(stream.close).toHaveBeenCalledOnce();
-      stream.emit({ type: 'done', completed: 500, errors: 0 });
+      stream.emit({ type: 'done', completed: 500, errors: 0, byOp: queryCounts(500, 0) });
     }
     expect(store.dispatch).toHaveBeenCalledTimes(calls);
   });
