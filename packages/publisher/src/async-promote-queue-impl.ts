@@ -8,6 +8,9 @@ import { PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissi
 import { recordUnstartedPromoteAttempt, isRetiredBoundRejection } from './promote-no-effect-rejection.js';
 import { FIND_ACTIVE_CONFLICT_SOURCE, createPromoteOwnershipReader, hasUnfinishedBoundObligation, readPromoteOwnershipCandidates, promoteOwnershipLookup, storedPromoteLaneScope, type PromoteConflictLookup } from './async-promote-ownership.js';
 import { withPromoteControlLock } from './promote-control-lock.js';
+import { countPromoteJobsByState, listAllPromoteJobs, listPromoteJobsForSelector, listPromoteJobsPage, promoteListingTuning } from './promote-job-listing.js';
+import type { PromoteListingHost } from './promote-job-page.js';
+import { sweepPostCommitFailures } from './promote-post-commit-sweep.js';
 import { isBoundPromoteJob, snapshotPromoteRequest, claimPromoteJob } from './bound-promote-job.js';
 import { DEFAULT_PROMOTE_RETRY_TUNING } from './promote-retry-policy.js';
 import { countLeaseRecovery, isAutomaticallyRecoverablePostCommitFailure, missingStorageLaneForAuthorOnlyJob, promoteFailureTransition, requiresManualInspection } from './async-promote-recovery-policy.js';
@@ -32,12 +35,15 @@ import {
   type PromoteCommitMarker,
   type PromoteCommitMarkerStep,
   type PromoteJob,
+  type PromoteJobPage,
   type PromoteJobState,
   type PromoteListFilter,
+  type PromoteListPageRequest,
   type PromotePostCommitRecoveryEvent,
   type PromoteRecoverySummary,
   type PromoteRequest,
   type PromoteResult,
+  type PromoteSelector,
   type PromoteStats,
 } from './async-promote-queue-types.js';
 import {
@@ -55,7 +61,6 @@ import {
   literal,
   normalizePromoteAgentLane,
   parseJobPayload,
-  postCommitRecoveryExhaustedReason,
   promoteLaneConflictScope,
   promoteLaneScopesConflict,
   uniquenessKey,
@@ -86,6 +91,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   private graphEnsured = false;
   private readonly admissions: PromoteAdmissionCoordinator;
   private readonly admissionTimeoutMs: number;
+  private readonly listing: PromoteListingHost;
 
   /** Compose lifecycle ownership independently of constructing a polling queue. */
   static ownershipReader(store: TripleStore, config: Pick<AsyncPromoteQueueConfig, 'graphUri'> = {}) {
@@ -108,6 +114,8 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     this.idGenerator = config.idGenerator ?? (() => crypto.randomUUID());
     this.claimTokenGenerator = config.claimTokenGenerator ?? (() => crypto.randomUUID());
     this.backoff = config.backoff ?? createDefaultPromoteBackoff(config.rand);
+    this.listing = { store, graphUri: this.graphUri, now: this.now, ...promoteListingTuning(config), observe: job => this.admissions.observe(job),
+      locked: run => this.withMutationLock(async () => { await this.ensureGraph(); return run(); }) };
   }
 
   // Public surface — RFC §3.1–3.4
@@ -185,11 +193,17 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     });
   }
 
+  /** The complete listing, read page by page (one hold of the mutex per page; not a snapshot). */
   async list(filter: PromoteListFilter = {}): Promise<PromoteJob[]> {
-    return this.withMutationLock(async () => {
-      await this.ensureGraph();
-      return this.listUnlocked(filter, 'publisher.asyncPromote.list');
-    });
+    return listAllPromoteJobs(this.listing, filter);
+  }
+
+  async listPage(filter: Omit<PromoteListFilter, 'limit'> = {}, request: PromoteListPageRequest = {}): Promise<PromoteJobPage> {
+    return listPromoteJobsPage(this.listing, filter, request);
+  }
+
+  async listForSelector(selector: PromoteSelector): Promise<PromoteJob[]> {
+    return listPromoteJobsForSelector(this.listing, selector);
   }
 
   async reconcileShare(input: ShareReconciliationInput) {
@@ -496,69 +510,11 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
     return summary;
   }
 
+  /** Requeue terminal post-commit failures for the publisher's idempotent replay (promote-post-commit-sweep.ts). */
   async recoverPostCommitFailures(): Promise<PromotePostCommitRecoveryEvent[]> {
-    // No scheduler wake: every requeued row carries a future `nextRetryAt`
-    // that the worker's durable poll already honours.
-    return this.withMutationLock(async () => {
-      await this.ensureGraph();
-      return this.reconcilePostCommitFailures(this.now());
-    });
+    return sweepPostCommitFailures(this.listing, { backoff: this.backoff, write: job => this.writeJob(job),
+      ownedElsewhere: async job => (await this.findActiveConflict(this.conflictLookupForStoredJob(job), job.jobId)) !== null });
   }
-
-  /**
-   * A post-commit failure is recorded only after the exact SWM replace was
-   * dispatched, so the promote may have committed. The publisher's promote is
-   * idempotent for exactly that case: a replay validates whatever the exact
-   * graph holds against the sealed payload and repairs the durable tail, or
-   * re-runs the commit when nothing landed. Re-running it is therefore the
-   * same recovery an operator performs through `recover()`, minus the reset
-   * of the attempt counter: the replay spends the job's own retry budget so
-   * a durable tail that keeps failing cannot loop forever.
-   */
-  private async reconcilePostCommitFailures(now: number): Promise<PromotePostCommitRecoveryEvent[]> {
-    const events: PromotePostCommitRecoveryEvent[] = [];
-    const failed = await this.listUnlocked(
-      { state: ['failed'] },
-      'publisher.asyncPromote.recoverPostCommit',
-    );
-    for (const job of failed) {
-      if (!isAutomaticallyRecoverablePostCommitFailure(job)) continue;
-      const attemptCount = Math.max(1, job.attempt.count);
-      const maxAttempts = job.attempt.maxRetries;
-      if (attemptCount >= maxAttempts) {
-        // One durable verdict: the `reason` keeps this row out of every later
-        // sweep while leaving explicit operator recovery available.
-        await this.writeJob({
-          ...job,
-          updatedAt: now,
-          reason: postCommitRecoveryExhaustedReason(attemptCount),
-        });
-        events.push({ jobId: job.jobId, action: 'exhausted', attempt: attemptCount, maxAttempts });
-        continue;
-      }
-      // Another active job already owns this assertion; leave the row for a
-      // later sweep rather than breaking the per-assertion uniqueness key.
-      const conflicting = await this.findActiveConflict(this.conflictLookupForStoredJob(job), job.jobId);
-      if (conflicting) continue;
-      const nextRetryAt = now + this.backoff(attemptCount);
-      const requeued: PromoteJob = {
-        ...job,
-        state: 'failed_retrying',
-        updatedAt: now,
-        lease: undefined,
-        attempt: {
-          count: attemptCount,
-          maxRetries: maxAttempts,
-          nextRetryAt,
-          lastError: job.attempt.lastError ? { ...job.attempt.lastError, retryable: true } : undefined,
-        },
-      };
-      await this.writeJob(requeued);
-      events.push({ jobId: job.jobId, action: 'requeued', attempt: attemptCount, maxAttempts, nextRetryAt });
-    }
-    return events;
-  }
-
 
   async pause(): Promise<void> {
     this.paused = true;
@@ -580,17 +536,7 @@ export class TripleStoreAsyncPromoteQueue implements AsyncPromoteQueue, PromoteT
   };
 
   async getStats(): Promise<PromoteStats> {
-    return this.withMutationLock(async () => {
-      await this.ensureGraph();
-      const stats = Object.fromEntries(PROMOTE_JOB_STATES.map((s) => [s, 0])) as PromoteStats;
-      for (const job of await this.listUnlocked(
-        {},
-        'publisher.asyncPromote.stats',
-      )) {
-        stats[job.state] += 1;
-      }
-      return stats;
-    });
+    return countPromoteJobsByState(this.listing);
   }
 
   // ===========================================================================

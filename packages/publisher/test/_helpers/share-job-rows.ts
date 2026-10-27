@@ -9,7 +9,9 @@ import {
   DEFAULT_PROMOTE_CONTROL_GRAPH_URI,
   PROMOTE_PAYLOAD,
   PROMOTE_STATE,
+  expectBindings,
   jobSubject,
+  parseJobPayload,
   serializeJobRecord,
 } from '../../src/async-promote-queue-utils.js';
 
@@ -97,4 +99,33 @@ export function mulberry32(seed: number): () => number {
     t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
+}
+
+/** Replace a row (all its quads) with the spec's, or write it when it is new: the state change or insert of another process. */
+export async function putShareRow(store: TripleStore, spec: ShareRowSpec, graph = DEFAULT_PROMOTE_CONTROL_GRAPH_URI): Promise<void> {
+  await store.deleteByPattern({ subject: jobSubject(spec.id), graph });
+  await seedShareRows(store, [spec], graph);
+}
+
+export async function deleteShareRow(store: TripleStore, id: string, graph = DEFAULT_PROMOTE_CONTROL_GRAPH_URI): Promise<void> {
+  await store.deleteByPattern({ subject: jobSubject(id), graph });
+}
+
+/** Every job in the control graph, by one unfiltered read of the payloads: the independent oracle of the paged reads. */
+export async function readEveryShareJob(store: TripleStore, graph = DEFAULT_PROMOTE_CONTROL_GRAPH_URI): Promise<PromoteJob[]> {
+  const rows = expectBindings(await store.query(`SELECT ?payload WHERE { GRAPH <${graph}> { ?job <${PROMOTE_STATE}> ?state ; <${PROMOTE_PAYLOAD}> ?payload } }`));
+  return rows.flatMap((row) => { const job = parseJobPayload(row['payload']); return job ? [job] : []; });
+}
+
+/** The keyset order of a page: oldest `enqueuedAt`, then `jobId` by code point. */
+export const keysetOrder = (a: Pick<PromoteJob, 'enqueuedAt' | 'jobId'>, b: Pick<PromoteJob, 'enqueuedAt' | 'jobId'>): number =>
+  a.enqueuedAt !== b.enqueuedAt ? a.enqueuedAt - b.enqueuedAt : a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0;
+
+const ID_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._:-';
+/** A job id of the grammar the queue accepts (mixed case, digits, `.` `_` `:` `-`), 1 to `max` characters. */
+export function randomJobId(rand: () => number, max = 12): string {
+  const length = 1 + Math.floor(rand() * max);
+  let id = ID_ALPHABET[Math.floor(rand() * 62)]!;
+  for (let i = 1; i < length; i++) id += ID_ALPHABET[Math.floor(rand() * ID_ALPHABET.length)]!;
+  return id;
 }
