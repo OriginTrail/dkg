@@ -648,8 +648,12 @@ jobs:
         timeout-minutes: 5
         run: |
           set -euo pipefail
-          image="$(node -p "require('./blazegraph-image.json').image")"
-          container_port="$(node -p "require('./blazegraph-image.json').containerPort")"
+          # Fields come from the canonical reader (it validates the whole contract), requested by name like the image contract check does.
+          if ! image="$(node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json image)" \
+            || ! container_port="$(node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json containerPort)"; then
+            echo "::error::Could not read image contract from blazegraph-image.json"
+            exit 1
+          fi
           container="dkg-ci-promote-lookup-blazegraph-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
           docker run -d --name "$container" -p "127.0.0.1::${container_port}" "$image" >/dev/null
