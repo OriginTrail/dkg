@@ -50,7 +50,7 @@ test('one topology change updates matrix, runner denominator and required receip
   assert.deepEqual(validateReceipts(receipts, needs, context), ['publisher']);
   assert.throws(() => validateReceipts(receipts.slice(0, -1), needs, context), /missing coverage shards: publisher:5/);
 });
-test('emitted agent deadlines follow inventory when policy counts and lane order change', (t) => {
+test('emitted agent deadlines cover both inventories when policy counts and lane order change', (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'agent-matrix-policy-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   for (const file of ['scripts/ci/emit-test-matrices.mjs', 'scripts/ci/agent-shard-policy.mjs',
@@ -68,7 +68,7 @@ test('emitted agent deadlines follow inventory when policy counts and lane order
     fs.writeFileSync(path.join(root, 'scripts/ci/agent-shard-policy.json'), JSON.stringify(policy));
     const env = { ...process.env }; delete env.GITHUB_OUTPUT;
     const matrices = JSON.parse(execFileSync(process.execPath, [path.join(root, 'scripts/ci/emit-test-matrices.mjs')], { env, encoding: 'utf8' }));
-    const expected = policy.lanes.flatMap(lane => lane.shards.map(() => lane.inventory === 'integration' ? 12 : 10));
+    const expected = policy.lanes.flatMap(lane => lane.shards.map(() => 12));
     assert.deepEqual(matrices['tornado-agent'].include.map(row => row.timeoutMinutes), expected);
     for (const [job, { include }] of Object.entries(matrices)) {
       if (job !== 'tornado-agent') assert.ok(include.every(row => row.timeoutMinutes === undefined), job);

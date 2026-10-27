@@ -22,6 +22,7 @@ import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
 import { installHardhatACKProvider } from './_helpers/v10-acks.js';
 import { DKGAgent } from '../src/index.js';
+import { RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2 } from '../src/rfc64/public-catalog-transport-v1.js';
 import type { ContextGraphSubscriptionRecord } from '../src/index.js';
 import {
   decodeReliableEnvelope,
@@ -88,12 +89,14 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
   let rejectedAddr: string;
   let retryAddr: string;
   let preapprovedAddr: string;
+  let capacityProvider: DKGAgent | undefined;
   const tempDirs: string[] = [];
   const joinerPersistedSubscriptions = new Map<string, ContextGraphSubscriptionRecord>();
 
   afterAll(async () => {
     try { await curator?.stop(); } catch { /* ignore */ }
     try { await joiner?.stop(); } catch { /* ignore */ }
+    try { await capacityProvider?.stop(); } catch { /* ignore */ }
     await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
   });
 
@@ -258,6 +261,132 @@ describe('E2E: cross-node curated-CG join over real libp2p (shared chain)', () =
       syncScoped: false,
     });
   }, 75_000);
+
+  it('keeps real join and fresh-head catch-up responsive during agent-owned catalog reconnect replay', async () => {
+    const capacityIds = ['join-capacity-public-a', 'join-capacity-public-b'];
+    const bindings: { id: string; onChainId: string }[] = [];
+    for (const id of capacityIds) {
+      await curator.createContextGraph({ id, name: id, accessPolicy: 0 });
+      const registration = await curator.registerContextGraph(id);
+      bindings.push({ id, onChainId: registration.onChainId });
+      joiner.setContextGraphSubscription(id, { subscribed: true, synced: false, syncMode: 'eager', onChainId: registration.onChainId });
+      await joiner.reconcileRfc64CatalogResponsibilityV1(id);
+    }
+    expect(joiner.listActiveRfc64CatalogReplayContextGraphIdsV1()).toEqual(expect.arrayContaining(capacityIds));
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-e2e-catalog-capacity-provider-'));
+    tempDirs.push(dataDir);
+    const provider = await DKGAgent.create({ ...TEST_SNAPSHOT_CONFIG,
+      name: 'Catalog Capacity Provider', dataDir, listenPort: 0, nodeRole: 'edge',
+      chainAdapter: sharedChain, chainConfig: makeSharedChainConfig(), kaNumberAllocator: makeTestKaNumberAllocator() });
+    capacityProvider = provider;
+    let release!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    let incoming = 0;
+    // This fixture deliberately holds the reply through a real chain publish
+    // and catch-up. Keep its request deadline bounded by the fixture lifetime,
+    // rather than letting the ordinary 10s transport timeout retry the held
+    // request while foreground chain work is still completing.
+    const send = joiner.router.send.bind(joiner.router);
+    const heldDeadline = vi.spyOn(joiner.router, 'send').mockImplementation((peerId, protocol, data, options) => {
+      if (peerId === provider.peerId && protocol === RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2
+        && capacityIds.includes(JSON.parse(new TextDecoder().decode(data)).contextGraphId)) {
+        return send(peerId, protocol, data, { ...(typeof options === 'object' ? options : {}), timeoutMs: 90_000 });
+      }
+      return send(peerId, protocol, data, options);
+    });
+    // The router is created during agent startup. Install the typed wrapper
+    // immediately before catalog startup registers the actual V2 transport.
+    // Its authorization and response receive the original stream options.
+    const startCatalog = provider.startRfc64CatalogRuntimeV1.bind(provider);
+    let restoreRegistration: (() => void) | undefined;
+    const startup = vi.spyOn(provider, 'startRfc64CatalogRuntimeV1').mockImplementation(ctx => {
+      const register = provider.router.register.bind(provider.router);
+      const handler = vi.spyOn(provider.router, 'register').mockImplementation((protocol, callback, options) => {
+        if (protocol !== RFC64_PUBLIC_CATALOG_HEAD_REPLAY_PROTOCOL_V2) {
+          return register(protocol, callback, options);
+        }
+        return register(protocol, async (data, peerId, streamOptions) => {
+          const request = JSON.parse(new TextDecoder().decode(data));
+          if (peerId.toString() === joiner.peerId && capacityIds.includes(request.contextGraphId)) {
+            incoming++;
+            await held;
+          }
+          return callback(data, peerId, streamOptions);
+        }, options);
+      });
+      restoreRegistration = () => handler.mockRestore();
+      return startCatalog(ctx);
+    });
+    const prepare = vi.spyOn(joiner, 'prepareRfc64CatalogConnectionReplayV1');
+    // Capture real signed successor output, rather than inferring catalog
+    // transfer from entity data that can arrive through another lane.
+    const signedHeads = vi.spyOn(curator, 'publishAuthorCatalogExactSetSuccessorV1');
+    try {
+      await provider.start();
+      for (const { id, onChainId } of bindings) {
+        provider.setContextGraphSubscription(id, { subscribed: true, synced: false, syncMode: 'eager', onChainId });
+        await provider.reconcileRfc64CatalogResponsibilityV1(id);
+      }
+      await joiner.connectTo(provider.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+      await vi.waitFor(() => expect(incoming).toBe(1), { timeout: 10_000 });
+      expect(prepare).toHaveBeenCalledWith(provider.peerId);
+      for (let i = 0; i < 20; i++) joiner.node.libp2p.dispatchEvent(new CustomEvent('connection:open', {
+        detail: { remotePeer: { toString: () => provider.peerId }, remoteAddr: { toString: () => '/ip4/127.0.0.1/tcp/1' },
+          direction: 'outbound', timeline: { open: Date.now() } },
+      } as any));
+      await vi.waitFor(() => expect(prepare.mock.calls.filter(([peer]) => peer === provider.peerId).length).toBeGreaterThanOrEqual(21));
+      const record = await joiner.registerAgent('replay-capacity-requester', { framework: 'test' });
+      const delegation = await joiner.signJoinRequest(CG, record.agentAddress);
+      const forwarded = await joiner.forwardJoinRequest(CG, delegation, 'capacity-requester', curator.peerId);
+      expect(forwarded.delivered).toBeGreaterThanOrEqual(1);
+      expect(await curator.getJoinRequestStatus(CG, record.agentAddress)).toBe('pending');
+      // A new signed public head must reach the subscriber while the provider's
+      // reconnect stream stays held; already-complete replay requests may be
+      // idempotent no-ops and are not evidence of a fresh transfer.
+      const subject = 'urn:dkg:e2e-join:capacity-catchup';
+      const freshHeadCg = capacityIds[0];
+      await curator.assertion.create(freshHeadCg, 'capacity-catchup');
+      await curator.assertion.write(freshHeadCg, 'capacity-catchup', [{
+        subject, predicate: 'http://schema.org/name', object: '"Capacity Catchup"',
+      }]);
+      await curator.assertion.promote(freshHeadCg, 'capacity-catchup');
+      expect((await curator.publishFromFinalizedAssertion(freshHeadCg, 'capacity-catchup')).status).toBe('confirmed');
+      const caughtUp = await pollUntil(
+        async () => (await joiner.query(
+          `SELECT ?name WHERE { <${subject}> <http://schema.org/name> ?name . }`, freshHeadCg,
+        )).bindings,
+        bindings => bindings.length === 1,
+        60_000,
+      );
+      expect(caughtUp).toHaveLength(1);
+      const produced = await pollUntil(async () => {
+        const heads = signedHeads.mock.settledResults
+          .filter(result => result.type === 'fulfilled')
+          .map(result => result.value);
+        return heads.findLast(head => head.catalogScope.contextGraphId === freshHeadCg);
+      }, head => head !== undefined, 60_000);
+      expect(produced).toBeDefined();
+      const headRef = { catalogScopeDigest: produced!.catalogScopeDigest,
+        authorAddress: produced!.catalogScope.authorAddress };
+      const applied = await pollUntil(async () => joiner.readRfc64AppliedCatalogHeadV1(headRef),
+        head => head?.currentCatalogHeadDigest === produced!.headObjectDigest, 60_000);
+      expect(applied?.currentCatalogHeadDigest).toBe(produced!.headObjectDigest);
+      // Foreground work completed while the physical replay stream remained held.
+      expect(incoming).toBe(1);
+      expect(joiner.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBeGreaterThanOrEqual(2);
+    } finally {
+      release();
+      restoreRegistration?.(); startup.mockRestore(); prepare.mockRestore(); heldDeadline.mockRestore(); signedHeads.mockRestore();
+      try {
+        // A genuine reconnect may leave owned cooldown demand after physical
+        // streams retire; the agent stop below retires that deferred work.
+        await vi.waitFor(() => expect(joiner.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.activePeers).toBe(0), { timeout: 20_000 });
+      } finally {
+        await provider.stop();
+        capacityProvider = undefined;
+      }
+    }
+  }, 90_000);
 
   it('a join request forwarded over real libp2p lands as PENDING on the curator', async () => {
     const delegation = await joiner.signJoinRequest(CG, approvedAddr);

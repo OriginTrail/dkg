@@ -43,8 +43,23 @@
 // by the time the job settles: the repeat then runs at once instead of after
 // its delay. A write that waits for the graph (`context-graph-write-readiness.ts`)
 // starts an armed repeat early the same way, once the lane is active.
+//
+// A walk that stalls is not such a cause. Each job walks every capable peer
+// and pulls the graph's shared-memory metadata from each, with further passes
+// while they make progress. A job stalled when peers served it that metadata
+// through the graph's lane, its walk was clean (no failed, timed-out, deferred
+// or locally yielded work, and no snapshot it could not write, as the shared
+// failure policy `classifyDurableProgress` and the local yield say), the walk
+// stopped because a further pass made no progress (`coverage-stalled`), and no
+// new shared-memory data was written from any peer. Two such jobs in a row end
+// the sequence: the next one would walk the same peers again and write nothing
+// more. After a restart every node of a network catches its subscriptions up
+// at once, and a graph whose snapshots no job completes was otherwise pulled
+// from every peer for hours. A job that reached no peer, ran before the lane
+// was active, or whose work failed or was cut short is never counted as
+// stalled, so the delayed repeats still cover peers and faults that pass.
 
-import type { ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
+import { classifyDurableProgress, type ContextGraphReadAuthorityDecision } from '@origintrail-official/dkg-agent';
 import { selectedSharedMemoryLaneActive } from '../catchup-selected-lane.js';
 import { classifyNameHashOnlyCatchup } from '../context-graph-readiness.js';
 import type { ContextGraphCatchupProgressSource } from './context-graph-catchup-progress.js';
@@ -128,6 +143,34 @@ function admitsRepeat(authority: ContextGraphReadAuthorityDecision): boolean {
   return authority.outcome === 'allowed' && authority.grantScope === 'public';
 }
 
+/**
+ * The job walked its peers and it made no difference: peers served the
+ * graph's shared-memory metadata through its lane, the walk was clean, it
+ * stopped because a further pass made no progress (`coverage-stalled`), and no
+ * new shared-memory data was written from any peer. Progress is judged across
+ * every peer of the job, not by the one peer the coverage diagnostic
+ * describes. A job that reached no peer, whose rounds failed before any
+ * metadata arrived, or whose work failed or was cut short, is not one.
+ */
+function stalledWithoutProgress(job: CatchupJob): boolean {
+  const result = job.result;
+  const sharedMemory = result?.diagnostics?.sharedMemory;
+  if (job.status === 'failed' || sharedMemory === undefined || job.selectedLaneFoundInactive === true) return false;
+  // A clean walk is what the shared failure policy (`classifyDurableProgress`)
+  // calls one: no peer or phase failed, timed out or was denied, nothing was
+  // rejected, and local admission deferred nothing. Its shared-memory counts
+  // include continuation passes, which the job's own deferral count leaves
+  // out, and a snapshot that failed to write fails its phase. A walk that
+  // yielded to the local budget is not clean either. Failed or interrupted
+  // work may go through on a later job.
+  return result?.deferredBackpressure === 0
+    && !classifyDurableProgress(sharedMemory).hasBlockingFailure
+    && sharedMemory.localYield !== true
+    && sharedMemory.continuationStopReason === 'coverage-stalled'
+    && sharedMemory.fetchedMetaTriples > 0
+    && sharedMemory.insertedDataTriples === 0;
+}
+
 /** The repeats that follow one subscribe call's job for one graph. */
 class ReadinessRepeatSequence {
   readonly #caller: ContextGraphReadinessRepeatCaller;
@@ -140,6 +183,8 @@ class ReadinessRepeatSequence {
   #laneFoundInactive = false;
   /** The armed repeat follows a settled attempt, not an admission that could not be read. */
   #armedAfterAttempt = false;
+  /** Attempts in a row whose walk stalled without writing anything new. */
+  #stalledInARow = 0;
 
   constructor(caller: ContextGraphReadinessRepeatCaller) {
     this.#caller = caller;
@@ -179,8 +224,10 @@ class ReadinessRepeatSequence {
   /**
    * After an attempt settles: arm the next repeat while the graph is still
    * actively subscribed and unsynced, with shared memory requested and no
-   * denial; else end. A denial is not cleared by asking again, and without
-   * shared memory nothing could prove an unregistered graph.
+   * denial, unless two attempts in a row stalled without writing anything new;
+   * else end.
+   * A denial is not cleared by asking again, and without shared memory
+   * nothing could prove an unregistered graph.
    */
   #afterAttempt(job: CatchupJob, authority: ContextGraphReadAuthorityDecision): void {
     if (this.#ended) return;
@@ -196,8 +243,21 @@ class ReadinessRepeatSequence {
         && classifyNameHashOnlyCatchup(this.#caller.agent.describeContextGraphIdentity?.(this.#caller.contextGraphId)) === null
         && subscription?.subscribed === true
         && subscription.synced !== true;
-      if (unproven) this.#armNext(true);
-      else this.cancel();
+      if (!unproven) {
+        this.cancel();
+        return;
+      }
+      this.#stalledInARow = stalledWithoutProgress(job) ? this.#stalledInARow + 1 : 0;
+      if (this.#stalledInARow >= 2) {
+        console.log(
+          `[catchup] not repeating the catch-up of "${this.#caller.contextGraphId}": two jobs in a row walked `
+            + 'its peers until no pass made progress and wrote nothing new, so another job would walk them '
+            + 'again for nothing; subscribe again or restart to start over',
+        );
+        this.cancel();
+        return;
+      }
+      this.#armNext(true);
     } catch {
       // A repeat is a convenience on top of a settled job; it must not turn
       // the job's terminal path into a failure.

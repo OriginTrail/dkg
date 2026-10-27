@@ -252,6 +252,9 @@ jobs:
           node-version-file: .nvmrc
           cache: pnpm
 
+      - name: Verify release workspace versions
+        run: node scripts/release-packages.mjs verify-versions --version "$(node -p "require('./package.json').version")"
+
       # Cheap (~300 ms) audit that bans `Wallet.createRandom()` outside a
       # small allowlist of intentional call sites. See
       # `scripts/audit-create-random.mjs` for the incident this prevents
@@ -366,6 +369,8 @@ jobs:
         run: node scripts/ci/fetch-trusted-controller.mjs
       - name: Test repository scripts
         run: pnpm run test:scripts
+      - name: Test devnet evidence parsers and suite manifest
+        run: pnpm test:devnet:manifest
       - name: Test share recovery evidence reducers
         run: |
           node --test scripts/testnet-share-recovery/*.test.mjs
@@ -665,6 +670,24 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
 
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '11'
+      - name: Prepare pinned native checkpoint test runtime
+        run: |
+          set -euo pipefail
+          jar="$RUNNER_TEMP/checkpoint-blazegraph.jar"
+          curl --fail --location --max-time 120 --output "$jar" \
+            https://github.com/blazegraph/database/releases/download/BLAZEGRAPH_2_1_6_RC/blazegraph.jar
+          sha=930c38b5bce7c0ae99701c1f6ef3057c52f3f385d938e1397a3e05561c7df5de
+          echo "$sha  $jar" | sha256sum --check --strict
+          {
+            echo "DKG_PUBLIC_CHECKPOINT_JAVA=$JAVA_HOME/bin/java"
+            echo "DKG_PUBLIC_CHECKPOINT_JAR=$jar"
+            echo "DKG_PUBLIC_CHECKPOINT_JAR_SHA256=$sha"
+          } >> "$GITHUB_ENV"
+
       - name: Wait for Blazegraph to be ready
         run: |
           set -euo pipefail
@@ -702,6 +725,7 @@ jobs:
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/scoped-catalog-backend.test.ts
           pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts
+          pnpm --filter @origintrail-official/dkg exec vitest run --config vitest.native-bootstrap.config.ts
           DKG_RFC64_GATE1_STORE_BACKEND=blazegraph node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
 
       # OT-RFC-73 AC4: the share conflict lookup's payload de-duplication answers a duplicate-row hazard that exists only on an engine which gives two

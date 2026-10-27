@@ -1,3 +1,4 @@
+import { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import type { AtomicAssetReplacement } from './atomic-asset-group.js';
 import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
@@ -268,9 +269,11 @@ export class SharedMemoryLiteralBlobStore implements TripleStoreDecorator {
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
-    return this.inner.listGraphsByPrefix
-      ? this.inner.listGraphsByPrefix(prefix, options)
-      : (await this.inner.listGraphs(options)).filter((graph) => graph.startsWith(prefix));
+    return [...(await this.readGraphInventory(prefix, options)).graphs];
+  }
+
+  async readGraphInventory(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory> {
+    return prefix === undefined ? readGraphInventory(this.inner, options) : readGraphInventoryByPrefix(this.inner, prefix, options);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {

@@ -152,8 +152,10 @@ export function operationFamily(call: Pick<RecordedStoreCall, 'method' | 'source
 
 export const SHARE_OWNERSHIP_READER_SOURCE = 'publisher.asyncPromote.ownershipReader';
 export const SHARE_QUEUE_USAGE_SOURCE = 'publisher.queueUsage.share';
+/** Retention's candidate scan runs outside the queue lock and is not control work: background (§5.1 tagging table). Its verify and delete are control rows. */
+export const SHARE_RETENTION_SCAN_SOURCE = 'publisher.asyncPromote.retention.scan';
 
-export type ShareRow = 'control' | 'ownership-reader' | 'queue-usage' | 'data-plane' | 'no-scheduler-run';
+export type ShareRow = 'control' | 'ownership-reader' | 'queue-usage' | 'retention-scan' | 'data-plane' | 'no-scheduler-run';
 
 /** The Share row of the §5.1 tagging table a recorded call belongs to, from what it touches and its source. */
 export function shareRowOf(call: RecordedStoreCall, shareGraphs: readonly string[]): ShareRow {
@@ -161,6 +163,7 @@ export function shareRowOf(call: RecordedStoreCall, shareGraphs: readonly string
   if (!call.graphs.some((graph) => shareGraphs.includes(graph))) return 'data-plane';
   if (call.source === SHARE_OWNERSHIP_READER_SOURCE) return 'ownership-reader';
   if (call.source === SHARE_QUEUE_USAGE_SOURCE) return 'queue-usage';
+  if (call.source === SHARE_RETENTION_SCAN_SOURCE) return 'retention-scan';
   return 'control';
 }
 
@@ -195,6 +198,11 @@ export function expectShareTaggingTable(
       case 'queue-usage':
         expect(call.options?.controlQueue, where).toBeUndefined();
         expect(lane, `${where}: monitoring reads stay background`).toBe('background');
+        break;
+      case 'retention-scan':
+        expect(call.options?.controlQueue, `${where}: the retention scan is not control work`).toBeUndefined();
+        expect(call.options?.priority, `${where}: the retention scan asks for the background lane`).toBe('background');
+        expect(lane, `${where}: the retention scan stays background whatever the ambient lane`).toBe('background');
         break;
       case 'data-plane':
         expect(call.options?.controlQueue, `${where}: data-plane work carries no control tag`).toBeUndefined();

@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { expect, test } from '@playwright/test';
 import { spawn } from 'node:child_process';
 import { once } from 'node:events';
@@ -6,9 +7,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { cleanupManagedDevnet, stopManagedNode } from '../global-teardown.js';
 
+// Stand-ins carry the same verified CLI entry/subcommand as a daemon. A plain
+// node process in a PID file is deliberately rejected by production cleanup.
+const fixtureDaemonArgs = ['-e', 'setInterval(() => {}, 1000)',
+  fileURLToPath(new URL('../../../cli/dist/cli.js', import.meta.url)), 'daemon-worker'];
+
 test('cleans interrupted-bootstrap children while preserving pre-existing nodes and chain', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-owned-cleanup-'));
-  const children = Array.from({ length: 5 }, (_, index) => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+  const children = Array.from({ length: 5 }, (_, index) => spawn(process.execPath, fixtureDaemonArgs, {
     stdio: 'ignore', env: { ...process.env, DKG_HOME: join(dir, index === 3 ? 'node2' : index === 4 ? 'node20' : `unrelated${index}`) },
   }));
   try {
@@ -42,7 +48,7 @@ test('cleans interrupted-bootstrap children while preserving pre-existing nodes 
 
 test('stops an owned chain from an interrupted boot with a legacy colorized PID', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-owned-chain-'));
-  const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' });
+  const child = spawn(process.execPath, fixtureDaemonArgs, { stdio: 'ignore' });
   try {
     await once(child, 'spawn');
     writeFileSync(join(dir, 'hardhat.pid'), `\u001b[33m${child.pid}\u001b[39m\n`);
@@ -62,7 +68,7 @@ test('stops an owned chain from an interrupted boot with a legacy colorized PID'
 
 test('retains ownership after one stop fails and safely retries all owned nodes', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'dkg-cleanup-retry-'));
-  const children = Array.from({ length: 4 }, () => spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { stdio: 'ignore' }));
+  const children = Array.from({ length: 4 }, () => spawn(process.execPath, fixtureDaemonArgs, { stdio: 'ignore' }));
   const markerFile = join(dir, '.playwright-managed');
   const attempted: number[] = [];
   let failNode2 = true;

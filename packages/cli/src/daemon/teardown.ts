@@ -90,6 +90,10 @@ import type { PublisherLiveControl } from '../publisher-live-control.js';
  * waits for its graph's catch-up (`context-graph-write-readiness.ts`) is
  * refused at once, retryable, so it does not hold the HTTP server's close,
  * which comes before the catch-up drain, until the shutdown deadline.
+ *
+ * `endCpuProfile` does the same for an operator's CPU profile, which records
+ * for up to 60 s inside its request: it is stopped and written at once, and a
+ * later one is refused.
  */
 export async function beginGracefulShutdown(deps: {
   state: { catchupAcceptingJobs: boolean };
@@ -102,6 +106,8 @@ export async function beginGracefulShutdown(deps: {
   endWriteReadinessWaits?: () => void;
   /** Stops the triggers of later catch-up jobs. */
   stopCatchupTriggers?: () => void;
+  /** Stops a running CPU profile now and refuses later ones. */
+  endCpuProfile?: () => void;
 }): Promise<void> {
   deps.state.catchupAcceptingJobs = false;
   const reportControlClose = (error: unknown) => deps.log(`Publisher control shutdown error: ${error instanceof Error ? error.message : String(error)}`);
@@ -122,6 +128,11 @@ export async function beginGracefulShutdown(deps: {
     deps.stopCatchupTriggers?.();
   } catch (err: any) {
     deps.log(`Catch-up trigger stop error: ${err?.message ?? String(err)}`);
+  }
+  try {
+    deps.endCpuProfile?.();
+  } catch (err: any) {
+    deps.log(`CPU profile stop error: ${err?.message ?? String(err)}`);
   }
   deps.log('Shutting down...');
   await deps.removeApiPort().catch((err: any) =>

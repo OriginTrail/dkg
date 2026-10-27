@@ -4,7 +4,7 @@ import type { ContextGraphIdV1, EvmAddressV1 } from '@origintrail-official/dkg-c
 import { rfc64SwmInventoryShadowRuntimeV1 } from '../rfc64/swm-inventory-shadow-runtime-v1.js';
 import { rfc64SwmInventorySettlementCanConvergeV1 } from '../rfc64/swm-inventory-settlement-outlook-v1.js';
 
-/** Shared bounded responsibility settlement, outside the inventory write lock. */
+/** Bounded responsibility settlement for detached observations. */
 export async function settleDurableSwmInventoryV1<T extends { status: string; dormantReason?: string }>(
   agent: DKGAgent, params: ObserveRfc64DurableSwmPromotionParamsV1,
   attempt: () => Promise<T>, warn: (message: string) => void,
@@ -76,26 +76,23 @@ export async function settleDurableSwmInventoryV1<T extends { status: string; do
   return result;
 }
 
-/** Both background entry points use the same projection admission policy. */
-export async function requestDurableSwmInventoryProjectionV1(
+/** One projection admission; durable retry owners schedule settlement separately. */
+export function admitDurableSwmInventoryProjectionV1(
   agent: DKGAgent, params: ObserveRfc64DurableSwmPromotionParamsV1,
-): Promise<boolean> {
-  const projection = {
+): boolean {
+  return agent.requestRfc64SwmCatalogProjectionV1({
     contextGraphId: params.contextGraphId as ContextGraphIdV1,
     authorAddress: params.lifecycleAgentAddress.toLowerCase() as EvmAddressV1,
     ctx: params.ctx,
-  } as const;
-  if (!agent.requestRfc64SwmCatalogProjectionV1(projection)) {
-    // The authority can turn over between the durable inventory CAS and
-    // projection admission. Reconcile once and retry the exact scope;
-    // ordinary supervisor backoff owns any later transient failure.
-    const responsibility = await agent.reconcileRfc64CatalogResponsibilityV1(
-      params.contextGraphId,
-    );
-    if (responsibility.active && responsibility.mode !== 'legacy') {
-      return agent.requestRfc64SwmCatalogProjectionV1(projection);
-    }
-    return false;
-  }
-  return true;
+  });
+}
+
+/** Detached observations retain their bounded settlement fallback. */
+export async function requestDurableSwmInventoryProjectionV1(
+  agent: DKGAgent, params: ObserveRfc64DurableSwmPromotionParamsV1,
+): Promise<boolean> {
+  if (admitDurableSwmInventoryProjectionV1(agent, params)) return true;
+  const responsibility = await agent.reconcileRfc64CatalogResponsibilityV1(params.contextGraphId);
+  return responsibility.active && responsibility.mode !== 'legacy'
+    && admitDurableSwmInventoryProjectionV1(agent, params);
 }

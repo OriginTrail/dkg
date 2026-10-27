@@ -1,9 +1,12 @@
+import type { StoreContentFence } from './internal/store-content-fence.js';
+import { ContextGraphSubscriptionActivations } from './context-graph-subscription-activation-state.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
-import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
+import { reconcileAfterMaterialization, reconcileAfterHeldAsset } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
+import { createDurableHeldStore } from './durable-recovery-held-store.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 import { VersionedSubscriptionRegistry } from './internal/versioned-subscription-registry.js';
@@ -210,7 +213,7 @@ import  {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
-import {
+import { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter,
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
@@ -476,7 +479,7 @@ import {
   type ReplicationEvent,
 } from './dkg-agent-types.js';
 import type { SyncCheckpointStore, ChangelogCursorStore } from './sync/checkpoint/state.js';
-import {
+import { readNonNegativeNumberEnv, readPositiveSafeIntegerEnv, readNonNegativeIntegerEnv,
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
@@ -521,18 +524,6 @@ import {
   type ChainAuthorityReadBudgets,
 } from './chain-authority-read-budgets.js';
 import type { DKGAgent } from './dkg-agent.js';
-
-function readNonNegativeNumberEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === '') return fallback;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
-}
-
-function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
-  const parsed = Number(process.env[name]);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 /**
  * Same-instance restart contract.
@@ -581,11 +572,10 @@ export class DKGAgentBase {
       retireFinalizedSwmTwinCandidate: (candidate, ctx) => agent.retireFinalizedSwmTwinCandidate(candidate, ctx),
       retireLegacySwmAfterVerifiedVmTwin: params => agent.retireLegacySwmAfterVerifiedVmTwin(params),
     };
-    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
-      reconcileAfterMaterialization(cleanup, asset, ctx);
+    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) => reconcileAfterMaterialization(cleanup, asset, ctx);
+    const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, (commitment, ctx) => reconcileAfterHeldAsset(cleanup, commitment, ctx), () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
     const materialization = new RecoveryMaterializationOwner({
-      chain: () => agent.chain,
-      store: () => agent.store,
+      chain: () => agent.chain, store: () => agent.store,
       isClosed: () => agent.graphScopedStoreClosed,
       subscription: id => agent.subscribedContextGraphs.get(id),
       bindingGeneration: id => agent.contextGraphBindingState.capture(id),
@@ -594,6 +584,7 @@ export class DKGAgentBase {
       verifyBinding: (id, onChainId, ctx, signal) => agent.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
       persistSubscription: (id, subscription, reason, isCurrent) => agent.persistContextGraphSyncStateStrict(id, subscription, reason, isCurrent),
       bindSubscription: (id, subscription, onChainId) => agent.bindSubscriptionOnChainId(id, subscription, onChainId),
+      logTiming: (ctx, message) => agent.log.debug(ctx, message),
       recordDrops: (drops, seam) => agent.oversizeTombstoneLog.record(drops, seam),
       reconcile,
     });
@@ -616,6 +607,7 @@ export class DKGAgentBase {
             signal: fetchContext.signal,
             manifestDigest: request.manifestDigest,
             manifestPrefixDigestAtOffset: request.manifestPrefixDigestAtOffset,
+            durableResumeBoundary: request.durableResumeBoundary,
             shouldStopAfterPage: request.shouldStopAfterPage,
             returnAcceptedPrefixOnRetryableTransportFailure: request.returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope: request.requesterScope,
@@ -652,6 +644,7 @@ export class DKGAgentBase {
       storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
         priority: 'background', source: 'agent.durableSync.storeInsert', signal,
       }),
+      heldStore,
       materialization: scope => materialization.forOperation(scope),
       checkpoints: {
         deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),
@@ -950,13 +943,7 @@ export class DKGAgentBase {
    * (`source: 'allowlist'`) are NOT truncated by this cap — see
    * `chooseFanOutTier` jsdoc for the rationale.
    */
-  protected readonly swmSubstrateMaxMembers: number = (() => {
-    const raw = process.env.DKG_SWM_SUBSTRATE_MAX_MEMBERS;
-    if (!raw) return 100;
-    const n = Number.parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < 0) return 100;
-    return n;
-  })();
+  protected readonly swmSubstrateMaxMembers = readNonNegativeIntegerEnv('DKG_SWM_SUBSTRATE_MAX_MEMBERS', 100);
   /**
    * Per-send substrate timeout for SWM update fan-out. Matches the
    * 15s reliability SLO the messenger targets for chat. Kept as a
@@ -1526,6 +1513,18 @@ export class DKGAgentBase {
   /** Which waiting row rolling activation checks next, and how soon; made anew when a start retires the runtime before. */
   protected contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
+  protected readonly contextGraphSubscriptionActivations = new ContextGraphSubscriptionActivations({
+    subscribedContextGraphs: this.subscribedContextGraphs,
+    contextGraphSubscriptionDormancyById: this.contextGraphSubscriptionDormancyById,
+    contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
+    contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
+    contextGraphSubscriptionRehydrationAccountedIds: this.contextGraphSubscriptionRehydrationAccountedIds,
+    getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
+    setStatus: status => { this.contextGraphSubscriptionRehydrationStatus = status; },
+    slotReleased: () => this.contextGraphSubscriptionRehydrationPromotionRuntime?.request(),
+    clearPersistRevision: id => (this as unknown as DKGAgent).clearContextGraphSubscriptionPersistRevisionStateIfIdle(id),
+    publish: id => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }),
+  });
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
@@ -2089,6 +2088,8 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
     publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
     ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
+    readonly storageAckCopyCleanup: StorageAckCopyCleanupWriter = input => clearDischargedStorageAckCopies(store, input),
+    private readonly heldStoreContentFence?: StoreContentFence,
   ) {
     this.config = config;
     this.wallet = wallet;

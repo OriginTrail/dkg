@@ -218,6 +218,92 @@ Required script tests continue through `pnpm test:scripts`; any activation as a
 required candidate gate needs a separately reviewed trusted-controller pin/route
 update and maintainer branch-protection decision.
 
+### 6a.1) Verify the complete release decision
+
+Package installation alone does not qualify promotion. Before changing a dist-tag,
+assemble a portable `decision.json` next to all harness `suite-state.json`
+attempts (and the downloaded nightly receipt, when the decision names a nightly
+run), then run:
+
+```bash
+pnpm release:verify-evidence --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
+  --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 \
+  --evidence "$EVIDENCE/decision.json"
+```
+
+Promotion completes fresh authenticated CI history and artifact acquisition before asking for an OTP. Immediately after the prompt, it rechecks the installed-package certificate, decision bytes and every local evidence receipt against that qualified snapshot before the first registry write. This local check performs no GitHub requests; changed evidence requires a new qualification. CI history is qualified as of the pre-prompt acquisition, not continuously monitored while the maintainer enters a code.
+
+The version-1 decision has these fields (full object IDs and SHA-256 file hashes
+are required; placeholders below are explanatory and cannot certify):
+
+```json
+{
+  "schemaVersion": 1,
+  "candidate": {
+    "commit": "<final product commit>", "tree": "<git tree>", "version": "<version>",
+    "sourceInputsDigest": "<manifest source input digest>", "packageSetDigest": "<manifest package set digest>"
+  },
+  "ci": { "runId": "<successful CI run>", "attempt": 1 },
+  "nightly": {
+    "runId": "<successful full nightly run>", "attempt": 1,
+    "receipt": { "file": "nightly-profile-summary.json", "sha256": "<file hash>" }
+  },
+  "harness": {
+    "commit": "<full harness commit>", "profile": "local-release-v1",
+    "attempts": [{ "id": "qualification-1", "receipt": { "file": "qualification-1/suite-state.json", "sha256": "<file hash>" } }]
+  },
+  "priorCiFailures": []
+}
+```
+
+The `nightly` entry is optional. Leave it out (or set it to `null`) to release on
+the CI run and the harness profile alone: `release:verify-evidence` then reports
+`"nightly": null`, and promotion logs that the evidence names no nightly run. A
+decision that names a nightly run must name it completely, and that run is
+checked in full as described below.
+
+Use the integrated harness profile from OriginTrail/dkg-blackbox-harness #47.
+It requires eight registration/policy cells, eight functional scenarios and the
+overlap leg, all with verified builds and successful process/run identities.
+Keep raw child runs with suite-state. The release helper verifies their recorded
+contract and identities; local harness evidence still relies on the trusted
+operator/executor, like locally produced package certificates. It is not a
+cryptographic attestation that an arbitrary operator ran the tests.
+
+The helper queries GitHub using `gh` credentials: CI must be complete/successful
+on the final commit. When the decision names a nightly run, its receipt must
+byte-match the authenticated `nightly-profile-summary` artifact of the latest run
+attempt, and the helper recomputes the nightly completeness check (all seven browser shards, mandatory lifecycle cases
+and 1,000 property trials). Deleted/expired artifacts are a qualification gap;
+archive them before the workflow retention expires, and re-run if the online
+source required for verification is no longer available.
+
+Every failed CI attempt found for that commit must appear in `priorCiFailures`
+with `runId`, `attempt`, `classification` (`product`, `test`, `environment` or
+`unknown`), an owning GitHub `issue`, and a later successful
+`supersededBy: {runId, attempt}` matching the selected CI run (or the nightly run,
+when the decision names one). Keep every
+local harness attempt in order. A failed attempt requires
+`resolution: {classification, issue, supersededBy}`; classification is `product`,
+`test`, `environment` or `unknown`, and supersededBy identifies a later complete
+passing harness attempt. A failure cannot be dismissed solely by relabeling it.
+Local attempt history is operator supplied; the verifier does not claim to
+discover unarchived private runs.
+
+Selected CI must be a successful push, scheduled or dispatched run of the
+candidate itself. Pull-request and merge-queue runs are ineligible here: GitHub's
+API head SHA alone does not prove the synthetic merge tree they checked out.
+The same complete dispatched nightly may satisfy both CI and nightly entries.
+
+Promotion and direct `latest`/`mainnet` publication require `--evidence`, including
+dry-runs. Canary publication can precede qualification. The package, registry and
+signed-tag checks still apply. A new candidate requires fresh receipts at its
+exact commit; this first implementation does not reuse receipts across equal
+trees. Run `pnpm qa:check-regressions` and `pnpm qa:incident-status` to inspect
+proven detectors and explicitly unresolved incident gaps before the human release
+decision. Archive the decision, package bundle/certificate and raw campaign
+records with the release; credentials and OTPs must not enter those artifacts.
+
 ### 6b) Publish the same bytes, verify the registry, then promote manually
 
 After the existing devnet gate and signed-tag policy are satisfied, use the same
@@ -243,7 +329,7 @@ pnpm release:verify-published --bundle "$BUNDLE" --commit "$COMMIT" --version "$
 # --otp or NPM_CONFIG_OTP skips the question; --dry-run shows the plan only.
 pnpm release:promote --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
   --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 \
-  --tag "v$VERSION" --tags testnet
+  --tag "v$VERSION" --tags testnet --evidence "$EVIDENCE/decision.json"
 ```
 
 Choose `latest` only for the stable release at the existing human-controlled

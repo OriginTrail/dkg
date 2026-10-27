@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
+import { StoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import {
   DKGEvent,
   DKG_ONTOLOGY,
@@ -1451,6 +1452,39 @@ describe('context graph open enrollment policy', () => {
       second.name,
       agent.peerId,
     )).resolves.toMatchObject({ status: 'pending', reason: 'context-graph-rate-limit' });
+  }, 30_000);
+
+  it('defers an admission whose key the store cannot read, without waiving the join limits for its retry (#3366)', async () => {
+    const { agent, owner, policyStore } = await boot();
+    const contextGraphId = 'private-policy-store-busy';
+    await createPrivateCg(agent, contextGraphId, owner.agentAddress);
+    await agent.setContextGraphJoinPolicy(contextGraphId, {
+      mode: 'open',
+      maxMembers: 20,
+      maxApprovalsPerHour: 5,
+      acknowledgeOpenEnrollment: true,
+    }, owner.agentAddress);
+    const joiner = await agent.registerAgent('busy-store-joiner', { framework: 'test' });
+    const delegation = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    const store = (agent as any).store;
+    const query = store.query.bind(store);
+    let storeBusy = true;
+    vi.spyOn(store, 'query').mockImplementation(async (sparql: unknown, options: any) => {
+      if (storeBusy && options?.source === 'publisher.workspaceRecipients.completeKeyCollect') {
+        throw new StoreSchedulerBusyError('queue_full', 'normal', 'publisher.workspaceRecipients.completeKeyCollect');
+      }
+      return query(sparql, options);
+    });
+
+    await expect(agent.processIncomingJoinRequest(contextGraphId, delegation, joiner.name, agent.peerId))
+      .rejects.toMatchObject({ name: 'RetryableJoinAdmissionError' });
+    // Only a membership repair waives the ingress limits; a deferred request pays them on every attempt.
+    expect(agent.hasRetryableContextGraphJoinAdmission(contextGraphId, delegation)).toBe(false);
+    expect(policyStore.audit.filter((event) => event.outcome === 'pending')).toEqual([]);
+
+    storeBusy = false;
+    await expect(agent.processIncomingJoinRequest(contextGraphId, delegation, joiner.name, agent.peerId))
+      .resolves.toMatchObject({ status: 'approved', autoApproved: true });
   }, 30_000);
 
   it('invalidates the sender-key epoch before a failing roster-version update', async () => {

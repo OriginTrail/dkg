@@ -7,6 +7,7 @@ import { isDeepStrictEqual } from 'node:util';
 import { verifyReleaseTag } from '../release-policy.mjs';
 import { fileIdentity, verifyCertificate } from './bundle.mjs';
 import { run } from '../release-process.mjs';
+import { prepareReleaseEvidence } from '../release-evidence.mjs';
 
 function validateRegistry(registry) {
   if (!registry) return;
@@ -127,9 +128,13 @@ function stopped({ stop, otp, completed, planned, remaining, version }) {
     ? `${remaining} tags are not on ${version}, and a re-run moves only those.`
     : `the registry shows every tag on ${version}.`}`;
 }
+// A release decision may name no nightly run; say so wherever tags move on it.
+function noteEvidence(result, log) {
+  if (result?.nightly === null) log('Release evidence names no nightly run: it rests on the CI run and the harness profile');
+}
 // Moves only the (package, tag) pairs the registry does not show on the
 // version, so a re-run continues where an earlier run stopped.
-async function promote({ manifest, tags, bundle, receiptFile, expected, registry, otp, dryRun, readTags, runner, askOtp, parallel, settle, log }) {
+async function promote({ manifest, tags, bundle, receiptFile, expected, registry, otp, dryRun, readTags, runner, askOtp, parallel, settle, log, prepareEvidence }) {
   const describe = ({ pkg, channel }) => ({ package: pkg.name, tag: channel });
   const readPackages = read => inParallel(manifest.packages, parallel, async pkg => {
     const current = await read(pkg);
@@ -141,6 +146,9 @@ async function promote({ manifest, tags, bundle, receiptFile, expected, registry
   const planned = lanes.flatMap(lane => lane.moves);
   const progress = { mode: 'promote', dryRun, reused: [], alreadyOnVersion: manifest.packages.length * tags.length - planned.length, completed: [], planned: planned.map(describe) };
   log(`${manifest.packages.length} packages, tags ${tags.join(', ')}: ${progress.alreadyOnVersion} already on ${expected.version}, ${planned.length} to move`);
+  // Finish potentially slow authenticated acquisition before asking for a code.
+  const { result, recheckLocalIntegrity } = await prepareEvidence();
+  noteEvidence(result, log);
   // Asked for after the reads, so the code is fresh when the writes start.
   const entered = dryRun || planned.length === 0 ? undefined : otp || (askOtp ? await askOtp() : undefined);
   const code = entered === undefined ? undefined : String(entered).replace(/\s/g, '');
@@ -148,6 +156,7 @@ async function promote({ manifest, tags, bundle, receiptFile, expected, registry
   // Recheck package AND evidence bytes after acquisition and the prompt,
   // immediately before the first write.
   verifyCertificate(bundle, receiptFile, expected);
+  recheckLocalIntegrity();
   if (dryRun) for (const { pkg, channel, now } of planned) log(`Would move ${channel} of ${pkg.name} to ${pkg.version} (now ${now})`);
   if (planned.length === 0) log('Nothing to move');
   if (dryRun || planned.length === 0) return progress;
@@ -195,26 +204,31 @@ async function promote({ manifest, tags, bundle, receiptFile, expected, registry
   throw error;
 }
 export async function preparedRelease({
-  mode, bundle, receiptFile, expected, rootDir, tag, tags, registry, otp,
+  mode, bundle, receiptFile, expected, rootDir, tag, tags, registry, otp, evidenceFile,
   dryRun = false, readDist = pkg => registryDist(pkg, registry),
   readTags = pkg => registryDistTags(pkg, registry),
   runner = mode === 'promote' ? (_command, args, options) => quietNpm(args, { ...options, mutation: true }) : mutate,
   askOtp = process.stdin.isTTY ? promptOtp : null, parallel = 8, settle = 4_000,
   gitRunner = (cmd, args) => run(cmd, args, { cwd: rootDir }),
-  log = console.log,
+  log = console.log, prepareEvidence = prepareReleaseEvidence,
 }) {
   assert.ok(['publish', 'promote'].includes(mode));
   validateRegistry(registry);
   assert.ok(tags?.length > 0 && new Set(tags).size === tags.length && tags.every(t => /^[a-z][a-z0-9-]*$/.test(t)), 'invalid/duplicate dist-tags');
   if (mode === 'publish') assert.equal(tags.length, 1, 'publish accepts exactly one initial dist-tag');
+  if (mode === 'promote' || tags.some(channel => ['latest', 'mainnet'].includes(channel))) {
+    assert.ok(typeof evidenceFile === 'string' && evidenceFile, 'release decision file is required for promotion');
+  }
   const { manifest } = verifyCertificate(bundle, receiptFile, expected);
+  if (evidenceFile) await prepareEvidence({ evidenceFile, expected, manifest, rootDir });
   const problems = verifyReleaseTag({ tag, version: expected.version, runner: gitRunner });
   assert.deepEqual(problems, [], 'release signed-tag/version/ancestry preflight failed');
   assert.equal(gitRunner('git', ['rev-parse', `${tag}^{commit}`]), expected.commit, 'tag does not identify prepared source');
   // Preflight EVERY package before even the first mutation. A matching version
   // alone cannot make a partial publication safe to resume.
   const state = checkRegistrySet(manifest, readDist, { allowMissing: mode === 'publish' });
-  if (mode === 'promote') return promote({ manifest, tags, bundle, receiptFile, expected, registry, otp, dryRun, readTags, runner, askOtp, parallel, settle, log });
+  if (mode === 'promote') return promote({ manifest, tags, bundle, receiptFile, expected, registry, otp, dryRun, readTags, runner, askOtp, parallel, settle, log,
+    prepareEvidence: () => prepareEvidence({ evidenceFile, expected, manifest, rootDir }) });
   const existing = new Set(state.filter(s => s.exists).map(s => s.pkg.name));
   const operations = publicationOrder(manifest).filter(pkg => !existing.has(pkg.name)).flatMap(pkg => tags.map(channel => ({
     pkg, channel, tarball: path.join(bundle, pkg.tarball),
@@ -224,7 +238,10 @@ export async function preparedRelease({
   const progress = { mode, dryRun, reused: state.filter(s => s.exists).map(s => s.pkg.name), completed: [], planned: operations.map(describe) };
   // Recheck package AND evidence bytes after acquisition and immediately before
   // mutation; no build-info generation/build/repack exists in this path.
+  const evidence = evidenceFile ? await prepareEvidence({ evidenceFile, expected, manifest, rootDir }) : undefined;
+  noteEvidence(evidence?.result, log);
   verifyCertificate(bundle, receiptFile, expected);
+  evidence?.recheckLocalIntegrity();
   try {
     for (const operation of operations) {
       const { pkg, channel, tarball, args } = operation;

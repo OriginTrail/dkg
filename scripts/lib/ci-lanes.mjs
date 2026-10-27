@@ -90,7 +90,9 @@ export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
         label: group.shards === 1 ? group.label ?? group.id : `${group.id} [${index + 1}/${group.shards}]`,
         sidecars: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
         ...(group.runner === 'agent' ? {
-          timeoutMinutes: AGENT_SHARD_POLICY.descriptors[index].inventory === 'integration' ? 12 : 10,
+          // Unit shards now include enough production-agent fixtures to exceed ten
+          // minutes on hosted runners; retain room for coverage receipt upload.
+          timeoutMinutes: 12,
         } : {}),
       });
     }

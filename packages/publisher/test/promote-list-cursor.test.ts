@@ -8,11 +8,13 @@ import {
   PROMOTE_LIST_DEFAULT_PAGE_SIZE,
   PROMOTE_LIST_MAX_PAGE_SIZE,
   PromoteListRequestError,
+  PromoteListStoredRowError,
   comparePromoteJobCursors,
   decodePromoteJobCursor,
   encodePromoteJobCursor,
   resolvePromotePageSize,
 } from '../src/promote-list-cursor.js';
+import * as publisher from '../src/index.js';
 import { mulberry32, randomJobId } from './_helpers/share-job-rows.js';
 
 const raw = (json: string) => `v1.${Buffer.from(json, 'utf8').toString('base64url')}`;
@@ -122,6 +124,8 @@ describe('the cursor codec', () => {
       const error = (() => { try { encodePromoteJobCursor(cursor); } catch (e) { return e; } })();
       expect(error, JSON.stringify(cursor)).toBeInstanceOf(Error);
       expect(error, JSON.stringify(cursor)).not.toBeInstanceOf(PromoteListRequestError);
+      expect(error, JSON.stringify(cursor)).toBeInstanceOf(PromoteListStoredRowError);
+      expect(error, JSON.stringify(cursor)).toMatchObject({ code: 'unreadable_row' });
       expect((error as Error).message).toMatch(/cannot be encoded as a cursor/);
       expect((error as Error).message).not.toContain('a b');
     }
@@ -129,11 +133,31 @@ describe('the cursor codec', () => {
 
   it('never echoes the rejected input in the error', () => {
     const hostile = 'v1.<script>alert(1)</script>';
-    try { decodePromoteJobCursor(hostile); expect.unreachable(); } catch (error) {
-      expect(error).toBeInstanceOf(PromoteListRequestError);
-      expect((error as Error).message).not.toContain('script');
-      expect((error as Error).message).toBe('cursor is not a valid share job cursor');
+    const error = (() => { try { decodePromoteJobCursor(hostile); } catch (cause) { return cause; } })();
+    expect(error).toBeInstanceOf(PromoteListRequestError);
+    expect((error as Error).message).not.toContain('script');
+    expect((error as Error).message).toBe('cursor is not a valid share job cursor');
+  });
+});
+
+describe('the typed fault of the stored rows', () => {
+  it('carries its code and name whatever its message says, and is not the request\'s error', () => {
+    for (const code of ['unreadable_row', 'unordered_page', 'unresumable_page'] as const) {
+      for (const message of ['Share job listing: a diagnostic', 'Share listing: the same fault, reworded', '']) {
+        const error = new PromoteListStoredRowError(code, message);
+        expect(error).toBeInstanceOf(Error);
+        expect(error).not.toBeInstanceOf(PromoteListRequestError);
+        expect(error.name).toBe('PromoteListStoredRowError');
+        expect(error.code).toBe(code);
+        expect(error.message).toBe(message);
+      }
     }
+    expect(new PromoteListRequestError('PROMOTE_LIST_CURSOR_INVALID')).not.toBeInstanceOf(PromoteListStoredRowError);
+  });
+
+  it('is exported by the package for the routes, next to the request error', () => {
+    expect(publisher.PromoteListStoredRowError).toBe(PromoteListStoredRowError);
+    expect(publisher.PromoteListRequestError).toBe(PromoteListRequestError);
   });
 });
 

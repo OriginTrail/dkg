@@ -10,6 +10,11 @@ import {
   type CursorPersistence,
   type LaneCursorStore,
 } from './chain-event-lane-cursor-store.js';
+import {
+  ChainEventLaneScanFailures,
+  STORE_BUSY_SCANS_BEFORE_ERROR,
+  isBackgroundStoreBusyFailure,
+} from './chain-event-lane-scan-failures.js';
 
 export type ChainEventPollerLane =
   | 'publish'
@@ -133,6 +138,7 @@ export class ChainEventLaneRunner {
   private readonly laneState = new Map<ChainEventPollerLane, ChainEventPollerLaneState>();
   private readonly restoredLanes = new Set<ChainEventPollerLane>();
   private readonly replayedEvents = new Map<ChainEventPollerLane, Map<number, Set<string>>>();
+  private readonly scanFailures = new ChainEventLaneScanFailures();
 
   constructor(config: ChainEventLaneRunnerConfig) {
     this.chain = config.chain;
@@ -145,6 +151,11 @@ export class ChainEventLaneRunner {
 
   async restoreCurrentlyActive(ctx: OperationContext): Promise<void> {
     await this.restoreLaneCursors(this.activeLaneSpecs(), ctx);
+  }
+
+  /** Scans of this lane that a busy store refused since start; each range was scanned again. */
+  storeBusyScans(lane: ChainEventPollerLane): number {
+    return this.scanFailures.storeBusyScans(lane);
   }
 
   async poll(signal?: AbortSignal): Promise<void> {
@@ -530,6 +541,7 @@ export class ChainEventLaneRunner {
         }
       }
       advanced = true;
+      this.scanFailures.succeeded(lane.spec.name);
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
       if (signal?.aborted) signal.throwIfAborted();
@@ -547,7 +559,17 @@ export class ChainEventLaneRunner {
         );
         this.applyLaneSchedule(lane, { kind: 'retry', now });
       } else {
-        this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${message}`);
+        // A busy store that refused background work is expected under load and
+        // heals by itself; only a range it keeps holding up is an error.
+        const storeBusy = isBackgroundStoreBusyFailure(err);
+        const inRow = this.scanFailures.failed(lane.spec.name, fromBlock, storeBusy);
+        if (storeBusy && inRow < STORE_BUSY_SCANS_BEFORE_ERROR) {
+          this.log.warn(ctx, `Poll lane ${lane.spec.name}: store busy, blocks ${fromBlock}-${upperBound} `
+            + `will be scanned again (${inRow} in a row): ${message}`);
+        } else {
+          this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${message}`
+            + (storeBusy ? ` (store busy for ${inRow} scans of blocks from ${fromBlock} in a row)` : ''));
+        }
         this.applyLaneSchedule(lane, { kind: 'failure', now });
       }
     }

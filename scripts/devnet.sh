@@ -59,7 +59,7 @@
 #
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
 NUM_NODES="${2:-6}"
@@ -1115,6 +1115,9 @@ start_node() {
   local cli_entry
   cli_entry="$(node_cli_entry "$node_num")"
   log "Node $node_num launching from $cli_entry"
+  # Shutdown uses the running node's launch identity, independent of the next
+  # invocation's DEVNET_VERSION_LAYOUT. Publish the record before spawning.
+  record_node_cli_entry "$node_num" "$cli_entry"
   # Use the CLI's detached supervisor. `restart-node` is commonly called from
   # short-lived devnet test scripts; foreground mode leaves the worker in that
   # shell's process group and can make the daemon disappear after the helper
@@ -1207,42 +1210,34 @@ start_node() {
   fi
 }
 
+record_node_cli_entry() {
+  local node_dir="$DEVNET_DIR/node$1"
+  printf '%s\n' "$2" > "$node_dir/.devnet-cli-entry.tmp.$$"
+  mv "$node_dir/.devnet-cli-entry.tmp.$$" "$node_dir/.devnet-cli-entry"
+}
+
+run_devnet_process_control() {
+  local action="$1" selected="${2:-}" node_dir num entry
+  local entries=()
+  # Old launches have no durable entry record. Only their node-specific configured
+  # version may fill that gap; a launch record always owns the process identity.
+  if [ -n "$DEVNET_VERSION_LAYOUT" ]; then
+    for node_dir in "$DEVNET_DIR"/node*; do
+      [ -d "$node_dir" ] || continue
+      num="${node_dir##*/node}"
+      case "$num" in ''|*[!0-9]*) continue ;; esac
+      [ -z "$selected" ] || [ "$selected" = "$num" ] || continue
+      [ ! -e "$node_dir/.devnet-cli-entry" ] || continue
+      entry="$(node_cli_entry "$num")"
+      entries+=("$num" "$entry")
+    done
+  fi
+  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs" \
+    "$action" "$REPO_ROOT" "$DEVNET_DIR" "$selected" ${entries[@]+"${entries[@]}"}
+}
+
 collect_devnet_node_pids() {
-  local node_num="${1:-}"
-  local pids="" f pid root_node ps_pids children
-  if [ -n "$node_num" ]; then
-    root_node="$DEVNET_DIR/node${node_num}"
-    for f in "$root_node/devnet.pid" "$root_node/daemon.pid"; do
-      [ -f "$f" ] || continue
-      pid=$(cat "$f" 2>/dev/null || true)
-      [ -n "$pid" ] && pids+=" $pid"
-    done
-  else
-    root_node="$DEVNET_DIR/node"
-    for f in "$DEVNET_DIR"/node*/devnet.pid "$DEVNET_DIR"/node*/daemon.pid; do
-      [ -f "$f" ] || continue
-      pid=$(cat "$f" 2>/dev/null || true)
-      [ -n "$pid" ] && pids+=" $pid"
-    done
-  fi
-
-  if command -v ps >/dev/null 2>&1; then
-    # Keep BSD selection flags together: GNU ps rejects the mixed -axo form.
-    ps_pids=$(ps axeww -o pid=,command= 2>/dev/null | awk -v root="$root_node" -v exact="$node_num" '
-      (index($0, "DKG_HOME=" root) > 0 && (exact == "" || index($0 " ", "DKG_HOME=" root " ") > 0)) || index($0, root "/") > 0 { print $1 }
-    ' 2>/dev/null || true)
-    for pid in $ps_pids; do pids+=" $pid"; done
-  fi
-
-  if [ -n "$pids" ] && command -v ps >/dev/null 2>&1; then
-    children=$(ps -A -o pid=,ppid= 2>/dev/null | awk -v plist="$pids" '
-      BEGIN { n = split(plist, arr, " "); for (i=1;i<=n;i++) if (arr[i] != "") parents[arr[i]] = 1 }
-      { if ($2 in parents) print $1 }
-    ' 2>/dev/null || true)
-    for pid in $children; do pids+=" $pid"; done
-  fi
-
-  echo "$pids" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' '
+  run_devnet_process_control collect "${1:-}"
 }
 
 refresh_node_pidfile() {
@@ -1292,44 +1287,7 @@ refresh_node_pidfile() {
 }
 
 stop_devnet_node_processes() {
-  local node_num="${1:-}"
-  local pids pid any_alive node_label
-  pids=$(collect_devnet_node_pids "$node_num")
-  [ -n "$(echo "$pids" | tr -d ' ')" ] || return 0
-
-  node_label="nodes"
-  [ -n "$node_num" ] && node_label="node $node_num"
-  log "Stopping $node_label (pids=$pids)..."
-  for pid in $pids; do
-    [ "$pid" = "$$" ] && continue
-    kill -0 "$pid" 2>/dev/null || continue
-    kill "$pid" 2>/dev/null || true
-  done
-
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    any_alive=false
-    for pid in $pids; do
-      [ "$pid" = "$$" ] && continue
-      if kill -0 "$pid" 2>/dev/null; then
-        any_alive=true
-        break
-      fi
-    done
-    [ "$any_alive" = false ] && break
-    sleep 1
-  done
-
-  for pid in $pids; do
-    [ "$pid" = "$$" ] && continue
-    kill -0 "$pid" 2>/dev/null || continue
-    kill -9 "$pid" 2>/dev/null || true
-  done
-
-  if [ -n "$node_num" ]; then
-    rm -f "$DEVNET_DIR/node${node_num}/devnet.pid" "$DEVNET_DIR/node${node_num}/daemon.pid" "$DEVNET_DIR/node${node_num}/api.port"
-  else
-    rm -f "$DEVNET_DIR"/node*/devnet.pid "$DEVNET_DIR"/node*/daemon.pid "$DEVNET_DIR"/node*/api.port
-  fi
+  run_devnet_process_control stop "${1:-}"
 }
 
 stop_devnet_nodes_only() {
@@ -2355,6 +2313,7 @@ case "${1:-}" in
   addnode)          cmd_addnode "$@" ;;
   stop-node)        cmd_stop_node "$@" ;;
   restart-node)     cmd_restart_node "$@" ;;
+  start-node)       start_node "${2:?node number required}" ;;
   prepare-version)  cmd_prepare_version "$@" ;;
   stop)         cmd_stop ;;
   status)       cmd_status ;;

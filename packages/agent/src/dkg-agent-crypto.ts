@@ -1563,8 +1563,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         }
         return {
           resolution: { requiresEncryption: true, recipients: [firstRecipient, ...remainingRecipients] },
-          stayedCurrent: () => projection.recipientKeyRouteFence.hasPendingWrites !== true
-            && attemptRevision === projection.recipientKeyRouteFence.revision
+          stayedCurrent: () => projection.recipientKeyRouteFence.isCurrentFor(attemptRevision, participantAgents)
             && attemptGate === projection.peerGateRevision.read(input.contextGraphId),
         };
       };

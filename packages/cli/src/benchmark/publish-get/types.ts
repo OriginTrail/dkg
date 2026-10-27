@@ -1,3 +1,4 @@
+import type { ConfirmedCatalogObligationPendingResponseV1 } from '../../knowledge-asset-publish-response.js';
 import type { QueryResult } from '../../api-client.js';
 
 export const DEFAULT_REPEAT = 30;
@@ -102,7 +103,7 @@ export interface BenchmarkClient {
     name: string,
     quads: BenchmarkPayload['quads'],
     options?: { clearAfter?: boolean },
-  ): Promise<{ kaId?: string; status?: string; kas?: Array<{ tokenId: string; rootEntity: string }> }>;
+  ): Promise<ConfirmedCatalogObligationPendingResponseV1 | { catalogObligationPending?: false; kaId?: string; status?: string; kas?: Array<{ tokenId: string; rootEntity: string }> }>;
   publisherJob(jobId: string): Promise<{ job: { status?: string; error?: string; lastError?: string } | null }>;
   query(
     sparql: string,

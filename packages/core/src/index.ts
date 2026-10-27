@@ -486,6 +486,7 @@ export {
   buildAssertionPublishReceiptQuads,
   parseAssertionSealQuads,
   parseGraphScopedAssertionSealCandidate,
+  parseGraphScopedAssertionSealStructure,
   type GraphScopedAssertionSealCandidate,
   type AssertionSealBuildArgs,
   type AssertionSeal,

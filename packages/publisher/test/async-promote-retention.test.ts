@@ -1,0 +1,1612 @@
+import { describe, expect, it } from 'vitest';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
+import { PROMOTE_STATE, PROMOTE_UPDATED_AT, PROMOTE_PAYLOAD, jobSubject, literal, integer, serializeJobRecord } from '../src/async-promote-queue-utils.js';
+import { buildRetentionScanQuery, buildRetentionTieQuery, buildRetentionVerifyQuery } from '../src/async-promote-retention-scan.js';
+import { PROMOTE_NO_EFFECT_REJECTION_CODE } from '../src/promote-no-effect-rejection.js';
+import type { PromoteJob } from '../src/async-promote-queue-types.js';
+import { decidePromoteRetention } from '../src/async-promote-retention-policy.js';
+import { SHARE_RETENTION_DEFAULTS, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
+import {
+  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, ATTEMPTED, W, WF, binding, cancelledJob, failedInPreparation, noPending,
+  decide, decideText, deletedSubjects, drain, insertQuads, mk, newRetention, pick, present, put, parseText, payloadWithFormatVersion, registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, from,
+  captureLogger, policy, standInForTheQueue, type Kind, type Quads, type QueryResult,
+} from './_helpers/share-retention-fixtures.js';
+
+// Share-queue retention, the proofs the measured prototype carried (OT-RFC-73 P10a, AC7) on the production API. They pin (1) the exclusion list job by job,
+// (2) that no excluded job is ever deleted on randomised stores (independent oracle), (3) bounded, lock-sliced behaviour, (4) that the queue keeps working
+// while a sweep runs, (5) that the scan always makes progress: thousands of old rows that can never be deleted neither starve the deletable ones nor are looked
+// at again and again (keyset cursor). The prototype's paced driver is not part of the core (the timer is P10b's); its tests are replaced by the overlap and the
+// clock-guard tests. The tests that changed with the production policy say so: the SPARQL delete guard is gone (deletes are per subject, under the lock).
+
+describe('retention decision (one job)', () => {
+  it('deletes an old succeeded job, an old operator-cancelled job and an old certified no-effect rejection', () => {
+    expect(decide(mk('s', 'succeeded'))).toEqual({ delete: true, jobClass: 'succeeded' });
+    expect(decide(cancelledJob('c', {}))).toEqual({ delete: true, jobClass: 'cancelled' });
+    expect(decide(retired('r'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+  });
+
+  it.each([
+    ['queued', mk('q', 'queued'), 'not_terminal'],
+    ['running', mk('r', 'running', { lease: LEASE }), 'not_terminal'],
+    ['failed_retrying', mk('fr', 'failed_retrying'), 'not_terminal'],
+    ['failed bound share without a certified retirement (owns the recovery obligation)', mk('fb', 'failed', { bound: true }), 'unfinished_bound_obligation'],
+    ['failed with a post-commit failure (replay budget remaining)', mk('pc', 'failed', { commitMarker: STARTED, attempt: { count: 1, maxRetries: 5, lastError: POST_COMMIT_ERROR } }), 'failed_retained'],
+    ['failed with an exhausted post-commit recovery (needs the operator)', mk('ex', 'failed', { reason: 'automatic post-commit recovery exhausted after 5 attempts; needs operator inspection' }), 'failed_retained'],
+    ['failed partial-promote ambiguity', mk('amb', 'failed', { reason: 'partial promote ambiguity: lease expired while job was running; needs operator inspection' }), 'failed_retained'],
+    ['failed legacy / fatal error', mk('fatal', 'failed', { attempt: { count: 5, maxRetries: 5, lastError: { message: 'boom', retryable: false, classification: 'fatal', recordedAt: 1 } } }), 'failed_retained'],
+    ['cancelled-looking row that already started promote', cancelledJob('cs', { commitMarker: STARTED }), 'failed_retained'],
+    ['written by a newer queue format', mk('nf', 'succeeded', { formatVersion: 5 }), 'newer_format'],
+    ['younger than the window', mk('y', 'succeeded', {}, W - 1), 'too_recent'],
+    ['updatedAt in the future', mk('fut', 'succeeded', {}, -1000), 'future_dated'],
+  ])('keeps %s', (_name, j, reason) => { expect(decide(j as ReturnType<typeof mk>)).toEqual({ delete: false, reason }); });
+
+  // A job that failed terminally in preparation is reachable and meets every condition of the cancelled class except its reason: every attempt proven unstarted (`preparationAttempts`
+  // equal to `attempt.count`, format 4), no binding, an all-false marker. Only `reason === 'cancelled'` keeps it from being deleted as one; nothing else in the policy stops it.
+  it.each([
+    ['no reason (what the queue leaves for a terminal failure)', {}],
+    ['a reason that is not "cancelled"', { reason: 'seal preparation failed' }],
+    ['a reason that only resembles it', { reason: 'Cancelled' }],
+    ['no last error either', { attempt: { count: 2, maxRetries: 5 } }],
+  ])('keeps a job that failed in preparation, not cancelled, although every attempt is proven unstarted: %s (failed_retained, at any age)', (_label, over) => {
+    const job = failedInPreparation('prep', over as Record<string, unknown>);
+    expect(job.preparationAttempts).toBe(job.attempt.count);                                       // the premise: every attempt is proven unstarted
+    expect(decide(job)).toEqual({ delete: false, reason: 'failed_retained' });
+    expect(decide(job, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason: 'failed_retained' });
+    expect(decide(failedInPreparation('prep0', { ...over as Record<string, unknown>, attempt: { count: 0, maxRetries: 5 }, preparationAttempts: 0 }))).toEqual({ delete: false, reason: 'failed_retained' });
+  });
+
+  it('deletes the same job once its reason is "cancelled": the reason is the only difference', () => {
+    expect(decide(failedInPreparation('prep', { reason: 'cancelled' }))).toEqual({ delete: true, jobClass: 'cancelled' });
+    expect(decide(failedInPreparation('prep', { reason: 'cancelled' }, WF - 1))).toEqual({ delete: false, reason: 'too_recent' });
+  });
+
+  it('never deletes a failed job when no benign-failed window is configured, and respects each window exactly at its boundary', () => {
+    expect(decide(cancelledJob('c', {}), { succeededMaxAgeMs: W })).toEqual({ delete: false, reason: 'failed_retained' });
+    expect(decide(mk('e', 'succeeded', {}, W))).toEqual({ delete: true, jobClass: 'succeeded' });
+    expect(decide(mk('e', 'succeeded', {}, W - 1))).toEqual({ delete: false, reason: 'too_recent' });
+    expect(decide(cancelledJob('f', {}, WF))).toEqual({ delete: true, jobClass: 'cancelled' });
+    expect(decide(cancelledJob('f', {}, WF - 1))).toEqual({ delete: false, reason: 'too_recent' });
+  });
+
+  it('keeps a job an uncertain admission still refers to', () => {
+    expect(decide(mk('p', 'succeeded'), policy, id => id === 'p')).toEqual({ delete: false, reason: 'pending_admission' });
+  });
+});
+
+describe('retention batch against the real queue', () => {
+  it('scan, tie and verify queries are bounded, ordered by a numeric key and subject-scoped', () => {
+    const scan = buildRetentionScanQuery(GRAPH, 'succeeded', NOW - W, 500, { after: 1234, inclusive: false });
+    expect(scan).toMatch(/ORDER BY \?updatedAt LIMIT 501$/);                                     // one row more than the batch: "fewer than limit + 1" = end of the region
+    expect(scan).toContain(`?job <${PROMOTE_STATE}> "succeeded" ; <${PROMOTE_UPDATED_AT}> ?updatedAt`);
+    expect(scan).toContain(`FILTER (?updatedAt <= ${NOW - W})`);
+    expect(scan).toContain('FILTER (?updatedAt > 1234)');
+    expect(buildRetentionScanQuery(GRAPH, 'failed', NOW - W, 5, { after: 1234, inclusive: true })).toContain('FILTER (?updatedAt >= 1234)');
+    expect(buildRetentionScanQuery(GRAPH, 'failed', NOW - W, 5)).not.toContain('FILTER (?updatedAt >');
+    const tie = buildRetentionTieQuery(GRAPH, 'succeeded', 42, 10, 'urn:dkg:promote-queue:job:Ab-1');
+    expect(tie).toContain('FILTER (?updatedAt = 42)');
+    expect(tie).toContain('FILTER (STR(?job) > "urn:dkg:promote-queue:job:Ab-1")');
+    expect(tie).toMatch(/ORDER BY STR\(\?job\) LIMIT 11$/);
+    const verify = buildRetentionVerifyQuery(GRAPH, [jobSubject('a')]);
+    expect(verify).toContain(`VALUES ?job { <${jobSubject('a')}> }`);
+    expect(verify).toContain(`OPTIONAL { ?job <${PROMOTE_STATE}> ?state }`);
+  });
+
+  it('deletes exactly the eligible jobs, in bounded batches, one verify per lock slice and one per-subject delete per job', async () => {
+    const store = new OxigraphStore();
+    const { store: spied, log } = spy(store);
+    const old = Array.from({ length: 25 }, (_, i) => mk(`old-${i}`, 'succeeded', {}, 10 * W + i * 7));
+    const keep = [mk('young', 'succeeded', {}, 1000), mk('queued', 'queued'), mk('failed-bound', 'failed', { bound: true }), mk('fatal', 'failed', { reason: 'partial promote ambiguity: x' })];
+    await put(store, ...old, ...keep);
+    const retention = newRetention(spied, { batchSize: 10, sliceSize: 5 });
+    const first = await retention.runBatch();
+    expect(first).toMatchObject({ scanned: 10, deleted: 10, hasMore: true, anomalies: 0, holds: 2 });
+    expect(from(log, 'verify')).toHaveLength(2);                                               // 10 candidates / slices of 5
+    expect(deletedSubjects(log)).toHaveLength(10);                                             // one delete per job
+    expect(log.filter(l => l.kind === 'update')).toHaveLength(0);                              // never a bulk update
+    await drain(retention);
+    for (const j of old) expect(await present(store, j.jobId)).toBe('');
+    for (const j of keep) expect(await present(store, j.jobId)).not.toBe('');
+    expect(await retention.runBatch()).toMatchObject({ deleted: 0, scanned: 0, hasMore: false });
+  });
+
+  it('does not need update() and never calls it: a store without the capability gives the same outcome as one that has it', async () => {
+    const store = new OxigraphStore();
+    let updates = 0;
+    const noUpdate = new Proxy(store, { get(t, p) { if (p === 'update') { return undefined; } const v = Reflect.get(t, p, t); return typeof v === 'function' ? v.bind(t) : v; } });
+    const countingUpdate = new Proxy(store, { get(t, p) { if (p === 'update') return async () => { updates++; }; const v = Reflect.get(t, p, t); return typeof v === 'function' ? v.bind(t) : v; } });
+    await put(store, mk('a', 'succeeded', {}, 10 * W), mk('b', 'succeeded', {}, 10 * W + 1), mk('c', 'succeeded', {}, 1));
+    const res = await newRetention(noUpdate, { batchSize: 10 }).runBatch();
+    expect(res.deleted).toBe(2);
+    expect(res.deletedJobs.map(d => d.jobId).sort()).toEqual(['a', 'b']);
+    expect(await present(store, 'c')).not.toBe('');
+    await put(store, mk('d', 'succeeded', {}, 10 * W));
+    expect((await newRetention(countingUpdate, { batchSize: 10 }).runBatch()).deleted).toBe(1);
+    expect(updates).toBe(0);
+  });
+
+  it('never deletes a job named by an uncertain admission, and deletes it once that admission is settled (the cursor is rewound to it, not to the start)', async () => {
+    const store = new OxigraphStore();
+    const { store: spied, log } = spy(store);
+    await put(store, mk('uncertain', 'succeeded', {}, 20 * W), ...Array.from({ length: 30 }, (_, i) => mk(`fatal-${i}`, 'failed', { reason: 'partial promote ambiguity: x' }, 10 * W + i)), mk('plain', 'succeeded', {}, 5 * W));
+    let t = NOW;
+    const retention = newRetention(spied, { now: () => t, batchSize: 5 });
+    const flight = registerPendingFlight(spied, 'uncertain');
+    for (let i = 0; i < 12; i++) await retention.runBatch();                                    // a whole pass: 32 rows, 5 per call
+    expect(await present(store, 'plain')).toBe('');
+    expect(await present(store, 'uncertain')).not.toBe('');
+    t += 6_000;                                                                                 // past the retry delay: the cursor goes back to the pending row, still protected
+    const before = verifiedSubjects(log).length;
+    for (let i = 0; i < 12; i++) await retention.runBatch();
+    expect(await present(store, 'uncertain')).not.toBe('');
+    expect(verifiedSubjects(log).length - before).toBe(1);                                       // the cursor went back to the pending row ONLY (the 30 fatal rows were not looked at again)
+    flight.clearAll();
+    t += 6_000;
+    for (let i = 0; i < 12; i++) await retention.runBatch();
+    expect(await present(store, 'uncertain')).toBe('');
+    expect((await storedIds(store)).size).toBe(30);                                              // the fatal rows are untouched
+  });
+
+  it('never deletes a payload it cannot read, an index row without a payload, or a row whose payload disagrees with its index triples (state or age)', async () => {
+    const store = new OxigraphStore();
+    await put(store, mk('corrupt', 'succeeded', {}, 10 * W), mk('lying-state', 'queued', {}, 10 * W + 1), mk('lying-age', 'succeeded', {}, 100));
+    await store.deleteByPattern({ subject: jobSubject('corrupt'), predicate: PROMOTE_PAYLOAD, graph: GRAPH });
+    await store.insert([{ subject: jobSubject('corrupt'), predicate: PROMOTE_PAYLOAD, object: literal('{"jobId":"corrupt"}'), graph: GRAPH }]);
+    await store.deleteByPattern({ subject: jobSubject('lying-state'), predicate: PROMOTE_STATE, graph: GRAPH });
+    await store.insert([{ subject: jobSubject('lying-state'), predicate: PROMOTE_STATE, object: literal('succeeded'), graph: GRAPH }]);
+    await store.deleteByPattern({ subject: jobSubject('lying-age'), predicate: PROMOTE_UPDATED_AT, graph: GRAPH });
+    await store.insert([{ subject: jobSubject('lying-age'), predicate: PROMOTE_UPDATED_AT, object: integer(1), graph: GRAPH }]);
+    await store.insert([{ subject: jobSubject('orphan'), predicate: PROMOTE_STATE, object: literal('succeeded'), graph: GRAPH }, { subject: jobSubject('orphan'), predicate: PROMOTE_UPDATED_AT, object: integer(1), graph: GRAPH }]);
+    const before = await Promise.all(['corrupt', 'lying-state', 'lying-age', 'orphan'].map(id => present(store, id)));
+    const retention = newRetention(store, { batchSize: 2 });
+    const kept: Record<string, number> = {};
+    for (let i = 0; i < 6; i++) for (const [k, v] of Object.entries((await retention.runBatch()).kept)) kept[k] = (kept[k] ?? 0) + v;
+    expect(await Promise.all(['corrupt', 'lying-state', 'lying-age', 'orphan'].map(id => present(store, id)))).toEqual(before);
+    expect(kept).toMatchObject({ unreadable: 1, index_mismatch: 1, too_recent: 1, vanished: 1 });
+  });
+
+  it('keeps a row whose stored state triple is missing, doubled or different from its payload (index_mismatch), and a row with two payload triples (unreadable)', async () => {
+    const store = new OxigraphStore();
+    await put(store, mk('no-state', 'succeeded', {}, 10 * W), mk('two-states', 'succeeded', {}, 10 * W + 1), mk('state-differs', 'succeeded', {}, 10 * W + 2), mk('two-payloads', 'succeeded', {}, 10 * W + 3), mk('control', 'succeeded', {}, 10 * W + 4));
+    await store.deleteByPattern({ subject: jobSubject('no-state'), predicate: PROMOTE_STATE, graph: GRAPH });
+    await store.insert([{ subject: jobSubject('two-states'), predicate: PROMOTE_STATE, object: literal('failed'), graph: GRAPH }]);
+    await store.deleteByPattern({ subject: jobSubject('state-differs'), predicate: PROMOTE_STATE, graph: GRAPH });
+    await store.insert([{ subject: jobSubject('state-differs'), predicate: PROMOTE_STATE, object: literal('failed'), graph: GRAPH }]);
+    await store.insert([{ subject: jobSubject('two-payloads'), predicate: PROMOTE_PAYLOAD, object: literal(JSON.stringify(mk('two-payloads', 'succeeded', { reason: 'second' }, 10 * W + 3))), graph: GRAPH }]);
+    const snapshot = await Promise.all(['no-state', 'two-states', 'state-differs', 'two-payloads'].map(id => present(store, id)));
+    const retention = newRetention(store, { batchSize: 3 });
+    const total: Record<string, number> = {};
+    for (let i = 0; i < 6; i++) for (const [k, v] of Object.entries((await retention.runBatch()).kept)) total[k] = (total[k] ?? 0) + v;
+    expect(await Promise.all(['no-state', 'two-states', 'state-differs', 'two-payloads'].map(id => present(store, id)))).toEqual(snapshot);
+    expect(await present(store, 'control')).toBe('');
+    expect(total['index_mismatch']).toBeGreaterThanOrEqual(2);
+    expect(total['unreadable']).toBeGreaterThanOrEqual(1);
+  });
+
+  it('keeps a row whose payload names another job than its subject (unreadable), although it is otherwise a deletable job', async () => {
+    const store = new OxigraphStore();
+    await put(store, mk('subject-1', 'succeeded', {}, 10 * W), mk('control', 'succeeded', {}, 10 * W + 1));
+    await store.deleteByPattern({ subject: jobSubject('subject-1'), predicate: PROMOTE_PAYLOAD, graph: GRAPH });
+    await store.insert([{ subject: jobSubject('subject-1'), predicate: PROMOTE_PAYLOAD, object: literal(JSON.stringify(mk('other-job', 'succeeded', {}, 10 * W))), graph: GRAPH }]);
+    const before = await present(store, 'subject-1');
+    const res = await newRetention(store, { batchSize: 10 }).runBatch();
+    expect(res.kept.unreadable).toBe(1);
+    expect(await present(store, 'subject-1')).toBe(before);
+    expect(await present(store, 'control')).toBe('');
+  });
+
+  it('a delete removes the triples of its own subject in the control graph and nothing else: the same subject in another graph, other subjects and other graphs survive', async () => {
+    const store = new OxigraphStore();
+    const OTHER_GRAPH = 'urn:dkg:publisher:journal';
+    await put(store, mk('s', 'succeeded'), cancelledJob('f', {}), mk('q', 'queued'), mk('bystander', 'succeeded', {}, 1000));
+    const foreign = [
+      { subject: jobSubject('s'), predicate: 'urn:test:p', object: '"same subject, other graph"', graph: OTHER_GRAPH },
+      { subject: 'urn:test:journal:entry-1', predicate: 'urn:test:p', object: '"journal row"', graph: OTHER_GRAPH },
+    ];
+    await store.insert(foreign);
+    const otherBefore = (await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${OTHER_GRAPH}> { ?s ?p ?o } }`) as { bindings: unknown[] }).bindings.length;
+    expect(otherBefore).toBe(2);
+    const res = await newRetention(store).runBatch();
+    expect(res.deletedJobs.map(d => d.jobId).sort()).toEqual(['f', 's']);
+    expect([await present(store, 's'), await present(store, 'f')]).toEqual(['', '']);
+    for (const id of ['q', 'bystander']) expect(await present(store, id), id).not.toBe('');
+    expect(await present(store, 's', OTHER_GRAPH)).not.toBe('');                                  // same subject IRI, other graph: untouched
+    expect((await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${OTHER_GRAPH}> { ?s ?p ?o } }`) as { bindings: unknown[] }).bindings.length).toBe(otherBefore);
+  });
+
+  it('never interpolates a subject the job-id grammar does not allow: an engine that names one gets it kept as unreadable, never verified or deleted', async () => {
+    const store = new OxigraphStore();
+    await put(store, mk('good', 'succeeded', {}, 10 * W));
+    const evil = 'urn:dkg:promote-queue:job:x> } DROP ALL # <';
+    const wrongPrefix = 'urn:dkg:other:job:y';
+    const { store: spied, log } = spy(store, async (sparql, source, run) => {
+      const result = await run();
+      if (source !== 'publisher.asyncPromote.retention.scan' || !sparql.includes('"succeeded"') || result.type !== 'bindings') return result;
+      const old = `"${NOW - 100 * W}"^^<http://www.w3.org/2001/XMLSchema#integer>`;
+      return { ...result, bindings: [{ job: evil, updatedAt: old }, { job: wrongPrefix, updatedAt: old }, ...result.bindings] } as QueryResult;
+    });
+    const res = await newRetention(spied, { batchSize: 10 }).runBatch();
+    expect(res.kept.unreadable).toBe(2);
+    expect(res.deletedJobs.map(j => j.jobId)).toEqual(['good']);
+    expect(log.filter(l => l.sparql.includes('DROP ALL') || l.sparql.includes('urn:dkg:other:job:y'))).toEqual([]);
+  });
+
+  it('a job another operation re-queues between the scan and the verification survives, the other jobs of the slice are deleted', async () => {
+    const store = new OxigraphStore();
+    await put(store, mk('a', 'succeeded', {}, 10 * W), mk('revived', 'succeeded', {}, 10 * W + 1), mk('c', 'succeeded', {}, 10 * W + 2));
+    let flipped = false;
+    const { store: spied } = spy(store, async (_sparql, source, run) => {
+      const result = await run();
+      if (source === 'publisher.asyncPromote.retention.scan' && !flipped) {
+        flipped = true;                                                                         // the scan has named the rows; the revival lands before the slice's verification
+        await store.deleteByPattern({ subject: jobSubject('revived'), predicate: PROMOTE_STATE, graph: GRAPH });
+        await store.insert([{ subject: jobSubject('revived'), predicate: PROMOTE_STATE, object: literal('queued'), graph: GRAPH }]);
+      }
+      return result;
+    });
+    await newRetention(spied, { batchSize: 10 }).runBatch();
+    expect(flipped).toBe(true);
+    expect(await present(store, 'a')).toBe('');
+    expect(await present(store, 'c')).toBe('');
+    expect(await present(store, 'revived')).not.toBe('');
+  });
+
+  it('caps the batch size at 1000 and floors both windows at 24 hours, so a misconfiguration cannot make one scan huge or shrink the 7-day D-6 window to minutes', () => {
+    const DAY = 24 * 3_600_000;
+    const store = new OxigraphStore();
+    standInForTheQueue(store);
+    const base = { store, mode: 'delete' as const, intervalMs: 60_000 };
+    expect(SHARE_RETENTION_DEFAULTS).toMatchObject({ batchSize: 100, maxBatchSize: 1000, minWindowMs: DAY });
+    for (const batchSize of [1001, 5000, 100_000, Number.MAX_SAFE_INTEGER]) expect(() => createShareRetention({ ...base, batchSize }), `batchSize ${batchSize}`).toThrow(/batchSize must be a positive integer of at most 1000/);
+    for (const batchSize of [1, 100, 999, 1000]) expect(() => createShareRetention({ ...base, batchSize }), `batchSize ${batchSize}`).not.toThrow();
+    for (const ms of [1, 1000, 60_000, 3_600_000, DAY - 1]) {
+      expect(() => createShareRetention({ ...base, succeededMaxAgeMs: ms }), `succeeded ${ms}`).toThrow(/succeededMaxAgeMs must be at least 86400000 ms/);
+      expect(() => createShareRetention({ ...base, benignFailedMaxAgeMs: ms }), `benign ${ms}`).toThrow(/benignFailedMaxAgeMs must be at least 86400000 ms/);
+    }
+    for (const ms of [DAY, DAY + 1, 7 * DAY, 30 * DAY]) expect(() => createShareRetention({ ...base, succeededMaxAgeMs: ms, benignFailedMaxAgeMs: ms }), `window ${ms}`).not.toThrow();
+    expect(() => createShareRetention({ ...base, benignFailedMaxAgeMs: null })).not.toThrow();              // failed classes switched off: no window to floor
+    expect(() => createShareRetention({ ...base, mode: 'report', succeededMaxAgeMs: 60_000 })).toThrow('succeededMaxAgeMs');   // the floors hold in every active mode
+    expect(() => createShareRetention({ ...base, mode: 'report', batchSize: 1001 })).toThrow('batchSize');
+  });
+
+  it('a window at the floor behaves as configured: a succeeded job just over 24 hours old goes, one just under stays', async () => {
+    const DAY = 24 * 3_600_000;
+    const store = new OxigraphStore();
+    await put(store, mk('over', 'succeeded', {}, DAY + 1), mk('exact', 'succeeded', {}, DAY), mk('under', 'succeeded', {}, DAY - 1), cancelledJob('cancelled-over', {}, DAY + 1), cancelledJob('cancelled-under', {}, DAY - 1));
+    await drain(newRetention(store, { succeededMaxAgeMs: DAY, benignFailedMaxAgeMs: DAY, batchSize: 10 }));
+    expect([...(await storedIds(store))].sort()).toEqual(['cancelled-under', 'under']);
+  });
+
+  it('rejects invalid configuration and reports a store failure as data, never as a throw', async () => {
+    const store = new OxigraphStore();
+    const base = { store, mode: 'delete' as const, intervalMs: 60_000 };
+    expect(() => createShareRetention({ ...base, succeededMaxAgeMs: 0 })).toThrow('succeededMaxAgeMs');
+    expect(() => createShareRetention({ ...base, benignFailedMaxAgeMs: -1 })).toThrow('benignFailedMaxAgeMs');
+    expect(() => createShareRetention({ ...base, batchSize: 0 })).toThrow('batchSize');
+    expect(() => createShareRetention({ ...base, sliceSize: 1.5 })).toThrow('sliceSize');
+    expect(() => createShareRetention({ ...base, sliceSize: 101 })).toThrow('sliceSize');
+    expect(() => createShareRetention({ ...base, rescanIntervalMs: 0 })).toThrow('rescanIntervalMs');
+    expect(() => createShareRetention({ ...base, rescanIntervalMs: Number.NaN })).toThrow('rescanIntervalMs');
+    expect(() => createShareRetention({ ...base, holdBudgetMs: 51 })).toThrow('holdBudgetMs');
+    expect(() => createShareRetention({ ...base, holdBudgetMs: 0 })).toThrow('holdBudgetMs');
+    expect(() => createShareRetention({ ...base, intervalMs: 0 })).toThrow('intervalMs');
+    expect(() => createShareRetention({ ...base, clockGuardFactor: 0.5 })).toThrow('clockGuardFactor');
+    expect(() => createShareRetention({ ...base, graphUri: 'urn:g> } DROP ALL #' })).toThrow('graphUri');
+    expect(() => createShareRetention({ ...base, mode: 'purge' as never })).toThrow('mode');
+    const broken = new Proxy(new OxigraphStore(), { get(t, p) { if (p === 'query') return async () => { throw new Error('store down'); }; const v = Reflect.get(t, p, t); return typeof v === 'function' ? v.bind(t) : v; } });
+    expect(await newRetention(broken, { batchSize: 5 }).runBatch()).toMatchObject({ scanned: 0, deleted: 0, error: { phase: 'scan', message: 'store down' } });
+  });
+
+  it('batches never overlap: a call made while one is in flight reports that and changes nothing, also across two sweeps over the same store and graph', async () => {
+    const store = new OxigraphStore();
+    await put(store, ...Array.from({ length: 12 }, (_, i) => mk(`o-${i}`, 'succeeded', {}, 10 * W + i)));
+    let release!: () => void;
+    const gate = new Promise<void>(res => { release = res; });
+    const { store: spied } = spy(store, async (_sparql, source, run) => { if (source === 'publisher.asyncPromote.retention.scan') await gate; return run(); });
+    const retention = newRetention(spied, { batchSize: 5 });
+    const twin = newRetention(spied, { batchSize: 5 });                                          // a second sweep object over the same store and graph
+    const first = retention.runBatch();
+    await new Promise(r => setTimeout(r, 5));
+    for (const second of [await retention.runBatch(), await twin.runBatch()]) {
+      expect(second).toMatchObject({ skipped: 'overlap', scanned: 0, scanQueries: 0, deleted: 0, hasMore: true });
+    }
+    expect(retention.counters().skipped.overlap).toBe(1);
+    release();
+    expect(await first).toMatchObject({ scanned: 5, deleted: 5 });
+    for (let i = 0; i < 4; i++) await retention.runBatch();                                      // the guard is released afterwards (also after a failed batch: try / finally)
+    expect((await storedIds(store)).size).toBe(0);
+  });
+
+  it('keeps admitting, claiming and completing work while a sweep runs, and never touches a live job', async () => {
+    const store = new OxigraphStore();
+    await put(store, ...Array.from({ length: 60 }, (_, i) => mk(`old-${i}`, 'succeeded', {}, 10 * W + i * 3)));
+    let t = NOW, n = 0;
+    const queue = new TripleStoreAsyncPromoteQueue(store, { now: () => t, idGenerator: () => `live-${++n}` });
+    const retention = newRetention(store, { batchSize: 7, sliceSize: 2, now: () => NOW });
+    const sweep = (async () => { for (let i = 0; i < 12; i++) await retention.runBatch(); })();
+    const live: string[] = [];
+    for (let i = 0; i < 6; i++) {
+      live.push(await queue.enqueue({ contextGraphId: 'cg', assertionName: `fresh-${i}`, agentAddress: AG, entities: 'all' }));
+      const claimed = await queue.claimNext('w');
+      if (claimed && i % 2 === 0) { await queue.recordCommitMarker(claimed.jobId, claimed.lease!.claimToken, 'swmInserted'); await queue.succeed(claimed.jobId, claimed.lease!.claimToken, { promotedCount: 1, succeededAt: t }); }
+      t += 1000;
+    }
+    await sweep;
+    for (const id of live) expect(await queue.getStatus(id)).not.toBeNull();                 // young (live or just finished): untouched
+    expect((await queue.list({})).filter(j => j.jobId.startsWith('old-'))).toHaveLength(0);  // all history swept
+  });
+});
+
+describe('retention scan progress (keyset cursor): rows that cannot be deleted never starve the ones that can', () => {
+  const K = 5000, D = 600;                                                                   // far beyond any in-memory quarantine
+
+  it(`${K} old undeletable rows (fatal / bound failed, newer format, corrupt, orphan index rows, index lying about the state), 2 000 of them OLDER than every deletable row and the rest interleaved with ${D} deletable ones: every deletable row is gone after ceil(M / batch) calls, each row is judged exactly once, and a parked sweep does no more work`, async () => {
+    const r = rng(20261903);
+    const store = new OxigraphStore();
+    const { store: spied, log } = spy(store);
+    const undeletableKinds: Kind[] = ['fatal', 'fatal', 'fatal', 'fatal', 'bound', 'bound', 'newer', 'newer', 'corrupt', 'orphan', 'lying', 'attempted'];
+    const rows = new Map<string, Kind>();
+    const quads: Quads = [];
+    let age = 100 * W;
+    for (let i = 0; i < 2000; i++) { const kind = pick(r, undeletableKinds), id = `u-${i}`; rows.set(id, kind); quads.push(...rowOf(kind, id, age)); age -= 3; }   // the oldest rows of the store come first
+    const rest: Kind[] = [...Array.from({ length: K - 2000 }, () => pick(r, undeletableKinds)), ...Array.from({ length: D }, () => pick(r, ['succeeded', 'succeeded', 'cancelled', 'retired'] as Kind[]))];
+    for (let i = rest.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [rest[i], rest[j]] = [rest[j]!, rest[i]!]; }
+    rest.forEach((kind, i) => { const id = `m-${i}`; rows.set(id, kind); quads.push(...rowOf(kind, id, 2 * W + (rest.length - i) * 5)); });
+    await insertQuads(store, quads);
+    const M = rows.size, batch = 500;
+    expect([...rows.values()].filter(k => !DELETABLE.has(k)).length).toBe(K);
+    const before = new Map<string, string>();
+    for (const [id, kind] of rows) if (!DELETABLE.has(kind)) before.set(id, await present(store, id));
+    const retention = newRetention(spied, { batchSize: batch, sliceSize: 100 });
+    const results: ShareRetentionBatchResult[] = [];
+    for (let call = 0; call < Math.ceil(M / batch) + 1; call++) results.push(await retention.runBatch());
+    for (const res of results) { expect(res.error).toBeUndefined(); expect(res.anomalies).toBe(0); expect(res.scanned).toBeLessThanOrEqual(batch); expect(res.scanQueries).toBeLessThanOrEqual(2); }
+    const left = await storedIds(store);
+    for (const [id, kind] of rows) {
+      if (DELETABLE.has(kind)) expect(left.has(id), `${id} (${kind}) should be deleted`).toBe(false);
+      else if (kind !== 'orphan') expect(await present(store, id), `${id} (${kind}) must be untouched`).toBe(before.get(id));
+    }
+    for (const [id, kind] of rows) if (kind === 'orphan') expect(await present(store, id)).toBe(before.get(id));
+    const judged = verifiedSubjects(log);
+    expect(new Set(judged).size).toBe(judged.length);                                           // no row was verified twice
+    expect(results.reduce((a, x) => a + x.scanned, 0)).toBe(M);                                  // every old row was judged exactly once
+    const mark = log.length;
+    for (let i = 0; i < 5; i++) expect(await retention.runBatch()).toMatchObject({ scanned: 0, deleted: 0, hasMore: false, scanQueries: 2 });
+    expect(log.slice(mark).filter(l => l.source !== 'publisher.asyncPromote.retention.scan')).toHaveLength(0);   // parked: only the two (empty) frontier scans, no verify, no delete
+  }, 120_000);
+
+  it('the reviewer reproduction (400 old fatal failed rows in front of 300 eligible succeeded rows, benign window on, batch 100) now deletes all 300 and judges each row once', async () => {
+    const store = new OxigraphStore();
+    const { store: spied, log } = spy(store);
+    const quads: Quads = [];
+    for (let i = 0; i < 400; i++) quads.push(...rowOf('fatal', `fatal-${i}`, 50 * W - i));
+    for (let i = 0; i < 300; i++) quads.push(...rowOf('succeeded', `ok-${i}`, 20 * W - i));
+    await insertQuads(store, quads);
+    const retention = newRetention(spied, { batchSize: 100 });
+    for (let i = 0; i < 9; i++) await retention.runBatch();                                    // ceil(700 / 100) + 2
+    expect((await storedIds(store)).size).toBe(400);
+    const judged = verifiedSubjects(log);
+    expect(judged.length).toBe(700);
+    expect(new Set(judged).size).toBe(700);
+  });
+
+  it('an engine that returns the undeletable rows first (they are the OLDEST rows, so any engine honouring ORDER BY does) is no obstacle at any batch size or lock slice', async () => {
+    for (const [batch, slice] of [[1, 1], [7, 3], [64, 64], [1000, 100]] as const) {
+      const store = new OxigraphStore();
+      const quads: Quads = [];
+      for (let i = 0; i < 300; i++) quads.push(...rowOf(i % 3 ? 'fatal' : 'newer', `u-${i}`, 80 * W - i));
+      for (let i = 0; i < 40; i++) quads.push(...rowOf('succeeded', `d-${i}`, 20 * W - i));
+      await insertQuads(store, quads);
+      const retention = newRetention(store, { batchSize: batch, sliceSize: slice });
+      for (let call = 0, needed = Math.ceil(340 / batch) + 2; call < needed; call++) await retention.runBatch();
+      expect((await storedIds(store)).size, `batch ${batch}`).toBe(300);
+    }
+  }, 120_000);
+
+  it('rows that share ONE updatedAt (a group larger than a batch, mixed-case and punctuated ids) are walked in key order: all judged once, deletable ones deleted', async () => {
+    const store = new OxigraphStore();
+    const { store: spied, log } = spy(store);
+    const quads: Quads = [];
+    const ids: Array<[string, Kind]> = [];
+    for (let i = 0; i < 600; i++) {
+      const id = `${pick(rng(i + 1), ['Ab', 'aB', 'a.b', 'A_b', 'a:B', 'z'])}-${i.toString(36)}`;
+      const kind: Kind = i % 2 ? 'succeeded' : 'fatal';
+      ids.push([id, kind]); quads.push(...rowOf(kind, id, 10 * W));                              // identical updatedAt for all
+    }
+    quads.push(...rowOf('succeeded', 'older', 12 * W), ...rowOf('succeeded', 'newer-but-old', 9 * W));   // neighbours on both sides of the group
+    await insertQuads(store, quads);
+    const retention = newRetention(spied, { batchSize: 64, sliceSize: 25 });
+    const results: ShareRetentionBatchResult[] = [];
+    for (let i = 0; i < 40 && !(results.at(-1) && !results.at(-1)!.hasMore); i++) results.push(await retention.runBatch());
+    expect(results.every(x => x.anomalies === 0 && !x.error)).toBe(true);
+    const left = await storedIds(store);
+    for (const [id, kind] of ids) expect(left.has(id), id).toBe(!DELETABLE.has(kind));
+    expect(left.has('older')).toBe(false);
+    expect(left.has('newer-but-old')).toBe(false);
+    const judged = verifiedSubjects(log);
+    expect(new Set(judged).size).toBe(judged.length);
+    expect(judged.length).toBe(602);
+  });
+
+  it('a parked sweep still picks up rows that become old enough later (the cursor sits at the frontier, not at the end of time), and finds nothing to re-judge behind it', async () => {
+    const store = new OxigraphStore();
+    const { store: spied, log } = spy(store);
+    await insertQuads(store, [...Array.from({ length: 50 }, (_, i) => rowOf('fatal', `f-${i}`, 20 * W + i)), ...rowOf('succeeded', 'a', 15 * W)].flat());
+    let t = NOW;
+    const retention = newRetention(spied, { now: () => t, batchSize: 40, rescanIntervalMs: Infinity });      // the clock jumps by days below: no safety rescan may restart the walk
+    for (let i = 0; i < 3; i++) await retention.runBatch();
+    await insertQuads(store, [...rowOf('succeeded', 'b', 30 * 1000), ...rowOf('succeeded', 'c', 10 * 1000)]);      // 30 s and 10 s old: not eligible yet
+    expect((await retention.runBatch()).deleted).toBe(0);
+    t += W - 20_000;                                                                              // b is now W + 10 s old, c is W - 10 s old
+    const mark = verifiedSubjects(log).length;
+    expect((await retention.runBatch()).deletedJobs.map(d => d.jobId)).toEqual(['b']);
+    t += 20_000;
+    expect((await retention.runBatch()).deletedJobs.map(d => d.jobId)).toEqual(['c']);
+    expect(verifiedSubjects(log).length - mark).toBe(2);                                          // only the two new rows were judged
+  });
+
+  it('a payload younger than its index triple is kept until it ages into the window, then the cursor is rewound to it (and only to it)', async () => {
+    const store = new OxigraphStore();
+    const { store: spied, log } = spy(store);
+    await insertQuads(store, [...Array.from({ length: 20 }, (_, i) => rowOf('newer', `n-${i}`, 30 * W + i)), ...rowOf('succeeded', 'skewed', 10_000)].flat());
+    await store.deleteByPattern({ subject: jobSubject('skewed'), predicate: PROMOTE_UPDATED_AT, graph: GRAPH });
+    await store.insert([{ subject: jobSubject('skewed'), predicate: PROMOTE_UPDATED_AT, object: integer(NOW - 5 * W), graph: GRAPH }]);       // index: old; payload: 10 s old
+    let t = NOW;
+    const retention = newRetention(spied, { now: () => t, batchSize: 100, rescanIntervalMs: Infinity });     // the clock jumps by days below: no safety rescan may restart the walk
+    const first = await retention.runBatch();
+    expect(first.kept.too_recent).toBe(1);
+    expect(await present(store, 'skewed')).not.toBe('');
+    t += W / 2;
+    await retention.runBatch();                                                                   // not due yet (the payload is W / 2 + 10 s old < the window)
+    expect(await present(store, 'skewed')).not.toBe('');
+    const mark = verifiedSubjects(log).length;
+    t += W / 2;                                                                                   // W + 10 s old now
+    await retention.runBatch();
+    expect(await present(store, 'skewed')).toBe('');
+    expect(verifiedSubjects(log).length - mark).toBe(1);                                         // the 20 older newer-format rows sit BEFORE the skewed row: they are not re-judged
+  });
+
+  it('rows written behind the cursor (a back-dated clock, a restore) are found by the safety rescan, not before', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 30 }, (_, i) => rowOf(i % 2 ? 'fatal' : 'newer', `f-${i}`, 20 * W + i)).flat());
+    let t = NOW;
+    const retention = newRetention(store, { now: () => t, batchSize: 100, rescanIntervalMs: 600_000 });
+    await retention.runBatch();
+    await insertQuads(store, rowOf('succeeded', 'backdated', 90 * W));                           // older than everything the cursor has passed
+    t += 300_000;
+    expect((await retention.runBatch()).deleted).toBe(0);
+    expect(await present(store, 'backdated')).not.toBe('');
+    t += 400_000;                                                                                  // > rescanIntervalMs after the first call
+    await retention.runBatch();
+    await retention.runBatch();
+    expect(await present(store, 'backdated')).toBe('');
+    expect((await storedIds(store)).size).toBe(30);
+  });
+
+  it('a failed batch moves no cursor: the next call judges the same rows again and nothing is lost', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...Array.from({ length: 40 }, (_, i) => rowOf('fatal', `f-${i}`, 30 * W + i)), ...Array.from({ length: 20 }, (_, i) => rowOf('succeeded', `s-${i}`, 20 * W + i))].flat());
+    let failVerify = 1;
+    const { store: spied } = spy(store, async (_sparql, source, run) => { if (source === 'publisher.asyncPromote.retention.verify' && failVerify-- > 0) throw new Error('verify down'); return run(); });
+    const retention = newRetention(spied, { batchSize: 30, sliceSize: 10 });
+    const res = await retention.runBatch();
+    expect(res).toMatchObject({ deleted: 0, error: { phase: 'verify', message: 'verify down' } });
+    for (let i = 0; i < 5; i++) await retention.runBatch();
+    expect((await storedIds(store)).size).toBe(40);
+  });
+
+  it('both scanned classes make progress (alternating priority): a huge succeeded backlog does not starve the failed class, nor the other way round', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...Array.from({ length: 1500 }, (_, i) => rowOf('succeeded', `s-${i}`, 20 * W + i)), ...Array.from({ length: 1500 }, (_, i) => rowOf('cancelled', `c-${i}`, 20 * W + 5000 + i))].flat());
+    const retention = newRetention(store, { batchSize: 100 });
+    const res1 = await retention.runBatch();
+    const res2 = await retention.runBatch();
+    expect(res1.deletedJobs.concat(res2.deletedJobs).some(d => d.jobClass === 'succeeded')).toBe(true);
+    expect(res1.deletedJobs.concat(res2.deletedJobs).some(d => d.jobClass === 'cancelled')).toBe(true);
+  });
+
+  it('another policy (windows) judges the rows a narrower one left: a sweep without the benign window never scans the failed class, a wider one does', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...rowOf('cancelled', 'c', 20 * W), ...rowOf('succeeded', 's', 20 * W + 1)].flat());
+    await newRetention(store, { benignFailedMaxAgeMs: null, batchSize: 10 }).runBatch();           // benign failed deletion off: the cancelled job is not even scanned
+    expect(await present(store, 'c')).not.toBe('');
+    expect(await present(store, 's')).toBe('');
+    await newRetention(store, { batchSize: 10 }).runBatch();
+    expect(await present(store, 'c')).toBe('');
+  });
+
+  it('an engine that does not honour ORDER BY is detected (anomalies), never moves a cursor on its answer, and still deletes only what is eligible; the same sweep then drains once the engine conforms', async () => {
+    const store = new OxigraphStore();
+    const quads: Quads = [];
+    for (let i = 0; i < 120; i++) quads.push(...rowOf(i % 2 ? 'fatal' : 'newer', `u-${i}`, 90 * W - i));
+    for (let i = 0; i < 30; i++) quads.push(...rowOf('succeeded', `d-${i}`, 20 * W - i));
+    await insertQuads(store, quads);
+    let engine: 'undeletable-first' | 'newest-first' | 'conforming' = 'undeletable-first';
+    // the legitimately free order of an UNORDERED scan, adversarially chosen (undeletable rows first, then LIMIT; or newest first), applied to the ORDER BY query
+    const adversary = async (sparql: string, source: string | undefined, run: () => Promise<QueryResult>): Promise<QueryResult> => {
+      if (engine === 'conforming' || source !== 'publisher.asyncPromote.retention.scan' || !sparql.includes('ORDER BY ?updatedAt')) return run();
+      const limit = Number(/LIMIT (\d+)$/.exec(sparql)![1]);
+      const all = await store.query(sparql.replace(/ ORDER BY \?updatedAt LIMIT \d+$/, ''));
+      if (all.type !== 'bindings') return all;
+      const u = (b: Record<string, string>) => Number(/^"?(\d+)/.exec(b['updatedAt']!)![1]);
+      const rank = (b: Record<string, string>) => (engine === 'newest-first' ? -u(b) : b['job']!.includes(':job:d-') ? 1 : 0);
+      return { type: 'bindings', bindings: [...all.bindings].sort((a, b) => rank(a) - rank(b)).slice(0, limit) } as QueryResult;
+    };
+    const { store: spied } = spy(store, adversary);
+    const retention = newRetention(spied, { batchSize: 20 });
+    let anomalies = 0;
+    for (const mode of ['undeletable-first', 'newest-first'] as const) {
+      engine = mode;
+      for (let i = 0; i < 4; i++) { const res = await retention.runBatch(); anomalies += res.anomalies; expect(res.hasMore, mode).toBe(true); }
+      expect(anomalies, `the tripwire fired under ${mode}`).toBeGreaterThan(0);
+      anomalies = 0;
+    }
+    for (let i = 0; i < 120; i++) expect(await present(store, `u-${i}`), `u-${i}`).not.toBe('');   // safety is independent of the engine's order
+    engine = 'conforming';                                                                           // the engine is fixed: the SAME sweep (same cursors) must still reach every deletable row
+    for (let i = 0; i < 12; i++) await retention.runBatch();
+    expect((await storedIds(store)).size).toBe(120);
+    expect(retention.counters().lastCompletePass).toBeUndefined();                                   // the pass that met the anomaly publishes no summary (its tally counted rows twice)
+  });
+});
+
+describe('retention safety on randomised stores (independent oracle)', () => {
+  it('no excluded job is ever deleted, every eligible one is, nothing else changes (150 cases, all classes, ages around both cutoffs, pending admissions, a clock that advances)', async () => {
+    const r = rng(20261702);
+    let deleted = 0, kept = 0, delayed = 0;
+    for (let c = 0; c < 150; c++) {
+      const store = new OxigraphStore();
+      const jobs: ReturnType<typeof mk>[] = [];
+      for (let i = 0, n = 1 + Math.floor(r() * 14); i < n; i++) {
+        const age = pick(r, [10 * W, W + 1, W, W - 1, 1000, -5000, WF, WF - 1]) + (r() < 0.5 ? 0 : i);           // equal ages (ties) and distinct ones
+        const kind = pick(r, ['succeeded', 'succeeded', 'queued', 'running', 'failed_retrying', 'failed-plain', 'failed-cancelled', 'failed-cancelled-prepared', 'failed-cancelled-attempted', 'failed-bound', 'failed-retired', 'failed-ambiguity', 'newer']);
+        jobs.push(kind === 'succeeded' ? mk(`j${i}`, 'succeeded', {}, age) : kind === 'queued' ? mk(`j${i}`, 'queued', {}, age) : kind === 'running' ? mk(`j${i}`, 'running', { lease: LEASE }, age)
+          : kind === 'failed_retrying' ? mk(`j${i}`, 'failed_retrying', {}, age) : kind === 'failed-plain' ? mk(`j${i}`, 'failed', {}, age)
+          : kind === 'failed-cancelled' ? cancelledJob(`j${i}`, {}, age) : kind === 'failed-bound' ? mk(`j${i}`, 'failed', { bound: true }, age)
+          : kind === 'failed-cancelled-prepared' ? cancelledJob(`j${i}`, { attempt: { count: 3, maxRetries: 5 }, preparationAttempts: 3 }, age) : kind === 'failed-cancelled-attempted' ? cancelledJob(`j${i}`, { attempt: ATTEMPTED }, age)
+          : kind === 'failed-retired' ? retired(`j${i}`, age) : kind === 'failed-ambiguity' ? mk(`j${i}`, 'failed', { reason: 'partial promote ambiguity: x' }, age)
+          : mk(`j${i}`, 'succeeded', { formatVersion: 5 }, age));
+      }
+      await put(store, ...jobs);
+      const before = new Map<string, string>(); for (const j of jobs) before.set(j.jobId, await present(store, j.jobId));
+      const withBenign = r() < 0.7;
+      let t = NOW;
+      const batchSize = pick(r, [1, 3, 50]), sliceSize = pick(r, [1, 4, 100]);
+      const retention = newRetention(store, { now: () => t, batchSize, sliceSize, benignFailedMaxAgeMs: withBenign ? WF : null });
+      const pendingIds = new Set(jobs.filter(() => r() < 0.15).map(j => j.jobId));
+      const flights = [...pendingIds].map(id => registerPendingFlight(store, id));
+      const deletedAt = new Map<string, number>();
+      const quiesce = async () => { let quiet = 0; for (let k = 0; k < 300 && quiet < 2; k++) { const res = await retention.runBatch(); for (const d of res.deletedJobs) deletedAt.set(d.jobId, t); quiet = res.scanned === 0 && !res.hasMore ? quiet + 1 : 0; } };
+      const eligibleAt = (j: ReturnType<typeof mk>, at: number, honourPending: boolean) => {
+        // the oracle: written from the exclusion list, not from the product predicate
+        const e = j.attempt.lastError;
+        const isRetired = j.state === 'failed' && j.request.recoveryBinding !== undefined && e?.diagnosticCode === 'PROMOTE_NO_EFFECT_REJECTION';
+        const bound = j.request.recoveryBinding !== undefined;
+        const aged = (max: number) => at - j.updatedAt >= max;
+        const provenUnstarted = j.attempt.count === 0 || j.preparationAttempts === j.attempt.count;      // a CLAIMED cancelled job may have run in an earlier attempt unless preparationAttempts covers all of them
+        return (j.formatVersion ?? 0) <= 4 && !(honourPending && pendingIds.has(j.jobId)) && ((j.state === 'succeeded' && aged(W))
+          || (withBenign && j.state === 'failed' && aged(WF) && ((isRetired) || (j.reason === 'cancelled' && !bound && provenUnstarted))));
+      };
+      await quiesce();                                                                                // phase 1: now = NOW, flights pending
+      for (const id of pendingIds) expect(await present(store, id), `pending ${id} must survive`).toBe(before.get(id));
+      t = NOW + 6_000; await quiesce();                                                               // phase 2: past the retry delay, flights still pending
+      for (const id of pendingIds) expect(await present(store, id), `pending ${id} must still survive`).toBe(before.get(id));
+      for (const flight of flights) flight.clear();
+      t = NOW + 12_000; await quiesce();                                                              // phase 3: flights settled
+      for (const j of jobs) {
+        const after = await present(store, j.jobId);
+        if (deletedAt.has(j.jobId)) { expect(eligibleAt(j, deletedAt.get(j.jobId)!, false), `${j.jobId} ${j.state} was deleted at +${deletedAt.get(j.jobId)! - NOW} ms but is excluded then`).toBe(true); expect(after).toBe(''); deleted++; }
+        else { expect(eligibleAt(j, t, false), `${j.jobId} ${j.state} is eligible at the end but was left behind`).toBe(false); expect(after, `${j.jobId} ${j.state} must be untouched`).toBe(before.get(j.jobId)); kept++; }
+        if (deletedAt.has(j.jobId) && deletedAt.get(j.jobId)! > NOW) delayed++;
+      }
+    }
+    expect(deleted).toBeGreaterThan(100);
+    expect(kept).toBeGreaterThan(100);
+    expect(delayed).toBeGreaterThan(10);                                                               // rows that only became eligible (or unblocked) after the clock moved
+  }, 120_000);
+});
+
+describe('keep rules the policy adds to the prototype', () => {
+  it.each([
+    ['a cancelled job that carries a post-commit failure', cancelledJob('c1', { attempt: { count: 1, maxRetries: 5, lastError: POST_COMMIT_ERROR }, preparationAttempts: 1 }), 'post_commit_recoverable'],
+    ['a cancelled job whose free text asks for manual inspection', cancelledJob('c2', { attempt: { count: 1, maxRetries: 5, lastError: { message: 'partial promote ambiguity', retryable: false, classification: 'fatal', recordedAt: 1 } }, preparationAttempts: 1 }), 'failed_retained'],
+    ['a cancelled job whose free text is not a string (the predicates throw: kept as unreadable)', cancelledJob('c3', { attempt: { count: 1, maxRetries: 5, lastError: { message: 42, retryable: false, classification: 'fatal', recordedAt: 1 } }, preparationAttempts: 1 }), 'unreadable'],
+    ['a cancelled job that swm-inserted', cancelledJob('c4', { commitMarker: { ...NO_MARKERS, swmInserted: true } }), 'failed_retained'],
+    ['a bound cancelled job (it owns a recovery obligation)', cancelledJob('c5', { bound: true }), 'unfinished_bound_obligation'],
+  ])('keeps %s', (_name, job, reason) => { expect(decide(job as ReturnType<typeof mk>)).toEqual({ delete: false, reason }); });
+
+  describe('the diagnostic code alone does not make a retired no-effect rejection: the certification the class requires does', () => {
+    const b = (id: string) => binding(id);
+    const proof = (id: string) => ({ sealDigest: b(id).sealDigest, operationId: b(id).intent.operationId });
+    const lastError = (extra: Record<string, unknown>) => ({ message: 'no effect', retryable: false, classification: 'cap_exceeded', recordedAt: 1, diagnosticCode: PROMOTE_NO_EFFECT_REJECTION_CODE, ...extra });
+    const failedWith = (id: string, over: Record<string, unknown>, error: Record<string, unknown>) =>
+      mk(id, 'failed', { commitMarker: NO_MARKERS, preparationAttempts: 0, attempt: { count: 1, maxRetries: 5, lastError: lastError(error) }, ...over });
+    const unbound = { request: { contextGraphId: 'cg', assertionName: 'n-x', entities: 'all', agentAddress: AG } };
+    const bound = (id: string) => ({ request: { contextGraphId: 'cg', assertionName: `n-${id}`, entities: 'all', agentAddress: AG, recoveryBinding: b(id) } });
+
+    it('sanity: the certified fixture is the retired class, and the same job without its certification is not', () => {
+      expect(decide(retired('ok'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+      expect(decide(failedWith('ok', bound('ok'), { noEffectProof: proof('ok') }))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+    });
+
+    it.each([
+      ['a job with no recovery binding that carries only the code (no proof)', 'u1', () => ({ ...unbound }), () => ({}), 'failed_retained'],
+      ['a job with no recovery binding whose error even carries a proof', 'u2', () => ({ ...unbound }), () => ({ noEffectProof: proof('u2') }), 'failed_retained'],
+      ['an unbound job with the code, fully "certified" by every other field', 'u3', () => ({ ...unbound, formatVersion: 4 }), () => ({ noEffectProof: proof('u3') }), 'failed_retained'],
+      ['a bound job with the code but no proof', 'b1', () => bound('b1'), () => ({}), 'unfinished_bound_obligation'],
+      ['a bound job whose proof names another seal', 'b2', () => bound('b2'), () => ({ noEffectProof: { ...proof('b2'), sealDigest: `0x${'ab'.repeat(32)}` } }), 'unfinished_bound_obligation'],
+      ['a bound job whose proof names another operation', 'b3', () => bound('b3'), () => ({ noEffectProof: { ...proof('b3'), operationId: 'op-other' } }), 'unfinished_bound_obligation'],
+      ['a bound job with the code and a proof but a retryable error', 'b4', () => bound('b4'), () => ({ retryable: true, noEffectProof: proof('b4') }), 'unfinished_bound_obligation'],
+      ['a bound job with the code and a proof but another classification', 'b5', () => bound('b5'), () => ({ classification: 'fatal', noEffectProof: proof('b5') }), 'unfinished_bound_obligation'],
+      ['a bound job with the code and a proof but an swm insert on record', 'b6', () => ({ ...bound('b6'), commitMarker: { ...NO_MARKERS, swmInserted: true } }), () => ({ noEffectProof: proof('b6') }), 'unfinished_bound_obligation'],
+    ])('keeps %s, however old', (_name, id, over, error, reason) => {
+      const job = failedWith(id, over() as Record<string, unknown>, error() as Record<string, unknown>);
+      expect(decide(job)).toEqual({ delete: false, reason });
+      expect(decide(job, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason });
+    });
+
+    it('and a batch keeps such a job in delete mode while the certified one beside it goes', async () => {
+      const store = new OxigraphStore();
+      await put(store, failedWith('u1', unbound, {}), retired('ok'), failedWith('ok-unbound-twin', unbound, { noEffectProof: proof('ok') }));
+      const res = await newRetention(store, { batchSize: 10 }).runBatch();
+      expect(res.deletedJobs.map(j => ({ id: j.jobId, class: j.jobClass }))).toEqual([{ id: 'ok', class: 'retired_no_effect' }]);
+      expect(res.kept.failed_retained).toBe(2);
+      expect([...(await storedIds(store))].sort()).toEqual(['ok-unbound-twin', 'u1']);
+    });
+  });
+
+  it('a job with an unrecognised state string is kept (unknown_state), and the log of a batch names no payload', async () => {
+    expect(decide(mk('u', 'archived' as never))).toEqual({ delete: false, reason: 'unknown_state' });
+    const store = new OxigraphStore();
+    await put(store, mk('s', 'succeeded', { request: { contextGraphId: 'cg', assertionName: 'secret-assertion-name', entities: 'all', agentAddress: AG } }));
+    const logger = captureLogger();
+    await newRetention(store, { logger }).runBatch();
+    expect(logger.infos.join('\n')).not.toContain('secret-assertion-name');
+  });
+
+  it('the default windows are the D-6 window of seven days for both classes', async () => {
+    const store = new OxigraphStore();
+    const day = 24 * 3_600_000;
+    await put(store, mk('s6', 'succeeded', {}, 6 * day), mk('s7', 'succeeded', {}, 7 * day), cancelledJob('c6', {}, 6 * day), cancelledJob('c7', {}, 7 * day),
+      mk('r7', 'failed', {}, 30 * day));
+    standInForTheQueue(store);                                                                    // no queue is built here; the sweep needs the coordinator its constructor makes
+    const retention = createShareRetention({ store, mode: 'delete', intervalMs: 60_000, now: () => NOW, monotonicNow: () => 0, logger: captureLogger() });
+    await drain(retention);
+    expect([...(await storedIds(store))].sort()).toEqual(['c6', 'r7', 's6']);
+  });
+});
+
+describe('a commit marker flag that is not a boolean is no evidence that promote never started (review of P10a: malformed promoteStarted)', () => {
+  const FLAGS = ['promoteStarted', 'swmInserted', 'wmCleaned', 'lifecycleStamped', 'gossiped'] as const;
+  const BAD: ReadonlyArray<[string, unknown]> = [['"true"', 'true'], ['"false"', 'false'], ['""', ''], ['1', 1], ['0', 0], ['null', null], ['{}', {}], ['[]', []]];
+  const cancelled = (id: string, commitMarker?: unknown, over: Record<string, unknown> = {}) => cancelledJob(id, { ...(commitMarker === undefined ? {} : { commitMarker }), ...over });
+  // The shared classifier checks four of the five flags and lets a bad promoteStarted through, and the policy must not lean on it for the other four either:
+  // the unit cases hand the policy the raw object, bypassing the classifier.
+  const raw = (j: PromoteJob) => decidePromoteRetention(j as never, NOW, policy, noPending);
+
+  it('the reviewer reproduction: an old cancelled job with promoteStarted "true" and no other sign of a start is kept as unreadable, not deleted as cancelled', () => {
+    const job = cancelled('mal', { promoteStarted: 'true', swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false });
+    expect(decide(job)).toEqual({ delete: false, reason: 'unreadable' });                 // through the classifier, as the sweep does
+    expect(decide(job, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  it.each(FLAGS.flatMap(flag => BAD.map(([label, value]) => [flag, label, value] as const)))('keeps a cancelled job whose %s is %s, however old (unreadable)', (flag, _label, value) => {
+    expect(raw(cancelled('m', { ...NO_MARKERS, [flag]: value }))).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  it('keeps a retired no-effect rejection whose marker has a flag that is not a boolean, and a marker that is not an object', () => {
+    expect(raw({ ...retired('r1'), commitMarker: { ...NO_MARKERS, promoteStarted: 'x' } } as never)).toEqual({ delete: false, reason: 'unreadable' });
+    for (const marker of ['started', 7, null, [], true]) expect(raw(cancelled('m', marker))).toEqual({ delete: false, reason: 'unreadable' });
+    expect(raw(cancelled('m', { promoteStarted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false }))).toEqual({ delete: false, reason: 'unreadable' });   // swmInserted absent: only promoteStarted may be
+  });
+
+  it('still deletes the cancelled jobs it can read: no marker, and a marker with every flag false', () => {
+    for (const job of [cancelled('c-none'), cancelled('c-clear', NO_MARKERS)]) {
+      expect(decide(job), job.jobId).toEqual({ delete: true, jobClass: 'cancelled' });
+    }
+    expect(decide(retired('r-ok'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+    expect(decide(cancelled('c-started', STARTED))).toEqual({ delete: false, reason: 'failed_retained' });   // a readable start still keeps it
+  });
+
+  it('a delete sweep leaves every job with a malformed marker flag untouched and deletes the readable cancelled jobs; a report sweep counts exactly those', async () => {
+    const malformed = [
+      ...BAD.map(([label, value]) => [`ps-${label}`, { ...NO_MARKERS, promoteStarted: value }] as const),
+      ...FLAGS.slice(1).map(flag => [`${flag}-str`, { ...NO_MARKERS, [flag]: 'true' }] as const),
+    ].map(([label, marker], i) => cancelled(`mal-${i}-${label.replace(/[^a-z0-9]/gi, '_')}`, marker));
+    const readable = [cancelled('ok-none'), cancelled('ok-clear', NO_MARKERS)];
+    const seed = async () => { const s = new OxigraphStore(); await put(s, ...malformed, ...readable); return s; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 5 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: readable.length, retired_no_effect: 0 }, kept: { unreadable: malformed.length } });
+    expect((await storedIds(reportStore)).size).toBe(malformed.length + readable.length);
+
+    const store = await seed();
+    const before = new Map(await Promise.all(malformed.map(async j => [j.jobId, await present(store, j.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 5 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual(malformed.map(j => j.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: readable.length, retired_no_effect: 0 });
+    expect(retention.counters().kept.unreadable).toBeGreaterThanOrEqual(malformed.length);
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: readable.length }, kept: { unreadable: malformed.length } });
+  });
+});
+
+describe('a missing promoteStarted is never accepted, a legacy row is no cancelled class, and a marker that says the job ran keeps it (second and fourth review of P10a)', () => {
+  /** The marker a row written before format 2 carries: every flag but `promoteStarted`. Only a claim writes it, so it proves the job was claimed and ran. */
+  const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
+  const cancelled = (id: string, commitMarker: unknown, over: Record<string, unknown> = {}) => cancelledJob(id, { commitMarker, ...over });
+  /** A marker as the parser reads it from JSON: `__proto__` is an own key there, not the prototype. */
+  const fromJson = (json: string) => JSON.parse(json) as Record<string, unknown>;
+  const NO_PS = '"swmInserted":false,"wmCleaned":false,"lifecycleStamped":false,"gossiped":false';
+
+  // Every writer since format 2 writes all five flags (recordCommitMarker), and reclaim / recover drop the marker; a format 2-4 marker without promoteStarted is corruption.
+  // A marker without it at format 0, 1 or absent is the legacy shape: it is no corruption, and it is no evidence either (see the legacy tests below).
+  const ABSENT: ReadonlyArray<[string, unknown]> = [
+    ['the legacy-shaped marker', LEGACY],
+    ['a mis-cased key (PromoteStarted: true)', { ...LEGACY, PromoteStarted: true }],
+    ['a key with a trailing space ("promoteStarted ": true)', fromJson(`{"promoteStarted ":true,${NO_PS}}`)],
+    ['a __proto__ key that carries the flag', fromJson(`{"__proto__":{"promoteStarted":true},${NO_PS}}`)],
+    ['a snake_case key (promote_started: true)', { ...LEGACY, promote_started: true }],
+  ];
+
+  it.each([2, 3, 4])('keeps a cancelled job of format %s whose marker has no promoteStarted, however old: a missing flag is never accepted (unreadable)', formatVersion => {
+    for (const [label, marker] of ABSENT) {
+      const job = cancelled(`abs-${formatVersion}`, marker, { formatVersion });
+      expect(decide(job), `${label}, through the classifier`).toEqual({ delete: false, reason: 'unreadable' });
+      expect(decide(job, policy, noPending, NOW + 1000 * W), label).toEqual({ delete: false, reason: 'unreadable' });
+    }
+  });
+
+  it('keeps a retired no-effect rejection (always format 4) whose marker has no promoteStarted', () => {
+    const { promoteStarted: _dropped, ...rest } = NO_MARKERS;
+    expect(decide({ ...retired('r-abs'), commitMarker: rest } as never)).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  // The legacy history is uncertain: a 4-flag marker was only ever written by claimNext, so it proves the job was claimed and ran, and a pre-v2 reclaim cleared the marker
+  // of a running job and requeued it, so a later cancel leaves a row with no marker that may have started promote. The queue's own reclaim never infers the absence of
+  // effects from a missing legacy marker (it sends every pre-v2 row to manual inspection), so retention does not read "never started" off it either.
+  const TIMED_OUT = { count: 3, maxRetries: 5, lastError: { classification: 'transient', retryable: true, message: 'promote timed out', recordedAt: 1 } };
+  it('the reviewer reproduction: a cancelled job with the legacy marker (or none) and a retry history of three timed-out attempts is kept, not deleted as "never started promote"', () => {
+    for (const [label, over] of [['formatVersion absent', { formatVersion: undefined }], ['formatVersion 1', { formatVersion: 1 }]] as const) {
+      for (const marker of [{ ...LEGACY }, undefined]) {
+        const job = cancelled('repro', marker, { ...over, attempt: TIMED_OUT });
+        expect(decide(job), `${label}, ${marker ? 'marker' : 'no marker'}`).toEqual({ delete: false, reason: 'failed_retained' });
+        expect(decide(job, policy, noPending, NOW + 1000 * W), `${label}, ${marker ? 'marker' : 'no marker'}, any age`).toEqual({ delete: false, reason: 'failed_retained' });
+      }
+    }
+  });
+
+  it.each([['absent', undefined], ['0', 0], ['1', 1]])('keeps a legacy cancelled job (format %s) whatever its marker: none, the pre-format-2 marker, a complete one (failed_retained)', (_label, formatVersion) => {
+    const over = formatVersion === undefined ? { formatVersion: undefined } : { formatVersion };
+    for (const marker of [LEGACY, NO_MARKERS, undefined]) {
+      expect(decide(cancelled('legacy', marker, over)), JSON.stringify(marker)).toEqual({ delete: false, reason: 'failed_retained' });
+    }
+  });
+
+  // The policy keeps any PRESENT formatVersion that is not an integer from 0 up to this build's as `unreadable`, for every class (fifth review: no coercion), before the cancelled class is asked.
+  it.each([['"1"', '1'], ['"legacy"', 'legacy'], ['null', null], ['{}', {}], ['[]', []], ['true', true]])('a formatVersion of %s is no format a writer produced: the cancelled job is kept, whatever its marker (unreadable)', (_label, formatVersion) => {
+    for (const marker of [LEGACY, NO_MARKERS, undefined]) expect(decide(cancelled('fv', marker, { formatVersion })), JSON.stringify(marker)).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  // The marker of a cancelled job records the promote steps that ran: any flag set means it ran, whatever promoteStarted says.
+  it.each([
+    ['gossiped: true, format 4', { ...NO_MARKERS, gossiped: true }, {}],
+    ['wmCleaned: true, format 4', { ...NO_MARKERS, wmCleaned: true }, {}],
+    ['lifecycleStamped: true, legacy marker', { ...LEGACY, lifecycleStamped: true }, { formatVersion: 1 }],
+    ['wmCleaned: true, legacy marker', { ...LEGACY, wmCleaned: true }, { formatVersion: 1 }],
+    ['every later flag true, promoteStarted false', { ...NO_MARKERS, wmCleaned: true, lifecycleStamped: true, gossiped: true }, {}],
+  ])('keeps a cancelled job whose marker contradicts itself (%s): it ran, so it is not "never started"', (_label, marker, over) => {
+    const job = cancelled('contra', marker, over);
+    expect(decide(job)).toEqual({ delete: false, reason: 'failed_retained' });
+    expect(decide(job, policy, noPending, NOW + 1000 * W)).toEqual({ delete: false, reason: 'failed_retained' });
+  });
+
+  it('does not tighten the retired class: a certified no-effect rejection may have entered promote (promoteStarted: true) and is still deletable', () => {
+    expect(decide({ ...retired('r-started'), commitMarker: STARTED } as never)).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+  });
+
+  it('a delete sweep leaves every one of those jobs untouched and deletes the readable cancelled jobs; a report sweep counts exactly those', async () => {
+    const unreadable = [
+      ...ABSENT.flatMap(([, marker], i) => [2, 3, 4].map(formatVersion => cancelled(`abs-${i}-f${formatVersion}`, marker, { formatVersion }))),
+      { ...retired('abs-retired'), commitMarker: (({ promoteStarted: _p, ...rest }) => rest)(NO_MARKERS) } as PromoteJob,
+    ];
+    const contradictory = [
+      cancelled('con-gossiped', { ...NO_MARKERS, gossiped: true }), cancelled('con-wm', { ...NO_MARKERS, wmCleaned: true }),
+      cancelled('con-life-legacy', { ...LEGACY, lifecycleStamped: true }, { formatVersion: 1 }),
+    ];
+    const legacy = [
+      cancelled('legacy-1', LEGACY, { formatVersion: 1 }), cancelled('legacy-0', LEGACY, { formatVersion: 0 }), cancelled('legacy-absent', LEGACY, { formatVersion: undefined }),
+      cancelled('legacy-1-none', undefined, { formatVersion: 1 }), cancelled('legacy-absent-none', undefined, { formatVersion: undefined }),
+      cancelled('legacy-absent-clear', NO_MARKERS, { formatVersion: undefined }),
+      cancelled('legacy-1-timed-out', LEGACY, { formatVersion: 1, attempt: TIMED_OUT }), cancelled('legacy-absent-timed-out', undefined, { formatVersion: undefined, attempt: TIMED_OUT }),   // the reviewer's payloads
+    ];
+    const readable = [cancelled('ok-none', undefined), cancelled('ok-clear', NO_MARKERS)];
+    const protectedJobs = [...unreadable, ...contradictory, ...legacy];
+    const seed = async () => { const s = new OxigraphStore(); await put(s, ...protectedJobs, ...readable); return s; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 5 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({
+      wouldDelete: { succeeded: 0, cancelled: readable.length, retired_no_effect: 0 }, kept: { unreadable: unreadable.length, failed_retained: contradictory.length + legacy.length },
+    });
+    expect((await storedIds(reportStore)).size).toBe(protectedJobs.length + readable.length);
+
+    const store = await seed();
+    const before = new Map(await Promise.all(protectedJobs.map(async j => [j.jobId, await present(store, j.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 5 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual(protectedJobs.map(j => j.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: readable.length, retired_no_effect: 0 });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: readable.length }, kept: { unreadable: unreadable.length, failed_retained: contradictory.length + legacy.length } });
+  });
+});
+
+describe('the cancelled class needs a format that stores the whole commit marker: an integer from 2 up to this build\'s (third and fourth review of P10a: no legacy row is "never started")', () => {
+  /** The marker a row written before format 2 carries: every flag but `promoteStarted`. */
+  const LEGACY = { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
+  const cancelled = (id: string, over: Record<string, unknown> = {}) => cancelledJob(id, { commitMarker: LEGACY, ...over });
+  const MARKERS: ReadonlyArray<[string, unknown]> = [['the pre-format-2 marker', LEGACY], ['a complete marker', NO_MARKERS], ['no marker', undefined]];
+  // JSON numbers as the parser reads them from the stored payload text. `JSON.stringify` writes -0 as 0 and -Infinity as null, so the text is built by hand.
+  // 0 and 1 are the legacy formats (integers in the known range: the cancelled class itself keeps them, `failed_retained`); the others are numbers no writer produced (the parser does
+  // not validate `formatVersion`, so the policy does): the whole job is kept before any class is asked, `unreadable`.
+  const NOT_WRITER_FORMAT: ReadonlyArray<[string, string, number, 'failed_retained' | 'unreadable']> = [
+    ['0', '0', 0, 'failed_retained'], ['1', '1', 1, 'failed_retained'], ['-1', '-1', -1, 'unreadable'], ['1.5', '1.5', 1.5, 'unreadable'], ['-0', '-0', -0, 'unreadable'],
+    ['1e-300', '1e-300', 1e-300, 'unreadable'], ['-Infinity (the text -1e999)', '-1e999', Number.NEGATIVE_INFINITY, 'unreadable'],
+    ['1.999999999999999', '1.999999999999999', 1.999999999999999, 'unreadable'], ['3.5', '3.5', 3.5, 'unreadable'],
+  ];
+
+  it.each(NOT_WRITER_FORMAT)('keeps a cancelled job whose formatVersion is %s, whatever its marker, however old', (_label, text, value, reason) => {
+    for (const [label, commitMarker] of MARKERS) {
+      const payload = payloadWithFormatVersion(cancelled('odd', { commitMarker }), text);
+      expect(Object.is(parseText(payload).formatVersion, value), 'the parser reads the number the case names').toBe(true);
+      expect(decideText(payload), label).toEqual({ delete: false, reason });
+      expect(decideText(payload, policy, noPending, NOW + 1000 * W), `${label}, any age`).toEqual({ delete: false, reason });
+    }
+  });
+
+  it('keeps a cancelled job with no formatVersion at all, whatever its marker', () => {
+    for (const [label, commitMarker] of MARKERS) {
+      const payload = JSON.stringify(cancelled('absent', { commitMarker, formatVersion: undefined }));
+      expect(payload).not.toContain('formatVersion');
+      expect(parseText(payload).formatVersion).toBeUndefined();
+      expect(decideText(payload), label).toEqual({ delete: false, reason: 'failed_retained' });
+    }
+  });
+
+  it.each([2, 3, 4])('still deletes a cancelled job of format %s with no marker and with a complete one: the formats that store the whole marker', formatVersion => {
+    for (const commitMarker of [undefined, NO_MARKERS]) {
+      const payload = payloadWithFormatVersion(cancelled('writer', { commitMarker }), String(formatVersion));
+      expect(Object.is(parseText(payload).formatVersion, formatVersion)).toBe(true);
+      expect(decideText(payload), JSON.stringify(commitMarker)).toEqual({ delete: true, jobClass: 'cancelled' });
+    }
+  });
+
+  it('the format is a condition of the cancelled class only: a succeeded job and a certified retired rejection do not depend on it', () => {
+    for (const formatVersion of [undefined, 0, 1, 2, 3, 4]) expect(decide(mk('s', 'succeeded', { formatVersion })), String(formatVersion)).toEqual({ delete: true, jobClass: 'succeeded' });
+    expect(decide(retired('r'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });
+  });
+
+  it('a delete sweep over the real store leaves every one of those jobs untouched and deletes the ones of a writer format; a report sweep counts exactly those', async () => {
+    const stored = (job: PromoteJob, text?: string): Quads => serializeJobRecord(job, GRAPH).jobQuads.map(q => (q.predicate === PROMOTE_PAYLOAD && text !== undefined ? { ...q, object: literal(payloadWithFormatVersion(job, text)) } : q));
+    const odd = NOT_WRITER_FORMAT.flatMap(([, text, , reason], i) => MARKERS.map(([label, commitMarker]) => ({ job: cancelled(`odd-${i}-${label.replace(/\W+/g, '_')}`, { commitMarker }), text, reason })));
+    const absent = MARKERS.map(([label, commitMarker]) => ({ job: cancelled(`absent-${label.replace(/\W+/g, '_')}`, { commitMarker, formatVersion: undefined }), text: undefined }));
+    const writer = [2, 3, 4].flatMap(n => [undefined, NO_MARKERS].map((commitMarker, i) => ({ job: cancelled(`writer-${n}-${i}`, { commitMarker }), text: String(n) })));
+    const kept = [...odd, ...absent];
+    const unreadable = odd.filter(({ reason }) => reason === 'unreadable').length;                       // the numbers no writer produced: kept before any class is asked
+    const seed = async () => { const s = new OxigraphStore(); await insertQuads(s, [...kept, ...writer].flatMap(({ job, text }) => stored(job, text))); return s; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 3 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: writer.length, retired_no_effect: 0 }, kept: { failed_retained: kept.length - unreadable, unreadable } });
+    expect((await storedIds(reportStore)).size).toBe(kept.length + writer.length);
+
+    const store = await seed();
+    const before = new Map(await Promise.all(kept.map(async ({ job }) => [job.jobId, await present(store, job.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 3 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual(kept.map(({ job }) => job.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: writer.length, retired_no_effect: 0 });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: writer.length }, kept: { failed_retained: kept.length - unreadable, unreadable } });
+  });
+});
+
+describe('the cancelled class needs EVERY attempt proven unstarted, not only the last (fifth review of P10a: the marker and the format describe the last attempt only)', () => {
+  // The marker, the format and the last error describe the LAST attempt: every claim resets the marker to all false, a reclaim drops it and rewrites the format, and a later failure
+  // overwrites lastError. The evidence that describes the whole job is `attempt.count` (every claim adds one) against `preparationAttempts` (the contiguous prefix of attempts the
+  // queue proved failed or abandoned before promote was entered: recordUnstartedPromoteAttempt, the rule canRetireBoundRejection uses). The real queue histories are in
+  // async-promote-retention-holds.test.ts; these are the payload shapes they produce, and the shapes around them.
+  const attempts = (count: number, over: Record<string, unknown> = {}) => cancelledJob('att', { attempt: { count, maxRetries: 5 }, ...over });
+  const KEPT = { delete: false, reason: 'failed_retained' } as const;
+  const MARKERS: ReadonlyArray<[string, unknown]> = [['no marker', undefined], ['a complete marker, every flag false', NO_MARKERS]];
+  /** The payload text with `"count":N` rewritten, for the numbers JSON.stringify cannot write (-0). */
+  const withCountText = (job: PromoteJob, text: string): string => JSON.stringify(job).replace(/"count":\d+/, `"count":${text}`);
+
+  it('the reviewer reproduction (format 4, attempt.count 2, no marker, no preparationAttempts: the payload a transient failure in promote followed by a reclaimed attempt leaves) is kept, not deleted as "never started promote"', () => {
+    for (const [label, commitMarker] of MARKERS) {
+      const job = attempts(2, { formatVersion: 4, commitMarker });
+      expect(decide(job), label).toEqual(KEPT);
+      expect(decide(job, policy, noPending, NOW + 1000 * W), `${label}, any age`).toEqual(KEPT);
+    }
+  });
+
+  it.each([2, 3, 4])('a claimed job (attempt.count 1, 2, 3 or 100) with no preparationAttempts is kept at format %s: nothing proves the earlier attempts never entered promote', formatVersion => {
+    for (const count of [1, 2, 3, 100]) for (const [label, commitMarker] of MARKERS) {
+      expect(decide(attempts(count, { formatVersion, commitMarker })), `count ${count}, ${label}`).toEqual(KEPT);
+    }
+  });
+
+  it('an attempt count that preparationAttempts does not cover is kept: it must cover every attempt, a contiguous prefix is not enough', () => {
+    for (const [count, prepared] of [[3, 1], [3, 2], [2, 0], [2, 1], [100, 99], [1, 0]] as const) {
+      expect(decide(attempts(count, { preparationAttempts: prepared })), `${prepared} of ${count}`).toEqual(KEPT);
+    }
+    expect(decide(attempts(2, { preparationAttempts: 3 })), 'more than the attempts made is no evidence either').toEqual(KEPT);
+    expect(decide(attempts(0, { preparationAttempts: 2 })), 'a never-claimed job that claims to have prepared twice is not a shape the queue writes').toEqual(KEPT);
+  });
+
+  it('is deleted when every attempt is proven unstarted: never claimed (attempt.count 0, any writer format 2 to 4), or preparationAttempts equal to attempt.count at format 4', () => {
+    for (const formatVersion of [2, 3, 4]) for (const [label, commitMarker] of MARKERS) {
+      expect(decide(attempts(0, { formatVersion, commitMarker })), `never claimed, format ${formatVersion}, ${label}`).toEqual({ delete: true, jobClass: 'cancelled' });
+    }
+    expect(decide(attempts(0, { preparationAttempts: 0 })), 'an explicit zero').toEqual({ delete: true, jobClass: 'cancelled' });
+    for (const count of [1, 2, 3, 100]) for (const [label, commitMarker] of MARKERS) {
+      expect(decide(attempts(count, { formatVersion: 4, preparationAttempts: count, commitMarker })), `${count} attempts, all proven, ${label}`).toEqual({ delete: true, jobClass: 'cancelled' });
+    }
+  });
+
+  it.each([2, 3, 1, 0, undefined])('preparationAttempts is only read at format 4, the format that records it: at format %s a matching count is no proof', formatVersion => {
+    expect(decide(attempts(2, { formatVersion, preparationAttempts: 2 }))).toEqual(KEPT);
+  });
+
+  it.each([
+    ['a fraction', 1.5, 1.5], ['a negative number', -1, -1], ['2^53 (not a safe integer)', 2 ** 53, 2 ** 53], ['Number.MAX_SAFE_INTEGER + 2', 2 ** 53 + 2, 2 ** 53 + 2],
+    ['a string that reads as the count', '1', 1], ['null', null, 1], ['true', true, 1], ['an object', {}, 1], ['an array holding the count', [1], 1],
+    ['null on a never-claimed job (present is not absent)', null, 0], ['false on a never-claimed job', false, 0], ['an empty string on a never-claimed job', '', 0], ['the string "0" on a never-claimed job', '0', 0],
+  ])('a preparationAttempts that is not a non-negative safe integer equal to the count is no proof (%s): kept', (_label, prepared, count) => {
+    expect(decide(attempts(count as number, { formatVersion: 4, preparationAttempts: prepared }))).toEqual(KEPT);
+  });
+
+  it('a count or a preparationAttempts of -0 (the stored text, which no writer produced) is no proof either; a count of 0 with no preparationAttempts is', () => {
+    const job = attempts(0, { formatVersion: 4 });
+    expect(decideText(JSON.stringify(job))).toEqual({ delete: true, jobClass: 'cancelled' });
+    expect(decideText(withCountText(job, '-0')), 'count -0').toEqual(KEPT);
+    expect(decideText(withCountText(attempts(0, { formatVersion: 4, preparationAttempts: 0 }), '-0')), 'count -0, preparationAttempts 0').toEqual(KEPT);
+    expect(decideText(JSON.stringify(attempts(0, { formatVersion: 4, preparationAttempts: 0 })).replace('"preparationAttempts":0', '"preparationAttempts":-0')), 'preparationAttempts -0').toEqual(KEPT);
+    expect(parseText(withCountText(job, '-0')).attempt.count, 'the parser reads -0').toSatisfy((n: number) => Object.is(n, -0));
+  });
+
+  it('the rule is part of the cancelled class only: a succeeded job, a certified retired rejection and the other keep reasons do not change', () => {
+    expect(decide(mk('s', 'succeeded', { attempt: { count: 7, maxRetries: 5 } }))).toEqual({ delete: true, jobClass: 'succeeded' });
+    expect(decide(retired('r'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });                       // count 1, preparationAttempts 0: a prefix of one execution attempt, certified by its proof
+    expect(decide(attempts(2, { bound: true, formatVersion: 4 }))).toEqual({ delete: false, reason: 'unfinished_bound_obligation' });
+    expect(decide(attempts(0, { commitMarker: STARTED }))).toEqual(KEPT);                                       // the marker rule still holds on a never-claimed job
+    expect(decide(attempts(0, { commitMarker: { ...NO_MARKERS, promoteStarted: 'true' } }))).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  it('a delete sweep keeps every attempted-then-cancelled job and deletes the proven-unstarted ones; a report sweep counts exactly those', async () => {
+    const protectedJobs = [
+      attempts(2, { formatVersion: 4 }), attempts(3, { formatVersion: 4, preparationAttempts: 1 }), attempts(1, { formatVersion: 3 }), attempts(2, { formatVersion: 3, preparationAttempts: 2 }),
+      attempts(5, { formatVersion: 4, commitMarker: NO_MARKERS }), attempts(2, { formatVersion: 4, preparationAttempts: 2.5 }),
+    ].map((job, i) => ({ ...job, jobId: `att-${i}`, request: { ...job.request, assertionName: `n-att-${i}` }, updatedAt: NOW - 10 * W - i }));
+    const deletable = [
+      cancelledJob('ok-never'), cancelledJob('ok-never-clear', { commitMarker: NO_MARKERS }), cancelledJob('ok-prepared-1', { attempt: { count: 1, maxRetries: 5 }, preparationAttempts: 1 }),
+      cancelledJob('ok-prepared-3', { attempt: { count: 3, maxRetries: 5 }, preparationAttempts: 3, commitMarker: NO_MARKERS }),
+    ];
+    const seed = async () => { const s = new OxigraphStore(); await put(s, ...protectedJobs, ...deletable); return s; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 4 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: deletable.length, retired_no_effect: 0 }, kept: { failed_retained: protectedJobs.length } });
+    expect((await storedIds(reportStore)).size).toBe(protectedJobs.length + deletable.length);
+
+    const store = await seed();
+    const before = new Map(await Promise.all(protectedJobs.map(async j => [j.jobId, await present(store, j.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 4 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual(protectedJobs.map(j => j.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: deletable.length, retired_no_effect: 0 });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: deletable.length }, kept: { failed_retained: protectedJobs.length } });
+  });
+});
+
+describe('a formatVersion that is not an integer in the known range is no format a writer produced, for every class (fifth review of P10a: no coercion)', () => {
+  // `(formatVersion ?? 0) > 4` coerced: "5" read as newer, but "4", "legacy" and null passed, and -1, 1.5, -0, 1e-300 were taken for a legacy number. A PRESENT value must be an integer
+  // from 0 up to this build's (4); above it the row is `newer_format`, anything else is `unreadable`. The numbers are the JSON text as the parser reads it from the stored payload.
+  const NOT_A_FORMAT: ReadonlyArray<[string, string]> = [
+    ['-1', '-1'], ['1.5', '1.5'], ['-0', '-0'], ['1e-300', '1e-300'], ['3.5', '3.5'], ['4.5', '4.5'], ['-Infinity (the text -1e999)', '-1e999'], ['Infinity (the text 1e999)', '1e999'],
+    ['the string "4"', '"4"'], ['the string "5"', '"5"'], ['the string "legacy"', '"legacy"'], ['null', 'null'], ['an object', '{}'], ['an array', '[]'], ['true', 'true'], ['false', 'false'],
+  ];
+  const NEWER: ReadonlyArray<[string, string]> = [['5', '5'], ['99', '99'], ['2^53', '9007199254740992'], ['1e300 (an integer)', '1e300']];
+  const classes = (formatText: string): ReadonlyArray<[string, string]> => [
+    ['succeeded', payloadWithFormatVersion(mk('s', 'succeeded'), formatText)],
+    ['cancelled', payloadWithFormatVersion(cancelledJob('c'), formatText)],
+    ['failed (plain)', payloadWithFormatVersion(mk('f', 'failed'), formatText)],
+    ['queued', payloadWithFormatVersion(mk('q', 'queued'), formatText)],
+  ];
+
+  it.each(NOT_A_FORMAT)('keeps a job whose formatVersion is %s, whatever its class, however old (unreadable)', (_label, text) => {
+    for (const [label, payload] of classes(text)) {
+      expect(decideText(payload), label).toEqual({ delete: false, reason: 'unreadable' });
+      expect(decideText(payload, policy, noPending, NOW + 1000 * W), `${label}, any age`).toEqual({ delete: false, reason: 'unreadable' });
+    }
+  });
+
+  it.each(NEWER)('keeps a job whose formatVersion is the integer %s, above this build\'s, as newer_format', (_label, text) => {
+    for (const [label, payload] of classes(text)) expect(decideText(payload), label).toEqual({ delete: false, reason: 'newer_format' });
+  });
+
+  it('still reads an absent formatVersion and every integer from 0 to 4 as a format: a succeeded job is deleted, a cancelled never-claimed job of a writer format too', () => {
+    for (const formatVersion of [undefined, 0, 1, 2, 3, 4]) expect(decide(mk('s', 'succeeded', { formatVersion })), String(formatVersion)).toEqual({ delete: true, jobClass: 'succeeded' });
+    for (const formatVersion of [2, 3, 4]) expect(decide(cancelledJob('c', { formatVersion })), String(formatVersion)).toEqual({ delete: true, jobClass: 'cancelled' });
+  });
+
+  it('a state this build does not know is still reported first (unknown_state), and a bound job stays malformed at any format but 4 (the parser)', () => {
+    expect(decideText(payloadWithFormatVersion(mk('u', 'archived' as never), '"4"'))).toEqual({ delete: false, reason: 'unknown_state' });
+    expect(() => decideText(payloadWithFormatVersion(retired('r'), '3'))).toThrow('bad fixture');
+  });
+
+  it('a delete sweep over the real store leaves every one of those jobs untouched and deletes the ones of a known format; a report sweep counts exactly those', async () => {
+    const stored = (job: PromoteJob, text?: string): Quads => serializeJobRecord(job, GRAPH).jobQuads.map(q => (q.predicate === PROMOTE_PAYLOAD && text !== undefined ? { ...q, object: literal(payloadWithFormatVersion(job, text)) } : q));
+    const odd = NOT_A_FORMAT.map(([label, text], i) => ({ job: mk(`odd-${i}-${label.replace(/\W+/g, '_')}`, 'succeeded', {}, 10 * W + i), text }));
+    const newer = NEWER.map(([label, text], i) => ({ job: mk(`newer-${i}-${label.replace(/\W+/g, '_')}`, 'succeeded', {}, 10 * W + i), text }));
+    const known = [undefined, '0', '1', '2', '3', '4'].map((text, i) => ({ job: mk(`known-${i}`, 'succeeded', { formatVersion: undefined }, 10 * W + i), text }));
+    const seed = async () => { const store = new OxigraphStore(); await insertQuads(store, [...odd, ...newer, ...known].flatMap(({ job, text }) => stored(job, text))); return store; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 5 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: known.length }, kept: { unreadable: odd.length, newer_format: newer.length } });
+
+    const store = await seed();
+    const before = new Map(await Promise.all([...odd, ...newer].map(async ({ job }) => [job.jobId, await present(store, job.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 5 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual([...odd, ...newer].map(({ job }) => job.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted.succeeded).toBe(known.length);
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { succeeded: known.length }, kept: { unreadable: odd.length, newer_format: newer.length } });
+  });
+});
+
+describe('subjects that are not share jobs cannot stall a pass (third review of P10a: blank nodes carrying the queue\'s state and updatedAt triples)', () => {
+  const calls = async (retention: ReturnType<typeof newRetention>, max = 12): Promise<ShareRetentionBatchResult[]> => {
+    const results: ShareRetentionBatchResult[] = [];
+    for (let i = 0; i < max; i++) { const res = await retention.runBatch(); results.push(res); if (!res.hasMore || res.error) break; }
+    return results;
+  };
+  /** A foreign writer's subject that carries the queue's two index triples (and nothing else). */
+  const foreign = (subject: string, state: string, updatedAt: number, graph = GRAPH): Quads => [
+    { subject, predicate: PROMOTE_STATE, object: literal(state), graph }, { subject, predicate: PROMOTE_UPDATED_AT, object: integer(updatedAt), graph },
+  ];
+  /** Every triple of the graph except those of the real jobs named in `jobs`, as sorted lines: what a sweep must leave exactly as it found it. */
+  const notJobs = async (store: OxigraphStore, ...jobs: string[]): Promise<string> => {
+    const skip = new Set(jobs.map(id => jobSubject(id)));
+    const r = await store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${GRAPH}> { ?s ?p ?o } }`);
+    return r.type === 'bindings' ? r.bindings.filter(b => !skip.has(b['s']!)).map(b => `${b['s']} ${b['p']} ${b['o']}`).sort().join('\n') : '';
+  };
+  const T = NOW - 10 * W;
+  const tieGroup = (subjects: readonly string[], state = 'succeeded') => subjects.flatMap(subject => foreign(subject, state, T));
+
+  it.each(['delete', 'report'] as const)('%s mode: five blank nodes sharing one updatedAt (a tie group larger than the batch) in front of an eligible job: the job is reached, the pass completes, no anomaly, the blank nodes are untouched', async mode => {
+    for (const batchSize of [1, 2, 3, 4]) {
+      const store = new OxigraphStore();
+      await insertQuads(store, [...tieGroup(['_:b1', '_:b2', '_:b3', '_:b4', '_:b5']), ...rowOf('succeeded', 'eligible', 5 * W)]);
+      const foreignBefore = await notJobs(store, 'eligible');
+      expect(foreignBefore.split('\n')).toHaveLength(10);
+      const retention = newRetention(store, { mode, batchSize });
+      const results = await calls(retention);
+      const at = `batch size ${batchSize}: ${results.length} calls, anomalies ${results.map(r => r.anomalies)}, scanned ${results.map(r => r.scanned)}`;
+      expect(results.at(-1)!.hasMore, at).toBe(false);
+      expect(results.every(r => r.anomalies === 0 && !r.error), at).toBe(true);
+      expect(retention.counters().anomalies, at).toBe(0);
+      expect(results.filter(r => r.passCompleted), at).toHaveLength(1);
+      expect(results.reduce((n, r) => n + r.scanned, 0), `${at}: the blank nodes are not candidates, the job is`).toBe(1);
+      expect(results.reduce((n, r) => n + r.deleted, 0), at).toBe(mode === 'delete' ? 1 : 0);
+      expect((await present(store, 'eligible')) !== '', at).toBe(mode !== 'delete');
+      expect(retention.counters().lastCompletePass, at).toMatchObject(mode === 'delete' ? { deleted: { succeeded: 1 }, wouldDelete: { succeeded: 0 } } : { deleted: { succeeded: 0 }, wouldDelete: { succeeded: 1 } });
+      expect(await notJobs(store, 'eligible'), `${at}: the blank nodes are untouched`).toBe(foreignBefore);
+    }
+  });
+
+  it('blank nodes among distinct timestamps (the range scan, no tie group) are no candidates either: never judged, never counted, never deleted', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...foreign('_:early', 'succeeded', NOW - 20 * W), ...foreign('_:mid', 'failed', NOW - 9 * W), ...rowOf('cancelled', 'eligible', 8 * W), ...rowOf('succeeded', 'eligible2', 7 * W)]);
+    const foreignBefore = await notJobs(store, 'eligible', 'eligible2');
+    const retention = newRetention(store, { batchSize: 2 });
+    const results = await calls(retention);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.reduce((n, r) => n + r.scanned, 0)).toBe(2);
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { succeeded: 1, cancelled: 1 }, kept: { unreadable: 0 } });
+    expect(await notJobs(store, 'eligible', 'eligible2')).toBe(foreignBefore);
+  });
+
+  // The engine labels a blank node afresh in every store, so where its rows land among the real jobs of a group varies from store to store: eight stores.
+  it('a tie group that mixes blank nodes and real jobs: every real job of the group is judged once, the blank nodes are skipped (eight stores, the engine labels blank nodes afresh)', async () => {
+    const jobs = ['m1', 'm2', 'm3', 'm4'];
+    for (let attempt = 0; attempt < 8; attempt++) {
+      const store = new OxigraphStore();
+      await insertQuads(store, [...tieGroup(['_:x1', '_:x2', '_:x3']), ...jobs.flatMap(id => rowOf('succeeded', id, 10 * W))]);
+      const foreignBefore = await notJobs(store, ...jobs);
+      const { store: spied, log } = spy(store);
+      const results = await calls(newRetention(spied, { batchSize: 2 }), 20);
+      expect(results.at(-1)!.hasMore, `store ${attempt}`).toBe(false);
+      expect(results.every(r => r.anomalies === 0 && !r.error), `store ${attempt}`).toBe(true);
+      expect(verifiedSubjects(log).sort(), `store ${attempt}`).toEqual(jobs.map(jobSubject));
+      for (const id of jobs) expect(await present(store, id), id).toBe('');
+      expect(await notJobs(store, ...jobs), `store ${attempt}: the three blank nodes are as they were`).toBe(foreignBefore);
+    }
+  });
+
+  // An IRI that is not a share job IRI (another prefix) is no candidate either: the scan reads IRIs under the job prefix only. An ASCII one was already kept safely (as
+  // unreadable, once each), but one that mixes astral and high BMP characters stalls a class: an engine orders it by code point and the key check by UTF-16.
+  it.each(['delete', 'report'] as const)('%s mode: IRI subjects with another prefix sharing one updatedAt (ASCII, and mixing astral and high BMP characters), in front of an eligible job: not read, the job is reached, no anomaly, untouched', async mode => {
+    const others = [
+      ['ASCII', ['urn:other:job:o1', 'urn:other:job:o2', 'urn:dkg:promote-queue:jobs:o3', 'http://example.org/job/o4', 'urn:dkg:promote-queue:job']],
+      ['astral and high BMP', ['urn:other:\uFF5E', 'urn:other:\u{1F600}', 'urn:other:a', 'urn:other:\u{10000}', 'urn:other:\uFF5F']],
+    ] as const;
+    for (const [label, subjects] of others) for (const batchSize of [1, 2, 3]) {
+      const store = new OxigraphStore();
+      await insertQuads(store, [...tieGroup(subjects), ...rowOf('succeeded', 'eligible', 5 * W)]);
+      const foreignBefore = await notJobs(store, 'eligible');
+      const { store: spied, log } = spy(store);
+      const retention = newRetention(spied, { mode, batchSize });
+      const results = await calls(retention);
+      const at = `${label}, batch size ${batchSize}: ${results.length} calls, anomalies ${results.map(r => r.anomalies)}`;
+      expect(results.at(-1)!.hasMore, at).toBe(false);
+      expect(results.every(r => r.anomalies === 0 && !r.error), at).toBe(true);
+      expect(results.reduce((n, r) => n + r.scanned, 0), `${at}: the foreign subjects are not candidates`).toBe(1);
+      expect(verifiedSubjects(log), `${at}: only the share job IRI is ever verified`).toEqual([jobSubject('eligible')]);
+      expect(deletedSubjects(log), at).toEqual(mode === 'delete' ? [jobSubject('eligible')] : []);
+      expect(retention.counters().lastCompletePass, at).toMatchObject({ kept: { unreadable: 0 } });
+      expect(await notJobs(store, 'eligible'), at).toBe(foreignBefore);
+    }
+  });
+
+  // The documented limit: under the job prefix a non-ASCII id needs a foreign writer (the queue's ids are ASCII, `isSafeJobId`), and an engine that orders such ids by
+  // code point disagrees with the key check, which reads UTF-16. The scan fails closed: an anomaly on every call, no cursor moves, nothing outside the judged rows is touched.
+  it('in-prefix IRI subjects with astral and high BMP characters (needs a foreign writer) fail closed: anomalies, no pass completes, nothing foreign is touched', async () => {
+    const store = new OxigraphStore();
+    const prefixed = ['\uFF5E', '\u{1F600}', 'a'].map(id => jobSubject(id));
+    await insertQuads(store, [...tieGroup(prefixed), ...rowOf('succeeded', 'eligible', 5 * W)]);
+    const foreignBefore = await notJobs(store, 'eligible');
+    const retention = newRetention(store, { mode: 'report', batchSize: 1 });
+    const results = await calls(retention, 6);
+    expect(results.at(-1)!.hasMore).toBe(true);
+    expect(results.some(r => r.anomalies > 0)).toBe(true);
+    expect(results.every(r => !r.error)).toBe(true);
+    expect(retention.counters().lastCompletePass).toBeUndefined();
+    expect(await notJobs(store, 'eligible')).toBe(foreignBefore);
+  });
+
+  it('the scan and tie queries select IRI subjects only', () => {
+    expect(buildRetentionScanQuery(GRAPH, 'succeeded', NOW - W, 5)).toContain('FILTER (isIRI(?job))');
+    expect(buildRetentionScanQuery(GRAPH, 'failed', NOW - W, 5, { after: 7, inclusive: true })).toContain('FILTER (isIRI(?job))');
+    expect(buildRetentionTieQuery(GRAPH, 'succeeded', 42, 10)).toContain('FILTER (isIRI(?job))');
+    expect(buildRetentionTieQuery(GRAPH, 'failed', 42, 10, 'urn:dkg:promote-queue:job:a')).toContain('FILTER (isIRI(?job))');
+  });
+});
+
+describe('repeated rows of one subject in the scan (review of P10a: a subject that comes back more than once must not stall the pass)', () => {
+  const XSD = 'http://www.w3.org/2001/XMLSchema#';
+  const SCAN = 'publisher.asyncPromote.retention.scan';
+  /** The job's rows with its `updatedAt` triple replaced by one triple per term. */
+  const withUpdatedAtTerms = (job: PromoteJob, ...terms: string[]): Quads =>
+    serializeJobRecord(job, GRAPH).jobQuads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? terms.map(object => ({ ...q, object })) : [q]));
+  /** Two terms of one value that the engine tells apart: `"100"^^xsd:integer` and `"100.0"^^xsd:decimal` are both equal to 100 and are two triples. */
+  const same = (n: number) => [`"${n}"^^<${XSD}integer>`, `"${n}.0"^^<${XSD}decimal>`];
+  /**
+   * An engine that answers a scan with the rows of some subjects `copies[id]` times, side by side (the equal-valued rows of a subject sort together) and within its
+   * LIMIT: what a store would return that keeps two integer terms of one value ("100" and "0100") apart. Oxigraph canonicalises them into one triple, so the repeat
+   * is made here, on the answer; the scan reads only integer terms, so a decimal twin is no longer one.
+   */
+  const repeating = (store: OxigraphStore, copies: Record<string, number>) => spy(store, async (sparql, source) => {
+    const all = await store.query(sparql.replace(/ LIMIT \d+$/, ''));
+    if (source !== SCAN || all.type !== 'bindings') return all;
+    const rows = all.bindings.flatMap(b => Array.from({ length: copies[String(b['job']).slice(jobSubject('').length)] ?? 1 }, () => b));
+    return { ...all, bindings: rows.slice(0, Number(/LIMIT (\d+)$/.exec(sparql)![1])) } as QueryResult;
+  });
+  const calls = async (retention: ReturnType<typeof newRetention>, max = 12): Promise<ShareRetentionBatchResult[]> => {
+    const results: ShareRetentionBatchResult[] = [];
+    for (let i = 0; i < max; i++) { const res = await retention.runBatch(); results.push(res); if (!res.hasMore || res.error) break; }
+    return results;
+  };
+
+  it.each(['delete', 'report'] as const)('%s mode, batch size 1: a retained job whose index holds 100 (integer) and 100.0 (decimal) stays, the cancelled job at 200 behind it is judged, the pass completes, no anomaly', async mode => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...withUpdatedAtTerms(mk('retained', 'failed', {}, NOW - 100), ...same(100)), ...serializeJobRecord(cancelledJob('eligible', {}, NOW - 200), GRAPH).jobQuads]);
+    const { store: spied, log } = spy(store);
+    const retention = newRetention(spied, { mode, batchSize: 1 });
+    const results = await calls(retention);
+    expect(results.at(-1)!.hasMore, `the pass ends (${results.length} calls, anomalies ${results.map(r => r.anomalies)})`).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.filter(r => r.passCompleted)).toHaveLength(1);
+    expect(verifiedSubjects(log)).toEqual([jobSubject('retained'), jobSubject('eligible')]);             // each judged once, in order
+    expect(results.reduce((n, r) => n + r.scanned, 0)).toBe(2);
+    expect([...(await storedIds(store))].sort()).toEqual(mode === 'delete' ? ['retained'] : ['eligible', 'retained']);
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(mode === 'delete' ? 1 : 0);
+    expect(retention.counters().anomalies).toBe(0);
+    expect(retention.counters().lastCompletePass).toMatchObject(mode === 'delete'
+      ? { scanned: 2, deleted: { cancelled: 1 }, wouldDelete: { cancelled: 0 }, kept: { failed_retained: 1 } }
+      : { scanned: 2, deleted: { cancelled: 0 }, wouldDelete: { cancelled: 1 }, kept: { failed_retained: 1 } });
+  });
+
+  it('a group larger than a batch whose members come back two or three times is walked by key: every subject judged once, all deleted, no anomaly', async () => {
+    const store = new OxigraphStore();
+    const T = 10 * W;
+    await insertQuads(store, ['s1', 's2', 's3', 's4', 's5', 's6'].flatMap(id => rowOf('succeeded', id, T)));
+    const { store: spied, log } = repeating(store, { s2: 2, s4: 2, s5: 3 });
+    const results = await calls(newRetention(spied, { batchSize: 2 }), 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(verifiedSubjects(log).sort()).toEqual(['s1', 's2', 's3', 's4', 's5', 's6'].map(jobSubject));
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(6);
+    expect((await storedIds(store)).size).toBe(0);
+  });
+
+  it('the range scan collapses a subject that appears twice: it is judged, counted and deleted once', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...rowOf('cancelled', 'twice', NOW - 200), ...rowOf('succeeded', 'once', NOW - 300)]);
+    const { store: spied, log } = repeating(store, { twice: 2 });
+    const retention = newRetention(spied, { batchSize: 10 });
+    const res = await retention.runBatch();
+    expect(res).toMatchObject({ scanned: 2, deleted: 2, anomalies: 0, hasMore: false, passCompleted: true });
+    expect(res.deletedJobs.map(j => j.jobId).sort()).toEqual(['once', 'twice']);
+    expect(verifiedSubjects(log).sort()).toEqual([jobSubject('once'), jobSubject('twice')]);
+    expect(deletedSubjects(log).sort()).toEqual([jobSubject('once'), jobSubject('twice')]);
+    expect(retention.counters().deleted).toEqual({ succeeded: 1, cancelled: 1, retired_no_effect: 0 });
+    expect(retention.counters().lastCompletePass).toMatchObject({ scanned: 2, deleted: { succeeded: 1, cancelled: 1 } });
+  });
+
+  it('the range scan collapses a repeated subject in the older part of a full window too: three subjects, the oldest appearing twice, batch size 2', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...rowOf('succeeded', 'x', 10 * W), ...rowOf('succeeded', 'y', 9 * W), ...rowOf('succeeded', 'z', 8 * W)]);
+    const { store: spied, log } = repeating(store, { x: 2 });
+    const results = await calls(newRetention(spied, { batchSize: 2 }));
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.map(r => r.scanned)).toEqual([1, 2]);                                                                            // x alone (its twin row is dropped), then y and z
+    expect(deletedSubjects(log)).toEqual(['x', 'y', 'z'].map(jobSubject));
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(3);
+  });
+
+  it.each(['delete', 'report'] as const)('%s mode: a subject whose index holds two DISTINCT updatedAt values (the queue cannot write that) cannot stall a pass either', async mode => {
+    const store = new OxigraphStore();
+    const twoValues = serializeJobRecord(cancelledJob('odd', {}, NOW - 100), GRAPH).jobQuads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? [q, { ...q, object: integer(300) }] : [q]));
+    await insertQuads(store, [...twoValues, ...serializeJobRecord(mk('after', 'succeeded', {}, NOW - 400), GRAPH).jobQuads]);
+    const retention = newRetention(store, { mode, batchSize: 1 });
+    const results = await calls(retention);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.reduce((n, r) => n + r.scanned, 0)).toBe(mode === 'delete' ? 2 : 3);                                       // report judges the subject at each of its values
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(mode === 'delete' ? 2 : 0);
+    expect((await storedIds(store)).size).toBe(mode === 'delete' ? 0 : 2);
+  });
+
+  it('an engine that repeats every row of a scan answer (within its LIMIT) is no obstacle: rows are judged once, the walk advances, no anomaly', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 9 }, (_, i) => rowOf('succeeded', `d-${i}`, i < 5 ? 10 * W : 10 * W + 1000 * i)).flat());   // a group of five, then four distinct rows
+    const doubling = async (sparql: string, source: string | undefined, _run: () => Promise<QueryResult>): Promise<QueryResult> => {
+      const all = await store.query(sparql.replace(/ LIMIT \d+$/, ''));                                                 // the ordered answer, every row twice, THEN the LIMIT (as an engine that repeats rows does)
+      if (source !== SCAN || all.type !== 'bindings') return all;
+      return { ...all, bindings: all.bindings.flatMap(b => [b, b]).slice(0, Number(/LIMIT (\d+)$/.exec(sparql)![1])) } as QueryResult;
+    };
+    const { store: spied, log } = spy(store, doubling);
+    const results = await calls(newRetention(spied, { batchSize: 3 }), 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(new Set(verifiedSubjects(log)).size).toBe(9);
+    expect(verifiedSubjects(log)).toHaveLength(9);
+    expect((await storedIds(store)).size).toBe(0);
+  });
+
+  it('a range answer that is out of order and repeats a subject is an anomaly, and what it judges is one row per subject', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...rowOf('succeeded', 'x', 10 * W), ...rowOf('succeeded', 'y', 9 * W), ...rowOf('succeeded', 'z', 8 * W)]);
+    // The repeat is made on the engine's answer (the scan reads integer terms only, so a decimal twin repeats nothing): the oldest subject twice, newest first, within LIMIT 4.
+    let served: string[] = [];
+    const { store: spied } = spy(store, async (_sparql, source, run) => {
+      const res = await run();
+      if (source !== SCAN || res.type !== 'bindings' || res.bindings.length === 0) return res;
+      const bindings = [res.bindings[0]!, ...res.bindings].reverse();                                                                                  // x, y, z becomes z, y, x, x
+      served = bindings.map(b => String(b['job']).slice(jobSubject('').length));
+      return { ...res, bindings } as QueryResult;
+    });
+    const res = await newRetention(spied, { mode: 'report', batchSize: 3 }).runBatch();
+    expect(served, 'the answer holds the repeat (otherwise the collapse is not exercised)').toEqual(['z', 'y', 'x', 'x']);
+    expect(res.anomalies).toBe(1);
+    expect(res.wouldDeleteJobs.map(j => j.jobId).sort(), 'one row per subject: the repeat of x does not push z out of the judged slice').toEqual(['x', 'y', 'z']);
+  });
+
+  it('a real reordering of a tie walk still fails closed: it is an anomaly, the cursor does not move, and the same sweep drains once the engine conforms', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 6 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W)).flat());                      // one group, larger than the batch
+    let engine: 'descending' | 'interleaved' | 'conforming' = 'descending';
+    const reorder = async (sparql: string, source: string | undefined, run: () => Promise<QueryResult>): Promise<QueryResult> => {
+      const res = await run();
+      if (engine === 'conforming' || source !== SCAN || !sparql.includes('ORDER BY STR(?job)') || res.type !== 'bindings') return res;
+      const rows = [...res.bindings];
+      // newest key first, or a repeated subject that is not adjacent to its twin (a, b, a)
+      return { ...res, bindings: engine === 'descending' ? rows.reverse() : [rows[0]!, rows[1]!, rows[0]!].slice(0, rows.length) } as QueryResult;
+    };
+    const { store: spied } = spy(store, reorder);
+    const retention = newRetention(spied, { batchSize: 2, mode: 'report' });
+    for (const mode of ['descending', 'interleaved'] as const) {
+      engine = mode;
+      const res = await retention.runBatch();
+      expect(res.anomalies, mode).toBe(1);
+      expect(res.hasMore, mode).toBe(true);
+      expect(new Set(res.wouldDeleteJobs.map(j => j.jobId)).size, `${mode}: what an anomalous answer judges is one row per subject`).toBe(res.wouldDeleteJobs.length);
+    }
+    engine = 'conforming';
+    const results = await calls(retention, 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(retention.counters().lastCompletePass).toBeUndefined();                                                                   // the pass that met an anomaly never completes
+    expect(retention.counters().anomalies).toBe(2);
+  });
+});
+
+describe('only exact integer timestamps are scan candidates (second review of P10a: a decimal updatedAt the engine tells apart from the double the cursor holds must not stall a pass)', () => {
+  const XSD = 'http://www.w3.org/2001/XMLSchema#';
+  const decimal = (lexical: string) => `"${lexical}"^^<${XSD}decimal>`;
+  const withTerms = (job: PromoteJob, ...terms: string[]): Quads =>
+    serializeJobRecord(job, GRAPH).jobQuads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? terms.map(object => ({ ...q, object })) : [q]));
+  const calls = async (retention: ReturnType<typeof newRetention>, max = 12): Promise<ShareRetentionBatchResult[]> => {
+    const results: ShareRetentionBatchResult[] = [];
+    for (let i = 0; i < max; i++) { const res = await retention.runBatch(); results.push(res); if (!res.hasMore || res.error) break; }
+    return results;
+  };
+
+  // The engine compares a decimal with a number exactly, the cursor holds a double: `100.0000000000000001` reads as 100 there, the tie walk for 100 does not return
+  // it, and the range scan `> 100` does, so the cursor never left. Only an exact integer term is a candidate, so the two sides always agree.
+  const CASES: ReadonlyArray<{ label: string; terms: string[]; retained: number; eligible: number; retainedIsCandidate: boolean }> = [
+    { label: 'an integer and a decimal 1e-16 above it (the reviewer repro)', terms: [integer(100), decimal('100.0000000000000001')], retained: 100, eligible: 200, retainedIsCandidate: true },
+    { label: 'the first review\'s pair, 100 (integer) and 100.0 (decimal): equal in every engine, and still one candidate', terms: [integer(100), decimal('100.0')], retained: 100, eligible: 200, retainedIsCandidate: true },
+    { label: 'a single decimal term, no repeat', terms: [decimal('100.0000000000000001')], retained: 100, eligible: 200, retainedIsCandidate: false },
+    { label: 'two decimals that are equal as doubles and different as decimals', terms: [decimal('100.0000000000000001'), decimal('100.0000000000000002')], retained: 100, eligible: 200, retainedIsCandidate: false },
+    { label: 'a real-scale decimal timestamp', terms: [decimal('1898272000000.0001')], retained: 1_898_272_000_000, eligible: 1_898_272_500_000, retainedIsCandidate: false },
+  ];
+
+  it.each(CASES.flatMap(c => (['delete', 'report'] as const).map(mode => [c.label, mode, c] as const)))('%s, %s mode: the pass completes at batch size 1 and 2, the cancelled job behind is reached, no anomaly', async (_label, mode, c) => {
+    for (const batchSize of [1, 2]) {
+      const store = new OxigraphStore();
+      await insertQuads(store, [...withTerms(mk('ret', 'failed', {}, NOW - c.retained), ...c.terms), ...serializeJobRecord(cancelledJob('eligible', {}, NOW - c.eligible), GRAPH).jobQuads]);
+      const retention = newRetention(store, { mode, batchSize });
+      const results = await calls(retention);
+      const at = `batch size ${batchSize}, ${results.length} calls, anomalies ${results.map(r => r.anomalies)}`;
+      expect(results.at(-1)!.hasMore, at).toBe(false);
+      expect(results.length, at).toBeLessThanOrEqual(3);
+      expect(results.every(r => r.anomalies === 0 && !r.error), at).toBe(true);
+      expect(results.filter(r => r.passCompleted), at).toHaveLength(1);
+      expect(results.reduce((n, r) => n + r.scanned, 0), at).toBe(c.retainedIsCandidate ? 2 : 1);
+      expect(results.reduce((n, r) => n + r.deleted, 0), at).toBe(mode === 'delete' ? 1 : 0);
+      expect([...(await storedIds(store))].sort(), at).toEqual(mode === 'delete' ? ['ret'] : ['eligible', 'ret']);
+      expect(retention.counters().anomalies).toBe(0);
+      expect(retention.counters().lastCompletePass, at).toMatchObject(mode === 'delete' ? { deleted: { cancelled: 1 }, wouldDelete: { cancelled: 0 } } : { deleted: { cancelled: 0 }, wouldDelete: { cancelled: 1 } });
+    }
+  });
+
+  it('a job whose only updatedAt term is not an integer is never a candidate: it is neither judged nor deleted, even when it would be eligible', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [
+      ...withTerms(cancelledJob('dec', {}, NOW - 150), decimal('150')), ...withTerms(mk('dbl', 'succeeded', {}, NOW - 160), `"1.6E2"^^<${XSD}double>`),
+      ...withTerms(mk('str', 'succeeded', {}, NOW - 170), '"170"'), ...withTerms(mk('neg', 'succeeded', {}, NOW + 5), integer(-5)),
+      ...serializeJobRecord(mk('plain', 'succeeded', {}, NOW - 300), GRAPH).jobQuads,
+    ]);
+    const retention = newRetention(store, { batchSize: 1 });
+    const results = await calls(retention);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.reduce((n, r) => n + r.scanned, 0)).toBe(1);
+    expect([...(await storedIds(store))].sort()).toEqual(['dbl', 'dec', 'neg', 'str']);
+  });
+
+  it('a decimal job whose value equals a tie group is not walked with it: the group of integers larger than a batch is judged, the decimal one never', async () => {
+    const store = new OxigraphStore();
+    const T = NOW - 10 * W;
+    await insertQuads(store, [
+      ...['t1', 't2', 't3', 't4'].flatMap(id => rowOf('succeeded', id, 10 * W)),
+      ...withTerms(mk('dec-equal', 'succeeded', {}, 10 * W), decimal(`${T}.0`)),                 // equal to the group's value in every engine, but not an integer term
+    ]);
+    const { store: spied, log } = spy(store);
+    const results = await calls(newRetention(spied, { batchSize: 2 }), 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(verifiedSubjects(log).sort()).toEqual(['t1', 't2', 't3', 't4'].map(jobSubject));
+    expect([...(await storedIds(store))]).toEqual(['dec-equal']);
+  });
+
+  it('the scan and tie queries select exact integers only, in range', () => {
+    const integerOnly = `FILTER (DATATYPE(?updatedAt) = <${XSD}integer> && ?updatedAt >= 0)`;
+    expect(buildRetentionScanQuery(GRAPH, 'succeeded', NOW - W, 5)).toContain(integerOnly);
+    expect(buildRetentionScanQuery(GRAPH, 'failed', NOW - W, 5, { after: 7, inclusive: true })).toContain(integerOnly);
+    expect(buildRetentionTieQuery(GRAPH, 'succeeded', 42, 10)).toContain(integerOnly);
+  });
+
+  it('integer terms in other lexical forms are still candidates, and a group of them is walked by key: "100", "0100" and "+100" are one timestamp', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [['a', '"100"'], ['b', '"0100"'], ['c', '"+100"'], ['d', '"100"']].flatMap(([id, lexical]) => withTerms(mk(id!, 'succeeded', {}, NOW - 100), `${lexical}^^<${XSD}integer>`)));
+    const results = await calls(newRetention(store, { batchSize: 1 }), 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(4);
+    expect((await storedIds(store)).size).toBe(0);
+  });
+});
+describe('the scan checks an engine\'s answer against the query it asked, and every violation is an anomaly that moves no cursor (fifth review of P10a: the contract checks no test exercised)', () => {
+  // planScan accepts an answer only when it is sorted, within the limit + 1 rows it asked for, after the cursor, not past the cutoff (range query), in the tie group's one
+  // `updatedAt` and after the tie cursor's key (tie query), and made of rows it can read. The sorted check is exercised above (descending, interleaved, repeated rows); each of the
+  // other checks is exercised here by an engine that ignores one clause of the query (or adds a row it cannot read) and answers the rest correctly. A violation is counted in
+  // `anomalies`, moves no cursor, completes no pass, still judges only what the call may judge (each row is verified under the lock first), and the same sweep drains once the
+  // engine conforms.
+  const SCAN = 'publisher.asyncPromote.retention.scan';
+  type Fault = (sparql: string, ask: (sparql: string) => Promise<QueryResult>) => Promise<QueryResult> | undefined;
+  /** Retention over a store whose FIRST scan query that `fault` answers (it returns undefined for the others) is answered wrongly; every other query is answered as asked. */
+  function faulty(store: OxigraphStore, fault: Fault, over: Parameters<typeof newRetention>[1]) {
+    const state = { armed: false, fired: 0 };
+    const { store: spied } = spy(store, async (sparql, source, run) => {
+      if (source !== SCAN || !state.armed) return run();
+      const wrong = fault(sparql, q => store.query(q));
+      if (wrong === undefined) return run();
+      state.armed = false; state.fired++;
+      return wrong;
+    });
+    return { retention: newRetention(spied, { benignFailedMaxAgeMs: null, ...over }), state };
+  }
+  const OLD = (n: number, firstAge = 10 * W) => Array.from({ length: n }, (_, i) => rowOf('succeeded', `o-${i}`, firstAge + n - i)).flat();   // o-0 is the oldest
+  const without = (sparql: string, clause: RegExp) => { expect(sparql, 'the clause the fault removes is part of the query').toMatch(clause); return sparql.replace(clause, ''); };
+  /** After a violation: no pass completed, the call kept its cursor (`hasMore`), and the same sweep drains once the engine conforms. */
+  async function expectFailsClosed(retention: ReturnType<typeof newRetention>, first: ShareRetentionBatchResult) {
+    expect(first.anomalies).toBe(1);
+    expect(first.hasMore).toBe(true);
+    expect(first.passCompleted).toBe(false);
+    const rest = await drain(retention);
+    expect(rest.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect(rest.at(-1)!.hasMore).toBe(false);
+    expect(retention.counters().anomalies).toBe(1);
+    expect(retention.counters().lastCompletePass, 'the pass that met an anomaly never completes').toBeUndefined();
+  }
+
+  it('control: a conforming answer is no anomaly, including a row exactly AT the cutoff (the filter is <=)', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...OLD(2), ...rowOf('succeeded', 'edge', W)]);                                               // 'edge' is exactly W old: updatedAt === the cutoff
+    const retention = newRetention(store, { benignFailedMaxAgeMs: null, batchSize: 100 });
+    const res = await retention.runBatch();
+    expect(res).toMatchObject({ scanned: 3, deleted: 3, anomalies: 0, hasMore: false, passCompleted: true });
+    expect((await storedIds(store)).size).toBe(0);
+  });
+
+  it('an answer past the cutoff (an engine that ignores the cutoff filter) is an anomaly, and the young row it returns is verified and kept, never deleted', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...OLD(2), ...rowOf('succeeded', 'young', 1000)]);                                           // 'young' is far inside the window
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.includes('ORDER BY ?updatedAt') ? ask(without(sparql, new RegExp(` FILTER \\(\\?updatedAt <= ${NOW - W}\\)`))) : undefined), { batchSize: 100 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.kept.too_recent, 'the row past the cutoff was judged, not deleted').toBe(1);
+    expect(first.deleted, 'what the call judged and verified is still deleted: o-0 and o-1').toBe(2);
+    expect(await present(store, 'young')).not.toBe('');
+    await expectFailsClosed(retention, first);
+    expect([...(await storedIds(store))]).toEqual(['young']);
+  });
+
+  it.each([
+    ['ignores the lower bound (answers from the start: o-0, o-1, o-2)', (sparql: string) => without(sparql, / FILTER \(\?updatedAt > \d+\)/)],
+    ['reads the exclusive lower bound as inclusive (answers from the cursor row: o-1, o-2, o-3)', (sparql: string) => sparql.replace(/ FILTER \(\?updatedAt > (\d+)\)/, ' FILTER (?updatedAt >= $1)')],
+  ])('an answer that starts at or before the cursor (an engine that %s) is an anomaly and moves no cursor', async (_label, widen) => {
+    const store = new OxigraphStore();
+    await insertQuads(store, OLD(4));
+    const { retention, state } = faulty(store, (sparql, ask) => (/ FILTER \(\?updatedAt > \d+\)/.test(sparql) ? ask(widen(sparql)) : undefined), { mode: 'report', batchSize: 2 });
+    const first = await retention.runBatch();                                                                              // o-0 and o-1; the cursor is now after o-1
+    expect(first).toMatchObject({ scanned: 2, anomalies: 0, hasMore: true });
+    state.armed = true;
+    const second = await retention.runBatch();                                                                             // the engine answers from at or before the cursor
+    expect(state.fired).toBe(1);
+    expect(second.anomalies).toBe(1);
+    expect(second.scanned, 'it judges what it may, at most the batch').toBeLessThanOrEqual(2);
+    expect(second.hasMore).toBe(true);
+    const rest = await drain(retention);
+    expect(rest.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect(rest.at(-1)!.hasMore).toBe(false);
+    expect(retention.counters().anomalies).toBe(1);
+    expect(retention.counters().lastCompletePass).toBeUndefined();
+    expect(retention.counters().kept.too_recent).toBe(0);
+  });
+
+  it.each(['delete', 'report'] as const)('%s mode: an answer of more than limit + 1 rows (an engine that ignores LIMIT) is an anomaly, and no more than the batch is judged from it', async mode => {
+    const store = new OxigraphStore();
+    await insertQuads(store, OLD(6));
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.endsWith('ORDER BY ?updatedAt LIMIT 4') ? ask(without(sparql, / LIMIT \d+$/)) : undefined), { mode, batchSize: 3 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.scanned, 'the batch bound holds against an engine that ignores LIMIT').toBe(3);
+    await expectFailsClosed(retention, first);
+    expect((await storedIds(store)).size).toBe(mode === 'delete' ? 0 : 6);
+  });
+
+  it.each(['delete', 'report'] as const)('%s mode: a tie walk answered with more than limit + 1 rows is an anomaly, and no more than the batch is judged from it', async mode => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 6 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W)).flat());              // one group, larger than the batch
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.endsWith('ORDER BY STR(?job) LIMIT 3') ? ask(without(sparql, / LIMIT \d+$/)) : undefined), { mode, batchSize: 2 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.scanned).toBe(2);
+    await expectFailsClosed(retention, first);
+    expect((await storedIds(store)).size).toBe(mode === 'delete' ? 0 : 6);
+  });
+
+  it('a tie walk answered with a row of another updatedAt (an engine that ignores the equality filter) is an anomaly', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...Array.from({ length: 4 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W + 10)).flat(), ...rowOf('succeeded', 'a-other', 10 * W)]);   // 'a-other' sorts before the group by key
+    const { retention, state } = faulty(store, (sparql, ask) => (/ FILTER \(\?updatedAt = \d+\)/.test(sparql) ? ask(without(sparql, / FILTER \(\?updatedAt = \d+\)/)) : undefined), { mode: 'report', batchSize: 2 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    await expectFailsClosed(retention, first);
+  });
+
+  it.each([
+    ['ignores the key filter (answers from the start of the group)', (sparql: string) => without(sparql, / FILTER \(STR\(\?job\) > "[^"]*"\)/)],
+    ['reads the exclusive key filter as inclusive (answers from the cursor key)', (sparql: string) => sparql.replace(/ FILTER \(STR\(\?job\) > ("[^"]*")\)/, ' FILTER (STR(?job) >= $1)')],
+  ])('a tie walk that answers from at or before its key cursor (an engine that %s) is an anomaly', async (_label, widen) => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 6 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W)).flat());
+    const { retention, state } = faulty(store, (sparql, ask) => (/ FILTER \(STR\(\?job\) > "[^"]*"\)/.test(sparql) ? ask(widen(sparql)) : undefined), { mode: 'report', batchSize: 2 });
+    const first = await retention.runBatch();                                                                              // the walk starts: t-0, t-1, and its key cursor is after t-1
+    expect(first).toMatchObject({ scanned: 2, anomalies: 0, hasMore: true });
+    state.armed = true;
+    const second = await retention.runBatch();                                                                             // the engine answers from at or before the cursor
+    expect(state.fired).toBe(1);
+    expect(second.anomalies).toBe(1);
+    expect(second.hasMore).toBe(true);
+    const rest = await drain(retention);
+    expect(rest.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect(rest.at(-1)!.hasMore).toBe(false);
+    expect(retention.counters().lastCompletePass).toBeUndefined();
+  });
+
+  it.each([
+    ['a row whose updatedAt is not a number', { job: jobSubject('ghost'), updatedAt: '"abc"' }],
+    ['a row with no subject', { updatedAt: `"${NOW - 10 * W}"^^<http://www.w3.org/2001/XMLSchema#integer>` }],
+  ])('an answer with %s is an anomaly: the rest of the answer is judged, nothing is deleted on the strength of the unreadable row', async (_label, extra) => {
+    const store = new OxigraphStore();
+    await insertQuads(store, OLD(2));
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.includes('ORDER BY ?updatedAt')
+      ? ask(sparql).then(res => (res.type === 'bindings' ? { ...res, bindings: [...res.bindings, extra] } as QueryResult : res)) : undefined), { batchSize: 100 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.deleted, 'the two readable rows are verified and deleted').toBe(2);
+    expect(first.scanned).toBe(2);
+    await expectFailsClosed(retention, first);
+  });
+
+  it.each([
+    ['a row whose updatedAt is not a number', { job: jobSubject('t-ghost'), updatedAt: '"abc"' }],
+    ['a row with no subject', { updatedAt: `"${NOW - 10 * W}"^^<http://www.w3.org/2001/XMLSchema#integer>` }],
+  ])('a tie walk answered with %s is an anomaly too', async (_label, extra) => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 4 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W)).flat());
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.includes('ORDER BY STR(?job)')
+      ? ask(sparql).then(res => (res.type === 'bindings' ? { ...res, bindings: [...res.bindings, extra] } as QueryResult : res)) : undefined), { mode: 'report', batchSize: 2 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.scanned, 'the readable rows are judged, at most the batch').toBe(2);
+    await expectFailsClosed(retention, first);
+  });
+});
+

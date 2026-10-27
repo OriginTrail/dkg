@@ -23,19 +23,37 @@ export default defineConfig({
           'test/durable-unregistered-author-process.test.ts',
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',
+          'test/public-checkpoint-job.test.ts',
+          'test/public-checkpoint-config.test.ts',
+          'test/snapshot-job-isolation.test.ts',
+          'test/sync-checkpoint-command.test.ts',
           'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
+          'test/rdf-parser.test.ts',
           'test/api-client.test.ts',
+          'test/context-graph-read-model.test.ts',
           'test/finalized-publish-options.test.ts',
+          'test/confirmed-catalog-obligation-response.test.ts',
           'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
+          'test/catalog-publication-admission-route.test.ts',
           // #2892 — real in-memory queue and supervisor; no chain or daemon process.
           'test/async-promote-supervisor-bookkeeping.test.ts',
           'test/promote-queue-config.test.ts',
+          // OT-RFC-73 P10b — queue retention wiring: config, the one timer, the daemon-only start, the share sweep over the queue's own store object, the usage line.
+          'test/retention-config.test.ts',
+          'test/retention-timer.test.ts',
+          'test/retention-sweeps.test.ts',
+          'test/retention-share-sweep.test.ts',
+          // OT-RFC-73 P11 — the publisher sweep over the daemon admission instance's own store object and claim transaction, with real publisher rows.
+          'test/retention-publisher-sweep.test.ts',
+          'test/retention-runtime-scope.test.ts',
+          'test/daemon-queue-retention-live.test.ts',
+          'test/async-admission-usage-retention.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
@@ -111,6 +129,7 @@ export default defineConfig({
           'test/daemon/routes/plugins.test.ts',
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
+          'test/knowledge-assets-publish-authority-route.test.ts',
           'test/promote-admission-route.test.ts',
           'test/async-share-control-busy-admission.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
@@ -122,6 +141,13 @@ export default defineConfig({
           // handlers plus one live daemon on the mock chain; no hardhat.
           'test/node-admin-scope-routes.test.ts',
           'test/daemon-operator-scope-live.test.ts',
+          // Operator-only CPU profile: route, recorder and command with a fake
+          // inspector session; real profiles in a child process and in one
+          // live daemon on the mock chain.
+          'test/cpu-profile.test.ts',
+          'test/cpu-profile-command.test.ts',
+          'test/cpu-profile-real.test.ts',
+          'test/cpu-profile-live.test.ts',
           'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
@@ -145,6 +171,8 @@ export default defineConfig({
           // A persisted subscription restored unsynced gets a catch-up job
           // (#3251). Agent double and stub runner; no hardhat.
           'test/context-graph-activation-catchup.test.ts',
+          'test/context-graph-activation-committed.test.ts',
+      'test/context-graph-activation-provisional.test.ts',
           // A write into a graph this node is still catching up waits for the
           // catch-up, bounded; a restarted owner's first write into its own
           // registered graph goes through. Same worker and fake thread.
@@ -244,6 +272,10 @@ export default defineConfig({
           'test/liveness-supervisor-log.test.ts',
           'test/foreground-supervisor-command.test.ts',
           'test/promote-async-routes.test.ts',
+          // OT-RFC-73 P9b — the opt-in paged mode of the two job list routes (real queues over HTTP, no hardhat).
+          'test/job-list-paging-routes.test.ts',
+          // OT-RFC-73 P9b — --cursor, --page-size and --all of the two list commands, and the client path helpers.
+          'test/job-list-paging-cli.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
           // Pure HTTP classification coverage for chain transport failures,
@@ -273,6 +305,7 @@ export default defineConfig({
           'test/rpc-usage-log.test.ts',
           'test/rpc-usage-snapshot-route.test.ts',
           'test/publisher-runner-rpc-usage.test.ts',
+          'test/publisher-runtime-cleanup.test.ts',
           'test/publisher-startup-admission.test.ts',
           'test/publisher-startup-lifecycle.test.ts',
           'test/daemon-publisher-startup-cancellation.test.ts',
@@ -323,6 +356,10 @@ export default defineConfig({
           // routes (real publisher control, no hardhat), and the CLI rendering.
           'test/publisher-retry-surfacing-2270.test.ts',
           'test/publisher-retry-command-output-2270.test.ts',
+          // OT-RFC-73 P11 (AC7) and #3551: the offline inspector refuses every command while a daemon is running.
+          'test/publisher-offline-write-guard.test.ts',
+          // #3551: the offline reads open the store read-only and leave its file unchanged (real store files, no hardhat).
+          'test/publisher-offline-read-only.test.ts',
           // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
           // intent-index backfill with the admission publisher control).
           'test/publisher-backfill-wiring-1828.test.ts',
@@ -339,6 +376,7 @@ export default defineConfig({
           'test/vector-store-extra.test.ts',
           'test/memory-vector-tenant-isolation.test.ts',
           'test/snapshot-page-index-store.test.ts',
+          'test/join-policy-store.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',
@@ -356,6 +394,7 @@ export default defineConfig({
           'test/oxigraph-orphan-policy.test.ts',
           'test/oxigraph-reclaim-policy.test.ts',
           'test/oxigraph-orphan-native.test.ts',
+          'test/process-inventory.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so
@@ -379,6 +418,7 @@ export default defineConfig({
           // at both async admission routes.
           'test/write-preflight-store-busy-route.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/writable-quad-terms.test.ts',
           'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/context-graph-join-policy-cli.test.ts',
@@ -387,6 +427,7 @@ export default defineConfig({
           'test/assertion-cli-smoke.test.ts',
           'test/knowledge-asset-cli-smoke.test.ts',
           'test/knowledge-asset-share-catalog-handoff.test.ts',
+          'test/async-job-failure-cli.test.ts',
           'test/okf-subcommands.test.ts',
           'test/okf-private-lifecycle.test.ts',
           'test/okf-subgraph-roundtrip.test.ts',
@@ -428,6 +469,10 @@ export default defineConfig({
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
           'test/daemon-managed-boot-wiring.test.ts',
+          // OT-RFC-73 P14 — the store control path's default and its store.controlReservedSlots setting: the
+          // config type and loader, and the daemon configuring the path before any store call. No hardhat.
+          'test/store-control-path-config.test.ts',
+          'test/daemon-store-control-path-wiring.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],

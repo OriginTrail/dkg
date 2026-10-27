@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+import { createTestSubscriptionActivations } from './subscription-activation-owner.js';
 // Shared by the Hardhat fence suite and the hermetic request-lane suite.
 import { vi } from 'vitest';
 import { RollingSubscriptionChecks } from '../../src/context-graph-subscription-rolling-checks.js';
-import type { RollingSubscriptionPromotionPorts } from '../../src/context-graph-subscription-authority-recovery.js';
+import type { RollingSubscriptionPromotionPorts, PersistedContextGraphSubscriptionActivationPorts } from '../../src/context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord, DurableContextGraphSubscriptionBinding } from '../../src/dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from '../../src/context-graph-subscription-dormancy.js';
 import { activateRollingSubscriptionPromotion, type RollingSubscriptionActivationPorts } from '../../src/context-graph-subscription-authority-recovery.js';
@@ -50,12 +51,11 @@ export function createRollingPromotionFixture(
     }),
     activate: (row: ContextGraphSubscriptionRecord, onChainId: string | undefined, isCurrent: (subscription: ContextGraphSub) => boolean) => activateRollingSubscriptionPromotion({
       activate: host.activatePersistedContextGraphSubscriptionRecord,
-      persistBinding: host.persistContextGraphSubscriptionStrict,
       reconcile: host.reconcileRfc64CatalogResponsibilityV1,
     }, row, onChainId, isCurrent),
     wakeAuthorityRecovery: () => wakeDeferredContextGraphSubscriptionAuthorityRecovery(host.contextGraphSubscriptionAuthorityRecoveryRuntime),
     config: { contextGraphSubscriptionStore: { load, loadAll: async () => [...savedRows.values()] } },
-    contextGraphSubscriptionRehydrationStatus: { rehydrationEnabled: true, activationCap: options.cap ?? 64 },
+    contextGraphSubscriptionRehydrationStatus: { rehydrationEnabled: true, activationCap: options.cap ?? 64, persistedTotal: rows.length, activated: 0, hostedActivated: 0, hostedActivatedIds: [] as string[] },
     contextGraphSubscriptionRehydrationPromotionRuntime: runtime,
     contextGraphSubscriptionAuthorityRecoveryRuntime: undefined,
     contextGraphSubscriptionRollingChecks: options.checks ?? new RollingSubscriptionChecks({ minPauseMs: 0, pausePerCheckTime: 0 }),
@@ -67,19 +67,33 @@ export function createRollingPromotionFixture(
     started: true,
     log: { warn: vi.fn<RollingSubscriptionPromotionPorts['log']['warn']>(), info: vi.fn<RollingSubscriptionPromotionPorts['log']['info']>(), debug: vi.fn<RollingSubscriptionPromotionPorts['log']['debug']>() },
     touchStatus: vi.fn(),
-    updateContextGraphSubscriptionRehydrationStatusAfterClear: vi.fn<RollingSubscriptionPromotionPorts['updateContextGraphSubscriptionRehydrationStatusAfterClear']>(),
-    updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn<RollingSubscriptionPromotionPorts['updateContextGraphSubscriptionRehydrationStatusAfterPersist']>(),
-    persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionActivationPorts['persistBinding']>(async () => undefined),
+    activated: vi.fn<(id: string) => void>(),
+    transitionDormancy: (id: string, reason: ContextGraphDormancyReason | undefined) => activations.transition({ id, kind: 'dormancy', reason }),
+    recordContextGraphSubscriptionClear: vi.fn<RollingSubscriptionPromotionPorts['recordContextGraphSubscriptionClear']>((removed, revoked = []) => activations.transitionBatch([
+      ...removed.map(id => ({ id, kind: 'cleared' as const })), ...revoked.map(id => ({ id, kind: 'deactivated' as const })),
+    ])),
+    persistContextGraphSubscriptionStrict: vi.fn<PersistedContextGraphSubscriptionActivationPorts['persistBinding']>(async () => undefined),
     reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationPorts['reconcile']>(async () => undefined),
     resolveContextGraphSubscriptionBootstrapAuthority: vi.fn<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>(options.answer ?? (async () => options.authority === 'unavailable'
       ? { outcome: 'unavailable', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible', dependency: 'unknown' }
       : options.authority === 'denied'
         ? { outcome: 'denied', grantScope: 'none', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible' }
         : { outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'test', metadataBootstrap: 'eligible' })),
-    activatePersistedContextGraphSubscriptionRecord: vi.fn<RollingSubscriptionActivationPorts['activate']>(options.activate ?? (async row => {
-      host.subscribedContextGraphs.set(row.id, promotionSubscription({ subscribed: row.subscribed, coreHosted: row.coreHosted, metaSynced: false, pendingMeta: false }));
-    })),
+    activatePersistedContextGraphSubscriptionRecord: vi.fn<RollingSubscriptionActivationPorts['activate']>(async (row, activationOptions) => {
+      if (options.activate) await options.activate(row, activationOptions);
+      else host.subscribedContextGraphs.set(row.id, promotionSubscription({ subscribed: row.subscribed, coreHosted: row.coreHosted, metaSynced: false, pendingMeta: false }));
+      const live = host.subscribedContextGraphs.get(row.id);
+      if (live) {
+        await activations.activate(row, {
+          install: () => live,
+          remove: id => { host.subscribedContextGraphs.delete(id); },
+          rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
+          commit: () => live, persistBinding: host.persistContextGraphSubscriptionStrict,
+        });
+      }
+    }),
   };
+  const activations = createTestSubscriptionActivations(host);
   return { agent: host, load } satisfies { agent: RollingSubscriptionPromotionPorts; load: typeof load };
 }
 

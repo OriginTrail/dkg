@@ -34,8 +34,8 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-import { externalStorePriorityScheduler, type StorePriorityScheduler } from '../store-priority-scheduler.js';
-import { selectStoreScheduler } from '../store-control-path.js';
+import { blazegraphSchedulers, type BlazegraphStoreOptions } from './blazegraph-scheduler.js';
+export type { BlazegraphStoreOptions } from './blazegraph-scheduler.js';
 import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
@@ -102,13 +102,6 @@ const MAX_QUERY_MILLIS_HEADER = 'X-BIGDATA-MAX-QUERY-MILLIS';
  * unreachable.
  */
 const SERVER_QUERY_DEADLINE_FACTOR = 4;
-
-export interface BlazegraphStoreOptions {
-  /** End-to-end timeout including scheduler wait, HTTP work, and response decoding. */
-  timeout?: number;
-  /** Optional scheduler injection for embedded callers and adapter-boundary tests. */
-  scheduler?: StorePriorityScheduler;
-}
 
 interface StoreOperationDeadline extends AdmittedReadDeadline {
   markStarted(): void;
@@ -250,12 +243,12 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   readonly rfc64SharedProjectionStreamV1;
   private readonly url: string;
   private readonly operationTimeoutMs: number;
-  private readonly scheduler: StorePriorityScheduler;
+  private readonly schedulers: ReturnType<typeof blazegraphSchedulers>;
 
   constructor(url: string, options: BlazegraphStoreOptions = {}) {
     this.url = url.replace(/\/$/, '');
     this.operationTimeoutMs = resolveOperationTimeout(options.timeout);
-    this.scheduler = options.scheduler ?? externalStorePriorityScheduler;
+    this.schedulers = blazegraphSchedulers(options);
     this.rfc64SharedProjectionStreamV1 = createRfc64HttpSharedProjectionRunnerV1({
       runConstruct: (request, consume) => this.runStreamingConstruct(request, consume),
       responseError: (status, excerpt) => new Error(
@@ -333,7 +326,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       operation,
     );
     const source = options?.source ?? `blazegraph.${operation}`;
-    const scheduled = selectStoreScheduler(this.scheduler, options).run(
+    const scheduled = this.schedulers.select(options).run(
       options?.priority,
       source,
       async () => {
@@ -356,7 +349,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
   }
 
   getPressureSnapshot(): StorePressureSnapshot {
-    return this.scheduler.snapshot;
+    return this.schedulers.shared.snapshot;
   }
 
   // -------------------------------------------------------------------
@@ -526,7 +519,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         'replaceGraphAndSubject',
       );
     } catch (error) {
-      await this.sparqlUpdate(
+      if (plan.cleanup) await this.sparqlUpdate(
         plan.cleanup,
         { ...options, source: 'blazegraph.replaceGraphAndSubject.cleanup' },
         'replaceGraphAndSubject',
