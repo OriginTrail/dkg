@@ -16,11 +16,12 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { MARKETPLACE_CONTEXT_GRAPH, type OperationContext } from '@origintrail-official/dkg-core';
 import type { TxResult } from '@origintrail-official/dkg-chain';
-import {
-  offeringIdFor,
-  type MarketplaceOffer,
-  type MeterState,
-  type PlanPolicy,
+import type {
+  MarketplaceOffer,
+  MeterState,
+  PlanPolicy,
+  SellerRecountRecord,
+  SellerStanding,
 } from '@origintrail-official/dkg-marketplace';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -31,18 +32,31 @@ import {
   MarketplaceSellerService,
   type MarketplaceFlushResult,
   type MarketplaceLogger,
-  type MarketplaceSellerOffering,
 } from './marketplace/seller-service.js';
 import {
   MarketplaceBuyerService,
   type MarketplaceInvokeResult,
   type MarketplaceSubscribeResult,
 } from './marketplace/buyer-service.js';
+import type { MarketplaceQueryFn } from './marketplace/executors.js';
 import {
-  createQueryExecutor,
-  createStubInferenceExecutor,
-  type MarketplaceExecutor,
-} from './marketplace/executors.js';
+  SellerConnectorManager,
+  type MarketplaceConnectorStatus,
+  type SellerOfferingDeps,
+} from './marketplace/seller-offerings.js';
+import { BuyerTokenizers } from './marketplace/tokenizer-files.js';
+import {
+  DEFAULT_CHAT_SERVE_TIMEOUT_MS,
+  listGatewayModels,
+  runChatCompletion,
+  runGatewayQuery,
+  type BuyerChatDeps,
+  type MarketplaceChatCompletionInput,
+  type MarketplaceChatCompletionResult,
+  type MarketplaceGatewayModel,
+  type MarketplaceGatewayQueryResult,
+} from './marketplace/buyer-chat.js';
+import type { MarketplaceSpendGuard } from './marketplace/buyer-errors.js';
 import {
   createContextGraphOfferSource,
   publishMarketplaceOfferings,
@@ -60,8 +74,12 @@ const OFFER_BACKFILL_MAX_PEERS = 4;
 
 interface MarketplaceRuntime {
   buyer: MarketplaceBuyerService;
+  /** Buyer chat/gateway deps (recount engines + chat serve timeout). */
+  chat: BuyerChatDeps;
   /** Absent when no operational signing key is available (buyer-only node). */
   seller?: MarketplaceSellerService;
+  /** The served offering set, incl. connector mounts + boot retries. */
+  offerings?: SellerConnectorManager;
   sellerAddress?: string;
   flushTimer: ReturnType<typeof setInterval> | null;
   log: MarketplaceLogger;
@@ -90,8 +108,19 @@ export interface MarketplaceStatus {
   degraded?: string;
   epoch?: bigint;
   settlementDeadline?: bigint;
-  seller?: { offerings: number; pendingReceipts: number; submittedClaims: number };
-  buyer?: { subscribed: boolean; epoch?: bigint; sessionKeyAddress?: string; meter?: MeterState };
+  seller?: {
+    offerings: number;
+    pendingReceipts: number;
+    submittedClaims: number;
+    connectors?: { mounted: number; failed: number; mounting: number };
+  };
+  buyer?: {
+    subscribed: boolean;
+    epoch?: bigint;
+    sessionKeyAddress?: string;
+    meter?: MeterState;
+    recount?: { sellers: number; deprioritized: number; denied: number };
+  };
 }
 
 function requireRuntime(agent: DKGAgentBase): MarketplaceRuntime {
@@ -104,37 +133,29 @@ function requireRuntime(agent: DKGAgentBase): MarketplaceRuntime {
   return runtime;
 }
 
-function resolveExecutor(agent: DKGAgent, config: MarketplaceOfferingConfig): MarketplaceExecutor {
-  const kind = config.executor ?? (config.serviceType === 'query' ? 'local-query' : 'stub-inference');
-  if (kind === 'local-query') {
-    return createQueryExecutor(async (sparql) => {
-      // Scoped read: an UNSCOPED query needs a store with all-writer revision
-      // coverage, which backend stores (e.g. oxigraph-server) do not provide —
-      // the executor would refuse every call there. The prototype serves the
-      // buyer's SPARQL over this node's Verifiable Memory of the marketplace
-      // CG (the confirmed offer KAs). Not shared memory too: that route runs
-      // the query once per partition and unions the results, so a `LIMIT n`
-      // could return up to 2n rows — metered past the buyer's maxUnits —
-      // whenever offer KAs are also held in shared memory (around a publish).
-      const result = await agent.query(sparql, { contextGraphId: MARKETPLACE_CONTEXT_GRAPH });
-      const bindings = (result as { bindings?: unknown })?.bindings;
-      return { rowCount: Array.isArray(bindings) ? bindings.length : 0, result };
-    });
-  }
-  return createStubInferenceExecutor();
-}
-
-function resolveOffering(agent: DKGAgent, config: MarketplaceOfferingConfig): MarketplaceSellerOffering {
+/** Seller offering deps bound to this agent (local SPARQL over the marketplace CG VM). */
+function sellerOfferingDeps(
+  agent: DKGAgent,
+  log: MarketplaceLogger,
+  opts: { dataDir?: string; queryGuards?: SellerOfferingDeps['queryGuards'] },
+): SellerOfferingDeps {
+  const queryFn: MarketplaceQueryFn = async (sparql, { signal }) => {
+    // Scoped read: an UNSCOPED query needs a store with all-writer revision
+    // coverage, which backend stores (e.g. oxigraph-server) do not provide —
+    // the executor would refuse every call there. The prototype serves the
+    // buyer's SPARQL over this node's Verifiable Memory of the marketplace
+    // CG (the confirmed offer KAs). Not shared memory too: that route runs
+    // the query once per partition and unions the results, so a `LIMIT n`
+    // could return up to 2n rows whenever offer KAs are also held in shared
+    // memory (around a publish). The guard's abort signal cancels store work.
+    const result = await agent.query(sparql, { contextGraphId: MARKETPLACE_CONTEXT_GRAPH, signal });
+    return { result };
+  };
   return {
-    offeringLocalId: config.offeringLocalId,
-    offeringId: offeringIdFor(config.offeringLocalId),
-    serviceType: config.serviceType,
-    ...(config.modelId !== undefined ? { modelId: config.modelId } : {}),
-    unit: config.unit,
-    askPerUnitWei: config.askPerUnitWei,
-    ...(config.capacityUnitsPerMin !== undefined ? { capacityUnitsPerMin: config.capacityUnitsPerMin } : {}),
-    ...(config.expiresAt !== undefined ? { expiresAt: config.expiresAt } : {}),
-    executor: resolveExecutor(agent, config),
+    log,
+    queryFn,
+    ...(opts.queryGuards ? { queryGuards: opts.queryGuards } : {}),
+    ...(opts.dataDir ? { dataDir: opts.dataDir } : {}),
   };
 }
 
@@ -231,9 +252,22 @@ export class MarketplaceMethods extends DKGAgentBase {
       ...(config.buyer?.quoteTimeoutMs !== undefined ? { quoteTimeoutMs: config.buyer.quoteTimeoutMs } : {}),
       ...(config.buyer?.serveTimeoutMs !== undefined ? { serveTimeoutMs: config.buyer.serveTimeoutMs } : {}),
       ...(config.buyer?.maxQuoteProbes !== undefined ? { maxQuoteProbes: config.buyer.maxQuoteProbes } : {}),
+      ...(this.config.dataDir
+        ? { standingPath: join(this.config.dataDir, 'marketplace', 'seller-standing.json') }
+        : {}),
+      ...(config.buyer?.recountPolicy ? { recountPolicy: config.buyer.recountPolicy } : {}),
     });
 
-    const runtime: MarketplaceRuntime = { buyer, flushTimer: null, log };
+    const runtime: MarketplaceRuntime = {
+      buyer,
+      chat: {
+        buyer,
+        tokenizers: new BuyerTokenizers(config.buyer?.tokenizers, log),
+        chatServeTimeoutMs: config.buyer?.chatServeTimeoutMs ?? DEFAULT_CHAT_SERVE_TIMEOUT_MS,
+      },
+      flushTimer: null,
+      log,
+    };
 
     // Receipts are signed by the operational wallet whose transactions submit
     // the batches (the contract resolves the seller identity from msg.sender).
@@ -253,9 +287,17 @@ export class MarketplaceMethods extends DKGAgentBase {
         ...(this.config.dataDir ? { stateDir: join(this.config.dataDir, 'marketplace') } : {}),
         ...(config.seller?.batching ? { batching: config.seller.batching } : {}),
       });
-      seller.setOfferings((config.seller?.offerings ?? []).map((offering) => resolveOffering(this, offering)));
+      // Static offerings serve now; connector offerings mount in the
+      // background (held `failed` + retried with backoff when the upstream
+      // is not up yet). Boot never publishes.
+      const offerings = new SellerConnectorManager(seller, sellerOfferingDeps(this, log, {
+        ...(this.config.dataDir ? { dataDir: this.config.dataDir } : {}),
+        ...(config.seller?.queryGuards ? { queryGuards: config.seller.queryGuards } : {}),
+      }));
+      offerings.boot(config.seller?.offerings ?? []);
       seller.registerProtocolHandlers();
       runtime.seller = seller;
+      runtime.offerings = offerings;
       runtime.sellerAddress = receiptSigner.address;
       runtime.flushTimer = setInterval(() => {
         void seller.flushReceipts();
@@ -307,6 +349,7 @@ export class MarketplaceMethods extends DKGAgentBase {
       clearInterval(runtime.flushTimer);
       runtime.flushTimer = null;
     }
+    runtime.offerings?.stop();
     const seller = runtime.seller;
     if (seller && seller.pendingReceiptCount() > 0) {
       try {
@@ -346,8 +389,10 @@ export class MarketplaceMethods extends DKGAgentBase {
       sellerReady: runtime.seller !== undefined,
       buyerReady: true,
       ...(runtime.degraded !== undefined ? { degraded: runtime.degraded } : {}),
-      ...(runtime.seller ? { seller: runtime.seller.status() } : {}),
-      buyer: runtime.buyer.status(),
+      ...(runtime.seller
+        ? { seller: { ...runtime.seller.status(), ...(runtime.offerings ? { connectors: runtime.offerings.counts() } : {}) } }
+        : {}),
+      buyer: { ...runtime.buyer.status(), recount: runtime.buyer.recountSummary() },
     };
     try {
       const epoch = await this.chain.getCurrentEpoch?.();
@@ -364,16 +409,20 @@ export class MarketplaceMethods extends DKGAgentBase {
     return status;
   }
 
-  /** Replace the served offering set; publishes the offer KAs unless told not to. */
+  /**
+   * Replace the served offering set; publishes the offer KAs unless told not
+   * to. ALL-OR-NOTHING: every connector offering mounts first; any mount
+   * failure throws `MarketplaceConnectorMountError` and the old set stays.
+   */
   async marketplaceSetOfferings(this: DKGAgent,
     offerings: MarketplaceOfferingConfig[],
     opts: { publish?: boolean } = {},
   ): Promise<{ offerings: number; published: string[]; assets?: MarketplaceOfferPublishResult['assets'] }> {
     const runtime = requireRuntime(this);
-    if (!runtime.seller) {
+    if (!runtime.seller || !runtime.offerings) {
       throw new Error('marketplace: seller role unavailable on this node (no operational signing key)');
     }
-    runtime.seller.setOfferings(offerings.map((offering) => resolveOffering(this, offering)));
+    await runtime.offerings.replace(offerings);
     if (opts.publish === false) return { offerings: offerings.length, published: [] };
     const { published, assets } = await this.marketplacePublishOfferings();
     return { offerings: offerings.length, published, assets };
@@ -431,11 +480,49 @@ export class MarketplaceMethods extends DKGAgentBase {
     return requireRuntime(this).buyer.invoke(opts);
   }
 
-  marketplaceMeter(this: DKGAgent): { state?: MeterState; summary?: string } {
+  marketplaceMeter(this: DKGAgent): {
+    state?: MeterState;
+    summary?: string;
+    recount: Array<SellerRecountRecord & { standing: SellerStanding }>;
+  } {
     const runtime = requireRuntime(this);
     const state = runtime.buyer.meterState();
     const summary = runtime.buyer.meterSummary();
-    return { ...(state ? { state } : {}), ...(summary !== undefined ? { summary } : {}) };
+    return {
+      ...(state ? { state } : {}),
+      ...(summary !== undefined ? { summary } : {}),
+      recount: runtime.buyer.recountSnapshot(),
+    };
+  }
+
+  /** An OpenAI-shaped chat completion routed to an `openai-chat/v1` offer (the gateway's chat call). */
+  async marketplaceChatCompletion(this: DKGAgent,
+    input: MarketplaceChatCompletionInput,
+  ): Promise<MarketplaceChatCompletionResult> {
+    return runChatCompletion(requireRuntime(this).chat, input);
+  }
+
+  /** A SPARQL call sized by the query cost schedule (the gateway's query call). */
+  async marketplaceGatewayQuery(this: DKGAgent,
+    input: { sparql: string; maxRows?: number; spendGuard?: MarketplaceSpendGuard },
+  ): Promise<MarketplaceGatewayQueryResult> {
+    return runGatewayQuery(requireRuntime(this).chat, input);
+  }
+
+  /** Chat models across discovered `openai-chat/v1` offers. */
+  async marketplaceGatewayModels(this: DKGAgent): Promise<MarketplaceGatewayModel[]> {
+    return listGatewayModels(requireRuntime(this).chat);
+  }
+
+  /** This seller's connector offerings: state, origin, metering pin, optional live health probe. */
+  async marketplaceConnectorStatus(this: DKGAgent, opts: { probe?: boolean } = {}): Promise<MarketplaceConnectorStatus[]> {
+    const runtime = requireRuntime(this);
+    return runtime.offerings ? runtime.offerings.status(opts) : [];
+  }
+
+  /** Operator override: clear a seller's local recount standing. */
+  marketplaceResetSellerStanding(this: DKGAgent, sellerIdentityId: bigint): boolean {
+    return requireRuntime(this).buyer.resetSellerStanding(sellerIdentityId);
   }
 
   /**

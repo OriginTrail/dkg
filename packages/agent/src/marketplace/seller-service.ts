@@ -42,6 +42,7 @@ import {
   computeAuthDigest,
   eip191RecoverDigest,
   type Eip191Signer,
+  type MarketplaceOffer,
   type MarketplaceServiceType,
   type MarketplaceUnit,
   type ReceiptBatch,
@@ -102,6 +103,19 @@ export interface MarketplaceSellerOffering {
   /** Unix seconds after which the published offer is stale. */
   expiresAt?: number;
   executor: MarketplaceExecutor;
+  /** Published offer extensions (chat connectors, metering pin, model facts, query schedule, access). */
+  apiShape?: MarketplaceOffer['apiShape'];
+  toolTransport?: MarketplaceOffer['toolTransport'];
+  metering?: MarketplaceOffer['metering'];
+  model?: MarketplaceOffer['model'];
+  queryCost?: MarketplaceOffer['queryCost'];
+  access?: MarketplaceOffer['access'];
+  /**
+   * Lowercase buyer funding addresses this offering serves exclusively
+   * (`access: 'restricted'`); never published. Checked AFTER the
+   * authorization signature verifies, so it is no membership oracle.
+   */
+  allowedBuyers?: ReadonlySet<string>;
 }
 
 export interface MarketplaceSellerDeps {
@@ -204,6 +218,8 @@ export class MarketplaceSellerService {
   readonly #bucketCacheTtlMs: number;
   /** offeringId (bytes32 hex, lowercase) → offering. */
   #offerings = new Map<string, MarketplaceSellerOffering>();
+  /** Configured offerings whose connector is not mounted (quote → CONNECTOR_UNAVAILABLE). */
+  #unavailable = new Set<string>();
   /** Locally consumed authDigests (bounded; the contract is the durable guard). */
   readonly #consumedAuth = new Map<string, true>();
   /** buyer (lowercase) → cached registered session key (bounded). */
@@ -264,13 +280,19 @@ export class MarketplaceSellerService {
     }
   }
 
-  /** Replace the served offering set (keyed by offeringId). */
-  setOfferings(offerings: readonly MarketplaceSellerOffering[]): void {
+  /**
+   * Replace the served offering set (keyed by offeringId). `unavailable`
+   * lists offeringIds that are configured but not servable (a connector
+   * still mounting or failed): quotes decline `CONNECTOR_UNAVAILABLE`, serves
+   * answer `UNKNOWN_OFFERING`.
+   */
+  setOfferings(offerings: readonly MarketplaceSellerOffering[], opts: { unavailable?: Iterable<string> } = {}): void {
     const next = new Map<string, MarketplaceSellerOffering>();
     for (const offering of offerings) {
       next.set(offering.offeringId.toLowerCase(), offering);
     }
     this.#offerings = next;
+    this.#unavailable = new Set([...(opts.unavailable ?? [])].map((id) => id.toLowerCase()));
   }
 
   listOfferings(): MarketplaceSellerOffering[] {
@@ -295,7 +317,8 @@ export class MarketplaceSellerService {
     }
     const offering = this.#offerings.get(offeringId);
     if (!offering) {
-      return encodeMarketplaceQuoteResponse({ available: false, declineCode: 'UNKNOWN_OFFERING' });
+      const declineCode = this.#unavailable.has(offeringId) ? 'CONNECTOR_UNAVAILABLE' : 'UNKNOWN_OFFERING';
+      return encodeMarketplaceQuoteResponse({ available: false, declineCode });
     }
     return encodeMarketplaceQuoteResponse({
       available: true,
@@ -434,6 +457,11 @@ export class MarketplaceSellerService {
 
     const authSignature = ethers.hexlify(request.authSignature);
     await this.#verifyAuthSignature(buyer, authDigest, authSignature);
+    // Restricted offerings: checked only AFTER the signature verified, so an
+    // unauthenticated prober cannot test addresses against the private list.
+    if (offering.allowedBuyers && offering.allowedBuyers.size > 0 && !offering.allowedBuyers.has(buyer.toLowerCase())) {
+      throw new ServeRejection('BUYER_NOT_ALLOWED', `buyer ${buyer} is not on this offering's allow list`);
+    }
 
     let execution;
     try {

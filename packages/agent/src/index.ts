@@ -236,8 +236,19 @@ export {
 } from './dkg-agent-marketplace.js';
 export type {
   DKGAgentMarketplaceConfig,
+  MarketplaceConnectorConfig,
   MarketplaceOfferingConfig,
 } from './marketplace/config.js';
+export * from './marketplace/gateway-domain.js';
+export { MarketplaceModelNotFoundError, MarketplaceInvalidToolResponseError } from './marketplace/buyer-errors.js';
+export { MarketplaceConnectorMountError, type ChatConnectorKind } from './marketplace/connectors/types.js';
+export type { MarketplaceConnectorStatus } from './marketplace/seller-offerings.js';
+export type {
+  MarketplaceChatCompletionInput,
+  MarketplaceChatCompletionResult,
+  MarketplaceGatewayModel,
+  MarketplaceGatewayQueryResult,
+} from './marketplace/buyer-chat.js';
 export {
   CclEvaluator,
   parseCclPolicy,

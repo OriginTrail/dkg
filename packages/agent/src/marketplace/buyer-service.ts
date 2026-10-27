@@ -2,11 +2,12 @@
  * OT-RFC-27 marketplace buyer runtime: session-key lifecycle (persisted under
  * the node data dir), the non-refundable period subscription (one TRAC
  * `transferFrom` into the epoch pool via `chain.marketplaceFundSubscription`),
- * and the Marketplace Router invoke path — discover offers, probe live
- * quotes, `selectRoute` under the plan policy + local meter, sign a bounded
+ * and the Marketplace Router invoke pipeline — discover offers, probe live
+ * quotes, `selectRoute` under the plan policy + local meter + recount
+ * standing, admit through an optional spend guard, reserve, sign a bounded
  * seller-specific authorization with the session key, serve the call
- * off-chain over `PROTOCOL_MARKETPLACE_SERVE`, verify the returned
- * seller-signed QueryInferenceReceipt, and settle the meter.
+ * off-chain, verify the seller-signed receipt (`buyer-transport.ts`), settle
+ * the meter, then recount the delivery and record the seller's standing.
  *
  * The meter reserves the worst case (`maxUnits · ask`) at admission and only
  * settles the verified receipt value, so "remaining" is always safe against
@@ -15,57 +16,59 @@
  * that proves the seller served but cannot be verified settles pessimistically
  * at the reserved worst case (the seller can still claim); an AMBIGUOUS
  * transport failure (timeout mid-flight) holds the reservation until the
- * authorization expiry passes, then voids — the seller may have served and
- * may still claim until then. Serve/quote requests go over the messenger's
- * request-owned send, never the durable outbox, so a "failed" call can never
- * be silently retried-and-served later behind the meter's back.
+ * authorization expiry passes, then voids. A failure AFTER the receipt
+ * verified (a malformed result, an invalid tool response) settles at the
+ * receipt value: the receipt is trusted, so the charge is known.
  *
- * Receipt trust is resolved ON-CHAIN: the receipt signer recovered from
- * `sellerSig` must resolve (IdentityStorage) to the AUTHORIZED
- * `sellerIdentityId` — the offer's RDF-published `sellerAddress` is an
- * unauthenticated routing hint and is never trusted for verification.
- * Delivery history is keyed by seller identityId for the same reason.
+ * Recount never changes settlement (the RFC settles a seller-signed,
+ * buyer-authorized receipt regardless); it drives the LOCAL standing that
+ * steers routing (`trusted` → `deprioritized` → `denied`). Delivery history
+ * and standing are keyed by seller identityId (the offer's sellerAddress is an
+ * unauthenticated hint).
  */
 import { randomBytes } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { ethers } from 'ethers';
-import {
-  MARKETPLACE_SERVE_VERSION,
-  PROTOCOL_MARKETPLACE_QUOTE,
-  PROTOCOL_MARKETPLACE_SERVE,
-  decodeMarketplaceQuoteResponse,
-  decodeMarketplaceServeResponse,
-  encodeMarketplaceQuoteRequest,
-  encodeMarketplaceServeRequest,
-} from '@origintrail-official/dkg-core';
 import type { ChainAdapter, TxResult } from '@origintrail-official/dkg-chain';
 import {
   BuyerMeter,
   SoftCeilingExceededError,
-  computeReceiptDigest,
+  assertQueryWithinLimit,
+  canonicalModelId,
   createSessionKey,
-  eip191RecoverDigest,
   loadSessionKey,
   persistSessionKey,
+  recountQuery,
   selectRoute,
   signAuthorization,
-  verifyReceiptAgainstAuthorization,
-  type BoundedAuthorization,
+  type ChatApiShape,
   type DeliveryStats,
   type MarketplaceOffer,
-  type MarketplaceQuote,
   type MarketplaceServiceType,
   type MeterState,
   type PlanPolicy,
-  type QueryInferenceReceipt,
+  type RecountPolicy,
+  type RecountVerdict,
   type RouteFailureReason,
   type RouteRejection,
+  type SellerRecountRecord,
+  type SellerStanding,
   type SessionKeyRecord,
 } from '@origintrail-official/dkg-marketplace';
-import { rememberBounded } from '../bounded-map.js';
+import { MarketplaceRequestError, type MarketplaceSpendGuard } from './buyer-errors.js';
+import {
+  BuyerTransport,
+  MarketplaceInvokeError,
+  type MarketplaceDeliveryState,
+  type MarketplaceServedCall,
+} from './buyer-transport.js';
 import { createChainClock, type ChainClock } from './chain-clock.js';
+import { MARKETPLACE_CALLER_FAULT_CODES } from './executors.js';
 import type { MarketplaceOfferSource } from './offer-publisher.js';
 import type { MarketplaceLogger, MarketplaceMessenger } from './seller-service.js';
+import { SellerStandingStore } from './seller-standing-store.js';
+
+export { MarketplaceInvokeError, type MarketplaceDeliveryState } from './buyer-transport.js';
 
 export class MarketplaceNotSubscribedError extends Error {
   constructor() {
@@ -91,53 +94,6 @@ export class MarketplaceRouteError extends Error {
   }
 }
 
-/**
- * What is KNOWN about delivery when an invoke fails — it decides how the
- * meter reservation resolves:
- *  - `not-served`: the seller provably did not serve (definitive non-delivery
- *    or an explicit refusal errorCode) → void immediately.
- *  - `served`: the seller responded ok (it holds a claimable receipt) but the
- *    result/receipt could not be trusted → settle pessimistically at the
- *    reserved worst case.
- *  - `ambiguous`: the request may or may not have reached the seller
- *    (timeout mid-flight) → hold the reservation until the authorization
- *    expiry passes, then void.
- */
-export type MarketplaceDeliveryState = 'not-served' | 'served' | 'ambiguous';
-
-/** The selected seller failed the call (transport, errorCode, or bad receipt). */
-export class MarketplaceInvokeError extends Error {
-  constructor(
-    readonly code: string,
-    detail: string,
-    readonly delivery: MarketplaceDeliveryState = 'not-served',
-  ) {
-    super(`marketplace: invoke failed (${code}): ${detail}`);
-    this.name = 'MarketplaceInvokeError';
-  }
-}
-
-/**
- * Transport errors that PROVE the request never reached the seller (dial /
- * address-resolution failures happen before any bytes go out). Anything else
- * — timeouts, stream resets, unknown faults — is ambiguous: the seller may
- * have received, served and enqueued a claim while the response was lost.
- */
-const DEFINITE_NON_DELIVERY_PATTERNS = [
-  'no valid addresses',
-  'all multiaddr dials failed',
-  'no_reservation',
-  'econnrefused',
-  'protocol selection failed',
-  'no route to', // in-process test router double
-  'no handler for', // remote never registered the marketplace protocols
-];
-
-function isDefinitelyUndelivered(message: string): boolean {
-  const lower = message.toLowerCase();
-  return DEFINITE_NON_DELIVERY_PATTERNS.some((needle) => lower.includes(needle));
-}
-
 export interface MarketplaceBuyerDeps {
   messenger: MarketplaceMessenger;
   chain: ChainAdapter;
@@ -147,19 +103,13 @@ export interface MarketplaceBuyerDeps {
   /**
    * Idempotently (re)subscribe this node to the `marketplace` context graph so
    * SWM-shared offer KAs sync into the local store the offer source queries.
-   * Invoked before every discovery: a subscription that could not install at
-   * startup, or a CG a seller creates only later, converges on the next call.
+   * Invoked before every discovery.
    */
   ensureOfferSubscription?: () => void;
   /**
    * Fire-and-forget refresh nudge, invoked after EVERY discovery with whether
-   * it found no offers: the node reconciles the marketplace CG from the chain
-   * now (so a confirmed offer update reaches the next discovery), and an
-   * empty discovery also backfills from peers — the periodic sync reconciler
-   * treats recently-synced peers as fresh, so a node whose first marketplace
-   * sync raced the CG's authority bootstrap would otherwise stay empty until
-   * the staleness window expires. The implementation throttles itself and
-   * contains its own failures.
+   * it found no offers (chain reconcile; an empty discovery also backfills
+   * from peers). The implementation throttles itself and contains its own failures.
    */
   requestOfferBackfill?: (empty: boolean) => void;
   log: MarketplaceLogger;
@@ -168,7 +118,10 @@ export interface MarketplaceBuyerDeps {
    * ephemeral in-memory key with a warning; fine for tests, not for nodes.
    */
   sessionKeyPath?: string;
-  /** Injectable unix-seconds clock (authorization expiry + offer staleness). */
+  /** Where the recount standing persists (0600); omitted → in memory only. */
+  standingPath?: string;
+  recountPolicy?: Partial<RecountPolicy>;
+  /** Injectable unix-seconds clock (authorization expiry + offer staleness + standing). */
   nowSeconds?: () => number;
   /** Authorization validity window. Default 600s. */
   authTtlSeconds?: number;
@@ -184,15 +137,31 @@ export interface MarketplaceSubscribeResult {
   tx: TxResult;
 }
 
-export interface MarketplaceInvokeResult {
-  /** Executor output parsed from the result JSON bytes. */
-  result: unknown;
-  resultBytes: Uint8Array;
-  receipt: QueryInferenceReceipt;
-  authorization: BoundedAuthorization;
-  seller: { peerId: string; identityId: bigint; address: string };
-  servedUnits: bigint;
-  costWei: bigint;
+export interface MarketplaceInvokeResult extends MarketplaceServedCall {
+  /** The buyer's recount of this delivery (local; never changes settlement). */
+  recount: RecountVerdict;
+}
+
+/** One routed call: what to route, how to size and build the payload per offer, and the post-receipt hooks. */
+export interface MarketplaceRoutedInvoke {
+  serviceType: MarketplaceServiceType;
+  modelId?: string;
+  /** The grant for every offer (ignored when `maxUnitsFor` is set). */
+  maxUnits: bigint;
+  maxUnitsFor?: (offer: MarketplaceOffer) => bigint;
+  requireApiShape?: ChatApiShape;
+  requiresTools?: boolean;
+  /** Offers already discovered by the caller (skips a second discovery). */
+  offers?: MarketplaceOffer[];
+  payloadFor: (offer: MarketplaceOffer, maxUnits: bigint) => Record<string, unknown>;
+  serveTimeoutMs?: number;
+  /** Authorization TTL floor (seconds) — the chat path outlives a long upstream call. */
+  minAuthTtlSeconds?: number;
+  spendGuard?: MarketplaceSpendGuard;
+  /** Recount of a verified delivery (recorded into the seller's standing). */
+  recount: (offer: MarketplaceOffer, served: MarketplaceServedCall) => RecountVerdict;
+  /** Post-receipt validation; a throw is a charged failure settled at the receipt value. */
+  validate?: (offer: MarketplaceOffer, invoke: MarketplaceInvokeResult) => void;
 }
 
 const DEFAULT_AUTH_TTL_SECONDS = 600;
@@ -212,18 +181,34 @@ interface DeferredVoid {
   expirySeconds: bigint;
 }
 
-/** Bound on cached receipt-signer → identityId resolutions. */
-const SIGNER_IDENTITY_CACHE_BOUND = 1_024;
 const MAX_TIMEOUT_MS = 2_147_483_647;
+const NOT_METERED = (servedUnits: bigint): RecountVerdict => ({ verdict: 'unverifiable', reason: 'not-metered', servedUnits });
+
+/** A spend guard's single settlement, swallowing (and logging) its own faults. */
+function guardSettler(guard: MarketplaceSpendGuard | undefined, log: MarketplaceLogger, callId: () => string) {
+  let settled = false;
+  return {
+    get settled() { return settled || !guard; },
+    settle(costWei: bigint, servedUnits: bigint, delivery: MarketplaceDeliveryState): void {
+      if (!guard || settled) return;
+      settled = true;
+      try {
+        guard.settle({ costWei, servedUnits, delivery });
+      } catch (error) {
+        log.warn(`[marketplace] spend guard settle failed for call ${callId()}: ${(error as Error)?.message ?? String(error)}`);
+      }
+    },
+  };
+}
 
 export class MarketplaceBuyerService {
   readonly #deps: MarketplaceBuyerDeps;
   readonly #nowSeconds: () => number;
   readonly #chainClock: ChainClock;
+  readonly #transport: BuyerTransport;
+  readonly #standing: SellerStandingStore;
   /** Keyed by seller identityId (decimal string) — see the header note. */
   readonly #deliveryHistory = new Map<string, DeliveryStats>();
-  /** Receipt signer address (lowercase) → resolved on-chain identityId. */
-  readonly #signerIdentityCache = new Map<string, bigint>();
   /** Reservations surviving ambiguous failures until their expiry passes. */
   #deferredVoids: DeferredVoid[] = [];
   #sessionKey: SessionKeyRecord | undefined;
@@ -237,6 +222,13 @@ export class MarketplaceBuyerService {
       localNowSeconds: () => this.#nowSeconds(),
       warn: (message) => deps.log.warn(message),
     });
+    this.#transport = new BuyerTransport({
+      messenger: deps.messenger,
+      chain: deps.chain,
+      log: deps.log,
+      ...(deps.quoteTimeoutMs !== undefined ? { quoteTimeoutMs: deps.quoteTimeoutMs } : {}),
+    });
+    this.#standing = new SellerStandingStore(deps.standingPath, deps.recountPolicy, deps.log);
   }
 
   /**
@@ -314,6 +306,23 @@ export class MarketplaceBuyerService {
     return offers;
   }
 
+  /** The active plan (epoch + policy), or `MarketplaceNotSubscribedError`. */
+  requirePlan(): { epoch: bigint; policy: PlanPolicy } {
+    const plan = this.#plan;
+    if (!plan) throw new MarketplaceNotSubscribedError();
+    return { epoch: plan.epoch, policy: plan.policy };
+  }
+
+  activePolicy(): PlanPolicy | undefined {
+    return this.#plan?.policy;
+  }
+
+  /**
+   * The generic invoke (`{ prompt }` / `{ sparql }` payloads at a fixed
+   * `maxUnits`). Never routes to an `apiShape` offer (symmetric api-shape).
+   * Query deliveries from schedule-pinned offers are recounted; everything
+   * else recounts `unverifiable` / `not-metered`.
+   */
   async invoke(opts: {
     serviceType: MarketplaceServiceType;
     modelId?: string;
@@ -321,65 +330,190 @@ export class MarketplaceBuyerService {
     payload: Record<string, unknown>;
     maxUnits: bigint;
   }): Promise<MarketplaceInvokeResult> {
+    this.requirePlan();
+    let modelId: string | undefined;
+    if (opts.modelId !== undefined) {
+      modelId = canonicalModelId(opts.modelId);
+      if (modelId === undefined) throw new MarketplaceRequestError('invalid_model', 'modelId is not a valid model id', 'modelId');
+    }
+    const sparql = opts.serviceType === 'query' && typeof opts.payload.sparql === 'string' ? opts.payload.sparql : undefined;
+    if (sparql !== undefined) {
+      try {
+        assertQueryWithinLimit(sparql);
+      } catch (error) {
+        throw new MarketplaceRequestError('invalid_sparql', (error as Error).message, 'sparql');
+      }
+    }
+    return this.invokeRouted({
+      serviceType: opts.serviceType,
+      ...(modelId !== undefined ? { modelId } : {}),
+      maxUnits: opts.maxUnits,
+      payloadFor: () => opts.payload,
+      recount: (offer, served) => (sparql !== undefined
+        ? recountQuery({ sparql, offerQueryCost: offer.queryCost, result: served.result, receiptServedUnits: served.servedUnits })
+        : NOT_METERED(served.servedUnits)),
+      validate: (offer, invoke) => {
+        if (offer.queryCost && invoke.recount.reason === 'malformed-result') {
+          throw new MarketplaceInvokeError('MALFORMED_RESULT', 'the query result does not conform to sparql-result/v1', 'served');
+        }
+      },
+    });
+  }
+
+  /** The invoke pipeline (see the module comment for the settlement rules). */
+  async invokeRouted(spec: MarketplaceRoutedInvoke): Promise<MarketplaceInvokeResult> {
     const plan = this.#plan;
     if (!plan) throw new MarketplaceNotSubscribedError();
     this.releaseExpiredReservations();
     const sessionKey = this.ensureSessionKey();
     const nowSeconds = this.#nowSeconds();
+    const standings = this.#standing.standings(nowSeconds);
 
-    const offers = await this.discoverOffers();
-    const quotes = await this.#probeQuotes(offers, opts.serviceType, opts.modelId, nowSeconds);
+    const offers = spec.offers ?? await this.discoverOffers();
+    const quotes = await this.#transport.probeQuotes(
+      offers,
+      (offer) => this.#worthProbing(offer, spec, plan.policy, standings, nowSeconds),
+      this.#deps.maxQuoteProbes ?? DEFAULT_MAX_QUOTE_PROBES,
+    );
     const decision = selectRoute(offers, quotes, plan.policy, plan.meter.snapshot(), {
-      serviceType: opts.serviceType,
-      modelId: opts.modelId,
-      maxUnits: opts.maxUnits,
+      serviceType: spec.serviceType,
+      ...(spec.modelId !== undefined ? { modelId: spec.modelId } : {}),
+      maxUnits: spec.maxUnits,
       nowSeconds,
       deliveryHistory: this.#deliveryHistoryByPeer(offers),
+      ...(spec.maxUnitsFor ? { maxUnitsFor: spec.maxUnitsFor } : {}),
+      ...(spec.requireApiShape !== undefined ? { requireApiShape: spec.requireApiShape } : {}),
+      ...(spec.requiresTools !== undefined ? { requiresTools: spec.requiresTools } : {}),
+      sellerStanding: standings,
     });
     if (!decision.ok) throw new MarketplaceRouteError(decision.reason, decision.rejections);
     const { offer } = decision;
 
-    const chainId = await this.#deps.chain.getEvmChainId();
-    const marketplaceAddress = await this.#deps.chain.marketplaceGetAddress?.();
-    if (!marketplaceAddress) {
-      throw new MarketplaceInvokeError('NO_MARKETPLACE_ADDRESS', 'chain adapter reports no Marketplace contract');
-    }
+    // The payload is built before admission: a fault here leaves nothing to undo.
+    const payload = spec.payloadFor(offer, decision.maxUnits);
+    // Spend guard admission: errors propagate UNCHANGED, nothing is reserved.
+    spec.spendGuard?.admit(decision.worstCaseCostWei);
     const callId = ethers.hexlify(randomBytes(32));
-    // Expiry is CHAIN time: the contract checks it against block.timestamp,
-    // and devnet/drifted chain time can sit far from this host's wall clock.
-    const chainNowSeconds = await this.#chainClock.nowSeconds();
-    const authorization = await signAuthorization(sessionKey, {
-      chainId,
-      marketplaceAddress,
-      buyer: await this.#deps.resolveBuyerAddress(),
-      sellerIdentityId: offer.sellerIdentityId,
-      offeringId: offer.offeringId,
-      callId,
-      epoch: plan.epoch,
-      maxUnits: opts.maxUnits,
-      askPerUnitWei: decision.askPerUnitWei,
-      expiry: chainNowSeconds + BigInt(this.#deps.authTtlSeconds ?? DEFAULT_AUTH_TTL_SECONDS),
-    });
-
+    const guard = guardSettler(spec.spendGuard, this.#deps.log, () => callId);
     try {
-      plan.meter.reserve(decision.bucketIndex, callId, decision.worstCaseCostWei);
-    } catch (error) {
-      if (error instanceof SoftCeilingExceededError) {
-        // A concurrent call reserved between this call's route check and now.
-        throw new MarketplaceRouteError('no-eligible-offer', [{ offerId: offer.offerId, reason: 'soft-ceiling' }]);
+      try {
+        plan.meter.reserve(decision.bucketIndex, callId, decision.worstCaseCostWei);
+      } catch (error) {
+        guard.settle(0n, 0n, 'not-served');
+        if (error instanceof SoftCeilingExceededError) {
+          // A concurrent call reserved between this call's route check and now.
+          throw new MarketplaceRouteError('no-eligible-offer', [{ offerId: offer.offerId, reason: 'soft-ceiling' }]);
+        }
+        throw error;
       }
-      throw error;
-    }
-    try {
-      const invokeResult = await this.#serve(offer, authorization, opts.payload);
-      plan.meter.settle(callId, invokeResult.costWei);
+
+      let authorization;
+      try {
+        const chainId = await this.#deps.chain.getEvmChainId();
+        const marketplaceAddress = await this.#deps.chain.marketplaceGetAddress?.();
+        if (!marketplaceAddress) {
+          throw new MarketplaceInvokeError('NO_MARKETPLACE_ADDRESS', 'chain adapter reports no Marketplace contract');
+        }
+        // Expiry is CHAIN time: the contract checks it against block.timestamp.
+        const chainNowSeconds = await this.#chainClock.nowSeconds();
+        const ttl = Math.max(this.#deps.authTtlSeconds ?? DEFAULT_AUTH_TTL_SECONDS, spec.minAuthTtlSeconds ?? 0);
+        authorization = await signAuthorization(sessionKey, {
+          chainId,
+          marketplaceAddress,
+          buyer: await this.#deps.resolveBuyerAddress(),
+          sellerIdentityId: offer.sellerIdentityId,
+          offeringId: offer.offeringId,
+          callId,
+          epoch: plan.epoch,
+          maxUnits: decision.maxUnits,
+          askPerUnitWei: decision.askPerUnitWei,
+          expiry: chainNowSeconds + BigInt(ttl),
+        });
+      } catch (error) {
+        plan.meter.voidReservation(callId);
+        guard.settle(0n, 0n, 'not-served');
+        throw error;
+      }
+
+      let served: MarketplaceServedCall;
+      try {
+        served = await this.#transport.serve(offer, authorization, payload, spec.serveTimeoutMs ?? this.#deps.serveTimeoutMs);
+      } catch (error) {
+        const delivery: MarketplaceDeliveryState = error instanceof MarketplaceInvokeError ? error.delivery : 'ambiguous';
+        const code = error instanceof MarketplaceInvokeError ? error.code : undefined;
+        if (!code || !MARKETPLACE_CALLER_FAULT_CODES.has(code)) this.#recordDelivery(offer.sellerIdentityId, false);
+        this.#resolveFailedReservation(plan.meter, callId, decision.worstCaseCostWei, authorization.expiry, error);
+        guard.settle(delivery === 'not-served' ? 0n : decision.worstCaseCostWei, 0n, delivery);
+        throw error;
+      }
+
+      // The receipt is verified: the actual charge is known from here on.
+      plan.meter.settle(callId, served.costWei);
+      const invoke: MarketplaceInvokeResult = { ...served, recount: this.#recount(offer, served, spec) };
+      try {
+        spec.validate?.(offer, invoke);
+      } catch (error) {
+        this.#recordDelivery(offer.sellerIdentityId, false);
+        guard.settle(served.costWei, served.servedUnits, 'served');
+        throw error;
+      }
       this.#recordDelivery(offer.sellerIdentityId, true);
-      return invokeResult;
-    } catch (error) {
-      this.#recordDelivery(offer.sellerIdentityId, false);
-      this.#resolveFailedReservation(plan.meter, callId, decision.worstCaseCostWei, authorization.expiry, error);
-      throw error;
+      guard.settle(served.costWei, served.servedUnits, 'served');
+      return invoke;
+    } finally {
+      // Unexpected faults: hold the worst case against the guard (conservative).
+      if (!guard.settled) guard.settle(decision.worstCaseCostWei, 0n, 'ambiguous');
     }
+  }
+
+  /** Static router checks before a quote probe is spent (the same predicates `selectRoute` applies). */
+  #worthProbing(
+    offer: MarketplaceOffer,
+    spec: MarketplaceRoutedInvoke,
+    policy: PlanPolicy,
+    standings: ReadonlyMap<string, SellerStanding>,
+    nowSeconds: number,
+  ): boolean {
+    if (offer.serviceType !== spec.serviceType) return false;
+    if (spec.modelId !== undefined && offer.modelId !== spec.modelId) return false;
+    if (offer.apiShape !== spec.requireApiShape) return false;
+    if (spec.requiresTools && offer.toolTransport !== 'native' && offer.toolTransport !== 'prompt') return false;
+    if (offer.expiresAt !== undefined && offer.expiresAt <= nowSeconds) return false;
+    if (offer.access === 'restricted' && !policy.sellerAllow?.includes(offer.sellerIdentityId)) return false;
+    if (policy.sellerDeny?.includes(offer.sellerIdentityId)) return false;
+    if (policy.sellerAllow && !policy.sellerAllow.includes(offer.sellerIdentityId)) return false;
+    return standings.get(offer.sellerIdentityId.toString()) !== 'denied';
+  }
+
+  #recount(offer: MarketplaceOffer, served: MarketplaceServedCall, spec: MarketplaceRoutedInvoke): RecountVerdict {
+    let verdict: RecountVerdict;
+    try {
+      verdict = spec.recount(offer, served);
+    } catch (error) {
+      this.#deps.log.warn(`[marketplace] recount failed for seller ${offer.sellerIdentityId}: ${(error as Error).message}`);
+      verdict = NOT_METERED(served.servedUnits);
+    }
+    const standing = this.#standing.record(offer.sellerIdentityId, verdict, this.#nowSeconds());
+    if (verdict.verdict === 'mismatch') {
+      this.#deps.log.warn(
+        `[marketplace] recount mismatch for seller ${offer.sellerIdentityId}: receipt ${verdict.servedUnits} units, `
+        + `recount ${verdict.recountUnits ?? 'n/a'} (${verdict.reason ?? 'unknown'}); standing now ${standing}`,
+      );
+    }
+    return verdict;
+  }
+
+  /** Operator override: forget a seller's recount history. */
+  resetSellerStanding(sellerIdentityId: bigint): boolean {
+    return this.#standing.reset(sellerIdentityId);
+  }
+
+  recountSnapshot(): Array<SellerRecountRecord & { standing: SellerStanding }> {
+    return this.#standing.snapshot(this.#nowSeconds());
+  }
+
+  recountSummary(): { sellers: number; deprioritized: number; denied: number } {
+    return this.#standing.summary(this.#nowSeconds());
   }
 
   /**
@@ -444,221 +578,6 @@ export class MarketplaceBuyerService {
     return released;
   }
 
-  async #probeQuotes(
-    offers: readonly MarketplaceOffer[],
-    serviceType: MarketplaceServiceType,
-    modelId: string | undefined,
-    nowSeconds: number,
-  ): Promise<MarketplaceQuote[]> {
-    const probes: Array<{ offer: MarketplaceOffer }> = [];
-    const seen = new Set<string>();
-    for (const offer of offers) {
-      if (offer.serviceType !== serviceType) continue;
-      if (modelId !== undefined && offer.modelId !== modelId) continue;
-      if (offer.expiresAt !== undefined && offer.expiresAt <= nowSeconds) continue;
-      const key = `${offer.sellerPeerId}:${offer.offeringId.toLowerCase()}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      probes.push({ offer });
-      if (probes.length >= (this.#deps.maxQuoteProbes ?? DEFAULT_MAX_QUOTE_PROBES)) break;
-    }
-    const quotes = await Promise.all(probes.map(async ({ offer }) => this.#probeQuote(offer)));
-    return quotes.filter((quote): quote is MarketplaceQuote => quote !== undefined);
-  }
-
-  async #probeQuote(offer: MarketplaceOffer): Promise<MarketplaceQuote | undefined> {
-    try {
-      // Request-owned: a quote probe must never park in the durable outbox
-      // and get retried hours later against a long-gone routing decision.
-      const sent = await this.#deps.messenger.sendRequestOwned(
-        offer.sellerPeerId,
-        PROTOCOL_MARKETPLACE_QUOTE,
-        encodeMarketplaceQuoteRequest({ offeringId: ethers.getBytes(offer.offeringId) }),
-        this.#deps.quoteTimeoutMs !== undefined ? { timeoutMs: this.#deps.quoteTimeoutMs } : undefined,
-      );
-      if (!sent.delivered) return undefined;
-      const response = decodeMarketplaceQuoteResponse(sent.response);
-      if (!response.available || !response.askPerUnitWei) {
-        this.#deps.log.info(
-          `[marketplace] quote declined by ${offer.sellerPeerId} for ${offer.offeringId}: ${response.declineCode ?? 'unavailable'}`,
-        );
-        return {
-          offeringId: offer.offeringId,
-          sellerIdentityId: offer.sellerIdentityId,
-          available: false,
-          askPerUnitWei: 0n,
-        };
-      }
-      const capacity = response.capacityUnitsPerMin === undefined
-        ? undefined
-        : BigInt(response.capacityUnitsPerMin.toString());
-      return {
-        offeringId: offer.offeringId,
-        sellerIdentityId: offer.sellerIdentityId,
-        available: true,
-        askPerUnitWei: BigInt(response.askPerUnitWei),
-        ...(capacity !== undefined && capacity > 0n ? { capacityUnitsPerMin: capacity } : {}),
-      };
-    } catch (error) {
-      this.#deps.log.warn(
-        `[marketplace] quote probe to ${offer.sellerPeerId} failed: ${error instanceof Error ? error.message : String(error)}`,
-      );
-      return undefined;
-    }
-  }
-
-  async #serve(
-    offer: MarketplaceOffer,
-    authorization: BoundedAuthorization,
-    payload: Record<string, unknown>,
-  ): Promise<MarketplaceInvokeResult> {
-    const request = encodeMarketplaceServeRequest({
-      version: MARKETPLACE_SERVE_VERSION,
-      buyer: ethers.getBytes(authorization.buyer),
-      sellerIdentityId: authorization.sellerIdentityId.toString(),
-      offeringId: ethers.getBytes(authorization.offeringId),
-      callId: ethers.getBytes(authorization.callId),
-      epoch: authorization.epoch,
-      maxUnits: authorization.maxUnits,
-      askPerUnitWei: authorization.askPerUnitWei.toString(),
-      expiry: authorization.expiry,
-      authSignature: ethers.getBytes(authorization.signature),
-      payloadKind: offer.serviceType === 'query' ? 'query' : 'inference',
-      payload: new TextEncoder().encode(JSON.stringify(payload)),
-    });
-    // Request-owned send: it either completes on the wire or throws — the
-    // durable outbox must never retry a serve in the background after the
-    // meter already resolved this call (the seller would serve + claim with
-    // nothing reserved). A throw that proves the dial never reached the
-    // seller voids immediately; everything else stays ambiguous.
-    let sent;
-    try {
-      sent = await this.#deps.messenger.sendRequestOwned(
-        offer.sellerPeerId,
-        PROTOCOL_MARKETPLACE_SERVE,
-        request,
-        this.#deps.serveTimeoutMs !== undefined ? { timeoutMs: this.#deps.serveTimeoutMs } : undefined,
-      );
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (isDefinitelyUndelivered(message)) {
-        throw new MarketplaceInvokeError('NOT_DELIVERED', message, 'not-served');
-      }
-      throw new MarketplaceInvokeError('DELIVERY_UNKNOWN', `serve transport failed mid-flight: ${message}`, 'ambiguous');
-    }
-    if (!sent.delivered) {
-      // Request-owned sends never queue; this is the in-flight dedup shape —
-      // another attempt owns the wire, so the outcome is unknown here.
-      throw new MarketplaceInvokeError('DELIVERY_UNKNOWN', sent.error ?? 'serve request state unknown', 'ambiguous');
-    }
-    const response = decodeMarketplaceServeResponse(sent.response);
-    if (!response.ok) {
-      // An explicit refusal: the seller rejected BEFORE serving — no claim exists.
-      throw new MarketplaceInvokeError(
-        response.errorCode ?? 'SELLER_ERROR', `seller ${offer.sellerPeerId} refused`, 'not-served',
-      );
-    }
-    // From here on the seller HAS served (ok response): failures settle
-    // pessimistically, because a claim for this authorization exists.
-    if (
-      !response.resultCommitment || response.resultCommitment.byteLength !== 32
-      || !response.sellerSignature || response.sellerSignature.byteLength !== 65
-      || !response.authDigest || response.authDigest.byteLength !== 32
-      || !response.receiptValueWei || !response.result
-    ) {
-      throw new MarketplaceInvokeError('MALFORMED_RECEIPT', 'serve response is missing receipt fields', 'served');
-    }
-    const receipt: QueryInferenceReceipt = {
-      authDigest: ethers.hexlify(response.authDigest),
-      servedUnits: BigInt((response.servedUnits ?? 0).toString()),
-      receiptValueWei: BigInt(response.receiptValueWei),
-      resultCommitment: ethers.hexlify(response.resultCommitment),
-      sellerSig: ethers.hexlify(response.sellerSignature),
-    };
-    if (receipt.authDigest !== authorization.authDigest) {
-      throw new MarketplaceInvokeError('MALFORMED_RECEIPT', 'receipt settles a different authorization', 'served');
-    }
-    // Recover the receipt signer FIRST, then verify everything against the
-    // recovered wallet and resolve its on-chain identity. The offer's
-    // RDF-published sellerAddress is unauthenticated data — a spoofed offer
-    // must not decide which wallet a receipt verifies against.
-    let signerAddress: string;
-    try {
-      signerAddress = eip191RecoverDigest(computeReceiptDigest(receipt), receipt.sellerSig);
-    } catch (error) {
-      throw new MarketplaceInvokeError(
-        'BAD_RECEIPT', `sellerSig unrecoverable: ${error instanceof Error ? error.message : String(error)}`, 'served',
-      );
-    }
-    const verification = verifyReceiptAgainstAuthorization(receipt, authorization, {
-      sellerAddress: signerAddress,
-      resultBytes: response.result,
-    });
-    if (!verification.ok) {
-      throw new MarketplaceInvokeError('BAD_RECEIPT', verification.errors.join('; '), 'served');
-    }
-    const signerIdentityId = await this.#resolveSignerIdentity(signerAddress);
-    if (signerIdentityId !== authorization.sellerIdentityId) {
-      throw new MarketplaceInvokeError(
-        'BAD_RECEIPT',
-        `receipt signer ${signerAddress} resolves to identity ${signerIdentityId}, `
-        + `the authorization binds seller ${authorization.sellerIdentityId}`,
-        'served',
-      );
-    }
-    let result: unknown;
-    try {
-      result = JSON.parse(new TextDecoder().decode(response.result));
-    } catch {
-      throw new MarketplaceInvokeError('MALFORMED_RESULT', 'result bytes are not valid JSON', 'served');
-    }
-    return {
-      result,
-      resultBytes: response.result,
-      receipt,
-      authorization,
-      seller: {
-        peerId: offer.sellerPeerId,
-        identityId: authorization.sellerIdentityId,
-        // The RECOVERED, identity-verified signer — never the offer hint.
-        address: signerAddress,
-      },
-      servedUnits: receipt.servedUnits,
-      costWei: receipt.receiptValueWei,
-    };
-  }
-
-  /**
-   * Resolve the recovered receipt signer to its on-chain identityId
-   * (`IdentityStorage.getIdentityId`). Fails CLOSED: without a trustworthy
-   * resolution the receipt cannot be attributed to the authorized seller.
-   * The seller HAS served, so callers settle pessimistically on this error.
-   */
-  async #resolveSignerIdentity(signerAddress: string): Promise<bigint> {
-    const cacheKey = signerAddress.toLowerCase();
-    const cached = this.#signerIdentityCache.get(cacheKey);
-    if (cached !== undefined && cached > 0n) return cached;
-    if (typeof this.#deps.chain.getIdentityIdForAddress !== 'function') {
-      throw new MarketplaceInvokeError(
-        'UNVERIFIABLE_SELLER', 'chain adapter cannot resolve wallet identities', 'served',
-      );
-    }
-    let identityId: bigint;
-    try {
-      identityId = await this.#deps.chain.getIdentityIdForAddress(signerAddress);
-    } catch (error) {
-      throw new MarketplaceInvokeError(
-        'UNVERIFIABLE_SELLER',
-        `identity lookup for receipt signer ${signerAddress} failed: ${error instanceof Error ? error.message : String(error)}`,
-        'served',
-      );
-    }
-    if (identityId > 0n) {
-      rememberBounded(this.#signerIdentityCache, cacheKey, identityId, SIGNER_IDENTITY_CACHE_BOUND);
-    }
-    return identityId;
-  }
-
   /** History is KEYED by identityId; the router looks sellers up by peer id. */
   #deliveryHistoryByPeer(offers: readonly MarketplaceOffer[]): Map<string, DeliveryStats> {
     const byPeer = new Map<string, DeliveryStats>();
@@ -675,6 +594,11 @@ export class MarketplaceBuyerService {
     if (success) stats.successes += 1;
     else stats.failures += 1;
     this.#deliveryHistory.set(key, stats);
+  }
+
+  /** Local delivery history by seller identityId (decimal). */
+  deliveryHistory(): Map<string, DeliveryStats> {
+    return new Map([...this.#deliveryHistory].map(([key, stats]) => [key, { ...stats }]));
   }
 
   /** The RFC's one-line meter: `used · remaining · resets`. */

@@ -9,16 +9,17 @@
  * entry point — the production (non-injected) offer source. A node without
  * the config block stays dormant.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Wallet } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
-import { offeringIdFor } from '@origintrail-official/dkg-marketplace';
+import { STUB_WORDS_DIGEST, offeringIdFor } from '@origintrail-official/dkg-marketplace';
 import {
   assertionLifecycleUri,
   contextGraphAssertionUri,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent } from '../src/dkg-agent.js';
+import type { MarketplaceConnectorConfig, MarketplaceOfferingConfig } from '../src/marketplace/config.js';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 
 const TRAC = 10n ** 18n;
@@ -129,6 +130,83 @@ describe('marketplace agent wiring', () => {
     const bucket = await chain.marketplaceGetBucket(wallet.address, 1n);
     expect(bucket.funded).toBe(2n * TRAC);
     expect(agent.marketplaceMeter().summary).toContain('remaining 2 TRAC');
+  });
+
+  it('holds a failing connector offering out of the served set, mounts all-or-nothing, and publishes the chat pin', async () => {
+    const wallet = Wallet.createRandom();
+    const chain = new MockChainAdapter('mock:31337', wallet.address);
+    chain.setMockACKSigner(wallet);
+    chain.seedIdentity(wallet.address, 7n);
+    const llm = { offeringLocalId: 'devnet-llm', serviceType: 'inference' as const, unit: 'token' as const, askPerUnitWei: 500_000_000_000n };
+    const chat = (connector: MarketplaceConnectorConfig, extra: Partial<MarketplaceOfferingConfig> = {}): MarketplaceOfferingConfig => ({
+      offeringLocalId: 'devnet-chat', serviceType: 'inference', unit: 'token', modelId: 'stub-chat',
+      askPerUnitWei: 500_000_000_000n, connector, metering: { tokenizer: { kind: 'stub-words-v1' } }, ...extra,
+    });
+    const agent = await DKGAgent.create({
+      name: 'MarketplaceChatSeller', listenHost: '127.0.0.1', listenPort: 0, nodeRole: 'core',
+      chainAdapter: chain, kaNumberAllocator: makeTestKaNumberAllocator(),
+      chainConfig: {
+        rpcUrl: 'http://127.0.0.1:1', hubAddress: '0x0000000000000000000000000000000000000001',
+        operationalKeys: [wallet.privateKey],
+      },
+      rfc64CatalogActivation: { enabled: false },
+      marketplace: {
+        enabled: true,
+        seller: {
+          offerings: [llm, chat({
+            kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:18080/v1', upstreamModel: 'stub-chat',
+            secretEnvFile: '/nonexistent/dkg-marketplace/llm-stub.env',
+          })],
+        },
+      },
+    });
+    agents.push(agent);
+    await agent.start();
+
+    // Boot mounts in the background: the connector offering is held `failed`, not served, not published.
+    await vi.waitFor(async () => {
+      expect((await agent.marketplaceConnectorStatus())[0]?.state).toBe('failed');
+    });
+    const [failed] = await agent.marketplaceConnectorStatus();
+    expect(failed).toMatchObject({
+      offeringLocalId: 'devnet-chat', kind: 'openai-compatible', modelId: 'stub-chat',
+      upstreamOrigin: 'http://127.0.0.1:18080', secretConfigured: true,
+      metering: { basis: 'pinned', tokenizerKind: 'stub-words-v1' },
+    });
+    expect(failed.detail).toContain('secretEnvFile');
+    expect((await agent.marketplaceStatus()).seller).toMatchObject({ offerings: 1, connectors: { mounted: 0, failed: 1, mounting: 0 } });
+    const published = await agent.marketplacePublishOfferings();
+    expect(published.assets.map((asset) => asset.offeringLocalId)).toEqual(['devnet-llm']);
+
+    // All-or-nothing: a set with an unmountable connector throws and the old set stays in force.
+    await expect(agent.marketplaceSetOfferings([llm, chat({
+      kind: 'codex-oauth', upstreamModel: 'gpt-5-codex', authFile: '/nonexistent/codex-auth.json', acknowledgeSubscriptionScope: true,
+    }, { metering: { tokenizer: { kind: 'stub-words-v1' } } })])).rejects.toMatchObject({
+      name: 'MarketplaceConnectorMountError', offeringLocalId: 'devnet-chat',
+    });
+    expect((await agent.marketplaceStatus()).seller?.offerings).toBe(1);
+
+    // A mountable connector (no secret file → no Authorization header; no upstream call at mount).
+    const buyer = '0x00000000000000000000000000000000000000Aa';
+    const set = await agent.marketplaceSetOfferings([llm, chat(
+      { kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:18080/v1', upstreamModel: 'stub-chat' },
+      { allowedBuyers: [buyer], model: { displayName: 'Stub Chat', contextLength: 32_768n } },
+    )]);
+    expect(set.assets?.map((asset) => [asset.offeringLocalId, asset.outcome])).toEqual([
+      ['devnet-llm', 'unchanged'], ['devnet-chat', 'published'],
+    ]);
+    const [mounted] = await agent.marketplaceConnectorStatus();
+    expect(mounted).toMatchObject({ state: 'mounted', secretConfigured: false, metering: { basis: 'pinned', tokenizerDigest: STUB_WORDS_DIGEST } });
+    const offers = await agent.marketplaceDiscoverOffers();
+    const offer = offers.find((o) => o.offeringId === offeringIdFor('devnet-chat'));
+    expect(offer).toMatchObject({
+      modelId: 'stub-chat', apiShape: 'openai-chat/v1', toolTransport: 'native', access: 'restricted',
+      metering: { basis: 'pinned', tokenizer: { kind: 'stub-words-v1', digest: STUB_WORDS_DIGEST } },
+      model: { provenanceClass: 'upstream-claimed', upstreamModel: 'stub-chat', displayName: 'Stub Chat', contextLength: 32_768n },
+    });
+    // The allow list itself is never published.
+    expect(JSON.stringify(offer, (_k, v) => (typeof v === 'bigint' ? v.toString() : v)).toLowerCase()).not.toContain(buyer.toLowerCase());
+    expect(agent.marketplaceMeter().recount).toEqual([]);
   });
 
   it('stays dormant without the config block', async () => {

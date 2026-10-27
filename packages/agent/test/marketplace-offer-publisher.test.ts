@@ -8,9 +8,19 @@
  * and offering), and the executors' deterministic unit schedules with their
  * fail-closed `maxUnits` behaviour.
  */
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { MARKETPLACE_CONTEXT_GRAPH } from '@origintrail-official/dkg-core';
-import { countTokens, offeringIdFor, queryUnits } from '@origintrail-official/dkg-marketplace';
+import {
+  CHAT_TEMPLATE_OPENAI_COUNT_V1_DIGEST,
+  QUERY_COST_SCHEDULE_V1_DIGEST,
+  STUB_WORDS_DIGEST,
+  countTokens,
+  offeringIdFor,
+  queryAdmissionUnits,
+} from '@origintrail-official/dkg-marketplace';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   MKT_NAMESPACE,
@@ -28,6 +38,8 @@ import {
   createStubInferenceExecutor,
 } from '../src/marketplace/executors.js';
 import type { MarketplaceSellerOffering } from '../src/marketplace/seller-service.js';
+import { mountConnectorOffering, resolveStaticOffering } from '../src/marketplace/seller-offerings.js';
+import type { MarketplaceOfferingConfig } from '../src/marketplace/config.js';
 
 const SELLER = {
   sellerIdentityId: 7n,
@@ -81,6 +93,29 @@ function objectOf(quads: readonly Quad[], predicate: string): string | undefined
 
 const kaGraph = (layer: '_verifiable_memory' | '_shared_memory', author: string, number = 1) =>
   `did:dkg:context-graph:${MARKETPLACE_CONTEXT_GRAPH}/${layer}/${author.toLowerCase()}/${number}`;
+
+/** Legacy row keys → offer predicates (the tests author rows; discovery reads `?g ?offer ?p ?o` triples). */
+const ROW_PREDICATE: Record<string, string> = {
+  offeringId: `${MKT_NAMESPACE}offeringId`,
+  serviceType: `${MKT_NAMESPACE}serviceType`,
+  unit: `${MKT_NAMESPACE}unit`,
+  ask: `${MKT_NAMESPACE}askPerUnitWei`,
+  sellerIdentityId: `${MKT_NAMESPACE}sellerIdentityId`,
+  sellerPeerId: `${MKT_NAMESPACE}sellerPeerId`,
+  sellerAddress: `${MKT_NAMESPACE}sellerAddress`,
+  revision: `${MKT_NAMESPACE}revision`,
+  modelId: `${MKT_NAMESPACE}modelId`,
+  capacity: `${MKT_NAMESPACE}capacityUnitsPerMin`,
+  expiresAt: `${MKT_NAMESPACE}expiresAt`,
+};
+
+/** One offer row as the triple-scan bindings the discovery query returns. */
+function triplesOf(row: Record<string, string>): Array<Record<string, string>> {
+  return Object.entries(row)
+    .filter(([key, value]) => key !== 'g' && key !== 'offer' && value !== '')
+    .map(([key, value]) => ({ g: row.g, offer: row.offer, p: ROW_PREDICATE[key] ?? key, o: value }));
+}
+const triples = (...rows: Array<Record<string, string>>) => rows.flatMap(triplesOf);
 
 describe('marketplace offer publication', () => {
   it('publishes one mkt: vocabulary offer KA per offering, anchoring the CG first', async () => {
@@ -197,7 +232,7 @@ describe('marketplace offer discovery', () => {
     const source = createContextGraphOfferSource({
       query: async (sparql, options) => {
         seen.push({ sparql, options });
-        return { type: 'bindings', bindings: rows };
+        return { type: 'bindings', bindings: triples(...rows) };
       },
     });
     const offers = await source.discoverOffers();
@@ -206,6 +241,8 @@ describe('marketplace offer discovery', () => {
     expect(seen[0].options).toEqual({ contextGraphId: MARKETPLACE_CONTEXT_GRAPH, includeSharedMemory: true });
     expect(seen[0].sparql).toContain(MKT_NAMESPACE);
     expect(seen[0].sparql).toContain('GRAPH ?g');
+    // A triple scan: no per-predicate OPTIONAL fan-out, no truncating LIMIT.
+    expect(seen[0].sparql).not.toMatch(/OPTIONAL|LIMIT/);
     expect(offers).toHaveLength(1);
     expect(offers[0]).toEqual({
       offerId: marketplaceOfferSubject(SELLER.sellerPeerId, 'devnet-llm'),
@@ -223,7 +260,7 @@ describe('marketplace offer discovery', () => {
   });
 
   it('accepts an offer only from a Knowledge Asset authored by its sellerAddress', () => {
-    const offers = parseMarketplaceOfferBindings([
+    const offers = parseMarketplaceOfferBindings(triples(
       // A different author advertising this seller's offer (forged or shadowing).
       goodRow({ g: kaGraph('_verifiable_memory', OTHER_AUTHOR), ask: '"1"', revision: '"99"' }),
       // Legacy root-scoped shared-memory bucket: no author to check.
@@ -231,31 +268,31 @@ describe('marketplace offer discovery', () => {
       // Another graph entirely.
       goodRow({ g: `did:dkg:context-graph:elsewhere/_verifiable_memory/${SELLER.sellerAddress}/1`, ask: '"3"' }),
       // No sellerAddress: nothing to bind the author to.
-      goodRow({ sellerAddress: '', ask: '"4"' }),
+      goodRow({ g: kaGraph('_verifiable_memory', SELLER.sellerAddress, 2), sellerAddress: '', ask: '"4"' }),
       goodRow({ g: kaGraph('_verifiable_memory', SELLER.sellerAddress.toUpperCase().replace('0X', '0x')) }),
-    ]);
+    ));
     expect(offers).toHaveLength(1);
     expect(offers[0].askPerUnitWei).toBe(500_000_000_000n);
   });
 
   it('keeps only the newest revision per (seller, offering) — no stale ask while an update is in flight', () => {
-    const updated = parseMarketplaceOfferBindings([
+    const updated = parseMarketplaceOfferBindings(triples(
       // Old version still in Verifiable Memory, new version already shared.
       goodRow({ ask: '"800000000000"', revision: '"10"' }),
       goodRow({ g: kaGraph('_shared_memory', SELLER.sellerAddress), ask: '"450000000000"', revision: '"11"' }),
-    ]);
+    ));
     expect(updated.map((offer) => offer.askPerUnitWei)).toEqual([450_000_000_000n]);
 
     // Byte-identical twin in both layers: one offer, Verifiable Memory wins the tie.
-    const twin = parseMarketplaceOfferBindings([
+    const twin = parseMarketplaceOfferBindings(triples(
       goodRow({ g: kaGraph('_shared_memory', SELLER.sellerAddress), ask: '"450000000000"', modelId: '"swm"' }),
       goodRow({ ask: '"450000000000"', modelId: '"vm"' }),
-    ]);
+    ));
     expect(twin).toHaveLength(1);
     expect(twin[0].modelId).toBe('vm');
 
     // Different sellers and different offerings stay separate.
-    const many = parseMarketplaceOfferBindings([
+    const many = parseMarketplaceOfferBindings(triples(
       goodRow(),
       goodRow({ offeringId: '"0xabc"', offer: 'urn:x:knowledge' }),
       goodRow({
@@ -265,7 +302,7 @@ describe('marketplace offer discovery', () => {
         sellerPeerId: '"12D3KooWOther"',
         offer: 'urn:x:other',
       }),
-    ]);
+    ));
     expect(many).toHaveLength(3);
   });
 
@@ -289,7 +326,7 @@ describe('marketplace offer discovery', () => {
     ];
     let step = 0;
     const source = createContextGraphOfferSource({
-      query: async () => ({ type: 'bindings', bindings: steps[step++] }),
+      query: async () => ({ type: 'bindings', bindings: triples(...steps[step++]) }),
     });
     const asks: bigint[][] = [];
     for (let i = 0; i < steps.length; i++) {
@@ -307,22 +344,8 @@ describe('marketplace offer discovery', () => {
 
   it('parses the quads it publishes (publish → bindings → offer round trip)', () => {
     const quads = buildMarketplaceOfferQuads(offering(), SELLER, 42n);
-    const row: Record<string, string> = { g: kaGraph('_verifiable_memory', SELLER.sellerAddress), offer: quads[0].subject };
-    const keyByPredicate: Record<string, string> = {
-      [`${MKT_NAMESPACE}offeringId`]: 'offeringId',
-      [`${MKT_NAMESPACE}serviceType`]: 'serviceType',
-      [`${MKT_NAMESPACE}unit`]: 'unit',
-      [`${MKT_NAMESPACE}askPerUnitWei`]: 'ask',
-      [`${MKT_NAMESPACE}sellerIdentityId`]: 'sellerIdentityId',
-      [`${MKT_NAMESPACE}sellerPeerId`]: 'sellerPeerId',
-      [`${MKT_NAMESPACE}sellerAddress`]: 'sellerAddress',
-      [`${MKT_NAMESPACE}revision`]: 'revision',
-    };
-    for (const quad of quads) {
-      const key = keyByPredicate[quad.predicate];
-      if (key) row[key] = quad.object;
-    }
-    const [offer] = parseMarketplaceOfferBindings([row]);
+    const g = kaGraph('_verifiable_memory', SELLER.sellerAddress);
+    const [offer] = parseMarketplaceOfferBindings(quads.map((q) => ({ g, offer: q.subject, p: q.predicate, o: q.object })));
     expect(offer.offeringId).toBe(offeringIdFor('devnet-llm'));
     expect(offer.askPerUnitWei).toBe(500_000_000_000n);
     expect(offer.sellerIdentityId).toBe(7n);
@@ -359,12 +382,25 @@ describe('marketplace executors', () => {
       .rejects.toMatchObject({ code: 'BAD_PAYLOAD' });
   });
 
-  it('query executor meters with the shared schedule and fails closed over maxUnits', async () => {
-    const sparql = 'SELECT * WHERE { ?s ?p ?o }';
-    const executor = createQueryExecutor(async () => ({ rowCount: 5, result: { rows: 5 } }));
+  it('query executor meters with the static cost schedule and fails closed before execution', async () => {
+    const sparql = 'SELECT ?s ?p ?o WHERE { ?s ?p ?o }';
+    const admission = queryAdmissionUnits(sparql);
+    expect(admission).toBe(13n); // GV-8: no LIMIT → +10 surcharge
+    const executor = createQueryExecutor(async () => ({ rowCount: 5, result: { bindings: [1, 2, 3, 4, 5] } }));
     const executed = await executor.execute(encode({ sparql }), { maxUnits: 100n });
-    expect(executed.unitsServed).toBe(queryUnits(sparql, 5));
-    expect(JSON.parse(new TextDecoder().decode(executed.resultBytes))).toEqual({ result: { rows: 5 } });
+    expect(executed.unitsServed).toBe(admission + 1n);
+    expect(JSON.parse(new TextDecoder().decode(executed.resultBytes))).toEqual({
+      schema: 'sparql-result/v1',
+      result: { bindings: [1, 2, 3, 4, 5] },
+      rowCount: 5,
+      metering: {
+        scheduleDigest: QUERY_COST_SCHEDULE_V1_DIGEST,
+        admissionUnits: 13,
+        deliveryUnits: 1,
+        servedUnits: 14,
+        rowCount: 5,
+      },
+    });
 
     await expect(executor.execute(encode({ sparql }), { maxUnits: 5n }))
       .rejects.toMatchObject({ code: 'OVER_MAX_UNITS' });
@@ -376,5 +412,132 @@ describe('marketplace executors', () => {
     expect(failure).toBeInstanceOf(MarketplaceExecutionError);
     expect((failure as MarketplaceExecutionError).code).toBe('EXECUTION_FAILED');
     expect((failure as MarketplaceExecutionError).message).toContain('store offline');
+  });
+});
+
+describe('marketplace offer extensions (connectors, metering pin, model facts, query schedule)', () => {
+  const g = kaGraph('_verifiable_memory', SELLER.sellerAddress);
+  const toTriples = (quads: readonly Quad[]) => quads.map((q) => ({ g, offer: q.subject, p: q.predicate, o: q.object }));
+
+  async function chatOffering(overrides: Partial<MarketplaceOfferingConfig> = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'dkg-mkt-offer-ext-'));
+    const secretEnvFile = join(dir, 'upstream.env');
+    writeFileSync(secretEnvFile, 'MY_UPSTREAM_KEY=sk-never-published\n', { mode: 0o600 });
+    const config: MarketplaceOfferingConfig = {
+      offeringLocalId: 'devnet-chat', serviceType: 'inference', unit: 'token', modelId: 'Stub-Chat',
+      askPerUnitWei: 500_000_000_000n,
+      connector: {
+        kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:18080/v1', upstreamModel: 'stub-chat',
+        secretEnvFile, secretEnvKey: 'MY_UPSTREAM_KEY', contextLength: 32_768n,
+      },
+      metering: { tokenizer: { kind: 'stub-words-v1' } },
+      model: { displayName: 'Stub "Chat"', quantization: 'q4' },
+      allowedBuyers: ['0x00000000000000000000000000000000000000Bb'],
+      ...overrides,
+    };
+    const deps = { log: { info: () => {}, warn: () => {} }, queryFn: async () => ({ result: null }) };
+    try {
+      const { offering: mounted } = await mountConnectorOffering(config, deps);
+      return { mounted, config, secretEnvFile };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('publishes the chat pin and model facts, never endpoints, paths, keys or the allow list — and parses them back', async () => {
+    const { mounted, secretEnvFile } = await chatOffering();
+    const quads = buildMarketplaceOfferQuads(mounted, SELLER, 7n);
+    const objects = quads.map((q) => q.object).join('\n');
+    for (const secret of ['127.0.0.1:18080', secretEnvFile, 'MY_UPSTREAM_KEY', 'sk-never-published', '0x00000000000000000000000000000000000000', 'http://']) {
+      expect(objects).not.toContain(secret);
+    }
+    expect(objectOf(quads, `${MKT_NAMESPACE}apiShape`)).toBe('"openai-chat/v1"');
+    expect(objectOf(quads, `${MKT_NAMESPACE}tokenizerDigest`)).toBe(`"${STUB_WORDS_DIGEST}"`);
+    expect(objectOf(quads, `${MKT_NAMESPACE}modelId`)).toBe('"stub-chat"');
+
+    const [offer] = parseMarketplaceOfferBindings(toTriples(quads));
+    expect(offer).toMatchObject({
+      modelId: 'stub-chat',
+      apiShape: 'openai-chat/v1',
+      toolTransport: 'native',
+      metering: {
+        basis: 'pinned',
+        tokenizer: { kind: 'stub-words-v1', digest: STUB_WORDS_DIGEST },
+        chatTemplate: { id: 'openai-chat-count/v1', digest: CHAT_TEMPLATE_OPENAI_COUNT_V1_DIGEST },
+      },
+      model: {
+        provenanceClass: 'upstream-claimed', upstreamModel: 'stub-chat', contextLength: 32_768n,
+        displayName: 'Stub "Chat"', quantization: 'q4',
+      },
+      access: 'restricted',
+    });
+    expect(offer).not.toHaveProperty('queryCost');
+    // Facts must round-trip exactly: control characters and backslashes are refused at mount.
+    await expect(chatOffering({ model: { displayName: 'bad\\name' } })).rejects.toMatchObject({ code: 'CONNECTOR_CONFIG' });
+  });
+
+  it('a local-query offering publishes the query cost schedule pin', () => {
+    const resolved = resolveStaticOffering(
+      { offeringLocalId: 'devnet-knowledge', serviceType: 'query', unit: 'query-unit', askPerUnitWei: 1n },
+      { log: { info: () => {}, warn: () => {} }, queryFn: async () => ({ result: null }) },
+    );
+    const [offer] = parseMarketplaceOfferBindings(toTriples(buildMarketplaceOfferQuads(resolved, SELLER, 1n)));
+    expect(offer.queryCost).toEqual({ schedule: 'dkg-mkt-query-cost/1', digest: QUERY_COST_SCHEDULE_V1_DIGEST });
+    expect(offer.apiShape).toBeUndefined();
+  });
+
+  it('a pin change republishes as a KA update; an unchanged pinned offer sends nothing', async () => {
+    const { mounted } = await chatOffering();
+    const { port, calls } = fakeAssetPort();
+    await publishMarketplaceOfferings(port, [mounted], SELLER, { nowMs: () => 1_000 });
+    calls.length = 0;
+    const unchanged = await publishMarketplaceOfferings(port, [mounted], SELLER, { nowMs: () => 2_000 });
+    expect(unchanged.assets[0].outcome).toBe('unchanged');
+    expect(calls.filter((c) => c.startsWith('publish:'))).toEqual([]);
+    const repinned = { ...mounted, metering: { basis: 'provider-reported' as const } };
+    const republished = await publishMarketplaceOfferings(port, [repinned], SELLER, { nowMs: () => 3_000 });
+    expect(republished.assets[0]).toMatchObject({ outcome: 'published', revision: '3000' });
+  });
+
+  it('a malformed extension drops only its own group; the offer stays', async () => {
+    const { mounted } = await chatOffering();
+    const quads = buildMarketplaceOfferQuads(mounted, SELLER, 7n);
+    const swap = (predicate: string, object: string) =>
+      quads.map((q) => (q.predicate === `${MKT_NAMESPACE}${predicate}` ? { ...q, object } : q));
+    const badDigest = parseMarketplaceOfferBindings(toTriples(swap('tokenizerDigest', '"sha256:nothex"')))[0];
+    expect(badDigest.metering).toBeUndefined();
+    expect(badDigest).toMatchObject({ apiShape: 'openai-chat/v1', model: { provenanceClass: 'upstream-claimed' } });
+    // A stub-words pin must carry the stub-words digest.
+    const wrongStub = parseMarketplaceOfferBindings(toTriples(swap('tokenizerDigest', `"sha256:${'1'.repeat(64)}"`)))[0];
+    expect(wrongStub.metering).toBeUndefined();
+    const badContext = parseMarketplaceOfferBindings(toTriples(swap('contextLength', '"12.5"')))[0];
+    expect(badContext.model).toBeUndefined();
+    expect(badContext.metering?.basis).toBe('pinned');
+    const badEnum = parseMarketplaceOfferBindings(toTriples(swap('toolTransport', '"telepathy"')))[0];
+    expect(badEnum.toolTransport).toBeUndefined();
+    expect(badEnum.askPerUnitWei).toBe(500_000_000_000n);
+  });
+
+  it('triple-scan safety: duplicated extension values drop their groups in linear time; >64 triples or a duplicated core predicate skip the offer', async () => {
+    const { mounted } = await chatOffering();
+    const quads = buildMarketplaceOfferQuads(mounted, SELLER, 7n);
+    const subject = quads[0].subject;
+    const ext = ['apiShape', 'toolTransport', 'meteringBasis', 'tokenizerKind', 'tokenizerDigest', 'chatTemplate',
+      'provenanceClass', 'upstreamModel', 'contextLength', 'modelDisplayName'];
+    const spam: Quad[] = ext.flatMap((local) => [1, 2, 3, 4].map((i) => ({
+      subject, predicate: `${MKT_NAMESPACE}${local}`, object: `"junk-${i}"`, graph: '',
+    })));
+    const started = performance.now();
+    const [offer] = parseMarketplaceOfferBindings(toTriples([...quads.filter((q) => !ext.some((l) => q.predicate.endsWith(`#${l}`))), ...spam]));
+    expect(performance.now() - started).toBeLessThan(100);
+    expect(offer.askPerUnitWei).toBe(500_000_000_000n);
+    expect(offer.apiShape).toBeUndefined();
+    expect(offer.metering).toBeUndefined();
+    expect(offer.model).toBeUndefined();
+
+    const oversized = Array.from({ length: 70 }, (_, i) => ({ subject, predicate: `${MKT_NAMESPACE}junk${i}`, object: '"x"', graph: '' }));
+    expect(parseMarketplaceOfferBindings(toTriples([...quads, ...oversized]))).toEqual([]);
+    const twoAsks = [...quads, { subject, predicate: `${MKT_NAMESPACE}askPerUnitWei`, object: '"1"', graph: '' }];
+    expect(parseMarketplaceOfferBindings(toTriples(twoAsks))).toEqual([]);
   });
 });

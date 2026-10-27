@@ -40,28 +40,27 @@ import {
   parseContextGraphLayerUri,
   validateAssertionName,
 } from '@origintrail-official/dkg-core';
-import type { MarketplaceOffer, MarketplaceServiceType, MarketplaceUnit } from '@origintrail-official/dkg-marketplace';
+import {
+  canonicalModelId,
+  type MarketplaceOffer,
+  type MarketplaceServiceType,
+  type MarketplaceUnit,
+} from '@origintrail-official/dkg-marketplace';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from '../dkg-agent-utils.js';
 import type { MarketplaceSellerOffering } from './seller-service.js';
+import {
+  DISCOVER_OFFER_TRIPLES_SPARQL,
+  MKT,
+  MKT_CORE_PREDICATES,
+  buildOfferExtensionQuads,
+  groupOfferTriples,
+  mktLiteral,
+  parseOfferExtensions,
+  type OfferTripleGroup,
+} from './offer-rdf.js';
 
-/** RDF namespace for marketplace offer Knowledge Assets. */
-export const MKT_NAMESPACE = 'https://w3id.org/dkg/marketplace#';
-
-const MKT = {
-  Offer: `${MKT_NAMESPACE}Offer`,
-  offeringId: `${MKT_NAMESPACE}offeringId`,
-  serviceType: `${MKT_NAMESPACE}serviceType`,
-  unit: `${MKT_NAMESPACE}unit`,
-  askPerUnitWei: `${MKT_NAMESPACE}askPerUnitWei`,
-  sellerIdentityId: `${MKT_NAMESPACE}sellerIdentityId`,
-  sellerPeerId: `${MKT_NAMESPACE}sellerPeerId`,
-  sellerAddress: `${MKT_NAMESPACE}sellerAddress`,
-  revision: `${MKT_NAMESPACE}revision`,
-  modelId: `${MKT_NAMESPACE}modelId`,
-  capacityUnitsPerMin: `${MKT_NAMESPACE}capacityUnitsPerMin`,
-  expiresAt: `${MKT_NAMESPACE}expiresAt`,
-} as const;
+export { MKT_NAMESPACE } from './offer-rdf.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -80,7 +79,8 @@ export interface MarketplaceSellerIdentity {
 
 type OfferContent = Pick<
   MarketplaceSellerOffering,
-  'offeringLocalId' | 'offeringId' | 'serviceType' | 'modelId' | 'unit' | 'askPerUnitWei' | 'capacityUnitsPerMin' | 'expiresAt'
+  | 'offeringLocalId' | 'offeringId' | 'serviceType' | 'modelId' | 'unit' | 'askPerUnitWei' | 'capacityUnitsPerMin' | 'expiresAt'
+  | 'apiShape' | 'toolTransport' | 'metering' | 'model' | 'queryCost' | 'access'
 >;
 
 /** Deterministic offer-KA subject for one (seller, offering) pair. */
@@ -108,7 +108,7 @@ export function buildMarketplaceOfferQuads(
   const subject = marketplaceOfferSubject(seller.sellerPeerId, offering.offeringLocalId);
   // `graph: ''` — the KA lifecycle routes quads into the asset's own graph.
   const quad = (predicate: string, object: string): Quad => ({ subject, predicate, object, graph: '' });
-  const literal = (value: string | bigint | number): string => `"${value}"`;
+  const literal = mktLiteral;
   const quads: Quad[] = [
     quad(RDF_TYPE, MKT.Offer),
     quad(MKT.offeringId, literal(offering.offeringId)),
@@ -125,6 +125,7 @@ export function buildMarketplaceOfferQuads(
     quads.push(quad(MKT.capacityUnitsPerMin, literal(offering.capacityUnitsPerMin)));
   }
   if (offering.expiresAt !== undefined) quads.push(quad(MKT.expiresAt, literal(offering.expiresAt)));
+  quads.push(...buildOfferExtensionQuads(offering, quad));
   return quads;
 }
 
@@ -227,27 +228,6 @@ export interface MarketplaceOfferQueryPort {
   query(sparql: string, options: { contextGraphId: string; includeSharedMemory: boolean }): Promise<unknown>;
 }
 
-// `GRAPH ?g` keeps every row inside ONE Knowledge Asset graph, so a row never
-// mixes the ask of one version with the revision of another, and `?g` names
-// the asset's author for the authority check below.
-const DISCOVER_OFFERS_SPARQL = `PREFIX mkt: <${MKT_NAMESPACE}>
-SELECT ?g ?offer ?offeringId ?serviceType ?unit ?ask ?sellerIdentityId ?sellerPeerId ?sellerAddress ?revision ?modelId ?capacity ?expiresAt WHERE {
-  GRAPH ?g {
-    ?offer a mkt:Offer ;
-      mkt:offeringId ?offeringId ;
-      mkt:serviceType ?serviceType ;
-      mkt:unit ?unit ;
-      mkt:askPerUnitWei ?ask ;
-      mkt:sellerIdentityId ?sellerIdentityId ;
-      mkt:sellerPeerId ?sellerPeerId ;
-      mkt:sellerAddress ?sellerAddress .
-    OPTIONAL { ?offer mkt:revision ?revision }
-    OPTIONAL { ?offer mkt:modelId ?modelId }
-    OPTIONAL { ?offer mkt:capacityUnitsPerMin ?capacity }
-    OPTIONAL { ?offer mkt:expiresAt ?expiresAt }
-  }
-}`;
-
 function optionalLiteral(row: Record<string, string>, key: string): string | undefined {
   const raw = row[key];
   if (typeof raw !== 'string' || raw.length === 0) return undefined;
@@ -285,7 +265,8 @@ function parseOfferRow(row: Record<string, string>): MarketplaceOffer | undefine
   const capacityUnitsPerMin = parseBigint(optionalLiteral(row, 'capacity'));
   const expiresAtRaw = optionalLiteral(row, 'expiresAt');
   const expiresAt = expiresAtRaw !== undefined ? Number(expiresAtRaw) : undefined;
-  const modelId = optionalLiteral(row, 'modelId');
+  // An invalid model id drops `modelId` only (the offer stays, unroutable by model).
+  const modelId = canonicalModelId(optionalLiteral(row, 'modelId'));
   return {
     offerId,
     offeringId,
@@ -307,21 +288,51 @@ interface NewestOffer {
   verified: boolean;
 }
 
-/** The authorized, newest offer row per `{author}\u0000{offeringId}` key. */
+/** Core predicate → the legacy row key `parseOfferRow` reads. */
+const CORE_ROW_KEYS: ReadonlyArray<[string, string]> = [
+  [MKT.offeringId, 'offeringId'],
+  [MKT.serviceType, 'serviceType'],
+  [MKT.unit, 'unit'],
+  [MKT.askPerUnitWei, 'ask'],
+  [MKT.sellerIdentityId, 'sellerIdentityId'],
+  [MKT.sellerPeerId, 'sellerPeerId'],
+  [MKT.sellerAddress, 'sellerAddress'],
+  [MKT.revision, 'revision'],
+  [MKT.modelId, 'modelId'],
+  [MKT.capacityUnitsPerMin, 'capacity'],
+  [MKT.expiresAt, 'expiresAt'],
+];
+
+/** One triple-scan group as a core row (undefined when a core predicate is duplicated). */
+function coreRowOf(group: OfferTripleGroup): Record<string, string> | undefined {
+  for (const predicate of MKT_CORE_PREDICATES) {
+    if ((group.values.get(predicate)?.length ?? 0) > 1) return undefined;
+  }
+  const row: Record<string, string> = { g: group.g, offer: group.offer };
+  for (const [predicate, key] of CORE_ROW_KEYS) {
+    const value = group.values.get(predicate)?.[0];
+    if (value !== undefined) row[key] = value;
+  }
+  return row;
+}
+
+/** The authorized, newest offer per `{author}\u0000{offeringId}` key. */
 function newestOffersByKey(bindings: ReadonlyArray<Record<string, string>>): Map<string, NewestOffer> {
   const newest = new Map<string, NewestOffer>();
-  for (const row of bindings) {
-    const offer = parseOfferRow(row);
-    if (!offer?.sellerAddress) continue;
-    const graph = typeof row['g'] === 'string' ? parseContextGraphLayerUri(strip(row['g'])) : undefined;
+  for (const group of groupOfferTriples(bindings)) {
+    const row = coreRowOf(group);
+    const core = row ? parseOfferRow(row) : undefined;
+    if (!row || !core?.sellerAddress) continue;
+    const graph = parseContextGraphLayerUri(group.g);
     if (
       graph === undefined
       || graph.contextGraphId !== MARKETPLACE_CONTEXT_GRAPH
       || graph.layer === MemoryLayer.WorkingMemory
-      || graph.agentAddress.toLowerCase() !== offer.sellerAddress.toLowerCase()
+      || graph.agentAddress.toLowerCase() !== core.sellerAddress.toLowerCase()
     ) {
       continue;
     }
+    const offer: MarketplaceOffer = { ...core, ...parseOfferExtensions(group.values) };
     const revision = parseBigint(optionalLiteral(row, 'revision')) ?? 0n;
     const verified = graph.layer === MemoryLayer.VerifiableMemory;
     const key = `${graph.agentAddress.toLowerCase()}\u0000${offer.offeringId.toLowerCase()}`;
@@ -335,7 +346,8 @@ function newestOffersByKey(bindings: ReadonlyArray<Record<string, string>>): Map
 }
 
 /**
- * Parse discovery SELECT rows into typed offers, one per (seller, offering).
+ * Parse discovery triple-scan rows (`?g ?offer ?p ?o`) into typed offers,
+ * one per (seller, offering).
  *
  * Authority: a row counts only when its graph is a Knowledge Asset graph
  * (`…/_verifiable_memory|_shared_memory/{author}/{number}`) whose author is
@@ -369,7 +381,7 @@ export function createContextGraphOfferSource(port: MarketplaceOfferQueryPort): 
   const returned = new Map<string, NewestOffer>();
   return {
     async discoverOffers() {
-      const result = await port.query(DISCOVER_OFFERS_SPARQL, {
+      const result = await port.query(DISCOVER_OFFER_TRIPLES_SPARQL, {
         contextGraphId: MARKETPLACE_CONTEXT_GRAPH,
         includeSharedMemory: true,
       });

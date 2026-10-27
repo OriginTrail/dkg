@@ -35,8 +35,10 @@ import {
   eip191SignDigest,
   offeringIdFor,
   proRataFinalize,
-  queryUnits,
+  queryAdmissionUnits,
+  queryDeliveryUnits,
   sessionKeyWallet,
+  QUERY_COST_SCHEDULE_V1_DIGEST,
   type AuthorizationFields,
   type MarketplaceOffer,
   type PlanPolicy,
@@ -139,6 +141,7 @@ function makeOfferings(queryCalls: string[], inferenceExecutor?: MarketplaceExec
         queryCalls.push(sparql);
         return { rowCount: 3, result: { bindings: ['a', 'b', 'c'] } };
       }),
+      queryCost: { schedule: 'dkg-mkt-query-cost/1', digest: QUERY_COST_SCHEDULE_V1_DIGEST },
     },
   ];
 }
@@ -198,6 +201,7 @@ function createHarness(opts: { inferenceExecutor?: MarketplaceExecutor } = {}): 
       sellerIdentityId: SELLER_IDENTITY,
       sellerPeerId: SELLER_PEER,
       sellerAddress: sellerWallet.address,
+      queryCost: { schedule: 'dkg-mkt-query-cost/1', digest: QUERY_COST_SCHEDULE_V1_DIGEST },
     },
   ];
 
@@ -326,16 +330,22 @@ describe('marketplace agent runtime — chainless end-to-end flow', () => {
       expect(inference.costWei).toBe(inferenceCost);
       expect(inference.seller.identityId).toBe(SELLER_IDENTITY);
       expect(inference.receipt.resultCommitment).toBe(ethers.sha256(inference.resultBytes));
+      // The stub executor publishes no metering pin: the recount is unverifiable, never a mismatch.
+      expect(inference.recount).toEqual({ verdict: 'unverifiable', reason: 'not-metered', servedUnits: inferenceUnits });
 
-      // 3. Invoke a SPARQL call; units follow the shared static schedule.
+      // 3. Invoke a SPARQL call; units follow the static query cost schedule
+      // (admission + ceil(rows/100)), recounted by the buyer as a match.
       const sparql = 'SELECT * WHERE { ?s ?p ?o } LIMIT 3';
       const query = await h.buyer.invoke({
         serviceType: 'query',
         payload: { sparql },
         maxUnits: 50n,
       });
-      const queryUnitCount = queryUnits(sparql, 3);
+      const queryUnitCount = queryAdmissionUnits(sparql) + queryDeliveryUnits(3);
+      expect(queryUnitCount).toBe(7n); // `SELECT *` analyses to admission 6, plus 1 delivery unit for 3 rows
       expect(query.servedUnits).toBe(queryUnitCount);
+      expect(query.recount).toEqual({ verdict: 'match', servedUnits: 7n, recountUnits: 7n });
+      expect((query.result as { schema: string; rowCount: number }).rowCount).toBe(3);
       const queryCost = queryUnitCount * QUERY_ASK;
       expect(query.costWei).toBe(queryCost);
       expect(h.queryCalls).toEqual([sparql]);
