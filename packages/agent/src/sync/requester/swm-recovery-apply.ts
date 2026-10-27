@@ -99,7 +99,7 @@ export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
       // preserved winner, carries its own publishedAt; the operation keeps one.
       let inserted = 0;
       await insertKeepingOnePublishedAt(params.store, quads, async (rows) => {
-        inserted = (await insertWithOversizeGuard(
+        const kept = await insertWithOversizeGuard(
           (kept) => params.store.insert(kept, {
             priority: 'background',
             source: 'agent.swmRecovery.insert',
@@ -107,7 +107,9 @@ export function createSwmRecoveryMutationRuntimeV1(params: Readonly<{
           rows,
           { recordDrops: params.recordDrops },
           'swm-recovery',
-        )).length;
+        );
+        inserted = kept.length;
+        return kept;
       }, 'agent.swmRecovery');
       if (inserted > 0) {
         params.invalidateListContextGraphsCache();

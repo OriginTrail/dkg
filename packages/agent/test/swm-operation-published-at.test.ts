@@ -1,3 +1,4 @@
+import { insertWithOversizeGuard } from '../src/sync/oversize-filter.js';
 /**
  * One dkg:publishedAt per share operation, and a defective head set aside
  * instead of every descriptor of its graph.
@@ -13,14 +14,14 @@
  * The writer cases run through `SwmTargetExecutorV1`, which owns the write
  * policy of both catch-up lanes; the set-aside cases exercise the round itself.
  */
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext, type OperationContext } from '@origintrail-official/dkg-core';
 import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import { parseGraphScopedSwmRecoveryDescriptorsSettingAside } from '../src/sync/graph-scoped-swm-set-aside.js';
 import { readSharedMemoryPhaseFailureAttribution } from '../src/sync/shared-memory-diagnostics.js';
-import { planOperationPublishedAt } from '../src/sync/swm-operation-published-at.js';
+import { insertKeepingOnePublishedAt, planOperationPublishedAt } from '../src/sync/swm-operation-published-at.js';
 import { createSwmRecoveryMutationRuntimeV1 } from '../src/sync/requester/swm-recovery-apply.js';
 import { SwmTargetExecutorV1 } from '../src/sync/requester/swm-target-executor.js';
 import { MemoryWorkspaceSnapshotStore } from './_helpers/memory-workspace-snapshot-store.js';
@@ -351,7 +352,7 @@ describe('a defective head is set aside, not its whole graph', () => {
     expect(twin.assertionGraph).toBe(valid.assertionGraph);
     expect(() => parseGraphScopedSwmRecoveryDescriptorsSettingAside({
       contextGraphId: CG,
-      metaQuads: [...valid.meta, ...twin.meta],
+      metaQuads: [...valid.meta, ...twin.meta, ...defective('bad').meta],
     })).toThrow(/multiple UAL owners/);
   });
 
@@ -397,5 +398,35 @@ describe('a defective head is set aside, not its whole graph', () => {
     expect(await rowsOf(store, valid.assertionGraph)).toHaveLength(valid.payload.length);
     expect(await rowsOf(store, bad.share.assertionGraph)).toEqual([]);
     expect(summary.swmCoverage).toMatchObject({ snapshotsResolved: 0, snapshotsTotal: 1 });
+  });
+});
+
+
+describe('timestamp replacement keeps stored evidence through failed writes', () => {
+  const row = (object: string): Quad => ({ subject: ack.operationSubject, predicate: PUBLISHED_AT, object, graph: WS_META });
+  it('preserves the stored timestamp when an oversized replacement is dropped', async () => {
+    const store = newStore();
+    await store.insert([row(stamp(LOCAL))]);
+    await insertKeepingOnePublishedAt(store, [row(`"${' '.repeat(60_001)}${EARLY}"`)],
+      rows => insertWithOversizeGuard(kept => store.insert(kept), rows, { recordDrops: () => {} }, 'test'), 'test');
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
+  });
+  it('does not retire stored evidence after a failed insert', async () => {
+    const store = newStore(); await store.insert([row(stamp(LOCAL))]);
+    const retire = vi.spyOn(store, 'delete');
+    await expect(insertKeepingOnePublishedAt(store, [row(stamp(PEER))], async () => { throw new Error('insert failed'); }, 'test'))
+      .rejects.toThrow('insert failed');
+    expect(retire).not.toHaveBeenCalled();
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
+  });
+  it('retains both stamps after failed retirement and converges on retry', async () => {
+    const store = newStore(); await store.insert([row(stamp(LOCAL))]);
+    const write = () => insertKeepingOnePublishedAt(store, [row(stamp(PEER))], async rows => { await store.insert(rows); return rows; }, 'test');
+    const retire = vi.spyOn(store, 'delete').mockRejectedValueOnce(new Error('retire failed'));
+    await expect(write()).rejects.toThrow('retire failed');
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER, LOCAL]);
+    retire.mockRestore();
+    await write();
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER]);
   });
 });

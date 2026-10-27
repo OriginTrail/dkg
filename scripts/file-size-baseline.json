@@ -54,7 +54,7 @@
     "packages/agent/src/rfc64/public-catalog-transport-v1.ts": 1237,
     "packages/agent/src/sync/backpressure.ts": 902,
     "packages/agent/src/sync/durable-integrity.ts": 1776,
-    "packages/agent/src/sync/graph-scoped-swm-recovery.ts": 934,
+    "packages/agent/src/sync/graph-scoped-swm-recovery.ts": 905,
     "packages/agent/src/sync/requester/durable-sync.ts": 1579,
     "packages/agent/src/sync/requester/page-fetch.ts": 1413,
     "packages/agent/src/sync/requester/shared-memory-sync.ts": 2255,

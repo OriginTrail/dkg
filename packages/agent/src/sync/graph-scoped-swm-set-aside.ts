@@ -6,9 +6,8 @@
  *
  * `parseGraphScopedSwmRecoveryDescriptors` throws on the first head that fails
  * validation, so one holder's defective head used to cost a catch-up round
- * every asset of the graph. Each head is validated from its own rows and the
- * rows of the operations it names, so a failing head can be parsed alone and
- * dropped while the rest of the graph parses as before. A conflict between two
+ * every asset of the graph. The shared parser indexes metadata once and decodes each head once,
+ * keeping per-head failures separate from graph-wide ownership validation. A conflict between two
  * valid heads still fails the whole graph.
  *
  * Setting a head aside must not certify its asset. A round that sets one aside
@@ -19,48 +18,13 @@
  * unresolved, because a resolved ref is not walked again.
  */
 
-import type { Quad } from '@origintrail-official/dkg-storage';
-import {
-  parseGraphScopedSwmRecoveryDescriptors,
-  type GraphScopedSwmRecoveryDescriptor,
-} from './graph-scoped-swm-recovery.js';
-import { stripMetadataLiteral } from './metadata-literal.js';
+import { parseGraphScopedSwmRecoveryHeadResults, type GraphScopedSwmRecoveryParseInput,
+  type GraphScopedSwmRecoveryDescriptor } from './graph-scoped-swm-recovery.js';
+import type { SetAsideGraphScopedSwmHead } from './graph-scoped-swm-head-parser.js';
+export type { SetAsideGraphScopedSwmHead } from './graph-scoped-swm-head-parser.js';
 
-type ParseParams = Parameters<typeof parseGraphScopedSwmRecoveryDescriptors>[0];
-
-const HEAD_SUFFIX = '#dkg-swm-head';
-const SHARE_OPERATION_ID = 'http://dkg.io/ontology/shareOperationId';
-
-/** A head that failed validation, kept out of the descriptors with its error. */
-export interface SetAsideGraphScopedSwmHead {
-  readonly metaGraph: string;
-  readonly headSubject: string;
-  /** The operation subjects the head names; empty when it names none. */
-  readonly operationSubjects: readonly string[];
-  readonly error: Error;
-}
-
-/**
- * The descriptors of every head that validates, and the heads that do not.
- * Throws only what fails the graph as a whole.
- */
-export function parseGraphScopedSwmRecoveryDescriptorsSettingAside(params: ParseParams): {
-  descriptors: GraphScopedSwmRecoveryDescriptor[];
-  setAside: SetAsideGraphScopedSwmHead[];
-} {
-  try {
-    return { descriptors: parseGraphScopedSwmRecoveryDescriptors(params), setAside: [] };
-  } catch (graphError) {
-    const setAside = defectiveHeads(params);
-    if (setAside.length === 0) throw graphError;
-    const setAsideKeys = new Set(setAside.map(({ metaGraph, headSubject }) => `${metaGraph}\u0000${headSubject}`));
-    const descriptors = parseGraphScopedSwmRecoveryDescriptors({
-      ...params,
-      metaQuads: params.metaQuads.filter((quad) => !setAsideKeys.has(`${quad.graph}\u0000${quad.subject}`)),
-    });
-    return { descriptors, setAside };
-  }
-}
+type ParseParams = GraphScopedSwmRecoveryParseInput;
+export const parseGraphScopedSwmRecoveryDescriptorsSettingAside = parseGraphScopedSwmRecoveryHeadResults;
 
 /** One round's set-aside heads, and the snapshot refs they may own. */
 export class SetAsideGraphScopedSwmHeads {
@@ -96,42 +60,3 @@ export class SetAsideGraphScopedSwmHeads {
   }
 }
 
-/** Every head that fails when parsed alone with the operations it names. */
-function defectiveHeads(params: ParseParams): SetAsideGraphScopedSwmHead[] {
-  const bySubject = new Map<string, Quad[]>();
-  for (const quad of params.metaQuads) {
-    const key = `${quad.graph}\u0000${quad.subject}`;
-    const rows = bySubject.get(key);
-    if (rows) rows.push(quad);
-    else bySubject.set(key, [quad]);
-  }
-  const setAside: SetAsideGraphScopedSwmHead[] = [];
-  for (const [key, headRows] of bySubject) {
-    const separator = key.indexOf('\u0000');
-    const metaGraph = key.slice(0, separator);
-    const headSubject = key.slice(separator + 1);
-    if (!headSubject.endsWith(HEAD_SUFFIX)) continue;
-    const operationSubjects = [...new Set(headRows
-      .filter((quad) => quad.predicate === SHARE_OPERATION_ID)
-      .map((quad) => stripMetadataLiteral(quad.object).trim())
-      .filter((shareOperationId) => shareOperationId.length > 0)
-      .map((shareOperationId) => `urn:dkg:share:${params.contextGraphId}:${shareOperationId}`))];
-    try {
-      parseGraphScopedSwmRecoveryDescriptors({
-        ...params,
-        metaQuads: [
-          ...headRows,
-          ...operationSubjects.flatMap((subject) => bySubject.get(`${metaGraph}\u0000${subject}`) ?? []),
-        ],
-      });
-    } catch (error) {
-      setAside.push({
-        metaGraph,
-        headSubject,
-        operationSubjects,
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
-    }
-  }
-  return setAside;
-}

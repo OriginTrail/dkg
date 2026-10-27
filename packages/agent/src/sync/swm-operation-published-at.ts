@@ -19,7 +19,7 @@
 
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { stripMetadataLiteral as stripLiteral } from './metadata-literal.js';
+import { decodeWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
 
 const PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
 /** Operation subjects per stored-stamp read. */
@@ -31,7 +31,7 @@ const READ_CHUNK = 100;
  */
 export function operationPublishedAtMs(rows: readonly Quad[], operationSubject: string): number {
   const stamps = [...new Set(rows.filter((row) => row.predicate === PUBLISHED_AT).map((row) => row.object))]
-    .map((value) => Date.parse(stripLiteral(value).trim()));
+    .map(decodeWorkspaceOperationTimestamp);
   if (stamps.length === 0) throw new Error('missing publishedAt');
   if (stamps.some((ms) => !Number.isFinite(ms))) {
     throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
@@ -96,7 +96,7 @@ export function planOperationPublishedAt(
 export async function insertKeepingOnePublishedAt(
   store: Pick<TripleStore, 'query' | 'delete'>,
   rows: readonly Quad[],
-  insert: (rows: Quad[]) => Promise<unknown>,
+  insert: (rows: Quad[]) => Promise<readonly Quad[]>,
   source: string,
 ): Promise<void> {
   const targets = new Map<string, Set<string>>();
@@ -130,9 +130,18 @@ export async function insertKeepingOnePublishedAt(
     }
   }
   const plan = planOperationPublishedAt(rows, stored);
-  if (plan.rows.length > 0) await insert(plan.rows);
-  if (plan.retire.length > 0) {
-    await store.delete(plan.retire, { priority: 'background', source: `${source}.retirePublishedAt` });
+  const inserted = plan.rows.length > 0 ? await insert(plan.rows) : [];
+  const key = (row: Quad) => `${row.graph}\u0000${row.subject}`;
+  const rowKey = (row: Quad) => JSON.stringify([row.graph, row.subject, row.predicate, row.object]);
+  const replacements = new Map(plan.rows.filter(isOperationPublishedAtRow).map(row => [key(row), rowKey(row)]));
+  const written = new Set(inserted.map(rowKey));
+  // A filtering insert can succeed without persisting its proposed winner.
+  const retire = plan.retire.filter(row => {
+    const replacement = replacements.get(key(row));
+    return replacement === undefined || written.has(replacement);
+  });
+  if (retire.length > 0) {
+    await store.delete(retire, { priority: 'background', source: `${source}.retirePublishedAt` });
   }
 }
 
@@ -151,8 +160,8 @@ interface StampCandidate {
 
 /** A stamp the head resolver accepts, or null. */
 function usableStampMs(object: string): number | null {
-  const ms = Date.parse(stripLiteral(object).trim());
-  return Number.isSafeInteger(ms) && ms >= 0 ? ms : null;
+  const ms = decodeWorkspaceOperationTimestamp(object);
+  return isResolverWorkspaceOperationTimestamp(ms) ? ms : null;
 }
 
 /** Usable before unusable, then earlier first, then stored before incoming. */
