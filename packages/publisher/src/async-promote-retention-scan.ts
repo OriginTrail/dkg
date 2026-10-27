@@ -38,8 +38,9 @@
  * DOCUMENTED LIMITS (each fails closed: the scan keeps what it cannot read, and no row is deleted on the strength of a bad answer).
  *  1. A subject that can never be a candidate (above: a blank node, an IRI outside the job prefix, a decimal, a double, a plain literal, a negative number) is never reclaimed
  *     by this sweep.
- *  2. The scan relies on the engine honouring ORDER BY, LIMIT and FILTER. The result is checked (sorted, after the cursor, within the cutoff, at most limit + 1 rows)
- *     and a violation is counted in `anomalies` and never moves a cursor: the call still deletes the rows it judged (each is verified under the lock first), the
+ *  2. The scan relies on the engine honouring ORDER BY, LIMIT and FILTER. The result is checked (a range answer: every row readable, sorted, after the cursor, within the
+ *     cutoff; a tie answer: every row readable, all at the group's `updatedAt`, after the key cursor, in key order; both: at most limit + 1 rows) and a violation is counted
+ *     in `anomalies` and never moves a cursor: the call still deletes the rows it judged (each is verified under the lock first), the
  *     pass that met it is never reported complete (its tally may count a re-judged row twice), and a batch may starve exactly like an unordered scan. It is a
  *     tripwire for a non-conforming engine, not a recovery.
  *  3. The key check of the tie walk compares ids as JavaScript strings, that is by UTF-16 code unit. An engine that orders by code point (Oxigraph does) answers in
