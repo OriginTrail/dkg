@@ -289,8 +289,7 @@ function resolveConfig(v) {
     die(2, '--namespace-prefix must match [A-Za-z0-9._-]{1,40}');
   if (!(observer in OBSERVER_CALLS) && observer !== 'none')
     die(2, `unknown --observer ${observer} (default, paged, none)`);
-  if (observer === 'paged' && !OBSERVER_CALLS.paged)
-    die(2, 'paged listing is not available in this build (needs P8a/P9b)');
+  if (observer === 'paged' && !OBSERVER_CALLS.paged) die(2, 'paged listing is not available in this build');
   const windows = windowsFor(v, windowDefaults);
   checkWindows(windows);
   const windowsMs = [windows.warmup * 1000, windows.measure * 1000, windows.cooldown * 1000];

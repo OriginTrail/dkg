@@ -418,15 +418,19 @@ export function startReaders(world) {
 
 // ---------------------------------------------------------------- list observer
 /**
- * What the observer polls. `default` is the public list route without a cursor, a full read. `paged` stays null until
- * the paging API exists (P8a / P9b): that PR adds ONE entry `(queue) => walkPages((cursor) => <their page
- * function>(queue, cursor).then((r) => ({ rows: <count>, nextCursor: <cursor or null> })))` and MUST ALSO update
- * `default` to whatever the route's cursorless call becomes (the plan keeps listUnlocked complete for claimNext, so it
- * may stop being list()).
+ * What the observer polls. `default` is the public list route without a cursor: a complete read, which since P8a is a loop of
+ * keyset pages that each release the queue's mutex (the queue's `list`). `paged` is a client's cursor walk over the queue's
+ * `listPage` (the opt-in surface the route and CLI expose in P9b), OBSERVER_PAGE_SIZE rows a page; its longest page time is
+ * the mutex-hold proxy.
  */
+export const OBSERVER_PAGE_SIZE = 100;
 export const OBSERVER_CALLS = {
   default: async (queue) => ({ rows: (await queue.list({})).length }),
-  paged: null,
+  paged: (queue) =>
+    walkPages(async (cursor) => {
+      const page = await queue.listPage({}, { pageSize: OBSERVER_PAGE_SIZE, ...(cursor ? { cursor } : {}) });
+      return { rows: page.jobs.length, nextCursor: page.nextCursor };
+    }),
 };
 
 /** Walks fetchPage(cursor) -> { rows, nextCursor? } to the end. The longest page time is the mutex-hold proxy. */
