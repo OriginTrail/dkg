@@ -579,7 +579,7 @@ export { validateShareReconciliationInput, type ShareReconciliationInput, type S
 export { readShareQueueDepth, readLiftQueueDepth, readLiftJournalEntryCount, type AsyncQueueDepthOptions } from './async-queue-depth.js';
 
 export { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';
-export { parseGraphKnowledgeAssetStructure, type GraphKnowledgeAssetStructure, type GraphKnowledgeAssetStructurePolicy } from './graph-metadata-envelope.js';
+export { parseWireGraphKnowledgeAssetStructure, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetStructure } from './graph-metadata-envelope.js';
 export {
   LIFT_JOB_PAGE_DEFAULT_LIMIT,
   LIFT_JOB_PAGE_MAX_LIMIT,

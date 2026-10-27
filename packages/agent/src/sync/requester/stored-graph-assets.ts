@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri, DEFAULT_MAX_READ_BYTES } from '@origintrail-official/dkg-core';
-import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
+import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
@@ -54,9 +54,9 @@ export async function readHeldGraphScopedAssets(
     }
     const eligible = chunk.filter(descriptor => {
       const rows = rowsBySubject.get(descriptor.ual) ?? [];
-      return holdsDescriptor(descriptor, parseGraphKnowledgeAssetMetadataEnvelope(
+      return holdsDescriptor(descriptor, parseStoredGraphKnowledgeAssetMetadataEnvelope(
         rows.map(row => ({ ...row, graph: metaGraph })),
-        { contextGraphId: request.contextGraphId, ual: descriptor.ual }, 'stored-context'), confirmation);
+        { contextGraphId: request.contextGraphId, ual: descriptor.ual }), confirmation);
     });
     for (const descriptor of eligible) {
       request.signal?.throwIfAborted();

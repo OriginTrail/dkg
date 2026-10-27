@@ -6,7 +6,7 @@ import {
   parseDeterministicKnowledgeAssetUal,
 } from '@origintrail-official/dkg-core';
 import {
-  parseGraphKnowledgeAssetStructure,
+  parseWireGraphKnowledgeAssetStructure,
   computeFlatKCRootV10 as computeStructuredKCRoot,
   skolemizeByEntity,
 } from '@origintrail-official/dkg-publisher';
@@ -1507,8 +1507,8 @@ export function parseGraphScopedDescriptor(
   ual: string,
   rows: readonly Quad[],
 ): GraphScopedDescriptor {
-  const { merkleRoot, privateMerkleRoot, ...structure } = parseGraphKnowledgeAssetStructure(
-    rows, { ual }, { syntax: 'wire', context: 'required' },
+  const { merkleRoot, privateMerkleRoot, ...structure } = parseWireGraphKnowledgeAssetStructure(
+    rows, ual,
   );
   return {
     ...structure,
