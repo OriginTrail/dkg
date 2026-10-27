@@ -23,6 +23,16 @@ export type PreparedDurableVerificationInput = VerificationInput & (
       readonly returnedDescriptorCount: number }
 );
 
+/** DATA-specific decisions are selected once; the graph scope owns the shared protocol. */
+export interface DurableVerifiedPageSettlementPolicy {
+  readonly empty: boolean;
+  readonly metaCheckpoint: { updateCheckpoint: boolean; countProgress?: boolean; emptyPhase?: boolean };
+  storeData?(partitioned: ReturnType<typeof partitionVerifiedGraphScopedAssets>): Promise<'stored' | 'yielded'>;
+  beforeCheckpoint?(): Promise<void>;
+  settleData(): void;
+  continueFanout(): boolean;
+}
+
 export async function verifyDurablePage(context: VerificationContext,
   input: PreparedDurableVerificationInput, acceptUnverified: boolean) {
   context.signal?.throwIfAborted();
