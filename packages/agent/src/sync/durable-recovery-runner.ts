@@ -396,7 +396,7 @@ export class DurableRecoveryRunner {
         round = await deps.executeSlice(action.peerId, metaContinuation,
           fetchPolicy.holdings(deps.executeExactSlice !== undefined),
           seed?.kind === 'candidate' ? seed.boundary : undefined);
-      } catch (error) { round = durableRecoveryRoundOutcome(failedSlice(action.peerId, error)); }
+      } catch (error) { round = durableRecoveryRoundOutcome(failedSlice(action.peerId, error), { strategy: 'not-started' }); }
       const result = round.result;
       const after = deps.checkpointStore.get(checkpointKey);
       resume.recordSlice({ peerId: action.peerId, checkpointKey, before, after,

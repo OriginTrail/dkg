@@ -18,7 +18,7 @@ export interface DurableRecoveryRoundOutcome {
 
 export function durableRecoveryRoundOutcome(
   result: DurableSyncResult,
-  decision: DurableRecoveryRoundDecision = { strategy: 'not-started' },
+  decision: DurableRecoveryRoundDecision,
 ): DurableRecoveryRoundOutcome {
   return { result, decision };
 }

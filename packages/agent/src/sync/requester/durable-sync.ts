@@ -430,7 +430,7 @@ export async function runDurableSyncDetailed(
   const detailed = await runDurableSyncWithBudget(normalizeDurableSyncContext(context));
   return {
     result: detailed.result,
-    ...(detailed.recoveryRound ? { recoveryRound: detailed.recoveryRound } : {}),
+    recoveryRound: detailed.recoveryRound,
     ...(detailed.committedExactAssetUals === undefined ? {} : { committedExactAssetUals: detailed.committedExactAssetUals }),
     ...(detailed.exactFetchDisposition === undefined
       ? {}
@@ -504,6 +504,7 @@ async function runDurableSyncWithBudget(
     signal,
   });
 
+  if (graphRecovery && contextGraphIds.length !== 1) throw new Error('Graph-owned recovery requires exactly one context graph');
   const durableMetaContinuation = graphRecovery?.meta;
   const durableResumeBoundary = graphRecovery?.boundary;
   const accumulator = createDurableSyncAccumulator();
@@ -1432,7 +1433,7 @@ async function runDurableSyncWithBudget(
 
   return {
     result,
-    ...(durableMetaContinuation ? { recoveryRound } : {}),
+    recoveryRound,
     ...(exactFetchDisposition ? { exactFetchDisposition, committedExactAssetUals: Object.freeze([...committedExactAssetUals]) } : {}),
     ...(exactResponderCapability ? { exactResponderCapability } : {}),
     ...(authenticatedExactAssets.length === 0

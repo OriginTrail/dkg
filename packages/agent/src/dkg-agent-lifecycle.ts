@@ -1,5 +1,6 @@
+import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
 // SPDX-License-Identifier: Apache-2.0
-import { durableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
+import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -5065,6 +5066,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
+  async runGraphOwnedDurableRecoveryRound(this: DKGAgent, request: AgentGraphOwnedRecoveryRequest): Promise<DurableRecoveryRoundOutcome> {
+    const host = DKGAgentBase.createDurableRecoveryCapabilities(this);
+    return runGraphOwnedDurableRecovery({ ...request, host,
+      authority: host.resolveOrdinaryAuthority(request.ctx, {}) });
+  }
+
   async runLegacyDurableSyncDetailed(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
@@ -6596,15 +6603,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }),
         executeSlice: async (peerId, durableMetaContinuation, durableRecoveryRound, durableResumeBoundary) => {
           if (!durableSyncEnabled(this.config) || !await this.canUseLegacyDurableSyncForContextGraphV1(contextGraphId)) {
-            return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult());
+            return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult(), { strategy: 'not-started' });
           }
-          const detailed = await this.runLegacyDurableSyncDetailed(ctx, peerId, [contextGraphId], undefined, undefined, undefined, {
-            stopOnBackoffWorthyFailure: true, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
-            settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
-            signal: this.node.stopSignal ?? undefined, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
-            source: 'vm-recovery', graphRecovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary },
+          return this.runGraphOwnedDurableRecoveryRound({ ctx, remotePeerId: peerId, contextGraphId,
+            recovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary },
+            options: { stopOnBackoffWorthyFailure: true, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
+              settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
+              signal: this.node.stopSignal ?? undefined, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY, source: 'vm-recovery' },
           });
-          return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
         },
         executeExactSlice: exactMissingAssetRequest(this, contextGraphId, DURABLE_RECOVERY_HARD_TIMEOUT_MS),
         logDebug: (message) => this.log.debug(ctx, message),

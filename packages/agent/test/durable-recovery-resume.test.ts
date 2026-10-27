@@ -93,7 +93,7 @@ const refuseResume: Slice = async (peerId, store) => {
   return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), failedPhases: 1 },
     { strategy: 'full', continuation: 'full-graph', rejectedResumeOffset: resumedAt });
 };
-const noProgress: Slice = async () => durableRecoveryRoundOutcome(createIncompleteDurableSyncResult());
+const noProgress: Slice = async () => durableRecoveryRoundOutcome(createIncompleteDurableSyncResult(), { strategy: 'not-started' });
 
 describe('durable recovery continues a verified prefix with another peer', () => {
   it('seeds the next peer with the verified boundary instead of row 0', async () => {

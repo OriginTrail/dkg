@@ -64,7 +64,6 @@ export type DurableRecoveryOptions = {
   /** Internal transport decision; required streams never replay an enlarged selection. */
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
   /** Owner-private retained META prefix for bounded durable recovery. */
-  graphRecovery?: GraphOwnedRecoveryInput;
   /** Admission override for foreground VM recovery. */
   priority?: number;
   /**
@@ -104,7 +103,6 @@ export interface ExactKnowledgeAssetSyncResult {
 }
 
 export type PhysicalDurableSyncResult = {
-  readonly recoveryRound?: DurableRecoveryRoundDecision;
   readonly result: DurableSyncResult;
   readonly exactFetchDisposition?: ExactDurableFetchDisposition;
   readonly exactResponderCapability?: ExactAssetResponderCapability;
@@ -112,6 +110,8 @@ export type PhysicalDurableSyncResult = {
   readonly committedExactAssetUals?: readonly string[];
   readonly exactStreamOutcome?: ExactBatchStreamOutcome;
 };
+
+export type PhysicalDurableGraphResult = PhysicalDurableSyncResult & { readonly recoveryRound: DurableRecoveryRoundDecision };
 
 export type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
   readonly admission: DurableSyncAdmissionOutcome;

@@ -127,7 +127,7 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
   });
 
   it('refuses graph readiness without a persisted terminal boundary', async () => {
-    const f = runner([async () => durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), complete: true })]);
+    const f = runner([async () => durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), complete: true }, { strategy: 'not-started' })]);
     const execution = await f.run();
     expect(execution.outcome).toBe('no-progress');
     expect(execution.result.complete).toBe(false);

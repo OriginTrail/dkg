@@ -8,7 +8,7 @@ const ctx = createOperationContext('sync');
 const contextGraphId = 'serialized-graph';
 afterEach(() => vi.restoreAllMocks());
 
-it('serializes non-coalesced operations across separately bound recovery hosts', async () => {
+it.each(['ordinary', 'owned'])('serializes %s operations across separately bound recovery hosts', async kind => {
   let release!: () => void;
   let entered!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
@@ -21,7 +21,7 @@ it('serializes non-coalesced operations across separately bound recovery hosts',
     entered();
     await held;
     active -= 1;
-    return { result: {} as Awaited<ReturnType<typeof runDurableSync>> };
+    return { result: {} as Awaited<ReturnType<typeof runDurableSync>>, recoveryRound: { strategy: 'full', continuation: 'full-graph' } };
   });
   const agentLike = {
     store: {  },
@@ -32,7 +32,11 @@ it('serializes non-coalesced operations across separately bound recovery hosts',
     ) => work(),
     log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
   } as any;
-  const run = () => LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
+  const run = () => kind === 'owned'
+    ? LifecycleSyncMethods.prototype.runGraphOwnedDurableRecoveryRound.call(agentLike, {
+      ctx, remotePeerId: 'serialized-peer', contextGraphId, recovery: { meta: {}, holdings: {} },
+      options: { signal: new AbortController().signal },
+    }) : LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
     agentLike, ctx, 'serialized-peer', [contextGraphId], undefined, undefined, undefined,
     { signal: new AbortController().signal },
   );

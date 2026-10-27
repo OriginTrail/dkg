@@ -14,7 +14,7 @@ import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
 import { currentHeldGraphScopedAssetsConfirmer } from './sync/requester/durable-data-holdings.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from './dkg-agent-constants.js';
 
-import type { DurableGraphOptions, PhysicalDurableSyncResult } from './durable-recovery-types.js';
+import type { DurableGraphOptions, PhysicalDurableGraphResult } from './durable-recovery-types.js';
 export type DurableGraphHost = DurableRecoveryHost;
 
 export interface DurableGraphRequest {
@@ -28,7 +28,7 @@ export interface DurableGraphRequest {
 }
 
 /** Executes one admitted graph while retaining physical authentication and materialization ownership. */
-export async function runAdmittedDurableGraph(request: DurableGraphRequest): Promise<PhysicalDurableSyncResult> {
+export async function runAdmittedDurableGraph(request: DurableGraphRequest): Promise<PhysicalDurableGraphResult> {
   const { host, authority, ctx, remotePeerId, contextGraphId, remainingContextGraphs, options } = request;
 
   const {
@@ -127,6 +127,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       authenticateChallengePinnedAsset,
     });
     return {
+      recoveryRound: { strategy: 'not-started' },
       result: fetched.result,
       exactFetchDisposition: fetched.disposition,
       authenticatedExactAssets: fetched.authenticatedAssets,
@@ -151,7 +152,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
 
     });
     switch (outcome.kind) {
-      case 'settled': return outcome.detailed;
+      case 'settled': return { ...outcome.detailed, recoveryRound: { strategy: 'not-started' } };
       case 'not-selected':
       case 'unsupported-before-start': break; // Paging uses the same stored-prefix proof as full-graph recovery.
     }

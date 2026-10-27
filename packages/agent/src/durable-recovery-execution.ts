@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { DurableRecoveryRoundDecision } from './sync/durable-recovery-round.js';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import { type DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import type { ExactBatchStreamOutcome } from './sync/requester/exact-recovery-transport.js';
@@ -71,7 +70,6 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
   const committedExactAssetUals: string[] = [];
   // What the stream established about this peer for one graph. A run over
   // several graphs has no single answer, so it reports none.
-  let recoveryRound: DurableRecoveryRoundDecision | undefined;
   let exactStreamOutcome: ExactBatchStreamOutcome | undefined;
   const markExactFetchIncomplete = () => {
     if (exactAssetUals === undefined) return;
@@ -104,7 +102,6 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
               settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs,
               signal: operationBoundary.signal,
               isCurrent: options?.isCurrent,
-              graphRecovery: options?.graphRecovery,
             },
           });
           if (detailed.exactFetchDisposition !== undefined) {
@@ -123,7 +120,7 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
           if (detailed.committedExactAssetUals !== undefined) {
             committedExactAssetUals.push(...detailed.committedExactAssetUals);
           }
-          if (orderedContextGraphIds.length === 1) { exactStreamOutcome = detailed.exactStreamOutcome; recoveryRound = detailed.recoveryRound; }
+          if (orderedContextGraphIds.length === 1) exactStreamOutcome = detailed.exactStreamOutcome;
           return durableSyncAccumulatorFromResult(detailed.result);
         },
       })),
@@ -182,7 +179,6 @@ export async function runDurableRecovery(request: DurableRecoveryRequest): Promi
     });
     return {
       admission: admissionBoundary.snapshot(),
-      ...(recoveryRound ? { recoveryRound } : {}),
       result: finalizeDurableSyncCompletion(accumulator),
       ...(exactFetchDisposition ? { exactFetchDisposition } : {}),
       ...(exactResponderCapability ? { exactResponderCapability } : {}),
