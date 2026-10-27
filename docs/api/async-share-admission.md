@@ -4,7 +4,7 @@
 
 ## Admission budget and evidence
 
-Queue admission has a ten-second budget covering mutex wait, graph initialization, conflict lookup, persistence and flush. Authentication, context-graph readiness, selected-author resolution, body transfer and HTTP response delivery are outside this queue budget. This is not a ten-second end-to-end HTTP guarantee. Ordinary store capacity, the `ack`, `health`, `normal` and `background` lanes and store deadlines are unchanged; the one change to which scheduler the queue's own store calls use is described in [Store scheduler of the queue's own calls](#store-scheduler-of-the-queues-own-calls).
+Queue admission has a ten-second budget covering mutex wait, graph initialization, conflict lookup, persistence and flush. Authentication, context-graph readiness, selected-author resolution, body transfer and HTTP response delivery are outside this queue budget. The context-graph write preflight that precedes admission lets concurrent submissions for one graph and one caller share a probe, and answers store pressure in its follow-up reads with a retryable `503`; see [write preflight coalescing](../use-dkg/write-preflight-coalescing.md). This is not a ten-second end-to-end HTTP guarantee. Ordinary store capacity, the `ack`, `health`, `normal` and `background` lanes and store deadlines are unchanged; the one change to which scheduler the queue's own store calls use is described in [Store scheduler of the queue's own calls](#store-scheduler-of-the-queues-own-calls).
 
 An admission that expires **before persistence starts** is prevented from later writing a job. The server returns HTTP 503 with `Retry-After: 1` and:
 
