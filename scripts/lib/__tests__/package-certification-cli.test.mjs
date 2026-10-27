@@ -83,6 +83,9 @@ process.stdout.write(results[key]);`);
   shim('npm', `const fs = require('node:fs');
 const args = process.argv.slice(2);
 fs.appendFileSync(${JSON.stringify(calls)}, JSON.stringify(args) + '\\n');
+if (args[0] === 'dist-tag' && args[1] === 'ls') {
+  process.stdout.write('canary: ${version}\\nlatest: 10.0.24\\n'); process.exit(0);
+}
 if (args[0] !== 'view') process.exit(91);
 if (${JSON.stringify(mode)} === 'publish-prepared') {
   process.stdout.write(JSON.stringify({ error: { code: 'E404' } })); process.exitCode = 1;

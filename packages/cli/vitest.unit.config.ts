@@ -36,6 +36,14 @@ export default defineConfig({
           // #2892 — real in-memory queue and supervisor; no chain or daemon process.
           'test/async-promote-supervisor-bookkeeping.test.ts',
           'test/promote-queue-config.test.ts',
+          // OT-RFC-73 P10b — queue retention wiring: config, the one timer, the daemon-only start, the share sweep over the queue's own store object, the usage line.
+          'test/retention-config.test.ts',
+          'test/retention-timer.test.ts',
+          'test/retention-sweeps.test.ts',
+          'test/retention-share-sweep.test.ts',
+          'test/retention-runtime-scope.test.ts',
+          'test/daemon-queue-retention-live.test.ts',
+          'test/async-admission-usage-retention.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
@@ -94,6 +102,7 @@ export default defineConfig({
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
           'test/promote-admission-route.test.ts',
+          'test/async-share-control-busy-admission.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
           // The dashboard shell carries the operator token only for trusted
           // local requests (loopback socket and loopback Host). Pure helpers
@@ -172,6 +181,7 @@ export default defineConfig({
           'test/node-runtime-preflight.test.ts',
           'test/outbound-brotli-refusal.test.ts',
           'test/dkg-doctor.test.ts',
+          'test/doctor-command-config.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
           'test/init-command.test.ts',
@@ -220,6 +230,10 @@ export default defineConfig({
           'test/liveness-supervisor-log.test.ts',
           'test/foreground-supervisor-command.test.ts',
           'test/promote-async-routes.test.ts',
+          // OT-RFC-73 P9b — the opt-in paged mode of the two job list routes (real queues over HTTP, no hardhat).
+          'test/job-list-paging-routes.test.ts',
+          // OT-RFC-73 P9b — --cursor, --page-size and --all of the two list commands, and the client path helpers.
+          'test/job-list-paging-cli.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
           // Pure HTTP classification coverage for chain transport failures,
@@ -343,6 +357,17 @@ export default defineConfig({
           // slow/closed. Real resolver + real agent probe + real (closed)
           // OxigraphWorkerStore; no hardhat needed.
           'test/write-preflight-resilience.test.ts',
+          // OT-RFC-73 S4a — concurrent write preflights share one probe: who may
+          // share, when a probe in flight stops being joinable, the optional
+          // result cache, the switches. Fake agent; the seam test runs the real
+          // probe, store observer and resolver. Neither needs hardhat.
+          'test/write-preflight-coalescing.test.ts',
+          'test/write-preflight-coalescing-seam.test.ts',
+          // The operator's unresolved-write window reaches DKGAgent.create from runDaemonInner.
+          'test/daemon-write-preflight-window-wiring.test.ts',
+          // A store-busy refusal in the preflight's follow-up reads answers 503
+          // at both async admission routes.
+          'test/write-preflight-store-busy-route.test.ts',
           'test/http-literal-size-validation.test.ts',
           'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.

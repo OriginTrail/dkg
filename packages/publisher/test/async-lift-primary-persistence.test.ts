@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { OxigraphStore, UnsupportedTripleStoreCapabilityError, type Quad, type QueryOptions, type TripleStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, UnsupportedTripleStoreCapabilityError, controlStoreOptions, type Quad, type QueryOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import { persistLiftJobRecord } from '../src/job-record-atomic-write.js';
 import { TripleStoreAsyncLiftPublisher } from '../src/async-lift-publisher-impl.js';
 import {
@@ -130,7 +130,7 @@ describe('async-lift primary request/job persistence', () => {
       expect(compoundCalls[0]).toEqual({
         graph: DEFAULT_CONTROL_GRAPH_URI, subject: record.jobRef,
         replacement: record.jobQuads, inserts: record.requestQuads,
-        options: expect.objectContaining({ source: 'publisher.asyncLift.writeJob' }),
+        options: controlStoreOptions('publisher', 'publisher.asyncLift.writeJob'),
       });
       expect(separateRequestInserts).toEqual([]);
     },

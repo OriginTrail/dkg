@@ -11,7 +11,34 @@ export interface WritePreflightHost {
   contextGraphExists(contextGraphId: string): Promise<boolean>;
   contextGraphHasLocalContent(contextGraphId: string): Promise<boolean>;
   curatorDidMatchesChecksumAgent(curator: string, checksumAddress: string): boolean;
-  callerIsAllowlistedAgentParticipant(contextGraphId: string, checksumAddress: string): Promise<boolean>;
+  callerIsAllowlistedAgentParticipant(
+    contextGraphId: string,
+    checksumAddress: string,
+    options?: { onChainLookup?: () => void },
+  ): Promise<boolean>;
+}
+
+/** What a probe call may carry besides the context graph id. */
+export interface WritePreflightProbeOptions {
+  callerAgentAddress?: string | null;
+  /**
+   * Called when the caller's authorization consulted the chain (an on-chain identity-ID entry of
+   * the allowlist). Such an answer can change without any local write, so a result cache must not keep it.
+   */
+  onChainLookup?: () => void;
+}
+
+/**
+ * The checksum address a probe judges the caller by, or null when the call names no usable caller
+ * (a `did:dkg:agent:` prefix is dropped; a string that is not an address names nobody). Two calls for the
+ * same context graph with equal results here get equal probe results.
+ */
+export function normalizeWritePreflightCaller(callerAgentAddress: string | null | undefined): string | null {
+  const rawCaller = callerAgentAddress?.trim();
+  if (!rawCaller) return null;
+  const didPrefix = 'did:dkg:agent:';
+  const rawAddress = rawCaller.startsWith(didPrefix) ? rawCaller.slice(didPrefix.length) : rawCaller;
+  return ethers.isAddress(rawAddress) ? ethers.getAddress(rawAddress) : null;
 }
 
 interface WritePreflightSubscriptions {
@@ -23,7 +50,7 @@ export async function probeContextGraphWritePreflight(
     host: WritePreflightHost,
     subscriptions: WritePreflightSubscriptions,
     contextGraphId: string,
-    opts?: { callerAgentAddress?: string | null },
+    opts?: WritePreflightProbeOptions,
   ): Promise<ContextGraphWritePreflightProbe> {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
@@ -158,13 +185,7 @@ export async function probeContextGraphWritePreflight(
       else if (sawGate) accessPolicy = 'private';
     }
 
-    let checksum: string | null = null;
-    const rawCaller = opts?.callerAgentAddress?.trim();
-    if (rawCaller) {
-      const didPrefix = 'did:dkg:agent:';
-      const rawAddress = rawCaller.startsWith(didPrefix) ? rawCaller.slice(didPrefix.length) : rawCaller;
-      if (ethers.isAddress(rawAddress)) checksum = ethers.getAddress(rawAddress);
-    }
+    const checksum = normalizeWritePreflightCaller(opts?.callerAgentAddress);
 
     let callerAuthorized: boolean | undefined;
     if (checksum && declarationFound) {
@@ -182,7 +203,9 @@ export async function probeContextGraphWritePreflight(
           // UNKNOWN (never a deny) and flag the store instead of throwing
           // the whole probe away.
           try {
-            callerAuthorized = await host.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
+            callerAuthorized = opts?.onChainLookup
+              ? await host.callerIsAllowlistedAgentParticipant(contextGraphId, checksum, { onChainLookup: opts.onChainLookup })
+              : await host.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
           } catch (err) {
             noteStoreFailure('caller-access', err);
           }

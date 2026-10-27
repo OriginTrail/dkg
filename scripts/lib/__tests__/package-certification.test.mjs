@@ -4,7 +4,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { verifyCertificate, verifyBundle, digest, readJson, tarFiles, fileIdentity, hash, dependencies, validatePackedManifest } from '../package-certification/bundle.mjs';
 import { preparedRelease, checkRegistrySet } from '../package-certification/publish.mjs';
-import { fixture, writeJson, archive, releaseGitFixture } from './package-certification-fixture.mjs';
+import { fixture, writeJson, archive, releaseGitFixture, fakeDistTags } from './package-certification-fixture.mjs';
 import { startRegistry } from '../package-certification/registry.mjs';
 import { archiveRecords } from '../package-certification/npm-cache.mjs';
 
@@ -156,10 +156,10 @@ for (const [name, alter, message] of [
   assert.throws(() => verifyBundle(f.bundle, f.expected), message);
 });
 function releaseOptions(f, extra = {}) {
-  return { mode: 'publish', bundle: f.bundle, receiptFile: f.receiptFile, expected: f.expected, tags: ['canary'], ...releaseGitFixture(f.expected), readDist: () => null, log: () => {}, ...extra };
+  return { mode: 'publish', bundle: f.bundle, receiptFile: f.receiptFile, expected: f.expected, tags: ['canary'], ...releaseGitFixture(f.expected), readDist: () => null, readTags: () => ({}), askOtp: null, settle: 0, log: () => {}, ...extra };
 }
 for (const mode of ['publish', 'promote']) for (const matches of [true, false]) {
-  test(`${mode} default authorization ${matches ? 'accepts' : 'rejects'} the resolved tag subject`, t => {
+  test(`${mode} default authorization ${matches ? 'accepts' : 'rejects'} the resolved tag subject`, async t => {
     const f = fixture(t), tag = `v${f.expected.version}`, object = 'c'.repeat(40);
     const responses = new Map([
       [`rev-parse --verify refs/tags/${tag}`, object],
@@ -177,22 +177,22 @@ for (const mode of ['publish', 'promote']) for (const matches of [true, false]) 
         return responses.get(args.join(' '));
       },
       readDist: pkg => { reads++; return mode === 'promote' ? { integrity: pkg.integrity } : null; },
-      runner: () => { mutations++; },
+      ...fakeDistTags({ write: () => { mutations++; } }),
     });
     if (matches) {
-      preparedRelease(options);
+      await preparedRelease(options);
       assert.equal(reads, f.manifest.packages.length);
       assert.equal(mutations, f.manifest.packages.length);
     } else {
-      assert.throws(() => preparedRelease(options), /tag does not identify prepared source/);
+      await assert.rejects(preparedRelease(options), /tag does not identify prepared source/);
       assert.equal(reads, 0, 'authorization must precede registry acquisition');
       assert.equal(mutations, 0, 'authorization must precede mutation');
     }
   });
 }
-test('publication plan exposes consumers only after their candidate dependencies; uses exact tarballs', t => {
+test('publication plan exposes consumers only after their candidate dependencies; uses exact tarballs', async t => {
   const f = fixture(t), calls = [], available = new Set();
-  const progress = preparedRelease(releaseOptions(f, { runner: (command, args) => {
+  const progress = await preparedRelease(releaseOptions(f, { runner: (command, args) => {
     const pkg = f.manifest.packages.find(p => path.join(f.bundle, p.tarball) === args[1]);
     const policy = f.expected.packages.find(p => p.name === pkg.name);
     for (const name of Object.keys(policy.dependencies.dependencies)) {
@@ -206,28 +206,28 @@ test('publication plan exposes consumers only after their candidate dependencies
   assert.deepEqual(calls.map(([, args]) => args[1]), [...f.manifest.packages].reverse().map(p => path.join(f.bundle, p.tarball)));
   assert.ok(calls.every(([command, args]) => command === 'npm' && args[0] === 'publish'));
 });
-test('validation and authorization failures invoke no mutating runner', t => {
+test('validation and authorization failures invoke no mutating runner', async t => {
   const f = fixture(t); let mutations = 0;
   const runner = () => { mutations++; };
-  assert.throws(() => preparedRelease(releaseOptions(f, { runner, gitRunner: () => { throw new Error('tag unavailable'); } })));
+  await assert.rejects(preparedRelease(releaseOptions(f, { runner, gitRunner: () => { throw new Error('tag unavailable'); } })));
   fs.appendFileSync(path.join(f.bundle, f.manifest.packages[1].tarball), 'damaged');
-  assert.throws(() => preparedRelease(releaseOptions(f, { runner })));
+  await assert.rejects(preparedRelease(releaseOptions(f, { runner })));
   assert.equal(mutations, 0);
 });
-test('preflights whole registry set before publish or promotion; rejects same-version mismatch', t => {
+test('preflights whole registry set before publish or promotion; rejects same-version mismatch', async t => {
   const f = fixture(t);
   for (const mode of ['publish', 'promote']) {
     let calls = 0;
-    assert.throws(() => preparedRelease(releaseOptions(f, { mode, readDist: p => ({ integrity: p.name === f.manifest.packages[1].name ? 'wrong' : p.integrity }), runner: () => { calls++; } })), /integrity mismatch/);
+    await assert.rejects(preparedRelease(releaseOptions(f, { mode, readDist: p => ({ integrity: p.name === f.manifest.packages[1].name ? 'wrong' : p.integrity }), runner: () => { calls++; } })), /integrity mismatch/);
     assert.equal(calls, 0);
   }
   assert.throws(() => checkRegistrySet(f.manifest, () => null), /unpublished/);
 });
-test('partial publication reports exact completed set and only reuses matching bytes', t => {
+test('partial publication reports exact completed set and only reuses matching bytes', async t => {
   const f = fixture(t), published = new Map();
   let error;
   try {
-    preparedRelease(releaseOptions(f, { runner: (_command, args) => {
+    await preparedRelease(releaseOptions(f, { runner: (_command, args) => {
       if (published.size) throw new Error('OTP=secret must not leak');
       const pkg = f.manifest.packages.find(p => path.join(f.bundle, p.tarball) === args[1]);
       published.set(pkg.name, { integrity: pkg.integrity });
@@ -236,24 +236,24 @@ test('partial publication reports exact completed set and only reuses matching b
   assert.deepEqual(error.progress.completed, error.progress.planned.slice(0, 1));
   assert.deepEqual(error.progress.completed, [{ package: f.manifest.packages[1].name, tag: 'canary' }]);
   assert.ok(!error.message.includes('secret'));
-  const resumed = preparedRelease(releaseOptions(f, { readDist: p => published.get(p.name) ?? null, runner: () => {} }));
+  const resumed = await preparedRelease(releaseOptions(f, { readDist: p => published.get(p.name) ?? null, runner: () => {} }));
   assert.deepEqual(resumed.reused, [f.manifest.packages[1].name]);
   assert.deepEqual(resumed.completed, [{ package: f.manifest.packages[0].name, tag: 'canary' }]);
 });
-test('partial promotion reports non-atomic progress; dry-run is nonmutating and secret-free', t => {
+test('partial promotion reports non-atomic progress; dry-run is nonmutating and secret-free', async t => {
   const f = fixture(t), lines = []; let count = 0;
-  const options = releaseOptions(f, { mode: 'promote', readDist: p => ({ integrity: p.integrity }), otp: 'secret', tags: ['testnet', 'mainnet'], runner: () => { if (++count === 2) throw new Error('expired'); }, log: line => lines.push(line) });
-  assert.throws(() => preparedRelease(options), error => {
+  const options = releaseOptions(f, { mode: 'promote', readDist: p => ({ integrity: p.integrity }), otp: '135791', tags: ['testnet', 'mainnet'], ...fakeDistTags({ write: () => { if (++count === 2) throw new Error('expired'); } }), log: line => lines.push(line) });
+  await assert.rejects(preparedRelease(options), error => {
     assert.equal(error.progress.planned.length, 4);
     assert.deepEqual(error.progress.completed, error.progress.planned.slice(0, 1));
     return true;
   });
-  preparedRelease({ ...options, dryRun: true, runner: () => assert.fail('dry-run mutated') });
-  assert.ok(lines.every(line => !line.includes('secret')));
+  await preparedRelease({ ...options, dryRun: true, runner: () => assert.fail('dry-run mutated') });
+  assert.ok(lines.every(line => !line.includes('135791')));
 });
-test('registry acquisition cannot change bytes between verification and mutation', t => {
+test('registry acquisition cannot change bytes between verification and mutation', async t => {
   const f = fixture(t); let calls = 0;
-  assert.throws(() => preparedRelease(releaseOptions(f, { runner: () => { calls++; }, readDist: () => {
+  await assert.rejects(preparedRelease(releaseOptions(f, { runner: () => { calls++; }, readDist: () => {
     fs.appendFileSync(path.join(f.bundle, f.manifest.packages[0].tarball), 'changed'); return null;
   } })));
   assert.equal(calls, 0);
@@ -276,12 +276,12 @@ test('candidate registry serves actual bytes and refuses scope fallback or runti
   } finally { await server.close(); }
 });
 
-test('cyclic internal runtime dependencies fail publication before mutation', t => {
+test('cyclic internal runtime dependencies fail publication before mutation', async t => {
   const initial = fixture(t);
   const expected = structuredClone(initial.expected);
   expected.packages[1].dependencies.optionalDependencies[expected.packages[0].name] = expected.version;
   const f = fixture(t, { expected });
-  assert.throws(() => preparedRelease(releaseOptions(f, { runner: () => assert.fail('cycle mutated') })), /cyclic internal publication dependency/);
+  await assert.rejects(preparedRelease(releaseOptions(f, { runner: () => assert.fail('cycle mutated') })), /cyclic internal publication dependency/);
 });
 
 

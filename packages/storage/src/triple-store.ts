@@ -71,6 +71,7 @@ export const STORE_WORK_PRIORITIES = Object.freeze([
   'background',
 ] as const);
 export type StoreWorkPriority = (typeof STORE_WORK_PRIORITIES)[number];
+export type StoreControlQueue = 'share' | 'publisher';
 
 export function isStoreWorkPriority(value: unknown): value is StoreWorkPriority {
   return typeof value === 'string'
@@ -106,6 +107,8 @@ export interface QueryOptions {
    * may use `background`.
    */
   priority?: StoreWorkPriority;
+  /** Control work of this async queue: runs on its own scheduler when that path is on (store-control-path.ts). */
+  controlQueue?: StoreControlQueue;
   /**
    * Best-effort caller cancellation. Async backends should reject promptly when
    * aborted; synchronous embedded backends may only observe the signal before

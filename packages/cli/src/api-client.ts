@@ -1,5 +1,6 @@
 import type { QueryOptions } from './query-options.js';
-import { shareJobsPath, shareReconciliationPath } from './share-job-client-paths.js';
+import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
+import { publisherJobsPath, type PublisherJobsPageOptions, type PublisherJobsResult } from './publisher-job-client-paths.js';
 import { createEntityClient } from './entity-search/client.js';
 import { readFile } from 'node:fs/promises';
 import { basename } from 'node:path';
@@ -1050,11 +1051,7 @@ export class ApiClient {
     return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
   }
 
-  async knowledgeAssetShareJobs(options?: {
-    contextGraphId?: string;
-    state?: KnowledgeAssetShareJobState | KnowledgeAssetShareJobState[];
-    limit?: number;
-  }): Promise<{ jobs: KnowledgeAssetShareJobView[] }> {
+  async knowledgeAssetShareJobs(options?: ShareJobsListOptions): Promise<ShareJobsListResult> {
     return this.get(shareJobsPath(options));
   }
 
@@ -1516,11 +1513,8 @@ export class ApiClient {
     return this.get(`/api/agent/${encodeURIComponent(address)}/encryption-keys`);
   }
 
-  async publisherJobs(status?: string, contextGraphId?: string): Promise<{ jobs: any[] }> {
-    const qs = new URLSearchParams();
-    if (status) qs.set('status', status);
-    if (contextGraphId) qs.set('contextGraphId', contextGraphId);
-    return this.get(`/api/publisher/jobs${qs.size ? `?${qs}` : ''}`);
+  async publisherJobs(status?: string, contextGraphId?: string, page?: PublisherJobsPageOptions): Promise<PublisherJobsResult> {
+    return this.get(publisherJobsPath(status, contextGraphId, page));
   }
 
   // GH#2270 — `retryState` is the daemon's DERIVED answer to "will this node retry this

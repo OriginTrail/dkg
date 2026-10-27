@@ -27,6 +27,11 @@ import {
   type AsyncAdmissionUsageSample,
   type AsyncQueueDepthReading,
 } from '../src/daemon/async-admission-usage-log.js';
+import {
+  configureWritePreflightCoalescing,
+  getWritePreflightCoalescingCounters,
+  probeWritePreflight,
+} from '../src/daemon/write-preflight-coalescing.js';
 
 const EMPTY: LatencySummary = { n: 0, p50Ms: null, p95Ms: null, p99Ms: null, maxMs: null };
 const summary = (n: number, p50: number, p95: number, p99: number, max: number): LatencySummary =>
@@ -111,6 +116,7 @@ const busy: AsyncAdmissionUsageSample = {
   depth: DEPTH,
   depthErrors: 0,
   shareWorker: { attempted: 210, succeeded: 200, failedTerminal: 2, failedRetrying: 8 },
+  preflight: { flights: 812, joins: 3390, cacheHits: 12, cacheStores: 5, direct: 1 },
 };
 
 const idle: AsyncAdmissionUsageSample = {
@@ -156,6 +162,7 @@ describe('async_admission_usage line', () => {
       'lift_pickup_free_n=30 lift_pickup_free_p50_ms=400 lift_pickup_free_p95_ms=1200 lift_pickup_unclassified=5',
       'lift_c2f_n=38 lift_c2f_p50_ms=12000 lift_c2f_p95_ms=15500',
       'lift_finalized=40 lift_failed=3',
+      'preflight_flights=812 preflight_joins=3390 preflight_cache_hits=12 preflight_cache_stores=5 preflight_direct=1',
     ].join(' '));
   });
 
@@ -174,7 +181,49 @@ describe('async_admission_usage line', () => {
       'lift_pickup_free_n=0 lift_pickup_free_p50_ms=- lift_pickup_free_p95_ms=- lift_pickup_unclassified=0',
       'lift_c2f_n=0 lift_c2f_p50_ms=- lift_c2f_p95_ms=-',
       'lift_finalized=0 lift_failed=0',
+      'preflight_flights=- preflight_joins=- preflight_cache_hits=- preflight_cache_stores=- preflight_direct=-',
     ].join(' '));
+  });
+
+  it('lists the queue control schedulers beside the store scheduler, each with its one control lane', () => {
+    const control = (queue: string, waitsMs: readonly number[], count: number): StoreSchedulerStatsReport => ({
+      scheduler: `store-control-${queue}`,
+      queueWaits: [laneWaits('control', waitsMs)],
+      rejections: count === 0 ? [] : [{ lane: 'control', family: `publisher.${queue}`, reason: 'queue_full', count }],
+    });
+    const line = formatAsyncAdmissionUsageLine({
+      ...idle,
+      store: [storeReport, control('publisher', [...repeat(1, 9), 17], 2), control('share', [], 0)],
+    });
+    expect(line).toContain(
+      ' store_rejections=store-control-publisher/control/publisher.publisher/queue_full:2,'
+      + 'store/background/publisher.asyncLift/queue_full:3,store/normal/agent.writePreflight/queue_wait_timeout:1 ',
+    );
+    expect(line).toContain(' store_max_wait_ms=store-control-publisher/control:17,store-control-share/control:0,store/ack:80,');
+    expect(line).toContain(' store_wait_n=store-control-publisher/control:10,store-control-share/control:0,store/ack:40,');
+    expect(line).toContain(' store_wait_p95_ms=store-control-publisher/control:17,store-control-share/control:0,store/ack:4,');
+    expect(line).toContain(' store_wait_buckets=store-control-publisher/control:1x9|17x1,store-control-share/control:-,store/ack:4x38|80x2,');
+    const [, ...tokens] = line.split(' ');
+    for (const token of tokens) expect(token).toMatch(/^[a-z0-9_]+=[^\s="]+$/);
+  });
+
+  it('prints the preflight counters as plain cumulative integers, zero included', () => {
+    const line = formatAsyncAdmissionUsageLine({
+      ...busy,
+      preflight: { flights: 0, joins: 0, cacheHits: 0, cacheStores: 0, direct: 0 },
+    });
+    expect(line.split(' ').filter((token) => token.startsWith('preflight_'))).toEqual([
+      'preflight_flights=0', 'preflight_joins=0', 'preflight_cache_hits=0', 'preflight_cache_stores=0', 'preflight_direct=0',
+    ]);
+  });
+
+  it('documents every preflight figure the line prints, in the operator doc', () => {
+    const doc = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), '../../../docs/use-dkg/backpressure-observability.md'), 'utf8');
+    const printed = formatAsyncAdmissionUsageLine(busy).split(' ')
+      .filter((token) => token.startsWith('preflight_'))
+      .map((token) => token.slice(0, token.indexOf('=')));
+    expect(printed).toHaveLength(5);
+    for (const field of printed) expect(doc, field).toContain(`\`${field}\``);
   });
 
   it('keeps a readable queue when the other one could not be read', () => {
@@ -603,6 +652,46 @@ describe('startAsyncAdmissionUsageLog', () => {
     const [ctx, line] = info.mock.calls[0]!;
     expect(ctx).toMatchObject({ operationName: 'system' });
     expect(line).toMatch(/^async_admission_usage interval_s=0 store_rejections=\S+ store_max_wait_ms=\S+ store_wait_n=\S+ store_wait_p95_ms=\S+ store_wait_buckets=\S+ http=- /);
+  });
+});
+
+describe('the preflight counters of a running log', () => {
+  const quiet = { info: () => {}, warn: () => {} };
+  const probe = { contextGraphId: 'cg', exists: true } as never;
+  afterEach(() => { configureWritePreflightCoalescing({}, quiet); });
+
+  it('reads the coalescer\'s own counters by default, as they stand when each line is built', async () => {
+    configureWritePreflightCoalescing({}, quiet);
+    const lines: string[] = [];
+    const agent = {
+      probeContextGraphWritePreflight: async () => probe,
+      writePreflightIdentity: () => ({ key: 'k', stamp: 's' }),
+    };
+    const accepts = () => true;
+    await Promise.all([
+      probeWritePreflight(agent, 'cg', null, { accepts }),
+      probeWritePreflight(agent, 'cg', null, { accepts }),
+      probeWritePreflight(agent, 'cg', null, { accepts }),
+    ]);
+    const log = startAsyncAdmissionUsageLog({ emit: (line) => lines.push(line), capture: () => ({ store: [], usage: usage() }) });
+    await vi.waitFor(() => expect(lines).toHaveLength(1));
+    log.stop();
+    expect(lines[0]).toContain(' preflight_flights=1 preflight_joins=2 preflight_cache_hits=0 preflight_cache_stores=0 preflight_direct=0');
+    expect(getWritePreflightCoalescingCounters()).toMatchObject({ flights: 1, joins: 2 });
+  });
+
+  it('takes a counter source of its own, and does not take (zero) the counters it reads', async () => {
+    const lines: string[] = [];
+    const source = vi.fn(() => ({ flights: 7, joins: 6, cacheHits: 5, cacheStores: 4, direct: 3 }));
+    const log = startAsyncAdmissionUsageLog({
+      emit: (line) => lines.push(line),
+      capture: () => ({ store: [], usage: usage() }),
+      preflightCounters: source,
+    });
+    await vi.waitFor(() => expect(lines).toHaveLength(1));
+    log.stop();
+    expect(lines[0]).toContain(' preflight_flights=7 preflight_joins=6 preflight_cache_hits=5 preflight_cache_stores=4 preflight_direct=3');
+    expect(source).toHaveBeenCalledTimes(1);
   });
 });
 
