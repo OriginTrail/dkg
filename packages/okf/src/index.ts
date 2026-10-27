@@ -48,7 +48,8 @@ export {
 
 export { parseDocument, OkfDocumentError } from './document.js';
 export { YamlTimestamp } from './yaml-lexical.js';
-export { frontmatterQuads, mapFrontmatter, parseBody, mapConcept, summarizeTrust } from './mapping.js';
+export { frontmatterQuads, mapFrontmatter, mapConcept, summarizeTrust } from './mapping.js';
+export { parseBody } from './markdown-body.js';
 export type { FrontmatterContext, FrontmatterMapping } from './mapping.js';
 // The v0.2 family definitions and codec (`./families/`) are internal; these
 // are the operations built on them.

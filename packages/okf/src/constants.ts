@@ -57,6 +57,9 @@ export const SCHEMA_CITATION = 'http://schema.org/citation';
 export const SCHEMA_HAS_PART = 'http://schema.org/hasPart';
 /** Optional folder hierarchy (off by default — see ADR 0005). */
 export const SCHEMA_IS_PART_OF = 'http://schema.org/isPartOf';
+/** On an `okf:BodyPart` node: its slice of the concept body, and its index in the body, from 0. */
+export const SCHEMA_TEXT = 'http://schema.org/text';
+export const SCHEMA_POSITION = 'http://schema.org/position';
 
 // --- W3C PROV-O ---
 export const PROV_NS = 'http://www.w3.org/ns/prov#';
@@ -124,6 +127,13 @@ export const OKF_CLASS_VERIFICATION = OKF_NS + 'Verification';
 export const OKF_CLASS_SOURCE = OKF_NS + 'Source';
 export const OKF_CLASS_PARAMETER = OKF_NS + 'Parameter';
 
+// --- The concept body, stored verbatim (`body.ts`) ---
+/** Concept → one `okf:BodyPart` node per part of its Markdown body. */
+export const OKF_BODY_PART = OKF_NS + 'bodyPart';
+/** The number of parts the concept's body is stored in (xsd:integer; 0 for an empty body). */
+export const OKF_BODY_PART_COUNT = OKF_NS + 'bodyPartCount';
+export const OKF_CLASS_BODY_PART = OKF_NS + 'BodyPart';
+
 /** The `type` value that makes a concept an Attested Computation (§10). */
 export const OKF_ATTESTED_COMPUTATION_TYPE = 'Attested Computation';
 /** Allowed `status` values (§5.4). Anything else is tolerated with a warning. */
@@ -132,8 +142,9 @@ export const OKF_STATUS_VALUES = ['draft', 'stable', 'deprecated'] as const;
 export const OKF_TRUST_TIERS = ['unverified', 'machine-confirmed', 'human-reviewed'] as const;
 
 /**
- * Infix for deterministic skolem IRIs minted for `dkg:hasSection` nodes and
- * for the v0.2 family nodes (`okf:Verification`, `okf:Source`, `okf:Parameter`).
+ * Infix for deterministic skolem IRIs minted for `dkg:hasSection` nodes, for
+ * the v0.2 family nodes (`okf:Verification`, `okf:Source`, `okf:Parameter`)
+ * and for the parts of the stored body (`okf:BodyPart`).
  * The daemon rejects blank-node RDF *objects* ("RDF object must be a quoted
  * literal term or absolute IRI"), so these nodes are skolemized into
  * concept-scoped IRIs `<conceptIri>/.well-known/genid/<tag><id>_<n>` — the
@@ -148,6 +159,7 @@ export const GENID_TAGS = {
   verification: 'okfver_',
   source: 'okfsrc_',
   parameter: 'okfparam_',
+  body: 'okfbody_',
 } as const;
 
 /** Default IRI namespace for concept Knowledge Asset subjects. */

@@ -52,6 +52,16 @@ A link (usually an external URL) under a legacy v0.1 `# Citations` heading,
 backing a claim. Mapped to `schema:citation`, semantically distinct from concept
 edges. Superseded in v0.2 by `sources` (§13.1) but still parsed.
 
+**Body**:
+A concept's Markdown after its frontmatter, as `parseDocument` reads it (line
+endings as `\n`, the one newline after the frontmatter dropped). Its links,
+headings and legacy citations become edges, sections and citations, and the
+body itself is stored verbatim (`src/body.ts`), in ordered **body parts**:
+skolemized `okf:BodyPart` nodes (`<conceptIri>/.well-known/genid/okfbody_<id>_<n>`)
+holding `schema:text` and `schema:position`, with `okf:bodyPartCount` on the
+concept, each within half the node's 60,000-byte literal limit
+(`docs/use-dkg/large-content.md`). Export writes it back as written.
+
 **Family** (v0.2):
 One of the optional frontmatter groups SPEC §5 and §10 define — provenance
 (`sources`, `usage_window`), trust (`generated`, `verified`), lifecycle
@@ -129,7 +139,8 @@ it; the CLI summary reports it against the current time.
   (so an edge only forms to a concept that is imported). Each concept is
   prepared once and resolved once.
 - Concept → one Knowledge Asset (one subject IRI) → many quads (frontmatter
-  triples + family nodes + body sections + untyped edges + citations).
+  triples + family nodes + body sections + untyped edges + citations + body
+  parts).
 - Frontmatter key → RDF predicate via the locked table (ADR 0005; the v0.2 rows
   are in `README.md`). `type` is the only required key (OKF §11); everything
   else degrades gracefully when absent.
@@ -184,17 +195,24 @@ it; the CLI summary reports it against the current time.
   Caveat: the rule is endpoint-type-based, so it cannot distinguish a same-dataset
   containment link from a cross-dataset reference of the same type pair — use it
   where that distinction doesn't apply, or leave the default.
-- **Round-trip is graph-faithful, not byte-faithful, by design.** `import →
-  export → import` reproduces an equivalent *semantic graph*, not the original
-  bytes: free-form prose isn't recoverable from triples, so export regenerates
-  bodies structurally, and a typed edge (e.g. `hasPart`) exports as a plain
-  (untyped) OKF link because OKF can't express the relation type. The v0.2
-  families are rebuilt in their original entry order from the node IRIs, and
-  everything the graph holds as a set is written in a canonical order, so export
-  depends only on which triples the graph holds, never on the order a store
-  returns them. This is a deliberate choice, not a defect; a future enhancement may have export
-  *add* provenance (UAL / seal, e.g. a `verified` entry naming the DKG
-  publisher) when serialising from a published graph.
+- **Round trip: the body as written, the frontmatter from the graph.**
+  `import → export → import` reproduces the graph, sections included. Export
+  writes each stored body back verbatim and rebuilds the frontmatter from the
+  graph, so the frontmatter comes back equivalent, not as written (key order,
+  quoting and comments are the exporter's), and a typed edge (e.g. `hasPart`)
+  comes back as a plain OKF link, because OKF can't express the relation type.
+  The body is the source of its own links: an edge or citation the graph holds
+  that the body does not express (a graph edited after import) is appended
+  after it, and a link it still holds comes back on re-import even if its edge
+  was removed from the graph. A concept with no complete stored body (imported
+  before bodies were stored, or with parts that no longer add up) gets a body
+  regenerated from the graph: a `# Related` section of links and a legacy
+  `# Citations` section. The v0.2 families are rebuilt in their original entry
+  order from the node IRIs, and everything the graph holds as a set is written
+  in a canonical order, so export depends only on which triples the graph
+  holds, never on the order a store returns them. A future enhancement may
+  have export *add* provenance (UAL / seal, e.g. a `verified` entry naming the
+  DKG publisher) when serialising from a published graph.
 - **Diagnostics are shared.** `familyDiagnostics` (context-free shape checks)
   feeds both `validateBundle` (as strings) and `importBundle` (as coded
   warnings), so the two never disagree. Only the mapper adds the
@@ -270,7 +288,8 @@ it; the CLI summary reports it against the current time.
   without changing these triples.
 - **Set-valued order.** A multi-valued RDF property is unordered, so export
   writes set-valued lists (`tags`, `authors`, `executor.receipt` — it declares
-  the fields a run must return — links, citations) and producer and extension
+  the fields a run must return — and the links and citations of a regenerated
+  body) and producer and extension
   keys in a canonical order (by RDF term), not the order the source bundle or
   the store happened to use. A single-valued field that somehow holds two
   values exports the same one either way. `parameters`, `verified` and
@@ -354,6 +373,18 @@ it; the CLI summary reports it against the current time.
   else is left alone. Detection is on body text nodes, so a label whose
   definition happens to parse as a CommonMark link reference definition is
   silently skipped (false negative only).
+- **The body is stored.** The mapper used to store only what it read from a
+  body (links, headings, citations), so export had to regenerate it. It now
+  stores the body verbatim too, which is what lets the prose round-trip, at
+  the cost of graph size: every body's text is in its Knowledge Asset, and so
+  in what a Verifiable Memory publish pays for. A graph imported before has no
+  `okf:bodyPartCount`; it still exports, with a regenerated body, and
+  `dkg okf verify` reports its body triples missing. An import still in
+  Working Memory gets them with `dkg okf import --replace`; one already
+  finalized or shared cannot be rewritten by `dkg okf import` (the node
+  refuses a write to an asset that is not an active Working Memory draft), so
+  its bodies are stored only by importing the bundle into a Context Graph or
+  sub-graph that does not hold it yet.
 - **Google's `acme_retail` `log.md` carries frontmatter**, which §8/§9 say a
   reserved file should not. It is tolerated with a warning and never minted.
 - **Versioning.** The consumer targets 0.2 and reads 0.1 under the §13.1

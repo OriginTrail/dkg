@@ -4,6 +4,8 @@ import {
   exportInputFromQuads,
   importBundle,
   parseDocument,
+  OKF_BODY_PART,
+  OKF_BODY_PART_COUNT,
   OKF_GENERATED_AT,
   OKF_LEGACY_TIMESTAMP,
   OKF_NS,
@@ -192,7 +194,9 @@ describe('each value on schema:dateModified names its owner', () => {
   });
 
   it('writes the legacy timestamp unmarked, as v0.1 did, and names it where a producer value holds its term', () => {
-    const okfOn = (r: ReturnType<typeof importBundle>) => r.quads.filter((q) => q.subject === IRI && q.predicate.startsWith(OKF_NS));
+    // Every okf: triple on the concept but the stored body's (`body.ts`).
+    const okfOn = (r: ReturnType<typeof importBundle>) =>
+      r.quads.filter((q) => q.subject === IRI && q.predicate.startsWith(OKF_NS) && q.predicate !== OKF_BODY_PART && q.predicate !== OKF_BODY_PART_COUNT);
     expect(okfOn(roundTrip("timestamp: '2026-01-01T00:00:00Z'").first)).toEqual([]);
     expect(okfOn(roundTrip("timestamp: '2026-01-01T00:00:00Z'\ndateModified: 2026-02-02T00:00:00Z").first).map((q) => q.predicate)).toEqual([OKF_PRODUCER_DATE_MODIFIED]);
     const { first } = roundTrip("timestamp: '2026-01-01T00:00:00Z'\ndateModified: 2026-01-01T00:00:00Z");

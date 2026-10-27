@@ -78,7 +78,7 @@ dkg okf import $BUNDLE --context-graph-id $CG --create-context-graph
 ```
 
 Import defaults to **Working Memory** — free, private, reversible. Expect the
-summary: `5 concepts, 3 reserved skipped, 101 triples, 11 links resolved, 0
+summary: `5 concepts, 3 reserved skipped, 126 triples, 11 links resolved, 0
 broken, 10 citations`, plus the deterministic `urn:okf:*` IRIs and the
 `memoryLayer: "WM"` note.
 
@@ -162,15 +162,16 @@ agent consuming OKF-derived, provenance-bearing knowledge from the shared graph.
 
 ## 7. Recreated, visibly
 
-Regenerate the graph from the shared Context Graph and compare it to Google's own
+Export the bundle from the shared Context Graph and compare it to Google's own
 `viz.html`:
 
 ```bash
 dkg okf export okf-crypto-bitcoin ./out --view shared-working-memory
 ```
 
-`export` is the clean inverse of `import` (graph-faithful). Confirm the
-regenerated bundle's `schema:mentions` structure matches the dataset→tables and
+`export` is the clean inverse of `import`: each concept comes back with its body
+as written and its frontmatter rebuilt from the graph. Confirm the
+exported bundle's `schema:mentions` structure matches the dataset→tables and
 cross-table edges in the bundle's own
 `okf/bundles/crypto_bitcoin/viz.html`. (`packages/graph-viz` can render the graph
 view directly.)
@@ -224,11 +225,11 @@ WM/SWM data never does.
 
 - Node network/chain confirmed mainnet: ______
 - Hermes `agentAddress`: ______
-- Import summary (WM): 5 concepts / 101 triples / 11 edges / 0 broken / 10 citations
+- Import summary (WM): 5 concepts / 126 triples / 11 edges / 0 broken / 10 citations
 - WM SPARQL edge count: ______
 - SWM SPARQL edge count: ______
 - Join invitation: ______
 - Second peer query result: ______
 - Hermes agent transcript: ______
-- Regenerated graph vs `viz.html`: ______
+- Exported graph vs `viz.html`: ______
 - (Deferred) VM UALs / txHashes: _(only if step 8 was run)_

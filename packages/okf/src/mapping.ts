@@ -12,6 +12,8 @@
  *     CommonMark rule that a link inside an inline code span is literal text;
  *   - OKF concept titles live in frontmatter, so body headings (including `#`
  *     H1s like `# Schema`) are genuine sections → `dkg:hasSection`;
+ *   - the body itself is stored verbatim, in ordered parts (`body.ts`), so
+ *     export writes back the prose as written;
  *   - `generated.at` (v0.2 §5.2), or the legacy v0.1 `timestamp` it supersedes
  *     (§13.1), is the last-modified time → `schema:dateModified`;
  *   - the v0.2 provenance / trust / lifecycle / attestation families (§5, §10)
@@ -19,9 +21,6 @@
  *     skolemized node per list entry, typed edges for bundle paths.
  */
 
-import { fromMarkdown } from 'mdast-util-from-markdown';
-import { toString as mdToString } from 'mdast-util-to-string';
-import type { Nodes, Link, InlineCode, Text } from 'mdast';
 import {
   RDF_TYPE,
   SCHEMA_NAME,
@@ -37,6 +36,8 @@ import {
   DEFAULT_IRI_BASE,
 } from './constants.js';
 import { conceptIdToIri, resolveLinkTarget } from './paths.js';
+import { parseBody, type ParsedBody } from './markdown-body.js';
+import { bodyQuads } from './body.js';
 import { dedupeQuads, isBlank, isMalformedIri, isScalar, isWritableIri, literalTerm, safeString, sanitizeForBlank } from './utils.js';
 import {
   typeToIri,
@@ -69,11 +70,6 @@ import type {
   OkfCitation,
   OkfWarning,
 } from './types.js';
-
-const BARE_URL_RE = /https?:\/\/[^\s)<>"]+/g;
-const INLINE_LINK_RE = /\[[^\]]*\]\(([^)\s]+)\)/g;
-/** A footnote *reference* `[^label]` (not a definition `[^label]: …`), SPEC §5.1 per-claim attribution. */
-const FOOTNOTE_REF_RE = /\[\^([^\]\s]+)\](?!:)/g;
 
 /**
  * Display bound for section names (OT-RFC-56 §4.6). Headings are headings —
@@ -211,76 +207,6 @@ export function summarizeTrust(
     derivedFromConcepts: [...new Set(derivedFromConcepts)].sort(),
     attestedComputation: isAttestedComputationType(frontmatter.type),
   };
-}
-
-interface ParsedBody {
-  headings: string[];
-  /** Real Markdown links found outside the Citations section. */
-  bodyLinks: string[];
-  /** `[label](target)` patterns found inside inline code spans (outside Citations). */
-  codeSpanHrefs: string[];
-  /** Citations gathered from a legacy `# Citations` section (both styles). */
-  citations: OkfCitation[];
-  /** Footnote reference labels (`[^label]`) found in body text, unique, in order of first appearance. */
-  footnoteRefs: string[];
-}
-
-function collect(node: Nodes, links: Link[], codes: InlineCode[], texts: string[]): void {
-  if (node.type === 'link') links.push(node);
-  else if (node.type === 'inlineCode') codes.push(node);
-  else if (node.type === 'text') texts.push((node as Text).value);
-  if ('children' in node && Array.isArray(node.children)) {
-    for (const child of node.children) collect(child as Nodes, links, codes, texts);
-  }
-}
-
-function extractInlineLinkHrefs(code: string): string[] {
-  const out: string[] = [];
-  for (const m of code.matchAll(INLINE_LINK_RE)) out.push(m[1]);
-  return out;
-}
-
-/** Parse a concept body with a real Markdown AST. */
-export function parseBody(body: string): ParsedBody {
-  const tree = fromMarkdown(body);
-  const headings: string[] = [];
-  const bodyLinks: string[] = [];
-  const codeSpanHrefs: string[] = [];
-  const citations: OkfCitation[] = [];
-  const footnoteRefs = new Set<string>();
-  let currentSection = '';
-
-  for (const node of tree.children) {
-    if (node.type === 'heading') {
-      const text = mdToString(node);
-      headings.push(text);
-      currentSection = text.trim().toLowerCase();
-      continue;
-    }
-    const inCitations = currentSection === 'citations';
-    const links: Link[] = [];
-    const codes: InlineCode[] = [];
-    const texts: string[] = [];
-    collect(node as Nodes, links, codes, texts);
-
-    for (const t of texts) {
-      for (const m of t.matchAll(FOOTNOTE_REF_RE)) footnoteRefs.add(m[1]);
-    }
-
-    if (inCitations) {
-      for (const l of links) {
-        const label = mdToString(l).trim();
-        citations.push(label ? { url: l.url, label } : { url: l.url });
-      }
-      for (const t of texts) {
-        for (const m of t.matchAll(BARE_URL_RE)) citations.push({ url: m[0] });
-      }
-    } else {
-      for (const l of links) bodyLinks.push(l.url);
-      for (const c of codes) codeSpanHrefs.push(...extractInlineLinkHrefs(c.value));
-    }
-  }
-  return { headings, bodyLinks, codeSpanHrefs, citations, footnoteRefs: [...footnoteRefs] };
 }
 
 /**
@@ -447,6 +373,9 @@ export function resolveConcept(prepared: PreparedConcept, conceptExists: (concep
       object: conceptIdToIri(parentId, iriBase),
     });
   }
+
+  // The body as written, which no other triple carries (`body.ts`).
+  quads.push(...bodyQuads(iri, doc.conceptId, doc.body));
 
   // Per-claim attribution (§5.1): a footnote label is the join key into
   // `sources[].id`. Only checked when the document declares `sources` at all,

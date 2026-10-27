@@ -1,7 +1,9 @@
+import { DKG_RDF_LITERAL_SAFE_MUTF8_BYTES, javaModifiedUtf8ByteLength } from '@origintrail-official/dkg-rdf-utils';
 import { DKGUserError } from './errors.js';
 
+// The limit and its measure are shared with writers that split text below it (`dkg-rdf-utils`).
+export { DKG_RDF_LITERAL_SAFE_MUTF8_BYTES, javaModifiedUtf8ByteLength };
 export const JAVA_WRITE_UTF_MAX_BYTES = 65_535;
-export const DKG_RDF_LITERAL_SAFE_MUTF8_BYTES = 60_000;
 export const OVERSIZED_RDF_LITERAL_ERROR_CODE = 'OVERSIZED_RDF_LITERAL';
 
 export interface RdfLiteralSizeContext {
@@ -70,32 +72,6 @@ function describeLiteralLocation(args: {
 
 function truncateForMessage(value: string): string {
   return value.length <= 120 ? value : `${value.slice(0, 117)}...`;
-}
-
-/**
- * Java Modified UTF-8 byte length using Java's UTF-16 code-unit rules.
- *
- * This intentionally differs from standard UTF-8:
- * - U+0000 is 2 bytes.
- * - U+0001 through U+007F are 1 byte.
- * - U+0080 through U+07FF are 2 bytes.
- * - All other UTF-16 code units, including surrogate halves, are 3 bytes.
- */
-export function javaModifiedUtf8ByteLength(value: string): number {
-  let bytes = 0;
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    if (code === 0) {
-      bytes += 2;
-    } else if (code <= 0x7f) {
-      bytes += 1;
-    } else if (code <= 0x07ff) {
-      bytes += 2;
-    } else {
-      bytes += 3;
-    }
-  }
-  return bytes;
 }
 
 export function rdfLiteralTermMutf8ByteLength(term: string): number | undefined {
