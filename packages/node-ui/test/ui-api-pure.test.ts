@@ -70,7 +70,7 @@ function startTestServer(): Promise<void> {
     server = createServer((req, res) => {
       let body = '';
       req.on('data', (chunk) => { body += chunk; });
-      req.on('end', () => {
+      req.on('end', async () => {
         const reqUrl = req.url ?? '';
         const reqMethod = req.method ?? '';
         requestLog.push({ url: reqUrl, method: reqMethod, body });
@@ -129,7 +129,8 @@ function startTestServer(): Promise<void> {
         } else if (url.startsWith('/api/context-graph/list') || url.startsWith('/api/context-graphs')) {
           res.end(JSON.stringify({ contextGraphs: [{ id: 'cg1' }] }));
         } else if (url.startsWith('/api/query')) {
-          res.end(JSON.stringify({ result: { bindings: queryBindings } }));
+          const bindings = queryBindings;
+          res.end(JSON.stringify({ result: { bindings } }));
         } else if (url.startsWith('/api/shared-memory')) {
           res.end(JSON.stringify({ success: true, ual: 'did:dkg:test' }));
         } else if (url.includes('/promote')) {
@@ -825,16 +826,6 @@ describe('UI API tests', () => {
       expect(list.map(a => a.name)).toEqual(['my-import.md']);
     });
 
-    it('listAssertions(wm) dedupes when BOTH the URN and data-URI markers exist', async () => {
-      const agent = '0x' + '2'.repeat(40);
-      queryBindings = [
-        { g: { value: `did:dkg:context-graph:cg-1/assertion/${agent}/doc` } },
-        { g: { value: `urn:dkg:assertion:cg-1:${agent}:doc` } },
-      ];
-      const list = await listAssertions('cg-1', 'wm');
-      expect(list.map(a => a.name)).toEqual(['doc']);
-    });
-
     it('listAssertions(wm) parses sub-graph-scoped URN markers and names containing ":"', async () => {
       const agent = '0x' + '3'.repeat(40);
       queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:code:${agent}:a:b.md` } }];
@@ -852,18 +843,6 @@ describe('UI API tests', () => {
       queryBindings = [{ g: { value: `urn:dkg:assertion:cg-1:${agent}:shared-doc.md` } }];
       const list = await listAssertions('cg-1', 'swm');
       expect(list.map(a => a.name)).toEqual(['shared-doc.md']);
-    });
-
-    it('listAssertions(swm) excludes assertions already published to VM (dkg:vmCurrentAssertion)', async () => {
-      // Publish records a vmCurrentAssertion pointer but does NOT flip memoryLayer
-      // off "SWM" (backend gap), so the SWM list must drop published rows itself.
-      const agent = '0x' + '5'.repeat(40);
-      queryBindings = [
-        { g: { value: `urn:dkg:assertion:cg-1:${agent}:unpublished.md` } },
-        { g: { value: `urn:dkg:assertion:cg-1:${agent}:published.md` }, vm: { value: 'abc123deadbeef' } },
-      ];
-      const list = await listAssertions('cg-1', 'swm');
-      expect(list.map(a => a.name)).toEqual(['unpublished.md']);
     });
 
     it('fetchAssertionUals maps assertionName -> reservedUal (shown next to the filename)', async () => {

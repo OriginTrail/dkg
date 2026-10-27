@@ -1,26 +1,23 @@
+import { normalizePublicSnapshotSyncOptions } from '@origintrail-official/dkg-agent';
 // SPDX-License-Identifier: Apache-2.0
 import { readBody, jsonResponse, isPayloadTooLargeError } from "../http-utils.js";
 import { randomUUID } from "node:crypto";
 import type {
   DKGAgent,
-  PublicSnapshotSyncOptions,
 } from "@origintrail-official/dkg-agent";
 import type { RequestContext } from "./context.js";
 
-interface Job {
+type WithoutSignal<T> = T extends unknown ? Omit<T, 'signal'> : never;
+interface JobBase {
   id: string;
-  request: {
-    contextGraphId: string;
-    onChainId: string;
-    mode: string;
-    trustedCorePeerIds: readonly string[];
-  };
-  state: "running" | "complete" | "failed";
+  request: WithoutSignal<ReturnType<typeof normalizePublicSnapshotSyncOptions>>;
   startedAt: number;
-  finishedAt?: number;
-  result?: unknown;
-  error?: string;
 }
+type Job = JobBase & (
+  | { state: 'running' }
+  | { state: 'complete'; finishedAt: number; result: Awaited<ReturnType<DKGAgent['syncPublicGraphSnapshot']>> }
+  | { state: 'failed'; finishedAt: number; error: string }
+);
 const jobs = new WeakMap<DKGAgent, Job>();
 /** The parent route enforces node-admin authorization for both start and status. */
 export async function handlePublicSnapshotJob({
@@ -32,7 +29,8 @@ export async function handlePublicSnapshotJob({
     jsonResponse(res, status, body);
   };
   if (req.method === "GET") {
-    reply(200, jobs.get(agent) ?? { state: "idle" });
+    reply(200, { ...(jobs.get(agent) ?? { state: "idle" }),
+      capabilities: { sourcePolicies: agent.getPublicSnapshotSourcePolicies() } });
     return;
   }
   if (req.method !== "POST") {
@@ -43,33 +41,26 @@ export async function handlePublicSnapshotJob({
     reply(409, { error: "Snapshot recovery already running" });
     return;
   }
-  let input: PublicSnapshotSyncOptions;
+  let input: ReturnType<typeof normalizePublicSnapshotSyncOptions>;
   try {
-    input = JSON.parse(await readBody(req, 4096));
+    const raw: unknown = JSON.parse(await readBody(req, 4096));
     if (
-      !input ||
-      typeof input !== "object" ||
-      Object.keys(input).some(
+      !raw ||
+      typeof raw !== "object" ||
+      Object.keys(raw).some(
         (k) =>
           ![
             "contextGraphId",
             "onChainId",
             "trustedCorePeerIds",
             "mode",
+            "transport",
+            "sourcePolicy",
           ].includes(k),
-      ) ||
-      typeof input.contextGraphId !== "string" ||
-      typeof input.onChainId !== "string" ||
-      !Array.isArray(input.trustedCorePeerIds) ||
-      input.trustedCorePeerIds.length < 1 ||
-      input.trustedCorePeerIds.length > 4 ||
-      input.trustedCorePeerIds.some(
-        (p) => typeof p !== "string" || !p || p.length > 256,
-      ) ||
-      ![undefined, "core-cache", "rpc-only"].includes(input.mode) ||
-      !/^[1-9][0-9]{0,77}$/.test(input.onChainId)
+      )
     )
       throw new Error("Invalid request");
+    input = normalizePublicSnapshotSyncOptions(raw);
   } catch (error) {
     if (isPayloadTooLargeError(error)) { reply(413, { error: "Request too large" }); return; }
     reply(400, { error: "Invalid snapshot recovery request" });
@@ -83,8 +74,11 @@ export async function handlePublicSnapshotJob({
     request: {
       contextGraphId: input.contextGraphId,
       onChainId: input.onChainId,
-      mode: input.mode ?? "core-cache",
-      trustedCorePeerIds: [...input.trustedCorePeerIds],
+      mode: input.mode,
+      transport: input.transport,
+      ...(input.sourcePolicy
+        ? { sourcePolicy: input.sourcePolicy, trustedCorePeerIds: [] as const }
+        : { trustedCorePeerIds: [...input.trustedCorePeerIds] }),
     },
     id: randomUUID(),
     state: "running",
@@ -95,16 +89,12 @@ export async function handlePublicSnapshotJob({
     .syncPublicGraphSnapshot(input)
     .then(
       (result) => {
-        job.result = result;
-        job.state = "complete";
+        jobs.set(agent, { ...job, state: "complete", result, finishedAt: Date.now() });
       },
       (error) => {
-        job.error = error instanceof Error ? error.message : String(error);
-        job.state = "failed";
+        jobs.set(agent, { ...job, state: "failed", finishedAt: Date.now(),
+          error: error instanceof Error ? error.message : String(error) });
       },
-    )
-    .finally(() => {
-      job.finishedAt = Date.now();
-    });
+    );
   reply(202, job);
 }

@@ -8,8 +8,12 @@ import type { PublicSnapshotMode } from "./public-snapshot-evidence.js";
 export interface AgentQueryOptions {
   contextGraphId?: string;
   accessDenied?: "empty" | "error";
+  /** Require routing to preserve every selected graph. */
+  requireCompleteGraphScope?: boolean;
   redactQuery?: boolean;
   maxResponseBytes?: number;
+  /** Independent literal hydration limit; defaults to the response cap. */
+  maxLiteralHydrationBytes?: number;
   /** Explicit acceptance of configured-core chain evidence for this graph. */
   chainEvidenceMode?: PublicSnapshotMode;
   graphSuffix?: "_shared_memory";
@@ -21,6 +25,9 @@ export interface AgentQueryOptions {
    * registered public content partitions in a scoped `GRAPH ?g` scan.
    */
   includeContextGraphPartitions?: boolean;
+  /** Include registered subgraph SWM metadata in scoped GRAPH-variable expansion; requires includeContextGraphPartitions. */
+  includeSharedMemoryMeta?: boolean;
+  excludeWorkingMemoryPartitions?: boolean;
   /**
    * Opt-in: allow the scoped query to reference the context graph's own
    * `_private` partition (excluded from the scope guard's allow-set by

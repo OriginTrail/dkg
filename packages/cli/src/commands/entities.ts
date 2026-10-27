@@ -1,7 +1,7 @@
 import type { Command } from 'commander';
 import { readFile } from 'node:fs/promises';
 import { ApiClient } from '../api-client.js';
-import { parseSpec } from '../entity-search/documents.js';
+import { parseSpec } from '../entity-search/requests.js';
 
 export function registerEntitiesCommand(program: Command): void {
   const group = program.command('entities').description('Discover graph entities semantically, then query their RDF identities');

@@ -1,4 +1,5 @@
 import { handlePublicSnapshotJob } from './public-snapshot-job.js';
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/context-graph.ts
 //
 // Route handlers for context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install.
@@ -80,7 +81,7 @@ import {
   VmReconcileQueueFullError,
   VmReconcileUnavailableError,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -130,11 +131,9 @@ import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type P
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
   classifyExistingContextGraphReadiness,
-  classifyNameHashOnlyCatchup,
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
-import { classifyAndCommitContextGraphCatchup } from '../../context-graph-catchup-readiness-owner.js';
 import { settlePrivateEmptyVmAtSubscribe } from '../../context-graph-empty-vm-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
@@ -176,7 +175,6 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 // the project's tsconfig (`noUnusedLocals` is off).
 import {
   daemonState,
-  DEBUG_SYNC_TRACE,
   resolveAutoUpdateEnabled,
   type CorsAllowlist,
 } from '../state.js';
@@ -187,15 +185,13 @@ import {
   toCatchupStatusResponse,
 } from '../types.js';
 import {
-  beginWalkCatchupJob,
   recordCatchupRequest,
   recordSyntheticCatchupJob,
-  recordTerminalOnce,
-  releaseCatchupJob,
 } from '../catchup-telemetry.js';
+import { startContextGraphCatchupJob } from '../context-graph-catchup-job.js';
+import { followContextGraphCatchupJob } from '../context-graph-readiness-repeat.js';
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
-import { attributionToken } from '../read-authority-diagnostics.js';
 import {
   admitContextGraphFollow,
   readContextGraphSubscriptionAdmission,
@@ -470,24 +466,6 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
   }
   return jsonResponse(res, 500, { error: message });
 }
-
-const SUBSCRIBE_AUTHORITY_LOG_REASONS = new Set([
-  'finalized-name-absence-unaccepted',
-  'chain-name-binding-unavailable',
-  'registered-authority-error',
-  'authority-circuit-open',
-  'local-chain-binding-unavailable',
-  'local-existence-unavailable',
-  'chain-access-policy-unavailable',
-  'chain-access-policy-timeout',
-  'chain-access-policy-unknown',
-  'chain-participant-authority-unavailable',
-  'chain-participant-authority-unsupported',
-  'chain-participant-authority-invalid',
-  'remote-local-authority-unaccepted',
-  'rfc64-private-read-roster-unavailable',
-  'no-read-authority',
-]);
 
 /** How the subscribe route answers an on-chain id that names nothing subscribable. */
 const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
@@ -1072,6 +1050,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const contextGraphId = qs.get("contextGraphId");
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
     try {
+      if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
       const registered = await agent.listSubGraphs(contextGraphId!);
       // One pass enumerates *all* named graphs in the project + their
       // distinct-subject and triple counts. Sub-graph ownership is inferred
@@ -1093,6 +1072,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         const result = await agent.query(sparql, {
           contextGraphId: contextGraphId!,
           includeContextGraphPartitions: true,
+          callerAgentAddress: actorFromRequestContext(ctx).authenticatedAgentAddress,
         });
         const parseCount = (v: any) => {
           if (v === undefined || v === null) return 0;
@@ -1190,6 +1170,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "GET" && listParticipantsMatch) {
     const contextGraphId = decodeURIComponent(listParticipantsMatch[1]);
     try {
+      if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
       const agents = await agent.getContextGraphAllowedAgents(contextGraphId);
       return jsonResponse(res, 200, { contextGraphId, allowedAgents: agents });
     } catch (err: unknown) {
@@ -1207,7 +1188,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req);
     try {
       const parsed = JSON.parse(body);
-      const { agentName, curatorPeerId, delegation } = parsed;
+      const { agentName, curatorPeerId, delegation, reRequest } = parsed;
+      if (reRequest !== undefined && typeof reRequest !== 'boolean') {
+        return jsonResponse(res, 400, { error: '"reRequest" must be a boolean when supplied' });
+      }
       if (!delegation || !delegation.agentAddress || !delegation.signature) {
         return jsonResponse(res, 400, {
           error: 'Missing signed delegation. Expected `delegation` field with agentAddress, signature, scope, issuedAtMs and at least one of delegateePeerId / delegateeOpKey.',
@@ -1260,7 +1244,18 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           cause: msg,
         });
       }
-      const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId);
+      const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId, { reRequest });
+      if (result.approvedMetadataPending === true) {
+        // The curator approved this agent already and its member list is on its
+        // way: nothing was sent, and the curator is not asked to approve again.
+        return jsonResponse(res, 200, {
+          ok: true,
+          status: 'approved',
+          joinState: 'approved-metadata-pending',
+          delivered: 0,
+          alreadyMember: true,
+        });
+      }
       if (result.delivered === 0 && result.queued !== true) {
         // Surface per-peer errors so the joiner can see WHY (curator
         // rejected with a specific reason, transport timed out, etc.)
@@ -1944,8 +1939,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         requestedContextGraphId,
         { signal: resolutionLifecycle.signal },
       ) ?? { kind: 'as-given' };
-    } catch {
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    } catch (error) {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, error);
     } finally {
       resolutionLifecycle.dispose();
     }
@@ -1981,19 +1976,12 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     try {
       ({ callerAgentAddress: callerAddr, authority: readAuthority } =
         await readContextGraphSubscriptionAdmission(agent, contextGraphId, requestAgentAddress));
-    } catch {
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+    } catch (error) {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, error);
     }
     if (readAuthority.outcome === 'unavailable') {
-      // The public response remains generic, but the operator needs the typed
-      // authority dependency to distinguish a missing seed from a chain read
-      // outage. Never log the graph name or caller identity here.
-      const reason = SUBSCRIBE_AUTHORITY_LOG_REASONS.has(readAuthority.reason)
-        ? readAuthority.reason : 'other';
-      console.warn(`[context-graph-subscribe] authority unavailable: reason=${reason}`
-        + ` dependency=${readAuthority.dependency}`
-        + (readAuthority.detailCode === undefined ? '' : ` detail=${attributionToken(readAuthority.detailCode)}`));
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+      // Keep graph names and caller identities out of the public body and log.
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, readAuthority);
     }
     // A private graph named by its on-chain id: one decision, with one answer
     // whether or not this node holds its cleartext id.
@@ -2012,12 +2000,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           : 'This node has no agent authorized to read this project. Ask the curator to invite an agent first.',
       });
     }
-    const registeredPublicProofFor = (verifiedContextGraphId: string) => readAuthority.source === 'registered-chain'
-      && readAuthority.reason === 'chain-public'
-      && readAuthority.onChainId !== undefined
-      ? { contextGraphId: verifiedContextGraphId, onChainId: readAuthority.onChainId.toString(10) }
-      : undefined;
-
     // A graph known only by its on-chain name hash syncs nothing under that
     // id: every holder keys it by the cleartext id. Give connected peers a
     // bounded moment to reveal (and this node to verify) the cleartext first.
@@ -2029,7 +2011,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }).catch(() => null);
       if (resolved) contextGraphId = resolved;
     }
-    const registeredPublicProof = registeredPublicProofFor(contextGraphId);
     // Two notes answer two questions about the requested id: which graph an
     // on-chain id named (`onChainReference`), and whether that graph's name
     // is known yet (`identity`, the #2744 contract that catch-up status and
@@ -2195,171 +2176,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode} forceCatchup=${forceCatchup}`,
     );
 
-    const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const job: CatchupJob = {
-      jobId,
+    const subscribeJob = {
+      agent,
+      store: dashDb,
+      catchupTracker,
       contextGraphId,
-      includeWorkspace: shouldSyncSharedMemory,
-      status: "queued",
-      queuedAt: Date.now(),
+      includeSharedMemory: shouldSyncSharedMemory,
+      callerAgentAddress: callerAddr,
+      admissionAuthority: readAuthority,
     };
-    catchupTracker.jobs.set(jobId, job);
-    catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
-
-    while (catchupTracker.jobs.size > 100) {
-      let oldestId: string | undefined;
-      let oldestQueuedAt = Number.POSITIVE_INFINITY;
-      for (const [id, entry] of catchupTracker.jobs.entries()) {
-        if (entry.queuedAt < oldestQueuedAt) {
-          oldestQueuedAt = entry.queuedAt;
-          oldestId = id;
-        }
-      }
-      if (!oldestId) break;
-      const removed = catchupTracker.jobs.get(oldestId);
-      catchupTracker.jobs.delete(oldestId);
-      if (
-        removed &&
-        catchupTracker.latestByContextGraph.get(removed.contextGraphId) === oldestId
-      ) {
-        catchupTracker.latestByContextGraph.delete(removed.contextGraphId);
-      }
-    }
-
-    // Retain the continuation so graceful shutdown can drain it, and hold the
-    // ENTRY (not the jobId) in the closure below: the ledger slot is released
-    // as soon as the job settles, and looking the entry up by id afterwards
-    // would find nothing and re-emit its terminal point.
-    const ledgerEntry = beginWalkCatchupJob(job);
-
-    const jobContextGraphId = contextGraphId;
-    ledgerEntry.task = (async () => {
-      job.status = "running";
-      job.startedAt = Date.now();
-      if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${jobContextGraphId} started`);
-      try {
-        let targetContextGraphId = jobContextGraphId;
-        // The first subscribe may activate the catalog receiver before its
-        // finalized public policy is accepted. That transition's one-shot
-        // metadata pull then declines, while subsequent catch-up retries skip
-        // legacy durable sync and cannot acquire the graph declaration.
-        // Retry the policy-gated public metadata pull for every explicit
-        // catch-up; it is a cheap no-op once the declaration is confirmed.
-        if (typeof agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 === 'function') {
-          await agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
-            targetContextGraphId,
-            undefined,
-            registeredPublicProof,
-          ).catch(() => undefined);
-        }
-        let result = await daemonState.catchupRunner!.run({
-          contextGraphId: targetContextGraphId,
-          includeSharedMemory: shouldSyncSharedMemory,
-        });
-        // The name hash may have been resolved to its verified cleartext id
-        // while this job ran; the graph syncs only under that id, so continue
-        // there. Still one job with one terminal status.
-        const resolvedContextGraphId = agent.resolveContextGraphIdAlias?.(targetContextGraphId);
-        if (resolvedContextGraphId) {
-          targetContextGraphId = resolvedContextGraphId;
-          job.resolvedContextGraphId = resolvedContextGraphId;
-          catchupTracker.latestByContextGraph.set(resolvedContextGraphId, jobId);
-          if (typeof agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1 === 'function') {
-            await agent.bootstrapRfc64CatalogContextGraphMetadataFromPeersV1(
-              targetContextGraphId,
-              undefined,
-              registeredPublicProofFor(targetContextGraphId),
-            ).catch(() => undefined);
-          }
-          result = await daemonState.catchupRunner!.run({
-            contextGraphId: targetContextGraphId,
-            includeSharedMemory: shouldSyncSharedMemory,
-          });
-        }
-        job.result = result;
-        // Nothing a peer returns for a name-hash id can count: holders key the
-        // graph by its cleartext id. Say what is missing instead of asking the
-        // operator to retry, and leave readiness state untouched.
-        const hashOnly = classifyNameHashOnlyCatchup(
-          agent.describeContextGraphIdentity?.(targetContextGraphId),
-        );
-        if (hashOnly) {
-          job.status = hashOnly.jobStatus;
-          job.error = hashOnly.error;
-        // Local scheduler pressure cut the round short. An incomplete round has
-        // no readiness to inspect and must never finalize the subscription, so
-        // short-circuit the whole classification path and report a distinct
-        // retryable status. A remote denial still wins: waiting for local
-        // capacity will never clear it.
-        } else if (result.deferredBackpressure > 0 && !result.denied) {
-          job.status = "deferred";
-          job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
-          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${targetContextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
-        } else {
-          const classification = await classifyAndCommitContextGraphCatchup({
-            agent, store: dashDb, contextGraphId: targetContextGraphId,
-            callerAgentAddress: callerAddr,
-            result, includeSharedMemory: shouldSyncSharedMemory,
-            admissionAuthority: readAuthority,
-          });
-
-          job.durablePlane = classification.durablePlane;
-          job.status = classification.jobStatus;
-          job.error = classification.error;
-          // The first subscribe can legitimately race ahead of metadata and
-          // the on-chain binding. Its eager RFC-64 responsibility pass then
-          // fails closed because accessPolicy is still unknown. Re-run the
-          // lifecycle decision after catch-up has installed authoritative
-          // metadata, before exposing a terminal job: otherwise an always-on
-          // subscription can be fully synced while remaining absent from the
-          // default catalog responsibility/status surface until restart.
-          await agent.reconcileRfc64CatalogResponsibilityV1(targetContextGraphId);
-          if (classification.eventPayload) {
-            agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
-              contextGraphId: targetContextGraphId,
-              ...classification.eventPayload,
-            });
-          }
-
-          // Denial took precedence above, but a denied-yet-still-deferred round
-          // is likewise incomplete: never let it settle as a successful "done".
-          if (job.status === "done" && result.deferredBackpressure > 0) {
-            job.status = "deferred";
-            job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
-          }
-        }
-
-        if (DEBUG_SYNC_TRACE) {
-          if (job.status === 'denied') {
-            console.log(`[catchup] job=${jobId} contextGraph=${targetContextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
-          }
-          console.log(
-            `[catchup] job=${jobId} contextGraph=${targetContextGraphId} status=${job.status} ` +
-              `peers=${result.peersTried}/${result.syncCapablePeers} ` +
-              `connected=${result.totalPeers ?? result.connectedPeers} ` +
-              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
-          );
-        }
-      } catch (err) {
-        job.error = err instanceof Error ? err.message : String(err);
-        job.status = "failed";
-        if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${jobContextGraphId} threw: ${job.error}`);
-      } finally {
-        job.finishedAt = Date.now();
-        // Synchronous, guarded, and inside the retained task's `finally` so it
-        // runs before the task settles and the shutdown drain observes it. Not
-        // "before any await" — a terminal status only exists after the work.
-        recordTerminalOnce(ledgerEntry);
-        releaseCatchupJob(ledgerEntry);
-      }
-    })().catch((err: unknown) => {
-      // The body above catches everything into `job.error`, so this is a
-      // backstop for the `finally` itself. Without it a throw here would be an
-      // unhandled rejection on a detached task.
-      console.error(
-        `[catchup] job=${jobId} continuation failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
+    const started = startContextGraphCatchupJob(subscribeJob);
+    // Same synchronous run: this call's repeat sequence replaces any older one.
+    followContextGraphCatchupJob({ ...subscribeJob, requestAgentAddress }, started);
+    const { jobId } = started.job;
 
     try {
       await settlePrivateEmptyVmAtSubscribe(agent, dashDb, contextGraphId, readAuthority, callerAddr);

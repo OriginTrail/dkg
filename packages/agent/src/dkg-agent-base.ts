@@ -1,9 +1,20 @@
+import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
+import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
+import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
+import { createRecoveryAuthority } from './durable-recovery-authority.js';
+import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
+import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
+import { AgentWorkLifetime } from './agent-work-lifetime.js';
+import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
+import { VersionedSubscriptionRegistry } from './internal/versioned-subscription-registry.js';
+import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
 import type { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryTransportBudgetPolicy } from './vm-recovery-transport-budget-policy.js';
 import { VmRecoveryStreamSetbackPolicy } from './vm-recovery-stream-setback-policy.js';
 import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
+import type { RecentSharedMemoryPullRuntime } from './recent-shared-memory-pull-runtime.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -18,6 +29,7 @@ import type { RandomSamplingRuntime } from './random-sampling-runtime.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { controlPlaneRefusalSummary } from './sync/control-plane-refusals.js';
 import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
 import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
 import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
@@ -50,6 +62,7 @@ import { GossipSession } from './gossip-session.js';
 import { ContextGraphBindingState } from './context-graph-binding-state.js';
 import { SlotFactsIndex } from './context-graph-claim-proof.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import { RollingSubscriptionChecks } from './context-graph-subscription-rolling-checks.js';
 import type { CoalescingRecurringTask } from './coalescing-recurring-task.js';
 import { SelectedSwmBootstrapAdmission } from './sync/selected-swm-bootstrap-admission.js';
 import {
@@ -213,7 +226,7 @@ import {
   FileWorkspacePublicSnapshotStore,
   parseWorkspacePublicSnapshotNQuads,
   type AsyncPromoteQueue, type AsyncPromoteQueueConfig,
-  type PromoteTerminalJobClearer,
+  type PromoteTerminalJobClearer, type PromoteShareReconciler,
   type PromoteJob, type PromoteListFilter,
   wrapAsRpcPreconditionIfApplicable,
   type PublishOptions, type PublishResult, type PhaseCallback, type KAMetadata, type CASCondition,
@@ -282,6 +295,7 @@ import {
   verifyCgDiscoveryBeacon,
 } from './swm/cg-discovery-beacon.js';
 import { DiscoveryRateLimit } from './swm/discovery-rate-limit.js';
+import { NamedKaRecoveryPendingLog } from './named-ka-recovery-pending-log.js';
 import {
   decodeSwmHostCatchupRequest,
   encodeSwmHostCatchupRequest,
@@ -314,6 +328,7 @@ import { orderCatchupPeers } from './p2p/peer-selection.js';
 import { reconcileWarmCoreConnections, type WarmCoreAgent } from './p2p/warm-core-connections.js';
 import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch.js';
 import { insertWithOversizeGuard } from './sync/oversize-filter.js';
+import { compactSyncedPrivateRosterGenerations } from './private-roster-version.js';
 import { OversizeTombstoneLog } from './sync/oversize-tombstones.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore, MemoryChangelogCursorStore } from './sync/checkpoint/state.js';
 import { runDurableSync } from './sync/requester/durable-sync.js';
@@ -443,7 +458,6 @@ import {
   type PeerConnectionSnapshot,
   type PeerDiagnostics,
   type ChatSendResult,
-  type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
@@ -559,9 +573,116 @@ function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
  * subscription wiring applies the remaining process-local intents.
  */
 export class DKGAgentBase {
+  /** Assemble operation capabilities at the protected-field owner. */
+  protected static createDurableRecoveryCapabilities(agent: DKGAgent): DurableRecoveryHost {
+    const cleanup: Parameters<typeof reconcileAfterMaterialization>[0] = {
+      store: agent.store, writeLocks: agent.writeLocks, log: agent.log,
+      invalidateListContextGraphsCache: () => agent.invalidateListContextGraphsCache(),
+      retireFinalizedSwmTwinCandidate: (candidate, ctx) => agent.retireFinalizedSwmTwinCandidate(candidate, ctx),
+      retireLegacySwmAfterVerifiedVmTwin: params => agent.retireLegacySwmAfterVerifiedVmTwin(params),
+    };
+    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
+      reconcileAfterMaterialization(cleanup, asset, ctx);
+    const materialization = new RecoveryMaterializationOwner({
+      chain: () => agent.chain,
+      store: () => agent.store,
+      isClosed: () => agent.graphScopedStoreClosed,
+      subscription: id => agent.subscribedContextGraphs.get(id),
+      bindingGeneration: id => agent.contextGraphBindingState.capture(id),
+      isBindingGenerationCurrent: (id, generation) => agent.contextGraphBindingState.isGenerationCurrent(id, generation),
+      track: run => { agent.workLifetime.track(run); },
+      verifyBinding: (id, onChainId, ctx, signal) => agent.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+      persistSubscription: (id, subscription, reason, isCurrent) => agent.persistContextGraphSyncStateStrict(id, subscription, reason, isCurrent),
+      bindSubscription: (id, subscription, onChainId) => agent.bindSubscriptionOnChainId(id, subscription, onChainId),
+      recordDrops: (drops, seam) => agent.oversizeTombstoneLog.record(drops, seam),
+      reconcile,
+    });
+    return {
+      owner: agent,
+      reconcile,
+      policy: () => ({
+        syncAgentsMeta: agent.config.syncAgentsMeta,
+        syncContextGraphPriorities: agent.config.syncContextGraphPriorities,
+      }),
+      admission: {
+        run: <T>({ ctx, contextGraphId, lane, label, work, ...admission }: RecoveryAdmissionRequest<T>): Promise<T> =>
+          agent.runContextGraphSyncWithBackpressure(ctx, contextGraphId, lane, label, work, admission),
+      },
+      transport: {
+        fetchPages: (request, options) => {
+          const { ctx, remotePeerId, contextGraphId, phase, graphUri, fetchContext } = request;
+          return agent.fetchSyncPages(ctx, remotePeerId, contextGraphId, false, phase, graphUri, fetchContext.deadline, {
+            snapshotRef: request.snapshotRef, sinceBatchId: request.sinceBatchId,
+            signal: fetchContext.signal,
+            manifestDigest: request.manifestDigest,
+            manifestPrefixDigestAtOffset: request.manifestPrefixDigestAtOffset,
+            shouldStopAfterPage: request.shouldStopAfterPage,
+            returnAcceptedPrefixOnRetryableTransportFailure: request.returnAcceptedPrefixOnRetryableTransportFailure,
+            requesterScope: request.requesterScope,
+            ephemeralRequesterState: request.ephemeralRequesterState,
+            forceFreshSession: request.forceFreshSession || options.forceFreshSession,
+            assetUals: options.assetUals,
+            checkpointStore: options.checkpointStore,
+          });
+        },
+        stream: (ctx, remotePeerId, contextGraphId) => ({
+          router: agent.router, capabilityOwner: agent,
+          captureConnectionKey: () => agent.getSyncReconcilerConnectionKey(remotePeerId),
+          captureRefusalScope: () => agent.captureExperimentalExactBatchRefusalScope(contextGraphId),
+          isChainEnabled: () => agent.chain.chainId !== 'none',
+          getPeerProtocols: () => agent.getPeerProtocols(remotePeerId),
+          requestIdentity: () => ({
+            requesterPeerId: agent.peerId,
+            computeSyncDigest: (...args) => agent.computeSyncDigest(...args),
+            getIdentityId: () => agent.chain.getIdentityId(),
+            signMessage: typeof agent.chain.signMessage === 'function' ? agent.chain.signMessage.bind(agent.chain) : undefined,
+          }),
+          reconnect: async signal => {
+            try { await agent.ensurePeerConnected(remotePeerId, { signal }); }
+            catch { return false; }
+            return agent.node.libp2p.getConnections().some(connection => connection.remotePeer.toString() === remotePeerId);
+          },
+          logInfo: message => agent.log.info(ctx, message),
+        }),
+      },
+      verification: {
+        processBatch: (...args) => agent.processDurableBatchInWorker(...args),
+        parseAndFilter: (...args) => agent.getOrCreateSyncVerifyWorker().parseAndFilter(...args),
+      },
+      storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
+        priority: 'background', source: 'agent.durableSync.storeInsert', signal,
+      }),
+      materialization: scope => materialization.forOperation(scope),
+      checkpoints: {
+        deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),
+        setCheckpoint: (key, checkpoint) => {
+          if (checkpoint.binding) {
+            agent.syncCheckpoints.setManifestBoundOffset(key, checkpoint.offset, checkpoint.binding.manifestDigest,
+              Date.now(), checkpoint.binding.manifestPrefixDigest, checkpoint.binding.terminal, checkpoint.responderSessionOffset);
+          } else {
+            agent.syncCheckpoints.set(key, checkpoint.offset, Date.now(), checkpoint.responderSessionOffset);
+          }
+        },
+      },
+      log: {
+        info: (ctx, message) => agent.log.info(ctx, message),
+        warn: (ctx, message) => agent.log.warn(ctx, message),
+        debug: (ctx, message) => agent.log.debug(ctx, message),
+      },
+      resolveOrdinaryAuthority: (ctx, input) => createRecoveryAuthority({
+        chain: agent.chain,
+        verifyContextGraphBinding: (id, onChainId, signal) => agent.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
+        resolveAuthority: (id, signal) => agent.resolveRegisteredContextGraphAuthority(id, { authorityReadMode: 'finalized-index-or-live', signal }),
+        warn: message => agent.log.warn(ctx, message),
+      }, input),
+    };
+  }
+
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
   readonly store: TripleStore;
+  protected readonly storageAckLedgerTimestampWriter: StorageAckLedgerTimestampWriter;
+  protected readonly publishedNamedKaVmLifecycleWriter: PublishedNamedKaVmLifecycleWriter;
   readonly publisher: DKGPublisher;
   readonly queryEngine: DKGQueryEngine;
   readonly discovery: DiscoveryClient;
@@ -579,7 +700,7 @@ export class DKGAgentBase {
   // Typed with the terminal-clear capability at the ownership boundary (not cast at the
   // getter): the only assigned value is `TripleStoreAsyncPromoteQueue`, which implements it,
   // and any test/subclass substituting a queue must now satisfy the clearer at compile time.
-  protected _promoteQueue?: AsyncPromoteQueue & PromoteTerminalJobClearer;
+  protected _promoteQueue?: AsyncPromoteQueue & PromoteTerminalJobClearer & PromoteShareReconciler;
   /**
    * Override for tests / future operator config. When set before
    * `promoteQueue` is first accessed, the queue is constructed with
@@ -625,6 +746,7 @@ export class DKGAgentBase {
   /** Shared write locks so gossip writes serialize against local CAS writes. */
   protected readonly writeLocks: Map<string, Promise<void>>;
   readonly publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  protected syncResponderPreparedCacheOwner?: { closeAndDrain(): Promise<void> };
   private swmTargetExecutorSessionFactoryV1?: SwmTargetExecutorSessionFactoryV1;
   protected sharedMemoryHandler?: InstanceType<typeof SharedMemoryHandler>;
   protected gossipPublishHandler?: GossipPublishHandler;
@@ -717,6 +839,10 @@ export class DKGAgentBase {
    */
   protected readonly reconciledKaAuthors = new Set<string>();
   protected readonly log = new Logger('DKGAgent');
+  /** Control-plane fetches refused for want of a sync slot: one warning per interval. */
+  readonly controlPlaneRefusals = controlPlaneRefusalSummary(this.log);
+  /** Rate limit for the "Named KA recovery ... remains pending" warning. */
+  protected readonly namedKaRecoveryPendingLog = new NamedKaRecoveryPendingLog();
 
   /**
    * Per-cgId count of SWM gossip publish failures. Populated by
@@ -1125,10 +1251,9 @@ export class DKGAgentBase {
   protected vmReconcileScheduling?: VmReconcileSchedulingRuntime<ContextGraphReconcileResult>;
   /** Closed dispatcher retained until every physically active worker settles. */
   protected vmReconcileRetirement: Promise<void> | null = null;
-  /** Reconcile engines may outlive a caller's abort race; stop drains these before store teardown. */
-  protected readonly vmReconcilePhysicalRuns = new Set<Promise<unknown>>();
+  /** Node-owned cancellation, generation fencing and physical retirement. */
+  protected readonly workLifetime = new AgentWorkLifetime();
   /** Admitted authenticated graph-scoped stores must physically drain before backing-store teardown. */
-  protected readonly graphScopedStorePhysicalRuns = new Set<Promise<unknown>>();
   protected graphScopedStoreClosed = false;
   /** True only after startup has installed every dependency the VM worker uses. */
   protected vmReconcileRuntimeReady = false;
@@ -1269,10 +1394,6 @@ export class DKGAgentBase {
   static readonly CONTEXT_GRAPH_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT_MS = 5_000;
   /** Late exact responses must not mutate rotation state after shutdown begins. */
   protected vmReconcileRotationClosed = false;
-  /** Monotonic guard: every VM reconcile continuation from an earlier node run stays stale. */
-  protected vmReconcileLifecycleGeneration = 0;
-  /** Abortable boundary paired with the generation guard for restart-safe async work. */
-  protected vmReconcileLifecycleController = new AbortController();
   /**
    * Phase D/A4 — one owned per-CG active-fetch cooldown record. Keeping the
    * timestamp and lifecycle owner together makes it impossible for stale
@@ -1376,7 +1497,7 @@ export class DKGAgentBase {
    * (restart contract on {@link DKGAgentBase}): only the gossip wiring derived
    * from it is session-scoped and re-established by `start()`.
    */
-  protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  protected readonly subscribedContextGraphs = new VersionedSubscriptionRegistry();
   /**
    * Process-local fence for a registration operation whose durable marker has
    * moved (or is about to move) to `pending`. Authority and policy readers use
@@ -1402,6 +1523,8 @@ export class DKGAgentBase {
   protected readonly contextGraphSubscriptionRehydrationSlotIds = new Set<string>();
   /** Non-hosted rows waiting behind the rolling rehydration cap. */
   protected readonly contextGraphSubscriptionRehydrationPendingIds = new Set<string>();
+  /** Which waiting row rolling activation checks next, and how soon; made anew when a start retires the runtime before. */
+  protected contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
@@ -1413,6 +1536,27 @@ export class DKGAgentBase {
   }>();
   protected readonly listContextGraphsInFlight = new Map<string, Promise<Array<Record<string, unknown>>>>();
   protected listContextGraphsCacheGeneration = 0;
+
+  /**
+   * Ask rolling activation for one row the activation cap left dormant. The
+   * row is checked before the rest of the backlog, whose checks are paced.
+   */
+  protected requestContextGraphSubscriptionPromotion(contextGraphId: string): void {
+    this.contextGraphSubscriptionRollingChecks.prefer(contextGraphId);
+    this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+  }
+
+  /**
+   * Close the runtime of rolling activation that a run before this start left.
+   * The order, the pace and the report totals of its checks end with it: an
+   * agent that is started again inherits none of them, while a row asked for
+   * during this start is remembered for the runtime that follows.
+   */
+  protected async retireContextGraphSubscriptionPromotionRuntime(): Promise<void> {
+    this.contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
+    await this.contextGraphSubscriptionRehydrationPromotionRuntime?.close();
+  }
+
   protected listContextGraphsCacheNow(): number {
     return performance.now();
   }
@@ -1453,9 +1597,7 @@ export class DKGAgentBase {
    * Sync-ingest store insert (durable sync + registry meta pulls). Guarded by
    * the oversize filter (OT-RFC-56): quads whose literal exceeds the protocol
    * size invariant are dropped + tombstoned BEFORE the insert, so the sync
-   * offset cursor advances past pages containing them instead of the store
-   * throwing and the page being re-fetched from every peer forever (the
-   * 2026-07-08 mainnet poison-literal retry storm).
+   * offset cursor can pass poison-literal pages without an endless retry.
    */
   protected async insertSyncedQuadsAndInvalidateListCache(quads: Quad[], options?: QueryOptions): Promise<void> {
     const inserted = await insertWithOversizeGuard(
@@ -1465,7 +1607,8 @@ export class DKGAgentBase {
       'durable-sync',
     );
     if (inserted.length > 0) {
-      this.invalidateListContextGraphsCache();
+      try { await compactSyncedPrivateRosterGenerations(this.store, inserted, options); }
+      finally { this.invalidateListContextGraphsCache(); }
     }
   }
   protected get gossipRegistered() { return this.gossipSession.gossipRegistered; }
@@ -1856,6 +1999,8 @@ export class DKGAgentBase {
   /** Peer + selected-CG scoped seed/retry/terminal state for RFC-64 SWM. */
   protected readonly selectedSwmBootstrapAdmission = new SelectedSwmBootstrapAdmission();
   protected syncReconcilerTimer: ReturnType<typeof setInterval> | null = null;
+  /** Safety-net pull of public graphs in use here (#3251); Edge only. */
+  protected recentSharedMemoryPulls: RecentSharedMemoryPullRuntime | null = null;
   /** A.4-lite+: periodic warm/pinned Core-connection reconcile (opt-in). */
   protected warmCoreTimer: ReturnType<typeof setInterval> | null = null;
   protected authorityIndexSnapshotRuntime?: { close(): Promise<void> };
@@ -1942,11 +2087,16 @@ export class DKGAgentBase {
     workspaceOwnedEntities: Map<string, Map<string, string>>,
     writeLocks: Map<string, Promise<void>>,
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
+    publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
+    ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
   ) {
     this.config = config;
     this.wallet = wallet;
     this.node = node;
     this.store = store;
+    this.storageAckLedgerTimestampWriter = ledgerTimestampWriter ?? applyStorageAckLedgerTimestamp(store);
+    this.publishedNamedKaVmLifecycleWriter = publishedLifecycleWriter
+      ?? (input => applyPublishedNamedKaVmLifecycle(store, input));
     this.contextGraphMetaProjection = new ContextGraphMetaProjection(store);
     this.publisher = publisher;
     this.queryEngine = queryEngine;
@@ -2088,6 +2238,8 @@ export class DKGAgentBase {
    * protected instead of the daemon reaching through a cast.
    */
   drainRpcUsage(): RpcUsageWindow {
-    return this.chain.drainRpcUsage?.() ?? emptyRpcUsageWindow();
+    const normal = this.chain.drainRpcUsage?.() ?? emptyRpcUsageWindow();
+    const cache = this.config.coreChainCacheNetworks;
+    return cache.length ? mergeRpcUsageWindows(normal, ...cache.map(n => n.registry.drainRpcUsage?.())) : normal;
   }
 }

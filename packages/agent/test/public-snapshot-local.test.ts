@@ -1,173 +1,38 @@
-import { MULTICALL3_RUNTIME_CODE } from "../../chain/test/fixtures/multicall3-runtime-code.js";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
-import { Contract, Wallet, ethers } from "ethers";
-import { readFileSync } from "node:fs";
-import { performance } from "node:perf_hooks";
-import { EVMChainAdapter } from "@origintrail-official/dkg-chain";
-import { OxigraphStore, type Quad } from "@origintrail-official/dkg-storage";
-import {
-  computeFlatKCRootV10,
-  generateGraphKnowledgeAssetMetadata,
-} from "@origintrail-official/dkg-publisher";
-import { DKGAgent } from "../src/dkg-agent.js";
-import { PublicSnapshotEvidence, assertPublicSnapshotQueryTrust } from "../src/public-snapshot-evidence.js";
-import {
-  getSharedContext,
-  createProvider,
-  makeAdapterConfig,
-  HARDHAT_KEYS,
-  takeSnapshot,
-  revertSnapshot,
-} from "../../chain/test/evm-test-context.js";
+import { observeOutboundBulkFrames } from './helpers/observe-bulk-graph-frames.js';
+import { DKGAgentBase } from '../src/dkg-agent-base.js';
+import { createUalOnlyExactAssetSelection } from '../src/sync/exact-assets.js';
+import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
+import * as exactRecovery from '../src/exact-recovery-execution.js';
+import { createOperationContext } from '@origintrail-official/dkg-core';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
+import { BULK_GRAPH_KIND } from '@origintrail-official/dkg-core';
+import { performance } from 'node:perf_hooks';
+import { normalizePublicGraphSnapshot, EVMChainAdapter } from '@origintrail-official/dkg-chain';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { PublicSnapshotEvidence, assertPublicSnapshotQueryTrust } from '../src/public-snapshot-evidence.js';
+import { makeAdapterConfig, HARDHAT_KEYS, takeSnapshot, revertSnapshot } from '../../chain/test/evm-test-context.js';
+import { graph, publicSnapshotFixture, mismatchedSnapshotMember } from './helpers/public-snapshot-local-fixture.js';
 
-const agents: DKGAgent[] = [];
-const graph = "public-snapshot-local";
-const abi = (name: string) =>
-  JSON.parse(
-    readFileSync(
-      new URL(`../../chain/abi/${name}.json`, import.meta.url),
-      "utf8",
-    ),
-  );
+const fixtures: Awaited<ReturnType<typeof publicSnapshotFixture>>[] = [];
+async function fixture(transport: 'exact' | 'bulk') {
+  const result = await publicSnapshotFixture(transport); fixtures.push(result); return result;
+}
 let before: string;
-beforeAll(async () => {
-  before = await takeSnapshot();
-  vi.stubEnv("DKG_EXACT_BATCH_STREAM_ENABLED", "1");
-});
-afterAll(async () => {
-  for (const agent of agents.reverse()) await agent.stop();
-  vi.unstubAllEnvs();
+beforeEach(async () => { vi.stubEnv('DKG_PUBLIC_SNAPSHOT_BULK', '0'); before = await takeSnapshot(); });
+beforeAll(() => { vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1'); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  for (const f of fixtures.splice(0).reverse()) await f.dispose();
   await revertSnapshot(before);
 });
+afterAll(() => vi.unstubAllEnvs());
 
 describe("public snapshot recovery over live local nodes and chain", () => {
-  it("reuses coherent core evidence and verifies content without receiver asset RPCs", async () => {
-    const { rpcUrl, hubAddress } = getSharedContext();
-    const provider = createProvider();
-    const signer = new Wallet(HARDHAT_KEYS.DEPLOYER, provider);
-    const adapter = new EVMChainAdapter(
-      makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.DEPLOYER),
-    );
-    const created = await adapter.createOnChainContextGraph({
-      participantAgents: [],
-      metadataBatchId: 0n,
-      accessPolicy: 0,
-      publishPolicy: 0,
-      publishAuthority: ethers.ZeroAddress,
-      publishAuthorityAccountId: 0n,
-      nameHash: ethers.id(graph),
-    });
-    const onChainId = created.contextGraphId.toString();
-    const hub = new Contract(hubAddress, abi("Hub"), signer);
-    await (
-      await hub.setContractAddress("SnapshotTestFixture", signer.address)
-    ).wait();
-    const kas = new Contract(
-      await hub.getAssetStorageAddress("DKGKnowledgeAssets"),
-      abi("DKGKnowledgeAssets"),
-      signer,
-    );
-    const cg = new Contract(
-      await hub.getAssetStorageAddress("ContextGraphStorage"),
-      abi("ContextGraphStorage"),
-      signer,
-    );
-    await provider.send("hardhat_setCode", [
-      "0xcA11bde05977b3631167028862bE2a173976CA11",
-      MULTICALL3_RUNTIME_CODE,
-    ]);
-    const source = new OxigraphStore();
-    for (let n = 1; n <= 12; n++) {
-      const id = (BigInt(signer.address) << 96n) | BigInt(n);
-      const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
-      const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
-      const data: Quad[] = [
-        {
-          subject: `urn:entity:${n}`,
-          predicate: "http://schema.org/name",
-          object: `"Entity ${n}"`,
-          graph: assertionGraph,
-        },
-      ];
-      const privateRoot = n === 12 ? new Uint8Array(32).fill(7) : undefined;
-      const root = computeFlatKCRootV10(data, privateRoot ? [privateRoot] : []);
-      await (
-        await kas.createKnowledgeAsset(
-          signer.address,
-          signer.address,
-          id,
-          `snapshot-${n}`,
-          ethers.hexlify(root),
-          1,
-          100,
-          1,
-          2,
-          0,
-          false,
-          1,
-        )
-      ).wait();
-      await (
-        await cg.registerKnowledgeAssetToContextGraph(BigInt(onChainId), id)
-      ).wait();
-      await source.insert([
-        ...data,
-        ...generateGraphKnowledgeAssetMetadata(
-          {
-            contextGraphId: graph,
-            ual,
-            assertionGraph,
-            merkleRoot: root,
-            publisherPeerId: "fixture",
-            accessPolicy: "public",
-            allowedPeers: [],
-            timestamp: new Date(),
-            assertionVersion: 1,
-            authorAddress: signer.address,
-            publicTripleCount: 1,
-            privateTripleCount: privateRoot ? 1 : 0,
-            privateMerkleRoot: privateRoot,
-          },
-          {
-            status: "confirmed",
-            confirmation: {
-              kind: "finalized-materialization",
-              provenance: {
-                batchId: id,
-                materializedVersion: { blockNumber: 0, txIndex: 0 },
-              },
-            },
-          },
-        ),
-      ]);
-    }
-    await source.insert([{subject:'urn:private-fixture',predicate:'urn:secret',object:'"synthetic-private-data"',graph:`did:dkg:context-graph:${graph}/_private`}]);
-    const snapshotRead = vi.spyOn(adapter, "readPublicGraphSnapshot");
-    const make = async (
-      name: string,
-      nodeRole: "core" | "edge",
-      chainAdapter: EVMChainAdapter,
-      store: OxigraphStore,
-    ) => {
-      const a = await DKGAgent.create({
-        name,
-        nodeRole,
-        listenHost: "127.0.0.1",
-        listenPort: 0,
-        chainAdapter,
-        store: Object.assign(store, {
-          queryResponseLimitMode: "pre-materialization" as const,
-        }),
-        randomSamplingUseWorkerThread: false,
-        syncReconcilerEnabled: false,
-        vmReconcilerEnabled: false,
-      });
-      agents.push(a);
-      await a.start();
-      if (nodeRole === "core")
-        a.subscribeToContextGraph(graph, { onChainId, syncMode: "on-demand" });
-      return a;
-    };
+  it.each(["exact", "bulk"] as const)("reuses coherent core evidence without receiver asset RPCs (%s)", async transport => {
+    if (transport === "bulk") vi.stubEnv("DKG_PUBLIC_SNAPSHOT_BULK", "1");
+    const { rpcUrl, hubAddress, signer, adapter, onChainId, source, make } = await fixture(transport);
+    const snapshotRead = vi.spyOn(adapter, 'readPublicGraphSnapshot');
     const core = await make("SnapshotCore", "core", adapter, source);
     const receiverChain = new EVMChainAdapter(
       makeAdapterConfig(rpcUrl, hubAddress, HARDHAT_KEYS.REC1_OP),
@@ -202,9 +67,30 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     expect(
       receiver.getSubscribedContextGraphs().get(graph)?.subscribed,
     ).not.toBe(true);
+    await receiver.awaitInitialChainPoll();
+    receiver.subscribeToContextGraph(graph, { onChainId, syncMode: "on-demand", trackSyncScope: false, deferSharedMemoryGossipSubscribe: true });
+    receiver.recordCgWireId(graph, null);
+    // Cold-start enumeration can finish while the first snapshot batch is
+    // arriving. Use the real discovery/subscription path at that boundary.
+    const recover = exactRecovery.runExactRecovery;
+    let discoveredDuringRecovery = false;
+    vi.spyOn(exactRecovery, "runExactRecovery").mockImplementation(async (...args) => {
+      if (!discoveredDuringRecovery) {
+        discoveredDuringRecovery = true;
+        await receiver.discoverContextGraphsFromStorage();
+      }
+      return recover(...args);
+    });
+    if (transport === 'bulk') {
+      const replace = target.replaceAssetGroup.bind(target);
+      vi.spyOn(target, 'replaceAssetGroup').mockImplementation(async (...args) => {
+        if (!discoveredDuringRecovery) { discoveredDuringRecovery = true; await receiver.discoverContextGraphsFromStorage(); }
+        return replace(...args);
+      });
+    }
     const t = performance.now();
     const result = await receiver.syncPublicGraphSnapshot({
-      contextGraphId: graph,
+      transport, contextGraphId: graph,
       onChainId,
       trustedCorePeerIds: [core.peerId],
     });
@@ -215,6 +101,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       completeAsOfSnapshot: true,
       current: true,
     });
+    expect(discoveredDuringRecovery).toBe(true);
     expect(snapshotRead).toHaveBeenCalledTimes(2);
     for (const call of calls) {
       expect(call).not.toHaveBeenCalled();
@@ -227,7 +114,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     const privateRows = await target.query('SELECT ?value WHERE {GRAPH ?g {?s <urn:secret> ?value}}');
     expect(privateRows.type === 'bindings' && privateRows.bindings.length).toBe(0);
     const commitments = await target.query('SELECT ?root WHERE {GRAPH ?g {?s <http://dkg.io/ontology/privateMerkleRoot> ?root}}');
-    expect(commitments.type === 'bindings' && commitments.bindings.length).toBe(1);
+    expect(commitments.type === 'bindings' && commitments.bindings.length).toBe(transport === 'exact' ? 1 : 0);
     await expect(assertPublicSnapshotQueryTrust(target, graph)).rejects.toThrow(
       "core-trusted",
     );
@@ -261,6 +148,10 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       },
     );
     expect(accepted.bindings?.length).toBe(12);
+    const namedVm = await receiver.query('SELECT ?entity WHERE {?entity a <http://schema.org/Thing>}', {
+      contextGraphId:graph,view:'verifiable-memory',chainEvidenceMode:'core-cache',
+    });
+    expect(namedVm.bindings).toEqual([{entity:'urn:entity:3'}]);
     // The remote protocol has no evidence-acceptance field yet, so it must
     // refuse marked graphs rather than silently weakening the caller's trust.
     for (const response of [
@@ -302,6 +193,23 @@ describe("public snapshot recovery over live local nodes and chain", () => {
       current: true,
     });
     expect(rpcReads).toHaveBeenCalledTimes(2);
+    // Re-authenticate through ordinary RPC exact sync after snapshot import. Replacing
+    // the snapshot receipt must leave the canonical partition route discoverable.
+    const replayUal = `did:dkg:evm:31337/${signer.address.toLowerCase()}/3`;
+    const replay = await rpcReceiver.syncExactKnowledgeAssetsFromPeerDetailed(core.peerId, graph, [replayUal], {
+      exactRecoveryTransportMode: 'legacy',
+    });
+    expect(replay.committedExactAssetUals).toContain(replayUal);
+    expect(replay.result.failedPhases).toBe(0);
+    const replayed = await rpcReceiver.query('SELECT ?entity WHERE {?entity a <http://schema.org/Thing>}', {
+      contextGraphId: graph, view: 'verifiable-memory',
+    });
+    expect(replayed.bindings).toEqual([{entity:'urn:entity:3'}]);
+    const entities = await core.findEntitiesByType(rpcReceiver.peerId, graph, 'http://schema.org/Thing');
+    expect(entities).toMatchObject({status:'OK',entityUris:['urn:entity:3']});
+    const triples = await core.getEntityTriples(rpcReceiver.peerId, graph, 'urn:entity:3');
+    expect(triples).toMatchObject({status:'OK',resultCount:2});
+    expect(triples.ntriples).toContain('<urn:entity:3>');
     console.log(
       JSON.stringify({
         measurement: "local-independent-snapshot-recovery",
@@ -317,43 +225,7 @@ describe("public snapshot recovery over live local nodes and chain", () => {
     expect(independent.inventoryDigest).toBe(
       (await adapter.readPublicGraphSnapshot(graph, onChainId)).inventoryDigest,
     );
-    // Internally valid peer content B must not replace local content when
-    // the accepted chain snapshot still authenticates root A.
-    for (const transport of ["stream-required", "legacy"] as const) {
-      const n = transport === "legacy" ? 12 : 1;
-      const ual = `did:dkg:evm:31337/${signer.address.toLowerCase()}/${n}`;
-      const assertionGraph = `did:dkg:context-graph:${graph}/_verifiable_memory/${signer.address.toLowerCase()}/${n}`;
-      const metaGraph = `did:dkg:context-graph:${graph}/_meta`;
-      const privateRoot = n === 12 ? new Uint8Array(32).fill(7) : undefined;
-      const changed: Quad[] = [{subject:`urn:entity:${n}`,predicate:"http://schema.org/name",object:'"Unanchored replacement"',graph:assertionGraph}];
-      const root = computeFlatKCRootV10(changed, privateRoot ? [privateRoot] : []);
-      const metadata = generateGraphKnowledgeAssetMetadata({contextGraphId:graph,ual,assertionGraph,merkleRoot:root,publisherPeerId:"fixture",accessPolicy:"public",allowedPeers:[],timestamp:new Date(),assertionVersion:1,authorAddress:signer.address,publicTripleCount:1,privateTripleCount:privateRoot?1:0,privateMerkleRoot:privateRoot}, {status:"confirmed",confirmation:{kind:"finalized-materialization",provenance:{batchId:BigInt(n),materializedVersion:{blockNumber:0,txIndex:0}}}});
-      await source.replaceGraphAndSubject(assertionGraph, changed, metaGraph, ual, metadata);
-      // A fresh supplier avoids the encoded cache from the matching-content test.
-      const supplier = await make(`MismatchSource-${transport}`, "core", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.DEPLOYER)),source);
-      const mismatchStore = new OxigraphStore();
-      const beforeQuads: Quad[] = [
-        {subject:"urn:preserved",predicate:"urn:value",object:'"unchanged"',graph:assertionGraph},
-        {subject:ual,predicate:"urn:local-note",object:'"unchanged"',graph:metaGraph},
-      ];
-      await mismatchStore.insert(beforeQuads);
-      const sink = await make(`MismatchReceiver-${transport}`, "edge", new EVMChainAdapter(makeAdapterConfig(rpcUrl,hubAddress,HARDHAT_KEYS.REC1_OP)),mismatchStore);
-      sink.subscribeToContextGraph(graph,{onChainId,syncMode:"on-demand",trackSyncScope:false});
-      await sink.connectTo(supplier.multiaddrs.find(a=>a.includes("/tcp/")&&!a.includes("/p2p-circuit"))!);
-      const beforeRows = await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o");
-      const writes = vi.spyOn(mismatchStore,"replaceGraphAndSubject");
-      const evidence = new PublicSnapshotEvidence({snapshot: independent, mode:"core-cache", sourceCore:supplier.peerId},()=>true);
-      const authenticate = vi.fn(asset => evidence.authenticate(asset));
-      const rejected = await sink.syncExactKnowledgeAssetsFromPeerDetailed(supplier.peerId,graph,[ual],{
-        forceFreshExactSession:true,exactRecoveryTransportMode:transport,totalTimeoutMs:15000,
-        authenticateGraphScopedAsset:authenticate,
-        registeredPublicEvidence:{usableFor:()=>true,revoke:()=>{}},
-      });
-      expect(authenticate).toHaveBeenCalled();
-      expect(rejected.committedExactAssetUals ?? []).toEqual([]);
-      expect(writes).not.toHaveBeenCalled();
-      expect(await mismatchStore.query("SELECT ?s ?p ?o ?g WHERE {GRAPH ?g {?s ?p ?o}} ORDER BY ?g ?s ?p ?o")).toEqual(beforeRows);
-    }
+
     const privateCreated = await adapter.createOnChainContextGraph({
       participantAgents: [],
       metadataBatchId: 0n,
@@ -369,5 +241,115 @@ describe("public snapshot recovery over live local nodes and chain", () => {
         privateCreated.contextGraphId.toString(),
       ),
     ).rejects.toThrow("unavailable");
+  }, 180_000);
+
+  it.each(['unsubscribe', 'rebind'] as const)('quarantines dispatched bulk writes after a real %s transition', async transition => {
+    vi.stubEnv('DKG_PUBLIC_SNAPSHOT_BULK', '1');
+    const f = await fixture('bulk');
+    const core = await f.make('RevocationCore', 'core', f.adapter, f.source);
+    const store = new OxigraphStore();
+    const receiver = await f.make('RevocationReceiver', 'edge',
+      new EVMChainAdapter(makeAdapterConfig(f.rpcUrl, f.hubAddress, HARDHAT_KEYS.REC1_OP)), store);
+    await receiver.awaitInitialChainPoll();
+    receiver.subscribeToContextGraph(graph, { onChainId: f.onChainId, syncMode: 'on-demand', trackSyncScope: false });
+    await receiver.connectTo(core.multiaddrs.find(a => a.includes('/tcp/') && !a.includes('/p2p-circuit'))!);
+    const deferred = () => { let resolve!: () => void; const promise = new Promise<void>(r => { resolve = r; }); return { promise, resolve }; };
+    const entered = deferred(), release = deferred(), quarantining = deferred(), drain = deferred();
+    const replace = store.replaceAssetGroup.bind(store);
+    const writes: Parameters<typeof replace>[0][] = [];
+    vi.spyOn(store, 'replaceAssetGroup').mockImplementation(async (...args) => {
+      writes.push(args[0]);
+      if (writes.length === 1) { entered.resolve(); await release.promise; }
+      else { quarantining.resolve(); await drain.promise; }
+      await replace(...args);
+    });
+    const commits: number[] = [];
+    observeOutboundBulkFrames(receiver.router, frame => {
+      if (frame.kind === BULK_GRAPH_KIND.COMMIT) commits.push(frame.kind);
+    });
+    let settled = false;
+    const pending = receiver.syncPublicGraphSnapshot({ transport: 'bulk', contextGraphId: graph,
+      onChainId: f.onChainId, trustedCorePeerIds: [core.peerId] })
+      .then(value => ({ value }), error => ({ error })).finally(() => { settled = true; });
+    try {
+      await entered.promise;
+      if (transition === 'unsubscribe') receiver.unsubscribeFromContextGraph(graph);
+      else receiver.subscribeToContextGraph(graph, { onChainId: String(BigInt(f.onChainId) + 1n), syncMode: 'on-demand', trackSyncScope: false });
+      expect(settled).toBe(false);
+      expect(commits).toEqual([]);
+      release.resolve();
+      await Promise.race([quarantining.promise, pending.then(() => { throw new Error('Job settled without quarantining revoked publication'); })]);
+      expect(settled).toBe(false); // The job owns the physical quarantine too.
+      expect(writes).toHaveLength(2);
+      expect(writes[0]!.length).toBeGreaterThan(1);
+      expect(writes[1]!.map(a => a.metadataSubject)).toEqual(writes[0]!.map(a => a.metadataSubject));
+      expect(writes[1]!.every(a => !a.graphQuads.length && !a.metadataQuads.length)).toBe(true);
+      drain.resolve();
+      const result = await pending;
+      expect('error' in result).toBe(true);
+      expect(commits).toEqual([]);
+      for (const member of writes[0]!) {
+        expect(await store.countQuads(member.graphUri)).toBe(0);
+        const rows = await store.query(`SELECT ?p WHERE { GRAPH <${member.metaGraphUri}> { <${member.metadataSubject}> ?p ?o } }`);
+        expect(rows.type === 'bindings' && rows.bindings).toEqual([]);
+      }
+    } finally { release.resolve(); drain.resolve(); await pending; }
+  }, 180_000);
+
+  it('rejects a bulk group with a matching first member and mismatched second member before publication', async () => {
+    vi.stubEnv('DKG_PUBLIC_SNAPSHOT_BULK', '1');
+    const f = await fixture('bulk');
+    const { supplier, sink, mismatchStore, ual, beforeRows, rows } = await mismatchedSnapshotMember(f, 2, 'bulk');
+    const writes = vi.spyOn(mismatchStore, 'replaceGraphAndSubject');
+    const groupWrites = vi.spyOn(mismatchStore, 'replaceAssetGroup');
+    const authenticated: string[] = [];
+    const original = PublicSnapshotEvidence.prototype.authenticate;
+    const authentication = vi.spyOn(PublicSnapshotEvidence.prototype, 'authenticate').mockImplementation(function(asset) {
+      authenticated.push(asset.ual);
+      return original.call(this, asset);
+    });
+    try {
+      await expect(sink.syncPublicGraphSnapshot({ transport: 'bulk', contextGraphId: graph,
+        onChainId: f.onChainId, trustedCorePeerIds: [supplier.peerId] })).rejects.toThrow();
+      expect(authenticated).toContain(`did:dkg:evm:31337/${f.signer.address.toLowerCase()}/1`);
+      expect(authenticated).toContain(ual);
+      expect(groupWrites).not.toHaveBeenCalled();
+      expect(writes).not.toHaveBeenCalled();
+      expect(await rows()).toEqual(beforeRows);
+    } finally { authentication.mockRestore(); }
+  }, 180_000);
+
+  it.each(['stream-required', 'legacy', 'legacy-envelope'] as const)('rejects unanchored exact content without replacing local data (%s)', async scenario => {
+    const transport = scenario === 'legacy-envelope' ? 'legacy' : scenario;
+    const f = await fixture('exact');
+    const independent = await f.adapter.readPublicGraphSnapshot(graph, f.onChainId);
+    const { supplier, sink, mismatchStore, ual, beforeRows, rows, changed, metadata } = await mismatchedSnapshotMember(f, scenario === 'legacy-envelope' ? 2 : transport === 'legacy' ? 12 : 1, scenario);
+    const writes = vi.spyOn(mismatchStore, 'replaceGraphAndSubject');
+    const evidence = new PublicSnapshotEvidence({ snapshot: normalizePublicGraphSnapshot(independent, { ...independent, now: independent.observedAt }), mode: 'rpc-only', sourceCore: null }, () => true);
+    const authenticate = vi.spyOn(evidence, 'authenticate');
+    if (scenario === 'legacy-envelope') {
+      // A controlled malicious peer reply, with real worker, RPC evidence and store.
+      vi.spyOn(sink as any, 'fetchSyncPages').mockImplementation(async (...args: any[]) => {
+        const phase = args[4], quads = phase === 'meta' ? metadata : changed;
+        return {quads,bytesReceived:0,resumedFromOffset:0,nextOffset:quads.length,
+          checkpointKey:`malicious:${phase}`,completed:true,timedOut:false};
+      });
+    }
+    const rejected = await exactRecovery.runExactRecovery({
+      host: (DKGAgentBase as any).createDurableRecoveryCapabilities(sink), ctx: createOperationContext('sync'),
+      remotePeerId: supplier.peerId, contextGraphId: graph, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection([ual]), 'vm-update-refresh'), authority: evidence,
+      options: {
+      exactRecoveryTransportMode: transport, totalTimeoutMs: 15000,
+      },
+    });
+    expect(await rows()).toEqual(beforeRows);
+    if (scenario === 'legacy-envelope') {
+      expect(rejected.result.complete).toBe(false);
+      expect(rejected.result.failedPhases).toBeGreaterThan(0);
+      expect(authenticate).not.toHaveBeenCalled();
+    } else expect(authenticate).toHaveBeenCalled();
+    expect(rejected.committedExactAssetUals ?? []).toEqual([]);
+    expect(writes).not.toHaveBeenCalled();
+    expect(await rows()).toEqual(beforeRows);
   }, 180_000);
 });

@@ -47,6 +47,7 @@ import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.
 import { retainedAuthorityReaderFixture } from '../../chain/test/helpers/retained-authority-reader.js';
 import { RpcEndpointsExhaustedError } from '@origintrail-official/dkg-chain';
 import { isApprovedPrivateReplicaDelegationActive } from '../src/approved-private-replica.js';
+import { localGossipSigner } from '../src/external-author-signing.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
 import { readinessApplied, readinessHead, readinessTarget } from './_helpers/private-catalog-readiness-fixture.js';
@@ -833,7 +834,7 @@ describe('approved private bare-name replica authorization', () => {
       contextGraphId,
       encryptedPayload,
       createOperationContext('share'),
-      { ...curatorAgent, privateKey: curatorAgent.privateKey },
+      localGossipSigner(curatorAgent.agentAddress, curatorAgent.privateKey!),
       shareOperationId,
     );
     await curator.awaitInFlightSubstrateFanOuts();
@@ -1354,6 +1355,43 @@ describe('approved private bare-name replica authorization', () => {
       .toContain(revokedMember.address.toLowerCase());
     expect(projected?.revokedAgents?.map((address) => address.toLowerCase()))
       .toContain(revokedMember.address.toLowerCase());
+    expect(projected?.allowedPeers).toEqual([fixture.receiver.peerId]);
+  });
+
+  it('keeps the approved-private SWM metadata snapshot while only other graphs change (#2968)', async () => {
+    const additionalMember = new ethers.Wallet(`0x${'37'.repeat(32)}`);
+    const fixture = await approvedBareNameReplicaFixture({
+      additionalAllowedAgents: [additionalMember.address],
+      peerAllowlist: 'receiver-only',
+    });
+    const handler = fixture.receiver.getOrCreateSharedMemoryHandler();
+    const oracle = Reflect.get(handler, 'contextGraphMetaOracle') as undefined | ((
+      contextGraphId: string,
+    ) => Promise<{
+      allowedAgents?: readonly string[];
+      allowedPeers?: readonly string[];
+    } | null>);
+    if (oracle === undefined) throw new Error('shared-memory metadata oracle is not configured');
+
+    const projection = Reflect.get(fixture.receiver, 'contextGraphMetaProjection');
+    const originalOverride = fixture.receiver
+      .resolveApprovedPrivateReplicaSwmAllowedPeersOverride.bind(fixture.receiver);
+    let calls = 0;
+    vi.spyOn(fixture.receiver, 'resolveApprovedPrivateReplicaSwmAllowedPeersOverride')
+      .mockImplementation(async (contextGraphId) => {
+        calls += 1;
+        // A busy node: other graphs' metadata changes during every read of this one.
+        for (let write = 0; write < 20; write += 1) {
+          projection.markDirty(`other-context-graph-${calls}-${write}`);
+        }
+        return originalOverride(contextGraphId);
+      });
+
+    const projected = await oracle(CONTEXT_GRAPH_ID);
+
+    expect(calls).toBe(1);
+    expect(projected?.allowedAgents?.map((address) => address.toLowerCase()))
+      .toContain(additionalMember.address.toLowerCase());
     expect(projected?.allowedPeers).toEqual([fixture.receiver.peerId]);
   });
 
@@ -1931,6 +1969,19 @@ describe('approved private bare-name replica authorization', () => {
       expect.stringMatching(/^0x[0-9a-f]{64}$/u),
       { awaitsProviderAuthorization: true, retryIncompletePrivate: true },
     );
+  });
+
+  it('asks the rows that shares admitted behind the fence still owe to be written once the authority is accepted', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const drain = vi.spyOn(fixture.receiver, 'requestRfc64OwedShareInventoryDrainV1');
+
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+
+    expect(drain).toHaveBeenCalledOnce();
   });
 
   it('refreshes an approved private catalog without depending on its own active recovery gate', async () => {

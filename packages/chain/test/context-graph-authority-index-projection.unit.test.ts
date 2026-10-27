@@ -213,6 +213,37 @@ describe('chain.indexTickMs', () => {
 });
 
 describe('finalized Context Graph authority projection cache', () => {
+  it('tells the validator of an incomplete read whether the projection is inside its tick', async () => {
+    const h = makeHarness();
+    const seen: boolean[] = [];
+    const readAbsent = () => h.index.projection({
+      scope: h.scope,
+      project: (cached) => ({ complete: cached.view.has(id(77n)), value: cached.finalized.number }),
+      validateIncomplete: async (_cached, served) => {
+        seen.push(served.withinTick);
+        return true;
+      },
+      refresh: h.refresh,
+    });
+
+    // The scan this read buys answers it; nothing retained is validated yet.
+    await expect(readAbsent()).resolves.toBe(25);
+    expect(seen).toEqual([]);
+
+    h.clock.nowMs += T - 1;
+    await expect(readAbsent()).resolves.toBe(25);
+    expect(seen).toEqual([true]);
+    expect(h.reads.refreshes).toBe(1);
+
+    // Past the tick the retained projection is only served over a failed
+    // refresh, and the validator is told it is no longer inside its tick.
+    h.clock.nowMs += 1;
+    h.failRefresh(new RpcEndpointsExhaustedError('all endpoints failed', 'mixed'));
+    await expect(readAbsent()).resolves.toBe(25);
+    expect(seen).toEqual([true, false]);
+    expect(h.reads.refreshes).toBe(2);
+  });
+
   it('keeps name-hash normalization and zero-hash opt-out inside the view', async () => {
     const h = makeHarness();
     const { view } = await h.read();

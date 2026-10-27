@@ -8,6 +8,7 @@ afterEach(async () => {
 });
 async function serve(admin: boolean, sync: () => Promise<unknown>, prebuffer = false) {
   const agent = {
+    getPublicSnapshotSourcePolicies: () => ['base-mainnet-registered-cores'],
     syncPublicGraphSnapshot: sync,
     getDefaultAgentAddress: () => undefined,
     resolveAgentByToken: () => undefined,
@@ -39,6 +40,29 @@ const body = JSON.stringify({
   trustedCorePeerIds: ["configured-core"],
 });
 describe("public snapshot administrator API", () => {
+  it("advertises registered-core capability and pins the chosen policy without silently inserting peers", async () => {
+    const sync = vi.fn(async () => ({ current: true }));
+    const url = await serve(true, sync);
+    expect(await (await fetch(url)).json()).toMatchObject({
+      capabilities: { sourcePolicies: ['base-mainnet-registered-cores'] },
+    });
+    const request = { ...JSON.parse(body), trustedCorePeerIds: [], sourcePolicy: 'base-mainnet-registered-cores' };
+    const response = await fetch(url, { method: 'POST', body: JSON.stringify(request) });
+    expect(response.status).toBe(202);
+    expect((await response.json()).request).toEqual({ ...request, mode: 'core-cache', transport: 'exact' });
+    await vi.waitFor(async () => expect((await (await fetch(url)).json()).state).toBe('complete'));
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...request, trustedCorePeerIds: ['core'] }) })).status).toBe(400);
+    expect(sync).toHaveBeenCalledTimes(1);
+  });
+  it("records an explicit bulk transport and rejects unknown transport values", async () => {
+    const sync = vi.fn(async () => ({ current: true }));
+    const url = await serve(true, sync);
+    const input = { ...JSON.parse(body), transport: 'bulk' };
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify(input) })).status).toBe(202);
+    await vi.waitFor(async () => expect((await (await fetch(url)).json()).request.transport).toBe('bulk'));
+    expect(sync).toHaveBeenCalledWith({...input, mode:'core-cache'});
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...input, transport: 'parallel' }) })).status).toBe(400);
+  });
   it("denies an agent principal and never starts recovery", async () => {
     const sync = vi.fn(async () => ({}));
     const url = await serve(false, sync);
@@ -53,6 +77,19 @@ describe("public snapshot administrator API", () => {
     await vi.waitFor(async () => expect((await (await fetch(url)).json()).state).toBe('complete'));
     expect((await fetch(url, {method:'POST',body:' '.repeat(4097)})).status).toBe(413);
     expect(sync).toHaveBeenCalledTimes(1);
+  });
+  it('shares distinct-peer normalization and rejects malformed domain values before dispatch', async () => {
+    const sync = vi.fn(async () => ({})), url = await serve(true, sync);
+    const request = JSON.parse(body);
+    expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...request, trustedCorePeerIds: Array(5).fill('core') }) })).status).toBe(202);
+    expect(sync).toHaveBeenCalledWith({ ...request, mode: 'core-cache', transport: 'exact', trustedCorePeerIds: ['core'] });
+    await vi.waitFor(async () => expect((await (await fetch(url)).json()).state).toBe('complete'));
+    sync.mockClear();
+    for (const patch of [{ mode: 'unknown' }, { contextGraphId: '../bad' }, { onChainId: '0' },
+      { trustedCorePeerIds: [] }, { trustedCorePeerIds: ['a', 'b', 'c', 'd', 'e'] }, { trustedCorePeerIds: [1] }]) {
+      expect((await fetch(url, { method: 'POST', body: JSON.stringify({ ...request, ...patch }) })).status).toBe(400);
+    }
+    expect(sync).not.toHaveBeenCalled();
   });
   it("starts one owned job, refuses duplicates, and preserves terminal failure", async () => {
     let reject!: (error: Error) => void;

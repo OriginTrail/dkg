@@ -391,7 +391,8 @@ describe('RFC-64 local SWM catalog projection repair', () => {
       sealDigest: `0x${'aa'.repeat(32)}` as Digest32V1,
     });
     await (agent as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs.put(repair);
-    const repairAttempt = vi.spyOn(agent, 'repairRfc64FinalizedPrivateCatalogPlacementV1')
+    // The supervisor runs the observed repair body with its admitted attempt's recorder.
+    const repairAttempt = vi.spyOn(agent as any, 'repairObservedRfc64FinalizedPrivateCatalogPlacementV1')
       .mockResolvedValue('repaired');
 
     expect(agent.requestRfc64SwmCatalogProjectionV1({
@@ -402,7 +403,7 @@ describe('RFC-64 local SWM catalog projection repair', () => {
     const request = agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair });
     expect(request.accepted).toBe(true);
     await request.whenAttempted;
-    expect(repairAttempt).toHaveBeenCalledWith(repair);
+    expect(repairAttempt).toHaveBeenCalledWith(repair, expect.anything());
     releaseOrdinary();
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
   }, 30_000);

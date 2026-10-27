@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE, SWM_INVENTORY_HANDOFF_PENDING_CODE } from '@origintrail-official/dkg-core';
 import {
   isReadOnlyStoreOperation,
   isStoreOperationTimeoutError,
-  StoreSchedulerBusyError,
+  StoreSchedulerBusyError, isStoreReadTransportFailure,
 } from '@origintrail-official/dkg-storage';
 import {
   getPromoteFailureDisposition,
+  CuratorUnconfirmedError, CuratorRejectedError,
   type PromoteFailureDisposition,
   type PromoteFailureClassification,
 } from '@origintrail-official/dkg-publisher';
@@ -74,6 +75,7 @@ export function safePromoteErrorIdentity(
 // allowlist of shared contract codes (dkg-core), never a shape test.
 const SAFE_PROMOTE_RETRY_CAUSE_CODES = Object.freeze({
   [RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE]: true,
+  [SWM_INVENTORY_HANDOFF_PENDING_CODE]: true,
 } as const);
 
 export function safePromoteRetryCauseCode(cause: unknown): string | undefined {
@@ -92,81 +94,61 @@ export function safePromoteRetryCauseCode(cause: unknown): string | undefined {
  * Map a promote error to a queue disposition. Unknown errors fail closed so an
  * operator can inspect and explicitly recover them.
  */
-export function classifyPromoteError(err: unknown): ClassifiedPromoteError {
-  // Workflow-level replay safety is a typed producer disposition. It is more
-  // authoritative than diagnostic prose inherited from the wrapped cause,
-  // including incidental cap-like wording.
-  const publisherDisposition = getPromoteFailureDisposition(err);
-  if (publisherDisposition) {
-    return publisherDisposition;
-  }
+export function classifyPromoteError(err: unknown, options: { boundRecovery?: boolean } = {}): ClassifiedPromoteError {
+  return options.boundRecovery ? classifyBoundRecovery(err) : classifyLegacyPromote(err);
+}
 
+const fatal = (): ClassifiedPromoteError => ({ classification: 'fatal', retryable: false });
+const transient = (): ClassifiedPromoteError => ({ classification: 'transient', retryable: true });
+
+/** Unlimited ownership accepts typed replay safety; arbitrary prose never grants retries. */
+function classifyBoundRecovery(err: unknown): ClassifiedPromoteError {
+  if (err instanceof CuratorRejectedError) return fatal();
+  if (err instanceof CuratorUnconfirmedError) return transient();
+  const publisher = getPromoteFailureDisposition(err);
+  if (publisher) return publisher;
+  if (isStoreReadTransportFailure(err)) return transient();
+  return classifyPayloadCap(errorText(err)) ?? classifyScheduledStore(err) ?? fatal();
+}
+
+/** Preserve historical cap precedence and bounded message fallbacks for ordinary jobs. */
+function classifyLegacyPromote(err: unknown): ClassifiedPromoteError {
+  if (err instanceof CuratorRejectedError) return fatal();
+  const publisher = getPromoteFailureDisposition(err);
+  if (publisher) return publisher;
+  const text = errorText(err);
+  const cap = classifyPayloadCap(text);
+  if (cap) return cap;
+  const store = classifyScheduledStore(err);
+  if (store) return store;
+  if (isStoreReadTransportFailure(err)) return transient();
+  const { code, message } = text;
+  if (code === 'store_operation_timeout' || code === 'store_scheduler_busy'
+    || message.includes('managed oxigraph') || message.includes('store scheduler')) return fatal();
+  return ['fetch failed', 'econnreset', 'econnrefused', 'etimedout', 'socket hang up',
+    'network', 'timeout', 'timed out'].some(fragment => message.includes(fragment)) ? transient() : fatal();
+}
+
+function errorText(err: unknown): { code: string; message: string } {
   const raw = err instanceof Error ? err.message : String(err);
-  // Strip a leading diagnostic tag before substring classification. A step
-  // label must not inject a classifier keyword into the producer's message.
-  const untagged = untagPromoteMessage(raw ?? '');
-  const message = untagged.toLowerCase();
-  const code =
-    err && typeof err === 'object' && 'code' in err
-      ? String((err as { code?: unknown }).code ?? '').toLowerCase()
-      : '';
+  return { message: untagPromoteMessage(raw ?? '').toLowerCase(),
+    code: err && typeof err === 'object' && 'code' in err
+      ? String((err as { code?: unknown }).code ?? '').toLowerCase() : '' };
+}
 
-  if (
-    code === 'swm_gossip_payload_too_large'
-    || code === 'payload_too_large'
+function classifyPayloadCap({ code, message }: ReturnType<typeof errorText>): ClassifiedPromoteError | undefined {
+  if (code === 'swm_gossip_payload_too_large' || code === 'payload_too_large'
     || (message.includes('gossip') && (message.includes('limit') || message.includes('too large')))
-    || message.includes('promoted assertion too large')
-  ) {
-    return { classification: 'cap_exceeded', retryable: false };
-  }
+    || message.includes('promoted assertion too large') || message.includes('request body too large')
+    || message.includes('payload too large')) return { classification: 'cap_exceeded', retryable: false };
+  return undefined;
+}
 
-  if (message.includes('request body too large') || message.includes('payload too large')) {
-    return { classification: 'cap_exceeded', retryable: false };
-  }
-
-  // Managed-store recovery can declare the exact operation outcome. A request
-  // rejected before dispatch is safe to retry, and interrupted reads cannot
-  // have mutated WM/SWM. Every interrupted write remains fail-closed unless
-  // the producer supplied the typed replay-safe disposition above.
+function classifyScheduledStore(err: unknown): ClassifiedPromoteError | undefined {
   if (isStoreOperationTimeoutError(err)) {
-    if (
-      err.outcome === 'not_started'
-      || (
-        err.outcome === 'indeterminate'
-        && err.storeOperation !== undefined
-        && isReadOnlyStoreOperation(err.storeOperation)
-      )
-    ) {
-      return { classification: 'transient', retryable: true };
-    }
-    return { classification: 'fatal', retryable: false };
+    // Indeterminate writes remain fail-closed without a producer's replay-safe disposition.
+    return err.outcome === 'not_started' || (err.outcome === 'indeterminate'
+      && err.storeOperation !== undefined && isReadOnlyStoreOperation(err.storeOperation)) ? transient() : fatal();
   }
-
-  if (err instanceof StoreSchedulerBusyError) {
-    return { classification: 'transient', retryable: true };
-  }
-
-  if (
-    code === 'store_operation_timeout'
-    || code === 'store_scheduler_busy'
-    || message.includes('managed oxigraph')
-    || message.includes('store scheduler')
-  ) {
-    return { classification: 'fatal', retryable: false };
-  }
-
-  if (
-    message.includes('fetch failed')
-    || message.includes('econnreset')
-    || message.includes('econnrefused')
-    || message.includes('etimedout')
-    || message.includes('socket hang up')
-    || message.includes('network')
-    || message.includes('timeout')
-    || message.includes('timed out')
-  ) {
-    return { classification: 'transient', retryable: true };
-  }
-
-  return { classification: 'fatal', retryable: false };
+  return err instanceof StoreSchedulerBusyError ? transient() : undefined;
 }

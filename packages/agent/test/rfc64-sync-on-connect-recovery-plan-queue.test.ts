@@ -751,7 +751,8 @@ describe('RFC-64 recovery-plan queue authorization', () => {
 
     await vi.waitFor(() => expect(ordinaryRun).toHaveBeenCalledOnce());
 
-    expect(ordinaryRun).toHaveBeenCalledWith();
+    // `null`: the queued ordinary pass covers the peer's whole sync scope.
+    expect(ordinaryRun).toHaveBeenCalledWith(null);
     expect(ordering).toEqual(['exact', 'ordinary']);
     expect(selectedSync).toHaveBeenCalledWith(
       PEER_A,

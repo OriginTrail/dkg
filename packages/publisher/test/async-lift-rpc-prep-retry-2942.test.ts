@@ -2,8 +2,8 @@
  * GH#2942 — a transient RPC failure while the publish transaction is being PREPARED is not a
  * transaction-submission timeout.
  *
- * `RpcFailoverClient.populateAndSign` throws a typed `RpcEndpointsExhaustedError` (no txHash) when
- * every endpoint failed during estimate / populate / sign. That error is raised strictly before the
+ * `RpcFailoverClient.prepareTransaction` throws a typed `RpcEndpointsExhaustedError` (no txHash) when
+ * every endpoint failed during estimate / populate. That error is raised strictly before the
  * pre-send write-ahead hook, so it can never follow a send of the publication transaction — yet it
  * is not store-typed, so it fell to the broadcast-origin classifier: `tx_submit_timeout` when its
  * text says "timed out" (check-chain resolution, but with no transaction to check), `rpc_unavailable`

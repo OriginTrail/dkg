@@ -15,6 +15,8 @@
 import { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 export { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
+import { createOperationalSignerPool, isExternalEvmSigner, operationalPrivateKeyOf, signTransactionOnce, type EvmSigner } from './evm-signer.js';
+export type { EvmSigner } from './evm-signer.js';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
 import type { FilterErrorSilencer } from './filter-error-silencer.js';
 import {
@@ -28,30 +30,33 @@ import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-author
 import type {
   ApprovalPolicy,
   ChainReadOptions,
+  IdentityReadOptions,
   EventScanHorizonLease,
   ContextGraphLiveAuthority,
   ContextGraphAuthorityIndexRevisionReader,
   KnowledgeAssetUpdateContext,
   V10PublishParams,
   OnChainPublishResult,
+  OperationalSigning,
   PreBroadcastSignal,
+  ReplacementBroadcastSignal,
   SignedTransactionEnvelope,
   BrowserWalletRpcMethod,
 } from './chain-adapter.js';
 import { HubResolutionCache } from './hub-resolution-cache.js';
-import { SignerTxSerializer, type SignerTxLaneState } from './signer-tx-serializer.js';
+import { SignerTxSerializer } from './signer-tx-serializer.js';
 import { floorPublishTokenAmount, withSpan, getMetrics } from '@origintrail-official/dkg-core';
 import { loadAbi } from './evm-adapter-abi.js';
-import { errorCode, errorMessage, errorStatus, isTooLowAllowanceError, enrichEvmError, HUB_STALE_ERROR_MARKERS, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
+import { errorCode, errorMessage, errorStatus, enrichEvmError, isCausedByRemoteSigner, isHubStaleError, isInsufficientFundsError, InsufficientPublisherFundsError, PcaFundingUnknownError, formatNoFundedPublisherWalletMessage, type PublisherWalletBalance } from './evm-adapter-errors.js';
 import { collectEvmErrorText } from './evm-error-text.js';
 import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import {
   classifyRpcRetryDisposition,
-  rethrowInterruptedInitialization,
   isRpcEndpointFailoverEligible,
   isRetryableRpcError,
   resolveRpcUrls,
-  assertSuccessfulReceipt,
+  explainOutOfGasRevert,
+  retryBroadcastEndpointSet,
   sleep,
 } from './evm-adapter-rpc.js';
 import {
@@ -60,21 +65,21 @@ import {
   activeRpcRequestContext,
   withDetachedRpcRequestContext,
   withOwnedRpcRequestContext,
+  withRpcRequestContext,
   withRpcRequestTimeout,
 } from './rpc-request-transport.js';
 import type { RpcRequestClass } from './rpc-request-transport.js';
-import { hostOnlyRpcText, rpcHost } from './rpc-failover-log.js';
-import {
-  RpcEndpointsExhaustedError,
-} from './chain-rpc-transport-error.js';
+import { hostOnlyRpcText } from './rpc-failover-log.js';
 import  {
   RpcFailoverClient,
   createRpcReadDescriptor,
   rpcReadDescriptor,
+  type PreparedTransaction,
   type ReadOpts,
   type ReceiptLookupOptions,
 } from './rpc-failover-client.js';
-import { waitForReceiptWithDeadline } from './receipt-wait.js';
+import type { GasLimitBufferOptions } from './gas-limit-buffer.js';
+import { markTransactionNotSubmitted } from './transaction-submission.js';
 import {
   RpcUsageTracker,
   withRpcUsageConsumer,
@@ -82,13 +87,17 @@ import {
 } from './rpc-usage.js';
 import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import { computeApprovalAction, effectivePublishAllowance, V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE } from './evm-adapter-allowance.js';
+import { prepareV10WriteWithAllowanceRecovery } from './evm-v10-write-preparation.js';
 import { formatProviderContext } from './evm-adapter-types.js';
 import {
   AbortableKeyedSingleFlight,
   ReadThroughTtlCache,
 } from './keyed-ttl-single-flight-cache.js';
+import { SharedAdapterInitialization, initializationBinder } from './evm-adapter-shared-init.js';
 import { IdentityIdCache, IDENTITY_ID_POSITIVE_TTL_MS, SIGNER_IDENTITY_ID_ZERO_TTL_MS } from './identity-id-cache.js';
 import { PcaReadCache } from './pca-read-cache.js';
+import { preferredFundableCandidate } from './signer-selection.js';
+import type { PublisherCandidateFundingAssessment, PublisherUnfundedCandidateFundingAssessment, PublisherFundingSelection } from './evm-publisher-funding.js';
 import type { PublisherConvictionPlanReader } from './publisher-plan.js';
 import { HubRotationPoller } from './hub-rotation-poller.js';
 import type {
@@ -113,20 +122,28 @@ import { ContextGraphRegistryRepairCoordinator } from
 import { EvmContextGraphNameHashFence } from './evm-context-graph-name-hash-fence.js';
 import { EvmContextGraphNameHashResolver } from './evm-context-graph-name-hash-resolver.js';
 import { BackgroundContractReadBatching } from './evm-background-read-batching.js';
-import { HubContractNotFoundError } from './hub-contract-not-found-error.js';
+import { HubBindingNotFoundError, HubContractNotFoundError, HubAssetStorageNotFoundError } from './hub-contract-not-found-error.js';
 import { RandomSamplingContractsUnavailableError } from './random-sampling-availability.js';
 import type {
   RandomSamplingBlockContext,
   RandomSamplingReadContextReader,
 } from './random-sampling-read-context.js';
 import type { ContractCache, EVMAdapterConfig } from './evm-adapter-types.js';
-import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, RPC_RECEIPT_POLL_INTERVAL_MS, RPC_ENDPOINT_SET_RETRIES, RPC_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRIES, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS, RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
+import { RPC_READ_STALL_TIMEOUT_MS, CONFIGURED_CHAIN_ID_VALIDATION_TIMEOUT_MS, DEFAULT_RANDOM_SAMPLING_HUB_REFRESH_MS, resolveFinalityConfirmations, resolveReceiptTimeoutMs, ADMIN_KEY_PURPOSE, OPERATIONAL_KEY_PURPOSE, PUBLISHER_FUNDING_CACHE_TTL_MS, CG_REGISTRY_DEFAULT_PAGE_SIZE,
   TX_SERIALIZER_OBSERVE_AFTER_MS,
   TX_SERIALIZER_OBSERVE_INTERVAL_MS,
   resolveTxSerializerStallAfterMs,
 } from './evm-adapter-constants.js';
 import { decodeKnowledgeAssetUpdateContext } from './evm-knowledge-asset-update-context.js';
-import { applyTransactionFeeCap, resolveMaxFeePerGasWei } from './evm-fee-cap.js';
+import { resolveMaxFeePerGasWei } from './evm-fee-cap.js';
+import { chainFeeFloor, prepareTransactionWithFees, type ChainFeeFloor } from './evm-fee-policy.js';
+import { numericChainIdOf } from './configured-chain-id.js';
+import {
+  StuckTransactionRecovery,
+  stuckTransactionRecoveryFor,
+  waitForRecoverableTransactionReceipt,
+  type StuckTransactionTarget,
+} from './stuck-transaction-recovery.js';
 import { ContextGraphAuthorityHistoryCache } from './context-graph-authority-history.js';
 import { ContextGraphAuthorityIndex } from './context-graph-authority-index.js';
 import {
@@ -143,9 +160,9 @@ type ContractWriteSender = (
   contract: Contract,
   method: string,
   args: readonly unknown[],
-  signer: Wallet,
+  signer: EvmSigner,
   label: string,
-  opts?: { gasLimitBufferBps?: number },
+  opts?: GasLimitBufferOptions,
 ) => Promise<ethers.TransactionReceipt>;
 
 type SerializedSignerWriteContext = {
@@ -607,6 +624,16 @@ export type SelectSignerSpec =
       preferIdle?: boolean;
     };
 
+/** Initialization tolerates only genuine Hub absence, while cancellation wins a raced miss. */
+async function resolveOptionalHubBinding(resolve: () => Promise<void>): Promise<void> {
+  try {
+    await resolve();
+  } catch (error) {
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    if (!(error instanceof HubBindingNotFoundError)) throw error;
+  }
+}
+
 export class EVMChainAdapterBase {
   /** See `ChainAdapter.deploymentId`. */
   get deploymentId(): string {
@@ -640,8 +667,8 @@ export class EVMChainAdapterBase {
    * The pure per-endpoint RPC transport mechanism. Owns the read-failover loop +
    * the named timeout-policy matrix + typed exhaustion; constructed with a LIVE
    * endpoint thunk over `this.providers` / `this.rpcUrls` and the
-   * `signPopulatedTransaction` callback, so it never holds a back-reference to
-   * the adapter and never owns tx-safety state.
+   * `prepareSignerTransaction` hook, so it never holds a back-reference to the
+   * adapter, never signs and never owns tx-safety state.
    */
   protected readonly rpcFailover: RpcFailoverClient;
   /** Background views coalesced into one Multicall3 request (see `evm-background-read-batching.ts`). */
@@ -665,15 +692,18 @@ export class EVMChainAdapterBase {
 
   protected readonly maxFeePerGasWei?: bigint;
 
+  /** The configured chain's fee floor (see evm-fee-policy.ts), if it has one. */
+  protected readonly feeFloor?: ChainFeeFloor;
+
   protected readonly configuredStaticChainId?: bigint;
 
   protected readonly filterErrorSilencer: FilterErrorSilencer;
 
   /** Primary signer — used for identity/profile/staking operations. */
-  protected readonly signer: Wallet;
+  protected readonly signer: EvmSigner;
 
   /** All operational signers (includes primary). Used round-robin for publish TXs. */
-  protected readonly signerPool: Wallet[];
+  protected readonly signerPool: EvmSigner[];
 
   /** Admin signer — used only for profile/key-management operations. */
   protected readonly adminSigner?: Wallet;
@@ -774,6 +804,14 @@ export class EVMChainAdapterBase {
   protected contracts: ContractCache;
 
   protected initialized = false;
+
+  /** The one initialization that callers of an uninitialized adapter share. */
+  private readonly sharedInit = new SharedAdapterInitialization({
+    rpcUrls: () => this.rpcUrls,
+    isInitialized: () => this.initialized,
+    markInitialized: () => { this.initialized = true; },
+    initContracts: (startsRequestClass) => this.initContracts(startsRequestClass),
+  });
 
   /** Monotonic fence for physical Hub binding generations, including ABA. */
   protected hubBindingGeneration = 0;
@@ -1240,7 +1278,9 @@ export class EVMChainAdapterBase {
   protected async readIdentityIdFromStorage(address: string): Promise<bigint> {
     if (!ethers.isAddress(address)) return 0n;
     const checksum = ethers.getAddress(address);
-    await this.init();
+    activeRpcRequestAbortSignal()?.throwIfAborted();
+    if (!this.initialized) await this.init();
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const previousIdentityStorage = this.contracts.identityStorage;
     // #1583 — keep the `{ refresh: true }` re-resolve. Pre-#1583 this re-hit the
     // Hub on every getIdentityId miss (a major RPC amplifier during publish
@@ -1256,7 +1296,9 @@ export class EVMChainAdapterBase {
     // stays fresh/uncached; `identityStorageChanged` flushes the identity caches
     // when the re-resolve lands on a new address.
     const identityStorage = await this.getIdentityStorage({ refresh: true });
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     const identityStorageChanged = await this.identityStorageAddressChanged(previousIdentityStorage, identityStorage);
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     if (identityStorageChanged) {
       this.identityIdCache.invalidateAll();
       this.resolvedContractAddressCache.invalidateAll();
@@ -1270,7 +1312,20 @@ export class EVMChainAdapterBase {
   }
 
   protected async readIdentityIdForAddress(address: string): Promise<bigint> {
-    return this.identityIdCache.getOrLoad(address, (checksum) => this.readIdentityIdFromStorage(checksum));
+    if (!ethers.isAddress(address)) return 0n;
+    const caller = activeRpcRequestContext();
+    caller.signal?.throwIfAborted();
+    // Initialization tracks its own waiters: preserve their progress and let
+    // it stop when all callers leave before sharing the cached value read.
+    if (!this.initialized) await this.init();
+    caller.signal?.throwIfAborted();
+    const identityId = await this.identityIdCache.getOrLoad(address, (checksum, onProgress) =>
+      withDetachedRpcRequestContext(caller.requestClass, () => withRpcRequestContext(
+        { onProgress, admissionPriority: caller.admissionPriority },
+        () => this.readIdentityIdFromStorage(checksum),
+      )), caller);
+    caller.signal?.throwIfAborted();
+    return identityId;
   }
 
   protected async refreshIdentityIdForAddress(address: string): Promise<bigint> {
@@ -1417,23 +1472,24 @@ export class EVMChainAdapterBase {
     this.provider = this.primaryProvider;
     // Construct the transport client AFTER `this.providers`/`this.rpcUrls` are
     // set (above). The endpoint thunk reads `providers`/`rpcUrls` live (so a
-    // reassignment of `(a as any).providers` is observed) and signing routes back
-    // to `signPopulatedTransaction` so that helper stays on the adapter. No
-    // failover read can run before this point — the constructor below only builds
-    // Wallets/Contracts and a lazily-resolved HubResolutionCache.
+    // reassignment of `(a as any).providers` is observed) and the signer-side
+    // preparation routes back to `prepareSignerTransaction`, so the fee-cap policy
+    // stays on the adapter. No failover read can run before this point — the
+    // constructor below only builds Wallets/Contracts and a lazily-resolved
+    // HubResolutionCache.
     this.rpcFailover = new RpcFailoverClient(
       // Mapped at CALL time inside the thunk (NOT captured), so a reassignment of
       // `(a as any).providers` / `(a as any).rpcUrls` after construction still
       // propagates live. `providers`/`rpcUrls` are built in lockstep
       // (`providers = rpcUrls.map(...)`), so index i pairs provider[i]↔rpcUrl[i].
       () => this.providers.map((provider, i) => ({ provider, rpcUrl: this.rpcUrls[i] })),
-      (signer, populated) => this.signPopulatedTransaction(signer, populated),
       // `this.chainId` is assigned later in this constructor (after the client is
       // built), so pass a LIVE thunk — resolved at metric-record time — rather
       // than capturing the still-undefined field value here.
       () => this.chainId,
       {
         validateEndpoint: async (endpoint) => { await this.ensureConfiguredStaticChainIdValidated(endpoint.provider); },
+        prepareForSigning: (signer, populated) => this.prepareSignerTransaction(signer, populated),
         // Endpoint-stickiness config. The kill-switch is resolved HERE at the config
         // boundary (LIVE per-check so flipping the env + restart disables it) so the
         // transport core stays free of any process-global dependency.
@@ -1446,14 +1502,7 @@ export class EVMChainAdapterBase {
       // Resolved here at the config boundary, live per read, like the stickiness switch.
       isEnabled: () => process.env.DKG_DISABLE_RPC_READ_BATCHING !== '1',
     });
-    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(
-      config.chainEventLogStore,
-      (error) => {
-        console.warn(
-          `[chain] one-log chain index disabled: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      },
-    );
+    this.chainIndexOwner = new EvmChainIndexRuntimeOwner(config.chainEventLogStore);
     this.receiptFinality = new EvmReceiptFinalityReader(
       this.finalityConfirmations,
       (label, read, options) => this.readProviderRetryingNull(label, read, options),
@@ -1529,11 +1578,8 @@ export class EVMChainAdapterBase {
         );
       }
     }
-    this.signer = new Wallet(config.privateKey, this.provider);
-    this.signerPool = [this.signer];
-    for (const key of config.additionalKeys ?? []) {
-      this.signerPool.push(new Wallet(key, this.provider));
-    }
+    this.signerPool = createOperationalSignerPool(config, this.provider);
+    this.signer = this.signerPool[0];
     // The primary signer is the node's identity anchor (a registered operational
     // key via createProfile), so RS may always fall back to it. Additional
     // wallets join this set only once their registration is confirmed on-chain.
@@ -1557,6 +1603,7 @@ export class EVMChainAdapterBase {
     }
     this.tokenAddress = config.tokenAddress ? ethers.getAddress(config.tokenAddress) : undefined;
     this.chainId = config.chainId ?? 'evm:31337';
+    this.feeFloor = chainFeeFloor(numericChainIdOf(this.chainId));
     this.contextGraphRegistryScanCursor = new ContextGraphRegistryScanCursor({
       chainId: this.chainId,
       deploymentId: this.deploymentId,
@@ -1641,13 +1688,13 @@ export class EVMChainAdapterBase {
   }
 
   /** Pick the next signer from the pool (round-robin). */
-  protected nextSigner(): Wallet {
+  protected nextSigner(): EvmSigner {
     const s = this.signerPool[this.signerIndex % this.signerPool.length];
     this.signerIndex++;
     return s;
   }
 
-  protected findSignerByAddress(address: string): Wallet | undefined {
+  protected findSignerByAddress(address: string): EvmSigner | undefined {
     const normalized = ethers.getAddress(address).toLowerCase();
     return this.signerPool.find((signer) => signer.address.toLowerCase() === normalized);
   }
@@ -1661,7 +1708,7 @@ export class EVMChainAdapterBase {
   protected async resolvePinnedPublisherSigner(
     contextGraphId: bigint,
     publisherAddress: string,
-  ): Promise<Wallet> {
+  ): Promise<EvmSigner> {
     const selected = this.findSignerByAddress(publisherAddress);
     if (!selected) {
       throw new Error(
@@ -1888,30 +1935,39 @@ export class EVMChainAdapterBase {
    * Rebind a CONTRACT to a `provider` for one per-endpoint VIEW read, leaving the
    * boot-bound `this.contracts.*` handle untouched. The sole remaining base caller
    * is the `getMaxKaNumberForAuthor` staticCall (a `readProvider` lambda); the
-   * write-path signer rebind lives in the module's `populateAndSign`. The
+   * write-path signer rebind lives in the module's `prepareTransaction`. The
    * `as Contract` recovers the dynamic-method index signature ethers'
    * `BaseContract.connect` drops.
    */
-  protected rebindContract(contract: Contract, runner: JsonRpcProvider | Wallet): Contract {
+  protected rebindContract(contract: Contract, runner: JsonRpcProvider | EvmSigner): Contract {
     return contract.connect(runner) as Contract;
   }
 
   protected async waitForReceiptWithFailover(
     txHash: string,
     label: string,
+    recovery?: StuckTransactionRecovery,
   ): Promise<ethers.TransactionReceipt> {
-    return waitForReceiptWithDeadline({
+    return waitForRecoverableTransactionReceipt({
       txHash,
+      label,
       receiptTimeoutMs: this.receiptTimeoutMs,
-      pollIntervalMs: RPC_RECEIPT_POLL_INTERVAL_MS,
       getReceipt: (hash, options) => this.getTransactionReceiptWithFailover(hash, options),
       isReceiptEligible: async (receipt, { deadlineMs }) => (
         await this.receiptFinality.read(receipt, { deadlineMs })
       ) !== null,
-      assertSuccessfulReceipt: (receipt) => assertSuccessfulReceipt(receipt, label),
-      formatTimeoutMessage: ({ lastError }) =>
-        `${label} tx ${txHash} timed out waiting for a receipt after ${this.receiptTimeoutMs}ms` +
-        (lastError ? ` (last RPC error: ${hostOnlyRpcText(errorMessage(lastError))})` : ''),
+    }, recovery);
+  }
+
+  /** Speed-up state for one broadcast transaction; see stuck-transaction-recovery.ts. */
+  protected createStuckTransactionRecovery(target: StuckTransactionTarget): StuckTransactionRecovery | undefined {
+    return stuckTransactionRecoveryFor(target, {
+      receiptTimeoutMs: this.receiptTimeoutMs,
+      maxFeePerGasCap: this.maxFeePerGasWei,
+      feeFloor: this.feeFloor,
+      readHead: (label, read, deadlineMs) => this.readTipProvider(label, read, { deadlineMs }),
+      read: (label, read, deadlineMs) => this.readProvider(label, read, { deadlineMs }),
+      broadcast: (signedTx, txHash, label) => this.broadcastSignedTransactionWithRetries(signedTx, txHash, label),
     });
   }
 
@@ -1933,38 +1989,41 @@ export class EVMChainAdapterBase {
     return (await this.receiptFinality.read(receipt, options)) !== null;
   }
 
-  protected async signPopulatedTransaction(
-    signer: Wallet,
+  /**
+   * The signer-side preparation of a contract-populated transaction (nonce, gas
+   * and fee reads) with the configured fee cap. `RpcFailoverClient.prepareTransaction`
+   * runs it on each endpoint under the per-endpoint deadline; it never signs.
+   */
+  protected async prepareSignerTransaction(
+    signer: EvmSigner,
     populated: ethers.TransactionRequest,
-  ): Promise<SignedTransactionEnvelope> {
-    let filled = await signer.populateTransaction(populated);
-    if (this.maxFeePerGasWei !== undefined) {
-      const cap = this.maxFeePerGasWei;
-      let baseFeePerGas: bigint | null | undefined;
-      if (filled.maxFeePerGas !== null && filled.maxFeePerGas !== undefined) {
-        const latestBlock = await signer.provider?.getBlock('latest');
-        baseFeePerGas = latestBlock?.baseFeePerGas;
-      }
-      filled = applyTransactionFeeCap(filled, cap, baseFeePerGas);
-    }
-    const signedTx = await signer.signTransaction(filled);
-    // GH#2270 PR-3 r3 — ONE decode of the signed bytes, here, for both facts the send window
-    // needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
-    const parsed = ethers.Transaction.from(signedTx);
+  ): Promise<ethers.TransactionRequest> {
+    return prepareTransactionWithFees(signer, populated, this.feeFloor, this.maxFeePerGasWei);
+  }
+
+  /**
+   * Sign a prepared transaction, once: callers sign after preparation and its
+   * retries and recoveries are complete, so a signer failure is final whatever
+   * it says. It is not endpoint work and has no RPC deadline; an external signer
+   * bounds its own request.
+   */
+  protected async signPreparedTransaction(prepared: PreparedTransaction): Promise<SignedTransactionEnvelope> {
+    // GH#2270 PR-3 r3 — ONE decode of the signed bytes, at signing, for both facts the send
+    // window needs. The nonce used to be re-parsed at the dispatch boundary from the same string.
+    const { signedTx, parsed } = await signTransactionOnce(prepared.signer, prepared.transaction);
     const nonce = Number.isSafeInteger(parsed.nonce) && parsed.nonce >= 0 ? parsed.nonce : undefined;
     return { signedTx, txHash: parsed.hash ?? '0x', ...(nonce === undefined ? {} : { nonce }) };
   }
 
   /**
-   * #888: populate + sign a V10 write tx (shared by publish + update) with a
-   * one-shot recovery for a stale-RPC `TooLowAllowance` revert. Gas estimation
-   * during populate can read a stale TRAC allowance and revert even though the
-   * approve succeeded; this is strictly pre-broadcast, so on that ONE revert we
-   * force a fresh approve (`ensureV10ApproveTrac(force=true)`) and retry exactly
-   * once. Any other error, or a second `TooLowAllowance`, propagates.
+   * #888: prepare a V10 write tx (shared by publish + update) with the one-shot
+   * stale-allowance recovery of `prepareV10WriteWithAllowanceRecovery`: the
+   * per-endpoint preparation, and a forced `ensureV10ApproveTrac(force=true)`
+   * sent by `approvalSender`. Both write paths sign the result once, inside their
+   * per-wallet serializer window, strictly pre-broadcast / pre-WAL.
    */
-  protected async populateAndSignV10WithAllowanceRecovery(
-    signer: Wallet,
+  protected async prepareV10WithAllowanceRecovery(
+    signer: EvmSigner,
     kaContract: Contract,
     method: 'publish' | 'update',
     methodParams: unknown,
@@ -1972,74 +2031,30 @@ export class EVMChainAdapterBase {
     tokenAmount: bigint,
     reapproveLabel: string,
     approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
-  ): Promise<SignedTransactionEnvelope> {
-    // Per-endpoint populate+sign failover lives in the shared
-    // `populateAndSignAcrossProviders` (so a 429ing primary can't fail-fast the
-    // publish); the #888 stale-allowance recovery stays a strict ONE-SHOT. OUTER
-    // (this loop) owns the SINGLE `forcedReapprove` latch + the lone forced
-    // approve; INNER iterates the bare providers. `TooLowAllowance` is a
-    // CALL_EXCEPTION (non-retryable), so the inner loop does NOT fail over on it —
-    // it propagates up here. The latch is never reset per endpoint, so at most
-    // ONE forced approve fires per publish regardless of endpoints tried. Only the
-    // one returned signed tx is broadcast; the whole thing runs inside the
-    // per-wallet `SignerTxSerializer` (#953), strictly pre-broadcast / pre-WAL.
-    let forcedReapprove = false;
-    for (;;) {
-      try {
-        for (let preparationPass = 0; ; preparationPass += 1) {
-          try {
-            return await this.populateAndSignAcrossProviders(
-              kaContract,
-              method,
-              [methodParams],
-              signer,
-              `V10 ${method}`,
-              { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
-            );
-          } catch (err) {
-            enrichEvmError(err);
-            const retryDisposition = classifyRpcRetryDisposition(err);
-            if ((errorCode(err) !== 'RPC_ENDPOINTS_EXHAUSTED'
-                && retryDisposition !== 'failover')
-              || preparationPass >= RPC_PREPARATION_ENDPOINT_SET_RETRIES) {
-              throw err;
-            }
-            const baseDelay = Math.min(
-              RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MAX_MS,
-              RPC_PREPARATION_ENDPOINT_SET_RETRY_BACKOFF_MS * 2 ** preparationPass,
-            );
-            const jitter = Math.floor(Math.random() * Math.max(1, baseDelay / 2));
-            await sleep(baseDelay + jitter);
-          }
-        }
-      } catch (err) {
-        enrichEvmError(err);
-        if (!forcedReapprove && isTooLowAllowanceError(err)) {
-          forcedReapprove = true;
-          console.warn(
-            `[chain] V10 ${method} gas-estimation reverted TooLowAllowance for ` +
-            `signer=${signer.address} — forcing a fresh TRAC approve and ` +
-            `retrying once (likely a stale RPC allowance read, #888).`,
-          );
-          await this.ensureV10ApproveTrac(
-            signer,
-            kav10Address,
-            tokenAmount,
-            reapproveLabel,
-            true,
-            approvalSender,
-          );
-          continue; // re-run the WHOLE inner per-provider populate loop, allowance now in place
-        }
-        throw err; // any other error, or a SECOND TooLowAllowance, propagates
-      }
-    }
+  ): Promise<PreparedTransaction> {
+    return prepareV10WriteWithAllowanceRecovery(method, signer.address, {
+      prepare: () => this.prepareAcrossProviders(
+        kaContract,
+        method,
+        [methodParams],
+        signer,
+        `V10 ${method}`,
+        { gasLimitBufferBps: V10_WRITE_GAS_LIMIT_BUFFER_BPS },
+      ),
+      forceReapprove: () => this.ensureV10ApproveTrac(signer, kav10Address, tokenAmount, reapproveLabel, true, approvalSender),
+    });
   }
 
   protected async sendSignedTransactionAndWait(
     signedTx: string,
     txHash: string,
     label: string,
+    /**
+     * Lets the receipt wait speed the transaction up while it is stuck: the
+     * wallet that signed it, the nonce read at signing, and the lane-progress
+     * callback a replacement refreshes. Without it the wait never replaces.
+     */
+    speedUp?: { signer: EvmSigner; nonce: number | undefined; markProgress?: () => void },
   ): Promise<ethers.TransactionReceipt> {
     // Bounded set-retry, BROADCAST phase ONLY: after a full per-endpoint
     // broadcast pass exhausts with a retryable error (a brief all-endpoints-429),
@@ -2049,9 +2064,18 @@ export class EVMChainAdapterBase {
     // idempotent (`isKnownTransactionError`), and the WAL `onBroadcast` already
     // fired once upstream. The receipt wait is NOT re-broadcast (it owns its own
     // poll + deadline), so lock-hold (held across the retries for the V10 path)
-    // stays bounded.
+    // stays bounded. A stuck transaction's same-nonce replacement is the
+    // receipt wait's own, bounded step (stuck-transaction-recovery.ts).
     await this.broadcastSignedTransactionWithRetries(signedTx, txHash, label);
-    return this.waitForReceiptWithFailover(txHash, label);
+    const recovery = speedUp && this.createStuckTransactionRecovery({
+      signer: speedUp.signer,
+      signedTx,
+      txHash,
+      nonce: speedUp.nonce,
+      label,
+      ...(speedUp.markProgress ? { onReplaced: speedUp.markProgress } : {}),
+    });
+    return this.waitForReceiptWithFailover(txHash, label, recovery).catch(explainOutOfGasRevert(signedTx));
   }
 
   /** Broadcast one immutable signed transaction with bounded endpoint-set retries. */
@@ -2060,18 +2084,9 @@ export class EVMChainAdapterBase {
     txHash: string,
     label: string,
   ): Promise<void> {
-    for (let pass = 0; ; pass += 1) {
-      try {
-        await this.broadcastSignedTransactionWithFailover(signedTx, txHash, label);
-        return;
-      } catch (err) {
-        if (errorCode(err) === 'RPC_ENDPOINTS_EXHAUSTED' && pass < RPC_ENDPOINT_SET_RETRIES) {
-          await sleep(RPC_ENDPOINT_SET_RETRY_BACKOFF_MS);
-          continue;
-        }
-        throw err;
-      }
-    }
+    return retryBroadcastEndpointSet(
+      () => this.broadcastSignedTransactionWithFailover(signedTx, txHash, label),
+    );
   }
 
   /**
@@ -2094,12 +2109,18 @@ export class EVMChainAdapterBase {
    * still local, never sent, so the caller can retry with no on-chain effect).
    */
   protected async dispatchSerializedV10Write(
-    signer: Wallet,
+    signer: EvmSigner,
     label: 'publish' | 'update',
     onBroadcast: ((signal: PreBroadcastSignal) => Promise<void> | void) | undefined,
     buildSignedTx: (ctx: SerializedSignerWriteContext) => Promise<SignedTransactionEnvelope>,
     onNullReceipt: (preBroadcastTxHash: string) => never,
     onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void,
+    /**
+     * The caller's opt-in to stuck-transaction speed-up, awaited before each
+     * replacement is broadcast (see `V10PublishParams.onBeforeReplacementBroadcast`).
+     * Absent, the receipt wait never replaces.
+     */
+    onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void,
   ): Promise<ethers.TransactionReceipt> {
     const prepared = await this.withSerializedSignerWrite(signer, async (ctx) => {
       const { signedTx, txHash: preBroadcastTxHash, nonce } = await buildSignedTx(ctx);
@@ -2110,7 +2131,7 @@ export class EVMChainAdapterBase {
       // nonce is what makes absence PROVABLE — once the wallet's account nonce at a FINALIZED
       // block is past this slot, and the transaction is still not found, it can never mine.
       //
-      // It arrives already parsed, from the one decode `signPopulatedTransaction` does at signing.
+      // It arrives already parsed, from the one decode `signPreparedTransaction` does at signing.
       // A signer that could not provide one leaves it undefined and the recovery side stays
       // fail-closed; nothing is re-derived here.
       try {
@@ -2147,43 +2168,46 @@ export class EVMChainAdapterBase {
           `tx=${preBroadcastTxHash}: ${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
         );
       }
-      return { preBroadcastTxHash };
+      return { preBroadcastTxHash, signedTx, nonce };
     }, label);
 
+    // A replacement keeps the nonce, so the speed-up runs outside the lane:
+    // every later same-wallet write already holds a higher nonce. Replacements
+    // never reach `onBroadcast` (its latch fires once) or `onBroadcastAccepted`.
+    const recovery = onBeforeReplacementBroadcast && this.createStuckTransactionRecovery({
+      signer,
+      signedTx: prepared.signedTx,
+      txHash: prepared.preBroadcastTxHash,
+      nonce: prepared.nonce,
+      label: `V10 ${label}`,
+      beforeBroadcast: onBeforeReplacementBroadcast,
+    });
     const receipt = await this.waitForReceiptWithFailover(
       prepared.preBroadcastTxHash,
       `V10 ${label}`,
+      recovery,
     );
     if (!receipt) onNullReceipt(prepared.preBroadcastTxHash);
     return receipt;
   }
 
-  protected async sendPopulatedTransaction(
-    signer: Wallet,
-    populated: ethers.TransactionRequest,
-    label: string,
-  ): Promise<ethers.TransactionReceipt> {
-    const { signedTx, txHash } = await this.signPopulatedTransaction(signer, populated);
-    return this.sendSignedTransactionAndWait(signedTx, txHash, label);
-  }
-
   /**
-   * Thin delegator to `this.rpcFailover.populateAndSign` — the per-endpoint
-   * populate+sign loop (which reaches `signPopulatedTransaction` via the injected
-   * callback). Called by `populateAndSignV10WithAllowanceRecovery` (the
-   * `forcedReapprove` latch owner) and `sendContractTransaction`. STRICTLY
-   * pre-broadcast — the caller owns the WAL split and broadcasts the single
-   * returned tx.
+   * Thin delegator to `this.rpcFailover.prepareTransaction` — the per-endpoint
+   * preparation loop (which runs `prepareSignerTransaction` through the injected
+   * hook). Called by `prepareV10WithAllowanceRecovery` (the `forcedReapprove`
+   * latch owner) and `sendContractTransaction`, whose callers sign the prepared
+   * tx once afterwards. STRICTLY pre-signing — the caller owns the
+   * signature, the WAL split and the broadcast.
    */
-  protected async populateAndSignAcrossProviders(
+  protected async prepareAcrossProviders(
     contract: Contract,
     method: string,
     args: readonly unknown[],
-    signer: Wallet,
+    signer: EvmSigner,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
-  ): Promise<SignedTransactionEnvelope> {
-    return this.rpcFailover.populateAndSign(contract, method, args, signer, label, opts);
+    opts?: GasLimitBufferOptions,
+  ): Promise<PreparedTransaction> {
+    return this.rpcFailover.prepareTransaction(contract, method, args, signer, label, opts);
   }
 
   /**
@@ -2196,9 +2220,9 @@ export class EVMChainAdapterBase {
     contract: Contract,
     method: string,
     args: readonly unknown[],
-    signer: Wallet,
+    signer: EvmSigner,
     label: string,
-    opts?: { gasLimitBufferBps?: number },
+    opts?: GasLimitBufferOptions,
   ): Promise<ethers.TransactionReceipt> {
     return this.withSerializedSignerWrite(
       signer,
@@ -2212,7 +2236,7 @@ export class EVMChainAdapterBase {
    * only to code already running inside that serializer window.
    */
   protected async withSerializedSignerWrite<T>(
-    signer: Wallet,
+    signer: EvmSigner,
     fn: (ctx: SerializedSignerWriteContext) => Promise<T>,
     /**
      * Names the operation in serializer stall diagnostics (GH#1574).
@@ -2238,6 +2262,7 @@ export class EVMChainAdapterBase {
             innerSigner,
             label,
             opts,
+            markProgress,
           );
           markProgress();
           return receipt;
@@ -2251,36 +2276,50 @@ export class EVMChainAdapterBase {
     contract: Contract,
     method: string,
     args: readonly unknown[],
-    signer: Wallet,
+    signer: EvmSigner,
     label: string,
     // Optional gas headroom for methods whose on-chain gas cost depends on
-    // per-block randomness. ethers fills `gasLimit` from a single
+    // the block they are mined in. ethers fills `gasLimit` from a single
     // `eth_estimateGas` with NO margin, but that estimate runs against the
     // CURRENT block while the tx is mined in a LATER block with different
-    // `prevrandao`/`blockhash`/`timestamp`. If the mined block's entropy
-    // drives a more expensive code path than the estimate's, the tx runs
-    // out of gas and reverts with empty (`0x`) data. `RandomSampling.createChallenge`
-    // is exactly this case (weighted CG draw + historical blockhash access):
-    // observed estimate-vs-execution spread is small here but unbounded in
-    // production with many CGs/KCs. When set, we estimate once and inflate
-    // the limit by `gasLimitBufferBps` basis points so the drift can't OOG.
-    opts?: { gasLimitBufferBps?: number },
+    // `prevrandao`/`blockhash`/`timestamp`. If the mined block drives a more
+    // expensive code path than the estimate's, the tx runs out of gas and
+    // reverts with empty (`0x`) data. `RandomSampling.createChallenge`
+    // (weighted CG draw that settles every graph it misses) and `submitProof`
+    // (stake settle at `block.timestamp`) are such cases. When set, we estimate
+    // once and add the headroom `bufferedGasLimit` computes from these options.
+    opts?: GasLimitBufferOptions,
+    // The holding lane's progress callback: a stuck-transaction replacement
+    // during the receipt wait is write-stage progress.
+    markProgress?: () => void,
   ): Promise<ethers.TransactionReceipt> {
     // Parent span for the whole send. Broadcast + receipt-wait open their own
     // nested spans/metrics (chain.tx_submit / chain.tx_wait) inside
-    // sendSignedTransactionAndWait; populate+sign failover is counted inside
-    // populateAndSignAcrossProviders.
+    // sendSignedTransactionAndWait; preparation failover is counted inside
+    // prepareAcrossProviders.
     return withSpan(
       'chain.tx_send',
       async (span) => {
-        // Populate+sign with per-endpoint failover (shared with the V10 path),
-        // then broadcast+confirm the single signed tx. Split so `onBroadcast`
-        // (the WAL checkpoint) can sit between sign and broadcast for V10 callers.
-        const { signedTx, txHash } = await this.populateAndSignAcrossProviders(
-          contract, method, args, signer, label, opts,
-        );
+        // Prepare with per-endpoint failover (shared with the V10 path), sign the
+        // prepared tx once, then broadcast+confirm it. The V10 path signs the same
+        // way and puts its `onBroadcast` WAL checkpoint between signing and broadcast.
+        const prepared = await this.prepareAcrossProviders(contract, method, args, signer, label, opts);
+        let signed: SignedTransactionEnvelope;
+        try {
+          signed = await this.signPreparedTransaction(prepared);
+        } catch (err) {
+          // The one signing request failed before any broadcast: no transaction was sent.
+          throw markTransactionNotSubmitted(err);
+        }
+        const { signedTx, txHash } = signed;
         span.setAttribute('dkg.tx_hash', txHash);
-        return this.sendSignedTransactionAndWait(signedTx, txHash, label);
+        // No caller of a standalone write keeps its hash before the receipt
+        // returns, so any of its same-nonce replacements may be the one mined.
+        return this.sendSignedTransactionAndWait(signedTx, txHash, label, {
+          signer,
+          nonce: signed.nonce,
+          ...(markProgress ? { markProgress } : {}),
+        });
       },
       { attributes: { 'rpc.method': 'eth_sendRawTransaction', 'dkg.chain_id': this.chainId } },
     );
@@ -2305,7 +2344,7 @@ export class EVMChainAdapterBase {
    * a single seam in unit tests (`mock allowance() / approve()`).
    */
   protected async ensureV10ApproveTrac(
-    signer: Wallet,
+    signer: EvmSigner,
     kav10Address: string,
     tokenAmount: bigint,
     txLabel: string,
@@ -2444,7 +2483,7 @@ export class EVMChainAdapterBase {
    * relay route through it with their own `txClass` + `FundingMode` in later phases.
    */
   protected async _withSignerSelection<T extends { address: string }>(
-    select: (ordered: Wallet[]) => Promise<T>,
+    select: (ordered: EvmSigner[]) => Promise<T>,
   ): Promise<T> {
     const previousSelection = this.signerSelectionQueue;
     let releaseSelection!: () => void;
@@ -2452,7 +2491,7 @@ export class EVMChainAdapterBase {
     await previousSelection;
     try {
       const start = this.signerIndex % this.signerPool.length;
-      const ordered: Wallet[] = [];
+      const ordered: EvmSigner[] = [];
       for (let i = 0; i < this.signerPool.length; i += 1) {
         ordered.push(this.signerPool[(start + i) % this.signerPool.length]);
       }
@@ -2466,11 +2505,11 @@ export class EVMChainAdapterBase {
   }
 
   protected async _authorizedPublisherSigners(
-    ordered: Wallet[],
+    ordered: EvmSigner[],
     contextGraphId: bigint,
-  ): Promise<Wallet[]> {
+  ): Promise<EvmSigner[]> {
     if (!this.contracts.contextGraphs) return ordered;
-    const eligible: Wallet[] = [];
+    const eligible: EvmSigner[] = [];
     for (const signer of ordered) {
       if (await this.readContract(
         this.contracts.contextGraphs, 'contextGraphs.isAuthorizedPublisher',
@@ -2488,14 +2527,14 @@ export class EVMChainAdapterBase {
     return eligible;
   }
 
-  protected async selectSigner(spec: SelectSignerSpec): Promise<Wallet> {
+  protected async selectSigner(spec: SelectSignerSpec): Promise<EvmSigner> {
     return this._withSignerSelection(async (ordered) => {
       // Eligibility by class. `rotatable-policy` filters to on-chain authorized
       // publishers for the CG; with no ContextGraphs surface every operational
       // wallet is a candidate (funding-aware over the whole pool, NOT a plain
       // pick). `rotatable-free` (RS) narrows to on-chain-registered operational
       // wallets, failing CLOSED. `rotatable-funded` uses the whole pool.
-      let eligible: Wallet[];
+      let eligible: EvmSigner[];
       if (spec.txClass === 'rotatable-policy') {
         eligible = await this._authorizedPublisherSigners(ordered, spec.contextGraphId);
       } else if (spec.txClass === 'rotatable-free') {
@@ -2534,7 +2573,7 @@ export class EVMChainAdapterBase {
     options: {
       publishEpochs?: number;
     } = {},
-  ): Promise<Wallet> {
+  ): Promise<EvmSigner> {
     return this.selectSigner({
       txClass: 'rotatable-policy',
       contextGraphId,
@@ -2562,7 +2601,7 @@ export class EVMChainAdapterBase {
    * the primary wallet (the wallet-#0 head-of-line contention this rotation
    * removes). Eligibility fails closed to the primary signer (see selectSigner).
    */
-  protected async nextRandomSamplingSigner(): Promise<Wallet> {
+  protected async nextRandomSamplingSigner(): Promise<EvmSigner> {
     // Bounded loop: every failed revalidation EVICTS the chosen wallet from
     // the registered set (strictly shrinking pool) and the primary signer
     // returns unconditionally, so this cannot spin.
@@ -2614,15 +2653,11 @@ export class EVMChainAdapterBase {
    * verdict.
    */
   private async _scanCandidateFunding<T extends { address: string }>(
-    candidates: T[],
+    candidates: readonly T[],
     fundingFor: (candidate: T) => FundingMode,
     forceRefresh = false,
     strictPcaRead = false,
-  ): Promise<{
-    fundings: Array<{ native: bigint | null; trac: bigint | null }>;
-    fundableIdx: number[];
-    inconclusiveReads: unknown[];
-  }> {
+  ): Promise<PublisherCandidateFundingAssessment<T>[]> {
     const fundingModes = candidates.map(fundingFor);
     const fundings = await Promise.all(
       candidates.map((candidate, index) => {
@@ -2641,116 +2676,101 @@ export class EVMChainAdapterBase {
         strictPcaRead,
       )),
     );
-    const fundableIdx: number[] = [];
-    const inconclusiveReads: unknown[] = [];
-    for (let index = 0; index < fundable.length; index += 1) {
-      const result = fundable[index];
-      if (result.status === 'fulfilled' && result.value) fundableIdx.push(index);
+    return fundable.map((result, index) => {
+      const candidate = candidates[index];
+      const funding = fundings[index];
       if (result.status === 'rejected') {
         if (!strictPcaRead) throw result.reason;
-        inconclusiveReads.push(result.reason);
+        return { kind: 'unavailable', candidate, funding, error: result.reason };
       }
-    }
-    return { fundings, fundableIdx, inconclusiveReads };
-  }
-
-  private _preferredFundableCandidate<T extends { address: string }>(
-    candidates: T[],
-    fundableIdx: number[],
-    preferIdle: boolean,
-  ): T {
-    if (preferIdle && !this.idleAwareSelectionDisabled) {
-      // GH#953 — soft-prefer a wallet with no in-flight or queued write.
-      // GH#1574 — a lane whose holder is wedged is NOT idle, but it is not
-      // healthy either: routing new work behind it inherits the wedge
-      // invisibly, which is the failure that issue reports. Rank the
-      // serializer's OWN health verdict rather than reading raw timings and
-      // re-deriving the threshold here — two copies of that policy would
-      // drift, and diagnostics could call a lane stalled while selection
-      // still called it healthy.
-      const laneRank: Record<SignerTxLaneState, number> = {
-        idle: 0,
-        busy: 1,
-        stalled: 2,
+      const mode = fundingModes[index];
+      return {
+        kind: result.value ? 'funded' : 'unfunded', candidate, funding,
+        refreshPcaEligibility: async () => this._walletFundingPath(
+          await this.getWalletFunding(candidate.address, { forceRefresh: true, metrics: mode.kind }), mode,
+        ) === 'pca',
       };
-      const rank = (address: string): number =>
-        laneRank[this.signerTxSerializer.state(address)];
-      let best: number | undefined;
-      let bestRank = Number.POSITIVE_INFINITY;
-      for (const index of fundableIdx) {
-        const r = rank(candidates[index].address);
-        if (r < bestRank) { bestRank = r; best = index; }
-        if (bestRank === 0) break;
-      }
-      if (best !== undefined) return candidates[best];
-    }
-    return candidates[fundableIdx[0]];
+    });
   }
 
   protected async selectFundedSigner(
-    candidates: Wallet[],
+    candidates: EvmSigner[],
     funding: FundingMode,
     policy: { preferIdle: boolean },
-  ): Promise<Wallet> {
+  ): Promise<EvmSigner> {
     // Mode-aware read: native-only selections (RS) touch only the native slot
     // so their high-frequency probes can't poison the cached TRAC balance.
-    const { fundings, fundableIdx } = await this._scanCandidateFunding(
-      candidates,
-      () => funding,
-    );
-    if (fundableIdx.length > 0) {
-      // Idle preference is a SOFT, fail-open bias: among funded candidates,
-      // prefer one whose per-wallet send lock is currently free so a
-      // deadline-bound write doesn't queue behind a slow in-flight send. Falls
-      // straight through to the first funded candidate when none is idle or the
-      // preference is off — so it can never EXCLUDE a wallet, only reorder.
-      return this._preferredFundableCandidate(candidates, fundableIdx, policy.preferIdle);
-    }
-    let bestIdx = 0;
-    for (let i = 1; i < candidates.length; i += 1) {
-      const a = fundings[i];
-      const b = fundings[bestIdx];
+    const assessments = await this._scanCandidateFunding(candidates, () => funding);
+    // Idle preference is a SOFT, fail-open bias: among funded candidates,
+    // prefer one whose per-wallet send lock is currently free so a
+    // deadline-bound write doesn't queue behind a slow in-flight send. Falls
+    // straight through to the first funded candidate when none is idle or the
+    // preference is off — so it can never EXCLUDE a wallet, only reorder.
+    const selected = preferredFundableCandidate(assessments.filter((assessment) => assessment.kind === 'funded'), {
+      ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
+      laneState: (address) => this.signerTxSerializer.state(address),
+    });
+    if (selected !== undefined) return selected;
+    let best = assessments[0];
+    for (const assessment of assessments.slice(1)) {
+      const a = assessment.funding;
+      const b = best.funding;
       const an = a.native ?? -1n;
       const bn = b.native ?? -1n;
-      if (an > bn || (an === bn && (a.trac ?? -1n) > (b.trac ?? -1n))) bestIdx = i;
+      if (an > bn || (an === bn && (a.trac ?? -1n) > (b.trac ?? -1n))) best = assessment;
     }
-    return candidates[bestIdx];
+    return best?.candidate;
   }
 
   /**
    * Canonical fail-closed funded-candidate selector for publish plans: cached
    * scan, fresh terminal recheck, idle preference, diagnostics, and typed failure.
    */
-  protected async _selectFundedCandidateOrThrow<T extends { address: string }>(
-    candidates: T[],
+  protected async _assessFundedCandidates<T extends { address: string }>(
+    candidates: readonly T[],
     fundingFor: (candidate: T) => NativeAndTracFundingMode,
     policy: { preferIdle: boolean },
-  ): Promise<T> {
+  ): Promise<PublisherFundingSelection<T>> {
+    const choose = (assessments: PublisherCandidateFundingAssessment<T>[]): T | undefined =>
+      preferredFundableCandidate(assessments.filter((assessment) => assessment.kind === 'funded'), {
+        ...policy, idleAwareSelectionDisabled: this.idleAwareSelectionDisabled,
+        laneState: (address) => this.signerTxSerializer.state(address),
+      });
     const initial = await this._scanCandidateFunding(candidates, fundingFor);
-    if (initial.fundableIdx.length > 0) {
-      return this._preferredFundableCandidate(candidates, initial.fundableIdx, policy.preferIdle);
-    }
+    const selected = choose(initial);
+    if (selected !== undefined) return { kind: 'funded', candidate: selected };
 
     // Cached balances are appropriate for soft routing, but a terminal
     // whole-pool claim must be based on a fresh snapshot. Operators commonly
     // fund a wallet and retry immediately, inside the advisory cache TTL.
     const refreshed = await this._scanCandidateFunding(candidates, fundingFor, true, true);
-    if (refreshed.fundableIdx.length > 0) {
-      return this._preferredFundableCandidate(candidates, refreshed.fundableIdx, policy.preferIdle);
+    const rechecked = choose(refreshed);
+    if (rechecked !== undefined) return { kind: 'funded', candidate: rechecked };
+    const unknown = refreshed.find((assessment) => assessment.kind === 'unavailable');
+    if (unknown?.kind === 'unavailable') {
+      return { kind: 'unavailable', assessments: refreshed, error: new PcaFundingUnknownError(errorCode(unknown.error)) };
     }
-
-    const unknown = refreshed.inconclusiveReads;
-    if (unknown.length > 0) throw new PcaFundingUnknownError(errorCode(unknown[0]));
-
-    const diagnostics = candidates.map((candidate, index) => ({
-      address: candidate.address,
-      nativeWei: refreshed.fundings[index].native,
-      tracWei: refreshed.fundings[index].trac,
+    const unfunded = refreshed.filter((assessment): assessment is PublisherUnfundedCandidateFundingAssessment<T> => assessment.kind === 'unfunded');
+    const diagnostics = unfunded.map(({ candidate, funding }) => ({
+      address: candidate.address, nativeWei: funding.native, tracWei: funding.trac,
     }));
-    throw new InsufficientPublisherFundsError(
-      formatNoFundedPublisherWalletMessage(diagnostics),
-      diagnostics,
-    );
+    return { kind: 'unfunded', assessments: unfunded, error: new InsufficientPublisherFundsError(
+      formatNoFundedPublisherWalletMessage(diagnostics), diagnostics,
+    ) };
+  }
+
+  /** Canonical native/direct/PCA interpretation shared by funding and reconciliation. */
+  private _walletFundingPath(
+    f: { native: bigint | null; trac: bigint | null },
+    funding: FundingMode,
+  ): 'unfunded' | 'direct' | 'pca' {
+    const nativeOk = f.native === null || f.native > funding.nativeFloorWei;
+    if (!nativeOk) return 'unfunded'; // even a PCA agent needs gas
+    if (funding.kind === 'native-only') return 'direct';
+    const ownTracOk = f.trac === null
+      || (f.trac > funding.tracFloorWei && f.trac >= funding.requiredTracWei);
+    if (ownTracOk) return 'direct';
+    return funding.pca.kind === 'none' ? 'unfunded' : 'pca';
   }
 
   /**
@@ -2771,13 +2791,8 @@ export class EVMChainAdapterBase {
     funding: FundingMode,
     strictPcaRead = false,
   ): Promise<boolean> {
-    const nativeOk = f.native === null || f.native > funding.nativeFloorWei;
-    if (!nativeOk) return false; // even a PCA agent needs gas
-    if (funding.kind === 'native-only') return true;
-    const ownTracOk = f.trac === null
-      || (f.trac > funding.tracFloorWei && f.trac >= funding.requiredTracWei);
-    if (ownTracOk) return true;
-    if (funding.pca.kind === 'none') return false;
+    const path = this._walletFundingPath(f, funding);
+    if (path !== 'pca' || funding.kind === 'native-only') return path === 'direct';
     return this.isConvictionFundedAgent(
       address,
       funding.requiredTracWei,
@@ -2928,10 +2943,12 @@ export class EVMChainAdapterBase {
    */
   protected async enrichInsufficientPublisherFundsError(
     err: unknown,
-    signer: Wallet,
+    signer: EvmSigner,
     contextGraphId: bigint,
     requiredTracWei: bigint = 0n,
   ): Promise<unknown> {
+    // A signer's refusal is final as it is, never re-read as a funding failure.
+    if (isCausedByRemoteSigner(err)) return err;
     try {
       let selectedShort = isInsufficientFundsError(err);
       if (!selectedShort && this.looksLikeFundsRevert(err)) {
@@ -3012,9 +3029,14 @@ export class EVMChainAdapterBase {
     return this.signerPool.map((s) => s.address);
   }
 
-  /** Primary operational private key (hex string with 0x prefix). */
+  /** Primary operational private key (0x hex); throws `OperationalKeyUnavailableError` for external signers. */
   getOperationalPrivateKey(): string {
-    return this.signer.privateKey;
+    return operationalPrivateKeyOf(this.signer);
+  }
+
+  /** How the operational wallets sign (one source signs for the whole pool), and which they are. */
+  operationalSigning(): OperationalSigning {
+    return { external: isExternalEvmSigner(this.signer), payerAddresses: this.getSignerAddresses() };
   }
 
   protected walletKeyHash(address: string): string {
@@ -3100,10 +3122,13 @@ export class EVMChainAdapterBase {
       return this.readHubContractAddress(name);
     }
     const key = `${this.hubAddress}:${this.chainId}:${name}`;
+    // The read runs under its caller's cancellation. Once that is aborted, as
+    // an initialization's is when the run is ended, nobody joins the read.
     return this.resolvedContractAddressCache.getOrLoad(
       key,
       key,
       () => this.readHubContractAddress(name),
+      activeRpcRequestAbortSignal(),
     );
   }
 
@@ -3139,12 +3164,12 @@ export class EVMChainAdapterBase {
       );
     } catch (err) {
       if (this.isContractMissingRevert(err)) {
-        throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`, { cause: err });
+        throw new HubAssetStorageNotFoundError(name, this.hubAddress, { cause: err });
       }
       throw err;
     }
     if (address === ethers.ZeroAddress) {
-      throw new Error(`Asset storage "${name}" not found in Hub at ${this.hubAddress}`);
+      throw new HubAssetStorageNotFoundError(name, this.hubAddress);
     }
     return new Contract(address, loadAbi(abiName ?? name), this.signer);
   }
@@ -3153,9 +3178,9 @@ export class EVMChainAdapterBase {
    * The current Hub implementation reverts with `ContractDoesNotExist(name)`
    * (custom error from `UnorderedNamedContractDynamicSet.get`) when a name
    * is missing, instead of returning `address(0)`. We normalise both
-   * shapes onto the legacy `Contract "X" not found in Hub at <addr>` marker
-   * so downstream code (`getRandomSampling()`'s catch block) only needs
-   * to recognise one wording.
+   * shapes onto typed Hub absence. Contract capability callers retain the
+   * historical contract-miss class; asset-storage misses share its absence
+   * base so optional initialization has one positive policy.
    */
   protected isContractMissingRevert(err: unknown): boolean {
     if (!(err instanceof Error)) return false;
@@ -3164,139 +3189,112 @@ export class EVMChainAdapterBase {
       || err.message.includes('AddressDoesNotExist');
   }
 
-  protected async init(): Promise<void> {
-    if (this.initialized) return;
-    try {
-      await this.initContracts();
-    } catch (err) {
-      // `init()` sits on the critical path of every chain write
-      // (`createOnChainContextGraph`, publish, verify, …). If the Hub lookups
-      // fail because the configured RPC endpoint(s) are exhausted (perpetual
-      // 429 / unreachable), surface the same `RPC_ENDPOINTS_EXHAUSTED` contract
-      // the tx-send path uses, so callers (e.g. `/api/context-graph/register`
-      // → `classifyRegisterContextGraphError`) map it to a bounded 503 instead
-      // of a generic 500 — and never hang waiting on it (#894 follow-up). A
-      // non-RPC error (e.g. a genuine "contract not in Hub" misconfig) keeps
-      // its original shape.
-      if (classifyRpcRetryDisposition(err) === 'failover') {
-        throw new RpcEndpointsExhaustedError(
-          `chain initialisation failed on all configured RPC endpoints (${this.rpcUrls.map(rpcHost).join(', ')}): ${hostOnlyRpcText(errorMessage(err))}`,
-          { cause: err, rpcUrls: this.rpcUrls },
-        );
-      }
-      throw err;
-    }
+  protected init(): Promise<void> {
+    return this.sharedInit.ensure();
   }
 
-  protected async initContracts(): Promise<void> {
-    this.contracts.identity = await this.resolveContract('Identity');
-    this.contracts.profile = await this.resolveContract('Profile');
-    this.contracts.parametersStorage = await this.resolveContract('ParametersStorage');
+  /** Make the next caller initialize again, and end an initialization that is out. */
+  private rearmInit(): void {
+    this.initialized = false;
+    this.sharedInit.rearm();
+  }
+
+  protected async initContracts(startsRequestClass: RpcRequestClass = activeRpcRequestContext().requestClass): Promise<void> {
+    // Every binding this routine writes goes through `bind`, so an ended
+    // initialization binds nothing more (the random-sampling pair, further
+    // down, has a guard of its own).
+    const bind = initializationBinder(this.contracts);
+    bind('identity', await this.resolveContract('Identity'));
+    bind('profile', await this.resolveContract('Profile'));
+    bind('parametersStorage', await this.resolveContract('ParametersStorage'));
 
     // V8 `Staking` is archived (PRD §4.1 — `Staking.sol` moved under
     // contracts/archive/, deploy script 023 archived). Tolerate its absence
     // so the V10 surface still initialises; the contract slot is retained
     // only to keep stale Hub bindings on older deploys resolving cleanly.
-    try {
-      this.contracts.staking = await this.resolveContract('Staking');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // V8 Staking not deployed on this Hub — V10 surface continues.
-    }
+    // V8 Staking not deployed on this Hub — V10 surface continues.
+    await resolveOptionalHubBinding(async () => {
+      bind('staking', await this.resolveContract('Staking'));
+    });
 
     // RFC 04 — ProfileStorage holds the relay registry views + events.
     // Tolerated as optional so adapters bound to a Hub that pre-dates the
     // Profile 1.2.0 / ProfileStorage 1.1.0 deploy still init cleanly; the
     // relay-registry methods will throw with a clear message at call time.
-    try {
-      this.contracts.profileStorage = await this.resolveContract('ProfileStorage');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Older deployments without the relay registry surface.
-    }
+    // Older deployments without the relay registry surface.
+    await resolveOptionalHubBinding(async () => {
+      bind('profileStorage', await this.resolveContract('ProfileStorage'));
+    });
 
     // V10.1 KA storage. Legacy V8 KnowledgeCollection + V10.0 DKGKnowledgeAssets
     // are deleted in the rc.12 KC->KA rename — no fallback resolution.
-    this.contracts.knowledgeAssetStorage = await this.resolveAssetStorage('DKGKnowledgeAssets');
+    bind('knowledgeAssetStorage', await this.resolveAssetStorage('DKGKnowledgeAssets'));
 
     // V9 contracts (KnowledgeAssets + KnowledgeAssetsStorage) are archived
     // (PRD §4.1, deploy scripts 040+041 moved under deploy/archive). Keep
-    // the try/catch so adapters bound to legacy deploys still resolve them.
+    // optional resolution so adapters bound to legacy deploys still resolve them.
     // AskStorage is V10-active (deploy script 017 still in the active set);
     // split it out so a missing V9 binding doesn't strand AskStorage. The
     // V10 publish-token-amount path depends on AskStorage being resolved.
-    try {
-      this.contracts.knowledgeAssets = await this.resolveContract('KnowledgeAssets');
-      this.contracts.knowledgeAssetsStorage = await this.resolveAssetStorage('KnowledgeAssetsStorage');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // V9 contracts not deployed — V9 publish/update surface unavailable.
-    }
-    try {
-      this.contracts.askStorage = await this.resolveContract('AskStorage');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
-    }
+    // V9 contracts not deployed — V9 publish/update surface unavailable.
+    await resolveOptionalHubBinding(async () => {
+      bind('knowledgeAssets', await this.resolveContract('KnowledgeAssets'));
+      bind('knowledgeAssetsStorage', await this.resolveAssetStorage('KnowledgeAssetsStorage'));
+    });
 
-    try {
-      this.contracts.contextGraphNameRegistry = await this.resolveContract('ContextGraphNameRegistry');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
-    }
+    // Older deployments that pre-date AskStorage — token-amount derivation unavailable.
+    await resolveOptionalHubBinding(async () => {
+      bind('askStorage', await this.resolveContract('AskStorage'));
+    });
 
-    try {
-      this.contracts.contextGraphs = await this.resolveContract('ContextGraphs');
-      this.contracts.contextGraphStorage = await this.resolveAssetStorage('ContextGraphStorage');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // ContextGraphs not deployed — context graph operations unavailable
-    }
+    // ContextGraphNameRegistry not registered in Hub — createContextGraph/listContextGraphsFromChain unavailable
+    await resolveOptionalHubBinding(async () => {
+      bind('contextGraphNameRegistry', await this.resolveContract('ContextGraphNameRegistry'));
+    });
 
-    try {
-      this.contracts.knowledgeAssetsLifecycle = await this.resolveContract('KnowledgeAssetsLifecycle');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Lifecycle not deployed — createKnowledgeAssets unavailable.
-      // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
-    }
+    // ContextGraphs not deployed — context graph operations unavailable
+    await resolveOptionalHubBinding(async () => {
+      bind('contextGraphs', await this.resolveContract('ContextGraphs'));
+      bind('contextGraphStorage', await this.resolveAssetStorage('ContextGraphStorage'));
+    });
 
-    try {
-      this.contracts.dkgPublishingConvictionNFT = await this.resolveContract('DKGPublishingConvictionNFT');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
-    }
+    // Lifecycle not deployed — createKnowledgeAssets unavailable.
+    // V10.0 KnowledgeAssetsLifecycle fallback was removed in the rc.12 rename.
+    await resolveOptionalHubBinding(async () => {
+      bind('knowledgeAssetsLifecycle', await this.resolveContract('KnowledgeAssetsLifecycle'));
+    });
 
-    try {
-      this.contracts.chronos = await this.resolveContract('Chronos');
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // Chronos not deployed — update-path growth-cost sizing falls back to
-      // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
-      // Greenfield V10 deployments always have Chronos; this catch is for older
-      // adapters bound to deploys that pre-date the Chronos registration.
-    }
+    // DKGPublishingConvictionNFT not deployed — V10 PCA agent-resolution unavailable
+    await resolveOptionalHubBinding(async () => {
+      bind('dkgPublishingConvictionNFT', await this.resolveContract('DKGPublishingConvictionNFT'));
+    });
 
-    try {
+    // Chronos not deployed — update-path growth-cost sizing falls back to
+    // currentEpoch=0 (treats KC as having full `endEpoch` remaining lifetime).
+    // Greenfield V10 deployments always have Chronos; optional resolution is for older
+    // adapters bound to deploys that pre-date the Chronos registration.
+    await resolveOptionalHubBinding(async () => {
+      bind('chronos', await this.resolveContract('Chronos'));
+    });
+
+    // RandomSampling not deployed — proof submission unavailable
+    await resolveOptionalHubBinding(async () => {
       await this.resolveAndAssignRandomSamplingPair();
-    } catch (error) {
-      rethrowInterruptedInitialization(error);
-      // RandomSampling not deployed — proof submission unavailable
-    }
+    });
 
     // THE tick. Started here because the Hub bindings resolved above ARE its
     // address array, and started WITHOUT an await so a cold backfill can never
     // delay a chain write. Only the adapter the composition root gave a store
     // does anything at all here.
+    // An initialization that was ended meanwhile starts nothing.
+    activeRpcRequestAbortSignal()?.throwIfAborted();
     // Both starts spawn detached work. Its context must belong to the adapter,
     // not to whichever transient caller happened to initialize it first: the
-    // work keeps that caller's request class, as it always has, and nothing
-    // else of it. An authority read that finds the adapter uninitialized must
-    // not lend its admission priority to scans that run for the process's
-    // lifetime.
-    await withDetachedRpcRequestContext(activeRpcRequestContext().requestClass, async () => {
+    // work keeps the request class of the caller that started the run, as it
+    // always has, and nothing else of it. An authority read that finds the
+    // adapter uninitialized must not lend its admission priority to scans that
+    // run for the process's lifetime.
+    await withDetachedRpcRequestContext(startsRequestClass, async () => {
       this.startChainIndexRuntime();
       await this.startHubRotationListener();
     });
@@ -3308,7 +3306,7 @@ export class EVMChainAdapterBase {
       'Token',
     );
     if (tokenAddress !== ethers.ZeroAddress) {
-      this.contracts.token = new Contract(
+      bind('token', new Contract(
         tokenAddress,
         [
           'function approve(address,uint256) returns (bool)',
@@ -3316,10 +3314,9 @@ export class EVMChainAdapterBase {
           'function allowance(address,address) view returns (uint256)',
         ],
         this.signer,
-      );
+      ));
     }
 
-    this.initialized = true;
   }
 
   protected requireV9(): void {
@@ -3378,8 +3375,18 @@ export class EVMChainAdapterBase {
   // Identity
   // =====================================================================
 
-  async getIdentityId(): Promise<bigint> {
-    return this.readIdentityIdForAddress(this.signer.address);
+  async getIdentityId(options: IdentityReadOptions = {}): Promise<bigint> {
+    return withRpcRequestContext(options, async () => {
+      const signal = activeRpcRequestAbortSignal();
+      signal?.throwIfAborted();
+      // Shared loads belong to the adapter, not to the first cancellable waiter.
+      // Independent proof reads keep their caller's physical-work ownership.
+      const identityId = await (options.ownership === 'independent'
+        ? this.readIdentityIdFromStorage(this.signer.address)
+        : this.readIdentityIdForAddress(this.signer.address));
+      signal?.throwIfAborted();
+      return identityId;
+    });
   }
 
   // =====================================================================
@@ -4117,7 +4124,7 @@ export class EVMChainAdapterBase {
       );
     }
 
-    let txSigner: Wallet;
+    let txSigner: EvmSigner;
     if (params.publisherAddress) {
       txSigner = await this.resolvePinnedPublisherSigner(
         params.contextGraphId,
@@ -4259,7 +4266,7 @@ export class EVMChainAdapterBase {
     // #888: populate (which gas-estimates and can revert `TooLowAllowance`
     // on a stale RPC allowance read) + sign, with a one-shot forced-approve
     // recovery shared with `updateV10` — see
-    // `populateAndSignV10WithAllowanceRecovery`. This runs strictly BEFORE
+    // `prepareV10WithAllowanceRecovery`. This runs strictly BEFORE
     // the `onBroadcast` WAL checkpoint and the broadcast below, so the
     // forced re-approve + single retry has no on-chain side effect.
     // #888 + #953: populate (gas-estimates; can revert `TooLowAllowance` on a
@@ -4286,7 +4293,7 @@ export class EVMChainAdapterBase {
           false,
           ctx.sendContractTransaction,
         );
-        return this.populateAndSignV10WithAllowanceRecovery(
+        return this.signPreparedTransaction(await this.prepareV10WithAllowanceRecovery(
           txSigner,
           ka as Contract,
           'publish',
@@ -4295,12 +4302,13 @@ export class EVMChainAdapterBase {
           params.tokenAmount,
           'approve V10 publish TRAC (forced re-approve, #888)',
           ctx.sendContractTransaction,
-        );
+        ));
       },
       () => {
         throw new Error('Transaction receipt is null');
       },
       params.onBroadcastAccepted,
+      params.onBeforeReplacementBroadcast,
     ).catch(async (err: unknown) => {
       // Turn an insufficient-funds failure (native gas OR a zero-TRAC
       // transferFrom revert) on the selected wallet into an actionable
@@ -4719,8 +4727,12 @@ export class EVMChainAdapterBase {
    */
   protected async resolveAndAssignRandomSamplingPair(): Promise<{ rs: Contract; rss: Contract }> {
     const generationBefore = this.randomSamplingPairCache.currentGeneration();
-    const pair = await this.randomSamplingPairCache.get();
-    if (this.randomSamplingPairCache.currentGeneration() === generationBefore) {
+    // Under the caller's cancellation, as the address reads: nobody joins a
+    // resolve whose caller was cancelled, and a caller cancelled meanwhile (an
+    // initialization that was ended) assigns nothing from its late result.
+    const owner = activeRpcRequestAbortSignal();
+    const pair = await this.randomSamplingPairCache.get(owner);
+    if (this.randomSamplingPairCache.currentGeneration() === generationBefore && owner?.aborted !== true) {
       this.contracts.randomSampling = pair.rs;
       this.contracts.randomSamplingStorage = pair.rss;
     }
@@ -4741,8 +4753,7 @@ export class EVMChainAdapterBase {
       return await fn();
     } catch (err) {
       if (err instanceof Error) enrichEvmError(err);
-      const msg = err instanceof Error ? err.message : '';
-      if (HUB_STALE_ERROR_MARKERS.some((m) => msg.includes(m))) {
+      if (isHubStaleError(err)) {
         this.invalidateRandomSamplingPair();
         return await fn();
       }
@@ -4776,8 +4787,7 @@ export class EVMChainAdapterBase {
       return await fn();
     } catch (err) {
       if (err instanceof Error) enrichEvmError(err);
-      const msg = err instanceof Error ? err.message : '';
-      if (HUB_STALE_ERROR_MARKERS.some((m) => msg.includes(m))) {
+      if (isHubStaleError(err)) {
         this.invalidateAllBoundContracts();
         await this.init();
         return await fn();
@@ -4896,7 +4906,10 @@ export class EVMChainAdapterBase {
    * refuses and each one does exactly what it did before the log existed.
    *
    * A failure here is a degraded index, not a degraded node: it is reported
-   * and the adapter keeps every pre-log path.
+   * and the adapter keeps every pre-log path. A start that could not complete
+   * for now (a read not admitted to the local RPC queue in time, an endpoint
+   * that timed out, throttled or was unreachable) is not a failure: the owner
+   * retries it, with this same snapshot, until the log attaches.
    *
    * Re-entrant after a Hub rotation, and only after one:
    * `rebuildChainIndexRuntimeOnRotation` clears the single-flight so the next
@@ -5111,7 +5124,7 @@ export class EVMChainAdapterBase {
     // every binding. Do not clear boot-bound handles here: the callback can
     // fire between a public method's `await init()` and its first
     // `this.contracts.X` read.
-    this.initialized = false;
+    this.rearmInit();
   }
 
   /**
@@ -5146,7 +5159,7 @@ export class EVMChainAdapterBase {
     // the entire resolved-address memo along with every bound handle.
     this.resolvedContractAddressCache.invalidateAll();
     this.invalidateRandomSamplingPair();
-    this.initialized = false;
+    this.rearmInit();
   }
 
   protected requireContextGraphStorage(): Contract {
@@ -5179,6 +5192,7 @@ export class EVMChainAdapterBase {
    * so destroying once flushes everything).
    */
   destroy(): void {
+    this.sharedInit.destroy();
     this.hubBindingGeneration += 1;
     this.knowledgeAssetStorageBindingGeneration += 1;
     this.hubRotationPoller.stop();

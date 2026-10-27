@@ -27,6 +27,9 @@ const REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS = Object.freeze(
 export const CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS = Object.freeze([
   ...REGISTERED_CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_REASONS,
   'rfc64-private-read-roster-unavailable',
+  // The curator approved a local agent's join, and the member list naming it
+  // has not reached this node yet (#3421).
+  'approved-member-metadata-pending',
 ] as const);
 
 export type ContextGraphAgentGateUnavailableReason =
@@ -53,6 +56,8 @@ const CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE_RETRYABLE = Object.freeze({
   'chain-participant-authority-unavailable': true,
   'chain-participant-authority-invalid': false,
   'rfc64-private-read-roster-unavailable': true,
+  // The member's metadata recovery keeps fetching it.
+  'approved-member-metadata-pending': true,
 } as const satisfies Record<ContextGraphAgentGateUnavailableReason, boolean>);
 
 export function isRetryableContextGraphAuthorityUnavailableReason(

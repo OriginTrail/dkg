@@ -6,11 +6,30 @@ import { createRequire } from 'node:module';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { validateNode26Evidence } from '../lib/ci-results.mjs';
 
-// Use the same interpreter for the runner, Vitest, and its cold-request child.
+// Use the same interpreter for the runner, its builds, Vitest, and its cold-request child.
 const root = fileURLToPath(new URL('../../', import.meta.url));
 const chain = path.join(root, 'packages/chain');
 
+/**
+ * The workspace packages the chain RPC transport imports. The job installs
+ * without building, and these resolve to their `dist`, so they are compiled
+ * before Vitest or the cold-request child loads the transport.
+ */
+export const NODE26_WORKSPACE_BUILDS = Object.freeze(['packages/http-utils']);
+
+function buildWorkspaceImports(env) {
+  const tsc = createRequire(path.join(root, 'package.json')).resolve('typescript/bin/tsc');
+  for (const workspace of NODE26_WORKSPACE_BUILDS) {
+    const result = spawnSync(process.execPath, [tsc, '-p', path.join(root, workspace, 'tsconfig.json')], {
+      cwd: root, env, stdio: 'inherit', timeout: 120_000,
+    });
+    if (result.error) throw result.error;
+    if (result.status !== 0) throw new Error(`building ${workspace} failed with exit status ${result.status}`);
+  }
+}
+
 function spawnVitest(reportPath, env) {
+  buildWorkspaceImports(env);
   const require = createRequire(path.join(chain, 'package.json'));
   const vitest = path.join(path.dirname(require.resolve('vitest/package.json')), 'vitest.mjs');
   return spawnSync(process.execPath, [

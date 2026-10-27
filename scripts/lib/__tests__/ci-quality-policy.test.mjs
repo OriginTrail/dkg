@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
+import { inspectJunitResults } from '../junit-results.mjs';
 import {
   baselineFromDiagnostics,
   compareOxlintBaseline,
@@ -156,7 +157,11 @@ test('shared JUnit runner creates reports and propagates child failures', (t) =>
     '--lane', 'rdf-utils', '--', 'test/rdf-literal.test.ts',
   ]);
   assert.equal(passed, 0);
-  assert.match(fs.readFileSync(reportPath, 'utf8'), /<testsuites[^>]*tests="19"/);
+  const report = fs.readFileSync(reportPath, 'utf8');
+  const execution = inspectJunitResults(report);
+  assert.ok(execution.executedTests > 0);
+  assert.equal(execution.skippedTests, 0);
+  assert.match(report, /<testsuite\s+name="test\/rdf-literal\.test\.ts"/);
 
   const failed = runVitestJunit([
     '--lane', 'rdf-utils', '--', 'test/does-not-exist.test.ts',
@@ -178,7 +183,7 @@ test('coverage is aggregated from required test lanes without a duplicate workfl
   const workflow = parseRepositoryYaml('.github/workflows/ci.yml');
   assert.equal(fs.existsSync(path.join(REPO_ROOT, '.github/workflows/node-coverage.yml')), false);
   assert.ok(workflow.on.merge_group !== undefined);
-  assert.ok(workflow.on.schedule.length > 0);
+  assert.ok(workflow.on.workflow_dispatch.inputs.profile.options.includes('nightly-equivalent'));
   const merge = workflow.jobs['coverage-results'];
   assert.equal(merge.if, 'always()');
   assert.equal(merge['continue-on-error'], undefined);

@@ -1956,7 +1956,10 @@ describe('private read authorization uses the on-chain participant roster', () =
 
       const recovery = member.recoverPendingJoinApprovalMetadata(contextGraphId, curatorPeerId);
       await vi.advanceTimersByTimeAsync(0);
-      // Another path completed the bootstrap meanwhile.
+      // Another path completed the bootstrap meanwhile: the row is ready and
+      // the approved member's metadata is confirmed (#3421).
+      vi.spyOn(member, 'resolveApprovedMemberAcceptance').mockResolvedValue({} as never);
+      vi.spyOn(member, 'hasConfirmedApprovedMemberMetaState').mockResolvedValue(true);
       internals.subscribedContextGraphs.set(contextGraphId, {
         ...internals.subscribedContextGraphs.get(contextGraphId),
         pendingMeta: false,

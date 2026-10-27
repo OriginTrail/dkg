@@ -4,6 +4,7 @@ import { AGENT_DID_PREFIX, isSafeIri, unwrapIri } from '@origintrail-official/dk
 import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { WORKSPACE_RECIPIENT_KEY_ROUTE_PREDICATES } from '@origintrail-official/dkg-publisher';
 import type { StoreMutation, StoreMutationOutcome, StoreRemoval } from './store-mutation.js';
+import { RecipientKeyRouteChanges, recipientSubjectAgent, type RecipientKeyRouteScope } from './recipient-key-route-changes.js';
 
 /** The predicates a recipient key lookup reads. Each is read only on an agent DID or key IRI subject. */
 export const RECIPIENT_KEY_ROUTE_PREDICATES: ReadonlySet<string> = new Set(
@@ -34,6 +35,21 @@ const isKeyRouteFact = (quad: Quad): boolean => (
   && !isNonAgentIri(quad.subject)
 );
 
+// Proven by the subject or the predicate alone, so it holds in every graph.
+const cannotRemoveKeyRouteFact = ({ subject, predicate }: StoreRemoval): boolean => (
+  isNonAgentIri(subject) || (isBareIri(predicate) && !RECIPIENT_KEY_ROUTE_PREDICATES.has(predicate))
+);
+
+/** Removals of one write that only the emptiness of their graphs proves harmless, while the write is in flight. */
+interface GraphBoundRemoval {
+  readonly graphs: readonly string[];
+  /** Set once one of the graphs gains a key or route fact: the write then counts as a pending key write. */
+  counted: boolean;
+}
+
+// How many graphs with a removal of unknown outcome are remembered before memoizing is given up.
+const UNSETTLED_REMOVAL_GRAPHS_MAX = 256;
+
 /**
  * A revision that moves only when a write can change which recipient keys or
  * routes a private-roster resolution finds. It ignores the job, share, metadata
@@ -51,20 +67,87 @@ const isKeyRouteFact = (quad: Quad): boolean => (
  * commit later, into a graph no scan has seen, so after one the list is never
  * trusted again and a removal moves the revision unless its subject or predicate
  * proves it harmless.
+ *
+ * A removal that only the emptiness of its graph proves harmless stops being
+ * harmless when that graph gains a key fact. While such a removal is in flight
+ * it then counts as a pending key write; and after one whose outcome is unknown,
+ * a key fact that lands in its graph can vanish unannounced, so nothing is
+ * memoized from then on.
  */
 export class RecipientKeyRouteFence {
   private value = 0;
+  private readonly changes = new RecipientKeyRouteChanges();
   private readonly keyGraphs = new Set<string>();
   private staleGeneration = 0;
   private scannedGeneration = -1;
   private pendingEverything = 0;
+  private recipientWritesUnknown = false;
   private graphsUnknown = false;
+  private readonly graphBoundRemovals = new Set<GraphBoundRemoval>();
+  /** Graphs that a removal of unknown outcome may still empty. */
+  private readonly graphsWithUnsettledRemoval = new Set<string>();
   private scan: Promise<void> | null = null;
 
   constructor(private readonly store: TripleStore) {}
 
   get revision(): number {
     return this.value;
+  }
+
+  /** Memoized collects are usable only with settled, trustworthy dependencies. */
+  get cacheable(): boolean {
+    return this.cacheableFor([]);
+  }
+
+  get hasPendingWrites(): boolean {
+    return this.changes.hasPending([]) || this.hasPendingGraphRemoval;
+  }
+
+  private get hasPendingGraphRemoval(): boolean {
+    // An opaque write can add a dependency without naming its graph. Until the
+    // graph inventory is trusted again, none of these removals is proven harmless.
+    return [...this.graphBoundRemovals].some(removal => removal.counted || !this.trusted);
+  }
+
+  /** A private roster depends on its own agent/key subjects and every unclassified write. */
+  isCurrentFor(revision: number, agents: readonly string[]): boolean {
+    return !this.hasPendingGraphRemoval
+      && this.changes.current(revision, this.value, agents);
+  }
+
+  cacheableFor(agents: readonly string[]): boolean {
+    return this.trusted && !this.recipientWritesUnknown
+      && !this.hasPendingGraphRemoval
+      && !this.changes.hasPending(agents);
+  }
+
+  /** Undefined proves harmless; null is a global dependency; a set names affected agents. */
+  private scope(mutation: StoreMutation): RecipientKeyRouteScope | undefined {
+    if (mutation.everything) return null;
+    const agents = new Set<string>();
+    const add = (subject: string | undefined): boolean => {
+      const agent = recipientSubjectAgent(subject);
+      if (agent === undefined) return false;
+      agents.add(agent);
+      return agents.size <= 128;
+    };
+    for (const quad of mutation.quads ?? []) {
+      if (!isKeyRouteFact(quad)) continue;
+      if (!isBareIri(quad.predicate)) return null;
+      if (!isBareIri(quad.graph)) return null;
+      if (!add(quad.subject)) return null;
+    }
+    for (const removal of mutation.removals ?? []) {
+      if (!this.removalMayChange(removal)) continue;
+      if (!isBareIri(removal.graph)) return null;
+      if (!add(removal.subject)) return null;
+    }
+    return agents.size > 0 ? agents : undefined;
+  }
+
+  private moved(scope: RecipientKeyRouteScope): void {
+    this.value += 1;
+    this.changes.record(this.value, scope);
   }
 
   private get trusted(): boolean {
@@ -82,9 +165,15 @@ export class RecipientKeyRouteFence {
       || mutation.quads?.some((quad) => !isBareIri(quad.predicate)) === true
       || mutation.removals?.some(({ graph }) => !isBareIri(graph)) === true;
     let opaque = unscoped;
+    const scope = unscoped ? null : this.scope(mutation);
+    const relevant = scope !== undefined;
+    const settleScope = scope !== undefined ? this.changes.begin(scope) : undefined;
+    // A mixed mutation can name one agent's key and remove a currently empty
+    // graph. The removal can acquire another agent's dependency while pending.
+    const graphBound = this.watchGraphBoundRemovals(mutation.removals);
     for (const quad of mutation.quads ?? []) {
       if (!isKeyRouteFact(quad)) continue;
-      if (isBareIri(quad.graph)) this.keyGraphs.add(quad.graph);
+      if (isBareIri(quad.graph)) this.learnKeyGraph(quad.graph);
       else opaque = true;
     }
     if (opaque) {
@@ -104,6 +193,13 @@ export class RecipientKeyRouteFence {
           }
         }
       } finally {
+        settleScope?.();
+        if (graphBound) this.graphBoundRemovals.delete(graphBound);
+        if (relevant || graphBound?.counted) {
+          if (outcome === 'indeterminate') this.recipientWritesUnknown = true;
+        } else if (graphBound && outcome === 'indeterminate') {
+          this.rememberUnsettledRemoval(graphBound.graphs);
+        }
         if (opaque) {
           this.pendingEverything -= 1;
           if (outcome === 'indeterminate') this.graphsUnknown = true;
@@ -114,28 +210,69 @@ export class RecipientKeyRouteFence {
 
   /** Quads that were inserted, removed or replaced into a graph. */
   noteQuads(quads: readonly Quad[]): void {
-    let changed = false;
     for (const quad of quads) {
       if (!isKeyRouteFact(quad)) continue;
       // A name that is not a bare IRI may be stored under another one: the next scan learns it.
-      if (isBareIri(quad.graph)) this.keyGraphs.add(quad.graph);
+      if (isBareIri(quad.graph)) this.learnKeyGraph(quad.graph);
       else this.staleGeneration += 1;
-      changed = true;
     }
-    if (changed) this.value += 1;
+    const scope = this.scope({ quads });
+    if (scope !== undefined) this.moved(scope);
   }
 
   /** A removal whose scope is known, in whole or in part. */
-  noteRemoval({ graph, subject, predicate }: StoreRemoval): void {
-    if (isNonAgentIri(subject)) return;
-    if (isBareIri(predicate) && !RECIPIENT_KEY_ROUTE_PREDICATES.has(predicate)) return;
-    if (isBareIri(graph) && this.trusted && !this.keyGraphs.has(graph)) return;
-    this.value += 1;
+  private removalMayChange(removal: StoreRemoval): boolean {
+    if (cannotRemoveKeyRouteFact(removal)) return false;
+    const { graph } = removal;
+    if (isBareIri(graph) && this.trusted && !this.keyGraphs.has(graph)) return false;
+    return true;
+  }
+
+  /** The graph holds, or is about to hold, a key or route fact. */
+  private learnKeyGraph(graph: string): void {
+    if (this.keyGraphs.has(graph)) return;
+    this.keyGraphs.add(graph);
+    // A removal of unknown outcome may still empty this graph, and nothing will say when.
+    if (this.graphsWithUnsettledRemoval.has(graph)) this.recipientWritesUnknown = true;
+    // A removal in flight that only this graph's emptiness proved harmless is a key write from now on.
+    for (const removal of this.graphBoundRemovals) {
+      if (removal.counted || !removal.graphs.includes(graph)) continue;
+      removal.counted = true;
+    }
+  }
+
+  /**
+   * Removals that neither subject nor predicate proves harmless are harmless only while their graphs
+   * hold no key fact, so they are watched until the write settles.
+   */
+  private watchGraphBoundRemovals(removals: readonly StoreRemoval[] | undefined): GraphBoundRemoval | undefined {
+    const graphs = (removals ?? [])
+      .filter((removal) => !cannotRemoveKeyRouteFact(removal) && !this.removalMayChange(removal))
+      .map(({ graph }) => graph)
+      .filter(isBareIri);
+    if (graphs.length === 0) return undefined;
+    const watched: GraphBoundRemoval = { graphs, counted: false };
+    this.graphBoundRemovals.add(watched);
+    return watched;
+  }
+
+  /** The removal may still run later; past the bound, memoizing is given up instead of the list growing. */
+  private rememberUnsettledRemoval(graphs: readonly string[]): void {
+    for (const graph of graphs) this.graphsWithUnsettledRemoval.add(graph);
+    if (this.graphsWithUnsettledRemoval.size > UNSETTLED_REMOVAL_GRAPHS_MAX) {
+      this.graphsWithUnsettledRemoval.clear();
+      this.recipientWritesUnknown = true;
+    }
+  }
+
+  noteRemoval(removal: StoreRemoval): void {
+    const scope = this.scope({ removals: [removal] });
+    if (scope !== undefined) this.moved(scope);
   }
 
   /** A write that may have changed anything has changed something (an UPDATE, a prefix delete). */
   noteUnscopedWrite(): void {
-    this.value += 1;
+    this.moved(null);
     this.staleGeneration += 1;
   }
 
@@ -157,7 +294,7 @@ export class RecipientKeyRouteFence {
       const result = await this.store.query(KEY_GRAPH_SCAN, { source: 'agent.recipientKeyRouteFence.scan' });
       if (result.type !== 'bindings') return;
       for (const row of result.bindings) {
-        if (typeof row['g'] === 'string') this.keyGraphs.add(unwrapIri(row['g']));
+        if (typeof row['g'] === 'string') this.learnKeyGraph(unwrapIri(row['g']));
       }
       if (generation === this.staleGeneration && this.pendingEverything === 0) this.scannedGeneration = generation;
     } catch {

@@ -4,7 +4,16 @@ export interface DkgLocalLlmDomainProfile {
   routingKeywords: string[];
   readTools: string[];
   writeTools?: string[];
+  requiredTools?: string[];
   systemContext?: string;
+}
+
+export function assertRequiredDomainTools(
+  profile: DkgLocalLlmDomainProfile | undefined,
+  tools: ReadonlyArray<{ name: string }>,
+): void {
+  const missing = profile?.requiredTools?.filter(name => !tools.some(tool => tool.name === name)) ?? [];
+  if (missing.length) throw new Error('LOCAL_LLM_REQUIRED_TOOLS_UNAVAILABLE: ' + missing.join(', '));
 }
 
 const TOOL_NAME = /^[A-Za-z0-9_.:-]{1,128}$/;
@@ -57,6 +66,9 @@ export function parseDomainProfile(value: unknown): DkgLocalLlmDomainProfile {
     readTools: stringList(record, 'readTools', { required: true, toolNames: true }),
     ...(record.writeTools !== undefined
       ? { writeTools: stringList(record, 'writeTools', { toolNames: true }) }
+      : {}),
+    ...(record.requiredTools !== undefined
+      ? { requiredTools: stringList(record, 'requiredTools', { toolNames: true }) }
       : {}),
     ...(systemContext ? { systemContext } : {}),
   };

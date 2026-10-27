@@ -76,6 +76,101 @@ afterEach(() => {
 });
 
 describe('RFC-64 restart-safe SWM author inventory persistence', () => {
+  it('rediscovers durable scopes, including empty heads, after native reopen and fences closed views', async () => {
+    const directory = temporaryDirectory();
+    const first = await openRfc64PersistenceV1(directory, { yieldAfterPurgeBatch: async () => {} });
+    const genesis = snapshot([ROW_A]);
+    first.swmAuthorInventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: genesis, mutation: { kind: 'upsert', row: ROW_A }, expectedCurrentHeadDigest: null,
+    });
+    const empty = snapshot([], genesis);
+    first.swmAuthorInventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: empty, mutation: { kind: 'remove', kaUal: ROW_A.kaUal }, expectedCurrentHeadDigest: genesis.head.objectDigest,
+    });
+    const otherScope = { ...SCOPE, contextGraphId: 'another-durable-scope' } as SwmAuthorInventoryScopeV1;
+    first.swmAuthorInventory.compareAndSwapSwmAuthorInventoryV1({
+      snapshot: snapshot([ROW_B], undefined, otherScope), mutation: { kind: 'upsert', row: ROW_B }, expectedCurrentHeadDigest: null,
+    });
+    await first.close();
+    expect(() => first.swmAuthorInventory.listSwmAuthorInventoryScopesV1()).toThrow('owner is closed');
+    const second = await openRfc64PersistenceV1(directory, { yieldAfterPurgeBatch: async () => {} });
+    try {
+      const prepare = vi.spyOn(DatabaseSync.prototype, 'prepare');
+      try {
+        expect(second.swmAuthorInventory.listSwmAuthorInventoryScopesV1()).toEqual(expect.arrayContaining([SCOPE, otherScope]));
+        expect(prepare.mock.calls.map(([sql]) => sql)).toEqual([INVENTORY_V1_STATEMENT_SQL.listSwmAuthorHeads]);
+      } finally { prepare.mockRestore(); }
+    } finally { await second.close(); }
+  });
+
+  it('refuses discovery when indexed author identity disagrees with the signed head', () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
+    const inventory = new CandidateInventoryV1(database);
+    try {
+      inventory.compareAndSwapSwmAuthorInventoryV1({ snapshot: snapshot([ROW_A]),
+        mutation: { kind: 'upsert', row: ROW_A }, expectedCurrentHeadDigest: null });
+      database.exec('PRAGMA foreign_keys = OFF');
+      database.prepare('UPDATE rfc64_swm_author_inventory_heads_v1 SET author_address = ?').run(hexBytes(OTHER_WALLET.address));
+      expect(() => inventory.listSwmAuthorInventoryScopesV1()).toThrowError(expect.objectContaining({ code: 'swm-inventory-database-corrupt' }));
+    } finally { inventory.close(); }
+  });
+
+  it('reads one local inventory row through the fenced facade without materializing 512 rows', async () => {
+    const persistence = await openRfc64PersistenceV1(temporaryDirectory(), {
+      yieldAfterPurgeBatch: async () => {},
+    });
+    const inventory = persistence.swmAuthorInventory;
+    const rows = Array.from({ length: 512 }, (_, i) => row(
+      String(i + 1), `point-${i}`, `point-share-${i}`, '11', '22',
+    ));
+    try {
+      const genesis = snapshot(rows);
+      inventory.compareAndSwapMergeSwmAuthorInventoryV1({
+        snapshot: genesis, mergeRows: rows, expectedCurrentHeadDigest: null,
+      });
+      const prepare = vi.spyOn(DatabaseSync.prototype, 'prepare');
+      try {
+        expect(inventory.readSwmAuthorInventoryRowV1(SCOPE_DIGEST, AUTHOR, rows[333].kaUal))
+          .toEqual(rows[333]);
+        expect(prepare.mock.calls.map(([sql]) => sql))
+          .toEqual([INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRow]);
+      } finally { prepare.mockRestore(); }
+      expect(inventory.readSwmAuthorInventoryRowV1(SCOPE_DIGEST, AUTHOR, row('9999', 'absent', 'absent-share', '11', '22').kaUal))
+        .toBeNull();
+      expect(inventory.readSwmAuthorInventoryRowV1(SCOPE_DIGEST, OTHER_WALLET.address.toLowerCase(), rows[333].kaUal))
+        .toBeNull();
+    } finally {
+      await persistence.close();
+    }
+    expect(() => inventory.readSwmAuthorInventoryRowV1(SCOPE_DIGEST, AUTHOR, rows[333].kaUal))
+      .toThrow('RFC-64 persistence owner is closed');
+  });
+
+  it('uses the full scope/author/KA primary key and refuses a corrupt local row', () => {
+    const database = new DatabaseSync(':memory:');
+    database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
+    const inventory = new CandidateInventoryV1(database);
+    try {
+      inventory.compareAndSwapSwmAuthorInventoryV1({
+        snapshot: snapshot([ROW_A]), mutation: { kind: 'upsert', row: ROW_A },
+        expectedCurrentHeadDigest: null,
+      });
+      const plan = database.prepare(`EXPLAIN QUERY PLAN ${INVENTORY_V1_STATEMENT_SQL.getSwmAuthorRow}`)
+        .all({ scope: hexBytes(SCOPE_DIGEST), author: hexBytes(AUTHOR), kaUal: ROW_A.kaUal });
+      expect(plan).toHaveLength(1);
+      expect(String(plan[0].detail)).toContain('PRIMARY KEY');
+      expect(String(plan[0].detail)).toContain('ka_ual=?');
+      expect(() => inventory.readSwmAuthorInventoryRowV1(SCOPE_DIGEST, AUTHOR, 'not-a-ual' as never))
+        .toThrow();
+      database.exec('PRAGMA ignore_check_constraints = ON');
+      database.prepare('UPDATE rfc64_swm_author_inventory_rows_v1 SET assertion_version_u64be = zeroblob(8)')
+        .run();
+      expect(() => inventory.readSwmAuthorInventoryRowV1(SCOPE_DIGEST, AUTHOR, ROW_A.kaUal))
+        .toThrow(/stored SWM author row is not canonical/);
+    } finally { inventory.close(); }
+  });
+
   it('reads only the local head digest without materializing inventory rows', () => {
     const database = new DatabaseSync(':memory:');
     database.exec(`PRAGMA foreign_keys = ON; ${INVENTORY_V1_DDL}`);
@@ -765,6 +860,7 @@ describe('RFC-64 restart-safe SWM author inventory persistence', () => {
     v2.exec(`
       PRAGMA journal_mode = DELETE;
       DROP TABLE rfc64_unregistered_authority_seeds_v1;
+      DROP TABLE rfc64_private_placement_failures_v1;
       DROP TABLE rfc64_finalized_private_placement_repairs_v1;
       DROP TABLE rfc64_staged_catalog_heads_v1;
       DROP TABLE rfc64_swm_author_inventory_rows_v1;

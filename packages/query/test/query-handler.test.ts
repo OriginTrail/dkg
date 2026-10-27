@@ -44,9 +44,14 @@ describe('QueryHandler', () => {
 
   it.each(['SPARQL_QUERY', 'ENTITY_TRIPLES', 'ENTITIES_BY_TYPE', 'ENTITY_BY_UAL'] as const)(
     'guards remote %s reads before dispatch', async lookupType => {
+      const dispatch = vi.spyOn(engine, 'query');
+      const resolve = vi.spyOn(engine, 'resolveKnowledgeAsset');
       const guard = vi.fn(async () => { throw new Error('Explicit evidence acceptance required'); });
       const handler = new QueryHandler(engine, {defaultPolicy:'public'}, {assertReadEvidence:guard});
       const response = await handler.handle(makeRequest({lookupType,sparql:'SELECT ?s WHERE {?s ?p ?o}',entityUri:ENTITY_A,rdfType:SCHEMA_PERSON,ual:'did:dkg:evm:31337/0x1111111111111111111111111111111111111111/1'}),'peer');
+      expect(dispatch).not.toHaveBeenCalled();
+      expect(resolve).not.toHaveBeenCalled();
+      dispatch.mockRestore(); resolve.mockRestore();
       expect(response.status).toBe('ERROR');
       expect(response.bindings).toBeUndefined();
       expect(response.ntriples).toBeUndefined();
@@ -54,12 +59,22 @@ describe('QueryHandler', () => {
     },
   );
   it('withholds remote results when evidence changes during execution', async () => {
-    const guard=vi.fn().mockResolvedValueOnce(undefined).mockRejectedValueOnce(new Error('Evidence changed'));
-    const handler=new QueryHandler(engine,{defaultPolicy:'public'},{assertReadEvidence:guard});
-    const response=await handler.handle(makeRequest({lookupType:'ENTITY_TRIPLES',entityUri:ENTITY_A}),'peer');
-    expect(guard).toHaveBeenCalledTimes(2);
-    expect(response.status).toBe('ERROR');
-    expect(response.ntriples).toBeUndefined();
+    let changed = false;
+    const execute = engine.query.bind(engine);
+    const dispatch = vi.spyOn(engine, 'query').mockImplementation(async (...args) => {
+      const result = await execute(...args);
+      changed = true;
+      return result;
+    });
+    const guard = vi.fn(async () => { if (changed) throw new Error('Evidence changed'); });
+    const handler = new QueryHandler(engine, { defaultPolicy: 'public' }, { assertReadEvidence: guard });
+    try {
+      const response = await handler.handle(makeRequest({ lookupType: 'SPARQL_QUERY', sparql: 'SELECT ?s WHERE {?s ?p ?o}' }), 'peer');
+      expect(dispatch).toHaveBeenCalledTimes(1);
+      expect(response.status).toBe('ERROR');
+      expect(response.bindings).toBeUndefined();
+      expect(response.ntriples).toBeUndefined();
+    } finally { dispatch.mockRestore(); }
   });
   describe('with public access policy', () => {
     let handler: QueryHandler;

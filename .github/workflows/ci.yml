@@ -20,13 +20,23 @@ on:
   # develop branch that batches unrelated failures into one large PR.
   merge_group:
   workflow_dispatch:
-  schedule:
-    - cron: '23 2 * * *'
+    inputs:
+      profile:
+        description: Execution profile (nightly-equivalent includes managed-local UI and 1000 property trials)
+        type: choice
+        options: [standard, nightly-equivalent]
+        default: standard
+      seed:
+        description: Optional signed 32-bit property seed (nightly default is the recorded run number)
+        type: string
+        required: false
+  # nightly-ci.yml owns the clock on the default branch and dispatches this
+  # workflow at testnet-canary with the nightly-equivalent profile.
 
 concurrency:
-  # Per-PR / per-branch lock: cancels any earlier in-flight run for the
-  # same ref as soon as a newer commit arrives.
-  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  # Keep campaigns independent of ordinary pushes/PRs; supersede duplicate
+  # campaigns on the same ref, without disabling ordinary cancellation.
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ (github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.profile == 'nightly-equivalent')) && 'nightly-equivalent' || 'standard' }}
   cancel-in-progress: true
 
 # Minimum-needed token scope. All jobs only check out and run tests; nothing
@@ -39,10 +49,6 @@ concurrency:
 # here is the single highest-leverage defence-in-depth control.
 permissions:
   contents: read
-
-env:
-  DKG_PROPERTY_RUNS: ${{ github.event_name == 'schedule' && '1000' || '100' }}
-  DKG_PROPERTY_SEED: ${{ github.event_name == 'schedule' && github.run_number || '640905' }}
 
 jobs:
   # ------------------------------------------------------------------
@@ -58,6 +64,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     outputs:
+      profile: ${{ steps.profile.outputs.profile }}
+      profile_json: ${{ steps.profile.outputs.profile_json }}
       full_ci: ${{ steps.plan.outputs.full_ci }}
       run_node: ${{ steps.plan.outputs.run_node }}
       node_test_artifacts: ${{ steps.plan.outputs.node_test_artifacts }}
@@ -84,6 +92,7 @@ jobs:
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
           # The PR checkout is a synthetic merge commit; depth 2 normally
           # includes that commit and both parents without cloning full history.
           fetch-depth: 2
@@ -91,6 +100,10 @@ jobs:
       # This immutable controller is the authority for test selection. A
       # policy update intentionally uses a new reviewed commit SHA; never use
       # the merge candidate or a mutable branch here.
+      # Rotation shims:
+      # - jobs.changes.steps.plan publisher campaign full-CI fallback
+      # Remove that exact-path fallback after rotating to protected policy
+      # that routes both publisher-live-control parent and worker to bura_cli.
       - name: Checkout trusted CI controller
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -145,6 +158,20 @@ jobs:
             PLAN_EVENT="pull_request_delta_disabled"
           fi
 
+          # The pinned controller predates this campaign route. Widen only
+          # exact parent/worker changes until its protected-policy rotation;
+          # the controller still generates and validates the entire plan.
+          if [[ "${PLAN_EVENT}" == "pull_request" ]]; then
+            while IFS= read -r -d '' changed; do
+              case "${changed}" in
+                scripts/repro/publisher-live-control-restart.test.mts|scripts/repro/publisher-live-control-worker.mts)
+                  PLAN_EVENT="pull_request_delta_disabled"
+                  break
+                  ;;
+              esac
+            done < "${CHANGES_FILE}"
+          fi
+
           node trusted-ci/scripts/ci/plan-ci.mjs \
             --event "${PLAN_EVENT}" \
             --changes-z "${CHANGES_FILE}" \
@@ -156,6 +183,17 @@ jobs:
       # has finalized its outputs, so it cannot influence test selection.
       - name: Validate npm metadata points to v10
         run: node candidate/scripts/check-npm-metadata.mjs
+
+      # Lane selection is already finalized by the immutable controller.
+      # This candidate script resolves execution settings, never the plan.
+      - name: Resolve execution profile and exact subject
+        id: profile
+        working-directory: candidate
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PROFILE_INPUT: ${{ inputs.profile || '' }}
+          SEED_INPUT: ${{ inputs.seed || '' }}
+        run: node scripts/ci/resolve-ci-profile.mjs
 
   # Source-only transport regressions use the supported runtime independently.
   chain-rpc-node26:
@@ -203,6 +241,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: Emit canonical test matrices
         id: test-matrices
         run: node scripts/ci/emit-test-matrices.mjs
@@ -318,6 +357,10 @@ jobs:
         run: node scripts/ci/fetch-trusted-controller.mjs
       - name: Test repository scripts
         run: pnpm run test:scripts
+      - name: Test share recovery evidence reducers
+        run: |
+          node --test scripts/testnet-share-recovery/*.test.mjs
+          python3 -m unittest discover -s scripts/testnet-share-recovery -p test_payload_evidence.py
       - name: Verify every test has an execution route
         run: pnpm test:inventory
       - name: Upload test execution inventory
@@ -396,6 +439,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -424,6 +468,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -463,6 +508,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -479,6 +525,10 @@ jobs:
       - uses: ./.github/actions/restore-evm-node-test-artifacts
         if: matrix.suite == 'chain'
 
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: Run canonical test row
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Authority mutation pilot
@@ -536,6 +586,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -583,8 +634,44 @@ jobs:
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-epcis exec vitest run test/external-event-query.test.ts
           DKG_REQUIRE_BLAZEGRAPH=1 pnpm test:conformance
           pnpm --filter @origintrail-official/dkg-storage exec vitest run --no-file-parallelism test/blazegraph.integration.test.ts test/term-canon-blazegraph-oracle.test.ts test/rfc64-semantic-read-gateway.blazegraph.integration.test.ts test/rfc64-shared-projection-stream.blazegraph.integration.test.ts
+          pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts
+          DKG_REQUIRE_BLAZEGRAPH=1 pnpm --filter @origintrail-official/dkg-query exec vitest run test/scoped-catalog-backend.test.ts
+          pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts
           pnpm --filter @origintrail-official/dkg-agent exec vitest run --config vitest.blazegraph.config.ts
           DKG_RFC64_GATE1_STORE_BACKEND=blazegraph node --import tsx --test devnet/rfc64-gate1-public-open/rollout-store-fixture.test.ts devnet/rfc64-gate1-public-open/rollout-transition.test.ts
+
+      # OT-RFC-73 AC4: the share conflict lookup's payload de-duplication answers a duplicate-row hazard that exists only on an engine which gives two
+      # uniqueness-key spellings (they differ by a trailing U+001F) ONE stored term. The suite above reports whether the service container above does;
+      # the image pinned in blazegraph-image.json (the one the node setup provisions) does, so the same live differential runs against THAT image with
+      # the reproduction required (BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1): the real-engine check cannot turn vacuous when the image changes.
+      - name: "Share promote lookup live differential on the provisioned Blazegraph image (U+001F positive control required)"
+        timeout-minutes: 5
+        run: |
+          set -euo pipefail
+          # Fields come from the canonical reader (it validates the whole contract), requested by name like the image contract check does.
+          if ! image="$(node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json image)" \
+            || ! container_port="$(node packages/cli/blazegraph-image-metadata.cjs blazegraph-image.json containerPort)"; then
+            echo "::error::Could not read image contract from blazegraph-image.json"
+            exit 1
+          fi
+          container="dkg-ci-promote-lookup-blazegraph-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          trap 'docker rm -f "$container" >/dev/null 2>&1 || true' EXIT
+          docker run -d --name "$container" -p "127.0.0.1::${container_port}" "$image" >/dev/null
+          binding="$(docker port "$container" "${container_port}/tcp" | head -n 1)"
+          host_port="${binding##*:}"
+          ready=0
+          for _ in $(seq 1 60); do
+            if curl -sf -o /dev/null --max-time 2 "http://127.0.0.1:${host_port}/bigdata/status"; then ready=1; break; fi
+            sleep 2
+          done
+          if [ "$ready" != 1 ]; then
+            docker logs "$container" || true
+            echo "::error::Pinned Blazegraph image did not serve /bigdata/status within 120s"
+            exit 1
+          fi
+          BLAZEGRAPH_TEST_URL="http://127.0.0.1:${host_port}/bigdata/namespace/kb/sparql" \
+          BLAZEGRAPH_REQUIRE_U001F_COLLAPSE=1 \
+          pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts test-live/async-promote-bounded-lookup.blazegraph.test.ts
 
       - name: Upload store conformance packet
         if: always()
@@ -625,6 +712,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -641,8 +729,21 @@ jobs:
       # Publisher globalSetup deploys the same Hardhat contracts as chain/CLI.
       # Restore the shared compiler outputs before starting its isolated node.
       - uses: ./.github/actions/restore-evm-node-test-artifacts
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "Publisher tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: Upload lift campaign progress
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: lift-campaign-${{ matrix.shard }}-of-${{ matrix.shards }}
+          path: packages/publisher/test-results/lift-lifecycle-campaign.json
+          retention-days: 14
+          if-no-files-found: ignore
+          overwrite: true
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -665,7 +766,8 @@ jobs:
     needs: [changes, build, evm-node-test-artifacts]
     if: needs.changes.outputs.tornado_agent == 'true'
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    # Inventory policy grants native runs headroom for coverage/report cleanup.
+    timeout-minutes: ${{ matrix.timeoutMinutes }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.build.outputs.test_matrices)['tornado-agent'] }}
@@ -673,6 +775,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -687,6 +790,10 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - uses: ./.github/actions/restore-evm-node-test-artifacts
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "Agent tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       # Gate 0's unit tests also run here because the Windows inventory leg
@@ -700,6 +807,12 @@ jobs:
       - name: "RFC-64 Gate 1 live evidence generate and verify (Oxigraph)"
         if: matrix.sidecars
         run: pnpm test:gate1:rfc64-public-open-harness
+      # The parent kills only its disposable worker, then reopens the actual
+      # SQLite/Oxigraph files and replays with fresh loopback peers. No devnet.
+      - name: "RFC-64 catalog durable-head process-death recovery"
+        if: matrix.sidecars
+        timeout-minutes: 4
+        run: node --experimental-sqlite --import tsx scripts/repro/rfc64-catalog-durable-head.mts
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -733,6 +846,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -750,8 +864,16 @@ jobs:
       - name: "Verify provisioned Blazegraph image contract"
         if: matrix.shard == 1
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "CLI tests (shard ${{ matrix.shard }}/${{ matrix.shards }})"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
+      - name: "Publisher pause/resume process-death durability (Oxigraph)"
+        if: matrix.shard == 1
+        timeout-minutes: 3
+        run: node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts
       - name: Upload Vitest JUnit report
         if: always()
         uses: ./.github/actions/upload-vitest-junit
@@ -768,6 +890,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - name: "Verify provisioned Blazegraph image contract on arm64"
         run: bash scripts/ci/verify-blazegraph-image-contract.sh
 
@@ -787,6 +910,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -800,6 +924,10 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "Query tests"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit and coverage reports
@@ -833,6 +961,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -848,6 +977,10 @@ jobs:
         run: tar -xzf /tmp/build-outputs.tgz
       - name: "node-ui production build (896 MB heap budget)"
         run: pnpm --filter @origintrail-official/dkg-node-ui run build:ui
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "node-ui tests"
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit and coverage reports
@@ -876,8 +1009,6 @@ jobs:
   # Channel is pinned to bundled chromium in playwright.config.ts under CI
   # (see `ciChromium`) since we only `playwright install chromium`.
   kosava-node-ui-e2e:
-    env:
-      PW_DEVNET_LOCAL: ${{ github.event_name == 'schedule' && '1' || '0' }}
     name: "Kosava: node-ui e2e [${{ matrix.shard }}/7] (Playwright real-node devnet)"
     needs: [changes, build, evm-devnet-test-artifacts]
     if: needs.changes.outputs.kosava_node_ui_e2e == 'true'
@@ -894,6 +1025,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -915,8 +1047,18 @@ jobs:
         run: tar -xzf /tmp/evm-devnet-test-artifacts.tgz
       - name: Install Playwright Chromium
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright install chromium --with-deps
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
+      - name: node-ui memory preview and WebGL regressions
+        if: matrix.shard == 1
+        run: pnpm --dir packages/node-ui exec playwright test --config playwright.pr3236.config.ts
       - name: "node-ui real-node Playwright e2e (shard ${{ matrix.shard }}/7)"
         run: pnpm --filter @origintrail-official/dkg-node-ui exec playwright test --shard=${{ matrix.shard }}/7
+      - name: Clean up only Playwright-owned devnet processes
+        if: always()
+        run: pnpm --dir packages/node-ui exec tsx -e "import('./e2e/global-teardown.ts').then(m => m.default())"
       - name: Record first-attempt browser failures separately from retries
         if: always()
         run: node scripts/ci/browser-quality.mjs packages/node-ui/playwright-report/results.json packages/node-ui/playwright-report/quality.json
@@ -927,6 +1069,7 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: node-ui-playwright-report-${{ matrix.shard }}-of-7
+          overwrite: true
           path: |
             packages/node-ui/playwright-report/
             packages/node-ui/test-results/
@@ -937,7 +1080,7 @@ jobs:
       # didn't come up. Upload them so a red run is debuggable without a
       # local repro.
       - name: Upload devnet logs on failure
-        if: failure()
+        if: failure() || cancelled()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: node-ui-devnet-logs-${{ matrix.shard }}-of-7
@@ -964,6 +1107,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -991,6 +1135,10 @@ jobs:
           path: /tmp
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: "Supporting Kosava packages"
         # DKG_REQUIRE_PYTEST=1 makes the adapter-hermes Python suite REQUIRED in
         # CI: run-pytest.mjs fails (not skips) if no interpreter/pytest is found,
@@ -1040,6 +1188,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -1054,6 +1203,10 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
       - uses: ./.github/actions/restore-evm-node-test-artifacts
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: Hardhat plugin tests
         run: node scripts/ci/run-vitest-lanes.mjs --job "$GITHUB_JOB" --row "$DKG_CI_ROW"
       - name: Upload Vitest JUnit and coverage reports
@@ -1086,6 +1239,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -1172,6 +1326,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
 
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
 
@@ -1304,6 +1459,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -1382,6 +1538,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -1522,6 +1679,7 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.sha }}
           fetch-depth: 2
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4.3.0
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
@@ -1534,6 +1692,10 @@ jobs:
         with:
           pattern: vitest-*
           path: ci-test-results
+      - name: Apply resolved execution profile
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+        run: node scripts/ci/apply-ci-profile.mjs
       - name: Verify complete shards, production source, floors and changed lines
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
@@ -1558,6 +1720,45 @@ jobs:
             packages/*/coverage/
           retention-days: 14
           if-no-files-found: error
+
+  profile-results:
+    name: Verify execution profile
+    if: always()
+    needs: [changes, tornado-publisher, kosava-node-ui-e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - run: mkdir -p nightly-evidence
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: always() && needs.changes.outputs.profile == 'nightly-equivalent'
+        continue-on-error: true
+        with:
+          pattern: node-ui-playwright-report-*
+          path: nightly-evidence
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: always() && needs.changes.outputs.profile == 'nightly-equivalent'
+        continue-on-error: true
+        with:
+          pattern: lift-campaign-*
+          path: nightly-evidence
+      - name: Verify actual required execution and retain all failures
+        if: always()
+        env:
+          PROFILE_JSON: ${{ needs.changes.outputs.profile_json }}
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node scripts/ci/nightly-profile-results.mjs nightly-evidence
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: nightly-profile-summary
+          path: nightly-profile-summary.json
+          retention-days: 14
+          if-no-files-found: error
+          overwrite: true
 
   ci-gate:
     name: CI gate
@@ -1584,6 +1785,7 @@ jobs:
       - solidity-coverage
       - tornado-static-analysis
       - coverage-results
+      - profile-results
       - inventory-windows
     runs-on: ubuntu-latest
     timeout-minutes: 3
@@ -1604,11 +1806,20 @@ jobs:
             scripts/lib/ci-results.mjs
             scripts/lib/ci-routing.mjs
           sparse-checkout-cone-mode: false
+      # As with coverage, require the execution verifier before the trusted
+      # aggregate. A skipped/missing verifier cannot certify this profile.
+      - name: Require the execution profile verdict
+        if: always()
+        env:
+          PROFILE_RESULT: ${{ needs.profile-results.result }}
+        run: test "$PROFILE_RESULT" = success
       - name: Require the coverage verdict
+        if: always()
         env:
           COVERAGE_RESULT: ${{ needs.coverage-results.result }}
         run: test "$COVERAGE_RESULT" = success
       - name: Verify selected lanes completed
+        if: always()
         env:
           EVENT_NAME: ${{ github.event_name }}
           PLAN_JSON: ${{ needs.changes.outputs.plan_json }}

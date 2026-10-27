@@ -96,17 +96,17 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
 
     expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
       owner, CONTEXT_GRAPH_ID, UAL_ONE, '1',
-    )).toBe(false);
+    )).toBe('kept');
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
 
     await store.delete([swmQuad]);
     expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
       owner, CONTEXT_GRAPH_ID, UAL_ONE, '1',
-    )).toBe(false);
+    )).toBe('kept');
     await store.delete([headQuad]);
     expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
       owner, CONTEXT_GRAPH_ID, UAL_ONE, '1',
-    )).toBe(true);
+    )).toBe('retired');
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
 
     const restartedOwner = {};
@@ -135,14 +135,14 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     // A verified twin in a named subgraph says nothing about the root share.
     expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
       owner, CONTEXT_GRAPH_ID, UAL_ONE, '1', 'private-lane',
-    )).toBe(false);
+    )).toBe('kept');
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
     expect(await markerRows()).toBe(1);
 
     // The same call for the root namespace is what retires it.
     expect(await retireRfc64LegacySwmAfterFinalizedVmV1(
       owner, CONTEXT_GRAPH_ID, UAL_ONE, '1',
-    )).toBe(true);
+    )).toBe('retired');
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(0);
     expect(await markerRows()).toBe(0);
   });
@@ -235,7 +235,7 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     inFlight.settle(true);
 
     // The committed share is visible to the recheck, so no marker is retired.
-    await expect(retirement).resolves.toBe(false);
+    await expect(retirement).resolves.toBe('kept');
     expect(absenceChecks).toHaveBeenCalled();
     expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);
     expect(await store.countQuads(swmGraph)).toBe(1);
@@ -255,11 +255,11 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
     await store.delete([headQuad]);
     await expect(retireRfc64LegacySwmAfterFinalizedVmV1(
       restartedOwner, CONTEXT_GRAPH_ID, UAL_ONE, inFlightVersion,
-    )).resolves.toBe(false);
+    )).resolves.toBe('kept');
     await store.delete([swmQuad]);
     await expect(retireRfc64LegacySwmAfterFinalizedVmV1(
       restartedOwner, CONTEXT_GRAPH_ID, UAL_ONE, inFlightVersion,
-    )).resolves.toBe(true);
+    )).resolves.toBe('retired');
     expect(readRfc64LegacySwmBoundaryCountV1(restartedOwner, CONTEXT_GRAPH_ID)).toBe(0);
     expect(await markerSubjects()).toEqual([]);
   });
@@ -298,7 +298,7 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
       const retirement = retireRfc64LegacySwmAfterFinalizedVmV1(owner, CONTEXT_GRAPH_ID, UAL_ONE, '1');
       const finishedWithoutWaiting = await inTime(retirement);
       inFlightTwo.settle(true); // always release, so a failing run does not leak its preparation
-      await expect(retirement).resolves.toBe(true);
+      await expect(retirement).resolves.toBe('retired');
 
       expect(finishedWithoutWaiting).toBe(true);
       // UAL_ONE's marker is retired; UAL_TWO's committed share stays tracked.
@@ -326,7 +326,7 @@ describe('RFC-64 10.0.16 legacy SWM boundary', () => {
         owner, CONTEXT_GRAPH_ID, UAL_TWO, 'prepared-mid-retirement', '1',
       );
       release();
-      await expect(retirement).resolves.toBe(true);
+      await expect(retirement).resolves.toBe('retired');
 
       // UAL_ONE is retired, UAL_TWO is still tracked; its rollback then removes only its own entry.
       expect(readRfc64LegacySwmBoundaryCountV1(owner, CONTEXT_GRAPH_ID)).toBe(1);

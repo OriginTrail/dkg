@@ -157,6 +157,13 @@ const SYNC_OPERATION_DURATION_BUCKETS = [
   10_000, 30_000, 60_000, 120_000, 300_000,
 ];
 
+/** ms; async admission: 5 ms to 60 s (the share route waits up to 20 s for write readiness). */
+const ADMISSION_LATENCY_BUCKETS = [5, 25, 100, 250, 500, 1000, 2500, 5000, 10000, 20000, 60000];
+/** ms; heartbeat and `claimNext` waits behind the share mutex: 1 ms to 2 min. */
+const QUEUE_WAIT_BUCKETS = [1, 5, 25, 100, 500, 1000, 2500, 5000, 15000, 60000, 120000];
+/** ms; publisher pick-up and claim-to-finish: 100 ms to 1 h. */
+const PICKUP_BUCKETS = [100, 500, 1000, 5000, 15000, 60000, 300000, 900000, 1800000, 3600000];
+
 export interface DkgMetrics {
   /** bytes; boundary and phase are bounded sync lifecycle enums */
   processHeapUsedBytes: Gauge;
@@ -197,10 +204,12 @@ export interface DkgMetrics {
   storageAckInflight: Histogram;
   /** queue_depth sample for background/normal store work competing with ACK */
   syncBackgroundQueueDepth: Histogram;
-  /** priority={ack|health|normal|background}, reason={queue_full|queue_wait_timeout} */
+  /** priority={ack|health|normal|background|control}, reason={queue_full|queue_wait_timeout}, operation_family=first two dot-separated segments of the caller's source (at most 64 per scheduler, then `other`). `control` is the queue control path's own schedulers (one per async queue). */
   storeSchedulerRejectionsTotal: Counter;
   /** ms; priority and operation identify the bounded admission lane and static caller */
   storeSchedulerQueueWaitMs: Histogram;
+  /** ms; admitted execution time by priority, static operation and outcome={ok|error} */
+  storeSchedulerOperationDurationMs: Histogram;
   /** active admitted operations by priority and operation */
   storeSchedulerActive: UpDownCounter;
   /** current queued work; scheduler and lane are bounded static labels */
@@ -362,6 +371,39 @@ export interface DkgMetrics {
   agentsPhonebookFetchTotal: Counter;
   /** ms; on-demand `agents` phonebook fetches that reached a peer. trigger, outcome. */
   agentsPhonebookFetchDurationMs: Histogram;
+
+  // ── Async share / publish queue admission (OT-RFC-73 P1b) ───────────────
+  // The `async_admission_usage` log line is the primary signal; these mirror it
+  // for nodes that export metrics. Attribute values are bounded static sets.
+
+  /** Async admission requests. route={share_async|publish_async},
+   *  phase={request|write_preflight|intent_resolution|snapshot_preflight|enqueue}
+   *  (the step that answered), status (HTTP, `0` = client left first), code
+   *  (response error code, `-` for none; at most 64 distinct series per process
+   *  and then `other`). Every outcome is counted, 2xx included. */
+  asyncAdmissionOutcomesTotal: Counter;
+  /** ms; request start to response, every outcome. route={share_async|publish_async} */
+  asyncAdmissionLatencyMs: Histogram;
+  /** Expired leases swept. queue={share|lift}, outcome={reclaimed|abandoned}
+   *  (`abandoned` is share only: a job out of retries). */
+  asyncQueueLeaseRecoveriesTotal: Counter;
+  /** A claimed publisher job whose claim token no longer matched. queue={lift} */
+  asyncQueueStaleClaimsTotal: Counter;
+  /** ms; share lease renewal, from the call to its settlement (mutex wait included) */
+  asyncQueueHeartbeatLatenessMs: Histogram;
+  /** ms; share `claimNext`, mutex wait and idle polls included */
+  asyncShareClaimNextMs: Histogram;
+  /** ms; publisher job ready (latest of accepted, retried, recovered) to claimed.
+   *  worker_free={true|false|unknown}: whether a configured wallet held no lock when it became ready. */
+  asyncLiftPickupMs: Histogram;
+  /** ms; publisher job claimed to finalized (the normal worker transition) */
+  asyncLiftClaimToFinishMs: Histogram;
+  /** Jobs per state, read every five minutes. queue={share|lift}, state=<job state> */
+  asyncQueueDepth: Gauge;
+  /** Publisher admission journal entries, read every five minutes */
+  asyncQueueJournalEntries: Gauge;
+  /** Wallets that run publisher workers */
+  asyncLiftConfiguredWallets: Gauge;
 }
 
 function buildMetrics(): DkgMetrics {
@@ -416,11 +458,16 @@ function buildMetrics(): DkgMetrics {
       description: 'Sampled non-ACK store queue depth',
     }),
     storeSchedulerRejectionsTotal: meter.createCounter('dkg.store.scheduler_rejections_total', {
-      description: 'External-store work rejected before dispatch by bounded priority and reason',
+      description: 'External-store work rejected before dispatch by bounded priority, reason and operation family',
     }),
     storeSchedulerQueueWaitMs: meter.createHistogram('dkg.store.scheduler_queue_wait_ms', {
       unit: 'ms',
       description: 'External-store admission queue wait by lane and static caller',
+      advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
+    }),
+    storeSchedulerOperationDurationMs: meter.createHistogram('dkg.store.scheduler_operation_duration_ms', {
+      unit: 'ms',
+      description: 'External-store execution time after admission by lane and static caller',
       advice: { explicitBucketBoundaries: OP_DURATION_BUCKETS },
     }),
     storeSchedulerActive: meter.createUpDownCounter('dkg.store.scheduler_active', {
@@ -626,6 +673,49 @@ function buildMetrics(): DkgMetrics {
       // Full fetches take tens of seconds, and one that runs into its 120 s
       // budget ends a little after it: the 300 s bound keeps both finite.
       advice: { explicitBucketBoundaries: SYNC_OPERATION_DURATION_BUCKETS },
+    }),
+    asyncAdmissionOutcomesTotal: meter.createCounter('dkg.async_admission.outcomes_total', {
+      description: 'Async share and publish admission requests by route, answering phase, status and code',
+    }),
+    asyncAdmissionLatencyMs: meter.createHistogram('dkg.async_admission.latency_ms', {
+      unit: 'ms',
+      description: 'Async admission request wall-time, request start to response',
+      advice: { explicitBucketBoundaries: ADMISSION_LATENCY_BUCKETS },
+    }),
+    asyncQueueLeaseRecoveriesTotal: meter.createCounter('dkg.async_queue.lease_recoveries_total', {
+      description: 'Expired async queue leases swept, by queue and outcome',
+    }),
+    asyncQueueStaleClaimsTotal: meter.createCounter('dkg.async_queue.stale_claims_total', {
+      description: 'Claimed async publisher jobs whose claim token no longer matched',
+    }),
+    asyncQueueHeartbeatLatenessMs: meter.createHistogram('dkg.async_queue.heartbeat_lateness_ms', {
+      unit: 'ms',
+      description: 'Async share lease renewal duration, mutex wait included',
+      advice: { explicitBucketBoundaries: QUEUE_WAIT_BUCKETS },
+    }),
+    asyncShareClaimNextMs: meter.createHistogram('dkg.async_share.claim_next_ms', {
+      unit: 'ms',
+      description: 'Async share claimNext duration, mutex wait and idle polls included',
+      advice: { explicitBucketBoundaries: QUEUE_WAIT_BUCKETS },
+    }),
+    asyncLiftPickupMs: meter.createHistogram('dkg.async_lift.pickup_ms', {
+      unit: 'ms',
+      description: 'Async publisher job wait from ready to claimed',
+      advice: { explicitBucketBoundaries: PICKUP_BUCKETS },
+    }),
+    asyncLiftClaimToFinishMs: meter.createHistogram('dkg.async_lift.claim_to_finish_ms', {
+      unit: 'ms',
+      description: 'Async publisher job duration from claimed to finalized',
+      advice: { explicitBucketBoundaries: PICKUP_BUCKETS },
+    }),
+    asyncQueueDepth: meter.createGauge('dkg.async_queue.depth', {
+      description: 'Async queue jobs by queue and state, sampled every five minutes',
+    }),
+    asyncQueueJournalEntries: meter.createGauge('dkg.async_queue.journal_entries', {
+      description: 'Async publisher admission journal entries, sampled every five minutes',
+    }),
+    asyncLiftConfiguredWallets: meter.createGauge('dkg.async_lift.configured_wallets', {
+      description: 'Wallets that run async publisher workers',
     }),
   };
 }

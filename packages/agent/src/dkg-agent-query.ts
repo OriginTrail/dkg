@@ -1,5 +1,5 @@
 import type { AgentQueryOptions } from './agent-query-options.js';
-import { withPublicSnapshotQueryTrust } from './public-snapshot-evidence.js';
+import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -9,7 +9,9 @@ import { withPublicSnapshotQueryTrust } from './public-snapshot-evidence.js';
  * so cross-calls resolve against the composed class.
  */
 
+import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from './swm-read-admission.js';
 import { deniedResult } from './query-denied-result.js';
+import { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -397,6 +399,7 @@ import {
   type ContextGraphReadAuthorityDecision,
   type ContextGraphReadAuthorityInput,
 } from './context-graph-read-authority.js';
+import { observedReadAuthorityDecision } from './internal/context-graph-authority/unanswered-authority-read.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { isRfc64UnregisteredOwnerUnresolvedErrorV1 } from './dkg-agent-rfc64-catalog.js';
 import type { Rfc64UnregisteredAuthoritySeedFetchOutcomeV1 } from './dkg-agent-rfc64-seed-fetch.js';
@@ -428,6 +431,7 @@ export class QueryMethods extends DKGAgentBase {
       contextGraphId: rawOpts.contextGraphId,
       includeSharedMemory: rawOpts.includeSharedMemory ?? rawOpts.includeWorkspace,
     };
+    opts.signal?.throwIfAborted();
     const ctx = opts.operationCtx ?? createOperationContext('query');
     const sgLabel = opts.subGraphName ? `/${opts.subGraphName}` : '';
     const viewLabel = opts.view ? ` view=${opts.view}` : '';
@@ -451,6 +455,7 @@ export class QueryMethods extends DKGAgentBase {
     const targetsSharedMemory =
       opts.graphSuffix === '_shared_memory'
       || opts.includeSharedMemory === true
+      || opts.includeSharedMemoryMeta === true
       || opts.view === 'shared-working-memory';
 
     // A-1: Working-Memory isolation. When the caller is authenticated
@@ -538,16 +543,17 @@ export class QueryMethods extends DKGAgentBase {
       }
     }
 
-    if (
-      opts.contextGraphId
-      && targetsSharedMemory
-      && !(await this.canUseSharedMemoryForContextGraph(opts.contextGraphId, {
-        callerAgentAddress: callerAgentAddressStr,
-        readAuthority: scopedReadAuthority,
-      }))
-    ) {
-      this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
-      return deniedResult(sparql, opts.accessDenied);
+    if (opts.contextGraphId && targetsSharedMemory) {
+      const admission = await this.resolveSharedMemoryReadAdmission(opts.contextGraphId, {
+        callerAgentAddress: callerAgentAddressStr, readAuthority: scopedReadAuthority, signal: opts.signal,
+      });
+      opts.signal?.throwIfAborted();
+      if (admission.outcome === 'unavailable'
+        && (!sharedMemoryAdmissionFailsClosed(admission) || opts.accessDenied === 'error')) throw sharedMemoryAdmissionError(opts.contextGraphId, admission);
+      if (admission.outcome !== 'allowed') {
+        this.log.info(ctx, `Shared memory query denied for unauthorized or unconfirmed context graph "${opts.contextGraphId}"`);
+        return deniedResult(sparql, opts.accessDenied);
+      }
     }
 
     // A-1 canonicalization (Codex PR #242 iter-9 re-review): the
@@ -565,14 +571,10 @@ export class QueryMethods extends DKGAgentBase {
     // silent empty deny even though both sides are the same
     // identity. Canonicalize both sides: when the default agent is
     // known, fold its `peerId` alias onto its EVM address.
-    const defaultEvmLc = this.defaultAgentAddress?.toLowerCase();
-    const peerIdLc = this.peerId?.toLowerCase();
-    const canonicaliseWmId = (addr: string | undefined): string | undefined => {
-      if (!addr) return undefined;
-      const lc = addr.toLowerCase();
-      if (peerIdLc && lc === peerIdLc && defaultEvmLc) return defaultEvmLc;
-      return lc;
-    };
+    const resolveWmIdentity = (address: string | undefined) => resolveWorkingMemoryIdentityAliases(
+      { defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, address, (value) => value.toLowerCase(),
+    );
+    const canonicaliseWmId = (address: string | undefined) => resolveWmIdentity(address).canonicalAddress;
 
     // An authenticated (agent-bound) /api/query call could previously
     // OMIT `agentAddress` and fall through to the `this.peerId`
@@ -590,10 +592,7 @@ export class QueryMethods extends DKGAgentBase {
     // alias-aware (`canonicaliseWmId`), so both forms resolve to the
     // same canonical identity and still pass the caller===target
     // invariant.
-    const callerIsDefaultAgent =
-      !!callerAgentAddressStr
-      && !!defaultEvmLc
-      && callerAgentAddressStr.toLowerCase() === defaultEvmLc;
+    const callerIsDefaultAgent = resolveWmIdentity(callerAgentAddressStr).isDefaultAgentAddress;
     const agentAddressStr =
       opts.agentAddress
       ?? (opts.view === 'working-memory' && callerAgentAddressStr
@@ -629,28 +628,29 @@ export class QueryMethods extends DKGAgentBase {
     // era of WM data is stranded. Aliases never cross identities: they are
     // only emitted when the target IS the default agent (per
     // `canonicaliseWmId`), so A-1 isolation is unaffected.
-    let wmAddressAliases: string[] | undefined;
-    if (
-      opts.view === 'working-memory' &&
-      effectiveWmAddress &&
-      defaultEvmLc &&
-      peerIdLc &&
-      (effectiveWmAddress.toLowerCase() === defaultEvmLc || effectiveWmAddress.toLowerCase() === peerIdLc)
-    ) {
-      wmAddressAliases =
-        effectiveWmAddress.toLowerCase() === defaultEvmLc ? [this.peerId!] : [this.defaultAgentAddress!];
-    }
+    const wmAddressAliases = opts.view === 'working-memory'
+      ? resolveWmIdentity(effectiveWmAddress).aliases : undefined;
+    // Ordinary dashboard scans may read only the authenticated caller's drafts.
+    // Explicit exclusion (the bounded product route) grants no draft owners.
+    const partitionOwner = callerAgentAddressStr ?? this.defaultAgentAddress ?? this.peerId;
 
-    const execute = () => withPublicSnapshotQueryTrust(this.store, opts.contextGraphId, opts.chainEvidenceMode, () => this.queryEngine.query(sparql, {
+    const execute = () => {
+      opts.signal?.throwIfAborted();
+      return queryWithPublicSnapshotTrust(this.store, this.queryEngine, sparql, {
       contextGraphId: opts.contextGraphId,
+      requireCompleteGraphScope: opts.requireCompleteGraphScope,
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
+      includeSharedMemoryMeta: opts.includeSharedMemoryMeta,
+      draftAccess: opts.excludeWorkingMemoryPartitions === true || !partitionOwner ? { kind: 'none' }
+        : { kind: 'owners', owners: [partitionOwner, ...(resolveWmIdentity(partitionOwner).aliases ?? [])] },
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,
       source: opts.source,
       maxResponseBytes: opts.maxResponseBytes,
+      maxLiteralHydrationBytes: opts.maxLiteralHydrationBytes,
       view: opts.view,
       agentAddress: effectiveWmAddress,
       agentAddressAliases: wmAddressAliases,
@@ -662,7 +662,8 @@ export class QueryMethods extends DKGAgentBase {
       // callers on the legacy shape still get the trust gate without
       // engines needing to know about both names.
       minTrust: opts.minTrust ?? opts._minTrust,
-    }), {signal:opts.signal,priority:opts.priority,source:opts.source});
+      }, opts.chainEvidenceMode, { signal: opts.signal, priority: opts.priority, source: opts.source });
+    };
     // Arbitrary unscoped SPARQL can reveal private data through aggregates or
     // projections without a graph column. The executor owns admission and both
     // local consistency checks, including the release of the materialized result.
@@ -719,7 +720,7 @@ export class QueryMethods extends DKGAgentBase {
       () => this.resolveContextGraphReadAuthority(contextGraphId, readOpts),
     );
     onReadAuthorityDecision?.(decision);
-    return decision.outcome === 'allowed';
+    return observedReadAuthorityDecision(contextGraphId, decision).outcome === 'allowed';
   }
 
   /** Candidate owners that must enter the same canonical authority resolver as scoped reads. */
@@ -1021,11 +1022,12 @@ export class QueryMethods extends DKGAgentBase {
       ?? [];
     return {
       contextGraphId,
+      signal: opts.signal,
       callerAgentAddress: opts.callerAgentAddress,
       allowSubscriptionFallback: opts.allowSubscriptionFallback !== false,
       isSystemContextGraph: (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId),
       getPeerId: () => this.peerId,
-      getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId),
+      getAllowedPeers: () => this.getContextGraphAllowedPeers(contextGraphId, { signal: opts.signal }),
       getRegisteredAuthority: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.readRegistered,
         () => this.resolveRegisteredContextGraphAuthority(
@@ -1066,12 +1068,12 @@ export class QueryMethods extends DKGAgentBase {
       ),
       isPendingMetadata:
         this.subscribedContextGraphs.get(contextGraphId)?.pendingMeta === true,
-      isPrivateLocalGraph: () => this.isPrivateContextGraph(contextGraphId),
+      isPrivateLocalGraph: () => this.isPrivateContextGraph(contextGraphId, { signal: opts.signal }),
       getLocalAgentGate: () => withRpcUsageSite(
         CG_AUTH_RPC_SITES.readLocalGate,
-        () => this.getContextGraphAgentGateAddresses(contextGraphId),
+        () => this.getContextGraphAgentGateAddresses(contextGraphId, { signal: opts.signal }),
       ),
-      getLegacyParticipants: () => this.getPrivateContextGraphParticipants(contextGraphId),
+      getLegacyParticipants: () => this.getPrivateContextGraphParticipants(contextGraphId, { signal: opts.signal }),
       // A crash-safe join approval may restore a restricted pending-metadata
       // row before ordinary read authority is proven. Its durable subscription
       // intent must not become the legacy subscription authorization fallback.

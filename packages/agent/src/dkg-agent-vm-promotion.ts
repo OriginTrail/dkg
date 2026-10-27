@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { requireStorageAckLedgerTimestamp, markStorageAckLedgerTimestamp } from './internal/storage-ack-ledger-timestamp-writer.js';
 
 /**
  * Core VM-promotion guarantees: the StorageACK finality gate, the signed-ACK
@@ -18,9 +19,7 @@ import {
 import {
   STORAGE_ACK_LEDGER_GRAPH,
   STORAGE_ACK_LEDGER_PREDICATES as LEDGER,
-  storageAckLedgerMarkUpdate,
   storageAckOperationId,
-  xsdDateTimeLiteral,
   type StorageAckPriorVersionRequest,
   type StorageAckVmPromotionRequest,
   type StorageAckVmPromotionVerdict,
@@ -35,6 +34,7 @@ import {
   type CoreHostedPublicCgRecordOutcome,
 } from './core-hosted-public-cg-record-decision.js';
 import { DEFAULT_SWM_TTL_MS } from './dkg-agent-constants.js';
+import { noteCoreHostedStorageAck } from './core-hosted-definition.js';
 import { deterministicStartupJitterMs, scheduleAfterStartupJitter } from './startup-jitter.js';
 import { resolveVmReconcilerEnabled } from './sync/backpressure.js';
 import { storageAckGrandfatherUpdate } from './storage-ack-retention.js';
@@ -199,6 +199,8 @@ export class VmPromotionMethods extends DKGAgentBase {
     switch (outcome) {
       case 'recorded':
       case 'already-recorded':
+        // While the definition is missing, a requester the owner tied to the graph is asked for it.
+        noteCoreHostedStorageAck(this, localCgId, request.publisherPeerId);
         return { ok: true };
       case 'curated':
         // A curated graph's plaintext never belongs in a core's VM; curated
@@ -224,7 +226,7 @@ export class VmPromotionMethods extends DKGAgentBase {
         this.storageAckDormantSince.set(localCgId, since);
         const selfClearing = reason === 'authorityUnavailable' || reason === 'activationCap';
         if (selfClearing && now - since < STORAGE_ACK_DORMANT_TRANSIENT_MS) {
-          if (reason === 'activationCap') this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+          if (reason === 'activationCap') this.requestContextGraphSubscriptionPromotion(localCgId);
           return unavailable(`the graph subscription on this core is not active yet (${reason})`);
         }
         return disabled(
@@ -363,7 +365,7 @@ export class VmPromotionMethods extends DKGAgentBase {
 
   /** Background RPC class and store lane for every audit read and write. */
   runVmPromotionInBackground<T>(this: DKGAgent, work: () => Promise<T>): Promise<T> {
-    const signal = this.vmReconcileLifecycleController?.signal;
+    const signal = this.workLifetime?.signal;
     return withOwnedRpcRequestContext(
       { requestClass: 'background', ...(signal ? { signal } : {}) },
       () => withDefaultStoreWorkPriority('background', work),
@@ -422,15 +424,12 @@ export class VmPromotionMethods extends DKGAgentBase {
         }
         if (since !== null) {
           await this.store.update(storageAckGrandfatherUpdate(now.toISOString(), since), options);
-          await this.store.update(
-            storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.grandfatheredThrough, now),
-            options,
-          );
+          await requireStorageAckLedgerTimestamp(this.storageAckLedgerTimestampWriter, STORAGE_ACK_LEDGER_GRAPH, LEDGER.grandfatheredThrough, now, options);
         }
         if (instant(row?.['epoch']) === undefined) {
-          await this.store.update(storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.epoch, now), options);
+          await requireStorageAckLedgerTimestamp(this.storageAckLedgerTimestampWriter, STORAGE_ACK_LEDGER_GRAPH, LEDGER.epoch, now, options);
         }
-        await this.store.update(storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.seenAt, now), options);
+        await requireStorageAckLedgerTimestamp(this.storageAckLedgerTimestampWriter, STORAGE_ACK_LEDGER_GRAPH, LEDGER.seenAt, now, options);
         this.storageAckLedgerReady = true;
         this.vmPromotionAuditStatus.ledgerReady = true;
         return true;
@@ -570,9 +569,9 @@ export class VmPromotionMethods extends DKGAgentBase {
       status.retriesTriggered += audit.reconciled;
       status.promotedByAudit += audit.promoted;
       status.lastError = ledgerReady ? null : 'StorageACK ledger is not ready (pre-ledger copies not grandfathered yet)';
-      if (ledgerReady) {
-        await this.store.update?.(
-          storageAckLedgerMarkUpdate(STORAGE_ACK_LEDGER_GRAPH, LEDGER.seenAt, new Date()),
+      if (ledgerReady && this.store.update) {
+        await this.storageAckLedgerTimestampWriter(
+          STORAGE_ACK_LEDGER_GRAPH, LEDGER.seenAt, new Date(),
           {
             source: 'agent.storageAckLedger.seen',
             priority: 'background',
@@ -1160,19 +1159,7 @@ export class VmPromotionMethods extends DKGAgentBase {
 
   /** Set one timestamp on a ledger row in a single store update (no delete-then-insert window). */
   async markStorageAckLedger(this: DKGAgent, operationSubject: string, predicate: string, at: number): Promise<void> {
-    if (typeof this.store.update === 'function') {
-      await this.store.update(storageAckLedgerMarkUpdate(operationSubject, predicate, new Date(at)), {
-        source: 'agent.storageAckLedger.mark',
-        touchedGraphs: STORAGE_ACK_LEDGER_TOUCHED_GRAPHS,
-      });
-      return;
-    }
-    await this.store.insert([{
-      subject: operationSubject,
-      predicate,
-      object: xsdDateTimeLiteral(new Date(at)),
-      graph: STORAGE_ACK_LEDGER_GRAPH,
-    }], { source: 'agent.storageAckLedger.mark' });
+    await markStorageAckLedgerTimestamp(this.store, this.storageAckLedgerTimestampWriter, operationSubject, predicate, at);
   }
 
   /**
@@ -1244,7 +1231,7 @@ export class VmPromotionMethods extends DKGAgentBase {
 
   /** The lane a declined update's prior-version promotion runs in (see {@link promoteStorageAckPriorVersion}). */
   runStorageAckPriorVersionPromotion<T>(this: DKGAgent, work: () => Promise<T>): Promise<T> {
-    const signal = this.vmReconcileLifecycleController?.signal;
+    const signal = this.workLifetime?.signal;
     return withOwnedRpcRequestContext(
       { requestClass: 'foreground', admissionPriority: 'authority', ...(signal ? { signal } : {}) },
       () => withDefaultStoreWorkPriority('normal', work),

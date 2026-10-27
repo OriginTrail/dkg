@@ -1,4 +1,5 @@
-import { sealPublicGraphSnapshot } from "@origintrail-official/dkg-chain";
+import { fixtureRoot } from './verified-asset-root-fixture.js';
+import { normalizePublicGraphSnapshot, sealPublicGraphSnapshot } from "@origintrail-official/dkg-chain";
 import { ethers } from "ethers";
 import { PublicSnapshotEvidence } from "../src/public-snapshot-evidence.js";
 import { materializeVerifiedGraphScopedAsset } from "../src/sync/requester/graph-scoped-materialization.js";
@@ -311,7 +312,8 @@ describe('graph-scoped finalization handler', () => {
       onChainId:'42',nameHash:ethers.id(CG),contextGraphStorage:AUTHOR,assetStorage:AUTHOR,blockNumber:String(block),
       blockHash:RECOVERY_BLOCK_HASH,finalityConfirmations:1,observedAt:Date.now(),expiresAt:Date.now()+10000,
       accessPolicy:0,assets:[{id:PACKED_KA_ID.toString(),root:ethers.hexlify(root),version:'2'}]});
-    const imported = new PublicSnapshotEvidence({snapshot,mode:'core-cache',sourceCore:'core'},()=>true).authenticate({
+    const imported = new PublicSnapshotEvidence({snapshot:normalizePublicGraphSnapshot(snapshot, snapshot),mode:'core-cache',sourceCore:'core'},()=>true).authenticate({
+      merkleRootHex: fixtureRoot(metadataQuads),
       contextGraphId:CG,ual:UAL,assertionVersion:2n,assertionGraph:vmGraph,metaGraph,dataQuads,metadataQuads});
     expect(await materializeVerifiedGraphScopedAsset({store,asset:imported.asset})).toBe('applied');
     const query = `SELECT ?s ?p ?o WHERE { GRAPH <${vmGraph}> { ?s ?p ?o } } ORDER BY ?s ?p ?o`;

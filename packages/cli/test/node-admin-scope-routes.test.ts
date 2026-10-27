@@ -1,3 +1,4 @@
+import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import type { ServerResponse } from 'node:http';
 import { Readable } from 'node:stream';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -10,6 +11,7 @@ import { handleLocalAgentsRoutes } from '../src/daemon/routes/local-agents.js';
 import { handlePublisherRoutes } from '../src/daemon/routes/publisher.js';
 import { handleStatusRoutes } from '../src/daemon/routes/status.js';
 import { handleSharedMemoryTtlSettingsRequest } from '../src/daemon/shared-memory-ttl-route.js';
+import { sanitizeRfc64FinalizedPrivatePlacementQueueV1 } from '../src/daemon/routes/rfc64-status-contract.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 // Node-wide operations accept only callers that can administer the node: a
@@ -378,4 +380,106 @@ describe('shared memory TTL setting', () => {
     expect((await ttl('POST', '/api/settings/shared-memory-ttl', OPERATOR)).handled).toBe(false);
     expect((await ttl('PUT', '/api/settings/retention', OPERATOR)).handled).toBe(false);
   });
+});
+
+
+describe('private placement operator retry', () => {
+  const path = '/api/rfc64/private-placement/retry-failed';
+  it('denies agent-scoped callers before scheduling any work', async () => {
+    const retryRfc64FailedPrivatePlacementsV1 = vi.fn(() => 2);
+    const result = await callRoute(handleStatusRoutes, 'POST', path, AGENT, { agent: { retryRfc64FailedPrivatePlacementsV1 } });
+    expect(result.status).toBe(403); expect(retryRfc64FailedPrivatePlacementsV1).not.toHaveBeenCalled();
+  });
+  it.each([OPERATOR, AUTH_DISABLED])('accepts node administration and returns only the scheduled count', async (authentication) => {
+    const retryRfc64FailedPrivatePlacementsV1 = vi.fn(() => 2);
+    expect(await callRoute(handleStatusRoutes, 'POST', path, authentication, { agent: { retryRfc64FailedPrivatePlacementsV1 } }))
+      .toEqual({ status: 202, body: { requested: 2 } });
+    expect(retryRfc64FailedPrivatePlacementsV1).toHaveBeenCalledTimes(1);
+  });
+  it('contains private persistence errors without claiming retry succeeded', async () => {
+    const retryRfc64FailedPrivatePlacementsV1 = () => { throw new Error('private marker SECRET'); };
+    const result = await callRoute(handleStatusRoutes, 'POST', path, OPERATOR, { agent: { retryRfc64FailedPrivatePlacementsV1 } });
+    expect(result.status).toBe(503); expect(result.body.code).toBe('PRIVATE_PLACEMENT_RETRY_UNAVAILABLE');
+    expect(JSON.stringify(result)).not.toContain('SECRET');
+  });
+});
+
+
+it('exposes only bounded private-placement failure aggregates and rejects forged kinds/counts', () => {
+  const failures = { failedMarkers: 2, parkedMarkers: 1, maxConsecutiveFailures: 3, oldestFailureAgeMs: 90000,
+    kinds: [{ kind: 'signer_mismatch', count: 2, repairId: 'SECRET' }], authorAddress: 'SECRET', error: 'SECRET' };
+  const queue = { depth: 2, waiters: 0, cooldownSkips: 3, passRunning: false,
+    oldestWaiterAgeMs: null, lastPassDurationMs: 4, failures };
+  const sanitized = sanitizeRfc64FinalizedPrivatePlacementQueueV1(queue);
+  expect(sanitized?.failures).toEqual({ failedMarkers: 2, parkedMarkers: 1,
+    maxConsecutiveFailures: 3, oldestFailureAgeMs: 90000, kinds: [{ kind: 'signer_mismatch', count: 2 }] });
+  expect(JSON.stringify(sanitized)).not.toContain('SECRET');
+  for (const bad of [{ ...failures, kinds: [{ kind: 'SECRET', count: 2 }] },
+    { ...failures, parkedMarkers: 3 }, { ...failures, kinds: [{ kind: 'unknown', count: 1 }] },
+    { ...failures, kinds: Array(15).fill({ kind: 'unknown', count: 1 }) },
+    { ...failures, oldestFailureAgeMs: -1 }]) {
+    expect(sanitizeRfc64FinalizedPrivatePlacementQueueV1({ ...queue, failures: bad })?.failures).toBeUndefined();
+  }
+});
+
+
+it('sanitizes every declared agent failure kind without dropping the aggregate', async () => {
+  const { CATALOG_REPAIR_FAILURE_KINDS_V1 } = await import('../../agent/src/rfc64/private-placement-failure-state-v1.js');
+  const kinds = CATALOG_REPAIR_FAILURE_KINDS_V1.map(kind => ({ kind, count: 1 }));
+  const failures = { failedMarkers: kinds.length, parkedMarkers: 0, maxConsecutiveFailures: 1, oldestFailureAgeMs: 10, kinds };
+  const queue = { depth: kinds.length, waiters: 0, cooldownSkips: 0, passRunning: false,
+    oldestWaiterAgeMs: null, lastPassDurationMs: 4, failures };
+  expect(sanitizeRfc64FinalizedPrivatePlacementQueueV1(queue)?.failures).toEqual(failures);
+});
+
+
+describe('published descriptor repair authority', () => {
+  it('rejects agent scope before parsing the body or accessing the asset', async () => {
+    const repairPublishedKnowledgeAssetDescriptor = vi.fn();
+    const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST',
+      '/api/knowledge-assets/asset/vm/repair-descriptor', AGENT,
+      { body: '{invalid', agent: { repairPublishedKnowledgeAssetDescriptor } });
+    expect(result.status).toBe(403);
+    expect(repairPublishedKnowledgeAssetDescriptor).not.toHaveBeenCalled();
+  });
+});
+
+
+describe('authorized published descriptor repair contract', () => {
+  const input = { contextGraphId: 'repair-cg', kaUal: 'did:dkg:evm:31337/0x00000000000000000000000000000000000000a1/402' };
+  it.each([undefined, true, false])('passes dryRun=%s explicitly to the SDK', async dryRun => {
+    const repairPublishedKnowledgeAssetDescriptor = vi.fn(async () => ({ status: dryRun === false ? 'repaired' : 'verified' }));
+    const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST',
+      '/api/knowledge-assets/asset/vm/repair-descriptor', OPERATOR, {
+        body: JSON.stringify({ ...input, dryRun }), agent: { repairPublishedKnowledgeAssetDescriptor,
+          listContextGraphs: vi.fn(async () => [{ id: input.contextGraphId, subscribed: true, synced: true }]) },
+      });
+    expect(result).toEqual({ status: 200, body: { status: dryRun === false ? 'repaired' : 'verified' } });
+    expect(repairPublishedKnowledgeAssetDescriptor).toHaveBeenCalledExactlyOnceWith({ ...input, name: 'asset', lifecycleOwner: undefined, subGraphName: undefined, dryRun: dryRun !== false });
+  });
+  it.each([null, 0, 1, 'false', {}, []])('rejects non-boolean dryRun=%j before SDK access', async dryRun => {
+    const repairPublishedKnowledgeAssetDescriptor = vi.fn();
+    const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST',
+      '/api/knowledge-assets/asset/vm/repair-descriptor', OPERATOR,
+      { body: JSON.stringify({ ...input, dryRun }), agent: { repairPublishedKnowledgeAssetDescriptor } });
+    expect(result.status).toBe(400);
+    expect(repairPublishedKnowledgeAssetDescriptor).not.toHaveBeenCalled();
+  });
+});
+
+
+it('passes an explicit lifecycle owner separately from the confirmed UAL', async () => {
+  const input = { contextGraphId: 'repair-cg', kaUal: 'did:dkg:evm:31337/0x00000000000000000000000000000000000000a1/402', lifecycleOwner: '12D3KooWLifecycleOwner' };
+  const repairPublishedKnowledgeAssetDescriptor = vi.fn(async () => ({ status: 'verified' }));
+  const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST', '/api/knowledge-assets/asset/vm/repair-descriptor', OPERATOR,
+    { body: JSON.stringify(input), agent: { repairPublishedKnowledgeAssetDescriptor,
+      listContextGraphs: vi.fn(async () => [{ id: input.contextGraphId, subscribed: true, synced: true }]) } });
+  expect(result.status).toBe(200);
+  expect(repairPublishedKnowledgeAssetDescriptor).toHaveBeenCalledExactlyOnceWith({ ...input, name: 'asset', subGraphName: undefined, dryRun: true });
+});
+it.each([null, 42, '', ' owner ', 'x'.repeat(257)])('rejects invalid lifecycleOwner=%j before SDK access', async lifecycleOwner => {
+  const repairPublishedKnowledgeAssetDescriptor = vi.fn();
+  const result = await callRoute(handleKnowledgeAssetsRoutes, 'POST', '/api/knowledge-assets/asset/vm/repair-descriptor', OPERATOR,
+    { body: JSON.stringify({ contextGraphId: 'repair-cg', kaUal: 'ual', lifecycleOwner }), agent: { repairPublishedKnowledgeAssetDescriptor } });
+  expect(result.status).toBe(400); expect(repairPublishedKnowledgeAssetDescriptor).not.toHaveBeenCalled();
 });

@@ -46,15 +46,27 @@ describe('FocusFilter', () => {
     expect(result.nodes.size).toBeLessThanOrEqual(5);
   });
 
+  it('reselects a valid focal resource when refreshed data replaces the old graph', () => {
+    buildStar(model, 'urn:old-hub', 10);
+    const filter = new FocusFilter({ maxNodes: 5, hops: 1 });
+    expect(filter.compute(model).nodes.has('urn:old-hub')).toBe(true);
+    model.clear(); buildStar(model, 'urn:new-hub', 10);
+    const result = filter.compute(model);
+    expect(result.nodes.has('urn:new-hub')).toBe(true);
+    expect(result.nodes.size).toBe(5);
+    expect(result.nodes.has('urn:old-hub')).toBe(false);
+  });
+
   it('respects hops config — only includes nodes within N hops', () => {
     buildChain(model, 20);
     const filter = new FocusFilter({ maxNodes: 5, hops: 1, focalNode: 'urn:node10' });
     const result = filter.compute(model);
 
-    expect(result.nodes.has('urn:node10')).toBe(true);
-    expect(result.nodes.has('urn:node9') || result.nodes.has('urn:node11')).toBe(true);
-    // 3+ hops away should not be visible
-    expect(result.nodes.has('urn:node0')).toBe(false);
+    expect(new Set(result.nodes.keys())).toEqual(new Set(['urn:node9', 'urn:node10', 'urn:node11']));
+    expect(result.edges.size).toBe(2);
+    expect(result.nodes.get('urn:node10')?.isBoundary).toBe(false);
+    expect(result.nodes.get('urn:node9')?.isBoundary).toBe(true);
+    expect(result.nodes.get('urn:node11')?.isBoundary).toBe(true);
   });
 
   it('respects maxNodes — stops BFS when limit reached', () => {
@@ -153,5 +165,23 @@ describe('FocusFilter', () => {
     const result = filter.compute(model);
     expect(result.nodes.size).toBe(0);
     expect(result.edges.size).toBe(0);
+  });
+});
+
+
+describe('FocusFilter empty and zero-hop boundaries', () => {
+  it('permits empty focus results without a focal node', () => {
+    const focus = new FocusFilter({ maxNodes: -1 });
+    expect(focus.compute(new GraphModel())).toEqual({ nodes: new Map(), edges: new Map() });
+  });
+  it('limits a zero-hop focus to its focal node and can re-enable without changing that node', () => {
+    const model = new GraphModel();
+    model.addTriples([{ subject: 'urn:a', predicate: 'urn:p', object: 'urn:b' }, { subject: 'urn:b', predicate: 'urn:p', object: 'urn:c' }]);
+    const focus = new FocusFilter({ maxNodes: 2, hops: 0 });
+    focus.enable('urn:b');
+    expect([...focus.compute(model).nodes.keys()]).toEqual(['urn:b']);
+    focus.disable();
+    focus.enable();
+    expect(focus.focalNode).toBe('urn:b');
   });
 });
