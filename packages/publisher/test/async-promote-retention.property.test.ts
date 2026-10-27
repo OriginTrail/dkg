@@ -64,7 +64,13 @@ async function oneCase(seed: number, tally: Tally): Promise<void> {
     await pass();                                                                        // phase 1: now = NOW, admissions pending
     t = NOW + 2_000; await pass();                                                       // phase 2: the clock moves a little, admissions still pending
     t = t - 30 * 60_000; await pass();                                                   // phase 3: a clock that stepped back (the guard skips the tick) ...
-    t = NOW + 5_000; await pass();                                                       // ... and back to the right time (half an hour later: skipped as a jump)
+    t = NOW + 5_000; await pass();                                                       // ... and back to the right time (the skipped tick was no sweep start: this one runs)
+    const clockSkipsBefore = tally.clockSkips;
+    for (let tick = 0; tick < 3; tick++) {                                               // phase 3b: a clock a year ahead (the monotonic clock did not move): EVERY tick is skipped, nothing is flagged
+      t = NOW + 400 * 86_400_000 + tick * INTERVAL; await pass();
+      expect(passes[passes.length - 1], `a far-future clock flagged a job at tick ${tick}`).toEqual([]);
+    }
+    expect(tally.clockSkips, 'the far-future ticks were not skipped').toBeGreaterThanOrEqual(clockSkipsBefore + 3);
     for (const flight of flights) flight.clear();
     t = NOW + 9_000; await pass();                                                       // phase 4: admissions settled
     t = NOW + 13_000; await pass();

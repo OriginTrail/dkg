@@ -496,6 +496,7 @@ describe('retention scan progress (keyset cursor): rows that cannot be deleted n
     engine = 'conforming';                                                                           // the engine is fixed: the SAME sweep (same cursors) must still reach every deletable row
     for (let i = 0; i < 12; i++) await retention.runBatch();
     expect((await storedIds(store)).size).toBe(120);
+    expect(retention.counters().lastCompletePass).toBeUndefined();                                   // the pass that met the anomaly publishes no summary (its tally counted rows twice)
   });
 });
 

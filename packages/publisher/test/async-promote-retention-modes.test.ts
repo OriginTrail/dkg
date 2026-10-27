@@ -11,7 +11,7 @@ import { createShareRetention, type ShareRetentionBatchResult } from '../src/asy
 import { emptyClassCounts } from '../src/async-promote-retention-policy.js';
 import {
   AG, GRAPH, NOW, W, WF, DELETABLE_KINDS, captureLogger, drain, genPopulation, graphFingerprint, insertQuads, mk, newRetention, pick, present, put,
-  registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, type Logged,
+  registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, type Logged, type QueryResult,
 } from './_helpers/share-retention-fixtures.js';
 
 const MUTATIONS = new Set(['insert', 'delete', 'deleteByPattern', 'deleteByPatternWithoutCount', 'update', 'flush', 'replaceSubject', 'createGraph']);
@@ -168,6 +168,29 @@ describe('the report gauge: the would-delete count by class of the latest comple
     expect(pass2.wouldDelete).toEqual({ succeeded: 3, cancelled: 2, retired_no_effect: 2 });   // not 6 / 4 / 4
     expect(pass2.completedAt).toBe(t);
     expect(retention.counters().deleted).toEqual(emptyClassCounts());
+  });
+
+  it('a scan that breaks the ORDER BY contract poisons its pass: the rows the sweep judged twice are never published as the gauge, the next clean pass is', async () => {
+    const store = new OxigraphStore();
+    await put(store, ...Array.from({ length: 6 }, (_, i) => mk(`s${i}`, 'succeeded', {}, 10 * W + i * 1000)));
+    let unordered = true;
+    const { store: spied } = spy(store, async (_sparql, source, run) => {
+      const res = await run();
+      if (!unordered || source !== 'publisher.asyncPromote.retention.scan' || res.type !== 'bindings') return res;
+      unordered = false;                                                                 // one non-conforming answer: newest first
+      return { ...res, bindings: [...res.bindings].reverse() } as QueryResult;
+    });
+    let t = NOW;
+    const retention = newRetention(spied, { mode: 'report', now: () => t, rescanIntervalMs: 1000 });
+    expect(await retention.runBatch()).toMatchObject({ anomalies: 1, wouldDelete: 6, hasMore: true, passCompleted: false });
+    const second = await retention.runBatch();                                           // the cursor did not move on the broken answer: the same six rows again
+    expect(second).toMatchObject({ anomalies: 0, wouldDelete: 6, hasMore: false, passCompleted: false });
+    expect(retention.counters().lastCompletePass).toBeUndefined();                       // not { succeeded: 12 }: a pass that met an anomaly never completes
+    t += 2000;                                                                           // the safety rescan starts a fresh pass
+    const clean = await drain(retention);
+    expect(clean.filter(r => r.passCompleted)).toHaveLength(1);
+    expect(retention.counters().lastCompletePass).toMatchObject({ scanned: 6, wouldDelete: { succeeded: 6, cancelled: 0, retired_no_effect: 0 } });
+    expect(retention.counters().anomalies).toBe(1);
   });
 
   it('follows the population: rows that left or arrived between passes change the next complete pass, and only that one', async () => {
@@ -339,72 +362,108 @@ describe('fault injection between sibling deletes', () => {
 
 describe('the clock guard', () => {
   const INTERVAL = 60_000;
+  const DAY = 24 * 3_600_000;
+  // `tick(ms)`: time passes (a timer fires late, a batch runs long): both clocks advance. `leap(ms)`: the wall clock steps and the monotonic clock does not.
   const rig = async (over: Record<string, unknown> = {}) => {
     const store = new OxigraphStore();
     const { store: spied, log } = spy(store);
     const clock = { wall: NOW, mono: 0 };
+    const tick = (ms: number) => { clock.wall += ms; clock.mono += ms; };
+    const leap = (ms: number) => { clock.wall += ms; };
     const logger = captureLogger();
     const retention = newRetention(spied, { intervalMs: INTERVAL, now: () => clock.wall, monotonicNow: () => clock.mono, logger, batchSize: 100, ...over });
-    return { store, spied, log, clock, logger, retention };
+    return { store, spied, log, clock, tick, leap, logger, retention };
   };
 
-  it('runs the first tick, and a tick on schedule, and a tick at exactly k intervals; skips one later than that', async () => {
-    const { store, clock, retention } = await rig();
+  it('runs the first tick, a tick on schedule, and a leap of exactly the tolerance (k intervals); skips one beyond it', async () => {
+    const { store, tick, leap, retention } = await rig();
     await put(store, ...Array.from({ length: 4 }, (_, i) => mk(`s${i}`, 'succeeded', {}, 10 * W + i)));
     expect((await retention.runBatch()).skipped).toBeUndefined();
-    clock.wall += INTERVAL;
+    tick(INTERVAL);
     expect((await retention.runBatch()).skipped).toBeUndefined();
-    clock.wall += 3 * INTERVAL;                                                         // exactly clockGuardFactor (3) intervals after the previous start
+    leap(3 * INTERVAL);                                                                 // exactly clockGuardFactor (3) intervals ahead of the monotonic clock
     expect((await retention.runBatch()).skipped).toBeUndefined();
-    clock.wall += 3 * INTERVAL + 1;
+    leap(3 * INTERVAL + 1);
     expect(await retention.runBatch()).toMatchObject({ skipped: 'clock_jump', scanned: 0, deleted: 0 });
     expect(retention.counters().skipped.clock_jump).toBe(1);
   });
 
-  it('skips a tick when the clock stepped back, makes no store call, and resumes on the next tick (the skipped tick re-baselines the guard)', async () => {
-    const { store, log, clock, logger, retention } = await rig();
+  it('skips every tick while the clock is behind the last sweep start (a skipped tick is not a sweep start), makes no store call, and resumes once it has caught up; a later leap is still caught', async () => {
+    const { store, log, tick, leap, logger, retention } = await rig();
     await put(store, mk('s1', 'succeeded', {}, 100 * W));
     await retention.runBatch();
     expect(await present(store, 's1')).toBe('');
     const calls = log.length;
-    clock.wall -= 1_800_000;                                                             // half an hour back
+    const BACK = 1_800_000;
+    leap(-BACK);                                                                         // half an hour back
     expect(await retention.runBatch()).toMatchObject({ skipped: 'clock_backwards', scanned: 0, deleted: 0 });
-    expect(log.length).toBe(calls);
     expect(logger.warns.at(-1)).toContain('skipped=clock_backwards');
     await put(store, mk('s2', 'succeeded', {}, 50 * W));                                 // 50 minutes old by the right clock, 20 by this one: old enough either way
-    clock.wall += INTERVAL;
+    for (let elapsed = INTERVAL; elapsed < BACK; elapsed += INTERVAL) {                  // still behind the last sweep start
+      tick(INTERVAL);
+      expect((await retention.runBatch()).skipped, `after ${elapsed} ms`).toBe('clock_backwards');
+    }
+    expect(log.length).toBe(calls);                                                      // the skipped ticks made no store call
+    expect(await present(store, 's2')).not.toBe('');
+    tick(INTERVAL);                                                                      // caught up with the start of the last sweep
     expect((await retention.runBatch()).skipped).toBeUndefined();
     expect(await present(store, 's2')).toBe('');
-    expect(retention.counters().skipped.clock_backwards).toBe(1);
+    expect(retention.counters().skipped.clock_backwards).toBe(BACK / INTERVAL);
+    leap(365 * DAY);                                                                     // a forward leap after the step back is a jump against the baseline of the tick that ran
+    expect((await retention.runBatch()).skipped).toBe('clock_jump');
   });
 
-  it('a forward leap deletes nothing even though every row now looks old; the next tick, on schedule again, judges by the new clock', async () => {
-    const { store, log, clock, retention } = await rig();
-    await put(store, mk('young', 'succeeded', {}, W / 2), mk('old', 'succeeded', {}, 10 * W));
+  it('a clock that stepped back and returns is not a jump: the next tick runs at once', async () => {
+    const { store, tick, leap, retention } = await rig();
+    await put(store, mk('s1', 'succeeded', {}, 100 * W));
     await retention.runBatch();
-    expect(await present(store, 'old')).toBe('');
-    expect(await present(store, 'young')).not.toBe('');
-    const calls = log.length;
-    clock.wall += 10 * W;                                                               // the clock leaps: 'young' would now count as 10 minutes old
-    expect(await retention.runBatch()).toMatchObject({ skipped: 'clock_jump', deleted: 0 });
-    expect(log.length).toBe(calls);
-    expect(await present(store, 'young')).not.toBe('');
-    clock.wall += INTERVAL;
+    leap(-1_800_000);
+    expect((await retention.runBatch()).skipped).toBe('clock_backwards');
+    await put(store, mk('s2', 'succeeded', {}, 50 * W));
+    leap(1_800_000);                                                                     // the clock is right again
+    tick(INTERVAL);
     expect((await retention.runBatch()).skipped).toBeUndefined();
-    expect(await present(store, 'young')).toBe('');
+    expect(await present(store, 's2')).toBe('');
   });
 
-  it('allows for the time the previous batch itself took (the caller paces ticks from the end of a batch)', async () => {
+  it('a forward leap is skipped and NEVER trusted afterwards: with the production 7-day windows rows that are really a minute old survive every later tick on the leapt clock, and the sweep resumes when the clock comes back', async () => {
+    const { store, log, tick, leap, retention } = await rig({ succeededMaxAgeMs: 7 * DAY, benignFailedMaxAgeMs: 7 * DAY });
+    await put(store, mk('old', 'succeeded', {}, 8 * DAY));
+    expect((await retention.runBatch()).skipped).toBeUndefined();                       // tick 1 runs
+    expect(await present(store, 'old')).toBe('');
+    await put(store, mk('young-s', 'succeeded', {}, INTERVAL), mk('young-c', 'failed', { reason: 'cancelled' }, INTERVAL));   // really one minute old
+    const calls = log.length;
+    leap(365 * DAY);                                                                     // the clock jumps a year ahead: both would now count as a year old
+    for (let i = 0; i < 6; i++) {                                                        // the jump, then every following tick on schedule on the leapt clock
+      expect(await retention.runBatch(), `tick ${i + 2}`).toMatchObject({ skipped: 'clock_jump', scanned: 0, deleted: 0 });
+      tick(INTERVAL);
+    }
+    expect(log.length).toBe(calls);                                                      // not a single store call
+    expect(await present(store, 'young-s')).not.toBe('');
+    expect(await present(store, 'young-c')).not.toBe('');
+    expect(retention.counters().skipped.clock_jump).toBe(6);
+    expect(retention.counters().deleted).toEqual({ succeeded: 1, cancelled: 0, retired_no_effect: 0 });
+    await put(store, mk('aged', 'succeeded', {}, 7.5 * DAY));                            // a row that really is old enough, waiting
+    leap(-365 * DAY);                                                                    // the clock comes back
+    expect(await retention.runBatch()).toMatchObject({ deleted: 1 });
+    expect(await present(store, 'aged')).toBe('');
+    expect(await present(store, 'young-s')).not.toBe('');                                // still really young by the sound clock
+    expect(await present(store, 'young-c')).not.toBe('');
+  });
+
+  it('a late timer or a batch that runs long is not a jump (both clocks advance), and never wedges the sweep', async () => {
     const store = new OxigraphStore();
     const clock = { wall: NOW, mono: 0 };
     let slowOnce = true;
-    const { store: spied } = spy(store, undefined, { after: (e: Logged) => { if (slowOnce && e.source?.endsWith('.scan')) { slowOnce = false; clock.mono += 300_000; } } });
+    const { store: spied } = spy(store, undefined, { after: (e: Logged) => { if (slowOnce && e.source?.endsWith('.scan')) { slowOnce = false; clock.wall += 300_000; clock.mono += 300_000; } } });
     const retention = newRetention(spied, { intervalMs: INTERVAL, clockGuardFactor: 1, now: () => clock.wall, monotonicNow: () => clock.mono, batchSize: 100 });
     await put(store, mk('s', 'succeeded', {}, 10 * W));
-    await retention.runBatch();                                                          // took 5 minutes on the monotonic clock
-    clock.wall += INTERVAL + 300_000;                                                    // one interval after the END of that batch: on schedule
+    await retention.runBatch();                                                          // took 5 minutes: five intervals, with a tolerance of one
+    clock.wall += INTERVAL + 300_000; clock.mono += INTERVAL + 300_000;
     expect((await retention.runBatch()).skipped).toBeUndefined();
-    clock.wall += INTERVAL + 1;                                                          // that batch was instant, so the allowance is back to one interval
+    clock.wall += 3 * 24 * 3_600_000; clock.mono += 3 * 24 * 3_600_000;                  // the event loop was stalled for three days
+    expect((await retention.runBatch()).skipped).toBeUndefined();
+    clock.wall += INTERVAL + 1;                                                          // only the wall clock moved: beyond the tolerance of one interval
     expect((await retention.runBatch()).skipped).toBe('clock_jump');
   });
 
@@ -415,6 +474,17 @@ describe('the clock guard', () => {
     expect(await retention.runBatch()).toMatchObject({ skipped: 'clock_invalid', deleted: 0 });
     clock.wall = NOW;
     expect((await retention.runBatch()).skipped).toBeUndefined();                       // there was no previous start to compare with
+    expect(await present(store, 's')).toBe('');
+  });
+
+  it('skips a tick whose monotonic clock does not read a finite number', async () => {
+    const { store, clock, retention } = await rig();
+    await put(store, mk('s', 'succeeded', {}, 10 * W));
+    clock.mono = Number.NaN;
+    expect(await retention.runBatch()).toMatchObject({ skipped: 'clock_invalid', deleted: 0 });
+    expect(await present(store, 's')).not.toBe('');
+    clock.mono = 0;
+    expect((await retention.runBatch()).skipped).toBeUndefined();
     expect(await present(store, 's')).toBe('');
   });
 

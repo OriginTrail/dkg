@@ -7,7 +7,8 @@
  * conservative: when in doubt, keep. Nothing calls it here: the mode, the timer and the config are the caller's (P10b); the default mode is `off`.
  *
  * One `runBatch()` is one tick of the sweep:
- *  1. the clock guard: the tick is skipped when the wall clock stepped back or jumped forward since the previous tick;
+ *  1. the clock guard: the tick is skipped when the wall clock is behind the start of the last tick that RAN, or has run ahead of the monotonic clock by more
+ *     than the tolerance since then (a skipped tick is not a sweep start: a leapt clock stays skipped, see clockVerdict);
  *  2. one index scan per class WITHOUT the queue lock, on the background lane, reads up to `batchSize` terminal jobs that look old enough after the class's
  *     keyset cursor (async-promote-retention-scan.ts);
  *  3. the candidates are processed in SLICES of at most `sliceSize` jobs. For each slice the queue's own per-graph mutation lock (promote-control-lock.ts) is
@@ -63,7 +64,7 @@ export const SHARE_RETENTION_DEFAULTS = Object.freeze({
   maxSliceSize: 100,
   /** Safety net: every this many ms (once a pass has reached the end) the scan restarts from the oldest row. */
   rescanIntervalMs: 3_600_000,
-  /** A tick is skipped when the wall clock is more than this many intervals (plus the previous batch) past the previous tick. */
+  /** A tick is skipped when the wall clock has run ahead of the monotonic clock by more than this many intervals since the last tick that ran. */
   clockGuardFactor: 3,
 });
 
@@ -77,7 +78,7 @@ export interface ShareRetentionConfig {
   readonly store: TripleStore;
   /** Default `off`: a caller that leaves the mode out deletes and judges nothing. */
   readonly mode?: ShareRetentionMode;
-  /** The pause between two `runBatch()` calls the caller schedules (ms). The clock guard compares the gap between ticks with it. */
+  /** The pause between two `runBatch()` calls the caller schedules (ms). The clock guard's tolerance is `clockGuardFactor` times it. */
   readonly intervalMs: number;
   readonly graphUri?: string;
   /** Default 7 days (D-6). */
@@ -225,7 +226,10 @@ const sum = <K extends string>(into: Record<K, number>, from: Readonly<Partial<R
 const activeBatches = new WeakMap<TripleStore, Set<string>>();
 
 interface PassTally {
-  /** Began at a fresh cursor: only such a pass can complete (a parked sweep that picks up newly aged rows continues the previous pass's walk). */
+  /**
+   * Began at a fresh cursor and has seen no scan anomaly: only such a pass can complete (a parked sweep that picks up newly aged rows continues the previous
+   * pass's walk; a batch whose scan broke the contract judged rows the cursor did not move past, so the next batch judges them again and the tally counts them twice).
+   */
   fresh: boolean; scanned: number;
   wouldDelete: Record<PromoteRetentionJobClass, number>; deleted: Record<PromoteRetentionJobClass, number>; kept: Record<PromoteRetentionKeepReason, number>;
 }
@@ -254,8 +258,9 @@ class ShareRetentionImpl implements ShareRetention {
   private readonly mono: () => number;
   private readonly log: ShareRetentionLogger | undefined;
   private sliceNow: number;
+  /** Wall clock of the last tick that ran, and its wall-minus-monotonic offset: the baseline of the clock guard. Only a tick that RAN moves it. */
   private lastStart: number | undefined;
-  private lastDurationMs = 0;
+  private lastOffset: number | undefined;
   private pass = newPass(true);
   private lastCompletePass: ShareRetentionPassSummary | undefined;
   private readonly totals = {
@@ -292,18 +297,16 @@ class ShareRetentionImpl implements ShareRetention {
     const running = activeBatches.get(this.config.store) ?? activeBatches.set(this.config.store, new Set()).get(this.config.store)!;
     if (running.has(this.cfg.graphUri)) return this.skip('overlap');
     running.add(this.cfg.graphUri);
-    const startedAt = this.mono();
     try {
-      const now = this.clock();
-      const verdict = this.clockVerdict(now);
-      if (Number.isFinite(now)) this.lastStart = now;                            // a skipped tick re-baselines the guard: the next tick is judged against this one
+      const now = this.clock(), mono = this.mono();
+      const verdict = this.clockVerdict(now, mono);
       if (verdict) {
         this.warn(`async_promote_retention skipped=${verdict} mode=${this.mode} now=${now}`);
-        return this.skip(verdict);
+        return this.skip(verdict);                                               // a skipped tick is not a sweep start: it never moves the baseline
       }
+      this.lastStart = now; this.lastOffset = now - mono;
       return await this.batch(now);
     } finally {
-      this.lastDurationMs = this.mono() - startedAt;
       running.delete(this.cfg.graphUri);
     }
   }
@@ -311,15 +314,21 @@ class ShareRetentionImpl implements ShareRetention {
   // ---- clock guard ----------------------------------------------------------------------------------------------------------------------
 
   /**
-   * The wall clock decides which jobs are old enough, so a clock that stepped back or leapt forward must not be trusted for this tick: skip when `now` is earlier
-   * than the previous tick's start, or later than it by more than `clockGuardFactor` intervals (plus the time the previous batch itself took: the caller paces
-   * ticks from the END of a batch).
+   * The wall clock decides which jobs are old enough, so a clock that stepped back or leapt forward must not be trusted for a tick. Skip when
+   *  - `now` is earlier than the start of the last tick that ran (`clock_backwards`), or
+   *  - the wall clock has run ahead of the monotonic clock by more than `clockGuardFactor` intervals since the last tick that ran (`clock_jump`): wall minus monotonic
+   *    is constant while the clock is sound, so a late timer or a slow batch (both advance the two clocks alike) never trips it.
+   * Only a tick that ran moves the baseline: a skipped tick is not a sweep start. A far-future clock therefore stays skipped on every later tick until it comes
+   * back, and a clock stepped back resumes once it has caught up with the last sweep start (or when it returns). The price is that a real clock step forward (NTP,
+   * a resumed VM) keeps retention off until the process restarts: the warn line and the `skipped.clock_jump` counter make that visible, and the rows just stay
+   * (when in doubt, keep). The guard bounds a STEP; it is no defence against a clock that runs fast tick after tick, and the first tick of a process has no baseline
+   * to compare with (a caller that starts the timer should do so once the host clock is synchronised).
    */
-  private clockVerdict(now: number): ShareRetentionSkip | undefined {
-    if (!Number.isFinite(now)) return 'clock_invalid';
-    if (this.lastStart === undefined) return undefined;
+  private clockVerdict(now: number, mono: number): ShareRetentionSkip | undefined {
+    if (!Number.isFinite(now) || !Number.isFinite(mono)) return 'clock_invalid';
+    if (this.lastStart === undefined || this.lastOffset === undefined) return undefined;
     if (now < this.lastStart) return 'clock_backwards';
-    if (now > this.lastStart + this.cfg.clockGuardFactor * this.cfg.intervalMs + this.lastDurationMs) return 'clock_jump';
+    if (now - mono - this.lastOffset > this.cfg.clockGuardFactor * this.cfg.intervalMs) return 'clock_jump';
     return undefined;
   }
 
@@ -458,6 +467,7 @@ class ShareRetentionImpl implements ShareRetention {
 
   private end(b: BatchState, now: number, error?: ShareRetentionBatchResult['error']): ShareRetentionBatchResult {
     this.totals.anomalies += b.anomalies;
+    if (b.anomalies > 0) this.pass.fresh = false;                                    // the pass may count a re-judged row twice: it never completes, the next fresh pass replaces it
     let passCompleted = false;
     if (error) this.totals.errors[error.phase] += 1;
     else {
