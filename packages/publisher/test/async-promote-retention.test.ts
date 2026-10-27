@@ -1458,6 +1458,15 @@ describe('the scan checks an engine\'s answer against the query it asked, and ev
     expect(retention.counters().lastCompletePass, 'the pass that met an anomaly never completes').toBeUndefined();
   }
 
+  it('control: a conforming answer is no anomaly, including a row exactly AT the cutoff (the filter is <=)', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...OLD(2), ...rowOf('succeeded', 'edge', W)]);                                               // 'edge' is exactly W old: updatedAt === the cutoff
+    const retention = newRetention(store, { benignFailedMaxAgeMs: null, batchSize: 100 });
+    const res = await retention.runBatch();
+    expect(res).toMatchObject({ scanned: 3, deleted: 3, anomalies: 0, hasMore: false, passCompleted: true });
+    expect((await storedIds(store)).size).toBe(0);
+  });
+
   it('an answer past the cutoff (an engine that ignores the cutoff filter) is an anomaly, and the young row it returns is verified and kept, never deleted', async () => {
     const store = new OxigraphStore();
     await insertQuads(store, [...OLD(2), ...rowOf('succeeded', 'young', 1000)]);                                           // 'young' is far inside the window
