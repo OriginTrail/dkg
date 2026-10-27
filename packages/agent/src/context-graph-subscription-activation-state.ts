@@ -107,11 +107,11 @@ export class ContextGraphSubscriptionActivations {
   install(handle: ActivationHandle, subscription: ContextGraphSub): void {
     this.owned(handle).phase = { kind: 'installing', subscription };
   }
-  repaired(row: ContextGraphSubscriptionRecord, live: ContextGraphSub): void {
-    const attempt = this.pending.get(row.id), phase = attempt?.phase;
-    if (attempt && phase && phase.kind === 'installing'
-      && sameIntent(attempt.intent, row) && isContextGraphSubscriptionStoredAgain(phase.subscription, live))
-      attempt.repaired = { ...row };
+  /** Activation preparation explicitly reports its acknowledged durable repair. */
+  repaired(handle: ActivationHandle, row: ContextGraphSubscriptionRecord): void {
+    const attempt = this.owned(handle);
+    if (attempt.phase.kind !== 'installing' || !sameIntent(attempt.intent, row)) throw changed();
+    attempt.repaired = { ...row };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
   commit(handle: ActivationHandle, expected: ContextGraphSub, apply: () => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {

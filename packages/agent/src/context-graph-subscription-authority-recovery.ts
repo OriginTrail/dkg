@@ -90,6 +90,7 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
       updateRehydrationStatus: boolean;
     }>,
   ): ContextGraphSub;
+  acknowledgeRepair(record: ContextGraphSubscriptionRecord): void;
   current(contextGraphId: string): ContextGraphSub | undefined;
   remove(contextGraphId: string): void;
   /** Restore the captured identity-only state after compensating activation. */
@@ -109,7 +110,7 @@ export interface PersistedContextGraphSubscriptionActivationOptions {
   readonly restorePendingMeta?: boolean;
   readonly rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
   readonly updateRehydrationStatus?: boolean;
-  readonly prepare?: (subscription: ContextGraphSub) => Promise<void>;
+  readonly prepare?: (subscription: ContextGraphSub, acknowledgeRepair: (record: ContextGraphSubscriptionRecord) => void) => Promise<void>;
   readonly isCurrent?: (subscription: ContextGraphSub) => boolean;
 }
 
@@ -143,7 +144,7 @@ export async function activatePersistedContextGraphSubscription(
   };
 
   try {
-    await options.prepare?.(subscription);
+    await options.prepare?.(subscription, record => ports.acknowledgeRepair(record));
     if (options.isCurrent && !options.isCurrent(subscription)) {
       throw new Error(`Persisted subscription activation for "${row.id}" became stale`);
     }
@@ -385,7 +386,7 @@ export function createRollingSubscriptionPromotionRuntime(callbacks: {
 /** Binding repair and responsibility preparation for one subscription generation. */
 export interface RollingSubscriptionActivationPorts {
   activate(row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions): Promise<unknown>;
-  persistBinding(id: string, subscription: ContextGraphSub, syncScoped: boolean, isCurrent: () => boolean): Promise<void>;
+  persistBinding(id: string, subscription: ContextGraphSub, syncScoped: boolean, isCurrent: () => boolean): Promise<ContextGraphSubscriptionRecord | undefined>;
   reconcile(id: string): Promise<unknown>;
 }
 
@@ -397,11 +398,12 @@ export async function activateRollingSubscriptionPromotion(
 ): Promise<void> {
   await ports.activate(row, {
     onChainId, claimRollingSlot: true, updateRehydrationStatus: false, rollbackSlotRelease: 'rolling-rollback',
-    prepare: async (subscription) => {
+    prepare: async (subscription, acknowledgeRepair) => {
       if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
       if (onChainId !== undefined && onChainId !== row.onChainId) {
         // A repaired binding must be durable before responsibility or network effects.
-        await ports.persistBinding(row.id, subscription, row.syncScoped, () => isCurrent(subscription));
+        const acknowledged = await ports.persistBinding(row.id, subscription, row.syncScoped, () => isCurrent(subscription));
+        if (acknowledged) acknowledgeRepair(acknowledged);
       }
       if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
       await ports.reconcile(row.id);

@@ -8443,8 +8443,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     subscription?: ContextGraphSub,
     syncScoped?: boolean,
     isCurrent: () => boolean = () => true,
-  ): Promise<void> {
-    await this.persistContextGraphSubscriptionProjectionStrict({
+  ): Promise<ContextGraphSubscriptionRecord | undefined> {
+    return this.persistContextGraphSubscriptionProjectionStrict({
       contextGraphId,
       subscription,
       syncScoped,
@@ -8471,7 +8471,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       requireDurableMemberIntent: boolean;
       operation: 'join approval' | 'chain discovery' | 'core hosting' | 'on-chain id binding' | 'VM reconcile cursor';
     },
-  ): Promise<void> {
+  ): Promise<ContextGraphSubscriptionRecord | undefined> {
     const store = this.config.contextGraphSubscriptionStore;
     if (!store) {
       // The library API has always allowed storeless agents. "Strict" means a
@@ -8506,6 +8506,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const record = persistence.record;
     // Queue behind any fire-and-forget writes scheduled by subscribe/mark so
     // this final authoritative snapshot is the last write before the ACK.
+    let acknowledged: ContextGraphSubscriptionRecord | undefined;
     await this.enqueueContextGraphSubscriptionPersistWrite(input.contextGraphId, async () => {
       const hostedRecord = await readPreservedContextGraphCoreHosting(store, record);
       const current = this.subscribedContextGraphs.get(input.contextGraphId);
@@ -8523,8 +8524,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         ));
       }
       await store.save(hostedRecord);
-      this.contextGraphSubscriptionActivations.repaired(hostedRecord, current);
+      acknowledged = { ...hostedRecord };
     });
+    return acknowledged;
   }
 
   /**
@@ -8894,6 +8896,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.contextGraphSubscriptionActivations.install(activation, installed);
         return installed;
       },
+      acknowledgeRepair: (record) => this.contextGraphSubscriptionActivations.repaired(activation, record),
       current: (contextGraphId) => this.subscribedContextGraphs.get(contextGraphId),
       remove: (contextGraphId) => this.deleteContextGraphSubscription(contextGraphId),
       restoreInactive: (id, previous) => {
@@ -8984,13 +8987,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
           onChainId,
           updateRehydrationStatus: false,
-          prepare: async (subscription) => {
+          prepare: async (subscription, acknowledgeRepair) => {
             // Cold registration discovery is the binding proof. Make RFC-64
             // responsibility and the healed durable row visible atomically
             // before any sync or gossip side effect is restored.
             await this.reconcileRfc64CatalogResponsibilityV1(row.id);
             if (!isCurrentRetry()) throw new Error('Authority recovery retired');
-            await this.persistContextGraphSubscriptionStrict(
+            const acknowledged = await this.persistContextGraphSubscriptionStrict(
               row.id,
               subscription,
               row.syncScoped,
@@ -9003,6 +9006,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                   === revision
               ),
             );
+            if (acknowledged) acknowledgeRepair(acknowledged);
           },
           isCurrent: (subscription) => (
             isCurrentRetry()
@@ -9436,12 +9440,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
                 // Persist a strict finalized-index repair before restoring any
                 // sync or gossip side effect. A crash can therefore never
                 // reactivate the same malformed/unbound durable id.
-                prepare: async (subscription) => {
-                  await this.persistContextGraphSubscriptionStrict(
+                prepare: async (subscription, acknowledgeRepair) => {
+                  const acknowledged = await this.persistContextGraphSubscriptionStrict(
                     row.id,
                     subscription,
                     row.syncScoped,
                   );
+                  if (acknowledged) acknowledgeRepair(acknowledged);
                 },
               }
             : {}),

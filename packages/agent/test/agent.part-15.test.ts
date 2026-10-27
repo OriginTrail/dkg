@@ -1378,7 +1378,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           staleBeforePrepare.agent.subscribedContextGraphs.set(row.id, subscription);
           staleBeforePrepare.agent.contextGraphSubscriptionDormancyById
             .set(row.id, 'authorityUnavailable');
-          await options.prepare(subscription);
+          await options.prepare(subscription, vi.fn());
           return subscription;
         });
       await expect(
@@ -1414,7 +1414,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         .mockImplementation(async (row: any, options: any) => {
           const subscription = promotionSubscription({ subscribed: true, onChainId: options.onChainId });
           staleDuringRepair.agent.subscribedContextGraphs.set(row.id, subscription);
-          await options.prepare(subscription);
+          await options.prepare(subscription, vi.fn());
           if (!options.isCurrent(subscription)) throw new Error('stale activation');
           staleDuringRepairNetworkEffects();
           return subscription;

@@ -176,7 +176,7 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     } : { outcome: 'denied', source: 'registered-chain', reason: 'not-a-member', metadataBootstrap: 'forbidden' });
     const persist = f.agent.persistContextGraphSubscriptionStrict.bind(f.agent);
     vi.spyOn(f.agent, 'persistContextGraphSubscriptionStrict').mockImplementationOnce(async (...args) => {
-      entered.resolve(); await release.promise; await persist(...args);
+      entered.resolve(); await release.promise; return persist(...args);
     });
     const events: string[] = [];
     f.agent.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, event => events.push(event.contextGraphId));

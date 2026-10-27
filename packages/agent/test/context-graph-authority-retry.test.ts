@@ -146,6 +146,7 @@ describe('Context Graph subscription authority retry', () => {
     const gossipHandlers = new Set<string>();
     let failSubscribe = true;
     const ports = {
+      acknowledgeRepair: vi.fn(),
       install: () => {
         const subscription = { ...row, syncMode: 'always-on' as const };
         subscriptions.set(contextGraphId, subscription);
