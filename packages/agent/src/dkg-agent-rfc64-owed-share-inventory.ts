@@ -11,7 +11,7 @@
  * A durable marker selects this owner instead of the detached observer.
  */
 
-import { settleDurableSwmInventoryV1, requestDurableSwmInventoryProjectionV1 } from './internal/durable-swm-inventory-execution.js';
+import { admitDurableSwmInventoryProjectionV1 } from './internal/durable-swm-inventory-execution.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import { withOwnedRpcRequestContext } from '@origintrail-official/dkg-chain';
 import { withDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
@@ -35,6 +35,8 @@ import {
 import { rfc64SwmInventoryShadowRuntimeV1 } from './rfc64/swm-inventory-shadow-runtime-v1.js';
 import { DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1 } from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 
+import { rfc64SwmInventorySettlementCanConvergeV1 } from './rfc64/swm-inventory-settlement-outlook-v1.js';
+
 const ownersV1 = new WeakMap<DKGAgent, Rfc64OwedShareInventoryOwnerV1>();
 
 export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
@@ -46,6 +48,11 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
       list: () => this.rfc64PersistenceV1?.owedShareInventories.list() ?? [],
       unreadableAtOpen: () => this.rfc64PersistenceV1?.owedShareInventories.unreadableAtOpen ?? 0,
       drain: (marker, ctx) => this.drainRfc64OwedShareInventoryV1(marker, ctx),
+      requestGraphSettlement: contextGraphId => {
+        if (rfc64SwmInventorySettlementCanConvergeV1(this.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId))) {
+          this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId, { coalesceExisting: true });
+        }
+      },
       remove: async (marker) => { await this.rfc64PersistenceV1?.owedShareInventories.delete(marker); },
       retryIntervalMs: () => resolvePartition()?.retryIntervalMs ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1,
       warn: (ctx, line) => this.log.warn(ctx, line),
@@ -110,9 +117,7 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
     }, async (): Promise<OwedShareInventoryDrainOutcomeV1> => {
       let result: SwmInventoryAttemptOutcome;
       try {
-        result = await settleDurableSwmInventoryV1(this, params,
-          () => runtime.runInventoryWriteExclusive(asset, () => this.tryCommitRfc64SwmAuthorInventoryV1(params)),
-          message => this.log.warn(ctx, message));
+        result = await runtime.runInventoryWriteExclusive(asset, () => this.tryCommitRfc64SwmAuthorInventoryV1(params));
       } catch (error) {
         const cause = error instanceof SwmInventoryWriteFailure ? error.cause : error;
         if (cause instanceof SwmCatalogAuthorityNotReady) return 'waiting';
@@ -124,7 +129,7 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
           ? 'waiting' : result.dormantReason;
       }
       // Retain the durable obligation if authority turnover prevents projection admission.
-      return await requestDurableSwmInventoryProjectionV1(this, params) ? 'written' : 'waiting';
+      return admitDurableSwmInventoryProjectionV1(this, params) ? 'written' : 'waiting';
     }));
   }
 }

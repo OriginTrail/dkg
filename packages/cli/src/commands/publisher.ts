@@ -32,6 +32,7 @@ import {
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
 import { assertNoDaemonForOfflineWrite } from '../offline-publisher-guard.js';
+import { parseJobListPagingOptions, readJobList, type JobListPage } from '../job-list-paging.js';
 import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
@@ -240,6 +241,9 @@ publisherCmd
   .description('List async publisher jobs')
   .option('--status <value>', 'Filter by status')
   .option('--context-graph <id>', 'Context graph to list (required for agent tokens)')
+  .option('--cursor <cursor>', 'Print one page, the one after this cursor (the "nextCursor" of an earlier page)')
+  .option('--page-size <n>', 'Print one page of this many jobs (1-1000, 100 by default); with --all, jobs per request')
+  .option('--all', 'Page through to the end and print every job, in acceptance order')
   .action(async (opts: ActionOpts) => {
     try {
       const status = opts.status ? String(opts.status) : undefined;
@@ -249,26 +253,37 @@ publisherCmd
       }
 
       const contextGraphId = opts.contextGraph ? String(opts.contextGraph) : undefined;
-      let jobs: any[];
+      const paging = parseJobListPagingOptions(opts);
+      let result: JobListPage<any>;
       try {
         const client = await ApiClient.connect();
-        const result = await client.publisherJobs(status, contextGraphId);
-        jobs = result.jobs;
+        result = await readJobList(
+          paging,
+          () => client.publisherJobs(status, contextGraphId),
+          (cursor, pageSize) => client.publisherJobs(status, contextGraphId, { cursor, pageSize }),
+        );
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
         try {
-          jobs = await inspector.publisher.list({
+          const filter = {
             ...(status ? { status: status as any } : {}),
             ...(contextGraphId ? { contextGraphId: normalizeContextGraphIdOrUri(contextGraphId) } : {}),
-          });
+          };
+          result = await readJobList(
+            paging,
+            async () => ({ jobs: await inspector.publisher.list(filter) }),
+            (cursor, pageSize) => inspector.publisher.listPage({ ...filter, cursor, limit: pageSize }),
+          );
         } finally {
           await inspector.stop();
         }
       }
-      console.log(JSON.stringify(jobs.map(formatPublisherJobOutput), null, 2));
+      // One page also names where the next one starts; the complete list and `--all` stay the bare array they always were.
+      const jobs = result.jobs.map(formatPublisherJobOutput);
+      console.log(JSON.stringify(result.complete === undefined ? jobs : { jobs, nextCursor: result.nextCursor, complete: result.complete }, null, 2));
     } catch (err) {
       console.error(toErrorMessage(err));
       process.exit(1);

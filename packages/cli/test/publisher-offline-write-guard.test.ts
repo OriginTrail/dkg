@@ -165,7 +165,7 @@ describe('dkg publisher cancel | retry | clear with a daemon that is running but
 
 describe('every offline write of the publisher command is guarded', () => {
   const source = readFileSync(join(dirname(fileURLToPath(import.meta.url)), '../src/commands/publisher.ts'), 'utf8');
-  const READ_ONLY = new Set(['list', 'getStatus', 'inspectPreparedPayload', 'getStats']);
+  const READ_ONLY = new Set(['list', 'listPage', 'getStatus', 'inspectPreparedPayload', 'getStats']);
   const DESTRUCTIVE = new Set(['cancel', 'retryDetailed', 'clear']);
   const uses = [...source.matchAll(/inspector\.publisher\.(\w+)\(/g)].map((m) => ({ method: m[1]!, at: m.index! }));
 
