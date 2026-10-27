@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
-import { LiftJobStoreSelectors } from '../src/lift-job-store-selectors.js';
+import { LiftJobStoreSelectors, lifecycleKeyOfJob } from '../src/lift-job-store-selectors.js';
 import { LiftLegacyScanMemo } from '../src/lift-legacy-scan-memo.js';
 import type { LiftJob, PersistedLiftJob, RawLiftRequest } from '../src/lift-job.js';
 import {
@@ -15,6 +15,7 @@ import {
   literal,
   serializeJob,
 } from '../src/async-lift-control-plane.js';
+import { createRawLiftJobRequest } from '../src/async-lift-publisher-utils.js';
 import { KA_VM_VALIDATION, kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 
@@ -75,6 +76,10 @@ describe('bounded VM-publish admission lookup', () => {
     return result.type === 'bindings' ? result.bindings.length : -1;
   };
 
+  // The selector has no scan-mode override: tests steer it through the process-wide memo, as a process restart does.
+  const restartProcess = (): void => new LiftLegacyScanMemo(store, DEFAULT_CONTROL_GRAPH_URI).forgetForTesting();
+  const selectorsOver = (): LiftJobStoreSelectors => new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
+
   /**
    * A VM-publish job that was admitted before the #1828 index existed, already on the store when the process starts: its row
    * is built on a scratch store (so no admission on `store` has learned anything yet) and copied without the lifecycle-key triple.
@@ -126,9 +131,9 @@ describe('bounded VM-publish admission lookup', () => {
 
     it('pins both query forms: the scan is the pre-P7 query text, the bounded form is its first branch alone', async () => {
       const key = knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' });
-      const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
-      await selectors.vmPublishAdmissionCandidates(key, () => null, { legacyUnindexedScan: true });
-      await selectors.vmPublishAdmissionCandidates(key, () => null, { legacyUnindexedScan: false });
+      const selectors = selectorsOver();
+      await selectors.vmPublishAdmissionCandidates(key);                    // the first call of a process scans and finds no legacy row ...
+      await selectors.vmPublishAdmissionCandidates(key);                    // ... so the next one is the bounded form
       const flat = (sparql: string): string => sparql.replace(/\s+/g, ' ').trim();
       const indexed = `{ ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${CONTROL_PAYLOAD}> ?payload . OPTIONAL { ?job <${CONTROL_STATUS}> ?status } BIND(true AS ?indexed) }`;
       const legacy = `{ ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_PAYLOAD}> ?payload . FILTER NOT EXISTS { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey } }`;
@@ -213,24 +218,83 @@ describe('bounded VM-publish admission lookup', () => {
       const p = publisher();
       await p.enqueueKnowledgeAssetVmPublish(request('albums'));
       await p.enqueueKnowledgeAssetVmPublish(request('songs'));
-      const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
-      const keyOf = (job: { request: { jobType: string } & Record<string, unknown> }): string | null => (job.request.jobType === 'knowledge-asset-vm-publish'
-        ? knowledgeAssetVmPublishLifecycleKey((job.request as unknown as { knowledgeAssetVmPublish: Parameters<typeof knowledgeAssetVmPublishLifecycleKey>[0] }).knowledgeAssetVmPublish) : null);
+      const selectors = selectorsOver();
       const key = knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' });
-      const full = await selectors.vmPublishAdmissionCandidates(key, keyOf as never, { legacyUnindexedScan: true });
-      const bounded = await selectors.vmPublishAdmissionCandidates(key, keyOf as never, { legacyUnindexedScan: false });
+      queries.length = 0;
+      restartProcess();                                                      // the admissions above learned "none": a restart forgets it
+      const full = await selectors.vmPublishAdmissionCandidates(key);
+      const bounded = await selectors.vmPublishAdmissionCandidates(key);
+      expect(unions()).toEqual([true, false]);                              // the two reads really are the scan and the bounded form
       expect(bounded.map((j) => j.jobId)).toEqual(full.map((j) => j.jobId));
       expect(bounded).toHaveLength(1);
     });
 
-    it('forcing the scan or the bounded query does not change what the selector learns', async () => {
-      const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
+    it('has ONE policy: the process-wide memo alone picks the query form, and no argument forces either one', async () => {
+      const selectors = selectorsOver();
       const key = knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' });
-      await selectors.vmPublishAdmissionCandidates(key, () => null, { legacyUnindexedScan: true });
-      await selectors.vmPublishAdmissionCandidates(key, () => null, { legacyUnindexedScan: false });
-      await selectors.vmPublishAdmissionCandidates(key, () => null);
-      await selectors.vmPublishAdmissionCandidates(key, () => null);
-      expect(unions()).toEqual([true, false, true, false]);                // neither forced call switched anything; the first default call cleared the memo
+      // An argument a former test-only mode took: ignored, so it neither switches the form nor changes what the memo learns.
+      const withExtraArgument = selectors.vmPublishAdmissionCandidates as (...args: unknown[]) => Promise<unknown>;
+      const admit = (extra?: unknown): Promise<unknown> => (extra === undefined
+        ? withExtraArgument.call(selectors, key)
+        : withExtraArgument.call(selectors, key, extra));
+      await admit();                                                         // learns "none"
+      await admit({ legacyUnindexedScan: true });                            // would have forced the scan
+      await admit({ legacyUnindexedScan: false });
+      expect(unions()).toEqual([true, false, false]);
+      restartProcess();
+      await admit({ legacyUnindexedScan: false });                           // would have forced the bounded form, and kept the memo untouched
+      await admit();
+      expect(unions()).toEqual([true, false, false, true, false]);           // the forgotten memo scans, and clearing it again ends the scan
+    });
+
+    it('owns its lifecycle-key classification: a caller cannot pass one, so none can declare the shared scan complete', async () => {
+      await legacyJob(request('albums'), 'legacy-1');                        // a KEYED legacy row: by the canonical rule the scan must go on
+      const selectors = selectorsOver();
+      const key = knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' });
+      expect(selectors.vmPublishAdmissionCandidates).toHaveLength(1);        // the key alone: there is no classifier parameter
+      // @ts-expect-error a second argument is a type error
+      const typed = selectors.vmPublishAdmissionCandidates.bind(selectors, key, () => null);
+      expect(typed).toBeTypeOf('function');
+      // What a JavaScript caller or a stale TypeScript build could still pass: a classifier that calls every row keyless.
+      const untyped = selectors.vmPublishAdmissionCandidates as (...args: unknown[]) => Promise<PersistedLiftJob[]>;
+      const first = await untyped.call(selectors, key, () => null);
+      const second = await untyped.call(selectors, key, () => null);
+      expect(first.map((job) => job.jobId)).toEqual(['legacy-1']);
+      expect(second.map((job) => job.jobId)).toEqual(['legacy-1']);          // still found: the scan was not ended by the argument
+      expect(unions()).toEqual([true, true]);
+      expect(new LiftLegacyScanMemo(store, DEFAULT_CONTROL_GRAPH_URI).scanRequired()).toBe(true);
+      // The memo is shared by every selector over the store: another one is not told the scan is complete either.
+      expect((await selectorsOver().vmPublishAdmissionCandidates(key)).map((job) => job.jobId)).toEqual(['legacy-1']);
+      expect(unions()).toEqual([true, true, true]);
+    });
+
+    it('clears the memo only by the canonical rule: keyed legacy rows keep scanning; keyless, non-VM and malformed rows do not', async () => {
+      const key = knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' });
+      const keyless = (job: PersistedLiftJob): PersistedLiftJob => (job.request.jobType !== 'knowledge-asset-vm-publish' ? job : {
+        ...job, request: { ...job.request, knowledgeAssetVmPublish: { ...job.request.knowledgeAssetVmPublish, name: `bad${SEPARATOR}name` } },
+      } as PersistedLiftJob);
+      await legacyJob(request('songs'), 'legacy-keyed');
+      await legacyJob(request('albums'), 'legacy-bad', keyless);
+      await seedLegacyRawLiftTestJob(store, rawLiftRequest(), { idGenerator: () => 'raw-1', now: () => 500 });
+      const selectors = selectorsOver();
+      await selectors.vmPublishAdmissionCandidates(key);
+      await selectors.vmPublishAdmissionCandidates(key);
+      expect(unions()).toEqual([true, true]);                                // the keyed row alone holds the scan open ...
+      await store.deleteByPattern({ subject: jobSubject('legacy-keyed'), graph: DEFAULT_CONTROL_GRAPH_URI });
+      await selectors.vmPublishAdmissionCandidates(key);
+      await selectors.vmPublishAdmissionCandidates(key);
+      expect(unions()).toEqual([true, true, true, false]);                   // ... and with it gone the keyless and raw-lift rows let one more scan end it
+    });
+
+    it('classifies a persisted job by one fixed rule: its lifecycle key, or none for a non-VM or unbuildable request', async () => {
+      const seed = new TripleStoreAsyncLiftPublisher(new OxigraphStore(), { now: () => 500, idGenerator: () => 'seed' });
+      await seed.enqueueKnowledgeAssetVmPublish(request('albums'));
+      const job = (await seed.getStatus('seed'))!;
+      expect(lifecycleKeyOfJob(job)).toBe(knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' }));
+      expect(lifecycleKeyOfJob({ ...job, request: createRawLiftJobRequest(rawLiftRequest()) } as unknown as PersistedLiftJob)).toBeNull();
+      expect(lifecycleKeyOfJob({
+        ...job, request: { ...job.request, knowledgeAssetVmPublish: { ...(job.request as { knowledgeAssetVmPublish: object }).knowledgeAssetVmPublish, name: `bad${SEPARATOR}name` } },
+      } as unknown as PersistedLiftJob)).toBeNull();
     });
   });
 
