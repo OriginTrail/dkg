@@ -1,32 +1,35 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { GraphScopedDurableManifestPlan } from '../durable-integrity.js';
-import type { DurableSyncAccumulator } from '../durable-progress.js';
+import type { GraphScopedDurableManifestPlan, GraphScopedDescriptor } from '../durable-integrity.js';
 import type { DurableRecoveryRoundDecision } from '../durable-recovery-round.js';
 import type { GraphOwnedRecoveryContext } from './graph-owned-recovery.js';
 import type { DurableSyncContext } from './durable-sync.js';
-import type { SyncPageResult } from './page-fetch.js';
-import { planDurableDataFromLocalHoldings, settleDurableDataFromHoldings } from './durable-data-holdings.js';
-import { persistDurableHoldingsMetadata } from './durable-verified-page.js';
+import { planDurableDataFromLocalHoldings, type DurableHoldingsPlan } from './durable-data-holdings.js';
 
-type HoldingsPhaseContext = Parameters<typeof persistDurableHoldingsMetadata>[0]
-  & Pick<DurableSyncContext, 'remotePeerId' | 'deleteCheckpoint' | 'setCheckpoint' | 'logInfo' | 'logWarn'>;
+type HoldingsPhaseContext = Pick<DurableSyncContext, 'ctx' | 'signal' | 'logWarn'>;
 
-/** Own the complete held attempt, including proof lifetime and synchronous settlement.
- * Every path returns one round decision; no callback communicates a decision.
- */
-export async function attemptDurableHoldingsPhase(input: {
+export interface PreparedHoldingsSettlement {
+  readonly manifest: GraphScopedDurableManifestPlan;
+  readonly plan: Exclude<DurableHoldingsPlan, { kind: 'full' }>;
+  readonly descriptors: readonly GraphScopedDescriptor[];
+  assertCurrent(): void;
+  close(): void;
+}
+type PreparedHoldingsPhase =
+  | { readonly kind: 'fetch'; readonly decision: DurableRecoveryRoundDecision }
+  | { readonly kind: 'metadata'; readonly decision: DurableRecoveryRoundDecision; readonly settlement: PreparedHoldingsSettlement };
+
+/** Select a DATA plan. A successful held proof transfers to the graph execution scope. */
+export async function prepareDurableHoldingsPhase(input: {
   readonly context: HoldingsPhaseContext;
   readonly contextGraphId: string;
   readonly manifest: GraphScopedDurableManifestPlan | null;
   readonly recovery: GraphOwnedRecoveryContext;
-  readonly meta: SyncPageResult;
-  readonly accumulator: DurableSyncAccumulator;
-  readonly recordMetaPhase: () => void;
-}): Promise<DurableRecoveryRoundDecision> {
-  const full: DurableRecoveryRoundDecision = { strategy: 'full', continuation: 'full-graph' };
-  const { context, contextGraphId, manifest, recovery, meta, accumulator } = input;
+}): Promise<PreparedHoldingsPhase> {
+  const fetch = (decision: DurableRecoveryRoundDecision): PreparedHoldingsPhase => ({ kind: 'fetch', decision });
+  const full = fetch({ strategy: 'full', continuation: 'full-graph' });
+  const { context, contextGraphId, manifest, recovery } = input;
   const held = recovery.held;
-  if (!manifest) return { strategy: 'legacy' };
+  if (!manifest) return fetch({ strategy: 'legacy' });
   if (!held) return full;
   let proof;
   try { proof = await held.prove({ contextGraphId, descriptors: manifest.descriptors, signal: context.signal }); }
@@ -34,9 +37,10 @@ export async function attemptDurableHoldingsPhase(input: {
     context.signal?.throwIfAborted();
     if (error instanceof Error && error.name === 'AbortError') throw error;
     context.logWarn(context.ctx, `Could not prove held content for "${contextGraphId}": ${String(error)}`);
-    return { strategy: 'full', continuation: 'reconsider-holdings' };
+    return fetch({ strategy: 'full', continuation: 'reconsider-holdings' });
   }
   if (!proof) return full;
+  let transferred = false;
   try {
     const assertCurrent = () => { held.assertCurrent(); proof.assertCurrent(); };
     assertCurrent();
@@ -44,7 +48,7 @@ export async function attemptDurableHoldingsPhase(input: {
       contextGraphId, manifest, options: recovery.holdings, held: proof.held, confirmCurrent: held.confirmCurrent,
       signal: context.signal, logWarn: message => context.logWarn(context.ctx, message),
     });
-    if (plan.kind === 'full') return { strategy: 'full', continuation: plan.continuation };
+    if (plan.kind === 'full') return fetch({ strategy: 'full', continuation: plan.continuation });
     assertCurrent();
     try {
       context.signal?.throwIfAborted();
@@ -54,19 +58,14 @@ export async function attemptDurableHoldingsPhase(input: {
       assertCurrent();
       if (error instanceof Error && error.name === 'AbortError') throw error;
       context.logWarn(context.ctx, `Could not reconcile held content for "${contextGraphId}": ${String(error)}`);
-      return { strategy: 'full', continuation: 'reconsider-holdings' };
+      return fetch({ strategy: 'full', continuation: 'reconsider-holdings' });
     }
     assertCurrent(); context.signal?.throwIfAborted();
-    await persistDurableHoldingsMetadata(context, contextGraphId, meta,
-      manifest.descriptors.filter(copy => proof.held.has(copy.ual)), accumulator, assertCurrent);
-    assertCurrent();
-    input.recordMetaPhase();
-    context.logInfo(context.ctx, settleDurableDataFromHoldings({
-      plan, remotePeerId: context.remotePeerId, contextGraphId, manifest, metaResult: meta,
-      accumulator, deleteCheckpoint: context.deleteCheckpoint, setCheckpoint: context.setCheckpoint,
-    }));
-    return plan.kind === 'held'
-      ? { strategy: 'held' }
-      : { strategy: 'exact-missing', batches: plan.batches };
-  } finally { proof.close(); }
+    const descriptors = manifest.descriptors.filter(copy => proof.held.has(copy.ual));
+    transferred = true;
+    return { kind: 'metadata',
+      decision: plan.kind === 'held' ? { strategy: 'held' } : { strategy: 'exact-missing', batches: plan.batches },
+      settlement: { manifest, plan, descriptors,
+        assertCurrent, close: () => proof.close() } };
+  } finally { if (!transferred) proof.close(); }
 }
