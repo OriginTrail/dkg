@@ -8,10 +8,17 @@ must match the resulting identities exactly. `detector-proven` means the
 stated component invariant has red/green evidence. It does not mean every
 reported symptom is explained or that a network release campaign passed.
 
+The incident loader includes every top-level `release-*.json` file in this
+directory, in filename order. Keep incident IDs unique across those files;
+nested proof reports are not registers. New releases require data additions
+without edits to inventory or status commands.
+
 Run `pnpm qa:check-regressions` to regenerate the inventory and validate both
 registers. `pnpm qa:incident-status` prints the validated incident status using
 that inventory. Validation discovers actual Vitest test names, rejects disabled
-or focused detectors, requires their required CI route and verifies proof bytes.
+or focused detectors, requires their required CI route and verifies proof bytes. Historical and
+incident detectors share source, exact-name, inventory and unit-shard eligibility;
+historical replay and guard-mutation evidence retain separate validators.
 Changing the production guard or selected test invalidates the mutation proof.
 
 Three actual guard mutations were run on Node 22.23.4 / pnpm 10.28.1:

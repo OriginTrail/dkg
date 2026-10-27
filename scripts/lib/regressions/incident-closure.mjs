@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import { inside, sha256 } from './identity.mjs';
-import { withDerivedNames } from './profile-contract.mjs';
+import { REQUIRED_ROUTE, withDerivedNames } from './profile-contract.mjs';
 import { namedTestDiscoveryInvocation, discoverNamedTests } from './named-test-discovery.mjs';
-import { analyzeTestSource } from '../disabled-test-scanner.mjs';
+import { validateDetectorEligibility } from './detector-eligibility.mjs';
+import { planAgentShards } from '../../ci/plan-agent-shards.mjs';
 function bytes(root, file) {
   assert.ok(typeof file === 'string' && file && !file.includes('..') && !path.isAbsolute(file) && !file.includes('\\'), 'unsafe incident evidence path');
   return fs.readFileSync(inside(root, file));
@@ -21,10 +22,23 @@ export function incidentDiscoveryInvocation(records) {
 export function discoverIncidentTests(root, records) {
   return discoverNamedTests(root, detectorFiles(records));
 }
-export function validateIncidentClosure(root, records, inventory, { discover = discoverIncidentTests } = {}) {
+// Keep release selection with the register, so callers automatically include
+// subsequent retrospectives while nested proof reports remain evidence only.
+export function loadIncidentRecords(root) {
+  const directory = inside(root, 'test-policy/incidents');
+  return fs.readdirSync(directory, { withFileTypes: true })
+    .filter(entry => entry.isFile() && /^release-.+\.json$/.test(entry.name))
+    .map(entry => entry.name).sort().flatMap(file => {
+      const records = JSON.parse(fs.readFileSync(path.join(directory, file), 'utf8'));
+      assert.ok(Array.isArray(records) && records.length, `empty or invalid incident register: ${file}`);
+      return records;
+    });
+}
+export function validateIncidentClosure(root, records, inventory, { discover = discoverIncidentTests, shards } = {}) {
   assert.ok(Array.isArray(records) && records.length, 'empty incident register');
   assert.equal(new Set(records.map(row => row.id)).size, records.length, 'duplicate incident');
   const discovered = discover(root, records);
+  const assigned = shards ?? planAgentShards(root);
   return records.map(record => {
     assert.match(record.id, /^GH-\d+$/);
     for (const field of ['owner', 'invariant', 'scope']) assert.ok(typeof record[field] === 'string' && record[field].trim(), 'missing incident context');
@@ -34,16 +48,10 @@ export function validateIncidentClosure(root, records, inventory, { discover = d
     assert.ok(['open','detector-proven'].includes(record.status), 'invalid incident status');
     assert.ok(Array.isArray(record.detectors) && record.detectors.length, 'missing detector binding');
     for (const detector of record.detectors) {
-      const source = bytes(root, detector.file).toString();
       assert.ok(typeof detector.suite === 'string' && detector.suite.trim()
         && typeof detector.title === 'string' && detector.title.trim(), 'missing detector suite/title');
-      const identity = withDerivedNames(detector);
-      assert.equal(discovered.filter(row => row.file === detector.file && row.name === identity.discoveryName).length, 1, `missing/ambiguous executable detector: ${record.id}`);
-      const scan = analyzeTestSource(source, detector.file, { applyWaivers: false });
-      assert.equal(scan.focused.length, 0, 'focused incident detector');
-      assert.equal(scan.disabled.length, 0, 'disabled incident detector');
-      const routes = inventory.filter(row => row.file === detector.file).flatMap(row => row.execution);
-      assert.ok(routes.some(route => route.cadence === 'required' && route.lane === detector.lane), `detector has no required lane: ${record.id}`);
+      assert.equal(detector.lane, REQUIRED_ROUTE.lane, 'detector declares another execution lane');
+      validateDetectorEligibility(root, withDerivedNames(detector), inventory, discovered, assigned);
     }
     if (record.status === 'open') {
       assert.ok(record.gap && !record.proof, 'open incident needs an explicit proof gap');
@@ -66,7 +74,7 @@ export function validateIncidentClosure(root, records, inventory, { discover = d
         assert.notEqual(report.exitCode, 0);
         assert.ok(observed.failureMessages.some(text => text.includes('AssertionError')), 'red was not a behavioral assertion');
       } else { assert.equal(report.exitCode, 0); assert.deepEqual(observed.failureMessages, []); }
-      assert.ok(report.command.includes('vitest.unit.config.ts') && report.command.includes(proof.test.file.replace('packages/agent/', ''))
+      assert.ok(report.command.includes(REQUIRED_ROUTE.config) && report.command.includes(proof.test.file.replace('packages/agent/', ''))
         && report.command.includes('run') && report.command.includes('vitest'), 'proof is not the required unit config/test');
     }
     return { id: record.id, status: 'detector-proven', classification: record.classification, scope: record.scope };

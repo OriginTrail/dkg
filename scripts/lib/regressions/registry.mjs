@@ -6,7 +6,7 @@ import { inside, sha256, proofIdentity, verifyIdentity } from './identity.mjs';
 import { sidePhases } from './phases.mjs';
 import { inspectExecution } from './results.mjs';
 import { namedTestDiscoveryInvocation, discoverNamedTests } from './named-test-discovery.mjs';
-import { analyzeTestSource } from '../disabled-test-scanner.mjs';
+import { validateDetectorEligibility } from './detector-eligibility.mjs';
 import { planAgentShards } from '../../ci/plan-agent-shards.mjs';
 
 const json = (file) => JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -14,7 +14,7 @@ export function loadRecords(root) {
   const directory = path.join(root, 'test-policy/regressions');
   return fs.readdirSync(directory).filter((file) => file.endsWith('.json')).sort().map((file) => ({ file, record: json(path.join(directory, file)) }));
 }
-export function validateRecord(record, file, inventory, discovered, shards) {
+export function validateRecord(record, file, inventory, discovered, shards, root = process.cwd()) {
   const profile = profileFor(record);
   if (record.schemaVersion !== 1 || file !== `${record.id}.json` || !record.owner?.trim() || !record.invariant?.trim()
       || !Array.isArray(record.links) || !record.links.length
@@ -22,16 +22,9 @@ export function validateRecord(record, file, inventory, discovered, shards) {
       || !record.affectedVersions?.firstAffected || !record.affectedVersions?.evidence) throw new Error('missing versioned case metadata, source links or ownership');
   if (record.test?.file !== profile.file || record.test.fullName !== profile.fullName) throw new Error('stale/ambiguous test binding');
   if (Object.entries(REQUIRED_ROUTE).some(([key, value]) => record.execution[key] !== value)) throw new Error('optional-only execution cannot satisfy required route');
-  const entries = inventory.filter((row) => row.file === profile.file);
-  if (entries.length !== 1 || !entries[0].execution.some((route) => route.lane === REQUIRED_ROUTE.lane && route.cadence === 'required')) {
-    throw new Error('missing file or required execution in current test inventory');
-  }
-  const assigned = shards.filter((shard) => shard.files.includes(profile.file.replace('packages/agent/', '')));
-  if (assigned.length !== 1 || assigned[0].config !== REQUIRED_ROUTE.config || assigned[0].inventory !== 'unit') throw new Error('test is not in exactly one required agent unit shard');
-  const matches = discovered.filter((row) => row.file === profile.file && row.name === profile.discoveryName);
-  if (matches.length !== 1) throw new Error('missing, ambiguous or undiscovered named assertion');
+  const eligible = validateDetectorEligibility(root, profile, inventory, discovered, shards);
   if (!['unproven', 'proven'].includes(record.proof?.status) || record.proof.method !== 'historical-replay') throw new Error('invalid proof status/method');
-  return { ...profile, shard: assigned[0].index, report: assigned[0].report };
+  return eligible;
 }
 export function validateEvidence(root, record, profile) {
   if (record.proof.status !== 'proven') {
@@ -74,16 +67,10 @@ export function validateRegressions(root, inventory, { records = loadRecords(roo
   const ids = records.map(({ record }) => record.id);
   if (new Set(ids).size !== ids.length) throw new Error('duplicate case IDs');
   const profiles = records.map(({ record }) => profileFor(record));
-  for (const profile of profiles) {
-    const source = fs.readFileSync(inside(root, profile.file), 'utf8');
-    // Registered assertions must execute even when general test debt has a waiver.
-    const analysis = analyzeTestSource(source, profile.file, { applyWaivers: false });
-    if (analysis.disabled.length || analysis.focused.length) throw new Error(`${profile.file}: disabled or focused regression test`);
-  }
   const assigned = shards ?? planAgentShards(root);
   const discovered = discover ? discover(profiles) : discoverNamedTests(root, profiles.map(profile => profile.file));
   return records.map(({ file, record }) => {
-    const profile = validateRecord(record, file, inventory, discovered, assigned);
+    const profile = validateRecord(record, file, inventory, discovered, assigned, root);
     validateEvidence(root, record, profile);
     return { id: record.id, proof: record.proof.status, lane: REQUIRED_ROUTE.lane, config: REQUIRED_ROUTE.config,
       shard: profile.shard, report: profile.report, assertion: profile.fullName };
