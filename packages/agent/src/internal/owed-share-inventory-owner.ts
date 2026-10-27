@@ -34,7 +34,7 @@ export interface OwedShareInventoryOwnerDependenciesV1 {
     marker: Readonly<Rfc64OwedShareInventoryV1>, ctx: OperationContext,
   ) => Promise<OwedShareInventoryDrainOutcomeV1>;
   /** One coalesced graph reconciliation, outside the serial marker pass. */
-  readonly settleGraph?: (contextGraphId: string, ctx: OperationContext, signal: AbortSignal) => Promise<void>;
+  readonly requestGraphSettlement?: (contextGraphId: string) => void;
   readonly remove: (marker: Readonly<Rfc64OwedShareInventoryV1>) => Promise<void>;
   /** The projection supervisor's retry interval; 0 leaves only the explicit passes. */
   readonly retryIntervalMs: () => number;
@@ -65,8 +65,6 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
   readonly #dependencies: OwedShareInventoryOwnerDependenciesV1;
   readonly #failed = new Map<string, FailedAttemptV1>();
   #runner: CoalescingRecurringTask | undefined;
-  #settlementController = new AbortController();
-  readonly #settlements = new Map<string, Promise<void>>();
   readonly #settleAfter = new Map<string, number>();
   #ctx: OperationContext = createOperationContext('system');
 
@@ -81,7 +79,6 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
     }
     this.#ctx = ctx;
     this.#failed.clear();
-    this.#settlementController = new AbortController();
     this.#settleAfter.clear();
     const unreadable = this.#dependencies.unreadableAtOpen();
     if (unreadable > 0) {
@@ -104,7 +101,7 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
     this.#runner?.request();
   }
 
-  /** Drain marker attempts; graph settlement is independent and physically drained by close(). */
+  /** Drain marker attempts; the canonical responsibility dispatcher owns graph settlement. */
   async whenIdle(): Promise<void> {
     await this.#runner?.whenIdle();
   }
@@ -112,9 +109,7 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
   async close(): Promise<void> {
     const runner = this.#runner;
     this.#runner = undefined;
-    this.#settlementController.abort(new Error('Owed inventory settlement closing'));
     await runner?.close();
-    await Promise.allSettled(this.#settlements.values());
   }
 
   async #runPass(signal: AbortSignal): Promise<'rearm' | 'idle'> {
@@ -135,18 +130,13 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
   }
 
   #scheduleSettlement(contextGraphId: string): void {
-    const settle = this.#dependencies.settleGraph;
-    const signal = this.#settlementController.signal;
+    const request = this.#dependencies.requestGraphSettlement;
     const now = this.#dependencies.now?.() ?? Date.now();
-    if (!settle || signal.aborted || this.#settlements.has(contextGraphId)
-      || now < (this.#settleAfter.get(contextGraphId) ?? 0)) return;
-    // Explicit authority events still retry markers immediately. Graph-level
-    // settlement itself gets one attempt per interval, with no nested ladder.
+    if (!request || !this.#runner || now < (this.#settleAfter.get(contextGraphId) ?? 0)) return;
+    // Authority/settlement events retry markers immediately. Pace their requests
+    // into the existing batched responsibility owner to avoid a feedback loop.
     this.#settleAfter.set(contextGraphId, now + Math.max(5_000, this.#dependencies.retryIntervalMs()));
-    const run = Promise.resolve().then(() => { if (!signal.aborted) return settle(contextGraphId, this.#ctx, signal); })
-      .catch(error => { if (!signal.aborted) this.#dependencies.warn(this.#ctx, `Owed inventory responsibility for ${contextGraphId} did not settle: ${message(error)}`); })
-      .finally(() => { if (this.#settlements.get(contextGraphId) === run) this.#settlements.delete(contextGraphId); });
-    this.#settlements.set(contextGraphId, run);
+    request(contextGraphId);
   }
 
   async #attempt(marker: Readonly<Rfc64OwedShareInventoryV1>, signal: AbortSignal): Promise<boolean> {

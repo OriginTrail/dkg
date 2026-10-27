@@ -177,29 +177,22 @@ describe('owed share inventory owner', () => {
   });
 });
 
-it('paces failed graph settlement separately and aborts its physical work on close', async () => {
+it('paces notifications to the canonical graph settlement owner independently of marker attempts', async () => {
   let now = 0;
-  const warning = vi.fn();
-  let activeSignal: AbortSignal | undefined;
-  const settleGraph = vi.fn().mockRejectedValueOnce(new Error('RPC busy')).mockImplementation(async (_graph, _ctx, signal: AbortSignal) => {
-    activeSignal = signal;
-    await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
-  });
+  const requestGraphSettlement = vi.fn();
   const drain = vi.fn(async () => 'waiting' as const);
   const owner = new Rfc64OwedShareInventoryOwnerV1({ list: () => [marker('one'), marker('two')],
-    unreadableAtOpen: () => 0, retryIntervalMs: () => 0, now: () => now, drain, settleGraph,
-    remove: async () => { throw new Error('waiting markers must be retained'); }, warn: warning });
+    unreadableAtOpen: () => 0, retryIntervalMs: () => 0, now: () => now, drain, requestGraphSettlement,
+    remove: async () => { throw new Error('waiting markers must be retained'); }, warn: vi.fn() });
   owner.start(createOperationContext('system'));
   await owner.whenIdle();
-  await vi.waitFor(() => expect(warning).toHaveBeenCalledWith(expect.anything(), expect.stringContaining('RPC busy')));
   owner.request(); await owner.whenIdle();
-  expect(settleGraph).toHaveBeenCalledOnce();
+  expect(requestGraphSettlement).toHaveBeenCalledOnce();
   expect(drain).toHaveBeenCalledTimes(4);
   now += 5_000;
   owner.request(); await owner.whenIdle();
-  expect(settleGraph).toHaveBeenCalledTimes(2);
+  expect(requestGraphSettlement).toHaveBeenCalledTimes(2);
   await owner.close();
-  expect(activeSignal?.aborted).toBe(true);
   owner.request(); await owner.whenIdle();
-  expect(settleGraph).toHaveBeenCalledTimes(2);
+  expect(requestGraphSettlement).toHaveBeenCalledTimes(2);
 });

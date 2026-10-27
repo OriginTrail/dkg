@@ -2239,6 +2239,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         },
       );
     }
+    // Responsibility can recover without an authority event; wake durable obligations.
+    this.requestRfc64OwedShareInventoryDrainV1();
     return transition.next;
   }
 

@@ -67,7 +67,7 @@ function fakeAgent(options: { store?: boolean; requires?: () => boolean } = {}) 
   agent.tryCommitRfc64SwmAuthorInventoryV1 = vi.fn();
   agent.requestRfc64SwmCatalogProjectionV1 = vi.fn(() => true);
   agent.rfc64CatalogAuthorityRefreshFailureReasonV1 = vi.fn(() => 'registered-authority-unfinalized');
-  agent.reconcileRfc64CatalogResponsibilityV1 = vi.fn(async () => ({ active: true, mode: 'catalog', selectionSource: 'default' }));
+  agent.scheduleRfc64CatalogResponsibilityReconciliationV1 = vi.fn(() => true);
   return { agent, store, kept };
 }
 
@@ -215,33 +215,31 @@ describe('one attempt at an owed row', () => {
     const { agent, kept } = fakeAgent();
     const runtime = rfc64SwmInventoryShadowRuntimeV1(agent);
     const wait = vi.spyOn(runtime, 'waitForResponsibilitySettlement');
-    let ready = false, release!: () => void;
-    const settling = new Promise<void>(resolve => { release = resolve; });
+    let ready = false;
     const readyGraph = `${AUTHOR}/ready`;
     kept.push(MARKER, { ...MARKER, assertionCoordinate: 'second', shareOperationId: 'second' },
       { ...MARKER, contextGraphId: readyGraph, shareOperationId: 'ready' } as Rfc64OwedShareInventoryV1);
     agent.rfc64CatalogAuthorityRefreshFailureReasonV1.mockReturnValue(undefined);
     agent.tryCommitRfc64SwmAuthorInventoryV1.mockImplementation(async (params: { contextGraphId: string }) =>
       ready || params.contextGraphId === readyGraph ? { status: 'applied' } : { status: 'dormant', dormantReason: 'inactive-lane' });
-    agent.reconcileRfc64CatalogResponsibilityV1.mockImplementation(async () => {
+    agent.scheduleRfc64CatalogResponsibilityReconciliationV1.mockImplementation(() => {
       expect(runtime.hasInventoryWrites({ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR })).toBe(false);
-      await settling;
-      return { active: true, mode: 'catalog', selectionSource: 'default' };
+      return true;
     });
     const owner = agent.createRfc64OwedShareInventoryOwnerV1(() => ({ retryIntervalMs: 0 }));
     owner.start(createOperationContext('system'));
     try {
       await owner.whenIdle();
       expect(kept.map(marker => marker.shareOperationId)).toEqual(['fenced-share', 'second']);
-      expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledOnce();
+      expect(agent.scheduleRfc64CatalogResponsibilityReconciliationV1).toHaveBeenCalledOnce();
       owner.request(); await owner.whenIdle();
-      expect(agent.reconcileRfc64CatalogResponsibilityV1).toHaveBeenCalledOnce();
+      expect(agent.scheduleRfc64CatalogResponsibilityReconciliationV1).toHaveBeenCalledOnce();
       expect(wait).not.toHaveBeenCalled();
-      ready = true; release();
+      ready = true;
       owner.request(); await owner.whenIdle();
       expect(kept).toEqual([]);
       expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledTimes(3);
-    } finally { release(); await owner.close(); }
+    } finally { await owner.close(); }
   });
 
   it('keeps the marker when projection cannot accept the durable row', async () => {
@@ -249,7 +247,7 @@ describe('one attempt at an owed row', () => {
     agent.tryCommitRfc64SwmAuthorInventoryV1.mockResolvedValue({ status: 'existing' });
     agent.requestRfc64SwmCatalogProjectionV1.mockReturnValue(false);
     await expect(agent.drainRfc64OwedShareInventoryV1(MARKER, createOperationContext('system'))).resolves.toBe('waiting');
-    expect(agent.reconcileRfc64CatalogResponsibilityV1).not.toHaveBeenCalled();
+    expect(agent.scheduleRfc64CatalogResponsibilityReconciliationV1).not.toHaveBeenCalled();
     expect(agent.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledOnce();
   });
 
@@ -294,6 +292,50 @@ describe('owed share inventory on a started agent', () => {
     await agent.whenRfc64CatalogResponsibilitiesIdleV1();
     return agent;
   }
+
+  it('retries waiting markers after canonical settlement with periodic retries disabled and unchanged authority', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'dkg-owed-settlement-wake-'));
+    tempDirs.push(dataDir);
+    const author = await startAuthor('owed-settlement-wake', dataDir, false);
+    const internals = author as any;
+    // Keep the already accepted policy; only responsibility needs another pass.
+    internals.subscribedContextGraphs.set(CONTEXT_GRAPH_ID, { subscribed: true });
+    const accepted = vi.spyOn(author, 'acceptOpenContextGraphPolicyV1');
+    vi.spyOn(author, 'rfc64CatalogAuthorityRefreshFailureReasonV1').mockReturnValue(undefined);
+    vi.spyOn(internals, 'getExplicitAccessPolicy').mockResolvedValue('public');
+    vi.spyOn(author, 'requestRfc64SwmCatalogProjectionV1').mockReturnValue(true);
+    let ready = false, release!: () => void;
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const original = author.reconcileRfc64CatalogResponsibilityCoreV1.bind(author);
+    const settlement = vi.spyOn(author, 'reconcileRfc64CatalogResponsibilityCoreV1')
+      .mockImplementation(async (...args) => {
+        await gate;
+        ready = true;
+        return original(...args);
+      });
+    const readyGraph = `${AUTHOR}/ready`;
+    vi.spyOn(author, 'tryCommitRfc64SwmAuthorInventoryV1').mockImplementation(async params =>
+      ready || params.contextGraphId === readyGraph
+        ? { status: 'existing', attempts: 1, headObjectDigest: 'h', kaUal: 'u' } as any
+        : { status: 'dormant', dormantReason: 'inactive-lane' } as any);
+    await internals.rfc64PersistenceV1.owedShareInventories.put(MARKER);
+    await internals.rfc64PersistenceV1.owedShareInventories.put({ ...MARKER, assertionCoordinate: 'second', shareOperationId: 'second' });
+    await internals.rfc64PersistenceV1.owedShareInventories.put({ ...MARKER, contextGraphId: readyGraph, shareOperationId: 'ready' });
+    const owner = author.createRfc64OwedShareInventoryOwnerV1(() => ({ retryIntervalMs: 0 }));
+    owner.start(createOperationContext('system'));
+    try {
+      await owner.whenIdle();
+      await vi.waitFor(() => expect(settlement).toHaveBeenCalledOnce());
+      expect(markers(author).map(marker => marker.shareOperationId).sort()).toEqual(['fenced-share', 'second']);
+      release();
+      await author.whenRfc64CatalogResponsibilitiesIdleV1();
+      // No request() or authority event here: the committed responsibility wakes the owner.
+      await owner.whenIdle();
+      expect(markers(author)).toEqual([]);
+      expect(accepted).not.toHaveBeenCalled();
+      expect(settlement).toHaveBeenCalledOnce();
+    } finally { release(); await owner.close(); }
+  }, 30_000);
 
   it('recovers the exact shared version after reopening for editing and restarting behind a fence', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'dkg-owed-share-inventory-'));

@@ -48,10 +48,10 @@ export class Rfc64OwedShareInventoryMethods extends DKGAgentBase {
       list: () => this.rfc64PersistenceV1?.owedShareInventories.list() ?? [],
       unreadableAtOpen: () => this.rfc64PersistenceV1?.owedShareInventories.unreadableAtOpen ?? 0,
       drain: (marker, ctx) => this.drainRfc64OwedShareInventoryV1(marker, ctx),
-      settleGraph: async (contextGraphId, _ctx, signal) => {
-        if (signal.aborted || !rfc64SwmInventorySettlementCanConvergeV1(this.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId))) return;
-        await withDefaultStoreWorkPriority('background', () => withOwnedRpcRequestContext({ requestClass: 'background', signal },
-          () => this.reconcileRfc64CatalogResponsibilityV1(contextGraphId)));
+      requestGraphSettlement: contextGraphId => {
+        if (rfc64SwmInventorySettlementCanConvergeV1(this.rfc64CatalogAuthorityRefreshFailureReasonV1(contextGraphId))) {
+          this.scheduleRfc64CatalogResponsibilityReconciliationV1(contextGraphId);
+        }
       },
       remove: async (marker) => { await this.rfc64PersistenceV1?.owedShareInventories.delete(marker); },
       retryIntervalMs: () => resolvePartition()?.retryIntervalMs ?? DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1,
