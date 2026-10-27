@@ -74,10 +74,19 @@ export async function finishDurableShare(
   agent: DKGAgent, params: AfterDurableSwmPromotionParamsV1,
   stamp: () => Promise<void>, schedule: (observation: ObserveRfc64DurableSwmPromotionParamsV1) => void,
 ): Promise<void> {
-  try { await runPromoteCommittedFinalization(stamp); }
-  finally {
+  let durableOwner = false;
+  try {
+    await runPromoteCommittedFinalization(stamp);
+    if (params.recoveryBinding && !params.recoveryBinding.inventoryRequired) {
+      // Persist before success, then let that one owner execute and retry the share.
+      await runPromoteCommittedFinalization(async () => {
+        durableOwner = await agent.recordRfc64OwedShareInventoryV1(params);
+      });
+    }
+  } finally {
     const shareOperationId = params.recoveryBinding ? params.recoveryBinding.intent.operationId : params.shareOperationId;
-    if (shareOperationId !== null && !params.recoveryBinding?.inventoryRequired) schedule({ ...params, shareOperationId });
+    // Preserve best-effort recovery when stamping/recording failed or persistence is unavailable.
+    if (!durableOwner && shareOperationId !== null && !params.recoveryBinding?.inventoryRequired) schedule({ ...params, shareOperationId });
   }
   if (params.recoveryBinding && params.recoveryBinding.inventoryRequired) await commitDurableShareInventory(agent, params);
 }

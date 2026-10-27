@@ -1,5 +1,9 @@
 import { RemoteSignerError } from '@origintrail-official/dkg-chain';
 import { createServer } from 'node:http';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { openRfc64PersistenceV1 } from '../../agent/src/rfc64/persistence-v1.js';
 import { Wallet } from 'ethers';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -14,7 +18,7 @@ import { DurableShareFailure, observeShareRecovery } from '../src/daemon/routes/
 import { afterEach, describe, expect, it, vi } from 'vitest';
 vi.mock('@origintrail-official/dkg-agent', () => import('../../agent/src/index.js'));
 vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src/index.js'));
-import { computeCanonicalGraphScopedAuthorSealDigestV1, assertionLifecycleUri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { computeCanonicalGraphScopedAuthorSealDigestV1, assertionLifecycleUri, contextGraphMetaUri, createOperationContext } from '@origintrail-official/dkg-core';
 import { BlazegraphStore, OxigraphStore, StoreOperationTimeoutError, StoreSchedulerBusyError, UnsupportedTripleStoreCapabilityError, type Quad } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncPromoteQueue, CuratorRejectedError, CuratorUnconfirmedError, PromoteAdmissionUncertainError, PromoteStaleAdmissionError,
   computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata, skolemizeKnowledgeAssetParts } from '@origintrail-official/dkg-publisher';
@@ -749,6 +753,48 @@ describe('durable synchronous share ownership', () => {
       }));
       expect(await store.countQuads(finalized.sharedGraphUri)).toBe(1);
     } finally { await close(); await store.close(); }
+  });
+
+  it('answers a refresh-fenced HTTP share as before with its owed inventory durable, and writes the row after a restart', async () => {
+    const { store, agent, freshAgent, finalized } = await setup();
+    const dataDir = await mkdtemp(join(tmpdir(), 'durable-sync-owed-inventory-'));
+    const openPersistence = () => openRfc64PersistenceV1(dataDir, { yieldAfterPurgeBatch: async () => undefined });
+    let persistence = await openPersistence();
+    agent.rfc64PersistenceV1 = persistence;
+    useInactiveCatalogAuthority(agent, 'refresh-fenced');
+    daemonState.promoteWorkerAvailable = true;
+    const { post, close } = await serveShares(agent);
+    let owed: unknown;
+    try {
+      const response = await post();
+      expect(response.status).toBe(200);
+      const body = await response.json();
+      expect(body).toMatchObject({ swmShared: true, sealed: true, publishReady: true, promotedCount: 1, shareOperationId: expect.any(String) });
+      const [job] = await agent.promoteQueue.list({});
+      owed = { version: 1, contextGraphId: CG, subGraphName: null, authorAddress: AUTHOR, assertionCoordinate: NAME,
+        sealDigest: job.request.recoveryBinding!.sealDigest, shareOperationId: body.shareOperationId };
+      // Durable before the answer: the share does not wait for the row.
+      expect(persistence.owedShareInventories.list()).toEqual([owed]);
+    } finally { await close(); await persistence.close(); }
+    try {
+      // A restarted node whose lane is open writes the owed row through the inventory writer and drops the marker.
+      persistence = await openPersistence();
+      const { agent: restarted } = await freshAgent();
+      restarted.rfc64PersistenceV1 = persistence;
+      restarted.resolveRfc64CatalogReceiverAuthorityV1 = () => OPEN_LANE;
+      const writer = vi.fn(async () => ({ status: 'applied', attempts: 1, headObjectDigest: 'owed-head', kaUal: finalized.kaUal }));
+      restarted.tryCommitRfc64SwmAuthorInventoryV1 = writer;
+      restarted.requestRfc64SwmCatalogProjectionV1 = vi.fn(() => true);
+      expect(persistence.owedShareInventories.list()).toEqual([owed]);
+      const owner = restarted.createRfc64OwedShareInventoryOwnerV1(() => ({ retryIntervalMs: 0 }));
+      owner.start(createOperationContext('system'));
+      await owner.whenIdle();
+      await owner.close();
+      expect(writer).toHaveBeenCalledWith(expect.objectContaining({ assertionCoordinate: NAME,
+        shareOperationId: (owed as { shareOperationId: string }).shareOperationId }));
+      expect(restarted.requestRfc64SwmCatalogProjectionV1).toHaveBeenCalledWith(expect.objectContaining({ contextGraphId: CG, authorAddress: AUTHOR }));
+      expect(persistence.owedShareInventories.list()).toEqual([]);
+    } finally { await persistence.close(); await store.close(); await rm(dataDir, { recursive: true, force: true }); }
   });
 
   it('answers a committed share with a pending catalog handoff when the authoring lane closes before commit, then writes the inventory once the lane reopens', async () => {
