@@ -28,7 +28,6 @@ import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integr
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../src/sync/durable-recovery-runner.js';
 import { classifyDurableProgress } from '../src/sync/durable-progress.js';
 import {
-  heldGraphScopedAssetsReader,
   readHeldGraphScopedAssets,
 } from '../src/sync/requester/stored-graph-assets.js';
 import {
@@ -176,6 +175,7 @@ function node(
   const info: string[] = [];
   let defaultSubscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
   const materialization = new RecoveryMaterializationOwner({
+    proveHeldAssets: createDurableHeldStore(store, contentFence, () => options.noChain ? 'integrity-only' : 'confirmed')?.prove,
     chain: () => { throw new Error('chain reads supplied below'); }, store: () => store,
     isClosed: () => false, subscription: () => {
       if (options.subscription) return options.subscription();
@@ -233,7 +233,7 @@ function node(
       logDebug: () => {},
     }),
     ...roundOptions,
-    storedPrefix: options.disablePrefixProof?.() ? undefined : { read: heldGraphScopedAssetsReader(store, () => options.noChain ? 'integrity-only' : 'confirmed'), openScope: contentFence.openScope.bind(contentFence), assertCurrent: fence.assertCurrent },
+    storedPrefix: options.disablePrefixProof?.() ? undefined : fence.acquireStoredPrefix,
     processDurableBatchInWorker: async (...args) => { await options.beforeVerify?.(); return processBatch(...args); },
     storeInsert: async ({ quads }) => { await options.beforeMetaStore?.(); await store.insert(quads); },
     storeGraphScopedAsset: async ({ asset: verified }) => {
@@ -328,7 +328,7 @@ const generation = (version3 = '1') => [1, 2, 3, 4, 5, 6].map((n) => asset(n, n 
 const rowsOf = (fixtures: readonly AssetFixture[]) => fixtures.reduce((rows, fixture) => rows + fixture.payload.length, 0);
 
 describe('cross-peer recovery keeps the actually stored prefix', () => {
-  it.each(['clean', 'deleted', 'corrupted', 'metadata', 'during-verification', 'during-store'].flatMap(change => [false, true].map(samePeer => ({ change, samePeer }))))('checks a live checkpoint after $change (same peer: $samePeer)', async ({ change, samePeer }) => {
+  it.each(['clean', 'deleted', 'corrupted', 'metadata', 'missing-context', 'wrong-context', 'during-verification', 'during-store'].flatMap(change => [false, true].map(samePeer => ({ change, samePeer }))))('checks a live checkpoint after $change (same peer: $samePeer)', async ({ change, samePeer }) => {
     const fixtures = generation();
     const a = servingPeer(fixtures), b = servingPeer(fixtures);
     let running = true, first = true, activePeer = PEER, changed = false;
@@ -366,6 +366,14 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
       expect(wrong.object).not.toBe(root.object);
       await core.store.delete([root]); await core.store.insert([wrong]);
       expect(await core.store.countQuads(prefix.graph)).toBe(prefix.payload.length);
+      const held = await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+        descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors });
+      expect(held.has(prefix.ual)).toBe(false);
+    }
+    if (change === 'missing-context' || change === 'wrong-context') {
+      const binding = prefix.meta.find(q => q.predicate === 'http://dkg.io/ontology/contextGraph')!;
+      await core.store.delete([binding]);
+      if (change === 'wrong-context') await core.store.insert([{ ...binding, object: 'did:dkg:context-graph:wrong' }]);
       const held = await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
         descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors });
       expect(held.has(prefix.ual)).toBe(false);
@@ -562,4 +570,22 @@ it.each(['clean', 'deleted', 'corrupted'])('resumes production exact paging with
   expect(await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
     descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors }))
     .toEqual(new Set(fixtures.map(f => f.ual)));
+});
+
+it('reuses a bounded prefix after an uncertain write rejects during supervised recovery', async () => {
+  const fixtures = generation(); let epoch = 0, recovering = false;
+  const read = Object.assign(() => recovering ? undefined : epoch, { epoch: () => epoch });
+  const core = node(servingPeer(fixtures), { recoveryGeneration: read });
+  vi.spyOn(core.rawStore, 'dropGraph').mockImplementationOnce(async () => {
+    epoch = 1; recovering = true;
+    throw new Error('worker replacing');
+  });
+  await expect(core.store.dropGraph(fixtures[0]!.graph)).rejects.toThrow('worker replacing');
+  epoch = 2; recovering = false;
+  let rounds = 0;
+  const result = await core.start({ sliceSpent: true, isRunning: () => rounds < 12,
+    afterSlice: () => { rounds++; } }).recover();
+  expect(result.outcome).toBe('terminal');
+  expect(rounds).toBeGreaterThan(1);
+  expect(core.writes).toEqual(fixtures.map(f => f.ual));
 });

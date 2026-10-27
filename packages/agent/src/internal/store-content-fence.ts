@@ -73,8 +73,8 @@ export class StoreContentFence implements StoreMutationObserver {
       if (outcome === 'indeterminate') {
         // Queue admission precedes backend dispatch. A queued write may execute
         // on a replacement, so only a replacement AFTER its settled outcome can
-        // retire uncertainty. Unknown/in-progress generations stay fail-closed.
-        const generation = this.recoveryGeneration?.();
+        // retire uncertainty. A supervised epoch remains available while recovery is in progress.
+        const generation = this.recoveryGeneration?.() ?? this.recoveryGeneration?.epoch?.();
         this.uncertain.set(generation,
           combine(this.uncertain.get(generation) ?? { kind: 'graphs', graphs: new Map() }, pending));
       }

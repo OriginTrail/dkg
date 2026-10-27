@@ -1,4 +1,3 @@
-import { StoreContentFence } from '../src/internal/store-content-fence.js';
 import { verifiedDurableBoundaryOf, type VerifiedDurableBoundary } from '../src/sync/durable-recovery-boundary-seed.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
@@ -215,8 +214,7 @@ function createTwoRoundHarness(
       remotePeerId,
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      storedPrefix: { read: async () => new Set(heldAssetUals), assertCurrent: () => {},
-        openScope: scope => new StoreContentFence().openScope(scope) },
+      storedPrefix: async () => ({ assertCurrent() {}, close() {}, covers: ual => new Set(heldAssetUals).has(ual) }),
       fetchSyncPages: fetch,
       durableMetaContinuation, durableResumeBoundary,
       exactAssetSelectionFor: exactAssetUals

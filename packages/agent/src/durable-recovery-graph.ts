@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { HeldAssetFence } from './durable-recovery-materialization.js';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import { type DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import { type OperationContext } from '@origintrail-official/dkg-core';
@@ -155,11 +156,9 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
   }
   // Resolve continuation policy once; snapshots own a fresh full walk.
   const continuation = onVerifiedFullSnapshot ? {} : { durableMetaContinuation, durableResumeBoundary };
-  const runPaging = (fence?: Parameters<Parameters<typeof materialization.withHeldAssetFence>[0]>[0]) =>
+  const runPaging = (fence?: HeldAssetFence) =>
     runDurableSyncDetailed({ ...durableContext, ...continuation,
-      storedPrefix: host.heldStore && fence ? {
-        read: host.heldStore.read, openScope: host.heldStore.openScope, assertCurrent: fence.assertCurrent,
-      } : undefined,
+      storedPrefix: fence?.acquireStoredPrefix,
     });
   return host.heldStore && !onVerifiedFullSnapshot
     ? materialization.withHeldAssetFence(runPaging, signal) : runPaging();

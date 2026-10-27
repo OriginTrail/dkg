@@ -1,52 +1,28 @@
 // SPDX-License-Identifier: Apache-2.0
-import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import type { StoreContentFence } from '../../internal/store-content-fence.js';
-import type { HeldGraphScopedAssetsRequest } from './stored-graph-assets.js';
-import { graphScopedDurableManifestPrefixAtOffset, type GraphScopedDurableManifestPlan } from '../durable-integrity.js';
+import type { GraphScopedDurableManifestPlan } from '../durable-integrity.js';
 
-export interface StoredDurablePrefix {
-  read(request: HeldGraphScopedAssetsRequest): Promise<ReadonlySet<string>>;
-  readonly openScope: StoreContentFence['openScope'];
+export interface StoredPrefixProof {
   assertCurrent(): void;
+  close(): void;
+  covers(ual: string): boolean;
 }
-
-/** A checkpoint proves past writes, not present contents. Retain a content watch
- * from before reading the skipped prefix until the caller settles its suffix.
- */
-export async function proveStoredDurablePrefix(
-  capability: StoredDurablePrefix | undefined,
-  manifest: GraphScopedDurableManifestPlan,
-  offset: number,
-  signal?: AbortSignal,
-): Promise<{ assertCurrent(): void; close(): void; covers(ual: string): boolean }> {
-  const prefix = graphScopedDurableManifestPrefixAtOffset(manifest, offset);
-  if (!prefix || !capability) throw new Error('Cannot prove stored durable prefix');
-  const descriptors = manifest.descriptors.slice(0, prefix.descriptorCount);
-  const proof = capability.openScope({
-    assertionGraphs: descriptors.map(descriptor => descriptor.assertionGraph),
-    metadataGraph: contextGraphMetaUri(manifest.contextGraphId), subjects: descriptors.map(descriptor => descriptor.ual),
-  });
-  if (!proof) throw new Error('Cannot prove stored durable prefix');
-  const assertCurrent = () => { capability.assertCurrent(); proof.assertCurrent(); signal?.throwIfAborted(); };
-  try {
-    assertCurrent();
-    const held = await capability.read({ contextGraphId: manifest.contextGraphId, descriptors, signal });
-    assertCurrent();
-    if (descriptors.some(descriptor => !held.has(descriptor.ual))) throw new Error('Stored durable prefix is missing or corrupt');
-    return { assertCurrent, close: proof.close, covers: ual => held.has(ual) };
-  } catch (error) { proof.close(); throw error; }
-}
+export type StoredDurablePrefix = (
+  manifest: GraphScopedDurableManifestPlan, offset: number, signal?: AbortSignal,
+) => Promise<StoredPrefixProof>;
 
 /** Owns one graph settlement's proof, including checkpoint rejection and disposal. */
 export class DurableGraphSettlementGuard {
-  private current: { proof: Awaited<ReturnType<typeof proveStoredDurablePrefix>>; reject(): void } | undefined;
+  private current: { proof: StoredPrefixProof; reject(): void } | undefined;
 
   constructor(private readonly assertNotAborted: () => void) {}
 
   async acquire(capability: StoredDurablePrefix | undefined, manifest: GraphScopedDurableManifestPlan,
     offset: number, reject: () => void, signal?: AbortSignal): Promise<void> {
     if (this.current) throw new Error('Graph settlement already owns a prefix proof');
-    try { this.current = { proof: await proveStoredDurablePrefix(capability, manifest, offset, signal), reject }; }
+    try {
+      if (!capability) throw new Error('Cannot prove stored durable prefix');
+      this.current = { proof: await capability(manifest, offset, signal), reject };
+    }
     catch (error) { reject(); throw error; }
   }
 
