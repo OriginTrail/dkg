@@ -4,10 +4,10 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { propertyOptions } from '../../../scripts/testing/property-options.js';
 import {
-  DAY, NOW, WINDOW, createRetentionTemplates, faultyStore, pick, present, rng, seedKeyed, type KeyedSpec, type RetentionTemplates,
+  DAY, NOW, WINDOW, createRetentionTemplates, faultyStore, pick, present, rng, seedKeyed, type RetentionTemplates,
 } from './_helpers/lift-retention-fixtures.js';
 import { drain, newRetention } from './_helpers/lift-retention-sweep.js';
-import { bindingOracle, genPopulation, keyedOf, prefixOracle, type Rec } from './_helpers/lift-retention-population.js';
+import { bindingOracle, genPopulation, keyedOf, prefixOracle } from './_helpers/lift-retention-population.js';
 
 // AC7 (OT-RFC-73) for the publisher queue: retention never deletes a job that is not finalized (so never a failed, held, non-terminal or recoverable one), deletes only what D-6
 // allows (a finalized job 7 days after it finished), never a job dated after `now`, never changes the binding decision of a lifecycle key, and keeps a key's newest record in

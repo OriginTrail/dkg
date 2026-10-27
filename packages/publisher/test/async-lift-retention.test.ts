@@ -400,7 +400,7 @@ describe('the scan', () => {
     ];
     const w = await world(specs);
     const results = await drain(newRetention(w.publisher, { batchSize: 3 }));
-    expect(deletedIds(results).sort()).toEqual([...specs.map((s) => s.id)].sort());
+    expect(deletedIds(results).sort()).toEqual(specs.map((s) => s.id).sort());
     expect(results.every((r) => r.anomalies === 0 && r.error === undefined)).toBe(true);
     expect(await idsOf(w)).toEqual([]);
   });
