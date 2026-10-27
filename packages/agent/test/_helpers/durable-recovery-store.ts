@@ -1,3 +1,4 @@
+import { createAgentStoreComposition } from '../../src/internal/agent-store-composition.js';
 import type { StoreRecoveryGenerationReader } from '@origintrail-official/dkg-storage';
 import { createDurableHeldStore, createStoredPrefixAcquirer } from '../../src/durable-recovery-held-store.js';
 import { runAdmittedDurableGraph } from '../../src/durable-recovery-graph.js';
@@ -23,7 +24,7 @@ import {
   generateGraphKnowledgeAssetMetadata,
   overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
 } from '@origintrail-official/dkg-publisher';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { SYNC_PAGE_SIZE } from '../../src/dkg-agent-constants.js';
 import { MemorySyncCheckpointStore } from '../../src/sync/checkpoint/state.js';
 import { createUalOnlyExactAssetSelection } from '../../src/sync/exact-assets.js';
@@ -46,7 +47,7 @@ export const CG = 'held-restart-cg';
 export const PEER = '12D3KooWHeldRestartPeer';
 export const SECOND_PEER = '12D3KooWHeldRestartPeerTwo';
 export const ctx = { operationId: 'held-restart', operationName: 'sync' } as OperationContext;
-const stores: OxigraphStore[] = [];
+const stores: TripleStore[] = [];
 
 afterEach(async () => {
   for (const store of stores.splice(0)) await store.close();
@@ -164,14 +165,16 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 export function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: StoreRecoveryGenerationReader; holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
+  options: { store?: TripleStore; signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: StoreRecoveryGenerationReader; holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
   const chain = options.chain ?? (() => Object.values(peers)[0]!.current());
-  const rawStore = new OxigraphStore();
+  const rawStore = options.store ?? new OxigraphStore();
   stores.push(rawStore);
-  const contentFence = new StoreContentFence(options.recoveryGeneration);
-  const store = createMutationObservedStore(rawStore, createObservedStoreMutation(() => {}, contentFence));
+  const production = createAgentStoreComposition(rawStore, () => {}, { begin: () => () => {} });
+  const contentFence = options.recoveryGeneration ? new StoreContentFence(options.recoveryGeneration) : production.heldContent;
+  const store = options.recoveryGeneration
+    ? createMutationObservedStore(rawStore, createObservedStoreMutation(() => {}, contentFence)) : production.store;
   const writes: string[] = [];
   const info: string[] = [];
   let holdingsUnreadable = options.holdingsUnreadable === true;

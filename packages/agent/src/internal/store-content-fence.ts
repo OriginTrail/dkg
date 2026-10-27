@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { isSafeIri } from '@origintrail-official/dkg-core';
 import type { StoreRecoveryGenerationReader } from '@origintrail-official/dkg-storage';
-import type { StoreMutation, StoreMutationOutcome, StoreMutationObserver } from './store-mutation.js';
+import type { StoreMutation, StoreMutationExecution, StoreMutationOutcome, StoreMutationObserver } from './store-mutation.js';
 
 export interface StoreContentScope {
   readonly assertionGraphs: readonly string[];
@@ -64,17 +64,17 @@ export class StoreContentFence implements StoreMutationObserver {
 
   constructor(private readonly recoveryGeneration?: StoreRecoveryGenerationReader) {}
 
-  begin(mutation: StoreMutation): (outcome: StoreMutationOutcome) => void {
+  begin(mutation: StoreMutation): (outcome: StoreMutationOutcome, execution?: StoreMutationExecution) => void {
     const pending = mutationEffect(mutation);
     this.pending.add(pending);
     for (const watch of this.watches) if (overlaps(watch.effect, pending)) watch.valid = false;
-    return outcome => {
+    return (outcome, execution) => {
       this.pending.delete(pending);
       if (outcome === 'indeterminate') {
-        // Queue admission precedes backend dispatch. A queued write may execute
-        // on a replacement, so only a replacement AFTER its settled outcome can
-        // retire uncertainty. A supervised epoch remains available while recovery is in progress.
-        const generation = this.recoveryGeneration?.()?.generation;
+        // A posted worker operation carries its actual backend generation. A
+        // queued/opaque failure has no such evidence and may have executed on
+        // the replacement, so conservatively label it at settlement instead.
+        const generation = execution?.generation ?? this.recoveryGeneration?.()?.generation;
         this.uncertain.set(generation,
           combine(this.uncertain.get(generation) ?? { kind: 'graphs', graphs: new Map() }, pending));
       }

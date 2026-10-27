@@ -1,3 +1,8 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Worker } from 'node:worker_threads';
+import { OxigraphWorkerStore, asStoreRecoveryGenerationReader } from '@origintrail-official/dkg-storage';
 import { overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1 } from '@origintrail-official/dkg-publisher';
 import { describe, expect, it, vi } from 'vitest';
 import type { ContextGraphSub } from '../src/dkg-agent-types.js';
@@ -301,4 +306,39 @@ it('preserves a verified prefix when a resumed round is cancelled during verific
   controller = undefined; cancel = false;
   expect((await core.round(checkpoints, PEER, {})).result.complete).toBe(true);
   expect(core.writes).toEqual(fixtures.map(f => f.ual));
+});
+
+it('finishes bounded recovery after one worker replacement with an in-flight write', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dkg-prefix-worker-'));
+  const raw = new OxigraphWorkerStore(join(directory, 'store.nq'));
+  try {
+    const fixtures = generation();
+    const core = node(servingPeer(fixtures), { store: raw });
+    const checkpoints = new MemorySyncCheckpointStore();
+    const first = await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() });
+    expect(first.result.complete).toBe(false);
+    expect(checkpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.offset).toBeGreaterThan(0);
+    const prefix = fixtures.find(f => core.writes.includes(f.ual))!;
+    await raw.flush();
+    const read = asStoreRecoveryGenerationReader(raw)!;
+    expect(read()).toEqual({ generation: 0, ready: true });
+    const worker = (raw as unknown as { worker: Worker }).worker;
+    // Hold a posted RPC until physical exit rejects it. Its owner is worker 0,
+    // even though the failure reaches the observer after generation advances.
+    vi.spyOn(worker, 'postMessage').mockImplementationOnce(message => { expect(message.method).toBe('insert'); });
+    const write = core.store.insert([{ ...prefix.payload[0]!, object: '"pending mutation"' }]);
+    const rejected = expect(write).rejects.toThrow('worker exited unexpectedly');
+    await worker.terminate();
+    await rejected;
+    await raw.countQuads(); // Wait for the replacement's first healthy reply.
+    expect(read()).toEqual({ generation: 1, ready: true });
+    let complete = false;
+    for (let round = 0; round < 12 && !complete; round++) {
+      complete = (await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() })).result.complete;
+    }
+    expect(complete).toBe(true);
+    expect(read()?.generation).toBe(1);
+    expect(core.writes).toEqual(fixtures.map(f => f.ual));
+    expect(core.writes.filter(ual => ual === prefix.ual)).toHaveLength(1);
+  } finally { await raw.close(); rmSync(directory, { recursive: true, force: true }); }
 });

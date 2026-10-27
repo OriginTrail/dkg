@@ -19,7 +19,7 @@ export function createAgentStoreComposition(
     begin(mutation) {
       const settleProjection = observer.begin(mutation);
       const settleContent = heldContent.begin(mutation);
-      return outcome => { settleContent(outcome); settleProjection(outcome); };
+      return (outcome, execution) => { settleContent(outcome, execution); settleProjection(outcome); };
     },
   });
   const store = createMutationObservedStore(raw, executeMutation);
