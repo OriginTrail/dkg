@@ -402,6 +402,22 @@ describe('the scan', () => {
     expect(results.every((r) => r.scanned <= 3)).toBe(true);
   });
 
+  it('reads the stored index of an older sibling only up to the first one that is not finalized: that one ends the key\'s deletable run, so the finalized records behind it need no read', async () => {
+    // key order, oldest first: a retryable failed job, a finalized one that is too young to be a candidate (the sweep would read it as a sibling), then the old candidate
+    const young = fin('young', 'k', 2, 99);                                                       // finished one day before NOW: not a candidate
+    const w = await world([at('failed', 'k', 'retryable', 1), young, fin('old', 'k', 3, 10)]);
+    const spy = spyStore(w.store);
+    const results = await drain(newRetention(publisherOver(spy.store)));
+    expect(deletedIds(results)).toEqual([]);
+    expect(kept(results)).toEqual({ older_sibling_kept: 1 });
+    expect(verifiedSubjects(spy.log)).toEqual([jobSubject('old')]);                             // the candidate only: the young sibling behind the failed job was not read
+    // the control: with the failed job gone the young sibling is the older record in front of the candidate, and its index is read
+    const control = await world([young, fin('old', 'k', 3, 10)]);
+    const controlSpy = spyStore(control.store);
+    await drain(newRetention(publisherOver(controlSpy.store)));
+    expect(verifiedSubjects(controlSpy.log)).toEqual([jobSubject('old'), jobSubject('young')]);
+  });
+
   it('walks a group of rows that share one finish time and are more than a batch', async () => {
     const same = Math.round(10 * DAY);
     const specs: KeyedSpec[] = [
