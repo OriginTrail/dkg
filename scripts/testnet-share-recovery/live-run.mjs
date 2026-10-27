@@ -1,4 +1,5 @@
 import { loadCampaign, persistCampaign, campaignCounts } from './campaign-manifest.mjs';
+import { getAllJobPages } from './job-pages.mjs';
 /* eslint-disable no-constant-condition, unicorn/no-new-array -- Preserve the frozen comparison runner; each loop has an explicit exit. */
 import fs from 'node:fs';
 import path from 'node:path';
@@ -28,6 +29,12 @@ async function request(route, body, label, timeout = campaign.requestTimeoutMs) 
     const result = { label, route, startedAt, durationMs: performance.now() - start, status: r.status, value };
     log(result); return result;
   } catch (e) { const result = { label, route, startedAt, durationMs: performance.now() - start, status: null, error: e.message }; log(result); return result; }
+}
+// The publisher job list, a page at a time. A walk that cannot be completed is reported the way a failed request is, so the
+// observation loop keeps polling; a job missing from a walk is never taken as lost (it may have been accepted behind the cursor).
+async function requestAllJobs(route, label) {
+  try { return await getAllJobPages(pageRoute => request(pageRoute, undefined, label), route); }
+  catch (e) { return { label, route, status: null, error: e.message }; }
 }
 async function concurrent(items, count, fn) {
   let cursor = 0;
@@ -83,7 +90,7 @@ if (mode === 'prepare') {
   console.log('Traffic complete', publications.filter(x => x.status === 202).length, `/${counts.publications} publications admitted;`, shares.filter(x => x.status === 200).length, `/${counts.shares} shares HTTP 200`);
   let pass = 0;
   do {
-    const [jobs, status] = await Promise.all([request('/api/publisher/jobs?limit=1000', undefined, 'observe:jobs'), request('/api/status', undefined, 'observe:status')]);
+    const [jobs, status] = await Promise.all([requestAllJobs('/api/publisher/jobs', 'observe:jobs'), request('/api/status', undefined, 'observe:status')]);
     const catalog = status.value?.rfc64Catalog?.contextGraphs?.find(c => c.contextGraphId === cg);
     save('observation-' + pass++, { observedAt: new Date().toISOString(), jobs, catalog });
     console.log('observe', pass, catalog?.phase, catalog?.appliedRowCount, catalog?.legacyReadOnlyCount);
