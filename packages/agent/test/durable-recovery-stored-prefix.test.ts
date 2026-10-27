@@ -1,3 +1,4 @@
+import * as contentVerifier from '../src/exact-graph-content-verifier.js';
 import { createAdmittedGraphHarness } from './_helpers/durable-recovery-admitted-graph.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -334,4 +335,33 @@ it('finishes bounded recovery after one worker replacement with an in-flight wri
     expect(core.writes).toEqual(fixtures.map(f => f.ual));
     expect(core.writes.filter(ual => ual === prefix.ual)).toHaveLength(1);
   } finally { await raw.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+it.each(['clean', 'during-verification'])('reuses one held-content proof in a resumed full round: %s', async change => {
+  const fixtures = generation();
+  let second = false;
+  let prefix: AssetFixture;
+  const core = createRequesterHarness(servingPeer(fixtures), { mutations: { beforeVerify: async () => {
+    if (second && change === 'during-verification') await core.store.dropGraph(prefix.graph);
+  } } });
+  const checkpoints = new MemorySyncCheckpointStore();
+  const recovery = () => ({ meta: { requesterScope: 'durable-recovery-meta:proof-reuse' as const },
+    holdings: { ownerFetchesMissingAssets: false } });
+  const first = await core.round(checkpoints, PEER, { recovery: recovery(), settlementSliceDeadline: Date.now() });
+  expect(first.result.complete).toBe(false);
+  prefix = fixtures.find(fixture => fixture.ual === core.writes[0])!;
+  const key = getSyncCheckpointKey(PEER, CG, false, 'data');
+  expect(checkpoints.get(key)?.offset).toBeGreaterThan(0);
+  const verify = vi.spyOn(contentVerifier, 'verifyExactGraphContent');
+  try {
+    second = true;
+    const next = await core.round(checkpoints, PEER, { recovery: recovery() });
+    expect(verify.mock.calls.filter(([, request]) => request.graphUri === prefix.graph
+      && request.source === 'agent.durableSync.heldAssetContent')).toHaveLength(1);
+    expect(core.writes.filter(ual => ual === prefix.ual)).toHaveLength(1);
+    expect(next.result.complete).toBe(change === 'clean');
+    expect(checkpoints.get(key)?.terminal === true).toBe(change === 'clean');
+    if (change !== 'clean') expect(next.result.failedPhases).toBeGreaterThan(0);
+  } finally { verify.mockRestore(); }
 });

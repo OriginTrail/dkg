@@ -2,8 +2,11 @@
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import { recordDurableSyncDiagnostics, type DurableSyncAccumulator } from '../durable-progress.js';
-import type { DurableSyncContext } from './durable-sync.js';
+import type { DurableSyncContext, VerifiedFullSnapshot } from './durable-sync.js';
 import type { PreparedHoldingsSettlement } from './durable-holdings-phase.js';
+import type { FetchedDurableAssetSettlementRequest } from './durable-fetched-assets.js';
+import type { GraphScopedDurableManifestPlan } from '../durable-integrity.js';
+import type { ExactDurableFetchDisposition, ExactAssetResponderCapability } from './exact-durable-fetch.js';
 import type { SyncPageResult } from './page-fetch.js';
 import { assertNoLegacyRfc64ControlGraphs, partitionVerifiedGraphScopedAssets } from './verified-asset-preparation.js';
 
@@ -23,15 +26,20 @@ export type PreparedDurableVerificationInput = VerificationInput & (
       readonly returnedDescriptorCount: number }
 );
 
-/** DATA-specific decisions are selected once; the graph scope owns the shared protocol. */
-export interface DurableVerifiedPageSettlementPolicy {
+interface DurablePhaseSettlementOptions { readonly updateCheckpoint: boolean; readonly countProgress?: boolean;
+  readonly emptyPhase?: boolean }
+/** A concrete plan, without callbacks that resume its preparer's local state. */
+export type DurableVerifiedPageSettlementPlan = {
   readonly empty: boolean;
-  readonly metaCheckpoint: { updateCheckpoint: boolean; countProgress?: boolean; emptyPhase?: boolean };
-  storeData?(partitioned: ReturnType<typeof partitionVerifiedGraphScopedAssets>): Promise<'stored' | 'yielded'>;
-  beforeCheckpoint?(): Promise<void>;
-  settleData(): void;
-  continueFanout(): boolean;
-}
+  readonly metaCheckpoint: DurablePhaseSettlementOptions;
+} & (
+  | { readonly kind: 'held'; readonly holdings: Pick<PreparedHoldingsSettlement, 'manifest' | 'plan'> }
+  | { readonly kind: 'fetched'; readonly assets: FetchedDurableAssetSettlementRequest;
+      readonly dataResult: SyncPageResult; readonly dataCheckpoint: DurablePhaseSettlementOptions & {
+        readonly manifestPlan?: GraphScopedDurableManifestPlan; readonly terminal: boolean };
+      readonly snapshot?: VerifiedFullSnapshot; readonly terminal: boolean; readonly timedOut: boolean;
+      readonly exactDisposition?: ExactDurableFetchDisposition; readonly exactCapability?: ExactAssetResponderCapability }
+);
 
 export async function verifyDurablePage(context: VerificationContext,
   input: PreparedDurableVerificationInput, acceptUnverified: boolean) {

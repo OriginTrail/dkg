@@ -20,15 +20,24 @@ export function createDurableHeldStore(
   if (!fence) return undefined;
   return {
     prove: async request => {
-      const proof = fence.openScope({ graphs: [...request.descriptors.map(d => d.assertionGraph), LOCAL_TRUSTED_KA_CONTROLS_GRAPH],
-        metadataGraph: contextGraphMetaUri(request.contextGraphId), subjects: request.descriptors.map(d => d.ual) });
+      const scopeOf = (descriptors: typeof request.descriptors) => ({
+        graphs: [...descriptors.map(d => d.assertionGraph), LOCAL_TRUSTED_KA_CONTROLS_GRAPH],
+        metadataGraph: contextGraphMetaUri(request.contextGraphId), subjects: descriptors.map(d => d.ual) });
+      const proof = fence.openScope(scopeOf(request.descriptors));
       if (!proof) return undefined;
       try {
         request.signal?.throwIfAborted();
-        const commitments: FinalizedVmAssetCommitment[] = [];
+        let commitments: FinalizedVmAssetCommitment[] = [];
         const held = await readHeldGraphScopedAssets(store, request, undefined, evidence => commitments.push(evidence), confirmation());
         proof.assertCurrent(); request.signal?.throwIfAborted();
         return { held, assertCurrent: proof.assertCurrent, close: proof.close,
+          retain: uals => {
+            proof.assertCurrent();
+            if ([...uals].some(ual => !held.has(ual))) throw new Error('Cannot retain an unproven held asset');
+            proof.restrict(scopeOf(request.descriptors.filter(descriptor => uals.has(descriptor.ual))));
+            for (const ual of held) if (!uals.has(ual)) held.delete(ual);
+            commitments = commitments.filter(commitment => uals.has(commitment.ual));
+          },
           reconcile: async ctx => {
             for (const commitment of commitments) {
               request.signal?.throwIfAborted(); proof.assertCurrent();

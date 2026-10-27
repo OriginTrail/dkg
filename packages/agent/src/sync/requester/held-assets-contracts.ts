@@ -7,6 +7,8 @@ import type { HeldGraphScopedAssetsRequest } from './stored-graph-assets.js';
 /** Acquired content ownership remains live until the requester settles or abandons its graph. */
 export interface HeldAssetsProof {
   readonly held: ReadonlySet<string>;
+  /** Retain a subset of already-proven assets without repeating their content reads. */
+  retain(uals: ReadonlySet<string>): void;
   /** Reconcile eligible confirmed copies while this content proof remains live. */
   reconcile?(ctx: OperationContext): Promise<void>;
   assertCurrent(): void;
