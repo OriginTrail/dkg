@@ -149,6 +149,39 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     } finally { state.started = false; vi.useRealTimers(); }
   });
 
+  it('retains activation ownership when a capped subscription is promoted into unavailable authority', async () => {
+    const f = await fixture(false), state = f.agent as any;
+    const caller = new AbortController(), signal = caller.signal;
+    const runtime = new CoalescingRecurringTask({ retryIntervalMs: 30_000, runPass: async () => 'idle',
+      onError: error => { throw error; }, closingMessage: 'test closed' });
+    vi.spyOn(runtime, 'owns').mockImplementation(candidate => candidate === signal);
+    state.contextGraphSubscriptionRehydrationPromotionRuntime = runtime;
+    state.contextGraphSubscriptionAuthorityRecoveryRuntime = runtime;
+    state.contextGraphSubscriptionRehydrationStatus.rehydrationEnabled = true;
+    state.contextGraphSubscriptionRehydrationStatus.activationCap = 1;
+    state.contextGraphSubscriptionRehydrationPendingIds.add(LOCAL);
+    state.contextGraphSubscriptionDormancyById.set(LOCAL, 'activationCap');
+    state.contextGraphSubscriptionActivations.reset([f.original]);
+    state.contextGraphSubscriptionActivations.reconcile(state.contextGraphSubscriptionDormancyById);
+    state.started = true;
+    vi.spyOn(f.agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
+      outcome: 'unavailable', source: 'registered-chain', reason: 'temporary-authority-outage', metadataBootstrap: 'eligible',
+    });
+    try {
+      await f.agent.promoteDormantContextGraphSubscriptions(signal);
+      expect(state.contextGraphSubscriptionDormancyById.get(LOCAL)).toBe('authorityUnavailable');
+      const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, signal)
+        .then(() => 'activated', (error: Error) => error);
+      expect(state.workLifetime.physicalRuns.size).toBe(1);
+      vi.mocked(f.agent.resolveContextGraphSubscriptionBootstrapAuthority).mockResolvedValue({
+        outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 582n,
+      });
+      await f.agent.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+      expect(await outcome).toBe('activated');
+      expect(state.workLifetime.physicalRuns.size).toBe(0);
+    } finally { caller.abort(); state.started = false; }
+  });
+
   it('settles an authority wait after an explicit persisted unsubscribe', async () => {
     const f = await fixture(false), state = f.agent as any;
     state.started = true;

@@ -69,7 +69,11 @@ export class ContextGraphSubscriptionActivations {
     this.pending.delete(id); activation?.settle();
   }
   reconcile(dormancy: Dormancy): void {
-    for (const id of this.pending.keys()) if (dormancy.get(id) !== 'authorityUnavailable') this.cancel(id);
+    // Capped intent is still queued for activation and may later need authority recovery.
+    for (const id of this.pending.keys()) {
+      const reason = dormancy.get(id);
+      if (reason !== 'authorityUnavailable' && reason !== 'activationCap') this.cancel(id);
+    }
   }
   install(activation: Activation, row: ContextGraphSub): void {
     if (this.pending.get(activation.intent.id) !== activation) throw changed();
