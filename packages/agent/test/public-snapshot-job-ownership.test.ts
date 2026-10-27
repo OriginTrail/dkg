@@ -1,5 +1,6 @@
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
+import * as snapshotRecovery from '../src/public-snapshot-exact.js';
 import * as recoveryGraph from '../src/durable-recovery-graph.js';
 
 vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
@@ -176,11 +177,16 @@ describe('public snapshot job ownership', () => {
     expect(a.subscribeToContextGraph).not.toHaveBeenCalled(); expect(a.store.insert).not.toHaveBeenCalled();
     expect(a.recoverSnapshotExactAssets).not.toHaveBeenCalled(); expect(a.workLifetime.physicalRuns.size).toBe(0);
   });
-  it.each(['core-cache', 'rpc-only'] as const)('keeps completed snapshot separate from changed current coverage in %s mode', async mode => {
+  it.each(['core-cache', 'rpc-only'] as const)('catches up changed coverage with fresh evidence in %s mode', async mode => {
     const {a} = fixture();
-    a.chain.readPublicGraphSnapshot.mockResolvedValueOnce(snapshot()).mockResolvedValueOnce(snapshot(true));
-    a.router.send.mockResolvedValueOnce(Buffer.from(JSON.stringify(snapshot()))).mockResolvedValueOnce(Buffer.from(JSON.stringify(snapshot(true))));
-    await expect(run(a, mode)).resolves.toMatchObject({ assets:0,committed:0,completeAsOfSnapshot:true,current:false });
+    const next = snapshot(true);
+    a.chain.readPublicGraphSnapshot.mockResolvedValueOnce(snapshot()).mockResolvedValue(next);
+    a.router.send.mockResolvedValueOnce(Buffer.from(JSON.stringify(snapshot()))).mockResolvedValue(Buffer.from(JSON.stringify(next)));
+    const recover = vi.spyOn(snapshotRecovery, 'recoverPublicSnapshotExact').mockImplementation(async (_host, options) => ({ committed: new Set(options.uals) }));
+    await expect(run(a, mode)).resolves.toMatchObject({ assets:1,committed:1,completeAsOfSnapshot:true,current:true,catchUpRounds:2 });
+    expect(recover).toHaveBeenCalledTimes(2);
+    expect(recover.mock.calls.map(([, options]) => options.evidence.snapshot.assets.length)).toEqual([0, 1]);
+    expect(recover.mock.calls[1]![1].deadline).toBe(recover.mock.calls[0]![1].deadline);
     if(mode === 'core-cache') expect(JSON.parse(new TextDecoder().decode(a.router.send.mock.calls[1][2]))).toMatchObject({refresh:true});
   });
   it('retains the initial supplier when final coverage falls back to another core', async () => {

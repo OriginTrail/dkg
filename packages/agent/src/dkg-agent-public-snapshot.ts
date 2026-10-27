@@ -2,10 +2,10 @@ import { PublicSnapshotProofRuntime } from './public-snapshot-proof-runtime.js';
 import { resolveSnapshotSourcePolicies, type SnapshotSourcePolicyName } from './public-snapshot-policy.js';
 import { registerCoreChainCacheHandlers } from './core-chain-cache-handler.js';
 import { createPublicSnapshotSourcePlan } from './public-snapshot-source-plan.js';
-import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
+import { recoverPublicSnapshotToCurrent } from './public-snapshot-catch-up.js';
 import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
-import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
+import { recoverPublicSnapshotParallelExact } from './public-snapshot-parallel-exact.js';
 import { createPublicSnapshotHeldAssetCheck } from './public-snapshot-held-assets.js';
 import { isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 import { vmRecoveryRetryDelay } from './vm-recovery-pass-authority.js';
@@ -181,7 +181,6 @@ export class PublicSnapshotMethods extends DKGAgentBase {
             throw new Error("Graph name binding differs from requested snapshot");
           // From admission onward every captured write premise stays strict.
           readingInitialInventory = false;
-          const evidence = new PublicSnapshotEvidence(initial, isCurrent);
           // A validated public snapshot admits this job without scheduling the
           // daemon's separate legacy subscribe/catch-up pipeline.
           control.admitSubscription(() => {
@@ -190,52 +189,53 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           assertCurrent();
           if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
           assertCurrent();
-          const uals = snapshot.assets.map((a) => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
-          const recovery = { contextGraphId, peerBatches: sourcePlan.contentPeerBatches, uals, evidence, signal, assertCurrent };
-          let recovered: PublicSnapshotRecoveryResult;
-          if (transport === 'bulk') {
-            const { verification, reconcile } = DKGAgentBase.createDurableRecoveryCapabilities(this);
-            recovered = await recoverPublicSnapshotBulk({
-              store: this.store, router: this.router, verification, reconcile,
-              ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
-            }, { ...recovery,
-              deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
-              shouldQuarantineCommitted: () => {
-                const current = this.subscribedContextGraphs.get(contextGraphId);
-                return !current || (!current.subscribed && !current.coreHosted) || current.onChainId !== onChainId;
-              },
-              onCommitted: () => this.invalidateListContextGraphsCache(),
-              log: message => this.log.info(createOperationContext('sync'), message),
-            });
-          } else recovered = await recoverPublicSnapshotExact(DKGAgentBase.createDurableRecoveryCapabilities(this), {
-            ...recovery, deadline: startedAt + 3_600_000,
-            canAdmit: () => this.vmRecoverySyncAdmissionAvailable(contextGraphId),
-            holds: createPublicSnapshotHeldAssetCheck(this.store, evidence),
+          const caughtUp = await recoverPublicSnapshotToCurrent({
+            initial, deadline: startedAt + 3_600_000, signal, assertCurrent,
+            readFresh: () => read(true),
+            recover: async observation => {
+              const evidence = new PublicSnapshotEvidence(observation, isCurrent);
+              const uals = observation.snapshot.assets.map(a => buildKnowledgeAssetUalFromOnChainIdV1(
+                observation.snapshot.chainId, observation.snapshot.assetStorage, BigInt(a.id)));
+              const recovery = { contextGraphId, peerBatches: sourcePlan.contentPeerBatches, uals, evidence, signal, assertCurrent };
+              if (transport === 'bulk') {
+                const { verification, reconcile } = DKGAgentBase.createDurableRecoveryCapabilities(this);
+                return recoverPublicSnapshotBulk({
+                  store: this.store, router: this.router, verification, reconcile,
+                  ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
+                }, { ...recovery, deadline: startedAt + 3_600_000, dataDir: this.config.dataDir,
+                  shouldQuarantineCommitted: () => {
+                    const current = this.subscribedContextGraphs.get(contextGraphId);
+                    return !current || (!current.subscribed && !current.coreHosted) || current.onChainId !== onChainId;
+                  },
+                  onCommitted: () => this.invalidateListContextGraphsCache(),
+                  log: message => this.log.info(createOperationContext('sync'), message),
+                });
+              }
+              return recoverPublicSnapshotParallelExact(DKGAgentBase.createDurableRecoveryCapabilities(this), {
+                ...recovery, deadline: startedAt + 3_600_000,
+                canAdmit: () => this.vmRecoverySyncAdmissionAvailable(contextGraphId),
+                holds: createPublicSnapshotHeldAssetCheck(this.store, evidence),
+              });
+            },
           });
-          const { committed, bulkChunks, alreadyPresent } = recovered;
-
-          // A new inventory/root comparison is required before claiming current coverage.
-          const fresh = await read(true);
-          assertCurrent();
-          const current =
-            fresh.snapshot.inventoryDigest === snapshot.inventoryDigest &&
-            fresh.snapshot.assetStorage === snapshot.assetStorage &&
-            fresh.snapshot.contextGraphStorage === snapshot.contextGraphStorage &&
-            BigInt(fresh.snapshot.blockNumber) >= BigInt(snapshot.blockNumber);
+          const { committed, alreadyPresent } = caughtUp.recovered;
+          const { snapshot: finalSnapshot, sourceCore } = caughtUp.observation;
+          const { bulkChunks, fresh } = caughtUp;
           return {
             mode, transport, bulkChunks,
             ...sourcePlan.report(),
-            sourceCore: initial.sourceCore,
+            sourceCore,
             coverageSourceCore: fresh.sourceCore,
-            snapshotDigest: snapshot.snapshotDigest,
-            blockNumber: snapshot.blockNumber,
-            blockHash: snapshot.blockHash,
-            inventoryDigest: snapshot.inventoryDigest,
-            assets: uals.length,
+            snapshotDigest: finalSnapshot.snapshotDigest,
+            blockNumber: finalSnapshot.blockNumber,
+            blockHash: finalSnapshot.blockHash,
+            inventoryDigest: finalSnapshot.inventoryDigest,
+            assets: finalSnapshot.assets.length,
             committed: committed.size,
             ...(alreadyPresent === undefined ? {} : { alreadyPresent }),
             completeAsOfSnapshot: true,
-            current,
+            current: true,
+            catchUpRounds: caughtUp.rounds,
             startedAt,
             finishedAt: Date.now(),
             elapsedMs: Date.now() - startedAt,

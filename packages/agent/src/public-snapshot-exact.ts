@@ -5,7 +5,7 @@ import { exactAssetFetchSessionPolicy } from './sync/requester/exact-durable-fet
 import { createOperationContext } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
 import type { PublicSnapshotRecoveryOptions, PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
-import { PublicSnapshotRecoveryPacing } from './public-snapshot-exact-pacing.js';
+import { PublicSnapshotRecoveryPacing, type PublicSnapshotAttemptVerdict } from './public-snapshot-exact-pacing.js';
 
 export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecoveryOptions {
   /** Epoch milliseconds at which the job ends. */
@@ -14,6 +14,13 @@ export interface PublicSnapshotExactRecoveryOptions extends PublicSnapshotRecove
   readonly canAdmit?: () => boolean;
   /** Whether the asset is already stored as the snapshot pins it. */
   readonly holds?: (ual: string) => Promise<boolean>;
+  /** Concurrent lanes share refusal history and never queue past a peer's new hold. */
+  readonly coordination?: {
+    pacing: PublicSnapshotRecoveryPacing;
+    serializePeer<T>(peer: string, run: () => Promise<T>): Promise<T>;
+    committed: Set<string>;
+    total: number;
+  };
 }
 
 type ExactTransport = 'stream-preferred' | 'legacy';
@@ -38,9 +45,9 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
   let alreadyPresent = 0;
   const ctx = createOperationContext('sync');
   const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
-  const pacing = new PublicSnapshotRecoveryPacing({ contextGraphId, deadline, signal, assertCurrent, canAdmit: options.canAdmit });
+  const pacing = options.coordination?.pacing ?? new PublicSnapshotRecoveryPacing({ contextGraphId, deadline, signal, assertCurrent, canAdmit: options.canAdmit });
   const incomplete = (reason?: string) => new Error(
-    `Snapshot recovery incomplete: ${committed.size}/${uals.length} committed${reason ? ` (${reason})` : ''}`);
+    `Snapshot recovery incomplete: ${options.coordination?.committed.size ?? committed.size}/${options.coordination?.total ?? uals.length} committed${reason ? ` (${reason})` : ''}`);
   const assertActive = () => {
     if (Date.now() >= deadline) throw incomplete('job time limit reached');
     assertCurrent();
@@ -49,10 +56,13 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
     for (const ual of batch) {
       if (committed.has(ual) || !options.holds) continue;
       assertActive();
-      if (await options.holds(ual)) { committed.add(ual); alreadyPresent += 1; }
+      if (await options.holds(ual)) { committed.add(ual); options.coordination?.committed.add(ual); alreadyPresent += 1; }
     }
   };
-  const attempt = async (peer: string, selection: string[], transport: ExactTransport) => {
+  const transfer = async (peer: string, selection: string[], transport: ExactTransport): Promise<PublicSnapshotAttemptVerdict> => {
+    assertActive();
+    // Another lane may have received BUSY while this one waited for the peer.
+    if (pacing.heldOff(peer)) return 'retry-peer';
     const result = await exactRecovery.runExactRecovery({
       host, ctx,
       remotePeerId: peer, contextGraphId, policy: exactAssetFetchSessionPolicy(createUalOnlyExactAssetSelection(selection), 'vm-update-refresh'), authority: evidence,
@@ -63,7 +73,7 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
       },
     });
     const before = committed.size;
-    for (const ual of result.committedExactAssetUals ?? []) committed.add(ual);
+    for (const ual of result.committedExactAssetUals ?? []) { committed.add(ual); options.coordination?.committed.add(ual); }
     // A completed, verified batch is a scheduling hint within this job only.
     // It grants no authority or coverage for any later asset; all other
     // admitted providers remain available, with unchanged retry/hold rules.
@@ -71,6 +81,9 @@ export async function recoverPublicSnapshotExact(host: DurableRecoveryHost, opti
       && selection.every(ual => result.committedExactAssetUals?.includes(ual))) lastCompletePeer = peer;
     return pacing.settle(peer, result, committed.size - before);
   };
+  const attempt = (peer: string, selection: string[], transport: ExactTransport) => options.coordination
+    ? options.coordination.serializePeer(peer, () => transfer(peer, selection, transport))
+    : transfer(peer, selection, transport);
   // One pass reports what happened. Only the scheduler below advances
   // discovery or waits; answer history belongs to the asset selection.
   const pass = async (selection: RecoverySelection, peers: readonly string[]): Promise<SelectionPass> => {
