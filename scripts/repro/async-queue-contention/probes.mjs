@@ -6,7 +6,10 @@
 // Health lane: the three store calls the daemon makes on the health lane, issued through the PRODUCT functions (no copy
 // of their query text, options or decision logic):
 //   daemon.status.storeProbe     probeExternalStore(agent): ASK, the caller waits at most 5 s and gets 'no-answer'
-//                                (also when the scheduler rejects it); concurrent callers share the running probe
+//                                (also when the scheduler rejects it); concurrent callers share the running probe. The
+//                                ASK itself is never aborted and goes on after its caller gave up, so the agent given
+//                                to this call sees the store through withTrackedQueries too: the caller returning says
+//                                nothing about the store query, and drain() waits for that (bounded)
 //   daemon.status.storeQuads     requestExternalStoreQuads(agent, now): the full-store COUNT, started in the background
 //                                unless a result younger than 30 s is cached or one is running. The product returns no
 //                                handle to it, so the agent given to this call sees the store through withTrackedCount:
@@ -38,11 +41,14 @@ import { within } from './workload.mjs';
 export const PROBE_RECONCILE_SOURCE = 'daemon.metrics.storeCountReconcile';
 /** The source label of the full-store COUNT (store-quads-cache.ts countStoreQuads). */
 export const COUNT_SOURCE = 'daemon.status.storeQuads';
+/** The source label of the status probe's ASK (store-reachability.ts runProbe). */
+export const STATUS_SOURCE = 'daemon.status.storeProbe';
 /** store-reachability.ts STORE_PROBE_WAIT_MS: a status probe that has not answered by then reports 'no-answer'. */
 export const NO_ANSWER_MS = 5000;
 /**
- * How long the end of a run waits for the probe load to finish (startProbeLoad's drain): the status probes answer
- * within NO_ANSWER_MS by construction, the full-store COUNT is never aborted (like the daemon's) and has no such bound.
+ * How long the end of a run waits for the probe load to finish (startProbeLoad's drain). A status probe's CALLER answers
+ * within NO_ANSWER_MS by construction, but the ASK behind it is never aborted (like the daemon's) and, like the
+ * full-store COUNT, has no such bound: the drain waits for the store queries, up to this long.
  */
 export const PROBE_DRAIN_MS = 30_000;
 /** The harness's cadences and phases in ms, and the ACK payload in quads. */
@@ -115,18 +121,20 @@ export function makeMetricsQuery(store, counters) {
 }
 
 /**
- * The store as the full-store COUNT sees it: every other member is the store's own, and a query labelled COUNT_SOURCE
- * is handed to track(promise) as well as returned. The product starts that COUNT in the background and keeps no handle
- * to it (requestExternalStoreQuads returns the cached fields at once), so this is the only way to know when it has
- * settled. The query itself is untouched: same options, same scheduler lane, same result or rejection.
+ * The store as a product caller sees it: every other member is the store's own, and a query labelled with one of
+ * `sources` is handed to track(promise) as well as returned. The product leaves two of its store queries running after
+ * the call that started them has returned: the full-store COUNT, started in the background (requestExternalStoreQuads
+ * returns the cached fields at once), and the status probe's ASK, which its caller stops waiting for after 5 s without
+ * aborting it. Neither returns a handle, so this is the only way to know when they have settled. The query itself is
+ * untouched: same options, same scheduler lane, same result or rejection.
  */
-export function withTrackedCount(store, track) {
+export function withTrackedQueries(store, sources, track) {
   return new Proxy(store, {
     get(target, prop) {
       if (prop === 'query') {
         return (sparql, options) => {
           const running = target.query(sparql, options);
-          if (options?.source === COUNT_SOURCE) track(Promise.resolve(running));
+          if (sources.includes(options?.source)) track(Promise.resolve(running));
           return running;
         };
       }
@@ -136,17 +144,20 @@ export function withTrackedCount(store, track) {
   });
 }
 
+/** The store as the full-store COUNT sees it (see withTrackedQueries). */
+export const withTrackedCount = (store, track) => withTrackedQueries(store, [COUNT_SOURCE], track);
+
 /**
  * Starts the probe load (call it after beginEpoch). deps = the loaded dist; cfg = { statusMs, metricsMs, countMs,
  * horizonMs } with 0 switching a probe off, and optional phases. Returns { state, stop(), drain(capMs) }; state.events
  * is [{ kind: 'status' | 'metrics' | 'count-request', t, ms, result, err }], t run-relative; a metrics result is 'ok'
  * (the store answered the health query), 'busy' or 'error' (the store rejected or failed it) or 'reconciled' (answered
- * locally, no query reached the store). drain(capMs) waits for the probes in flight and for the COUNT's query (see
- * withTrackedCount), for at most capMs in all, and returns how many were still running then.
+ * locally, no query reached the store). drain(capMs) waits for the probes in flight and for the store queries behind
+ * them that outlive their callers, the status ASK and the COUNT (see withTrackedQueries), for at most capMs in all, and
+ * returns how many were still running then.
  */
 export async function startProbeLoad(world, deps, cfg) {
   const { store } = world;
-  const agent = { store };
   const counters = { reconcilesStubbed: 0, queries: 0 };
   const metrics = deps.probeMetrics.createStoreCountMetrics(makeMetricsQuery(store, counters));
   deps.probeQuads.invalidateExternalStoreQuadsCache(); // a fresh process has an empty cache anyway; explicit for determinism
@@ -159,13 +170,14 @@ export async function startProbeLoad(world, deps, cfg) {
     inflight.add(p);
     p.finally(() => inflight.delete(p)).catch(() => {});
   };
+  const statusAgent = { store: withTrackedQueries(store, [STATUS_SOURCE], track) };
   const countAgent = { store: withTrackedCount(store, track) };
   const statusOnce = async () => {
     const t0 = performance.now();
     let result;
     let err;
     try {
-      result = await deps.probeReach.probeExternalStore(agent);
+      result = await deps.probeReach.probeExternalStore(statusAgent);
     } catch (e) {
       result = 'threw';
       err = e?.code ?? e?.name;
@@ -241,9 +253,13 @@ export async function startProbeLoad(world, deps, cfg) {
     },
     async drain(capMs) {
       await Promise.allSettled(loops);
-      // the probes in flight and the COUNT's query (tracked by withTrackedCount); the cap bounds the wait, and its
-      // timer does not outlive the work
-      await within(Promise.allSettled(inflight), capMs);
+      // the probes in flight and the store queries behind them (tracked by withTrackedQueries): a status probe returns
+      // 'no-answer' to its caller after 5 s while its ASK runs on, so the probe settling is not the query settling.
+      // A tracked query can start after a snapshot of the set (the probe that issues it is still in the set, so the
+      // loop looks again when that settles); the cap bounds the wait in all, and its timer does not outlive the work
+      const deadline = performance.now() + capMs;
+      for (let left = capMs; inflight.size > 0 && left > 0; left = deadline - performance.now())
+        await within(Promise.allSettled(inflight), left);
       return inflight.size;
     },
   };
@@ -252,9 +268,10 @@ export async function startProbeLoad(world, deps, cfg) {
 /**
  * One synthetic graph-scoped storage ACK (8 operations, priority 'ack'); k = its sequence number. onOp(source, ms, ok,
  * startedAt) sees every operation as the caller experienced it, with the performance.now() it started at: an ACK takes
- * as long as its operations queue, so an operation's start is not its ACK's.
+ * as long as its operations queue, so an operation's start is not its ACK's. onOpStart(source, startedAt) sees each
+ * operation as it is issued, so an operation that never returns is still known to be running.
  */
-export async function ackOnce(store, deleteByPatternWithoutCount, k, payload, onOp = () => {}) {
+export async function ackOnce(store, deleteByPatternWithoutCount, k, payload, onOp = () => {}, onOpStart = () => {}) {
   const slot = k % 16;
   const kaUal = `did:dkg:31337/0x3420aaaa00000000000000000000000000000000/${9000 + slot}`;
   const meta = `did:dkg:context-graph:${CG_ID}/_shared_memory_meta`;
@@ -264,6 +281,7 @@ export async function ackOnce(store, deleteByPatternWithoutCount, k, payload, on
   const opt = (i) => ({ priority: 'ack', source: ACK_SOURCES[i] });
   const step = async (i, call) => {
     const t0 = performance.now();
+    onOpStart(ACK_SOURCES[i], t0);
     try {
       await call(opt(i));
       onOp(ACK_SOURCES[i], performance.now() - t0, true, t0);
@@ -325,6 +343,11 @@ export async function ackOnce(store, deleteByPatternWithoutCount, k, payload, on
  * running delays the next (recorded as start lateness). Returns { state, stop(), drain(capMs) }; state.events is
  * [{ k, due, t, lateMs, ms, ok, err }] and state.opEvents [{ k, source, t, ms, ok }], t run-relative: an event's own
  * start, so an operation's t is when that operation began, not when its ACK did.
+ * drain(capMs) waits at most capMs for the running ACK. One still running then is the slowest work of the run and has no
+ * event of its own, so the drain gives it one: the ACK and the operation it is in are recorded as CENSORED at the moment
+ * the drain gave up (ms = how long they had run, a lower bound; ok false, err 'UNFINISHED_AT_DRAIN', unfinished true),
+ * and anything the stuck work records after that is dropped, so it is counted once. It returns how many ACKs it
+ * left unfinished (0 or 1: they run one at a time).
  */
 export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
   const { store } = world;
@@ -334,6 +357,8 @@ export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
     schedule: fixedSchedule(cfg.intervalMs, cfg.phaseMs ?? LOAD_DEFAULTS.ackPhaseMs, cfg.horizonMs),
   };
   let stopped = false;
+  let closed = false; // the drain gave up: what the work still running records from then on is not recorded
+  let running = null; // the ACK being run: { k, due, t0, op: the operation it is in, or null }
   const loop = (async () => {
     for (let k = 0; k < state.schedule.length && !stopped; k++) {
       const due = state.schedule[k];
@@ -341,25 +366,38 @@ export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
         await sleep(Math.min(due - now, 50));
       if (stopped) break;
       const t0 = performance.now();
+      const ack = (running = { k, due, t0, op: null });
       let ok = true;
       let err;
       try {
-        await ackOnce(store, deleteByPatternWithoutCount, k, cfg.payload, (source, ms, opOk, startedAt) =>
-          state.opEvents.push({ k, source, t: startedAt - world.t0, ms, ok: opOk }),
+        await ackOnce(
+          store,
+          deleteByPatternWithoutCount,
+          k,
+          cfg.payload,
+          (source, ms, opOk, startedAt) => {
+            ack.op = null;
+            if (!closed) state.opEvents.push({ k, source, t: startedAt - world.t0, ms, ok: opOk });
+          },
+          (source, startedAt) => {
+            ack.op = { source, startedAt };
+          },
         );
       } catch (e) {
         ok = false;
         err = e?.code ?? e?.name;
       }
-      state.events.push({
-        k,
-        due,
-        t: t0 - world.t0,
-        lateMs: t0 - world.t0 - due,
-        ms: performance.now() - t0,
-        ok,
-        err,
-      });
+      running = null;
+      if (!closed)
+        state.events.push({
+          k,
+          due,
+          t: t0 - world.t0,
+          lateMs: t0 - world.t0 - due,
+          ms: performance.now() - t0,
+          ok,
+          err,
+        });
     }
   })();
   return {
@@ -368,7 +406,33 @@ export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
       stopped = true;
     },
     async drain(capMs) {
-      await Promise.race([loop, sleep(capMs)]);
+      const finished = Symbol('finished');
+      if ((await within(loop.then(() => finished), capMs)) === finished) return 0;
+      const at = performance.now();
+      closed = true;
+      stopped = true;
+      const ack = running;
+      if (!ack) return 0;
+      if (ack.op)
+        state.opEvents.push({
+          k: ack.k,
+          source: ack.op.source,
+          t: ack.op.startedAt - world.t0,
+          ms: at - ack.op.startedAt,
+          ok: false,
+          unfinished: true,
+        });
+      state.events.push({
+        k: ack.k,
+        due: ack.due,
+        t: ack.t0 - world.t0,
+        lateMs: ack.t0 - world.t0 - ack.due,
+        ms: at - ack.t0,
+        ok: false,
+        err: 'UNFINISHED_AT_DRAIN',
+        unfinished: true,
+      });
+      return 1;
     },
   };
 }
@@ -384,6 +448,10 @@ export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
  *   ack.opMs           caller-visible duration of every ACK operation that started in the window (queue wait included);
  *                      an operation is in the window by its OWN start, whichever window its ACK started in
  *   ack.acksStarted    ACKs started in the window; ackMs their whole-sequence duration
+ *   ack.acksUnfinished ACKs the drain left running, WHATEVER window they started in (startAckLoad's drain records them
+ *                      as censored): the ones that started in the window are in acksStarted and their censored
+ *                      duration in ackMs, the operation each was in is in ops, opMs and opsUnfinished (by its own
+ *                      start). An unfinished ACK is not a failed one: acksFailed and opsFailed leave it out
  */
 export function probeAckSummary({ probeState, ackState, from, to }) {
   const inWindow = (t) => t >= from && t < to;
@@ -418,11 +486,13 @@ export function probeAckSummary({ probeState, ackState, from, to }) {
     ack: {
       on: Boolean(ackState),
       acksStarted: acks.length,
-      acksFailed: acks.filter((e) => !e.ok).length,
+      acksFailed: acks.filter((e) => !e.ok && !e.unfinished).length,
+      acksUnfinished: (ackState?.events ?? []).filter((e) => e.unfinished).length,
       ackMs: summarize(acks.map((e) => e.ms)),
       startLatenessMs: summarize(acks.map((e) => Math.max(0, e.lateMs))),
       ops: ackOps.length,
-      opsFailed: ackOps.filter((e) => !e.ok).length,
+      opsFailed: ackOps.filter((e) => !e.ok && !e.unfinished).length,
+      opsUnfinished: ackOps.filter((e) => e.unfinished).length,
       opMs: summarize(ackOps.map((e) => e.ms)),
       bySource: ackOps.reduce((acc, e) => ({ ...acc, [e.source]: (acc[e.source] ?? 0) + 1 }), {}),
     },

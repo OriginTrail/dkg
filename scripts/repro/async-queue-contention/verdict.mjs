@@ -893,10 +893,13 @@ function publisherChecks(p, measureMs) {
  * but 0 (a missing field included) leaves the reconciliation unresolved and the run invalid.
  * P2b: `queue` is the run's stream(s): 'share' (default; the idle publisher runs beside it), 'lift' or 'both'. A lift
  * run has no share stream, so the share checks are left out; `publisher` (see publisherChecks) adds the publisher
- * stream's; `load` = { probes, ack, statusProbes, metricsProbes, acksStarted } requires the probe and ACK load that was
- * switched on to have run (probesRan, acksRan): the counts are probes and ACKs STARTED in the measure window whatever
- * their result, so a probe that got no answer still ran (the answers are reported in summary.probes.noAnswer, not
- * checked here); `liftSeedFileVerified` is the lift seed file's hash check. Without these the result is the P2a one.
+ * stream's; `load` = { probes, ack, statusProbes, metricsProbes, acksStarted, acksUnfinished } requires the probe and
+ * ACK load that was switched on to have run (probesRan, acksRan): the counts are probes and ACKs STARTED in the measure
+ * window whatever their result, so a probe that got no answer still ran (the answers are reported in
+ * summary.probes.noAnswer, not checked here). `acksUnfinished` = the ACKs the end-of-run drain left running, whatever
+ * window they started in (summary.ack.acksUnfinished): their latency is only a lower bound, censored at the drain, so a
+ * run with any has incomplete ACK evidence (acksFinished; a missing count fails it). `liftSeedFileVerified` is the lift
+ * seed file's hash check. Without these the result is the P2a one.
  */
 export function validity({
   lambda,
@@ -946,7 +949,7 @@ export function validity({
     // a run with a publisher stream and no evidence from it is no run
     ...(publisher ? publisherChecks(publisher, measureMs) : queue === 'share' ? {} : { publisherEvidence: false }),
     ...(load?.probes ? { probesRan: load.statusProbes > 0 && load.metricsProbes > 0 } : {}),
-    ...(load?.ack ? { acksRan: load.acksStarted > 0 } : {}),
+    ...(load?.ack ? { acksRan: load.acksStarted > 0, acksFinished: load.acksUnfinished === 0 } : {}),
   };
   return {
     arrivalsMeasured: measured,

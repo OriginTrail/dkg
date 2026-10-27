@@ -331,9 +331,30 @@ test('the probes and ACKs that were switched on must have run, and a lift seed f
       statusProbes: 18,
       metricsProbes: 6,
       acksStarted: 45,
+      acksUnfinished: 0,
     }).ok,
     true,
   );
+  // an ACK left running at the drain has only a censored latency: the ACK evidence is incomplete, the run invalid
+  const unfinished = run({
+    probes: true,
+    ack: true,
+    statusProbes: 18,
+    metricsProbes: 6,
+    acksStarted: 45,
+    acksUnfinished: 1,
+  });
+  assert.deepEqual(
+    [unfinished.acksRan, unfinished.acksFinished, unfinished.ok],
+    [true, false, false],
+    'it started, so the ACKs ran, but one did not finish',
+  );
+  assert.equal(
+    run({ probes: true, ack: true, statusProbes: 18, metricsProbes: 6, acksStarted: 45 }).acksFinished,
+    false,
+    'missing evidence fails',
+  );
+  assert.equal('acksFinished' in run({ probes: true, ack: false, statusProbes: 1, metricsProbes: 1 }), false);
   assert.deepEqual(
     [
       run({ probes: true, ack: false, statusProbes: 0, metricsProbes: 6 }).probesRan,

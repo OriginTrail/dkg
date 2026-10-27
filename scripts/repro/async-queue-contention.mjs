@@ -799,9 +799,10 @@ async function runOnce(c, dist, endpoint, outDir) {
           await readers.drain(5000);
           await observer.drain(1000);
           await liftObserver.drain(1000);
-          // a status probe answers within its 5 s wait by construction; the COUNT is never aborted (like the daemon's),
-          // so the drain waits for it too, up to PROBE_DRAIN_MS: one still running then is reported
-          // (stillInflightAtDrain)
+          // a status probe's CALLER answers within its 5 s wait by construction, but its ASK is never aborted and
+          // neither is the COUNT (like the daemon's), so the drain waits for those store queries too, up to
+          // PROBE_DRAIN_MS: one still running then is reported (stillInflightAtDrain). An ACK still running at its
+          // own drain is recorded as censored at that moment and fails the acksFinished check
           const probesStillInflight = probeLoad ? await probeLoad.drain(PROBE_DRAIN_MS) : 0;
           await ackLoad?.drain(10_000);
           worker?.freeze(); // jobs cut short by the shutdown are not worker contract breaks
@@ -946,6 +947,7 @@ async function runOnce(c, dist, endpoint, outDir) {
                     statusProbes: pa.probes.nStatus,
                     metricsProbes: pa.probes.nMetrics,
                     acksStarted: pa.ack.acksStarted,
+                    acksUnfinished: pa.ack.acksUnfinished,
                   },
                 }
               : {}),
