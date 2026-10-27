@@ -11,6 +11,7 @@
  *     publisher-written inventory.
  *  2. Membership. Does a walk of pages hold exactly the jobs `list(filter)` returns, in the page order, once each?
  *  3. Stats. Does the COUNT tally what the list-based tally it replaces did?
+ *  4. Corrupted rows. Does a job stored with a repeated status or payload triple still walk once, in order?
  *
  * Each runs over a fixed mixed inventory and as a property over random ones (100 cases per run, 1,000 nightly).
  */
@@ -288,5 +289,64 @@ describe('publisher job page: properties over random inventories', () => {
     expect(stats.scoped).toBeGreaterThan(0);
     expect(stats.rawInScope).toBeGreaterThan(0);       // a raw lift named the graph being listed
     expect(stats.ties).toBeGreaterThan(0);             // equal acceptance times, ordered by id
+  }, 300_000);
+});
+
+describe('publisher job page: a repeated status or payload triple changes no walk', () => {
+  const repeats = fc.constantFrom<'none' | 'status' | 'payload' | 'both'>('none', 'none', 'status', 'payload', 'both');
+  const scenarios = fc.record({
+    ids: fc.uniqueArray(fc.stringMatching(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,5}$/), { minLength: 2, maxLength: 12 }),
+    jobs: fc.array(fc.record({
+      kind: fc.constantFrom<InventoryKind>(...INVENTORY_KINDS),
+      state: fc.constantFrom<InventoryState>('accepted', 'claimed', 'finalized', 'retryable', 'held'),
+      contextGraphId: fc.constantFrom(...GRAPHS),
+      acceptedAt: fc.integer({ min: 0, max: 3 }),
+      repeat: repeats,
+    }), { minLength: 12, maxLength: 12 }),
+    contextGraphId: fc.constantFrom<string | undefined>(undefined, undefined, ...GRAPHS),
+    limit: fc.constantFrom(1, 2, 3, 5, 1_000),
+  });
+  const stats = { cases: 0, repeated: 0, multiPage: 0 };
+
+  it('walks the jobs once each, in order, as it does without the repeats (property)', async () => {
+    const options = propertyOptions();
+    await fc.assert(fc.asyncProperty(scenarios, async (scenario) => {
+      const specs: JobSpec[] = scenario.ids.map((id, index) => {
+        const { repeat: _repeat, ...job } = scenario.jobs[index]!;
+        return { id, ...job };
+      });
+      const { store, publisher } = await inventory(specs);
+      try {
+        let repeated = 0;
+        for (const [index, spec] of specs.entries()) {
+          const repeat = scenario.jobs[index]!.repeat;
+          if (repeat === 'none') continue;
+          repeated += 1;
+          const quads = [];
+          if (repeat === 'status' || repeat === 'both') {
+            quads.push({ subject: jobSubject(spec.id), predicate: CONTROL_STATUS, object: literal(spec.state === 'finalized' ? 'accepted' : 'finalized'), graph: GRAPH });
+          }
+          if (repeat === 'payload' || repeat === 'both') {
+            const other = jobQuads(templates, { ...spec, state: spec.state === 'claimed' ? 'accepted' : 'claimed' })
+              .find((quad) => quad.predicate === CONTROL_PAYLOAD)!;
+            quads.push({ subject: jobSubject(spec.id), predicate: CONTROL_PAYLOAD, object: other.object, graph: GRAPH });
+          }
+          await store.insert(quads);
+        }
+        const filter: JobFilter = scenario.contextGraphId ? { contextGraphId: scenario.contextGraphId } : {};
+        const members = specs.filter((spec) => expectedMembership(spec, filter));
+        const walk = await walkPages(publisher, { ...filter, limit: scenario.limit });
+        expect(walk.ids).toEqual(expectedOrder(members));
+        stats.cases += 1;
+        if (repeated > 0) stats.repeated += 1;
+        if (walk.pages.length > 1) stats.multiPage += 1;
+      } finally {
+        await store.close();
+        opened.pop();
+      }
+    }), options);
+    expect(stats.cases).toBe(options.numRuns);
+    expect(stats.repeated).toBeGreaterThan(options.numRuns / 2);   // most cases carried a repeat
+    expect(stats.multiPage).toBeGreaterThan(0);
   }, 300_000);
 });

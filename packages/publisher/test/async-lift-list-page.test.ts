@@ -77,6 +77,9 @@ function mixedSpecs(): JobSpec[] {
 
 const NS = (value: number): string => `"${value}"^^<${XSD_INTEGER}>`;
 
+/** The stored `payload` object (a literal) the production serializer writes for a spec. */
+const storedPayload = (spec: JobSpec): string => jobQuads(templates, spec).find((quad) => quad.predicate === CONTROL_PAYLOAD)!.object;
+
 describe('publisher job page: static walks', () => {
   it('is the complete, ordered, duplicate-free listing at every page size, whichever way the boundaries fall', async () => {
     const specs = mixedSpecs();
@@ -231,6 +234,12 @@ describe('publisher job page: the query', () => {
     expect(query).toContain(literal('cg-a'));
   });
 
+  it('keeps the inner select DISTINCT: a job stored with a repeated status or payload triple is one candidate, not two', () => {
+    const query = buildLiftJobPageQuery(GRAPH, base);
+    expect(query).toContain('SELECT DISTINCT ?job ?acceptedAt WHERE');
+    expect(query.indexOf('SELECT DISTINCT')).toBeLessThan(query.indexOf('LIMIT 4'));
+  });
+
   it('writes every caller value as a literal, so a hostile graph id or status cannot change the query', async () => {
     const { publisher } = await publisherOver(mixedSpecs());
     const hostile = 'cg-a" } } UNION { ?s ?p ?o } #';
@@ -282,7 +291,8 @@ describe('publisher job page: what the store may answer', () => {
   it.each([
     ['rows out of order by time', [row('a', 2), row('b', 1)], undefined],
     ['rows out of order by id', [row('b', 1), row('a', 1)], undefined],
-    ['a row repeated', [row('a', 1), row('a', 1)], undefined],
+    ['a job that comes back after another job', [row('a', 1), row('b', 1), row('a', 1)], undefined],
+    ['rows of a repeated job followed by a smaller one', [row('b', 1), row('b', 1), row('a', 1)], undefined],
     ['a first row at the cursor', [row('a', 1)], { acceptedAt: 1, jobId: 'a' }],
     ['a first row before the cursor', [row('a', 1)], { acceptedAt: 5, jobId: 'a' }],
     ['a first row before the cursor in id order', [row('a', 5)], { acceptedAt: 5, jobId: 'b' }],
@@ -299,6 +309,41 @@ describe('publisher job page: what the store may answer', () => {
   ])('refuses %s as unreadable_row', async (_name, bad) => {
     await expect(selectorsAnswering([bad as Record<string, string>]).page({ limit: 5 }))
       .rejects.toMatchObject({ code: 'unreadable_row' });
+  });
+
+  it('reads the repeated rows of one job (a second payload triple) as one job, in the place the first row gave it', async () => {
+    const claimed = payloadOf({ ...spec('a', 1), state: 'claimed' });
+    const rows = [row('a', 1), row('a', 1, claimed), row('b', 2), row('c', 3)];
+    const page = await selectorsAnswering(rows).page({ limit: 2 });
+    expect(page.jobs.map((job) => job.jobId)).toEqual(['a', 'b']);
+    expect(page.complete).toBe(false);
+    expect(decodeLiftJobPageCursor(page.nextCursor!)).toEqual({ acceptedAt: 2, jobId: 'b' });
+    // A job's repeats do not count against the page size or make a short page look full.
+    const only = await selectorsAnswering([row('a', 1), row('a', 1, claimed)]).page({ limit: 1 });
+    expect(only.jobs.map((job) => job.jobId)).toEqual(['a']);
+    expect(only).toMatchObject({ nextCursor: null, complete: true });
+  });
+
+  it('shows the repeated job from a payload that decodes, and the same one whichever way the engine ordered the repeats', async () => {
+    const good = payloadOf(spec('a'));
+    const other = payloadOf({ ...spec('a'), state: 'claimed' });
+    for (const rows of [[row('a', 1, literal('{no')), row('a', 1, good)], [row('a', 1, good), row('a', 1, literal('{no'))]]) {
+      expect((await selectorsAnswering(rows).page()).jobs.map((job) => job.jobId)).toEqual(['a']);
+    }
+    const forward = await selectorsAnswering([row('a', 1, good), row('a', 1, other)]).page();
+    const reversed = await selectorsAnswering([row('a', 1, other), row('a', 1, good)]).page();
+    expect(forward.jobs).toHaveLength(1);
+    expect(reversed.jobs).toEqual(forward.jobs);
+    // A job none of whose payloads decode is skipped, like any undecodable row, and the cursor still steps past it.
+    const none = await selectorsAnswering([row('a', 1, literal('{no')), row('a', 1, literal('{nope')), row('b', 2)]).page({ limit: 1 });
+    expect(none.jobs).toEqual([]);
+    expect(decodeLiftJobPageCursor(none.nextCursor!)).toEqual({ acceptedAt: 1, jobId: 'a' });
+  });
+
+  it('still refuses the first row at the cursor when it is repeated: the repeat is never a way past the cursor check', async () => {
+    const cursor = encodeLiftJobPageCursor({ acceptedAt: 1, jobId: 'a' });
+    await expect(selectorsAnswering([row('a', 1), row('a', 1)]).page({ limit: 5, cursor }))
+      .rejects.toMatchObject({ code: 'unordered_page' });
   });
 
   it('will not mint a cursor from a row whose id the cursor grammar cannot hold', async () => {
@@ -350,6 +395,70 @@ describe('publisher job page: lanes', () => {
     expect(options.filter((opts) => opts?.source === LIFT_JOB_PAGE_SOURCE)).toHaveLength(walk.pages.length);
     expect(options.filter((opts) => opts?.source === LIFT_JOB_STATS_SOURCE)).toHaveLength(1);
     for (const opts of options) expect(opts).toEqual({ source: opts?.source });
+  });
+});
+
+describe('publisher job page: a job stored with a repeated status or payload triple', () => {
+  // Corrupted data only: the publisher writes one status and one payload triple per job. Six jobs, three ties.
+  const specs: JobSpec[] = ['j1', 'j2', 'j3', 'j4', 'j5', 'j6'].map((id, index) => ({
+    id, kind: 'vm', state: 'accepted', contextGraphId: 'cg-a', acceptedAt: 10 + Math.floor(index / 2),
+  }));
+  const want = ['j1', 'j2', 'j3', 'j4', 'j5', 'j6'];
+
+  async function corrupted(repeats: Record<string, ReadonlyArray<'status' | 'payload'>>) {
+    const { store, publisher } = await publisherOver(specs);
+    for (const [id, kinds] of Object.entries(repeats)) {
+      const spec = specs.find((candidate) => candidate.id === id)!;
+      await store.insert(kinds.map((kind) => (kind === 'status'
+        ? { subject: jobSubject(id), predicate: CONTROL_STATUS, object: literal('failed'), graph: GRAPH }
+        : { subject: jobSubject(id), predicate: CONTROL_PAYLOAD, object: storedPayload({ ...spec, state: 'claimed' }), graph: GRAPH })));
+    }
+    return publisher;
+  }
+
+  it.each([
+    ['a second payload triple', { j2: ['payload'], j5: ['payload'] }],
+    ['a second status triple', { j2: ['status'], j3: ['status'] }],
+    ['both', { j4: ['status', 'payload'], j1: ['payload'] }],
+  ] as const)('walks %s as one job, once, in order, at every page size', async (_name, repeats) => {
+    const publisher = await corrupted(repeats);
+    for (const limit of [1, 2, 3, 4, 5, 6, 7, 1_000]) {
+      const walk = await walkPages(publisher, { limit });
+      expect(walk.ids, `limit ${limit}`).toEqual(want);
+      expect(walk.pages).toHaveLength(Math.ceil(want.length / limit));
+      walk.pages.forEach((page, index) => expect(page.complete).toBe(index === walk.pages.length - 1));
+    }
+  });
+
+  it('filters a job with two status triples under each of its states, once', async () => {
+    const publisher = await corrupted({ j2: ['status'], j3: ['status'] });
+    for (const limit of [1, 2, 1_000]) {
+      expect((await walkPages(publisher, { status: 'failed', limit })).ids, `failed limit ${limit}`).toEqual(['j2', 'j3']);
+      expect((await walkPages(publisher, { status: 'accepted', limit })).ids, `accepted limit ${limit}`).toEqual(want);
+    }
+  });
+
+  it('does not lose the jobs behind a repeated one at a page boundary', async () => {
+    // The repeat must not use up a place of the inner LIMIT: a page that held two rows of j2 would call itself the last.
+    const publisher = await corrupted({ j1: ['status', 'payload'], j2: ['status', 'payload'] });
+    const first = await publisher.listPage({ limit: 1 });
+    expect(first.jobs.map((job) => job.jobId)).toEqual(['j1']);
+    expect(first.complete).toBe(false);
+    const second = await publisher.listPage({ limit: 1, cursor: first.nextCursor! });
+    expect(second.jobs.map((job) => job.jobId)).toEqual(['j2']);
+    expect(second.complete).toBe(false);
+  });
+
+  it('hands out the same pages twice', async () => {
+    const publisher = await corrupted({ j2: ['payload'], j3: ['status', 'payload'] });
+    const first = await publisher.listPage({ limit: 3 });
+    expect(await publisher.listPage({ limit: 3 })).toEqual(first);
+  });
+
+  it('does not repeat the jobs of list(), which still returns a job once per row', async () => {
+    const publisher = await corrupted({ j2: ['payload'] });
+    expect((await publisher.list()).filter((job) => job.jobId === 'j2')).toHaveLength(2);
+    expect((await walkPages(publisher, {})).ids.filter((id) => id === 'j2')).toHaveLength(1);
   });
 });
 
