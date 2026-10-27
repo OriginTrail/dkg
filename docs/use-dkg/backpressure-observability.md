@@ -355,6 +355,7 @@ async_admission_usage interval_s=300 store_rejections=store/background/publisher
 | `lift_pickup_unclassified` | cumulative | Jobs whose wallet state at ready time could not be determined, and which are left out of the worker-free sample |
 | `lift_c2f_n`, `_p50_ms`, `_p95_ms` | window | Claim-to-finish: claimed to finalized |
 | `lift_finalized`, `lift_failed` | cumulative | Publisher jobs that reached a terminal state through a worker; with the share counters these give completions per minute |
+| `share_retention`, `share_retention_ticks`, `_deleted`, `_kept`, `_skipped`, `_errors`, `share_retention_pass_scanned`, `_pass_would_delete`, `_pass_deleted` | cumulative, gauge | **Only while a share retention sweep runs** (`queueRetention.share.mode` is `report` or `delete`); with retention off the line has none of them. The mode, the ticks run, and the jobs deleted (by class), kept (by reason), skipped (by reason) and failed (by phase) since the process started; the `_pass_` fields are a gauge of the latest complete pass, `-` until one completes, and in `report` mode `_pass_would_delete` is the would-delete count by class that delete-gate item 1 reads. The publisher queue's sweep will print the same fields under `lift_retention`. See [promote-queue-operations.md](../promote-queue-operations.md#reading-the-async_admission_usage-line) |
 
 ### Queue-wait P95 is a bucket upper bound
 

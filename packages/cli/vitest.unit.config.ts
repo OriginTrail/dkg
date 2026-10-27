@@ -36,6 +36,14 @@ export default defineConfig({
           // #2892 — real in-memory queue and supervisor; no chain or daemon process.
           'test/async-promote-supervisor-bookkeeping.test.ts',
           'test/promote-queue-config.test.ts',
+          // OT-RFC-73 P10b — queue retention wiring: config, the one timer, the daemon-only start, the share sweep over the queue's own store object, the usage line.
+          'test/retention-config.test.ts',
+          'test/retention-timer.test.ts',
+          'test/retention-sweeps.test.ts',
+          'test/retention-share-sweep.test.ts',
+          'test/retention-runtime-scope.test.ts',
+          'test/daemon-queue-retention-live.test.ts',
+          'test/async-admission-usage-retention.test.ts',
           // #1828 — durable-admission recovery lookup route (pure handler, no hardhat).
           'test/publisher-job-by-intent-route.test.ts',
           'test/publisher-journal-route.test.ts',
