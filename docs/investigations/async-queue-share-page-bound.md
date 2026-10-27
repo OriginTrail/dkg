@@ -41,7 +41,9 @@ read the plan rules out; with a broad filter it is the slowest. A grows with the
 0, 10k and 50k) because the engine joins the payload before it cuts. **B is used**: flat for a selective filter, no worse than A for a
 broad one, and its payload read is bounded by the page.
 
-Two details of B's key read matter:
+Two details of B's key read matter (and a third, added after review: the key read is `SELECT DISTINCT ?job ?enq`, so a record with a
+second state triple is one row and not one per triple; re-measured, the first page and the page after it at 50,000 retained jobs are
+148 ms and 274 ms, within noise of the 156 and 335 ms below):
 
 - `ORDER BY ?enq ?job` is 2.3 times cheaper than ordering on a computed `STR(?job)` (120 ms against 283 ms at 50,000, keys only), because
   the engine does not materialize 50,000 IRI strings. A check on 600 random mixed-case job IDs loaded in six separate batches shows
@@ -86,31 +88,47 @@ that matches the whole retained history a page of up to 1,000 jobs takes at most
 0.03 s whatever the history. The share mutex is therefore held for at most that long per page, where the single complete read held it for
 the whole read (1.2 to 1.5 s at 50,000 retained jobs, and longer under load).
 
-## What it cost the complete listing, and what that implies
+## What the complete listing costs, and how it was made linear
 
-The cursorless call still has to return everything, and it is now a loop of pages. Every page scans again, so its total cost is
-about the number of pages times the matching rows. Measured at 10,000 and 50,000 retained jobs against the previous single read
-(`SELECT ?payload` for every job, parsed and sorted, in one hold):
+The cursorless call has to return everything. The first version of this change made it a loop of keyset pages of 1,000 rows. Every pass
+reran the filtered, ordered scan, so its total cost grew with the pages times the matching rows (quadratic in the history), and `limit`,
+which is applied after the ready-time sort, still paid the whole loop.
 
-| Complete listing | 10,000 retained | 50,000 retained |
-| --- | --- | --- |
-| previous single read | 0.18 to 0.21 s, one hold | 1.2 to 1.5 s, one hold |
-| 1,000 per page (the default) | 0.8 s, 11 holds of 72 ms (max 84) | 10.0 s, 51 holds of 206 ms (max 285) |
-| 500 per page | 1.1 s, 21 holds | 28 s, 101 holds |
-| 100 per page | 5.8 s, 101 holds | 125 s, 501 holds |
+The shipped design reads the ordered keys in **key pages of 10,000** (`listKeyPageSize`: one scan each, so 6 at 50,026 rows
+instead of 51), then fetches the payloads of those keys **by subject in batches of 1,000** (`listPageSize`), and takes the mutex once per
+key read and once per batch. No hold fetches a full payload set. A payload batch cannot see a job that changed since its key was read, so
+each decoded row is checked against the filter again in the hold that read it. With a `limit` the walk stops as soon as no unread job
+can rank among the first `limit` rows (the keys arrive in enqueue order and the result is in ready order; see the module comment of
+`promote-job-listing.ts`), so `?limit=10` pays one small batch.
 
-The loop therefore trades a much shorter mutex hold (0.3 s against 1.3 s at 50,000) for several times more wall time and engine work.
-That is the plan's intent (the cursorless default stays complete, "not a snapshot", warned about above a row threshold) and why the page
-size of the loop is the maximum, 1,000: the cost falls steeply as the page grows (125 s, 28 s and 10 s per 100, 500 and 1,000 rows at 50,000 retained jobs). Two ways to cut it further, estimated from the parts
-measured above and left out of this change because they change the shape of the loop, not its contract:
+Complete listing through the product code on the pinned image, fresh namespace per size, median of 3 timed runs after a warm-up (Apple M2
+Pro, Docker 8 GB). "Longest wait" is the longest latency of a job-status read that arrives while the listing runs: it takes the same mutex
+as an admission, a claim and a heartbeat, so it is how long the listing keeps them waiting (an idle status read takes 15 ms).
 
-- Reading the keys once without `ORDER BY` or `LIMIT` (about 0.15 s at 50,000), then the payloads in batches of 1,000 by subject, one
-  hold per batch, would make the complete call linear: about 2.8 s at 50,000 retained jobs instead of 10 s.
-- Key pages of 10,000 followed by payload batches would give about 3.5 s.
+| Complete `list()` | 0 retained | 10,000 | 50,000 |
+| --- | --- | --- | --- |
+| previous single read (before P8a; measured earlier) | - | 0.18 to 0.21 s, one hold | 1.2 to 1.5 s, one hold |
+| page loop, 1,000 rows per page (first version of this change) | 53 ms, 2 queries, longest wait 54 ms | 1,034 ms, 22 queries, longest wait 185 ms | 10,073 ms, 102 queries, longest wait 329 ms |
+| keys in pages of 10,000, payloads in batches of 1,000 (shipped) | 64 ms, 2 queries, longest wait 33 ms | 520 ms, 13 queries, longest wait 84 ms | 3,183 ms, 57 queries, longest wait 288 ms |
+| `limit: 10`, page loop | 53 ms | 993 ms, longest wait 119 ms | 9,812 ms, longest wait 286 ms |
+| `limit: 10`, shipped | 87 ms, 3 queries | 117 ms, 3 queries, longest wait 68 ms | 228 ms, 3 queries, longest wait 180 ms |
+| live states (`queued`, `running`, `failed_retrying`), shipped | 65 ms | 70 ms | 60 ms |
 
-Clients that need the whole history should page with a cursor (the walk does the same total work but spread over the client's own
-pace) or filter by state. A filtered complete listing is as cheap as a page: `list({ state: ['queued', 'running', 'failed_retrying'] })` is
-31 ms at 0 and 10,000 retained jobs, and a page of the live states is 34 ms at 50,000.
+At 50,000 retained jobs the complete call falls from 10.1 s to 3.2 s (3.2 times), and from 1.0 s to 0.5 s at 10,000; the work is now
+6 ordered scans (five full key pages and one of the last 26 rows) plus 51 payload batches instead of 51 scans plus 51 batches. A call with a `limit` falls from 9.8 s to 0.23 s (43 times).
+The longest hold is one key read of up to 10,000 rows at a deep cursor (268 ms, the slowest single query, at 50,000 retained jobs) or
+one batch (tens of milliseconds), against 1.2 to 1.5 s for the single read before P8a; the longest wait is flat to the page bound
+declared below, and no longer grows with the number of pages.
+
+Reading the keys in one scan is cheaper in total but holds longer and holds more in memory. Measured the same way at 50,000 retained
+jobs with `listKeyPageSize: 100000` (one key read of 50,026 rows): the complete call takes 2.4 s (against 3.2 s), but the longest wait
+is 390 ms (against 288 ms) and `limit: 10` takes 462 ms (against 228 ms), because that call must fetch every key before it can cut.
+Pages of 10,000 were kept: they bound the memory of a key read (about 1.5 MB), keep a `limit` call cheap, and cost 0.8 s of total time
+at 50,000. The size is a queue setting (`listKeyPageSize`, at most 100,000).
+
+Clients that need the whole history can still page with a cursor (the same total scans, at the client's pace) or filter by state: a
+filtered complete listing is as cheap as a page (`list({ state: ['queued', 'running', 'failed_retrying'] })` takes 60 to 70 ms at every
+size above).
 
 ## Other queries measured
 
@@ -131,9 +149,10 @@ history of other states.
 - The P8a bound for AC5 is the product-code table above: at 50,000 retained jobs a listing page is held for at most about 0.35 s (0.16 s for
   a first page), against 1.2 to 1.5 s for the single read, so a share submission that arrives during an observer's page waits at most that
   page, and at most one page per observer poll.
-- The cost of the cursorless observer's whole call is not flat: 0.8 s per poll at 10,000 and 10 s at 50,000 retained jobs, in many short
-  holds. The benchmark's `default` observer measures exactly that call (`queue.list({})`); its `paged` observer now walks `queue.listPage`
-  100 rows at a time.
+- The cost of the cursorless observer's whole call is not flat, but it is linear in the history and split into short holds: 0.5 s per poll
+  at 10,000 and 3.2 s at 50,000 retained jobs (10 s in the first version of this change), with a longest wait of 84 ms and 288 ms. The
+  benchmark's `default` observer measures exactly that call (`queue.list({})`); its `paged` observer now walks `queue.listPage` 100 rows
+  at a time.
 
 ## Reproduce
 
@@ -144,4 +163,9 @@ docker run -d --name <name> -p 127.0.0.1:<port>:8080 "$(node -p "require('./blaz
 DKG_PROMOTE_LISTING_LIVE_HISTORY=50000 BLAZEGRAPH_TEST_URL=http://127.0.0.1:<port>/bigdata/namespace/kb/sparql \
   pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts \
   test-live/async-promote-listing.blazegraph.test.ts -t "page cost"
+# the complete listing (total time and the longest wait of a status read that arrives meanwhile), one namespace per size:
+DKG_PROMOTE_LISTING_LIVE_HISTORY=50000 BLAZEGRAPH_TEST_URL=http://127.0.0.1:<port>/bigdata/namespace/kb/sparql \
+  pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts \
+  test-live/async-promote-listing.blazegraph.test.ts -t "complete listing cost"
+# add DKG_PROMOTE_LISTING_LIVE_KEY_PAGE=<keys> to change the key page of that listing
 ```
