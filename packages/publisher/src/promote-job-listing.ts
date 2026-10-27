@@ -82,15 +82,27 @@ const readyTime = (job: PromoteJob): number => job.attempt.nextRetryAt ?? job.en
  * `limit` ends the walk early, without changing which jobs it keeps. Rows come in `(enqueuedAt, jobId)` order and the result is in ready
  * order, which differs only for a job with a `nextRetryAt`. So the walk keeps the `limit` best rows read so far and stops once the
  * last of them is strictly earlier than everything unread can be: the next unread key's `enqueuedAt`, or the earliest `nextRetryAt` of
- * an unread job (read once up front, since a retry time may be before its job's enqueue time after a clock step). A job whose retry
- * time is not an integer counts as the earliest possible one, and so does the retry time of a job the filter excludes (it is never read), which
- * only makes the walk longer. Strictly earlier, because a tie is broken by job id and an unread job could win it.
+ * an unread job (a retry time may be before its job's enqueue time after a clock step). A job whose retry time is not an integer counts as
+ * the earliest possible one, and so does the retry time of a job the filter excludes (it is never read), which only makes the walk longer.
+ * Strictly earlier, because a tie is broken by job id and an unread job could win it.
+ *
+ * Retry times change while a listing runs (a failing job gets one), so no stop rests on one read before the hold that decides it. The walk
+ * reads them (`readPromoteRetryTimes`, one small query in a hold of its own) only when the enqueue bound and the values it holds say it
+ * could stop, and stops only if the bound still holds with the values that read returned. If it does not, the walk goes on and keeps those
+ * values to skip the read while they block a stop; a stale value can delay a stop but never cause one, because every stop follows a
+ * fresh read. A retry time written after the read that confirmed the stop, like any change after a read, is a change after the walk.
  */
 export async function listAllPromoteJobs(host: PromoteListingHost, filter: PromoteListFilter): Promise<PromoteJob[]> {
   const limit = filter.limit && filter.limit > 0 ? Math.floor(filter.limit) : undefined;
   if (limit === 0) return [];
-  const retryAt = limit ? await host.locked(() => readPromoteRetryTimes(host, LIST_SOURCES.keys)) : undefined;
   const readIds = new Set<string>();
+  let retryAt: Map<string, number> | undefined;
+  /** The ready time no unread job can precede, from the next unread key and the retry times last read. */
+  const earliestUnread = (nextKey: PromoteJobCursor): number => {
+    let earliest = nextKey.enqueuedAt;
+    for (const [jobId, time] of retryAt ?? []) if (time < earliest && !readIds.has(jobId)) earliest = time;
+    return earliest;
+  };
   let jobs: PromoteJob[] = [];
   let rowsRead = 0;
   let cursor: PromoteJobCursor | undefined;
@@ -104,15 +116,16 @@ export async function listAllPromoteJobs(host: PromoteListingHost, filter: Promo
       const batch = await host.locked(() => readPromoteJobPayloads(host, filter, keys, LIST_SOURCES.payloads));
       rowsRead += batch.length;
       jobs.push(...batch);
-      if (!limit || !retryAt) continue;
+      if (!limit) continue;
       for (const key of keys) readIds.add(key.jobId);
       jobs.sort(comparePromoteJobs);
       if (jobs.length > limit) jobs = jobs.slice(0, limit);
       const nextKey = at < keyPage.keys.length ? keyPage.keys[at] : keyPage.next;
       if (!nextKey || jobs.length < limit) continue;
-      let earliestUnread = nextKey.enqueuedAt;
-      for (const [jobId, time] of retryAt) if (time < earliestUnread && !readIds.has(jobId)) earliestUnread = time;
-      if (readyTime(jobs[limit - 1]!) < earliestUnread) break walk;
+      const last = readyTime(jobs[limit - 1]!);
+      if (last >= earliestUnread(nextKey)) continue;
+      retryAt = await host.locked(() => readPromoteRetryTimes(host, LIST_SOURCES.keys));
+      if (last < earliestUnread(nextKey)) break walk;
     }
     cursor = keyPage.next;
   } while (cursor);
