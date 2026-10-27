@@ -22,18 +22,20 @@ import { PromoteListRequestError } from '../src/promote-list-cursor.js';
 import {
   PromoteJobConflictError, type AsyncPromoteQueueConfig, type PromoteJob, type PromoteJobPage, type PromoteJobState, type PromoteListFilter,
 } from '../src/async-promote-queue-types.js';
-import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_STATE, comparePromoteJobs, jobSubject, uniquenessLookupKeys } from '../src/async-promote-queue-utils.js';
-import { isAutomaticallyRecoverablePostCommitFailure } from '../src/async-promote-recovery-policy.js';
+import {
+  DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_ENQUEUED_AT, PROMOTE_STATE, comparePromoteJobs, integer, jobSubject, serializeJobRecord, uniquenessLookupKeys,
+} from '../src/async-promote-queue-utils.js';
+import { isAutomaticallyRecoverablePostCommitFailure, promoteFailureTransition } from '../src/async-promote-recovery-policy.js';
 import { POST_COMMIT_MARKERS } from '../src/promote-post-commit-sweep.js';
 import { PROMOTE_POST_COMMIT_FAILURE_MESSAGE } from '../src/promote-replay-safety.js';
 import {
-  LANES, POST_COMMIT_ERRORS, SPELLINGS, STATES, expectedSweep, failedPopulation, population, respell, selectorPopulation, walkPages,
+  LANES, POST_COMMIT_ERRORS, SPELLINGS, STATES, expectedSweep, failedPopulation, population, respell, selectorPopulation, tiedContenders, walkPages,
 } from './_helpers/share-listing-models.js';
 import {
   ROW_AGENT, ROW_NOW as NOW, deleteShareRow, keysetOrder, mulberry32, putShareRow, randomJobId, readEveryShareJob, seedShareRows, seedUnreadableRow,
   shareRow, type ShareRowSpec,
 } from './_helpers/share-job-rows.js';
-import { tapStore } from './_helpers/store-tap.js';
+import { tapStore, type TappedCall } from './_helpers/store-tap.js';
 
 const ids = (jobs: readonly Pick<PromoteJob, 'jobId'>[]) => jobs.map((job) => job.jobId);
 const stores: OxigraphStore[] = [];
@@ -55,7 +57,7 @@ async function seeded(specs: readonly ShareRowSpec[], config: Partial<AsyncPromo
 
 const walked = (pages: readonly PromoteJobPage[]) => pages.flatMap((page) => ids(page.jobs));
 
-/** The listing reads of a call, in order: `keys`, `retry` (the retry-time read behind `limit`), or `payloads:<subjects asked for>`. */
+/** The listing reads of a call, in order: `keys`, `retry` (the retry-time read a `limit` makes before it stops), or `payloads:<subjects asked for>`. */
 const listingReads = (calls: ReadonlyArray<{ method: string; source?: string; text?: string }>) => calls
   .filter((call) => call.method === 'query' && call.source?.startsWith('publisher.asyncPromote.list'))
   .map((call) => (call.source!.endsWith('.payloads')
@@ -620,7 +622,7 @@ describe('limit ends a complete listing as soon as no unread job can rank among 
     const { queue } = queueOver(tapped.store, { listPageSize: 100 });
     tapped.calls.length = 0;
     expect(ids(await queue.list({ limit: 5 }))).toEqual(['q-0000', 'q-0001', 'q-0002', 'q-0003', 'q-0004']);
-    expect(listingReads(tapped.calls)).toEqual(['retry', 'keys', 'payloads:5']);
+    expect(listingReads(tapped.calls)).toEqual(['keys', 'payloads:5', 'retry']); // the retry times are read when that batch could end the walk, not before it
     tapped.calls.length = 0;
     expect(await queue.list()).toHaveLength(3_000);
     expect(listingReads(tapped.calls)).toEqual(['keys', ...Array.from({ length: 30 }, () => 'payloads:100')]); // no retry read without a limit
@@ -633,8 +635,9 @@ describe('limit ends a complete listing as soon as no unread job can rank among 
     const { queue } = queueOver(tapped.store, { listPageSize: 100 });
     tapped.calls.length = 0;
     // 'later' was enqueued early but is ready at +500, so the first three rows read (q-0, q-1, later) are not yet the three earliest to be ready.
+    // The enqueue bound alone blocks the stop there, so no retry time is read at all.
     expect(ids(await queue.list({ limit: 3 }))).toEqual(['q-0000', 'q-0001', 'q-0002']);
-    expect(listingReads(tapped.calls)).toEqual(['retry', 'keys', 'payloads:3', 'payloads:18']);
+    expect(listingReads(tapped.calls)).toEqual(['keys', 'payloads:3', 'payloads:18']);
   });
 
   it('does not stop before an unread job whose retry time is earlier than its enqueue time, which a walk in enqueue order cannot see coming', async () => {
@@ -642,6 +645,22 @@ describe('limit ends a complete listing as soon as no unread job can rank among 
     const { queue } = await seeded([...queuedRun(20), { id: 'a-x', state: 'failed_retrying', enqueuedAt: NOW + 1_000, nextRetryAt: NOW + 1 }], { listPageSize: 100 });
     expect(ids(await queue.list({ limit: 3 }))).toEqual(['q-0000', 'a-x', 'q-0001']);
     expect(ids(await queue.list({ limit: 1 }))).toEqual(['q-0000']);
+  });
+
+  it('bounds the unread rows by the next unread key, not by the last key of the key page, which is later', async () => {
+    // A is ready at +5, after B (+1) that is unread when A alone is held. A stop bounded by the page's last key (C, +10) would end the walk
+    // there and return A; the next unread key is B, so the walk goes on and B, which is due first, is the answer.
+    const rows: ShareRowSpec[] = [
+      { id: 'A', state: 'failed_retrying', enqueuedAt: NOW, nextRetryAt: NOW + 5 }, { id: 'B', state: 'queued', enqueuedAt: NOW + 1 },
+      { id: 'C', state: 'queued', enqueuedAt: NOW + 10 }, { id: 'D', state: 'queued', enqueuedAt: NOW + 20 },
+    ];
+    const tapped = tapStore(openStore());
+    await seedShareRows(tapped.store, rows);
+    const { queue } = queueOver(tapped.store, { listPageSize: 1, listKeyPageSize: 3 });
+    tapped.calls.length = 0;
+    expect(ids(await queue.list({ limit: 1 }))).toEqual(['B']);
+    // One key page (A, B, C; D follows it). A is read and does not end the walk, B is read and does, after one read of the retry times.
+    expect(listingReads(tapped.calls)).toEqual(['keys', 'payloads:1', 'payloads:1', 'retry']);
   });
 
   it.each(Array.from({ length: 20 }, (_, seed) => seed))('returns exactly the first limit jobs of the sorted complete listing, retry times before and after their enqueue times, seed %i', async (seed) => {
@@ -666,6 +685,110 @@ describe('limit ends a complete listing as soon as no unread job can rank among 
         }
       }
     }
+  });
+
+  describe('a retry time written while the walk runs', () => {
+    // The stop rule rests on the retry times of the unread jobs. They change while a listing runs (a failing job gets one, a clock step
+    // puts one before its job's enqueue time), so no stop may rest on a value read before the hold that decides it.
+    const isKeyRead = (call: TappedCall) => call.source === 'publisher.asyncPromote.list' && call.text!.includes('ORDER BY');
+    const isRetryRead = (call: TappedCall) => call.source === 'publisher.asyncPromote.list' && !call.text!.includes('ORDER BY');
+    const isBatchRead = (call: TappedCall) => call.source === 'publisher.asyncPromote.list.payloads';
+    const fullSort = async (store: TripleStore, limit: number) => (await readEveryShareJob(store)).sort(comparePromoteJobs).slice(0, limit);
+    const q: ShareRowSpec = { id: 'q', state: 'queued', enqueuedAt: NOW + 100 };
+    const x: ShareRowSpec = { id: 'x', state: 'failed_retrying', enqueuedAt: NOW + 1_000, nextRetryAt: NOW + 2_000 };
+
+    /** A listing of `specs` where `write` runs, as a writer outside this process, at the point `at` picks out (once). */
+    async function listingWithWrite(specs: readonly ShareRowSpec[], config: Partial<AsyncPromoteQueueConfig>, limit: number,
+      at: { when: 'before' | 'after'; call: (call: TappedCall) => boolean; nth?: number }, write: (store: OxigraphStore) => Promise<void>,
+      filter: Omit<PromoteListFilter, 'limit'> = {}) {
+      const raw = openStore();
+      let seen = 0, written = false;
+      const hook = async (call: TappedCall) => {
+        if (written || !at.call(call) || ++seen < (at.nth ?? 1)) return;
+        written = true;
+        await write(raw);
+      };
+      const tapped = tapStore(raw, { before: at.when === 'before' ? hook : undefined, after: at.when === 'after' ? async (call, result) => { await hook(call); return result; } : undefined });
+      await seedShareRows(raw, specs);
+      const { queue } = queueOver(tapped.store, config);
+      tapped.calls.length = 0;
+      const listing = await queue.list({ ...filter, limit });
+      expect(written, 'the write ran').toBe(true);
+      return { listing, raw, reads: listingReads(tapped.calls) };
+    }
+
+    it.each([
+      ['before its key read', 'before', isKeyRead],
+      ['after its key read', 'after', isKeyRead],
+      ['after its first payload batch', 'after', isBatchRead],
+    ] as const)('returns an unread job whose retry time moves ahead of the rows read, written %s', async (_name, when, call) => {
+      // x was due at +2000 and then at +50, ahead of q (+100). It is unread when the walk would stop at q.
+      const { listing, raw } = await listingWithWrite([q, x], { listPageSize: 100 }, 1, { when, call },
+        (store) => putShareRow(store, { ...x, nextRetryAt: NOW + 50 }));
+      expect(ids(listing)).toEqual(['x']);
+      expect(listing).toEqual(await fullSort(raw, 1));
+    });
+
+    it('returns the job that failed with a retry time before the rows read when the clock stepped back before its key read', async () => {
+      // A is queued at +150000. B is running (enqueued at +200000); it fails with a clock stepped back, so its retry is due at +110000, ahead of A.
+      const a: ShareRowSpec = { id: 'A', state: 'queued', enqueuedAt: NOW + 150_000 };
+      const b: ShareRowSpec = { id: 'B', state: 'running', enqueuedAt: NOW + 200_000 };
+      const { listing, raw } = await listingWithWrite([a, b], { listPageSize: 100 }, 1, { when: 'before', call: isKeyRead }, async (store) => {
+        // Another process, whose clock is behind, records the failure: the transition the queue's own fail() writes.
+        const failure = { message: 'store busy', retryable: true, classification: 'transient' as const, recordedAt: NOW + 109_000 };
+        const { job } = promoteFailureTransition(shareRow(b), failure, NOW + 109_000, () => 1_000);
+        await deleteShareRow(store, 'B');
+        await store.insert(serializeJobRecord(job, DEFAULT_PROMOTE_CONTROL_GRAPH_URI).jobQuads);
+      });
+      expect((await readEveryShareJob(raw)).find((job) => job.jobId === 'B')).toMatchObject({ state: 'failed_retrying', attempt: { nextRetryAt: NOW + 110_000 } });
+      expect(ids(listing)).toEqual(['B']);
+      expect(listing).toEqual(await fullSort(raw, 1));
+    });
+
+    it('does not return a running job that fails with an early retry time after a key page covered its position without it, which only holds the stop back', async () => {
+      // Under a state filter that leaves running out, r has no key in the page. It fails after that read, due at +10, ahead of q1 (+100). The retry
+      // times name it and it is unread, so the walk cannot stop at q1 and reads on, but it never reaches the batch of a key it does not have: not a snapshot.
+      const rows: ShareRowSpec[] = [
+        { id: 'q1', state: 'queued', enqueuedAt: NOW + 100 }, { id: 'r', state: 'running', enqueuedAt: NOW + 150 },
+        { id: 'q2', state: 'queued', enqueuedAt: NOW + 200 }, { id: 'q3', state: 'queued', enqueuedAt: NOW + 300 },
+      ];
+      const { listing, reads, raw } = await listingWithWrite(rows, { listPageSize: 1 }, 1, { when: 'after', call: isKeyRead },
+        (store) => putShareRow(store, { id: 'r', state: 'failed_retrying', enqueuedAt: NOW + 150, nextRetryAt: NOW + 10 }), { state: ['queued', 'failed_retrying'] });
+      expect(ids(listing)).toEqual(['q1']);
+      expect(reads).toEqual(['keys', 'payloads:1', 'retry', 'payloads:1', 'payloads:1']); // one retry read, then the walk to the end of the keys it has
+      expect(ids(await fullSort(raw, 1))).toEqual(['r']); // the store has moved on to a row that matches the filter now
+    });
+
+    it('decides a later stop on retry times read in the hold that decides it, not on the ones that blocked an earlier stop', async () => {
+      // q0 is due first. x1 (due at -5) blocks the first stop; x2, queued then, becomes due at -9 right after that decision, ahead of x1.
+      const rows: ShareRowSpec[] = [
+        { id: 'q0', state: 'queued', enqueuedAt: NOW }, { id: 'q1', state: 'queued', enqueuedAt: NOW + 1 },
+        { id: 'x1', state: 'failed_retrying', enqueuedAt: NOW + 10, nextRetryAt: NOW - 5 }, { id: 'x2', state: 'queued', enqueuedAt: NOW + 20 },
+      ];
+      const { listing, raw } = await listingWithWrite(rows, { listPageSize: 1 }, 1, { when: 'after', call: isRetryRead },
+        (store) => putShareRow(store, { id: 'x2', state: 'failed_retrying', enqueuedAt: NOW + 20, nextRetryAt: NOW - 9 }));
+      expect(ids(listing)).toEqual(['x2']);
+      expect(listing).toEqual(await fullSort(raw, 1));
+    });
+
+    it('reads the retry times when it is about to stop and not again while an unread one blocks the stop', async () => {
+      const rows: ShareRowSpec[] = [...queuedRun(6), { id: 'x', state: 'failed_retrying', enqueuedAt: NOW + 100, nextRetryAt: NOW - 1 }];
+      const tapped = tapStore(openStore());
+      await seedShareRows(tapped.store, rows);
+      const { queue } = queueOver(tapped.store, { listPageSize: 2 });
+      tapped.calls.length = 0;
+      expect(ids(await queue.list({ limit: 1 }))).toEqual(['x']);
+      // One read of the retry times, at the first batch that could end the walk; the cached value blocks every later stop until x is read.
+      expect(listingReads(tapped.calls)).toEqual(['keys', 'payloads:1', 'retry', 'payloads:2', 'payloads:2', 'payloads:2']);
+    });
+
+    it('ends the walk at the read that confirmed the bound: a retry time written after it comes after the walk', async () => {
+      const { listing, reads, raw } = await listingWithWrite([q, x], { listPageSize: 100 }, 1, { when: 'after', call: isRetryRead },
+        (store) => putShareRow(store, { ...x, nextRetryAt: NOW + 50 }));
+      expect(ids(listing)).toEqual(['q']);
+      expect(reads).toEqual(['keys', 'payloads:1', 'retry']);
+      expect(ids(await fullSort(raw, 1))).toEqual(['x']); // the store has moved on; the listing, which finished before it did, has not
+    });
   });
 });
 
@@ -766,6 +889,128 @@ describe('the post-commit sweep reads only its candidates and decides them as be
     expect(reads[0]!.text).not.toMatch(/OFFSET/i);
     expect(reads.every((call) => call.options?.controlQueue === 'share')).toBe(true);
     expect(tapped.calls.some((call) => call.source === 'publisher.asyncPromote.list')).toBe(false);
+    // Its candidates are then decided 50 at a time, each in a hold of its own that reads the rows it is about to judge by subject.
+    const decided = tapped.calls.filter((call) => call.source === 'publisher.asyncPromote.recoverPostCommit.payloads');
+    expect(decided.map((call) => [...call.text!.matchAll(/<urn:dkg:promote-queue:job:[^>]+>/g)].length)).toEqual([50, 50, 30]);
+    expect(decided.every((call) => call.options?.controlQueue === 'share')).toBe(true);
+  });
+
+  const failed = (id: string, at: number, over: Partial<ShareRowSpec> = {}): ShareRowSpec =>
+    ({ id, state: 'failed', enqueuedAt: NOW + at, lastError: code, attemptCount: 1, maxRetries: 3, ...over });
+  const sweepOf = async (specs: readonly ShareRowSpec[]) => {
+    const { queue, store, setNow } = await seeded(specs);
+    const now = NOW + 77_000;
+    setNow(now);
+    return { queue, store, now, expected: expectedSweep(specs, now) };
+  };
+  const storedAs = async (store: TripleStore, id: string) => (await readEveryShareJob(store)).find((job) => job.jobId === id)!;
+
+  describe('decides its candidates in the queue\'s own order, ties included', () => {
+    it('requeues the localeCompare-first of two tied jobs that share an assertion and defers the other, though code point order puts it second', async () => {
+      // 'a' < 'B' by locale, 'B' < 'a' by code point: the order the previous sweep decided in (comparePromoteJobs) is what picks the winner.
+      expect('a'.localeCompare('B')).toBeLessThan(0);
+      const specs = [failed('B', 10, { name: 'asset' }), failed('a', 10, { name: 'asset' })];
+      const { queue, store, now } = await sweepOf(specs);
+      expect(await queue.recoverPostCommitFailures()).toEqual([{ jobId: 'a', action: 'requeued', attempt: 1, maxAttempts: 3, nextRetryAt: now + 1_000 }]);
+      expect(await storedAs(store, 'a')).toMatchObject({ state: 'failed_retrying' });
+      expect(await storedAs(store, 'B')).toEqual(shareRow(specs[0]!)); // deferred: untouched, left for a later sweep
+    });
+
+    it.each([0, 1, 2, 25, 49])('decides a block of 120 tied jobs exactly as the previous sweep did when %i earlier candidates put the first page boundary inside it', async (earlier) => {
+      // 120 recoverable jobs at one enqueue time, three to an assertion, behind `earlier` jobs of their own: the page boundaries (every 50 candidates) cut through tied jobs and assertions.
+      const specs = [...Array.from({ length: earlier }, (_, i) => failed(`early-${i}`, -1_000 + i, { name: `early-asset-${i}` })), ...tiedContenders(mulberry32(90 + earlier), 120)];
+      const { queue, store, expected } = await sweepOf(specs);
+      // Not vacuous: in some assertion the job the locale order picks is not the one code point order picks.
+      const winner = (group: readonly ShareRowSpec[], order: (a: string, b: string) => number) => [...group].sort((x, y) => order(x.id, y.id))[0]!.id;
+      const groups = new Map<string, ShareRowSpec[]>();
+      for (const spec of specs.filter((spec) => spec.id.includes('-tie'))) groups.set(spec.name!, [...(groups.get(spec.name!) ?? []), spec]);
+      const differing = [...groups.values()].filter((group) => winner(group, (a, b) => a.localeCompare(b)) !== winner(group, (a, b) => (a < b ? -1 : 1)));
+      expect(differing.length).toBeGreaterThan(3);
+      expect(expected.events).toHaveLength(earlier + 40);
+      expect(await queue.recoverPostCommitFailures()).toEqual(expected.events);
+      const stored = new Map((await readEveryShareJob(store)).map((job) => [job.jobId, job]));
+      for (const [id, job] of expected.finals) expect(stored.get(id), id).toEqual(JSON.parse(JSON.stringify(job)));
+    });
+
+    it('orders a failed row that carries a retry time by that time, as the previous sweep did, not by its enqueue time', async () => {
+      // The queue never leaves a retry time on a failed row, but the payload format allows it (an older release, a repaired record). X was enqueued first and is due at +1000; Y is due at +500.
+      const specs = [failed('X', 1, { name: 'asset', nextRetryAt: NOW + 1_000 }), failed('Y', 500, { name: 'asset' })];
+      const { queue, store, now, expected } = await sweepOf(specs);
+      expect(expected.events.map((event) => event['jobId'])).toEqual(['Y']);
+      expect(await queue.recoverPostCommitFailures()).toEqual([{ jobId: 'Y', action: 'requeued', attempt: 1, maxAttempts: 3, nextRetryAt: now + 1_000 }]);
+      expect(await storedAs(store, 'X')).toEqual(shareRow(specs[0]!));
+      expect(await storedAs(store, 'Y')).toMatchObject({ state: 'failed_retrying' });
+    });
+
+    it('judges a candidate on the row as it is when its turn comes: one that left the failed state since it was found is not touched', async () => {
+      const raw = openStore();
+      const operator = { ...failed('moved', 2, { name: 'asset-2' }), state: 'queued' as const, lastError: undefined };
+      let moved = 0;
+      const tapped = tapStore(raw, { before: async (call) => {
+        if (call.source !== 'publisher.asyncPromote.recoverPostCommit.payloads') return;
+        moved++;
+        await putShareRow(raw, operator); // an operator recovered the job after the sweep found it
+      } });
+      await seedShareRows(tapped.store, [failed('stays', 1, { name: 'asset-1' }), failed('moved', 2, { name: 'asset-2' }), failed('last', 3, { name: 'asset-3' })]);
+      const { queue, setNow } = queueOver(tapped.store);
+      setNow(NOW + 5_000);
+      expect((await queue.recoverPostCommitFailures()).map((event) => event.jobId)).toEqual(['stays', 'last']);
+      expect(moved).toBeGreaterThan(0);
+      expect(await storedAs(raw, 'moved')).toEqual(shareRow(operator));
+    });
+  });
+
+  it('reads the clock once per decide turn and not once per sweep: with a moving clock the later turns requeue to a later time (documented)', async () => {
+    // The previous sweep read the clock once. Each turn now reads it in its own hold, so a clock that moves between turns stamps their rows later.
+    const specs = Array.from({ length: 60 }, (_, i) => failed(`turn-${String(i).padStart(2, '0')}`, i, { name: `turn-asset-${i}` }));
+    let moveClock = () => {};
+    let turns = 0;
+    const tapped = tapStore(openStore(), { after: (call, result) => {
+      if (call.source === 'publisher.asyncPromote.recoverPostCommit.payloads' && ++turns === 1) moveClock(); // after the first turn has read its rows and its clock
+      return result;
+    } });
+    await seedShareRows(tapped.store, specs);
+    const { queue, setNow } = queueOver(tapped.store);
+    const now = NOW + 77_000;
+    setNow(now);
+    moveClock = () => setNow(now + 500);
+    const events = await queue.recoverPostCommitFailures();
+    expect(events.map((event) => event.jobId)).toEqual(expectedSweep(specs, now).events.map((event) => event['jobId']));
+    expect(events.map((event) => event.nextRetryAt)).toEqual([...Array(50).fill(now + 1_000), ...Array(10).fill(now + 1_500)]);
+  });
+
+  describe('a failed record with a second enqueuedAt triple is one candidate (corruption only; the queue never writes one)', () => {
+    /** The same job under a second enqueue time: the find pass's key read, which has no `enqueuedAt` in its payload, returns the job once per triple. */
+    const withSecondEnqueuedAt = (store: TripleStore, id: string, at: number) =>
+      store.insert([{ subject: jobSubject(id), predicate: PROMOTE_ENQUEUED_AT, object: integer(NOW + at), graph: DEFAULT_PROMOTE_CONTROL_GRAPH_URI }]);
+
+    it('judges it once, as the previous sweep did: one event and one final row, not a second requeue of the same job', async () => {
+      const specs = [failed('dup', 1, { name: 'asset-1' }), failed('other', 3, { name: 'asset-2' })];
+      const { queue, store, expected } = await sweepOf(specs);
+      await withSecondEnqueuedAt(store, 'dup', 2);
+      expect(expected.events.map((event) => event['jobId'])).toEqual(['dup', 'other']);
+      expect(await queue.recoverPostCommitFailures()).toEqual(expected.events);
+      expect(await storedAs(store, 'dup')).toEqual(JSON.parse(JSON.stringify(expected.finals.get('dup'))));
+      expect(await storedAs(store, 'other')).toEqual(JSON.parse(JSON.stringify(expected.finals.get('other'))));
+      expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    });
+
+    it('judges it once when its two keys fall on two key pages of the find pass but one decide turn', async () => {
+      // Forty-nine failed rows that name the marker without being recoverable (a lookalike message) and the first copy fill the first key page,
+      // so the second copy is the first key of the second page, and the two copies are the only candidates: one turn.
+      const lookalikes = Array.from({ length: 49 }, (_, i) => failed(`look-${String(i).padStart(2, '0')}`, -1_000 + i, { name: `look-asset-${i}`, lastError: POST_COMMIT_ERRORS.lookalike }));
+      const specs = [...lookalikes, failed('dup', 1, { name: 'asset-1' })];
+      const tapped = tapStore(openStore());
+      await seedShareRows(tapped.store, specs);
+      const { queue, setNow } = queueOver(tapped.store);
+      const now = NOW + 77_000;
+      setNow(now);
+      await withSecondEnqueuedAt(tapped.store, 'dup', 2);
+      tapped.calls.length = 0;
+      expect(await queue.recoverPostCommitFailures()).toEqual(expectedSweep(specs, now).events);
+      expect(tapped.calls.filter((call) => call.source === 'publisher.asyncPromote.recoverPostCommit')).toHaveLength(2);
+      expect(await storedAs(tapped.store, 'dup')).toMatchObject({ state: 'failed_retrying', attempt: { nextRetryAt: now + 1_000 } });
+    });
   });
 });
 

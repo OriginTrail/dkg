@@ -191,6 +191,37 @@ describe('recoverPostCommitFailures()', () => {
     ]);
   });
 
+  it('decides in the queue\'s order, so of two jobs that tie on the enqueue time and share an assertion the localeCompare-first is requeued', async () => {
+    // 'a' < 'B' by locale and 'B' < 'a' by code point; requeuing the first one blocks the second, so the order is the outcome.
+    expect('a'.localeCompare('B')).toBeLessThan(0);
+    const { queue, setNow } = await seeded([failed('B', 10, { name: 'tied' }), failed('a', 10, { name: 'tied' })]);
+    setNow(NOW + 500);
+    expect(await queue.recoverPostCommitFailures()).toEqual([{ jobId: 'a', action: 'requeued', attempt: 1, maxAttempts: 3, nextRetryAt: NOW + 1_500 }]);
+    expect((await queue.getStatus('a'))!.state).toBe('failed_retrying');
+    expect(await queue.getStatus('B')).toEqual(shareRow(failed('B', 10, { name: 'tied' })));
+  });
+
+  it('decides ties in that order across pages: 120 jobs at one enqueue time, three to an assertion, the locale-first of each requeued', async () => {
+    // Per assertion g: a<g>, b<g> and C<g>. Locale order: a, b, C. Code point order: C, a, b (the order of the rows by their keys).
+    const group = (g: number) => String(g).padStart(2, '0');
+    const specs: ShareRowSpec[] = [];
+    for (let g = 0; g < 40; g++) for (const head of ['b', 'C', 'a']) specs.push(failed(`${head}${group(g)}`, 7, { name: `tied-${group(g)}` }));
+    const { queue, setNow } = await seeded(specs);
+    setNow(NOW + 500);
+    const events = await queue.recoverPostCommitFailures();
+    expect(events.map((event) => event.jobId)).toEqual(Array.from({ length: 40 }, (_, g) => `a${group(g)}`));
+    expect(events.every((event) => event.action === 'requeued')).toBe(true);
+    expect(await queue.getStats()).toMatchObject({ failed: 80, failed_retrying: 40 });
+  });
+
+  it('decides a failed row that carries a retry time by that time, not by its enqueue time', async () => {
+    // The queue never leaves a retry time on a failed row, but the payload format allows one (an older release, a repaired record).
+    const { queue, setNow } = await seeded([failed('X', 1, { name: 'tied', nextRetryAt: NOW + 1_000 }), failed('Y', 500, { name: 'tied' })]);
+    setNow(NOW + 5_000);
+    expect(await queue.recoverPostCommitFailures()).toEqual([{ jobId: 'Y', action: 'requeued', attempt: 1, maxAttempts: 3, nextRetryAt: NOW + 6_000 }]);
+    expect((await queue.getStatus('X'))!.state).toBe('failed');
+  });
+
   it('handles a failed backlog longer than any page: every recoverable row once, every other row untouched', async () => {
     const specs: ShareRowSpec[] = [];
     for (let i = 0; i < 260; i++) {

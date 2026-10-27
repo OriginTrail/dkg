@@ -9,7 +9,7 @@ import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js
 import type { PromoteJob, PromoteListFilter } from '../src/async-promote-queue-types.js';
 import { PROMOTE_STATE, comparePromoteJobs, jobSubject, uniquenessLookupKeys } from '../src/async-promote-queue-utils.js';
 import {
-  LANES, SPELLINGS, STATES, expectedSweep, failedPopulation, population, respell, selectorPopulation, walkPages,
+  LANES, SPELLINGS, STATES, expectedSweep, failedPopulation, population, respell, selectorPopulation, tiedContenders, walkPages,
 } from '../test/_helpers/share-listing-models.js';
 import { tapStore } from '../test/_helpers/store-tap.js';
 import {
@@ -159,6 +159,15 @@ describe('share queue paging (live Blazegraph)', () => {
     expect(await sweeper.recoverPostCommitFailures()).toEqual(expectedRun.events);
     const stored = new Map((await readEveryShareJob(store, sweepGraph)).map((job) => [job.jobId, job]));
     for (const [jobId, job] of expectedRun.finals) expect(stored.get(jobId), jobId).toEqual(JSON.parse(JSON.stringify(job)));
+    // 120 contenders at one enqueue time, three to an assertion: the pages (50) cut through tied jobs, and the previous sweep's order (localeCompare) picks each winner.
+    const tiedGraph = graphOf('sweep-ties');
+    const tiedSpecs = tiedContenders(mulberry32(9), 120);
+    await seedShareRows(store, tiedSpecs, tiedGraph);
+    const expectedTied = expectedSweep(tiedSpecs, clock);
+    expect(expectedTied.events).toHaveLength(40);
+    expect(await queueFor(tiedGraph).recoverPostCommitFailures()).toEqual(expectedTied.events);
+    const storedTied = new Map((await readEveryShareJob(store, tiedGraph)).map((job) => [job.jobId, job]));
+    for (const [jobId, job] of expectedTied.finals) expect(storedTied.get(jobId), jobId).toEqual(JSON.parse(JSON.stringify(job)));
     clock = NOW;
 
     // the selector lookup, over every spelling an older version wrote the key in

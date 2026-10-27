@@ -60,7 +60,23 @@ export const POST_COMMIT_ERRORS = (() => {
   return { code, legacy, lookalike, other, otherCode, all: [code, legacy, lookalike, other, otherCode, undefined] as const };
 })();
 
-/** Failed jobs with every kind of last error, reason, marker, format and budget, plus four owners that hold some of their assertions. */
+/**
+ * Recoverable post-commit failures (retry budget left) that all carry one enqueue time, in groups of `group` that share one assertion.
+ * The ids are mixed-case, where code point order and `localeCompare` disagree, so of each group the job recovery requeues is the one
+ * the queue's own order ranks first and the rest are deferred behind it: the order the sweep decides in is the outcome.
+ */
+export function tiedContenders(rand: () => number, count: number, over: { enqueuedAt?: number; group?: number; prefix?: string } = {}): ShareRowSpec[] {
+  const group = over.group ?? 3, prefix = over.prefix ?? 'tie';
+  return Array.from({ length: count }, (_, k): ShareRowSpec => ({
+    id: `${randomJobId(rand, 6)}-${prefix}${k}`, state: 'failed', enqueuedAt: over.enqueuedAt ?? NOW + 1, name: `${prefix}-asset-${Math.floor(k / group)}`,
+    lastError: POST_COMMIT_ERRORS.code, attemptCount: 1, maxRetries: 3,
+  }));
+}
+
+/**
+ * Failed jobs with every kind of last error, reason, marker, format and budget, plus four owners that hold some of their assertions,
+ * and twelve recoverable contenders (four assertions, three jobs each) that tie on one enqueue time in the middle of the range.
+ */
 export function failedPopulation(rand: () => number, count: number): ShareRowSpec[] {
   const specs: ShareRowSpec[] = [];
   for (let i = 0; i < count; i++) {
@@ -77,6 +93,7 @@ export function failedPopulation(rand: () => number, count: number): ShareRowSpe
   for (let k = 0; k < 4; k++) {
     specs.push({ id: `owner-${k}`, state: (['queued', 'running', 'failed_retrying', 'succeeded'] as const)[k]!, enqueuedAt: NOW + 5 + k * 17, name: `shared-${k}` });
   }
+  specs.push(...tiedContenders(rand, 12, { enqueuedAt: NOW + Math.floor(count / 2) * 10 + 3 }));
   return specs;
 }
 
