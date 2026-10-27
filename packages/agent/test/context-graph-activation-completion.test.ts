@@ -47,3 +47,42 @@ it.each(['cancelled', 'prepare', 'subscribe'] as const)('never publishes a %s ac
   expect(a.contextGraphSubscriptionRehydrationSlotIds.has(id)).toBe(false);
   expect(a.getSubscribedContextGraphs().get(id)?.subscribed).not.toBe(true);
 });
+
+it('keeps repaired intent and waiters across rollback while retiring the failed retry acknowledgement', async () => {
+  const { a, id, row, events } = await fixture();
+  const owner = a.contextGraphSubscriptionActivations, handle = owner.observe(row);
+  const wait = owner.wait(id, new AbortController().signal);
+  let settled = false, acknowledge!: (record: typeof row) => void;
+  void wait.then(() => { settled = true; });
+  const repaired = { ...row, onChainId: '8' };
+  await expect(a.activatePersistedContextGraphSubscriptionRecord(row, {
+    prepare: async (_sub: unknown, ack: typeof acknowledge) => {
+      acknowledge = ack; ack(repaired); throw new Error('retryable preparation failure');
+    },
+  })).rejects.toThrow('retryable preparation failure');
+  expect(owner.get(id)).toBe(handle);
+  expect(settled).toBe(false); expect(events).toEqual([]);
+  expect(() => acknowledge(repaired)).toThrow('ownership changed');
+  await a.activatePersistedContextGraphSubscriptionRecord(repaired, {
+    prepare: async () => {
+      expect(owner.get(id)).toBe(handle);
+      expect(() => acknowledge(repaired)).toThrow('ownership changed');
+    },
+  });
+  await expect(wait).resolves.toMatchObject({ kind: 'committed', subscription: { onChainId: '8' } });
+  expect(events).toHaveLength(1);
+});
+
+it('rejects an overlapping retry without replacing the installing owner', async () => {
+  const { a, id, row, events } = await fixture();
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const first = a.activatePersistedContextGraphSubscriptionRecord(row, { prepare: () => gate });
+  const handle = a.contextGraphSubscriptionActivations.get(id);
+  try {
+    await expect(a.activatePersistedContextGraphSubscriptionRecord(row)).rejects.toThrow('ownership changed');
+    expect(a.contextGraphSubscriptionActivations.get(id)).toBe(handle);
+    expect(events).toEqual([]);
+  } finally { release(); }
+  await first; expect(events).toHaveLength(1);
+});

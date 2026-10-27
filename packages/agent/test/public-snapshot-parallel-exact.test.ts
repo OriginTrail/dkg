@@ -183,4 +183,39 @@ describe('bounded snapshot recovery overlap', () => {
     expect(askedAt.length).toBeGreaterThan(1);
     expect(askedAt[1]! - askedAt[0]!).toBeGreaterThanOrEqual(15_000);
   });
+
+  it('shares one admission timer and capacity poll between simultaneous lane refusals', async () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, 'random').mockReturnValue(1);
+    const both = deferred(), attempts: number[] = [];
+    const canAdmit = vi.fn().mockReturnValueOnce(false).mockReturnValue(true);
+    vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
+      const attempt = attempts.length;
+      attempts.push(Date.now());
+      if (attempt < 2) {
+        if (attempt === 1) both.resolve();
+        await both.promise;
+        return { ...success([]), admission: 'local-admission-deferred', disposition: 'incomplete' };
+      }
+      return success(selected(request));
+    });
+    const assets = uals.slice(0, 20);
+    const caller = new AbortController();
+    const job = recoverPublicSnapshotExact(host, { ...options(), uals: assets, canAdmit, signal: caller.signal });
+    void job.catch(() => undefined);
+    try {
+      await both.promise; await vi.advanceTimersByTimeAsync(0);
+      expect(attempts).toHaveLength(2);
+      expect(vi.getTimerCount()).toBe(1);
+      // Two real refusals retain the existing exponential five-second hold.
+      await vi.advanceTimersByTimeAsync(5_000);
+      expect(canAdmit).toHaveBeenCalledTimes(1);
+      expect(attempts).toHaveLength(2);
+      await vi.runAllTimersAsync();
+      expect((await job).committed).toEqual(new Set(assets));
+      expect(canAdmit).toHaveBeenCalledTimes(2);
+      expect(attempts).toHaveLength(4);
+      expect(attempts[2]! - attempts[0]!).toBeGreaterThanOrEqual(7_500);
+    } finally { caller.abort(); await vi.runAllTimersAsync(); await job.catch(() => undefined); }
+  });
 });

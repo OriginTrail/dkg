@@ -83,9 +83,12 @@ export function createRollingPromotionFixture(
       else host.subscribedContextGraphs.set(row.id, promotionSubscription({ subscribed: row.subscribed, coreHosted: row.coreHosted, metaSynced: false, pendingMeta: false }));
       const live = host.subscribedContextGraphs.get(row.id);
       if (live) {
-        const handle = activations.observe(row);
-        activations.install(handle, live);
-        activations.commit(handle, live, () => live, activationOptions.claimRollingSlot === true);
+        await activations.activate(row, {
+          install: () => live, current: id => host.subscribedContextGraphs.get(id),
+          remove: id => { host.subscribedContextGraphs.delete(id); },
+          rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
+          prepareCommit: () => ({ subscription: live, apply: () => live }),
+        }, { claimRollingSlot: activationOptions.claimRollingSlot });
       }
     }),
   };

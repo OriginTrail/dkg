@@ -54,7 +54,7 @@ export interface PublicSnapshotPacingOptions {
 export class PublicSnapshotRecoveryPacing {
   private readonly setbacks = new VmRecoveryStreamSetbackPolicy();
   private refusals = 0;
-  private admissionWaitPending = false;
+  private admissionBarrier?: { wait?: Promise<boolean> };
 
   constructor(private readonly options: PublicSnapshotPacingOptions) {}
 
@@ -63,7 +63,7 @@ export class PublicSnapshotRecoveryPacing {
     if (committed === 0 && (attempt.admission === 'local-admission-deferred'
       || (attempt.result?.deferredBackpressure ?? 0) > 0)) {
       this.refusals += 1;
-      this.admissionWaitPending = true;
+      this.admissionBarrier ??= {};
       return 'local-refusal';
     }
     if (attempt.admission === 'work-started') this.refusals = 0;
@@ -83,7 +83,7 @@ export class PublicSnapshotRecoveryPacing {
 
   /** A queued worker must honor a refusal already observed by this job. */
   localAdmissionDeferred(): boolean {
-    return this.admissionWaitPending;
+    return this.admissionBarrier !== undefined;
   }
 
   /** The bound of the next attempt, which never runs past the job's limit. */
@@ -95,13 +95,19 @@ export class PublicSnapshotRecoveryPacing {
    * Wait until local sync admission would take the attempt. False when that
    * cannot happen in time; the job's cancellation or loss of its graph throws.
    */
-  async waitForAdmission(): Promise<boolean> {
+  waitForAdmission(): Promise<boolean> {
+    const barrier = this.admissionBarrier ??= {};
+    return barrier.wait ??= this.waitForLocalCapacity().finally(() => {
+      if (this.admissionBarrier === barrier) this.admissionBarrier = undefined;
+    });
+  }
+
+  private async waitForLocalCapacity(): Promise<boolean> {
     const hold = Math.min(PUBLIC_SNAPSHOT_MAX_HOLD_MS, PUBLIC_SNAPSHOT_RETRY_MS * 2 ** (this.refusals - 1));
     if (!(await this.sleep(jitter(hold)))) return false;
     while (!this.admissionAvailable()) {
       if (!(await this.sleep(jitter(PUBLIC_SNAPSHOT_RETRY_MS)))) return false;
     }
-    this.admissionWaitPending = false;
     return true;
   }
 

@@ -90,7 +90,6 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
       updateRehydrationStatus: boolean;
     }>,
   ): ContextGraphSub;
-  acknowledgeRepair(record: ContextGraphSubscriptionRecord): void;
   current(contextGraphId: string): ContextGraphSub | undefined;
   remove(contextGraphId: string): void;
   /** Restore the captured identity-only state after compensating activation. */
@@ -101,7 +100,7 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
   subscribe(contextGraphId: string): void;
   persistMembership(contextGraphId: string): void;
   /** Retire/adopt wire custody only after all speculative effects succeed. */
-  commit?(contextGraphId: string): ContextGraphSub;
+  prepareCommit(contextGraphId: string): { subscription: ContextGraphSub; apply(): ContextGraphSub };
 }
 
 export interface PersistedContextGraphSubscriptionActivationOptions {
@@ -112,55 +111,6 @@ export interface PersistedContextGraphSubscriptionActivationOptions {
   readonly updateRehydrationStatus?: boolean;
   readonly prepare?: (subscription: ContextGraphSub, acknowledgeRepair: (record: ContextGraphSubscriptionRecord) => void) => Promise<void>;
   readonly isCurrent?: (subscription: ContextGraphSub) => boolean;
-}
-
-/** Canonical install/prepare/network-side-effect transaction for durable rows. */
-export async function activatePersistedContextGraphSubscription(
-  row: ContextGraphSubscriptionRecord,
-  ports: PersistedContextGraphSubscriptionActivationPorts,
-  options: PersistedContextGraphSubscriptionActivationOptions = {},
-): Promise<ContextGraphSub> {
-  const previous = ports.current(row.id);
-  const restorePendingMeta = options.restorePendingMeta === true;
-  const subscription = ports.install(row, {
-    onChainId: options.onChainId,
-    restorePendingMeta,
-    updateRehydrationStatus: options.updateRehydrationStatus !== false,
-  });
-  let networkEffectsStarted = false;
-  const rollback = (): void => {
-    // Before network activation, preserve a concurrently replaced generation.
-    // After it begins, every port is synchronous: any changed object is the
-    // activation's own transition and must be compensated as part of this call.
-    if (!networkEffectsStarted && ports.current(row.id) !== subscription) return;
-    try {
-      ports.rollbackNetworkEffects(row.id, options.rollbackSlotRelease ?? 'activation-rollback');
-    } finally {
-      ports.remove(row.id);
-      if (previous && !previous.subscribed && previous.coreHosted !== true) {
-        ports.restoreInactive?.(row.id, previous);
-      }
-    }
-  };
-
-  try {
-    await options.prepare?.(subscription, record => ports.acknowledgeRepair(record));
-    if (options.isCurrent && !options.isCurrent(subscription)) {
-      throw new Error(`Persisted subscription activation for "${row.id}" became stale`);
-    }
-    if (!restorePendingMeta) {
-      networkEffectsStarted = true;
-      if (row.syncScoped) ports.trackSync(row.id);
-      if (row.subscribed) {
-        ports.subscribe(row.id);
-        ports.persistMembership(row.id);
-      }
-    }
-    return ports.commit?.(row.id) ?? subscription;
-  } catch (error) {
-    rollback();
-    throw error;
-  }
 }
 
 export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {

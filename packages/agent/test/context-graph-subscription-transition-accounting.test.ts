@@ -33,8 +33,6 @@ it('accounts persistence and activation from captured transitions after dormancy
   expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ persistedTotal: 1, activated: 0, dormant: 1 });
   agent.contextGraphSubscriptionRehydrationPendingIds.add(id);
   const live = subscription(), handle = owner.observe(intent(id));
-  owner.install(handle, live);
-  agent.subscribedContextGraphs.set(id, live);
   const wait = owner.wait(id, new AbortController().signal);
   let status = agent.contextGraphSubscriptionRehydrationStatus;
   const observations: unknown[] = [];
@@ -50,11 +48,16 @@ it('accounts persistence and activation from captured transitions after dormancy
   const atEvent: unknown[] = [];
   agent.eventBus.emit.mockImplementation(() => atEvent.push({ status: agent.getContextGraphSubscriptionRehydrationStatus(),
     slot: agent.contextGraphSubscriptionRehydrationSlotIds.has(id), owner: owner.get(id) }));
-  owner.commit(handle, live, () => live, true);
+  await owner.activate(intent(id), {
+    install: () => { agent.subscribedContextGraphs.set(id, live); return live; },
+    current: key => agent.subscribedContextGraphs.get(key), remove: key => { agent.subscribedContextGraphs.delete(key); },
+    rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
+    prepareCommit: () => ({ subscription: live, apply: () => live }),
+  }, { claimRollingSlot: true });
   expect(observations).toEqual([{ dormancy: undefined, pending: false, slot: true, owner: true }]);
   expect(atEvent).toEqual([{ status: expect.objectContaining({ persistedTotal: 1, activated: 1, dormant: 0 }), slot: true, owner: undefined }]);
   await expect(wait).resolves.toEqual({ kind: 'committed', subscription: live });
-  expect(() => owner.commit(handle, live, () => live, true)).toThrow('ownership changed');
+  expect(() => (owner as any).commit(handle, live, () => live, true)).toThrow('ownership changed');
   agent.recordContextGraphSubscriptionPersistence(id, intent(id));
   expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ persistedTotal: 1, activated: 1 });
   expect(agent.eventBus.emit).toHaveBeenCalledTimes(1);

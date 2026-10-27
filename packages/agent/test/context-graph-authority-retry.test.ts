@@ -10,7 +10,6 @@ import {
 import { DKGAgent } from '../src/index.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
-  activatePersistedContextGraphSubscription,
   DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
   recoverDeferredContextGraphSubscriptionAuthorities,
   wakeDeferredContextGraphSubscriptionAuthorityRecovery,
@@ -18,6 +17,8 @@ import {
   '../src/context-graph-subscription-authority-recovery.js';
 import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
 import { RollingSubscriptionChecks } from '../src/context-graph-subscription-rolling-checks.js';
+import { createTestSubscriptionActivations } from './_helpers/subscription-activation-owner.js';
+import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 
 const mockLivePolicy = (agent: DKGAgent, accessPolicy: 0 | 1) =>
   vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
@@ -144,9 +145,10 @@ describe('Context Graph subscription authority retry', () => {
     const subscriptions = new Map<string, any>();
     const syncScope = new Set<string>();
     const gossipHandlers = new Set<string>();
+    const activations = createTestSubscriptionActivations({ subscribedContextGraphs: subscriptions,
+      contextGraphSubscriptionDormancyById: new Map() });
     let failSubscribe = true;
     const ports = {
-      acknowledgeRepair: vi.fn(),
       install: () => {
         const subscription = { ...row, syncMode: 'always-on' as const };
         subscriptions.set(contextGraphId, subscription);
@@ -162,21 +164,24 @@ describe('Context Graph subscription authority retry', () => {
       subscribe: (id: string) => {
         // Model the real activation replacing the installed record, then a
         // topic installed before a later topic subscription throws.
-        subscriptions.set(id, { ...subscriptions.get(id), subscribed: true });
+        const previous = subscriptions.get(id), next = { ...previous, subscribed: true };
+        continueContextGraphSubscriptionLine(previous, next);
+        subscriptions.set(id, next);
         gossipHandlers.add(id);
         if (failSubscribe) throw new Error('gossip topic install failed');
       },
       persistMembership: () => undefined,
+      prepareCommit: (id: string) => ({ subscription: subscriptions.get(id), apply: () => subscriptions.get(id) }),
     };
 
-    await expect(activatePersistedContextGraphSubscription(row, ports))
+    await expect(activations.activate(row, ports))
       .rejects.toThrow('gossip topic install failed');
     expect([...subscriptions]).toEqual([]);
     expect([...syncScope]).toEqual([]);
     expect([...gossipHandlers]).toEqual([]);
 
     failSubscribe = false;
-    await expect(activatePersistedContextGraphSubscription(row, ports))
+    await expect(activations.activate(row, ports))
       .resolves.toMatchObject({ id: contextGraphId, subscribed: true });
     expect(subscriptions.get(contextGraphId)).toMatchObject({ subscribed: true });
     expect([...syncScope]).toEqual([contextGraphId]);

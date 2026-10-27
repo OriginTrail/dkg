@@ -536,7 +536,6 @@ import {
   projectContextGraphDormancy,
 } from './context-graph-subscription-dormancy.js';
 import {
-  activatePersistedContextGraphSubscription as activatePersistedContextGraphSubscriptionTransaction,
   activateRollingSubscriptionPromotion,
   createRollingSubscriptionPromotionRuntime,
   DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
@@ -8874,8 +8873,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this: DKGAgent,
     row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions = {},
   ): Promise<ContextGraphSub> {
-    const activation = this.contextGraphSubscriptionActivations.observe(row);
-    return activatePersistedContextGraphSubscriptionTransaction(row, {
+    return this.contextGraphSubscriptionActivations.activate(row, {
       install: (record, input) => {
         const installed = this.setContextGraphSubscription(record.id, {
           name: record.name,
@@ -8893,10 +8891,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           persist: false, deferWireAdoption: true,
           updateRehydrationStatus: input.updateRehydrationStatus,
         });
-        this.contextGraphSubscriptionActivations.install(activation, installed);
         return installed;
       },
-      acknowledgeRepair: (record) => this.contextGraphSubscriptionActivations.repaired(activation, record),
       current: (contextGraphId) => this.subscribedContextGraphs.get(contextGraphId),
       remove: (contextGraphId) => this.deleteContextGraphSubscription(contextGraphId),
       restoreInactive: (id, previous) => {
@@ -8915,15 +8911,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         syncMode: 'always-on',
       }),
       persistMembership: (id) => this.persistLocalNodeMembership(id, 'rehydrated-subscription'),
-      commit: (id) => {
+      prepareCommit: (id) => {
         const plan = this.prepareContextGraphSubscriptionWrite(id, this.subscribedContextGraphs.get(id)!, {
           persist: false, preserveAdmittedWireBinding: true, retireNamePlaceholder: true,
         });
-        return this.contextGraphSubscriptionActivations.commit(activation, plan.subscription, () => {
+        return { subscription: plan.subscription, apply: () => {
           const committed = plan.apply();
           if (plan.adoptedWire) void this.persistContextGraphSubscription(id, { retiredNamePredecessor: plan.adoptedWire });
           return committed;
-        }, options.claimRollingSlot === true);
+        } };
       },
     }, options);
   }

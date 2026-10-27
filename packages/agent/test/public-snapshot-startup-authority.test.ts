@@ -27,7 +27,8 @@ function fixture() {
     store: { insert: vi.fn(async () => {}) },
   };
   a.contextGraphSubscriptionActivations = createTestSubscriptionActivations(a);
-  a.contextGraphSubscriptionActivations.observe({ id: graph, subscribed: true, syncScoped: true, synced: false, metaSynced: false, sharedMemorySynced: false, onChainId: '1', onChainHash: ethers.id(graph) });
+  a.activationIntent = { id: graph, subscribed: true, syncScoped: true, synced: false, metaSynced: false, sharedMemorySynced: false, onChainId: '1', onChainHash: ethers.id(graph) };
+  a.contextGraphSubscriptionActivations.observe(a.activationIntent);
   a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;
   const replace = (next: ReturnType<typeof active>) => {
     continueContextGraphSubscriptionLine(a.subscribedContextGraphs.get(graph), next);
@@ -38,15 +39,20 @@ function fixture() {
 function coldIntent(a: any) {
   const row = { id: graph, subscribed: true, syncScoped: true, synced: false, metaSynced: false, sharedMemorySynced: false };
   a.subscribedContextGraphs.clear();
+  a.activationIntent = row;
   a.contextGraphSubscriptionActivations.reset([row]);
   a.contextGraphSubscriptionDormancyById.set(graph, 'authorityUnavailable');
   return row;
 }
-function finish(a: any) {
+async function finish(a: any) {
   const owner = a.contextGraphSubscriptionActivations, row = a.subscribedContextGraphs.get(graph);
-  a.contextGraphSubscriptionDormancyById.delete(graph);
-  if (row?.subscribed) { owner.install(owner.get(graph), row); owner.commit(owner.get(graph), row, () => row, false); }
-  else owner.cancel(graph);
+  if (row?.subscribed) await owner.activate(a.activationIntent, {
+    install: () => row, current: (id: string) => a.subscribedContextGraphs.get(id),
+    remove: (id: string) => { a.subscribedContextGraphs.delete(id); },
+    rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
+    prepareCommit: () => ({ subscription: row, apply: () => row }),
+  });
+  else { a.contextGraphSubscriptionDormancyById.delete(graph); owner.cancel(graph); }
 }
 const run = (a: any, signal?: AbortSignal) => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a,
   { contextGraphId: graph, onChainId: '1', mode: 'core-cache', trustedCorePeerIds: ['core'], signal });
@@ -61,7 +67,7 @@ describe('snapshot waits for persisted startup authority', () => {
     expect(a.router.send).not.toHaveBeenCalled();
     const committed = active();
     a.subscribedContextGraphs.set(graph, committed);
-    finish(a);
+    await finish(a);
     await vi.advanceTimersByTimeAsync(2500);
     await expect(pending).resolves.toMatchObject({ assets: 0, current: true });
     expect(a.router.send).toHaveBeenCalledTimes(2);
@@ -81,7 +87,7 @@ describe('snapshot waits for persisted startup authority', () => {
     await vi.advanceTimersByTimeAsync(2500);
     expect(a.router.send).not.toHaveBeenCalled();
     replace(active());
-    finish(a);
+    await finish(a);
     await vi.advanceTimersByTimeAsync(2500);
     await expect(pending).resolves.toMatchObject({ assets: 0, current: true, elapsedMs: 2500 });
     expect(a.router.send).toHaveBeenCalledTimes(2);
@@ -120,7 +126,7 @@ describe('snapshot waits for persisted startup authority', () => {
     const rejected = expect(pending).rejects.toThrow('inactive');
     await vi.advanceTimersByTimeAsync(0);
     replace({ ...active(), subscribed: false });
-    finish(a);
+    await finish(a);
     await vi.advanceTimersByTimeAsync(2500);
     await rejected;
     expect(a.router.send).not.toHaveBeenCalled();
