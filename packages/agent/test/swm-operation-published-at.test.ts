@@ -263,12 +263,12 @@ describe('planOperationPublishedAt', () => {
       new Map([[key, [stamp(LOCAL), stamp(LATEST)]]]),
     )).toEqual({
       rows: [typeRow, row(stamp(PEER))],
-      retirements: [{ rows: [row(stamp(LOCAL)), row(stamp(LATEST))], requiredReplacement: row(stamp(PEER)) }],
+      retirements: [{ rows: [row(stamp(LOCAL)), row(stamp(LATEST))], winner: row(stamp(PEER)), requiredReplacement: row(stamp(PEER)) }],
     });
     expect(planOperationPublishedAt(
       [typeRow, row(stamp(LATER))],
       new Map([[key, [stamp(LOCAL), stamp(LATEST)]]]),
-    )).toEqual({ rows: [typeRow], retirements: [{ rows: [row(stamp(LATEST))] }] });
+    )).toEqual({ rows: [typeRow], retirements: [{ rows: [row(stamp(LATEST))], winner: row(stamp(LOCAL)) }] });
   });
 
   it('keeps the stored stamp for the same instant in another lexical form', () => {
@@ -280,7 +280,7 @@ describe('planOperationPublishedAt', () => {
 
   it('prefers a stamp the head resolver accepts over an earlier unusable one', () => {
     expect(planOperationPublishedAt([row(stamp(LOCAL))], new Map([[key, ['"not-a-date"']]])))
-      .toEqual({ rows: [row(stamp(LOCAL))], retirements: [{ rows: [row('"not-a-date"')], requiredReplacement: row(stamp(LOCAL)) }] });
+      .toEqual({ rows: [row(stamp(LOCAL))], retirements: [{ rows: [row('"not-a-date"')], winner: row(stamp(LOCAL)), requiredReplacement: row(stamp(LOCAL)) }] });
     expect(planOperationPublishedAt([row(stamp('1960-01-01T00:00:00.000Z'))], new Map([[key, [stamp(LOCAL)]]])))
       .toEqual({ rows: [], retirements: [] });
   });
@@ -351,13 +351,21 @@ describe('a defective head is set aside, not its whole graph', () => {
     })]);
   });
 
-  it('a head naming no operation is set aside with no operation subjects', () => {
+  it('a head naming no operation keeps cached refs unresolved through the round', async () => {
     const bad = defective('bad');
-    const { setAside } = parseGraphScopedSwmRecoveryHeadResults({
-      contextGraphId: CG,
-      metaQuads: [...valid.meta, ...bad.meta.filter((quad) => quad.predicate !== `${DKG}shareOperationId`)],
-    });
+    const servedMeta = [...valid.meta, ...bad.meta.filter(quad => quad.predicate !== `${DKG}shareOperationId`)];
+    const { setAside } = parseGraphScopedSwmRecoveryHeadResults({ contextGraphId: CG, metaQuads: servedMeta });
     expect(setAside).toEqual([expect.objectContaining({ headSubject: bad.share.headSubject, operationSubjects: [] })]);
+    const store = newStore();
+    const summary = await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, servedMeta,
+      cachedSnapshots: new Map([[valid.digest, valid.payload], [bad.share.digest, bad.share.payload]]),
+    }).run();
+    expect(await rowsOf(store, valid.assertionGraph)).toHaveLength(valid.payload.length);
+    expect(await rowsOf(store, WS_META, valid.headSubject)).not.toEqual([]);
+    expect(await rowsOf(store, WS_META, bad.share.headSubject)).toEqual([]);
+    expect(await rowsOf(store, WS_META, bad.share.operationSubject)).toEqual([]);
+    expect(summary.swmCoverage).toMatchObject({ snapshotsResolved: 0, descriptorsAuthoritative: false });
+    expect(summary.failedPhases).toBeGreaterThan(0);
   });
 
   it('a conflict between two valid heads still fails the whole graph', () => {
@@ -446,6 +454,30 @@ describe('a defective head is set aside, not its whole graph', () => {
 describe('timestamp replacement keeps stored evidence through failed writes', () => {
   const options = { source: 'test', seam: 'test', recordDrops: () => {} };
   const row = (object: string): Quad => ({ subject: ack.operationSubject, predicate: PUBLISHED_AT, object, graph: WS_META });
+  it.each([
+    { incoming: PEER, initial: [LOCAL], restored: LOCAL },
+    { incoming: LATEST, initial: [LOCAL, LATER], restored: LATER },
+  ])('preserves the concurrently restored $restored stamp after inserting $incoming', async ({ incoming, initial, restored }) => {
+    const store = newStore();
+    await store.insert(initial.map(value => row(stamp(value))));
+    const insert = store.insert.bind(store);
+    vi.spyOn(store, 'insert').mockImplementationOnce(async quads => {
+      await insert(quads);
+      // Interleave a complete metadata replacement after persistence but before retirement.
+      await store.deleteByPattern({ graph: WS_META, subject: ack.operationSubject });
+      await insert([row(stamp(restored))]);
+    });
+    await insertKeepingOnePublishedAt(store, [row(stamp(incoming)),
+      { ...row(`${DKG}WorkspaceOperation`), predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' }], options);
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([restored]);
+  });
+  it('keeps duplicate stamps when conditional update is unavailable', async () => {
+    const store = newStore();
+    await store.insert([row(stamp(LOCAL))]);
+    Object.defineProperty(store, 'update', { value: undefined });
+    await insertKeepingOnePublishedAt(store, [row(stamp(PEER))], options);
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER, LOCAL]);
+  });
   it('preserves the stored timestamp when an oversized replacement is dropped', async () => {
     const store = newStore();
     await store.insert([row(stamp(LOCAL))]);
@@ -493,7 +525,7 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
   });
   it('does not retire stored evidence after a failed insert', async () => {
     const store = newStore(); await store.insert([row(stamp(LOCAL))]);
-    const retire = vi.spyOn(store, 'delete');
+    const retire = vi.spyOn(store, 'update');
     vi.spyOn(store, 'insert').mockRejectedValueOnce(new Error('insert failed'));
     await expect(insertKeepingOnePublishedAt(store, [row(stamp(PEER))], options))
       .rejects.toThrow('insert failed');
@@ -503,7 +535,7 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
   it('retains both stamps after failed retirement and converges on retry', async () => {
     const store = newStore(); await store.insert([row(stamp(LOCAL))]);
     const write = () => insertKeepingOnePublishedAt(store, [row(stamp(PEER))], options);
-    const retire = vi.spyOn(store, 'delete').mockRejectedValueOnce(new Error('retire failed'));
+    const retire = vi.spyOn(store, 'update').mockRejectedValueOnce(new Error('retire failed'));
     await expect(write()).rejects.toThrow('retire failed');
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER, LOCAL]);
     retire.mockRestore();

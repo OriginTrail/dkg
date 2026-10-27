@@ -18,8 +18,9 @@
  */
 
 import { canonicalQuadKey } from './requester/quad-key.js';
-import { isSafeIri } from '@origintrail-official/dkg-core';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { assertSafeIri, isSafeIri } from '@origintrail-official/dkg-core';
+import { tryUpdateWithTouchedGraphs, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { formatCanonicalRdfLiteralTerm, parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
 
 import { filterOversizedSyncQuads, insertPrefilteredSyncQuads, type OversizeGuardHooks } from './oversize-filter.js';
@@ -48,6 +49,7 @@ export interface OperationPublishedAtPlan {
   /** Each group's stored losers and the incoming winner required before retiring them. */
   readonly retirements: readonly {
     readonly rows: readonly Quad[];
+    readonly winner: Quad;
     readonly requiredReplacement?: Quad;
   }[];
 }
@@ -87,7 +89,7 @@ export function planOperationPublishedAt(
       }
     }
     if (retiring.length > 0) {
-      retirements.push({ rows: retiring, ...(winner.row ? { requiredReplacement: winner.row } : {}) });
+      retirements.push({ rows: retiring, winner: { subject, predicate: PUBLISHED_AT, object: winner.object, graph }, ...(winner.row ? { requiredReplacement: winner.row } : {}) });
     }
   }
   return {
@@ -99,12 +101,12 @@ export function planOperationPublishedAt(
 /**
  * Own guarded persistence of `rows`, keeping one publishedAt per share operation:
  * read the stamps `store` holds for the operations the rows stamp, write the
- * planned rows, then delete the stored stamps that lost. An interruption
+ * planned rows, then conditionally delete the stored stamps that lost. An interruption
  * between the two leaves an extra stamp, never none, and the next write of the
  * operation removes it.
  */
 export async function insertKeepingOnePublishedAt(
-  store: Pick<TripleStore, 'query' | 'delete' | 'insert'>,
+  store: TripleStore,
   rows: readonly Quad[],
   options: { source: string; seam: string; recordDrops: OversizeGuardHooks['recordDrops'] },
 ): Promise<Quad[]> {
@@ -151,11 +153,25 @@ export async function insertKeepingOnePublishedAt(
   );
   assertUsableOperationTimestamps(targets, stored, inserted);
   const written = new Set(inserted.map(canonicalQuadKey));
-  // A filtering insert can succeed without persisting its proposed winner.
-  const retire = plan.retirements.flatMap(({ rows: losingRows, requiredReplacement }) =>
-    requiredReplacement === undefined || written.has(canonicalQuadKey(requiredReplacement)) ? [...losingRows] : []);
-  if (retire.length > 0) {
-    await store.delete(retire, { priority: 'background', source: `${source}.retirePublishedAt` });
+  // The winning stamp must still exist in the SAME backend delete operation.
+  // A recovery can replace all operation rows after our insert; an unconditional
+  // delete based on the earlier read would then remove its only restored stamp.
+  // Backends without UPDATE keep harmless duplicate stamps for a later repair.
+  for (const { rows: losers, winner, requiredReplacement } of plan.retirements) {
+    if (requiredReplacement && !written.has(canonicalQuadKey(requiredReplacement))) continue;
+    const graph = assertSafeIri(winner.graph), subject = assertSafeIri(winner.subject);
+    const term = (object: string): string => {
+      const literal = parseRdfLiteralTerm(object);
+      return literal === null ? `<${assertSafeIri(object)}>` : formatCanonicalRdfLiteralTerm(literal);
+    };
+    const winnerTerm = term(winner.object);
+    await tryUpdateWithTouchedGraphs(store,
+      `DELETE { GRAPH <${graph}> { <${subject}> <${PUBLISHED_AT}> ?loser } } WHERE { `
+      + `GRAPH <${graph}> { <${subject}> <${PUBLISHED_AT}> ${winnerTerm} . `
+      + `<${subject}> <${PUBLISHED_AT}> ?loser } `
+      + `VALUES ?loser { ${losers.map(row => term(row.object)).join(' ')} } `
+      + `FILTER(!sameTerm(?loser, ${winnerTerm})) }`,
+      [graph], { priority: 'background', source: `${source}.retirePublishedAt` });
   }
   return inserted;
 }
