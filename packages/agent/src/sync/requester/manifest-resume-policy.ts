@@ -1,3 +1,4 @@
+import { withoutSyncCheckpointResponderSession } from '@origintrail-official/dkg-core';
 import type {
   DurableManifestDigest,
   DurableManifestPrefixDigest,
@@ -124,4 +125,55 @@ export function resolveResponderSessionLossCleanup(input: {
     && input.supportsSessionClear
     ? 'clear-session'
     : 'clear-checkpoint';
+}
+
+/** One immutable plan for candidate selection, final generation and responder coordinates. */
+export interface ManifestResumePlan {
+  readonly checkpoint?: SyncCheckpointEntry;
+  readonly checkpointAction: 'keep' | 'reset' | 'replace' | 'upgrade';
+  readonly seeded: boolean;
+  readonly resume: ResponderResumeDecision;
+}
+
+export function resolveManifestResumePlan(input: {
+  readonly checkpoint?: SyncCheckpointEntry;
+  /** A live, non-terminal source that advances the destination, checked without mutation. */
+  readonly proposedCheckpoint?: SyncCheckpointEntry;
+  readonly manifestDigest?: DurableManifestDigest;
+  readonly prefixDigestAtOffset?: (offset: number) => DurableManifestPrefixDigest | undefined;
+  readonly hasExactAssetFilter: boolean;
+  readonly usesPageSession: boolean;
+  readonly savedResponderSessionOffset?: number;
+  readonly forceFreshSession?: boolean;
+  readonly nowMs: number;
+}): ManifestResumePlan {
+  const reset = (): ManifestResumePlan => ({ checkpointAction: 'reset', seeded: false,
+    resume: { kind: 'fresh', verifiedOffset: 0, rawOffset: 0 } });
+  if (input.forceFreshSession) return reset();
+  const decide = (checkpoint: SyncCheckpointEntry | undefined) => resolveManifestCheckpointDecision({
+    checkpoint, manifestDigest: input.manifestDigest,
+    prefixDigestAtOffset: checkpoint ? input.prefixDigestAtOffset?.(checkpoint.offset) : undefined,
+    hasExactAssetFilter: input.hasExactAssetFilter,
+  });
+  const proposed = input.manifestDigest && !input.hasExactAssetFilter && input.proposedCheckpoint
+    ? withoutSyncCheckpointResponderSession(input.proposedCheckpoint) : undefined;
+  const proposedDecision = proposed ? decide(proposed) : undefined;
+  const seeded = proposedDecision !== undefined && proposedDecision.kind !== 'reset';
+  let checkpoint = seeded ? proposed : input.checkpoint;
+  const decision = seeded ? proposedDecision! : decide(checkpoint);
+  if (decision.kind === 'reset') return reset();
+  let checkpointAction: ManifestResumePlan['checkpointAction'] = seeded ? 'replace' : 'keep';
+  const prefix = decision.kind === 'rebind-and-prime' ? decision.prefixDigest : decision.prefixUpgrade;
+  if (checkpoint && prefix) {
+    const updatedAtMs = seeded ? checkpoint.updatedAtMs : input.nowMs;
+    checkpoint = { ...checkpoint, manifestDigest: input.manifestDigest!, manifestPrefixDigest: prefix,
+      terminal: undefined, updatedAtMs, expiresAtMs: updatedAtMs + checkpoint.expiresAtMs - checkpoint.updatedAtMs };
+    checkpointAction = seeded || decision.kind === 'rebind-and-prime' ? 'replace' : 'upgrade';
+  }
+  if (checkpointAction === 'replace') checkpoint = withoutSyncCheckpointResponderSession(checkpoint!);
+  const resume = resolveResponderResumeDecision({ checkpoint, usesPageSession: input.usesPageSession,
+    savedResponderSessionOffset: checkpointAction === 'replace' ? undefined : input.savedResponderSessionOffset,
+    manifestCheckpointDecision: decision });
+  if (resume.kind === 'reset-unmappable') return { ...reset(), resume };
+  return { checkpoint, checkpointAction, seeded, resume };
 }

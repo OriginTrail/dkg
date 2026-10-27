@@ -473,7 +473,7 @@ describe('manifest-bound durable DATA continuation', () => {
     expect(result.complete).toBe(true);
   });
 
-  it('seeds over a live destination session only after META validation and clears both token stores', async () => {
+  it.each([false, true])('seeds over a live destination session directly into current META (cross generation: %s)', async crossGeneration => {
     const { contextGraphId, remotePeerId, x } = makeScenario('live-session-seed', cg => ({
       x: ordered([asset(cg, 1), asset(cg, 3), asset(cg, 5)]), y: [],
     }));
@@ -484,13 +484,17 @@ describe('manifest-bound durable DATA continuation', () => {
     const original = harness.checkpointStore.get(key)!;
     expect(original.responderSessionId).toEqual(expect.any(String));
     const manifest = createGraphScopedDurableManifestPlan(meta, contextGraphId)!;
+    const sourceManifest = crossGeneration
+      ? createGraphScopedDurableManifestPlan([...meta, ...asset(contextGraphId, 7).meta], contextGraphId)!
+      : manifest;
     const offset = x[0]!.payload.length + x[1]!.payload.length;
     // Model the second assertion already stored by the source peer.
     harness.heldAssetUals.add(x[1]!.ual);
     const sourceKey = getSyncCheckpointKey('source-peer', contextGraphId, false, 'data');
-    harness.checkpointStore.setManifestBoundOffset(sourceKey, offset, manifest.manifestDigest, Date.now(),
+    harness.checkpointStore.setManifestBoundOffset(sourceKey, offset, sourceManifest.manifestDigest, Date.now() - 60_000,
       graphScopedDurableManifestPrefixAtOffset(manifest, offset)!.prefixDigest);
     const candidate = verifiedDurableBoundaryOf(harness.checkpointStore.get(sourceKey), sourceKey);
+    const writes = vi.spyOn(harness.checkpointStore, 'setManifestBoundOffset');
     harness.dataRequests.length = 0;
     const result = await harness.run({ meta, dataPage: rawOffset => rawOffset === 0
       ? x.flatMap(a => a.payload) : x[2]!.payload }, undefined, candidate);
@@ -498,6 +502,10 @@ describe('manifest-bound durable DATA continuation', () => {
     expect(harness.dataRequests[0]!.syncSessionId).not.toBe(original.responderSessionId);
     expect(harness.dataRequests[1]!.syncSessionId).toBe(harness.dataRequests[0]!.syncSessionId);
     expect(result.complete).toBe(true);
+    const installed = writes.mock.calls.filter(([target, at]) => target === key && at === offset);
+    expect(installed.length).toBeGreaterThan(0);
+    expect(installed[0]!.slice(2, 5)).toEqual([manifest.manifestDigest, candidate!.updatedAtMs, candidate!.manifestPrefixDigest]);
+    expect(writes.mock.calls.filter(([target]) => target === key).every(([, , digest]) => digest === manifest.manifestDigest)).toBe(true);
   });
 
   it('continues a proven prefix through a primed session after the responder forgets a session coordinate', async () => {

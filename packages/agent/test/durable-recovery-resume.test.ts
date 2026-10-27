@@ -1,3 +1,4 @@
+import { resolveManifestResumePlan } from '../src/sync/requester/manifest-resume-policy.js';
 import { describe, expect, it } from 'vitest';
 import {
   DEFAULT_SYNC_CHECKPOINT_TTL_MS,
@@ -9,7 +10,8 @@ import {
   durableBoundaryIdentity,
   liveDurableBoundarySource,
   preferVerifiedDurableBoundary,
-  seedVerifiedDurableBoundary as installSeed,
+  eligibleDurableBoundarySource,
+  type VerifiedDurableBoundary,
   takeRejectedResumeOffset,
   verifiedDurableBoundaryOf,
 } from '../src/sync/durable-recovery-boundary-seed.js';
@@ -29,13 +31,20 @@ const PREFIX_20 = `sha256:${'d4'.repeat(32)}` as const;
 
 const dataKey = (peerId: string) => getSyncCheckpointKey(peerId, GRAPH, false, 'data');
 
+// The runner fixture applies the same pure plan as paging after a simulated META proof.
 const seedVerifiedDurableBoundary = (
-  store: MemorySyncCheckpointStore, key: string, boundary: Parameters<typeof installSeed>[2],
-) => installSeed(store, key, boundary, {
-  manifestDigest: GENERATION,
-  prefixDigestAtOffset: () => boundary?.manifestPrefixDigest,
-  clearCheckpoint: () => deleteSyncPageCheckpoint(store, key),
-});
+  store: MemorySyncCheckpointStore, key: string, boundary: VerifiedDurableBoundary | undefined,
+) => {
+  const plan = resolveManifestResumePlan({ checkpoint: store.get(key),
+    proposedCheckpoint: eligibleDurableBoundarySource(store, key, boundary),
+    manifestDigest: GENERATION, prefixDigestAtOffset: () => boundary?.manifestPrefixDigest,
+    hasExactAssetFilter: false, usesPageSession: true, nowMs: Date.now() });
+  if (!plan.seeded) return false;
+  const final = plan.checkpoint!;
+  deleteSyncPageCheckpoint(store, key);
+  store.setManifestBoundOffset(key, final.offset, final.manifestDigest!, final.updatedAtMs, final.manifestPrefixDigest);
+  return true;
+};
 
 type Slice = (
   peerId: string,

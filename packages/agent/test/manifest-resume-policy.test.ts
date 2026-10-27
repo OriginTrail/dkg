@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import type { SyncCheckpointEntry } from '../src/sync/checkpoint/state.js';
 import {
   resolveManifestCheckpointDecision,
+  resolveManifestResumePlan,
   resolveResponderResumeDecision,
   resolveResponderSessionLossCleanup,
 } from '../src/sync/requester/manifest-resume-policy.js';
@@ -177,5 +178,33 @@ describe('manifest resume policy', () => {
       prefixDigestAtOffset: PREFIX,
       supportsSessionClear: true,
     })).toBe('clear-checkpoint');
+  });
+});
+
+
+describe('one checkpoint resume plan', () => {
+  it('binds a cross-generation candidate directly to current META without extending its lifetime', () => {
+    const proposed = checkpoint({ offset: 1024 });
+    const plan = resolveManifestResumePlan({ checkpoint: checkpoint(), proposedCheckpoint: proposed,
+      manifestDigest: MANIFEST_B, prefixDigestAtOffset: () => PREFIX,
+      hasExactAssetFilter: false, usesPageSession: true, savedResponderSessionOffset: 512, nowMs: 5000 });
+    expect(plan.checkpointAction).toBe('replace');
+    expect(plan.seeded).toBe(true);
+    expect(plan.checkpoint).toMatchObject({ offset: 1024, manifestDigest: MANIFEST_B,
+      manifestPrefixDigest: PREFIX, updatedAtMs: proposed.updatedAtMs, expiresAtMs: proposed.expiresAtMs });
+    expect(plan.checkpoint?.responderSessionId).toBeUndefined();
+    expect(plan.resume).toEqual({ kind: 'prime', verifiedOffset: 1024, rawOffset: 1024 });
+  });
+
+  it('retains the destination checkpoint and live token when a proposed prefix is incompatible', () => {
+    const destination = checkpoint();
+    const plan = resolveManifestResumePlan({ checkpoint: destination,
+      proposedCheckpoint: checkpoint({ offset: 1024, manifestDigest: MANIFEST_B, manifestPrefixDigest: OTHER_PREFIX }),
+      manifestDigest: MANIFEST_A, prefixDigestAtOffset: () => PREFIX,
+      hasExactAssetFilter: false, usesPageSession: true, savedResponderSessionOffset: 512, nowMs: 5000 });
+    expect(plan.checkpointAction).toBe('keep');
+    expect(plan.seeded).toBe(false);
+    expect(plan.checkpoint).toBe(destination);
+    expect(plan.resume).toEqual({ kind: 'resume', verifiedOffset: 512, rawOffset: 512 });
   });
 });
