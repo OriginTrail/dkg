@@ -186,7 +186,6 @@ export function createRecoveryFixture(serving: RecoveryPeers, options: RecoveryF
   } });
   const heldStore = () => options.storage?.disablePrefixProof?.() ? undefined
     : createDurableHeldStore(store, contentFence, async () => {}, () => options.noChain ? 'integrity-only' : 'confirmed');
-  const confirmedHoldings = createDurableHeldStore(store, contentFence, async () => {})!;
   const pagingPorts = (checkpointStore: MemorySyncCheckpointStore, remotePeerId: string): DurableSyncContext => ({
     ctx,
     remotePeerId,
@@ -254,7 +253,7 @@ export function createRecoveryFixture(serving: RecoveryPeers, options: RecoveryF
     logWarn: (_ctx, message) => { info.push(message); },
     logDebug: () => {},
   });
-  return { peers, rawStore, store, writes, info, materialization, heldStore, confirmedHoldings, pagingPorts };
+  return { peers, rawStore, store, writes, info, materialization, heldStore, pagingPorts };
 }
 
 export const generation = (version3 = '1') => [1, 2, 3, 4, 5, 6].map((n) => asset(n, n === 3 ? version3 : '1'));

@@ -19,6 +19,12 @@ export type ProveHeldAssets = (
   request: HeldGraphScopedAssetsRequest,
 ) => Promise<HeldAssetsProof | undefined>;
 
+/** Physical content and operation ownership are supplied once to a graph scope. */
+export interface HeldAssetContentSource {
+  readonly prove: ProveHeldAssets;
+  assertOwnership(): void;
+}
+
 /** An authenticated mismatch is a value; unavailable evidence and cancellation reject. */
 export type AuthenticateHeldAsset = (
   copy: GraphScopedDescriptor,

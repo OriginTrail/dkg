@@ -215,7 +215,7 @@ function createTwoRoundHarness(
       remotePeerId,
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      storedPrefix: async () => ({ assertCurrent() {}, close() {}, covers: ual => new Set(heldAssetUals).has(ual) }),
+      contentProofs: { assertOwnership() {}, prove: async () => ({ assertCurrent() {}, close() {}, retain() {}, held: new Set(heldAssetUals) }) },
       fetchSyncPages: fetch,
       exactAssetSelectionFor: exactAssetUals
         ? () => ({ kind: 'ual-only', assetUals: exactAssetUals })

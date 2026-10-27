@@ -2,9 +2,6 @@
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import type { FinalizedVmAssetCommitment } from './sync/requester/finalized-vm-asset-commitment.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
-import type { ProveHeldAssets } from './sync/requester/held-assets-contracts.js';
-import { graphScopedDurableManifestPrefixAtOffset } from './sync/durable-integrity.js';
-import type { StoredDurablePrefix } from './sync/requester/durable-prefix-proof.js';
 import { LOCAL_TRUSTED_KA_CONTROLS_GRAPH, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { StoreContentFence } from './internal/store-content-fence.js';
@@ -47,26 +44,5 @@ export function createDurableHeldStore(
           } };
       } catch (error) { proof.close(); throw error; }
     },
-  };
-}
-
-/** Bind the host-owned content prover to this paging operation's subscription ownership. */
-export function createStoredPrefixAcquirer(
-  prove: ProveHeldAssets | undefined, contextGraphId: string, assertOwnership: () => void,
-): StoredDurablePrefix | undefined {
-  if (!prove) return undefined;
-  return async (manifest, offset, signal) => {
-    const prefix = graphScopedDurableManifestPrefixAtOffset(manifest, offset);
-    if (!prefix || manifest.contextGraphId !== contextGraphId) throw new Error('Cannot prove stored durable prefix');
-    const descriptors = manifest.descriptors.slice(0, prefix.descriptorCount);
-    assertOwnership(); signal?.throwIfAborted();
-    const proof = await prove({ contextGraphId, descriptors, signal });
-    if (!proof) throw new Error('Cannot prove stored durable prefix');
-    const assertCurrent = () => { assertOwnership(); proof.assertCurrent(); };
-    try {
-      assertCurrent(); signal?.throwIfAborted();
-      if (descriptors.some(descriptor => !proof.held.has(descriptor.ual))) throw new Error('Stored durable prefix is missing or corrupt');
-      return { assertCurrent, close: proof.close, covers: ual => proof.held.has(ual) };
-    } catch (error) { proof.close(); throw error; }
   };
 }

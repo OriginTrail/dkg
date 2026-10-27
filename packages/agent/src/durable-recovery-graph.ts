@@ -1,4 +1,3 @@
-import { createStoredPrefixAcquirer } from './durable-recovery-held-store.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { HeldAssetFence } from './durable-recovery-materialization.js';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
@@ -159,7 +158,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     }
   }
   const runPaging = (fence?: HeldAssetFence) => runDurableSyncDetailed({ ...durableContext,
-    storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
+    contentProofs: fence && host.heldStore ? { prove: host.heldStore.prove, assertOwnership: fence.assertCurrent } : undefined,
   });
   return host.heldStore && !onVerifiedFullSnapshot
     ? materialization.withHeldAssetFence(runPaging, signal) : runPaging();
@@ -182,10 +181,10 @@ export async function runAdmittedGraphOwnedDurableGraph(request: OwnedDurableGra
     return runGraphOwnedDurableSyncDetailed({ ...ports, ...host.checkpoints,
       ...graphPageTransport(host, { forceFreshSession: false }), contextGraphId,
       storeGraphScopedAsset: materialization.storeGraphScopedAsset,
-      storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
+      contentProofs: fence && host.heldStore ? { prove: host.heldStore.prove, assertOwnership: fence.assertCurrent } : undefined,
       recovery: { ...recovery,
         held: confirmCurrent && host.heldStore && fence
-          ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent } : undefined },
+          ? { confirmCurrent } : undefined },
     });
   };
   return host.heldStore ? materialization.withHeldAssetFence(runPaging, options.signal) : runPaging();

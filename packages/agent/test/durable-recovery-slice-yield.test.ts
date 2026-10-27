@@ -131,7 +131,7 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
     settlementSliceDeadline: Date.now(),
     recovery: { meta: durableMetaContinuation, holdings: {} },
-    storedPrefix: async () => ({ assertCurrent() {}, close() {}, covers: ual => new Set(writes).has(ual) }),
+    contentProofs: { assertOwnership() {}, prove: async () => ({ assertCurrent() {}, close() {}, retain() {}, held: new Set(writes) }) },
     fetchSyncPages: (request) => {
       if (request.phase === 'data') {
         dataRounds.push({

@@ -1,5 +1,4 @@
 import { createRpcTimeoutError } from '@origintrail-official/dkg-chain';
-import { createStoredPrefixAcquirer } from '../../src/durable-recovery-held-store.js';
 import { MemorySyncCheckpointStore } from '../../src/sync/checkpoint/state.js';
 import { createUalOnlyExactAssetSelection } from '../../src/sync/exact-assets.js';
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../../src/sync/durable-recovery-runner.js';
@@ -44,18 +43,20 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
     const { recovery, ...ordinaryOptions } = roundOptions;
     const context = {
       ...fixture.pagingPorts(checkpointStore, remotePeerId), ...ordinaryOptions,
-      storedPrefix: createStoredPrefixAcquirer(fixture.heldStore()?.prove, CG, fence.assertCurrent),
+      contentProofs: fixture.heldStore() ? { assertOwnership: fence.assertCurrent,
+        prove: async request => {
+          if (recovery && options.holdings?.enabled !== false && !options.noChain) {
+            if (holdingsUnreadable) throw new Error('store queue wait timeout');
+          }
+          return fixture.heldStore()!.prove(request);
+        } } : undefined,
     } satisfies DurableSyncContext;
     if (!recovery) return runDurableSyncDetailed(context);
     const { contextGraphIds: _contextGraphIds, exactAssetSelectionFor: _exactAssetSelectionFor, ...shared } = context;
     return runGraphOwnedDurableSyncDetailed({ ...shared, contextGraphId: CG,
       recovery: { ...recovery,
-        held: options.holdings?.enabled === false ? undefined : {
-          confirmCurrent: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
-          prove: async request => {
-            if (holdingsUnreadable) throw new Error('store queue wait timeout');
-            return fixture.confirmedHoldings.prove(request);
-          },
+        held: options.holdings?.enabled === false || options.noChain ? undefined : {
+          confirmCurrent: holdings(fence.binding)!,
         },
       },
     });
@@ -110,4 +111,3 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
   const limitChainAnswersPerRound = (answers: number) => { chainAnswersPerRound = answers; };
   return { ...fixture, start, round, failHoldingsReads, limitChainAnswersPerRound };
 }
-
