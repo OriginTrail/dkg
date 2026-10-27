@@ -18,9 +18,10 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { createLiftJobFailureMetadata } from '../../src/lift-job.js';
 import type { LiftJob, PersistedLiftJob } from '../../src/lift-job.js';
 import {
-  DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI, jobSubject, requestSubject, serializeJob, serializeWalletLock,
+  CONTROL_FINALIZED_AT, DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI, jobSubject, requestSubject, serializeJob, serializeWalletLock,
 } from '../../src/async-lift-control-plane.js';
 import { createRawLiftJobRequest } from '../../src/async-lift-publisher-utils.js';
+import { KA_VM_BROADCAST_TX } from '../../../../scripts/testing/ka-vm-publish.js';
 import { createJobTemplates, type JobTemplates } from './lift-job-inventory.js';
 
 export const DAY = 24 * 60 * 60 * 1000;
@@ -43,6 +44,10 @@ export interface KeyedSpec {
   readonly updatedAt?: number;
   /** `raw` is a raw-lift job: it has no lifecycle key, so no sibling. Default `vm`. */
   readonly kind?: 'vm' | 'raw';
+  /** A finalized job stored the pre-upgrade way (legacy v0 payload, local finalization with chain evidence): the decoder reads it as `compatibility`, which retention never deletes. */
+  readonly compat?: boolean;
+  /** A finalized job stored without its finish-time index triple, so the retention scan never meets it (it is still a record of its key that admission reads). */
+  readonly unindexed?: boolean;
 }
 
 export interface RetentionTemplates {
@@ -91,13 +96,15 @@ export function stampKeyed(templates: RetentionTemplates, spec: KeyedSpec): Lift
     jobSlug: spec.id,
     request,
     timestamps,
+    ...(spec.compat ? { broadcast: KA_VM_BROADCAST_TX } : {}),
     controlPlane: { jobRef: jobSubject(spec.id) },
   } as unknown as LiftJob;
 }
 
 /** The quads the production serializer writes for a spec (a test may corrupt them before they are inserted). */
 export function keyedQuads(templates: RetentionTemplates, spec: KeyedSpec, graph = DEFAULT_CONTROL_GRAPH_URI): Quad[] {
-  return serializeJob(stampKeyed(templates, spec), graph);
+  const quads = serializeJob(stampKeyed(templates, spec), graph, spec.compat ? { payloadSchema: 'legacy-v0' } : {});
+  return spec.unindexed ? quads.filter((quad) => quad.predicate !== CONTROL_FINALIZED_AT) : quads;
 }
 
 export async function seedKeyed(store: TripleStore, templates: RetentionTemplates, specs: readonly KeyedSpec[], graph = DEFAULT_CONTROL_GRAPH_URI): Promise<void> {

@@ -11,8 +11,9 @@
  *  - a wallet lock still names it (a bound obligation: the coordinator releases ownership of a finalized job, so a lock that survives means something is
  *    mid-flight);
  *  - its `finalizedAt` or `updatedAt` is dated after `now`, or it is younger than the window;
- *  - an older sibling of its lifecycle key is kept (a failed job, a job that is not terminal, a finalized one that is not deletable itself): see
- *    async-lift-lifecycle-siblings.ts, which is the rule that keeps every binding decision of the key as it was.
+ *  - an older sibling of its lifecycle key is kept (a failed job, a job that is not terminal, a finalized one that is not deletable itself, one the sweep kept earlier in its
+ *    walk, one it could not delete at all: a pre-upgrade payload, a stored index the scan does not match): see async-lift-lifecycle-siblings.ts, which is the rule that keeps
+ *    every binding decision of the key as it was, and async-lift-retention.ts, which keeps the records of a key leaving oldest first.
  * The pending-admission, held and post-commit-recoverable jobs of AC7 need no rule of their own here: an admission in flight holds the claim lock the sweep runs
  * under, a held job is a failed job (kept), and a finalized publisher job has no recovery left to run.
  */

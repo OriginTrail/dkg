@@ -14,7 +14,8 @@
  *     (async-lift-retention-scan.ts);
  *  3. the candidates are processed in SLICES of at most `sliceSize` jobs. Each slice runs INSIDE the queue's claim transaction (async-lift-retention-access.ts), the one
  *     that serializes admission, claims, retries and clears: the payloads and stored index triples are re-read on the control path, the wallet locks are checked, the
- *     records of each candidate's lifecycle key are read the way admission reads them, and the plan of the key (the deletable PREFIX of its records, oldest first) decides.
+ *     records of each candidate's lifecycle key are read the way admission reads them, and the plan of the key (the deletable PREFIX of its records, oldest first) decides. An older
+ *     record of the key that this sweep could not delete itself (a payload it does not delete, a stored index the scan does not match) ends the prefix, like a failed one.
  *     In `delete` mode the survivors are removed ONE JOB AT A TIME, oldest first within a key, each through its own job lock from a fresh read, so a failure after any
  *     number of deletes leaves the key's newest record in place and its binding decision as it was. The claim lock is released between slices so admissions and claims
  *     interleave. A hold has a time budget (default 50 ms): no further delete starts once the next one would exceed it, and the slice size adapts. The store flush runs
@@ -37,7 +38,7 @@ import { compareAcceptedJobs, expectBindings } from './async-lift-publisher-util
 import { decodeLiftJobPayload } from './lift-job-payload-codec.js';
 import type { LiftJob, PersistedLiftJob } from './lift-job.js';
 import { lifecycleKeyOfJob } from './lift-job-store-selectors.js';
-import { isUndecodableSiblingError, planKeyDeletion } from './async-lift-lifecycle-siblings.js';
+import { isUndecodableSiblingError, planKeyDeletion, recordsOfKey } from './async-lift-lifecycle-siblings.js';
 import type { LiftRetentionAccess } from './async-lift-retention-access.js';
 import {
   PUBLISHER_RETENTION_MODES, PUBLISHER_RETENTION_WINDOW_MS, emptyClassCounts, emptyKeptCounts, judgeFinalizedRecord,
@@ -223,6 +224,11 @@ interface Doomed { readonly row: SliceRow; readonly entry: PublisherRetentionJob
 
 const termString = (term: string | undefined): string | undefined => { try { return parseLiteral(String(term)) as string; } catch { return undefined; } };
 const termNumber = (term: string | undefined): number => { const m = /^"?([^"^]*)"?(?:\^\^<[^>]*>)?$/.exec(String(term ?? '')); return m && m[1] !== '' ? Number(m[1]) : Number.NaN; };
+/** The stored status and finish time are what the scan reads a row by: they agree with the payload when the scan meets the record as a finalized row of its finish time. */
+const indexAgrees = (states: ReadonlySet<string>, finishes: ReadonlySet<string>, finalizedAt: number | undefined): boolean =>
+  states.size === 1 && termString([...states][0]) === 'finalized' && finishes.size === 1 && termNumber([...finishes][0]) === finalizedAt;
+/** Most subjects one verify read names: a key with a long history is read in several queries. */
+const VERIFY_CHUNK = 100;
 
 class PublisherRetentionImpl implements PublisherRetention {
   readonly mode: PublisherRetentionMode;
@@ -236,10 +242,11 @@ class PublisherRetentionImpl implements PublisherRetention {
   private readonly guard: RetentionClockGuard;
   private pass = newPass(true);
   /**
-   * Per lifecycle key, the `acceptedAt` of the oldest record this walk of the scan kept although the records alone would have let it go (it waits for an older record that
-   * finished later, or a rule that needs the job alone holds it: a wallet lock, a stored index that disagrees). Every record of the key accepted at or after it waits too, so the
-   * records of a key leave strictly oldest first and what a failed or stopped sweep leaves behind is always a suffix of the key. Only exceptions are in it: it is empty on a
-   * healthy store. Cleared when the scan restarts.
+   * Per lifecycle key, the `acceptedAt` of the oldest record this walk of the scan KEPT although the records alone might let it go later: it waits for an older record that finished
+   * later, a rule that needs the job alone holds it (a wallet lock, a stored index that disagrees, a date after now), an older failed sibling stands in front of it, or the key could not
+   * be read. The scan moves past a kept record, and whatever held it can pass before the walk ends (the clock moves on, an operator clears the failed job, the key becomes readable): so
+   * every record of the key accepted at or after it waits too, and the records of a key leave strictly oldest first: what a failed or stopped sweep leaves behind is always a suffix of
+   * the key. One number per key the walk has kept a record of (the keys held back by a failed job are most of it). Cleared when the scan restarts.
    */
   private readonly blockedSince = new Map<string, number>();
   private lastCompletePass: PublisherRetentionPassSummary | undefined;
@@ -387,18 +394,23 @@ class PublisherRetentionImpl implements PublisherRetention {
     return deferred;
   }
 
+  /** The stored payload, status, finish time and key of `iris` (control path, inside the claim transaction), as a lookup of one column of one subject. */
+  private async readStored(iris: readonly string[]): Promise<(iri: string, column: string) => Set<string>> {
+    const rows = expectBindings(await this.access.store.query(buildLiftRetentionVerifyQuery(this.access.graphUri, iris), controlStoreOptions('publisher', LIFT_RETENTION_VERIFY_SOURCE)));
+    return (iri, column) => new Set(rows.flatMap(row => (row['job'] === iri && row[column] !== undefined ? [row[column]!] : [])));
+  }
+
   /** Re-read the slice under the lock and apply every rule that needs the job alone. A candidate that passes is a `Judged`; the rest are counted as kept. */
   private async judgeCandidates(slice: readonly SliceRow[], b: BatchState, now: number): Promise<Judged[]> {
-    const { store, graphUri, walletLockGraphUri } = this.access;
+    const { store, walletLockGraphUri } = this.access;
     const iris = slice.map(s => s.iri);
-    const rows = expectBindings(await store.query(buildLiftRetentionVerifyQuery(graphUri, iris), controlStoreOptions('publisher', LIFT_RETENTION_VERIFY_SOURCE)));
+    const stored = await this.readStored(iris);
     const bound = new Set(expectBindings(await store.query(buildLiftRetentionBoundQuery(walletLockGraphUri, iris), controlStoreOptions('publisher', LIFT_RETENTION_LOCKS_SOURCE))).map(row => row['job']));
-    const column = (job: string, name: string): Set<string> => new Set(rows.flatMap(row => (row['job'] === job && row[name] !== undefined ? [row[name]!] : [])));
 
     const judged: Judged[] = [];
     for (const row of slice) {
       const keep = (reason: PublisherRetentionKeepReason): void => { b.kept[reason] += 1; };
-      const payloads = column(row.iri, 'payload');
+      const payloads = stored(row.iri, 'payload');
       if (payloads.size === 0) { keep('vanished'); continue; }
       const decoded = payloads.size === 1 ? decodeLiftJobPayload([...payloads][0]) : undefined;
       if (decoded?.kind === 'unknown') { keep('unknown_state'); continue; }
@@ -406,16 +418,14 @@ class PublisherRetentionImpl implements PublisherRetention {
       const job = decoded.job;
       if (job.status !== 'finalized') { keep('not_terminal'); continue; }
       const key = lifecycleKeyOfJob(job);
-      const states = column(row.iri, 'state'), finishes = column(row.iri, 'finalizedAt'), keys = column(row.iri, 'key');
+      const keys = stored(row.iri, 'key');
       // The stored lifecycle key is not compared with the payload's here: the key's records are read by that very triple (planDeletions), so a record whose triple names another key is
       // not among them and is kept there. A job that has no key must have no key triple at all.
-      const indexed = states.size === 1 && termString([...states][0]) === 'finalized'
-        && finishes.size === 1 && termNumber([...finishes][0]) === job.timestamps.finalizedAt
-        && (key !== null || keys.size === 0);
+      const indexed = indexAgrees(stored(row.iri, 'state'), stored(row.iri, 'finalizedAt'), job.timestamps.finalizedAt) && (key !== null || keys.size === 0);
       if (!indexed) { keep('index_mismatch'); this.block(key, job); continue; }
       if (bound.has(row.iri)) { keep('bound_obligation'); this.block(key, job); continue; }
       const own = judgeFinalizedRecord(job, now, this.cfg.policy);
-      if (own !== undefined) { keep(own); continue; }
+      if (own !== undefined) { keep(own); this.block(key, job); continue; }
       judged.push({ row, job, key });
     }
     return judged;
@@ -440,9 +450,12 @@ class PublisherRetentionImpl implements PublisherRetention {
       try { siblings = await tx.siblings(key); } catch (cause) {
         if (!isUndecodableSiblingError(cause)) throw cause;                               // a store failure ends the batch; an undecodable record keeps the key's candidates
         b.kept.siblings_unreadable += members.length;
+        for (const j of members) this.block(key, j.job);                                // the key may be readable by the time the scan reaches its next record
         continue;
       }
-      const plan = planKeyDeletion(siblings, key, record => judgeFinalizedRecord(record, now, this.cfg.policy));
+      const ordered = [...members].sort((x, y) => compareAcceptedJobs(x.job, y.job));
+      const refused = await this.refusedSiblings(siblings, key, ordered);
+      const plan = planKeyDeletion(siblings, key, record => (refused.has(record.jobId) ? 'index_mismatch' : judgeFinalizedRecord(record, now, this.cfg.policy)));
       const inKey = new Set(plan.order.map(record => record.jobId));
       // Records leave a key oldest first, and the scan walks by finish time: so the records of the plan that go in THIS pass are those from the oldest up to the first whose finish
       // is not strictly later than the one before it. A record accepted earlier but finished later (or at the same instant) would be met after its successors: it, and every record
@@ -452,10 +465,10 @@ class PublisherRetentionImpl implements PublisherRetention {
         last = plan.prefix[i]!.timestamps.finalizedAt!;
         inOrder.add(plan.prefix[i]!.jobId);
       }
-      for (const j of [...members].sort((x, y) => compareAcceptedJobs(x.job, y.job))) {
+      for (const j of ordered) {
         const reason = plan.kept.get(j.row.jobId);
         if (!inKey.has(j.row.jobId)) { b.kept.index_mismatch += 1; this.block(key, j.job); continue; }   // admission cannot reach this record: its siblings cannot be judged
-        if (reason !== undefined) { b.kept[reason === 'blocked' ? 'older_sibling_kept' : reason as PublisherRetentionKeepReason] += 1; continue; }
+        if (reason !== undefined) { b.kept[reason === 'blocked' ? 'older_sibling_kept' : reason as PublisherRetentionKeepReason] += 1; this.block(key, j.job); continue; }
         if (!inOrder.has(j.row.jobId) || j.job.timestamps.acceptedAt >= (this.blockedSince.get(key) ?? Number.POSITIVE_INFINITY)) {
           b.kept.older_sibling_pending += 1; this.block(key, j.job); continue;
         }
@@ -463,6 +476,40 @@ class PublisherRetentionImpl implements PublisherRetention {
       }
     }
     return doomed;
+  }
+
+  /**
+   * The finalized records of `key` older than its youngest candidate (and not candidates themselves) that this sweep could not delete itself: the plan must not reach past them,
+   * or a newer record would go while they stay. A record the scan met earlier and kept is in `blockedSince`, and one it would delete (in report mode, one an earlier hold counted) is
+   * no obstacle. What `blockedSince` cannot know is a record the scan never meets: a pre-upgrade payload the sweep does not delete, a stored status or finish time that is missing
+   * or disagrees with the payload. So the stored index of each is read and the candidate checks of `judgeCandidates` are applied to it: one that would not pass is refused, and a
+   * refused record ends the plan's prefix. The answer is a function of the stored records alone, so report and delete mode give the same one.
+   */
+  private async refusedSiblings(siblings: readonly PersistedLiftJob[], key: string, members: readonly Judged[]): Promise<Set<string>> {
+    const refused = new Set<string>();
+    const youngest = members[members.length - 1]!.job;
+    const candidates = new Set(members.map(j => j.row.jobId));
+    const toRead = new Map<string, PersistedLiftJob>();                                 // subject -> sibling
+    for (const record of recordsOfKey(siblings, key)) {
+      if (compareAcceptedJobs(record, youngest) >= 0) break;
+      if (candidates.has(record.jobId) || record.status !== 'finalized') continue;      // anything else ends the prefix by itself
+      if (isSafeJobId(record.jobId)) toRead.set(jobSubject(record.jobId), record);
+      else refused.add(record.jobId);                                                  // never interpolate an id the job-id grammar does not allow
+    }
+    const iris = [...toRead.keys()];
+    for (let i = 0; i < iris.length; i += VERIFY_CHUNK) {
+      const chunk = iris.slice(i, i + VERIFY_CHUNK);
+      const stored = await this.readStored(chunk);
+      for (const iri of chunk) {
+        const record = toRead.get(iri)!;
+        const payloads = stored(iri, 'payload');
+        const decoded = payloads.size === 1 ? decodeLiftJobPayload([...payloads][0]) : undefined;
+        const reachable = decoded?.kind === 'canonical' && decoded.job.jobId === record.jobId && decoded.job.status === 'finalized'
+          && indexAgrees(stored(iri, 'state'), stored(iri, 'finalizedAt'), decoded.job.timestamps.finalizedAt);
+        if (!reachable) refused.add(record.jobId);
+      }
+    }
+    return refused;
   }
 
   private block(key: string | null, job: LiftJob): void {

@@ -110,6 +110,7 @@ export default defineConfig({
       'test/async-lift-lifecycle-siblings.test.ts',
       'test/async-lift-retention.test.ts',
       'test/async-lift-retention-holds.test.ts',
+      'test/async-lift-retention-order.test.ts',
       'test/async-lift-retention.property.test.ts',
       'test/async-lift-retention-control-oracle.test.ts',
       'test/retention-sweep-core.test.ts',

@@ -4,10 +4,13 @@
  * The oracles are written from the spec, not from the product's predicates: `bindingOracle` restates the documented admission rule (which records bind a key) over the generator's
  * own knowledge of each record's STATE, and `prefixOracle` the D-6 rule (the oldest records of a key, up to the first that is not a finalized record old enough and not dated
  * after now). Neither imports anything from the sweep or from `selectLifecycleBindingJobs`.
+ *
+ * Two kinds of old finalized record are ones the sweep can NEVER delete, and so stand in front of every record behind them for good: a pre-upgrade payload (`compat`: the decoder
+ * reads it as `compatibility`) and a record whose finish-time index triple is missing (`unindexed`: the scan never meets it). The oracle knows them by the generator's own flags.
  */
 import { DAY, NOW, WINDOW, pick, type KeyedSpec, type KeyedState } from './lift-retention-fixtures.js';
 
-export interface Rec { readonly spec: KeyedSpec; readonly kind: 'old' | 'young' | 'future-update' | 'future-finish' | 'live' | 'failed' }
+export interface Rec { readonly spec: KeyedSpec; readonly kind: 'old' | 'young' | 'future-update' | 'future-finish' | 'live' | 'failed' | 'compat' | 'unindexed' }
 
 export const FAILED_STATES: ReadonlySet<KeyedState> = new Set(['retryable', 'held', 'terminal', 'recovery']);
 
@@ -26,7 +29,7 @@ export function prefixOracle(records: readonly KeyedSpec[], now: number): KeyedS
   const prefix: KeyedSpec[] = [];
   for (const r of ordered) {
     const finished = r.finalizedAt ?? Number.NaN;
-    const ok = r.state === 'finalized' && finished <= now && (r.updatedAt ?? finished) <= now && now - finished >= WINDOW;
+    const ok = r.state === 'finalized' && r.compat !== true && r.unindexed !== true && finished <= now && (r.updatedAt ?? finished) <= now && now - finished >= WINDOW;
     if (!ok) break;
     prefix.push(r);
   }
@@ -50,9 +53,13 @@ export function genPopulation(r: () => number): Rec[] {
       const id = `k${k}-${i}`;
       const roll = r();
       const acceptedAt = Math.round(day * DAY);
-      if (roll < 0.46) {
+      if (roll < 0.38) {
         const finishedDay = day + 0.05 + r() * 0.4;
         recs.push({ kind: 'old', spec: { id, key: `key${k}`, state: 'finalized', acceptedAt, finalizedAt: Math.round(finishedDay * DAY) } });
+      } else if (roll < 0.42) {
+        recs.push({ kind: 'compat', spec: { id, key: `key${k}`, state: 'finalized', acceptedAt, finalizedAt: Math.round((day + 0.1) * DAY), compat: true } });
+      } else if (roll < 0.46) {
+        recs.push({ kind: 'unindexed', spec: { id, key: `key${k}`, state: 'finalized', acceptedAt, finalizedAt: Math.round((day + 0.1) * DAY), unindexed: true } });
       } else if (roll < 0.56) {
         recs.push({ kind: 'young', spec: { id, key: `key${k}`, state: 'finalized', acceptedAt, finalizedAt: NOW - Math.round(r() * 6.5 * DAY) } });
       } else if (roll < 0.60) {

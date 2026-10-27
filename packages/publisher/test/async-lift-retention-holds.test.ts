@@ -187,6 +187,43 @@ describe('the last line before a delete', () => {
   });
 });
 
+describe('the last line before a delete: records rewritten under the job lock', () => {
+  /** Run a sweep whose first removal finds `replace` stored for f1 (the clock of the judgement was NOW, and the judgement saw an ordinary finalized f1). */
+  async function sweepRewritten(replace: KeyedSpec) {
+    let touched = false;
+    let raw!: OxigraphStore;
+    const t = await setup([fin('f1', 'k', 10), fin('f2', 'k', 20), fin('g1', 'other', 10)], {
+      before: async (entry) => {
+        if (!touched && entry.source === 'publisher.asyncLift.getStatus') {
+          touched = true;
+          await raw.deleteByPattern({ subject: jobSubject('f1'), graph: DEFAULT_CONTROL_GRAPH_URI });
+          await raw.insert(keyedQuads(templates, replace));
+        }
+      },
+    });
+    raw = t.raw;
+    const results = await drain(newRetention(t.publisher));
+    expect(results.every((r) => r.error === undefined)).toBe(true);
+    return { t, results };
+  }
+
+  it('keeps a record that became a pre-upgrade payload (a compatibility record is never removed), and does not delete what follows it in its key', async () => {
+    const { t, results } = await sweepRewritten({ ...fin('f1', 'k', 10), compat: true });
+    expect(kept(results)).toEqual({ not_terminal: 1, older_sibling_pending: 1 });          // f1 refused by the transaction itself; f2 waits behind it
+    expect(await t.other.getStatus('f1')).not.toBeNull();
+    expect(await t.other.getStatus('f2')).not.toBeNull();
+    expect(await t.other.getStatus('g1')).toBeNull();
+  });
+
+  it('keeps a record whose finish time is no longer the one judged, though it is still old enough, and does not delete what follows it in its key', async () => {
+    const { t, results } = await sweepRewritten(fin('f1', 'k', 10, 12));
+    expect(kept(results)).toEqual({ index_mismatch: 1, older_sibling_pending: 1 });
+    expect(await t.other.getStatus('f1')).not.toBeNull();
+    expect(await t.other.getStatus('f2')).not.toBeNull();
+    expect(await t.other.getStatus('g1')).toBeNull();
+  });
+});
+
 describe('batches never overlap', () => {
   it('skips a tick while another batch of the same store and graph is running, even from a second sweep object', async () => {
     let release!: () => void;

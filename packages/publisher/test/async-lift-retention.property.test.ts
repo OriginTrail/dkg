@@ -4,7 +4,7 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { propertyOptions } from '../../../scripts/testing/property-options.js';
 import {
-  DAY, NOW, WINDOW, createRetentionTemplates, faultyStore, pick, present, rng, seedKeyed, type RetentionTemplates,
+  DAY, NOW, WINDOW, createRetentionTemplates, faultyStore, pick, present, rng, seedKeyed, type KeyedSpec, type RetentionTemplates,
 } from './_helpers/lift-retention-fixtures.js';
 import { drain, newRetention } from './_helpers/lift-retention-sweep.js';
 import { bindingOracle, genPopulation, keyedOf, prefixOracle } from './_helpers/lift-retention-population.js';
@@ -16,12 +16,16 @@ import { bindingOracle, genPopulation, keyedOf, prefixOracle } from './_helpers/
 // it replays from the integer seed fast-check prints. The oracle is written from the generator's own knowledge of what it built (the STATE of each record and the order of
 // the key), not from the product's predicates: its binding rule is re-stated from the documented admission rule, not imported. The PR budget is the repository default
 // (100 runs, fixed seed); the nightly profile raises it through DKG_PROPERTY_RUNS (1,000) and DKG_PROPERTY_SEED.
+// The healthy passes are RESTLESS first: between two batches of one pass the clock moves on (a record dated after now stops being so) and an operator clears a terminal failed job
+// (a record an older failed job held back is free), and the population holds records the sweep can never delete (a pre-upgrade payload, a record without its finish-time index).
+// The suffix rule is asserted after every batch: nothing may be deleted ahead of an older record of its key that stays.
 
 const options = propertyOptions();
 const GRAPH = 'urn:dkg:publisher:control-plane';
 
 interface Tally {
   cases: number; deleted: number; keptBehindFailed: number; inversions: number; futureDated: number; faultsInjected: number; keys: number; reportEqualsDelete: number; clockSkips: number;
+  heldByUnreachable: number; midPassClears: number; clockPassedFutureUpdate: number;
 }
 
 async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally): Promise<void> {
@@ -36,8 +40,12 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
   // ---- the oracle, from the spec alone
   const expectedPrefix = new Map<string, string[]>();                                           // per key: ids a full run removes
   for (const [key, group] of byKey) expectedPrefix.set(key, prefixOracle(group, NOW).map((s) => s.id));
-  const rawOld = specs.filter((s) => s.kind === 'raw' && NOW - s.finalizedAt! >= WINDOW).map((s) => s.id);
-  const expectedDeleted = new Set([...expectedPrefix.values()].flat().concat(rawOld));
+  const rawOldAt = (time: number) => specs.filter((s) => s.kind === 'raw' && time - s.finalizedAt! >= WINDOW).map((s) => s.id);
+  const expectedDeleted = new Set([...expectedPrefix.values()].flat().concat(rawOldAt(NOW)));
+  // terminal failed records an operator cleared between two batches; the spec of the key is the records that are left, and what it allows grows with the time
+  const cleared = new Set<string>();
+  const liveByKey = (): Map<string, KeyedSpec[]> => new Map([...byKey].map(([key, group]) => [key, group.filter((s) => !cleared.has(s.id))] as const));
+  const allowedAt = (time: number): Set<string> => new Set([...liveByKey().values()].flatMap((group) => prefixOracle(group, time).map((s) => s.id)).concat(rawOldAt(time)));
   const bindingBefore = new Map([...byKey].map(([key, group]) => [key, bindingOracle(group)] as const));
 
   const store = new OxigraphStore();
@@ -86,39 +94,60 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
     const first = await drain(newRetention(publisherOver(target as OxigraphStore), { batchSize, sliceSize }));
     if (injectFault && first.some((res) => res.error !== undefined)) tally.faultsInjected += 1;
 
-    // the state right after the (possibly failed) first run: AC7 holds at every stage
-    const stage = async () => {
+    // the state right after the (possibly failed) first run: AC7 holds at every stage. `time` is the clock of the latest batch: what is gone must be allowed by then.
+    const stage = async (time: number, deep = true) => {                  // `deep` also reads every record back and asks the production binding selector: too slow after every batch
       const present_ = await left(publisher);
+      const allowed = allowedAt(time);
       for (const s of specs) {
-        if (!present_.has(s.id)) {
-          expect(expectedDeleted.has(s.id), `${s.id} (${s.state}) was removed but the spec does not allow it`).toBe(true);
+        if (!present_.has(s.id) && !cleared.has(s.id)) {
+          expect(allowed.has(s.id), `${s.id} (${s.state}) was removed but the spec does not allow it`).toBe(true);
           expect(['finalized'].includes(s.state), `${s.id} is not finalized`).toBe(true);
         }
       }
-      for (const [key, group] of byKey) {
+      for (const [key, group] of liveByKey()) {
         const ordered = [...group].sort((a, b) => a.acceptedAt - b.acceptedAt);
         const remaining = ordered.filter((s) => present_.has(s.id));
         // what is gone is a prefix of the oldest-first order: the remaining records are a suffix, so the newest is there until the last one goes
         expect(remaining.map((s) => s.id), `${key}: the records left are a suffix of the key`).toEqual(ordered.slice(ordered.length - remaining.length).map((s) => s.id));
         // every record that is not deleted is untouched
-        for (const s of remaining) expect(await present(store, s.id, GRAPH), `${s.id} must be untouched`).toBe(before.get(s.id));
+        if (deep) for (const s of remaining) expect(await present(store, s.id, GRAPH), `${s.id} must be untouched`).toBe(before.get(s.id));
         // the binding decision of the key is the one it had, by the oracle and by the production selector
         expect(bindingOracle(remaining), `${key}: oracle binding`).toEqual(bindingBefore.get(key));
-        expect(await view(publisher, key), `${key}: production binding`).toEqual(bindingBefore.get(key));
+        if (deep) expect(await view(publisher, key), `${key}: production binding`).toEqual(bindingBefore.get(key));
       }
     };
-    await stage();
+    await stage(NOW);
 
+    // restless passes: between two batches of one pass the clock moves on and an operator clears a terminal failed job that has a newer record (it binds nothing)
     let t = NOW;
     const healthy = newRetention(publisher, { batchSize, sliceSize, now: () => t, rescanIntervalMs: 1000 });
+    const clearable = specs.filter((s) => s.state === 'terminal' && byKey.get(s.key)!.some((other) => other.acceptedAt > s.acceptedAt));
+    for (let pass = 0; pass < 2; pass++) {
+      for (let i = 0; i < 12; i++) {
+        const batchTime = t;
+        const res = await healthy.runBatch();
+        expect(res.error === undefined && res.anomalies === 0, `restless pass ${pass} batch ${i}`).toBe(true);
+        await stage(batchTime, false);
+        if (!res.hasMore && res.scanned === 0) break;
+        t += Math.round(r() * 0.8 * DAY);
+        const victim = clearable.length > 0 && r() < 0.4 ? pick(r, clearable) : undefined;
+        if (victim !== undefined && !cleared.has(victim.id) && (await publisher.clearTerminalJob(victim.id)).outcome === 'cleared') { cleared.add(victim.id); tally.midPassClears += 1; }
+      }
+      t += 5000;
+    }
+    for (const rec of recs) if (rec.kind === 'future-update' && rec.spec.updatedAt! <= t) tally.clockPassedFutureUpdate += 1;
+
+    // then the clock stands still and the sweep finishes what the spec allows
+    let tEnd = t;
     for (let pass = 0; pass < 8; pass++) {
+      tEnd = t;
       const results = await drain(healthy);
       expect(results.every((res) => res.error === undefined && res.anomalies === 0), `pass ${pass}`).toBe(true);
-      await stage();
+      await stage(tEnd);
       t += 5000;
     }
     const finalLeft = await left(publisher);
-    expect(new Set(specs.filter((s) => !finalLeft.has(s.id)).map((s) => s.id)), 'exactly what the spec says is gone').toEqual(expectedDeleted);
+    expect(new Set(specs.filter((s) => !finalLeft.has(s.id) && !cleared.has(s.id)).map((s) => s.id)), 'exactly what the spec says is gone').toEqual(allowedAt(tEnd));
     // report names what the first pass of delete removes from the same snapshot (a record that finished out of order waits for the next pass in both modes)
     for (const id of wouldDelete) expect(expectedDeleted.has(id), `${id} reported but not allowed`).toBe(true);
     if (!injectFault) {
@@ -143,6 +172,8 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
     }
     for (const [, group] of byKey) {
       const ordered = [...group].sort((a, b) => a.acceptedAt - b.acceptedAt);
+      const unreachable = ordered.findIndex((s) => s.compat === true || s.unindexed === true);
+      if (unreachable >= 0 && ordered.slice(unreachable + 1).some((s) => s.state === 'finalized' && NOW - (s.finalizedAt ?? NOW) >= WINDOW && s.updatedAt === undefined)) tally.heldByUnreachable += 1;
       const firstBlocker = ordered.findIndex((s) => !prefixOracle(ordered, NOW).some((p) => p.id === s.id));
       if (firstBlocker >= 0 && ordered.slice(firstBlocker + 1).some((s) => s.state === 'finalized' && NOW - (s.finalizedAt ?? NOW) >= WINDOW && s.updatedAt === undefined)) tally.keptBehindFailed += 1;
       const prefix = prefixOracle(ordered, NOW);
@@ -159,7 +190,10 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
 
 it('retention never deletes anything but old finalized records, never changes the binding of a key, keeps its newest record at every stage, and misses nothing the spec allows (random keys, histories, modes, slices and store failures)', async () => {
   const templates = await createRetentionTemplates();
-  const tally: Tally = { cases: 0, deleted: 0, keptBehindFailed: 0, inversions: 0, futureDated: 0, faultsInjected: 0, keys: 0, reportEqualsDelete: 0, clockSkips: 0 };
+  const tally: Tally = {
+    cases: 0, deleted: 0, keptBehindFailed: 0, inversions: 0, futureDated: 0, faultsInjected: 0, keys: 0, reportEqualsDelete: 0, clockSkips: 0,
+    heldByUnreachable: 0, midPassClears: 0, clockPassedFutureUpdate: 0,
+  };
   await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 0x7fffffff }), (seed) => oneCase(seed, templates, tally)),
     { seed: options.seed, numRuns: options.numRuns, endOnFailure: true, ...(options.path ? { path: options.path } : {}) });
   // The generator must really reach what the claim is about. The floors apply from the 100-run default up and only to a full run (a replay of one failing path
@@ -173,7 +207,10 @@ it('retention never deletes anything but old finalized records, never changes th
       expect(tally.futureDated).toBeGreaterThan(0);
       expect(tally.faultsInjected).toBeGreaterThan(10);                                  // runs that really stopped in the middle
       expect(tally.clockSkips).toBe(options.numRuns);
+      expect(tally.heldByUnreachable).toBeGreaterThan(5);                                // old records really held behind one the sweep can never delete
+      expect(tally.midPassClears).toBeGreaterThan(5);                                    // failed jobs really cleared between two batches
+      expect(tally.clockPassedFutureUpdate).toBeGreaterThan(5);                          // records dated after now that the clock really passed during the walk
     }
   }
-  console.log(`publisher retention AC7 property: seed=${options.seed} runs=${tally.cases} deleted=${tally.deleted} keys=${tally.keys} held-back-keys=${tally.keptBehindFailed} out-of-order-keys=${tally.inversions} future-dated=${tally.futureDated} faults=${tally.faultsInjected}`);
+  console.log(`publisher retention AC7 property: seed=${options.seed} runs=${tally.cases} deleted=${tally.deleted} keys=${tally.keys} held-back-keys=${tally.keptBehindFailed} out-of-order-keys=${tally.inversions} future-dated=${tally.futureDated} faults=${tally.faultsInjected} unreachable-held=${tally.heldByUnreachable} mid-pass-clears=${tally.midPassClears} clock-passed=${tally.clockPassedFutureUpdate}`);
 }, 600_000);
