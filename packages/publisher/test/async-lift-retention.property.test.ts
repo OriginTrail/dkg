@@ -217,8 +217,8 @@ it('retention never deletes anything but old finalized records, never changes th
     await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 0x7fffffff }), async (seed) => { await oneCase(seed, templates, tally); await new Promise<void>((resolve) => setImmediate(resolve)); }),
       { seed: options.seed, numRuns: options.numRuns, endOnFailure: true, ...(options.path ? { path: options.path } : {}) });
   } finally { clearImmediate(ticker); }
-  // The generator must really reach what the claim is about. The floors apply from the 100-run default up and only to a full run (a replay of one failing path
-  // executes just the cases along it).
+  // The generator must really reach what the claim is about. The floors apply from the 100-run default up (the two tie floors from 1,000, see below) and only to a
+  // full run (a replay of one failing path executes just the cases along it).
   if (!options.path) {
     expect(tally.cases).toBe(options.numRuns);
     expect(turns, 'the event loop turned between the cases').toBeGreaterThanOrEqual(tally.cases);
@@ -232,6 +232,12 @@ it('retention never deletes anything but old finalized records, never changes th
       expect(tally.heldByUnreachable).toBeGreaterThan(5);                                // old records really held behind one the sweep can never delete
       expect(tally.midPassClears).toBeGreaterThan(5);                                    // failed jobs really cleared between two batches
       expect(tally.clockPassedFutureUpdate).toBeGreaterThan(5);                          // records dated after now that the clock really passed during the walk
+    }
+    // The two tie floors need the larger budget. A tie inside a key's deletable run that the walk meets newest first comes up in about 5% of the cases (5.4% over a
+    // reviewer's 400,000 seeds of the generator), so a 100-run run with a seed other than the fixed one (a dispatched `standard` profile with its own seed) fails one of
+    // the two about 0.8% of the time with no bug anywhere. From 1,000 runs (the nightly) a miss is beyond any practical chance (under e^-50 for each), so a failure there
+    // means the generator stopped reaching ties. The deterministic tie tests (async-lift-retention-order.test.ts) pin the behaviour at every budget.
+    if (options.numRuns >= 1000) {
       expect(tally.tiedNewestFirst).toBeGreaterThan(0);                                  // keys whose deletable run holds a tie the walk meets newest first
       expect(tally.tiedPrefixes).toBeGreaterThan(tally.tiedNewestFirst);                 // and ties it meets oldest first
     }
