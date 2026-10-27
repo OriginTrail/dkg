@@ -197,6 +197,7 @@ export default defineConfig({
       "test/durable-recovery-stored-prefix.test.ts",
       "test/durable-prefix-production.test.ts",
       "test/durable-cross-peer-production.test.ts",
+      "test/durable-large-prefix-production.test.ts",
       "test/store-content-fence.test.ts",
       "test/store-content-fence-bounds.test.ts",
       "test/store-lane-yield.test.ts",

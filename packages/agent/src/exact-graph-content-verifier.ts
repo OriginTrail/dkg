@@ -46,6 +46,8 @@ export async function verifyExactGraphContent(
     expectedMerkleRoot: Uint8Array;
     expectedPublicQuadsDigest?: string;
     source: string;
+    /** Caller-owned whole-asset limits; physical query pages remain storage-bounded. */
+    readLimits?: { maxQuadCount: number; maxNQuadsBytes: number };
     queryOptions?: Omit<QueryOptions, 'source'>;
   },
 ): Promise<ExactGraphContentVerification> {
@@ -53,6 +55,7 @@ export async function verifyExactGraphContent(
   try {
     quads = await readExactGraph(store, input.graphUri, {
       profile: 'bounded-single-result',
+      ...input.readLimits,
       expectedQuadCount: input.publicTripleCount,
       outputGraph: '',
       queryOptions: { ...input.queryOptions, source: input.source },
