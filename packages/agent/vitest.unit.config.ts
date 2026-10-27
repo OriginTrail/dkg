@@ -470,6 +470,7 @@ export default defineConfig({
       "test/recipient-key-route-fence.test.ts",
       "test/recipient-key-route-fence-wrapper.test.ts",
       "test/recipient-key-route-fence.property.test.ts",
+      "test/share-retention-key-route-fence.test.ts",
       "test/peer-gate-revision.test.ts",
       "test/recipient-key-route-dependencies.test.ts",
       "test/recipient-key-route-lifecycle.test.ts",
