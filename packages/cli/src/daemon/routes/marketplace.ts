@@ -1,11 +1,18 @@
 // OT-RFC-27 marketplace operator routes: the daemon surface over the agent's
 // marketplace mixin (`agent.marketplace*`). Reads (status, offers, meter) are
-// ungated; every mutating route is node-admin-gated like the sibling PCA
-// writes (the on-chain funding/claim transactions are signed with the node's
-// own wallets). Wei amounts cross this boundary as decimal strings — the
-// shared jsonResponse serializer stringifies every bigint on the way out, and
+// ungated; every mutating route — and the gateway key / connector admin
+// reads — is node-admin-gated like the sibling PCA writes (the on-chain
+// funding/claim transactions are signed with the node's own wallets). Wei
+// amounts cross this boundary as decimal strings — the shared jsonResponse
+// serializer stringifies every bigint on the way out, and
 // `parseMarketplaceUint` rejects JSON numbers above 2^53 on the way in.
+//
+// The buyer gateway (`/api/marketplace/gateway/v1/…`) is NOT served here: it
+// is the daemon's one pre-auth carve-out (daemon/marketplace-gateway-dispatch.ts).
+// A gateway-prefixed request only reaches this module when the gateway is
+// disabled, and then it is answered 404 — no other route may claim the prefix.
 
+import { isAbsolute } from 'node:path';
 import { ethers } from 'ethers';
 import type {
   MarketplaceOfferingConfig,
@@ -19,11 +26,17 @@ import {
 } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 import { canAdministerNode } from '../../auth.js';
+import { dkgDir } from '../../config.js';
 import {
   MARKETPLACE_SERVICE_TYPES,
   parseMarketplaceOffering,
   parseMarketplaceUint,
+  resolveMarketplaceGatewayConfig,
 } from '../../marketplace-config.js';
+import { canonicalModelId, defaultCodexAuthFile } from '@origintrail-official/dkg-agent/dist/marketplace/gateway-domain.js';
+import { MARKETPLACE_GATEWAY_BASE_PATH, isMarketplaceGatewayPath } from '../marketplace-gateway-dispatch.js';
+import { MARKETPLACE_KEYS_PATH, daemonGatewayKeyStore, handleMarketplaceKeyRoutes } from './marketplace-keys.js';
+import { codexOAuthFlow } from '../../marketplace-codex-oauth-flow.js';
 
 // The agent mixin's own parameter types, extracted instead of imported: the
 // CLI package has no direct dependency on the marketplace domain package, and
@@ -96,6 +109,21 @@ function respondMarketplaceError(res: RequestContext['res'], err: any, prefix: s
     // The selected seller (or its transport) failed the call — upstream fault.
     return jsonResponse(res, 502, { error: msg, code: err.code ?? 'INVOKE_FAILED' });
   }
+  if (err?.name === 'MarketplaceRequestError') {
+    return jsonResponse(res, 400, { error: msg, code: err.code, ...(err.param ? { param: err.param } : {}) });
+  }
+  if (err?.name === 'MarketplaceModelNotFoundError') {
+    return jsonResponse(res, 404, { error: msg, code: 'MODEL_NOT_FOUND' });
+  }
+  if (err?.name === 'MarketplaceConnectorMountError') {
+    // The old offering set stays in force (all-or-nothing). An unhealthy
+    // upstream is a deployment gap (503); every other mount code is config.
+    return jsonResponse(res, err.code === 'CONNECTOR_UNHEALTHY' ? 503 : 400, {
+      error: msg,
+      code: err.code,
+      ...(err.offeringLocalId ? { offeringLocalId: err.offeringLocalId } : {}),
+    });
+  }
   if (/seller role unavailable/i.test(msg)) {
     return jsonResponse(res, 409, { error: msg, code: 'SELLER_UNAVAILABLE' });
   }
@@ -137,13 +165,15 @@ function parsePlanPolicy(raw: unknown): AgentPlanPolicy {
       || !(MARKETPLACE_SERVICE_TYPES as readonly string[]).includes(match.serviceType)) {
       throw new Error(`${field}.match.serviceType must be one of ${MARKETPLACE_SERVICE_TYPES.join(', ')}`);
     }
-    if (match.modelId !== undefined && typeof match.modelId !== 'string') {
-      throw new Error(`${field}.match.modelId must be a string`);
+    // Bucket model ids are canonicalized like every buyer-side model id (§5.3).
+    const modelId = match.modelId === undefined ? undefined : canonicalModelId(match.modelId);
+    if (match.modelId !== undefined && modelId === undefined) {
+      throw new Error(`${field}.match.modelId must be a valid model id`);
     }
     return {
       match: {
         serviceType: match.serviceType as AgentServiceType,
-        ...(match.modelId !== undefined ? { modelId: match.modelId } : {}),
+        ...(modelId !== undefined ? { modelId } : {}),
       },
       budgetWei: parseMarketplaceUint(bucket.budgetWei, `${field}.budgetWei`),
       // Width-bound at the boundary: asks are uint96, units uint64 on-chain.
@@ -193,6 +223,13 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
 
   if (!path.startsWith('/api/marketplace')) return;
 
+  // Defense in depth: with the gateway enabled the lifecycle carve-out owns
+  // this prefix and these requests never get here. Disabled, the prefix
+  // answers 404 to every (token-authenticated) caller — never another route.
+  if (isMarketplaceGatewayPath(path)) {
+    return jsonResponse(res, 404, { error: 'marketplace gateway is disabled on this node' });
+  }
+
   // Mutating routes move the node's own TRAC (subscribe) or submit node-signed
   // transactions (offerings publish, settle), so they require the node-admin
   // token — mirrors requireNodeAdmin in the PCA routes. Reads are ungated.
@@ -211,11 +248,19 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
   // tell "disabled" from "down".
   if (req.method === 'GET' && path === '/api/marketplace/status') {
     try {
-      return jsonResponse(res, 200, await agent.marketplaceStatus());
+      return jsonResponse(res, 200, { ...(await agent.marketplaceStatus()), gateway: gatewayStatus(ctx) });
     } catch (err: any) {
       return respondMarketplaceError(res, err, 'marketplaceStatus');
     }
   }
+
+  // Gateway key administration (node-admin): list, mint, revoke.
+  if (path === MARKETPLACE_KEYS_PATH || path.startsWith(`${MARKETPLACE_KEYS_PATH}/`)) {
+    if (await handleMarketplaceKeyRoutes(ctx, requireNodeAdmin)) return;
+  }
+
+  // Seller connectors, the Codex login, recount standing resets (node-admin).
+  if (await handleMarketplaceOpsRoutes(ctx, requireNodeAdmin)) return;
 
   // POST /api/marketplace/seller/offerings — replace the served offering set
   // and (by default) publish each one as an offer KA into the `marketplace`
@@ -341,6 +386,7 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
         seller: result.seller,
         receipt: result.receipt,
         authorization: result.authorization,
+        ...(result.recount ? { recount: result.recount } : {}),
       });
     } catch (err: any) {
       return respondMarketplaceError(res, err, 'marketplaceInvoke');
@@ -400,4 +446,92 @@ export async function handleMarketplaceRoutes(ctx: RequestContext): Promise<void
       return respondMarketplaceError(res, err, `marketplaceSettle ${action}`);
     }
   }
+}
+
+/** `GET /api/marketplace/status` → `gateway: { enabled, basePath, keys }` (merged by the daemon). */
+function gatewayStatus(ctx: RequestContext): { enabled: boolean; basePath: string; keys: number; error?: string } {
+  let enabled = false;
+  try {
+    enabled = resolveMarketplaceGatewayConfig(ctx.config?.marketplace) !== undefined;
+  } catch {
+    enabled = false;
+  }
+  const store = daemonGatewayKeyStore();
+  return {
+    enabled,
+    basePath: MARKETPLACE_GATEWAY_BASE_PATH,
+    keys: store.available ? store.ledger().list().length : 0,
+    ...(store.available ? {} : { error: 'gateway key store is unusable; see GET /api/marketplace/keys' }),
+  };
+}
+
+const CONNECTORS_PATH = '/api/marketplace/seller/connectors';
+const CODEX_LOGIN_PATH = '/api/marketplace/seller/connectors/codex-oauth/login';
+const RECOUNT_RESET_PATH = '/api/marketplace/recount/reset';
+
+/** Connector status, the Codex OAuth login and recount resets. Returns true when it answered. */
+async function handleMarketplaceOpsRoutes(ctx: RequestContext, requireNodeAdmin: () => boolean): Promise<boolean> {
+  const { req, res, agent, path, url } = ctx;
+
+  // GET /api/marketplace/seller/connectors[?probe=1] — mount state, upstream
+  // origin (never the full URL), metering pin, optional live health probe.
+  if (req.method === 'GET' && path === CONNECTORS_PATH) {
+    if (!requireNodeAdmin()) return true;
+    const probe = url.searchParams.get('probe');
+    try {
+      const connectors = await agent.marketplaceConnectorStatus({ probe: probe === '1' || probe === 'true' });
+      jsonResponse(res, 200, { connectors });
+    } catch (err: any) {
+      respondMarketplaceError(res, err, 'marketplaceConnectorStatus');
+    }
+    return true;
+  }
+
+  // POST starts (idempotently) the Codex OAuth login and returns the URL the
+  // HUMAN opens; GET reports its state. Tokens go to the node secret store.
+  if (path === CODEX_LOGIN_PATH && (req.method === 'POST' || req.method === 'GET')) {
+    if (!requireNodeAdmin()) return true;
+    if (req.method === 'GET') {
+      jsonResponse(res, 200, codexOAuthFlow().status());
+      return true;
+    }
+    const parsed = safeParseJson(await readBody(req, SMALL_BODY_BYTES) || '{}');
+    if (!parsed.ok) {
+      jsonResponse(res, 400, { error: parsed.error });
+      return true;
+    }
+    const { authFile } = (parsed.value ?? {}) as Record<string, unknown>;
+    if (authFile !== undefined && (typeof authFile !== 'string' || !isAbsolute(authFile) || authFile.includes('\0'))) {
+      jsonResponse(res, 400, { error: 'authFile must be an absolute file path' });
+      return true;
+    }
+    const state = await codexOAuthFlow().start({ authFile: (authFile as string | undefined) ?? defaultCodexAuthFile(dkgDir()) });
+    jsonResponse(res, state.status === 'error' ? 409 : 200, state);
+    return true;
+  }
+
+  // POST /api/marketplace/recount/reset { sellerIdentityId } — operator
+  // override of a seller's local recount standing.
+  if (req.method === 'POST' && path === RECOUNT_RESET_PATH) {
+    if (!requireNodeAdmin()) return true;
+    const parsed = safeParseJson(await readBody(req, SMALL_BODY_BYTES));
+    if (!parsed.ok) {
+      jsonResponse(res, 400, { error: parsed.error });
+      return true;
+    }
+    let sellerIdentityId: bigint;
+    try {
+      sellerIdentityId = parseMarketplaceUint((parsed.value ?? {}).sellerIdentityId, 'sellerIdentityId', 72);
+    } catch (err: any) {
+      jsonResponse(res, 400, { error: err?.message ?? String(err) });
+      return true;
+    }
+    try {
+      jsonResponse(res, 200, { reset: agent.marketplaceResetSellerStanding(sellerIdentityId) });
+    } catch (err: any) {
+      respondMarketplaceError(res, err, 'marketplaceResetSellerStanding');
+    }
+    return true;
+  }
+  return false;
 }

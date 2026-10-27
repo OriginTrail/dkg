@@ -1,9 +1,12 @@
 import { describe, it, expect } from 'vitest';
+import { ethers } from 'ethers';
 import {
   MARKETPLACE_ENABLED_ENV,
+  MARKETPLACE_GATEWAY_ENABLED_ENV,
   parseMarketplaceOffering,
   parseMarketplaceUint,
   resolveMarketplaceAgentConfig,
+  resolveMarketplaceGatewayConfig,
   type DkgMarketplaceConfig,
 } from '../src/marketplace-config.js';
 
@@ -151,5 +154,190 @@ describe('resolveMarketplaceAgentConfig', () => {
       { enabled: true, seller: { batching: { maxBuyerExposureWei: 2 ** 53 } } },
       undefined,
     )).toThrow(/marketplace\.seller\.batching\.maxBuyerExposureWei/);
+  });
+});
+
+describe('chat-connector offerings (structural parse)', () => {
+  const chatOffering = {
+    offeringLocalId: 'devnet-chat',
+    serviceType: 'inference',
+    unit: 'token',
+    modelId: 'stub-chat',
+    askPerUnitWei: '500000000000',
+    executor: 'chat-connector',
+    connector: {
+      kind: 'openai-compatible',
+      baseUrl: 'http://127.0.0.1:18080/v1',
+      upstreamModel: 'stub-chat',
+      secretEnvFile: '/abs/.devnet/node1/marketplace/.secrets/llm-stub.env',
+      toolTransport: 'native',
+      maxTokensField: 'max_tokens',
+      contextLength: '32768',
+      timeoutMs: 120000,
+    },
+    metering: { tokenizer: { kind: 'stub-words-v1' } },
+    model: { displayName: 'Stub Chat', contextLength: '32768', family: 'stub', quantization: 'none' },
+    allowedBuyers: [],
+  };
+
+  it('maps the §12 example into the agent shape (bigint context lengths)', () => {
+    expect(parseMarketplaceOffering(chatOffering, 'o')).toEqual({
+      offeringLocalId: 'devnet-chat',
+      serviceType: 'inference',
+      modelId: 'stub-chat',
+      unit: 'token',
+      askPerUnitWei: 500_000_000_000n,
+      executor: 'chat-connector',
+      connector: {
+        kind: 'openai-compatible',
+        baseUrl: 'http://127.0.0.1:18080/v1',
+        upstreamModel: 'stub-chat',
+        secretEnvFile: '/abs/.devnet/node1/marketplace/.secrets/llm-stub.env',
+        toolTransport: 'native',
+        maxTokensField: 'max_tokens',
+        contextLength: 32768n,
+        timeoutMs: 120000,
+      },
+      metering: { tokenizer: { kind: 'stub-words-v1' } },
+      allowedBuyers: [],
+      model: { displayName: 'Stub Chat', family: 'stub', contextLength: 32768n, quantization: 'none' },
+    });
+  });
+
+  it('parses llamacpp and codex-oauth connectors; allowedBuyers are checksummed', () => {
+    const llama = parseMarketplaceOffering({
+      ...chatOffering,
+      connector: { kind: 'llamacpp', baseUrl: 'http://127.0.0.1:8081', ggufPath: '/models/q.gguf', settings: { seed: 7, temperature: '0', ctx: 8192 } },
+      metering: { tokenizer: { kind: 'hf-bpe-v1', path: '/models/tokenizer.json' } },
+    }, 'o');
+    expect(llama.connector).toEqual({
+      kind: 'llamacpp', baseUrl: 'http://127.0.0.1:8081', ggufPath: '/models/q.gguf', settings: { seed: 7, temperature: '0', ctx: 8192 },
+    });
+    expect(llama.metering).toEqual({ tokenizer: { kind: 'hf-bpe-v1', path: '/models/tokenizer.json' } });
+    const codex = parseMarketplaceOffering({
+      ...chatOffering,
+      connector: { kind: 'codex-oauth', upstreamModel: 'gpt-5-codex', reasoningEffort: 'low', acknowledgeSubscriptionScope: true },
+      metering: { tokenizer: { kind: 'tiktoken-o200k-v1', path: '/tok/o200k_base.tiktoken' } },
+      allowedBuyers: ['0x' + 'ab'.repeat(20)],
+    }, 'o');
+    expect(codex.connector).toEqual({ kind: 'codex-oauth', upstreamModel: 'gpt-5-codex', reasoningEffort: 'low', acknowledgeSubscriptionScope: true });
+    expect(codex.allowedBuyers).toEqual([ethers.getAddress('0x' + 'ab'.repeat(20))]);
+    // An offering without a connector keeps the old shape.
+    expect(parseMarketplaceOffering({ offeringLocalId: 'q', serviceType: 'query', unit: 'query-unit', askPerUnitWei: '1' }, 'o'))
+      .toEqual({ offeringLocalId: 'q', serviceType: 'query', unit: 'query-unit', askPerUnitWei: 1n });
+  });
+
+  it.each([
+    [{ connector: { ...chatOffering.connector, secretEnvFile: 'relative/llm.env' } }, /connector\.secretEnvFile must be an absolute file path/],
+    [{ connector: { kind: 'llamacpp', baseUrl: 'http://127.0.0.1:8081', ggufPath: 'models/q.gguf', settings: { seed: 1, temperature: '0', ctx: 1 } } }, /ggufPath must be an absolute/],
+    [{ connector: { kind: 'llamacpp', baseUrl: 'http://127.0.0.1:8081', ggufPath: '/q.gguf', settings: { seed: 1, temperature: 0.7, ctx: 1 } } }, /settings\.temperature must be a decimal string/],
+    [{ connector: { kind: 'codex-oauth', upstreamModel: 'gpt-5', acknowledgeSubscriptionScope: 'yes' } }, /acknowledgeSubscriptionScope must be the literal true/],
+    [{ connector: { kind: 'codex-oauth', upstreamModel: 'gpt-5' } }, /acknowledgeSubscriptionScope must be the literal true/],
+    [{ connector: { kind: 'codex-oauth', upstreamModel: 'gpt-5', acknowledgeSubscriptionScope: true, authFile: './auth.json' } }, /authFile must be an absolute/],
+    [{ connector: { ...chatOffering.connector, baseUrl: 'ftp://host/v1' } }, /baseUrl must be an http or https URL/],
+    [{ connector: { ...chatOffering.connector, baseUrl: 'https://user:pw@api.example/v1' } }, /must not carry credentials/],
+    [{ connector: { ...chatOffering.connector, baseUrl: 'https://api.example/v1?x=1' } }, /must not carry credentials, a query/],
+    [{ connector: { ...chatOffering.connector, baseUrl: 'not a url' } }, /baseUrl is not a valid URL/],
+    [{ connector: { ...chatOffering.connector, toolTransport: 'magic' } }, /toolTransport must be one of native, prompt, none/],
+    [{ connector: { ...chatOffering.connector, maxTokensField: 'max_output_tokens' } }, /maxTokensField must be one of/],
+    [{ connector: { ...chatOffering.connector, timeoutMs: 999 } }, /timeoutMs must be an integer 1000\.\.600000/],
+    [{ connector: { ...chatOffering.connector, contextLength: 2 ** 53 } }, /contextLength must be a positive decimal integer string/],
+    [{ connector: { ...chatOffering.connector, secretEnvKey: 'BAD KEY' } }, /secretEnvKey must be an environment-variable name/],
+    [{ connector: { ...chatOffering.connector, apiKey: 'sk-live-secret' } }, /connector\.apiKey is not a recognised connector field/],
+    [{ connector: { ...chatOffering.connector, kind: 'anthropic' } }, /connector\.kind must be one of/],
+    [{ metering: { tokenizer: { kind: 'hf-bpe-v1' } } }, /metering\.tokenizer\.path must be an absolute file path/],
+    [{ metering: { tokenizer: { kind: 'stub-words-v1', path: '/x' } } }, /path must be omitted for stub-words-v1/],
+    [{ metering: { tokenizer: { kind: 'sentencepiece' } } }, /metering\.tokenizer\.kind must be one of/],
+    [{ allowedBuyers: ['not-an-address'] }, /allowedBuyers\[0\] must be a 0x-prefixed EVM address/],
+    [{ executor: 'stub-inference' }, /connector requires executor chat-connector/],
+    [{ connector: undefined }, /connector is required for executor chat-connector/],
+    [{ model: { contextLength: 'many' } }, /model\.contextLength/],
+  ])('%j is rejected', (patch, error) => {
+    expect(() => parseMarketplaceOffering({ ...chatOffering, ...patch }, 'o')).toThrow(error);
+  });
+
+  it('a credential-shaped unknown key is named, never echoed', () => {
+    let message = '';
+    try {
+      parseMarketplaceOffering({ ...chatOffering, connector: { ...chatOffering.connector, apiKey: 'sk-live-very-secret' } }, 'o');
+    } catch (err) {
+      message = (err as Error).message;
+    }
+    expect(message).toContain('apiKey');
+    expect(message).not.toContain('sk-live-very-secret');
+  });
+
+  it('metering applies only to chat-connector offerings', () => {
+    expect(() => parseMarketplaceOffering({
+      offeringLocalId: 'x', serviceType: 'inference', unit: 'token', askPerUnitWei: '1', metering: { tokenizer: { kind: 'stub-words-v1' } },
+    }, 'o')).toThrow(/metering applies only to chat-connector offerings/);
+  });
+});
+
+describe('seller query guards and buyer recount/tokenizer config', () => {
+  it('maps queryGuards, chatServeTimeoutMs, tokenizers and recountPolicy', () => {
+    expect(resolveMarketplaceAgentConfig({
+      enabled: true,
+      seller: { queryGuards: { timeoutMs: 5000, maxRows: 500 } },
+      buyer: {
+        chatServeTimeoutMs: 200000,
+        tokenizers: [{ kind: 'hf-bpe-v1', path: '/abs/tokenizer.json' }, { kind: 'tiktoken-o200k-v1', path: '/abs/o200k.tiktoken' }],
+        recountPolicy: { window: 20, deprioritizeAt: 1, denyAt: 3, denyCooldownSeconds: 86400 },
+        gateway: { enabled: true, defaultMaxTokens: 256, maxBodyBytes: 4194304, maxConcurrent: 16 },
+      },
+    }, undefined)).toEqual({
+      enabled: true,
+      seller: { queryGuards: { timeoutMs: 5000, maxRows: 500 } },
+      buyer: {
+        chatServeTimeoutMs: 200000,
+        tokenizers: [{ kind: 'hf-bpe-v1', path: '/abs/tokenizer.json' }, { kind: 'tiktoken-o200k-v1', path: '/abs/o200k.tiktoken' }],
+        recountPolicy: { window: 20, deprioritizeAt: 1, denyAt: 3, denyCooldownSeconds: 86400 },
+      },
+    });
+  });
+
+  it.each([
+    [{ seller: { queryGuards: { timeoutMs: 0 } } }, /marketplace\.seller\.queryGuards\.timeoutMs/],
+    [{ seller: { queryGuards: { maxRows: -1 } } }, /marketplace\.seller\.queryGuards\.maxRows/],
+    [{ buyer: { tokenizers: [{ kind: 'hf-bpe-v1', path: 'rel/tokenizer.json' }] } }, /marketplace\.buyer\.tokenizers\[0\]\.path must be an absolute/],
+    [{ buyer: { tokenizers: [{ kind: 'stub-words-v1' }] } }, /stub-words-v1 is built in/],
+    [{ buyer: { recountPolicy: { window: 0 } } }, /marketplace\.buyer\.recountPolicy\.window/],
+    [{ buyer: { recountPolicy: { denyCooldownSeconds: -1 } } }, /denyCooldownSeconds/],
+    [{ buyer: { chatServeTimeoutMs: 10 } }, /marketplace\.buyer\.chatServeTimeoutMs/],
+    [{ buyer: { gateway: { maxConcurrent: 0 } } }, /marketplace\.buyer\.gateway\.maxConcurrent/],
+    [{ buyer: { gateway: { maxBodyBytes: 1 } } }, /marketplace\.buyer\.gateway\.maxBodyBytes/],
+    [{ buyer: { gateway: { defaultMaxTokens: 1_000_001 } } }, /marketplace\.buyer\.gateway\.defaultMaxTokens/],
+    [{ buyer: { gateway: { enabled: 'yes' } } }, /marketplace\.buyer\.gateway\.enabled must be a boolean/],
+  ])('%j fails at boot', (patch, error) => {
+    expect(() => resolveMarketplaceAgentConfig({ enabled: false, ...patch } as DkgMarketplaceConfig, undefined)).toThrow(error);
+  });
+});
+
+describe('resolveMarketplaceGatewayConfig', () => {
+  const defaults = { defaultMaxTokens: 256, maxBodyBytes: 4 * 1024 * 1024, maxConcurrent: 16 };
+
+  it('is on by default with the marketplace and off without it', () => {
+    expect(resolveMarketplaceGatewayConfig({ enabled: true }, {})).toEqual(defaults);
+    expect(resolveMarketplaceGatewayConfig({ enabled: false }, {})).toBeUndefined();
+    expect(resolveMarketplaceGatewayConfig(undefined, {})).toBeUndefined();
+    expect(resolveMarketplaceGatewayConfig(undefined, { [MARKETPLACE_ENABLED_ENV]: '1' })).toEqual(defaults);
+  });
+
+  it('config and DKG_MARKETPLACE_GATEWAY_ENABLED can switch it off (env wins both ways)', () => {
+    expect(resolveMarketplaceGatewayConfig({ enabled: true, buyer: { gateway: { enabled: false } } }, {})).toBeUndefined();
+    expect(resolveMarketplaceGatewayConfig({ enabled: true }, { [MARKETPLACE_GATEWAY_ENABLED_ENV]: '0' })).toBeUndefined();
+    expect(resolveMarketplaceGatewayConfig(
+      { enabled: true, buyer: { gateway: { enabled: false } } },
+      { [MARKETPLACE_GATEWAY_ENABLED_ENV]: 'true' },
+    )).toEqual(defaults);
+    expect(() => resolveMarketplaceGatewayConfig({ enabled: true }, { [MARKETPLACE_GATEWAY_ENABLED_ENV]: 'maybe' }))
+      .toThrow(/DKG_MARKETPLACE_GATEWAY_ENABLED must be one of 1, 0, true, or false/);
+  });
+
+  it('carries the tunables', () => {
+    expect(resolveMarketplaceGatewayConfig({
+      enabled: true,
+      buyer: { gateway: { defaultMaxTokens: 64, maxBodyBytes: 65536, maxConcurrent: 4 } },
+    }, {})).toEqual({ defaultMaxTokens: 64, maxBodyBytes: 65536, maxConcurrent: 4 });
   });
 });

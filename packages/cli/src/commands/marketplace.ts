@@ -4,6 +4,8 @@ import { ethers } from 'ethers';
 import { toErrorMessage } from '@origintrail-official/dkg-core';
 import { ApiClient } from '../api-client.js';
 import type {
+  MarketplaceGatewayKeyMintBody,
+  MarketplaceGatewayKeyWire,
   MarketplaceMeterStateWire,
   MarketplaceOfferingWire,
   MarketplacePlanPolicyWire,
@@ -17,6 +19,9 @@ import type {
 // daemon/routes/marketplace.ts). Buyer writes (subscribe, invoke) and seller
 // writes (offerings, settle) are node-admin-gated by the daemon; status,
 // offers and meter are open reads. All wei values travel as decimal strings.
+// Gateway keys, connectors and the Codex login are node-admin surfaces; the
+// OpenAI-compatible gateway itself is called with a minted key, never the
+// node token (`dkg marketplace gateway` prints how).
 
 const SERVICE_TYPES: readonly MarketplaceServiceTypeWire[] = ['inference', 'query', 'reasoning', 'graph-ml'];
 const SETTLE_ACTIONS: readonly MarketplaceSettleActionWire[] = ['flush-receipts', 'finalize', 'claim', 'roll'];
@@ -40,6 +45,22 @@ function tracLine(wei: string): string {
   } catch {
     return `${wei} wei`;
   }
+}
+
+function formatKey(key: MarketplaceGatewayKeyWire): string[] {
+  const state = key.revokedAt !== null
+    ? `revoked ${new Date(key.revokedAt * 1000).toISOString()}`
+    : key.scopes.expiresAt !== null && key.scopes.expiresAt * 1000 <= Date.now()
+      ? 'expired'
+      : 'active';
+  return [
+    `${key.keyId}${key.scopes.label ? ` (${key.scopes.label})` : ''} — ${state}`,
+    `  budget:   ${tracLine(key.scopes.budgetWei)}, spent ${tracLine(key.usage.spentWei)}`,
+    `  scope:    models ${key.scopes.modelAllowlist ? key.scopes.modelAllowlist.join(', ') || '(none)' : 'any'}, `
+      + `query ${key.scopes.allowQuery ? 'yes' : 'no'}, ${key.scopes.rps} rps`,
+    `  expires:  ${key.scopes.expiresAt !== null ? new Date(key.scopes.expiresAt * 1000).toISOString() : 'never'}`,
+    `  usage:    ${key.usage.calls} call(s) (${key.usage.inferenceCalls} chat, ${key.usage.queryCalls} query), ${key.usage.servedUnits} unit(s)`,
+  ];
 }
 
 function printMeterState(state: MarketplaceMeterStateWire | undefined, summary: string | undefined): void {
@@ -89,6 +110,17 @@ marketplaceCmd
         console.log(`  Subscribed:  ${status.buyer.subscribed}${status.buyer.epoch !== undefined ? ` (epoch ${status.buyer.epoch})` : ''}`);
         if (status.buyer.sessionKeyAddress) console.log(`  Session key: ${status.buyer.sessionKeyAddress}`);
         printMeterState(status.buyer.meter, undefined);
+        if (status.buyer.recount) {
+          const { sellers, deprioritized, denied } = status.buyer.recount;
+          console.log(`  Recount:     ${sellers} seller(s) recounted, ${deprioritized} deprioritized, ${denied} denied`);
+        }
+      }
+      if (status.seller?.connectors) {
+        const { mounted, failed, mounting } = status.seller.connectors;
+        console.log(`  Connectors:  ${mounted} mounted, ${failed} failed, ${mounting} mounting`);
+      }
+      if (status.gateway) {
+        console.log(`  Gateway:     ${status.gateway.enabled ? `enabled at ${status.gateway.basePath} (${status.gateway.keys} key(s))` : 'disabled'}`);
       }
     } catch (err) {
       fail(toErrorMessage(err));
@@ -293,6 +325,182 @@ marketplaceCmd
       console.log(`  txHash: ${result.txHash}`);
       console.log(`  block:  ${result.blockNumber}`);
       if (result.rewardWei !== undefined) console.log(`  reward: ${tracLine(result.rewardWei)}`);
+    } catch (err) {
+      fail(toErrorMessage(err));
+    }
+  });
+
+
+// ─── gateway keys / connectors / gateway usage ────────────────────────
+
+const keysCmd = marketplaceCmd
+  .command('keys')
+  .description('Scoped API keys for the OpenAI-compatible buyer gateway (node-admin)');
+
+keysCmd
+  .command('list')
+  .description('List gateway keys (budget, scope, usage; never the key itself)')
+  .option('--json', 'Print the raw JSON response')
+  .action(async (opts: { json?: boolean }) => {
+    try {
+      const client = await ApiClient.connect();
+      const { keys } = await client.marketplace.keys();
+      if (opts.json) {
+        console.log(JSON.stringify({ keys }, null, 2));
+        return;
+      }
+      if (keys.length === 0) {
+        console.log('No gateway keys — mint one with `dkg marketplace keys mint --budget-trac <n>`');
+        return;
+      }
+      for (const key of keys) for (const line of formatKey(key)) console.log(line);
+    } catch (err) {
+      fail(toErrorMessage(err));
+    }
+  });
+
+keysCmd
+  .command('mint')
+  .description('Mint a gateway key (the key is printed ONCE; store it now)')
+  .option('--label <label>', 'Display label (at most 64 characters)')
+  .option('--budget-trac <amount>', 'Spend budget in TRAC (decimal)')
+  .option('--budget-wei <amount>', 'Spend budget in wei (decimal integer string)')
+  .option('--expires-in <seconds>', 'Expire the key after this many seconds')
+  .option('--models <ids>', 'Comma-separated model allowlist (default: every model)')
+  .option('--no-query', 'Refuse SPARQL calls (POST …/query) with this key')
+  .option('--rps <n>', 'Requests per second (1..1000, default 5)')
+  .option('--json', 'Print the raw JSON response')
+  .action(async (opts: {
+    label?: string; budgetTrac?: string; budgetWei?: string; expiresIn?: string;
+    models?: string; query: boolean; rps?: string; json?: boolean;
+  }) => {
+    try {
+      if ((opts.budgetTrac === undefined) === (opts.budgetWei === undefined)) {
+        fail('Pass exactly one of --budget-trac or --budget-wei');
+      }
+      const body: MarketplaceGatewayKeyMintBody = {
+        ...(opts.label !== undefined ? { label: opts.label } : {}),
+        ...(opts.budgetWei !== undefined ? { budgetWei: opts.budgetWei } : { budgetTrac: opts.budgetTrac }),
+        ...(opts.expiresIn !== undefined ? { expiresInSeconds: Number(opts.expiresIn) } : {}),
+        ...(opts.models !== undefined
+          ? { modelAllowlist: opts.models.split(',').map((model) => model.trim()).filter(Boolean) }
+          : {}),
+        allowQuery: opts.query,
+        ...(opts.rps !== undefined ? { rps: Number(opts.rps) } : {}),
+      };
+      const client = await ApiClient.connect();
+      const minted = await client.marketplace.mintKey(body);
+      if (opts.json) {
+        console.log(JSON.stringify(minted, null, 2));
+        return;
+      }
+      console.log('Gateway key minted — it is shown ONCE and stored only as a hash:');
+      console.log('');
+      console.log(`  ${minted.key}`);
+      console.log('');
+      for (const line of formatKey(minted.record)) console.log(line);
+    } catch (err) {
+      fail(toErrorMessage(err));
+    }
+  });
+
+keysCmd
+  .command('revoke <keyId>')
+  .description('Revoke a gateway key (effective on its next call)')
+  .action(async (keyId: string) => {
+    try {
+      const client = await ApiClient.connect();
+      const result = await client.marketplace.revokeKey(keyId);
+      console.log(`Revoked ${result.keyId} at ${new Date(result.revokedAt * 1000).toISOString()}`);
+    } catch (err) {
+      fail(toErrorMessage(err));
+    }
+  });
+
+marketplaceCmd
+  .command('connectors')
+  .description('Seller chat connectors: mount state, upstream origin, metering pin (node-admin)')
+  .option('--probe', 'Also run a live health probe against each upstream')
+  .option('--json', 'Print the raw JSON response')
+  .action(async (opts: { probe?: boolean; json?: boolean }) => {
+    try {
+      const client = await ApiClient.connect();
+      const { connectors } = await client.marketplace.connectors({ probe: opts.probe === true });
+      if (opts.json) {
+        console.log(JSON.stringify({ connectors }, null, 2));
+        return;
+      }
+      if (connectors.length === 0) {
+        console.log('No chat-connector offerings on this node');
+        return;
+      }
+      for (const connector of connectors) {
+        console.log(`${connector.offeringLocalId} (${connector.modelId}) — ${connector.kind}, ${connector.state}`);
+        if (connector.detail) console.log(`  detail:   ${connector.detail}`);
+        if (connector.upstreamOrigin) console.log(`  upstream: ${connector.upstreamOrigin}`);
+        console.log(`  secret:   ${connector.secretConfigured ? 'configured' : 'none'}`);
+        console.log(`  metering: ${connector.metering.basis}${connector.metering.tokenizerKind ? ` (${connector.metering.tokenizerKind}${connector.metering.tokenizerDigest ? ` ${connector.metering.tokenizerDigest}` : ''})` : ''}`);
+        if (connector.weightsDigest) console.log(`  weights:  ${connector.weightsDigest}`);
+        if (connector.health) {
+          console.log(`  health:   ${connector.health.ok ? 'ok' : 'FAIL'} (${connector.health.latencyMs} ms)${connector.health.detail ? ` — ${connector.health.detail}` : ''}`);
+        }
+      }
+    } catch (err) {
+      fail(toErrorMessage(err));
+    }
+  });
+
+marketplaceCmd
+  .command('codex-login')
+  .description('Sign this node in to a ChatGPT subscription for a codex-oauth connector (opens nothing: prints the URL to open)')
+  .option('--status', 'Only report the state of the current login flow')
+  .option('--auth-file <path>', 'Absolute path to store the tokens (default <dkgDir>/marketplace/.secrets/codex-auth.json)')
+  .action(async (opts: { status?: boolean; authFile?: string }) => {
+    try {
+      const client = await ApiClient.connect();
+      const state = opts.status
+        ? await client.marketplace.codexLoginStatus()
+        : await client.marketplace.codexLogin(opts.authFile ? { authFile: opts.authFile } : {});
+      console.log(`Codex login: ${state.status}${state.detail ? ` (${state.detail})` : ''}`);
+      if (state.authorizeUrl && state.status === 'pending') {
+        console.log('Open this URL in a browser ON THIS MACHINE and sign in:');
+        console.log(`  ${state.authorizeUrl}`);
+      }
+    } catch (err) {
+      fail(toErrorMessage(err));
+    }
+  });
+
+marketplaceCmd
+  .command('gateway')
+  .description('Show how to call the OpenAI-compatible buyer gateway (base URL, curl and SDK snippets)')
+  .action(async () => {
+    try {
+      const client = await ApiClient.connect();
+      const status = await client.marketplace.status();
+      const gateway = status.gateway;
+      if (!gateway?.enabled) {
+        console.log('The buyer gateway is disabled on this node (needs marketplace.enabled; '
+          + 'marketplace.buyer.gateway.enabled / DKG_MARKETPLACE_GATEWAY_ENABLED must not be false).');
+        return;
+      }
+      // The daemon URL the client already resolved (private field; read-only use).
+      const baseUrl = `${client['baseUrl']}${gateway.basePath}`;
+      console.log(`Gateway base URL: ${baseUrl}`);
+      console.log(`Keys:             ${gateway.keys} minted (\`dkg marketplace keys mint --budget-trac 1\`)`);
+      console.log('');
+      console.log('Authenticate with a gateway key — NEVER the node token:');
+      console.log('');
+      console.log(`  export DKG_GATEWAY_KEY=dkg_gw_…`);
+      console.log(`  curl -s ${baseUrl}/models -H "Authorization: Bearer $DKG_GATEWAY_KEY"`);
+      console.log(`  curl -s ${baseUrl}/chat/completions -H "Authorization: Bearer $DKG_GATEWAY_KEY" \\`);
+      console.log(`    -H 'Content-Type: application/json' \\`);
+      console.log(`    -d '{"model":"<model id>","messages":[{"role":"user","content":"hello"}]}'`);
+      console.log(`  curl -s ${baseUrl}/query -H "Authorization: Bearer $DKG_GATEWAY_KEY" \\`);
+      console.log(`    -H 'Content-Type: application/json' -d '{"sparql":"SELECT ?s WHERE { ?s ?p ?o } LIMIT 5"}'`);
+      console.log('');
+      console.log('OpenAI SDK (server side):');
+      console.log(`  new OpenAI({ baseURL: '${baseUrl}', apiKey: process.env.DKG_GATEWAY_KEY })`);
     } catch (err) {
       fail(toErrorMessage(err));
     }

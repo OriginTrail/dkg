@@ -158,7 +158,8 @@ import {
   formatMetricsCollectorStartupLog,
   resolveMetricsCollectorConfig,
 } from '../metrics-collector-config.js';
-import { resolveMarketplaceAgentConfig } from '../marketplace-config.js';
+import { resolveMarketplaceAgentConfig, resolveMarketplaceGatewayConfig } from '../marketplace-config.js';
+import { createMarketplaceGatewayDispatch, isMarketplaceGatewayPath } from './marketplace-gateway-dispatch.js';
 import { assertNodeRuntimeSupported } from '../node-runtime-preflight.js';
 import { startDashboardLogVolumePruner } from './dashboard-log-volume-pruner.js';
 import {
@@ -3384,6 +3385,8 @@ async function runDaemonInnerWithStartupOwnership(
     cancelContextGraphReadinessRepeats();
   };
 
+  // OT-RFC-27 buyer gateway (undefined ⇔ disabled): scoped-key auth, see the carve-out below.
+  const marketplaceGateway = createMarketplaceGatewayDispatch({ agent, gateway: resolveMarketplaceGatewayConfig(config.marketplace), dataDir: dkgDir(), log });
   const server = createServer(async (req, res) => {
     try {
       const reqUrl = new URL(req.url ?? "/", `http://${req.headers.host}`);
@@ -3434,6 +3437,14 @@ async function runDaemonInnerWithStartupOwnership(
           "Access-Control-Allow-Headers": "Content-Type, Authorization",
         });
         res.end();
+        return;
+      }
+
+      // OT-RFC-27 buyer gateway — the ONLY pre-auth carve-out: requests under
+      // /api/marketplace/gateway/v1 authenticate by a scoped gateway key inside
+      // the dedicated handler and NEVER reach the token-authenticated surfaces.
+      if (marketplaceGateway && isMarketplaceGatewayPath(reqUrl.pathname)) {
+        await marketplaceGateway.handle(req, res, reqUrl, reqCorsOrigin);
         return;
       }
 

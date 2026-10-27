@@ -1,4 +1,7 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { mkdtempSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { ethers } from 'ethers';
 import { handleMarketplaceRoutes } from '../src/daemon/routes/marketplace.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
@@ -18,6 +21,18 @@ function fakeReq(method: string, path: string, body?: unknown) {
   }
   return req;
 }
+
+// The key admin routes and the status gateway block open the daemon's key
+// store under DKG_HOME: keep it in a throwaway directory.
+let savedDkgHome: string | undefined;
+beforeAll(() => {
+  savedDkgHome = process.env.DKG_HOME;
+  process.env.DKG_HOME = mkdtempSync(join(tmpdir(), 'dkg-mkt-routes-'));
+});
+afterAll(() => {
+  if (savedDkgHome === undefined) delete process.env.DKG_HOME;
+  else process.env.DKG_HOME = savedDkgHome;
+});
 
 function runCtx(
   method: string,
@@ -570,5 +585,201 @@ describe('node-admin gating', () => {
     await done;
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).enabled).toBe(false);
+  });
+});
+
+describe('OT-RFC-27 gateway admin and seller ops routes', () => {
+  it('a gateway-prefixed path that reaches the route module (gateway disabled) is 404, never another route', async () => {
+    for (const path of ['/api/marketplace/gateway/v1', '/api/marketplace/gateway/v1/models', '/api/marketplace/gateway/v1/chat/completions']) {
+      let called = false;
+      const trap = async () => { called = true; return {} as never; };
+      const agent = { marketplaceChatCompletion: trap, marketplaceGatewayModels: trap, marketplaceStatus: trap };
+      const { res, done } = runCtx('POST', path, agent, { model: 'x', messages: [] });
+      await done;
+      expect(res.statusCode).toBe(404);
+      expect(JSON.parse(res.body)).toEqual({ error: 'marketplace gateway is disabled on this node' });
+      expect(called).toBe(false);
+    }
+  });
+
+  it('GET /api/marketplace/status merges the gateway block', async () => {
+    const agent = { marketplaceStatus: async () => ({ enabled: true, sellerReady: false, buyerReady: true }) };
+    const { res, done } = runCtx('GET', '/api/marketplace/status', agent);
+    await done;
+    const body = JSON.parse(res.body);
+    expect(body.gateway).toEqual({ enabled: false, basePath: '/api/marketplace/gateway/v1', keys: expect.any(Number) });
+  });
+
+  it('keys: mint (201, plaintext once) → list (no hash) → revoke (idempotent) → 404 unknown', async () => {
+    const minted = runCtx('POST', '/api/marketplace/keys', {}, {
+      label: 'sdk', budgetTrac: '0.5', expiresInSeconds: 3600, modelAllowlist: ['Stub-Chat', 'stub-chat'], allowQuery: false, rps: 3,
+    });
+    await minted.done;
+    expect(minted.res.statusCode).toBe(201);
+    const { key, record } = JSON.parse(minted.res.body);
+    expect(key).toMatch(/^dkg_gw_[0-9a-f]{8}_[A-Za-z0-9_-]{43}$/);
+    expect(record).toMatchObject({
+      keyId: `gw_${key.slice(7, 15)}`,
+      scopes: { label: 'sdk', budgetWei: '500000000000000000', modelAllowlist: ['stub-chat'], allowQuery: false, rps: 3 },
+      revokedAt: null,
+      usage: { spentWei: '0', reservedWei: '0', calls: 0 },
+    });
+    expect(record).not.toHaveProperty('keyHash');
+    expect(record.scopes.expiresAt - Math.floor(Date.now() / 1000)).toBeGreaterThan(3500);
+
+    const listed = runCtx('GET', '/api/marketplace/keys', {});
+    await listed.done;
+    const keys = JSON.parse(listed.res.body).keys;
+    expect(keys.map((k: { keyId: string }) => k.keyId)).toContain(record.keyId);
+    expect(listed.res.body).not.toContain(key);
+    expect(listed.res.body).not.toContain('keyHash');
+
+    const revoked = runCtx('POST', `/api/marketplace/keys/${record.keyId}/revoke`, {}, {});
+    await revoked.done;
+    expect(revoked.res.statusCode).toBe(200);
+    const first = JSON.parse(revoked.res.body);
+    expect(first).toEqual({ keyId: record.keyId, revokedAt: expect.any(Number) });
+    const again = runCtx('POST', `/api/marketplace/keys/${record.keyId}/revoke`, {}, {});
+    await again.done;
+    expect(JSON.parse(again.res.body).revokedAt).toBe(first.revokedAt);
+    for (const unknown of ['gw_00000000', 'not-a-key-id']) {
+      const missing = runCtx('POST', `/api/marketplace/keys/${unknown}/revoke`, {}, {});
+      await missing.done;
+      expect(missing.res.statusCode).toBe(404);
+    }
+  });
+
+  it.each([
+    [{}, /exactly one of budgetWei .* or budgetTrac/],
+    [{ budgetWei: '1', budgetTrac: '1' }, /exactly one of budgetWei/],
+    [{ budgetWei: '0' }, /budget must be > 0/],
+    [{ budgetWei: (1n << 96n).toString() }, /budgetWei must fit in uint96/],
+    [{ budgetTrac: '-1' }, /budgetTrac must be a positive decimal/],
+    [{ budgetTrac: '1', expiresAt: 1 }, /expiresAt must be a future unix timestamp/],
+    [{ budgetTrac: '1', expiresAt: 4_000_000_000, expiresInSeconds: 60 }, /at most one of expiresAt/],
+    [{ budgetTrac: '1', modelAllowlist: ['Not A Model!'] }, /modelAllowlist\[0\] is not a valid model id/],
+    [{ budgetTrac: '1', modelAllowlist: 'stub-chat' }, /modelAllowlist must be null or an array/],
+    [{ budgetTrac: '1', rps: 0 }, /rps must be an integer 1\.\.1000/],
+    [{ budgetTrac: '1', allowQuery: 'yes' }, /allowQuery must be a boolean/],
+    [{ budgetTrac: '1', label: 'x'.repeat(65) }, /label must be a string of at most 64/],
+  ])('mint %j → 400', async (body, error) => {
+    const { res, done } = runCtx('POST', '/api/marketplace/keys', {}, body);
+    await done;
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toMatch(error);
+  });
+
+  it('key routes are node-admin only (agent token → 403, even for the list)', async () => {
+    for (const [method, path] of [['GET', '/api/marketplace/keys'], ['POST', '/api/marketplace/keys'], ['POST', '/api/marketplace/keys/gw_00000000/revoke']] as const) {
+      const { res, done } = runCtx(method, path, {}, { budgetTrac: '1' }, { authEnabled: true, requestToken: 'dkg_at_x' });
+      await done;
+      expect(res.statusCode, `${method} ${path}`).toBe(403);
+    }
+  });
+
+  it('GET /api/marketplace/seller/connectors[?probe=1] → { connectors } (node-admin)', async () => {
+    const seen: unknown[] = [];
+    const agent = {
+      marketplaceConnectorStatus: async (opts: unknown) => {
+        seen.push(opts);
+        return [{
+          offeringLocalId: 'devnet-chat', modelId: 'stub-chat', kind: 'openai-compatible', state: 'mounted',
+          upstreamOrigin: 'http://127.0.0.1:18080', secretConfigured: true,
+          metering: { basis: 'pinned', tokenizerKind: 'stub-words-v1', tokenizerDigest: 'sha256:77c4' },
+        }];
+      },
+    };
+    const plain = runCtx('GET', '/api/marketplace/seller/connectors', agent);
+    await plain.done;
+    expect(plain.res.statusCode).toBe(200);
+    expect(JSON.parse(plain.res.body).connectors[0]).toMatchObject({ offeringLocalId: 'devnet-chat', state: 'mounted' });
+    const probed = runCtx('GET', '/api/marketplace/seller/connectors?probe=1', agent);
+    await probed.done;
+    expect(seen).toEqual([{ probe: false }, { probe: true }]);
+    const gated = runCtx('GET', '/api/marketplace/seller/connectors', agent, undefined, { authEnabled: true, requestToken: 'dkg_at_x' });
+    await gated.done;
+    expect(gated.res.statusCode).toBe(403);
+  });
+
+  it('POST /api/marketplace/recount/reset { sellerIdentityId } → { reset }', async () => {
+    const seen: bigint[] = [];
+    const agent = { marketplaceResetSellerStanding: (id: bigint) => { seen.push(id); return true; } };
+    const ok = runCtx('POST', '/api/marketplace/recount/reset', agent, { sellerIdentityId: '3' });
+    await ok.done;
+    expect(ok.res.statusCode).toBe(200);
+    expect(JSON.parse(ok.res.body)).toEqual({ reset: true });
+    expect(seen).toEqual([3n]);
+    const bad = runCtx('POST', '/api/marketplace/recount/reset', agent, { sellerIdentityId: 'three' });
+    await bad.done;
+    expect(bad.res.statusCode).toBe(400);
+    const gated = runCtx('POST', '/api/marketplace/recount/reset', agent, { sellerIdentityId: '3' }, { authEnabled: true, requestToken: 'dkg_at_x' });
+    await gated.done;
+    expect(gated.res.statusCode).toBe(403);
+  });
+
+  it('codex login: GET reports the idle flow; POST validates authFile; both node-admin only', async () => {
+    const status = runCtx('GET', '/api/marketplace/seller/connectors/codex-oauth/login', {});
+    await status.done;
+    expect(status.res.statusCode).toBe(200);
+    expect(JSON.parse(status.res.body)).toMatchObject({ status: expect.stringMatching(/^(idle|pending|done|error)$/) });
+    const bad = runCtx('POST', '/api/marketplace/seller/connectors/codex-oauth/login', {}, { authFile: 'relative/auth.json' });
+    await bad.done;
+    expect(bad.res.statusCode).toBe(400);
+    expect(JSON.parse(bad.res.body).error).toMatch(/authFile must be an absolute file path/);
+    for (const method of ['GET', 'POST'] as const) {
+      const gated = runCtx(method, '/api/marketplace/seller/connectors/codex-oauth/login', {}, {}, { authEnabled: true, requestToken: 'dkg_at_x' });
+      await gated.done;
+      expect(gated.res.statusCode).toBe(403);
+    }
+  });
+
+  it('offerings: a connector mount failure maps to 400 with its code (503 for an unhealthy upstream)', async () => {
+    for (const [code, status] of [['CONNECTOR_SECRET_PERMS', 400], ['CONNECTOR_UNHEALTHY', 503]] as const) {
+      const agent = {
+        marketplaceSetOfferings: async () => {
+          throw namedError('MarketplaceConnectorMountError', `offering devnet-chat: ${code}`, { code, offeringLocalId: 'devnet-chat' });
+        },
+      };
+      const { res, done } = runCtx('POST', '/api/marketplace/seller/offerings', agent, { offerings: [] });
+      await done;
+      expect(res.statusCode).toBe(status);
+      expect(JSON.parse(res.body)).toMatchObject({ code, offeringLocalId: 'devnet-chat' });
+    }
+  });
+
+  it('offerings: a chat-connector offering is parsed before the mixin (bigint context length)', async () => {
+    const calls: unknown[] = [];
+    const agent = { marketplaceSetOfferings: async (offerings: unknown) => { calls.push(offerings); return { offerings: 1, published: [] }; } };
+    const { res, done } = runCtx('POST', '/api/marketplace/seller/offerings', agent, {
+      offerings: [{
+        offeringLocalId: 'devnet-chat', serviceType: 'inference', unit: 'token', modelId: 'stub-chat', askPerUnitWei: '500000000000',
+        connector: { kind: 'openai-compatible', baseUrl: 'http://127.0.0.1:18080/v1', upstreamModel: 'stub-chat', contextLength: '32768' },
+        metering: { tokenizer: { kind: 'stub-words-v1' } },
+      }],
+    });
+    await done;
+    expect(res.statusCode).toBe(200);
+    expect((calls[0] as Array<{ connector: { contextLength: bigint } }>)[0].connector.contextLength).toBe(32768n);
+  });
+
+  it('subscribe: bucket model ids are canonicalized; an invalid one is 400', async () => {
+    const seen: any[] = [];
+    const agent = {
+      marketplaceSubscribe: async (opts: any) => {
+        seen.push(opts);
+        return { epoch: 1n, sessionKeyAddress: '0x' + '2'.repeat(40), tx: { hash: '0x' + '3'.repeat(64), blockNumber: 1 } };
+      },
+    };
+    const bucket = (modelId: string) => ({
+      totalBudgetWei: '10', buckets: [{ match: { serviceType: 'inference', modelId }, budgetWei: '1', priceCapWeiPerUnit: '1', maxUnitsPerCall: '1' }],
+    });
+    const ok = runCtx('POST', '/api/marketplace/subscribe', agent, { amountWei: '1', policy: bucket('  Stub-Chat ') });
+    await ok.done;
+    expect(ok.res.statusCode).toBe(200);
+    expect(seen[0].policy.buckets[0].match).toEqual({ serviceType: 'inference', modelId: 'stub-chat' });
+    const bad = runCtx('POST', '/api/marketplace/subscribe', agent, { amountWei: '1', policy: bucket('Not A Model!') });
+    await bad.done;
+    expect(bad.res.statusCode).toBe(400);
+    expect(JSON.parse(bad.res.body).error).toMatch(/match\.modelId must be a valid model id/);
   });
 });

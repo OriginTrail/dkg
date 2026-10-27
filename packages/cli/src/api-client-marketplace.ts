@@ -22,10 +22,79 @@ export interface MarketplaceStatusResponse {
   enabled: boolean;
   sellerReady: boolean;
   buyerReady: boolean;
+  degraded?: string;
   epoch?: string;
   settlementDeadline?: string;
-  seller?: { offerings: number; pendingReceipts: number; submittedClaims: number };
-  buyer?: { subscribed: boolean; epoch?: string; sessionKeyAddress?: string; meter?: MarketplaceMeterStateWire };
+  seller?: {
+    offerings: number;
+    pendingReceipts: number;
+    submittedClaims: number;
+    connectors?: { mounted: number; failed: number; mounting: number };
+  };
+  buyer?: {
+    subscribed: boolean;
+    epoch?: string;
+    sessionKeyAddress?: string;
+    meter?: MarketplaceMeterStateWire;
+    recount?: { sellers: number; deprioritized: number; denied: number };
+  };
+  /** The OpenAI-compatible buyer gateway (merged by the daemon). */
+  gateway?: { enabled: boolean; basePath: string; keys: number; error?: string };
+}
+
+/** A gateway key as the admin routes return it (never the hash; plaintext only at mint). */
+export interface MarketplaceGatewayKeyWire {
+  keyId: string;
+  scopes: {
+    label: string;
+    budgetWei: string;
+    expiresAt: number | null;
+    modelAllowlist: string[] | null;
+    allowQuery: boolean;
+    rps: number;
+  };
+  mintedAt: number;
+  revokedAt: number | null;
+  usage: {
+    spentWei: string;
+    reservedWei: string;
+    calls: number;
+    inferenceCalls: number;
+    queryCalls: number;
+    servedUnits: string;
+    lastUsedAt: number | null;
+  };
+}
+
+export interface MarketplaceGatewayKeyMintBody {
+  label?: string;
+  budgetWei?: string;
+  budgetTrac?: string;
+  expiresAt?: number;
+  expiresInSeconds?: number;
+  modelAllowlist?: string[] | null;
+  allowQuery?: boolean;
+  rps?: number;
+}
+
+export interface MarketplaceConnectorStatusWire {
+  offeringLocalId: string;
+  modelId: string;
+  kind: 'openai-compatible' | 'llamacpp' | 'codex-oauth';
+  state: 'mounting' | 'mounted' | 'failed';
+  detail?: string;
+  upstreamOrigin?: string;
+  secretConfigured: boolean;
+  metering: { basis: 'pinned' | 'provider-reported'; tokenizerKind?: string; tokenizerDigest?: string };
+  weightsDigest?: string;
+  health?: { ok: boolean; latencyMs: number; detail?: string; checkedAt: number };
+}
+
+export interface MarketplaceCodexLoginState {
+  status: 'idle' | 'pending' | 'done' | 'error';
+  authorizeUrl?: string;
+  startedAt?: string;
+  detail?: string;
 }
 
 export interface MarketplaceOfferWire {
@@ -51,7 +120,12 @@ export interface MarketplaceOfferingWire {
   askPerUnitWei: string | number;
   capacityUnitsPerMin?: string | number;
   expiresAt?: number;
-  executor?: 'stub-inference' | 'local-query';
+  executor?: 'stub-inference' | 'local-query' | 'chat-connector';
+  /** Chat connector; secrets are file PATHS (`secretEnvFile`, `authFile`), never values. */
+  connector?: Record<string, unknown>;
+  metering?: { tokenizer?: { kind: string; path?: string } };
+  allowedBuyers?: string[];
+  model?: { displayName?: string; family?: string; contextLength?: string; quantization?: string };
 }
 
 export interface MarketplacePlanPolicyWire {
@@ -124,8 +198,27 @@ export function createMarketplaceClient(get: Get, post: Post) {
       payload: Record<string, unknown>;
       maxUnits?: string | number;
     }) => post<MarketplaceInvokeResponse>('/api/marketplace/invoke', body),
-    meter: () => get<{ state?: MarketplaceMeterStateWire; summary?: string }>('/api/marketplace/meter'),
+    meter: () => get<{
+      state?: MarketplaceMeterStateWire;
+      summary?: string;
+      recount?: Array<Record<string, unknown> & { sellerIdentityId: string; standing: string }>;
+    }>('/api/marketplace/meter'),
     settle: (body: { action: MarketplaceSettleActionWire; buyer?: string; epoch?: string | number }) =>
       post<MarketplaceSettleResponse>('/api/marketplace/settle', body),
+    // Gateway keys (node-admin). The plaintext `key` exists only in the mint response.
+    keys: () => get<{ keys: MarketplaceGatewayKeyWire[] }>('/api/marketplace/keys'),
+    mintKey: (body: MarketplaceGatewayKeyMintBody) =>
+      post<{ key: string; record: MarketplaceGatewayKeyWire }>('/api/marketplace/keys', body),
+    revokeKey: (keyId: string) =>
+      post<{ keyId: string; revokedAt: number }>(`/api/marketplace/keys/${encodeURIComponent(keyId)}/revoke`, {}),
+    connectors: (opts: { probe?: boolean } = {}) =>
+      get<{ connectors: MarketplaceConnectorStatusWire[] }>(
+        `/api/marketplace/seller/connectors${opts.probe ? '?probe=1' : ''}`,
+      ),
+    codexLogin: (body: { authFile?: string } = {}) =>
+      post<MarketplaceCodexLoginState>('/api/marketplace/seller/connectors/codex-oauth/login', body),
+    codexLoginStatus: () => get<MarketplaceCodexLoginState>('/api/marketplace/seller/connectors/codex-oauth/login'),
+    resetRecount: (sellerIdentityId: string) =>
+      post<{ reset: boolean }>('/api/marketplace/recount/reset', { sellerIdentityId }),
   };
 }
