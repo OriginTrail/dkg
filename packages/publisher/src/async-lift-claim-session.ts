@@ -4,7 +4,7 @@ import { completionTrace } from './async-lift-completion-trace.js';
 import type { ClaimLockQueue } from './async-lift-claim-lock.js';
 import { claimTrace, withObservedClaimLock, type ClaimLockKind, type ClaimLockTrace } from './async-lift-claim-trace.js';
 import type { PublishResult } from './publisher.js';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import type {
   JournalKind,
@@ -514,7 +514,7 @@ export class AsyncLiftClaimCoordinator {
     const now = this.config.now();
     const result = await this.store.query(
       `SELECT ?wallet ?job ?expiresAt ?claimToken WHERE { GRAPH <${this.config.walletLockGraphUri}> { ?lock <${CONTROL_WALLET_ID}> ?wallet ; <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ${literal('active')} ; <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt . OPTIONAL { ?lock <${CONTROL_CLAIM_TOKEN}> ?claimToken } } }`,
-      { source: 'publisher.asyncLift.walletLock.sweep' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.walletLock.sweep'),
     );
     const expiredWallets: string[] = [];
     for (const row of expectBindings(result)) {

@@ -486,6 +486,26 @@ export const PATH_TRIGGERS = Object.freeze([
     evmScopes: [],
     reason: 'the chain RPC-site census asserts their authority call sites',
   },
+  {
+    // packages/publisher/test/async-lift-queue-graph-coverage.test.ts scans every package's src for the publisher
+    // queue's graphs and labels, and reads the storage routing test (which the storage rule already routes to
+    // this lane) to keep its list of routing-covered store methods in step. This names the one file outside the
+    // publisher's own closure that names a queue graph: the chain-reset wipe in cli.
+    //
+    // It is deliberately NOT widened to packages/agent/src and packages/cli/src. That would send the publisher
+    // lane (4 shards and the Hardhat artifacts) to every agent-only or cli-only PR (about a third of the PRs
+    // merged since July 2026), and the agent layer is routed off this lane on purpose
+    // (ci-delta-routing.test.mjs). A path pattern cannot see what a file says, so the guard is a test instead:
+    // ci-delta-routing.test.mjs scans every workspace's src for the same vocabulary as the coverage test, and the
+    // build job runs it on every PR that changes code. A new reference anywhere fails that PR until its file is
+    // listed here, and listing it makes the coverage test run.
+    patterns: [
+      /^packages\/cli\/src\/daemon\/chain-reset-wipe\.ts$/,
+    ],
+    lanes: ['tornado_publisher'],
+    evmScopes: [],
+    reason: 'the publisher queue graph coverage test asserts the chain-reset wipe reference',
+  },
 ]);
 
 // Repository areas outside the package workspaces, in first-match order. An
