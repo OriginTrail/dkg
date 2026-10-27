@@ -237,9 +237,10 @@ it('retention never deletes anything but old finalized records, never changes th
       expect(tally.clockPassedFutureUpdate).toBeGreaterThan(5);                          // records dated after now that the clock really passed during the walk
     }
     // The tie floors need the larger budget. A tie inside a key's deletable run that the walk meets newest first comes up in about 4% of the cases (4.1% over 100,000
-    // seeds of the generator; 5.4% over a reviewer's 400,000 before it accepted two records in one millisecond), and two records of a run accepted in one millisecond, the
-    // newer finished first, in about 2% (2.1%). So a 100-run run with a seed other than the fixed one (a dispatched `standard` profile with its own seed) would miss one
-    // of them a few percent of the time with no bug anywhere. From 1,000 runs (the nightly) a miss is beyond any practical chance (under e^-20 for each), so a failure
+    // seeds of the generator; 5.4% over a reviewer's 400,000 before it accepted two records in one millisecond), one it meets oldest first in about 6% (6.2%), and two
+    // records of a run accepted in one millisecond, the newer finished first, in about 2% (2.1%). So a 100-run run with a seed other than the fixed one (a dispatched
+    // `standard` profile with its own seed) would miss at least one of them about one time in eight with no bug anywhere: 12.5% of 2,000 simulated 100-run runs missed
+    // one, 11.2% the same-millisecond floor alone. From 1,000 runs (the nightly) a miss is beyond any practical chance (under e^-20 for each), so a failure
     // there means the generator stopped reaching them. The deterministic tests (async-lift-retention-order.test.ts) pin the behaviour at every budget.
     if (options.numRuns >= 1000) {
       expect(tally.tiedNewestFirst).toBeGreaterThan(0);                                  // keys whose deletable run holds a tie the walk meets newest first
