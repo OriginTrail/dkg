@@ -37,6 +37,11 @@ export async function recoverPublicSnapshotToCurrent(options: {
     if (BigInt(next.blockNumber) < BigInt(previous.blockNumber)
       || (next.blockNumber === previous.blockNumber && next.blockHash !== previous.blockHash))
       throw new Error('Snapshot catch-up finalized anchor regressed or changed');
+    const nextIds = new Set(next.assets.map(asset => asset.id));
+    // Catch-up can add or replace authenticated content, but cannot silently
+    // authorize old stored data after a member disappears from the inventory.
+    if (previous.assets.some(asset => !nextIds.has(asset.id)))
+      throw new Error('Snapshot catch-up inventory removed previously pinned assets');
     if (next.inventoryDigest === previous.inventoryDigest) {
       return { observation, fresh, recovered, rounds,
         bulkChunks: recovered.bulkChunks === undefined ? undefined : bulkChunks };

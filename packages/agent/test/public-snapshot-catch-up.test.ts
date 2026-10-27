@@ -71,6 +71,15 @@ describe('catch-up stays inside one snapshot job', () => {
     expect(recover).toHaveBeenCalledTimes(1);
   });
 
+  it('refuses a shrinking inventory without claiming current coverage of retained old content', async () => {
+    const assets = makeSnapshotAssets(graph, 2), initial = observation(assets), smaller = observation(assets.slice(0, 1), '11');
+    const recover = vi.fn(async () => ({ committed: new Set(assets.map(asset => asset.ual)) }));
+    await expect(recoverPublicSnapshotToCurrent({ initial, deadline: Date.now() + 3_600_000,
+      signal: new AbortController().signal, assertCurrent() {}, recover, readFresh: async () => smaller }))
+      .rejects.toThrow('removed previously pinned assets');
+    expect(recover).toHaveBeenCalledTimes(1);
+  });
+
   it('drains recovery and rejects cancellation before starting another coverage read', async () => {
     const initial = observation([]), caller = new AbortController();
     let finish!: () => void;
