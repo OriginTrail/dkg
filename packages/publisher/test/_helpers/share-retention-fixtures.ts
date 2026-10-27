@@ -57,8 +57,8 @@ export type Quads = ReturnType<typeof serializeJobRecord>['jobQuads'];
 export async function insertQuads(store: TripleStore, quads: Quads) { for (let i = 0; i < quads.length; i += 4000) await store.insert(quads.slice(i, i + 4000)); }
 export async function put(store: TripleStore, ...jobs: PromoteJob[]) { for (const j of jobs) await store.insert(serializeJobRecord(j, GRAPH).jobQuads); }
 /**
- * `put`, but each job named in `twinned` has a second `updatedAt` triple that compares equal to its first (`"100"^^xsd:integer` and `"100.0"^^xsd:decimal` are two terms):
- * a scan that matches the subject returns it once per term.
+ * `put`, but each job named in `twinned` has a second `updatedAt` triple of the same value (`"100"^^xsd:integer` and `"100.0"^^xsd:decimal` are two terms, equal
+ * in every engine): a scan that read both would return the subject twice, and the sweep must judge and delete it once.
  */
 export async function putTwinned(store: TripleStore, twinned: ReadonlySet<string>, ...jobs: PromoteJob[]) {
   const twin = (j: PromoteJob) => `"${j.updatedAt}.0"^^<http://www.w3.org/2001/XMLSchema#decimal>`;

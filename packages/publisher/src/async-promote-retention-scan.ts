@@ -16,15 +16,20 @@
  * are walked in key order through a second cursor component (`tie`), so even a group larger than a batch is covered. The scan relies on the engine
  * honouring ORDER BY / LIMIT; the result is checked (sorted, after the cursor, within the cutoff) and a violation is reported in `anomalies` and never advances
  * the cursor (a batch then still deletes what it judges, but may starve exactly like an unordered scan: it is a tripwire for a non-conforming engine).
- * One subject can come back as SEVERAL rows: distinct numeric terms that compare equal (`"100"^^xsd:integer` and `"100.0"^^xsd:decimal`) are separate triples, and
- * both match a range or an equality filter. That is a conforming answer, not a reordering: the rows of a subject are collapsed to one judged row, a window of
- * limit + 1 ROWS counts as full however few subjects the repeats left in it, and the walk goes on after the last subject judged, so repeats cost calls and never stall.
+ * ONLY EXACT INTEGER TERMS ARE CANDIDATES. The cursor holds a JS number and the engine compares terms exactly, so a term a double cannot represent reads back as a
+ * number the engine does not consider equal to it: `"100.0000000000000001"^^xsd:decimal` reads as 100, the tie walk at 100 does not return it (it is not equal to
+ * 100) and the range scan `> 100` does (it is greater), so the cursor would never leave it. Both queries therefore select `xsd:integer` terms in [0, cutoff] (the queue
+ * writes nothing else, and an integer in that range is exact in a double): the number the cursor holds IS the term. A subject whose `updatedAt` is anything else (a
+ * decimal, a double, a plain literal, a negative number) is never a candidate: it is not judged, so it is kept.
+ * One subject can still come back as SEVERAL rows: an engine that keeps two integer lexical forms of one value (`"100"`, `"0100"`) apart answers it once per term, and
+ * both match. That is a conforming answer, not a reordering: the rows of a subject are collapsed to one judged row, a window of limit + 1 ROWS counts as full however few
+ * subjects the repeats left in it, and the walk goes on after the last subject judged, so repeats cost calls and never stall.
  *
  * The scan runs outside the queue lock, on the background lane (OT-RFC-73 §5.1 tagging table: it is not queue control work). It reads only the two stored
  * index triples; the payload is judged later, under the lock.
  */
 import type { QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
-import { PROMOTE_PAYLOAD, PROMOTE_STATE, PROMOTE_UPDATED_AT, expectBindings, jobSubject, literal } from './async-promote-queue-utils.js';
+import { PROMOTE_PAYLOAD, PROMOTE_STATE, PROMOTE_UPDATED_AT, XSD_INTEGER, expectBindings, jobSubject, literal } from './async-promote-queue-utils.js';
 import type { PromoteRetentionKeepReason } from './async-promote-retention-policy.js';
 import { PERMANENT_KEEP_REASONS } from './async-promote-retention-policy.js';
 
@@ -49,6 +54,8 @@ export interface PromoteRetentionScanCursor {
 
 const num = (n: number): string => (Number.isFinite(n) ? String(n) : '0');
 export const JOB_SUBJECT_PREFIX = jobSubject('');
+/** The terms a scan may read: exact integers, which a JS number holds without loss (see the module doc). Both scan queries carry it, so they select the same rows. */
+const EXACT_TIMESTAMP = `FILTER (DATATYPE(?updatedAt) = <${XSD_INTEGER}> && ?updatedAt >= 0)`;
 
 /**
  * Candidate scan of one class: the rows whose stored `state` is the class and whose stored `updatedAt` lies after the cursor and not after `cutoff`, oldest first.
@@ -57,13 +64,13 @@ export const JOB_SUBJECT_PREFIX = jobSubject('');
  */
 export function buildRetentionScanQuery(graph: string, scanClass: PromoteRetentionScanClass, cutoff: number, limit: number, cursor: PromoteRetentionScanCursor = {}): string {
   const lower = cursor.after === undefined ? '' : ` FILTER (?updatedAt ${cursor.inclusive ? '>=' : '>'} ${num(cursor.after)})`;
-  return `SELECT ?job ?updatedAt WHERE { GRAPH <${graph}> { ?job <${PROMOTE_STATE}> ${literal(scanClass)} ; <${PROMOTE_UPDATED_AT}> ?updatedAt . FILTER (?updatedAt <= ${num(cutoff)})${lower} } } ORDER BY ?updatedAt LIMIT ${limit + 1}`;
+  return `SELECT ?job ?updatedAt WHERE { GRAPH <${graph}> { ?job <${PROMOTE_STATE}> ${literal(scanClass)} ; <${PROMOTE_UPDATED_AT}> ?updatedAt . ${EXACT_TIMESTAMP} FILTER (?updatedAt <= ${num(cutoff)})${lower} } } ORDER BY ?updatedAt LIMIT ${limit + 1}`;
 }
 
 /** The rows of one class that share exactly one `updatedAt`, in key order after `afterKey` (only used inside a group larger than one batch). */
 export function buildRetentionTieQuery(graph: string, scanClass: PromoteRetentionScanClass, updatedAt: number, limit: number, afterKey?: string): string {
   const after = afterKey === undefined ? '' : ` FILTER (STR(?job) > ${literal(afterKey)})`;
-  return `SELECT ?job ?updatedAt WHERE { GRAPH <${graph}> { ?job <${PROMOTE_STATE}> ${literal(scanClass)} ; <${PROMOTE_UPDATED_AT}> ?updatedAt . FILTER (?updatedAt = ${num(updatedAt)})${after} } } ORDER BY STR(?job) LIMIT ${limit + 1}`;
+  return `SELECT ?job ?updatedAt WHERE { GRAPH <${graph}> { ?job <${PROMOTE_STATE}> ${literal(scanClass)} ; <${PROMOTE_UPDATED_AT}> ?updatedAt . ${EXACT_TIMESTAMP} FILTER (?updatedAt = ${num(updatedAt)})${after} } } ORDER BY STR(?job) LIMIT ${limit + 1}`;
 }
 
 /** Payload and stored state of a slice of candidate subjects (read again under the lock). The slice is bounded by the caller. */

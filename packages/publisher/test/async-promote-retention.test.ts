@@ -805,13 +805,25 @@ describe('a missing promoteStarted is a legacy shape only before format 2, and a
   });
 });
 
-describe('repeated rows of one subject in the scan (review of P10a: equal-comparing timestamp terms must not stall the pass)', () => {
+describe('repeated rows of one subject in the scan (review of P10a: a subject that comes back more than once must not stall the pass)', () => {
   const XSD = 'http://www.w3.org/2001/XMLSchema#';
   const SCAN = 'publisher.asyncPromote.retention.scan';
-  /** The job's rows with its `updatedAt` triple replaced by one triple per term: distinct RDF terms that compare equal (`"100"^^xsd:integer`, `"100.0"^^xsd:decimal`). */
+  /** The job's rows with its `updatedAt` triple replaced by one triple per term. */
   const withUpdatedAtTerms = (job: PromoteJob, ...terms: string[]): Quads =>
     serializeJobRecord(job, GRAPH).jobQuads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? terms.map(object => ({ ...q, object })) : [q]));
+  /** Two terms of one value that the engine tells apart: `"100"^^xsd:integer` and `"100.0"^^xsd:decimal` are both equal to 100 and are two triples. */
   const same = (n: number) => [`"${n}"^^<${XSD}integer>`, `"${n}.0"^^<${XSD}decimal>`];
+  /**
+   * An engine that answers a scan with the rows of some subjects `copies[id]` times, side by side (the equal-valued rows of a subject sort together) and within its
+   * LIMIT: what a store would return that keeps two integer terms of one value ("100" and "0100") apart. Oxigraph canonicalises them into one triple, so the repeat
+   * is made here, on the answer; the scan reads only integer terms, so a decimal twin is no longer one.
+   */
+  const repeating = (store: OxigraphStore, copies: Record<string, number>) => spy(store, async (sparql, source) => {
+    const all = await store.query(sparql.replace(/ LIMIT \d+$/, ''));
+    if (source !== SCAN || all.type !== 'bindings') return all;
+    const rows = all.bindings.flatMap(b => Array.from({ length: copies[String(b['job']).slice(jobSubject('').length)] ?? 1 }, () => b));
+    return { ...all, bindings: rows.slice(0, Number(/LIMIT (\d+)$/.exec(sparql)![1])) } as QueryResult;
+  });
   const calls = async (retention: ReturnType<typeof newRetention>, max = 12): Promise<ShareRetentionBatchResult[]> => {
     const results: ShareRetentionBatchResult[] = [];
     for (let i = 0; i < max; i++) { const res = await retention.runBatch(); results.push(res); if (!res.hasMore || res.error) break; }
@@ -837,12 +849,11 @@ describe('repeated rows of one subject in the scan (review of P10a: equal-compar
       : { scanned: 2, deleted: { cancelled: 0 }, wouldDelete: { cancelled: 1 }, kept: { failed_retained: 1 } });
   });
 
-  it('a group larger than a batch whose members carry two or three equal-comparing terms is walked by key: every subject judged once, all deleted, no anomaly', async () => {
+  it('a group larger than a batch whose members come back two or three times is walked by key: every subject judged once, all deleted, no anomaly', async () => {
     const store = new OxigraphStore();
     const T = 10 * W;
-    const terms: Record<string, string[]> = { s2: same(NOW - T), s4: same(NOW - T), s5: [...same(NOW - T), `"${NOW - T}.00"^^<${XSD}decimal>`] };
-    await insertQuads(store, ['s1', 's2', 's3', 's4', 's5', 's6'].flatMap(id => withUpdatedAtTerms(mk(id, 'succeeded', {}, T), ...(terms[id] ?? [integer(NOW - T)]))));
-    const { store: spied, log } = spy(store);
+    await insertQuads(store, ['s1', 's2', 's3', 's4', 's5', 's6'].flatMap(id => rowOf('succeeded', id, T)));
+    const { store: spied, log } = repeating(store, { s2: 2, s4: 2, s5: 3 });
     const results = await calls(newRetention(spied, { batchSize: 2 }), 20);
     expect(results.at(-1)!.hasMore).toBe(false);
     expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
@@ -851,10 +862,10 @@ describe('repeated rows of one subject in the scan (review of P10a: equal-compar
     expect((await storedIds(store)).size).toBe(0);
   });
 
-  it('the range scan collapses a subject that appears twice with equal-comparing terms: it is judged, counted and deleted once', async () => {
+  it('the range scan collapses a subject that appears twice: it is judged, counted and deleted once', async () => {
     const store = new OxigraphStore();
-    await insertQuads(store, [...withUpdatedAtTerms(mk('twice', 'failed', { reason: 'cancelled' }, NOW - 200), ...same(200)), ...serializeJobRecord(mk('once', 'succeeded', {}, NOW - 300), GRAPH).jobQuads]);
-    const { store: spied, log } = spy(store);
+    await insertQuads(store, [...rowOf('cancelled', 'twice', NOW - 200), ...rowOf('succeeded', 'once', NOW - 300)]);
+    const { store: spied, log } = repeating(store, { twice: 2 });
     const retention = newRetention(spied, { batchSize: 10 });
     const res = await retention.runBatch();
     expect(res).toMatchObject({ scanned: 2, deleted: 2, anomalies: 0, hasMore: false, passCompleted: true });
@@ -865,10 +876,10 @@ describe('repeated rows of one subject in the scan (review of P10a: equal-compar
     expect(retention.counters().lastCompletePass).toMatchObject({ scanned: 2, deleted: { succeeded: 1, cancelled: 1 } });
   });
 
-  it('the range scan collapses a repeated subject in the older part of a full window too: three subjects, the oldest with two equal-comparing terms, batch size 2', async () => {
+  it('the range scan collapses a repeated subject in the older part of a full window too: three subjects, the oldest appearing twice, batch size 2', async () => {
     const store = new OxigraphStore();
-    await insertQuads(store, [...withUpdatedAtTerms(mk('x', 'succeeded', {}, 10 * W), ...same(NOW - 10 * W)), ...rowOf('succeeded', 'y', 9 * W), ...rowOf('succeeded', 'z', 8 * W)]);
-    const { store: spied, log } = spy(store);
+    await insertQuads(store, [...rowOf('succeeded', 'x', 10 * W), ...rowOf('succeeded', 'y', 9 * W), ...rowOf('succeeded', 'z', 8 * W)]);
+    const { store: spied, log } = repeating(store, { x: 2 });
     const results = await calls(newRetention(spied, { batchSize: 2 }));
     expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
     expect(results.map(r => r.scanned)).toEqual([1, 2]);                                                                            // x alone (its twin row is dropped), then y and z
@@ -943,5 +954,93 @@ describe('repeated rows of one subject in the scan (review of P10a: equal-compar
     expect(results.at(-1)!.hasMore).toBe(false);
     expect(retention.counters().lastCompletePass).toBeUndefined();                                                                   // the pass that met an anomaly never completes
     expect(retention.counters().anomalies).toBe(2);
+  });
+});
+
+describe('only exact integer timestamps are scan candidates (second review of P10a: a decimal updatedAt the engine tells apart from the double the cursor holds must not stall a pass)', () => {
+  const XSD = 'http://www.w3.org/2001/XMLSchema#';
+  const decimal = (lexical: string) => `"${lexical}"^^<${XSD}decimal>`;
+  const withTerms = (job: PromoteJob, ...terms: string[]): Quads =>
+    serializeJobRecord(job, GRAPH).jobQuads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? terms.map(object => ({ ...q, object })) : [q]));
+  const calls = async (retention: ReturnType<typeof newRetention>, max = 12): Promise<ShareRetentionBatchResult[]> => {
+    const results: ShareRetentionBatchResult[] = [];
+    for (let i = 0; i < max; i++) { const res = await retention.runBatch(); results.push(res); if (!res.hasMore || res.error) break; }
+    return results;
+  };
+
+  // The engine compares a decimal with a number exactly, the cursor holds a double: `100.0000000000000001` reads as 100 there, the tie walk for 100 does not return
+  // it, and the range scan `> 100` does, so the cursor never left. Only an exact integer term is a candidate, so the two sides always agree.
+  const CASES: ReadonlyArray<{ label: string; terms: string[]; retained: number; eligible: number; retainedIsCandidate: boolean }> = [
+    { label: 'an integer and a decimal 1e-16 above it (the reviewer repro)', terms: [integer(100), decimal('100.0000000000000001')], retained: 100, eligible: 200, retainedIsCandidate: true },
+    { label: 'the first review\'s pair, 100 (integer) and 100.0 (decimal): equal in every engine, and still one candidate', terms: [integer(100), decimal('100.0')], retained: 100, eligible: 200, retainedIsCandidate: true },
+    { label: 'a single decimal term, no repeat', terms: [decimal('100.0000000000000001')], retained: 100, eligible: 200, retainedIsCandidate: false },
+    { label: 'two decimals that are equal as doubles and different as decimals', terms: [decimal('100.0000000000000001'), decimal('100.0000000000000002')], retained: 100, eligible: 200, retainedIsCandidate: false },
+    { label: 'a real-scale decimal timestamp', terms: [decimal('1898272000000.0001')], retained: 1_898_272_000_000, eligible: 1_898_272_500_000, retainedIsCandidate: false },
+  ];
+
+  it.each(CASES.flatMap(c => (['delete', 'report'] as const).map(mode => [c.label, mode, c] as const)))('%s, %s mode: the pass completes at batch size 1 and 2, the cancelled job behind is reached, no anomaly', async (_label, mode, c) => {
+    for (const batchSize of [1, 2]) {
+      const store = new OxigraphStore();
+      await insertQuads(store, [...withTerms(mk('ret', 'failed', {}, NOW - c.retained), ...c.terms), ...serializeJobRecord(mk('eligible', 'failed', { reason: 'cancelled' }, NOW - c.eligible), GRAPH).jobQuads]);
+      const retention = newRetention(store, { mode, batchSize });
+      const results = await calls(retention);
+      const at = `batch size ${batchSize}, ${results.length} calls, anomalies ${results.map(r => r.anomalies)}`;
+      expect(results.at(-1)!.hasMore, at).toBe(false);
+      expect(results.length, at).toBeLessThanOrEqual(3);
+      expect(results.every(r => r.anomalies === 0 && !r.error), at).toBe(true);
+      expect(results.filter(r => r.passCompleted), at).toHaveLength(1);
+      expect(results.reduce((n, r) => n + r.scanned, 0), at).toBe(c.retainedIsCandidate ? 2 : 1);
+      expect(results.reduce((n, r) => n + r.deleted, 0), at).toBe(mode === 'delete' ? 1 : 0);
+      expect([...(await storedIds(store))].sort(), at).toEqual(mode === 'delete' ? ['ret'] : ['eligible', 'ret']);
+      expect(retention.counters().anomalies).toBe(0);
+      expect(retention.counters().lastCompletePass, at).toMatchObject(mode === 'delete' ? { deleted: { cancelled: 1 }, wouldDelete: { cancelled: 0 } } : { deleted: { cancelled: 0 }, wouldDelete: { cancelled: 1 } });
+    }
+  });
+
+  it('a job whose only updatedAt term is not an integer is never a candidate: it is neither judged nor deleted, even when it would be eligible', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [
+      ...withTerms(mk('dec', 'failed', { reason: 'cancelled' }, NOW - 150), decimal('150')), ...withTerms(mk('dbl', 'succeeded', {}, NOW - 160), `"1.6E2"^^<${XSD}double>`),
+      ...withTerms(mk('str', 'succeeded', {}, NOW - 170), '"170"'), ...withTerms(mk('neg', 'succeeded', {}, NOW + 5), integer(-5)),
+      ...serializeJobRecord(mk('plain', 'succeeded', {}, NOW - 300), GRAPH).jobQuads,
+    ]);
+    const retention = newRetention(store, { batchSize: 1 });
+    const results = await calls(retention);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.reduce((n, r) => n + r.scanned, 0)).toBe(1);
+    expect([...(await storedIds(store))].sort()).toEqual(['dbl', 'dec', 'neg', 'str']);
+  });
+
+  it('a decimal job whose value equals a tie group is not walked with it: the group of integers larger than a batch is judged, the decimal one never', async () => {
+    const store = new OxigraphStore();
+    const T = NOW - 10 * W;
+    await insertQuads(store, [
+      ...['t1', 't2', 't3', 't4'].flatMap(id => rowOf('succeeded', id, 10 * W)),
+      ...withTerms(mk('dec-equal', 'succeeded', {}, 10 * W), decimal(`${T}.0`)),                 // equal to the group's value in every engine, but not an integer term
+    ]);
+    const { store: spied, log } = spy(store);
+    const results = await calls(newRetention(spied, { batchSize: 2 }), 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(verifiedSubjects(log).sort()).toEqual(['t1', 't2', 't3', 't4'].map(jobSubject));
+    expect([...(await storedIds(store))]).toEqual(['dec-equal']);
+  });
+
+  it('the scan and tie queries select exact integers only, in range', () => {
+    const integerOnly = `FILTER (DATATYPE(?updatedAt) = <${XSD}integer> && ?updatedAt >= 0)`;
+    expect(buildRetentionScanQuery(GRAPH, 'succeeded', NOW - W, 5)).toContain(integerOnly);
+    expect(buildRetentionScanQuery(GRAPH, 'failed', NOW - W, 5, { after: 7, inclusive: true })).toContain(integerOnly);
+    expect(buildRetentionTieQuery(GRAPH, 'succeeded', 42, 10)).toContain(integerOnly);
+  });
+
+  it('integer terms in other lexical forms are still candidates, and a group of them is walked by key: "100", "0100" and "+100" are one timestamp', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [['a', '"100"'], ['b', '"0100"'], ['c', '"+100"'], ['d', '"100"']].flatMap(([id, lexical]) => withTerms(mk(id!, 'succeeded', {}, NOW - 100), `${lexical}^^<${XSD}integer>`)));
+    const results = await calls(newRetention(store, { batchSize: 1 }), 20);
+    expect(results.at(-1)!.hasMore).toBe(false);
+    expect(results.every(r => r.anomalies === 0 && !r.error)).toBe(true);
+    expect(results.reduce((n, r) => n + r.deleted, 0)).toBe(4);
+    expect((await storedIds(store)).size).toBe(0);
   });
 });

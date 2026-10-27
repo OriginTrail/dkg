@@ -36,7 +36,7 @@ async function oneCase(seed: number, tally: Tally): Promise<void> {
   const withBenign = r() < 0.75;
   const batchSize = pick(r, [1, 2, 5, 100]), sliceSize = pick(r, [1, 3, 10]);
   const pending = new Set(population.filter(() => r() < 0.15).map(p => p.job.jobId));
-  const twinned = new Set(population.filter(() => r() < 0.25).map(p => p.job.jobId));   // a second, equal-comparing updatedAt term: the scan returns these subjects twice
+  const twinned = new Set(population.filter(() => r() < 0.25).map(p => p.job.jobId));   // a second, equal-comparing updatedAt term (a decimal): the scan reads integer terms only, so each of these subjects is still judged once
 
   const store = new OxigraphStore();
   try {
