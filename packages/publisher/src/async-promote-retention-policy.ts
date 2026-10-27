@@ -111,12 +111,36 @@ function hasReadableCommitMarker(job: StructurallyValidPromoteJobPayload): boole
   return PROMOTE_COMMIT_MARKER_STEPS.every(step => typeof flags[step] === 'boolean');
 }
 
+/** A value the queue writes as a count of attempts: a non-negative safe integer (not -0, which JSON text can carry and no writer produced). */
+const isAttemptCount = (n: unknown): n is number => typeof n === 'number' && Number.isSafeInteger(n) && n >= 0 && !Object.is(n, -0);
+
+/**
+ * "Never started promote" has to hold for EVERY attempt of the job, and the commit marker, the format and the last error describe only the LAST attempt: since format 2 every
+ * claim resets the marker to all false (`claimPromoteJob`), a reclaim drops it and rewrites `formatVersion` to this build's while it keeps `attempt.count` and the last error,
+ * and a later failure overwrites `lastError`. A job whose first attempt entered promote (it may even have committed) and whose last attempt was reclaimed before promote reads,
+ * once cancelled, as format 4 with no marker: exactly like a job that never ran. The queue keeps the evidence that does describe the whole job: `attempt.count` (every claim
+ * adds one; only an operator `recover()` resets it) against `preparationAttempts` (the contiguous prefix of attempts that failed or were abandoned with `promoteStarted` and
+ * `swmInserted` still false: `recordUnstartedPromoteAttempt`, the same "contiguous prefix only" rule `canRetireBoundRejection` applies to a retired rejection).
+ *
+ * Every attempt is proven unstarted when the two AGREE: nothing was ever claimed (count 0, no `preparationAttempts` or 0), or `preparationAttempts` equals the count at format 4,
+ * the only format whose writers record it (the same literal 4 as those two functions). A count that the evidence does not cover (a prefix: some attempt is unproven), exceeds
+ * (more preparation than attempts: no writer produces that) or does not match in kind (not a non-negative safe integer; no coercion) proves nothing, and the job is kept.
+ */
+function everyAttemptProvenUnstarted(job: StructurallyValidPromoteJobPayload): boolean {
+  const claims: unknown = job.attempt.count;
+  const prepared: unknown = job.preparationAttempts === undefined ? 0 : job.preparationAttempts;
+  if (!isAttemptCount(claims) || !isAttemptCount(prepared) || claims !== prepared) return false;
+  return claims === 0 || job.formatVersion === 4;
+}
+
 /** The benign failed classes of D-6: nothing else that failed is ever deletable. */
 function benignFailedClass(job: StructurallyValidPromoteJobPayload): Exclude<PromoteRetentionJobClass, 'succeeded'> | undefined {
   if (isRetiredBoundRejection(job)) return 'retired_no_effect';
   // "Never started promote" is read off the whole marker: a flag for any later step (`wmCleaned`, `lifecycleStamped`, `gossiped`) also says the job ran. It is read only
-  // from a format that records the marker before promote is entered: a legacy row's missing marker (or its marker without `promoteStarted`) proves nothing.
-  if (job.reason === 'cancelled' && isMarkerWriterFormat(job.formatVersion) && job.request.recoveryBinding === undefined && !PROMOTE_COMMIT_MARKER_STEPS.some(step => job.commitMarker?.[step] === true)) return 'cancelled';
+  // from a format that records the marker before promote is entered: a legacy row's missing marker (or its marker without `promoteStarted`) proves nothing. And the marker
+  // is the LAST attempt's: it counts only for a job all of whose attempts are proven unstarted (`everyAttemptProvenUnstarted`).
+  if (job.reason === 'cancelled' && isMarkerWriterFormat(job.formatVersion) && job.request.recoveryBinding === undefined && everyAttemptProvenUnstarted(job)
+    && !PROMOTE_COMMIT_MARKER_STEPS.some(step => job.commitMarker?.[step] === true)) return 'cancelled';
   return undefined;
 }
 
@@ -128,7 +152,13 @@ export function decidePromoteRetention(
   hasPendingAdmission: (jobId: string) => boolean,
 ): PromoteRetentionDecision {
   if (!(PROMOTE_JOB_STATES as readonly string[]).includes(job.state)) return { delete: false, reason: 'unknown_state' };
-  if ((job.formatVersion ?? 0) > ASYNC_PROMOTE_QUEUE_FORMAT_VERSION) return { delete: false, reason: 'newer_format' };
+  // A PRESENT `formatVersion` must be an integer from 0 up to this build's; no coercion. `(formatVersion ?? 0) > 4` read the string "5" as newer, but took "4", "legacy" and null
+  // (and -1, 1.5, -0, 1e-300) for a legacy number. Above this build's it is a newer queue's row; anything else is no format a writer produced.
+  const format: unknown = job.formatVersion;
+  if (format !== undefined) {
+    if (typeof format !== 'number' || !Number.isInteger(format) || format < 0 || Object.is(format, -0)) return { delete: false, reason: 'unreadable' };
+    if (format > ASYNC_PROMOTE_QUEUE_FORMAT_VERSION) return { delete: false, reason: 'newer_format' };
+  }
   if (job.state !== 'succeeded' && job.state !== 'failed') return { delete: false, reason: 'not_terminal' };
   if (hasUnfinishedBoundObligation(job)) return { delete: false, reason: 'unfinished_bound_obligation' };
   let jobClass: PromoteRetentionJobClass;

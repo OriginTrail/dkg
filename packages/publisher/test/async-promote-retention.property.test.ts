@@ -24,7 +24,7 @@ const options = propertyOptions();
 
 /** The only class a kind may ever be deleted as; every other kind is protected, whatever its age. */
 const ALLOWED_CLASS: Readonly<Partial<Record<PopulationKind, PromoteRetentionJobClass>>> = {
-  'succeeded': 'succeeded', 'succeeded-legacy': 'succeeded', 'failed-cancelled': 'cancelled', 'failed-retired': 'retired_no_effect',
+  'succeeded': 'succeeded', 'succeeded-legacy': 'succeeded', 'failed-cancelled': 'cancelled', 'failed-cancelled-prepared': 'cancelled', 'failed-retired': 'retired_no_effect',
 };
 const WINDOW: Readonly<Record<PromoteRetentionJobClass, number>> = { succeeded: W, cancelled: WF, retired_no_effect: WF };
 

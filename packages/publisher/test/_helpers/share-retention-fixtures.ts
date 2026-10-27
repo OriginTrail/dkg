@@ -39,6 +39,12 @@ export function mk(id: string, state: PromoteJob['state'], over: Record<string, 
 /** The attempt state of a job no worker ever claimed (`count` 0): every one of its (no) attempts is trivially unstarted. */
 export const UNCLAIMED = { count: 0, maxRetries: 5 };
 /**
+ * The attempt state of a cancelled job that was claimed twice with no proof that the claims never entered promote (`attempt.count` 2, no `preparationAttempts`): the row the
+ * queue leaves when a first attempt entered promote and failed, a second was reclaimed (which drops the marker), and the operator cancels. It looks like a never-started job
+ * (format 4, no marker) and is not one.
+ */
+export const ATTEMPTED = { count: 2, maxRetries: 5 };
+/**
  * An operator-cancelled job that retention may delete once old enough: cancelled while queued and never claimed (`attempt.count` 0, format 4, no recovery binding,
  * no marker). `mk` defaults to `attempt.count` 1 with no `preparationAttempts`, which is NOT proven unstarted (an earlier attempt may have entered promote), so a test
  * that means a deletable cancelled job, or that isolates one other rule on an otherwise deletable one, builds it here. `over` replaces any field.
@@ -168,11 +174,11 @@ export const verifiedSubjects = (log: Logged[]) => from(log, 'verify').flatMap(l
 export const deletedSubjects = (log: Logged[]) => from(log, 'delete').filter(l => l.kind === 'deleteByPatternWithoutCount' || l.kind === 'deleteByPattern').map(l => (JSON.parse(l.sparql) as { subject: string }).subject);
 
 // ---- rows that can never be deleted, and rows that can
-export type Kind = 'succeeded' | 'cancelled' | 'retired' | 'fatal' | 'bound' | 'newer' | 'corrupt' | 'orphan' | 'lying';
+export type Kind = 'succeeded' | 'cancelled' | 'retired' | 'attempted' | 'fatal' | 'bound' | 'newer' | 'corrupt' | 'orphan' | 'lying';
 export const DELETABLE: ReadonlySet<Kind> = new Set(['succeeded', 'cancelled', 'retired']);
 export function rowOf(kind: Kind, id: string, age: number): Quads {
   const jobFor: Record<Kind, () => PromoteJob> = {
-    succeeded: () => mk(id, 'succeeded', {}, age), cancelled: () => cancelledJob(id, {}, age), retired: () => retired(id, age),
+    succeeded: () => mk(id, 'succeeded', {}, age), cancelled: () => cancelledJob(id, {}, age), retired: () => retired(id, age), attempted: () => cancelledJob(id, { attempt: ATTEMPTED }, age),
     fatal: () => mk(id, 'failed', { attempt: { count: 5, maxRetries: 5, lastError: { message: 'boom', retryable: false, classification: 'fatal', recordedAt: 1 } } }, age),
     bound: () => mk(id, 'failed', { bound: true }, age), newer: () => mk(id, 'succeeded', { formatVersion: 5 }, age), corrupt: () => mk(id, 'succeeded', {}, age),
     orphan: () => mk(id, 'succeeded', {}, age), lying: () => mk(id, 'succeeded', {}, age),
@@ -241,7 +247,7 @@ export const POPULATION_KINDS = [
   'queued', 'running', 'failed_retrying',
   'failed-plain', 'failed-ambiguity', 'failed-legacy', 'failed-postcommit', 'failed-postcommit-exhausted', 'failed-bound',
   'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-cancelled-legacy', 'failed-cancelled-legacy-no-marker',
-  'failed-cancelled-no-started-flag', 'failed-cancelled-contradictory', 'failed-retired',
+  'failed-cancelled-no-started-flag', 'failed-cancelled-contradictory', 'failed-cancelled-prepared', 'failed-cancelled-attempted', 'failed-cancelled-attempted-partial', 'failed-retired',
 ] as const;
 export type PopulationKind = (typeof POPULATION_KINDS)[number];
 
@@ -271,12 +277,17 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
     case 'failed-cancelled-legacy-no-marker': return cancelledJob(id, { formatVersion: undefined, attempt: LEGACY_HISTORY }, age);
     case 'failed-cancelled-no-started-flag': return cancelledJob(id, { commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);   // format 4: not legacy
     case 'failed-cancelled-contradictory': return cancelledJob(id, { commitMarker: { ...NO_MARKERS, gossiped: true } }, age);
+    // Every attempt proven unstarted is the only way a CLAIMED cancelled job is deletable (`preparationAttempts` covers `attempt.count`, format 4): deletable. Without that proof a
+    // claimed job may have run in an earlier attempt, whatever the marker and the format of the last one say: protected (the marker is reset by every claim, dropped by a reclaim).
+    case 'failed-cancelled-prepared': return cancelledJob(id, { attempt: { count: 2, maxRetries: 5 }, preparationAttempts: 2 }, age);
+    case 'failed-cancelled-attempted': return cancelledJob(id, { attempt: ATTEMPTED }, age);
+    case 'failed-cancelled-attempted-partial': return cancelledJob(id, { attempt: { count: 3, maxRetries: 5 }, preparationAttempts: 1 }, age);
     case 'failed-retired': return retired(id, age);
   }
 }
 
 /** The jobs a correct sweep may delete once old enough, written from the D-6 list and nothing else (not from the product predicate). */
-export const DELETABLE_KINDS: ReadonlySet<PopulationKind> = new Set(['succeeded', 'succeeded-legacy', 'failed-cancelled', 'failed-retired']);
+export const DELETABLE_KINDS: ReadonlySet<PopulationKind> = new Set(['succeeded', 'succeeded-legacy', 'failed-cancelled', 'failed-cancelled-prepared', 'failed-retired']);
 
 /** Ages around both windows (and the future), tied and distinct, so every boundary and every tie of the scan is met. */
 export function populationAges(_r: () => number): number[] {

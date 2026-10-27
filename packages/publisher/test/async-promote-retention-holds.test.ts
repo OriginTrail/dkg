@@ -10,7 +10,7 @@ import { SHARE_RETENTION_DEFAULTS } from '../src/async-promote-retention.js';
 import { JOB_SUBJECT_PREFIX } from '../src/async-promote-retention-scan.js';
 import { jobSubject } from '../src/async-promote-queue-utils.js';
 import { withPromoteControlLock } from '../src/promote-control-lock.js';
-import { AG, GRAPH, NOW, W, cancelledJob, deletedSubjects, drain, from, mk, newRetention, present, put, registerPendingFlight, retired, spy, storedIds, type Logged } from './_helpers/share-retention-fixtures.js';
+import { AG, GRAPH, NOW, POST_COMMIT_ERROR, W, cancelledJob, deletedSubjects, drain, from, mk, newRetention, present, put, registerPendingFlight, retired, spy, storedIds, type Logged } from './_helpers/share-retention-fixtures.js';
 
 const RETENTION = 'publisher.asyncPromote.retention.';
 const isRetention = (l: Logged) => l.source?.startsWith(RETENTION) === true;
@@ -433,5 +433,149 @@ describe('interleavings with the queue never cost a job that is no longer, or no
     for (const id of revived) expect(await present(store, id)).not.toBe('');
     expect(holdTrace(log)).not.toMatch(/Vd*x+d/);
     expect(deletedBeforeVerified(log)).toEqual([]);
+  });
+});
+
+describe('a cancelled job is deleted only when EVERY attempt is proven unstarted, on the real queue (fifth review of P10a: the marker and the format describe the last attempt only)', () => {
+  const DAY = 24 * 3_600_000;
+  const PREREQUISITE = { message: 'authority not answered', retryable: true, classification: 'transient', diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE' };
+
+  /** A real queue and a clock this scenario moves; each step is one operation of a worker or an operator. */
+  async function history() {
+    const store = new OxigraphStore();
+    let t = 1_800_000_000_000;
+    const queue = new TripleStoreAsyncPromoteQueue(store, { now: () => t, idGenerator: () => 'job-1', claimTokenGenerator: () => 'tok', leaseMs: 60_000, backoff: () => 1_000 });
+    const id = await queue.enqueue({ contextGraphId: 'cg', assertionName: 'a1', entities: 'all', agentAddress: AG });
+    const claim = async () => (await queue.claimNext('w1'))!;
+    const steps = {
+      /** A worker records `promoteStarted` and promote fails with a transient error the classifier calls retryable: the job waits to retry. */
+      async enterPromoteAndFailTransiently() {
+        const job = await claim();
+        await queue.recordCommitMarker(id, job.lease!.claimToken, 'promoteStarted');
+        expect((await queue.fail(id, job.lease!.claimToken, { message: 'promote timed out', retryable: true, classification: 'transient', recordedAt: t })).state).toBe('failed_retrying');
+        t += 2_000;
+      },
+      /** A worker fails before it enters promote (a prerequisite is not answered): the job waits to retry. */
+      async failBeforePromote() {
+        const job = await claim();
+        expect((await queue.fail(id, job.lease!.claimToken, { ...PREREQUISITE, recordedAt: t } as never)).state).toBe('failed_retrying');
+        t += 2_000;
+      },
+      /** A worker enters promote and the failure is a post-commit one (promote may have committed): the queue's own sweep puts the job back on the retry path. */
+      async failAfterCommitAndRequeue() {
+        const job = await claim();
+        await queue.recordCommitMarker(id, job.lease!.claimToken, 'promoteStarted');
+        const transition = await queue.fail(id, job.lease!.claimToken, { ...POST_COMMIT_ERROR, recordedAt: t } as never);
+        expect(transition.state).toBe('failed');
+        expect((await queue.recoverPostCommitFailures()).map(e => e.action)).toEqual(['requeued']);
+        t += 2_000;
+      },
+      /** A worker claims the job and dies before it records `promoteStarted`; the lease expires and startup recovery reclaims it. */
+      async claimDieAndReclaim() {
+        const job = await claim();
+        expect(job.commitMarker).toEqual({ promoteStarted: false, swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false });
+        t += 120_000;
+        expect((await queue.recoverOnStartup()).reclaimed).toBe(1);
+        expect((await queue.getStatus(id))!.state).toBe('queued');
+      },
+      async cancel() { await queue.cancel(id); return (await queue.getStatus(id))!; },
+    };
+    /** A report sweep and then a delete sweep, `later` ms after the cancel: what each flags, and whether the job is still in the store. */
+    async function sweep(later = 8 * DAY) {
+      t += later;
+      const report = newRetention(store, { mode: 'report', now: () => t, benignFailedMaxAgeMs: 7 * DAY, succeededMaxAgeMs: 7 * DAY });
+      const reported = (await drain(report)).flatMap(r => r.wouldDeleteJobs.map(j => j.jobId));
+      const retention = newRetention(store, { mode: 'delete', now: () => t, benignFailedMaxAgeMs: 7 * DAY, succeededMaxAgeMs: 7 * DAY });
+      const deleted = (await drain(retention)).flatMap(r => r.deletedJobs.map(j => j.jobId));
+      return { reported, deleted, kept: retention.counters().kept, after: await queue.getStatus(id) };
+    }
+    return { store, queue, id, ...steps, sweep };
+  }
+
+  it('attempt 1 entered promote and timed out, attempt 2 was reclaimed before promote, then the operator cancels: the payload looks like a never-started job, and it is KEPT (the reviewer\'s case A)', async () => {
+    const h = await history();
+    await h.enterPromoteAndFailTransiently();
+    await h.claimDieAndReclaim();
+    const cancelled = await h.cancel();
+    expect(cancelled).toMatchObject({ state: 'failed', reason: 'cancelled', formatVersion: 4, attempt: { count: 2 } });
+    expect(cancelled.commitMarker, 'the marker of the last attempt was dropped by the reclaim').toBeUndefined();
+    expect(cancelled.preparationAttempts, 'the first attempt entered promote, so it is not in the proven prefix').toBeUndefined();
+    const { reported, deleted, kept, after } = await h.sweep();
+    expect(after, 'a job whose first attempt entered promote must not be deleted as "never started promote"').not.toBeNull();
+    expect({ reported, deleted }).toEqual({ reported: [], deleted: [] });
+    expect(kept.failed_retained).toBe(1);
+  });
+
+  it('attempt 1 was a post-commit failure (promote may have committed) and was requeued, attempt 2 failed before promote and overwrote lastError, attempt 3 was reclaimed, then cancel: KEPT, the only handle for recover() stays (the reviewer\'s case B, AC7)', async () => {
+    const h = await history();
+    await h.failAfterCommitAndRequeue();
+    await h.failBeforePromote();
+    await h.claimDieAndReclaim();
+    const cancelled = await h.cancel();
+    expect(cancelled).toMatchObject({ state: 'failed', reason: 'cancelled', formatVersion: 4, attempt: { count: 3 } });
+    expect(cancelled.attempt.lastError?.diagnosticCode, 'the post-commit evidence was overwritten by attempt 2, so post_commit_recoverable can no longer fire').toBe('PROMOTE_RETRYABLE_FAILURE');
+    const { reported, deleted, kept, after } = await h.sweep();
+    expect(after, 'a job whose first attempt may have committed must not be deleted').not.toBeNull();
+    expect({ reported, deleted }).toEqual({ reported: [], deleted: [] });
+    expect(kept.failed_retained).toBe(1);
+  });
+
+  it('an unproven attempt in the middle keeps the job: attempt 1 failed before promote, attempt 2 entered promote, attempt 3 was reclaimed (preparationAttempts 1 of 3 attempts)', async () => {
+    const h = await history();
+    await h.failBeforePromote();
+    await h.enterPromoteAndFailTransiently();
+    await h.claimDieAndReclaim();
+    expect(await h.cancel()).toMatchObject({ attempt: { count: 3 }, preparationAttempts: 1 });
+    const { deleted, after } = await h.sweep();
+    expect({ deleted, after: after === null }).toEqual({ deleted: [], after: false });
+  });
+
+  it('a job cancelled before any worker claimed it (attempt.count 0) is deleted', async () => {
+    const h = await history();
+    expect(await h.cancel()).toMatchObject({ state: 'failed', reason: 'cancelled', formatVersion: 4, attempt: { count: 0 } });
+    const { reported, deleted, after } = await h.sweep();
+    expect({ reported, deleted, after }).toEqual({ reported: ['job-1'], deleted: ['job-1'], after: null });
+  });
+
+  it('a job whose only attempt was reclaimed before promote (preparationAttempts 1 of 1) is deleted', async () => {
+    const h = await history();
+    await h.claimDieAndReclaim();
+    expect(await h.cancel()).toMatchObject({ attempt: { count: 1 }, preparationAttempts: 1 });
+    const { reported, deleted, after } = await h.sweep();
+    expect({ reported, deleted, after }).toEqual({ reported: ['job-1'], deleted: ['job-1'], after: null });
+  });
+
+  it('a job whose every attempt failed or was abandoned before promote (preparationAttempts 3 of 3) is deleted', async () => {
+    const h = await history();
+    await h.failBeforePromote();
+    await h.failBeforePromote();
+    await h.claimDieAndReclaim();
+    expect(await h.cancel()).toMatchObject({ attempt: { count: 3 }, preparationAttempts: 3 });
+    const { reported, deleted, after } = await h.sweep();
+    expect({ reported, deleted, after }).toEqual({ reported: ['job-1'], deleted: ['job-1'], after: null });
+  });
+
+  it('a proven-unstarted job still waits out its window: cancelled six days ago it stays', async () => {
+    const h = await history();
+    await h.cancel();
+    const { deleted, after } = await h.sweep(6 * DAY);
+    expect({ deleted, after: after === null }).toEqual({ deleted: [], after: false });
+  });
+
+  // STATED LIMIT (for the delete-gate owner and the P10b operations doc): the queue's operator `recover()` resets `attempt.count` to 0 and drops the marker, `lastError` and
+  // `preparationAttempts`, so a job that DID run and was then recovered and cancelled looks exactly like a job nobody ever claimed. Retention reads only the row, so it cannot
+  // tell them apart and deletes it. This pins the limit so that a change to `recover()` that keeps the history shows up here.
+  it('STATED LIMIT: recover() then cancel() erases the history, the job looks never-claimed and is deleted (retention cannot detect it from the row)', async () => {
+    const h = await history();
+    const job = await h.queue.claimNext('w1');
+    await h.queue.recordCommitMarker(h.id, job!.lease!.claimToken, 'promoteStarted');
+    await h.queue.fail(h.id, job!.lease!.claimToken, { ...POST_COMMIT_ERROR, recordedAt: 1_800_000_000_000 } as never);      // promote may have committed: failed, post-commit
+    expect(await h.queue.getStatus(h.id)).toMatchObject({ state: 'failed', attempt: { count: 1 } });
+    await h.queue.recover(h.id);
+    const recovered = await h.cancel();
+    expect(recovered).toMatchObject({ state: 'failed', reason: 'cancelled', formatVersion: 4, attempt: { count: 0 } });
+    expect([recovered.commitMarker, recovered.preparationAttempts, recovered.attempt.lastError], 'recover() dropped every trace of the earlier attempt').toEqual([undefined, undefined, undefined]);
+    const { deleted, after } = await h.sweep();
+    expect({ deleted, after }).toEqual({ deleted: ['job-1'], after: null });
   });
 });

@@ -8,7 +8,7 @@ import type { PromoteJob } from '../src/async-promote-queue-types.js';
 import { decidePromoteRetention } from '../src/async-promote-retention-policy.js';
 import { SHARE_RETENTION_DEFAULTS, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import {
-  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, UNCLAIMED, W, WF, binding, cancelledJob, noPending,
+  AG, DELETABLE, GRAPH, LEASE, NOW, NO_MARKERS, POST_COMMIT_ERROR, STARTED, ATTEMPTED, UNCLAIMED, W, WF, binding, cancelledJob, noPending,
   decide, decideText, deletedSubjects, drain, insertQuads, mk, newRetention, pick, present, put, parseText, payloadWithFormatVersion, registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, from,
   captureLogger, policy, standInForTheQueue, type Kind, type Quads, type QueryResult,
 } from './_helpers/share-retention-fixtures.js';
@@ -324,7 +324,7 @@ describe('retention scan progress (keyset cursor): rows that cannot be deleted n
     const r = rng(20261903);
     const store = new OxigraphStore();
     const { store: spied, log } = spy(store);
-    const undeletableKinds: Kind[] = ['fatal', 'fatal', 'fatal', 'fatal', 'bound', 'bound', 'newer', 'newer', 'corrupt', 'orphan', 'lying'];
+    const undeletableKinds: Kind[] = ['fatal', 'fatal', 'fatal', 'fatal', 'bound', 'bound', 'newer', 'newer', 'corrupt', 'orphan', 'lying', 'attempted'];
     const rows = new Map<string, Kind>();
     const quads: Quads = [];
     let age = 100 * W;
@@ -538,10 +538,11 @@ describe('retention safety on randomised stores (independent oracle)', () => {
       const jobs: ReturnType<typeof mk>[] = [];
       for (let i = 0, n = 1 + Math.floor(r() * 14); i < n; i++) {
         const age = pick(r, [10 * W, W + 1, W, W - 1, 1000, -5000, WF, WF - 1]) + (r() < 0.5 ? 0 : i);           // equal ages (ties) and distinct ones
-        const kind = pick(r, ['succeeded', 'succeeded', 'queued', 'running', 'failed_retrying', 'failed-plain', 'failed-cancelled', 'failed-bound', 'failed-retired', 'failed-ambiguity', 'newer']);
+        const kind = pick(r, ['succeeded', 'succeeded', 'queued', 'running', 'failed_retrying', 'failed-plain', 'failed-cancelled', 'failed-cancelled-prepared', 'failed-cancelled-attempted', 'failed-bound', 'failed-retired', 'failed-ambiguity', 'newer']);
         jobs.push(kind === 'succeeded' ? mk(`j${i}`, 'succeeded', {}, age) : kind === 'queued' ? mk(`j${i}`, 'queued', {}, age) : kind === 'running' ? mk(`j${i}`, 'running', { lease: LEASE }, age)
           : kind === 'failed_retrying' ? mk(`j${i}`, 'failed_retrying', {}, age) : kind === 'failed-plain' ? mk(`j${i}`, 'failed', {}, age)
           : kind === 'failed-cancelled' ? cancelledJob(`j${i}`, {}, age) : kind === 'failed-bound' ? mk(`j${i}`, 'failed', { bound: true }, age)
+          : kind === 'failed-cancelled-prepared' ? cancelledJob(`j${i}`, { attempt: { count: 3, maxRetries: 5 }, preparationAttempts: 3 }, age) : kind === 'failed-cancelled-attempted' ? cancelledJob(`j${i}`, { attempt: ATTEMPTED }, age)
           : kind === 'failed-retired' ? retired(`j${i}`, age) : kind === 'failed-ambiguity' ? mk(`j${i}`, 'failed', { reason: 'partial promote ambiguity: x' }, age)
           : mk(`j${i}`, 'succeeded', { formatVersion: 5 }, age));
       }
@@ -561,8 +562,9 @@ describe('retention safety on randomised stores (independent oracle)', () => {
         const isRetired = j.state === 'failed' && j.request.recoveryBinding !== undefined && e?.diagnosticCode === 'PROMOTE_NO_EFFECT_REJECTION';
         const bound = j.request.recoveryBinding !== undefined;
         const aged = (max: number) => at - j.updatedAt >= max;
+        const provenUnstarted = j.attempt.count === 0 || j.preparationAttempts === j.attempt.count;      // a CLAIMED cancelled job may have run in an earlier attempt unless preparationAttempts covers all of them
         return (j.formatVersion ?? 0) <= 4 && !(honourPending && pendingIds.has(j.jobId)) && ((j.state === 'succeeded' && aged(W))
-          || (withBenign && j.state === 'failed' && aged(WF) && ((isRetired) || (j.reason === 'cancelled' && !bound))));
+          || (withBenign && j.state === 'failed' && aged(WF) && ((isRetired) || (j.reason === 'cancelled' && !bound && provenUnstarted))));
       };
       await quiesce();                                                                                // phase 1: now = NOW, flights pending
       for (const id of pendingIds) expect(await present(store, id), `pending ${id} must survive`).toBe(before.get(id));
@@ -585,9 +587,9 @@ describe('retention safety on randomised stores (independent oracle)', () => {
 
 describe('keep rules the policy adds to the prototype', () => {
   it.each([
-    ['a cancelled job that carries a post-commit failure', cancelledJob('c1', { attempt: { count: 1, maxRetries: 5, lastError: POST_COMMIT_ERROR } }), 'post_commit_recoverable'],
-    ['a cancelled job whose free text asks for manual inspection', cancelledJob('c2', { attempt: { count: 1, maxRetries: 5, lastError: { message: 'partial promote ambiguity', retryable: false, classification: 'fatal', recordedAt: 1 } } }), 'failed_retained'],
-    ['a cancelled job whose free text is not a string (the predicates throw: kept as unreadable)', cancelledJob('c3', { attempt: { count: 1, maxRetries: 5, lastError: { message: 42, retryable: false, classification: 'fatal', recordedAt: 1 } } }), 'unreadable'],
+    ['a cancelled job that carries a post-commit failure', cancelledJob('c1', { attempt: { count: 1, maxRetries: 5, lastError: POST_COMMIT_ERROR }, preparationAttempts: 1 }), 'post_commit_recoverable'],
+    ['a cancelled job whose free text asks for manual inspection', cancelledJob('c2', { attempt: { count: 1, maxRetries: 5, lastError: { message: 'partial promote ambiguity', retryable: false, classification: 'fatal', recordedAt: 1 } }, preparationAttempts: 1 }), 'failed_retained'],
+    ['a cancelled job whose free text is not a string (the predicates throw: kept as unreadable)', cancelledJob('c3', { attempt: { count: 1, maxRetries: 5, lastError: { message: 42, retryable: false, classification: 'fatal', recordedAt: 1 } }, preparationAttempts: 1 }), 'unreadable'],
     ['a cancelled job that swm-inserted', cancelledJob('c4', { commitMarker: { ...NO_MARKERS, swmInserted: true } }), 'failed_retained'],
     ['a bound cancelled job (it owns a recovery obligation)', cancelledJob('c5', { bound: true }), 'unfinished_bound_obligation'],
   ])('keeps %s', (_name, job, reason) => { expect(decide(job as ReturnType<typeof mk>)).toEqual({ delete: false, reason }); });
@@ -764,8 +766,9 @@ describe('a missing promoteStarted is never accepted, a legacy row is no cancell
     }
   });
 
-  it.each([['"1"', '1'], ['"legacy"', 'legacy'], ['null', null], ['{}', {}], ['[]', []], ['true', true]])('a formatVersion of %s is no format a writer produced: the cancelled job is kept, whatever its marker (failed_retained)', (_label, formatVersion) => {
-    for (const marker of [LEGACY, NO_MARKERS, undefined]) expect(decide(cancelled('fv', marker, { formatVersion })), JSON.stringify(marker)).toEqual({ delete: false, reason: 'failed_retained' });
+  // The policy keeps any PRESENT formatVersion that is not an integer from 0 up to this build's as `unreadable`, for every class (fifth review: no coercion), before the cancelled class is asked.
+  it.each([['"1"', '1'], ['"legacy"', 'legacy'], ['null', null], ['{}', {}], ['[]', []], ['true', true]])('a formatVersion of %s is no format a writer produced: the cancelled job is kept, whatever its marker (unreadable)', (_label, formatVersion) => {
+    for (const marker of [LEGACY, NO_MARKERS, undefined]) expect(decide(cancelled('fv', marker, { formatVersion })), JSON.stringify(marker)).toEqual({ delete: false, reason: 'unreadable' });
   });
 
   // The marker of a cancelled job records the promote steps that ran: any flag set means it ran, whatever promoteStarted says.
@@ -830,18 +833,20 @@ describe('the cancelled class needs a format that stores the whole commit marker
   const cancelled = (id: string, over: Record<string, unknown> = {}) => cancelledJob(id, { commitMarker: LEGACY, ...over });
   const MARKERS: ReadonlyArray<[string, unknown]> = [['the pre-format-2 marker', LEGACY], ['a complete marker', NO_MARKERS], ['no marker', undefined]];
   // JSON numbers as the parser reads them from the stored payload text. `JSON.stringify` writes -0 as 0 and -Infinity as null, so the text is built by hand.
-  // 0 and 1 are the legacy formats; the others are numbers no writer produced (the parser does not validate `formatVersion`, so the policy does).
-  const NOT_WRITER_FORMAT: ReadonlyArray<[string, string, number]> = [
-    ['0', '0', 0], ['1', '1', 1], ['-1', '-1', -1], ['1.5', '1.5', 1.5], ['-0', '-0', -0], ['1e-300', '1e-300', 1e-300], ['-Infinity (the text -1e999)', '-1e999', Number.NEGATIVE_INFINITY],
-    ['1.999999999999999', '1.999999999999999', 1.999999999999999], ['3.5', '3.5', 3.5],
+  // 0 and 1 are the legacy formats (integers in the known range: the cancelled class itself keeps them, `failed_retained`); the others are numbers no writer produced (the parser does
+  // not validate `formatVersion`, so the policy does): the whole job is kept before any class is asked, `unreadable`.
+  const NOT_WRITER_FORMAT: ReadonlyArray<[string, string, number, 'failed_retained' | 'unreadable']> = [
+    ['0', '0', 0, 'failed_retained'], ['1', '1', 1, 'failed_retained'], ['-1', '-1', -1, 'unreadable'], ['1.5', '1.5', 1.5, 'unreadable'], ['-0', '-0', -0, 'unreadable'],
+    ['1e-300', '1e-300', 1e-300, 'unreadable'], ['-Infinity (the text -1e999)', '-1e999', Number.NEGATIVE_INFINITY, 'unreadable'],
+    ['1.999999999999999', '1.999999999999999', 1.999999999999999, 'unreadable'], ['3.5', '3.5', 3.5, 'unreadable'],
   ];
 
-  it.each(NOT_WRITER_FORMAT)('keeps a cancelled job whose formatVersion is %s, whatever its marker, however old (failed_retained)', (_label, text, value) => {
+  it.each(NOT_WRITER_FORMAT)('keeps a cancelled job whose formatVersion is %s, whatever its marker, however old', (_label, text, value, reason) => {
     for (const [label, commitMarker] of MARKERS) {
       const payload = payloadWithFormatVersion(cancelled('odd', { commitMarker }), text);
       expect(Object.is(parseText(payload).formatVersion, value), 'the parser reads the number the case names').toBe(true);
-      expect(decideText(payload), label).toEqual({ delete: false, reason: 'failed_retained' });
-      expect(decideText(payload, policy, noPending, NOW + 1000 * W), `${label}, any age`).toEqual({ delete: false, reason: 'failed_retained' });
+      expect(decideText(payload), label).toEqual({ delete: false, reason });
+      expect(decideText(payload, policy, noPending, NOW + 1000 * W), `${label}, any age`).toEqual({ delete: false, reason });
     }
   });
 
@@ -869,16 +874,17 @@ describe('the cancelled class needs a format that stores the whole commit marker
 
   it('a delete sweep over the real store leaves every one of those jobs untouched and deletes the ones of a writer format; a report sweep counts exactly those', async () => {
     const stored = (job: PromoteJob, text?: string): Quads => serializeJobRecord(job, GRAPH).jobQuads.map(q => (q.predicate === PROMOTE_PAYLOAD && text !== undefined ? { ...q, object: literal(payloadWithFormatVersion(job, text)) } : q));
-    const odd = NOT_WRITER_FORMAT.flatMap(([, text], i) => MARKERS.map(([label, commitMarker]) => ({ job: cancelled(`odd-${i}-${label.replace(/\W+/g, '_')}`, { commitMarker }), text })));
+    const odd = NOT_WRITER_FORMAT.flatMap(([, text, , reason], i) => MARKERS.map(([label, commitMarker]) => ({ job: cancelled(`odd-${i}-${label.replace(/\W+/g, '_')}`, { commitMarker }), text, reason })));
     const absent = MARKERS.map(([label, commitMarker]) => ({ job: cancelled(`absent-${label.replace(/\W+/g, '_')}`, { commitMarker, formatVersion: undefined }), text: undefined }));
     const writer = [2, 3, 4].flatMap(n => [undefined, NO_MARKERS].map((commitMarker, i) => ({ job: cancelled(`writer-${n}-${i}`, { commitMarker }), text: String(n) })));
     const kept = [...odd, ...absent];
+    const unreadable = odd.filter(({ reason }) => reason === 'unreadable').length;                       // the numbers no writer produced: kept before any class is asked
     const seed = async () => { const s = new OxigraphStore(); await insertQuads(s, [...kept, ...writer].flatMap(({ job, text }) => stored(job, text))); return s; };
 
     const reportStore = await seed();
     const report = newRetention(reportStore, { mode: 'report', batchSize: 3 });
     await drain(report);
-    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: writer.length, retired_no_effect: 0 }, kept: { failed_retained: kept.length, unreadable: 0 } });
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: writer.length, retired_no_effect: 0 }, kept: { failed_retained: kept.length - unreadable, unreadable } });
     expect((await storedIds(reportStore)).size).toBe(kept.length + writer.length);
 
     const store = await seed();
@@ -889,7 +895,168 @@ describe('the cancelled class needs a format that stores the whole commit marker
     expect([...(await storedIds(store))].sort()).toEqual(kept.map(({ job }) => job.jobId).sort());
     for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
     expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: writer.length, retired_no_effect: 0 });
-    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: writer.length }, kept: { failed_retained: kept.length, unreadable: 0 } });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: writer.length }, kept: { failed_retained: kept.length - unreadable, unreadable } });
+  });
+});
+
+describe('the cancelled class needs EVERY attempt proven unstarted, not only the last (fifth review of P10a: the marker and the format describe the last attempt only)', () => {
+  // The marker, the format and the last error describe the LAST attempt: every claim resets the marker to all false, a reclaim drops it and rewrites the format, and a later failure
+  // overwrites lastError. The evidence that describes the whole job is `attempt.count` (every claim adds one) against `preparationAttempts` (the contiguous prefix of attempts the
+  // queue proved failed or abandoned before promote was entered: recordUnstartedPromoteAttempt, the rule canRetireBoundRejection uses). The real queue histories are in
+  // async-promote-retention-holds.test.ts; these are the payload shapes they produce, and the shapes around them.
+  const attempts = (count: number, over: Record<string, unknown> = {}) => cancelledJob('att', { attempt: { count, maxRetries: 5 }, ...over });
+  const KEPT = { delete: false, reason: 'failed_retained' } as const;
+  const MARKERS: ReadonlyArray<[string, unknown]> = [['no marker', undefined], ['a complete marker, every flag false', NO_MARKERS]];
+  /** The payload text with `"count":N` rewritten, for the numbers JSON.stringify cannot write (-0). */
+  const withCountText = (job: PromoteJob, text: string): string => JSON.stringify(job).replace(/"count":\d+/, `"count":${text}`);
+
+  it('the reviewer reproduction (format 4, attempt.count 2, no marker, no preparationAttempts: the payload a transient failure in promote followed by a reclaimed attempt leaves) is kept, not deleted as "never started promote"', () => {
+    for (const [label, commitMarker] of MARKERS) {
+      const job = attempts(2, { formatVersion: 4, commitMarker });
+      expect(decide(job), label).toEqual(KEPT);
+      expect(decide(job, policy, noPending, NOW + 1000 * W), `${label}, any age`).toEqual(KEPT);
+    }
+  });
+
+  it.each([2, 3, 4])('a claimed job (attempt.count 1, 2, 3 or 100) with no preparationAttempts is kept at format %s: nothing proves the earlier attempts never entered promote', formatVersion => {
+    for (const count of [1, 2, 3, 100]) for (const [label, commitMarker] of MARKERS) {
+      expect(decide(attempts(count, { formatVersion, commitMarker })), `count ${count}, ${label}`).toEqual(KEPT);
+    }
+  });
+
+  it('an attempt count that preparationAttempts does not cover is kept: it must cover every attempt, a contiguous prefix is not enough', () => {
+    for (const [count, prepared] of [[3, 1], [3, 2], [2, 0], [2, 1], [100, 99], [1, 0]] as const) {
+      expect(decide(attempts(count, { preparationAttempts: prepared })), `${prepared} of ${count}`).toEqual(KEPT);
+    }
+    expect(decide(attempts(2, { preparationAttempts: 3 })), 'more than the attempts made is no evidence either').toEqual(KEPT);
+    expect(decide(attempts(0, { preparationAttempts: 2 })), 'a never-claimed job that claims to have prepared twice is not a shape the queue writes').toEqual(KEPT);
+  });
+
+  it('is deleted when every attempt is proven unstarted: never claimed (attempt.count 0, any writer format 2 to 4), or preparationAttempts equal to attempt.count at format 4', () => {
+    for (const formatVersion of [2, 3, 4]) for (const [label, commitMarker] of MARKERS) {
+      expect(decide(attempts(0, { formatVersion, commitMarker })), `never claimed, format ${formatVersion}, ${label}`).toEqual({ delete: true, jobClass: 'cancelled' });
+    }
+    expect(decide(attempts(0, { preparationAttempts: 0 })), 'an explicit zero').toEqual({ delete: true, jobClass: 'cancelled' });
+    for (const count of [1, 2, 3, 100]) for (const [label, commitMarker] of MARKERS) {
+      expect(decide(attempts(count, { formatVersion: 4, preparationAttempts: count, commitMarker })), `${count} attempts, all proven, ${label}`).toEqual({ delete: true, jobClass: 'cancelled' });
+    }
+  });
+
+  it.each([2, 3, 1, 0, undefined])('preparationAttempts is only read at format 4, the format that records it: at format %s a matching count is no proof', formatVersion => {
+    expect(decide(attempts(2, { formatVersion, preparationAttempts: 2 }))).toEqual(KEPT);
+  });
+
+  it.each([
+    ['a fraction', 1.5, 1.5], ['a negative number', -1, -1], ['2^53 (not a safe integer)', 2 ** 53, 2 ** 53], ['Number.MAX_SAFE_INTEGER + 2', 2 ** 53 + 2, 2 ** 53 + 2],
+    ['a string that reads as the count', '1', 1], ['null', null, 1], ['true', true, 1], ['an object', {}, 1], ['an array holding the count', [1], 1],
+    ['null on a never-claimed job (present is not absent)', null, 0], ['false on a never-claimed job', false, 0], ['an empty string on a never-claimed job', '', 0], ['the string "0" on a never-claimed job', '0', 0],
+  ])('a preparationAttempts that is not a non-negative safe integer equal to the count is no proof (%s): kept', (_label, prepared, count) => {
+    expect(decide(attempts(count as number, { formatVersion: 4, preparationAttempts: prepared }))).toEqual(KEPT);
+  });
+
+  it('a count or a preparationAttempts of -0 (the stored text, which no writer produced) is no proof either; a count of 0 with no preparationAttempts is', () => {
+    const job = attempts(0, { formatVersion: 4 });
+    expect(decideText(JSON.stringify(job))).toEqual({ delete: true, jobClass: 'cancelled' });
+    expect(decideText(withCountText(job, '-0')), 'count -0').toEqual(KEPT);
+    expect(decideText(withCountText(attempts(0, { formatVersion: 4, preparationAttempts: 0 }), '-0')), 'count -0, preparationAttempts 0').toEqual(KEPT);
+    expect(decideText(JSON.stringify(attempts(0, { formatVersion: 4, preparationAttempts: 0 })).replace('"preparationAttempts":0', '"preparationAttempts":-0')), 'preparationAttempts -0').toEqual(KEPT);
+    expect(parseText(withCountText(job, '-0')).attempt.count, 'the parser reads -0').toSatisfy((n: number) => Object.is(n, -0));
+  });
+
+  it('the rule is part of the cancelled class only: a succeeded job, a certified retired rejection and the other keep reasons do not change', () => {
+    expect(decide(mk('s', 'succeeded', { attempt: { count: 7, maxRetries: 5 } }))).toEqual({ delete: true, jobClass: 'succeeded' });
+    expect(decide(retired('r'))).toEqual({ delete: true, jobClass: 'retired_no_effect' });                       // count 1, preparationAttempts 0: a prefix of one execution attempt, certified by its proof
+    expect(decide(attempts(2, { bound: true, formatVersion: 4 }))).toEqual({ delete: false, reason: 'unfinished_bound_obligation' });
+    expect(decide(attempts(0, { commitMarker: STARTED }))).toEqual(KEPT);                                       // the marker rule still holds on a never-claimed job
+    expect(decide(attempts(0, { commitMarker: { ...NO_MARKERS, promoteStarted: 'true' } }))).toEqual({ delete: false, reason: 'unreadable' });
+  });
+
+  it('a delete sweep keeps every attempted-then-cancelled job and deletes the proven-unstarted ones; a report sweep counts exactly those', async () => {
+    const protectedJobs = [
+      attempts(2, { formatVersion: 4 }), attempts(3, { formatVersion: 4, preparationAttempts: 1 }), attempts(1, { formatVersion: 3 }), attempts(2, { formatVersion: 3, preparationAttempts: 2 }),
+      attempts(5, { formatVersion: 4, commitMarker: NO_MARKERS }), attempts(2, { formatVersion: 4, preparationAttempts: 2.5 }),
+    ].map((job, i) => ({ ...job, jobId: `att-${i}`, request: { ...job.request, assertionName: `n-att-${i}` }, updatedAt: NOW - 10 * W - i }));
+    const deletable = [
+      cancelledJob('ok-never'), cancelledJob('ok-never-clear', { commitMarker: NO_MARKERS }), cancelledJob('ok-prepared-1', { attempt: { count: 1, maxRetries: 5 }, preparationAttempts: 1 }),
+      cancelledJob('ok-prepared-3', { attempt: { count: 3, maxRetries: 5 }, preparationAttempts: 3, commitMarker: NO_MARKERS }),
+    ];
+    const seed = async () => { const s = new OxigraphStore(); await put(s, ...protectedJobs, ...deletable); return s; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 4 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: 0, cancelled: deletable.length, retired_no_effect: 0 }, kept: { failed_retained: protectedJobs.length } });
+    expect((await storedIds(reportStore)).size).toBe(protectedJobs.length + deletable.length);
+
+    const store = await seed();
+    const before = new Map(await Promise.all(protectedJobs.map(async j => [j.jobId, await present(store, j.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 4 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual(protectedJobs.map(j => j.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted).toEqual({ succeeded: 0, cancelled: deletable.length, retired_no_effect: 0 });
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { cancelled: deletable.length }, kept: { failed_retained: protectedJobs.length } });
+  });
+});
+
+describe('a formatVersion that is not an integer in the known range is no format a writer produced, for every class (fifth review of P10a: no coercion)', () => {
+  // `(formatVersion ?? 0) > 4` coerced: "5" read as newer, but "4", "legacy" and null passed, and -1, 1.5, -0, 1e-300 were taken for a legacy number. A PRESENT value must be an integer
+  // from 0 up to this build's (4); above it the row is `newer_format`, anything else is `unreadable`. The numbers are the JSON text as the parser reads it from the stored payload.
+  const NOT_A_FORMAT: ReadonlyArray<[string, string]> = [
+    ['-1', '-1'], ['1.5', '1.5'], ['-0', '-0'], ['1e-300', '1e-300'], ['3.5', '3.5'], ['4.5', '4.5'], ['-Infinity (the text -1e999)', '-1e999'], ['Infinity (the text 1e999)', '1e999'],
+    ['the string "4"', '"4"'], ['the string "5"', '"5"'], ['the string "legacy"', '"legacy"'], ['null', 'null'], ['an object', '{}'], ['an array', '[]'], ['true', 'true'], ['false', 'false'],
+  ];
+  const NEWER: ReadonlyArray<[string, string]> = [['5', '5'], ['99', '99'], ['2^53', '9007199254740992'], ['1e300 (an integer)', '1e300']];
+  const classes = (formatText: string): ReadonlyArray<[string, string]> => [
+    ['succeeded', payloadWithFormatVersion(mk('s', 'succeeded'), formatText)],
+    ['cancelled', payloadWithFormatVersion(cancelledJob('c'), formatText)],
+    ['failed (plain)', payloadWithFormatVersion(mk('f', 'failed'), formatText)],
+    ['queued', payloadWithFormatVersion(mk('q', 'queued'), formatText)],
+  ];
+
+  it.each(NOT_A_FORMAT)('keeps a job whose formatVersion is %s, whatever its class, however old (unreadable)', (_label, text) => {
+    for (const [label, payload] of classes(text)) {
+      expect(decideText(payload), label).toEqual({ delete: false, reason: 'unreadable' });
+      expect(decideText(payload, policy, noPending, NOW + 1000 * W), `${label}, any age`).toEqual({ delete: false, reason: 'unreadable' });
+    }
+  });
+
+  it.each(NEWER)('keeps a job whose formatVersion is the integer %s, above this build\'s, as newer_format', (_label, text) => {
+    for (const [label, payload] of classes(text)) expect(decideText(payload), label).toEqual({ delete: false, reason: 'newer_format' });
+  });
+
+  it('still reads an absent formatVersion and every integer from 0 to 4 as a format: a succeeded job is deleted, a cancelled never-claimed job of a writer format too', () => {
+    for (const formatVersion of [undefined, 0, 1, 2, 3, 4]) expect(decide(mk('s', 'succeeded', { formatVersion })), String(formatVersion)).toEqual({ delete: true, jobClass: 'succeeded' });
+    for (const formatVersion of [2, 3, 4]) expect(decide(cancelledJob('c', { formatVersion })), String(formatVersion)).toEqual({ delete: true, jobClass: 'cancelled' });
+  });
+
+  it('a state this build does not know is still reported first (unknown_state), and a bound job stays malformed at any format but 4 (the parser)', () => {
+    expect(decideText(payloadWithFormatVersion(mk('u', 'archived' as never), '"4"'))).toEqual({ delete: false, reason: 'unknown_state' });
+    expect(() => decideText(payloadWithFormatVersion(retired('r'), '3'))).toThrow('bad fixture');
+  });
+
+  it('a delete sweep over the real store leaves every one of those jobs untouched and deletes the ones of a known format; a report sweep counts exactly those', async () => {
+    const stored = (job: PromoteJob, text?: string): Quads => serializeJobRecord(job, GRAPH).jobQuads.map(q => (q.predicate === PROMOTE_PAYLOAD && text !== undefined ? { ...q, object: literal(payloadWithFormatVersion(job, text)) } : q));
+    const odd = NOT_A_FORMAT.map(([label, text], i) => ({ job: mk(`odd-${i}-${label.replace(/\W+/g, '_')}`, 'succeeded', {}, 10 * W + i), text }));
+    const newer = NEWER.map(([label, text], i) => ({ job: mk(`newer-${i}-${label.replace(/\W+/g, '_')}`, 'succeeded', {}, 10 * W + i), text }));
+    const known = [undefined, '0', '1', '2', '3', '4'].map((text, i) => ({ job: mk(`known-${i}`, 'succeeded', { formatVersion: undefined }, 10 * W + i), text }));
+    const seed = async () => { const store = new OxigraphStore(); await insertQuads(store, [...odd, ...newer, ...known].flatMap(({ job, text }) => stored(job, text))); return store; };
+
+    const reportStore = await seed();
+    const report = newRetention(reportStore, { mode: 'report', batchSize: 5 });
+    await drain(report);
+    expect(report.counters().lastCompletePass).toMatchObject({ wouldDelete: { succeeded: known.length }, kept: { unreadable: odd.length, newer_format: newer.length } });
+
+    const store = await seed();
+    const before = new Map(await Promise.all([...odd, ...newer].map(async ({ job }) => [job.jobId, await present(store, job.jobId)] as const)));
+    const retention = newRetention(store, { batchSize: 5 });
+    const results = await drain(retention);
+    expect(results.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect([...(await storedIds(store))].sort()).toEqual([...odd, ...newer].map(({ job }) => job.jobId).sort());
+    for (const [id, fingerprint] of before) expect(await present(store, id), id).toBe(fingerprint);
+    expect(retention.counters().deleted.succeeded).toBe(known.length);
+    expect(retention.counters().lastCompletePass).toMatchObject({ deleted: { succeeded: known.length }, kept: { unreadable: odd.length, newer_format: newer.length } });
   });
 });
 
