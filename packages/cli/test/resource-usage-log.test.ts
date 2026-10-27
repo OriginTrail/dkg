@@ -112,6 +112,30 @@ describe('resource_usage line', () => {
     ].join(' '));
   });
 
+  it('prints the queue control schedulers after the store lanes, only while that path is on', () => {
+    const control = [
+      // The registry lists schedulers by id; each has the one `control` lane.
+      scheduler('store-control-publisher', [
+        lane('control', { inflight: 2, inflightLimit: 2, queued: 1, active: [op('publisher.asyncLift.claim', 200, 2)] }),
+      ], { inflight: 2, inflightLimit: 2, queued: 1, queueLimit: 64 }),
+      scheduler('store-control-share', [lane('control', { inflightLimit: 1 })], { inflight: 0, inflightLimit: 1, queued: 0, queueLimit: 64 }),
+    ];
+    const line = formatResourceUsageLine({ ...busyCore, control });
+    expect(line).toContain(
+      'store_background_active=agent.durableSync.graphScopedMaterialization:9.8s '
+      + 'store_control_publisher=2/2 store_control_publisher_queued=1 store_control_publisher_active=publisher.asyncLift.claim*2:0.2s '
+      + 'store_control_share=0/1 store_control_share_queued=0 '
+      + 'sync=3/3',
+    );
+    const [name, ...tokens] = line.split(' ');
+    expect(name).toBe('resource_usage');
+    for (const token of tokens) expect(token).toMatch(/^[a-z_]+=[^\s="]+$/);
+
+    // Off: no instance registered, so no control figure and the line is unchanged.
+    expect(formatResourceUsageLine({ ...busyCore, control: [] })).toBe(formatResourceUsageLine(busyCore));
+    expect(formatResourceUsageLine(busyCore)).not.toContain('store_control');
+  });
+
   it('is one logfmt record: a name, then key=value tokens without spaces or quotes', () => {
     const [name, ...tokens] = formatResourceUsageLine(busyCore).split(' ');
     expect(name).toBe('resource_usage');
@@ -167,10 +191,28 @@ describe('resource_usage line', () => {
 
     expect(sample.store).toBe(busyCore.store);
     expect(sample.sync).toBe(busyCore.sync);
+    expect(sample.control).toEqual([]);
     expect(sample.rssBytes).toBeGreaterThan(0);
     expect(sample.heapUsedBytes).toBeGreaterThan(0);
     expect(sample.heapLimitBytes).toBeGreaterThan(sample.heapUsedBytes);
     expect(sample.externalBytes).toBeGreaterThanOrEqual(0);
+  });
+});
+
+describe('captureResourceUsage with the control path on', () => {
+  it('takes the control schedulers by their registry ids and leaves the shared store scheduler alone', () => {
+    const share = scheduler('store-control-share', [lane('control')]);
+    const publisher = scheduler('store-control-publisher', [lane('control')]);
+    const snapshot: BackpressureRegistrySnapshot = {
+      capturedAt: new Date(0).toISOString(),
+      state: 'healthy',
+      schedulers: [scheduler('other', []), busyCore.store!, publisher, share, busyCore.sync!],
+      failures: [],
+    };
+    const sample = captureResourceUsage({ capture: () => snapshot });
+
+    expect(sample.store).toBe(busyCore.store);
+    expect(sample.control).toEqual([publisher, share]);
   });
 });
 

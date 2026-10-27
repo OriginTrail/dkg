@@ -177,6 +177,28 @@ describe('async_admission_usage line', () => {
     ].join(' '));
   });
 
+  it('lists the queue control schedulers beside the store scheduler, each with its one control lane', () => {
+    const control = (queue: string, waitsMs: readonly number[], count: number): StoreSchedulerStatsReport => ({
+      scheduler: `store-control-${queue}`,
+      queueWaits: [laneWaits('control', waitsMs)],
+      rejections: count === 0 ? [] : [{ lane: 'control', family: `publisher.${queue}`, reason: 'queue_full', count }],
+    });
+    const line = formatAsyncAdmissionUsageLine({
+      ...idle,
+      store: [storeReport, control('publisher', [...repeat(1, 9), 17], 2), control('share', [], 0)],
+    });
+    expect(line).toContain(
+      ' store_rejections=store-control-publisher/control/publisher.publisher/queue_full:2,'
+      + 'store/background/publisher.asyncLift/queue_full:3,store/normal/agent.writePreflight/queue_wait_timeout:1 ',
+    );
+    expect(line).toContain(' store_max_wait_ms=store-control-publisher/control:17,store-control-share/control:0,store/ack:80,');
+    expect(line).toContain(' store_wait_n=store-control-publisher/control:10,store-control-share/control:0,store/ack:40,');
+    expect(line).toContain(' store_wait_p95_ms=store-control-publisher/control:17,store-control-share/control:0,store/ack:4,');
+    expect(line).toContain(' store_wait_buckets=store-control-publisher/control:1x9|17x1,store-control-share/control:-,store/ack:4x38|80x2,');
+    const [, ...tokens] = line.split(' ');
+    for (const token of tokens) expect(token).toMatch(/^[a-z0-9_]+=[^\s="]+$/);
+  });
+
   it('keeps a readable queue when the other one could not be read', () => {
     const line = formatAsyncAdmissionUsageLine({
       ...busy,

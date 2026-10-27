@@ -84,7 +84,7 @@ import {
   type ContextGraphOnChainIdResolution,
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
-import { isExternalBackend } from '@origintrail-official/dkg-storage';
+import { isExternalBackend, logStoreControlPathGeometry } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
@@ -1315,6 +1315,7 @@ async function runDaemonInnerWithStartupOwnership(
     info: log,
     warn: log,
   });
+  logStoreControlPathGeometry({ info: log, warn: log });
 
   const startupLogRotationMessage = startupLogRotation
     && describeDaemonLogRotation(startupLogRotation, 'during startup');
