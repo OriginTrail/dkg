@@ -265,4 +265,29 @@ test('publishSummary adds the ground truth, the finished counts, the rate and th
   );
   assert.equal(s.pickup.nAccepted, 2);
   assert.equal(s.workerFree.traceLive, true);
+  assert.equal(s.failed, 0, 'no job failed');
+});
+
+test('publishSummary counts the jobs that ended in failure, however the record shows it', () => {
+  const failedBy = (rows) =>
+    publishSummary({
+      admission: { n: 3, F: 0 },
+      groundTruth: {},
+      rows,
+      window: { from: 0, to: 120_000 },
+      runEnd: 130_000,
+      walletEvents: [ev(1600, 'written', 'w0')],
+      walletIds: ['w0'],
+      scheduledArrivals: 3,
+      reconcileError: null,
+      handler: {},
+      runner: {},
+      config: {},
+    }).failed;
+  const ok = row('A', 1500, 1600, { finalizedAt: 4600 });
+  assert.equal(failedBy([ok, { ...row('B', 2000, 2300), status: 'failed' }]), 1, 'by status');
+  assert.equal(failedBy([ok, { ...row('B', 2000, 2300), status: 'claimed', failedAt: 3000 }]), 1, 'by failure time');
+  const both = { ...row('B', 2000, 2300), status: 'failed', failedAt: 5 };
+  assert.equal(failedBy([{ ...row('A', 1500, 1600), status: 'failed' }, both]), 2, 'a job counts once');
+  assert.equal(failedBy([ok, row('B', 2000, 2300, { finalizedAt: 5000 })]), 0);
 });

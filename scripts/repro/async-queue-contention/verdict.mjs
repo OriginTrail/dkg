@@ -844,13 +844,22 @@ export function guards(pairs, family = 'share') {
 }
 
 // ---------------------------------------------------------------- validity and the run record
+/** The most claimed jobs that may end in `failed` before the run is no publication lifecycle (G0 rule R28's 2 %). */
+export const MAX_FAILED_JOB_FRACTION = 0.02;
+
 /**
  * The publisher stream's checks (queue lift or both). `p` = { measured (publish requests in the measure window), mu,
  * successWithoutJob, doubleAdmissions, errors (runner errors), stopTimedOut, reclaimed (jobs the record shows retried or
- * recovered), claimed, finalized, executions, tailOps (the synthetic handler's counts) }; a missing field fails its check.
+ * recovered), claimed, finalized, failed (jobs the record shows terminally failed), wallets (the runner's workers, one
+ * job each), executions, tailOps (the synthetic handler's counts) }; a missing field fails its check.
  * The handler never fails, so a retried or recovered job is a run defect (the record keeps the last claim only, which
- * would no longer be the first), and the body check ties the handler's work to the jobs the publisher finished: no more
- * executions than claims, at least the 16 tail operations of every finished job and no more than its executions issued.
+ * would no longer be the first), and a terminal failure is a business failure the runner's exceptions do not show: the
+ * runner survives a job that fails, so `publisherQuiet` alone would pass a run in which every claimed job failed. The
+ * lifecycle checks therefore need evidence that publications finished: some job finalized, no more than
+ * MAX_FAILED_JOB_FRACTION of the claimed jobs failed, and no more than one job per wallet left neither finalized nor
+ * failed (a job the shutdown cut short). The body check ties the handler's work to the jobs the publisher finished and
+ * cannot hold on nothing: the handler ran, no more executions than claims, at least the 16 tail operations of every
+ * finished job and no more than its executions issued.
  */
 function publisherChecks(p, measureMs) {
   const expected = (p.mu * measureMs) / 1000;
@@ -863,7 +872,12 @@ function publisherChecks(p, measureMs) {
     publisherStopped: p.stopTimedOut === false,
     publisherNoReclaims: p.reclaimed === 0,
     publisherClaimed: p.claimed > 0,
+    publisherFinalized: p.finalized > 0,
+    publisherJobsNotFailed: Number.isFinite(p.failed) && p.failed <= MAX_FAILED_JOB_FRACTION * p.claimed,
+    publisherJobsSettled: Number.isFinite(p.failed) && p.claimed - p.finalized - p.failed <= p.wallets,
     publisherBodyReplayed:
+      p.executions > 0 &&
+      p.tailOps > 0 &&
       p.executions <= p.claimed &&
       p.tailOps >= LIFT_TAIL_OPS * p.finalized &&
       p.tailOps <= LIFT_TAIL_OPS * p.executions,

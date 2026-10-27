@@ -61,9 +61,10 @@
 // the measurement window's. The P8c claimNext windows (first and last 5 min) are anchored to that same workload
 // horizon, never to when the run ended: claims after it are shutdown, not workload. meta.timing records the horizon,
 // the drain after it and the run's total, apart from every window. A run with a publisher stream must also show its own
-// evidence: requests in the window, no runner error, jobs claimed, the handler's work matching the jobs finished
-// (publisherBodyReplayed), no retried or recovered job (the handler never fails, and a record keeps its last claim
-// only), and the probes and ACKs that were switched on having run.
+// evidence: requests in the window, no runner error, jobs claimed AND finalized (a run whose claimed jobs all fail has
+// no runner error either), at most 2 % of the claimed jobs failed and at most one per wallet left unfinished, the
+// handler's work matching the jobs finished (publisherBodyReplayed), no retried or recovered job (the handler never
+// fails, and a record keeps its last claim only), and the probes and ACKs that were switched on having run.
 //
 // Publisher metrics (summary.publish, plan D-15/D-16, see pickup.mjs): pick-up is accepted -> first claim over the jobs
 // accepted in the measure window, the run's value its p50, a job nobody claimed by the end of the run right-censored
@@ -930,6 +931,8 @@ async function runOnce(c, dist, endpoint, outDir) {
                     reclaimed: publish.reclaimed,
                     claimed: publish.claimed,
                     finalized: publish.finalized,
+                    failed: publish.failed,
+                    wallets: liftSide.walletIds.length,
                     executions: liftSide.handler.state.executions,
                     tailOps: liftSide.handler.state.tailOps,
                   },

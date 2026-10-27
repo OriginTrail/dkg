@@ -15,7 +15,10 @@
 //   daemon.metrics.storeHealth   createStoreCountMetrics(query).getStoreCountSnapshot(): ASK {}, on every read that
 //                                reuses a reconciled snapshot. The one reconcile it needs first (background lane,
 //                                source daemon.metrics.storeCountReconcile, at most once per 5 min in production) is
-//                                answered locally and counted: it is not a health-lane call.
+//                                answered locally and counted: it is not a health-lane call. A health query that fails
+//                                drops the product's reconciled snapshot, so the NEXT read reconciles again, and that
+//                                answer is local too: a sample that issued no query to the store is recorded as
+//                                'reconciled', never as an answer of the store, and is left out of the latency.
 //   `agent` is { store }: the product functions read agent.store only, so the calls reach the scheduler as in the daemon.
 // Cadences (the harness's D30a proposal): status every 10 s, metrics every 30 s, COUNT request every 60 s, on fixed
 // schedules offset 5 s / 15 s / 20 s from the epoch so no event sits on a window edge.
@@ -26,6 +29,7 @@
 // What is measured differs from the harness in one way: it timed each operation inside its scheduler slot and its queue
 // wait apart (a recording scheduler), this benchmark runs on the product's own scheduler and times what the caller sees,
 // queue wait included. The ACK queue-wait P95 of G2 is read from the product's per-lane wait counts (P1a/P1b), not here.
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { CG_ID } from './fixture.mjs';
 import { summarize } from './verdict.mjs';
@@ -77,6 +81,13 @@ export function fixedSchedule(periodMs, phaseMs, horizonMs) {
   return out;
 }
 
+/**
+ * The metrics probe sample the running getStoreCountSnapshot() call belongs to ({ storeQueries }): makeMetricsQuery
+ * counts into it the queries that went to the store, so a sample knows whether the store answered it or the reconcile
+ * did, without a counter that overlapping samples would share.
+ */
+const metricsSample = new AsyncLocalStorage();
+
 /** The query adapter the metrics module expects ({ bindings }); the one-time reconcile is answered locally. */
 export function makeMetricsQuery(store, counters) {
   return async (sparql, options) => {
@@ -95,6 +106,8 @@ export function makeMetricsQuery(store, counters) {
       };
     }
     counters.queries++;
+    const sample = metricsSample.getStore();
+    if (sample) sample.storeQueries++;
     const r = await store.query(sparql, options);
     if (r?.type === 'boolean') return { bindings: [{ result: String(r.value) }] };
     return { bindings: r?.bindings ?? [] };
@@ -126,9 +139,10 @@ export function withTrackedCount(store, track) {
 /**
  * Starts the probe load (call it after beginEpoch). deps = the loaded dist; cfg = { statusMs, metricsMs, countMs,
  * horizonMs } with 0 switching a probe off, and optional phases. Returns { state, stop(), drain(capMs) }; state.events
- * is [{ kind: 'status' | 'metrics' | 'count-request', t, ms, result, err }], t run-relative. drain(capMs) waits for
- * the probes in flight and for the COUNT's query (see withTrackedCount), for at most capMs in all, and returns how many
- * were still running then.
+ * is [{ kind: 'status' | 'metrics' | 'count-request', t, ms, result, err }], t run-relative; a metrics result is 'ok'
+ * (the store answered the health query), 'busy' or 'error' (the store rejected or failed it) or 'reconciled' (answered
+ * locally, no query reached the store). drain(capMs) waits for the probes in flight and for the COUNT's query (see
+ * withTrackedCount), for at most capMs in all, and returns how many were still running then.
  */
 export async function startProbeLoad(world, deps, cfg) {
   const { store } = world;
@@ -168,8 +182,12 @@ export async function startProbeLoad(world, deps, cfg) {
     const t0 = performance.now();
     let result = 'ok';
     let err;
+    const sample = { storeQueries: 0 };
     try {
-      await metrics.getStoreCountSnapshot();
+      await metricsSample.run(sample, () => metrics.getStoreCountSnapshot());
+      // after a failed health query the product reconciles again, and the adapter answers that locally: no query
+      // reached the store, so this sample says nothing about it
+      if (sample.storeQueries === 0) result = 'reconciled';
     } catch (e) {
       result = e?.code === 'STORE_SCHEDULER_BUSY' ? 'busy' : 'error';
       err = e?.code ?? e?.name;
@@ -232,8 +250,9 @@ export async function startProbeLoad(world, deps, cfg) {
 }
 
 /**
- * One synthetic graph-scoped storage ACK (8 operations, priority 'ack'); k = its sequence number. onOp(source, ms, ok)
- * sees every operation as the caller experienced it.
+ * One synthetic graph-scoped storage ACK (8 operations, priority 'ack'); k = its sequence number. onOp(source, ms, ok,
+ * startedAt) sees every operation as the caller experienced it, with the performance.now() it started at: an ACK takes
+ * as long as its operations queue, so an operation's start is not its ACK's.
  */
 export async function ackOnce(store, deleteByPatternWithoutCount, k, payload, onOp = () => {}) {
   const slot = k % 16;
@@ -247,9 +266,9 @@ export async function ackOnce(store, deleteByPatternWithoutCount, k, payload, on
     const t0 = performance.now();
     try {
       await call(opt(i));
-      onOp(ACK_SOURCES[i], performance.now() - t0, true);
+      onOp(ACK_SOURCES[i], performance.now() - t0, true, t0);
     } catch (e) {
-      onOp(ACK_SOURCES[i], performance.now() - t0, false);
+      onOp(ACK_SOURCES[i], performance.now() - t0, false, t0);
       throw e;
     }
   };
@@ -304,7 +323,8 @@ export async function ackOnce(store, deleteByPatternWithoutCount, k, payload, on
 /**
  * The synthetic ACK stream (call it after beginEpoch): one ACK every cfg.intervalMs, one at a time, so an ACK still
  * running delays the next (recorded as start lateness). Returns { state, stop(), drain(capMs) }; state.events is
- * [{ k, due, t, lateMs, ms, ok, err }] and state.opEvents [{ k, source, t, ms, ok }], t run-relative.
+ * [{ k, due, t, lateMs, ms, ok, err }] and state.opEvents [{ k, source, t, ms, ok }], t run-relative: an event's own
+ * start, so an operation's t is when that operation began, not when its ACK did.
  */
 export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
   const { store } = world;
@@ -324,8 +344,8 @@ export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
       let ok = true;
       let err;
       try {
-        await ackOnce(store, deleteByPatternWithoutCount, k, cfg.payload, (source, ms, opOk) =>
-          state.opEvents.push({ k, source, t: t0 - world.t0, ms, ok: opOk }),
+        await ackOnce(store, deleteByPatternWithoutCount, k, cfg.payload, (source, ms, opOk, startedAt) =>
+          state.opEvents.push({ k, source, t: startedAt - world.t0, ms, ok: opOk }),
         );
       } catch (e) {
         ok = false;
@@ -355,10 +375,14 @@ export function startAckLoad(world, { deleteByPatternWithoutCount }, cfg) {
 
 /**
  * The two loads over [from, to) (run-relative ms, by event start). Pure.
- *   probes.latencyMs   caller-visible latency of every status and metrics probe that started in the window (a status
- *                      probe is capped at the product's 5 s wait by construction)
+ *   probes.latencyMs   caller-visible latency of every status probe and every metrics probe the store answered, among
+ *                      those that started in the window (a status probe is capped at the product's 5 s wait by
+ *                      construction). A metrics sample the product answered locally (result 'reconciled', see the top)
+ *                      never reached the store: it is counted in nMetrics and nMetricsReconciled and is in no latency
+ *                      and no noAnswer
  *   probes.noAnswer    status probes answered 'no-answer' plus metrics probes that took over 5 s or were rejected busy
- *   ack.opMs           caller-visible duration of every ACK operation that started in the window (queue wait included)
+ *   ack.opMs           caller-visible duration of every ACK operation that started in the window (queue wait included);
+ *                      an operation is in the window by its OWN start, whichever window its ACK started in
  *   ack.acksStarted    ACKs started in the window; ackMs their whole-sequence duration
  */
 export function probeAckSummary({ probeState, ackState, from, to }) {
@@ -366,8 +390,10 @@ export function probeAckSummary({ probeState, ackState, from, to }) {
   const pe = (probeState?.events ?? []).filter((e) => inWindow(e.t));
   const status = pe.filter((e) => e.kind === 'status');
   const metrics = pe.filter((e) => e.kind === 'metrics');
+  const reconciled = metrics.filter((e) => e.result === 'reconciled');
+  const storeMetrics = metrics.filter((e) => e.result !== 'reconciled');
   const noAnswerStatus = status.filter((e) => e.result === 'no-answer').length;
-  const noAnswerMetrics = metrics.filter((e) => e.ms > NO_ANSWER_MS || e.result === 'busy').length;
+  const noAnswerMetrics = storeMetrics.filter((e) => e.ms > NO_ANSWER_MS || e.result === 'busy').length;
   const counts = (events) => events.reduce((acc, e) => ({ ...acc, [e.result]: (acc[e.result] ?? 0) + 1 }), {});
   const acks = (ackState?.events ?? []).filter((e) => inWindow(e.t));
   const ackOps = (ackState?.opEvents ?? []).filter((e) => inWindow(e.t));
@@ -377,10 +403,11 @@ export function probeAckSummary({ probeState, ackState, from, to }) {
       n: status.length + metrics.length,
       nStatus: status.length,
       nMetrics: metrics.length,
+      nMetricsReconciled: reconciled.length,
       nCountRequests: pe.filter((e) => e.kind === 'count-request').length,
-      latencyMs: summarize([...status, ...metrics].map((e) => e.ms)),
+      latencyMs: summarize([...status, ...storeMetrics].map((e) => e.ms)),
       statusLatencyMs: summarize(status.map((e) => e.ms)),
-      metricsLatencyMs: summarize(metrics.map((e) => e.ms)),
+      metricsLatencyMs: summarize(storeMetrics.map((e) => e.ms)),
       noAnswer: noAnswerStatus + noAnswerMetrics,
       noAnswerStatus,
       noAnswerMetrics,

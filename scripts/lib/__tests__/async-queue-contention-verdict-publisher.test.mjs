@@ -157,6 +157,8 @@ const publisher = {
   reclaimed: 0,
   claimed: 70,
   finalized: 68,
+  failed: 0,
+  wallets: 6,
   executions: 69,
   tailOps: 69 * LIFT_TAIL_OPS,
 };
@@ -178,6 +180,9 @@ const PUBLISH_CHECKS = [
   'publisherStopped',
   'publisherNoReclaims',
   'publisherClaimed',
+  'publisherFinalized',
+  'publisherJobsNotFailed',
+  'publisherJobsSettled',
   'publisherBodyReplayed',
 ];
 
@@ -235,13 +240,20 @@ test('every publisher check fails on the evidence it stands for, and on a missin
     [{ stopTimedOut: true }, ['publisherStopped']],
     [{ stopTimedOut: null }, ['publisherStopped']],
     [{ reclaimed: 1 }, ['publisherNoReclaims']],
-    [{ claimed: 0, executions: 0, finalized: 0, tailOps: 0 }, ['publisherClaimed']],
+    [
+      { claimed: 0, executions: 0, finalized: 0, tailOps: 0 },
+      ['publisherClaimed', 'publisherFinalized', 'publisherBodyReplayed'],
+    ],
     [{ executions: 67 }, ['publisherBodyReplayed']], // fewer executions than finished jobs
     [{ executions: 71 }, ['publisherBodyReplayed']], // more executions than claimed jobs
     [{ tailOps: 68 * LIFT_TAIL_OPS - 1 }, ['publisherBodyReplayed']], // fewer tail operations than finished jobs replay
     [{ tailOps: 70 * LIFT_TAIL_OPS }, ['publisherBodyReplayed']], // more than the executions can have issued
     [{ errors: undefined }, ['publisherQuiet']],
     [{ executions: undefined }, ['publisherBodyReplayed']],
+    [{ failed: 2 }, ['publisherJobsNotFailed']], // 2 of 70 claimed jobs failed: more than 2 %
+    [{ failed: undefined }, ['publisherJobsNotFailed', 'publisherJobsSettled']],
+    [{ finalized: 60 }, ['publisherJobsSettled']], // 10 claimed jobs neither finalized nor failed: over the 6 wallets
+    [{ wallets: undefined }, ['publisherJobsSettled']],
     [{ mu: undefined }, ['publishArrivalsWithin4Sigma']],
   ]) {
     const v = run(o);
@@ -257,6 +269,49 @@ test('every publisher check fails on the evidence it stands for, and on a missin
     true,
     'a job cut short by the shutdown may be unfinished',
   );
+  assert.equal(run({ finalized: 64, executions: 64, tailOps: 64 * LIFT_TAIL_OPS }).ok, true, 'one per wallet at most');
+  assert.equal(run({ failed: 1, finalized: 67 }).ok, true, '1 of 70 claimed jobs failed: within 2 %');
+});
+
+test('a publisher run whose claimed jobs never finish is invalid although no runner raised an exception', () => {
+  const run = (o) =>
+    validity({
+      ...base,
+      lambda: 0,
+      measured: 0,
+      queue: 'lift',
+      publisher: { ...publisher, ...o },
+    });
+  const failingOf = (v) => PUBLISH_CHECKS.filter((k) => v[k] === false);
+  // every claimed job failed (or hung): finalized, executions and tail operations are all 0, which the body check's
+  // inequalities alone hold for (0 <= 0 <= 0), and the runner raised nothing
+  const dead = run({ claimed: 72, finalized: 0, executions: 0, tailOps: 0, errors: 0 });
+  assert.equal(dead.ok, false, JSON.stringify(dead));
+  assert.deepEqual(failingOf(dead), ['publisherFinalized', 'publisherJobsSettled', 'publisherBodyReplayed']);
+  assert.equal(dead.publisherQuiet, true, 'the runner survives a job that fails');
+  // every claimed job ended in failure: finished as far as the lifecycle goes, but no publication
+  const allFailed = run({ claimed: 72, finalized: 0, failed: 72, executions: 0, tailOps: 0 });
+  assert.equal(allFailed.ok, false);
+  assert.deepEqual(failingOf(allFailed), ['publisherFinalized', 'publisherJobsNotFailed', 'publisherBodyReplayed']);
+  // most of them failed while the handler ran for the others
+  const most = run({ claimed: 72, finalized: 30, failed: 42, executions: 72, tailOps: 30 * LIFT_TAIL_OPS });
+  assert.equal(most.ok, false);
+  assert.deepEqual(failingOf(most), ['publisherJobsNotFailed']);
+  // the bound is 2 % of the claimed jobs: 1 of 72 is within it, 2 are not
+  assert.equal(run({ claimed: 72, finalized: 71, failed: 1, executions: 72, tailOps: 71 * LIFT_TAIL_OPS }).ok, true);
+  assert.equal(
+    run({ claimed: 72, finalized: 70, failed: 2, executions: 72, tailOps: 70 * LIFT_TAIL_OPS }).publisherJobsNotFailed,
+    false,
+  );
+  // the record: a run like that is not a valid run, so it never reaches a verdict
+  const rec = extractRecord({
+    meta: { cell: { queue: 'lift', repeat: 1, mu: 0.4 } },
+    validity: dead,
+    submission: { F: 0, latencyMs: { p95: 1 } },
+    publish: { F: 0, latencyMs: { p95: 1 }, pickup: { p50: 1 } },
+  });
+  assert.equal(rec.valid, false);
+  assert.ok(['publisherFinalized', 'publisherBodyReplayed'].every((k) => rec.failedChecks.includes(k)));
 });
 
 test('the probes and ACKs that were switched on must have run, and a lift seed file must hash as its manifest says', () => {

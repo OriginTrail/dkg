@@ -161,6 +161,8 @@ export function publishSummary({
     ...block,
     claimed: rows.filter((j) => j.claimedAt !== null).length,
     finalized: rows.filter((j) => j.finalizedAt !== null).length,
+    // terminal business failures: the runner survives a job that fails, so its exception count does not show them
+    failed: rows.filter((j) => j.status === 'failed' || j.failedAt !== null).length,
     completionsPerMin: Math.round((block.finalizedInWindow / (measureMs / 60_000)) * 100) / 100,
     walletEvents: {
       written: walletEvents.filter((e) => e.ev === 'written').length,

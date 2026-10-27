@@ -202,6 +202,75 @@ test('a probe cadence of 0 switches that probe off', async () => {
   assert.deepEqual([...new Set(load.state.events.map((e) => e.kind))], ['status']);
 });
 
+/** A store that answers every query at once, except that the first `rejections` health-lane ones are rejected. */
+function storeRejectingHealth(rejections = Infinity) {
+  const seen = { health: 0 };
+  return {
+    seen,
+    store: {
+      query: async (_sparql, options) => {
+        if (options?.source === 'daemon.metrics.storeHealth' && seen.health++ < rejections)
+          throw Object.assign(new Error('busy'), { code: 'STORE_SCHEDULER_BUSY' });
+        return { type: 'boolean', value: true };
+      },
+    },
+  };
+}
+
+/** A metrics-only probe load (every 25 ms) over `store`, run for `ms` and drained; returns the metrics events. */
+async function metricsEventsOf(store, ms) {
+  const world = await epochOn(store);
+  const load = await startProbeLoad(world, deps, {
+    statusMs: 0,
+    metricsMs: 25,
+    metricsPhaseMs: 5,
+    countMs: 0,
+    horizonMs: 5000,
+  });
+  await sleep(ms);
+  load.stop();
+  await load.drain(2000);
+  return load.state;
+}
+
+test('a store that keeps rejecting the health query yields no successful metrics sample', async () => {
+  const state = await metricsEventsOf(storeRejectingHealth().store, 300);
+  const results = state.events.map((e) => e.result);
+  assert.ok(results.length >= 6, `${results.length} metrics probes`);
+  // a failed health query drops the product's snapshot, so the next read reconciles (answered locally): busy, local,
+  // busy, local, ... and never an answer of the store
+  assert.deepEqual(
+    results,
+    results.map((_, i) => (i % 2 === 0 ? 'busy' : 'reconciled')),
+  );
+  assert.equal(results.includes('ok'), false, 'no synthetic successful sample');
+  const summary = probeAckSummary({ probeState: state, from: 0, to: 1e9 });
+  const busy = results.filter((r) => r === 'busy').length;
+  assert.deepEqual(
+    [summary.probes.nMetrics, summary.probes.nMetricsReconciled, summary.probes.noAnswerMetrics],
+    [results.length, results.length - busy, busy],
+  );
+  assert.deepEqual(summary.probes.metricsResults, { busy, reconciled: results.length - busy });
+  assert.equal(summary.probes.metricsLatencyMs.n, busy, 'the local answers are in no latency');
+});
+
+test('a metrics sample is the store\'s answer once it queried the store, whatever came before', async () => {
+  const { store, seen } = storeRejectingHealth(1);
+  const state = await metricsEventsOf(store, 300);
+  const results = state.events.map((e) => e.result);
+  assert.ok(results.length >= 5);
+  assert.deepEqual(
+    results.slice(0, 3),
+    ['busy', 'reconciled', 'ok'],
+    'rejected, then the local reconcile, then a real answer',
+  );
+  assert.ok(results.slice(2).every((r) => r === 'ok'));
+  assert.equal(seen.health, results.length - 1, 'every sample but the local one asked the store');
+  const summary = probeAckSummary({ probeState: state, from: 0, to: 1e9 });
+  assert.equal(summary.probes.nMetricsReconciled, 1);
+  assert.equal(summary.probes.metricsLatencyMs.n, results.length - 1);
+});
+
 /** A store that answers everything at once except the full-store COUNT, which settles when the test says so. */
 function storeWithGatedCount() {
   const gate = { calls: 0 };
@@ -358,6 +427,58 @@ test('an ACK stream whose store rejects records the failures and keeps going', a
   );
 });
 
+test('every ACK operation is handed its own start, after the previous one finished', async () => {
+  const r = recordingStore();
+  const timed = [];
+  const before = performance.now();
+  await ackOnce(r.store, r.deleteByPattern, 0, 2, (source, ms, ok, startedAt) =>
+    timed.push({ source, ms, ok, startedAt }),
+  );
+  assert.equal(timed.length, ACK_OPS_PER_ACK);
+  assert.ok(timed[0].startedAt >= before);
+  for (let i = 1; i < timed.length; i++) {
+    const prev = timed[i - 1];
+    assert.ok(timed[i].startedAt >= prev.startedAt + prev.ms - 0.001, `operation ${i} starts after operation ${i - 1}`);
+  }
+});
+
+/** A store whose every operation takes `ms`: an ACK on it lasts 8 x ms, and its operations start ms apart. */
+function slowStore(ms) {
+  const slow = async () => sleep(ms);
+  return { query: slow, replaceGraph: slow, insert: slow, update: slow };
+}
+
+test('an ACK that began before the window has the operations that began inside it counted by their own start', async () => {
+  const world = await epochOn(slowStore(25));
+  const load = startAckLoad(world, { deleteByPatternWithoutCount: async () => sleep(25) }, {
+    intervalMs: 5000,
+    phaseMs: 10,
+    payload: 1,
+    horizonMs: 100,
+  });
+  await load.drain(5000);
+  const { events, opEvents } = load.state;
+  assert.equal(events.length, 1, 'one ACK');
+  assert.equal(opEvents.length, ACK_OPS_PER_ACK);
+  for (let i = 1; i < opEvents.length; i++) {
+    const gap = opEvents[i].t - opEvents[i - 1].t;
+    assert.ok(gap >= 20, `operation ${i} started ${gap} ms after the previous one`);
+  }
+  assert.ok(events[0].ms >= 7 * 25, 'the ACK lasts as long as its operations');
+  // the window opens between the first operation's start and the second's: the ACK, which started with its first
+  // operation, began before it; the other 7 operations began inside it
+  const from = (opEvents[0].t + opEvents[1].t) / 2;
+  const s = probeAckSummary({ ackState: load.state, from, to: from + 60_000 });
+  assert.equal(s.ack.acksStarted, 0, 'the ACK started before the window');
+  assert.equal(s.ack.ops, ACK_OPS_PER_ACK - 1);
+  assert.equal(s.ack.opMs.n, ACK_OPS_PER_ACK - 1);
+  assert.deepEqual(s.ack.bySource, Object.fromEntries(ACK_SOURCES.slice(1).map((src) => [src, 1])));
+  // and the window that closes after the second operation began has exactly the first two
+  const upto = probeAckSummary({ ackState: load.state, from: 0, to: (opEvents[1].t + opEvents[2].t) / 2 });
+  assert.equal(upto.ack.ops, 2);
+  assert.equal(upto.ack.acksStarted, 1);
+});
+
 test('probeAckSummary counts the window only and calls a slow or rejected probe a no-answer', () => {
   const probeState = {
     counters: { reconcilesStubbed: 1 },
@@ -434,4 +555,27 @@ test('probeAckSummary counts the window only and calls a slow or rejected probe 
     [false, 0, 0, false, 0],
   );
   assert.deepEqual(off.probes.latencyMs, { n: 0 });
+});
+
+test('probeAckSummary keeps a locally answered metrics sample out of the latencies and the no-answers', () => {
+  const probeState = {
+    events: [
+      { kind: 'status', t: 100, ms: 10, result: 'reachable' },
+      { kind: 'metrics', t: 200, ms: 30, result: 'ok' },
+      { kind: 'metrics', t: 300, ms: 50, result: 'busy' },
+      { kind: 'metrics', t: 400, ms: 0.2, result: 'reconciled' },
+      { kind: 'metrics', t: 500, ms: 0.1, result: 'reconciled' },
+    ],
+  };
+  const s = probeAckSummary({ probeState, from: 0, to: 1000 });
+  assert.deepEqual(
+    [s.probes.n, s.probes.nStatus, s.probes.nMetrics, s.probes.nMetricsReconciled],
+    [5, 1, 4, 2],
+    'they started in the window, so the probes ran',
+  );
+  assert.deepEqual([s.probes.noAnswerMetrics, s.probes.noAnswer], [1, 1]);
+  assert.deepEqual(s.probes.metricsResults, { ok: 1, busy: 1, reconciled: 2 });
+  assert.equal(s.probes.metricsLatencyMs.n, 2);
+  assert.equal(s.probes.metricsLatencyMs.max, 50);
+  assert.equal(s.probes.latencyMs.n, 3, 'the status probe and the two metrics probes the store answered');
 });
