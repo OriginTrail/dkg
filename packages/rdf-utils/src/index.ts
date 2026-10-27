@@ -424,3 +424,4 @@ export function normalizeRdfObject(value: unknown): string {
 }
 
 export { isRdfBlankNodeLabel } from './blank-node-label.js';
+export { DKG_RDF_LITERAL_SAFE_MUTF8_BYTES, javaModifiedUtf8ByteLength } from './rdf-literal-size.js';

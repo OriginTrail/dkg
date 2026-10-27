@@ -19,7 +19,8 @@ import {
   XSD_INTEGER,
 } from '../src/index.js';
 import type { BundleFile, Quad } from '../src/index.js';
-import { BODY_PART_MAX_BYTES, modifiedUtf8Length, splitBody } from '../src/body.js';
+import { javaModifiedUtf8ByteLength } from '@origintrail-official/dkg-rdf-utils';
+import { BODY_PART_MAX_BYTES, splitBody } from '../src/body.js';
 import { literalTerm } from '../src/utils.js';
 import { IRI, IDX_V02, node, objs, shuffled, withoutBody } from './helpers/okf-v02-fixtures.js';
 
@@ -105,18 +106,14 @@ describe('how a body is stored', () => {
     expect(parts.length).toBeGreaterThan(5);
     expect(objs(quads, OKF_BODY_PART_COUNT)).toEqual([INT(parts.length)]);
     for (const q of quads.filter((x) => x.object.startsWith('"'))) {
-      expect(modifiedUtf8Length(q.object)).toBeLessThanOrEqual(BODY_PART_MAX_BYTES);
+      expect(javaModifiedUtf8ByteLength(q.object)).toBeLessThanOrEqual(BODY_PART_MAX_BYTES);
     }
-    expect(BODY_PART_MAX_BYTES * 2).toBe(60_000);
+    expect(BODY_PART_MAX_BYTES).toBe(30_000);
     const texts = parts.map((_, n) => objs(quads, SCHEMA_TEXT, part(n)));
     expect(texts.map((t) => t.length)).toEqual(parts.map(() => 1));
     expect(splitBody(body).map(literalTerm)).toEqual(texts.map((t) => t[0]));
     expect(splitBody(body).join('')).toBe(body);
     expect(bodyOf(exportOf(shuffled(quads, 42)))).toBe(body);
-  });
-
-  it('measures a term as the node does, in Java modified UTF-8', () => {
-    expect(['\u0000', 'a', 'é', '漢', '😀', '\ud800'].map(modifiedUtf8Length)).toEqual([2, 1, 2, 3, 6, 3]);
   });
 });
 
@@ -132,7 +129,7 @@ describe('splitBody', () => {
       const parts = splitBody(body, maxBytes);
       expect(parts.join('')).toBe(body);
       for (const p of parts) {
-        expect(modifiedUtf8Length(literalTerm(p))).toBeLessThanOrEqual(maxBytes);
+        expect(javaModifiedUtf8ByteLength(literalTerm(p))).toBeLessThanOrEqual(maxBytes);
         expect(p).not.toMatch(/[\uD800-\uDBFF]$|^[\uDC00-\uDFFF]/);
       }
     }

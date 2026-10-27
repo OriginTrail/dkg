@@ -9,8 +9,9 @@
  * from 0, on `schema:position`, and the concept holds the number of parts on
  * `okf:bodyPartCount` (0 for an empty body), so a reader can tell a complete
  * body from a partial one. The node refuses any literal over 60,000 bytes,
- * measured on the serialized term in Java modified UTF-8; a part's term stays
- * within half that, leaving room for serialization as the guide advises, and
+ * measured on the serialized term in Java modified UTF-8 (both shared from
+ * `dkg-rdf-utils`); a part's term stays within half that, leaving room for
+ * serialization as the guide advises, and
  * a part never ends inside a surrogate pair, so the parts, concatenated in
  * position order, are the body exactly. The split depends on the body alone:
  * the same body always mints the same parts.
@@ -30,34 +31,20 @@ import {
   SECTION_GENID_INFIX,
   XSD_INTEGER,
 } from './constants.js';
+import { DKG_RDF_LITERAL_SAFE_MUTF8_BYTES, javaModifiedUtf8ByteLength } from '@origintrail-official/dkg-rdf-utils';
 import { literalDatatype, literalValue } from './decode-terms.js';
 import { literalTerm, sanitizeForBlank, typedLiteralTerm } from './utils.js';
 import type { Quad } from './types.js';
 
-/** The largest serialized term a part is written as: half the node's 60,000-byte literal limit. */
-export const BODY_PART_MAX_BYTES = 30_000;
+/** The largest serialized term a part is written as: half the node's literal limit. */
+export const BODY_PART_MAX_BYTES = DKG_RDF_LITERAL_SAFE_MUTF8_BYTES / 2;
 
 /** Bytes the two quotes of a plain literal term add. */
 const QUOTE_BYTES = 2;
 
-/**
- * Java modified UTF-8 length, by UTF-16 code unit, as the node measures a
- * literal term (`javaModifiedUtf8ByteLength` in `dkg-core`, which this package
- * does not import): U+0000 is 2 bytes, U+0001–U+007F 1, U+0080–U+07FF 2, and
- * every other code unit, a surrogate included, 3.
- */
-export function modifiedUtf8Length(value: string): number {
-  let bytes = 0;
-  for (let i = 0; i < value.length; i++) {
-    const code = value.charCodeAt(i);
-    bytes += code === 0 ? 2 : code <= 0x7f ? 1 : code <= 0x7ff ? 2 : 3;
-  }
-  return bytes;
-}
-
 /** The node's measure of `text` written as a plain literal term, escapes and quotes included. */
 function termBytes(text: string): number {
-  return modifiedUtf8Length(literalTerm(text));
+  return javaModifiedUtf8ByteLength(literalTerm(text));
 }
 
 /**
