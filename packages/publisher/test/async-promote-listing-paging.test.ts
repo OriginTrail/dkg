@@ -645,6 +645,22 @@ describe('limit ends a complete listing as soon as no unread job can rank among 
     expect(ids(await queue.list({ limit: 1 }))).toEqual(['q-0000']);
   });
 
+  it('bounds the unread rows by the next unread key, not by the last key of the key page, which is later', async () => {
+    // A is ready at +5, after B (+1) that is unread when A alone is held. A stop bounded by the page's last key (C, +10) would end the walk
+    // there and return A; the next unread key is B, so the walk goes on and B, which is due first, is the answer.
+    const rows: ShareRowSpec[] = [
+      { id: 'A', state: 'failed_retrying', enqueuedAt: NOW, nextRetryAt: NOW + 5 }, { id: 'B', state: 'queued', enqueuedAt: NOW + 1 },
+      { id: 'C', state: 'queued', enqueuedAt: NOW + 10 }, { id: 'D', state: 'queued', enqueuedAt: NOW + 20 },
+    ];
+    const tapped = tapStore(openStore());
+    await seedShareRows(tapped.store, rows);
+    const { queue } = queueOver(tapped.store, { listPageSize: 1, listKeyPageSize: 3 });
+    tapped.calls.length = 0;
+    expect(ids(await queue.list({ limit: 1 }))).toEqual(['B']);
+    // One key page (A, B, C; D follows it). A is read and does not end the walk, B is read and does, after one read of the retry times.
+    expect(listingReads(tapped.calls)).toEqual(['keys', 'payloads:1', 'payloads:1', 'retry']);
+  });
+
   it.each(Array.from({ length: 20 }, (_, seed) => seed))('returns exactly the first limit jobs of the sorted complete listing, retry times before and after their enqueue times, seed %i', async (seed) => {
     const rand = mulberry32(31_000 + seed);
     const specs = population(60 + Math.floor(rand() * 140), rand, { tieGroup: 1 + Math.floor(rand() * 6), contexts: ['cg-a', 'cg-b'] })
