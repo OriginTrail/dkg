@@ -28,15 +28,15 @@ export function createDurableHeldStore(
         const commitments: FinalizedVmAssetCommitment[] = [];
         const held = await readHeldGraphScopedAssets(store, request, undefined, evidence => commitments.push(evidence), confirmation());
         proof.assertCurrent(); request.signal?.throwIfAborted();
-        return { held, commitments: Object.freeze(commitments), assertCurrent: proof.assertCurrent, close: proof.close };
+        return { held, assertCurrent: proof.assertCurrent, close: proof.close,
+          reconcile: async ctx => {
+            for (const commitment of commitments) {
+              request.signal?.throwIfAborted(); proof.assertCurrent();
+              await reconcile(commitment, ctx);
+              request.signal?.throwIfAborted(); proof.assertCurrent();
+            }
+          } };
       } catch (error) { proof.close(); throw error; }
-    },
-    reconcile: async (request, proof, ctx) => {
-      for (const commitment of proof.commitments) {
-        request.signal?.throwIfAborted(); proof.assertCurrent();
-        await reconcile(commitment, ctx);
-        request.signal?.throwIfAborted(); proof.assertCurrent();
-      }
     },
   };
 }

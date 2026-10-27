@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { FinalizedVmAssetCommitment } from './finalized-vm-asset-commitment.js';
+import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import type { GraphScopedChainEvidence } from './graph-scoped-chain-views.js';
 import type { HeldGraphScopedAssetsRequest } from './stored-graph-assets.js';
@@ -7,8 +7,8 @@ import type { HeldGraphScopedAssetsRequest } from './stored-graph-assets.js';
 /** Acquired content ownership remains live until the requester settles or abandons its graph. */
 export interface HeldAssetsProof {
   readonly held: ReadonlySet<string>;
-  /** Confirmed copies eligible for cleanup; tentative no-chain prefixes grant no retirement evidence. */
-  readonly commitments: readonly FinalizedVmAssetCommitment[];
+  /** Reconcile eligible confirmed copies while this content proof remains live. */
+  reconcile?(ctx: OperationContext): Promise<void>;
   assertCurrent(): void;
   close(): void;
 }

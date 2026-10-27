@@ -172,7 +172,7 @@ export interface OwnedDurableGraphRequest extends DurableGraphIdentity {
 
 /** A graph owner receives a required decision without adding policy fields to transport results. */
 export async function runAdmittedGraphOwnedDurableGraph(request: OwnedDurableGraphRequest): Promise<DurableRecoveryRoundOutcome> {
-  const { host, authority, ctx, contextGraphId, recovery, options } = request;
+  const { host, authority, contextGraphId, recovery, options } = request;
   const { ports, materialization, contextGraphBudget } = prepareDurableGraph({ ...request, remainingContextGraphs: 1 }, false);
   const runPaging = async (fence?: HeldAssetFence): Promise<DurableRecoveryRoundOutcome> => {
     // An unbound subscription must persist its numeric binding before skipping DATA.
@@ -185,8 +185,7 @@ export async function runAdmittedGraphOwnedDurableGraph(request: OwnedDurableGra
       storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
       recovery: { ...recovery,
         held: confirmCurrent && host.heldStore && fence
-          ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent,
-              reconcile: (request, proof) => host.heldStore?.reconcile?.(request, proof, ctx) ?? Promise.resolve() } : undefined },
+          ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent } : undefined },
     });
   };
   return host.heldStore ? materialization.withHeldAssetFence(runPaging, options.signal) : runPaging();
