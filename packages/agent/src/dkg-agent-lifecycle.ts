@@ -8906,7 +8906,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /** Await an in-flight authority activation within the caller's existing lifetime. */
   waitForContextGraphSubscriptionActivation(this: DKGAgent, id: string, signal: AbortSignal): Promise<void> {
-    return waitForSubscriptionActivation(this.workLifetime, () => this.started, this.contextGraphSubscriptionDormancyById, id, signal);
+    return waitForSubscriptionActivation(this.workLifetime, () => this.started, this.subscribedContextGraphs, this.contextGraphSubscriptionDormancyById, id, signal);
   }
 
   /** Commit the activation transaction; its owner finalizes bookkeeping and publication. */
@@ -8933,7 +8933,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }),
       current: (contextGraphId) => this.subscribedContextGraphs.get(contextGraphId),
       remove: (contextGraphId) => this.deleteContextGraphSubscription(contextGraphId),
-      restoreInactive: (id, previous) => void this.setContextGraphSubscription(id, previous, { persist: false, preserveAdmittedWireBinding: true }),
+      restoreInactive: (id, previous) => {
+        const restored = this.setContextGraphSubscription(id, previous, { persist: false, preserveAdmittedWireBinding: true });
+        // Transaction rollback restores the same durable intent. An operator
+        // clear followed by a new subscribe must still start a separate line.
+        continueContextGraphSubscriptionLine(previous, restored);
+      },
       rollbackNetworkEffects: (contextGraphId, rollbackSlotRelease) => this.unsubscribeFromContextGraph(
         contextGraphId, { persist: false, updateRehydrationStatus: false, rollbackSlotRelease },
       ),

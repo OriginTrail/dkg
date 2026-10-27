@@ -29,34 +29,14 @@ export function prepareAtomicGraphAndSubjectReplace(
   adapter: Adapter, graphUri: string, graphQuads: Quad[],
   metaGraphUri: string, metadataSubject: string, metadataQuads: Quad[],
 ) {
-  return prepareGraphAndSubjectReplace(adapter, graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, 'staged');
-}
-
-/** One preflight/reporting boundary, independent of the selected write strategy. */
-function prepareGraphAndSubjectReplace(
-  adapter: Adapter, graphUri: string, graphQuads: Quad[],
-  metaGraphUri: string, metadataSubject: string, metadataQuads: Quad[],
-  strategy: 'staged' | 'bounded-direct',
-) {
   validateLiterals(adapter, 'replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
   const plan = buildAtomicGraphAndSubjectReplaceUpdate(
-    graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, strategy,
+    graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, adapter === 'blazegraph' ? 'bounded-direct' : 'staged',
   );
   sparqlStatements(adapter).checkIris.replaceGraphAndSubject(
     graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
   );
   return plan;
-}
-
-/** Blazegraph executes the whole update transactionally, including CLEAR and
- * the metadata replacement. Avoid staging/MOVE for a bounded single asset.
- * Larger or overlapping legacy inputs keep their previous strategy. */
-export function prepareBlazegraphGraphAndSubjectReplace(
-  graphUri: string, graphQuads: Quad[], metaGraphUri: string,
-  metadataSubject: string, metadataQuads: Quad[],
-) {
-  return prepareGraphAndSubjectReplace('blazegraph', graphUri, graphQuads,
-    metaGraphUri, metadataSubject, metadataQuads, 'bounded-direct');
 }
 
 export function prepareAtomicSubjectReplace(

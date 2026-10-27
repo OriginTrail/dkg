@@ -2,6 +2,7 @@
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
 import type { ContextGraphSub } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
+import { isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 import { vmRecoveryRetryDelay } from './vm-recovery-pass-authority.js';
 
 export function isCommittedSubscription(
@@ -17,13 +18,16 @@ export function isCommittedSubscription(
  * The caller supplies its original deadline signal; no new deadline or RPC is added. */
 export async function waitForSubscriptionActivation(
   workLifetime: AgentWorkLifetime, isStarted: () => boolean,
+  subscriptions: ReadonlyMap<string, ContextGraphSub>,
   dormancy: ReadonlyMap<string, ContextGraphDormancyReason>, id: string, caller: AbortSignal,
 ): Promise<void> {
   if (dormancy.get(id) !== 'authorityUnavailable') return;
+  const subscription = subscriptions.get(id);
   const generation = workLifetime.generation;
   const signal = AbortSignal.any([caller, workLifetime.signal]);
   const assertCurrent = () => {
-    if (signal.aborted || generation !== workLifetime.generation || !isStarted())
+    if (signal.aborted || generation !== workLifetime.generation || !isStarted()
+      || !isContextGraphSubscriptionStoredAgain(subscription, subscriptions.get(id)))
       throw new Error('Subscription activation ownership changed');
   };
   assertCurrent();

@@ -2,6 +2,7 @@ import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
+import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { PublicSnapshotMethods } from '../src/dkg-agent-public-snapshot.js';
 
@@ -25,7 +26,11 @@ function fixture() {
     store: { insert: vi.fn(async () => {}) },
   };
   a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;
-  return { a, active };
+  const replace = (next: ReturnType<typeof active>) => {
+    continueContextGraphSubscriptionLine(a.subscribedContextGraphs.get(graph), next);
+    a.subscribedContextGraphs.set(graph, next);
+  };
+  return { a, active, replace };
 }
 const run = (a: any, signal?: AbortSignal) => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a,
   { contextGraphId: graph, onChainId: '1', mode: 'core-cache', trustedCorePeerIds: ['core'], signal });
@@ -34,17 +39,17 @@ afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 describe('snapshot waits for persisted startup authority', () => {
   it('does not capture a provisional row that a failed activation rolls back', async () => {
     vi.useFakeTimers();
-    const { a, active } = fixture();
+    const { a, active, replace } = fixture();
     const pending = run(a);
     await vi.advanceTimersByTimeAsync(0);
     expect(a.router.send).not.toHaveBeenCalled();
     expect(a.store.insert).not.toHaveBeenCalled();
     // The real activation transaction can roll back while its authority read
     // is unavailable. Its next successful pass installs a different row.
-    a.subscribedContextGraphs.set(graph, { ...active(), subscribed: false });
+    replace({ ...active(), subscribed: false });
     await vi.advanceTimersByTimeAsync(2500);
     expect(a.router.send).not.toHaveBeenCalled();
-    a.subscribedContextGraphs.set(graph, active());
+    replace(active());
     a.contextGraphSubscriptionDormancyById.delete(graph);
     await vi.advanceTimersByTimeAsync(2500);
     await expect(pending).resolves.toMatchObject({ assets: 0, current: true, elapsedMs: 5000 });
@@ -68,9 +73,9 @@ describe('snapshot waits for persisted startup authority', () => {
   });
 
   it.each(['authorityDenied', 'deactivated', 'rehydrationDisabled'] as const)('keeps %s inactive without a core read', async reason => {
-    const { a, active } = fixture();
+    const { a, active, replace } = fixture();
     a.contextGraphSubscriptionDormancyById.set(graph, reason);
-    a.subscribedContextGraphs.set(graph, { ...active(), subscribed: false });
+    replace({ ...active(), subscribed: false });
     await expect(run(a)).rejects.toThrow('inactive');
     expect(a.router.send).not.toHaveBeenCalled();
     expect(a.store.insert).not.toHaveBeenCalled();
@@ -78,11 +83,11 @@ describe('snapshot waits for persisted startup authority', () => {
 
   it('honors an explicit unsubscribe while startup authority is unavailable', async () => {
     vi.useFakeTimers();
-    const { a, active } = fixture();
+    const { a, active, replace } = fixture();
     const pending = run(a);
     const rejected = expect(pending).rejects.toThrow('inactive');
     await vi.advanceTimersByTimeAsync(0);
-    a.subscribedContextGraphs.set(graph, { ...active(), subscribed: false });
+    replace({ ...active(), subscribed: false });
     a.contextGraphSubscriptionDormancyById.delete(graph);
     await vi.advanceTimersByTimeAsync(2500);
     await rejected;

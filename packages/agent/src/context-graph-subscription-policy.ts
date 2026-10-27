@@ -106,14 +106,23 @@ export function contextGraphSubscriptionSyncPremisesEqual(
   current: ContextGraphSub | undefined,
 ): boolean {
   if (captured === undefined || current === undefined) return false;
+  return contextGraphSubscriptionAdmissionPremisesEqual(captured, current)
+    // `metaSynced === false` and an absent value are read differently.
+    && captured.metaSynced === current.metaSynced
+    && (captured.pendingMeta === true) === (current.pendingMeta === true);
+}
+
+/** Admission and chain binding, before metadata readiness has been established. */
+export function contextGraphSubscriptionAdmissionPremisesEqual(
+  captured: ContextGraphSub | undefined,
+  current: ContextGraphSub | undefined,
+): boolean {
+  if (captured === undefined || current === undefined) return false;
   return captured.subscribed === current.subscribed
     && (captured.coreHosted === true) === (current.coreHosted === true)
     && captured.syncMode === current.syncMode
     && captured.onChainId === current.onChainId
-    && captured.onChainHash === current.onChainHash
-    // `metaSynced === false` and an absent value are read differently.
-    && captured.metaSynced === current.metaSynced
-    && (captured.pendingMeta === true) === (current.pendingMeta === true);
+    && captured.onChainHash === current.onChainHash;
 }
 
 /**

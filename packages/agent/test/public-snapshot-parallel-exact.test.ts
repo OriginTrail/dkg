@@ -44,21 +44,25 @@ describe('bounded snapshot recovery overlap', () => {
 
   it('cancels the other lane and waits for its physical work before reporting a failure', async () => {
     const both = deferred(), physical = deferred(); let count = 0, settled = false;
+    let siblingAborted: boolean | undefined;
     vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
       const lane = count++;
       if (count === 2) both.resolve();
       await both.promise;
       if (lane === 0) throw new Error('first lane failed');
       await physical.promise;
-      expect(request.options.signal?.aborted).toBe(true);
+      siblingAborted = request.options.signal?.aborted;
       return success(selected(request));
     });
     const job = recoverPublicSnapshotExact(host, options());
     job.then(() => { settled = true; }, () => { settled = true; });
     const rejection = expect(job).rejects.toThrow('first lane failed');
-    await both.promise; await Promise.resolve(); await Promise.resolve();
+    await both.promise;
+    // Let the failed lane propagate through its peer lock and abort the job.
+    await new Promise<void>(resolve => setImmediate(resolve));
     expect(settled).toBe(false);
     physical.resolve(); await rejection;
+    expect(siblingAborted).toBe(true);
     expect(count).toBe(2);
   });
 

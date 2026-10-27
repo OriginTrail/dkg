@@ -20,6 +20,7 @@ function deferred() {
 const agents: DKGAgent[] = [];
 afterEach(async () => {
   for (const agent of agents.splice(0)) { await agent.stop(); await agent.store.close(); }
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 async function fixture(hosted: boolean) {
@@ -51,6 +52,57 @@ async function fixture(hosted: boolean) {
 }
 
 describe('bulk clear preserves independent saved Core hosting', () => {
+  it.each([false, true])('fences pending snapshot activation after real clear, recreated=%s', async recreate => {
+    const f = await fixture(false);
+    const state = f.agent as any;
+    state.started = true;
+    state.contextGraphSubscriptionDormancyById.set(LOCAL, 'authorityUnavailable');
+    const send = vi.fn(async () => { throw new Error('unexpected core read'); });
+    state.router = { send };
+    const insert = vi.spyOn(f.agent.store, 'insert');
+    vi.useFakeTimers();
+    const pending = f.agent.syncPublicGraphSnapshot({ contextGraphId: LOCAL, onChainId: '582',
+      mode: 'core-cache', trustedCorePeerIds: ['core'] });
+    const outcome = pending.catch(error => error);
+    try {
+      await vi.advanceTimersByTimeAsync(0);
+      expect(await f.agent.clearContextGraphSubscriptions()).toBe(1);
+      expect(state.subscribedContextGraphs.has(LOCAL)).toBe(false);
+      if (recreate) state.setContextGraphSubscription(LOCAL, {
+        subscribed: true, syncMode: 'always-on', onChainId: '582', onChainHash: HASH,
+      }, { persist: false });
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(await outcome).toMatchObject({ message: 'Snapshot job ownership changed' });
+      expect(send).not.toHaveBeenCalled();
+      expect(insert).not.toHaveBeenCalled();
+      expect(f.rows.has(LOCAL)).toBe(false);
+      expect(state.subscribedContextGraphs.has(LOCAL)).toBe(recreate);
+      expect(state.workLifetime.physicalRuns.size).toBe(0);
+    } finally { state.started = false; vi.useRealTimers(); }
+  });
+
+  it('keeps the activation wait alive across a transaction rollback of the same saved intent', async () => {
+    const f = await fixture(false);
+    const state = f.agent as any;
+    state.started = true;
+    state.contextGraphSubscriptionDormancyById.set(LOCAL, 'authorityUnavailable');
+    vi.useFakeTimers();
+    let settled = false;
+    const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, new AbortController().signal)
+      .then(() => { settled = true; }, (error: Error) => { settled = true; return error; });
+    try {
+      await expect(state.activatePersistedContextGraphSubscriptionRecord(f.original, {
+        prepare: async () => { throw new Error('authority temporarily unavailable'); },
+      })).rejects.toThrow('authority temporarily unavailable');
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(settled).toBe(false);
+      await f.agent.clearContextGraphSubscriptions();
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(await outcome).toMatchObject({ message: 'Subscription activation ownership changed' });
+      expect(state.workLifetime.physicalRuns.size).toBe(0);
+    } finally { state.started = false; vi.useRealTimers(); }
+  });
+
   it.each([false, true])('retains disabled hosting intent and identity, held unsubscribe=%s', async held => {
     const f = await fixture(true);
     const entered = deferred(); const release = deferred();

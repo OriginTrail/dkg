@@ -1,6 +1,6 @@
 import { afterEach, expect, it, vi } from 'vitest';
 import * as core from '@origintrail-official/dkg-core';
-import { prepareBlazegraphGraphAndSubjectReplace } from '../src/adapters/atomic-write-plans.js';
+import { prepareAtomicGraphAndSubjectReplace } from '../src/adapters/atomic-write-plans.js';
 import { observeInvalidSparqlTerms } from './helpers/invalid-sparql-term-observer.js';
 
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
@@ -17,7 +17,7 @@ it.each(['direct', 'overlapping', 'oversized'] as const)('preflights and reports
   const literals = vi.spyOn(core, 'assertQuadLiteralsMutf8Safe');
   const observer = observeInvalidSparqlTerms();
   try {
-    const plan = prepareBlazegraphGraphAndSubjectReplace(graph, quads, meta, 'urn:metadata', []);
+    const plan = prepareAtomicGraphAndSubjectReplace('blazegraph', graph, quads, meta, 'urn:metadata', []);
     expect(literals).toHaveBeenCalledTimes(1);
     expect(observer.counted).toEqual([{ value: 1, adapter: 'blazegraph', operation: 'replaceGraphAndSubject',
       position: 'predicate', kind: 'relative-iri', enforcement: 'observe' }]);
@@ -30,7 +30,7 @@ it.each([false, true])('rejects invalid payloads before optional IRI reporting, 
   const graph = 'urn:data', meta = overlapping ? graph : 'urn:meta';
   const observer = observeInvalidSparqlTerms();
   try {
-    expect(() => prepareBlazegraphGraphAndSubjectReplace(graph, [{ graph: 'urn:wrong',
+    expect(() => prepareAtomicGraphAndSubjectReplace('blazegraph', graph, [{ graph: 'urn:wrong',
       subject: 'urn:asset', predicate: 'relative-predicate', object: '"value"' }], meta, 'urn:metadata', [])).toThrow('targets');
     expect(observer.counted).toEqual([]);
     expect(observer.warnings).toEqual([]);

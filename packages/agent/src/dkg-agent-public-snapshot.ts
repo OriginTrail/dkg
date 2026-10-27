@@ -7,7 +7,7 @@ import { createOperationContext } from "@origintrail-official/dkg-core";
 import { recoverPublicSnapshotBulk } from './public-snapshot-bulk.js';
 import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
 import { createPublicSnapshotHeldAssetCheck } from './public-snapshot-held-assets.js';
-import { isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
+import { isContextGraphSubscriptionStoredAgain, contextGraphSubscriptionAdmissionPremisesEqual } from './context-graph-subscription-policy.js';
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { createPublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
@@ -128,11 +128,7 @@ export class PublicSnapshotMethods extends DKGAgentBase {
         // changed binding generation remains a different owner.
         isEquivalentSubscription: (captured, current) =>
           isContextGraphSubscriptionStoredAgain(captured, current)
-          && captured?.subscribed === current?.subscribed
-          && (captured?.coreHosted === true) === (current?.coreHosted === true)
-          && captured?.syncMode === current?.syncMode
-          && captured?.onChainId === current?.onChainId
-          && captured?.onChainHash === current?.onChainHash,
+          && contextGraphSubscriptionAdmissionPremisesEqual(captured, current),
         assertLifecycleCurrent: () => { if (lifetime !== this.workLifetime.generation) throw new Error("Snapshot job ownership changed"); },
         closedError: () => new Error("Node is stopping"),
         bindingChangedError: () => new Error("Snapshot job ownership changed"),
