@@ -1,3 +1,4 @@
+import { createStoredPrefixAcquirer } from './durable-recovery-held-store.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { HeldAssetFence } from './durable-recovery-materialization.js';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
@@ -158,7 +159,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
   const continuation = onVerifiedFullSnapshot ? {} : { durableMetaContinuation, durableResumeBoundary };
   const runPaging = (fence?: HeldAssetFence) =>
     runDurableSyncDetailed({ ...durableContext, ...continuation,
-      storedPrefix: fence?.acquireStoredPrefix,
+      storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
     });
   return host.heldStore && !onVerifiedFullSnapshot
     ? materialization.withHeldAssetFence(runPaging, signal) : runPaging();

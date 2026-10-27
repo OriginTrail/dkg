@@ -573,3 +573,5 @@ export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvi
 export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
 
 export { readShareQueueDepth, readLiftQueueDepth, readLiftJournalEntryCount, type AsyncQueueDepthOptions } from './async-queue-depth.js';
+
+export { parseGraphKnowledgeAssetStructure, type GraphKnowledgeAssetStructure, type GraphKnowledgeAssetStructurePolicy } from './graph-metadata-envelope.js';

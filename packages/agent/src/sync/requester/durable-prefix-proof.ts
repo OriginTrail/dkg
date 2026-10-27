@@ -23,7 +23,7 @@ export class DurableGraphSettlementGuard {
       if (!capability) throw new Error('Cannot prove stored durable prefix');
       this.current = { proof: await capability(manifest, offset, signal), reject };
     }
-    catch (error) { reject(); throw error; }
+    catch (error) { if (!signal?.aborted) reject(); throw error; }
   }
 
   readonly assertPrefixCurrent = (): void => {

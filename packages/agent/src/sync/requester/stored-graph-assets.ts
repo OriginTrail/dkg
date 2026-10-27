@@ -2,7 +2,7 @@
 import { assertSafeIri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { parseGraphScopedDescriptor, type GraphScopedDescriptor } from '../durable-integrity.js';
+import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
 
 /** Assets per store read: one VALUES list of exact metadata subjects. */
@@ -54,13 +54,9 @@ export async function readHeldGraphScopedAssets(
     }
     const eligible = chunk.filter(descriptor => {
       const rows = rowsBySubject.get(descriptor.ual) ?? [];
-      try {
-        const local = parseGraphScopedDescriptor(descriptor.ual,
-          rows.map(row => ({ ...row, subject: descriptor.ual, graph: metaGraph })));
-        if (local.contextGraphId !== request.contextGraphId) return false;
-      } catch { return false; }
-      return holdsDescriptor(descriptor, parseGraphKnowledgeAssetMetadataEnvelope(rows,
-        { contextGraphId: request.contextGraphId, ual: descriptor.ual }), confirmation);
+      return holdsDescriptor(descriptor, parseGraphKnowledgeAssetMetadataEnvelope(
+        rows.map(row => ({ ...row, graph: metaGraph })),
+        { contextGraphId: request.contextGraphId, ual: descriptor.ual }, 'stored-context'), confirmation);
     });
     for (const descriptor of eligible) {
       request.signal?.throwIfAborted();

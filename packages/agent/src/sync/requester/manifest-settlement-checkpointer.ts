@@ -122,3 +122,19 @@ export function createManifestSettlementCheckpointer(options: {
   };
 }
 
+
+
+/** Fetching can advance a responder cursor ahead of the still-stored prefix. Keep both coordinates aligned until settlement advances it. */
+export function preserveResumedManifestCheckpoint(
+  manifest: GraphScopedDurableManifestPlan,
+  result: { checkpointKey: string; resumedFromOffset: number; rawResumedFromOffset?: number },
+  setCheckpoint: DurableSyncContext['setCheckpoint'],
+): void {
+  const prefix = graphScopedDurableManifestPrefixAtOffset(manifest, result.resumedFromOffset);
+  if (!prefix) throw new Error('Cannot preserve a non-boundary stored prefix');
+  setCheckpoint(result.checkpointKey, {
+    offset: result.resumedFromOffset,
+    responderSessionOffset: result.rawResumedFromOffset ?? result.resumedFromOffset,
+    binding: { manifestDigest: manifest.manifestDigest, manifestPrefixDigest: prefix.prefixDigest, terminal: false },
+  });
+}

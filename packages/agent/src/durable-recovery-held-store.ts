@@ -34,7 +34,7 @@ export function createDurableHeldStore(
   } };
 }
 
-/** Materialization binds subscription ownership and content acquisition once. */
+/** Bind the host-owned content prover to this paging operation's subscription ownership. */
 export function createStoredPrefixAcquirer(
   prove: ProveHeldAssets | undefined, contextGraphId: string, assertOwnership: () => void,
 ): StoredDurablePrefix | undefined {
@@ -46,9 +46,9 @@ export function createStoredPrefixAcquirer(
     assertOwnership(); signal?.throwIfAborted();
     const proof = await prove({ contextGraphId, descriptors, signal });
     if (!proof) throw new Error('Cannot prove stored durable prefix');
-    const assertCurrent = () => { assertOwnership(); proof.assertCurrent(); signal?.throwIfAborted(); };
+    const assertCurrent = () => { assertOwnership(); proof.assertCurrent(); };
     try {
-      assertCurrent();
+      assertCurrent(); signal?.throwIfAborted();
       if (descriptors.some(descriptor => !proof.held.has(descriptor.ual))) throw new Error('Stored durable prefix is missing or corrupt');
       return { assertCurrent, close: proof.close, covers: ual => proof.held.has(ual) };
     } catch (error) { proof.close(); throw error; }

@@ -1,4 +1,4 @@
-import { createDurableHeldStore } from '../src/durable-recovery-held-store.js';
+import { createDurableHeldStore, createStoredPrefixAcquirer } from '../src/durable-recovery-held-store.js';
 import { runAdmittedDurableGraph } from '../src/durable-recovery-graph.js';
 import type { DurableRecoveryHost } from '../src/durable-recovery-host.js';
 import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
@@ -163,7 +163,7 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: () => number | undefined; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
+  options: { signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: () => number | undefined; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
 
@@ -175,7 +175,6 @@ function node(
   const info: string[] = [];
   let defaultSubscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
   const materialization = new RecoveryMaterializationOwner({
-    proveHeldAssets: createDurableHeldStore(store, contentFence, () => options.noChain ? 'integrity-only' : 'confirmed')?.prove,
     chain: () => { throw new Error('chain reads supplied below'); }, store: () => store,
     isClosed: () => false, subscription: () => {
       if (options.subscription) return options.subscription();
@@ -200,6 +199,7 @@ function node(
     ctx,
     remotePeerId,
     contextGraphIds: [CG],
+    signal: options.signal?.(),
     durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
     fetchSyncPages: (request) => fetchSyncPages({
       ctx: request.ctx,
@@ -233,7 +233,7 @@ function node(
       logDebug: () => {},
     }),
     ...roundOptions,
-    storedPrefix: options.disablePrefixProof?.() ? undefined : fence.acquireStoredPrefix,
+    storedPrefix: options.disablePrefixProof?.() ? undefined : createStoredPrefixAcquirer(createDurableHeldStore(store, contentFence, () => options.noChain ? 'integrity-only' : 'confirmed')?.prove, CG, fence.assertCurrent),
     processDurableBatchInWorker: async (...args) => { await options.beforeVerify?.(); return processBatch(...args); },
     storeInsert: async ({ quads }) => { await options.beforeMetaStore?.(); await store.insert(quads); },
     storeGraphScopedAsset: async ({ asset: verified }) => {
@@ -275,7 +275,7 @@ function node(
       log: { info: context.logInfo, warn: context.logWarn, debug: context.logDebug },
       reconcile: async () => {}, resolveOrdinaryAuthority: () => { throw new Error('supplied authority'); },
       materialization: () => ({ ...materialization, storeGraphScopedAsset: context.storeGraphScopedAsset! }),
-      heldStore: createDurableHeldStore(store, contentFence),
+      heldStore: options.disablePrefixProof?.() ? undefined : createDurableHeldStore(store, contentFence),
     };
     return runAdmittedDurableGraph({ host, ctx, remotePeerId, contextGraphId: CG, remainingContextGraphs: 1,
       authority: { coalescing: 'owner-only', admitVerifiedPage() {}, isRegisteredPublic: () => true,
@@ -283,7 +283,7 @@ function node(
       options: { exactAssetFetchPolicy: exactAssetFetchSessionPolicy(selection), exactRecoveryTransportMode: 'legacy',
         settlementSliceTimeoutMs: roundOptions.settlementSliceDeadline === undefined ? undefined : 1 },
     });
-  });
+  }, options.signal?.());
 
   /**
    * A process lifetime: a new owner and a new checkpoint store. With
@@ -549,9 +549,9 @@ it('finishes bounded no-chain recovery while retaining tentative status', async 
   for (const f of fixtures) expect(await core.store.query(`ASK { GRAPH <${f.meta[0]!.graph}> { <${f.ual}> <http://dkg.io/ontology/status> "tentative" } }`)).toEqual({ type: 'boolean', value: true });
 });
 
-it.each(['clean', 'deleted', 'corrupted'])('resumes production exact paging with a %s stored prefix', async change => {
+it.each(['clean', 'deleted', 'corrupted', 'unavailable'])('resumes production exact paging with a %s stored prefix', async change => {
   const fixtures = generation(); let fail = true, attempts = 0;
-  const core = node(servingPeer(fixtures), { exactPaging: true, failAssetStore: () => fail && ++attempts > 1 });
+  const core = node(servingPeer(fixtures), { exactPaging: true, disablePrefixProof: () => change === 'unavailable', failAssetStore: () => fail && ++attempts > 1 });
   const checkpoints = new MemorySyncCheckpointStore();
   const first = await core.round(checkpoints, PEER, {});
   expect(first.result.complete).toBe(false);
@@ -587,5 +587,30 @@ it('reuses a bounded prefix after an uncertain write rejects during supervised r
     afterSlice: () => { rounds++; } }).recover();
   expect(result.outcome).toBe('terminal');
   expect(rounds).toBeGreaterThan(1);
+  expect(core.writes).toEqual(fixtures.map(f => f.ual));
+});
+
+
+it('preserves a verified prefix when a resumed round is cancelled during verification', async () => {
+  const fixtures = generation();
+  let controller: AbortController | undefined, cancel = false;
+  const core = node(servingPeer(fixtures), {
+    signal: () => controller?.signal,
+    beforeVerify: async () => { if (cancel) controller!.abort(new Error('caller cancelled')); },
+  });
+  const checkpoints = new MemorySyncCheckpointStore();
+  await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() });
+  const dataKey = getSyncCheckpointKey(PEER, CG, false, 'data');
+  const data = checkpoints.get(dataKey);
+  expect(data?.offset).toBeGreaterThan(0);
+  const writes = core.writes.length;
+  controller = new AbortController(); cancel = true;
+  const cancelled = await core.round(checkpoints, PEER, {});
+  expect(cancelled.result.complete).toBe(false);
+  expect(core.writes).toHaveLength(writes);
+  expect(checkpoints.get(dataKey)).toMatchObject({ offset: data!.offset, manifestDigest: data!.manifestDigest, manifestPrefixDigest: data!.manifestPrefixDigest });
+  expect(checkpoints.get(dataKey)?.terminal).not.toBe(true);
+  controller = undefined; cancel = false;
+  expect((await core.round(checkpoints, PEER, {})).result.complete).toBe(true);
   expect(core.writes).toEqual(fixtures.map(f => f.ual));
 });

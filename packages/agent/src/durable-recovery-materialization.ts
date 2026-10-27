@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import { createStoredPrefixAcquirer, type ProveHeldAssets } from './durable-recovery-held-store.js';
-import type { StoredDurablePrefix } from './sync/requester/durable-prefix-proof.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { ContextGraphSub } from './dkg-agent-types.js';
@@ -16,7 +14,6 @@ import type { ChallengeExactAssetFetchContext, DurableSyncContext } from './sync
 
 type MaterializationOptions = Parameters<typeof materializeVerifiedGraphScopedAsset>[0];
 export interface RecoveryMaterializationPorts {
-  readonly proveHeldAssets?: ProveHeldAssets;
   chain(): ChainAdapter;
   store(): MaterializationOptions['store'];
   isClosed(): boolean;
@@ -39,7 +36,6 @@ export interface RecoveryMaterializationScope {
 }
 export interface HeldAssetFence {
   assertCurrent(): void;
-  readonly acquireStoredPrefix?: StoredDurablePrefix;
 }
 export interface RecoveryMaterialization {
   withHeldAssetFence<T>(operation: (fence: HeldAssetFence) => Promise<T>, signal?: AbortSignal): Promise<T>;
@@ -94,9 +90,8 @@ export class RecoveryMaterializationOwner {
         closedError: () => asSyncFetchAbortError(new Error('Held asset recovery is closed for node shutdown')),
         bindingChangedError: () => asSyncFetchAbortError(new Error(`Subscription for ${contextGraphId} changed during held recovery`)),
         operation: control => {
-          const assertCurrent = () => { control.adoptEquivalentSubscription(); control.assertCurrent(); };
-          return operation({ assertCurrent,
-            acquireStoredPrefix: createStoredPrefixAcquirer(ports.proveHeldAssets, contextGraphId, assertCurrent) });
+          const assertCurrent = () => { control.adoptEquivalentSubscription(); control.assertOwnershipCurrent(); };
+          return operation({ assertCurrent });
         },
       }),
       authenticateChallengePinnedAsset: ({
