@@ -68,7 +68,7 @@ export function startRetention(input: RetentionStartInput): RetentionHandle {
   for (const queue of active) {
     const factory = factories.find(candidate => candidate.queue === queue);
     if (!factory) {
-      log(`[warn] [retention] queueRetention.${queue}.mode is "${settings[queue].mode}" but this build has no ${queue} retention sweep: nothing will run for that queue`);
+      log(`[warn] [retention] queueRetention.${queue}.mode is "${settings[queue].mode}" but this build has no ${queue} retention sweep: nothing will run for that queue. The setting takes effect, without further notice, on the first start of a release that ships the ${queue} sweep`);
       continue;
     }
     try {

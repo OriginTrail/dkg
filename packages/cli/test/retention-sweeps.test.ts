@@ -152,6 +152,7 @@ describe('the registry', () => {
     expect(handle.usage()).toEqual([]);
     expect(log).toHaveBeenCalledTimes(1);
     expect(String(log.mock.calls[0]![0])).toMatch(/\[warn\] \[retention\] queueRetention\.publisher\.mode is "report" but this build has no publisher retention sweep/);
+    expect(String(log.mock.calls[0]![0])).toContain('takes effect, without further notice, on the first start of a release that ships the publisher sweep');
     // and the share queue is unaffected when both are asked for
     const both = startRetention({ runtime: 'daemon-admission', settings: settings({ share: { mode: 'report' }, publisher: { mode: 'report' } }), agent: untouchable, log: vi.fn(), factories: [share] });
     expect(both.usage().map(view => view.queue)).toEqual(['share']);
