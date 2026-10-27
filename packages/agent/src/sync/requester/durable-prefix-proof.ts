@@ -16,12 +16,17 @@ export class DurableGraphSettlementGuard {
 
   constructor(private readonly assertNotAborted: () => void) {}
 
+  adopt(proof: StoredPrefixProof, reject: () => void = () => {}): void {
+    if (this.current) throw new Error('Graph settlement already owns a content proof');
+    this.current = { proof, reject };
+  }
+
   async acquire(capability: StoredDurablePrefix | undefined, manifest: GraphScopedDurableManifestPlan,
     offset: number, reject: () => void, signal?: AbortSignal): Promise<void> {
     if (this.current) throw new Error('Graph settlement already owns a prefix proof');
     try {
       if (!capability) throw new Error('Cannot prove stored durable prefix');
-      this.current = { proof: await capability(manifest, offset, signal), reject };
+      this.adopt(await capability(manifest, offset, signal), reject);
     }
     catch (error) { if (!signal?.aborted) reject(); throw error; }
   }

@@ -369,7 +369,6 @@ describe('planning a DATA phase from holdings', () => {
         remotePeerId: 'peer-settle',
         contextGraphId: CG,
         manifest,
-        metaResult: { bytesReceived: 512, quads: manifest.descriptors.map(() => ({}) as Quad) },
         accumulator,
         deleteCheckpoint: (checkpointKey) => checkpoints.delete(checkpointKey),
         setCheckpoint: (checkpointKey, checkpoint) => checkpoints.setManifestBoundOffset(
@@ -387,7 +386,7 @@ describe('planning a DATA phase from holdings', () => {
 
     const missing = settle({ kind: 'fetch-missing', held: 2, batches: [[{ ual: uals(manifest)[0]!, assertionVersion: '1' }]], rows: 3 });
     expect(missing.result).toMatchObject({
-      complete: false, bytesReceived: 512, fetchedMetaTriples: 3, fetchedDataTriples: 0, verifiedHeldAssets: 0,
+      complete: false, bytesReceived: 0, fetchedMetaTriples: 0, fetchedDataTriples: 0, verifiedHeldAssets: 0,
     });
     expect(checkpoints.get(key)).toBeUndefined();
     expect(missing.line).toContain('leaving 1 asset(s)');

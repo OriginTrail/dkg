@@ -151,7 +151,6 @@ function heldGenerationRoundResult(agent: DKGAgent, contextGraphId: string, remo
     remotePeerId,
     contextGraphId,
     manifest,
-    metaResult: { bytesReceived: 512, quads: meta },
     accumulator,
     deleteCheckpoint: (key) => checkpoints.delete(key),
     setCheckpoint: (key, checkpoint) => checkpoints.setManifestBoundOffset(key, checkpoint.offset,

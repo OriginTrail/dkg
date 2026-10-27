@@ -18,7 +18,6 @@ import { DEFAULT_DURABLE_DATA_ROUND_BUDGET, type DurableDataRoundBudget } from '
 import type { DurableSyncContext } from './durable-sync.js';
 import type { AuthenticateHeldAsset } from './held-assets-contracts.js';
 import type { GraphScopedChainEvidence } from './graph-scoped-chain-views.js';
-import type { SyncPageResult } from './page-fetch.js';
 
 /** An asset of a verified generation that this node does not hold at that version. */
 export interface MissingDurableAsset {
@@ -251,20 +250,15 @@ export function settleHeldDurableData(input: {
 }
 
 /**
- * Settle a round whose DATA phase a holdings plan replaced: count its META
- * fetch, and settle a held generation with {@link settleHeldDurableData},
+ * Settle the DATA decision after the shared page scope persisted and counted META.
+ * Settle a held generation with {@link settleHeldDurableData},
  * which makes the round complete. A fetch-missing round stays incomplete; the
  * owner fetches what it left. Returns the round's log line.
  */
 export function settleDurableDataFromHoldings(input: Parameters<typeof settleHeldDurableData>[0] & {
   readonly plan: Exclude<DurableHoldingsPlan, { kind: 'full' }>;
-  readonly metaResult: Pick<SyncPageResult, 'bytesReceived' | 'quads'>;
 }): string {
-  const { plan, metaResult, accumulator } = input;
-  recordDurableSyncDiagnostics(accumulator, {
-    bytesReceived: metaResult.bytesReceived,
-    fetchedMetaTriples: metaResult.quads.length,
-  });
+  const { plan, accumulator } = input;
   if (plan.kind === 'held') settleHeldDurableData(input);
   markDurableTerminalBoundary(accumulator, plan.kind === 'held');
   return describeDurableHoldingsPlan(input.contextGraphId, input.manifest, plan);

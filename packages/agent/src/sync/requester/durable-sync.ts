@@ -3,7 +3,7 @@ import { createManifestSettlementCheckpointer } from './manifest-settlement-chec
 import { DurableGraphSettlementGuard, type StoredDurablePrefix } from './durable-prefix-proof.js';
 import type { DurableMetaContinuation } from './durable-meta-continuation.js';
 import type { GraphOwnedRecoveryContext } from './graph-owned-recovery.js';
-import { verifyDurablePage, prepareDurableVerifiedPage, persistDurableRemainingMetadata, persistDurableHoldingsMetadata } from './durable-verified-page.js';
+import { verifyDurablePage, prepareDurableVerifiedPage, persistDurableRemainingMetadata, type PreparedDurableVerificationInput } from './durable-verified-page.js';
 export type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
 import type { DurableRecoveryRoundDecision, DurableRecoveryRoundOutcome } from '../durable-recovery-round.js';
 import type { VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
@@ -682,7 +682,6 @@ async function executeDurableGraph(
   });
   let rejectedResumeOffset: number | undefined;
   let graphSettlement: DurableGraphSettlement = { kind: 'not-started' };
-  let heldSettlement: PreparedHoldingsSettlement | undefined;
   let activePhase: 'fetch' | 'verify' | 'store' | undefined;
   let peerRespondedForContextGraph = false;
   const startPhase = (phase: 'fetch' | 'verify' | 'store') => {
@@ -821,212 +820,209 @@ async function executeDurableGraph(
     }
     const { preparedMeta, metaResult } = metaPhase;
     const dataPlan = await dataPolicy?.selectDataPlan(preparedMeta) ?? { kind: 'fetch' as const };
-    if (dataPlan.kind === 'metadata') {
-      heldSettlement = dataPlan.settlement;
-      const held = heldSettlement;
-      const assertHeldCurrent = () => { settlement.assertCurrent(); held.assertCurrent(); };
-      assertHeldCurrent();
-      await persistDurableHoldingsMetadata(context, pid, metaResult, held.descriptors, accumulator, assertHeldCurrent);
-      assertHeldCurrent();
-      recordPhaseOutcome(metaResult, { updateCheckpoint: true });
-      logInfo(ctx, settleDurableDataFromHoldings({ plan: held.plan, remotePeerId, contextGraphId: pid,
-        manifest: held.manifest, metaResult, accumulator, deleteCheckpoint, setCheckpoint }));
-      graphSettlement = { kind: 'metadata', plan: held.plan };
-      endPhase();
-      return finishGraph();
-    }
-    graphSettlement = { kind: 'fetch', graphScoped: preparedMeta.manifestPlan !== null,
-      continuation: dataPlan.continuation ?? 'full-graph' };
     const graphScopedManifest = preparedMeta.manifestPlan;
-    const fetchPhase = createPhaseFetcher(undefined, dataPlan.boundary);
-    const rawDataResult = await fetchPhase(
-      'data',
-      dataGraph,
-      sinceBatchId,
-      graphScopedManifest?.manifestDigest,
-      graphScopedManifest
-        ? (offset) => graphScopedDurableManifestPrefixAtOffset(
-          graphScopedManifest!,
-          offset,
-        )?.prefixDigest
-        : undefined,
-      preparedMeta.forceFreshUnboundDataSession || (graphScopedManifest !== null && !context.storedPrefix),
-      // A full-graph round holds what it fetched until it is verified and
-      // stored, so it ends at a checkpointable graph within a row/heap budget.
-      // A caller that needs one complete snapshot from row 0 keeps one round.
-      graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
-        ? createDurableDataRoundBoundary({ manifest: graphScopedManifest, settlementSliceDeadline,
-            onHardLimit: ({ resumedFromOffset, nextOffset, acceptedQuads }) => logWarn(ctx,
-              `Durable data round for "${pid}" reached its hard limit at ${acceptedQuads} rows `
-                + `(offset ${resumedFromOffset}->${nextOffset}) without a complete graph to checkpoint`) })
-        : undefined,
-    );
-    settlement.assertCurrent();
-    peerRespondedForContextGraph = true;
-    endPhase();
-    const fetchDurationMs = Date.now() - fetchStartedAt;
-    const preparedPayload = prepareDurableVerificationPayload({
-      rawDataResult,
-      rawMetaResult: metaResult,
-      preparedMeta,
-      exactAssetSelection,
-    });
-    const dataResult = preparedPayload.dataResult;
-    const effectiveMetaResult = preparedPayload.metaResult;
-    const exactAssetDescriptorCoverageComplete =
-      preparedPayload.exactDescriptorCoverageComplete;
-    const exactAssetReturnedDescriptorCount =
-      preparedPayload.exactReturnedDescriptorCount;
-    if (exactAssetUals !== undefined && !exactAssetDescriptorCoverageComplete) {
-      logWarn(
-        ctx,
-        `Exact durable response for "${pid}" did not cover every requested asset descriptor`,
-      );
-    }
-
-    let effectiveDataResult = dataResult;
-    let dataForVerification = dataResult.quads;
-    let verificationMode: DurableBatchVerificationMode = sinceBatchId === undefined
-      ? { kind: 'fullSnapshot' }
-      : { kind: 'sinceBatchId', sinceBatchId };
-
-    // A rootless full snapshot is a deterministic concatenation of complete
-    // exact graphs. Always compare a graph-scoped response with its verified
-    // metadata manifest: a relayed stream can close cleanly after a prefix
-    // and surface `completed=true` even though later graphs never arrived.
-    // Verify and persist only complete leading graphs, checkpoint their
-    // absolute row boundary, and call the phase complete only at the manifest
-    // total. A partial final graph is deliberately discarded and retried.
-    // This gives large V2 snapshots bounded memory and monotonic progress
-    // without weakening legacy/mixed-layout fail-closed behaviour.
-    if (
-      sinceBatchId === undefined
-      && !isSystemContextGraph
-    ) {
-      if (
+    let verificationInput: PreparedDurableVerificationInput;
+    if (dataPlan.kind === 'metadata') {
+      const held = dataPlan.settlement;
+      settlement.adopt({ assertCurrent: held.assertCurrent, close: held.close, covers: () => false });
+      settlement.assertCurrent();
+      verificationInput = { kind: 'held', data: [], metaResult,
+        mode: { kind: 'heldMetadata', descriptors: held.descriptors },
+        holdings: { manifest: held.manifest, plan: held.plan } };
+    } else {
+      graphSettlement = { kind: 'fetch', graphScoped: preparedMeta.manifestPlan !== null,
+        continuation: dataPlan.continuation ?? 'full-graph' };
+      const fetchPhase = createPhaseFetcher(undefined, dataPlan.boundary);
+      const rawDataResult = await fetchPhase(
+        'data',
+        dataGraph,
+        sinceBatchId,
+        graphScopedManifest?.manifestDigest,
         graphScopedManifest
-        && dataResult.resumedFromOffset > 0
-        && dataResult.manifestDigest !== graphScopedManifest.manifestDigest
-      ) {
-        deleteCheckpoint(dataResult.checkpointKey);
-        throw Object.assign(
-          new Error(
-            `Discarding rootless durable response for "${pid}": resumed DATA `
-            + 'continuation is not bound to the completed META generation',
-          ),
-          { code: 'SYNC_DATA_MANIFEST_UNBOUND' },
-        );
-      }
-      const resumeIsManifestBoundary = dataResult.resumedFromOffset > 0
-        ? graphScopedManifest !== null
-          && isGraphScopedDurableManifestBoundary(
-            graphScopedManifest,
-            dataResult.resumedFromOffset,
-          )
-        : true;
-      if (resumeIsManifestBoundary === false) {
-        // An OFFSET inside an exact assertion graph can never produce a
-        // complete first graph in this round. Keeping it creates a permanent
-        // N-1 verification loop (for example 9,999/10,000 rows). Delete the
-        // paired responder session/checkpoint and retry from offset zero on
-        // the next bounded sync; never store this non-contiguous suffix.
-        deleteCheckpoint(dataResult.checkpointKey);
-        throw Object.assign(
-          new Error(
-            `Discarding rootless durable response for "${pid}": resumed offset `
-            + `${dataResult.resumedFromOffset} is inside an assertion graph; `
-            + 'resetting the data checkpoint to a manifest boundary',
-          ),
-          { code: 'SYNC_GRAPH_CHECKPOINT_MISALIGNED' },
-        );
-      }
-      const responderCursorDelta = (dataResult.rawNextOffset ?? dataResult.nextOffset)
-        - (dataResult.rawResumedFromOffset ?? dataResult.resumedFromOffset);
-      if (responderCursorDelta !== dataResult.quads.length) {
+          ? (offset) => graphScopedDurableManifestPrefixAtOffset(
+            graphScopedManifest!,
+            offset,
+          )?.prefixDigest
+          : undefined,
+        preparedMeta.forceFreshUnboundDataSession || (graphScopedManifest !== null && !context.storedPrefix),
+        // A full-graph round holds what it fetched until it is verified and
+        // stored, so it ends at a checkpointable graph within a row/heap budget.
+        // A caller that needs one complete snapshot from row 0 keeps one round.
+        graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
+          ? createDurableDataRoundBoundary({ manifest: graphScopedManifest, settlementSliceDeadline,
+              onHardLimit: ({ resumedFromOffset, nextOffset, acceptedQuads }) => logWarn(ctx,
+                `Durable data round for "${pid}" reached its hard limit at ${acceptedQuads} rows `
+                  + `(offset ${resumedFromOffset}->${nextOffset}) without a complete graph to checkpoint`) })
+          : undefined,
+      );
+      settlement.assertCurrent();
+      peerRespondedForContextGraph = true;
+      const preparedPayload = prepareDurableVerificationPayload({
+        rawDataResult,
+        rawMetaResult: metaResult,
+        preparedMeta,
+        exactAssetSelection,
+      });
+      const dataResult = preparedPayload.dataResult;
+      const effectiveMetaResult = preparedPayload.metaResult;
+      const exactAssetDescriptorCoverageComplete =
+        preparedPayload.exactDescriptorCoverageComplete;
+      const exactAssetReturnedDescriptorCount =
+        preparedPayload.exactReturnedDescriptorCount;
+      if (exactAssetUals !== undefined && !exactAssetDescriptorCoverageComplete) {
         logWarn(
           ctx,
-          `Rootless durable cursor drift for "${pid}": responder advanced `
-            + `${responderCursorDelta} row(s) but delivered ${dataResult.quads.length}; `
-            + 'projecting only the verified complete-graph prefix',
+          `Exact durable response for "${pid}" did not cover every requested asset descriptor`,
         );
       }
-      const bounded = graphScopedManifest
-        ? planBoundedGraphScopedDurableBatch(
-            dataResult.quads,
-            graphScopedManifest,
-            dataResult.resumedFromOffset,
-            dataResult.rawNextOffset ?? dataResult.nextOffset,
-            dataResult.completed,
-            dataResult.rawResumedFromOffset ?? dataResult.resumedFromOffset,
-            dataResult.quadRawOffsets,
-          )
-        : null;
-      if (!bounded && graphScopedManifest) {
-        deleteCheckpoint(dataResult.checkpointKey);
-        if (dataResult.resumedFromOffset > 0) rejectedResumeOffset = dataResult.resumedFromOffset;
-        throw Object.assign(
-          new Error(
-            `Discarding rootless durable response for "${pid}": responder and manifest coordinates cannot be reconciled`,
-          ),
-          { code: 'SYNC_DATA_CURSOR_UNMAPPABLE' },
-        );
-      }
-      if (bounded) {
-        dataForVerification = bounded.dataQuads;
-        const boundedCompleted = dataResult.completed
-          && bounded.safeNextOffset === bounded.manifestRowCount;
-        if (boundedCompleted) {
-          const { localYield: _impossibleLocalYield, ...completedResult } = dataResult;
-          effectiveDataResult = {
-            ...completedResult,
-            quads: bounded.dataQuads,
-            nextOffset: bounded.safeNextOffset,
-            rawNextOffset: bounded.safeRawNextOffset,
-            completed: true,
-          };
-        } else {
-          effectiveDataResult = {
-            ...dataResult,
-            quads: bounded.dataQuads,
-            nextOffset: bounded.safeNextOffset,
-            rawNextOffset: bounded.safeRawNextOffset,
-            completed: false,
-          };
-        }
-        verificationMode = {
-          kind: 'changelogPage',
-          changedDataGraphs: bounded.changedDataGraphs,
-        };
-        logInfo(
-          ctx,
-          `Rootless durable progress for "${pid}": `
-            + `${bounded.completedGraphCount} complete graph(s), `
-            + `safe offset ${dataResult.resumedFromOffset}->${bounded.safeNextOffset} `
-            + `of ${bounded.manifestRowCount} (raw ${dataResult.rawNextOffset ?? dataResult.nextOffset}->${bounded.safeRawNextOffset})`,
-        );
-      }
-    }
 
-    if (graphScopedManifest && dataResult.resumedFromOffset > 0) {
-      await settlement.acquire(context.storedPrefix, graphScopedManifest, dataResult.resumedFromOffset, () => {
-        deleteCheckpoint(dataResult.checkpointKey);
-        deleteCheckpoint(metaResult.checkpointKey);
-        rejectedResumeOffset = dataResult.resumedFromOffset;
-      }, signal);
+      let effectiveDataResult = dataResult;
+      let dataForVerification = dataResult.quads;
+      let verificationMode: DurableBatchVerificationMode = sinceBatchId === undefined
+        ? { kind: 'fullSnapshot' }
+        : { kind: 'sinceBatchId', sinceBatchId };
+
+      // A rootless full snapshot is a deterministic concatenation of complete
+      // exact graphs. Always compare a graph-scoped response with its verified
+      // metadata manifest: a relayed stream can close cleanly after a prefix
+      // and surface `completed=true` even though later graphs never arrived.
+      // Verify and persist only complete leading graphs, checkpoint their
+      // absolute row boundary, and call the phase complete only at the manifest
+      // total. A partial final graph is deliberately discarded and retried.
+      // This gives large V2 snapshots bounded memory and monotonic progress
+      // without weakening legacy/mixed-layout fail-closed behaviour.
+      if (
+        sinceBatchId === undefined
+        && !isSystemContextGraph
+      ) {
+        if (
+          graphScopedManifest
+          && dataResult.resumedFromOffset > 0
+          && dataResult.manifestDigest !== graphScopedManifest.manifestDigest
+        ) {
+          deleteCheckpoint(dataResult.checkpointKey);
+          throw Object.assign(
+            new Error(
+              `Discarding rootless durable response for "${pid}": resumed DATA `
+              + 'continuation is not bound to the completed META generation',
+            ),
+            { code: 'SYNC_DATA_MANIFEST_UNBOUND' },
+          );
+        }
+        const resumeIsManifestBoundary = dataResult.resumedFromOffset > 0
+          ? graphScopedManifest !== null
+            && isGraphScopedDurableManifestBoundary(
+              graphScopedManifest,
+              dataResult.resumedFromOffset,
+            )
+          : true;
+        if (resumeIsManifestBoundary === false) {
+          // An OFFSET inside an exact assertion graph can never produce a
+          // complete first graph in this round. Keeping it creates a permanent
+          // N-1 verification loop (for example 9,999/10,000 rows). Delete the
+          // paired responder session/checkpoint and retry from offset zero on
+          // the next bounded sync; never store this non-contiguous suffix.
+          deleteCheckpoint(dataResult.checkpointKey);
+          throw Object.assign(
+            new Error(
+              `Discarding rootless durable response for "${pid}": resumed offset `
+              + `${dataResult.resumedFromOffset} is inside an assertion graph; `
+              + 'resetting the data checkpoint to a manifest boundary',
+            ),
+            { code: 'SYNC_GRAPH_CHECKPOINT_MISALIGNED' },
+          );
+        }
+        const responderCursorDelta = (dataResult.rawNextOffset ?? dataResult.nextOffset)
+          - (dataResult.rawResumedFromOffset ?? dataResult.resumedFromOffset);
+        if (responderCursorDelta !== dataResult.quads.length) {
+          logWarn(
+            ctx,
+            `Rootless durable cursor drift for "${pid}": responder advanced `
+              + `${responderCursorDelta} row(s) but delivered ${dataResult.quads.length}; `
+              + 'projecting only the verified complete-graph prefix',
+          );
+        }
+        const bounded = graphScopedManifest
+          ? planBoundedGraphScopedDurableBatch(
+              dataResult.quads,
+              graphScopedManifest,
+              dataResult.resumedFromOffset,
+              dataResult.rawNextOffset ?? dataResult.nextOffset,
+              dataResult.completed,
+              dataResult.rawResumedFromOffset ?? dataResult.resumedFromOffset,
+              dataResult.quadRawOffsets,
+            )
+          : null;
+        if (!bounded && graphScopedManifest) {
+          deleteCheckpoint(dataResult.checkpointKey);
+          if (dataResult.resumedFromOffset > 0) rejectedResumeOffset = dataResult.resumedFromOffset;
+          throw Object.assign(
+            new Error(
+              `Discarding rootless durable response for "${pid}": responder and manifest coordinates cannot be reconciled`,
+            ),
+            { code: 'SYNC_DATA_CURSOR_UNMAPPABLE' },
+          );
+        }
+        if (bounded) {
+          dataForVerification = bounded.dataQuads;
+          const boundedCompleted = dataResult.completed
+            && bounded.safeNextOffset === bounded.manifestRowCount;
+          if (boundedCompleted) {
+            const { localYield: _impossibleLocalYield, ...completedResult } = dataResult;
+            effectiveDataResult = {
+              ...completedResult,
+              quads: bounded.dataQuads,
+              nextOffset: bounded.safeNextOffset,
+              rawNextOffset: bounded.safeRawNextOffset,
+              completed: true,
+            };
+          } else {
+            effectiveDataResult = {
+              ...dataResult,
+              quads: bounded.dataQuads,
+              nextOffset: bounded.safeNextOffset,
+              rawNextOffset: bounded.safeRawNextOffset,
+              completed: false,
+            };
+          }
+          verificationMode = {
+            kind: 'changelogPage',
+            changedDataGraphs: bounded.changedDataGraphs,
+          };
+          logInfo(
+            ctx,
+            `Rootless durable progress for "${pid}": `
+              + `${bounded.completedGraphCount} complete graph(s), `
+              + `safe offset ${dataResult.resumedFromOffset}->${bounded.safeNextOffset} `
+              + `of ${bounded.manifestRowCount} (raw ${dataResult.rawNextOffset ?? dataResult.nextOffset}->${bounded.safeRawNextOffset})`,
+          );
+        }
+      }
+
+      if (graphScopedManifest && dataResult.resumedFromOffset > 0) {
+        await settlement.acquire(context.storedPrefix, graphScopedManifest, dataResult.resumedFromOffset, () => {
+          deleteCheckpoint(dataResult.checkpointKey);
+          deleteCheckpoint(metaResult.checkpointKey);
+          rejectedResumeOffset = dataResult.resumedFromOffset;
+        }, signal);
+      }
+
+      verificationInput = { kind: 'fetched', data: dataForVerification, metaResult: effectiveMetaResult,
+        mode: verificationMode, rawDataResult, dataResult: effectiveDataResult,
+        descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
+        returnedDescriptorCount: exactAssetReturnedDescriptorCount };
     }
+    endPhase();
+    const fetchDurationMs = Date.now() - fetchStartedAt;
 
     startPhase('verify');
     const verifyStartedAt = Date.now();
     let processed: Awaited<ReturnType<DurableSyncContext['processDurableBatchInWorker']>>;
     try {
-      processed = await verifyDurablePage(
-        context, dataForVerification,
-        effectiveMetaResult.quads,
-        isSystemContextGraph,
-        verificationMode,
-      );
+      processed = await verifyDurablePage(context, verificationInput, isSystemContextGraph);
     } catch (error) {
-      if (graphScopedManifest && !signal?.aborted) deleteCheckpoint(rawDataResult.checkpointKey);
+      if (verificationInput.kind === 'fetched' && graphScopedManifest && !signal?.aborted)
+        deleteCheckpoint(verificationInput.rawDataResult.checkpointKey);
       throw error;
     }
     settlement.assertCurrent();
@@ -1036,7 +1032,7 @@ async function executeDurableGraph(
     logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
     logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
     recordDurableSyncDiagnostics(accumulator, {
-      bytesReceived: metaResult.bytesReceived + rawDataResult.bytesReceived,
+      bytesReceived: metaResult.bytesReceived + (verificationInput.kind === 'fetched' ? verificationInput.rawDataResult.bytesReceived : 0),
       fetchedMetaTriples: processed.totalFetchedMetaQuads,
       fetchedDataTriples: processed.totalFetchedDataQuads,
       emptyResponses: processed.emptyResponses,
@@ -1051,27 +1047,32 @@ async function executeDurableGraph(
     // instead of silently skipping it.
     const batchVerifiedCleanly = processed.rejectedKcs === 0;
     if (!batchVerifiedCleanly) {
-      if (graphScopedManifest) deleteCheckpoint(rawDataResult.checkpointKey);
+      if (verificationInput.kind === 'fetched' && graphScopedManifest) deleteCheckpoint(verificationInput.rawDataResult.checkpointKey);
       logWarn(
         ctx,
         `Rejected ${processed.rejectedKcs} KCs that failed durable integrity verification from ${remotePeerId}`,
       );
       recordDurableSyncDiagnostics(accumulator, { rejectedKcs: processed.rejectedKcs });
     }
-    if (graphScopedManifest && processed.dataRejectedMissingMeta !== 0) {
-      deleteCheckpoint(rawDataResult.checkpointKey);
+    if (verificationInput.kind === 'fetched' && graphScopedManifest && processed.dataRejectedMissingMeta !== 0) {
+      deleteCheckpoint(verificationInput.rawDataResult.checkpointKey);
+    }
+
+    if (verificationInput.kind === 'held' && (!batchVerifiedCleanly || processed.dataRejectedMissingMeta > 0)) {
+      throw new Error('Held durable generation has rejected metadata');
     }
 
     const notifyVerifiedFullSnapshot = async (): Promise<void> => {
       if (
-        !onVerifiedFullSnapshot
+        verificationInput.kind !== 'fetched'
+        || !onVerifiedFullSnapshot
         || exactAssetUals !== undefined
         || sinceBatchId !== undefined
         || !batchVerifiedCleanly
         || processed.dataRejectedMissingMeta !== 0
-        || !effectiveDataResult.completed
-        || effectiveDataResult.timedOut
-        || effectiveDataResult.resumedFromOffset !== 0
+        || !verificationInput.dataResult.completed
+        || verificationInput.dataResult.timedOut
+        || verificationInput.dataResult.resumedFromOffset !== 0
         || (!skipAgentsMeta && (!metaResult.completed || metaResult.timedOut))
         || (!skipAgentsMeta && metaResult.resumedFromOffset !== 0)
       ) return;
@@ -1114,48 +1115,69 @@ async function executeDurableGraph(
       && processed.dataRejectedMissingMeta === 0
       && !metadataOnlyResponse;
     const allowDurableCheckpoints = exactFetchPolicy?.allowDurableCheckpoints ?? true;
-    const updateMetaCheckpoint = metaPhaseCanAdvance && allowDurableCheckpoints;
-    const updateDataCheckpoint = dataPhaseCanAdvance && allowDurableCheckpoints;
-    const reachedContextGraphTerminalBoundary = batchVerifiedCleanly
+    const updateMetaCheckpoint = verificationInput.kind === 'held' || (metaPhaseCanAdvance && allowDurableCheckpoints);
+    const updateDataCheckpoint = verificationInput.kind === 'fetched' && dataPhaseCanAdvance && allowDurableCheckpoints;
+    const reachedContextGraphTerminalBoundary = verificationInput.kind === 'fetched' && batchVerifiedCleanly
       && processed.dataRejectedMissingMeta === 0
-      && exactAssetDescriptorCoverageComplete
+      && verificationInput.descriptorCoverageComplete
       && metaPhaseCanAdvance
       && dataPhaseCanAdvance
       && metaResult.completed
       && !metaResult.timedOut
-      && effectiveDataResult.completed
-      && !effectiveDataResult.timedOut;
-    const settledExactDisposition = (): ExactDurableFetchDisposition => (
-      classifyExactDurableFetch({
+      && verificationInput.dataResult.completed
+      && !verificationInput.dataResult.timedOut;
+    const settledExactDisposition = (): ExactDurableFetchDisposition => {
+      if (verificationInput.kind !== 'fetched') throw new Error('Exact retrieval requires fetched DATA');
+      return classifyExactDurableFetch({
         requestedAssetCount: exactAssetUals?.length ?? 0,
         metaResult,
-        dataResult: rawDataResult,
+        dataResult: verificationInput.rawDataResult,
         metaFetched: !skipAgentsMeta,
-        descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
-        rejectedKcs: processed.rejectedKcs,
-        dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
-      })
-    );
-    const settledExactResponderCapability = (): ExactAssetResponderCapability | undefined => {
-      if (exactAssetSelection?.kind !== 'ual-only') return undefined;
-      return classifyExactAssetResponderCapability({
-        requestedAssetCount: exactAssetUals?.length ?? 0,
-        metaResult,
-        dataResult: rawDataResult,
-        metaFetched: !skipAgentsMeta,
-        descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
-        returnedDescriptorCount: exactAssetReturnedDescriptorCount,
+        descriptorCoverageComplete: verificationInput.descriptorCoverageComplete,
         rejectedKcs: processed.rejectedKcs,
         dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
       });
     };
+    const settledExactResponderCapability = (): ExactAssetResponderCapability | undefined => {
+      if (verificationInput.kind !== 'fetched' || exactAssetSelection?.kind !== 'ual-only') return undefined;
+      return classifyExactAssetResponderCapability({
+        requestedAssetCount: exactAssetUals?.length ?? 0,
+        metaResult,
+        dataResult: verificationInput.rawDataResult,
+        metaFetched: !skipAgentsMeta,
+        descriptorCoverageComplete: verificationInput.descriptorCoverageComplete,
+        returnedDescriptorCount: verificationInput.returnedDescriptorCount,
+        rejectedKcs: processed.rejectedKcs,
+        dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
+      });
+    };
+    const settleVerifiedPage = (options: { emptyPhase?: boolean; checkpointAdvanceAlreadyRecorded?: boolean } = {}): void => {
+      settlement.assertCurrent();
+      recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint,
+        countProgress: verificationInput.kind === 'held' || !metadataOnlyResponse,
+        emptyPhase: options.emptyPhase });
+      if (verificationInput.kind === 'held') {
+        const held = verificationInput.holdings;
+        logInfo(ctx, settleDurableDataFromHoldings({ plan: held.plan, remotePeerId, contextGraphId: pid,
+          manifest: held.manifest, accumulator, deleteCheckpoint, setCheckpoint }));
+        graphSettlement = { kind: 'metadata', plan: held.plan };
+      } else {
+        recordPhaseOutcome(verificationInput.dataResult, { updateCheckpoint: updateDataCheckpoint,
+          ...options, manifestPlan: graphScopedManifest ?? undefined, terminal: reachedContextGraphTerminalBoundary });
+        markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
+        if (exactFetchDisposition !== undefined) {
+          exactFetchDisposition = settledExactDisposition();
+          exactResponderCapability = settledExactResponderCapability();
+        }
+      }
+    };
     // Metadata-only pages may move the meta cursor after storage, but they
     // still are not usable data progress for freshness/backoff accounting.
-    if (
+    if (verificationInput.kind === 'fetched' && (
       processed.emptyResponses > 0 ||
       processed.dataRejectedMissingMeta > 0 ||
       (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
-    ) {
+    )) {
       await notifyVerifiedFullSnapshot();
       settlement.assertCurrent();
       // The verifier reports an empty batch only when both fetched phase
@@ -1163,30 +1185,15 @@ async function executeDurableGraph(
       // zero-offset phase is a real clean-empty response, while a sibling
       // timeout remains incomplete.
       const emptyPhase = processed.emptyResponses > 0;
-      recordPhaseOutcome(metaResult, {
-        updateCheckpoint: updateMetaCheckpoint,
-        countProgress: !metadataOnlyResponse,
-        emptyPhase,
-      });
-      recordPhaseOutcome(effectiveDataResult, {
-        updateCheckpoint: updateDataCheckpoint,
-        emptyPhase,
-        manifestPlan: graphScopedManifest ?? undefined,
-        terminal: reachedContextGraphTerminalBoundary,
-      });
-      markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
-      if (exactFetchDisposition !== undefined) {
-        exactFetchDisposition = settledExactDisposition();
-        exactResponderCapability = settledExactResponderCapability();
-      }
-      if ((metaResult.timedOut || effectiveDataResult.timedOut)
+      settleVerifiedPage({ emptyPhase });
+      if ((metaResult.timedOut || verificationInput.dataResult.timedOut)
         && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) return finishGraph(false);
       return finishGraph();
     }
 
     startPhase('store');
     const storeStartedAt = Date.now();
-    const partitioned = prepareDurableVerifiedPage(context, pid, processed);
+    const partitioned = prepareDurableVerifiedPage(context, pid, processed, verificationInput);
     if (partitioned.assets.length && exactAssetSelection?.kind !== 'challenge-pinned' && !storeGraphScopedAsset)
       throw Object.assign(new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
         { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
@@ -1198,20 +1205,20 @@ async function executeDurableGraph(
     // atomic materialization is therefore a durable continuation boundary.
     // Persisting it immediately turns a later authentication deadline into
     // partial progress instead of replaying every earlier chain lookup.
-    const checkpointSettledManifestGraph = graphScopedManifest
+    const checkpointSettledManifestGraph = verificationInput.kind === 'fetched' && graphScopedManifest
       && updateDataCheckpoint
-      && exactAssetDescriptorCoverageComplete
+      && verificationInput.descriptorCoverageComplete
       && partitioned.remainingData.length === 0
       && partitioned.remainingMeta.length === 0
       ? createManifestSettlementCheckpointer({
           manifest: graphScopedManifest,
-          checkpointKey: effectiveDataResult.checkpointKey,
-          resumedFromOffset: effectiveDataResult.resumedFromOffset,
-          rawResumedFromOffset: effectiveDataResult.rawResumedFromOffset
-            ?? effectiveDataResult.resumedFromOffset,
-          maximumOffset: effectiveDataResult.nextOffset,
-          dataQuads: effectiveDataResult.quads,
-          quadRawOffsets: effectiveDataResult.quadRawOffsets,
+          checkpointKey: verificationInput.dataResult.checkpointKey,
+          resumedFromOffset: verificationInput.dataResult.resumedFromOffset,
+          rawResumedFromOffset: verificationInput.dataResult.rawResumedFromOffset
+            ?? verificationInput.dataResult.resumedFromOffset,
+          maximumOffset: verificationInput.dataResult.nextOffset,
+          dataQuads: verificationInput.dataResult.quads,
+          quadRawOffsets: verificationInput.dataResult.quadRawOffsets,
           setCheckpoint,
         })
       : undefined;
@@ -1310,20 +1317,9 @@ async function executeDurableGraph(
     settlement.assertCurrent();
     await notifyVerifiedFullSnapshot();
     settlement.assertCurrent();
-    recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-    recordPhaseOutcome(effectiveDataResult, {
-      updateCheckpoint: updateDataCheckpoint,
-      checkpointAdvanceAlreadyRecorded: incrementalCheckpointAdvanceRecorded,
-      manifestPlan: graphScopedManifest ?? undefined,
-      terminal: reachedContextGraphTerminalBoundary,
-    });
-    markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
-    if (exactFetchDisposition !== undefined) {
-      exactFetchDisposition = settledExactDisposition();
-      exactResponderCapability = settledExactResponderCapability();
-    }
+    settleVerifiedPage({ checkpointAdvanceAlreadyRecorded: incrementalCheckpointAdvanceRecorded });
     endPhase();
-    if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+    if (verificationInput.kind === 'fetched' && (metaResult.timedOut || verificationInput.dataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
       return finishGraph(false);
     }
     const storeDurationMs = Date.now() - storeStartedAt;
@@ -1383,7 +1379,6 @@ async function executeDurableGraph(
     }
     if (signal?.aborted) return finishGraph(false);
   } finally {
-    heldSettlement?.close();
     settlement.close();
   }
   return finishGraph();

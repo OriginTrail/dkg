@@ -69,6 +69,9 @@ function fixture(
   ));
   const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
   const metadataQuads: Quad[] = [
+    { subject: UAL, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"`, graph: metaGraph },
+    { subject: UAL, predicate: `${DKG}kaUal`, object: UAL, graph: metaGraph },
+    { subject: UAL, predicate: `${DKG}contextGraph`, object: `did:dkg:context-graph:${CG}`, graph: metaGraph },
     { subject: UAL, predicate: `${DKG}assertionVersion`, object: `"3"^^<${XSD_INTEGER}>`, graph: metaGraph },
     { subject: UAL, predicate: `${DKG}assertionGraph`, object: vmGraph, graph: metaGraph },
     { subject: UAL, predicate: `${DKG}status`, object: '"confirmed"', graph: metaGraph },

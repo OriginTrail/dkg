@@ -95,7 +95,7 @@ vi.mock('../src/sync/requester/finalized-swm-twin-reconciliation.js', async (imp
   };
 });
 
-import { PROTOCOL_SYNC_CHANGELOG, createOperationContext } from '@origintrail-official/dkg-core';
+import { PROTOCOL_SYNC_CHANGELOG, createOperationContext, GRAPH_KA_CONTENT_SCOPE_VERSION, MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { resolveSyncGlobalBackpressure, withGlobalSyncBackpressure } from '../src/sync/backpressure.js';
 import { createDurableSyncAccumulator } from '../src/sync/durable-progress.js';
 import { exactAssetFetchSessionPolicy } from '../src/sync/requester/exact-durable-fetch.js';
@@ -130,7 +130,7 @@ import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 const DKG = 'http://dkg.io/ontology/';
 const contextGraphId = 'public-recovery-vm';
 const ual = 'did:dkg:otp:2043/0x1111111111111111111111111111111111111111/1';
-const assertionGraph = `did:dkg:context-graph:${contextGraphId}/_verifiable_memory/asset/1`;
+const assertionGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, 2));
 const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
 const ctx = { kind: 'sync', id: 'lifecycle-binding-test', startedAt: 0 } as OperationContext;
 
@@ -148,6 +148,8 @@ function graphScopedAsset(
   root: Uint8Array,
   assertionVersion: bigint = 2n,
 ): VerifiedGraphScopedAsset {
+  const assertionGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory,
+    createGraphKnowledgeAssetScope(ual, assertionVersion));
   const rootHex = Array.from(root, (byte) => byte.toString(16).padStart(2, '0')).join('');
   return {
       merkleRootHex: fixtureRoot([
@@ -171,6 +173,11 @@ function graphScopedAsset(
     metaGraph,
     dataQuads: [{ subject: 'urn:fixture', predicate: 'urn:value', object: '"content"', graph: assertionGraph }],
     metadataQuads: [
+      { subject: ual, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"`, graph: metaGraph },
+      { subject: ual, predicate: `${DKG}kaUal`, object: ual, graph: metaGraph },
+      { subject: ual, predicate: `${DKG}contextGraph`, object: `did:dkg:context-graph:${contextGraphId}`, graph: metaGraph },
+      { subject: ual, predicate: `${DKG}assertionVersion`, object: `"${assertionVersion}"`, graph: metaGraph },
+      { subject: ual, predicate: `${DKG}assertionGraph`, object: assertionGraph, graph: metaGraph },
       { subject: ual, predicate: `${DKG}publicTripleCount`, object: '"1"', graph: metaGraph },
       { subject: ual, predicate: `${DKG}privateTripleCount`, object: '"0"', graph: metaGraph },
       {

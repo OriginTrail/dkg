@@ -5,7 +5,7 @@ import { heldMetadataControlsMatchReplay } from './held-metadata-controls.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
-import type { FinalizedVmAssetCommitment } from './finalized-vm-asset-commitment.js';
+import { commitmentFromDescriptor, type FinalizedVmAssetCommitment } from './finalized-vm-asset-commitment.js';
 
 /** Assets per store read: one VALUES list of exact metadata subjects. */
 const HOLDINGS_READ_CHUNK = 200;
@@ -83,14 +83,8 @@ export async function readHeldGraphScopedAssets(
       if (content.status !== 'verified') continue;
       held.add(descriptor.ual);
       // No-chain tentative content can prove a prefix, but cannot authorize finalized cleanup.
-      if (confirmed.has(descriptor.ual)) onVerified?.({
-        contextGraphId: request.contextGraphId, ual: descriptor.ual,
-        assertionVersion: BigInt(descriptor.assertionVersion), assertionGraph: descriptor.assertionGraph,
-        subGraphName: descriptor.subGraphName, merkleRootHex: descriptor.claimedRootHex,
-        metaGraph, publicQuadsDigest: workspacePublicQuadsDigest(content.quads),
-        publicTripleCount: descriptor.publicTripleCount, privateTripleCount: descriptor.privateTripleCount,
-        privateMerkleRoot: descriptor.privateRootHex,
-      });
+      if (confirmed.has(descriptor.ual)) onVerified?.(commitmentFromDescriptor(
+        descriptor, workspacePublicQuadsDigest(content.quads)));
     }
   }
   return held;

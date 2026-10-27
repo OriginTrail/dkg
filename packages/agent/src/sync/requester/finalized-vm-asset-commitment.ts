@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
+import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
+import { parseGraphScopedDescriptor, type GraphScopedDescriptor } from '../durable-integrity.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
-import { literalValue, parseSafeCount, optionalHex32 } from './finalized-swm-twin-terms.js';
+import { literalValue } from './finalized-swm-twin-terms.js';
 
 /** Compact verified content plus confirmed VM metadata; no payload survives the proof read. */
 export interface FinalizedVmAssetCommitment {
@@ -18,63 +20,27 @@ export interface FinalizedVmAssetCommitment {
   readonly merkleRootHex: string;
 }
 
-const DKG = 'http://dkg.io/ontology/';
-
-/** Fetched materialization and held-copy proofs feed the same canonical cleanup contract. */
-export function commitmentFromVmAsset(asset: VerifiedGraphScopedAsset): FinalizedVmAssetCommitment {
-  if (optionalMetadataLiteral(asset, `${DKG}status`) !== 'confirmed') {
-    throw new Error('Authenticated VM metadata is not confirmed');
-  }
+/** Both paths retain the same normalized descriptor and compact public-content digest. */
+export function commitmentFromDescriptor(
+  descriptor: GraphScopedDescriptor, publicQuadsDigest: string,
+): FinalizedVmAssetCommitment {
   return {
-    contextGraphId: asset.contextGraphId, ual: asset.ual, assertionVersion: asset.assertionVersion,
-    assertionGraph: asset.assertionGraph, metaGraph: asset.metaGraph,
-    subGraphName: optionalMetadataLiteral(asset, `${DKG}subGraphName`),
-    publicQuadsDigest: workspacePublicQuadsDigest(asset.dataQuads),
-    publicTripleCount: requiredMetadataCount(asset, `${DKG}publicTripleCount`),
-    privateTripleCount: requiredMetadataCount(asset, `${DKG}privateTripleCount`),
-    privateMerkleRoot: optionalMetadataHex32(asset, `${DKG}privateMerkleRoot`),
-    merkleRootHex: requiredMetadataHex32(asset, `${DKG}merkleRoot`),
+    contextGraphId: descriptor.contextGraphId, ual: descriptor.ual,
+    assertionVersion: BigInt(descriptor.assertionVersion), assertionGraph: descriptor.assertionGraph,
+    metaGraph: contextGraphMetaUri(descriptor.contextGraphId), subGraphName: descriptor.subGraphName,
+    publicQuadsDigest, publicTripleCount: descriptor.publicTripleCount,
+    privateTripleCount: descriptor.privateTripleCount, privateMerkleRoot: descriptor.privateRootHex,
+    merkleRootHex: descriptor.claimedRootHex,
   };
 }
 
-function metadataObjects(asset: VerifiedGraphScopedAsset, predicate: string): string[] {
-  return asset.metadataQuads
-    .filter((quad) => (
-      quad.graph === asset.metaGraph
-      && quad.subject === asset.ual
-      && quad.predicate === predicate
-    ))
-    .map((quad) => quad.object);
-}
-
-function optionalMetadataLiteral(
-  asset: VerifiedGraphScopedAsset,
-  predicate: string,
-): string | undefined {
-  const values = metadataObjects(asset, predicate);
-  if (values.length > 1) throw new Error(`Authenticated VM metadata has ambiguous ${predicate}`);
-  return values[0] === undefined ? undefined : literalValue(values[0]);
-}
-
-function requiredMetadataCount(asset: VerifiedGraphScopedAsset, predicate: string): number {
-  const values = metadataObjects(asset, predicate);
-  if (values.length !== 1) throw new Error(`Authenticated VM metadata has non-unique ${predicate}`);
-  const value = parseSafeCount(values[0]);
-  if (value === null) throw new Error(`Authenticated VM metadata has invalid ${predicate}`);
-  return value;
-}
-
-function optionalMetadataHex32(
-  asset: VerifiedGraphScopedAsset,
-  predicate: string,
-): string | undefined {
-  const values = metadataObjects(asset, predicate);
-  if (values.length > 1) throw new Error(`Authenticated VM metadata has ambiguous ${predicate}`);
-  return optionalHex32(values[0]);
-}
-
-function requiredMetadataHex32(asset: VerifiedGraphScopedAsset, predicate: string): string {
-  const value = optionalMetadataHex32(asset, predicate);
-  if (value === undefined) throw new Error(`Authenticated VM metadata has invalid ${predicate}`);
-  return value;
+/** Confirmation is an admission decision, separate from canonical structural decoding. */
+export function commitmentFromVmAsset(asset: VerifiedGraphScopedAsset): FinalizedVmAssetCommitment {
+  const rows = asset.metadataQuads.filter(quad => quad.subject === asset.ual);
+  const statuses = rows.filter(quad => quad.predicate === 'http://dkg.io/ontology/status');
+  if (statuses.length !== 1 || literalValue(statuses[0]!.object) !== 'confirmed') {
+    throw new Error('Authenticated VM metadata is not confirmed');
+  }
+  return commitmentFromDescriptor(parseGraphScopedDescriptor(asset.ual, rows),
+    workspacePublicQuadsDigest(asset.dataQuads));
 }
