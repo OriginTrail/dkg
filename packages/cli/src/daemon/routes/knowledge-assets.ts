@@ -54,7 +54,8 @@ import {
   respondIfPcaFundingUnknown,
   SMALL_BODY_BYTES,
 } from "../http-utils.js";
-import { validateWritableQuads } from "../knowledge-asset-quad-validation.js";
+import { validateKnowledgeAssetPartitions } from "../knowledge-asset-quad-validation.js";
+import { readPrivateKnowledgeAssetPartition } from './knowledge-asset-private-read.js';
 import { validatePreSignedAuthorAttestation } from "./memory.js";
 import { recordAssertionActivity, recordConvictionCostCovered } from "../activity-notification.js";
 import {
@@ -719,6 +720,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
       name,
       subGraphName,
       quads,
+      privateQuads,
       finalize,
       authorAgentAddress,
       preSignedAuthorAttestation,
@@ -779,13 +781,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // a finalized assertion can be shared to SWM while the CG remains
     // unregistered. Only the later VM publish requires that registration.
     // OT-RFC-43 §10.5.5.
+    const invalidPartitions = validateKnowledgeAssetPartitions(parsed);
+    if (invalidPartitions) return jsonResponse(res, 400, invalidPartitions);
     const hasQuads = Array.isArray(quads) && quads.length > 0;
-    if (hasQuads) {
-      // Reject malformed quads and terms before any create/write mutation.
-      const invalid = validateWritableQuads("quads", quads);
-      if (invalid) return jsonResponse(res, 400, invalid);
-    }
-    const shouldFinalize = hasQuads && finalize !== false;
+    const hasPrivateQuads = Array.isArray(privateQuads) && privateQuads.length > 0;
+    const shouldFinalize = (hasQuads || hasPrivateQuads) && finalize !== false;
     // #1116 D5: the create ROUTE stays a primitive — create+write+seal, with
     // opt-in share (this preserves the "create stops at a sealed WM draft"
     // invariant the agent-tooling work relies on). The "default to seal AND
@@ -808,12 +808,12 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     if (alsoPublishVmOptions === null) return;
     if (!shouldFinalize && (alsoShareSwm === true || alsoPublishVmRequested)) {
       return jsonResponse(res, 400, {
-        error: '"alsoShareSwm"/"alsoPublishVm" require a finalized assertion (non-empty "quads" and "finalize" !== false)',
+        error: '"alsoShareSwm"/"alsoPublishVm" require a finalized assertion (non-empty "quads" or "privateQuads", and "finalize" !== false)',
       });
     }
     if (!shouldFinalize && hasFinalizeOnlyCreateFields(parsed)) {
       return jsonResponse(res, 400, {
-        error: '"authorAgentAddress", "preSignedAuthorAttestation", and "schemeVersion" require non-empty "quads" with finalize !== false',
+        error: '"authorAgentAddress", "preSignedAuthorAttestation", and "schemeVersion" require non-empty "quads" or "privateQuads" with finalize !== false',
       });
     }
     // GH#1786 — the create body's top level is not otherwise inspected for this field
@@ -909,6 +909,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         await agent.assertion.write(resolvedContextGraphId, name, quads, { subGraphName, ...atomicAuthorLane });
         result.written = quads.length;
         emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: quads.length } });
+      }
+      if (hasPrivateQuads) {
+        await agent.assertion.writePrivate(resolvedContextGraphId, name, privateQuads, { subGraphName, ...atomicAuthorLane });
+        result.writtenPrivate = privateQuads.length;
+        emitMemoryGraphChanged?.({ contextGraphId: resolvedContextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: privateQuads.length } });
       }
       if (shouldFinalize) {
         const seal = await agent.assertion.finalize(resolvedContextGraphId, name, {
@@ -1072,7 +1077,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     const cg = normalizeContextGraphIdOrUri(rawCg as string);
     return requireKnowledgeAssetRead(ctx, {
       cg, name, layer, subGraphName, agentAddress,
-      ...(literal ? { kind: 'literal', lookup: 'none' } : { kind: 'identifier', lookup: verb === 'quads' ? 'quads' : 'descriptor' }),
+      ...(literal ? { kind: 'literal', lookup: 'none' } : { kind: 'identifier', lookup: verb === 'quads' && url.searchParams.get('partition') !== 'private' ? 'quads' : 'descriptor' }),
     });
   }
 
@@ -1084,6 +1089,18 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     const hist = p.descriptor;
     if (!hist) return jsonResponse(res, 404, { error: `No knowledge asset "${name}" in context graph "${p.cg}"` });
     return jsonResponse(res, 200, hist);
+  }
+
+  if (method === 'GET' && (layer === 'wm' || layer === 'vm') && verb === 'quads') {
+    const partition = url.searchParams.get('partition');
+    if (partition !== null && partition !== 'public' && partition !== 'private') {
+      return jsonResponse(res, 400, { error: '"partition" must be public or private' });
+    }
+    if (partition === 'private') {
+      const target = await readGetParams();
+      if (!target) return;
+      return readPrivateKnowledgeAssetPartition(ctx, target, layer);
+    }
   }
 
   // GET /api/knowledge-assets/:identifier/wm/quads — dump the WM draft's quads.
@@ -1173,10 +1190,10 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
     // ── WM verbs (the only writable layer) ──
     if (layer === "wm") {
       if (verb === "write") {
-        if (!Array.isArray(parsed.quads)) return jsonResponse(res, 400, { error: 'Missing "quads"' });
+        if (parsed.quads === undefined && parsed.privateQuads === undefined) return jsonResponse(res, 400, { error: 'Missing "quads" or "privateQuads"' });
         // GH #306 — reject malformed quads and terms here (4xx) instead of
         // letting them crash the agent write path (HTTP 500).
-        const invalid = validateWritableQuads("quads", parsed.quads);
+        const invalid = validateKnowledgeAssetPartitions(parsed);
         if (invalid) return jsonResponse(res, 400, invalid);
         // A bare write to a name that was never created used to fall through to
         // the legacy `/assertion/{addr}/{name}` graph and produce a KA that is
@@ -1203,9 +1220,11 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             ...writeAuthorLane,
           });
         }
-        await agent.assertion.write(contextGraphId, name, parsed.quads, { subGraphName, ...writeAuthorLane });
-        emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: parsed.quads.length } });
-        return jsonResponse(res, 200, { written: parsed.quads.length });
+        if (parsed.quads !== undefined) await agent.assertion.write(contextGraphId, name, parsed.quads, { subGraphName, ...writeAuthorLane });
+        if (parsed.privateQuads !== undefined) await agent.assertion.writePrivate(contextGraphId, name, parsed.privateQuads, { subGraphName, ...writeAuthorLane });
+        const written = (parsed.quads?.length ?? 0) + (parsed.privateQuads?.length ?? 0);
+        emitMemoryGraphChanged?.({ contextGraphId, layers: ["wm"], subGraphName, operation: "assertion_written", source: "api", counts: { triples: written } });
+        return jsonResponse(res, 200, { written, ...(parsed.privateQuads !== undefined ? { writtenPrivate: parsed.privateQuads.length } : {}) });
       }
       if (verb === "finalize") {
         const finalizeOptions = resolveFinalizeOptions(parsed, res, writePreflightCallerAgentAddress);

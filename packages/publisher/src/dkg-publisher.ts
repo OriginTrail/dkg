@@ -122,6 +122,7 @@ import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js
 import { verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
 import { snapshotAssertionPullOptions, verifyExactAssertionDraft, draftRecoveryError, rethrowDraftSourceFailure, rethrowDraftVerificationFailure, type AssertionPullFromOptions, type AssertionPullFromResult } from './assertion-draft-recovery.js';
 import { resolveAssertionPullSource, type AssertionPromoteState } from './assertion-pull-source.js';
+import { readConfirmedPrivateKnowledgeAsset } from './private-knowledge-asset-read.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
 import { ethers } from 'ethers';
@@ -8042,6 +8043,11 @@ export class DKGPublisher implements Publisher {
       name,
       subGraphName,
     );
+  }
+
+  /** Exact confirmed private partition; transport callers must authorize the KA owner. */
+  async readPrivateKnowledgeAsset(contextGraphId: string, ual: string, subGraphName?: string) {
+    return readConfirmedPrivateKnowledgeAsset(this.store, this.privateStore, contextGraphId, ual, subGraphName);
   }
 
   /**

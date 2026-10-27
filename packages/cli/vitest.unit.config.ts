@@ -12,6 +12,7 @@ export default defineConfig({
     include: runsDaemonHttpBehavior
       ? ['test/daemon-http-behavior-extra.test.ts']
       : [
+          'test/knowledge-assets-private-partitions.test.ts',
           'test/async-share-bound-recovery.test.ts',
           'test/write-preflight-diagnostics.test.ts',
           'test/durable-synchronous-share.test.ts',
