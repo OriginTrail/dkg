@@ -1424,3 +1424,160 @@ describe('only exact integer timestamps are scan candidates (second review of P1
     expect((await storedIds(store)).size).toBe(0);
   });
 });
+describe('the scan checks an engine\'s answer against the query it asked, and every violation is an anomaly that moves no cursor (fifth review of P10a: the contract checks no test exercised)', () => {
+  // planScan accepts an answer only when it is sorted, within the limit + 1 rows it asked for, after the cursor, not past the cutoff (range query), in the tie group's one
+  // `updatedAt` and after the tie cursor's key (tie query), and made of rows it can read. The sorted check is exercised above (descending, interleaved, repeated rows); each of the
+  // other checks is exercised here by an engine that ignores one clause of the query (or adds a row it cannot read) and answers the rest correctly. A violation is counted in
+  // `anomalies`, moves no cursor, completes no pass, still judges only what the call may judge (each row is verified under the lock first), and the same sweep drains once the
+  // engine conforms.
+  const SCAN = 'publisher.asyncPromote.retention.scan';
+  type Fault = (sparql: string, ask: (sparql: string) => Promise<QueryResult>) => Promise<QueryResult> | undefined;
+  /** Retention over a store whose FIRST scan query that `fault` answers (it returns undefined for the others) is answered wrongly; every other query is answered as asked. */
+  function faulty(store: OxigraphStore, fault: Fault, over: Parameters<typeof newRetention>[1]) {
+    const state = { armed: false, fired: 0 };
+    const { store: spied } = spy(store, async (sparql, source, run) => {
+      if (source !== SCAN || !state.armed) return run();
+      const wrong = fault(sparql, q => store.query(q));
+      if (wrong === undefined) return run();
+      state.armed = false; state.fired++;
+      return wrong;
+    });
+    return { retention: newRetention(spied, { benignFailedMaxAgeMs: null, ...over }), state };
+  }
+  const OLD = (n: number, firstAge = 10 * W) => Array.from({ length: n }, (_, i) => rowOf('succeeded', `o-${i}`, firstAge + n - i)).flat();   // o-0 is the oldest
+  const without = (sparql: string, clause: RegExp) => { expect(sparql, 'the clause the fault removes is part of the query').toMatch(clause); return sparql.replace(clause, ''); };
+  /** After a violation: no pass completed, the call kept its cursor (`hasMore`), and the same sweep drains once the engine conforms. */
+  async function expectFailsClosed(retention: ReturnType<typeof newRetention>, first: ShareRetentionBatchResult) {
+    expect(first.anomalies).toBe(1);
+    expect(first.hasMore).toBe(true);
+    expect(first.passCompleted).toBe(false);
+    const rest = await drain(retention);
+    expect(rest.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect(rest.at(-1)!.hasMore).toBe(false);
+    expect(retention.counters().anomalies).toBe(1);
+    expect(retention.counters().lastCompletePass, 'the pass that met an anomaly never completes').toBeUndefined();
+  }
+
+  it('an answer past the cutoff (an engine that ignores the cutoff filter) is an anomaly, and the young row it returns is verified and kept, never deleted', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...OLD(2), ...rowOf('succeeded', 'young', 1000)]);                                           // 'young' is far inside the window
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.includes('ORDER BY ?updatedAt') ? ask(without(sparql, new RegExp(` FILTER \\(\\?updatedAt <= ${NOW - W}\\)`))) : undefined), { batchSize: 100 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.kept.too_recent, 'the row past the cutoff was judged, not deleted').toBe(1);
+    expect(first.deleted, 'what the call judged and verified is still deleted: o-0 and o-1').toBe(2);
+    expect(await present(store, 'young')).not.toBe('');
+    await expectFailsClosed(retention, first);
+    expect([...(await storedIds(store))]).toEqual(['young']);
+  });
+
+  it.each([
+    ['ignores the lower bound (answers from the start: o-0, o-1, o-2)', (sparql: string) => without(sparql, / FILTER \(\?updatedAt > \d+\)/)],
+    ['reads the exclusive lower bound as inclusive (answers from the cursor row: o-1, o-2, o-3)', (sparql: string) => sparql.replace(/ FILTER \(\?updatedAt > (\d+)\)/, ' FILTER (?updatedAt >= $1)')],
+  ])('an answer that starts at or before the cursor (an engine that %s) is an anomaly and moves no cursor', async (_label, widen) => {
+    const store = new OxigraphStore();
+    await insertQuads(store, OLD(4));
+    const { retention, state } = faulty(store, (sparql, ask) => (/ FILTER \(\?updatedAt > \d+\)/.test(sparql) ? ask(widen(sparql)) : undefined), { mode: 'report', batchSize: 2 });
+    const first = await retention.runBatch();                                                                              // o-0 and o-1; the cursor is now after o-1
+    expect(first).toMatchObject({ scanned: 2, anomalies: 0, hasMore: true });
+    state.armed = true;
+    const second = await retention.runBatch();                                                                             // the engine answers from at or before the cursor
+    expect(state.fired).toBe(1);
+    expect(second.anomalies).toBe(1);
+    expect(second.scanned, 'it judges what it may, at most the batch').toBeLessThanOrEqual(2);
+    expect(second.hasMore).toBe(true);
+    const rest = await drain(retention);
+    expect(rest.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect(rest.at(-1)!.hasMore).toBe(false);
+    expect(retention.counters().anomalies).toBe(1);
+    expect(retention.counters().lastCompletePass).toBeUndefined();
+    expect(retention.counters().kept.too_recent).toBe(0);
+  });
+
+  it.each(['delete', 'report'] as const)('%s mode: an answer of more than limit + 1 rows (an engine that ignores LIMIT) is an anomaly, and no more than the batch is judged from it', async mode => {
+    const store = new OxigraphStore();
+    await insertQuads(store, OLD(6));
+    const { retention, state } = faulty(store, (sparql, ask) => (/ORDER BY \?updatedAt LIMIT 4$/.test(sparql) ? ask(without(sparql, / LIMIT \d+$/)) : undefined), { mode, batchSize: 3 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.scanned, 'the batch bound holds against an engine that ignores LIMIT').toBe(3);
+    await expectFailsClosed(retention, first);
+    expect((await storedIds(store)).size).toBe(mode === 'delete' ? 0 : 6);
+  });
+
+  it.each(['delete', 'report'] as const)('%s mode: a tie walk answered with more than limit + 1 rows is an anomaly, and no more than the batch is judged from it', async mode => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 6 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W)).flat());              // one group, larger than the batch
+    const { retention, state } = faulty(store, (sparql, ask) => (/ORDER BY STR\(\?job\) LIMIT 3$/.test(sparql) ? ask(without(sparql, / LIMIT \d+$/)) : undefined), { mode, batchSize: 2 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.scanned).toBe(2);
+    await expectFailsClosed(retention, first);
+    expect((await storedIds(store)).size).toBe(mode === 'delete' ? 0 : 6);
+  });
+
+  it('a tie walk answered with a row of another updatedAt (an engine that ignores the equality filter) is an anomaly', async () => {
+    const store = new OxigraphStore();
+    await insertQuads(store, [...Array.from({ length: 4 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W + 10)).flat(), ...rowOf('succeeded', 'a-other', 10 * W)]);   // 'a-other' sorts before the group by key
+    const { retention, state } = faulty(store, (sparql, ask) => (/ FILTER \(\?updatedAt = \d+\)/.test(sparql) ? ask(without(sparql, / FILTER \(\?updatedAt = \d+\)/)) : undefined), { mode: 'report', batchSize: 2 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    await expectFailsClosed(retention, first);
+  });
+
+  it.each([
+    ['ignores the key filter (answers from the start of the group)', (sparql: string) => without(sparql, / FILTER \(STR\(\?job\) > "[^"]*"\)/)],
+    ['reads the exclusive key filter as inclusive (answers from the cursor key)', (sparql: string) => sparql.replace(/ FILTER \(STR\(\?job\) > ("[^"]*")\)/, ' FILTER (STR(?job) >= $1)')],
+  ])('a tie walk that answers from at or before its key cursor (an engine that %s) is an anomaly', async (_label, widen) => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 6 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W)).flat());
+    const { retention, state } = faulty(store, (sparql, ask) => (/ FILTER \(STR\(\?job\) > "[^"]*"\)/.test(sparql) ? ask(widen(sparql)) : undefined), { mode: 'report', batchSize: 2 });
+    const first = await retention.runBatch();                                                                              // the walk starts: t-0, t-1, and its key cursor is after t-1
+    expect(first).toMatchObject({ scanned: 2, anomalies: 0, hasMore: true });
+    state.armed = true;
+    const second = await retention.runBatch();                                                                             // the engine answers from at or before the cursor
+    expect(state.fired).toBe(1);
+    expect(second.anomalies).toBe(1);
+    expect(second.hasMore).toBe(true);
+    const rest = await drain(retention);
+    expect(rest.every(r => !r.error && r.anomalies === 0)).toBe(true);
+    expect(rest.at(-1)!.hasMore).toBe(false);
+    expect(retention.counters().lastCompletePass).toBeUndefined();
+  });
+
+  it.each([
+    ['a row whose updatedAt is not a number', { job: jobSubject('ghost'), updatedAt: '"abc"' }],
+    ['a row with no subject', { updatedAt: `"${NOW - 10 * W}"^^<http://www.w3.org/2001/XMLSchema#integer>` }],
+  ])('an answer with %s is an anomaly: the rest of the answer is judged, nothing is deleted on the strength of the unreadable row', async (_label, extra) => {
+    const store = new OxigraphStore();
+    await insertQuads(store, OLD(2));
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.includes('ORDER BY ?updatedAt')
+      ? ask(sparql).then(res => (res.type === 'bindings' ? { ...res, bindings: [...res.bindings, extra] } as QueryResult : res)) : undefined), { batchSize: 100 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.deleted, 'the two readable rows are verified and deleted').toBe(2);
+    expect(first.scanned).toBe(2);
+    await expectFailsClosed(retention, first);
+  });
+
+  it.each([
+    ['a row whose updatedAt is not a number', { job: jobSubject('t-ghost'), updatedAt: '"abc"' }],
+    ['a row with no subject', { updatedAt: `"${NOW - 10 * W}"^^<http://www.w3.org/2001/XMLSchema#integer>` }],
+  ])('a tie walk answered with %s is an anomaly too', async (_label, extra) => {
+    const store = new OxigraphStore();
+    await insertQuads(store, Array.from({ length: 4 }, (_, i) => rowOf('succeeded', `t-${i}`, 10 * W)).flat());
+    const { retention, state } = faulty(store, (sparql, ask) => (sparql.includes('ORDER BY STR(?job)')
+      ? ask(sparql).then(res => (res.type === 'bindings' ? { ...res, bindings: [...res.bindings, extra] } as QueryResult : res)) : undefined), { mode: 'report', batchSize: 2 });
+    state.armed = true;
+    const first = await retention.runBatch();
+    expect(state.fired).toBe(1);
+    expect(first.scanned, 'the readable rows are judged, at most the batch').toBe(2);
+    await expectFailsClosed(retention, first);
+  });
+});
+
