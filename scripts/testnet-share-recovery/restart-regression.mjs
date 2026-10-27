@@ -1,5 +1,6 @@
 import { loadCampaign, campaignCounts } from './campaign-manifest.mjs';
 import { observeRestartRecoveryPoll } from './restart-observation.mjs';
+import { getAllJobPages } from './job-pages.mjs';
 // Separate from the fixed-denominator comparison. No publication or HTTP replay.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -49,10 +50,11 @@ if (mode === 'start') {
     try {
       const observation = await observeRestartRecoveryPoll(async () => {
       const [jobs,descriptor,status] = await Promise.all([
-        get('/api/knowledge-assets/swm/share-jobs'),
+        getAllJobPages(get, '/api/knowledge-assets/swm/share-jobs'),
         get(`/api/knowledge-assets/${name}?${new URLSearchParams({contextGraphId:cg,agentAddress:campaign.author})}`),
         get('/api/status'),
       ]);
+      // Not finding the job in a walk proves nothing (it may be admitted behind the cursor): the poll only counts a job it saw succeed.
       const job = jobs.value.jobs.find(j=>j.assertionName===name);
       const catalog = status.value.rfc64Catalog?.contextGraphs?.find(c=>c.contextGraphId===cg);
       return {job,descriptor,catalog};

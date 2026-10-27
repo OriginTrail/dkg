@@ -86,6 +86,17 @@
     ]
   },
   {
+    "pattern": "scripts/docs/*.test.mjs",
+    "lane": "docs",
+    "reason": "Documentation contracts workflow runs these dependency-free tests for documentation, example, and docs-tooling changes",
+    "cadence": "pull_request/manual",
+    "command": "node --test scripts/docs/*.test.mjs",
+    "layer": "documentation tooling",
+    "prerequisites": [
+      "Node.js 22"
+    ]
+  },
+  {
     "pattern": "devnet/rfc64-persistence-lifecycle/*.test.ts",
     "lane": "inventory-windows",
     "reason": "Gate 0 evidence-encoder, child-process cleanup and verifier unit tests run on the Windows inventory evidence leg before generation and on the Linux tornado-agent sidecar shard, which also runs the POSIX-only cases",
@@ -133,6 +144,13 @@
     "reason": "Native graph-prefix evaluation conformance is mandatory in the existing Blazegraph CI lane",
     "cadence": "required",
     "command": "pnpm --filter @origintrail-official/dkg-storage exec vitest run --config vitest.blazegraph-prefix.config.ts"
+  },
+  {
+    "pattern": "packages/publisher/test-live/**/*.blazegraph.test.ts",
+    "lane": "tornado-blazegraph",
+    "reason": "Live Blazegraph differential of the bounded share conflict lookup (OT-RFC-73 AC4), required in the existing Tornado Blazegraph CI lane: on its service container and again on the blazegraph-image.json image with the U+001F reproduction required",
+    "cadence": "required",
+    "command": "pnpm --filter @origintrail-official/dkg-publisher exec vitest run --config vitest.blazegraph.config.ts"
   },
   {
     "pattern": "packages/agent/test-live/**/*.blazegraph.test.ts",

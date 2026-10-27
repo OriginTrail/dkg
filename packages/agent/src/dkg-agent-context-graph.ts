@@ -389,6 +389,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { LocalContextGraphRegistrationStatusStore } from
   './local-context-graph-registration-status.js';
+import { storeAdmissionRetrier } from './store-admission-retry.js';
 import type { DKGAgent } from './dkg-agent.js';
 import { createLocalContextGraphOriginMembershipRecord } from
   './local-context-graph-provenance.js';
@@ -473,8 +474,10 @@ export class ContextGraphMethods extends DKGAgentBase {
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const cgMetaGraph = contextGraphMetaGraphUri(opts.id);
     const now = new Date().toISOString();
+    // Only the existence check waits out a busy store; a retried declaration could land after a competing create.
+    const admitStoreStep = storeAdmissionRetrier(`Context graph "${opts.id}" create`, (line) => this.log.info(ctx, line));
 
-    const exists = await this.contextGraphExists(opts.id);
+    const exists = await admitStoreStep(() => this.contextGraphExists(opts.id));
     if (exists) {
       throw new Error(`Context graph "${opts.id}" already exists`);
     }
@@ -1161,10 +1164,12 @@ export class ContextGraphMethods extends DKGAgentBase {
         this.contextGraphMetaProjection.markDirty(contextGraphId)
       ),
     });
+    // The caller waits on a registration: its idempotent status and binding steps outlast a busy store.
+    const admitStoreStep = storeAdmissionRetrier(`Context graph "${id}" registration`, (line) => this.log.info(ctx, line));
     const persistRegistrationStatus = async (
       status: 'unregistered' | 'pending' | 'registered',
-    ): Promise<void> => registrationStatuses.set(id, status);
-    const registrationStatus = await this.readLocalContextGraphRegistrationStatus(id);
+    ): Promise<void> => admitStoreStep(() => registrationStatuses.set(id, status));
+    const registrationStatus = await admitStoreStep(() => this.readLocalContextGraphRegistrationStatus(id));
     if (registrationStatus === 'registered') {
       const existingOnChainId = this.subscribedContextGraphs.get(id)?.onChainId;
       throw new Error(`Context graph "${id}" is already registered on-chain${existingOnChainId ? ` (${existingOnChainId})` : ''}`);
@@ -1199,7 +1204,7 @@ export class ContextGraphMethods extends DKGAgentBase {
           // binding lives only in its `_meta`. If the local policy can't be
           // read, treat the graph as curated.
           const reconciledIsCurated = await this.isPrivateContextGraph(id).catch(() => true);
-          await replaceContextGraphMetadataFact(this.store, id, {
+          await admitStoreStep(() => replaceContextGraphMetadataFact(this.store, id, {
             predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
             object: `"${resolvedOnChainId}"`,
             graphs: contextGraphMetadataGraphs(id, { curated: reconciledIsCurated }),
@@ -1209,8 +1214,8 @@ export class ContextGraphMethods extends DKGAgentBase {
               object: `"${nameHash}"`,
               graph: cgMetaGraph,
             }],
-          });
-          await this.store.flush?.();
+          }));
+          await admitStoreStep(async () => { await this.store.flush?.(); });
           await persistRegistrationStatus('registered');
           reconciledOnChainId = resolvedOnChainId;
           reconciledNameHash = nameHash;
@@ -1724,7 +1729,8 @@ export class ContextGraphMethods extends DKGAgentBase {
       // Single-valued binding guard (RS heal): the on-chain id is immutable, so
       // clear any prior value before insert — the cgId resolver / heal read this
       // and must never see a multi-valued (LIMIT-1-nondeterministic) binding.
-      await replaceContextGraphMetadataFact(this.store, id, {
+      // Mined by now: a busy store must not turn it into a failed request.
+      await admitStoreStep(() => replaceContextGraphMetadataFact(this.store, id, {
         predicate: CONTEXT_GRAPH_ON_CHAIN_ID_PREDICATE,
         object: `"${onChainId}"`,
         graphs: contextGraphMetadataGraphs(id, { curated: isCuratedRegistration }),
@@ -1734,8 +1740,8 @@ export class ContextGraphMethods extends DKGAgentBase {
         alsoInsert: [
           { subject: contextGraphUri, predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainHash`, object: `"${nameHash}"`, graph: cgMetaGraph },
         ],
-      });
-      await this.store.flush?.();
+      }));
+      await admitStoreStep(async () => { await this.store.flush?.(); });
       // Keep `pending` durable until every recovery binding above is committed.
       // A crash or store failure before this final flip therefore forces the
       // next authority read to reconcile the now-discoverable chain slot.

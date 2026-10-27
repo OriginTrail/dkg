@@ -4,6 +4,8 @@
 
 import {
   assertSafeIri,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
   contextGraphAssertionUri,
   contextGraphMetaUri,
   contextGraphPrivateUri,
@@ -22,6 +24,8 @@ export interface ResolveDurableGraphScopedAuthorSealCandidateParamsV1 {
   readonly assertionCoordinate: string;
   readonly subGraphName?: string;
   readonly source: string;
+  /** Exact committed version; permit its archived seal after reopening for editing. */
+  readonly sealDigest?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -49,7 +53,13 @@ export async function resolveDurableGraphScopedAuthorSealCandidateV1(
   if (candidates.length > 1) {
     throw new Error('durable assertion has ambiguous author seal subjects');
   }
-  return candidates[0];
+  const active = candidates[0];
+  if (params.sealDigest === undefined) return active;
+  const matches = (candidate: GraphScopedAssertionSealCandidate | undefined) => candidate !== undefined
+    && computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal)) === params.sealDigest;
+  if (matches(active)) return active;
+  const archived = await resolveArchivedGraphScopedAuthorSealCandidateV1(params);
+  return matches(archived) ? archived : undefined;
 }
 
 /**
