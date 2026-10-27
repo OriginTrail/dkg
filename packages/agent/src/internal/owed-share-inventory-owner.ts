@@ -33,6 +33,8 @@ export interface OwedShareInventoryOwnerDependenciesV1 {
   readonly drain: (
     marker: Readonly<Rfc64OwedShareInventoryV1>, ctx: OperationContext,
   ) => Promise<OwedShareInventoryDrainOutcomeV1>;
+  /** One coalesced graph reconciliation, outside the serial marker pass. */
+  readonly requestGraphSettlement?: (contextGraphId: string) => void;
   readonly remove: (marker: Readonly<Rfc64OwedShareInventoryV1>) => Promise<void>;
   /** The projection supervisor's retry interval; 0 leaves only the explicit passes. */
   readonly retryIntervalMs: () => number;
@@ -97,6 +99,7 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
     this.#runner?.request();
   }
 
+  /** Drain marker attempts; the canonical responsibility dispatcher owns graph settlement. */
   async whenIdle(): Promise<void> {
     await this.#runner?.whenIdle();
   }
@@ -113,33 +116,39 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
     for (const identity of this.#failed.keys()) {
       if (!kept.has(identity)) this.#failed.delete(identity);
     }
+    const waitingGraphs = new Set<string>();
     for (const marker of markers) {
       if (signal.aborted) return 'rearm';
-      await this.#attempt(marker, signal);
+      if (await this.#attempt(marker, signal)) waitingGraphs.add(marker.contextGraphId);
     }
+    for (const graph of waitingGraphs) this.#scheduleSettlement(graph);
     return this.#dependencies.list().length > 0 ? 'rearm' : 'idle';
   }
 
-  async #attempt(marker: Readonly<Rfc64OwedShareInventoryV1>, signal: AbortSignal): Promise<void> {
+  #scheduleSettlement(contextGraphId: string): void {
+    this.#dependencies.requestGraphSettlement?.(contextGraphId);
+  }
+
+  async #attempt(marker: Readonly<Rfc64OwedShareInventoryV1>, signal: AbortSignal): Promise<boolean> {
     const identity = markerIdentity(marker);
     const now = this.#dependencies.now?.() ?? Date.now();
     const failed = this.#failed.get(identity);
-    if (failed !== undefined && now < failed.nextAttemptAtMs) return;
+    if (failed !== undefined && now < failed.nextAttemptAtMs) return false;
     let outcome: OwedShareInventoryDrainOutcomeV1;
     try {
       outcome = await this.#dependencies.drain(marker, this.#ctx);
     } catch (error) {
-      if (signal.aborted) return;
+      if (signal.aborted) return false;
       const failures = (failed?.failures ?? 0) + 1;
       const base = Math.max(this.#dependencies.retryIntervalMs(), 5_000);
       const pauseMs = Math.min(OWED_SHARE_INVENTORY_FAILURE_PAUSE_MAX_MS, base * 2 ** Math.min(20, failures - 1));
       this.#failed.set(identity, { failures, nextAttemptAtMs: now + pauseMs });
       this.#dependencies.warn(this.#ctx, `Owed share inventory row ${markerLabel(marker)} was not written `
         + `(attempt ${failures}, next in ${Math.round(pauseMs / 1000)} s): ${message(error)}`);
-      return;
+      return false;
     }
     this.#failed.delete(identity);
-    if (outcome === 'waiting') return;
+    if (outcome === 'waiting') return true;
     if (outcome === 'policy-mismatch') {
       this.#dependencies.warn(this.#ctx, `Owed share inventory row ${markerLabel(marker)} is dropped: `
         + 'the graph\'s catalog policy no longer takes the share');
@@ -151,5 +160,6 @@ export class Rfc64OwedShareInventoryOwnerV1 implements Rfc64CatalogWorkloadOwner
       this.#dependencies.warn(this.#ctx,
         `Owed share inventory marker ${markerLabel(marker)} was not removed: ${message(error)}`);
     }
+    return false;
   }
 }

@@ -4461,7 +4461,7 @@ describe('RFC-64 rollout authority integration', () => {
     }
   });
 
-  it('bounds finalized-absence retries and re-arms them on a later lifecycle revision', async () => {
+  it.each([false, true])('bounds finalized-absence retries and resumes after exhaustion (owed retries: %s)', async owedRetries => {
     const contextGraphId = `${AUTHOR}/scheduled-finality-absence`;
     const nameHash = ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)).toLowerCase();
     const snapshot = Object.freeze({
@@ -4496,11 +4496,26 @@ describe('RFC-64 rollout authority integration', () => {
       onChainHash: nameHash,
     });
 
+    let owedOwner: ReturnType<DKGAgent['createRfc64OwedShareInventoryOwnerV1']> | undefined;
+    const markers = (edge as any).rfc64PersistenceV1.owedShareInventories;
     vi.useFakeTimers();
     try {
       edge.subscribeToContextGraph(contextGraphId);
       await vi.advanceTimersByTimeAsync(100);
       expect(readSnapshots).toHaveBeenCalledOnce();
+      if (owedRetries) {
+        vi.spyOn(edge, 'rfc64CatalogAuthorityRefreshFailureReasonV1').mockReturnValue(undefined);
+        vi.spyOn(edge, 'requestRfc64SwmCatalogProjectionV1').mockReturnValue(true);
+        vi.spyOn(edge, 'tryCommitRfc64SwmAuthorInventoryV1').mockImplementation(async () =>
+          edge.readRfc64CatalogResponsibilityV1(contextGraphId).active
+            ? { status: 'existing', attempts: 1, headObjectDigest: 'h', kaUal: 'u' } as any
+            : { status: 'dormant', dormantReason: 'inactive-lane' } as any);
+        await markers.put({ version: 1, contextGraphId, subGraphName: null, authorAddress: AUTHOR,
+          assertionCoordinate: 'owed-finality', sealDigest: `0x${'ab'.repeat(32)}`, shareOperationId: 'owed-finality' });
+        owedOwner = edge.createRfc64OwedShareInventoryOwnerV1(() => ({ retryIntervalMs: 5_000 }));
+        owedOwner.start(createOperationContext('system'));
+        await owedOwner.whenIdle();
+      }
 
       await vi.advanceTimersByTimeAsync(30_100);
       expect(readSnapshots).toHaveBeenCalledTimes(2);
@@ -4515,6 +4530,18 @@ describe('RFC-64 rollout authority integration', () => {
       expect(edge.readRfc64CatalogResponsibilitiesV1()).not.toContainEqual(
         expect.objectContaining({ contextGraphId }),
       );
+
+      if (owedOwner) {
+        expect(markers.list()).toHaveLength(1);
+        finalized = true; // Finality arrives after all four timers have exhausted.
+        await vi.advanceTimersByTimeAsync(5_100);
+        await edge.whenRfc64CatalogResponsibilitiesIdleV1();
+        await owedOwner.whenIdle();
+        expect(readSnapshots).toHaveBeenCalledTimes(6);
+        expect(edge.readRfc64CatalogResponsibilityV1(contextGraphId).active).toBe(true);
+        expect(markers.list()).toEqual([]);
+        return; // No lifecycle notification or manual marker request was needed.
+      }
 
       await vi.advanceTimersByTimeAsync(480_000);
       expect(readSnapshots).toHaveBeenCalledTimes(5);
@@ -4534,6 +4561,7 @@ describe('RFC-64 rollout authority integration', () => {
         }),
       );
     } finally {
+      await owedOwner?.close();
       vi.useRealTimers();
       await edge.stop();
     }

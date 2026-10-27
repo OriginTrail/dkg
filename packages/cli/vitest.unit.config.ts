@@ -222,6 +222,10 @@ export default defineConfig({
           'test/liveness-supervisor-log.test.ts',
           'test/foreground-supervisor-command.test.ts',
           'test/promote-async-routes.test.ts',
+          // OT-RFC-73 P9b — the opt-in paged mode of the two job list routes (real queues over HTTP, no hardhat).
+          'test/job-list-paging-routes.test.ts',
+          // OT-RFC-73 P9b — --cursor, --page-size and --all of the two list commands, and the client path helpers.
+          'test/job-list-paging-cli.test.ts',
           'test/promote-async-daemon-lifecycle.test.ts',
           'test/daemon-ka-transport.test.ts',
           // Pure HTTP classification coverage for chain transport failures,

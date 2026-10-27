@@ -566,8 +566,19 @@ export { classifyQueuedSharePreparation } from './bind-promote-recovery.js';
 export type { ACKDiagnosticSummary } from './ack-diagnostics.js';
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
 
-export { PromoteListRequestError, PROMOTE_LIST_DEFAULT_PAGE_SIZE, PROMOTE_LIST_MAX_PAGE_SIZE, type PromoteListRequestErrorCode } from './promote-list-cursor.js';
+export {
+  PromoteListRequestError, PromoteListStoredRowError, PROMOTE_LIST_DEFAULT_PAGE_SIZE, PROMOTE_LIST_MAX_PAGE_SIZE,
+  type PromoteListRequestErrorCode, type PromoteListStoredRowErrorCode,
+} from './promote-list-cursor.js';
 export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';
+
+// Share-queue retention core (OT-RFC-73 P10a). Passive: the mode, the timer and the config that drive it are the daemon's (P10b); the mode defaults to off.
+export {
+  createShareRetention, ShareRetentionAdmissionUnavailableError, SHARE_RETENTION_DEFAULTS, SHARE_RETENTION_MODES, SHARE_RETENTION_WINDOW_MS,
+  type ShareRetention, type ShareRetentionBatchResult, type ShareRetentionConfig, type ShareRetentionCounters, type ShareRetentionJob,
+  type ShareRetentionLogger, type ShareRetentionMode, type ShareRetentionPassSummary, type ShareRetentionSkip,
+} from './async-promote-retention.js';
+export { PROMOTE_RETENTION_JOB_CLASSES, PROMOTE_RETENTION_KEEP_REASONS, type PromoteRetentionJobClass, type PromoteRetentionKeepReason } from './async-promote-retention-policy.js';
 
 export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
 
