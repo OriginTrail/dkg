@@ -285,26 +285,27 @@ test('cyclic internal runtime dependencies fail publication before mutation', as
 });
 
 
-test('promotion and direct stable publication cannot omit the decision or mutate after it fails', t => {
+test('promotion and direct stable publication cannot omit the decision or mutate after it fails', async t => {
   const f = fixture(t);
   for (const extra of [{ mode: 'promote' }, { tags: ['latest'] }, { tags: ['mainnet'] }]) {
     const options = releaseOptions(f, { ...extra, evidenceFile: undefined, runner: () => assert.fail('mutated without decision') });
-    assert.throws(() => preparedRelease(options), /decision file is required/);
+    await assert.rejects(preparedRelease(options), /decision file is required/);
     options.evidenceFile = 'decision.json';
     options.verifyEvidence = () => { throw new Error('decision invalid'); };
-    assert.throws(() => preparedRelease(options), /decision invalid/);
+    await assert.rejects(preparedRelease(options), /decision invalid/);
   }
 });
 
-for (const dryRun of [false, true]) test(`evidence invalidated during registry acquisition blocks ${dryRun ? 'dry-run planning' : 'every mutation'}`, t => {
+for (const dryRun of [false, true]) test(`evidence invalidated during registry acquisition blocks ${dryRun ? 'dry-run planning' : 'every mutation'}`, async t => {
   const f = fixture(t);
   let verified = 0, acquired = 0, mutations = 0, valid = true;
   const options = releaseOptions(f, { mode: 'promote', tags: ['mainnet'], dryRun, evidenceFile: 'decision.json',
     verifyEvidence: () => { verified++; assert.ok(valid, 'qualification changed during acquisition'); },
+    readTags: async () => ({}), askOtp: null, settle: 0,
     readDist: pkg => { acquired++; valid = false; return { integrity: pkg.integrity }; },
     runner: () => { mutations++; },
   });
-  assert.throws(() => preparedRelease(options), /qualification changed during acquisition/);
+  await assert.rejects(preparedRelease(options), /qualification changed during acquisition/);
   assert.equal(verified, 2);
   assert.equal(acquired, f.manifest.packages.length);
   assert.equal(mutations, 0);

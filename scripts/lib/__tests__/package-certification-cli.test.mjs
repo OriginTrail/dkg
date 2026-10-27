@@ -28,7 +28,7 @@ async function cliFixture(t, mode) {
   for (const name of [
     'scripts/release-packages.mjs', 'scripts/copy-cli-runtime-assets.mjs',
     'scripts/lib/release-policy.mjs', 'scripts/lib/release-process.mjs', 'scripts/lib/build-info.mjs',
-    'scripts/lib/release-evidence.mjs', 'scripts/ci/nightly-profile-results.mjs',
+    'scripts/lib/release-evidence.mjs', 'scripts/lib/release-evidence-qualification.mjs', 'scripts/ci/nightly-profile-results.mjs',
     'scripts/ci/resolve-ci-profile.mjs', 'scripts/lib/playwright-executions.mjs',
     'scripts/lib/libp2p-pins.mjs', 'scripts/lib/package-certification/source.mjs',
     'scripts/lib/package-certification/bundle.mjs', 'scripts/lib/package-certification/publish.mjs',
@@ -123,7 +123,8 @@ test('promotion dry-run verifies default GitHub acquisition and complete candida
   const evidence = evidenceFixture(t, { expected: { commit, version, sourceInputsDigest }, manifest: f.manifest, tree: 'e'.repeat(40) });
   evidence.write('decision.json', evidence.decision);
   const gh = installGithubFixture(f.bin, {
-    latestAttempt: 1, nightlyBytes: JSON.stringify(evidence.nightly),
+    latestAttempt: 1, candidateCommit: commit,
+    artifacts: { 'OriginTrail/dkg/123/nightly-profile-summary': JSON.stringify(evidence.nightly) },
     pages: [[{ id: 122, run_attempt: 1 }], [{ id: 123, run_attempt: 1 }]],
     runs: { '122/1': evidence.options.readRun(122, 1), '123/1': evidence.options.readRun(123, 1) },
   });
@@ -138,8 +139,8 @@ test('promotion dry-run verifies default GitHub acquisition and complete candida
   assert.equal(progress.planned.length, f.manifest.packages.length * 2);
   assert.deepEqual(progress.completed, []);
   const calls = fs.readFileSync(f.calls, 'utf8').trim().split('\n').map(JSON.parse);
-  assert.equal(calls.length, f.manifest.packages.length);
-  assert.ok(calls.every(args => args[0] === 'view'));
+  assert.equal(calls.length, f.manifest.packages.length * 2);
+  assert.ok(calls.every(args => args[0] === 'view' || (args[0] === 'dist-tag' && args[1] === 'ls')));
   const githubCalls = fs.readFileSync(gh.calls, 'utf8').trim().split('\n').map(JSON.parse);
   assert.ok(githubCalls.some(args => args[0] === 'run' && args[1] === 'download'));
 });

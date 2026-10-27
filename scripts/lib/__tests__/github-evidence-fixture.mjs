@@ -9,7 +9,7 @@ export function installGithubFixture(bin, config) {
   const configFile = path.join(bin, 'github-fixture.json');
   const calls = path.join(bin, 'github-calls.jsonl');
   const script = path.join(bin, 'gh-fixture.cjs');
-  const encoded = value => JSON.stringify({ ...value, candidateCommit: value.runs['123/1'].head_sha, artifacts: { 'OriginTrail/dkg/123/nightly-profile-summary': value.nightlyBytes } });
+  const encoded = JSON.stringify;
   fs.writeFileSync(configFile, encoded(config));
   fs.writeFileSync(script, `const fs = require('node:fs'), path = require('node:path');
 const config = JSON.parse(fs.readFileSync(${JSON.stringify(configFile)}, 'utf8'));

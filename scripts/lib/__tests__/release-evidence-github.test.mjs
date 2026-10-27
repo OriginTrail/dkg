@@ -10,7 +10,8 @@ function githubFixture(t) {
   const f = fixture(t), read = f.options.readRun;
   const run = (id, attempt, conclusion = 'success') => ({ ...read(id, attempt), conclusion,
     path: '.github/workflows/ci.yml@main', run_started_at: `2026-10-26T${conclusion === 'success' ? '11' : '10'}:00:00Z` });
-  const config = { latestAttempt: 1, nightlyBytes: JSON.stringify(f.nightly),
+  const config = { latestAttempt: 1, candidateCommit: f.options.expected.commit,
+    artifacts: { 'OriginTrail/dkg/123/nightly-profile-summary': JSON.stringify(f.nightly) },
     pages: [[{ id: 122, run_attempt: 1 }], [{ id: 123, run_attempt: 1 }, { id: 121, run_attempt: 2 }]],
     runs: { '122/1': run(122, 1), '123/1': run(123, 1), '121/1': run(121, 1, 'failure'), '121/2': run(121, 2) } };
   const gh = installGithubFixture(path.join(path.dirname(f.options.evidenceFile), 'bin'), config);
@@ -56,7 +57,7 @@ test('default GitHub acquisition rejects superseded nightly artifacts', t => {
   assert.ok(!fs.readFileSync(f.gh.calls, 'utf8').includes('download'));
 });
 test('default GitHub acquisition rejects byte changes even for semantically identical artifacts', t => {
-  const f = githubFixture(t); f.resolveFailure(); f.config.nightlyBytes += '\n';
+  const f = githubFixture(t); f.resolveFailure(); f.config.artifacts['OriginTrail/dkg/123/nightly-profile-summary'] += '\n';
   assert.throws(f.verify, /differs from authenticated Actions artifact/);
 });
 
@@ -100,4 +101,16 @@ test('single-attempt histories reuse listing metadata and refresh on every verif
   calls = fs.readFileSync(f.gh.calls, 'utf8').trim().split('\n').map(JSON.parse);
   assert.equal(calls.filter(args => args.some(arg => arg.endsWith('/workflows/ci.yml/runs'))).length, 2);
   assert.equal(calls.filter(args => args.some(arg => arg.includes('/attempts/'))).length, 0);
+});
+
+
+test('GitHub fixture accepts explicit candidate and artifact identity without run 123', t => {
+  const f = githubFixture(t);
+  f.config.runs = {};
+  f.config.artifacts = { 'OriginTrail/dkg/987/nightly-profile-summary': 'explicit artifact bytes' };
+  f.gh.update(f.config);
+  const dir = path.dirname(f.options.evidenceFile);
+  execFileSync('gh', ['run', 'download', '987', '--repo', 'OriginTrail/dkg',
+    '--name', 'nightly-profile-summary', '--dir', dir], { env: f.gh.env, stdio: 'pipe' });
+  assert.equal(fs.readFileSync(path.join(dir, 'nightly-profile-summary.json'), 'utf8'), 'explicit artifact bytes');
 });
