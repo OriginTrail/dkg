@@ -170,6 +170,7 @@ export interface DeferredContextGraphSubscriptionAuthorityRecoveryPorts {
   readonly coldCursor?: DeferredContextGraphSubscriptionAuthorityRecoveryCursor;
   getStatus(): ContextGraphSubscriptionRehydrationInternalStatus | null;
   isCurrent(): boolean;
+  transitionDormancy(id: string, reason: ContextGraphDormancyReason | undefined): void;
   touchStatus(): void;
   clearStatus(contextGraphId: string): void;
   resolveAuthority(
@@ -294,7 +295,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       const { outcome, reason } = authority;
       const dormancy = contextGraphDormancyAfterAuthority({ outcome, reason });
       if (dormancy !== 'authorityUnavailable') {
-        ports.dormancyById.set(contextGraphId, dormancy);
+        ports.transitionDormancy(contextGraphId, dormancy);
         ports.touchStatus();
       }
       continue;
@@ -339,7 +340,7 @@ export async function recoverDeferredContextGraphSubscriptionAuthorities(
       && currentStatus.activationCap > 0
       && activatedUserRows >= currentStatus.activationCap
     ) {
-      ports.dormancyById.set(contextGraphId, 'activationCap');
+      ports.transitionDormancy(contextGraphId, 'activationCap');
       ports.capped(contextGraphId);
       ports.touchStatus();
       continue;
@@ -424,8 +425,9 @@ export interface RollingSubscriptionPromotionPorts {
   readonly contextGraphSubscriptionPersistRevisions: ReadonlyMap<string, number>;
   readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
   readonly log: { warn(ctx: OperationContext, message: string): void; info(ctx: OperationContext, message: string): void; debug(ctx: OperationContext, message: string): void };
+  transitionDormancy(id: string, reason: ContextGraphDormancyReason | undefined): void;
   touchStatus(): void;
-  updateContextGraphSubscriptionRehydrationStatusAfterClear(removed: readonly string[], revoked?: readonly string[]): void;
+  recordContextGraphSubscriptionClear(removed: readonly string[], revoked?: readonly string[]): void;
   resolveAuthority(binding: Readonly<DurableContextGraphSubscriptionBinding>, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision>;
   activate(row: ContextGraphSubscriptionRecord, onChainId: string | undefined, isCurrent: (subscription: ContextGraphSub) => boolean): Promise<void>;
   wakeAuthorityRecovery(): void;
@@ -474,7 +476,7 @@ export async function promoteDormantContextGraphSubscriptions(
       if (!ports.isCurrent(signal)) return 'idle';
       if (row === null) {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
-        ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        ports.recordContextGraphSubscriptionClear([contextGraphId]);
         continue;
       }
       // Rows without durable subscription or hosting intent are not eligible
@@ -482,13 +484,13 @@ export async function promoteDormantContextGraphSubscriptions(
       // after startup even when the row still exists in a custom store.
       if (!row.subscribed && !row.coreHosted) {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
-        ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
+        ports.recordContextGraphSubscriptionClear([], [contextGraphId]);
         continue;
       }
       const currentSubscription = ports.subscribedContextGraphs.get(contextGraphId);
       if (currentSubscription?.subscribed || currentSubscription?.coreHosted) {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
-        ports.contextGraphSubscriptionDormancyById.delete(contextGraphId);
+        ports.transitionDormancy(contextGraphId, undefined);
         continue;
       }
 
@@ -517,12 +519,12 @@ export async function promoteDormantContextGraphSubscriptions(
       if (!ports.isCurrent(signal)) return 'idle';
       if (freshRow === null) {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
-        ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        ports.recordContextGraphSubscriptionClear([contextGraphId]);
         continue;
       }
       if (!freshRow.subscribed && !freshRow.coreHosted) {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
-        ports.updateContextGraphSubscriptionRehydrationStatusAfterClear([], [contextGraphId]);
+        ports.recordContextGraphSubscriptionClear([], [contextGraphId]);
         continue;
       }
       if (
@@ -534,7 +536,7 @@ export async function promoteDormantContextGraphSubscriptions(
       const freshSubscription = ports.subscribedContextGraphs.get(contextGraphId);
       if (freshSubscription?.subscribed || freshSubscription?.coreHosted) {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
-        ports.contextGraphSubscriptionDormancyById.delete(contextGraphId);
+        ports.transitionDormancy(contextGraphId, undefined);
         continue;
       }
       if (
@@ -554,7 +556,7 @@ export async function promoteDormantContextGraphSubscriptions(
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         const { outcome, source, reason } = authority;
         const dormancy = pass.leftDormant(contextGraphId, { outcome, source, reason });
-        ports.contextGraphSubscriptionDormancyById.set(contextGraphId, dormancy);
+        ports.transitionDormancy(contextGraphId, dormancy);
         if (dormancy === 'authorityUnavailable') ports.wakeAuthorityRecovery();
         ports.touchStatus();
         continue;

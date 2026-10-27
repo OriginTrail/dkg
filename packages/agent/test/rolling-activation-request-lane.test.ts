@@ -397,7 +397,7 @@ describe('rolling activation and the chain request lane', () => {
       await expect(runPass(host)).resolves.toBe('idle');
 
       expect(host.contextGraphSubscriptionRehydrationPendingIds.has(ID)).toBe(false);
-      expect(host.updateContextGraphSubscriptionRehydrationStatusAfterClear).toHaveBeenCalledWith([ID]);
+      expect(host.recordContextGraphSubscriptionClear).toHaveBeenCalledWith([ID]);
       expect(host.contextGraphSubscriptionDormancyById.get(ID)).toBe('activationCap');
       expect(host.log.warn).not.toHaveBeenCalled();
     });

@@ -1,3 +1,4 @@
+import { ContextGraphSubscriptionActivations } from '../src/context-graph-subscription-activation-state.js';
 import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -67,6 +68,8 @@ function persistenceAgent(config: Record<string, unknown> = {}): any {
   Object.assign(agent, {
     config,
     contextGraphBindingState: new ContextGraphBindingState(),
+    contextGraphSubscriptionActivations: new ContextGraphSubscriptionActivations(),
+    contextGraphSubscriptionDormancyById: new Map(),
     contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     contextGraphSubscriptionPersistRevisions: new Map<string, number>(),

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { finalizePersistedSubscriptionActivation } from './context-graph-subscription-activation-finalization.js';
 import { isCommittedSubscription, waitForSubscriptionActivation } from './context-graph-subscription-activation-state.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
@@ -8137,11 +8138,22 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     this.contextGraphSubscriptionPersistCanceledRevisions.delete(contextGraphId);
   }
 
+  /** Record an acknowledged durable write and its explicit activation transition. */
+  recordContextGraphSubscriptionPersistence(this: DKGAgent, contextGraphId: string, persisted?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>): void {
+    // The report counts the previous dormant-to-active transition.
+    this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, persisted);
+    const live = this.subscribedContextGraphs.get(contextGraphId);
+    const remainsDormant = (persisted?.subscribed || persisted?.coreHosted) && !live?.subscribed && !live?.coreHosted;
+    this.transitionContextGraphSubscriptionDormancy(contextGraphId, remainsDormant
+      ? this.contextGraphSubscriptionDormancyById.get(contextGraphId)
+        ?? (this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled')
+      : undefined);
+  }
+
   updateContextGraphSubscriptionRehydrationStatusAfterPersist(this: DKGAgent,
     contextGraphId: string,
     next?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>,
   ): void {
-    if (!next?.subscribed && !next?.coreHosted) this.contextGraphSubscriptionActivations.cancel(contextGraphId);
     const status = this.contextGraphSubscriptionRehydrationStatus;
     if (!status) return;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
@@ -8156,10 +8168,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
     let persistedTotal = status.persistedTotal;
     let activated = status.activated;
-    const dormancyById = this.contextGraphSubscriptionDormancyById;
-    if (!isPersisted || isActive) dormancyById.delete(contextGraphId);
-    else dormancyById.set(contextGraphId, dormancyById.get(contextGraphId)
-      ?? (status.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled'));
     let nextHostedActivatedIds = hostedActivatedIds.filter((id) => id !== contextGraphId);
     if (live?.coreHosted === true) {
       nextHostedActivatedIds = sortIds([...nextHostedActivatedIds, contextGraphId]);
@@ -8193,16 +8201,17 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
   }
 
-  updateContextGraphSubscriptionRehydrationStatusAfterClear(this: DKGAgent,
+  recordContextGraphSubscriptionClear(this: DKGAgent,
     clearedIds: Iterable<string>,
     deactivatedIds: Iterable<string> = [],
   ): void {
     const clearedSet = new Set(clearedIds), deactivatedSet = new Set(deactivatedIds);
-    for (const id of [...clearedSet, ...deactivatedSet]) this.contextGraphSubscriptionActivations.cancel(id);
+    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
+    const previousDormancy = new Set(this.contextGraphSubscriptionDormancyById.keys());
+    for (const id of clearedSet) if (!systemContextGraphs.has(id)) this.transitionContextGraphSubscriptionDormancy(id, undefined);
+    for (const id of deactivatedSet) if (!systemContextGraphs.has(id) && !clearedSet.has(id)) this.transitionContextGraphSubscriptionDormancy(id, 'deactivated');
     const status = this.contextGraphSubscriptionRehydrationStatus;
     if (!status) return;
-    const systemContextGraphs = new Set<string>(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]);
-    const dormancyById = this.contextGraphSubscriptionDormancyById;
     const hostedActivatedIds = [...(status.hostedActivatedIds ?? [])];
     const removeFrom = (ids: string[], id: string): boolean => {
       const index = ids.indexOf(id);
@@ -8218,7 +8227,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       this.contextGraphSubscriptionRehydrationPendingIds.delete(id);
       releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, id, 'clear');
       const wasAccounted = this.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
-      const wasDormant = dormancyById.delete(id);
+      const wasDormant = previousDormancy.has(id);
       removeFrom(hostedActivatedIds, id);
       if (!wasAccounted) continue;
       persistedTotal = Math.max(0, persistedTotal - 1);
@@ -8232,10 +8241,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds, this.contextGraphSubscriptionRehydrationPromotionRuntime, id, 'clear');
       if (!this.contextGraphSubscriptionRehydrationAccountedIds.has(id)) continue;
       removeFrom(hostedActivatedIds, id);
-      if (!dormancyById.has(id)) {
+      if (!previousDormancy.has(id)) {
         activated = Math.max(0, activated - 1);
       }
-      dormancyById.set(id, 'deactivated');
     }
 
     this.contextGraphSubscriptionRehydrationStatus = {
@@ -8472,7 +8480,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     }).then(() => {
       if (written && options?.updateRehydrationStatus === true
         && this.claimContextGraphSubscriptionPersistRevision(contextGraphId, options.revision)) {
-        this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, persisted);
+        this.recordContextGraphSubscriptionPersistence(contextGraphId, persisted);
       }
     }).catch((err) => {
       this.log.warn(createOperationContext('system'),
@@ -8903,6 +8911,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
   }
 
+  /** Operational dormancy and activation ownership change together; status is only reporting. */
+  transitionContextGraphSubscriptionDormancy(this: DKGAgent, id: string, reason: ContextGraphDormancyReason | undefined): void {
+    this.contextGraphSubscriptionActivations.transition(this.contextGraphSubscriptionDormancyById, id, reason);
+  }
+
   /** A provisional subscribed row is not a committed activation. */
   isContextGraphSubscriptionCommitted(this: DKGAgent, id: string): boolean {
     return isCommittedSubscription(this.subscribedContextGraphs, this.contextGraphSubscriptionDormancyById, id);
@@ -8976,13 +8989,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       subscribedContextGraphs: this.subscribedContextGraphs,
       contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
       contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
-      contextGraphSubscriptionDormancyById: this.contextGraphSubscriptionDormancyById,
       updateContextGraphSubscriptionRehydrationStatusAfterPersist: this.updateContextGraphSubscriptionRehydrationStatusAfterPersist.bind(this),
+      completeActivation: (id, row, finalize) => this.contextGraphSubscriptionActivations.complete(id, row, this.contextGraphSubscriptionDormancyById, finalize),
     }, contextGraphId, claimRollingSlot,
-      id => {
-        this.contextGraphSubscriptionActivations.complete(id, this.subscribedContextGraphs.get(id));
-        this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id });
-      });
+      id => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }));
   }
 
   /**
@@ -9007,13 +9017,13 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await recoverDeferredContextGraphSubscriptionAuthorities(signal, {
       store,
       dormancyById: this.contextGraphSubscriptionDormancyById,
+      transitionDormancy: this.transitionContextGraphSubscriptionDormancy.bind(this),
       persistRevisions: this.contextGraphSubscriptionPersistRevisions,
       subscriptions: this.subscribedContextGraphs,
       coldCursor,
       getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
       isCurrent: isCurrentRetry,
       touchStatus: () => {
-        this.contextGraphSubscriptionActivations.reconcile(this.contextGraphSubscriptionDormancyById);
         const current = this.contextGraphSubscriptionRehydrationStatus;
         if (current !== null) {
           this.contextGraphSubscriptionRehydrationStatus = {
@@ -9023,7 +9033,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       },
       clearStatus: (contextGraphId) => {
-        this.updateContextGraphSubscriptionRehydrationStatusAfterClear([contextGraphId]);
+        this.recordContextGraphSubscriptionClear([contextGraphId]);
       },
       resolveAuthority: (row, retrySignal) => (
         this.resolveContextGraphSubscriptionBootstrapAuthority(row.id, {
@@ -9108,13 +9118,14 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       isCurrent: (ownerSignal) => this.started
         && this.contextGraphSubscriptionRehydrationPromotionRuntime?.owns(ownerSignal) === true,
       contextGraphSubscriptionRollingChecks: this.contextGraphSubscriptionRollingChecks,
+      transitionDormancy: this.transitionContextGraphSubscriptionDormancy.bind(this),
       contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
       contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
       contextGraphSubscriptionDormancyById: this.contextGraphSubscriptionDormancyById,
       contextGraphSubscriptionPersistRevisions: this.contextGraphSubscriptionPersistRevisions,
       subscribedContextGraphs: this.subscribedContextGraphs,
       log: this.log,
-      updateContextGraphSubscriptionRehydrationStatusAfterClear: this.updateContextGraphSubscriptionRehydrationStatusAfterClear.bind(this),
+      recordContextGraphSubscriptionClear: this.recordContextGraphSubscriptionClear.bind(this),
       finalizeActivation: (contextGraphId) => this.finalizePersistedContextGraphSubscriptionActivation(contextGraphId, true),
       resolveAuthority: (binding, ownerSignal) => this.resolveContextGraphSubscriptionBootstrapAuthority(binding.contextGraphId, {
         allowSubscriptionFallback: false, signal: ownerSignal,
@@ -9127,7 +9138,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }, row, onChainId, isCurrent),
       wakeAuthorityRecovery: () => wakeDeferredContextGraphSubscriptionAuthorityRecovery(this.contextGraphSubscriptionAuthorityRecoveryRuntime),
       touchStatus: () => {
-        this.contextGraphSubscriptionActivations.reconcile(this.contextGraphSubscriptionDormancyById);
         const current = this.contextGraphSubscriptionRehydrationStatus;
         if (current !== null) this.contextGraphSubscriptionRehydrationStatus = { ...current, updatedAt: Date.now() };
       },
@@ -9218,7 +9228,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       let rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
       const namePlaceholders = partitionSupersededContextGraphNamePlaceholders(rows);
       rows = namePlaceholders.active;
-      this.contextGraphSubscriptionActivations.reset(rows);
+      this.contextGraphSubscriptionActivations.reset(rows, this.contextGraphSubscriptionDormancyById);
       // The operator kill-switch below promises not to touch durable state.
       if (this.config.contextGraphSubscriptionRehydrationEnabled) {
         for (const superseded of namePlaceholders.superseded) {
@@ -9264,9 +9274,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         });
       }
       if (!this.config.contextGraphSubscriptionRehydrationEnabled) {
-        const dormancyById = this.contextGraphSubscriptionDormancyById;
-        dormancyById.clear();
-        for (const row of rows) dormancyById.set(row.id, 'rehydrationDisabled');
+        for (const row of rows) this.transitionContextGraphSubscriptionDormancy(row.id, 'rehydrationDisabled');
         this.contextGraphSubscriptionRehydrationAccountedIds.clear();
         for (const row of rows) {
           this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
@@ -9341,7 +9349,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       const toActivate = [...hostedRows, ...userRows];
       const dormancyById = this.contextGraphSubscriptionDormancyById;
-      dormancyById.clear();
       const activatedRows: ContextGraphSubscriptionRecord[] = [];
       let activatedUserRows = 0;
       // #2815: every row's authority may need a chain read, and start() (with
@@ -9375,12 +9382,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // Hosted rows are exempt from the cap and always go to recovery.
       const leaveUnresolved = (row: ContextGraphSubscriptionRecord): void => {
         if (!row.coreHosted && cap > 0 && activatedUserRows + deferredUserRows >= cap) {
-          dormancyById.set(row.id, 'activationCap');
+          this.transitionContextGraphSubscriptionDormancy(row.id, 'activationCap');
           this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
           return;
         }
         if (!row.coreHosted) deferredUserRows += 1;
-        dormancyById.set(row.id, 'authorityUnavailable');
+        this.transitionContextGraphSubscriptionDormancy(row.id, 'authorityUnavailable');
         deferredIds.push(row.id);
       };
       authorityBudget = startRehydrationAuthorityBudget(authorityBudgetMs);
@@ -9394,7 +9401,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           && cap > 0
           && activatedUserRows >= cap
         ) {
-          dormancyById.set(row.id, 'activationCap');
+          this.transitionContextGraphSubscriptionDormancy(row.id, 'activationCap');
           this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
           continue;
         }
@@ -9481,7 +9488,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             || !approvedAgentAuthorized
           );
         if (readAuthority.outcome !== 'allowed' && !restrictedApprovalBootstrap) {
-          dormancyById.set(
+          this.transitionContextGraphSubscriptionDormancy(
             row.id,
             readAuthority.outcome === 'denied' ? 'authorityDenied' : 'authorityUnavailable',
           );
@@ -9612,7 +9619,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch (err) {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      this.contextGraphSubscriptionActivations.reconcile(this.contextGraphSubscriptionDormancyById);
       authorityBudget?.dispose();
       startupPlan.finish();
     }
@@ -9727,7 +9733,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
     }
     if (cleared > 0 || deactivatedIds.length > 0) {
-      this.updateContextGraphSubscriptionRehydrationStatusAfterClear(clearedIds, deactivatedIds);
+      this.recordContextGraphSubscriptionClear(clearedIds, deactivatedIds);
     }
 
     this.log.info(

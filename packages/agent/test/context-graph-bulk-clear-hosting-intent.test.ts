@@ -1,3 +1,4 @@
+import { DKGEvent } from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -56,11 +57,11 @@ async function fixture(hosted: boolean, unbound = false) {
 }
 
 describe('bulk clear preserves independent saved Core hosting', () => {
-  it('accepts an owned binding repair even when an earlier durable load returns only after activation', async () => {
+  it('settles owned binding repair without issuing or releasing a waiter-owned durable load', async () => {
     const f = await fixture(false, true), state = f.agent as any;
     const delayed = deferred(); let recoveryMayRead = false;
     const load = f.store.load!.bind(f.store);
-    vi.spyOn(f.store, 'load').mockImplementation(async id => {
+    const loadSpy = vi.spyOn(f.store, 'load').mockImplementation(async id => {
       if (!recoveryMayRead) await delayed.promise;
       return load(id);
     });
@@ -70,10 +71,13 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     vi.spyOn(runtime, 'owns').mockImplementation(candidate => candidate === signal);
     state.contextGraphSubscriptionAuthorityRecoveryRuntime = runtime;
     state.started = true; vi.useFakeTimers();
+    let settled = false;
     const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, signal)
-      .then(() => 'activated', (error: Error) => error);
+      .then(() => { settled = true; return 'activated'; }, (error: Error) => { settled = true; return error; });
     try {
       await vi.advanceTimersByTimeAsync(0);
+      expect(loadSpy).not.toHaveBeenCalled();
+      expect(settled).toBe(false);
       recoveryMayRead = true;
       vi.mocked(f.agent.resolveContextGraphSubscriptionBootstrapAuthority).mockResolvedValue({
         outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 582n,
@@ -81,7 +85,9 @@ describe('bulk clear preserves independent saved Core hosting', () => {
       await f.agent.retryUnavailableContextGraphSubscriptionAuthorities(signal);
       expect(f.rows.get(LOCAL)?.onChainId).toBe('582');
       expect(f.agent.isContextGraphSubscriptionCommitted(LOCAL)).toBe(true);
-      delayed.resolve(); await vi.advanceTimersByTimeAsync(2500);
+      // Only lifecycle recovery may read. A hypothetical waiter read remains blocked.
+      await vi.advanceTimersByTimeAsync(0);
+      expect(settled).toBe(true);
       expect(await outcome).toBe('activated');
       expect(state.workLifetime.physicalRuns.size).toBe(0);
     } finally { delayed.resolve(); state.started = false; vi.useRealTimers(); }
@@ -149,6 +155,47 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     } finally { state.started = false; vi.useRealTimers(); }
   });
 
+  it('finalizes rolling activation while another graph is denied during its preparation', async () => {
+    const f = await fixture(false, true), state = f.agent as any;
+    const other = { ...f.original, id: 'unrelated-denied', onChainId: '583', onChainHash: ethers.id('unrelated-denied') };
+    await f.store.save(other);
+    const caller = new AbortController(), signal = caller.signal, entered = deferred(), release = deferred();
+    const runtime = new CoalescingRecurringTask({ retryIntervalMs: 30_000, runPass: async () => 'idle',
+      onError: error => { throw error; }, closingMessage: 'test closed' });
+    vi.spyOn(runtime, 'owns').mockImplementation(candidate => candidate === signal);
+    state.contextGraphSubscriptionRehydrationPromotionRuntime = runtime;
+    state.contextGraphSubscriptionAuthorityRecoveryRuntime = runtime;
+    state.contextGraphSubscriptionRehydrationStatus.rehydrationEnabled = true;
+    state.contextGraphSubscriptionRehydrationStatus.activationCap = 1;
+    state.contextGraphSubscriptionRehydrationPendingIds.add(LOCAL);
+    state.contextGraphSubscriptionActivations.reset([f.original, other], state.contextGraphSubscriptionDormancyById);
+    state.transitionContextGraphSubscriptionDormancy(LOCAL, 'activationCap');
+    state.transitionContextGraphSubscriptionDormancy(other.id, 'authorityUnavailable');
+    vi.spyOn(f.agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockImplementation(async id => id === LOCAL ? {
+      outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 582n,
+    } : { outcome: 'denied', source: 'registered-chain', reason: 'not-a-member', metadataBootstrap: 'forbidden' });
+    const persist = f.agent.persistContextGraphSubscriptionStrict.bind(f.agent);
+    vi.spyOn(f.agent, 'persistContextGraphSubscriptionStrict').mockImplementationOnce(async (...args) => {
+      entered.resolve(); await release.promise; await persist(...args);
+    });
+    const events: string[] = [];
+    f.agent.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, event => events.push(event.contextGraphId));
+    state.started = true;
+    const promotion = f.agent.promoteDormantContextGraphSubscriptions(signal);
+    try {
+      await entered.promise;
+      const owner = state.contextGraphSubscriptionActivations.get(LOCAL);
+      expect(owner).toBeDefined();
+      await f.agent.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+      expect(state.contextGraphSubscriptionDormancyById.get(other.id)).toBe('authorityDenied');
+      expect(state.contextGraphSubscriptionActivations.get(LOCAL)).toBe(owner);
+      release.resolve(); await promotion;
+      expect(f.agent.isContextGraphSubscriptionCommitted(LOCAL)).toBe(true);
+      expect(events).toEqual([LOCAL]);
+      expect(state.contextGraphSubscriptionRehydrationPendingIds.has(LOCAL)).toBe(false);
+    } finally { release.resolve(); caller.abort(); await promotion.catch(() => undefined); state.started = false; }
+  });
+
   it('retains activation ownership when a capped subscription is promoted into unavailable authority', async () => {
     const f = await fixture(false), state = f.agent as any;
     const caller = new AbortController(), signal = caller.signal;
@@ -160,9 +207,8 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     state.contextGraphSubscriptionRehydrationStatus.rehydrationEnabled = true;
     state.contextGraphSubscriptionRehydrationStatus.activationCap = 1;
     state.contextGraphSubscriptionRehydrationPendingIds.add(LOCAL);
-    state.contextGraphSubscriptionDormancyById.set(LOCAL, 'activationCap');
-    state.contextGraphSubscriptionActivations.reset([f.original]);
-    state.contextGraphSubscriptionActivations.reconcile(state.contextGraphSubscriptionDormancyById);
+    state.contextGraphSubscriptionActivations.reset([f.original], state.contextGraphSubscriptionDormancyById);
+    state.transitionContextGraphSubscriptionDormancy(LOCAL, 'activationCap');
     state.started = true;
     vi.spyOn(f.agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
       outcome: 'unavailable', source: 'registered-chain', reason: 'temporary-authority-outage', metadataBootstrap: 'eligible',

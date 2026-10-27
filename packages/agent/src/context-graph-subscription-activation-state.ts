@@ -20,81 +20,94 @@ function sameIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSub
 function sameDurableIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
   return sameIntent(left, right) && left.onChainId === right.onChainId && left.onChainHash === right.onChainHash;
 }
-class Activation {
+const activationHandleBrand: unique symbol = Symbol('subscription-activation');
+type ActivationHandle = Readonly<{ id: string; [activationHandleBrand]: true }>;
+type ActivationOutcome = { kind: 'committed'; subscription: ContextGraphSub } | { kind: 'cancelled' };
+type ActivationPhase = { kind: 'queued' } | { kind: 'installing' | 'ready'; subscription: ContextGraphSub }
+  | { kind: 'settled'; outcome: ActivationOutcome };
+interface ActivationAttempt {
+  readonly handle: ActivationHandle;
   readonly intent: ContextGraphSubscriptionRecord;
   repaired?: ContextGraphSubscriptionRecord;
-  installed?: ContextGraphSub;
-  ready?: ContextGraphSub;
-  committed?: ContextGraphSub;
-  settled = false;
-  private readonly listeners = new Set<() => void>();
-  constructor(intent: ContextGraphSubscriptionRecord) { this.intent = { ...intent }; }
-  settle(): void {
-    this.settled = true;
-    for (const notify of this.listeners) notify();
-    this.listeners.clear();
-  }
-  wait(signal: AbortSignal): Promise<void> {
-    return new Promise((resolve, reject) => {
-      const finish = () => {
-        this.listeners.delete(finish); signal.removeEventListener('abort', finish);
-        if (signal.aborted) reject(changed()); else resolve();
-      };
-      if (this.settled || signal.aborted) { finish(); return; }
-      this.listeners.add(finish); signal.addEventListener('abort', finish, { once: true });
-    });
-  }
+  phase: ActivationPhase;
+  readonly listeners: Set<() => void>;
 }
 
-/** Lifecycle-owned durable intent. Waiters never load or reinterpret the store.
- * Only the activation transaction can attach a repaired binding and live row. */
+/** Owns activation attempts and their outcomes. External handles carry identity only;
+ * waiters never load or reinterpret durable intent or mutate attempt phases. */
 export class ContextGraphSubscriptionActivations {
-  private readonly pending = new Map<string, Activation>();
-  reset(rows: readonly ContextGraphSubscriptionRecord[]): void {
+  private readonly pending = new Map<string, ActivationAttempt>();
+  reset(rows: readonly ContextGraphSubscriptionRecord[], dormancy: Map<string, ContextGraphDormancyReason>): void {
     for (const id of this.pending.keys()) this.cancel(id);
+    dormancy.clear();
     for (const row of rows) this.observe(row);
   }
-  observe(row: ContextGraphSubscriptionRecord): Activation {
+  observe(row: ContextGraphSubscriptionRecord): ActivationHandle {
     const current = this.pending.get(row.id);
     if (current && (sameDurableIntent(current.intent, row)
-      || (current.repaired && sameDurableIntent(current.repaired, row)))) return current;
+      || (current.repaired && sameDurableIntent(current.repaired, row)))) return current.handle;
     this.cancel(row.id);
-    const activation = new Activation(row);
-    this.pending.set(row.id, activation);
-    return activation;
+    const handle: ActivationHandle = Object.freeze({ id: row.id, [activationHandleBrand]: true as const });
+    this.pending.set(row.id, { handle, intent: { ...row }, phase: { kind: 'queued' }, listeners: new Set() });
+    return handle;
   }
-  get(id: string): Activation | undefined { return this.pending.get(id); }
+  get(id: string): ActivationHandle | undefined { return this.pending.get(id)?.handle; }
+  private settle(attempt: ActivationAttempt, outcome: ActivationOutcome): void {
+    if (attempt.phase.kind === 'settled') return;
+    this.pending.delete(attempt.handle.id);
+    attempt.phase = { kind: 'settled', outcome };
+    for (const notify of attempt.listeners) notify();
+    attempt.listeners.clear();
+  }
   cancel(id: string): void {
-    const activation = this.pending.get(id);
-    this.pending.delete(id); activation?.settle();
+    const attempt = this.pending.get(id);
+    if (attempt) this.settle(attempt, { kind: 'cancelled' });
   }
-  reconcile(dormancy: Dormancy): void {
-    // Capped intent is still queued for activation and may later need authority recovery.
-    for (const id of this.pending.keys()) {
-      const reason = dormancy.get(id);
-      if (reason !== 'authorityUnavailable' && reason !== 'activationCap') this.cancel(id);
-    }
+  /** One explicit transition updates both dormancy and pending ownership. */
+  transition(dormancy: Map<string, ContextGraphDormancyReason>, id: string, reason: ContextGraphDormancyReason | undefined): void {
+    if (reason === undefined) dormancy.delete(id); else dormancy.set(id, reason);
+    if (reason !== 'authorityUnavailable' && reason !== 'activationCap') this.cancel(id);
   }
-  install(activation: Activation, row: ContextGraphSub): void {
-    if (this.pending.get(activation.intent.id) !== activation) throw changed();
-    activation.installed = row;
-    activation.ready = undefined;
+  private owned(handle: ActivationHandle): ActivationAttempt {
+    const attempt = this.pending.get(handle.id);
+    if (!attempt || attempt.handle !== handle) throw changed();
+    return attempt;
   }
-  stage(activation: Activation, row: ContextGraphSub): void {
-    this.install(activation, row);
-    activation.ready = row;
+  install(handle: ActivationHandle, subscription: ContextGraphSub): void {
+    this.owned(handle).phase = { kind: 'installing', subscription };
+  }
+  stage(handle: ActivationHandle, subscription: ContextGraphSub): void {
+    this.owned(handle).phase = { kind: 'ready', subscription };
   }
   repaired(row: ContextGraphSubscriptionRecord, live: ContextGraphSub): void {
-    const activation = this.pending.get(row.id);
-    if (activation?.installed && sameIntent(activation.intent, row)
-      && isContextGraphSubscriptionStoredAgain(activation.installed, live)) activation.repaired = { ...row };
+    const attempt = this.pending.get(row.id), phase = attempt?.phase;
+    if (attempt && phase && (phase.kind === 'installing' || phase.kind === 'ready')
+      && sameIntent(attempt.intent, row) && isContextGraphSubscriptionStoredAgain(phase.subscription, live))
+      attempt.repaired = { ...row };
   }
-  complete(id: string, live: ContextGraphSub | undefined): void {
-    const activation = this.pending.get(id);
-    if (!activation) return;
-    if (live && activation.ready && isContextGraphSubscriptionStoredAgain(activation.ready, live)
-      && contextGraphSubscriptionAdmissionPremisesEqual(activation.ready, live)) activation.committed = live;
-    this.cancel(id);
+  complete(id: string, live: ContextGraphSub, dormancy: Map<string, ContextGraphDormancyReason>, finalize: () => void): boolean {
+    const attempt = this.pending.get(id), phase = attempt?.phase;
+    if (!attempt || phase?.kind !== 'ready' || !isContextGraphSubscriptionStoredAgain(phase.subscription, live)
+      || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live)) return false;
+    // Reporting sees the previous dormancy; listeners see the committed transition.
+    finalize();
+    dormancy.delete(id);
+    this.settle(attempt, { kind: 'committed', subscription: live });
+    return true;
+  }
+  wait(id: string, signal: AbortSignal): Promise<ActivationOutcome> {
+    const attempt = this.pending.get(id);
+    if (!attempt) return Promise.reject(changed());
+    return new Promise((resolve, reject) => {
+      const finish = () => {
+        if (!signal.aborted && attempt.phase.kind !== 'settled') return;
+        attempt.listeners.delete(finish); signal.removeEventListener('abort', finish);
+        if (signal.aborted) reject(changed());
+        else if (attempt.phase.kind === 'settled') resolve(attempt.phase.outcome);
+      };
+      attempt.listeners.add(finish); signal.addEventListener('abort', finish, { once: true });
+      finish();
+    });
   }
 }
 
@@ -106,19 +119,18 @@ export async function waitForSubscriptionActivation(
   id: string, caller: AbortSignal, activations: ContextGraphSubscriptionActivations,
 ): Promise<void> {
   if (dormancy.get(id) !== 'authorityUnavailable') return;
-  const activation = activations.get(id), generation = workLifetime.generation;
+  const generation = workLifetime.generation;
   const signal = AbortSignal.any([caller, workLifetime.signal]);
   const assertCurrent = () => {
     if (signal.aborted || generation !== workLifetime.generation || !isStarted()) throw changed();
   };
   assertCurrent();
-  if (!activation) throw changed();
-  await workLifetime.track(activation.wait(signal));
+  const outcome = await workLifetime.track(activations.wait(id, signal));
   assertCurrent();
   const live = subscriptions.get(id);
   // Preserve the caller's inactive-subscription error after an explicit unsubscribe.
   if (live && !live.subscribed && !live.coreHosted && dormancy.get(id) !== 'authorityUnavailable') return;
-  if (!activation.committed || !live || dormancy.has(id)
-    || !isContextGraphSubscriptionStoredAgain(activation.committed, live)
-    || !contextGraphSubscriptionAdmissionPremisesEqual(activation.committed, live)) throw changed();
+  if (outcome.kind !== 'committed' || !live || dormancy.has(id)
+    || !isContextGraphSubscriptionStoredAgain(outcome.subscription, live)
+    || !contextGraphSubscriptionAdmissionPremisesEqual(outcome.subscription, live)) throw changed();
 }
