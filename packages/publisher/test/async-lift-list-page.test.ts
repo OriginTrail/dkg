@@ -408,6 +408,68 @@ describe('publisher job page: lanes', () => {
   });
 });
 
+describe('publisher job page: a non-default control graph', () => {
+  // Two publishers over ONE store, each with its own control graph and its own jobs. A read that named the default graph
+  // (or any graph but its own) would show one publisher the other's jobs.
+  const CUSTOM = 'urn:test:custom-control-plane';
+  const OTHER = 'urn:test:other-control-plane';
+  const spec = (id: string, state: JobSpec['state'], acceptedAt: number, contextGraphId = 'cg-a'): JobSpec => ({ id, kind: 'vm', state, contextGraphId, acceptedAt });
+  const customSpecs = [spec('c1', 'accepted', 1), spec('c2', 'retryable', 2), spec('c3', 'finalized', 3, 'cg-b'), spec('c4', 'accepted', 4)];
+  const defaultSpecs = [spec('d1', 'accepted', 1), spec('d2', 'claimed', 2), spec('d3', 'claimed', 3, 'cg-b')];
+  const otherSpecs = [spec('o1', 'finalized', 1)];
+
+  async function threeGraphs() {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedJobs(store, templates, customSpecs, CUSTOM);
+    await seedJobs(store, templates, defaultSpecs);
+    await seedJobs(store, templates, otherSpecs, OTHER);
+    const on = (graphUri?: string) => new TripleStoreAsyncLiftPublisher(store, { now: () => 1, ...(graphUri ? { graphUri } : {}) });
+    return { store, custom: on(CUSTOM), standard: on(), other: on(OTHER) };
+  }
+
+  it('pages the jobs of its own graph and no other, at every page size and under every filter', async () => {
+    const { custom, standard, other } = await threeGraphs();
+    for (const limit of [1, 2, 3, 1_000]) {
+      expect((await walkPages(custom, { limit })).ids, `custom limit ${limit}`).toEqual(['c1', 'c2', 'c3', 'c4']);
+      expect((await walkPages(standard, { limit })).ids, `default limit ${limit}`).toEqual(['d1', 'd2', 'd3']);
+      expect((await walkPages(other, { limit })).ids, `other limit ${limit}`).toEqual(['o1']);
+    }
+    expect((await walkPages(custom, { status: 'accepted', limit: 1 })).ids).toEqual(['c1', 'c4']);
+    expect((await walkPages(custom, { status: 'failed' })).ids).toEqual(['c2']);
+    expect((await walkPages(custom, { contextGraphId: 'cg-b' })).ids).toEqual(['c3']);
+    expect((await walkPages(standard, { status: 'claimed', contextGraphId: 'cg-b' })).ids).toEqual(['d3']);
+    expect((await walkPages(standard, { status: 'failed' })).ids).toEqual([]);
+    // The complete listing reads the same graph, so it holds the same jobs.
+    expect((await custom.list()).map((job) => job.jobId).sort()).toEqual(['c1', 'c2', 'c3', 'c4']);
+  });
+
+  it('counts the jobs of its own graph and no other', async () => {
+    const { custom, standard, other } = await threeGraphs();
+    expect(await custom.getStats()).toEqual({ accepted: 2, claimed: 0, validated: 0, broadcast: 0, included: 0, finalized: 1, failed: 1 });
+    expect(await standard.getStats()).toEqual({ accepted: 1, claimed: 2, validated: 0, broadcast: 0, included: 0, finalized: 0, failed: 0 });
+    expect(await other.getStats()).toEqual({ accepted: 0, claimed: 0, validated: 0, broadcast: 0, included: 0, finalized: 1, failed: 0 });
+  });
+
+  it('names its graph, and only its graph, in the page query and the COUNT it sends', async () => {
+    const { store, custom } = await threeGraphs();
+    const query = vi.spyOn(store, 'query');
+    await walkPages(custom, { limit: 2, status: 'accepted', contextGraphId: 'cg-a' });
+    await custom.getStats();
+    const texts = query.mock.calls.map(([text]) => String(text));
+    expect(texts).toHaveLength(2);
+    for (const text of texts) {
+      expect(text).toContain(`GRAPH <${CUSTOM}>`);
+      expect(text).not.toContain(GRAPH);
+    }
+    // The page query names it for both selects, the inner key read and the outer payload join.
+    expect(texts[0]!.match(new RegExp(`GRAPH <${CUSTOM}>`, 'g'))).toHaveLength(2);
+    const built = buildLiftJobPageQuery(OTHER, { limit: 5, status: 'failed', contextGraphId: 'cg-a' });
+    expect(built.match(new RegExp(`GRAPH <${OTHER}>`, 'g'))).toHaveLength(2);
+    expect(built).not.toContain(GRAPH);
+  });
+});
+
 describe('publisher job page: a job stored with a repeated status or payload triple', () => {
   // Corrupted data only: the publisher writes one status and one payload triple per job. Six jobs, three ties.
   const specs: JobSpec[] = ['j1', 'j2', 'j3', 'j4', 'j5', 'j6'].map((id, index) => ({
