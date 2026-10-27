@@ -1125,14 +1125,20 @@ describe('repeated rows of one subject in the scan (review of P10a: a subject th
 
   it('a range answer that is out of order and repeats a subject is an anomaly, and what it judges is one row per subject', async () => {
     const store = new OxigraphStore();
-    await insertQuads(store, [...withUpdatedAtTerms(mk('x', 'succeeded', {}, 10 * W), ...same(NOW - 10 * W)), ...rowOf('succeeded', 'y', 9 * W), ...rowOf('succeeded', 'z', 8 * W)]);
+    await insertQuads(store, [...rowOf('succeeded', 'x', 10 * W), ...rowOf('succeeded', 'y', 9 * W), ...rowOf('succeeded', 'z', 8 * W)]);
+    // The repeat is made on the engine's answer (the scan reads integer terms only, so a decimal twin repeats nothing): the oldest subject twice, newest first, within LIMIT 4.
+    let served: string[] = [];
     const { store: spied } = spy(store, async (_sparql, source, run) => {
       const res = await run();
-      return source === SCAN && res.type === 'bindings' ? { ...res, bindings: [...res.bindings].reverse() } as QueryResult : res;                     // newest first: x, x, y, z becomes z, y, x, x
+      if (source !== SCAN || res.type !== 'bindings' || res.bindings.length === 0) return res;
+      const bindings = [res.bindings[0]!, ...res.bindings].reverse();                                                                                  // x, y, z becomes z, y, x, x
+      served = bindings.map(b => String(b['job']).slice(jobSubject('').length));
+      return { ...res, bindings } as QueryResult;
     });
     const res = await newRetention(spied, { mode: 'report', batchSize: 3 }).runBatch();
+    expect(served, 'the answer holds the repeat (otherwise the collapse is not exercised)').toEqual(['z', 'y', 'x', 'x']);
     expect(res.anomalies).toBe(1);
-    expect(res.wouldDeleteJobs.map(j => j.jobId).sort()).toEqual(['x', 'y', 'z']);
+    expect(res.wouldDeleteJobs.map(j => j.jobId).sort(), 'one row per subject: the repeat of x does not push z out of the judged slice').toEqual(['x', 'y', 'z']);
   });
 
   it('a real reordering of a tie walk still fails closed: it is an anomaly, the cursor does not move, and the same sweep drains once the engine conforms', async () => {
