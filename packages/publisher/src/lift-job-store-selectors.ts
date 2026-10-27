@@ -64,8 +64,8 @@ export class LiftJobStoreSelectors {
    * job and removes the indexed ones with FILTER NOT EXISTS, and admission runs it under the
    * global claim lock. A scan that finds no un-indexed VM-publish row therefore clears the
    * process-wide memo (`LiftLegacyScanMemo`), and later admissions of any publisher instance over
-   * this store send only the indexed branch. A restart scans once more. `options.legacyUnindexedScan`
-   * forces either form (tests, diagnostics) and leaves the memo alone.
+   * this store send only the indexed branch. A restart scans once more. The memo is the only policy:
+   * nothing forces either form (a test forgets the memo with `LiftLegacyScanMemo.forgetForTesting`).
    *
    * Accepted narrowing (P7's own, beyond the share-side D1/D2/D4 of plan D-5): a legacy un-indexed
    * VM-publish row that appears AFTER the memo has cleared is not seen until the next boot
@@ -75,10 +75,8 @@ export class LiftJobStoreSelectors {
   async vmPublishAdmissionCandidates(
     lifecycleKey: string,
     keyOfJob: (job: PersistedLiftJob) => string | null,
-    options: { readonly legacyUnindexedScan?: boolean } = {},
   ): Promise<PersistedLiftJob[]> {
-    const forced = options.legacyUnindexedScan !== undefined;
-    const scanLegacy = options.legacyUnindexedScan ?? this.legacyScan.scanRequired();
+    const scanLegacy = this.legacyScan.scanRequired();
     const indexedBranch = `{
           ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(lifecycleKey)} ; <${CONTROL_PAYLOAD}> ?payload .
           OPTIONAL { ?job <${CONTROL_STATUS}> ?status }
@@ -121,7 +119,7 @@ export class LiftJobStoreSelectors {
       jobs.set(job.jobId, job);
       if (keyOfJob(job) !== null) keyedLegacyRows += 1;
     }
-    if (scanLegacy && !forced && keyedLegacyRows === 0) this.legacyScan.clear();
+    if (scanLegacy && keyedLegacyRows === 0) this.legacyScan.clear();
     return projectListedLiftJobs([...jobs.values()], undefined, this.project);
   }
 

@@ -75,6 +75,10 @@ describe('bounded VM-publish admission lookup', () => {
     return result.type === 'bindings' ? result.bindings.length : -1;
   };
 
+  // The selector has no scan-mode override: tests steer it through the process-wide memo, as a process restart does.
+  const restartProcess = (): void => new LiftLegacyScanMemo(store, DEFAULT_CONTROL_GRAPH_URI).forgetForTesting();
+  const selectorsOver = (): LiftJobStoreSelectors => new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
+
   /**
    * A VM-publish job that was admitted before the #1828 index existed, already on the store when the process starts: its row
    * is built on a scratch store (so no admission on `store` has learned anything yet) and copied without the lifecycle-key triple.
@@ -126,9 +130,9 @@ describe('bounded VM-publish admission lookup', () => {
 
     it('pins both query forms: the scan is the pre-P7 query text, the bounded form is its first branch alone', async () => {
       const key = knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' });
-      const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
-      await selectors.vmPublishAdmissionCandidates(key, () => null, { legacyUnindexedScan: true });
-      await selectors.vmPublishAdmissionCandidates(key, () => null, { legacyUnindexedScan: false });
+      const selectors = selectorsOver();
+      await selectors.vmPublishAdmissionCandidates(key, () => null);        // the first call of a process scans and finds no legacy row ...
+      await selectors.vmPublishAdmissionCandidates(key, () => null);        // ... so the next one is the bounded form
       const flat = (sparql: string): string => sparql.replace(/\s+/g, ' ').trim();
       const indexed = `{ ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(key)} ; <${CONTROL_PAYLOAD}> ?payload . OPTIONAL { ?job <${CONTROL_STATUS}> ?status } BIND(true AS ?indexed) }`;
       const legacy = `{ ?job <${CONTROL_STATUS}> ?status ; <${CONTROL_PAYLOAD}> ?payload . FILTER NOT EXISTS { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey } }`;
@@ -213,24 +217,35 @@ describe('bounded VM-publish admission lookup', () => {
       const p = publisher();
       await p.enqueueKnowledgeAssetVmPublish(request('albums'));
       await p.enqueueKnowledgeAssetVmPublish(request('songs'));
-      const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
+      const selectors = selectorsOver();
       const keyOf = (job: { request: { jobType: string } & Record<string, unknown> }): string | null => (job.request.jobType === 'knowledge-asset-vm-publish'
         ? knowledgeAssetVmPublishLifecycleKey((job.request as unknown as { knowledgeAssetVmPublish: Parameters<typeof knowledgeAssetVmPublishLifecycleKey>[0] }).knowledgeAssetVmPublish) : null);
       const key = knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' });
-      const full = await selectors.vmPublishAdmissionCandidates(key, keyOf as never, { legacyUnindexedScan: true });
-      const bounded = await selectors.vmPublishAdmissionCandidates(key, keyOf as never, { legacyUnindexedScan: false });
+      queries.length = 0;
+      restartProcess();                                                      // the admissions above learned "none": a restart forgets it
+      const full = await selectors.vmPublishAdmissionCandidates(key, keyOf as never);
+      const bounded = await selectors.vmPublishAdmissionCandidates(key, keyOf as never);
+      expect(unions()).toEqual([true, false]);                              // the two reads really are the scan and the bounded form
       expect(bounded.map((j) => j.jobId)).toEqual(full.map((j) => j.jobId));
       expect(bounded).toHaveLength(1);
     });
 
-    it('forcing the scan or the bounded query does not change what the selector learns', async () => {
-      const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
+    it('has ONE policy: the process-wide memo alone picks the query form, and no argument forces either one', async () => {
+      const selectors = selectorsOver();
       const key = knowledgeAssetVmPublishLifecycleKey({ contextGraphId: 'music-social', name: 'albums' });
-      await selectors.vmPublishAdmissionCandidates(key, () => null, { legacyUnindexedScan: true });
-      await selectors.vmPublishAdmissionCandidates(key, () => null, { legacyUnindexedScan: false });
-      await selectors.vmPublishAdmissionCandidates(key, () => null);
-      await selectors.vmPublishAdmissionCandidates(key, () => null);
-      expect(unions()).toEqual([true, false, true, false]);                // neither forced call switched anything; the first default call cleared the memo
+      // An argument a former test-only mode took: ignored, so it neither switches the form nor changes what the memo learns.
+      const withExtraArgument = selectors.vmPublishAdmissionCandidates as (...args: unknown[]) => Promise<unknown>;
+      const admit = (extra?: unknown): Promise<unknown> => (extra === undefined
+        ? withExtraArgument.call(selectors, key, () => null)
+        : withExtraArgument.call(selectors, key, () => null, extra));
+      await admit();                                                         // learns "none"
+      await admit({ legacyUnindexedScan: true });                            // would have forced the scan
+      await admit({ legacyUnindexedScan: false });
+      expect(unions()).toEqual([true, false, false]);
+      restartProcess();
+      await admit({ legacyUnindexedScan: false });                           // would have forced the bounded form, and kept the memo untouched
+      await admit();
+      expect(unions()).toEqual([true, false, false, true, false]);           // the forgotten memo scans, and clearing it again ends the scan
     });
   });
 
