@@ -6615,7 +6615,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           const exact = await this.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
             signal: this.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
           });
-          return { result: exact.result, complete: exact.disposition === 'found' && exact.result.complete === true };
+          return { ...exact.result, complete: exact.disposition === 'found' && exact.result.complete === true };
         },
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),

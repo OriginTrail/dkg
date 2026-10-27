@@ -78,7 +78,7 @@ export interface DurableRecoveryRunnerDependencies {
   executeExactSlice?(
     peerId: string,
     assetUals: readonly string[],
-  ): Promise<{ readonly result: DurableSyncResult; readonly complete: boolean }>;
+  ): Promise<DurableSyncResult>;
   logDebug(message: string): void;
   logInfo(message: string): void;
   logWarn(message: string): void;
@@ -317,11 +317,11 @@ export class DurableRecoveryRunner {
     };
 
     const executeExactAction = async (action: Extract<DurableRecoveryAction, { kind: 'exact-batch' }>): Promise<ActionOutcome> => {
-      let exact: { result: DurableSyncResult; complete: boolean };
+      let exact: DurableSyncResult;
       try { exact = await deps.executeExactSlice!(action.peerId, action.assets.map(asset => asset.ual)); }
-      catch (error) { exact = { result: failedSlice(action.peerId, error), complete: false }; }
+      catch (error) { exact = failedSlice(action.peerId, error); }
       // Exact completion covers only this selection, never the graph.
-      const result = { ...exact.result, complete: false };
+      const result = { ...exact, complete: false };
       fetchPolicy.recordExact(exact.complete);
       if (exact.complete) {
         attemptedWithoutProgress.clear();

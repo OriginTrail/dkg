@@ -1,3 +1,4 @@
+import { persistDurableManifestBoundary } from './durable-manifest-checkpoint.js';
 import { challengeAssetConsumer, materializedAssetConsumer, type DurableAssetConsumer, type DurableSettlementProgress } from './durable-asset-consumer.js';
 import { prepareDurableMetaPhase, type PreparedDurableMeta } from './durable-meta-phase.js';
 import { settleDurableVerifiedPage, type DurablePhaseSettlementOptions } from './durable-page-settlement.js';
@@ -621,56 +622,15 @@ async function executeDurableGraph(
     });
     if (!options.updateCheckpoint) return;
     if (result.completed && options.manifestPlan && options.terminal === true) {
-      if (result.nextOffset !== options.manifestPlan.manifestRowCount) {
-        deleteCheckpoint(result.checkpointKey);
-        throw new Error(
-          `Refusing to persist terminal durable DATA offset ${result.nextOffset}: `
-          + `manifest requires ${options.manifestPlan.manifestRowCount}`,
-        );
-      }
-      const prefix = graphScopedDurableManifestPrefixAtOffset(
-        options.manifestPlan,
-        result.nextOffset,
-      );
-      if (!prefix) {
-        deleteCheckpoint(result.checkpointKey);
-        throw new Error(
-          `Refusing to persist terminal durable DATA offset ${result.nextOffset}: `
-          + 'the completed META manifest has no matching graph boundary',
-        );
-      }
-      setCheckpoint(result.checkpointKey, {
-        offset: result.nextOffset,
-        responderSessionOffset: result.rawNextOffset,
-        binding: {
-          manifestDigest: options.manifestPlan.manifestDigest,
-          manifestPrefixDigest: prefix.prefixDigest,
-          terminal: true,
-        },
-      });
+      persistDurableManifestBoundary({ checkpointKey: result.checkpointKey, manifest: options.manifestPlan,
+        offset: result.nextOffset, terminal: true, session: { kind: 'fetched', rawOffset: result.rawNextOffset },
+        deleteCheckpoint, setCheckpoint });
     } else if (result.completed) deleteCheckpoint(result.checkpointKey);
     else if (result.nextOffset > 0 || result.resumedFromOffset > 0) {
       if (options.manifestPlan) {
-        const prefix = graphScopedDurableManifestPrefixAtOffset(
-          options.manifestPlan,
-          result.nextOffset,
-        );
-        if (!prefix) {
-          deleteCheckpoint(result.checkpointKey);
-          throw new Error(
-            `Refusing to checkpoint durable DATA offset ${result.nextOffset}: `
-            + 'the completed META manifest has no matching graph boundary',
-          );
-        }
-        setCheckpoint(result.checkpointKey, {
-          offset: result.nextOffset,
-          responderSessionOffset: result.rawNextOffset,
-          binding: {
-            manifestDigest: options.manifestPlan.manifestDigest,
-            manifestPrefixDigest: prefix.prefixDigest,
-            terminal: false,
-          },
-        });
+        persistDurableManifestBoundary({ checkpointKey: result.checkpointKey, manifest: options.manifestPlan,
+          offset: result.nextOffset, terminal: false, session: { kind: 'fetched', rawOffset: result.rawNextOffset },
+          deleteCheckpoint, setCheckpoint });
       } else {
         setCheckpoint(result.checkpointKey, {
           offset: result.nextOffset,

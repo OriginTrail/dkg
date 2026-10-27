@@ -1,9 +1,9 @@
+import { persistDurableManifestBoundary } from './durable-manifest-checkpoint.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { HeldGraphScopedAssetsRequest } from './stored-graph-assets.js';
 export { readHeldGraphScopedAssets, heldGraphScopedAssetsReader, type HeldGraphScopedAssetsRequest } from './stored-graph-assets.js';
 import { getSyncCheckpointKey } from '../checkpoint/state.js';
 import {
-  graphScopedDurableManifestPrefixAtOffset,
   type GraphScopedDurableManifestPlan,
   type GraphScopedDescriptor,
 } from '../durable-integrity.js';
@@ -232,14 +232,10 @@ export function settleHeldDurableData(input: {
   readonly setCheckpoint: DurableSyncContext['setCheckpoint'];
 }): void {
   const { manifest } = input;
-  const prefix = graphScopedDurableManifestPrefixAtOffset(manifest, manifest.manifestRowCount);
-  if (!prefix) throw new Error(`Held durable manifest of "${input.contextGraphId}" has no terminal boundary`);
-  const checkpointKey = getSyncCheckpointKey(input.remotePeerId, input.contextGraphId, false, 'data');
-  // Drop a responder session first: its raw coordinate belongs to an earlier round.
-  input.deleteCheckpoint(checkpointKey);
-  input.setCheckpoint(checkpointKey, {
-    offset: manifest.manifestRowCount,
-    binding: { manifestDigest: manifest.manifestDigest, manifestPrefixDigest: prefix.prefixDigest, terminal: true },
+  persistDurableManifestBoundary({
+    checkpointKey: getSyncCheckpointKey(input.remotePeerId, input.contextGraphId, false, 'data'),
+    manifest, offset: manifest.manifestRowCount, terminal: true, session: { kind: 'discard' },
+    deleteCheckpoint: input.deleteCheckpoint, setCheckpoint: input.setCheckpoint,
   });
   recordDurableSyncDiagnostics(input.accumulator, {
     resumedPhases: 1,

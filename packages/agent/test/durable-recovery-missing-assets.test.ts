@@ -70,7 +70,7 @@ function runner(
       executeExactSlice: async (_peerId: string, assetUals: readonly string[]) => {
         exactRequests.push([...assetUals]);
         const complete = await exact(assetUals);
-        return { result: { ...createIncompleteDurableSyncResult(), insertedDataTriples: complete ? 7 : 0, complete }, complete };
+        return { ...createIncompleteDurableSyncResult(), insertedDataTriples: complete ? 7 : 0, complete };
       },
     } : {}),
     logDebug: () => {},
