@@ -19,22 +19,27 @@ async function fixture() {
   a.contextGraphSubscriptionRehydrationStatus = { persistedTotal: 1, activated: 0,
     hostedActivated: 0, hostedActivatedIds: [], rehydrationEnabled: true, activationCap: 1 };
   a.contextGraphSubscriptionRehydrationAccountedIds.add(id);
-  const events: unknown[] = [];
-  agent.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, () => events.push({
+  const events: unknown[] = [], publicationWaits: Promise<unknown>[] = [];
+  agent.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, () => {
+    publicationWaits.push(a.contextGraphSubscriptionActivations.wait(id, new AbortController().signal).catch((error: Error) => error.message));
+    events.push({
     dormant: a.contextGraphSubscriptionDormancyById.has(id), pending: a.contextGraphSubscriptionRehydrationPendingIds.has(id),
     slot: a.contextGraphSubscriptionRehydrationSlotIds.has(id), activated: a.contextGraphSubscriptionRehydrationStatus.activated,
-    owner: a.contextGraphSubscriptionActivations.get(id),
-  }));
+    });
+  });
   const row = { id, subscribed: true, synced: false, metaSynced: false, syncScoped: false, onChainId: '7' };
-  return { a, id, row, events, topics };
+  a.contextGraphSubscriptionActivations.reset([row]);
+  a.contextGraphSubscriptionDormancyById.set(id, 'activationCap');
+  return { a, id, row, events, topics, publicationWaits };
 }
 
 it.each([false, true])('returns a completed activation and publishes once with rolling slot policy %s', async claimRollingSlot => {
-  const { a, row, events } = await fixture();
+  const { a, row, events, publicationWaits } = await fixture();
   a.contextGraphSubscriptionRehydrationStatus.activationCap = claimRollingSlot ? 1 : 0;
   const result = await a.activatePersistedContextGraphSubscriptionRecord(row, { claimRollingSlot });
   expect(result.subscribed).toBe(true);
-  expect(events).toEqual([{ dormant: false, pending: false, slot: claimRollingSlot, activated: 1, owner: undefined }]);
+  expect(await Promise.all(publicationWaits)).toEqual(['Subscription activation ownership changed']);
+  expect(events).toEqual([{ dormant: false, pending: false, slot: claimRollingSlot, activated: 1 }]);
 });
 
 it.each(['cancelled', 'prepare', 'subscribe'] as const)('never publishes a %s activation', async failure => {
@@ -52,7 +57,7 @@ it.each(['cancelled', 'prepare', 'subscribe'] as const)('never publishes a %s ac
 
 it('keeps repaired intent and waiters across rollback while retiring the failed retry acknowledgement', async () => {
   const { a, id, row, events } = await fixture();
-  const owner = a.contextGraphSubscriptionActivations, handle = owner.observe(row);
+  const owner = a.contextGraphSubscriptionActivations;
   const wait = owner.wait(id, new AbortController().signal);
   let settled = false, acknowledge!: (record: typeof row) => void;
   void wait.then(() => { settled = true; });
@@ -62,13 +67,11 @@ it('keeps repaired intent and waiters across rollback while retiring the failed 
       acknowledge = ack; ack(repaired); throw new Error('retryable preparation failure');
     },
   })).rejects.toThrow('retryable preparation failure');
-  expect(owner.get(id)).toBe(handle);
   expect(settled).toBe(false); expect(events).toEqual([]);
   expect(() => acknowledge(repaired)).toThrow('ownership changed');
   await a.activatePersistedContextGraphSubscriptionRecord(repaired, {
     prepare: async () => {
-      expect(owner.get(id)).toBe(handle);
-      expect(() => acknowledge(repaired)).toThrow('ownership changed');
+          expect(() => acknowledge(repaired)).toThrow('ownership changed');
     },
   });
   await expect(wait).resolves.toMatchObject({ kind: 'committed', subscription: { onChainId: '8' } });
@@ -80,13 +83,14 @@ it('rejects an overlapping retry without replacing the installing owner', async 
   let release!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; });
   const first = a.activatePersistedContextGraphSubscriptionRecord(row, { prepare: () => gate });
-  const handle = a.contextGraphSubscriptionActivations.get(id);
+  const wait = a.contextGraphSubscriptionActivations.wait(id, new AbortController().signal);
   try {
     await expect(a.activatePersistedContextGraphSubscriptionRecord(row)).rejects.toThrow('ownership changed');
-    expect(a.contextGraphSubscriptionActivations.get(id)).toBe(handle);
     expect(events).toEqual([]);
   } finally { release(); }
-  await first; expect(events).toHaveLength(1);
+  const committed = await first;
+  await expect(wait).resolves.toEqual({ kind: 'committed', subscription: committed });
+  expect(events).toHaveLength(1);
 });
 
 it('preserves a replacement subscription and gossip when preparation resumes without an optional fence', async () => {
@@ -113,7 +117,6 @@ it('rejects a queued replacement after activation before the snapshot reads inve
   a.started = true;
   a.node.stop = async () => {};
   a.contextGraphSubscriptionDormancyById.set(id, 'authorityUnavailable');
-  a.contextGraphSubscriptionActivations.observe(row);
   const send = vi.fn(async () => Buffer.from('{"unavailable":true}'));
   a.router = { send };
   let replacement: unknown, replacementTopics: Set<string>;

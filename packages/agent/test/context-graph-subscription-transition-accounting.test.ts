@@ -28,35 +28,38 @@ it('accounts persistence and activation from captured transitions after dormancy
   const agent = fixture(), id = 'queued';
   const owner: ContextGraphSubscriptionActivations = agent.contextGraphSubscriptionActivations;
   agent.subscribedContextGraphs.set(id, { ...subscription(), subscribed: false });
+  owner.reset([intent(id)]);
   agent.recordContextGraphSubscriptionPersistence(id, intent(id));
   expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ persistedTotal: 1, activated: 0, dormant: 1 });
   agent.contextGraphSubscriptionRehydrationPendingIds.add(id);
-  const live = subscription(), handle = owner.observe(intent(id));
+  const live = subscription();
   const wait = owner.wait(id, new AbortController().signal);
   let status = agent.contextGraphSubscriptionRehydrationStatus;
-  const observations: unknown[] = [];
+  const observations: unknown[] = [], accountingWaits: Promise<unknown>[] = [];
   Object.defineProperty(agent, 'contextGraphSubscriptionRehydrationStatus', {
     get: () => status,
     set: next => {
+      accountingWaits.push(owner.wait(id, new AbortController().signal).catch(error => error.message));
       observations.push({ dormancy: agent.contextGraphSubscriptionDormancyById.get(id),
         pending: agent.contextGraphSubscriptionRehydrationPendingIds.has(id),
-        slot: agent.contextGraphSubscriptionRehydrationSlotIds.has(id), owner: owner.get(id) === handle });
+        slot: agent.contextGraphSubscriptionRehydrationSlotIds.has(id) });
       status = next;
     },
   });
   const atEvent: unknown[] = [];
   agent.eventBus.emit.mockImplementation(() => atEvent.push({ status: agent.getContextGraphSubscriptionRehydrationStatus(),
-    slot: agent.contextGraphSubscriptionRehydrationSlotIds.has(id), owner: owner.get(id) }));
+    slot: agent.contextGraphSubscriptionRehydrationSlotIds.has(id) }));
   await owner.activate(intent(id), {
     install: () => { agent.subscribedContextGraphs.set(id, live); return live; },
     remove: key => { agent.subscribedContextGraphs.delete(key); },
     rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
     commit: () => live,
   }, { claimRollingSlot: true });
-  expect(observations).toEqual([{ dormancy: undefined, pending: false, slot: true, owner: true }]);
-  expect(atEvent).toEqual([{ status: expect.objectContaining({ persistedTotal: 1, activated: 1, dormant: 0 }), slot: true, owner: undefined }]);
+  expect(observations).toEqual([{ dormancy: undefined, pending: false, slot: true }]);
+  expect(atEvent).toEqual([{ status: expect.objectContaining({ persistedTotal: 1, activated: 1, dormant: 0 }), slot: true }]);
   await expect(wait).resolves.toEqual({ kind: 'committed', subscription: live });
-  expect(() => (owner as any).commit(handle, { subscription: live }, () => live, true)).toThrow('ownership changed');
+  expect(await Promise.all(accountingWaits)).toEqual([{ kind: 'committed', subscription: live }]);
+  await expect(owner.wait(id, new AbortController().signal)).rejects.toThrow('ownership changed');
   agent.recordContextGraphSubscriptionPersistence(id, intent(id));
   expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ persistedTotal: 1, activated: 1 });
   expect(agent.eventBus.emit).toHaveBeenCalledTimes(1);
@@ -65,12 +68,12 @@ it('accounts persistence and activation from captured transitions after dormancy
 it('accounts mixed active and dormant clear/deactivation as one batch before cancelling owners', async () => {
   const agent = fixture(), ids = ['active-clear', 'dormant-clear', 'active-deactivate', 'dormant-deactivate'];
   const owner: ContextGraphSubscriptionActivations = agent.contextGraphSubscriptionActivations;
+  owner.reset(ids.map(intent));
   for (const id of ids) {
     agent.contextGraphSubscriptionRehydrationAccountedIds.add(id);
     agent.contextGraphSubscriptionRehydrationPendingIds.add(id);
     agent.contextGraphSubscriptionRehydrationSlotIds.add(id);
     if (id.startsWith('dormant')) agent.contextGraphSubscriptionDormancyById.set(id, 'activationCap');
-    owner.observe(intent(id));
   }
   Object.assign(agent.contextGraphSubscriptionRehydrationStatus, { persistedTotal: 4, activated: 2,
     hostedActivated: 1, hostedActivatedIds: ['active-deactivate'] });
@@ -81,15 +84,24 @@ it('accounts mixed active and dormant clear/deactivation as one batch before can
     get: () => status,
     set: next => {
       observations.push({ status: next, dormancy: [...agent.contextGraphSubscriptionDormancyById],
-        owners: ids.map(id => !!owner.get(id)), pending: [...agent.contextGraphSubscriptionRehydrationPendingIds],
+        pending: [...agent.contextGraphSubscriptionRehydrationPendingIds],
         slots: [...agent.contextGraphSubscriptionRehydrationSlotIds] });
       status = next;
     },
   });
+  const beforeCancel: unknown[] = [], cancel = owner.cancel.bind(owner);
+  vi.spyOn(owner, 'cancel').mockImplementation(id => {
+    beforeCancel.push({ id, status: agent.getContextGraphSubscriptionRehydrationStatus(),
+      pending: [...agent.contextGraphSubscriptionRehydrationPendingIds], slots: [...agent.contextGraphSubscriptionRehydrationSlotIds] });
+    cancel(id);
+  });
   agent.recordContextGraphSubscriptionClear(ids.slice(0, 2), ids.slice(2));
   expect(observations).toEqual([{ status: expect.objectContaining({ persistedTotal: 2, activated: 0, hostedActivated: 0 }),
     dormancy: expect.arrayContaining([[ids[2], 'deactivated'], [ids[3], 'deactivated']]),
-    owners: [true, true, true, true], pending: [], slots: [] }]);
+    pending: [], slots: [] }]);
+  expect(beforeCancel).toEqual(expect.arrayContaining(ids.map(id => ({ id,
+    status: expect.objectContaining({ persistedTotal: 2, activated: 0, dormant: 2 }), pending: [], slots: [] }))));
+  expect(beforeCancel).toHaveLength(4);
   expect(agent.clearContextGraphSubscriptionPersistRevisionStateIfIdle.mock.calls).toEqual([[ids[0]], [ids[1]]]);
   expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ persistedTotal: 2, activated: 0, hostedActivated: 0, dormant: 2 });
   expect([...agent.contextGraphSubscriptionRehydrationPendingIds]).toEqual([]);

@@ -184,12 +184,11 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     const promotion = f.agent.promoteDormantContextGraphSubscriptions(signal);
     try {
       await entered.promise;
-      const owner = state.contextGraphSubscriptionActivations.get(LOCAL);
-      expect(owner).toBeDefined();
+      const wait = state.contextGraphSubscriptionActivations.wait(LOCAL, signal);
       await f.agent.retryUnavailableContextGraphSubscriptionAuthorities(signal);
       expect(state.contextGraphSubscriptionDormancyById.get(other.id)).toBe('authorityDenied');
-      expect(state.contextGraphSubscriptionActivations.get(LOCAL)).toBe(owner);
       release.resolve(); await promotion;
+      await expect(wait).resolves.toMatchObject({ kind: 'committed' });
       expect(f.agent.isContextGraphSubscriptionCommitted(LOCAL)).toBe(true);
       expect(events).toEqual([LOCAL]);
       expect(state.contextGraphSubscriptionRehydrationPendingIds.has(LOCAL)).toBe(false);
@@ -232,8 +231,8 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     const f = await fixture(false), state = f.agent as any;
     state.started = true;
     state.setContextGraphSubscription(LOCAL, { ...state.subscribedContextGraphs.get(LOCAL), subscribed: true }, { persist: false });
+    state.contextGraphSubscriptionActivations.reset([f.original]);
     state.contextGraphSubscriptionDormancyById.set(LOCAL, 'authorityUnavailable');
-    state.contextGraphSubscriptionActivations.observe(f.original);
     const caller = new AbortController();
     const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, caller.signal)
       .then(() => 'inactive', (error: Error) => error);
@@ -251,8 +250,8 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     const f = await fixture(false);
     const state = f.agent as any;
     state.started = true;
+    state.contextGraphSubscriptionActivations.reset([f.original]);
     state.contextGraphSubscriptionDormancyById.set(LOCAL, 'authorityUnavailable');
-    state.contextGraphSubscriptionActivations.observe(f.original);
     const send = vi.fn(async () => { throw new Error('unexpected core read'); });
     state.router = { send };
     const insert = vi.spyOn(f.agent.store, 'insert');
@@ -281,8 +280,8 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     const f = await fixture(false);
     const state = f.agent as any;
     state.started = true;
+    state.contextGraphSubscriptionActivations.reset([f.original]);
     state.contextGraphSubscriptionDormancyById.set(LOCAL, 'authorityUnavailable');
-    state.contextGraphSubscriptionActivations.observe(f.original);
     vi.useFakeTimers();
     let settled = false;
     const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, new AbortController().signal)

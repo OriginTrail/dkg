@@ -33,13 +33,10 @@ function sameIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSub
 function sameDurableIntent(left: ContextGraphSubscriptionRecord, right: ContextGraphSubscriptionRecord): boolean {
   return sameIntent(left, right) && left.onChainId === right.onChainId && left.onChainHash === right.onChainHash;
 }
-const activationHandleBrand: unique symbol = Symbol('subscription-activation');
-type ActivationHandle = Readonly<{ id: string; [activationHandleBrand]: true }>;
 type ActivationOutcome = { kind: 'committed'; subscription: ContextGraphSub } | { kind: 'cancelled' };
 type ActivationPhase = { kind: 'queued' } | { kind: 'installing'; subscription: ContextGraphSub }
   | { kind: 'settled'; outcome: ActivationOutcome };
 interface ActivationAttempt {
-  readonly handle: ActivationHandle;
   readonly intent: ContextGraphSubscriptionRecord;
   repaired?: ContextGraphSubscriptionRecord;
   phase: ActivationPhase;
@@ -67,7 +64,7 @@ export interface SubscriptionActivationPorts {
   publish(id: string): void;
 }
 
-/** Owns activation attempts and their outcomes. External handles carry identity only;
+/** Owns activation attempts and their outcomes. The attempt object owns generation identity;
  * waiters never load or reinterpret durable intent or mutate attempt phases. */
 export class ContextGraphSubscriptionActivations {
   constructor(private readonly ports: SubscriptionActivationPorts) {}
@@ -75,21 +72,20 @@ export class ContextGraphSubscriptionActivations {
   reset(rows: readonly ContextGraphSubscriptionRecord[]): void {
     for (const id of this.pending.keys()) this.cancel(id);
     this.ports.contextGraphSubscriptionDormancyById.clear();
-    for (const row of rows) this.observe(row);
+    for (const row of rows) this.attemptFor(row);
   }
-  observe(row: ContextGraphSubscriptionRecord): ActivationHandle {
+  private attemptFor(row: ContextGraphSubscriptionRecord): ActivationAttempt {
     const current = this.pending.get(row.id);
     if (current && (sameDurableIntent(current.intent, row)
-      || (current.repaired && sameDurableIntent(current.repaired, row)))) return current.handle;
+      || (current.repaired && sameDurableIntent(current.repaired, row)))) return current;
     this.cancel(row.id);
-    const handle: ActivationHandle = Object.freeze({ id: row.id, [activationHandleBrand]: true as const });
-    this.pending.set(row.id, { handle, intent: { ...row }, phase: { kind: 'queued' }, listeners: new Set() });
-    return handle;
+    const attempt: ActivationAttempt = { intent: { ...row }, phase: { kind: 'queued' }, listeners: new Set() };
+    this.pending.set(row.id, attempt);
+    return attempt;
   }
-  get(id: string): ActivationHandle | undefined { return this.pending.get(id)?.handle; }
   private settle(attempt: ActivationAttempt, outcome: ActivationOutcome): void {
     if (attempt.phase.kind === 'settled') return;
-    this.pending.delete(attempt.handle.id);
+    this.pending.delete(attempt.intent.id);
     attempt.phase = { kind: 'settled', outcome };
     for (const notify of attempt.listeners) notify();
     attempt.listeners.clear();
@@ -138,26 +134,24 @@ export class ContextGraphSubscriptionActivations {
     if (released) ports.slotReleased();
     return transitions;
   }
-  private owned(handle: ActivationHandle): ActivationAttempt {
-    const attempt = this.pending.get(handle.id);
-    if (!attempt || attempt.handle !== handle) throw changed();
-    return attempt;
+  private assertOwned(attempt: ActivationAttempt): void {
+    if (this.pending.get(attempt.intent.id) !== attempt) throw changed();
   }
   /** One retry owns installation, repair, network effects, rollback and commit. */
   async activate(row: ContextGraphSubscriptionRecord, ports: PersistedContextGraphSubscriptionActivationPorts,
     options: PersistedContextGraphSubscriptionActivationOptions = {}): Promise<ContextGraphSub> {
-    const handle = this.observe(row), attempt = this.owned(handle);
+    const attempt = this.attemptFor(row);
     if (attempt.phase.kind !== 'queued') throw changed();
     const previous = this.ports.subscribedContextGraphs.get(row.id);
     const restorePendingMeta = options.restorePendingMeta === true;
     const subscription = ports.install(row, { onChainId: options.onChainId, restorePendingMeta,
       updateRehydrationStatus: options.updateRehydrationStatus !== false });
-    this.owned(handle);
+    this.assertOwned(attempt);
     attempt.phase = { kind: 'installing', subscription };
     let networkEffectsStarted = false;
     try {
-      await options.prepare?.(subscription, record => this.repaired(handle, subscription, record));
-      this.assertInstalled(handle);
+      await options.prepare?.(subscription, record => this.repaired(attempt, subscription, record));
+      this.assertInstalled(attempt);
       if (options.isCurrent && !options.isCurrent(subscription)) {
         throw new Error(`Persisted subscription activation for "${row.id}" became stale`);
       }
@@ -166,7 +160,7 @@ export class ContextGraphSubscriptionActivations {
         if (row.syncScoped) ports.trackSync(row.id);
         if (row.subscribed) { ports.subscribe(row.id); ports.persistMembership(row.id); }
       }
-      return this.commit(handle, ports.commit, options.claimRollingSlot === true);
+      return this.commit(attempt, ports.commit, options.claimRollingSlot === true);
     } catch (error) {
       try {
         // Before network effects, preserve a concurrently replaced generation.
@@ -186,17 +180,17 @@ export class ContextGraphSubscriptionActivations {
     }
   }
   /** Mandatory generation fence after asynchronous preparation and before commit. */
-  private assertInstalled(handle: ActivationHandle): ActivationAttempt {
-    const attempt = this.owned(handle), phase = attempt.phase;
-    const live = this.ports.subscribedContextGraphs.get(handle.id);
+  private assertInstalled(attempt: ActivationAttempt): void {
+    this.assertOwned(attempt);
+    const phase = attempt.phase;
+    const live = this.ports.subscribedContextGraphs.get(attempt.intent.id);
     if (!live || (!live.subscribed && !live.coreHosted) || phase.kind !== 'installing'
       || !isContextGraphSubscriptionStoredAgain(phase.subscription, live)
       || !contextGraphSubscriptionAdmissionPremisesEqual(phase.subscription, live)) throw changed();
-    return attempt;
   }
   /** Activation preparation explicitly reports its acknowledged durable repair. */
-  private repaired(handle: ActivationHandle, subscription: ContextGraphSub, row: ContextGraphSubscriptionRecord): void {
-    const attempt = this.owned(handle);
+  private repaired(attempt: ActivationAttempt, subscription: ContextGraphSub, row: ContextGraphSubscriptionRecord): void {
+    this.assertOwned(attempt);
     if (attempt.phase.kind !== 'installing' || attempt.phase.subscription !== subscription) throw changed();
     // Preserving independent Core custody can add hosting to the saved row.
     // That is not a binding repair of this attempt's member intent; canonical
@@ -204,10 +198,10 @@ export class ContextGraphSubscriptionActivations {
     if (sameIntent(attempt.intent, row)) attempt.repaired = { ...row };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
-  private commit(handle: ActivationHandle, write: (id: string) => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {
-    const ports = this.ports, id = handle.id;
+  private commit(attempt: ActivationAttempt, write: (id: string) => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {
+    const ports = this.ports, id = attempt.intent.id;
     // Fence the old owner before the verified transition retires any wire custody.
-    const attempt = this.assertInstalled(handle);
+    this.assertInstalled(attempt);
     const live = write(id);
     // The canonical setter may legitimately start a new line when it adopts
     // verified Core hosting. The canonical write returns its committed row.

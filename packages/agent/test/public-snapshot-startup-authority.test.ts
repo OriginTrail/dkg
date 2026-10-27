@@ -28,7 +28,8 @@ function fixture() {
   };
   a.contextGraphSubscriptionActivations = createTestSubscriptionActivations(a);
   a.activationIntent = { id: graph, subscribed: true, syncScoped: true, synced: false, metaSynced: false, sharedMemorySynced: false, onChainId: '1', onChainHash: ethers.id(graph) };
-  a.contextGraphSubscriptionActivations.observe(a.activationIntent);
+  a.contextGraphSubscriptionActivations.reset([a.activationIntent]);
+  a.contextGraphSubscriptionDormancyById.set(graph, 'authorityUnavailable');
   a.getSubscribedContextGraphs = () => a.subscribedContextGraphs;
   const replace = (next: ReturnType<typeof active>) => {
     continueContextGraphSubscriptionLine(a.subscribedContextGraphs.get(graph), next);
