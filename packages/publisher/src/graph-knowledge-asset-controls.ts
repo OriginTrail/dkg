@@ -13,10 +13,6 @@ export const GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES: readonly string[] 
 ]);
 const replayControls = new Set(GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES);
 
-export function stripGraphKnowledgeAssetPeerControls<T extends Pick<Quad, 'predicate'>>(rows: readonly T[]): T[] {
-  return rows.filter(row => !replayControls.has(row.predicate));
-}
-
 /** The bounded held-content read compares exactly what a replay replaces or drops. */
 export function projectGraphKnowledgeAssetReplayControls<T extends Pick<Quad, 'predicate'>>(rows: readonly T[]): T[] {
   return rows.filter(row => replayControls.has(row.predicate));
