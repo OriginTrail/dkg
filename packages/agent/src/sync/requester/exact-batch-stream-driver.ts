@@ -84,7 +84,7 @@ export const EXACT_BATCH_STREAM_BUSY_RETRY = Object.freeze({
 export type ExactBatchStreamDriverOutcome =
   | Readonly<{ kind: 'not-selected' }>
   | Readonly<{ kind: 'unsupported-before-start' }>
-  | Readonly<{ kind: 'settled'; detailed: Omit<DetailedDurableSyncResult, 'recoveryRound'> & {
+  | Readonly<{ kind: 'settled'; detailed: DetailedDurableSyncResult & {
       readonly committedExactAssetUals?: readonly string[];
       readonly exactStreamOutcome?: ExactBatchStreamOutcome;
     } }>;

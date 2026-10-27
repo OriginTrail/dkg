@@ -3,9 +3,8 @@ import { createStoredPrefixAcquirer } from '../../src/durable-recovery-held-stor
 import { MemorySyncCheckpointStore } from '../../src/sync/checkpoint/state.js';
 import { createUalOnlyExactAssetSelection } from '../../src/sync/exact-assets.js';
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../../src/sync/durable-recovery-runner.js';
-import { durableRecoveryRoundOutcome } from '../../src/sync/durable-recovery-round.js';
 import { currentHeldGraphScopedAssetsConfirmer } from '../../src/sync/requester/durable-data-holdings.js';
-import { runDurableSyncDetailed, type DurableMetaContinuation, type DurableSyncContext } from '../../src/sync/requester/durable-sync.js';
+import { runDurableSyncDetailed, runGraphOwnedDurableSyncDetailed, type DurableMetaContinuation, type DurableSyncContext } from '../../src/sync/requester/durable-sync.js';
 import { CG, createRecoveryFixture, type RecoveryFixtureOptions, type RecoveryPeers, type AssetFixture } from './durable-recovery-fixture.js';
 export { CG, PEER, SECOND_PEER, asset, servingPeer, generation, rowsOf, type AssetFixture } from './durable-recovery-fixture.js';
 
@@ -37,7 +36,8 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
   });
   const round = (checkpointStore: MemorySyncCheckpointStore, remotePeerId: string,
     roundOptions: Pick<DurableSyncContext, 'graphRecovery' | 'exactAssetSelectionFor' | 'settlementSliceDeadline'>,
-  ) => materialization.withHeldAssetFence(async fence => runDurableSyncDetailed({
+  ) => materialization.withHeldAssetFence(async fence => {
+    const context = {
     ...fixture.pagingPorts(checkpointStore, remotePeerId), ...roundOptions,
     storedPrefix: createStoredPrefixAcquirer(fixture.heldStore()?.prove, CG, fence.assertCurrent),
     graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery,
@@ -49,7 +49,11 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
         },
       },
     } : undefined,
-  }), options.lifecycle?.signal?.());
+    } satisfies DurableSyncContext;
+    return context.graphRecovery
+      ? runGraphOwnedDurableSyncDetailed({ ...context, graphRecovery: context.graphRecovery })
+      : runDurableSyncDetailed(context);
+  }, options.lifecycle?.signal?.());
 
   /**
    * A process lifetime: a new owner and a new checkpoint store. With
@@ -76,7 +80,8 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
           settlementSliceDeadline: (typeof startOptions.sliceSpent === 'function' ? startOptions.sliceSpent() : startOptions.sliceSpent) ? Date.now() : undefined,
         });
         startOptions.afterSlice?.();
-        return durableRecoveryRoundOutcome(detailed.result, detailed.recoveryRound);
+        if (!('decision' in detailed)) throw new Error('Expected an owned requester round');
+        return detailed;
       },
       ...(startOptions.exactRequests === false ? {} : {
         executeExactSlice: async (peerId: string, assetUals: readonly string[]) => {

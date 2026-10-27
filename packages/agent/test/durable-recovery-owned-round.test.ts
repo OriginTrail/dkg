@@ -18,15 +18,14 @@ it.each<DurableRecoveryRoundDecision>([
   { strategy: 'full', continuation: 'reconsider-holdings' }, { strategy: 'legacy' },
 ])('returns an explicit $strategy decision from exactly one admitted graph', async decision => {
   const result = createIncompleteDurableSyncResult();
-  const physical = vi.spyOn(graph, 'runAdmittedDurableGraph').mockResolvedValue({ result, recoveryRound: decision });
+  const physical = vi.spyOn(graph, 'runAdmittedGraphOwnedDurableGraph').mockResolvedValue({ result, decision });
   const input = request();
   expect(await runGraphOwnedDurableRecovery(input)).toEqual({ result, decision });
   expect(physical).toHaveBeenCalledOnce();
-  expect(physical.mock.calls[0]![0]).toMatchObject({ contextGraphId: input.contextGraphId, remainingContextGraphs: 1,
-    options: { graphRecovery: input.recovery } });
+  expect(physical.mock.calls[0]![0]).toMatchObject({ contextGraphId: input.contextGraphId, recovery: input.recovery });
 });
 it.each(['cancelled', 'deferred'] as const)('reports not-started explicitly for %s admission', async state => {
-  const physical = vi.spyOn(graph, 'runAdmittedDurableGraph');
+  const physical = vi.spyOn(graph, 'runAdmittedGraphOwnedDurableGraph');
   const input = request();
   const controller = new AbortController();
   if (state === 'cancelled') controller.abort();

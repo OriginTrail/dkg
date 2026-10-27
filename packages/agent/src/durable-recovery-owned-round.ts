@@ -7,7 +7,7 @@ import type { GraphOwnedRecoveryInput } from './sync/requester/graph-owned-recov
 import type { DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 import { createIncompleteDurableSyncResult } from './sync/durable-progress.js';
 import { getSyncBackpressureBusyError } from './sync/backpressure.js';
-import { runAdmittedDurableGraph } from './durable-recovery-graph.js';
+import { runAdmittedGraphOwnedDurableGraph } from './durable-recovery-graph.js';
 import { DurableSyncAdmissionBoundary } from './sync/requester/admission-boundary.js';
 import { createDurableSyncFetchTimeoutMs, normalizeDurableSyncTimeoutMs } from './sync/requester/durable-sync-budget.js';
 import { createDurableSyncOperationBoundary, runSerializedDurableContextGraphSync, DURABLE_RECOVERY_HARD_TIMEOUT_MS } from './durable-recovery-scheduling.js';
@@ -40,8 +40,8 @@ export async function runGraphOwnedDurableRecovery(request: GraphOwnedDurableRec
       () => host.admission.run({ ctx, contextGraphId, lane: 'durable', label: `durable:${contextGraphId}:${remotePeerId.slice(-8)}`,
         priorityOverride: options?.priority, operationSignal: operation.signal, source: options?.source,
         onWorkStarted: admission.startWork,
-        work: () => runAdmittedDurableGraph({ host, authority, ctx, remotePeerId, contextGraphId, remainingContextGraphs: 1,
-          options: { graphRecovery: recovery, stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
+        work: () => runAdmittedGraphOwnedDurableGraph({ host, authority, ctx, remotePeerId, contextGraphId, recovery,
+          options: { stopOnBackoffWorthyFailure: options?.stopOnBackoffWorthyFailure,
             onAtomicCommitStarted: options?.onAtomicCommitStarted, isCurrent: options?.isCurrent,
             fetchTimeoutMs: createDurableSyncFetchTimeoutMs({ totalTimeoutMs: options?.totalTimeoutMs,
               exactRecovery: false, extendedRecovery: options?.settlementSliceTimeoutMs !== undefined }),
@@ -50,7 +50,7 @@ export async function runGraphOwnedDurableRecovery(request: GraphOwnedDurableRec
             settlementSliceTimeoutMs: options?.settlementSliceTimeoutMs, signal: operation.signal },
         }),
       }), operation.signal);
-    return { result: detailed.result, decision: detailed.recoveryRound };
+    return detailed;
   } catch (error) {
     if (operation.signal?.aborted) return notStarted();
     const busy = getSyncBackpressureBusyError(error);

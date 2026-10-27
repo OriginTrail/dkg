@@ -12,3 +12,8 @@ const invalidPlan: ManifestResumePlan = { checkpointAction: 'replace', seeded: t
 void invalidPlan;
 // @ts-expect-error A round must state its decision, including when execution never started.
 void durableRecoveryRoundOutcome(createIncompleteDurableSyncResult());
+
+import type { DetailedDurableSyncResult } from '../src/sync/requester/durable-sync-result.js';
+declare const physical: DetailedDurableSyncResult;
+// @ts-expect-error Ordinary transport results do not expose graph-owner continuation decisions.
+void physical.recoveryRound;

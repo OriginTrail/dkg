@@ -15,14 +15,18 @@ it.each(['ordinary', 'owned'])('serializes %s operations across separately bound
   const started = new Promise<void>(resolve => { entered = resolve; });
   let active = 0;
   let maximumActive = 0;
-  vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph').mockImplementation(async () => {
+  const execute = async () => {
     active += 1;
     maximumActive = Math.max(maximumActive, active);
     entered();
     await held;
     active -= 1;
-    return { result: {} as Awaited<ReturnType<typeof runDurableSync>>, recoveryRound: { strategy: 'full', continuation: 'full-graph' } };
-  });
+    return {} as Awaited<ReturnType<typeof runDurableSync>>;
+  };
+  vi.spyOn(recoveryGraph, 'runAdmittedDurableGraph').mockImplementation(async () => ({ result: await execute() }));
+  vi.spyOn(recoveryGraph, 'runAdmittedGraphOwnedDurableGraph').mockImplementation(async () => ({
+    result: await execute(), decision: { strategy: 'full', continuation: 'full-graph' },
+  }));
   const agentLike = {
     store: {  },
     config: {},

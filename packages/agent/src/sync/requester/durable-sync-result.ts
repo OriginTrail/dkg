@@ -1,9 +1,7 @@
-import type { DurableRecoveryRoundDecision } from '../durable-recovery-round.js';
 import type { InitializedDurableSyncResult } from '../durable-progress.js';
 import type { ExactAssetResponderCapability, ExactDurableFetchDisposition } from './exact-durable-fetch.js';
 
 export interface DetailedDurableSyncResult {
-  readonly recoveryRound: DurableRecoveryRoundDecision;
   /** Assets whose normal atomic materialization completed, including a partial exact run. */
   readonly committedExactAssetUals?: readonly string[];
   readonly result: InitializedDurableSyncResult;
@@ -13,3 +11,17 @@ export interface DetailedDurableSyncResult {
   readonly exactResponderCapability?: ExactAssetResponderCapability;
 }
 
+
+/** Do not expose owner policy or invocation-local authentication evidence to ordinary callers. */
+export function physicalDurableSyncResult(detailed: DetailedDurableSyncResult): DetailedDurableSyncResult {
+  return {
+    result: detailed.result,
+    ...(detailed.committedExactAssetUals === undefined ? {} : { committedExactAssetUals: detailed.committedExactAssetUals }),
+    ...(detailed.exactFetchDisposition === undefined
+      ? {}
+      : { exactFetchDisposition: detailed.exactFetchDisposition }),
+    ...(detailed.exactResponderCapability === undefined
+      ? {}
+      : { exactResponderCapability: detailed.exactResponderCapability }),
+  };
+}

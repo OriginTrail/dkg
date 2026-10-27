@@ -14,7 +14,7 @@ export function stubDurableSync(
       decision: { strategy: 'legacy' },
     }),
     runLegacyDurableSyncDetailed: async (_ctx: unknown, ...args: Parameters<typeof sync>) => ({
-      result: await sync(...args), recoveryRound: { strategy: 'legacy' },
+      result: await sync(...args),
     }),
   });
 }

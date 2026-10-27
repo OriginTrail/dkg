@@ -7,14 +7,16 @@ import { type OperationContext } from '@origintrail-official/dkg-core';
 import { exactAssetUalsForSelection } from './sync/exact-assets.js';
 import { MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
 import { createDurableSyncBudget, normalizeDurableSyncTimeoutMs } from './sync/requester/durable-sync-budget.js';
-import { runChallengeExactAssetFetch, runDurableSyncDetailed, type ChallengeExactAssetFetchContext, type DurableSyncContext } from './sync/requester/durable-sync.js';
+import { runChallengeExactAssetFetch, runDurableSyncDetailed, runGraphOwnedDurableSyncDetailed, type ChallengeExactAssetFetchContext, type DurableSyncContext } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
 import { currentHeldGraphScopedAssetsConfirmer } from './sync/requester/durable-data-holdings.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from './dkg-agent-constants.js';
 
-import type { DurableGraphOptions, PhysicalDurableGraphResult } from './durable-recovery-types.js';
+import type { DurableGraphOptions, PhysicalDurableSyncResult } from './durable-recovery-types.js';
+import type { GraphOwnedRecoveryInput } from './sync/requester/graph-owned-recovery.js';
+import type { DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 export type DurableGraphHost = DurableRecoveryHost;
 
 export interface DurableGraphRequest {
@@ -27,8 +29,7 @@ export interface DurableGraphRequest {
   readonly options: DurableGraphOptions;
 }
 
-/** Executes one admitted graph while retaining physical authentication and materialization ownership. */
-export async function runAdmittedDurableGraph(request: DurableGraphRequest): Promise<PhysicalDurableGraphResult> {
+function prepareDurableGraph(request: DurableGraphRequest) {
   const { host, authority, ctx, remotePeerId, contextGraphId, remainingContextGraphs, options } = request;
 
   const {
@@ -39,14 +40,12 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     stopOnBackoffWorthyFailure,
     onVerifiedFullSnapshot,
     fetchTimeoutMs = SYNC_TOTAL_TIMEOUT_MS,
-    exactRecoveryTransportMode = 'stream-preferred',
     authenticationTimeoutMs = fetchTimeoutMs,
     operationFetchDeadline,
     operationDeadline,
     settlementSliceTimeoutMs,
     signal,
     isCurrent,
-    graphRecovery,
   } = options;
   const exactAssetFetchPolicy = options.exactAssetFetchPolicy;
   const exactAssetSelection = exactAssetFetchPolicy?.selection;
@@ -109,6 +108,15 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     logWarn: (opCtx, message) => host.log.warn(opCtx, message),
     logDebug: (opCtx, message) => host.log.debug(opCtx, message),
   };
+  return { durableContext, materialization, contextGraphBudget };
+}
+
+/** Ordinary physical results are independent of graph-owner continuation policy. */
+export async function runAdmittedDurableGraph(request: DurableGraphRequest): Promise<PhysicalDurableSyncResult> {
+  const { host, authority, ctx, remotePeerId, contextGraphId, options } = request;
+  const { signal, isCurrent, onVerifiedFullSnapshot, exactRecoveryTransportMode = 'stream-preferred' } = options;
+  const exactAssetSelection = options.exactAssetFetchPolicy?.selection;
+  const { durableContext, materialization, contextGraphBudget } = prepareDurableGraph(request);
   if (exactAssetSelection?.kind === 'challenge-pinned') {
     const {
       exactAssetSelectionFor: _exactAssetSelectionFor,
@@ -127,7 +135,6 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       authenticateChallengePinnedAsset,
     });
     return {
-      recoveryRound: { strategy: 'not-started' },
       result: fetched.result,
       exactFetchDisposition: fetched.disposition,
       authenticatedExactAssets: fetched.authenticatedAssets,
@@ -152,29 +159,39 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
 
     });
     switch (outcome.kind) {
-      case 'settled': return { ...outcome.detailed, recoveryRound: { strategy: 'not-started' } };
+      case 'settled': return outcome.detailed;
       case 'not-selected':
       case 'unsupported-before-start': break; // Paging uses the same stored-prefix proof as full-graph recovery.
     }
   }
-  // Resolve continuation policy once; snapshots own a fresh full walk.
-  const continuation = onVerifiedFullSnapshot ? undefined : graphRecovery;
-  const runPaging = (fence?: HeldAssetFence) => {
-    // An unbound subscription must persist its numeric binding before skipping DATA.
-    const confirmCurrent = continuation && fence && fence.binding().onChainId !== undefined
-      ? currentHeldGraphScopedAssetsConfirmer({
-          binding: fence.binding,
-          authenticateHeld: authority.authenticateHeld?.bind(authority), budget: contextGraphBudget,
-        }) : undefined;
-    return runDurableSyncDetailed({ ...durableContext,
-      storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
-      graphRecovery: continuation ? { ...continuation,
-        held: confirmCurrent && host.heldStore && fence
-          ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent,
-              reconcile: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve() } : undefined,
-      } : undefined,
-    });
-  };
+  const runPaging = (fence?: HeldAssetFence) => runDurableSyncDetailed({ ...durableContext,
+    storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
+  });
   return host.heldStore && !onVerifiedFullSnapshot
     ? materialization.withHeldAssetFence(runPaging, signal) : runPaging();
+}
+
+export interface OwnedDurableGraphRequest extends Omit<DurableGraphRequest, 'options' | 'remainingContextGraphs'> {
+  readonly recovery: GraphOwnedRecoveryInput;
+  readonly options: Omit<DurableGraphOptions, 'exactAssetFetchPolicy' | 'onVerifiedFullSnapshot'>;
+}
+
+/** A graph owner receives a required decision without adding policy fields to transport results. */
+export async function runAdmittedGraphOwnedDurableGraph(request: OwnedDurableGraphRequest): Promise<DurableRecoveryRoundOutcome> {
+  const { host, authority, ctx, contextGraphId, recovery, options } = request;
+  const { durableContext, materialization, contextGraphBudget } = prepareDurableGraph({ ...request, remainingContextGraphs: 1 });
+  const runPaging = async (fence?: HeldAssetFence): Promise<DurableRecoveryRoundOutcome> => {
+    // An unbound subscription must persist its numeric binding before skipping DATA.
+    const confirmCurrent = fence && fence.binding().onChainId !== undefined
+      ? currentHeldGraphScopedAssetsConfirmer({ binding: fence.binding,
+          authenticateHeld: authority.authenticateHeld?.bind(authority), budget: contextGraphBudget }) : undefined;
+    return runGraphOwnedDurableSyncDetailed({ ...durableContext,
+      storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
+      graphRecovery: { ...recovery,
+        held: confirmCurrent && host.heldStore && fence
+          ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent,
+              reconcile: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve() } : undefined },
+    });
+  };
+  return host.heldStore ? materialization.withHeldAssetFence(runPaging, options.signal) : runPaging();
 }

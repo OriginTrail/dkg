@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { DurableRecoveryRoundDecision } from './sync/durable-recovery-round.js';
-import type { GraphOwnedRecoveryInput } from './sync/requester/graph-owned-recovery.js';
 import { type DurableRecoveryInput } from './durable-recovery-authority.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
@@ -111,8 +109,6 @@ export type PhysicalDurableSyncResult = {
   readonly exactStreamOutcome?: ExactBatchStreamOutcome;
 };
 
-export type PhysicalDurableGraphResult = PhysicalDurableSyncResult & { readonly recoveryRound: DurableRecoveryRoundDecision };
-
 export type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
   readonly admission: DurableSyncAdmissionOutcome;
 };
@@ -132,7 +128,6 @@ export type DurableGraphOptions = {
   settlementSliceTimeoutMs?: number;
   signal?: AbortSignal;
   isCurrent?: () => boolean;
-  graphRecovery?: GraphOwnedRecoveryInput;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
 };
 

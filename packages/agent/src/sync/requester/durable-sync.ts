@@ -3,9 +3,9 @@ import { DurableGraphSettlementGuard, type StoredDurablePrefix } from './durable
 import type { GraphOwnedRecoveryContext } from './graph-owned-recovery.js';
 import { verifyDurablePage, prepareDurableVerifiedPage, persistDurableRemainingMetadata } from './durable-verified-page.js';
 export type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
-import type { DurableRecoveryRoundDecision } from '../durable-recovery-round.js';
+import type { DurableRecoveryRoundDecision, DurableRecoveryRoundOutcome } from '../durable-recovery-round.js';
 import type { VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
-import type { DetailedDurableSyncResult } from './durable-sync-result.js';
+import { physicalDurableSyncResult, type DetailedDurableSyncResult } from './durable-sync-result.js';
 import { randomUUID } from 'node:crypto';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { contextGraphDataGraphUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
@@ -403,6 +403,7 @@ interface InternalDurableSyncContext extends Omit<
 }
 
 interface InternalDetailedDurableSyncResult extends DetailedDurableSyncResult {
+  readonly recoveryRound: DurableRecoveryRoundDecision;
   readonly authenticatedExactAssets?: readonly ChallengePinnedGraphScopedAsset[];
 }
 
@@ -427,18 +428,15 @@ export function runDurableSyncDetailed(
 export async function runDurableSyncDetailed(
   context: DurableSyncContext | LegacyDurableSyncContext,
 ): Promise<DetailedDurableSyncResult> {
+  return physicalDurableSyncResult(await runDurableSyncWithBudget(normalizeDurableSyncContext(context)));
+}
+
+/** The owner-only result boundary; ordinary sync and exact transport expose no decision. */
+export async function runGraphOwnedDurableSyncDetailed(
+  context: DurableSyncContext & { graphRecovery: GraphOwnedRecoveryContext },
+): Promise<DurableRecoveryRoundOutcome> {
   const detailed = await runDurableSyncWithBudget(normalizeDurableSyncContext(context));
-  return {
-    result: detailed.result,
-    recoveryRound: detailed.recoveryRound,
-    ...(detailed.committedExactAssetUals === undefined ? {} : { committedExactAssetUals: detailed.committedExactAssetUals }),
-    ...(detailed.exactFetchDisposition === undefined
-      ? {}
-      : { exactFetchDisposition: detailed.exactFetchDisposition }),
-    ...(detailed.exactResponderCapability === undefined
-      ? {}
-      : { exactResponderCapability: detailed.exactResponderCapability }),
-  };
+  return { result: detailed.result, decision: detailed.recoveryRound };
 }
 
 export async function runChallengeExactAssetFetch(

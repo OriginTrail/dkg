@@ -28,7 +28,7 @@ import {
 } from '../src/sync/requester/page-fetch.js';
 import {
   runDurableSync,
-  runDurableSyncDetailed,
+  runDurableSyncDetailed, runGraphOwnedDurableSyncDetailed, type DurableSyncContext,
   type DurableMetaContinuation,
   type DurableSyncFetchRequest,
   type DurableSyncGraphScopedStoreRequest,
@@ -210,7 +210,7 @@ function createTwoRoundHarness(
 
   const runDetailed = async (round: Round, durableMetaContinuation?: DurableMetaContinuation, durableResumeBoundary?: VerifiedDurableBoundary) => {
     currentRound = round;
-    return runDurableSyncDetailed({
+    const context = {
       ctx,
       remotePeerId,
       contextGraphIds: [contextGraphId],
@@ -250,7 +250,10 @@ function createTwoRoundHarness(
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
-    });
+    } satisfies DurableSyncContext;
+    return context.graphRecovery
+      ? runGraphOwnedDurableSyncDetailed({ ...context, graphRecovery: context.graphRecovery })
+      : runDurableSyncDetailed(context);
   };
 
   const run = async (...args: Parameters<typeof runDetailed>) => (await runDetailed(...args)).result;
@@ -579,7 +582,7 @@ describe('manifest-bound durable DATA continuation', () => {
     expect(misaligned.result.complete).toBe(false);
     expect(harness.checkpointStore.get(key)).toBeUndefined();
     // The round tells the recovery owner which boundary the peer's rows refused.
-    expect(misaligned.recoveryRound?.rejectedResumeOffset).toBe(prefix.length);
+    expect('decision' in misaligned ? misaligned.decision.rejectedResumeOffset : undefined).toBe(prefix.length);
 
     harness.dataRequests.length = 0;
     const restarted = await harness.run({
