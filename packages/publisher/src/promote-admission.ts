@@ -109,6 +109,14 @@ export class PromoteAdmissionCoordinator {
   }
 
   invalidate(jobId: string): void { this.owners.delete(jobId); }
+  /**
+   * True while an admission that has handed this job ID to persistence is still unsettled: in flight, or retained because its outcome is
+   * uncertain until a durable read of the job settles it. Retention never deletes such a job (OT-RFC-73 AC7).
+   */
+  hasPendingJob(jobId: string): boolean {
+    for (const flight of this.pending.values()) if (flight.attempt.jobId === jobId) return true;
+    return false;
+  }
   /** One pending-owner lookup, including legacy wildcard lanes and caller exclusions. */
   findPendingConflict(scope: ReturnType<typeof promoteLaneConflictScope>, excludeJobId?: string,
     excludeAttempt?: PromoteAdmissionAttempt): PromoteAdmissionError | undefined {

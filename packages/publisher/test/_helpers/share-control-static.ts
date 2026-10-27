@@ -82,7 +82,7 @@ const STORE_HELPER_OPTIONS: Readonly<Record<string, number>> = {
   replaceSubjectAtomicallyOrFallback: 4, readPromoteOwnershipCandidates: 3,
 };
 
-export type OptionsClass = 'control' | 'reader' | 'monitoring' | 'parameter' | 'other' | 'missing';
+export type OptionsClass = 'control' | 'reader' | 'monitoring' | 'retention-scan' | 'parameter' | 'other' | 'missing';
 
 function isShareControlCall(expr: ts.Expression): boolean {
   return ts.isCallExpression(expr) && ts.isIdentifier(expr.expression) && expr.expression.text === 'controlStoreOptions'
@@ -106,8 +106,14 @@ export function classifyOptions(expr: ts.Expression | undefined, sf: ts.SourceFi
     && ts.isStringLiteralLike(expr.arguments[0]!) && expr.arguments[0].text.startsWith('publisher.queueUsage.')) return 'monitoring';
   if (ts.isObjectLiteralExpression(expr)) {
     if (expr.properties.some((p) => ts.isSpreadAssignment(p) && classifyOptions(p.expression, sf, depth + 1) === 'control')) return 'control';
-    const source = expr.properties.find((p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && p.name.getText(sf) === 'source');
+    const property = (name: string) => expr.properties.find((p): p is ts.PropertyAssignment => ts.isPropertyAssignment(p) && p.name.getText(sf) === name);
+    const source = property('source');
     if (source && ts.isStringLiteralLike(source.initializer) && source.initializer.text === 'publisher.asyncPromote.ownershipReader') return 'reader';
+    // Retention's candidate scan: its own source label (the exported constant, or the literal) and the background lane, nothing else.
+    const priority = property('priority');
+    if (source && priority && ts.isStringLiteralLike(priority.initializer) && priority.initializer.text === 'background' && expr.properties.length === 2
+      && ((ts.isIdentifier(source.initializer) && source.initializer.text === 'RETENTION_SCAN_SOURCE')
+        || (ts.isStringLiteralLike(source.initializer) && source.initializer.text === 'publisher.asyncPromote.retention.scan'))) return 'retention-scan';
     return 'other';
   }
   if (ts.isIdentifier(expr) && depth < 4) {

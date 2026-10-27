@@ -17,6 +17,7 @@ import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI } from '../src/async-promote-queue-ut
 import {
   SHARE_OWNERSHIP_READER_SOURCE,
   SHARE_QUEUE_USAGE_SOURCE,
+  SHARE_RETENTION_SCAN_SOURCE,
   recordShareStore,
   shareRowOf,
   withControlPath,
@@ -30,6 +31,7 @@ import {
   type OptionsClass,
   type SourceText,
 } from './_helpers/share-control-static.js';
+import { driveRetentionWorkload } from './_helpers/share-retention-workload.js';
 import { driveShareWorkload } from './_helpers/share-control-workload.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
@@ -42,6 +44,7 @@ const GRAPH_REFERENCE_FILES: Readonly<Record<string, string>> = {
   [`${SRC}async-promote-ownership.ts`]: 'the conflict read, and the lock-free reader',
   [`${SRC}share-reconciliation.ts`]: 'the retained-share reconcile read (in the mutex)',
   [`${SRC}async-queue-depth.ts`]: 'the monitoring COUNT (background)',
+  [`${SRC}async-promote-retention.ts`]: 'the retention sweep: verify and delete in the mutex (control), the graph its holds lock',
 };
 
 /**
@@ -55,6 +58,8 @@ const SITE_FILES: Readonly<Record<string, readonly OptionsClass[]>> = {
   [`${SRC}async-promote-ownership.ts`]: ['parameter', 'reader'],
   [`${SRC}async-queue-depth.ts`]: ['parameter', 'monitoring'],
   [`${SRC}promote-admission-persistence.ts`]: [],
+  [`${SRC}async-promote-retention.ts`]: ['control'],
+  [`${SRC}async-promote-retention-scan.ts`]: ['retention-scan'],
 };
 
 const sources = readPackageSources(REPO_ROOT);
@@ -107,7 +112,9 @@ describe('the share control graph census over every package\'s src/', () => {
 describe('every site the scan found is observed by the recorder in a driven scenario', () => {
   const fileLabels = (path: string): string[] => labelOccurrences(site(path)).map((o) => o.label);
   const scanned = sources.flatMap((file) => labelOccurrences(file).map((o) => o.label));
-  const controlLabels = scanned.filter((l) => l !== SHARE_OWNERSHIP_READER_SOURCE && l !== SHARE_QUEUE_USAGE_SOURCE).sort();
+  // The retention sweep's sites are driven by their own scenario below (the share workload does not run a sweep).
+  const retentionLabels = scanned.filter((l) => l.startsWith('publisher.asyncPromote.retention.')).sort();
+  const controlLabels = scanned.filter((l) => l !== SHARE_OWNERSHIP_READER_SOURCE && l !== SHARE_QUEUE_USAGE_SOURCE && !retentionLabels.includes(l)).sort();
 
   it.each([
     { name: 'atomic', atomic: true, hidden: [] as string[] },
@@ -123,6 +130,19 @@ describe('every site the scan found is observed by the recorder in a driven scen
     expect(onGraph.filter((call) => shareRowOf(call, [DEFAULT_PROMOTE_CONTROL_GRAPH_URI]) === 'control').every((call) => call.options?.controlQueue === 'share')).toBe(true);
     expect(rowLabels('ownership-reader')).toEqual([SHARE_OWNERSHIP_READER_SOURCE]);
     expect(rowLabels('queue-usage')).toEqual([SHARE_QUEUE_USAGE_SOURCE]);
+  });
+
+  it.each(['report', 'delete'] as const)('retention sweep (%s mode): its verify and delete sites are control rows, its scan a background row, and the scan found no other label', async (mode) => {
+    const inner = new OxigraphStore();
+    const recorder = recordShareStore(inner);
+    await withControlPath(true, async () => { await driveRetentionWorkload(recorder, inner, { mode }); });
+    const onGraph = recorder.calls.filter((call) => call.graphs.includes(DEFAULT_PROMOTE_CONTROL_GRAPH_URI));
+    const rowLabels = (row: string) => [...new Set(onGraph.filter((call) => shareRowOf(call, [DEFAULT_PROMOTE_CONTROL_GRAPH_URI]) === row).map((call) => call.source))].sort();
+    expect(rowLabels('retention-scan')).toEqual([SHARE_RETENTION_SCAN_SOURCE]);
+    // report mode deletes nothing, so only its verify is observed; delete mode observes both control sites
+    expect(rowLabels('control')).toEqual(retentionLabels.filter((l) => l !== SHARE_RETENTION_SCAN_SOURCE && (mode === 'delete' || l.endsWith('.verify'))));
+    if (mode === 'delete') expect([...rowLabels('control'), ...rowLabels('retention-scan')].sort()).toEqual(retentionLabels);
+    expect(onGraph.filter((call) => shareRowOf(call, [DEFAULT_PROMOTE_CONTROL_GRAPH_URI]) === 'control').every((call) => call.options?.controlQueue === 'share')).toBe(true);
   });
 
   it('attributes each queue file\'s labels to that file: the site files between them hold every label', () => {
@@ -173,5 +193,17 @@ describe('the scanners report what they must', () => {
       ['query', 'other'], ['query', 'missing'], ['query', 'other'],
       ['deleteByPatternWithoutCount', 'other'], ['replaceSubjectAtomicallyOrFallback', 'other'],
     ]);
+  });
+  it('classes the retention scan\'s options as such, and nothing that merely resembles them', () => {
+    const text = [
+      "const SCAN_OPTIONS = { source: RETENTION_SCAN_SOURCE, priority: 'background' };",
+      'await ctx.store.query(sql, SCAN_OPTIONS);',
+      "await ctx.store.query(sql, { source: 'publisher.asyncPromote.retention.scan', priority: 'background' });",
+      "await ctx.store.query(sql, { source: RETENTION_SCAN_SOURCE, priority: 'normal' });",
+      'await ctx.store.query(sql, { source: RETENTION_SCAN_SOURCE });',
+      "await ctx.store.query(sql, { source: RETENTION_SCAN_SOURCE, priority: 'background', signal });",
+      "await ctx.store.query(sql, { source: 'publisher.asyncPromote.retention.other', priority: 'background' });",
+    ].join('\n');
+    expect(storeSites(fixture('fixture.ts', text)).map((s) => s.options)).toEqual(['retention-scan', 'retention-scan', 'other', 'other', 'other', 'other']);
   });
 });
