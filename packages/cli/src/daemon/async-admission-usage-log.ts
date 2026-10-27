@@ -13,6 +13,7 @@ import {
   type StoreSchedulerStatsReport,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
+import type { RetentionQueueName, RetentionUsageView } from './retention-timer.js';
 
 /**
  * One `async_admission_usage` line every five minutes: how the async share and async publish
@@ -42,6 +43,15 @@ import {
  * also prints `store_wait_buckets`, the lane's wait counts as `<upper bound ms>x<count>` for each bucket that
  * holds a wait, ascending, joined by `|` (`infx<count>` past 10000 ms, `-` for none). Adding those counts over
  * the lines of a test cell or a monitoring window gives that window's P95 (docs/use-dkg/backpressure-observability.md).
+ *
+ * Queue retention (OT-RFC-73 P10b) appends fields only while a retention sweep runs (a queue whose mode is not `off`), so the line is unchanged by default. Per
+ * sweep, with the prefix `share_retention` (the publisher's, when P11 adds it, is `lift_retention`):
+ *     share_retention=report share_retention_ticks=12 share_retention_deleted=cancelled:0,retired_no_effect:0,succeeded:0
+ *     share_retention_kept=failed_retained:2,too_recent:40 share_retention_skipped=clock_jump:1 share_retention_errors=scan:1
+ *     share_retention_pass_scanned=300 share_retention_pass_would_delete=cancelled:1,retired_no_effect:0,succeeded:240 share_retention_pass_deleted=cancelled:0,...
+ * `_deleted`, `_kept` (judgments by reason), `_skipped` (ticks not run, by reason) and `_errors` (by phase, `tick` for a batch that threw) are cumulative since the
+ * process started; `_kept`, `_skipped` and `_errors` list only what is not zero. The `_pass_` fields are a gauge of the latest COMPLETE pass, not cumulative (`-`
+ * until one completed): in report mode `_pass_would_delete` is what the plan's delete gate reads.
  *
  * `http=` counts every admission request, 2xx included: `<route>/<phase>/<status>/<code>`, where
  * the phase is the step that answered (`request`, `write_preflight`, `intent_resolution`,
@@ -75,6 +85,8 @@ export interface AsyncAdmissionUsageSample {
   /** Cumulative count of queue depth reads that failed, timed out, or were skipped behind a hung one. */
   depthErrors: number;
   shareWorker: ShareWorkerCountersView | null;
+  /** The running retention sweeps; absent or empty prints nothing. */
+  retention?: readonly RetentionUsageView[];
 }
 
 const UNKNOWN = '-';
@@ -114,6 +126,31 @@ function windowFields(prefix: string, summary: LatencySummary, figures: readonly
     p50: summary.p50Ms, p95: summary.p95Ms, p99: summary.p99Ms, max: summary.maxMs,
   } satisfies Record<Figure, number | null>;
   return [`${prefix}_n=${summary.n}`, ...figures.map((figure) => `${prefix}_${figure}_ms=${ms(value[figure])}`)];
+}
+
+const RETENTION_PREFIX: Record<RetentionQueueName, string> = { share: 'share_retention', publisher: 'lift_retention' };
+
+/** `key:count` entries sorted by key; with `omitZero` only the keys that are not zero. */
+function retentionCounts(counts: Readonly<Record<string, number>>, omitZero: boolean): string {
+  return list(Object.entries(counts).filter(([, n]) => !omitZero || n !== 0).map(([key, n]): [string, number] => [component(key), n]));
+}
+
+function retentionFields(views: readonly RetentionUsageView[] | undefined): string[] {
+  return (views ?? []).flatMap((view) => {
+    const prefix = RETENTION_PREFIX[view.queue];
+    const pass = view.lastCompletePass;
+    return [
+      `${prefix}=${view.mode}`,
+      `${prefix}_ticks=${view.ticks}`,
+      `${prefix}_deleted=${retentionCounts(view.deleted, false)}`,
+      `${prefix}_kept=${retentionCounts(view.kept, true)}`,
+      `${prefix}_skipped=${retentionCounts(view.skipped, true)}`,
+      `${prefix}_errors=${retentionCounts(view.errors, true)}`,
+      `${prefix}_pass_scanned=${pass ? pass.scanned : UNKNOWN}`,
+      `${prefix}_pass_would_delete=${pass ? retentionCounts(pass.wouldDelete, false) : UNKNOWN}`,
+      `${prefix}_pass_deleted=${pass ? retentionCounts(pass.deleted, false) : UNKNOWN}`,
+    ];
+  });
 }
 
 export function formatAsyncAdmissionUsageLine(sample: AsyncAdmissionUsageSample): string {
@@ -173,6 +210,7 @@ export function formatAsyncAdmissionUsageLine(sample: AsyncAdmissionUsageSample)
     ...windowFields('lift_c2f', usage.liftClaimToFinish, ['p50', 'p95']),
     `lift_finalized=${usage.liftFinalized}`,
     `lift_failed=${usage.liftFailed}`,
+    ...retentionFields(sample.retention),
   ];
   return `async_admission_usage ${fields.join(' ')}`;
 }
@@ -205,6 +243,8 @@ export interface AsyncAdmissionUsageLogOptions {
   capture?: () => { store: readonly StoreSchedulerStatsReport[]; usage: AsyncAdmissionUsageSnapshot };
   readDepth?: (signal: AbortSignal) => Promise<AsyncQueueDepthReading>;
   shareWorkerCounters?: () => ShareWorkerCountersView | null;
+  /** The running retention sweeps' figures (OT-RFC-73 P10b); the line prints them only while a sweep runs. */
+  retention?: () => readonly RetentionUsageView[];
   intervalMs?: number;
   depthTimeoutMs?: number;
   now?: () => number;
@@ -256,6 +296,15 @@ export function startAsyncAdmissionUsageLog(options: AsyncAdmissionUsageLogOptio
     }
   };
 
+  /** The retention figures never cost the line: a provider that fails prints no retention fields. */
+  const readRetention = (): readonly RetentionUsageView[] | undefined => {
+    try {
+      return options.retention?.();
+    } catch {
+      return undefined;
+    }
+  };
+
   const write = async (): Promise<void> => {
     try {
       const at = now();
@@ -274,6 +323,7 @@ export function startAsyncAdmissionUsageLog(options: AsyncAdmissionUsageLogOptio
         depth,
         depthErrors,
         shareWorker: options.shareWorkerCounters?.() ?? null,
+        retention: readRetention(),
       }));
     } catch {
       // A failed sample is skipped; the next one is taken on time.

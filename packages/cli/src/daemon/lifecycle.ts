@@ -466,6 +466,8 @@ import {
 
 import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
+import { startRetention, type RetentionHandle } from './retention-sweeps.js';
+import { resolveRetentionConfig } from '../retention-config.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
@@ -1433,6 +1435,8 @@ async function runDaemonInnerWithStartupOwnership(
   if (isPublisherRuntimeEnabled(config.publisher)) {
     resolvePublisherRetryTuning(config.publisher);
   }
+  // OT-RFC-73 P10b: a bad queue-retention value fails the boot here and the error names the key (the default is off for both queues).
+  const retentionSettings = resolveRetentionConfig(config.queueRetention);
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,
@@ -2149,6 +2153,7 @@ async function runDaemonInnerWithStartupOwnership(
   // torn down in `shutdown` before `agent.stop()` so the queue store is
   // still open when we wait for in-flight promotes to drain.
   let promoteWorkerLifecycle: PromoteWorkerDaemonLifecycle | null = null;
+  let daemonRetention: RetentionHandle | null = null;
   let shuttingDown = false;
 
   const publisherControl = createPublisherControlFromStore(agent.store, {
@@ -2448,6 +2453,8 @@ async function runDaemonInnerWithStartupOwnership(
         postCommitRecoveryIntervalMs: promoteWorkerConfig?.postCommitRecoveryIntervalMs,
       },
     });
+    // Queue retention (off by default) runs only here, in the daemon's admission instance, over the queue's own store object.
+    daemonRetention = startRetention({ runtime: 'daemon-admission', settings: retentionSettings, agent, log });
 
     publisherStartupTimer = setTimeout(() => {
       if (publisherStartupController.signal.aborted) return;
@@ -2909,6 +2916,7 @@ async function runDaemonInnerWithStartupOwnership(
   const asyncAdmissionUsageLog = startAsyncAdmissionUsageLog({
     readDepth: (signal) => readAsyncQueueDepth(agent.store, signal),
     shareWorkerCounters: () => promoteWorkerLifecycle?.getSupervisor()?.getCounters() ?? null,
+    retention: () => daemonRetention?.usage() ?? [],
   });
 
   // A time window cannot bound a same-day compatibility-log storm. This
@@ -3717,6 +3725,7 @@ async function runDaemonInnerWithStartupOwnership(
         daemonLogRotationChecks.stop();
         resourceUsageLog.stop();
         asyncAdmissionUsageLog.stop();
+        await daemonRetention?.stop();
         await runChainDiscoveryScan.close().catch((err: unknown) => {
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });
