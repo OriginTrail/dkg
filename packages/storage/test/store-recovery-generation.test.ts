@@ -1,6 +1,6 @@
 import { expect, it } from 'vitest';
 import { SparqlHttpStore, createManagedOxigraphSparqlStoreV1 } from '../src/adapters/sparql-http.js';
-import { asStoreRecoveryGenerationReader } from '../src/store-recovery-generation.js';
+import { asStoreRecoveryGenerationReader, readStoreOperationExecutionGeneration, storeWorkerExecutionFailure } from '../src/store-recovery-generation.js';
 
 const options = { queryEndpoint: 'http://127.0.0.1:9/query', updateEndpoint: 'http://127.0.0.1:9/update' };
 it('exposes one supervised epoch/readiness snapshot without granting early proof admission', async () => {
@@ -25,4 +25,12 @@ it('does not grant recovery authority to a generic endpoint or a forged object',
     expect(asStoreRecoveryGenerationReader(generic)).toBeUndefined();
     expect(asStoreRecoveryGenerationReader({ getRecoveryGeneration: () => 42 })).toBeUndefined();
   } finally { await generic.close(); }
+});
+
+
+it('binds worker failure evidence to the actual posted operation and refuses structural forgeries', () => {
+  const error = storeWorkerExecutionFailure(new Error('worker exited'), 'insert', 0);
+  expect(readStoreOperationExecutionGeneration(error, 'insert')).toBe(0);
+  expect(readStoreOperationExecutionGeneration(error, 'update')).toBeUndefined();
+  expect(readStoreOperationExecutionGeneration({ operation: 'insert', generation: 0 }, 'insert')).toBeUndefined();
 });

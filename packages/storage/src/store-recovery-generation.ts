@@ -1,3 +1,4 @@
+import { isStoreOperation, type StoreOperation } from './store-operation-outcome.js';
 import { findTripleStoreCapability } from './triple-store.js';
 
 /** One observation of a supervised backend. A newer ready generation certifies
@@ -20,4 +21,23 @@ export function asStoreRecoveryGenerationReader(store: unknown): StoreRecoveryGe
   const owner = findTripleStoreCapability(store, (value): value is object =>
     typeof value === 'object' && value !== null && readers.has(value));
   return owner === null ? undefined : readers.get(owner);
+}
+
+
+const failedExecutions = new WeakMap<object, { operation: StoreOperation; generation: number }>();
+
+/** Internal worker failure construction: bind evidence to one posted operation, never to a later queue admission. */
+export function storeWorkerExecutionFailure(cause: Error, operation: string, generation: number): Error {
+  const error = new Error(cause.message, { cause });
+  error.name = cause.name;
+  if ('code' in cause) Object.assign(error, { code: cause.code });
+  if (isStoreOperation(operation)) failedExecutions.set(error, { operation, generation });
+  return error;
+}
+
+/** Only privately registered execution evidence for this exact operation can label uncertainty. */
+export function readStoreOperationExecutionGeneration(error: unknown, operation: StoreOperation): number | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const evidence = failedExecutions.get(error);
+  return evidence?.operation === operation ? evidence.generation : undefined;
 }

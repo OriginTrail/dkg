@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
-import { isStoreOperationNotStarted, type Quad, type StoreOperation } from '@origintrail-official/dkg-storage';
+import { readStoreOperationExecutionGeneration, isStoreOperationNotStarted, type Quad, type StoreOperation } from '@origintrail-official/dkg-storage';
 import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 
 /**
@@ -57,7 +57,8 @@ export function createObservedStoreMutation(
       const indeterminate = operation === undefined
         ? mutation !== undefined : !isStoreOperationNotStarted(error, operation);
       if (indeterminate) invalidate();
-      settle?.(indeterminate ? 'indeterminate' : 'unchanged');
+      const generation = operation === undefined ? undefined : readStoreOperationExecutionGeneration(error, operation);
+      settle?.(indeterminate ? 'indeterminate' : 'unchanged', generation === undefined ? undefined : { generation });
       throw error;
     }
     const didChange = changed(result);

@@ -1,3 +1,8 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import type { Worker } from 'node:worker_threads';
+import { createAgentStoreComposition } from '../src/internal/agent-store-composition.js';
 import type { StoreRecoveryGenerationReader } from '@origintrail-official/dkg-storage';
 import { createDurableHeldStore, createStoredPrefixAcquirer } from '../src/durable-recovery-held-store.js';
 import { runAdmittedDurableGraph } from '../src/durable-recovery-graph.js';
@@ -22,7 +27,7 @@ import {
   generateGraphKnowledgeAssetMetadata,
   overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1,
 } from '@origintrail-official/dkg-publisher';
-import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, OxigraphWorkerStore, asStoreRecoveryGenerationReader, type TripleStore, type Quad } from '@origintrail-official/dkg-storage';
 import { SYNC_PAGE_SIZE } from '../src/dkg-agent-constants.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
@@ -46,7 +51,7 @@ const CG = 'stored-prefix-cg';
 const PEER = '12D3KooWHeldRestartPeer';
 const SECOND_PEER = '12D3KooWHeldRestartPeerTwo';
 const ctx = { operationId: 'held-restart', operationName: 'sync' } as OperationContext;
-const stores: OxigraphStore[] = [];
+const stores: TripleStore[] = [];
 
 afterEach(async () => {
   for (const store of stores.splice(0)) await store.close();
@@ -164,14 +169,16 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: StoreRecoveryGenerationReader; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
+  options: { store?: TripleStore; signal?: () => AbortSignal | undefined; failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: StoreRecoveryGenerationReader; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
 
-  const rawStore = new OxigraphStore();
+  const rawStore = options.store ?? new OxigraphStore();
   stores.push(rawStore);
-  const contentFence = new StoreContentFence(options.recoveryGeneration);
-  const store = createMutationObservedStore(rawStore, createObservedStoreMutation(() => {}, contentFence));
+  const production = createAgentStoreComposition(rawStore, () => {}, { begin: () => () => {} });
+  const contentFence = options.recoveryGeneration ? new StoreContentFence(options.recoveryGeneration) : production.heldContent;
+  const store = options.recoveryGeneration
+    ? createMutationObservedStore(rawStore, createObservedStoreMutation(() => {}, contentFence)) : production.store;
   const writes: string[] = [];
   const info: string[] = [];
   let defaultSubscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
@@ -614,4 +621,40 @@ it('preserves a verified prefix when a resumed round is cancelled during verific
   controller = undefined; cancel = false;
   expect((await core.round(checkpoints, PEER, {})).result.complete).toBe(true);
   expect(core.writes).toEqual(fixtures.map(f => f.ual));
+});
+
+
+it('finishes bounded recovery after one worker replacement with an in-flight write', async () => {
+  const directory = mkdtempSync(join(tmpdir(), 'dkg-prefix-worker-'));
+  const raw = new OxigraphWorkerStore(join(directory, 'store.nq'));
+  try {
+    const fixtures = generation();
+    const core = node(servingPeer(fixtures), { store: raw });
+    const checkpoints = new MemorySyncCheckpointStore();
+    const first = await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() });
+    expect(first.result.complete).toBe(false);
+    expect(checkpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.offset).toBeGreaterThan(0);
+    const prefix = fixtures.find(f => core.writes.includes(f.ual))!;
+    await raw.flush();
+    const read = asStoreRecoveryGenerationReader(raw)!;
+    expect(read()).toEqual({ generation: 0, ready: true });
+    const worker = (raw as unknown as { worker: Worker }).worker;
+    // Hold a posted RPC until physical exit rejects it. Its owner is worker 0,
+    // even though the failure reaches the observer after generation advances.
+    vi.spyOn(worker, 'postMessage').mockImplementationOnce(message => { expect(message.method).toBe('insert'); });
+    const write = core.store.insert([{ ...prefix.payload[0]!, object: '"pending mutation"' }]);
+    const rejected = expect(write).rejects.toThrow('worker exited unexpectedly');
+    await worker.terminate();
+    await rejected;
+    await raw.countQuads(); // Wait for the replacement's first healthy reply.
+    expect(read()).toEqual({ generation: 1, ready: true });
+    let complete = false;
+    for (let round = 0; round < 12 && !complete; round++) {
+      complete = (await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() })).result.complete;
+    }
+    expect(complete).toBe(true);
+    expect(read()?.generation).toBe(1);
+    expect(core.writes).toEqual(fixtures.map(f => f.ual));
+    expect(core.writes.filter(ual => ual === prefix.ual)).toHaveLength(1);
+  } finally { await raw.close(); rmSync(directory, { recursive: true, force: true }); }
 });
