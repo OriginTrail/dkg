@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { decodePublicGraphSnapshot, normalizePublicGraphSnapshot } from '@origintrail-official/dkg-chain';
+import { decodePublicGraphSnapshotResponse, normalizePublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { PublicSnapshotMode, PublicSnapshotObservation } from './public-snapshot-evidence.js';
 
@@ -11,7 +11,7 @@ export function createPublicSnapshotReader(options: {
   mode: PublicSnapshotMode;
   chain: Pick<ChainAdapter, 'readPublicGraphSnapshot'>; request: SnapshotRequest;
   peers: readonly string[]; signal: AbortSignal; assertCurrent(): void;
-  expected: Parameters<typeof decodePublicGraphSnapshot>[1];
+  expected: Parameters<typeof decodePublicGraphSnapshotResponse>[1];
 }): (refresh?: boolean) => Promise<PublicSnapshotObservation> {
   const {chain,request,signal,expected,assertCurrent}=options;
   if (options.mode === 'rpc-only') return async () => {
@@ -29,11 +29,12 @@ export function createPublicSnapshotReader(options: {
       assertCurrent();
       try {
         const bytes = await request(peer, refresh, signal);
-        if (JSON.parse(new TextDecoder().decode(bytes))?.unavailable === true) {
+        const response = decodePublicGraphSnapshotResponse(bytes, expected);
+        if (response.kind === 'unavailable') {
           unavailable = true;
           throw new PublicSnapshotUnavailableError('Snapshot temporarily unavailable');
         }
-        const snapshot=decodePublicGraphSnapshot(bytes,expected);
+        const { snapshot } = response;
         assertCurrent();
         return {mode:'core-cache',snapshot,sourceCore:peer};
       } catch(error) { failure=error; signal.throwIfAborted(); }

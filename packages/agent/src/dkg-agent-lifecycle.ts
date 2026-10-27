@@ -485,7 +485,7 @@ import  {
   type SyncReconcilerBackoff,
 } from './dkg-agent-types.js';
 import {
-  mayAdoptContextGraphWireSubscription,
+  projectContextGraphWireAdoption,
   normalizeContextGraphSubscriptionTransition,
   projectContextGraphSubscriptionPersistence,
   projectContextGraphSubscriptionPersistenceWithSavedHosting,
@@ -7840,35 +7840,16 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const explicitNextWireId = next.onChainHash === undefined
       ? undefined
       : this.contextGraphWireId(next.onChainHash);
-    const adoptsWireOnlySubscription =
-      options?.deferWireAdoption !== true && wireOnlySubscription !== null
-      && mayAdoptContextGraphWireSubscription(next, wireOnlySubscription.subscription)
-      && (explicitNextWireId === undefined || explicitNextWireId === localWireId)
-      && (
-        next.onChainId === undefined
-        || wireOnlySubscription.subscription.onChainId === undefined
-        || next.onChainId === wireOnlySubscription.subscription.onChainId
-      );
-    const normalizedNext = normalizeContextGraphSubscriptionTransition(previous, {
-      ...next,
-      ...(adoptsWireOnlySubscription && next.onChainId === undefined
-        ? { onChainId: wireOnlySubscription.subscription.onChainId }
-        : {}),
-      ...(adoptsWireOnlySubscription && next.onChainHash === undefined
-        ? { onChainHash: localWireId }
-        : {}),
-      // A Core's hosting obligation belongs to the graph, not to the id it
-      // was first recorded under.
-      ...(adoptsWireOnlySubscription
-        && wireOnlySubscription.subscription.coreHosted === true
-        ? { coreHosted: true }
-        : {}),
-    });
+    const adoption = projectContextGraphWireAdoption(next,
+      options?.deferWireAdoption === true ? undefined : wireOnlySubscription?.subscription,
+      localWireId, explicitNextWireId);
+    const adoptsWireOnlySubscription = adoption.adopts;
+    const normalizedNext = normalizeContextGraphSubscriptionTransition(previous, adoption.next);
     if (adoptsWireOnlySubscription) {
       // Retire the authenticated placeholder before publishing its canonical
       // row so no RFC-64 responsibility, binding or receiver stays wire-keyed.
-      this.deleteContextGraphSubscription(wireOnlySubscription.localId);
-      if (this.wireIdToLocalCgId.get(localWireId) === wireOnlySubscription.localId) {
+      this.deleteContextGraphSubscription(wireOnlySubscription!.localId);
+      if (this.wireIdToLocalCgId.get(localWireId) === wireOnlySubscription!.localId) {
         this.wireIdToLocalCgId.delete(localWireId);
       }
       this.log.info(
@@ -8151,7 +8132,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ? this.contextGraphSubscriptionDormancyById.get(contextGraphId)
         ?? (this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled')
       : undefined;
-    this.contextGraphSubscriptionActivations.transition(this.contextGraphSubscriptionDormancyById, contextGraphId, reason,
+    this.contextGraphSubscriptionActivations.transition(contextGraphId, reason,
       dormancy => this.accountContextGraphSubscriptionTransitions([{ dormancy, kind: 'saved',
         persisted: isPersisted, active: isActive, hosted: live?.coreHosted === true }]));
   }
@@ -8182,7 +8163,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const changes = new Map<string, ContextGraphDormancyReason | undefined>();
     for (const id of deactivatedIds) if (!systemIds.has(id)) changes.set(id, 'deactivated');
     for (const id of clearedIds) if (!systemIds.has(id)) changes.set(id, undefined);
-    this.contextGraphSubscriptionActivations.transitionBatch(this.contextGraphSubscriptionDormancyById, changes,
+    this.contextGraphSubscriptionActivations.transitionBatch(changes,
       transitions => this.accountContextGraphSubscriptionTransitions(transitions.map(dormancy => ({
         dormancy, kind: dormancy.after === 'deactivated' ? 'deactivated' : 'cleared',
       }))));
@@ -8842,7 +8823,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /** Operational dormancy and activation ownership change together; status is only reporting. */
   transitionContextGraphSubscriptionDormancy(this: DKGAgent, id: string, reason: ContextGraphDormancyReason | undefined): void {
-    this.contextGraphSubscriptionActivations.transition(this.contextGraphSubscriptionDormancyById, id, reason);
+    this.contextGraphSubscriptionActivations.transition(id, reason);
   }
 
   /** A provisional subscribed row is not a committed activation. */
@@ -8901,12 +8882,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }),
       persistMembership: (id) => this.persistLocalNodeMembership(id, 'rehydrated-subscription'),
       commit: (id) => {
+        const before = this.subscribedContextGraphs.get(id)!;
         const wire = this.resolveWireOnlyContextGraphSubscription(id);
-        this.retireLiveContextGraphNamePlaceholderFor(id);
-        const committed = this.setContextGraphSubscription(id, this.subscribedContextGraphs.get(id)!, { persist: false, preserveAdmittedWireBinding: true });
-        if (wire && !this.subscribedContextGraphs.has(wire.localId)) void this.persistContextGraphSubscription(id, { retiredNamePredecessor: { ...wire.subscription, id: wire.localId } });
-        this.contextGraphSubscriptionActivations.commit(activation, committed, options.claimRollingSlot === true);
-        return committed;
+        const localWireId = this.contextGraphNameCommitment(id);
+        const adoption = projectContextGraphWireAdoption(before, wire?.subscription, localWireId,
+          before.onChainHash === undefined ? undefined : this.contextGraphWireId(before.onChainHash));
+        const expected = normalizeContextGraphSubscriptionTransition(before, adoption.next);
+        if (expected.onChainHash) expected.onChainHash = this.contextGraphWireId(expected.onChainHash);
+        return this.contextGraphSubscriptionActivations.commit(activation, expected, () => {
+          this.retireLiveContextGraphNamePlaceholderFor(id);
+          const committed = this.setContextGraphSubscription(id, before, { persist: false, preserveAdmittedWireBinding: true });
+          if (wire && !this.subscribedContextGraphs.has(wire.localId)) void this.persistContextGraphSubscription(id, { retiredNamePredecessor: { ...wire.subscription, id: wire.localId } });
+          return committed;
+        }, options.claimRollingSlot === true);
       },
     }, options);
   }
@@ -9136,7 +9124,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       let rows = persistedRows.filter((r) => !systemContextGraphs.has(r.id));
       const namePlaceholders = partitionSupersededContextGraphNamePlaceholders(rows);
       rows = namePlaceholders.active;
-      this.contextGraphSubscriptionActivations.reset(rows, this.contextGraphSubscriptionDormancyById);
+      this.contextGraphSubscriptionActivations.reset(rows);
       // The operator kill-switch below promises not to touch durable state.
       if (this.config.contextGraphSubscriptionRehydrationEnabled) {
         for (const superseded of namePlaceholders.superseded) {

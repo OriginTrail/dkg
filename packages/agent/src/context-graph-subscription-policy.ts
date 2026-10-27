@@ -150,6 +150,22 @@ export function mayAdoptContextGraphWireSubscription(
     || (wire.subscribed !== true && wire.coreHosted !== true);
 }
 
+/** One projection owns verified wire adoption for both ordinary writes and activation. */
+export function projectContextGraphWireAdoption(
+  next: ContextGraphSubInput, wire: ContextGraphSub | undefined,
+  localWireId: string, explicitNextWireId: string | undefined,
+): { adopts: boolean; next: ContextGraphSubInput } {
+  const adopts = wire !== undefined && mayAdoptContextGraphWireSubscription(next, wire)
+    && (explicitNextWireId === undefined || explicitNextWireId === localWireId)
+    && (next.onChainId === undefined || wire.onChainId === undefined || next.onChainId === wire.onChainId);
+  return { adopts, next: {
+    ...next,
+    ...(adopts && next.onChainId === undefined ? { onChainId: wire.onChainId } : {}),
+    ...(adopts && next.onChainHash === undefined ? { onChainHash: localWireId } : {}),
+    ...(adopts && wire.coreHosted === true ? { coreHosted: true } : {}),
+  } };
+}
+
 export function resolveContextGraphSyncMode(input: {
   existing?: Pick<ContextGraphSub, 'subscribed' | 'syncMode'>;
   requested?: ContextGraphSyncMode;

@@ -38,14 +38,14 @@ function fixture() {
 function coldIntent(a: any) {
   const row = { id: graph, subscribed: true, syncScoped: true, synced: false, metaSynced: false, sharedMemorySynced: false };
   a.subscribedContextGraphs.clear();
-  a.contextGraphSubscriptionActivations.reset([row], a.contextGraphSubscriptionDormancyById);
+  a.contextGraphSubscriptionActivations.reset([row]);
   a.contextGraphSubscriptionDormancyById.set(graph, 'authorityUnavailable');
   return row;
 }
 function finish(a: any) {
   const owner = a.contextGraphSubscriptionActivations, row = a.subscribedContextGraphs.get(graph);
   a.contextGraphSubscriptionDormancyById.delete(graph);
-  if (row?.subscribed) { owner.install(owner.get(graph), row); owner.commit(owner.get(graph), row, false); }
+  if (row?.subscribed) { owner.install(owner.get(graph), row); owner.commit(owner.get(graph), row, () => row, false); }
   else owner.cancel(graph);
 }
 const run = (a: any, signal?: AbortSignal) => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a,

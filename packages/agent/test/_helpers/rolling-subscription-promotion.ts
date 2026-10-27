@@ -85,7 +85,7 @@ export function createRollingPromotionFixture(
       if (live) {
         const handle = activations.observe(row);
         activations.install(handle, live);
-        activations.commit(handle, live, activationOptions.claimRollingSlot === true);
+        activations.commit(handle, live, () => live, activationOptions.claimRollingSlot === true);
       }
     }),
   };

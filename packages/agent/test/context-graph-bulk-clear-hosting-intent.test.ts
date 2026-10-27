@@ -168,7 +168,7 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     state.contextGraphSubscriptionRehydrationStatus.rehydrationEnabled = true;
     state.contextGraphSubscriptionRehydrationStatus.activationCap = 1;
     state.contextGraphSubscriptionRehydrationPendingIds.add(LOCAL);
-    state.contextGraphSubscriptionActivations.reset([f.original, other], state.contextGraphSubscriptionDormancyById);
+    state.contextGraphSubscriptionActivations.reset([f.original, other]);
     state.transitionContextGraphSubscriptionDormancy(LOCAL, 'activationCap');
     state.transitionContextGraphSubscriptionDormancy(other.id, 'authorityUnavailable');
     vi.spyOn(f.agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockImplementation(async id => id === LOCAL ? {
@@ -207,7 +207,7 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     state.contextGraphSubscriptionRehydrationStatus.rehydrationEnabled = true;
     state.contextGraphSubscriptionRehydrationStatus.activationCap = 1;
     state.contextGraphSubscriptionRehydrationPendingIds.add(LOCAL);
-    state.contextGraphSubscriptionActivations.reset([f.original], state.contextGraphSubscriptionDormancyById);
+    state.contextGraphSubscriptionActivations.reset([f.original]);
     state.transitionContextGraphSubscriptionDormancy(LOCAL, 'activationCap');
     state.started = true;
     vi.spyOn(f.agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
