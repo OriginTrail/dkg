@@ -1,10 +1,39 @@
 import { afterEach, expect, it, vi } from 'vitest';
+import { createOperationContext } from '@origintrail-official/dkg-core';
 import { classifyDurableProgress } from '../src/sync/durable-progress.js';
 import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
 import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 import { CG, PEER, createHeldProductionHarness, stopHeldProductionAgents } from './_helpers/durable-held-production.js';
 
 afterEach(async () => { await stopHeldProductionAgents(); vi.restoreAllMocks(); });
+
+it('preserves a held META write during cancellation without publishing terminal readiness', async () => {
+  const h = await createHeldProductionHarness();
+  const controller = new AbortController();
+  const ns = 'http://dkg.io/ontology/', subject = 'urn:held:cancelled-lifecycle', graph = h.meta[0]!.graph;
+  const row = (predicate: string, object: string) => ({ subject, predicate: ns + predicate, object, graph });
+  h.meta.push(row('kaUal', h.ual), row('contentScopeVersion', '"2"'),
+    row('assertionVersion', '"1"'), row('assertionGraph', h.graph));
+  const insert = h.internal.store.insert.bind(h.internal.store);
+  vi.spyOn(h.internal.store, 'insert').mockImplementation(async (...args: unknown[]) => {
+    await insert(...args);
+    controller.abort(new Error('operation deadline expired during the dispatched write'));
+  });
+  const recovered = await h.internal.runGraphOwnedDurableRecoveryRound({
+    ctx: createOperationContext('sync'), remotePeerId: PEER, contextGraphId: CG,
+    recovery: { meta: { requesterScope: 'durable-recovery-meta:cancel-held' }, holdings: {} },
+    options: { signal: controller.signal },
+  });
+  expect(controller.signal.aborted).toBe(true);
+  expect(recovered.result.insertedMetaTriples).toBeGreaterThan(0);
+  expect(recovered.result.complete).toBe(false);
+  expect(recovered.result.verifiedHeldAssets).toBe(0);
+  expect(recovered.decision).toEqual({ strategy: 'not-started' });
+  expect(h.internal.syncCheckpoints.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).not.toBe(true);
+  expect(h.dataRequests()).toBe(0);
+  const pointers = await h.internal.store.query(`SELECT ?pointer WHERE { GRAPH <${graph}> { <${subject}> <${ns}assertionGraph> ?pointer } }`);
+  expect(pointers.bindings).toEqual([{ pointer: h.graph }]);
+}, 15_000);
 
 it.each([false, true])('persists the discovered binding before held readiness (save fails: %s)', async failBindingSave => {
   const h = await createHeldProductionHarness({ unbound: true, failBindingSave });

@@ -818,9 +818,10 @@ async function executeDurableGraph(
     if (dataPlan.kind === 'metadata') {
       heldSettlement = dataPlan.settlement;
       const held = heldSettlement;
-      held.assertCurrent();
-      await persistDurableHoldingsMetadata(context, pid, metaResult, held.descriptors, accumulator, held.assertCurrent);
-      held.assertCurrent();
+      const assertHeldCurrent = () => { settlement.assertCurrent(); held.assertCurrent(); };
+      assertHeldCurrent();
+      await persistDurableHoldingsMetadata(context, pid, metaResult, held.descriptors, accumulator, assertHeldCurrent);
+      assertHeldCurrent();
       recordPhaseOutcome(metaResult, { updateCheckpoint: true });
       logInfo(ctx, settleDurableDataFromHoldings({ plan: held.plan, remotePeerId, contextGraphId: pid,
         manifest: held.manifest, metaResult, accumulator, deleteCheckpoint, setCheckpoint }));
