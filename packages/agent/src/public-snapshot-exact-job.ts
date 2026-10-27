@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import type { PublicSnapshotExactRecoveryOptions } from './public-snapshot-exact.js';
 import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 import { PublicSnapshotRecoveryPacing } from './public-snapshot-exact-pacing.js';
@@ -10,7 +11,7 @@ export class PublicSnapshotExactJob {
   readonly pacing: PublicSnapshotRecoveryPacing;
   private alreadyPresent = 0;
   private readonly failure = new AbortController();
-  private readonly tails = new Map<string, Promise<unknown>>();
+  private readonly peerLocks = new Map<string, Promise<void>>();
 
   constructor(private readonly options: PublicSnapshotExactRecoveryOptions) {
     this.signal = AbortSignal.any([options.signal, this.failure.signal]);
@@ -35,10 +36,10 @@ export class PublicSnapshotExactJob {
     return added;
   }
   async serializePeer<T>(peer: string, run: () => Promise<T>): Promise<T> {
-    const previous = this.tails.get(peer) ?? Promise.resolve();
-    const work = previous.catch(() => {}).then(() => { this.assertActive(); return run(); });
-    this.tails.set(peer, work);
-    try { return await work; } finally { if (this.tails.get(peer) === work) this.tails.delete(peer); }
+    return withKeyedLocks(this.peerLocks, [peer], async () => {
+      this.assertActive();
+      return run();
+    });
   }
   async run(workers: Array<() => Promise<void>>): Promise<PublicSnapshotRecoveryResult> {
     let firstFailure: unknown;

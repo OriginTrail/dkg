@@ -182,6 +182,19 @@ describe('persisted activation commits admitted wire adoption after successful e
     expect(f.state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: false, coreHosted: true, lastReconciledOrdinal: 1 });
     await f.drain();
   });
+  it('rejects a stale prepared transition before retiring Core custody', async () => {
+    const f = await fixture('host');
+    const before = f.state.subscribedContextGraphs.get(LOCAL)!;
+    const plan = f.agent.prepareContextGraphSubscriptionWrite(LOCAL, { ...before, subscribed: true }, { persist: false });
+    f.agent.setContextGraphSubscription(LOCAL, { ...before, pendingMeta: true }, { persist: false, deferWireAdoption: true });
+    expect(() => plan.apply()).toThrow('Subscription transition changed before apply');
+    expect(f.state.subscribedContextGraphs.get(HASH)).toBe(f.originalWire);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.pendingMeta).toBe(true);
+    expect(f.state.subscribedContextGraphs.get(LOCAL)?.subscribed).toBe(false);
+    expect(f.remove).not.toHaveBeenCalled();
+    await f.assertHostLive(); await f.drain();
+  });
+
   it('stops dispatch when the native host listener is unwired', async () => {
     const f = await fixture('host');
     f.agent.unwireSwmHostModeHandler(HASH);
