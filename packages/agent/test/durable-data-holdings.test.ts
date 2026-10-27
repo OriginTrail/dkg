@@ -424,8 +424,9 @@ describe('holding a copy only while it is current on chain', () => {
         deadlines.push(deadline);
         const state = chain.get(ual);
         if (!state) throw createRpcTimeoutError('held chain check exceeded its context-graph deadline');
-        return state.bound && (requiredBinding === undefined || state.onChainContextGraphId === requiredBinding)
+        const matches = state.bound && (requiredBinding === undefined || state.onChainContextGraphId === requiredBinding)
           && state.merkleRootHex === descriptor.claimedRootHex && state.assertionVersion === BigInt(descriptor.assertionVersion);
+        return matches ? { kind: 'match' } : { kind: 'mismatch', code: 'VM_CHAIN_ROOT_MISMATCH', message: `Held asset ${ual} is not current on chain` };
       },
       budget: { createGraphScopedAuthenticationDeadline: authenticationDeadline },
     })!;
@@ -437,7 +438,7 @@ describe('holding a copy only while it is current on chain', () => {
     const manifest = generation(1);
     const descriptor = manifest.descriptors[0]!;
     let onChainId = '323';
-    const authenticateHeld = vi.fn(async (_descriptor, requiredBinding) => requiredBinding === '323');
+    const authenticateHeld = vi.fn(async (_descriptor, requiredBinding) => requiredBinding === '323' ? { kind: 'match' as const } : { kind: 'mismatch' as const, code: 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH' as const, message: 'binding mismatch' });
     const holdings = currentHeldGraphScopedAssetsConfirmer({
       authenticateHeld,
       binding: () => ({ onChainId, generation: 0 }),

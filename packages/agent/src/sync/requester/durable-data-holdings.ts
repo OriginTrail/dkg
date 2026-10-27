@@ -114,7 +114,7 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
       HELD_CHAIN_CHECK_CONCURRENCY,
       async (descriptor) => {
         const { ual } = descriptor;
-        let current: boolean;
+        let current: Awaited<ReturnType<NonNullable<DurableRecoveryAuthority['authenticateHeld']>>>;
         try {
           current = await authenticateHeld(descriptor, binding?.onChainId, deadline, request.signal);
         } catch (error) {
@@ -126,7 +126,7 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
           );
         }
         request.signal?.throwIfAborted();
-        if (!current) throw new HeldGenerationNotCurrentError(`Held asset ${ual} of "${contextGraphId}" is not current on chain`);
+        if (current.kind === 'mismatch') throw new HeldGenerationNotCurrentError(`Held asset ${ual} of "${contextGraphId}" is not current on chain: ${current.message}`);
         confirmed?.add(cacheKey(descriptor));
       },
     );

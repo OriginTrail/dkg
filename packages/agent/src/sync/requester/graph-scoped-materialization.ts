@@ -1,4 +1,4 @@
-import { prepareGraphScopedChainViewRead, assertGraphScopedChainEvidence, type VerifyContextGraphBinding } from './graph-scoped-chain-views.js';
+import { prepareGraphScopedChainViewRead, validateGraphScopedChainEvidence, type GraphScopedChainEvidence, type VerifyContextGraphBinding } from './graph-scoped-chain-views.js';
 import { packKnowledgeAssetIdFromIdentity } from '../../ka-identity.js';
 import { executeGraphScopedPublication } from './graph-scoped-publication.js';
 import {
@@ -138,21 +138,14 @@ export async function authenticateChallengePinnedGraphScopedAsset(
 export async function authenticateHeldGraphScopedDescriptor(
   chain: ChainAdapter, copy: GraphScopedDescriptor, requiredBinding: string | undefined,
   verifyContextGraphBinding: VerifyContextGraphBinding, options: { signal?: AbortSignal } = {},
-): Promise<boolean> {
+): Promise<GraphScopedChainEvidence> {
   const views = prepareGraphScopedChainViewRead(chain, copy.ual, {
     unsupported: 'A held graph-scoped asset check requires chain root, assertion-count, and context-graph views',
     wrongChain: () => `Held graph-scoped asset ${copy.ual} is not on local chain ${chain.chainId}`,
   }, options.signal);
   const evidence = await views.read();
-  try {
-    await assertGraphScopedChainEvidence({ ...copy, assertionVersion: BigInt(copy.assertionVersion),
-      merkleRootHex: copy.claimedRootHex }, evidence, verifyContextGraphBinding, options.signal, requiredBinding);
-    return true;
-  } catch (error) {
-    if (['VM_CHAIN_ROOT_MISMATCH', 'VM_CHAIN_ASSERTION_VERSION_MISMATCH', 'VM_CHAIN_CONTEXT_GRAPH_MISMATCH']
-      .includes((error as { code?: string }).code ?? '')) return false;
-    throw error;
-  }
+  return validateGraphScopedChainEvidence({ ...copy, assertionVersion: BigInt(copy.assertionVersion),
+    merkleRootHex: copy.claimedRootHex }, evidence, verifyContextGraphBinding, options.signal, requiredBinding);
 }
 
 /**
@@ -201,7 +194,8 @@ export async function authenticateVerifiedGraphScopedAsset(
   const provenance = resolveProvenance(chain, asset, options.signal);
   provenance.catch(() => undefined);
   const { latestRoot, rootCount, boundContextGraphId } = await views.read();
-  await assertGraphScopedChainEvidence(asset, { latestRoot, rootCount, boundContextGraphId }, verifyContextGraphBinding, options.signal);
+  const evidence = await validateGraphScopedChainEvidence(asset, { latestRoot, rootCount, boundContextGraphId }, verifyContextGraphBinding, options.signal);
+  if (evidence.kind === 'mismatch') throw Object.assign(new Error(evidence.message), { code: evidence.code });
   const claimed = await provenance;
 
   let materializedBlock: number;

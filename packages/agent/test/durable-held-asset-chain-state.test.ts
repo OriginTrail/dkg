@@ -26,7 +26,7 @@ describe('authority-owned authentication of a held graph-scoped asset', () => {
     const verifyBinding = vi.fn(async (id: string, onChainId: bigint) => id === COPY.contextGraphId && onChainId === 9n);
     expect(await authenticateHeldGraphScopedDescriptor(chain({
       getLatestMerkleRoot: async kaId => { asked.push(kaId); return ROOT; },
-    }), COPY, '9', verifyBinding)).toBe(true);
+    }), COPY, '9', verifyBinding)).toEqual({ kind: 'match' });
     expect(asked).toEqual([KA_ID]);
     expect(verifyBinding).toHaveBeenCalledOnce();
   });
@@ -39,7 +39,7 @@ describe('authority-owned authentication of a held graph-scoped asset', () => {
         ...(fault === 'version' ? { getMerkleRootCount: async () => 4n } : {}),
         ...(fault === 'unbound' ? { getKAContextGraphId: async () => 0n } : {}),
       });
-      expect(await authenticate(adapter, fault === 'wrong-binding' ? '10' : '9', async () => fault !== 'wrong-local-binding')).toBe(false);
+      expect(await authenticate(adapter, fault === 'wrong-binding' ? '10' : '9', async () => fault !== 'wrong-local-binding')).toMatchObject({ kind: 'mismatch' });
     });
 
   it('distinguishes unavailable chain evidence from an authenticated mismatch', async () => {
@@ -57,7 +57,7 @@ describe('authority-owned authentication of a held graph-scoped asset', () => {
     } });
     await expect(authenticateHeldGraphScopedAssetWithinDeadline({
       chain: flaky, copy: COPY, requiredBinding: '9', verifyContextGraphBinding: async () => true, deadline: Date.now() + 30_000,
-    })).resolves.toBe(true);
+    })).resolves.toEqual({ kind: 'match' });
     expect(reads).toBe(2);
     await expect(authenticateHeldGraphScopedAssetWithinDeadline({
       chain: chain(), copy: COPY, requiredBinding: '9', verifyContextGraphBinding: async () => true, deadline: Date.now() - 1,
@@ -69,10 +69,10 @@ describe('authority-owned authentication of a held graph-scoped asset', () => {
     const authority = createRecoveryAuthority({ chain: chain(), verifyContextGraphBinding,
       resolveAuthority: async () => { throw new Error('not read'); }, warn: () => {} });
     for (let read = 0; read < 2; read += 1) {
-      await expect(authority.authenticateHeld!(COPY, '9', Date.now() + 30_000)).resolves.toBe(true);
+      await expect(authority.authenticateHeld!(COPY, '9', Date.now() + 30_000)).resolves.toEqual({ kind: 'match' });
     }
     expect(verifyContextGraphBinding).toHaveBeenCalledOnce();
     expect(verifyContextGraphBinding.mock.calls[0]!.slice(0, 2)).toEqual([COPY.contextGraphId, '9']);
-    await expect(authority.authenticateHeld!(COPY, '10', Date.now() + 30_000)).resolves.toBe(false);
+    await expect(authority.authenticateHeld!(COPY, '10', Date.now() + 30_000)).resolves.toMatchObject({ kind: 'mismatch' });
   });
 });

@@ -1,3 +1,4 @@
+import type { GraphScopedChainEvidence } from './sync/requester/graph-scoped-chain-views.js';
 import type { GraphScopedDescriptor } from './sync/durable-integrity.js';
 import { createAbortError as asSyncFetchAbortError } from './bounded-operation.js';
 import { withRetry } from '@origintrail-official/dkg-core';
@@ -113,7 +114,7 @@ export function authenticateHeldGraphScopedAssetWithinDeadline(params: {
   verifyContextGraphBinding: VerifyContextGraphBinding;
   deadline: number;
   signal?: AbortSignal;
-}): Promise<boolean> {
+}): Promise<GraphScopedChainEvidence> {
   const { chain, copy, verifyContextGraphBinding, deadline, signal } = params;
   return runAuthenticationWithinDeadline({
     deadline,

@@ -1,3 +1,4 @@
+import type { GraphScopedChainEvidence } from './sync/requester/graph-scoped-chain-views.js';
 import type { GraphScopedDescriptor } from './sync/durable-integrity.js';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
@@ -18,9 +19,9 @@ export interface DurableRecoveryAuthority {
   isRegisteredPublic(contextGraphId: string, signal?: AbortSignal): boolean | Promise<boolean>;
   authenticate(asset: VerifiedGraphScopedAsset, deadline: number, signal?: AbortSignal):
     AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
-  /** Authenticate a proven local copy. False is a chain mismatch; unavailable evidence rejects. */
+  /** Authenticate a proven local copy. An authenticated mismatch is a typed result; unavailable evidence rejects. */
   authenticateHeld?(copy: GraphScopedDescriptor, requiredBinding: string | undefined, deadline: number,
-    signal?: AbortSignal): Promise<boolean>;
+    signal?: AbortSignal): Promise<GraphScopedChainEvidence>;
 }
 
 /** Public compatibility evidence; authentication strategies remain internal. */

@@ -30,8 +30,9 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
       if (chainAnswersLeft <= 0) throw createRpcTimeoutError('held chain check exceeded its context-graph deadline');
       chainAnswersLeft -= 1;
       const onChain = chain().find((fixture) => fixture.ual === ual)!;
-      return (requiredBinding === undefined || requiredBinding === '323')
+      const matches = (requiredBinding === undefined || requiredBinding === '323')
         && onChain.rootHex === descriptor.claimedRootHex && BigInt(onChain.version) === BigInt(descriptor.assertionVersion);
+      return matches ? { kind: 'match' } : { kind: 'mismatch', code: 'VM_CHAIN_ROOT_MISMATCH', message: `Held asset ${ual} is not current on chain` };
     },
     budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 60_000 },
   });
