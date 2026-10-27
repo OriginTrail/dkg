@@ -25,7 +25,7 @@ import {
   auditPublisherCalls,
   type RecordedStoreCall,
 } from './_helpers/queue-boundary-oracle.js';
-import { runPublisherWorkload, type PublisherStack } from './_helpers/publisher-queue-scenarios.js';
+import { runPublisherPagingScenario, runPublisherWorkload, type PublisherStack } from './_helpers/publisher-queue-scenarios.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const PACKAGES = join(REPO_ROOT, 'packages');
@@ -166,6 +166,12 @@ const QUEUE_FILES: Readonly<Record<string, QueueFile>> = {
       L('claimCandidates')].sort(),
     storeCalls: ['query', 'query', 'query', 'query', 'query', 'query'],
   },
+  'packages/publisher/src/lift-job-listing-selectors.ts': {
+    role: 'sites',
+    labels: [L('listPage'), L('stats')].sort(),
+    storeCalls: ['query'],
+    note: 'P9a: the bounded page (one query) and the stats COUNT (issued through the shared countByState helper); both keep the caller\'s lane',
+  },
   'packages/publisher/src/job-record-atomic-write.ts': {
     role: 'sites',
     labels: [L('writeJob'), L('writeJobRequest')].sort(),
@@ -281,9 +287,11 @@ describe('publisher queue graph references (observed)', () => {
   it('observes every labelled site and every option-less createGraph site in a driven scenario', async () => {
     const calls: RecordedStoreCall[] = [];
     for (const stack of STACKS) {
-      const run = await runPublisherWorkload(stack);
-      expect(auditPublisherCalls(run.calls, { pathOn: true }).violations).toEqual([]);
-      calls.push(...run.calls);
+      // The paging scenario is separate from the workload the AC2 lane trace compares with the base SHA, which has no page read.
+      for (const run of [await runPublisherWorkload(stack), await runPublisherPagingScenario(stack)]) {
+        expect(auditPublisherCalls(run.calls, { pathOn: true }).violations).toEqual([]);
+        calls.push(...run.calls);
+      }
     }
     const observed = new Set(calls.map((call) => call.source));
     const declared = Object.values(QUEUE_FILES).flatMap((file) => file.labels);

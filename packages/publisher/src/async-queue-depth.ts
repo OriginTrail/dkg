@@ -53,7 +53,8 @@ function stateName(raw: string): string {
   }
 }
 
-async function countByState<S extends string>(
+/** One `COUNT ... GROUP BY` over a status predicate; every state in `states` is present, with 0 when none. */
+export async function countByState<S extends string>(
   store: QueryableStore,
   states: readonly S[],
   predicate: string,

@@ -11,6 +11,7 @@ const TARGETS = [
   '../src/job-record-atomic-write.ts',
   '../src/subject-atomic-write.ts',
   '../src/lift-job-store-selectors.ts',
+  '../src/lift-job-listing-selectors.ts',
 ] as const;
 
 // RFC-73 P1b: the queue-graph MUTATIONS must be attributable too, so a rejection at the store

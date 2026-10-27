@@ -41,8 +41,9 @@ const json = (body: unknown): Response =>
 /**
  * The stub SPARQL endpoint, stateful so that "no job exists" can fail:
  *   - `updates` is every update request that reached the wire, so a dispatched job write cannot go unnoticed;
- *   - `payloads` is what those updates wrote (graph -> job subject -> payload JSON), and the queue's job reads answer from it, so a
- *     persisted job is visible to `queue.list()` the way it would be on a real endpoint.
+ *   - `payloads` is what those updates wrote (graph -> job subject -> payload JSON), and the queue's job reads answer from it (the
+ *     conflict read, and the listing's key read and payload batch), so a persisted job is visible to `queue.list()` the way it would be
+ *     on a real endpoint.
  * `onConflictRead` runs while the queue's conflict read is in flight.
  */
 const endpoint = {
@@ -76,6 +77,35 @@ function payloadRows(query: string): Response {
   return json({ head: { vars: ['payload'] }, results: { bindings } });
 }
 
+/** The records of the queried graph as `[subject, job]`, in the listing's key order `(enqueuedAt, subject)`. */
+function jobsOf(query: string): Array<[string, { enqueuedAt: number }]> {
+  const graph = /GRAPH <([^>]+)>/.exec(query)?.[1] ?? '';
+  return [...(endpoint.payloads.get(graph) ?? [])]
+    .map(([subject, payload]): [string, { enqueuedAt: number }] => [subject, JSON.parse(payload) as { enqueuedAt: number }])
+    .sort(([a, x], [b, y]) => x.enqueuedAt - y.enqueuedAt || (a < b ? -1 : a > b ? 1 : 0));
+}
+
+/**
+ * Answer the listing's two reads from the stored records (P8a): the ordered key read (`SELECT DISTINCT ?job ?enq`, every stored job,
+ * which is exact here because no test stores more than one key page) and the payload batch (`SELECT ?job ?payload` over `VALUES ?job`).
+ */
+function keyRows(query: string): Response {
+  const bindings = jobsOf(query).map(([subject, job]) => ({
+    job: { type: 'uri', value: subject },
+    enq: { type: 'literal', value: String(job.enqueuedAt), datatype: 'http://www.w3.org/2001/XMLSchema#integer' },
+  }));
+  return json({ head: { vars: ['job', 'enq'] }, results: { bindings } });
+}
+
+function payloadBatchRows(query: string): Response {
+  const graph = /GRAPH <([^>]+)>/.exec(query)?.[1] ?? '';
+  const wanted = new Set([.../VALUES \?job \{([^}]*)\}/.exec(query)?.[1]?.matchAll(/<([^>]+)>/g) ?? []].map(([, subject]) => subject));
+  const bindings = [...(endpoint.payloads.get(graph) ?? [])]
+    .filter(([subject]) => wanted.has(subject))
+    .map(([subject, payload]) => ({ job: { type: 'uri', value: subject }, payload: { type: 'literal', value: payload } }));
+  return json({ head: { vars: ['job', 'payload'] }, results: { bindings } });
+}
+
 /** Updates 200 and are recorded, ASK true, job reads answer from the recorded writes: an empty control graph that accepts writes. */
 async function stubFetch(_input: unknown, init?: RequestInit): Promise<Response> {
   const headers = new Headers(init?.headers);
@@ -86,6 +116,8 @@ async function stubFetch(_input: unknown, init?: RequestInit): Promise<Response>
     endpoint.onConflictRead?.();
     return payloadRows(body);
   }
+  if (/SELECT DISTINCT \?job \?enq\b/.test(body)) return keyRows(body);
+  if (/SELECT \?job \?payload\b/.test(body)) return payloadBatchRows(body);
   return json({ head: { vars: ['payload'] }, results: { bindings: [] } });
 }
 

@@ -34,6 +34,7 @@ import {
 } from './_helpers/queue-boundary-oracle.js';
 import {
   WORKER_PROBE_SOURCES,
+  runPublisherPagingScenario,
   runPublisherWakeScenario,
   runPublisherWorkload,
   type PublisherStack,
@@ -45,6 +46,9 @@ const CONTROL_SOURCES = PUBLISHER_TAGGING_ROWS.filter((row) => row.lane === 'con
 
 /** The one source only the fallback path of the job-record writer makes. */
 const FALLBACK_ONLY_SOURCE = 'publisher.asyncLift.writeJobRequest';
+/** The sources of the bounded page and COUNT reads (P9a). The scripted workload is the AC2 base and has none; their scenario is below. */
+const PAGE_SOURCES = ['publisher.asyncLift.listPage', 'publisher.asyncLift.stats'];
+const PAGE_ONLY_SOURCES = ['publisher.asyncLift.listPage'];
 
 const synthetic = (over: Partial<RecordedStoreCall>): RecordedStoreCall => ({
   index: 0,
@@ -93,6 +97,8 @@ describe('publisher queue boundary oracle: the oracle itself', () => {
     expect(PUBLISHER_ROW_SOURCES.get('publisher.asyncLift.list')?.lane).toBe('normal');
     expect(PUBLISHER_ROW_SOURCES.get('publisher.asyncLift.reconciliationInventory')?.lane).toBe('normal');
     expect(PUBLISHER_ROW_SOURCES.get('publisher.asyncLift.ensureVmPublishIntentIndex')?.lane).toBe('normal');
+    expect(PUBLISHER_ROW_SOURCES.get('publisher.asyncLift.listPage')?.lane).toBe('normal');
+    expect(PUBLISHER_ROW_SOURCES.get('publisher.asyncLift.stats')?.lane).toBe('normal');
     expect(PUBLISHER_ROW_SOURCES.get('publisher.queueUsage.lift')?.lane).toBe('background');
     expect(PUBLISHER_ROW_SOURCES.get('publisher.queueUsage.liftJournal')?.lane).toBe('background');
   });
@@ -104,6 +110,9 @@ describe('publisher queue boundary oracle: the oracle itself', () => {
     ['a queue call with an unknown label', synthetic({ source: 'publisher.asyncLift.somethingNew', options: { source: 'publisher.asyncLift.somethingNew' } }), 'outside the tagging table'],
     ['a queue call with no label', synthetic({ source: undefined, options: undefined }), 'outside the tagging table'],
     ['a queue call to a method the routing test does not cover', synthetic({ method: 'hasGraph' }), 'does not cover'],
+    ['a tagged page read', synthetic({ source: 'publisher.asyncLift.listPage', options: controlStoreOptions('publisher', 'publisher.asyncLift.listPage') }), 'is not control but carries controlQueue'],
+    ['a page read moved to the background lane', synthetic({ source: 'publisher.asyncLift.listPage', options: { source: 'publisher.asyncLift.listPage', priority: 'background' } }), 'sets priority=background'],
+    ['a stats COUNT moved to a priority', synthetic({ source: 'publisher.asyncLift.stats', options: { source: 'publisher.asyncLift.stats', priority: 'health' } }), 'sets priority=health'],
     ['a tagged full-history read', synthetic({ source: 'publisher.asyncLift.list', options: controlStoreOptions('publisher', 'publisher.asyncLift.list') }), 'is not control but carries controlQueue'],
     ['a full-history read moved to a priority', synthetic({ source: 'publisher.asyncLift.list', options: { source: 'publisher.asyncLift.list', priority: 'background' } }), 'sets priority=background'],
     ['a queue_usage COUNT off the background lane', synthetic({ source: 'publisher.queueUsage.lift', options: { source: 'publisher.queueUsage.lift' } }), 'resolved normal, want background'],
@@ -139,7 +148,8 @@ describe.each(STACKS)('publisher queue boundary oracle: %s stack', (stack) => {
     const audit = auditPublisherCalls(run.calls, { pathOn: true });
     expect(audit.violations).toEqual([]);
     expect(audit.queueCalls).toBeGreaterThan(100);
-    const expected = stack === 'atomic' ? ALL_SOURCES.filter((source) => source !== FALLBACK_ONLY_SOURCE) : ALL_SOURCES;
+    const driven = ALL_SOURCES.filter((source) => !PAGE_ONLY_SOURCES.includes(source));
+    const expected = stack === 'atomic' ? driven.filter((source) => source !== FALLBACK_ONLY_SOURCE) : driven;
     expect([...audit.sourcesSeen].sort()).toEqual([...expected].sort());
   });
 
@@ -200,6 +210,47 @@ describe.each(STACKS)('publisher queue boundary oracle: %s stack', (stack) => {
     for (const call of run.calls) {
       expect(selectStoreScheduler(externalStorePriorityScheduler, call.options)).toBe(externalStorePriorityScheduler);
     }
+  });
+});
+
+describe.each(STACKS)('publisher queue boundary oracle: bounded page reads (P9a), %s stack', (stack) => {
+  const AMBIENTS: ReadonlyArray<StoreWorkPriority | undefined> = [undefined, 'background'];
+
+  it.each(AMBIENTS)('keeps the page and stats reads on the caller\'s lane with the path on and off (ambient %s)', async (ambient) => {
+    const run = await runPublisherPagingScenario(stack, { ambient });
+    for (const pathOn of [true, false]) {
+      const audit = auditPublisherCalls(run.calls, { pathOn });
+      expect(audit.violations, `path ${pathOn ? 'on' : 'off'}`).toEqual([]);
+      for (const source of PAGE_SOURCES) expect(audit.sourcesSeen.has(source), source).toBe(true);
+    }
+    const reads = run.calls.filter((call) => PAGE_SOURCES.includes(call.source!));
+    expect(reads.filter((call) => call.source === 'publisher.asyncLift.listPage')).toHaveLength(3);
+    expect(reads.filter((call) => call.source === 'publisher.asyncLift.stats')).toHaveLength(1);
+    for (const call of reads) {
+      expect(call.method).toBe('query');
+      expect(call.graphs).toEqual(['job']);
+      expect(call.options).toEqual({ source: call.source });
+      expect(call.ambient).toBe(ambient);
+      // Not control, with the path on or off: the lane the caller already had.
+      expect(resolveLane(call, true)).toBe(ambient ?? 'normal');
+      expect(resolveLane(call, false)).toBe(ambient ?? 'normal');
+    }
+  });
+
+  it('never routes a page or stats read to the publisher\'s control instance, the path being on', async () => {
+    const run = await runPublisherPagingScenario(stack);
+    const on = buildStoreControlPath({ share: 1, publisher: 2 });
+    setStoreControlPathForTesting(on);
+    const reads = run.calls.filter((call) => PAGE_SOURCES.includes(call.source!));
+    expect(reads.length).toBe(4);
+    for (const call of reads) {
+      expect(selectStoreScheduler(externalStorePriorityScheduler, call.options), `${call.method} ${call.source}`)
+        .toBe(externalStorePriorityScheduler);
+    }
+    // Next to them, the admissions of the same scenario are control calls and do take the instance.
+    const admission = run.calls.filter((call) => call.source === 'publisher.asyncLift.findActiveVmPublish');
+    expect(admission.length).toBe(3);
+    for (const call of admission) expect(selectStoreScheduler(externalStorePriorityScheduler, call.options)).toBe(on.publisher);
   });
 });
 

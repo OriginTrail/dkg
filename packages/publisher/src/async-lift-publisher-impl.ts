@@ -4,11 +4,11 @@ import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
 import { completionTrace } from './async-lift-completion-trace.js';
 import { traceProcessNext } from './async-lift-claim-trace.js';
-import { LiftJobStoreSelectors, lifecycleKeyOfJob } from './lift-job-store-selectors.js';
+import { LiftJobListingSelectors } from './lift-job-listing-selectors.js';
+import { lifecycleKeyOfJob } from './lift-job-store-selectors.js';
 import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
 import { LiftJobChainObservations } from './lift-job-chain-observations.js';
 import { committedLiftJob, type CommittedLiftJob } from './lift-job-committed.js';
-import type { PreBroadcastRecord } from './publisher.js';
 import { bestEffortNotify } from './best-effort-notify.js';
 import { createOperationContext, resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { isPendingPublishTransactionStatus } from '@origintrail-official/dkg-chain';
@@ -25,10 +25,9 @@ import {
   LegacyKnowledgeAssetReadOnlyError,
   createGraphKnowledgeAssetScope,
 } from '@origintrail-official/dkg-core';
-import type { PhaseCallback, PublishResult } from './publisher.js';
+import type { PhaseCallback, PreBroadcastRecord, PublishResult } from './publisher.js';
 import { resolveEffectiveAsyncLiftRetryTuning } from './async-lift-retry-tuning.js';
 import {
-  LIFT_JOB_STATES,
   createLiftJobFailureMetadata,
   type LiftJob,
   type LiftJobCompatibility,
@@ -110,10 +109,8 @@ import {
   selectLifecycleBindingJobs,
   type LiftJobRetryProjection,
 } from './async-lift-retry-disposition.js';
-import {
-  type TargetedLiftJobClearOptions,
-  type TerminalJobClearOutcome,
-} from './terminal-job-clear.js';
+import type { TargetedLiftJobClearOptions, TerminalJobClearOutcome } from './terminal-job-clear.js';
+import type { LiftJobPage, LiftJobPageRequest } from './lift-job-page.js';
 import { isSafeJobId } from './job-id.js';
 import { persistLiftJobRecord } from './job-record-atomic-write.js';
 import {
@@ -566,7 +563,7 @@ export class TripleStoreAsyncLiftPublisher
    * consumption, invalidation (hash mismatch / terminal disposition), or eviction.
    */
   private readonly chainObservations: LiftJobChainObservations;
-  private readonly jobSelectors: LiftJobStoreSelectors;
+  private readonly jobSelectors: LiftJobListingSelectors;
   private readonly executorProofHints = new Map<string, {
     readonly txHash: string;
     proof?: {
@@ -662,7 +659,7 @@ export class TripleStoreAsyncLiftPublisher
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.queueScheduler = new AsyncLiftQueueScheduler(store, this.graphUri);
     this.chainObservations = LiftJobChainObservations.shared(store, this.graphUri);
-    this.jobSelectors = new LiftJobStoreSelectors(store, this.graphUri, (job) => this.chainObservations.project(job));
+    this.jobSelectors = new LiftJobListingSelectors(store, this.graphUri, (job) => this.chainObservations.project(job));
     this.journalGraphUri = DEFAULT_JOURNAL_GRAPH_URI;
     this.journalWrites = config.journalWrites ?? false;
     this.maxRetries = config.maxRetries ?? TripleStoreAsyncLiftPublisher.DEFAULT_MAX_RETRIES;
@@ -924,6 +921,11 @@ export class TripleStoreAsyncLiftPublisher
   async list(filter: { status?: LiftJobState; contextGraphId?: string } = {}): Promise<PersistedLiftJob[]> {
     await this.ensureGraph();
     return this.jobSelectors.list(filter);
+  }
+
+  async listPage(request: LiftJobPageRequest = {}): Promise<LiftJobPage> {
+    await this.ensureGraph();
+    return this.jobSelectors.page(request);
   }
 
   private async readNextClaimCandidate(section: JournalSection, now: number): Promise<LiftJobAccepted | undefined> {
@@ -2724,9 +2726,8 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async getStats(): Promise<Record<LiftJobState, number>> {
-    const stats = Object.fromEntries(LIFT_JOB_STATES.map((state) => [state, 0])) as Record<LiftJobState, number>;
-    for (const job of await this.list()) stats[job.status] += 1;
-    return stats;
+    await this.ensureGraph();
+    return this.jobSelectors.stats();
   }
 
   async pause(): Promise<void> {

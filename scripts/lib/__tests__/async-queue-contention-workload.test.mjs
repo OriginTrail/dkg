@@ -14,7 +14,6 @@ import {
 } from '../../repro/async-queue-contention/fixture.mjs';
 import { finalizeRequests, validity } from '../../repro/async-queue-contention/verdict.mjs';
 import {
-  OBSERVER_CALLS,
   beginEpoch,
   classifyError,
   createIdlePublisher,
@@ -633,7 +632,7 @@ test('readers run closed-loop on the background lane and record failures by code
   assert.ok(w.readerEvents.filter((e) => e.kind === 'content').every((e) => e.ok && e.ms >= 0));
 });
 
-test('the observer polls sequentially, walks pages when the paged call exists and is a no-op for none', async () => {
+test('the observer polls sequentially, walks the queue\'s pages in paged mode and is a no-op for none', async () => {
   const w = world({});
   let listed = 0;
   w.queue = {
@@ -649,23 +648,21 @@ test('the observer polls sequentially, walks pages when the paged call exists an
   await obs.drain(1000);
   assert.ok(w.observerEvents.length >= 2 && w.observerEvents.length <= listed);
   assert.ok(w.observerEvents.every((e) => e.ok && e.rows === 3 && e.ms > 0));
-  assert.equal(OBSERVER_CALLS.paged, null);
-  for (const mode of ['none', 'paged'])
-    assert.equal(await startObserver(world({}), mode).drain(), 0, `${mode} is a no-op while the paged call is missing`);
+  assert.equal(await startObserver(world({}), 'none').drain(), 0, 'none is a no-op');
   const paged = world({});
-  paged.queue = {};
-  OBSERVER_CALLS.paged = async () => ({ rows: 7, pages: 2, pageMs: [3, 9] });
-  try {
-    const p = startObserver(paged, 'paged');
-    await sleep(40);
-    p.stop();
-    await p.drain(1000);
-  } finally {
-    OBSERVER_CALLS.paged = null;
-  }
+  paged.queue = {
+    listPage: async (_filter, request) => {
+      await sleep(1);
+      return request.cursor ? { jobs: [1, 2, 3, 4], complete: true } : { jobs: [1, 2, 3], nextCursor: 'c1', complete: false };
+    },
+  };
+  const p = startObserver(paged, 'paged');
+  await sleep(40);
+  p.stop();
+  await p.drain(1000);
   assert.ok(
     paged.observerEvents.length >= 1 &&
-      paged.observerEvents.every((e) => e.rows === 7 && e.pages === 2 && e.maxPageMs === 9),
+      paged.observerEvents.every((e) => e.ok && e.rows === 7 && e.pages === 2 && e.maxPageMs > 0),
   );
   const failing = world({});
   failing.queue = {
