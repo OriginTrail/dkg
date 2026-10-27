@@ -43,12 +43,14 @@ test('parses NUL-delimited git name-status output without shell-splitting file n
 });
 
 test('non-PR events run every lane while full-PR overrides preserve the Solidity gate', () => {
-  // Every trigger the planning workflows declare other than pull_request,
-  // the nightly schedule included: these full runs are the post-merge net.
+  // Every trigger the planning workflows declare other than pull_request.
+  // The nightly dispatcher enters through workflow_dispatch; keep checking
+  // legacy schedule events too while the default branch is being promoted.
   const triggers = new Set(['ci.yml', 'evm-integration.yml'].flatMap((name) => Object.keys(
     parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', name), 'utf8')).on,
   )));
-  assert.ok(triggers.has('schedule'), 'ci.yml runs nightly');
+  assert.ok(triggers.has('workflow_dispatch'), 'ci.yml accepts the nightly dispatcher');
+  triggers.add('schedule');
   triggers.delete('pull_request');
   for (const eventName of triggers) {
     const plan = planCi({ eventName });

@@ -1971,6 +1971,19 @@ describe('approved private bare-name replica authorization', () => {
     );
   });
 
+  it('asks the rows that shares admitted behind the fence still owe to be written once the authority is accepted', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const drain = vi.spyOn(fixture.receiver, 'requestRfc64OwedShareInventoryDrainV1');
+
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+
+    expect(drain).toHaveBeenCalledOnce();
+  });
+
   it('refreshes an approved private catalog without depending on its own active recovery gate', async () => {
     const fixture = await approvedBareNameReplicaFixture();
     const recoveryGate = vi.spyOn(fixture.receiver, 'getMemberRecoveryRosterSource')

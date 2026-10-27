@@ -37,7 +37,7 @@ import {
   resolveLane,
   withControlPath,
 } from '../../publisher/test/_helpers/share-control-recorder.js';
-import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE, asyncAdmissionUsage } from '@origintrail-official/dkg-core';
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE, SWM_INVENTORY_HANDOFF_PENDING_CODE, asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import {
   createPromoteWorkerSupervisor,
   runPromoteJob,
@@ -679,6 +679,31 @@ describe('runPromoteJob', () => {
     // The allowlist is built from the shared contract code, so the wire value is what gets named.
     expect(RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE)
       .toBe('RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS');
+  });
+
+  it('names a pending catalog inventory handoff behind a retryable bound share replay', async () => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async () => {
+        throw createPromoteRetryableFailure(Object.assign(
+          new Error('Durable share inventory remains pending: inactive-lane'),
+          { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'inactive-lane' },
+        ));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    expect(promoteFailureDiagnostics(logs)[0]).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+      errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      causeCode: 'SWM_INVENTORY_HANDOFF_PENDING',
+    });
+    expect(SWM_INVENTORY_HANDOFF_PENDING_CODE).toBe('SWM_INVENTORY_HANDOFF_PENDING');
   });
 
   describe('a promote refused by the legacy SWM retirement fence', () => {

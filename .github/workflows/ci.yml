@@ -30,8 +30,8 @@ on:
         description: Optional signed 32-bit property seed (nightly default is the recorded run number)
         type: string
         required: false
-  schedule:
-    - cron: '23 2 * * *'
+  # nightly-ci.yml owns the clock on the default branch and dispatches this
+  # workflow at testnet-canary with the nightly-equivalent profile.
 
 concurrency:
   # Keep campaigns independent of ordinary pushes/PRs; supersede duplicate

@@ -1,4 +1,4 @@
-import { deleteByPatternWithoutCount, type TripleStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, deleteByPatternWithoutCount, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { PersistedLiftJob } from './lift-job.js';
 import { replaceSubjectAtomicallyOrFallback } from './subject-atomic-write.js';
 import {
@@ -49,7 +49,7 @@ export class AsyncLiftWalletPersistence {
       this.walletLockGraphUri,
       walletLockSubject(lock.walletId),
       serializeWalletLock(lock, this.walletLockGraphUri),
-      'publisher.asyncLift.walletLock.write',
+      controlStoreOptions('publisher', 'publisher.asyncLift.walletLock.write'),
     );
   }
 
@@ -57,13 +57,13 @@ export class AsyncLiftWalletPersistence {
     await deleteByPatternWithoutCount(this.store, {
       subject: walletLockSubject(walletId),
       graph: this.walletLockGraphUri,
-    }, { source: 'publisher.asyncLift.walletLock.delete' });
+    }, controlStoreOptions('publisher', 'publisher.asyncLift.walletLock.delete'));
   }
 
   async readMetadata(walletId: string): Promise<WalletLockSnapshot | null> {
     const result = await this.store.query(
       `SELECT ?job ?status ?expiresAt ?claimToken WHERE { GRAPH <${this.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ?status . OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt } OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_CLAIM_TOKEN}> ?claimToken } } }`,
-      { source: 'publisher.asyncLift.walletLock.read' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.walletLock.read'),
     );
     return this.parse(walletId, expectBindings(result)[0]);
   }
@@ -72,7 +72,7 @@ export class AsyncLiftWalletPersistence {
     // Keep the OPTIONAL join unfiltered: Blazegraph can lose its payload with a correlated status filter.
     const result = await this.store.query(
       `SELECT ?job ?status ?expiresAt ?claimToken ?payload WHERE { GRAPH <${this.walletLockGraphUri}> { <${walletLockSubject(walletId)}> <${CONTROL_LOCKED_JOB}> ?job ; <${CONTROL_LOCK_STATUS}> ?status . OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_LOCK_EXPIRES_AT}> ?expiresAt } OPTIONAL { <${walletLockSubject(walletId)}> <${CONTROL_CLAIM_TOKEN}> ?claimToken } } OPTIONAL { GRAPH <${this.graphUri}> { ?job <${PAYLOAD_PREDICATE}> ?payload } } }`,
-      { source: 'publisher.asyncLift.walletLock.ownership' },
+      controlStoreOptions('publisher', 'publisher.asyncLift.walletLock.ownership'),
     );
     const row = expectBindings(result)[0];
     const lock = this.parse(walletId, row);

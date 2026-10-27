@@ -4,6 +4,18 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+### Fixed
+
+- **`dkg doctor` checks a node configured in `config.yaml`** (#3247): the
+  daemon loads `config.yaml` when there is no `config.json`, but the doctor
+  read only `config.json`. On such a node it reported "No config file" and
+  skipped every config check. It also took a Core node for an Edge node, so
+  install-layout described the node's release slots as legacy Edge state.
+  The doctor now reads the file the daemon loads and reports a YAML syntax
+  error as malformed YAML. A malformed `config.json` or `config.yaml` no
+  longer stops `dkg doctor` with a stack trace: it warns, runs its checks
+  and reports the file.
+
 ## [10.0.26] - 2026-10-25
 
 10.0.26 makes collaboration between AI agents dependable on any network.

@@ -1,8 +1,12 @@
 #!/usr/bin/env node
-// Async queue contention benchmark (OT-RFC-73 P2a): open-loop share submissions (the route's preflight reads, then the
-// real enqueue), the real worker supervisor claiming jobs and replaying the 43-operation share body, closed-loop client
-// readers on the background lane, a list observer and an always-on idle publisher, all on the real default scheduler,
-// the real queue and the real Blazegraph adapter against a Blazegraph. No chain, wallets or funds.
+// Async queue contention benchmark (OT-RFC-73 P2a/P2b): open-loop share submissions (the route's preflight reads, then
+// the real enqueue), the real worker supervisor claiming jobs and replaying the 43-operation share body, closed-loop
+// client readers on the background lane, a list observer and an always-on publisher, all on the real default
+// scheduler, the real queue and the real Blazegraph adapter against a Blazegraph. The publisher is idle beside a
+// share run (--queue share, the default); --queue lift adds open-loop publish submissions into the real
+// TripleStoreAsyncLiftPublisher and AsyncLiftRunner (6 wallets) with a synthetic handler for the chain, and --queue
+// both runs the two streams together (the mixed cell). --probes and --ack-load add the health-lane status probes and
+// the synthetic storage-ACK stream that G0 and G0b ran with. No chain, wallets or funds.
 // NOT a CI gate: it needs a Blazegraph the build job does not have, and the knee is host-dependent, so the rung is
 // calibrated per host. Needs the built workspace (pnpm run build:packages).
 //
@@ -10,14 +14,30 @@
 //        (--rung L3 | --calibration FILE [--at reproduction|sub-knee]) [options]
 //   node scripts/repro/async-queue-contention.mjs calibrate --blazegraph-url URL \
 //        [--ladder L0,L1,..] [--calib-repeats 2] [--out DIR]
-//   node scripts/repro/async-queue-contention.mjs verdict --rule halve|flat|equal|aa|ledger --a DIR [--b DIR] \
-//        [--margin m] [--where history=0,observer=default] [--json]
+//   node scripts/repro/async-queue-contention.mjs verdict --rule halve|flat|equal|noworse|aa|g1b|ledger --a DIR \
+//        [--b DIR] [--margin m] [--metric share|publish|pickup|pickupFree] [--min-qualifying N] \
+//        [--where history=0,observer=default] [--json]
 //
 // run options:
+//   --queue share|lift|both                  the stream(s): share (default; the publisher idles), publish only, or mixed
 //   --history 0|10k|50k [--seed-file FILE]   retained share-job history (a seed file: async-queue-seed-history.mjs)
-//   --observer default|paged|none            the list observer's call; --observer-ms 5000 its polling period
+//   --lift-history 0|10k|50k [--lift-seed-file FILE]   retained publisher-job history (the seed tool's --kind lift)
+//   --mu M                                   publish submissions per second (a custom load, see below)
+//   --wallets 6 --wallet-hold-ms 3000 --lift-poll-ms 1000   the chain-time model of the publisher (G0b's), --queue
+//                                            lift|both only: a wallet is held for the hold while a job "publishes"
+//   --probes --ack-load                      the status-probe and ACK load (cadences: --probe-status-ms 10000,
+//                                            --probe-metrics-ms 30000, --probe-count-ms 60000, --ack-interval-ms 4000,
+//                                            --ack-payload 32); off by default, ON in every G0/G0b and G1b-rehearsal run.
+//                                            A probe cadence of 0 switches that probe off: the run's validity then asks
+//                                            no evidence of it (statusProbesOff, metricsProbesOff in the result)
+//   --observer default|paged|none            the list observer's call; --observer-ms 5000 its polling period. paged
+//                                            needs the paged call of each stream the run has (the share queue's:
+//                                            P8a/P9b, the publisher's: P9a/P9b): a --queue lift run needs only the
+//                                            publisher's
 //   --repeats N                              N repeats, one fresh process each; --repeat I runs only repeat I
-//   --seed S                                 default 7300+repeat: a repeat is the same arrival schedule in every build
+//   --seed S                                 default seed-base+repeat: a repeat is the same arrival schedule in every build;
+//   --seed-base B                            B+repeat for each repeat (default 7300; the G1b rehearsal uses 20262901,
+//                                            the G0b seeds)
 //   --warmup 30 --measure 180 --cooldown 10 seconds; with --calibration these default to the calibration's own windows
 //                                            (its knee was measured with them); other values are flagged in the run's
 //                                            meta and in the verdict. calibrate uses the run defaults, so the rung it
@@ -26,7 +46,11 @@
 //   --namespace-prefix aqc --keep-namespace  the run creates and drops its own namespace
 //   --out DIR                                default .dkg-repro-reports/async-queue-contention/<timestamp>
 //   --dry                                    check imports and config only
-//   --lambda L --content N --aggregate N     a custom load instead of a rung (all three)
+//   --lambda L --mu M --content N --aggregate N   a custom load instead of a rung (content, aggregate and the rate of
+//                                            each stream the queue runs)
+//   --rung: the share ladder L0..L5 (--queue share), and G0b's levels PSTAR (publish only, mu 0.8), MIX (mixed, lambda 4
+//   and mu 0.4) and PLOW (publish only, mu 0.4). calibrate covers the share ladder only; a publish ladder is declared in
+//   the G2 protocol and run with --mu.
 // Counts and seeds are plain integers; a bad value exits 2.
 //
 // Latency is intended arrival to response, censored at 20 s; every non-success and every client timeout is a failure.
@@ -38,7 +62,22 @@
 // The P8c backlog leg reads the largest active backlog of the whole workload (warmup to cooldown); worker.backlog stays
 // the measurement window's. The P8c claimNext windows (first and last 5 min) are anchored to that same workload
 // horizon, never to when the run ended: claims after it are shutdown, not workload. meta.timing records the horizon,
-// the drain after it and the run's total, apart from every window.
+// the drain after it and the run's total, apart from every window. A run with a publisher stream must also show its own
+// evidence: requests in the window, no runner error, jobs claimed AND finalized (a run whose claimed jobs all fail has
+// no runner error either), at most 2 % of the claimed jobs failed and at most one per wallet left unfinished, the
+// handler's work matching the jobs finished (publisherBodyReplayed), no retried or recovered job (the handler never
+// fails, and a record keeps its last claim only), and the probes and ACKs that were switched on having run.
+//
+// Publisher metrics (summary.publish, plan D-15/D-16, see pickup.mjs): pick-up is accepted -> first claim over the jobs
+// accepted in the measure window, the run's value its p50, a job nobody claimed by the end of the run right-censored
+// there (G0b's and G1b's number). Worker-free pick-up (D-16, G2/G3) is ready -> claimed (ready = the latest of
+// acceptedAt, lastRetriedAt, lastRecoveredAt) over the jobs that became ready while at least one of the N wallets held
+// no wallet lock; the busy intervals are the wallet-lock writes and deletes (the product's claim trace, never job
+// finish times), and workerFree.nQualifying is the sample behind it. The accepted-but-unclaimed backlog and the
+// claim-to-finish time are reported next to both, with no threshold: in the ledger (two columns after the pick-up ones)
+// and under every `verdict --metric pickup|pickupFree` result (text lines, and `companions` in the JSON of the rules
+// and of aa), whatever the result. The probe and ACK numbers are what the caller saw
+// (queue wait included); the ACK queue-wait P95 of G2 comes from the product's per-lane counts, not from here.
 //
 // Runbook. Backend: a Blazegraph that YOU started (never reuse someone else's container); the script only takes a URL
 // and refuses non-loopback hosts, e.g.
@@ -52,9 +91,10 @@
 //           --out $OUT/aa-1                                                              (and aa-2)
 //      node ... verdict --rule aa --a $OUT/aa-1 --b $OUT/aa-2                            # prints {"margin": ...}
 //    exit 0 only with 3 valid paired repeats per cell, a finite margin AND one build in both arms: an A/A pair with a
-//    P95 of 0 against a nonzero one deviates without bound, and runs from different commits (or a clean and a dirty
-//    tree of one) are not noise, and a run with no recorded git sha / dirty flag is no evidence of one build: each is
-//    INCOMPLETE (exit 2, margin null, the reason in the output). The A/B rules below still compare two revisions.
+//    P95 of 0 against a nonzero one (the same for the number --metric picks, step 6) deviates without bound, and runs
+//    from different commits (or a clean and a dirty tree of one) are not noise, and a run with no recorded git sha /
+//    dirty flag is no evidence of one build: each is INCOMPLETE (exit 2, margin null, the reason in the output). The A/B
+//    rules below still compare two revisions.
 // 3. A/B: run THIS script file from the base and the head worktree (rebuild each worktree's packages first), same
 //    calibration file, same flags and env except the knob under test, alternating base and head per repeat (ABBA):
 //      node ... verdict --rule halve --a $OUT/base --b $OUT/head                         # G1 from P4: b/a <= 0.5
@@ -73,9 +113,44 @@
 // 5. Put `verdict --rule ledger --a ... --b ...` in the PR: every run is listed (worker counters and the P8c indicator
 //    included), a discarded run with its failed checks. Two valid runs of one cell are ambiguous and the pair does not
 //    count: delete the one that is not meant to count, it stays in the PR.
+// 6. Publisher and mixed cells. Declare the load (a rung above or --mu), run the same flags in both arms with
+//    --probes --ack-load as G0 and G0b did, and judge the publisher's numbers with the same rules, --metric picking the
+//    number: share (the share P95, the default), publish (the publish P95), pickup (D-15) or pickupFree (D-16):
+//      node ... run --blazegraph-url $URL --queue both --rung MIX --probes --ack-load --label base --repeats 3 ...
+//      node ... verdict --rule aa    --metric pickup --a $OUT/aa-1 --b $OUT/aa-2        # the pick-up's own noise margin
+//      node ... verdict --rule halve --metric pickupFree --min-qualifying 20 --a $OUT/base --b $OUT/head
+//      node ... verdict --rule noworse --metric publish --margin <A/A> --a $OUT/base --b $OUT/head   # G2's guardrail
+//    pickupFree needs --min-qualifying: the protocol states how many qualifying jobs an arm needs, and a run below it is
+//    INCOMPLETE (so is one whose wallet trace recorded nothing). Both pick-up metrics print the claim-to-finish p50 and
+//    the unclaimed max of each pair under the result (D-16), judged by nothing. Cells of other streams never pair: the
+//    stream joins the cell key, as does a lift history.
+// 7. Publisher history (AC5's publisher flatness, G2's 10k lift jobs), 3 repeats each, then flat on the publish P95:
+//      node scripts/repro/async-queue-seed-history.mjs --kind lift --jobs 10k --out $OUT/lift-10k.nq.gz
+//      node ... run --queue lift --rung PSTAR --lift-history 0 --label l0 --repeats 3 ...
+//      node ... run --queue lift --rung PSTAR --lift-history 10k --lift-seed-file $OUT/lift-10k.nq.gz --label l10k \
+//           --repeats 3 ...
+//      node ... verdict --rule flat --metric publish --a $OUT/l0 --b $OUT/l10k
+//    --a must hold lift history 0 only and --b ONE non-zero lift history. G2's seeded cell is both histories at once
+//    (--history 50k --seed-file ... --lift-history 10k --lift-seed-file ...) from one seed file of each kind; flat then
+//    judges it twice over the same two arms, --a empty in both histories: the share P95 (b must be history 50k, the
+//    default metric) and --metric publish (b one lift history).
+// 8. G1b REHEARSAL, not the D-15 G1b. The plan fixes G1b to harness 0.9 (adapted only to set the P3 env and drive the
+//    P4/P5 tagging, backend limited to 3 CPUs); this benchmark is another instrument (P2a's share replay and fixture, no
+//    backend CPU gate), so what follows rehearses G0b's cells here and says nothing about P14: a PASS or a MISS neither
+//    releases nor stops it. G0b's two-publisher-slot cells, the same five seeds (20262901 + repeat), the path on (the P3
+//    env at the S1 geometry), probes and ACK on, fixed rungs (no calibration), 5 repeats of each of G0b's three cells:
+//      DKG_STORE_CONTROL_RESERVED_SLOTS=share:1,publisher:2 node ... run --blazegraph-url $URL --queue share --rung L3 \
+//           --probes --ack-load --seed-base 20262901 --repeats 5 --out $OUT/g9L3
+//      (same env and flags)  node ... run --blazegraph-url $URL --queue both --rung MIX ... --out $OUT/g9mix
+//      (same env and flags)  node ... run --blazegraph-url $URL --queue lift --rung PSTAR ... --out $OUT/g9pub
+//      node ... verdict --rule g1b --a $OUT        # one directory holding the three cells; labelled a rehearsal
+//    g1b checks each run's setup against G0b's (windows, observer, loads, wallets, seed) and that the run recorded the
+//    path on (DKG_STORE_CONTROL_RESERVED_SLOTS at share:1,publisher:2: unset, 0, malformed or another geometry is
+//    non-conforming), and takes the median of the five repeats against the G0b medians: share P95 within 25 %, pick-up
+//    within 25 % or 0.5 s, whichever is larger. A missing, invalid or non-conforming repeat is INCOMPLETE.
 //
-// Not modelled (see fixture.mjs): the preflight's O(catalog) list leg, the readiness wait and the chain rescue;
-// publisher and mixed cells are P2b.
+// Not modelled (see fixture.mjs, publisher.mjs): the preflight's O(catalog) list leg, the readiness wait and the chain
+// rescue, the real chain (the publisher waits a fixed hold), publisher retries.
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync, writeSync } from 'node:fs';
@@ -86,11 +161,35 @@ import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import { REPO_ROOT, loadDist, provenance, resolveEndpoint, withNamespace } from './async-queue-contention/backend.mjs';
 import { seedMainNamespace } from './async-queue-contention/fixture.mjs';
+import { G1B_METRICS, g1b } from './async-queue-contention/g1b.mjs';
 import { loadGenerated, loadSeedFile, parseCount } from './async-queue-contention/history.mjs';
+import { loadGeneratedLift } from './async-queue-contention/lift-history.mjs';
+import { jobRow, publishSummary } from './async-queue-contention/pickup.mjs';
 import {
+  LOAD_DEFAULTS,
+  PROBE_DRAIN_MS,
+  backgroundLoadEvidence,
+  startAckLoad,
+  startProbeLoad,
+} from './async-queue-contention/probes.mjs';
+import {
+  LIFT_DEFAULTS,
+  LIFT_OBSERVER_CALLS,
+  createLiftSide,
+  createPublishPreflight,
+  pagedObserverProblem,
+  publishArrivals,
+  readLiftJobs,
+  startPublishProducers,
+} from './async-queue-contention/publisher.mjs';
+import {
+  FAMILIES,
+  PUBLISH_RUNGS,
   RUNGS,
   aaDeclaration,
   admissionSummary,
+  companionLines,
+  companionsOf,
   equivalent,
   extractRecord,
   finalizeRequests,
@@ -102,12 +201,14 @@ import {
   kneeReached,
   ledgerMarkdown,
   median,
+  noWorse,
   p8cOfRun,
   pairKey,
   pairRuns,
   pickReproductionRung,
   summarize,
   validity,
+  withMetric,
 } from './async-queue-contention/verdict.mjs';
 import {
   OBSERVER_CALLS,
@@ -170,7 +271,25 @@ const OPTIONS = {
   margin: str,
   where: str,
   json: bool,
+  queue: str,
+  mu: str,
+  'lift-history': str,
+  'lift-seed-file': str,
+  wallets: str,
+  'wallet-hold-ms': str,
+  'lift-poll-ms': str,
+  probes: bool,
+  'ack-load': bool,
+  'probe-status-ms': str,
+  'probe-metrics-ms': str,
+  'probe-count-ms': str,
+  'ack-interval-ms': str,
+  'ack-payload': str,
+  'seed-base': str,
+  metric: str,
+  'min-qualifying': str,
 };
+const QUEUES = ['share', 'lift', 'both'];
 /**
  * Windows in seconds [warmup, measure, cooldown]: the defaults of run AND calibrate, so a calibrated knee is the knee a
  * run sees.
@@ -185,10 +304,14 @@ const CALIBRATE_OWNS = [
   'at',
   'rung',
   'lambda',
+  'mu',
   'content',
   'aggregate',
   'history',
   'seed-file',
+  'queue',
+  'lift-history',
+  'lift-seed-file',
   'observer',
   'repeat',
   'repeats',
@@ -244,9 +367,53 @@ function checkWindows({ warmup, measure, cooldown }) {
   if (!ok) die(2, '--warmup, --measure and --cooldown are seconds (measure > 0)');
 }
 
+/** The probe and ACK load of a run as the cell records it (null cadences while a load is off). */
+function loadFactorsOf(v) {
+  const probes = Boolean(v.probes);
+  const ack = Boolean(v['ack-load']);
+  const cadences = [
+    ['probe-status-ms', probes],
+    ['probe-metrics-ms', probes],
+    ['probe-count-ms', probes],
+    ['ack-interval-ms', ack],
+    ['ack-payload', ack],
+  ];
+  for (const [flag, on] of cadences)
+    if (v[flag] !== undefined && !on) die(2, `--${flag} needs ${flag.startsWith('probe') ? '--probes' : '--ack-load'}`);
+  return {
+    probes,
+    ack,
+    statusMs: probes ? intFlag(v, 'probe-status-ms', LOAD_DEFAULTS.statusMs) : null,
+    metricsMs: probes ? intFlag(v, 'probe-metrics-ms', LOAD_DEFAULTS.metricsMs) : null,
+    countMs: probes ? intFlag(v, 'probe-count-ms', LOAD_DEFAULTS.countMs) : null,
+    ackMs: ack ? intFlag(v, 'ack-interval-ms', LOAD_DEFAULTS.ackMs, 1) : null,
+    ackPayload: ack ? intFlag(v, 'ack-payload', LOAD_DEFAULTS.ackPayload, 1) : null,
+  };
+}
+const NO_LOAD = loadFactorsOf({});
+
+/**
+ * A retained-history seed file's manifest, checked against the kind and job count the flags asked for. `what` names the
+ * file in messages, `historyFlag` the count flag it must agree with.
+ */
+function seedManifest(file, { what, historyFlag, kind, jobs }) {
+  if (!existsSync(file)) die(2, `the ${what} ${file} does not exist`);
+  const manifest = readJson(`${file}.json`, `${what} manifest`);
+  if (manifest.kind !== undefined && manifest.kind !== kind)
+    die(2, `the ${what} ${file} holds ${manifest.kind} jobs, not ${kind}`);
+  if (manifest.jobs !== jobs) die(2, `--${historyFlag} ${jobs} does not match the ${what} (${manifest.jobs} jobs)`);
+  return { path: path.resolve(file), sha256: manifest.sha256, jobs: manifest.jobs, baseTime: manifest.baseTime };
+}
+
+const countLabel = (n) => (n === 0 ? '0' : n % 1000 === 0 ? `${n / 1000}k` : String(n));
+
 function resolveConfig(v) {
   if (v.at !== undefined && !['reproduction', 'sub-knee'].includes(v.at))
     die(2, '--at must be reproduction or sub-knee');
+  const queue = v.queue ?? 'share';
+  if (!QUEUES.includes(queue)) die(2, `--queue must be ${QUEUES.join(', ')}`);
+  const withShare = queue !== 'lift';
+  const withLift = queue !== 'share';
   let base = null;
   let calibration = null;
   let windowDefaults = DEFAULT_WINDOWS_S;
@@ -258,38 +425,78 @@ function resolveConfig(v) {
     base = cal.rungs?.find((r) => r.id === id) ?? die(2, `the calibration lists no rung ${id}`);
     if (cal.windows)
       windowDefaults = [cal.windows.warmupMs / 1000, cal.windows.measureMs / 1000, cal.windows.cooldownMs / 1000];
-    calibration = { file: path.resolve(v.calibration), sha256: sha256(v.calibration), windowsMs: cal.windows ?? null };
+    calibration = {
+      file: path.resolve(v.calibration),
+      sha256: sha256(v.calibration),
+      windowsMs: cal.windows ?? null,
+      factors: cal.factors ?? NO_LOAD,
+    };
   } else if (v.rung) {
     base =
-      RUNGS.find((r) => r.id === v.rung) ?? die(2, `unknown rung ${v.rung} (${RUNGS.map((r) => r.id).join(', ')})`);
+      [...RUNGS, ...PUBLISH_RUNGS].find((r) => r.id === v.rung) ??
+      die(2, `unknown rung ${v.rung} (${[...RUNGS, ...PUBLISH_RUNGS].map((r) => r.id).join(', ')})`);
   }
-  const custom = [v.lambda, v.content, v.aggregate].some((x) => x !== undefined);
-  if (!base && !(v.lambda !== undefined && v.content !== undefined && v.aggregate !== undefined)) {
-    die(2, 'give --rung, --calibration or all of --lambda --content --aggregate');
+  const custom = [v.lambda, v.mu, v.content, v.aggregate].some((x) => x !== undefined);
+  const needs = [
+    ['lambda', v.lambda, withShare],
+    ['content', v.content, true],
+    ['aggregate', v.aggregate, true],
+    ['mu', v.mu, withLift],
+  ].filter(([, , needed]) => needed);
+  if (!base && needs.some(([, x]) => x === undefined)) {
+    die(2, `give --rung, --calibration or all of ${needs.map(([k]) => `--${k}`).join(' ')}`);
   }
-  const lambda = num(v.lambda, base?.lambda);
+  const lambda = num(v.lambda, base?.lambda ?? 0);
+  const mu = num(v.mu, base?.mu ?? 0);
   const content = num(v.content, base?.content);
   const aggregate = num(v.aggregate, base?.aggregate);
-  if (![lambda, content, aggregate].every((x) => Number.isFinite(x) && x >= 0) || !(lambda > 0)) {
+  if (![lambda, mu, content, aggregate].every((x) => Number.isFinite(x) && x >= 0) || (withShare && !(lambda > 0))) {
     die(2, 'lambda must be positive; content and aggregate must be non-negative numbers');
   }
-  const historyJobs = parseCountOrDie(v.history ?? '0');
-  let manifest = null;
-  if (v['seed-file']) {
-    if (!existsSync(v['seed-file'])) die(2, `the seed file ${v['seed-file']} does not exist`);
-    manifest = readJson(`${v['seed-file']}.json`, 'seed file manifest');
+  if (withLift && !(mu > 0)) {
+    die(
+      2,
+      `--queue ${queue} needs a positive publish rate mu (--mu, or a rung with publish arrivals: ${PUBLISH_RUNGS.map((r) => r.id).join(', ')})`,
+    );
   }
-  if (manifest && manifest.jobs !== historyJobs)
-    die(2, `--history ${historyJobs} does not match the seed file (${manifest.jobs} jobs)`);
+  if (!withLift && mu > 0) die(2, `the load has publish arrivals (mu ${mu}): use --queue lift or --queue both`);
+  if (!withShare && lambda > 0) die(2, `the load has share arrivals (lambda ${lambda}): use --queue both`);
+  const historyJobs = parseCountOrDie(v.history ?? '0', '--history');
+  if (!withShare && historyJobs > 0) die(2, '--history seeds the share queue: a --queue lift run has none');
+  if (v['seed-file'] && !withShare) die(2, '--seed-file seeds the share queue: a --queue lift run has none');
+  const seedFile = v['seed-file']
+    ? seedManifest(v['seed-file'], { what: 'seed file', historyFlag: 'history', kind: 'share', jobs: historyJobs })
+    : null;
+  const liftHistoryJobs = parseCountOrDie(v['lift-history'] ?? '0', '--lift-history');
+  const liftSeedFile = v['lift-seed-file']
+    ? seedManifest(v['lift-seed-file'], {
+        what: 'lift seed file',
+        historyFlag: 'lift-history',
+        kind: 'lift',
+        jobs: liftHistoryJobs,
+      })
+    : null;
+  const liftFlags = ['wallets', 'wallet-hold-ms', 'lift-poll-ms'].filter((k) => v[k] !== undefined);
+  if (!withLift && liftFlags.length)
+    die(2, `--${liftFlags.join(', --')} apply to --queue lift or both (the idle publisher of a share run is fixed)`);
+  const liftModel = withLift
+    ? {
+        wallets: intFlag(v, 'wallets', LIFT_DEFAULTS.wallets, 1),
+        walletHoldMs: intFlag(v, 'wallet-hold-ms', LIFT_DEFAULTS.walletHoldMs),
+        liftPollMs: intFlag(v, 'lift-poll-ms', LIFT_DEFAULTS.pollMs, 1),
+      }
+    : null;
+  const loadFactors = loadFactorsOf(v);
   const observer = v.observer ?? 'default';
   const repeat = intFlag(v, 'repeat', 0);
-  const seed = intFlag(v, 'seed', 7300 + repeat);
+  const seed = intFlag(v, 'seed', intFlag(v, 'seed-base', 7300) + repeat);
   const observerMs = intFlag(v, 'observer-ms', 5000, 1);
   if (!/^[A-Za-z0-9._-]{1,40}$/.test(v['namespace-prefix'] ?? 'aqc'))
     die(2, '--namespace-prefix must match [A-Za-z0-9._-]{1,40}');
   if (!(observer in OBSERVER_CALLS) && observer !== 'none')
     die(2, `unknown --observer ${observer} (default, paged, none)`);
-  if (observer === 'paged' && !OBSERVER_CALLS.paged) die(2, 'paged listing is not available in this build');
+  const pagedProblem = observer === 'paged' ? pagedObserverProblem({ withShare, withLift }) : null;
+  if (pagedProblem) die(2, pagedProblem);
   const windows = windowsFor(v, windowDefaults);
   checkWindows(windows);
   const windowsMs = [windows.warmup * 1000, windows.measure * 1000, windows.cooldown * 1000];
@@ -297,28 +504,26 @@ function resolveConfig(v) {
     const cal = calibration.windowsMs;
     calibration.windowsDiffer = [cal.warmupMs, cal.measureMs, cal.cooldownMs].some((x, i) => x !== windowsMs[i]);
   }
-  let history = String(historyJobs);
-  if (historyJobs === 0) history = '0';
-  else if (historyJobs % 1000 === 0) history = `${historyJobs / 1000}k`;
+  if (calibration) calibration.factorsDiffer = JSON.stringify(calibration.factors) !== JSON.stringify(loadFactors);
   return {
     label: v.label ?? null,
     role: v.role ?? null,
-    rung: custom ? `custom-l${lambda}-c${content}-a${aggregate}` : base.id,
+    queue,
+    rung: custom ? `custom-l${lambda}${withLift ? `-m${mu}` : ''}-c${content}-a${aggregate}` : base.id,
     lambda,
+    mu,
     content,
     aggregate,
-    history,
+    history: countLabel(historyJobs),
     historyJobs,
+    liftHistory: countLabel(liftHistoryJobs),
+    liftHistoryJobs,
     observer,
     observerMs,
-    seedFile: manifest
-      ? {
-          path: path.resolve(v['seed-file']),
-          sha256: manifest.sha256,
-          jobs: manifest.jobs,
-          baseTime: manifest.baseTime,
-        }
-      : null,
+    seedFile,
+    liftSeedFile,
+    liftModel,
+    loadFactors,
     calibration,
     repeat,
     seed,
@@ -328,14 +533,15 @@ function resolveConfig(v) {
     backendNote: v['backend-note'] ?? null,
     namespacePrefix: v['namespace-prefix'] ?? 'aqc',
     keep: Boolean(v['keep-namespace']),
+    ...liftModel,
   };
 }
 
-function parseCountOrDie(value) {
+function parseCountOrDie(value, flag) {
   try {
     return parseCount(value);
   } catch (e) {
-    return die(2, `--history: ${e.message}`);
+    return die(2, `${flag}: ${e.message}`);
   }
 }
 
@@ -410,10 +616,24 @@ async function runCommand(v) {
     out: outDir,
     p95Ms: summary.submission.latencyMs?.p95 ?? null,
     F: summary.submission.F,
+    ...(summary.publish
+      ? {
+          publishP95Ms: summary.publish.latencyMs?.p95 ?? null,
+          publishF: summary.publish.F,
+          pickupP50Ms: summary.publish.pickup?.p50 ?? null,
+        }
+      : {}),
     valid: summary.validity.ok,
   });
   process.exit(0);
 }
+
+const NOOP = {
+  stop() {},
+  async drain() {
+    return 0;
+  },
+};
 
 async function runOnce(c, dist, endpoint, outDir) {
   const { storage, core, pub, utils } = dist;
@@ -421,6 +641,8 @@ async function runOnce(c, dist, endpoint, outDir) {
   const warn = console.warn;
   const runTag = `run${randomBytes(3).toString('hex')}`;
   const runId = `${c.label ?? 'run'}-${c.rung}-r${c.repeat}-${Date.now().toString(36)}`;
+  const useShare = c.queue !== 'lift';
+  const useLift = c.queue !== 'share';
   const host = {
     cpus: os.cpus().length,
     loadavgStart: os.loadavg().map((x) => Math.round(x * 100) / 100),
@@ -457,18 +679,26 @@ async function runOnce(c, dist, endpoint, outDir) {
         const cfg = { ...c, runTag };
         const world = {
           cfg,
-          t0: null, // set by beginEpoch, once the worker and the idle publisher are up
+          t0: null, // set by beginEpoch, once the worker and the publisher are up
           epoch0: 0,
           store,
           queue: null,
           requests: [],
+          pubRequests: [],
           observerEvents: [],
+          liftObserverEvents: [],
           readerEvents: [],
           claimMs: [],
           claimLatMs: [],
           completions: [],
         };
-        const idle = createIdlePublisher(world, dist);
+        // the daemon's publisher: the idle one (no publish load) beside a share run, the real one with the synthetic
+        // handler when the run publishes
+        const idle = useLift ? null : createIdlePublisher(world, dist);
+        const liftSide = useLift
+          ? createLiftSide(world, dist, { stageStore: seedStore, graphManager: new storage.GraphManager(seedStore) })
+          : null;
+        const publisherSide = liftSide ?? idle;
         let worker = null;
         let sampler = null;
         let admissions = null;
@@ -477,26 +707,37 @@ async function runOnce(c, dist, endpoint, outDir) {
         try {
           await seedMainNamespace(seedStore, core);
           let seedLoad = null;
+          let liftSeedLoad = null;
           if (c.historyJobs > 0) {
             if (c.seedFile) seedLoad = await loadSeedFile(sparqlUrl, c.seedFile.path);
             else await loadGenerated(seedStore, dist, { jobs: c.historyJobs, baseTime: Date.now() });
           }
-          world.queue = new pub.TripleStoreAsyncPromoteQueue(store);
-          // the admission work an enqueue leaves running after its caller was answered at the deadline
-          admissions = trackAdmissionWork(
-            dist.admission.PromoteAdmissionCoordinator.for(store, utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI),
-          );
-          worker = createWorker(world, dist);
+          if (c.liftHistoryJobs > 0) {
+            if (c.liftSeedFile) liftSeedLoad = await loadSeedFile(sparqlUrl, c.liftSeedFile.path);
+            else await loadGeneratedLift(seedStore, dist, { jobs: c.liftHistoryJobs, baseTime: Date.now() });
+          }
+          const arrivals = useLift ? publishArrivals(cfg) : [];
+          // every scheduled publication's share snapshot is staged before the run (the share step precedes the publish call)
+          for (let n = 0; n < arrivals.length; n++) await liftSide.stage(n);
+          if (useShare) {
+            world.queue = new pub.TripleStoreAsyncPromoteQueue(store);
+            // the admission work an enqueue leaves running after its caller was answered at the deadline
+            admissions = trackAdmissionWork(
+              dist.admission.PromoteAdmissionCoordinator.for(store, utils.DEFAULT_PROMOTE_CONTROL_GRAPH_URI),
+            );
+            worker = createWorker(world, dist);
+          }
           const schedulerSnapshot = storage.getExternalStorePrioritySchedulerSnapshot();
           const maxOldest = {};
           const window = { from: c.warmupMs, to: c.warmupMs + c.measureMs };
           const preflight = makePreflight({ store, deps: dist });
+          const publishPreflight = useLift ? createPublishPreflight(world, preflight) : null;
           // the epoch starts after the awaited startup; the samplers and every window boundary count from it
           await beginEpoch(
             world,
             async () => {
-              await worker.supervisor.start();
-              await idle.start();
+              await worker?.supervisor.start();
+              await publisherSide.start();
             },
             () => {
               loopMonitor.enable();
@@ -510,9 +751,30 @@ async function runOnce(c, dist, endpoint, outDir) {
             },
           );
           running = true;
-          const producers = startShareProducers(world, preflight);
+          const horizonMs = c.warmupMs + c.measureMs + c.cooldownMs;
+          const producers = useShare ? startShareProducers(world, preflight) : NOOP;
+          const pubProducers = useLift ? startPublishProducers(world, liftSide, publishPreflight, arrivals) : NOOP;
           const readers = startReaders(world);
-          const observer = startObserver(world, c.observer);
+          const observer = useShare ? startObserver(world, c.observer) : NOOP;
+          const liftObserver = useLift
+            ? startObserver(world, c.observer, {
+                calls: LIFT_OBSERVER_CALLS,
+                target: liftSide.admission,
+                events: world.liftObserverEvents,
+              })
+            : NOOP;
+          const lf = c.loadFactors;
+          const probeLoad = lf.probes
+            ? await startProbeLoad(world, dist, {
+                statusMs: lf.statusMs,
+                metricsMs: lf.metricsMs,
+                countMs: lf.countMs,
+                horizonMs,
+              })
+            : null;
+          const ackLoad = lf.ack
+            ? startAckLoad(world, storage, { intervalMs: lf.ackMs, payload: lf.ackPayload, horizonMs })
+            : null;
           await sleepUntil(world, window.from);
           loopMonitor.reset();
           const before = core.backpressureRegistry.capture();
@@ -529,34 +791,59 @@ async function runOnce(c, dist, endpoint, outDir) {
           await sleepUntil(world, window.to + c.cooldownMs);
           const horizonReachedAt = performance.now() - world.t0;
           producers.stop(); // an arrival overdue at the horizon is still issued, so none is missing from the stats
+          pubProducers.stop();
           readers.stop();
           observer.stop();
-          const stillInflight = await producers.drain(50_000);
+          liftObserver.stop();
+          probeLoad?.stop();
+          ackLoad?.stop();
+          const stillInflight = (await producers.drain(50_000)) + (await pubProducers.drain(50_000));
           await readers.drain(5000);
           await observer.drain(1000);
-          worker.freeze(); // jobs cut short by the shutdown are not worker contract breaks
-          await worker.supervisor.stop();
-          await idle.stop();
+          await liftObserver.drain(1000);
+          // a status probe's CALLER answers within its 5 s wait by construction, but its ASK is never aborted and
+          // neither is the COUNT (like the daemon's), so the drain waits for those store queries too, up to
+          // PROBE_DRAIN_MS: one still running then is reported (stillInflightAtDrain). A metrics probe still running
+          // at that drain and an ACK still running at its own are recorded as censored at that moment and fail the
+          // probesFinished / acksFinished checks
+          const probesStillInflight = probeLoad ? await probeLoad.drain(PROBE_DRAIN_MS) : 0;
+          await ackLoad?.drain(10_000);
+          worker?.freeze(); // jobs cut short by the shutdown are not worker contract breaks
+          await worker?.supervisor.stop();
+          await publisherSide.stop();
           running = false;
           clearInterval(sampler);
-          // the shutdown after the workload horizon: reported on its own, it is no input to any window
+          // the shutdown after the workload horizon: reported on its own, it is no input to any window. The publisher can
+          // no longer claim at runMs: the censoring time of an unclaimed job
           const runMs = performance.now() - world.t0;
           const timing = {
-            horizonMs: c.warmupMs + c.measureMs + c.cooldownMs,
+            horizonMs,
             drainMs: Math.round(runMs - horizonReachedAt),
             runMs: Math.round(runMs),
           };
 
-          // ground truth: which request keys became persisted jobs (read off the measured scheduler), once the admission
-          // writes the queue left running past their callers' deadline have settled
-          const reconciled = await reconcileAdmissions({
-            tracker: admissions,
-            issued: world.requests.some((r) => r.enqStart !== undefined),
-            readJobs: () => readShareJobs(seedStore, utils, runTag),
-          });
+          // ground truth: which request keys became persisted jobs (read off the unscheduled seed store), once the
+          // admission writes the queue left running past their callers' deadline have settled
+          const reconciled = useShare
+            ? await reconcileAdmissions({
+                tracker: admissions,
+                issued: world.requests.some((r) => r.enqStart !== undefined),
+                readJobs: () => readShareJobs(seedStore, utils, runTag),
+              })
+            : { jobsByName: new Map(), reconcileError: null, admissions: null };
           const { jobsByName, reconcileError } = reconciled;
+          let liftByName = new Map();
+          let liftReconcileError = null;
+          if (useLift) {
+            try {
+              liftByName = await readLiftJobs(seedStore, dist, runTag);
+            } catch (e) {
+              liftReconcileError = String(e?.message ?? e).slice(0, 300);
+            }
+          }
 
           finalizeRequests(world.requests);
+          finalizeRequests(world.pubRequests);
           const submission = admissionSummary(world.requests);
           const gt = groundTruth(world.requests, jobsByName);
           const inWin = (e) => e.t >= window.from && e.t < window.to;
@@ -571,38 +858,96 @@ async function runOnce(c, dist, endpoint, outDir) {
             claimNext: world.claimMs,
             windows: { warmupMs: c.warmupMs, measureMs: c.measureMs, cooldownMs: c.cooldownMs },
           });
-          const counters = worker.supervisor.getCounters();
+          const counters = worker?.supervisor.getCounters() ?? {};
           const rejected = (cap) =>
             Object.fromEntries(cap.schedulers.map((s) => [s.scheduler, s.totals.rejectedTotal]));
           const agent = {
-            agentErrors: worker.stats.agentErrors,
-            dataOps: worker.stats.dataOps,
-            firstAgentError: worker.stats.firstAgentError,
-            crashes: worker.log.crashes,
+            agentErrors: worker?.stats.agentErrors,
+            dataOps: worker?.stats.dataOps,
+            firstAgentError: worker?.stats.firstAgentError,
+            crashes: worker?.log.crashes,
           };
+          // the publisher stream: persisted jobs (run-relative times), the wallet-lock events and the pick-up metrics
+          let publish = null;
+          let liftRows = [];
+          if (useLift) {
+            const pgt = groundTruth(world.pubRequests, liftByName);
+            const rows = [...liftByName.values()].flat().map((j) => jobRow(j, world.epoch0));
+            liftRows = rows;
+            publish = publishSummary({
+              admission: admissionSummary(world.pubRequests),
+              groundTruth: pgt,
+              rows,
+              window,
+              runEnd: runMs,
+              walletEvents: liftSide.trace.events.map((e) => ({
+                t: e.at - world.epoch0,
+                ev: e.ev,
+                walletId: e.walletId,
+              })),
+              walletIds: liftSide.walletIds,
+              scheduledArrivals: arrivals.length,
+              reconcileError: liftReconcileError,
+              handler: liftSide.handler.state,
+              runner: { ...liftSide.state },
+              config: { ...c.liftModel, mu: c.mu },
+            });
+          }
+          const background = backgroundLoadEvidence({
+            loadFactors: lf,
+            probeState: probeLoad?.state,
+            ackState: ackLoad?.state,
+            from: window.from,
+            to: window.to,
+            stillInflightAtDrain: probesStillInflight,
+          });
           const validityChecks = validity({
             lambda: c.lambda,
             measureMs: c.measureMs,
             measured: submission.n,
             stillInflight,
-            admissionsPending: reconciled.admissions.pending,
-            reconcileError,
+            admissionsPending: reconciled.admissions?.pending,
+            reconcileError: reconcileError ?? liftReconcileError,
             successWithoutJob: gt.successWithoutPersistedJob,
             doubleAdmissions: gt.doubleAdmissions,
             driverCpu: (cpu.user + cpu.system) / 1000 / wallMs,
-            idlePublisherErrors: idle.state.errors,
-            worker: {
-              agentErrors: agent.agentErrors,
-              crashes: agent.crashes,
-              failedTerminal: counters.failedTerminal,
-              succeeded: counters.succeeded,
-              attempted: counters.attempted,
-              dataOps: agent.dataOps,
-            },
+            idlePublisherErrors: idle?.state.errors,
+            worker: useShare
+              ? {
+                  agentErrors: agent.agentErrors,
+                  crashes: agent.crashes,
+                  failedTerminal: counters.failedTerminal,
+                  succeeded: counters.succeeded,
+                  attempted: counters.attempted,
+                  dataOps: agent.dataOps,
+                }
+              : undefined,
             seedFileVerified: c.seedFile ? seedLoad?.sha256 === c.seedFile.sha256 : true,
+            queue: c.queue,
+            ...(c.liftSeedFile ? { liftSeedFileVerified: liftSeedLoad?.sha256 === c.liftSeedFile.sha256 } : {}),
+            ...(publish
+              ? {
+                  publisher: {
+                    measured: publish.n,
+                    mu: c.mu,
+                    successWithoutJob: publish.groundTruth.successWithoutPersistedJob,
+                    doubleAdmissions: publish.groundTruth.doubleAdmissions,
+                    errors: liftSide.state.errors,
+                    stopTimedOut: liftSide.state.stopTimedOut,
+                    reclaimed: publish.reclaimed,
+                    claimed: publish.claimed,
+                    finalized: publish.finalized,
+                    failed: publish.failed,
+                    wallets: liftSide.walletIds.length,
+                    executions: liftSide.handler.state.executions,
+                    tailOps: liftSide.handler.state.tailOps,
+                  },
+                }
+              : {}),
+            ...(background.load ? { load: background.load } : {}),
           });
           const summary = {
-            schema: 1,
+            schema: 2,
             meta: {
               runId,
               label: c.label,
@@ -625,14 +970,19 @@ async function runOnce(c, dist, endpoint, outDir) {
               scheduler: schedulerSnapshot,
               cell: {
                 history: c.history,
+                liftHistory: c.liftHistory,
+                queue: c.queue,
                 observer: c.observer,
                 rung: c.rung,
                 lambda: c.lambda,
+                mu: c.mu,
                 content: c.content,
                 aggregate: c.aggregate,
                 repeat: c.repeat,
                 seed: c.seed,
                 observerMs: c.observerMs,
+                loadFactors: c.loadFactors,
+                liftModel: c.liftModel,
               },
               windows: { warmupMs: c.warmupMs, measureMs: c.measureMs, cooldownMs: c.cooldownMs },
               timing,
@@ -645,8 +995,15 @@ async function runOnce(c, dist, endpoint, outDir) {
                 loadedSha256: seedLoad?.sha256 ?? null,
                 jobs: c.seedFile.jobs,
               },
+              liftSeedFile: c.liftSeedFile && {
+                path: c.liftSeedFile.path,
+                sha256: c.liftSeedFile.sha256,
+                loadedSha256: liftSeedLoad?.sha256 ?? null,
+                jobs: c.liftSeedFile.jobs,
+              },
             },
             submission,
+            publish,
             observer: {
               mode: c.observer,
               polls: obs.length,
@@ -657,25 +1014,38 @@ async function runOnce(c, dist, endpoint, outDir) {
                 ? { pages: { n: obs.at(-1).pages, maxPageMs: Math.max(...obs.map((e) => e.maxPageMs ?? 0)) } }
                 : {}),
             },
-            worker: {
-              completionsInWindow: done.length,
-              completionsPerMin: Math.round((done.length / (c.measureMs / 60_000)) * 100) / 100,
-              claimLatencyMs: summarize(world.claimLatMs),
-              claimNextMs: summarize(claims.map((x) => x.ms)),
-              counters,
-              agent,
-              backlog,
-              p8c,
-              workerLogLines: worker.log.count,
-              workerLog: worker.log.lines,
-            },
+            liftObserver: useLift
+              ? {
+                  mode: c.observer,
+                  polls: world.liftObserverEvents.length,
+                  failed: world.liftObserverEvents.filter((e) => !e.ok).length,
+                  latencyMs: summarize(world.liftObserverEvents.filter(inWin).map((e) => e.ms)),
+                  rows: world.liftObserverEvents.at(-1)?.rows ?? null,
+                }
+              : null,
+            worker: useShare
+              ? {
+                  completionsInWindow: done.length,
+                  completionsPerMin: Math.round((done.length / (c.measureMs / 60_000)) * 100) / 100,
+                  claimLatencyMs: summarize(world.claimLatMs),
+                  claimNextMs: summarize(claims.map((x) => x.ms)),
+                  counters,
+                  agent,
+                  backlog,
+                  p8c,
+                  workerLogLines: worker.log.count,
+                  workerLog: worker.log.lines,
+                }
+              : null,
             readers: {
               n: reads.length,
               failed: reads.filter((e) => !e.ok).length,
               failFrac: reads.length ? reads.filter((e) => !e.ok).length / reads.length : null,
               latencyMs: summarize(reads.map((e) => e.ms)),
             },
-            idlePublisher: idle.state,
+            idlePublisher: idle?.state ?? null,
+            probes: background.probes,
+            ack: background.ack,
             backpressure: {
               before,
               after,
@@ -694,10 +1064,16 @@ async function runOnce(c, dist, endpoint, outDir) {
           writeFileSync(path.join(outDir, 'summary.json'), `${JSON.stringify(summary, null, 2)}\n`);
           const events = [
             ['req', world.requests],
+            ['preq', world.pubRequests],
             ['obs', world.observerEvents],
+            ['lobs', world.liftObserverEvents],
             ['read', world.readerEvents],
             ['claim', world.claimMs],
             ['done', world.completions],
+            ['ljob', liftRows],
+            ['wallet', liftSide?.trace.events ?? []],
+            ['probe', probeLoad?.state.events ?? []],
+            ['ack', ackLoad?.state.events ?? []],
           ];
           writeFileSync(
             path.join(outDir, 'events.jsonl'),
@@ -709,7 +1085,8 @@ async function runOnce(c, dist, endpoint, outDir) {
           admissions?.dispose();
           loopMonitor.disable();
           // only when the run failed half way
-          if (running) await within(Promise.allSettled([worker.supervisor.stop(), idle.stop()]), 25_000);
+          if (running) await within(Promise.allSettled([worker?.supervisor.stop(), publisherSide.stop()]), 25_000);
+          liftSide?.trace.uninstall(); // the product's claim trace is the process's: leave it as it was found
           await store.close?.();
           await seedStore.close?.();
         }
@@ -801,6 +1178,8 @@ async function calibrateCommand(v) {
       cooldownMs: windows.cooldown * 1000,
     },
     cell: { history: '0', observer: 'default' },
+    // the probe and ACK load the knee was measured under: a run with another load is flagged (calibration.factorsDiffer)
+    factors: loadFactorsOf(v),
     criteria: { p95Ms: 5000, failureFrac: 0.05 },
     ladder: ladder.map((r) => r.id),
     rungs,
@@ -859,6 +1238,37 @@ function loadRecords(dir, where) {
     .filter((r) => Object.entries(conds).every(([k, x]) => String(r.cell[k]) === x));
 }
 
+/** The metric family a rule judges (--metric), with the sample minimum the worker-free pick-up needs. */
+function familyFlags(v) {
+  const family = v.metric ?? 'share';
+  if (!Object.hasOwn(FAMILIES, family)) die(2, `--metric must be ${Object.keys(FAMILIES).join(', ')}`);
+  if (v['min-qualifying'] !== undefined && family !== 'pickupFree')
+    die(2, '--min-qualifying belongs to --metric pickupFree');
+  if (family !== 'pickupFree') return { family };
+  if (v['min-qualifying'] === undefined)
+    die(2, '--metric pickupFree needs --min-qualifying N (the sample the protocol requires, declared before the A/B)');
+  return { family, minSamples: intFlag(v, 'min-qualifying', 0, 1) };
+}
+
+function printG1b(result, warnings) {
+  const reason = result.reason ? ` - ${result.reason}` : '';
+  console.log(
+    `${result.label}: ${result.status.toUpperCase()} (${result.have} usable repeats in the thinnest cell, ${result.need} needed)${reason}`,
+  );
+  console.log(`  ${result.note}`);
+  for (const [id, cell] of Object.entries(result.cells)) {
+    console.log(`  ${id} (--queue ${cell.queue}, rung ${cell.rung}): ${cell.have} of ${result.need} repeats usable`);
+    for (const [name, m] of Object.entries(cell.metrics)) {
+      const pct = `${m.deviation >= 0 ? '+' : ''}${(m.deviation * 100).toFixed(1)} %`;
+      console.log(
+        `    ${G1B_METRICS[name].label}: median ${m.median} ms vs G0b ${m.ref} ms (${pct}), band ${m.lo}..${m.hi} ms  ${m.ok ? 'ok' : 'MISS'}`,
+      );
+    }
+    for (const p of cell.problems) console.log(`    problem: ${p}`);
+  }
+  for (const w of warnings) console.log(`warning: ${w}`);
+}
+
 function verdictCommand(v) {
   if (!v.a) die(2, 'verdict needs --a DIR');
   const A = loadRecords(v.a, v.where);
@@ -868,33 +1278,57 @@ function verdictCommand(v) {
     console.log(ledgerMarkdown([...A, ...B]));
     process.exit(0);
   }
-  if (!['halve', 'flat', 'equal', 'aa'].includes(rule)) die(2, 'verdict needs --rule halve|flat|equal|aa|ledger');
+  if (rule === 'g1b') {
+    if (v.b) die(2, '--rule g1b judges one arm (--a DIR) against the G0b medians: drop --b');
+    const result = g1b(A);
+    const warnings = integrityWarnings(A, [], null);
+    if (v.json) console.log(JSON.stringify({ result, warnings }));
+    else printG1b(result, warnings);
+    process.exit({ pass: 0, fail: 1, incomplete: 2 }[result.status]);
+  }
+  if (!['halve', 'flat', 'equal', 'noworse', 'aa'].includes(rule))
+    die(2, 'verdict needs --rule halve|flat|equal|noworse|aa|g1b|ledger');
   if (!v.b) die(2, `--rule ${rule} needs --b DIR`);
-  if (rule === 'equal' && v.margin === undefined)
-    die(2, '--rule equal needs --margin (declare it from the A/A pair first)');
+  if ((rule === 'equal' || rule === 'noworse') && v.margin === undefined)
+    die(2, `--rule ${rule} needs --margin (declare it from the A/A pair first)`);
   const margin = num(v.margin, null);
-  if (rule === 'equal' && !(Number.isFinite(margin) && margin >= 0)) die(2, '--margin must be a non-negative number');
-  const keyOf = rule === 'flat' ? (r) => pairKey(r, { ignoreHistory: true }) : (r) => r.key;
-  const { pairs, missing } = pairRuns(A, B, keyOf, { ignoreSeed: rule === 'flat' });
+  if ((rule === 'equal' || rule === 'noworse') && !(Number.isFinite(margin) && margin >= 0))
+    die(2, '--margin must be a non-negative number');
+  const { family, minSamples } = familyFlags(v);
+  if (rule === 'flat' && family !== 'share' && family !== 'publish')
+    die(2, '--rule flat judges a P95: --metric share or publish');
+  // the flatness rule pairs across histories and their seed files, the share and the lift one (G2's seeded cell is both)
+  const flatKey = { ignoreHistory: true, ignoreLiftHistory: true };
+  const keyOf = rule === 'flat' ? (r) => pairKey(r, flatKey) : (r) => r.key;
+  const { pairs, missing } = pairRuns(A, B, keyOf, { ignoreSeed: rule === 'flat', ignoreLiftSeed: rule === 'flat' });
   if (rule === 'aa') {
     // three repeats of EACH cell, whatever cell has a run in either arm: valid pairs of different cells do not add up
-    // and a finite margin: an unbounded A/A deviation (a zero P95 against a nonzero one) declares nothing, and neither
-    // do runs of different (or unrecorded) builds: the whole arms are checked, the runs that did not pair included
-    const declaration = aaDeclaration(pairs, missing, { aRecords: A, bRecords: B });
-    const warnings = integrityWarnings([...A, ...B], pairs, null);
-    console.log(JSON.stringify({ ...declaration, warnings, missing }));
+    // and a finite margin: an unbounded A/A deviation (a zero value against a nonzero one, in any metric) declares
+    // nothing, and neither do runs of different (or unrecorded) builds: the whole arms are checked, the runs that did
+    // not pair included
+    const declaration = aaDeclaration(pairs, missing, { family, minSamples, aRecords: A, bRecords: B });
+    const aaPairs = withMetric(pairs, family, { minSamples });
+    const warnings = integrityWarnings([...A, ...B], aaPairs, null);
+    console.log(JSON.stringify({ ...declaration, warnings, missing, companions: companionsOf(aaPairs, family) }));
     process.exit(declaration.status === 'complete' ? 0 : 2);
   }
+  const options = { missing, family, minSamples };
+  // the pairs the rule can judge: one whose runs lack the metric says why among the warnings
+  const judged = withMetric(pairs, family, { minSamples });
   const result =
     rule === 'halve'
-      ? halve(pairs, { missing })
+      ? halve(judged, options)
       : rule === 'flat'
-        ? flat(pairs, { aRecords: A, bRecords: B, missing })
-        : equivalent(pairs, margin, { missing });
-  const g = guards(pairs);
-  const warnings = integrityWarnings([...A, ...B], pairs, result);
+        ? flat(judged, { aRecords: A, bRecords: B, family, missing })
+        : rule === 'noworse'
+          ? noWorse(judged, margin, options)
+          : equivalent(judged, margin, options);
+  const g = guards(judged, family);
+  const warnings = integrityWarnings([...A, ...B], judged, result);
+  // D-16: the backlog and the claim-to-finish time, next to a pick-up result, whatever the result
+  const companions = companionsOf(judged, family);
   if (v.json) {
-    console.log(JSON.stringify({ result, guards: g, missing, warnings }));
+    console.log(JSON.stringify({ result, guards: g, missing, warnings, companions }));
   } else {
     const reason = result.reason ? ` - ${result.reason}` : '';
     console.log(
@@ -909,6 +1343,7 @@ function verdictCommand(v) {
       `guards (reported, not gating): candidate failure fraction <= 0.02 ${failureOk}; ` +
         `completions >= 0.9 x base ${completionsOk}`,
     );
+    for (const line of companionLines(companions, family)) console.log(line);
     for (const w of warnings) console.log(`warning: ${w}`);
   }
   process.exit({ pass: 0, fail: 1, incomplete: 2 }[result.status]);
