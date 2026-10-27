@@ -247,6 +247,7 @@ export const POPULATION_KINDS = [
   'queued', 'running', 'failed_retrying',
   'failed-plain', 'failed-ambiguity', 'failed-legacy', 'failed-postcommit', 'failed-postcommit-exhausted', 'failed-bound',
   'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-cancelled-legacy', 'failed-cancelled-legacy-no-marker',
+  'failed-cancelled-unclaimed-legacy-absent', 'failed-cancelled-unclaimed-legacy-0', 'failed-cancelled-unclaimed-legacy-1',
   'failed-cancelled-no-started-flag', 'failed-cancelled-contradictory', 'failed-cancelled-prepared', 'failed-cancelled-attempted', 'failed-cancelled-attempted-partial', 'failed-retired',
 ] as const;
 export type PopulationKind = (typeof POPULATION_KINDS)[number];
@@ -275,6 +276,11 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
     // reclaim cleared the marker of a running job and requeued it with its attempt count, so a later cancel leaves no marker on a job that may have started promote.
     case 'failed-cancelled-legacy': return cancelledJob(id, { formatVersion: 1, commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false }, attempt: LEGACY_HISTORY }, age);
     case 'failed-cancelled-legacy-no-marker': return cancelledJob(id, { formatVersion: undefined, attempt: LEGACY_HISTORY }, age);
+    // A cancelled job of a pre-format-2 row that was NEVER claimed (`attempt.count` 0, no `preparationAttempts`, no marker): the every-attempt rule alone proves every attempt unstarted
+    // (there was none), so the format rule (`isMarkerWriterFormat`) is the only thing that keeps it. The three formats a pre-format-2 row has: absent, 0 and 1.
+    case 'failed-cancelled-unclaimed-legacy-absent': return cancelledJob(id, { formatVersion: undefined }, age);
+    case 'failed-cancelled-unclaimed-legacy-0': return cancelledJob(id, { formatVersion: 0 }, age);
+    case 'failed-cancelled-unclaimed-legacy-1': return cancelledJob(id, { formatVersion: 1 }, age);
     case 'failed-cancelled-no-started-flag': return cancelledJob(id, { commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);   // format 4: not legacy
     case 'failed-cancelled-contradictory': return cancelledJob(id, { commitMarker: { ...NO_MARKERS, gossiped: true } }, age);
     // Every attempt proven unstarted is the only way a CLAIMED cancelled job is deletable (`preparationAttempts` covers `attempt.count`, format 4): deletable. Without that proof a

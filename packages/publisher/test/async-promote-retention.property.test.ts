@@ -19,6 +19,10 @@ import type { PromoteRetentionJobClass } from '../src/async-promote-retention-po
 // row: a repeat is no reordering and no stall, a subject is judged and deleted once, and a window of repeats still counts as full (the walk goes on after it). A quarter
 // of the jobs additionally carry a decimal `updatedAt` twin, which the scan ignores (it reads exact integer terms only): that is a check that a twin changes nothing, not
 // a repeated row.
+//
+// Each rule of the cancelled class has a kind that ONLY that rule protects, so dropping one rule fails this property. The format rule (`isMarkerWriterFormat`) is the only
+// thing that keeps `failed-cancelled-unclaimed-legacy-absent|0|1`: a pre-format-2 cancelled job with `attempt.count` 0 and no `preparationAttempts`, which the every-attempt
+// rule alone proves unstarted (there was no attempt). The legacy kinds that were claimed (`attempt.count` 3) are protected by the every-attempt rule as well.
 
 const options = propertyOptions();
 
