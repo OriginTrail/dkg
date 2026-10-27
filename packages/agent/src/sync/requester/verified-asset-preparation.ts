@@ -6,6 +6,8 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+  GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES,
+  stripGraphKnowledgeAssetPeerControls,
   readGraphKnowledgeAssetConfirmationKindV1,
 } from '@origintrail-official/dkg-publisher';
 import { parseGraphScopedDescriptor } from '../durable-integrity.js';
@@ -23,9 +25,7 @@ const TRANSACTION_HASH = `${DKG_NS}transactionHash`;
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
   MATERIALIZED_VERSION,
-  `${DKG_NS}accessPolicy`,
-  `${DKG_NS}allowedPeer`,
-  `${DKG_NS}publisherPeerId`,
+  ...GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES,
   `${DKG_NS}status`,
 ]);
 const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
@@ -144,7 +144,7 @@ export function partitionVerifiedGraphScopedAssets(
     // and receipt claim consumed by the chain authenticator below. ACLs,
     // status, timestamps, and local ordering are never accepted as trusted
     // controls from a peer.
-    const metadataQuads = (metadataBySubject.get(ual) ?? []).filter(
+    const metadataQuads = stripGraphKnowledgeAssetPeerControls(metadataBySubject.get(ual) ?? []).filter(
       (quad) => GRAPH_SCOPED_SYNC_METADATA_PREDICATES.has(quad.predicate),
     );
     const rootCount = metadataQuads.filter(quad => quad.predicate === `${DKG_NS}merkleRoot`).length;
