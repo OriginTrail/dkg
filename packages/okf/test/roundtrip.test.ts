@@ -20,7 +20,7 @@ import {
   okfExtensionPredicate,
 } from '../src/index.js';
 import type { BundleFile, Quad } from '../src/index.js';
-import { objs, IDX_V02, bundle, exportedFrontmatter, DT, semantic, shuffled } from './helpers/okf-v02-fixtures.js';
+import { objs, IDX_V02, bundle, exportedFrontmatter, DT, semantic, shuffled, withoutBody } from './helpers/okf-v02-fixtures.js';
 
 const files = loadBundleDir(fileURLToPath(new URL('./fixtures/crypto_bitcoin', import.meta.url)));
 
@@ -373,8 +373,14 @@ describe('export depends only on which triples the graph holds', () => {
     expect(fm.runtime).toEqual(['second', 'first']);
     // extension keys follow the family's own fields, in canonical order
     expect(Object.keys(fm.executor as object)).toEqual(['resource', 'backoff', 'retry']);
-    const body = exportBundle(importBundle(mixed)).find((f) => f.path === 'metrics/revenue.md')!.content;
-    expect(body.indexOf('https://a.example/')).toBeLessThan(body.indexOf('https://b.example/'));
+    // A body regenerated from the graph lists the citations in canonical
+    // order; a stored body keeps the order they were written in.
+    const imported = importBundle(mixed);
+    const revenue = (out: BundleFile[]) => out.find((f) => f.path === 'metrics/revenue.md')!.content;
+    const regenerated = revenue(exportBundle(exportInputFromQuads(withoutBody(imported.quads))));
+    expect(regenerated.indexOf('https://a.example/')).toBeLessThan(regenerated.indexOf('https://b.example/'));
+    const written = revenue(exportBundle(imported));
+    expect(written.indexOf('https://b.example/')).toBeLessThan(written.indexOf('https://a.example/'));
   });
 
   it('exports the same value for a single-valued field that holds two, whichever arrives first', () => {

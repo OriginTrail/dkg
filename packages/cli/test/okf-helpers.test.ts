@@ -258,8 +258,9 @@ describe('the numbers an OKF import writes are ones a store computes with', () =
       },
     ]);
     const numeric = quads.filter((q) => /\^\^<http:\/\/www\.w3\.org\/2001\/XMLSchema#(integer|decimal|double)>$/.test(q.object));
-    // six parameter defaults, an executor extension, a usage count and a producer key
-    expect(numeric.length).toBe(9);
+    // six parameter defaults, an executor extension, a usage count, a producer key,
+    // and the stored body's part count and part position
+    expect(numeric.length).toBe(11);
     const store = await createTripleStore({ backend: 'oxigraph' });
     try {
       const graph = 'urn:test:okf-numbers';

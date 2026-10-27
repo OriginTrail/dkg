@@ -434,14 +434,19 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
 
   it('verify gates on scoped per-predicate counts and reads object-form cells', async () => {
     clear();
-    // Clean 2-concept bundle, no headings/links: predicates are rdf:type×2, schema:name×2.
+    // Clean 2-concept bundle, no headings/links: each concept's type, name and stored body.
     const dir = await mkdtemp(join(tmpdir(), 'okf-verify-'));
-    await writeFile(join(dir, 'index.md'), '---\nokf_version: "0.1"\n---\n# Root\n');
-    await writeFile(join(dir, 'x.md'), '---\ntype: Thing\ntitle: X\n---\n\nplain body\n');
-    await writeFile(join(dir, 'y.md'), '---\ntype: Thing\ntitle: Y\n---\n\nplain body\n');
+    const files = [
+      { path: 'index.md', content: '---\nokf_version: "0.1"\n---\n# Root\n' },
+      { path: 'x.md', content: '---\ntype: Thing\ntitle: X\n---\n\nplain body\n' },
+      { path: 'y.md', content: '---\ntype: Thing\ntitle: Y\n---\n\nplain body\n' },
+    ];
+    for (const f of files) await writeFile(join(dir, f.path), f.content);
 
-    const TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
     const NAME = 'http://schema.org/name';
+    // What a complete import stores: the distinct triples of each predicate.
+    const counts = Object.fromEntries([...pairsByPredicate(importBundle(files).quads)].map(([p, pairs]) => [p, pairs.length]));
+    expect(counts[NAME]).toBe(2);
     // The stored pairs come back as SPARQL-JSON OBJECT cells (exercises the cell reading in verify).
     const issuedSparql: string[] = [];
     const countHandler =
@@ -454,7 +459,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
       };
 
     // All present → complete, zero missing, exit 0.
-    stub.setHandler(countHandler({ [TYPE]: 2, [NAME]: 2 }));
+    stub.setHandler(countHandler(counts));
     const ok = await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-v'], env());
     expect(ok.exitCode).toBe(0);
     const okOut = parseJsonTail(ok.stdout);
@@ -469,7 +474,7 @@ describe.sequential('dkg okf subcommands', { timeout: 180_000 }, () => {
     for (const s of issuedSparql) expect(s).toMatch(/STRSTARTS\(STR\(\?s\)/);
 
     // One name missing → shortfall → complete:false, non-zero exit (pipeline gate).
-    stub.setHandler(countHandler({ [TYPE]: 2, [NAME]: 1 }));
+    stub.setHandler(countHandler({ ...counts, [NAME]: 1 }));
     const bad = await runCli(['okf', 'verify', dir, '--context-graph-id', 'cg-v'], env());
     stub.setHandler(okfDaemonHandler(createdCGs));
     expect(bad.exitCode).not.toBe(0);

@@ -65,8 +65,9 @@ for (const c of result.concepts) {
 
 ## OKF v0.2 → RDF
 
-Every triple is a pure function of the frontmatter; nothing is inferred from
-prose. `type` is the only required key; every family is optional and its
+Every triple is a pure function of the document: its frontmatter, the links,
+headings and legacy citations of its body, and the body itself, stored as
+written; nothing is inferred from prose. `type` is the only required key; every family is optional and its
 absence carries meaning (an unverified concept is distinguishable from a
 verified one, and is never rejected — SPEC §11).
 
@@ -87,6 +88,7 @@ verified one, and is never rejected — SPEC §11).
 | `executor`, `attester` (§10.2) | `okf:executorResource`, `okf:executorReceipt` (one per field), `okf:attesterResource` | extra keys → `okf:executor.<key>` / `okf:attester.<key>` |
 | body links (§6.1) | `schema:mentions` (untyped; opt-in `--relate` typing) | unchanged |
 | legacy `# Citations` (§13.1) | `schema:citation` | still parsed for v0.1 documents |
+| the body (§4) | `okf:bodyPartCount` (xsd:integer); `okf:bodyPart → okf:BodyPart` node: `schema:position` (xsd:integer, from 0), `schema:text` | stored verbatim, in parts each within half the node's 60,000-byte literal limit, so a body of any length imports; the parts, concatenated in position order, are the body (see *Round trip*) |
 | producer-defined keys (§4.1) | `schema:<camelKey>` | scalars typed (a number as `xsd:integer` or `xsd:decimal`, or `xsd:double` when it needs an exponent, `1e-7`, `1e+21`, or is `.inf` / `.nan`, which no decimal holds); nested mappings as `rdf:JSON` literals so they round-trip as objects; an empty list as one `[]` |
 | a family value of the wrong shape (§11) | `schema:<camelKey>`, plus `okf:keptVerbatim.<familyKey>` holding the same term | kept verbatim with a warning; the marker says the value is the family's, since a producer key of the same camelCase (`Sources`) shares the `schema:` predicate |
 
@@ -152,7 +154,17 @@ ontology, so it never collides with the node's own `dkg:status` /
 
 ### Round trip
 
-`dkg okf export` is graph-faithful, not byte-faithful. The v0.2 families are
+`dkg okf export` writes each concept's body back as it was written, as
+`parseDocument` reads it (line endings as `\n`, the one newline after the
+frontmatter dropped), and rebuilds the frontmatter from the graph, so the
+frontmatter is graph-faithful, not byte-faithful. An edge or citation the graph
+holds that the body does not express (a graph edited after import) is appended
+after the body, so a re-import reads every one; the body is the source of its
+own links, so a link it still holds comes back on re-import even if its edge
+was removed from the graph. A concept with no complete stored body (imported
+before bodies were stored, or with parts that no longer add up) gets a body
+regenerated from the graph: a `# Related` section of links and a legacy
+`# Citations` section. The v0.2 families are
 rebuilt in their original order; derived triples (`okf:trustTier`,
 `prov:wasDerivedFrom`) are not written back and are re-derived on the next
 import. A last-modified time comes back under the key it was written with: a
@@ -164,8 +176,8 @@ depends only on which triples it holds: entry order is restored from the node
 IRIs (a skipped entry takes no number, so they are the same after a round
 trip), and everything else is written in a canonical order, so two stores holding
 the same graph export the same bytes whatever order they return rows in. Known
-deviations: set-valued lists (`tags`, `authors`, `executor.receipt`, links,
-citations) and producer keys come back in canonical order (a value kept
+deviations: set-valued lists (`tags`, `authors`, `executor.receipt`, and the
+links and citations of a regenerated body) and producer keys come back in canonical order (a value kept
 verbatim as one JSON literal keeps its own), a repeated list value
 (`tags: [a, a]`) comes back once, a producer key named like a family or base
 field (`Sources` beside `sources`, `Type`) comes back capitalised, so neither

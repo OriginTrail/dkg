@@ -18,7 +18,11 @@ import { freePort } from './fixtures/oxigraph-server-real-fixture.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import { makeTestKaNumberAllocator } from '../../agent/test/_helpers/ka-allocator.js';
 import { ensureOkfCliBuilt, makeBundle, makeOkfCliHome, parseJsonTail, runCli } from './okf-test-helpers.js';
-import { exportBundle, importBundle, loadBundleDir, parseDocument, quadsToNQuads, DKG_HAS_SECTION, GENID_TAGS } from '@origintrail-official/dkg-okf';
+import {
+  conceptIdToKaName, exportBundle, importBundle, loadBundleDir, parseDocument, quadsToNQuads,
+  DKG_HAS_SECTION, GENID_TAGS, OKF_BODY_PART, OKF_BODY_PART_COUNT, type Quad,
+} from '@origintrail-official/dkg-okf';
+import { ApiClient } from '../src/api-client.js';
 
 // Compiled CLI -> actual daemon routes -> actual agent lifecycle and Oxigraph.
 // The chain is local/mock: this WM/SWM roundtrip needs no on-chain publication.
@@ -264,5 +268,76 @@ describe.sequential('OKF subgraph lifecycle roundtrip', { timeout: 120_000 }, ()
 
     // Re-importing the store export reproduces the original graph.
     expect(semantic(importBundle(loadBundleDir(output)).quads)).toBe(semantic(offline.quads));
+  });
+
+  it('stores each body verbatim through the real store, a long one in parts the write route accepts', async () => {
+    const bodies = 'bodyrt';
+    await agent.createSubGraph(cg, bodies);
+    const source = join(root, 'body-bundle');
+    // Over the node's 60,000-byte literal limit, dense with what costs extra
+    // bytes: escapes, control characters, non-ASCII and astral characters.
+    const unit = 'ab😀 "q" \\ \t\u0001 é漢\n';
+    const long = Array.from({ length: 4000 }, (_, i) => `${i} ${unit}`).join('');
+    const files: Record<string, string> = {
+      'index.md': '---\nokf_version: "0.2"\n---\n\n# Root\n',
+      'bodyrt/long.md': `---\ntype: Note\n---\n\n# Notes\n\nSee [short](/bodyrt/short.md).\n\n${long}\n# Citations\n\n[1] [spec](https://example.org/spec)\n`,
+      'bodyrt/short.md': '---\ntype: Note\n---\nNo blank line before me, trailing spaces after me   \n\n\n',
+    };
+    await writeBundle(source, files);
+    expect(importBundle(loadBundleDir(source)).quads.filter((q) => q.predicate === OKF_BODY_PART).length).toBeGreaterThan(3);
+
+    const imported = await runCli(['okf', 'import', source, '--context-graph-id', cg,
+      '--sub-graph-name', bodies, '--share', '--manifest', join(root, 'body-manifest.json')], env);
+    expect(imported.exitCode, imported.stderr).toBe(0);
+    expect(parseJsonTail(imported.stdout)).toMatchObject({ assetsShared: 2, memoryLayer: 'SWM' });
+    const verified = await runCli(['okf', 'verify', source, '--context-graph-id', cg, '--sub-graph-name', bodies], env);
+    expect(verified.exitCode, verified.stdout + verified.stderr).toBe(0);
+
+    const output = join(root, 'body-export');
+    const exported = await runCli(['okf', 'export', cg, output, '--sub-graph-name', bodies], env);
+    expect(exported.exitCode, exported.stderr).toBe(0);
+    const storeExport = await readTree(output);
+    for (const path of ['bodyrt/long.md', 'bodyrt/short.md']) {
+      expect(parseDocument(path, storeExport[path]).body, path).toBe(parseDocument(path, files[path]).body);
+    }
+  });
+
+  it('stores the bodies of a Working Memory import made before bodies were stored, on import --replace', async () => {
+    const upgrade = 'okf-body-upgrade';
+    await agent.createContextGraph({ id: upgrade, name: upgrade });
+    const source = join(root, 'upgrade-bundle');
+    const files: Record<string, string> = {
+      'index.md': '---\nokf_version: "0.2"\n---\n\n# Root\n',
+      'bodyup/a.md': '---\ntype: Note\n---\n\n# About\n\nProse that links to [b](/bodyup/b.md).\n',
+      'bodyup/b.md': '---\ntype: Note\n---\n\nMore prose.\n',
+    };
+    await writeBundle(source, files);
+    // What an earlier release left in Working Memory: the same drafts, without the body triples.
+    const earlier = (quads: Quad[]) =>
+      quads.filter((q) => !q.subject.includes(GENID_TAGS.body) && !q.object.includes(GENID_TAGS.body) && q.predicate !== OKF_BODY_PART_COUNT);
+    const client = new ApiClient(Number(env.DKG_API_PORT), 'stub-token');
+    const stages: Record<string, string> = {};
+    for (const concept of importBundle(loadBundleDir(source)).concepts) {
+      const name = conceptIdToKaName(concept.conceptId);
+      await client.createKnowledgeAsset(upgrade, name);
+      await client.knowledgeAssetWrite(upgrade, name, earlier(concept.quads).map((q) => ({ ...q, graph: `did:dkg:context-graph:${upgrade}` })));
+      stages[concept.conceptId] = 'written';
+    }
+    const manifest = join(root, 'upgrade-manifest.json');
+    await writeFile(manifest, JSON.stringify({ contextGraphId: upgrade, mode: 'per-concept', stages }));
+    const reimport = (flag: string) => runCli(['okf', 'import', source, '--context-graph-id', upgrade, '--manifest', manifest, flag], env);
+
+    // --replace writes the drafts again, bodies included; the share that follows
+    // advances them as they are, so verify passes only if the bodies were written.
+    expect((await reimport('--replace')).exitCode).toBe(0);
+    expect((await reimport('--share')).exitCode).toBe(0);
+    const verified = await runCli(['okf', 'verify', source, '--context-graph-id', upgrade], env);
+    expect(parseJsonTail(verified.stdout)).toMatchObject({ complete: true, totalMissingTriples: 0 });
+    const output = join(root, 'upgrade-export');
+    expect((await runCli(['okf', 'export', upgrade, output], env)).exitCode).toBe(0);
+    const storeExport = await readTree(output);
+    for (const path of ['bodyup/a.md', 'bodyup/b.md']) {
+      expect(parseDocument(path, storeExport[path]).body, path).toBe(parseDocument(path, files[path]).body);
+    }
   });
 });

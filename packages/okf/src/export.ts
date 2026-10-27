@@ -5,12 +5,19 @@
  *   import(bundle) → exportBundle(...) → import(...)
  *
  * reproduces an *equivalent graph* (same concepts, frontmatter triples, v0.2
- * family nodes, untyped edges and legacy citations). It is graph-faithful, not
- * byte-faithful: free-form prose is not recoverable from triples, so bodies are
- * regenerated structurally (a `# Related` section of links + a legacy
- * `# Citations` section). Section headings from the original body are
- * presentational and are not reconstructed — round-trip equivalence is asserted
- * over the semantic (non-`hasSection`) quad set.
+ * family nodes, bodies, untyped edges and legacy citations).
+ *
+ * A body comes back as written: the importer stores it verbatim (`body.ts`),
+ * and export writes it back, followed by any edge or citation the graph holds
+ * that the body does not express (a graph edited after import), so a
+ * re-import reads every one. The body is the source of its own links: a link
+ * it still holds comes back on re-import even if its edge was removed from the
+ * graph. A concept with no complete stored body (imported before bodies were
+ * stored, or with parts that no longer add up) gets a body regenerated from
+ * the graph: a `# Related` section of links and a legacy `# Citations`
+ * section, without the original prose or section headings. The frontmatter is
+ * rebuilt from the graph, so it comes back equivalent, not as written: key
+ * order, quoting and comments are the exporter's.
  *
  * This module rebuilds the base fields, body and indexes; the v0.2 families
  * are rebuilt by `families/decode.ts` from the same definitions the importer
@@ -44,8 +51,10 @@ import {
   DEFAULT_IRI_BASE,
 } from './constants.js';
 import { conceptIdFromIri, literalValue, orderKeys, termValue, ValueBuckets, type ExportContext } from './decode-terms.js';
+import { storedBody } from './body.js';
 import { decodeFamilies } from './families/decode.js';
 import { readsAsProducerKey } from './frontmatter-keys.js';
+import { linkedConceptIds, parseBody } from './markdown-body.js';
 import { dict, distinctTriples, pascalCase } from './utils.js';
 import type { BundleFile, ExportInput, OkfMappingOptions, Quad } from './types.js';
 
@@ -132,6 +141,59 @@ function byTriple(a: Quad, b: Quad): number {
   return a.object < b.object ? -1 : a.object > b.object ? 1 : 0;
 }
 
+/** A body regenerated from the graph: a `# Related` link per edge, then a legacy `# Citations` section. */
+function regeneratedBody(edges: readonly string[], citations: readonly string[]): string {
+  const lines: string[] = [];
+  if (edges.length > 0) {
+    lines.push('# Related', '');
+    for (const id of edges) lines.push(`* [${id}](/${id}.md)`);
+    lines.push('');
+  }
+  if (citations.length > 0) {
+    lines.push('# Citations', '');
+    citations.forEach((url, i) => lines.push(`[${i + 1}] [${url}](${url})`));
+    lines.push('');
+  }
+  return lines.join('\n');
+}
+
+/** The edges and citations a re-import of `body` would not read: the concepts it links to, the URLs it cites. */
+function unexpressed(
+  body: string,
+  edges: readonly string[],
+  citations: readonly string[],
+  conceptId: string,
+  ctx: ExportContext,
+): { edges: string[]; citations: string[] } {
+  const parsed = parseBody(body);
+  const linked = linkedConceptIds(parsed, conceptId, ctx.includeCodeSpanLinks === true);
+  const cited = new Set(parsed.citations.map((citation) => citation.url));
+  return { edges: edges.filter((id) => !linked.has(id)), citations: citations.filter((url) => !cited.has(url)) };
+}
+
+/**
+ * A stored body, followed by the edges and citations the graph holds that it
+ * does not express, regenerated as `regeneratedBody` writes them after a
+ * blank line. `null` when even then a re-import would not read them all (a
+ * body that leaves a code block open swallows what follows): the body is
+ * then regenerated whole.
+ */
+function bodyWithAppendix(
+  body: string,
+  edges: readonly string[],
+  citations: readonly string[],
+  conceptId: string,
+  ctx: ExportContext,
+): string | null {
+  if (edges.length === 0 && citations.length === 0) return body;
+  const missing = unexpressed(body, edges, citations, conceptId, ctx);
+  if (missing.edges.length === 0 && missing.citations.length === 0) return body;
+  const separator = body === '' || body.endsWith('\n\n') ? '' : body.endsWith('\n') ? '\n' : '\n\n';
+  const composed = body + separator + regeneratedBody(missing.edges, missing.citations);
+  const left = unexpressed(composed, edges, citations, conceptId, ctx);
+  return left.edges.length === 0 && left.citations.length === 0 ? composed : null;
+}
+
 function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportContext): BundleFile {
   const bySubject = new Map<string, Quad[]>();
   // The graph is a set: a repeated triple is one triple, and the triples are
@@ -208,7 +270,8 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
           // as native values so the datatype / structure survives re-import.
           extras.add(q.predicate.slice(SCHEMA_NS.length), termValue(q.object, ctx));
         }
-      // okf:* family predicates were read by the family decoder; derived triples are not read back.
+      // okf:* family predicates were read by the family decoder, the stored body's by `storedBody`;
+      // derived triples are not read back.
     }
   }
   if (tags.length > 0) frontmatter.tags = tags;
@@ -229,22 +292,15 @@ function reconstructConcept(c: ExportInput['concepts'][number], ctx: ExportConte
   // The OKF schema writes a typed date read back as a `Date` unquoted, exactly as stored.
   const yaml = dumpYaml(ordered, { schema: OKF_YAML_SCHEMA, sortKeys: false, lineWidth: -1 }).trimEnd();
 
-  const bodyParts: string[] = [];
   const uniqueEdges = [...new Set(edges)].sort();
-  if (uniqueEdges.length > 0) {
-    bodyParts.push('# Related', '');
-    for (const id of uniqueEdges) bodyParts.push(`* [${id}](/${id}.md)`);
-    bodyParts.push('');
-  }
-  if (citations.length > 0) {
-    bodyParts.push('# Citations', '');
-    citations.forEach((url, i) => bodyParts.push(`[${i + 1}] [${url}](${url})`));
-    bodyParts.push('');
-  }
+  const stored = storedBody(conceptQuads, (node) => bySubject.get(node) ?? []);
+  const body =
+    (stored === null ? null : bodyWithAppendix(stored, uniqueEdges, citations, c.conceptId, ctx)) ??
+    regeneratedBody(uniqueEdges, citations);
 
   return {
     path: `${c.conceptId}.md`,
-    content: `---\n${yaml}\n---\n\n${bodyParts.join('\n')}`,
+    content: `---\n${yaml}\n---\n\n${body}`,
   };
 }
 
@@ -292,6 +348,7 @@ export function exportBundle(input: ExportInput, opts: OkfMappingOptions = {}): 
     iriBase: opts.iriBase ?? DEFAULT_IRI_BASE,
     conceptIris: new Set(input.concepts.map((c) => c.iri)),
     folderHierarchy: opts.emitFolderHierarchy === true,
+    includeCodeSpanLinks: opts.includeCodeSpanLinks === true,
   };
   const concepts = input.concepts.map((c) => reconstructConcept(c, ctx));
   const indexes = regenerateIndexes(input.concepts.map((c) => c.conceptId));

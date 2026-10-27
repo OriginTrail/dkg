@@ -46,8 +46,9 @@ describe('edge-case bundle (type-only, unknown keys, broken link, log.md)', () =
 
   it('maps a type-only concept with just rdf:type (graceful degradation)', () => {
     const t = r.concepts.find((c) => c.conceptId === 'type_only')!;
+    // On the concept itself: its stored body is a typed node of its own.
     const types = t.quads.filter(
-      (q) => q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
+      (q) => q.subject === t.iri && q.predicate === 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type',
     );
     expect(types).toHaveLength(1);
     expect(t.quads.some((q) => q.predicate === 'http://schema.org/name')).toBe(false);

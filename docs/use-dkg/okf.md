@@ -61,7 +61,7 @@ The import summary (and `--dry-run`) reports the trust picture next to the tripl
 ```json
 {
   "concepts": 9,
-  "triples": 321,
+  "triples": 375,
   "sources": 9,
   "derivedFromConcepts": 8,
   "trustTiers": { "humanReviewed": 8, "machineConfirmed": 0, "unverified": 1 },
@@ -104,7 +104,9 @@ dkg okf export okf-demo ./out --sub-graph-name science
 
 Export reads a context graph view and writes an OKF v0.2 bundle to the output directory (the root `index.md` declares `okf_version: "0.2"`). Use export views to choose Working Memory, Shared Working Memory, or Verifiable Memory.
 
-Export is graph-faithful, not byte-faithful: bodies are regenerated structurally, the v0.2 families come back in their original order, set-valued lists (`tags`, links, citations) and producer keys come back in a canonical order so the output depends only on which triples the graph holds, derived triples (`okf:trustTier`, `prov:wasDerivedFrom`) are re-derived on the next import rather than written, and a last-modified time comes back under the key it was written with (a v0.1 import's legacy `timestamp` as `timestamp`, a `generated.at` inside `generated`, with no `by` invented for it), since each value on `schema:dateModified` names its owner.
+Export writes each concept's Markdown body back as it was written: the importer stores the body verbatim, in ordered `okf:BodyPart` nodes, so the prose, headings and formatting survive a round trip. An edge or citation the graph holds that the body does not express (a graph edited after import) is appended after the body, so a re-import reads it, and a link the body holds comes back on re-import even if its edge was removed from the graph. A concept imported before bodies were stored has no body in the graph, and export regenerates one from it: a `# Related` section of links and a legacy `# Citations` section.
+
+The frontmatter is rebuilt from the graph, so it is graph-faithful, not byte-faithful: the v0.2 families come back in their original order, set-valued lists (`tags`, and a regenerated body's links and citations) and producer keys come back in a canonical order so the output depends only on which triples the graph holds, derived triples (`okf:trustTier`, `prov:wasDerivedFrom`) are re-derived on the next import rather than written, and a last-modified time comes back under the key it was written with (a v0.1 import's legacy `timestamp` as `timestamp`, a `generated.at` inside `generated`, with no `by` invented for it), since each value on `schema:dateModified` names its owner.
 
 ## Verify
 
@@ -121,6 +123,8 @@ dkg okf import ./bundle --context-graph-id okf-demo --sub-graph-name science --s
 dkg okf export okf-demo ./out --sub-graph-name science
 dkg okf verify ./out --context-graph-id okf-demo --sub-graph-name science --list-missing 20
 ```
+
+A Context Graph imported before bodies were stored lacks the body triples (`okf:bodyPartCount`, `okf:bodyPart`, and each part's `rdf:type`, `schema:position` and `schema:text`), so verify reports them missing. While the import is still in Working Memory, `dkg okf import ./bundle --context-graph-id okf-demo --replace` writes the drafts again with their bodies. `dkg okf import` cannot rewrite assets that are already finalized or shared, so for those, import the bundle into a Context Graph or sub-graph that does not hold them yet.
 
 ## VM Capstone
 

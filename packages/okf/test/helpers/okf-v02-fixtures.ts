@@ -11,6 +11,7 @@ import {
   quadsToNQuads,
   DKG_HAS_SECTION,
   GENID_TAGS,
+  OKF_BODY_PART_COUNT,
   SECTION_GENID_INFIX,
   XSD_DATE_TIME,
 } from '../../src/index.js';
@@ -45,14 +46,21 @@ export function exportedFrontmatter(files: BundleFile[], path = 'metrics/revenue
 
 /**
  * The semantic graph: every quad minus the presentational `dkg:hasSection`
- * structure (the `hasSection` edges and the skolemized *section* nodes). The
- * v0.2 family nodes (`okfver_` / `okfsrc_` / `okfparam_`) ARE part of the
- * semantic graph and must survive the round trip. Equivalence is asserted over
- * this projection (export is graph-faithful, not byte-faithful — see export.ts).
+ * structure (the `hasSection` edges and the skolemized *section* nodes), which
+ * only a stored body brings back: a body regenerated from the graph has no
+ * headings (see export.ts). The v0.2 family nodes (`okfver_` / `okfsrc_` /
+ * `okfparam_`) and the stored body (`okfbody_`) ARE part of the semantic graph
+ * and must survive the round trip.
  */
 export function semantic(quads: Quad[]): string {
   const sectionNode = SECTION_GENID_INFIX + GENID_TAGS.section;
   return quadsToNQuads(quads.filter((q) => !q.subject.includes(sectionNode) && q.predicate !== DKG_HAS_SECTION));
+}
+
+/** The graph without its stored bodies (`body.ts`): what an import made before bodies were stored. */
+export function withoutBody(quads: readonly Quad[]): Quad[] {
+  const part = SECTION_GENID_INFIX + GENID_TAGS.body;
+  return quads.filter((q) => !q.subject.includes(part) && !q.object.includes(part) && q.predicate !== OKF_BODY_PART_COUNT);
 }
 
 /** The same items in a seeded pseudo-random order: a store may return a graph's rows in any order. */

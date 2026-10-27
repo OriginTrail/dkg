@@ -30,6 +30,8 @@ export interface ExportContext {
   conceptIris: ReadonlySet<string>;
   /** The graph was imported with `emitFolderHierarchy`, so a nested concept's edge to its parent directory is inferred. */
   folderHierarchy?: boolean;
+  /** The graph was imported with `includeCodeSpanLinks`, so a link inside a code span made an edge, and makes one again. */
+  includeCodeSpanLinks?: boolean;
 }
 
 /**
