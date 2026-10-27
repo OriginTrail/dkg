@@ -1,5 +1,6 @@
 import { createManifestSettlementCheckpointer, preserveResumedManifestCheckpoint } from './manifest-settlement-checkpointer.js';
 import { DurableGraphSettlementGuard, type StoredDurablePrefix } from './durable-prefix-proof.js';
+import type { DurableMetaContinuation } from './durable-meta-continuation.js';
 import type { GraphOwnedRecoveryContext } from './graph-owned-recovery.js';
 import { verifyDurablePage, prepareDurableVerifiedPage, persistDurableRemainingMetadata } from './durable-verified-page.js';
 export type { DurableMetaContinuation, DurableMetaContinuationState } from './durable-meta-continuation.js';
@@ -32,7 +33,7 @@ import {
   finalizeDurableSyncCompletion,
   markDurableTerminalBoundary,
   recordDurableSyncDiagnostics,
-  type InitializedDurableSyncResult,
+  type InitializedDurableSyncResult, type DurableSyncAccumulator,
 } from '../durable-progress.js';
 import {
   getSyncCheckpointKey,
@@ -409,9 +410,27 @@ interface InternalDurableSyncContext extends Omit<
 }
 
 interface InternalDetailedDurableSyncResult extends DetailedDurableSyncResult {
-  readonly recoveryRound: DurableRecoveryRoundDecision;
   readonly authenticatedExactAssets?: readonly ChallengePinnedGraphScopedAsset[];
 }
+
+interface PreparedDurableGraphMeta {
+  readonly preparedMeta: PreparedDurableMeta;
+  readonly metaResult: SyncPageResult;
+  readonly fetchStartedAt: number;
+}
+
+/** Physical phase operations. Continuation decisions belong to their caller. */
+interface DurableGraphPhases {
+  readonly accumulator: DurableSyncAccumulator;
+  readonly rejectedResumeOffset: number | undefined;
+  prepareMeta(continuation?: DurableMetaContinuation): Promise<PreparedDurableGraphMeta>;
+  settleData(meta: PreparedDurableGraphMeta, boundary?: VerifiedDurableBoundary): Promise<boolean>;
+  recordMetaPhase(meta: SyncPageResult): void;
+  finishMetadataOnly(): void;
+}
+type ExecuteDurableGraph = (phases: DurableGraphPhases) => Promise<boolean>;
+const executePhysicalDurableGraph: ExecuteDurableGraph = async phases =>
+  phases.settleData(await phases.prepareMeta());
 
 export function runDurableSync(
   context: DurableSyncContext,
@@ -442,8 +461,22 @@ export async function runGraphOwnedDurableSyncDetailed(
   context: GraphOwnedDurableSyncContext,
 ): Promise<DurableRecoveryRoundOutcome> {
   const { contextGraphId, recovery, ...sharedContext } = context;
-  const detailed = await runDurableSyncWithBudget({ ...sharedContext, contextGraphIds: [contextGraphId] }, recovery);
-  return { result: detailed.result, decision: detailed.recoveryRound };
+  let decision: DurableRecoveryRoundDecision = { strategy: 'not-started' };
+  const detailed = await runDurableSyncWithBudget({ ...sharedContext, contextGraphIds: [contextGraphId] }, async phases => {
+    try {
+      const prepared = await phases.prepareMeta(recovery.meta);
+      decision = await attemptDurableHoldingsPhase({ context: sharedContext, contextGraphId,
+        manifest: prepared.preparedMeta.manifestPlan, meta: prepared.metaResult, recovery,
+        accumulator: phases.accumulator, recordMetaPhase: () => phases.recordMetaPhase(prepared.metaResult) });
+      if (decision.strategy === 'held' || decision.strategy === 'exact-missing') {
+        phases.finishMetadataOnly(); return true;
+      }
+      return await phases.settleData(prepared, recovery.boundary);
+    } finally {
+      if (phases.rejectedResumeOffset !== undefined) decision = { ...decision, rejectedResumeOffset: phases.rejectedResumeOffset };
+    }
+  });
+  return { result: detailed.result, decision };
 }
 
 export async function runChallengeExactAssetFetch(
@@ -475,7 +508,7 @@ export async function runChallengeExactAssetFetch(
 
 async function runDurableSyncWithBudget(
   context: InternalDurableSyncContext,
-  graphRecovery?: GraphOwnedRecoveryContext,
+  executeGraph: ExecuteDurableGraph = executePhysicalDurableGraph,
 ): Promise<InternalDetailedDurableSyncResult> {
   const {
     ctx,
@@ -509,10 +542,7 @@ async function runDurableSyncWithBudget(
     signal,
   });
 
-  const durableMetaContinuation = graphRecovery?.meta;
-  const durableResumeBoundary = graphRecovery?.boundary;
   const accumulator = createDurableSyncAccumulator();
-  let recoveryRound: DurableRecoveryRoundDecision = { strategy: 'not-started' };
   const exactFetchDispositions: ExactDurableFetchDisposition[] = [];
   const exactResponderCapabilities: (ExactAssetResponderCapability | undefined)[] = [];
   const authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] = [];
@@ -628,6 +658,7 @@ async function runDurableSyncWithBudget(
     const settlement = new DurableGraphSettlementGuard(() => {
       if (signal?.aborted) throw normalizeDurableSyncAbortReason(signal.reason);
     });
+    let rejectedResumeOffset: number | undefined;
     let activePhase: 'fetch' | 'verify' | 'store' | undefined;
     let peerRespondedForContextGraph = false;
     let exactFetchDispositionIndex: number | undefined;
@@ -693,13 +724,8 @@ async function runDurableSyncWithBudget(
 
       logInfo(ctx, `Syncing context graph "${pid}" from ${remotePeerId}`);
 
-      startPhase('fetch');
-      const fetchStartedAt = Date.now();
       const skipAgentsMeta = pid === SYSTEM_CONTEXT_GRAPHS.AGENTS && syncAgentsMeta === false;
-      if (skipAgentsMeta) {
-        logInfo(ctx, `Skipping agents meta sync from ${remotePeerId} (syncAgentsMeta=false)`);
-      }
-      const fetchPhase = (
+      const createPhaseFetcher = (durableMetaContinuation?: DurableMetaContinuation, durableResumeBoundary?: VerifiedDurableBoundary) => (
         phase: 'data' | 'meta',
         graphUri: string,
         sinceBatchId?: string,
@@ -741,463 +767,609 @@ async function runDurableSyncWithBudget(
         ephemeralRequesterState: isProofOnlyChallengeFetch || undefined,
         fetchContext: fetchContext(phase === 'meta' ? metaFetchDeadline : deadline),
       });
-      const rawMetaResult: SyncPageResult = skipAgentsMeta
-        ? {
-            quads: [],
-            bytesReceived: 0,
-            resumedFromOffset: 0,
-            nextOffset: 0,
-            checkpointKey: getSyncCheckpointKey(remotePeerId, pid, false, 'meta'),
-            completed: true,
-            timedOut: false,
+      const prepareMeta = async (durableMetaContinuation?: DurableMetaContinuation): Promise<PreparedDurableGraphMeta> => {
+        const fetchPhase = createPhaseFetcher(durableMetaContinuation);
+        startPhase('fetch');
+        const fetchStartedAt = Date.now();
+        if (skipAgentsMeta) {
+          logInfo(ctx, `Skipping agents meta sync from ${remotePeerId} (syncAgentsMeta=false)`);
+        }
+        const rawMetaResult: SyncPageResult = skipAgentsMeta
+          ? {
+              quads: [],
+              bytesReceived: 0,
+              resumedFromOffset: 0,
+              nextOffset: 0,
+              checkpointKey: getSyncCheckpointKey(remotePeerId, pid, false, 'meta'),
+              completed: true,
+              timedOut: false,
+            }
+          : await fetchPhase('meta', metaGraph);
+        if (!skipAgentsMeta) peerRespondedForContextGraph = true;
+        // A meta timeout can be the intentional phase boundary assigned by the
+        // per-phase budget. Keep going so data can use the time reserved for it;
+        // the post-processing timeout gate below still prevents fanout to the
+        // next context graph when stopOnBackoffWorthyFailure is enabled.
+        settlement.assertCurrent();
+        let metaResult = rawMetaResult;
+        if (!skipAgentsMeta && durableMetaContinuation) {
+          const retained = durableMetaContinuation.state;
+          if (retained) {
+            const continuationMatches = retained.checkpointKey === rawMetaResult.checkpointKey
+              && rawMetaResult.resumedFromOffset === retained.nextOffset
+              && (rawMetaResult.rawResumedFromOffset ?? rawMetaResult.resumedFromOffset)
+                === retained.rawNextOffset;
+            if (!continuationMatches) {
+              deleteCheckpoint(retained.checkpointKey);
+              durableMetaContinuation.state = undefined;
+              throw Object.assign(
+                new Error(
+                  `Discarding retained META prefix for "${pid}": responder continuation changed`,
+                ),
+                { code: 'SYNC_META_CONTINUATION_MISMATCH' },
+              );
+            }
+            const rawOffsets = retained.quadRawOffsets && rawMetaResult.quadRawOffsets
+              ? [...retained.quadRawOffsets, ...rawMetaResult.quadRawOffsets]
+              : undefined;
+            metaResult = {
+              ...rawMetaResult,
+              quads: [...retained.quads, ...rawMetaResult.quads],
+              ...(rawOffsets ? { quadRawOffsets: rawOffsets } : {}),
+              bytesReceived: retained.bytesReceived + rawMetaResult.bytesReceived,
+              resumedFromOffset: 0,
+              rawResumedFromOffset: 0,
+            };
           }
-        : await fetchPhase('meta', metaGraph);
-      if (!skipAgentsMeta) peerRespondedForContextGraph = true;
-      // A meta timeout can be the intentional phase boundary assigned by the
-      // per-phase budget. Keep going so data can use the time reserved for it;
-      // the post-processing timeout gate below still prevents fanout to the
-      // next context graph when stopOnBackoffWorthyFailure is enabled.
-      settlement.assertCurrent();
-      let metaResult = rawMetaResult;
-      if (!skipAgentsMeta && durableMetaContinuation) {
-        const retained = durableMetaContinuation.state;
-        if (retained) {
-          const continuationMatches = retained.checkpointKey === rawMetaResult.checkpointKey
-            && rawMetaResult.resumedFromOffset === retained.nextOffset
-            && (rawMetaResult.rawResumedFromOffset ?? rawMetaResult.resumedFromOffset)
-              === retained.rawNextOffset;
-          if (!continuationMatches) {
-            deleteCheckpoint(retained.checkpointKey);
-            durableMetaContinuation.state = undefined;
+          if (!rawMetaResult.completed || rawMetaResult.timedOut) {
+            const rawNextOffset = rawMetaResult.rawNextOffset ?? rawMetaResult.nextOffset;
+            durableMetaContinuation.state = {
+              checkpointKey: rawMetaResult.checkpointKey,
+              quads: metaResult.quads,
+              ...(metaResult.quadRawOffsets
+                ? { quadRawOffsets: metaResult.quadRawOffsets }
+                : {}),
+              bytesReceived: metaResult.bytesReceived,
+              nextOffset: rawMetaResult.nextOffset,
+              rawNextOffset,
+            };
+            recordPhaseOutcome(rawMetaResult, { updateCheckpoint: true });
             throw Object.assign(
               new Error(
-                `Discarding retained META prefix for "${pid}": responder continuation changed`,
+                `Retained bounded durable META prefix for "${pid}" through raw offset ${rawNextOffset}`,
               ),
-              { code: 'SYNC_META_CONTINUATION_MISMATCH' },
+              { code: 'SYNC_META_CONTINUATION_PENDING' },
             );
           }
-          const rawOffsets = retained.quadRawOffsets && rawMetaResult.quadRawOffsets
-            ? [...retained.quadRawOffsets, ...rawMetaResult.quadRawOffsets]
-            : undefined;
-          metaResult = {
-            ...rawMetaResult,
-            quads: [...retained.quads, ...rawMetaResult.quads],
-            ...(rawOffsets ? { quadRawOffsets: rawOffsets } : {}),
-            bytesReceived: retained.bytesReceived + rawMetaResult.bytesReceived,
-            resumedFromOffset: 0,
-            rawResumedFromOffset: 0,
-          };
+          durableMetaContinuation.state = undefined;
         }
-        if (!rawMetaResult.completed || rawMetaResult.timedOut) {
-          const rawNextOffset = rawMetaResult.rawNextOffset ?? rawMetaResult.nextOffset;
-          durableMetaContinuation.state = {
-            checkpointKey: rawMetaResult.checkpointKey,
-            quads: metaResult.quads,
-            ...(metaResult.quadRawOffsets
-              ? { quadRawOffsets: metaResult.quadRawOffsets }
-              : {}),
-            bytesReceived: metaResult.bytesReceived,
-            nextOffset: rawMetaResult.nextOffset,
-            rawNextOffset,
-          };
-          recordPhaseOutcome(rawMetaResult, { updateCheckpoint: true });
-          throw Object.assign(
-            new Error(
-              `Retained bounded durable META prefix for "${pid}" through raw offset ${rawNextOffset}`,
-            ),
-            { code: 'SYNC_META_CONTINUATION_PENDING' },
-          );
-        }
-        durableMetaContinuation.state = undefined;
-      }
-      const buildsManifest = sinceBatchId === undefined && !isSystemContextGraph;
-      if (buildsManifest) {
-        if (
-          !metaResult.completed
-          || metaResult.timedOut
-          || metaResult.resumedFromOffset !== 0
-        ) {
-          // A suffix or incomplete META phase is not a manifest. It cannot
-          // identify the generation of a saved DATA OFFSET/session, so do not
-          // fetch or advance DATA under it. A legacy resumed META checkpoint
-          // is discarded so the next round can obtain the complete manifest.
-          if (metaResult.resumedFromOffset !== 0) {
-            deleteCheckpoint(metaResult.checkpointKey);
+        const buildsManifest = sinceBatchId === undefined && !isSystemContextGraph;
+        if (buildsManifest) {
+          if (
+            !metaResult.completed
+            || metaResult.timedOut
+            || metaResult.resumedFromOffset !== 0
+          ) {
+            // A suffix or incomplete META phase is not a manifest. It cannot
+            // identify the generation of a saved DATA OFFSET/session, so do not
+            // fetch or advance DATA under it. A legacy resumed META checkpoint
+            // is discarded so the next round can obtain the complete manifest.
+            if (metaResult.resumedFromOffset !== 0) {
+              deleteCheckpoint(metaResult.checkpointKey);
+            }
+            throw Object.assign(
+              new Error(
+                `Cannot authorize durable DATA continuation for "${pid}": `
+                + 'META did not complete from offset zero',
+              ),
+              { code: 'SYNC_DATA_MANIFEST_INCOMPLETE' },
+            );
           }
-          throw Object.assign(
-            new Error(
-              `Cannot authorize durable DATA continuation for "${pid}": `
-              + 'META did not complete from offset zero',
-            ),
-            { code: 'SYNC_DATA_MANIFEST_INCOMPLETE' },
-          );
         }
-      }
-      // Scope exact META once before it authorizes DATA. The immutable result
-      // makes the generation identity and verification input explicit instead
-      // of depending on later mutation order.
-      const preparedMeta = prepareDurableMeta({
-        contextGraphId: pid,
-        rawMetaResult: metaResult,
-        exactAssetSelection,
-        buildsManifest,
-      });
-      if (
-        exactAssetSelection !== undefined
-        && exactAssetSelection.kind === 'challenge-pinned'
-        && preparedMeta.exactMismatchedDescriptorUals.length > 0
-      ) {
-        throw Object.assign(
-          new Error(
-            `Exact durable response for "${pid}" does not match the requested selection`,
-          ),
-          { code: 'SYNC_EXACT_DESCRIPTOR_MISMATCH' },
-        );
-      }
-      const graphScopedManifest = preparedMeta.manifestPlan;
-      recoveryRound = await attemptDurableHoldingsPhase({
-        context, contextGraphId: pid, manifest: graphScopedManifest, meta: metaResult, accumulator,
-        recovery: graphRecovery,
-        recordMetaPhase: () => recordPhaseOutcome(metaResult, { updateCheckpoint: true }),
-      });
-      if (recoveryRound.strategy === 'held' || recoveryRound.strategy === 'exact-missing') {
-        endPhase(); continue;
-      }
-      const rawDataResult = await fetchPhase(
-        'data',
-        dataGraph,
-        sinceBatchId,
-        graphScopedManifest?.manifestDigest,
-        graphScopedManifest
-          ? (offset) => graphScopedDurableManifestPrefixAtOffset(
-            graphScopedManifest!,
-            offset,
-          )?.prefixDigest
-          : undefined,
-        preparedMeta.forceFreshUnboundDataSession || (graphScopedManifest !== null && !context.storedPrefix),
-        // A full-graph round holds what it fetched until it is verified and
-        // stored, so it ends at a checkpointable graph within a row/heap budget.
-        // A caller that needs one complete snapshot from row 0 keeps one round.
-        graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
-          ? createDurableDataRoundBoundary({ manifest: graphScopedManifest, settlementSliceDeadline,
-              onHardLimit: ({ resumedFromOffset, nextOffset, acceptedQuads }) => logWarn(ctx,
-                `Durable data round for "${pid}" reached its hard limit at ${acceptedQuads} rows `
-                  + `(offset ${resumedFromOffset}->${nextOffset}) without a complete graph to checkpoint`) })
-          : undefined,
-      );
-      settlement.assertCurrent();
-      peerRespondedForContextGraph = true;
-      endPhase();
-      const fetchDurationMs = Date.now() - fetchStartedAt;
-      const preparedPayload = prepareDurableVerificationPayload({
-        rawDataResult,
-        rawMetaResult: metaResult,
-        preparedMeta,
-        exactAssetSelection,
-      });
-      const dataResult = preparedPayload.dataResult;
-      const effectiveMetaResult = preparedPayload.metaResult;
-      const exactAssetDescriptorCoverageComplete =
-        preparedPayload.exactDescriptorCoverageComplete;
-      const exactAssetReturnedDescriptorCount =
-        preparedPayload.exactReturnedDescriptorCount;
-      if (exactAssetUals !== undefined && !exactAssetDescriptorCoverageComplete) {
-        logWarn(
-          ctx,
-          `Exact durable response for "${pid}" did not cover every requested asset descriptor`,
-        );
-      }
-
-      let effectiveDataResult = dataResult;
-      let dataForVerification = dataResult.quads;
-      let verificationMode: DurableBatchVerificationMode = sinceBatchId === undefined
-        ? { kind: 'fullSnapshot' }
-        : { kind: 'sinceBatchId', sinceBatchId };
-
-      // A rootless full snapshot is a deterministic concatenation of complete
-      // exact graphs. Always compare a graph-scoped response with its verified
-      // metadata manifest: a relayed stream can close cleanly after a prefix
-      // and surface `completed=true` even though later graphs never arrived.
-      // Verify and persist only complete leading graphs, checkpoint their
-      // absolute row boundary, and call the phase complete only at the manifest
-      // total. A partial final graph is deliberately discarded and retried.
-      // This gives large V2 snapshots bounded memory and monotonic progress
-      // without weakening legacy/mixed-layout fail-closed behaviour.
-      if (
-        sinceBatchId === undefined
-        && !isSystemContextGraph
-      ) {
+        // Scope exact META once before it authorizes DATA. The immutable result
+        // makes the generation identity and verification input explicit instead
+        // of depending on later mutation order.
+        const preparedMeta = prepareDurableMeta({
+          contextGraphId: pid,
+          rawMetaResult: metaResult,
+          exactAssetSelection,
+          buildsManifest,
+        });
         if (
-          graphScopedManifest
-          && dataResult.resumedFromOffset > 0
-          && dataResult.manifestDigest !== graphScopedManifest.manifestDigest
+          exactAssetSelection !== undefined
+          && exactAssetSelection.kind === 'challenge-pinned'
+          && preparedMeta.exactMismatchedDescriptorUals.length > 0
         ) {
-          deleteCheckpoint(dataResult.checkpointKey);
           throw Object.assign(
             new Error(
-              `Discarding rootless durable response for "${pid}": resumed DATA `
-              + 'continuation is not bound to the completed META generation',
+              `Exact durable response for "${pid}" does not match the requested selection`,
             ),
-            { code: 'SYNC_DATA_MANIFEST_UNBOUND' },
+            { code: 'SYNC_EXACT_DESCRIPTOR_MISMATCH' },
           );
         }
-        const resumeIsManifestBoundary = dataResult.resumedFromOffset > 0
-          ? graphScopedManifest !== null
-            && isGraphScopedDurableManifestBoundary(
-              graphScopedManifest,
-              dataResult.resumedFromOffset,
-            )
-          : true;
-        if (resumeIsManifestBoundary === false) {
-          // An OFFSET inside an exact assertion graph can never produce a
-          // complete first graph in this round. Keeping it creates a permanent
-          // N-1 verification loop (for example 9,999/10,000 rows). Delete the
-          // paired responder session/checkpoint and retry from offset zero on
-          // the next bounded sync; never store this non-contiguous suffix.
-          deleteCheckpoint(dataResult.checkpointKey);
-          throw Object.assign(
-            new Error(
-              `Discarding rootless durable response for "${pid}": resumed offset `
-              + `${dataResult.resumedFromOffset} is inside an assertion graph; `
-              + 'resetting the data checkpoint to a manifest boundary',
-            ),
-            { code: 'SYNC_GRAPH_CHECKPOINT_MISALIGNED' },
-          );
-        }
-        const responderCursorDelta = (dataResult.rawNextOffset ?? dataResult.nextOffset)
-          - (dataResult.rawResumedFromOffset ?? dataResult.resumedFromOffset);
-        if (responderCursorDelta !== dataResult.quads.length) {
+        return { preparedMeta, metaResult, fetchStartedAt };
+      };
+      const settleData = async ({ preparedMeta, metaResult, fetchStartedAt }: PreparedDurableGraphMeta,
+        durableResumeBoundary?: VerifiedDurableBoundary): Promise<boolean> => {
+        const graphScopedManifest = preparedMeta.manifestPlan;
+        const fetchPhase = createPhaseFetcher(undefined, durableResumeBoundary);
+        const rawDataResult = await fetchPhase(
+          'data',
+          dataGraph,
+          sinceBatchId,
+          graphScopedManifest?.manifestDigest,
+          graphScopedManifest
+            ? (offset) => graphScopedDurableManifestPrefixAtOffset(
+              graphScopedManifest!,
+              offset,
+            )?.prefixDigest
+            : undefined,
+          preparedMeta.forceFreshUnboundDataSession || (graphScopedManifest !== null && !context.storedPrefix),
+          // A full-graph round holds what it fetched until it is verified and
+          // stored, so it ends at a checkpointable graph within a row/heap budget.
+          // A caller that needs one complete snapshot from row 0 keeps one round.
+          graphScopedManifest && exactAssetUals === undefined && onVerifiedFullSnapshot === undefined
+            ? createDurableDataRoundBoundary({ manifest: graphScopedManifest, settlementSliceDeadline,
+                onHardLimit: ({ resumedFromOffset, nextOffset, acceptedQuads }) => logWarn(ctx,
+                  `Durable data round for "${pid}" reached its hard limit at ${acceptedQuads} rows `
+                    + `(offset ${resumedFromOffset}->${nextOffset}) without a complete graph to checkpoint`) })
+            : undefined,
+        );
+        settlement.assertCurrent();
+        peerRespondedForContextGraph = true;
+        endPhase();
+        const fetchDurationMs = Date.now() - fetchStartedAt;
+        const preparedPayload = prepareDurableVerificationPayload({
+          rawDataResult,
+          rawMetaResult: metaResult,
+          preparedMeta,
+          exactAssetSelection,
+        });
+        const dataResult = preparedPayload.dataResult;
+        const effectiveMetaResult = preparedPayload.metaResult;
+        const exactAssetDescriptorCoverageComplete =
+          preparedPayload.exactDescriptorCoverageComplete;
+        const exactAssetReturnedDescriptorCount =
+          preparedPayload.exactReturnedDescriptorCount;
+        if (exactAssetUals !== undefined && !exactAssetDescriptorCoverageComplete) {
           logWarn(
             ctx,
-            `Rootless durable cursor drift for "${pid}": responder advanced `
-              + `${responderCursorDelta} row(s) but delivered ${dataResult.quads.length}; `
-              + 'projecting only the verified complete-graph prefix',
+            `Exact durable response for "${pid}" did not cover every requested asset descriptor`,
           );
         }
-        const bounded = graphScopedManifest
-          ? planBoundedGraphScopedDurableBatch(
-              dataResult.quads,
-              graphScopedManifest,
-              dataResult.resumedFromOffset,
-              dataResult.rawNextOffset ?? dataResult.nextOffset,
-              dataResult.completed,
-              dataResult.rawResumedFromOffset ?? dataResult.resumedFromOffset,
-              dataResult.quadRawOffsets,
-            )
-          : null;
-        if (!bounded && graphScopedManifest) {
-          deleteCheckpoint(dataResult.checkpointKey);
-          if (durableMetaContinuation && dataResult.resumedFromOffset > 0) {
-            recoveryRound = { ...recoveryRound, rejectedResumeOffset: dataResult.resumedFromOffset };
+
+        let effectiveDataResult = dataResult;
+        let dataForVerification = dataResult.quads;
+        let verificationMode: DurableBatchVerificationMode = sinceBatchId === undefined
+          ? { kind: 'fullSnapshot' }
+          : { kind: 'sinceBatchId', sinceBatchId };
+
+        // A rootless full snapshot is a deterministic concatenation of complete
+        // exact graphs. Always compare a graph-scoped response with its verified
+        // metadata manifest: a relayed stream can close cleanly after a prefix
+        // and surface `completed=true` even though later graphs never arrived.
+        // Verify and persist only complete leading graphs, checkpoint their
+        // absolute row boundary, and call the phase complete only at the manifest
+        // total. A partial final graph is deliberately discarded and retried.
+        // This gives large V2 snapshots bounded memory and monotonic progress
+        // without weakening legacy/mixed-layout fail-closed behaviour.
+        if (
+          sinceBatchId === undefined
+          && !isSystemContextGraph
+        ) {
+          if (
+            graphScopedManifest
+            && dataResult.resumedFromOffset > 0
+            && dataResult.manifestDigest !== graphScopedManifest.manifestDigest
+          ) {
+            deleteCheckpoint(dataResult.checkpointKey);
+            throw Object.assign(
+              new Error(
+                `Discarding rootless durable response for "${pid}": resumed DATA `
+                + 'continuation is not bound to the completed META generation',
+              ),
+              { code: 'SYNC_DATA_MANIFEST_UNBOUND' },
+            );
           }
-          throw Object.assign(
-            new Error(
-              `Discarding rootless durable response for "${pid}": responder and manifest coordinates cannot be reconciled`,
-            ),
-            { code: 'SYNC_DATA_CURSOR_UNMAPPABLE' },
-          );
-        }
-        if (bounded) {
-          dataForVerification = bounded.dataQuads;
-          const boundedCompleted = dataResult.completed
-            && bounded.safeNextOffset === bounded.manifestRowCount;
-          if (boundedCompleted) {
-            const { localYield: _impossibleLocalYield, ...completedResult } = dataResult;
-            effectiveDataResult = {
-              ...completedResult,
-              quads: bounded.dataQuads,
-              nextOffset: bounded.safeNextOffset,
-              rawNextOffset: bounded.safeRawNextOffset,
-              completed: true,
+          const resumeIsManifestBoundary = dataResult.resumedFromOffset > 0
+            ? graphScopedManifest !== null
+              && isGraphScopedDurableManifestBoundary(
+                graphScopedManifest,
+                dataResult.resumedFromOffset,
+              )
+            : true;
+          if (resumeIsManifestBoundary === false) {
+            // An OFFSET inside an exact assertion graph can never produce a
+            // complete first graph in this round. Keeping it creates a permanent
+            // N-1 verification loop (for example 9,999/10,000 rows). Delete the
+            // paired responder session/checkpoint and retry from offset zero on
+            // the next bounded sync; never store this non-contiguous suffix.
+            deleteCheckpoint(dataResult.checkpointKey);
+            throw Object.assign(
+              new Error(
+                `Discarding rootless durable response for "${pid}": resumed offset `
+                + `${dataResult.resumedFromOffset} is inside an assertion graph; `
+                + 'resetting the data checkpoint to a manifest boundary',
+              ),
+              { code: 'SYNC_GRAPH_CHECKPOINT_MISALIGNED' },
+            );
+          }
+          const responderCursorDelta = (dataResult.rawNextOffset ?? dataResult.nextOffset)
+            - (dataResult.rawResumedFromOffset ?? dataResult.resumedFromOffset);
+          if (responderCursorDelta !== dataResult.quads.length) {
+            logWarn(
+              ctx,
+              `Rootless durable cursor drift for "${pid}": responder advanced `
+                + `${responderCursorDelta} row(s) but delivered ${dataResult.quads.length}; `
+                + 'projecting only the verified complete-graph prefix',
+            );
+          }
+          const bounded = graphScopedManifest
+            ? planBoundedGraphScopedDurableBatch(
+                dataResult.quads,
+                graphScopedManifest,
+                dataResult.resumedFromOffset,
+                dataResult.rawNextOffset ?? dataResult.nextOffset,
+                dataResult.completed,
+                dataResult.rawResumedFromOffset ?? dataResult.resumedFromOffset,
+                dataResult.quadRawOffsets,
+              )
+            : null;
+          if (!bounded && graphScopedManifest) {
+            deleteCheckpoint(dataResult.checkpointKey);
+            if (dataResult.resumedFromOffset > 0) rejectedResumeOffset = dataResult.resumedFromOffset;
+            throw Object.assign(
+              new Error(
+                `Discarding rootless durable response for "${pid}": responder and manifest coordinates cannot be reconciled`,
+              ),
+              { code: 'SYNC_DATA_CURSOR_UNMAPPABLE' },
+            );
+          }
+          if (bounded) {
+            dataForVerification = bounded.dataQuads;
+            const boundedCompleted = dataResult.completed
+              && bounded.safeNextOffset === bounded.manifestRowCount;
+            if (boundedCompleted) {
+              const { localYield: _impossibleLocalYield, ...completedResult } = dataResult;
+              effectiveDataResult = {
+                ...completedResult,
+                quads: bounded.dataQuads,
+                nextOffset: bounded.safeNextOffset,
+                rawNextOffset: bounded.safeRawNextOffset,
+                completed: true,
+              };
+            } else {
+              effectiveDataResult = {
+                ...dataResult,
+                quads: bounded.dataQuads,
+                nextOffset: bounded.safeNextOffset,
+                rawNextOffset: bounded.safeRawNextOffset,
+                completed: false,
+              };
+            }
+            verificationMode = {
+              kind: 'changelogPage',
+              changedDataGraphs: bounded.changedDataGraphs,
             };
+            logInfo(
+              ctx,
+              `Rootless durable progress for "${pid}": `
+                + `${bounded.completedGraphCount} complete graph(s), `
+                + `safe offset ${dataResult.resumedFromOffset}->${bounded.safeNextOffset} `
+                + `of ${bounded.manifestRowCount} (raw ${dataResult.rawNextOffset ?? dataResult.nextOffset}->${bounded.safeRawNextOffset})`,
+            );
+          }
+        }
+
+        if (graphScopedManifest && dataResult.resumedFromOffset > 0) {
+          preserveResumedManifestCheckpoint(graphScopedManifest, dataResult, setCheckpoint);
+          await settlement.acquire(context.storedPrefix, graphScopedManifest, dataResult.resumedFromOffset, () => {
+            deleteCheckpoint(dataResult.checkpointKey);
+            deleteCheckpoint(metaResult.checkpointKey);
+            rejectedResumeOffset = dataResult.resumedFromOffset;
+          }, signal);
+        }
+
+        startPhase('verify');
+        const verifyStartedAt = Date.now();
+        let processed: Awaited<ReturnType<DurableSyncContext['processDurableBatchInWorker']>>;
+        try {
+          processed = await verifyDurablePage(
+            context, dataForVerification,
+            effectiveMetaResult.quads,
+            isSystemContextGraph,
+            verificationMode,
+          );
+        } catch (error) {
+          if (graphScopedManifest && !signal?.aborted) deleteCheckpoint(rawDataResult.checkpointKey);
+          throw error;
+        }
+        settlement.assertCurrent();
+        endPhase();
+        const verifyDurationMs = Date.now() - verifyStartedAt;
+
+        logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
+        logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
+        recordDurableSyncDiagnostics(accumulator, {
+          bytesReceived: metaResult.bytesReceived + rawDataResult.bytesReceived,
+          fetchedMetaTriples: processed.totalFetchedMetaQuads,
+          fetchedDataTriples: processed.totalFetchedDataQuads,
+          emptyResponses: processed.emptyResponses,
+          metaOnlyResponses: processed.metaOnlyResponses,
+          verifiedPrivateOnlyResponses: processed.verifiedPrivateOnlyResponses,
+          dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
+        });
+
+        // A rejected KA means this page cannot be acknowledged safely. We may
+        // still persist independently verified KAs from the page, but keeping
+        // both cursors unchanged makes the next pass retry the rejected content
+        // instead of silently skipping it.
+        const batchVerifiedCleanly = processed.rejectedKcs === 0;
+        if (!batchVerifiedCleanly) {
+          if (graphScopedManifest) deleteCheckpoint(rawDataResult.checkpointKey);
+          logWarn(
+            ctx,
+            `Rejected ${processed.rejectedKcs} KCs that failed durable integrity verification from ${remotePeerId}`,
+          );
+          recordDurableSyncDiagnostics(accumulator, { rejectedKcs: processed.rejectedKcs });
+        }
+        if (graphScopedManifest && processed.dataRejectedMissingMeta !== 0) {
+          deleteCheckpoint(rawDataResult.checkpointKey);
+        }
+
+        const notifyVerifiedFullSnapshot = async (): Promise<void> => {
+          if (
+            !onVerifiedFullSnapshot
+            || exactAssetUals !== undefined
+            || sinceBatchId !== undefined
+            || !batchVerifiedCleanly
+            || processed.dataRejectedMissingMeta !== 0
+            || !effectiveDataResult.completed
+            || effectiveDataResult.timedOut
+            || effectiveDataResult.resumedFromOffset !== 0
+            || (!skipAgentsMeta && (!metaResult.completed || metaResult.timedOut))
+            || (!skipAgentsMeta && metaResult.resumedFromOffset !== 0)
+          ) return;
+
+          const verifiedDataGraphs = new Set(processed.verifiedData.map((quad) => quad.graph));
+          for (const graph of processed.verifiedGraphScopedDataGraphs ?? []) {
+            verifiedDataGraphs.add(graph);
+          }
+          await onVerifiedFullSnapshot({
+            contextGraphId: pid,
+            verifiedDataGraphs,
+            verifiedMetaGraphs: new Set(processed.verifiedMeta.map((quad) => quad.graph)),
+            metaFetched: !skipAgentsMeta,
+          });
+        };
+
+        const metadataOnlyResponse = processed.metaOnlyResponses > 0;
+        // The worker reports, as ONE reason-agnostic count, how many fetched meta
+        // rows the verifier deliberately consumed but did NOT persist — unverified
+        // sync controls plus non-IRI `_meta` subjects (#1921). A metadata-only page
+        // discarded ENTIRELY this way carries no verifiedMeta, so the meta cursor
+        // must still advance or durable sync pins on the same page. Depending on the
+        // aggregate (not per-reason counters) keeps checkpoint orchestration
+        // decoupled from verifier discard policy; the per-reason counts remain as
+        // verifier-side diagnostics only.
+        const consumedUnpersistedMetaTriples = processed.consumedUnpersistedMetaTriples;
+        const discardedOnlyMetadataResponse = metadataOnlyResponse
+          && processed.verifiedData.length === 0
+          && processed.verifiedMeta.length === 0
+          && consumedUnpersistedMetaTriples > 0
+          && consumedUnpersistedMetaTriples === processed.totalFetchedMetaQuads;
+        const metaPhaseCanAdvance = batchVerifiedCleanly
+          && processed.dataRejectedMissingMeta === 0
+          && (
+            !metadataOnlyResponse
+            || processed.verifiedMeta.length > 0
+            || discardedOnlyMetadataResponse
+          );
+        const dataPhaseCanAdvance = batchVerifiedCleanly
+          && processed.dataRejectedMissingMeta === 0
+          && !metadataOnlyResponse;
+        const allowDurableCheckpoints = exactFetchPolicy?.allowDurableCheckpoints ?? true;
+        const updateMetaCheckpoint = metaPhaseCanAdvance && allowDurableCheckpoints;
+        const updateDataCheckpoint = dataPhaseCanAdvance && allowDurableCheckpoints;
+        const reachedContextGraphTerminalBoundary = batchVerifiedCleanly
+          && processed.dataRejectedMissingMeta === 0
+          && exactAssetDescriptorCoverageComplete
+          && metaPhaseCanAdvance
+          && dataPhaseCanAdvance
+          && metaResult.completed
+          && !metaResult.timedOut
+          && effectiveDataResult.completed
+          && !effectiveDataResult.timedOut;
+        const settledExactDisposition = (): ExactDurableFetchDisposition => (
+          classifyExactDurableFetch({
+            requestedAssetCount: exactAssetUals?.length ?? 0,
+            metaResult,
+            dataResult: rawDataResult,
+            metaFetched: !skipAgentsMeta,
+            descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
+            rejectedKcs: processed.rejectedKcs,
+            dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
+          })
+        );
+        const settledExactResponderCapability = (): ExactAssetResponderCapability | undefined => {
+          if (exactAssetSelection?.kind !== 'ual-only') return undefined;
+          return classifyExactAssetResponderCapability({
+            requestedAssetCount: exactAssetUals?.length ?? 0,
+            metaResult,
+            dataResult: rawDataResult,
+            metaFetched: !skipAgentsMeta,
+            descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
+            returnedDescriptorCount: exactAssetReturnedDescriptorCount,
+            rejectedKcs: processed.rejectedKcs,
+            dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
+          });
+        };
+        // Metadata-only pages may move the meta cursor after storage, but they
+        // still are not usable data progress for freshness/backoff accounting.
+        if (
+          processed.emptyResponses > 0 ||
+          processed.dataRejectedMissingMeta > 0 ||
+          (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
+        ) {
+          await notifyVerifiedFullSnapshot();
+          settlement.assertCurrent();
+          // The verifier reports an empty batch only when both fetched phase
+          // payloads are empty. Record each phase independently: a completed
+          // zero-offset phase is a real clean-empty response, while a sibling
+          // timeout remains incomplete.
+          const emptyPhase = processed.emptyResponses > 0;
+          recordPhaseOutcome(metaResult, {
+            updateCheckpoint: updateMetaCheckpoint,
+            countProgress: !metadataOnlyResponse,
+            emptyPhase,
+          });
+          recordPhaseOutcome(effectiveDataResult, {
+            updateCheckpoint: updateDataCheckpoint,
+            emptyPhase,
+            manifestPlan: graphScopedManifest ?? undefined,
+            terminal: reachedContextGraphTerminalBoundary,
+          });
+          markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
+          if (exactFetchDispositionIndex !== undefined) {
+            exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();
+          }
+          if (exactResponderCapabilityIndex !== undefined) {
+            exactResponderCapabilities[exactResponderCapabilityIndex] = settledExactResponderCapability();
+          }
+          return !((metaResult.timedOut || effectiveDataResult.timedOut)
+            && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout'));
+        }
+
+        startPhase('store');
+        const storeStartedAt = Date.now();
+        const partitioned = prepareDurableVerifiedPage(context, pid, processed);
+        if (partitioned.assets.length && exactAssetSelection?.kind !== 'challenge-pinned' && !storeGraphScopedAsset)
+          throw Object.assign(new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
+            { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
+        if (partitioned.assets.length && exactAssetSelection?.kind === 'challenge-pinned' && !authenticateChallengePinnedAsset)
+          throw Object.assign(new Error('Challenge-pinned durable sync requires a proof-only authentication path'),
+            { code: 'VM_CHALLENGE_AUTHENTICATION_UNSUPPORTED' });
+        // A rootless manifest contains only exact graph assets in the DATA
+        // ordering. When there are no deferred legacy rows, each authenticated
+        // atomic materialization is therefore a durable continuation boundary.
+        // Persisting it immediately turns a later authentication deadline into
+        // partial progress instead of replaying every earlier chain lookup.
+        const checkpointSettledManifestGraph = graphScopedManifest
+          && updateDataCheckpoint
+          && exactAssetDescriptorCoverageComplete
+          && partitioned.remainingData.length === 0
+          && partitioned.remainingMeta.length === 0
+          ? createManifestSettlementCheckpointer({
+              manifest: graphScopedManifest,
+              checkpointKey: effectiveDataResult.checkpointKey,
+              resumedFromOffset: effectiveDataResult.resumedFromOffset,
+              rawResumedFromOffset: effectiveDataResult.rawResumedFromOffset
+                ?? effectiveDataResult.resumedFromOffset,
+              maximumOffset: effectiveDataResult.nextOffset,
+              dataQuads: effectiveDataResult.quads,
+              quadRawOffsets: effectiveDataResult.quadRawOffsets,
+              setCheckpoint,
+            })
+          : undefined;
+        let incrementalCheckpointAdvanceRecorded = false;
+        let mayYieldAtSettledManifestBoundary = false;
+        let yieldedAtSettledManifestBoundary = false;
+        const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
+          ? contextGraphBudget.createGraphScopedAuthenticationDeadline()
+          : deadline;
+        for (const [assetIndex, asset] of partitioned.assets.entries()) {
+          // Bounded verification includes private-only assets in every round.
+          // The proven prefix already owns these copies; rewriting them would
+          // invalidate its content watch without adding any settled work.
+          if (settlement.covers(asset.ual)) continue;
+          if (
+            assetIndex > 0
+            && mayYieldAtSettledManifestBoundary
+            && settlementSliceDeadline !== undefined
+            && Date.now() >= settlementSliceDeadline
+          ) {
+            yieldedAtSettledManifestBoundary = true;
+            break;
+          }
+          settlement.assertCurrent();
+          const challengeCommitment = challengeCommitments.get(asset.ual);
+          if (exactAssetSelection?.kind === 'challenge-pinned') {
+            if (challengeCommitment === undefined) {
+              throw new Error(`Challenge-pinned durable sync returned unselected asset ${asset.ual}`);
+            }
+            const authenticated = await authenticateChallengePinnedAsset!({
+              asset,
+              commitment: challengeCommitment,
+              authenticationDeadline: graphScopedAuthenticationDeadline,
+              signal,
+            });
+            authenticatedExactAssets.push(authenticated);
+            logDebug(ctx, `Authenticated challenge-scoped exact asset ${asset.ual}`);
           } else {
-            effectiveDataResult = {
-              ...dataResult,
-              quads: bounded.dataQuads,
-              nextOffset: bounded.safeNextOffset,
-              rawNextOffset: bounded.safeRawNextOffset,
-              completed: false,
-            };
+            const outcome = await storeGraphScopedAsset!({
+              asset,
+              authenticationDeadline: graphScopedAuthenticationDeadline,
+              signal,
+            });
+            if (outcome === 'applied') {
+              if (exactAssetSelection !== undefined) committedExactAssetUals.push(asset.ual);
+              // Materialization is atomic per asset, not per fetched page. Account
+              // for each committed asset immediately so a later asset failure does
+              // not erase truthful progress from the returned summary.
+              recordDurableSyncDiagnostics(accumulator, {
+                insertedDataTriples: asset.dataQuads.length,
+                insertedMetaTriples: asset.metadataQuads.length,
+                insertedTriples: asset.dataQuads.length + asset.metadataQuads.length,
+              });
+            } else if (outcome === 'stale') {
+              logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+            } else {
+              logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
+            }
           }
-          verificationMode = {
-            kind: 'changelogPage',
-            changedDataGraphs: bounded.changedDataGraphs,
-          };
+          // Preserve a physically settled first prefix on cancellation. A reused
+          // prefix still must pass its ownership/content proof before advancing.
+          settlement.assertPrefixCurrent();
+          const settledCheckpoint = checkpointSettledManifestGraph?.(asset.assertionGraph);
+          if (settledCheckpoint) mayYieldAtSettledManifestBoundary = true;
+          if (settledCheckpoint?.numericAdvance && !incrementalCheckpointAdvanceRecorded) {
+            recordDurableSyncDiagnostics(accumulator, { checkpointAdvances: 1 });
+            incrementalCheckpointAdvanceRecorded = true;
+          }
+        }
+        if (yieldedAtSettledManifestBoundary) {
           logInfo(
             ctx,
-            `Rootless durable progress for "${pid}": `
-              + `${bounded.completedGraphCount} complete graph(s), `
-              + `safe offset ${dataResult.resumedFromOffset}->${bounded.safeNextOffset} `
-              + `of ${bounded.manifestRowCount} (raw ${dataResult.rawNextOffset ?? dataResult.nextOffset}->${bounded.safeRawNextOffset})`,
+            `Yielding durable recovery for "${pid}" at an authenticated manifest boundary after the settlement slice expired`,
           );
+          // As after a whole page: the next round proves its DATA boundary with META fetched again from row zero.
+          if (updateMetaCheckpoint && metaResult.completed) deleteCheckpoint(metaResult.checkpointKey);
+          markDurableTerminalBoundary(accumulator, false);
+          endPhase();
+          return false;
         }
-      }
-
-      if (graphScopedManifest && dataResult.resumedFromOffset > 0) {
-        preserveResumedManifestCheckpoint(graphScopedManifest, dataResult, setCheckpoint);
-        await settlement.acquire(context.storedPrefix, graphScopedManifest, dataResult.resumedFromOffset, () => {
-          deleteCheckpoint(dataResult.checkpointKey);
-          deleteCheckpoint(metaResult.checkpointKey);
-          recoveryRound = { ...recoveryRound, rejectedResumeOffset: dataResult.resumedFromOffset };
-        }, signal);
-      }
-
-      startPhase('verify');
-      const verifyStartedAt = Date.now();
-      let processed: Awaited<ReturnType<DurableSyncContext['processDurableBatchInWorker']>>;
-      try {
-        processed = await verifyDurablePage(
-          context, dataForVerification,
-          effectiveMetaResult.quads,
-          isSystemContextGraph,
-          verificationMode,
-        );
-      } catch (error) {
-        if (graphScopedManifest && !signal?.aborted) deleteCheckpoint(rawDataResult.checkpointKey);
-        throw error;
-      }
-      settlement.assertCurrent();
-      endPhase();
-      const verifyDurationMs = Date.now() - verifyStartedAt;
-
-      logInfo(ctx, `  meta: ${processed.totalFetchedMetaQuads} triples fetched`);
-      logInfo(ctx, `  data: ${processed.totalFetchedDataQuads} triples fetched`);
-      recordDurableSyncDiagnostics(accumulator, {
-        bytesReceived: metaResult.bytesReceived + rawDataResult.bytesReceived,
-        fetchedMetaTriples: processed.totalFetchedMetaQuads,
-        fetchedDataTriples: processed.totalFetchedDataQuads,
-        emptyResponses: processed.emptyResponses,
-        metaOnlyResponses: processed.metaOnlyResponses,
-        verifiedPrivateOnlyResponses: processed.verifiedPrivateOnlyResponses,
-        dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
-      });
-
-      // A rejected KA means this page cannot be acknowledged safely. We may
-      // still persist independently verified KAs from the page, but keeping
-      // both cursors unchanged makes the next pass retry the rejected content
-      // instead of silently skipping it.
-      const batchVerifiedCleanly = processed.rejectedKcs === 0;
-      if (!batchVerifiedCleanly) {
-        if (graphScopedManifest) deleteCheckpoint(rawDataResult.checkpointKey);
-        logWarn(
-          ctx,
-          `Rejected ${processed.rejectedKcs} KCs that failed durable integrity verification from ${remotePeerId}`,
-        );
-        recordDurableSyncDiagnostics(accumulator, { rejectedKcs: processed.rejectedKcs });
-      }
-      if (graphScopedManifest && processed.dataRejectedMissingMeta !== 0) {
-        deleteCheckpoint(rawDataResult.checkpointKey);
-      }
-
-      const notifyVerifiedFullSnapshot = async (): Promise<void> => {
-        if (
-          !onVerifiedFullSnapshot
-          || exactAssetUals !== undefined
-          || sinceBatchId !== undefined
-          || !batchVerifiedCleanly
-          || processed.dataRejectedMissingMeta !== 0
-          || !effectiveDataResult.completed
-          || effectiveDataResult.timedOut
-          || effectiveDataResult.resumedFromOffset !== 0
-          || (!skipAgentsMeta && (!metaResult.completed || metaResult.timedOut))
-          || (!skipAgentsMeta && metaResult.resumedFromOffset !== 0)
-        ) return;
-
-        const verifiedDataGraphs = new Set(processed.verifiedData.map((quad) => quad.graph));
-        for (const graph of processed.verifiedGraphScopedDataGraphs ?? []) {
-          verifiedDataGraphs.add(graph);
+        if (partitioned.remainingData.length > 0) {
+          settlement.assertCurrent();
+          await storeInsert({
+            quads: partitioned.remainingData,
+            signal,
+          });
+          recordDurableSyncDiagnostics(accumulator, {
+            insertedTriples: partitioned.remainingData.length,
+            insertedDataTriples: partitioned.remainingData.length,
+          });
         }
-        await onVerifiedFullSnapshot({
-          contextGraphId: pid,
-          verifiedDataGraphs,
-          verifiedMetaGraphs: new Set(processed.verifiedMeta.map((quad) => quad.graph)),
-          metaFetched: !skipAgentsMeta,
-        });
-      };
-
-      const metadataOnlyResponse = processed.metaOnlyResponses > 0;
-      // The worker reports, as ONE reason-agnostic count, how many fetched meta
-      // rows the verifier deliberately consumed but did NOT persist — unverified
-      // sync controls plus non-IRI `_meta` subjects (#1921). A metadata-only page
-      // discarded ENTIRELY this way carries no verifiedMeta, so the meta cursor
-      // must still advance or durable sync pins on the same page. Depending on the
-      // aggregate (not per-reason counters) keeps checkpoint orchestration
-      // decoupled from verifier discard policy; the per-reason counts remain as
-      // verifier-side diagnostics only.
-      const consumedUnpersistedMetaTriples = processed.consumedUnpersistedMetaTriples;
-      const discardedOnlyMetadataResponse = metadataOnlyResponse
-        && processed.verifiedData.length === 0
-        && processed.verifiedMeta.length === 0
-        && consumedUnpersistedMetaTriples > 0
-        && consumedUnpersistedMetaTriples === processed.totalFetchedMetaQuads;
-      const metaPhaseCanAdvance = batchVerifiedCleanly
-        && processed.dataRejectedMissingMeta === 0
-        && (
-          !metadataOnlyResponse
-          || processed.verifiedMeta.length > 0
-          || discardedOnlyMetadataResponse
-        );
-      const dataPhaseCanAdvance = batchVerifiedCleanly
-        && processed.dataRejectedMissingMeta === 0
-        && !metadataOnlyResponse;
-      const allowDurableCheckpoints = exactFetchPolicy?.allowDurableCheckpoints ?? true;
-      const updateMetaCheckpoint = metaPhaseCanAdvance && allowDurableCheckpoints;
-      const updateDataCheckpoint = dataPhaseCanAdvance && allowDurableCheckpoints;
-      const reachedContextGraphTerminalBoundary = batchVerifiedCleanly
-        && processed.dataRejectedMissingMeta === 0
-        && exactAssetDescriptorCoverageComplete
-        && metaPhaseCanAdvance
-        && dataPhaseCanAdvance
-        && metaResult.completed
-        && !metaResult.timedOut
-        && effectiveDataResult.completed
-        && !effectiveDataResult.timedOut;
-      const settledExactDisposition = (): ExactDurableFetchDisposition => (
-        classifyExactDurableFetch({
-          requestedAssetCount: exactAssetUals?.length ?? 0,
-          metaResult,
-          dataResult: rawDataResult,
-          metaFetched: !skipAgentsMeta,
-          descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
-          rejectedKcs: processed.rejectedKcs,
-          dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
-        })
-      );
-      const settledExactResponderCapability = (): ExactAssetResponderCapability | undefined => {
-        if (exactAssetSelection?.kind !== 'ual-only') return undefined;
-        return classifyExactAssetResponderCapability({
-          requestedAssetCount: exactAssetUals?.length ?? 0,
-          metaResult,
-          dataResult: rawDataResult,
-          metaFetched: !skipAgentsMeta,
-          descriptorCoverageComplete: exactAssetDescriptorCoverageComplete,
-          returnedDescriptorCount: exactAssetReturnedDescriptorCount,
-          rejectedKcs: processed.rejectedKcs,
-          dataRejectedMissingMeta: processed.dataRejectedMissingMeta,
-        });
-      };
-      // Metadata-only pages may move the meta cursor after storage, but they
-      // still are not usable data progress for freshness/backoff accounting.
-      if (
-        processed.emptyResponses > 0 ||
-        processed.dataRejectedMissingMeta > 0 ||
-        (processed.verifiedData.length === 0 && processed.verifiedMeta.length === 0 && processed.metaOnlyResponses > 0)
-      ) {
+        await persistDurableRemainingMetadata(context, partitioned.remainingMeta, accumulator, settlement.assertCurrent);
+        // An already-started atomic write is awaited, counted, and manifest-
+        // checkpointed truthfully. An expired operation may not enter another
+        // commit boundary or claim the whole page terminal.
+        settlement.assertCurrent();
         await notifyVerifiedFullSnapshot();
         settlement.assertCurrent();
-        // The verifier reports an empty batch only when both fetched phase
-        // payloads are empty. Record each phase independently: a completed
-        // zero-offset phase is a real clean-empty response, while a sibling
-        // timeout remains incomplete.
-        const emptyPhase = processed.emptyResponses > 0;
-        recordPhaseOutcome(metaResult, {
-          updateCheckpoint: updateMetaCheckpoint,
-          countProgress: !metadataOnlyResponse,
-          emptyPhase,
-        });
+        recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
         recordPhaseOutcome(effectiveDataResult, {
           updateCheckpoint: updateDataCheckpoint,
-          emptyPhase,
+          checkpointAdvanceAlreadyRecorded: incrementalCheckpointAdvanceRecorded,
           manifestPlan: graphScopedManifest ?? undefined,
           terminal: reachedContextGraphTerminalBoundary,
         });
@@ -1208,164 +1380,26 @@ async function runDurableSyncWithBudget(
         if (exactResponderCapabilityIndex !== undefined) {
           exactResponderCapabilities[exactResponderCapabilityIndex] = settledExactResponderCapability();
         }
-        if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
-          break;
-        }
-        continue;
-      }
-
-      startPhase('store');
-      const storeStartedAt = Date.now();
-      const partitioned = prepareDurableVerifiedPage(context, pid, processed);
-      if (partitioned.assets.length && exactAssetSelection?.kind !== 'challenge-pinned' && !storeGraphScopedAsset)
-        throw Object.assign(new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
-          { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
-      if (partitioned.assets.length && exactAssetSelection?.kind === 'challenge-pinned' && !authenticateChallengePinnedAsset)
-        throw Object.assign(new Error('Challenge-pinned durable sync requires a proof-only authentication path'),
-          { code: 'VM_CHALLENGE_AUTHENTICATION_UNSUPPORTED' });
-      // A rootless manifest contains only exact graph assets in the DATA
-      // ordering. When there are no deferred legacy rows, each authenticated
-      // atomic materialization is therefore a durable continuation boundary.
-      // Persisting it immediately turns a later authentication deadline into
-      // partial progress instead of replaying every earlier chain lookup.
-      const checkpointSettledManifestGraph = graphScopedManifest
-        && updateDataCheckpoint
-        && exactAssetDescriptorCoverageComplete
-        && partitioned.remainingData.length === 0
-        && partitioned.remainingMeta.length === 0
-        ? createManifestSettlementCheckpointer({
-            manifest: graphScopedManifest,
-            checkpointKey: effectiveDataResult.checkpointKey,
-            resumedFromOffset: effectiveDataResult.resumedFromOffset,
-            rawResumedFromOffset: effectiveDataResult.rawResumedFromOffset
-              ?? effectiveDataResult.resumedFromOffset,
-            maximumOffset: effectiveDataResult.nextOffset,
-            dataQuads: effectiveDataResult.quads,
-            quadRawOffsets: effectiveDataResult.quadRawOffsets,
-            setCheckpoint,
-          })
-        : undefined;
-      let incrementalCheckpointAdvanceRecorded = false;
-      let mayYieldAtSettledManifestBoundary = false;
-      let yieldedAtSettledManifestBoundary = false;
-      const graphScopedAuthenticationDeadline = partitioned.assets.length > 0
-        ? contextGraphBudget.createGraphScopedAuthenticationDeadline()
-        : deadline;
-      for (const [assetIndex, asset] of partitioned.assets.entries()) {
-        // Bounded verification includes private-only assets in every round.
-        // The proven prefix already owns these copies; rewriting them would
-        // invalidate its content watch without adding any settled work.
-        if (settlement.covers(asset.ual)) continue;
-        if (
-          assetIndex > 0
-          && mayYieldAtSettledManifestBoundary
-          && settlementSliceDeadline !== undefined
-          && Date.now() >= settlementSliceDeadline
-        ) {
-          yieldedAtSettledManifestBoundary = true;
-          break;
-        }
-        settlement.assertCurrent();
-        const challengeCommitment = challengeCommitments.get(asset.ual);
-        if (exactAssetSelection?.kind === 'challenge-pinned') {
-          if (challengeCommitment === undefined) {
-            throw new Error(`Challenge-pinned durable sync returned unselected asset ${asset.ual}`);
-          }
-          const authenticated = await authenticateChallengePinnedAsset!({
-            asset,
-            commitment: challengeCommitment,
-            authenticationDeadline: graphScopedAuthenticationDeadline,
-            signal,
-          });
-          authenticatedExactAssets.push(authenticated);
-          logDebug(ctx, `Authenticated challenge-scoped exact asset ${asset.ual}`);
-        } else {
-          const outcome = await storeGraphScopedAsset!({
-            asset,
-            authenticationDeadline: graphScopedAuthenticationDeadline,
-            signal,
-          });
-          if (outcome === 'applied') {
-            if (exactAssetSelection !== undefined) committedExactAssetUals.push(asset.ual);
-            // Materialization is atomic per asset, not per fetched page. Account
-            // for each committed asset immediately so a later asset failure does
-            // not erase truthful progress from the returned summary.
-            recordDurableSyncDiagnostics(accumulator, {
-              insertedDataTriples: asset.dataQuads.length,
-              insertedMetaTriples: asset.metadataQuads.length,
-              insertedTriples: asset.dataQuads.length + asset.metadataQuads.length,
-            });
-          } else if (outcome === 'stale') {
-            logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
-          } else {
-            logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
-          }
-        }
-        // Preserve a physically settled first prefix on cancellation. A reused
-        // prefix still must pass its ownership/content proof before advancing.
-        settlement.assertPrefixCurrent();
-        const settledCheckpoint = checkpointSettledManifestGraph?.(asset.assertionGraph);
-        if (settledCheckpoint) mayYieldAtSettledManifestBoundary = true;
-        if (settledCheckpoint?.numericAdvance && !incrementalCheckpointAdvanceRecorded) {
-          recordDurableSyncDiagnostics(accumulator, { checkpointAdvances: 1 });
-          incrementalCheckpointAdvanceRecorded = true;
-        }
-      }
-      if (yieldedAtSettledManifestBoundary) {
-        logInfo(
-          ctx,
-          `Yielding durable recovery for "${pid}" at an authenticated manifest boundary after the settlement slice expired`,
-        );
-        // As after a whole page: the next round proves its DATA boundary with META fetched again from row zero.
-        if (updateMetaCheckpoint && metaResult.completed) deleteCheckpoint(metaResult.checkpointKey);
-        markDurableTerminalBoundary(accumulator, false);
         endPhase();
-        break;
-      }
-      if (partitioned.remainingData.length > 0) {
-        settlement.assertCurrent();
-        await storeInsert({
-          quads: partitioned.remainingData,
-          signal,
-        });
-        recordDurableSyncDiagnostics(accumulator, {
-          insertedTriples: partitioned.remainingData.length,
-          insertedDataTriples: partitioned.remainingData.length,
-        });
-      }
-      await persistDurableRemainingMetadata(context, partitioned.remainingMeta, accumulator, settlement.assertCurrent);
-      // An already-started atomic write is awaited, counted, and manifest-
-      // checkpointed truthfully. An expired operation may not enter another
-      // commit boundary or claim the whole page terminal.
-      settlement.assertCurrent();
-      await notifyVerifiedFullSnapshot();
-      settlement.assertCurrent();
-      recordPhaseOutcome(metaResult, { updateCheckpoint: updateMetaCheckpoint, countProgress: !metadataOnlyResponse });
-      recordPhaseOutcome(effectiveDataResult, {
-        updateCheckpoint: updateDataCheckpoint,
-        checkpointAdvanceAlreadyRecorded: incrementalCheckpointAdvanceRecorded,
-        manifestPlan: graphScopedManifest ?? undefined,
-        terminal: reachedContextGraphTerminalBoundary,
-      });
-      markDurableTerminalBoundary(accumulator, reachedContextGraphTerminalBoundary);
-      if (exactFetchDispositionIndex !== undefined) {
-        exactFetchDispositions[exactFetchDispositionIndex] = settledExactDisposition();
-      }
-      if (exactResponderCapabilityIndex !== undefined) {
-        exactResponderCapabilities[exactResponderCapabilityIndex] = settledExactResponderCapability();
-      }
-      endPhase();
-      if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
-        break;
-      }
-      const storeDurationMs = Date.now() - storeStartedAt;
+        if ((metaResult.timedOut || effectiveDataResult.timedOut) && shouldStopAfterBackoffWorthyFailure(pid, 'phase timeout')) {
+          return false;
+        }
+        const storeDurationMs = Date.now() - storeStartedAt;
 
-      if (fetchDurationMs + verifyDurationMs + storeDurationMs > 100) {
-        logDebug(
-          ctx,
-          `Requester durable timing for "${pid}": fetch=${fetchDurationMs}ms verify=${verifyDurationMs}ms store=${storeDurationMs}ms`,
-        );
-      }
+        if (fetchDurationMs + verifyDurationMs + storeDurationMs > 100) {
+          logDebug(
+            ctx,
+            `Requester durable timing for "${pid}": fetch=${fetchDurationMs}ms verify=${verifyDurationMs}ms store=${storeDurationMs}ms`,
+          );
+        }
+
+        return true;
+      };
+      if (!await executeGraph({ prepareMeta, settleData, accumulator,
+        get rejectedResumeOffset() { return rejectedResumeOffset; },
+        recordMetaPhase: meta => recordPhaseOutcome(meta, { updateCheckpoint: true }),
+        finishMetadataOnly: endPhase,
+      })) break;
 
     } catch (pidErr) {
       markDurableTerminalBoundary(accumulator, false);
@@ -1437,7 +1471,6 @@ async function runDurableSyncWithBudget(
 
   return {
     result,
-    recoveryRound,
     ...(exactFetchDisposition ? { exactFetchDisposition, committedExactAssetUals: Object.freeze([...committedExactAssetUals]) } : {}),
     ...(exactResponderCapability ? { exactResponderCapability } : {}),
     ...(authenticatedExactAssets.length === 0

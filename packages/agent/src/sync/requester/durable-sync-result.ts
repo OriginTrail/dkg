@@ -12,7 +12,7 @@ export interface DetailedDurableSyncResult {
 }
 
 
-/** Do not expose owner policy or invocation-local authentication evidence to ordinary callers. */
+/** Keep invocation-local challenge authentication evidence out of ordinary results. */
 export function physicalDurableSyncResult(detailed: DetailedDurableSyncResult): DetailedDurableSyncResult {
   return {
     result: detailed.result,

@@ -18,14 +18,14 @@ export async function attemptDurableHoldingsPhase(input: {
   readonly context: HoldingsPhaseContext;
   readonly contextGraphId: string;
   readonly manifest: GraphScopedDurableManifestPlan | null;
-  readonly recovery?: GraphOwnedRecoveryContext;
+  readonly recovery: GraphOwnedRecoveryContext;
   readonly meta: SyncPageResult;
   readonly accumulator: DurableSyncAccumulator;
   readonly recordMetaPhase: () => void;
 }): Promise<DurableRecoveryRoundDecision> {
   const full: DurableRecoveryRoundDecision = { strategy: 'full', continuation: 'full-graph' };
   const { context, contextGraphId, manifest, recovery, meta, accumulator } = input;
-  const held = recovery?.held;
+  const held = recovery.held;
   if (!manifest) return { strategy: 'legacy' };
   if (!held) return full;
   let proof;
