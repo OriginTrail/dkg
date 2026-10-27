@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { assertSafeIri, formatSparqlTerm } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
-import { ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES } from './atomic-asset-limits.js';
+import { formatGraphBlock, renderBoundedAtomicAssetUpdate } from './atomic-update-rendering.js';
+export { formatGraphBlock } from './atomic-update-rendering.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
 export const ATOMIC_GRAPH_REPLACE_STAGING_PREFIX =
@@ -79,13 +80,9 @@ export function buildAtomicGraphAndSubjectReplaceUpdate(
   assertSubjectReplacementPayload(metaGraph, subject, metadataQuads);
 
   if (strategy === 'bounded-direct' && target !== metaGraph) {
-    const blocks = [graphQuads.length ? formatGraphBlock(target, graphQuads) : '',
-      metadataQuads.length ? formatGraphBlock(metaGraph, metadataQuads) : ''].filter(Boolean);
-    const update = [`CLEAR SILENT GRAPH <${target}>`,
-      `DELETE WHERE { GRAPH <${metaGraph}> { <${subject}> ?p ?o } }`,
-      ...(blocks.length ? [`INSERT DATA {\n${blocks.join('\n')}\n}`] : [])].join(';\n');
-    if (Buffer.byteLength(update) <= ATOMIC_ASSET_GROUP_MAX_UPDATE_BYTES)
-      return { update, cleanup: '', stagingGraphs: [] };
+    const direct = renderBoundedAtomicAssetUpdate([{ graphUri: target, graphQuads,
+      metaGraphUri: metaGraph, metadataSubject: subject, metadataQuads }]);
+    if (direct) return { update: direct.update, cleanup: '', stagingGraphs: [] };
   }
 
   const dataStagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
@@ -218,21 +215,6 @@ export function assertSubjectReplacementPayload(
       );
     }
   }
-}
-
-/**
- * One `GRAPH` block of an atomic update. `graphUri` must already be a safe
- * bare IRI; every term of every quad goes through {@link formatSparqlTerm}.
- */
-export function formatGraphBlock(graphUri: string, quads: readonly Quad[]): string {
-  const triples = quads.map((quad) => `    ${formatTriple(quad)}`).join('\n');
-  return `  GRAPH <${graphUri}> {\n${triples}\n  }`;
-}
-
-function formatTriple(quad: Quad): string {
-  return `${formatSparqlTerm(quad.subject, { position: 'subject' })} ` +
-    `${formatSparqlTerm(quad.predicate, { position: 'predicate' })} ` +
-    `${formatSparqlTerm(quad.object, { position: 'object' })} .`;
 }
 
 // Compatibility exports: `dist/atomic-graph-replace.js` is a public package

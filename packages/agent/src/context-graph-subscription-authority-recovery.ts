@@ -412,8 +412,8 @@ export async function activateRollingSubscriptionPromotion(
 
 /** Rolling promotion owns candidate ordering and generation fences. */
 export interface RollingSubscriptionPromotionPorts {
-  /** Publish only after committed activation, dormancy clearing and slot bookkeeping. */
-  activated(contextGraphId: string): void;
+  /** Complete dormancy, status and slot bookkeeping, then publish activation. */
+  finalizeActivation(contextGraphId: string): void;
   readonly store?: Pick<ContextGraphSubscriptionStore, 'load' | 'loadAll'>;
   getStatus(): Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
   isCurrent(signal: AbortSignal): boolean;
@@ -426,7 +426,6 @@ export interface RollingSubscriptionPromotionPorts {
   readonly log: { warn(ctx: OperationContext, message: string): void; info(ctx: OperationContext, message: string): void; debug(ctx: OperationContext, message: string): void };
   touchStatus(): void;
   updateContextGraphSubscriptionRehydrationStatusAfterClear(removed: readonly string[], revoked?: readonly string[]): void;
-  updateContextGraphSubscriptionRehydrationStatusAfterPersist(id: string, intent: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>): void;
   resolveAuthority(binding: Readonly<DurableContextGraphSubscriptionBinding>, signal: AbortSignal): Promise<ContextGraphReadAuthorityDecision>;
   activate(row: ContextGraphSubscriptionRecord, onChainId: string | undefined, isCurrent: (subscription: ContextGraphSub) => boolean): Promise<void>;
   wakeAuthorityRecovery(): void;
@@ -588,20 +587,7 @@ export async function promoteDormantContextGraphSubscriptions(
       if (!ports.isCurrent(signal)) return 'idle';
 
       pass.activated();
-      ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
-      ports.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, {
-        subscribed: row.subscribed,
-        coreHosted: row.coreHosted,
-      });
-      const activated = ports.subscribedContextGraphs.get(contextGraphId);
-      if (
-        !row.coreHosted
-        && activated
-        && !rehydratedSubscriptionReachedSafeState(activated)
-      ) {
-        ports.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
-      }
-      ports.activated(contextGraphId);
+      ports.finalizeActivation(contextGraphId);
       ports.log.info(
         ctx,
         `Promoted pending persisted context-graph subscription "${contextGraphId}"; ` +

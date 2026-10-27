@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { finalizePersistedSubscriptionActivation, type PersistedSubscriptionFinalizationPorts } from '../../src/context-graph-subscription-activation-finalization.js';
 // Shared by the Hardhat fence suite and the hermetic request-lane suite.
 import { vi } from 'vitest';
 import { RollingSubscriptionChecks } from '../../src/context-graph-subscription-rolling-checks.js';
@@ -67,9 +68,10 @@ export function createRollingPromotionFixture(
     started: true,
     log: { warn: vi.fn<RollingSubscriptionPromotionPorts['log']['warn']>(), info: vi.fn<RollingSubscriptionPromotionPorts['log']['info']>(), debug: vi.fn<RollingSubscriptionPromotionPorts['log']['debug']>() },
     touchStatus: vi.fn(),
-    activated: vi.fn<RollingSubscriptionPromotionPorts['activated']>(),
+    activated: vi.fn<(id: string) => void>(),
+    finalizeActivation: (id: string) => finalizePersistedSubscriptionActivation(host, id, true, host.activated),
     updateContextGraphSubscriptionRehydrationStatusAfterClear: vi.fn<RollingSubscriptionPromotionPorts['updateContextGraphSubscriptionRehydrationStatusAfterClear']>(),
-    updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn<RollingSubscriptionPromotionPorts['updateContextGraphSubscriptionRehydrationStatusAfterPersist']>(),
+    updateContextGraphSubscriptionRehydrationStatusAfterPersist: vi.fn<PersistedSubscriptionFinalizationPorts['updateContextGraphSubscriptionRehydrationStatusAfterPersist']>(),
     persistContextGraphSubscriptionStrict: vi.fn<RollingSubscriptionActivationPorts['persistBinding']>(async () => undefined),
     reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationPorts['reconcile']>(async () => undefined),
     resolveContextGraphSubscriptionBootstrapAuthority: vi.fn<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>(options.answer ?? (async () => options.authority === 'unavailable'

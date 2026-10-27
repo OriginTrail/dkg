@@ -11,7 +11,7 @@ import {
 } from '../exact-batch-stream-contract.js';
 import type { ExactBatchAgentSession } from '../requester/exact-batch-stream.js';
 
-import { ExactBatchAssetMissingError } from './exact-asset-export-cache.js';
+import { ExactBatchAssetMissingError, type ExactAssetEncodedExportLease } from './exact-asset-export-cache.js';
 import type { PublicAssetResponderOptions } from './public-asset-responder.js';
 
 const EMPTY = new Uint8Array(0);
@@ -123,47 +123,42 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         // becomes private. This never enters the private/member join lane.
         await requirePublicAuthority(request.contextGraphId, session.signal);
         let started = performance.now();
-        const lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal, readPriority: 'normal',
-          signal: session.signal,
-          // A definitive policy change during an already prepared export is
-          // fenced by the cache as a changed source, before ASSET_END.
-          authorizeMissingAccessPolicy: () => readPublicAuthority(request.contextGraphId, session.signal),
-          onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context),
-          onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) }).catch(async error => {
-            // Preparation may overlap a pending commit, but a refusal must
-            // not cut that commit short merely because it was found earlier.
+        let lease: ExactAssetEncodedExportLease | null = null;
+        try {
+          try {
+            // Prepare one bounded lease while prior assets await commit credit.
+            lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal, readPriority: 'normal',
+              signal: session.signal,
+              // The source fence also protects the final ASSET_END.
+              authorizeMissingAccessPolicy: () => readPublicAuthority(request.contextGraphId, session.signal),
+              onStage: (stage, durationMs) => options.onStage?.(stage, assetIndex, durationMs, context),
+              onFallback: (reason, budgetReason) => observeExactBatch(() => options.onFallback?.(reason, assetIndex, context, budgetReason)) });
+            const encodingMs = lease?.encodingDurationMs ?? 0;
+            observeExactBatch(() => options.onStage?.('export', assetIndex,
+              Math.max(0, performance.now() - started - encodingMs), context));
+          } finally {
+            // Prepared bytes and preparation failures both wait for wire credit.
             session.signal.throwIfAborted();
             while (!window.canStartAsset) await readAck();
-            throw error;
-          });
-        observeExactBatch(() => options.onStage?.('export', assetIndex,
-          Math.max(0, performance.now() - started - (lease?.encodingDurationMs ?? 0)), context));
-        if (!lease) {
-          session.signal.throwIfAborted();
-          while (!window.canStartAsset) await readAck();
-          throw new ExactBatchResponderRefusal('RESOURCE_LIMIT');
-        }
-        try {
-          // Prepare at most one ordinary budgeted lease while the receiver
-          // commits. Wire credit remains fixed at two assets, and no bytes
-          // from this lease are sent until a commit ACK grants that credit.
-          while (!window.canStartAsset) await readAck();
+          }
+          const prepared = lease;
+          if (!prepared) throw new ExactBatchResponderRefusal('RESOURCE_LIMIT');
           session.signal.throwIfAborted();
           if (awaitingCredit) {
             if (options.servingWithheld?.(request.contextGraphId)) refuse('serving', 'BUSY');
             await requirePublicAuthority(request.contextGraphId, session.signal);
           }
           // Bounded observation cannot affect exporter ownership or response.
-          if (lease.wholePayloadExports !== undefined) {
-            observeExactBatch(() => options.onExport?.(assetIndex, lease.wholePayloadExports!, context));
+          if (prepared.wholePayloadExports !== undefined) {
+            observeExactBatch(() => options.onExport?.(assetIndex, prepared.wholePayloadExports!, context));
           }
           // A lease owns the unchanged bounded gzip/plain representation. A
           // warm lease reuses only verified bytes, never cached read authority.
-          const { body, plainBytes } = lease;
-          observeExactBatch(() => options.onStage?.('encode', assetIndex, lease.encodingDurationMs, context));
+          const { body, plainBytes } = prepared;
+          observeExactBatch(() => options.onStage?.('encode', assetIndex, prepared.encodingDurationMs, context));
           observeExactBatch(() => options.onPayload?.(assetIndex, plainBytes, body.byteLength, context));
           started = performance.now();
-          await send({ kind: K.META, assetIndex, sequence: 0, payload: lease.metadata });
+          await send({ kind: K.META, assetIndex, sequence: 0, payload: prepared.metadata });
           let sequence = 0;
           for (let offset = 0; offset < body.byteLength; offset += EXACT_BATCH_MAX_FRAME_BYTES) {
             await send({ kind: K.DATA, assetIndex, sequence: sequence++, payload: body.subarray(offset, offset + EXACT_BATCH_MAX_FRAME_BYTES) });
@@ -174,11 +169,11 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
           // immutable assertion, not proof that present physical DATA remains
           // unchanged. Fresh metadata/public profile and available revisions
           // fence every serve. Receiver chain authentication remains required.
-          await lease.assertCurrent();
+          await prepared.assertCurrent();
           session.signal.throwIfAborted();
           observeExactBatch(() => options.onStage?.('source-fence', assetIndex, performance.now() - started, context));
           await send({ kind: K.ASSET_END, assetIndex, sequence, payload: EMPTY });
-        } finally { lease.release(); }
+        } finally { lease?.release(); }
       }
       await send({ kind: K.BATCH_END, assetIndex: EXACT_BATCH_BATCH_INDEX, sequence: assetUals.length, payload: EMPTY });
       while (window.acknowledgedCount < assetUals.length) await readAck();

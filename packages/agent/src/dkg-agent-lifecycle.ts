@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { finalizePersistedSubscriptionActivation } from './context-graph-subscription-activation-finalization.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -8897,6 +8898,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     };
   }
 
+  /** Commit the activation transaction; its owner finalizes bookkeeping and publication. */
   async activatePersistedContextGraphSubscriptionRecord(
     this: DKGAgent,
     row: ContextGraphSubscriptionRecord, options: PersistedContextGraphSubscriptionActivationOptions = {},
@@ -8939,9 +8941,19 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return committed;
       },
     }, options);
-    // Deferred status owners publish after clearing dormancy and claiming slots.
-    if (options.updateRehydrationStatus !== false) this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: row.id });
     return activated;
+  }
+
+  /** Finalize the owner's committed activation before notifying synchronous listeners. */
+  finalizePersistedContextGraphSubscriptionActivation(this: DKGAgent, contextGraphId: string, claimRollingSlot: boolean): void {
+    finalizePersistedSubscriptionActivation({
+      subscribedContextGraphs: this.subscribedContextGraphs,
+      contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
+      contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
+      contextGraphSubscriptionDormancyById: this.contextGraphSubscriptionDormancyById,
+      updateContextGraphSubscriptionRehydrationStatusAfterPersist: this.updateContextGraphSubscriptionRehydrationStatusAfterPersist.bind(this),
+    }, contextGraphId, claimRollingSlot,
+      id => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }));
   }
 
   /**
@@ -9039,12 +9051,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       },
       activated: (contextGraphId) => {
-        const row = this.subscribedContextGraphs.get(contextGraphId);
-        this.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, {
-          subscribed: row?.subscribed ?? false,
-          coreHosted: row?.coreHosted,
-        });
-        this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId });
+        this.finalizePersistedContextGraphSubscriptionActivation(contextGraphId, false);
         this.log.info(
           ctx,
           `Activated persisted context-graph subscription "${contextGraphId}" after authority recovery`,
@@ -9078,8 +9085,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       subscribedContextGraphs: this.subscribedContextGraphs,
       log: this.log,
       updateContextGraphSubscriptionRehydrationStatusAfterClear: this.updateContextGraphSubscriptionRehydrationStatusAfterClear.bind(this),
-      updateContextGraphSubscriptionRehydrationStatusAfterPersist: this.updateContextGraphSubscriptionRehydrationStatusAfterPersist.bind(this),
-      activated: (contextGraphId) => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId }),
+      finalizeActivation: (contextGraphId) => this.finalizePersistedContextGraphSubscriptionActivation(contextGraphId, true),
       resolveAuthority: (binding, ownerSignal) => this.resolveContextGraphSubscriptionBootstrapAuthority(binding.contextGraphId, {
         allowSubscriptionFallback: false, signal: ownerSignal,
         durableSubscriptionBinding: binding,
@@ -9478,19 +9484,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
               }
             : {}),
         });
+        this.finalizePersistedContextGraphSubscriptionActivation(row.id, cap > 0);
         // A restored hosted graph gets the owner's definition back (or keeps it current).
         if (row.coreHosted) void ensureCoreHostedDefinition(this, row.id, 'restored');
-        if (
-          !row.coreHosted
-          && cap > 0
-          && !rehydratedSubscriptionReachedSafeState({
-            synced: restorePendingMeta ? false : row.synced,
-            metaSynced: restorePendingMeta ? false : row.metaSynced,
-            pendingMeta: restorePendingMeta,
-          })
-        ) {
-          this.contextGraphSubscriptionRehydrationSlotIds.add(row.id);
-        }
         if (restrictedApprovalBootstrap) {
           const curatorPeerId = this.preferredSyncPeers.get(row.id);
           this.log.info(
