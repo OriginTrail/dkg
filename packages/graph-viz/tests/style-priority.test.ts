@@ -60,3 +60,8 @@ describe('style precedence and palette changes', () => {
     expect(new StyleEngine({ gradientIntensity: 0 }, new PrefixManager()).getGradientCenter('#123456')).toBe('#123456');
   });
 });
+
+it('falls through unrelated custom namespaces to a built-in vocabulary color', () => {
+  const styles = new StyleEngine({ namespaceColors: { 'https://unrelated.invalid/': 'red' } }, new PrefixManager());
+  expect(styles.getNodeColor(graph().node)).toBe('#8b5cf6');
+});

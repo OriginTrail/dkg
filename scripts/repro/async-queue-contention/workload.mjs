@@ -1,8 +1,8 @@
 // Load generators and worker wiring of the async queue contention benchmark: open-loop Poisson share submissions with
 // the route's preflight reads, closed-loop client readers, a list observer, the real worker supervisor over a fake
 // agent that replays the per-share store operations, and the idle publisher. The product comes in through `deps`
-// (backend.mjs loadDist), so this file is import-safe. Publisher and mixed cells (P2b) would add their producers beside
-// startShareProducers and reuse the idle publisher's wiring.
+// (backend.mjs loadDist), so this file is import-safe. The publisher stream of the publisher and mixed cells (P2b) runs
+// through the same open loop (startArrivals) from publisher.mjs.
 import { randomBytes } from 'node:crypto';
 import { setImmediate as yieldToLoop, setTimeout as sleep } from 'node:timers/promises';
 import {
@@ -173,41 +173,23 @@ export const sleepUntil = (world, ms) => sleep(Math.max(0, ms - (performance.now
  * stalled driver cannot hide late requests (no coordinated omission) and latency is ended - intended. The window tag
  * comes from the intended time. stop() freezes the clock: every arrival due by then is still issued (a stall across
  * the horizon leaves none out), and an arrival not yet due is recorded as an unsent failure (outcome 'not_issued', no
- * `ended`, so finalizeRequests censors it), so world.requests holds the whole schedule once drain() has returned.
+ * `ended`, so finalizeRequests censors it), so `requests` holds the whole schedule once drain() has returned.
+ * `issue(rec, n)` makes request n (its record already pushed to `requests`): it sets the record's fields and resolves,
+ * or throws, and a throw is classified by classifyError. Both submission streams run through it.
  */
-export function startShareProducers(world, preflight) {
+export function startArrivals(world, { arrivals, requests, keyOf, issue }) {
   requireEpoch(world);
   const { cfg } = world;
-  const horizon = cfg.warmupMs + cfg.measureMs + cfg.cooldownMs;
-  const arrivals = poissonArrivals(cfg.seed, cfg.lambda, horizon);
   const inflight = new Set();
   const windowOf = (t) => (t < cfg.warmupMs ? 'warmup' : t < cfg.warmupMs + cfg.measureMs ? 'measure' : 'cooldown');
   let next = 0;
   let stoppedAt = null; // run-relative ms of the stop() call
-  world.arrivalCount = arrivals.length;
-  const keyOf = (n) => `${cfg.runTag}-s${n}`;
   const request = async (n, intended) => {
     const key = keyOf(n);
     const rec = { i: n, key, intended, started: performance.now() - world.t0, windowTag: windowOf(intended) };
-    world.requests.push(rec);
+    requests.push(rec);
     try {
-      const pf0 = performance.now();
-      const pf = await preflight();
-      rec.preMs = performance.now() - pf0;
-      if (pf.reject) {
-        Object.assign(rec, pf.reject);
-        return;
-      }
-      const e0 = performance.now();
-      rec.enqStart = e0 - world.t0;
-      rec.jobId = await world.queue.enqueue({
-        contextGraphId: CG_ID,
-        assertionName: key,
-        agentAddress: AGENT,
-        entities: 'all',
-      });
-      rec.enqMs = performance.now() - e0;
-      rec.outcome = 'success';
+      await issue(rec, n);
     } catch (e) {
       Object.assign(rec, classifyError(e));
       if (rec.enqStart !== undefined) rec.enqMs = performance.now() - (rec.enqStart + world.t0);
@@ -230,7 +212,7 @@ export function startShareProducers(world, preflight) {
       }
     }
     for (; next < arrivals.length; next++) {
-      world.requests.push({
+      requests.push({
         i: next,
         key: keyOf(next),
         intended: arrivals[next],
@@ -251,6 +233,37 @@ export function startShareProducers(world, preflight) {
       return inflight.size;
     },
   };
+}
+
+/** The share stream: the route's preflight reads, then the real enqueue. */
+export function startShareProducers(world, preflight) {
+  const { cfg } = world;
+  const arrivals = poissonArrivals(cfg.seed, cfg.lambda, cfg.warmupMs + cfg.measureMs + cfg.cooldownMs);
+  world.arrivalCount = arrivals.length;
+  return startArrivals(world, {
+    arrivals,
+    requests: world.requests,
+    keyOf: (n) => `${cfg.runTag}-s${n}`,
+    issue: async (rec) => {
+      const pf0 = performance.now();
+      const pf = await preflight();
+      rec.preMs = performance.now() - pf0;
+      if (pf.reject) {
+        Object.assign(rec, pf.reject);
+        return;
+      }
+      const e0 = performance.now();
+      rec.enqStart = e0 - world.t0;
+      rec.jobId = await world.queue.enqueue({
+        contextGraphId: CG_ID,
+        assertionName: rec.key,
+        agentAddress: AGENT,
+        entities: 'all',
+      });
+      rec.enqMs = performance.now() - e0;
+      rec.outcome = 'success';
+    },
+  });
 }
 
 // ---------------------------------------------------------------- admission work and reconciliation
@@ -418,15 +431,19 @@ export function startReaders(world) {
 
 // ---------------------------------------------------------------- list observer
 /**
- * What the observer polls. `default` is the public list route without a cursor, a full read. `paged` stays null until
- * the paging API exists (P8a / P9b): that PR adds ONE entry `(queue) => walkPages((cursor) => <their page
- * function>(queue, cursor).then((r) => ({ rows: <count>, nextCursor: <cursor or null> })))` and MUST ALSO update
- * `default` to whatever the route's cursorless call becomes (the plan keeps listUnlocked complete for claimNext, so it
- * may stop being list()).
+ * What the observer polls. `default` is the public list route without a cursor: a complete read, which since P8a is a loop of
+ * keyset pages that each release the queue's mutex (the queue's `list`). `paged` is a client's cursor walk over the queue's
+ * `listPage` (the opt-in surface the route and CLI expose in P9b), OBSERVER_PAGE_SIZE rows a page; its longest page time is
+ * the mutex-hold proxy.
  */
+export const OBSERVER_PAGE_SIZE = 100;
 export const OBSERVER_CALLS = {
   default: async (queue) => ({ rows: (await queue.list({})).length }),
-  paged: null,
+  paged: (queue) =>
+    walkPages(async (cursor) => {
+      const page = await queue.listPage({}, { pageSize: OBSERVER_PAGE_SIZE, ...(cursor ? { cursor } : {}) });
+      return { rows: page.jobs.length, nextCursor: page.nextCursor };
+    }),
 };
 
 /** Walks fetchPage(cursor) -> { rows, nextCursor? } to the end. The longest page time is the mutex-hold proxy. */
@@ -446,9 +463,16 @@ export async function walkPages(fetchPage) {
   return { rows, pages: pageMs.length, pageMs };
 }
 
-/** Sequential like a polling script: the next poll starts observerMs after the previous one settled. */
-export function startObserver(world, mode) {
-  const call = OBSERVER_CALLS[mode];
+/**
+ * Sequential like a polling script: the next poll starts observerMs after the previous one settled. `calls`, `target`
+ * and `events` default to the share queue's; the publisher's observer passes its own (publisher.mjs).
+ */
+export function startObserver(
+  world,
+  mode,
+  { calls = OBSERVER_CALLS, target = world.queue, events = world.observerEvents } = {},
+) {
+  const call = calls[mode];
   const { observerMs } = world.cfg;
   if (mode === 'none' || !call) return NOOP;
   requireEpoch(world);
@@ -460,14 +484,14 @@ export function startObserver(world, mode) {
       const t0 = performance.now();
       const ev = { t: t0 - world.t0, ok: true };
       try {
-        const r = await call(world.queue);
+        const r = await call(target);
         Object.assign(ev, { rows: r.rows, ...(r.pageMs ? { pages: r.pages, maxPageMs: Math.max(...r.pageMs) } : {}) });
       } catch (e) {
         ev.ok = false;
         ev.err = e?.code ?? e?.name;
       }
       ev.ms = performance.now() - t0;
-      world.observerEvents.push(ev);
+      events.push(ev);
     }
   })();
   return {

@@ -10,7 +10,7 @@ import { jobSubject } from '../src/async-promote-queue-utils.js';
 import { ShareRetentionAdmissionUnavailableError, createShareRetention, type ShareRetentionBatchResult } from '../src/async-promote-retention.js';
 import { emptyClassCounts } from '../src/async-promote-retention-policy.js';
 import {
-  AG, GRAPH, NOW, W, WF, DELETABLE_KINDS, captureLogger, drain, genPopulation, graphFingerprint, insertQuads, mk, newRetention, pick, present, put,
+  AG, GRAPH, NOW, W, WF, DELETABLE_KINDS, cancelledJob, captureLogger, drain, genPopulation, graphFingerprint, insertQuads, mk, newRetention, pick, present, put,
   registerPendingFlight, retired, rng, rowOf, spy, storedIds, verifiedSubjects, type Logged, type QueryResult,
 } from './_helpers/share-retention-fixtures.js';
 
@@ -23,7 +23,7 @@ const jobsOf = (line: string) => JSON.parse(/ jobs=(\[.*\])$/.exec(line)![1]!) a
 async function standardStore(store: TripleStore) {
   await put(store,
     mk('s1', 'succeeded', {}, 10 * W), mk('s2', 'succeeded', {}, 11 * W), mk('s3', 'succeeded', {}, 12 * W),
-    mk('c1', 'failed', { reason: 'cancelled' }, 10 * W), mk('c2', 'failed', { reason: 'cancelled' }, 11 * W),
+    cancelledJob('c1', {}, 10 * W), cancelledJob('c2', {}, 11 * W),
     retired('r1', 10 * W), retired('r2', 11 * W),
     mk('fatal-1', 'failed', {}, 20 * W), mk('fatal-2', 'failed', {}, 21 * W), mk('bound-1', 'failed', { bound: true }, 20 * W),
     mk('young-1', 'succeeded', {}, 1000), mk('queued-1', 'queued', {}, 30 * W));
@@ -94,7 +94,7 @@ describe('mode report', () => {
   it('judges every row once per pass: a row kept for a pending admission is not revisited within the pass, so nothing after it is counted twice; the next pass takes it', async () => {
     const store = new OxigraphStore();
     const { store: spied, log } = spy(store);
-    await put(store, mk('pend', 'succeeded', {}, 20 * W), mk('a', 'succeeded', {}, 10 * W), mk('b', 'succeeded', {}, 10 * W - 1), mk('c', 'failed', { reason: 'cancelled' }, 9 * W));
+    await put(store, mk('pend', 'succeeded', {}, 20 * W), mk('a', 'succeeded', {}, 10 * W), mk('b', 'succeeded', {}, 10 * W - 1), cancelledJob('c', {}, 9 * W));
     const flight = registerPendingFlight(spied, 'pend');
     let t = NOW;
     const retention = newRetention(spied, { mode: 'report', now: () => t, batchSize: 100, rescanIntervalMs: 3_600_000 });
@@ -484,7 +484,7 @@ describe('the clock guard', () => {
     await put(store, mk('old', 'succeeded', {}, 8 * DAY));
     expect((await retention.runBatch()).skipped).toBeUndefined();                       // tick 1 runs
     expect(await present(store, 'old')).toBe('');
-    await put(store, mk('young-s', 'succeeded', {}, INTERVAL), mk('young-c', 'failed', { reason: 'cancelled' }, INTERVAL));   // really one minute old
+    await put(store, mk('young-s', 'succeeded', {}, INTERVAL), cancelledJob('young-c', {}, INTERVAL));   // really one minute old
     const calls = log.length;
     leap(365 * DAY);                                                                     // the clock jumps a year ahead: both would now count as a year old
     for (let i = 0; i < 6; i++) {                                                        // the jump, then every following tick on schedule on the leapt clock
@@ -543,7 +543,7 @@ describe('the clock guard', () => {
 
   it('never deletes a row dated after now: an index that says old but a payload dated in the future, and a future row of every deletable class', async () => {
     const store = new OxigraphStore();
-    await put(store, mk('sf', 'succeeded', {}, -60_000), mk('cf', 'failed', { reason: 'cancelled' }, -60_000), { ...retired('rf'), updatedAt: NOW + 60_000 }, mk('skew', 'succeeded', {}, -5000));
+    await put(store, mk('sf', 'succeeded', {}, -60_000), cancelledJob('cf', {}, -60_000), { ...retired('rf'), updatedAt: NOW + 60_000 }, mk('skew', 'succeeded', {}, -5000));
     await store.deleteByPattern({ subject: jobSubject('skew'), predicate: 'urn:dkg:promote-queue:updatedAt', graph: GRAPH });
     await store.insert([{ subject: jobSubject('skew'), predicate: 'urn:dkg:promote-queue:updatedAt', object: `"${NOW - 5 * W}"^^<http://www.w3.org/2001/XMLSchema#integer>`, graph: GRAPH }]);     // index: old, payload: dated NOW + 5 s
     const retention = newRetention(store, { batchSize: 100 });

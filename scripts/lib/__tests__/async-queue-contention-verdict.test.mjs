@@ -1356,7 +1356,7 @@ test('integrityWarnings reports what a verdict reader must see next to the resul
   assert.match(unconfirmed[0], /cannot be confirmed to come from one machine/);
 });
 
-test('walkPages walks every page and stops on a falsy cursor; the paged seam is empty until P8a/P9b', async () => {
+test('walkPages walks every page and stops on a falsy cursor; the paged observer walks the queue\'s listPage', async () => {
   const pages = [
     { rows: 100, nextCursor: 'c1' },
     { rows: 100, nextCursor: 'c2' },
@@ -1375,9 +1375,8 @@ test('walkPages walks every page and stops on a falsy cursor; the paged seam is 
     walkPages(async () => ({ rows: 1, nextCursor: 'same' })),
     /did not advance/,
   );
-  // This documents the seam: the PR that adds the paged listing (P8a / P9b) fills `paged` and MUST also update
-  // `default` (see workload.mjs); it changes this assertion.
-  assert.equal(OBSERVER_CALLS.paged, null);
+  // The seam P8a filled: `default` is still the queue's complete `list`, `paged` walks `listPage` 100 rows at a time.
+  assert.equal(typeof OBSERVER_CALLS.paged, 'function');
   assert.equal(typeof OBSERVER_CALLS.default, 'function');
   assert.equal(
     (
@@ -1390,6 +1389,20 @@ test('walkPages walks every page and stops on a falsy cursor; the paged seam is 
     ).rows,
     2,
   );
+  const requests = [];
+  const listed = await OBSERVER_CALLS.paged({
+    listPage: async (filter, request) => {
+      requests.push([filter, request]);
+      return request.cursor === 'next'
+        ? { jobs: [1, 2, 3], complete: true }
+        : { jobs: Array.from({ length: 100 }, () => 0), nextCursor: 'next', complete: false };
+    },
+  });
+  assert.deepEqual([listed.rows, listed.pages, listed.pageMs.length], [103, 2, 2]);
+  assert.deepEqual(requests, [
+    [{}, { pageSize: 100 }],
+    [{}, { pageSize: 100, cursor: 'next' }],
+  ]);
 });
 
 // ---------------------------------------------------------------- the verdict subcommand end to end (no backend)
@@ -1938,12 +1951,14 @@ test('verdict refuses a margin that is not a number and an unreadable summary', 
   assert.match(bad.err, /cannot read the run summary/);
 });
 
-test('run refuses the paged observer before touching a backend and a non-loopback backend with exit 3', () => {
-  assert.equal(cli('run', '--rung', 'L3', '--observer', 'paged').code, 2);
-  assert.match(
-    cli('run', '--rung', 'L3', '--observer', 'paged').err,
-    /paged listing is not available in this build \(needs P8a\/P9b\)/,
-  );
+test('run takes the paged observer, refuses an unknown one before touching a backend and a non-loopback backend with exit 3', () => {
+  const bogus = cli('run', '--rung', 'L3', '--observer', 'bogus');
+  assert.equal(bogus.code, 2);
+  assert.match(bogus.err, /unknown --observer bogus \(default, paged, none\)/);
+  // The paged observer exists since P8a: the run goes on to the backend check, which has no URL here.
+  const paged = cli('run', '--rung', 'L3', '--observer', 'paged');
+  assert.equal(paged.code, 3);
+  assert.doesNotMatch(paged.err, /paged listing is not available/);
   assert.equal(cli('run', '--rung', 'L9').code, 2);
   assert.equal(cli('run').code, 2);
   const refused = cli('run', '--rung', 'L3', '--blazegraph-url', 'http://10.1.2.3:9999/bigdata/namespace/kb/sparql');

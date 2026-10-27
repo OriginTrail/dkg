@@ -133,6 +133,14 @@ export function isRfc64LegacySwmBoundaryRetirementInProgressError(error: unknown
 }
 
 /**
+ * A committed synchronous share whose signed author-inventory handoff has not completed yet. The
+ * agent makes it the typed cause of a retryable promote failure, and the daemon names it in its
+ * share route and promote worker logs. Shared here because it crosses those packages; the wire
+ * value is part of the contract.
+ */
+export const SWM_INVENTORY_HANDOFF_PENDING_CODE = 'SWM_INVENTORY_HANDOFF_PENDING';
+
+/**
  * An unscoped query whose dataset or read-authority facts changed while it ran: the agent
  * withholds the result and raises this code with `retryable: true`, and the daemon answers a
  * retryable 503 that carries the same sentence. Shared here because it crosses those packages:

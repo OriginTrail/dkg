@@ -5,9 +5,10 @@
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { PromoteAdmissionAttempt, PromoteAdmissionCoordinator } from '../../src/promote-admission.js';
 import { PROMOTE_NO_EFFECT_REJECTION_CODE } from '../../src/promote-no-effect-rejection.js';
-import { PROMOTE_STATE, DEFAULT_PROMOTE_CONTROL_GRAPH_URI as GRAPH, PROMOTE_PAYLOAD, classifyJobPayload, jobSubject, literal, promoteLaneConflictScope, serializeJobRecord } from '../../src/async-promote-queue-utils.js';
+import { PROMOTE_STATE, PROMOTE_UPDATED_AT, DEFAULT_PROMOTE_CONTROL_GRAPH_URI as GRAPH, PROMOTE_PAYLOAD, classifyJobPayload, jobSubject, literal, promoteLaneConflictScope, serializeJobRecord } from '../../src/async-promote-queue-utils.js';
 import { decidePromoteRetention, type PromoteRetentionPolicy } from '../../src/async-promote-retention-policy.js';
 import { createShareRetention, type ShareRetention, type ShareRetentionBatchResult, type ShareRetentionConfig, type ShareRetentionLogger } from '../../src/async-promote-retention.js';
+import { RETENTION_SCAN_SOURCE } from '../../src/async-promote-retention-scan.js';
 import { validatePromoteRecoveryBinding } from '../../src/promote-recovery-binding.js';
 import { createPromoteOperationIntent } from '../../src/promote-operation-intent.js';
 import type { PromoteJob } from '../../src/async-promote-queue-types.js';
@@ -35,6 +36,31 @@ export function mk(id: string, state: PromoteJob['state'], over: Record<string, 
   return { jobId: id, request, state, enqueuedAt: NOW - age - 1000, updatedAt: NOW - age, attempt: { count: 1, maxRetries: 5 }, formatVersion: 4, ...rest } as PromoteJob;
 }
 
+/** The attempt state of a job no worker ever claimed (`count` 0): every one of its (no) attempts is trivially unstarted. */
+export const UNCLAIMED = { count: 0, maxRetries: 5 };
+/**
+ * The attempt state of a cancelled job that was claimed twice with no proof that the claims never entered promote (`attempt.count` 2, no `preparationAttempts`): the row the
+ * queue leaves when a first attempt entered promote and failed, a second was reclaimed (which drops the marker), and the operator cancels. It looks like a never-started job
+ * (format 4, no marker) and is not one.
+ */
+export const ATTEMPTED = { count: 2, maxRetries: 5 };
+/**
+ * An operator-cancelled job that retention may delete once old enough: cancelled while queued and never claimed (`attempt.count` 0, format 4, no recovery binding,
+ * no marker). `mk` defaults to `attempt.count` 1 with no `preparationAttempts`, which is NOT proven unstarted (an earlier attempt may have entered promote), so a test
+ * that means a deletable cancelled job, or that isolates one other rule on an otherwise deletable one, builds it here. `over` replaces any field.
+ */
+export const cancelledJob = (id: string, over: Record<string, unknown> = {}, age = 10 * W): PromoteJob => mk(id, 'failed', { reason: 'cancelled', attempt: UNCLAIMED, ...over }, age);
+
+/** The last error of a job that failed in preparation: terminal, not a post-commit failure, and its free text asks for no inspection. */
+export const PREPARATION_ERROR = { message: 'seal preparation failed', retryable: false, classification: 'fatal', recordedAt: 1 };
+/**
+ * A job that failed terminally in preparation and was NOT cancelled (`reason` absent, which is what the queue leaves for a terminal failure): every one of its two attempts is
+ * proven unstarted (`preparationAttempts` equals `attempt.count`, at format 4), it has no recovery binding and an all-false marker. It meets every condition of the cancelled
+ * class except `reason === 'cancelled'`, so only that reason keeps it (D-6: every `failed` job that is not one of the two benign classes is kept). `over` replaces any field.
+ */
+export const failedInPreparation = (id: string, over: Record<string, unknown> = {}, age = 10 * W): PromoteJob =>
+  mk(id, 'failed', { attempt: { count: 2, maxRetries: 5, lastError: PREPARATION_ERROR }, preparationAttempts: 2, commitMarker: NO_MARKERS, ...over }, age);
+
 export const NO_MARKERS = { promoteStarted: false, swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false };
 export const STARTED = { ...NO_MARKERS, promoteStarted: true };
 export const LEASE = { workerId: 'w', acquiredAt: 1, expiresAt: 9e12, lastHeartbeatAt: 1, claimToken: 't' };
@@ -48,14 +74,37 @@ export const retired = (id: string, age = 10 * W): PromoteJob => {
     request: { contextGraphId: 'cg', assertionName: `n-${id}`, entities: 'all', agentAddress: AG, recoveryBinding: b } }, age);
 };
 
+/** Three attempts that each timed out in promote, as the retry history of a legacy job that was claimed and ran. */
+const LEGACY_HISTORY = { count: 3, maxRetries: 5, lastError: { classification: 'transient', retryable: true, message: 'promote timed out', recordedAt: 1 } };
 export const POST_COMMIT_ERROR = { message: 'post-commit failure', retryable: false, classification: 'fatal', recordedAt: 1, diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE' };
 
 export const parse = (j: PromoteJob) => { const r = classifyJobPayload(literal(JSON.stringify(j))); if (r.kind !== 'job') throw new Error('bad fixture'); return r.job; };
 export const decide = (j: PromoteJob, p: PromoteRetentionPolicy = policy, pending: (id: string) => boolean = noPending, now = NOW) => decidePromoteRetention(parse(j), now, p, pending);
 
+/**
+ * The payload TEXT of `j` with its `formatVersion` replaced by the JSON number `numberText`. `JSON.stringify` cannot write `-0` (it writes `0`) or `-Infinity` (it writes
+ * `null`), and the parser reads `-0` and `-1e999` as exactly those values: the text is how such a number reaches the policy.
+ */
+export const payloadWithFormatVersion = (j: PromoteJob, numberText: string): string => JSON.stringify({ ...j, formatVersion: '__FORMAT_VERSION__' }).replace('"__FORMAT_VERSION__"', numberText);
+/** `decide`, from the stored payload text (the way the sweep reads a job under the lock). */
+export const parseText = (payload: string) => { const r = classifyJobPayload(literal(payload)); if (r.kind !== 'job') throw new Error('bad fixture'); return r.job; };
+export const decideText = (payload: string, p: PromoteRetentionPolicy = policy, pending: (id: string) => boolean = noPending, now = NOW) => decidePromoteRetention(parseText(payload), now, p, pending);
+
 export type Quads = ReturnType<typeof serializeJobRecord>['jobQuads'];
 export async function insertQuads(store: TripleStore, quads: Quads) { for (let i = 0; i < quads.length; i += 4000) await store.insert(quads.slice(i, i + 4000)); }
 export async function put(store: TripleStore, ...jobs: PromoteJob[]) { for (const j of jobs) await store.insert(serializeJobRecord(j, GRAPH).jobQuads); }
+/**
+ * `put`, but each job named in `twinned` has a second `updatedAt` triple of the same value (`"100"^^xsd:integer` and `"100.0"^^xsd:decimal` are two terms, equal
+ * in every engine). The scan reads exact integer terms only, so the decimal twin is ignored: this checks that a twin neither makes the sweep judge or delete the
+ * subject twice nor stalls a pass. It does NOT repeat a scan row (`repeatingScanRows` does).
+ */
+export async function putTwinned(store: TripleStore, twinned: ReadonlySet<string>, ...jobs: PromoteJob[]) {
+  const twin = (j: PromoteJob) => `"${j.updatedAt}.0"^^<http://www.w3.org/2001/XMLSchema#decimal>`;
+  for (const j of jobs) {
+    const quads = serializeJobRecord(j, GRAPH).jobQuads;
+    await store.insert(twinned.has(j.jobId) ? quads.flatMap(q => (q.predicate === PROMOTE_UPDATED_AT ? [q, { ...q, object: twin(j) }] : [q])) : quads);
+  }
+}
 export async function present(store: TripleStore, jobId: string, graph = GRAPH) {
   const r = await store.query(`SELECT ?p ?o WHERE { GRAPH <${graph}> { <${jobSubject(jobId)}> ?p ?o } }`);
   return r.type === 'bindings' ? r.bindings.map(b => `${b.p} ${b.o}`).sort().join('\n') : '';
@@ -96,16 +145,50 @@ export function spy(store: TripleStore, rewrite?: (sparql: string, source: strin
   } }) as TripleStore;
   return { store: proxy, log };
 }
+
+/**
+ * Copies of a scan row that the engine in `repeatingScanRows` answers for `iri`: 1 for about half of the subjects, 2 to 4 for the rest. Stateless (a hash of the seed and
+ * the subject), so it does not consume the caller's random stream and a replayed seed repeats the same rows.
+ */
+export function scanRowCopies(seed: number, iri: string): number {
+  let h = (seed ^ 0x811c9dc5) >>> 0;
+  for (let i = 0; i < iri.length; i++) h = Math.imul(h ^ iri.charCodeAt(i), 0x01000193) >>> 0;
+  const r = rng(h)();
+  return r < 0.5 ? 1 : r < 0.8 ? 2 : r < 0.95 ? 3 : 4;
+}
+
+/**
+ * `store` behind an engine that answers every retention scan query with the rows of some subjects REPEATED (side by side: the equal-valued rows of a subject sort
+ * together), cut to the query's LIMIT afterwards, as an engine does that keeps two integer lexical forms of one value ("100" and "0100") apart and answers a subject
+ * once per term. Oxigraph canonicalises such terms into one triple, so the repeat is made on the answer. The answer is a conforming one: sorted, within the LIMIT, no
+ * reordering. Every other query goes through unchanged. The coordinator lookup is by store object, so register admissions on the RETURNED store.
+ */
+export function repeatingScanRows(store: TripleStore, seed: number) {
+  /** `repeatedRows`: rows served beyond the first of their subject, in the answers that were returned. */
+  const stats = { scans: 0, repeatedRows: 0 };
+  const spied = spy(store, async (sparql, source, run) => {
+    if (source !== RETENTION_SCAN_SOURCE) return run();
+    const limit = /LIMIT (\d+)$/.exec(sparql);
+    const all = await store.query(sparql.replace(/ LIMIT \d+$/, ''));
+    if (all.type !== 'bindings' || !limit) return all;
+    const rows = all.bindings.flatMap(b => Array.from({ length: scanRowCopies(seed, String(b['job'])) }, () => b)).slice(0, Number(limit[1]));
+    stats.scans += 1;
+    stats.repeatedRows += rows.length - new Set(rows.map(b => b['job'])).size;
+    return { ...all, bindings: rows } as QueryResult;
+  });
+  return { ...spied, stats };
+}
+
 export const from = (log: Logged[], what: string) => log.filter(l => l.source === `publisher.asyncPromote.retention.${what}`);
 export const verifiedSubjects = (log: Logged[]) => from(log, 'verify').flatMap(l => [...(/VALUES \?job \{([^}]*)\}/.exec(l.sparql)?.[1] ?? '').matchAll(/<([^>]+)>/g)].map(m => m[1]!));
 export const deletedSubjects = (log: Logged[]) => from(log, 'delete').filter(l => l.kind === 'deleteByPatternWithoutCount' || l.kind === 'deleteByPattern').map(l => (JSON.parse(l.sparql) as { subject: string }).subject);
 
 // ---- rows that can never be deleted, and rows that can
-export type Kind = 'succeeded' | 'cancelled' | 'retired' | 'fatal' | 'bound' | 'newer' | 'corrupt' | 'orphan' | 'lying';
+export type Kind = 'succeeded' | 'cancelled' | 'retired' | 'attempted' | 'fatal' | 'bound' | 'newer' | 'corrupt' | 'orphan' | 'lying';
 export const DELETABLE: ReadonlySet<Kind> = new Set(['succeeded', 'cancelled', 'retired']);
 export function rowOf(kind: Kind, id: string, age: number): Quads {
   const jobFor: Record<Kind, () => PromoteJob> = {
-    succeeded: () => mk(id, 'succeeded', {}, age), cancelled: () => mk(id, 'failed', { reason: 'cancelled' }, age), retired: () => retired(id, age),
+    succeeded: () => mk(id, 'succeeded', {}, age), cancelled: () => cancelledJob(id, {}, age), retired: () => retired(id, age), attempted: () => cancelledJob(id, { attempt: ATTEMPTED }, age),
     fatal: () => mk(id, 'failed', { attempt: { count: 5, maxRetries: 5, lastError: { message: 'boom', retryable: false, classification: 'fatal', recordedAt: 1 } } }, age),
     bound: () => mk(id, 'failed', { bound: true }, age), newer: () => mk(id, 'succeeded', { formatVersion: 5 }, age), corrupt: () => mk(id, 'succeeded', {}, age),
     orphan: () => mk(id, 'succeeded', {}, age), lying: () => mk(id, 'succeeded', {}, age),
@@ -173,7 +256,10 @@ export const POPULATION_KINDS = [
   'succeeded', 'succeeded-future', 'succeeded-newer', 'succeeded-legacy',
   'queued', 'running', 'failed_retrying',
   'failed-plain', 'failed-ambiguity', 'failed-legacy', 'failed-postcommit', 'failed-postcommit-exhausted', 'failed-bound',
-  'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-retired',
+  'failed-cancelled', 'failed-cancelled-started', 'failed-cancelled-swm', 'failed-cancelled-bound', 'failed-cancelled-bad-marker', 'failed-cancelled-legacy', 'failed-cancelled-legacy-no-marker',
+  'failed-cancelled-unclaimed-legacy-absent', 'failed-cancelled-unclaimed-legacy-0', 'failed-cancelled-unclaimed-legacy-1',
+  'failed-cancelled-no-started-flag', 'failed-cancelled-contradictory', 'failed-cancelled-prepared', 'failed-cancelled-attempted', 'failed-cancelled-attempted-partial',
+  'failed-unstarted-not-cancelled', 'failed-retired',
 ] as const;
 export type PopulationKind = (typeof POPULATION_KINDS)[number];
 
@@ -192,26 +278,49 @@ export function jobOfKind(kind: PopulationKind, id: string, age: number): Promot
     case 'failed-postcommit': return mk(id, 'failed', { commitMarker: STARTED, attempt: { count: 1, maxRetries: 5, lastError: POST_COMMIT_ERROR } }, age);
     case 'failed-postcommit-exhausted': return mk(id, 'failed', { reason: 'automatic post-commit recovery exhausted after 5 attempts; needs operator inspection', commitMarker: STARTED, attempt: { count: 5, maxRetries: 5, lastError: POST_COMMIT_ERROR } }, age);
     case 'failed-bound': return mk(id, 'failed', { bound: true }, age);
-    case 'failed-cancelled': return mk(id, 'failed', { reason: 'cancelled' }, age);
-    case 'failed-cancelled-started': return mk(id, 'failed', { reason: 'cancelled', commitMarker: STARTED }, age);
-    case 'failed-cancelled-swm': return mk(id, 'failed', { reason: 'cancelled', commitMarker: { ...NO_MARKERS, swmInserted: true } }, age);
-    case 'failed-cancelled-bound': return mk(id, 'failed', { reason: 'cancelled', bound: true }, age);
+    case 'failed-cancelled': return cancelledJob(id, {}, age);
+    case 'failed-cancelled-started': return cancelledJob(id, { commitMarker: STARTED }, age);
+    case 'failed-cancelled-swm': return cancelledJob(id, { commitMarker: { ...NO_MARKERS, swmInserted: true } }, age);
+    case 'failed-cancelled-bound': return cancelledJob(id, { bound: true }, age);
+    case 'failed-cancelled-bad-marker': return cancelledJob(id, { commitMarker: { ...NO_MARKERS, promoteStarted: 'true' } }, age);
+    // The history of a legacy cancelled row is uncertain, so it is a protected kind: a 4-flag marker was only ever written by claimNext (the job was claimed and ran), and a pre-v2
+    // reclaim cleared the marker of a running job and requeued it with its attempt count, so a later cancel leaves no marker on a job that may have started promote.
+    case 'failed-cancelled-legacy': return cancelledJob(id, { formatVersion: 1, commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false }, attempt: LEGACY_HISTORY }, age);
+    case 'failed-cancelled-legacy-no-marker': return cancelledJob(id, { formatVersion: undefined, attempt: LEGACY_HISTORY }, age);
+    // A cancelled job of a pre-format-2 row that was NEVER claimed (`attempt.count` 0, no `preparationAttempts`, no marker): the every-attempt rule alone proves every attempt unstarted
+    // (there was none), so the format rule (`isMarkerWriterFormat`) is the only thing that keeps it. The three formats a pre-format-2 row has: absent, 0 and 1.
+    case 'failed-cancelled-unclaimed-legacy-absent': return cancelledJob(id, { formatVersion: undefined }, age);
+    case 'failed-cancelled-unclaimed-legacy-0': return cancelledJob(id, { formatVersion: 0 }, age);
+    case 'failed-cancelled-unclaimed-legacy-1': return cancelledJob(id, { formatVersion: 1 }, age);
+    case 'failed-cancelled-no-started-flag': return cancelledJob(id, { commitMarker: { swmInserted: false, wmCleaned: false, lifecycleStamped: false, gossiped: false } }, age);   // format 4: not legacy
+    case 'failed-cancelled-contradictory': return cancelledJob(id, { commitMarker: { ...NO_MARKERS, gossiped: true } }, age);
+    // Every attempt proven unstarted is the only way a CLAIMED cancelled job is deletable (`preparationAttempts` covers `attempt.count`, format 4): deletable. Without that proof a
+    // claimed job may have run in an earlier attempt, whatever the marker and the format of the last one say: protected (the marker is reset by every claim, dropped by a reclaim).
+    case 'failed-cancelled-prepared': return cancelledJob(id, { attempt: { count: 2, maxRetries: 5 }, preparationAttempts: 2 }, age);
+    case 'failed-cancelled-attempted': return cancelledJob(id, { attempt: ATTEMPTED }, age);
+    case 'failed-cancelled-attempted-partial': return cancelledJob(id, { attempt: { count: 3, maxRetries: 5 }, preparationAttempts: 1 }, age);
+    // Meets every condition of the cancelled class but the reason (see `failedInPreparation`): a job that failed terminally in preparation is `failed` and kept, not a cancelled one. Protected.
+    case 'failed-unstarted-not-cancelled': return failedInPreparation(id, {}, age);
     case 'failed-retired': return retired(id, age);
   }
 }
 
 /** The jobs a correct sweep may delete once old enough, written from the D-6 list and nothing else (not from the product predicate). */
-export const DELETABLE_KINDS: ReadonlySet<PopulationKind> = new Set(['succeeded', 'succeeded-legacy', 'failed-cancelled', 'failed-retired']);
+export const DELETABLE_KINDS: ReadonlySet<PopulationKind> = new Set(['succeeded', 'succeeded-legacy', 'failed-cancelled', 'failed-cancelled-prepared', 'failed-retired']);
 
 /** Ages around both windows (and the future), tied and distinct, so every boundary and every tie of the scan is met. */
 export function populationAges(_r: () => number): number[] {
   return [10 * W, W + 1, W, W - 1, 1000, -5000, WF, WF - 1, WF + 1, 100 * W];
 }
 
-export function genPopulation(r: () => number, size: number): Array<{ kind: PopulationKind; job: PromoteJob }> {
-  const ages = populationAges(r);
+/**
+ * `ties`: put the jobs on three ages only and never spread them, so most of a class shares one `updatedAt` (groups larger than the batch, which the scan walks by
+ * key). Without it, half the jobs are spread by their index and the groups stay small.
+ */
+export function genPopulation(r: () => number, size: number, opts: { ties?: boolean } = {}): Array<{ kind: PopulationKind; job: PromoteJob }> {
+  const ages = opts.ties ? [10 * W, 9 * W, WF + 1] : populationAges(r);
   return Array.from({ length: size }, (_, i) => {
     const kind = pick(r, POPULATION_KINDS);
-    return { kind, job: jobOfKind(kind, `j${String(i).padStart(3, '0')}`, pick(r, ages) + (r() < 0.5 ? 0 : i)) };
+    return { kind, job: jobOfKind(kind, `j${String(i).padStart(3, '0')}`, pick(r, ages) + (opts.ties || r() < 0.5 ? 0 : i)) };
   });
 }
