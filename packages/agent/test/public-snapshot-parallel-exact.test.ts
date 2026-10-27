@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { PublicSnapshotExactJob } from '../src/public-snapshot-exact-job.js';
 import * as execution from '../src/exact-recovery-execution.js';
 import { recoverPublicSnapshotExact } from '../src/public-snapshot-exact.js';
 import { createCoreChainCacheContentPeers } from '../src/core-chain-cache-peers.js';
@@ -101,6 +102,49 @@ describe('bounded snapshot recovery overlap', () => {
     expect(connect).toHaveBeenCalledTimes(candidates.length);
     expect(admit).toHaveBeenCalledTimes(candidates.length);
     expect(peers.selected).toEqual(candidates);
+  });
+
+  it.each(['complete', 'responder-busy'] as const)('serializes fallback contention after the first exchange returns %s', async firstOutcome => {
+    vi.useFakeTimers();
+    const entered = deferred(), release = deferred(), caller = new AbortController();
+    const queue = vi.spyOn(PublicSnapshotExactJob.prototype, 'serializePeer');
+    const active = new Map<string, number>(), askedAt: number[] = [];
+    let peak = 0;
+    vi.spyOn(execution, 'runExactRecovery').mockImplementation(async request => {
+      const peer = request.remotePeerId;
+      active.set(peer, (active.get(peer) ?? 0) + 1); peak = Math.max(peak, active.get(peer)!);
+      try {
+        if (peer === 'core-b') return { ...success([]), disposition: 'clean-absent', streamOutcome: undefined };
+        askedAt.push(Date.now());
+        if (askedAt.length === 1) {
+          entered.resolve(); await release.promise;
+          if (firstOutcome === 'responder-busy') return { ...success([]), disposition: 'incomplete', streamOutcome: firstOutcome };
+        }
+        return success(selected(request));
+      } finally { active.set(peer, active.get(peer)! - 1); }
+    });
+    const assets = uals.slice(0, 20);
+    const job = recoverPublicSnapshotExact(host, { ...options(), uals: assets, signal: caller.signal });
+    void job.catch(() => undefined);
+    try {
+      await entered.promise; await vi.advanceTimersByTimeAsync(0);
+      // B has answered absent, so its lane is queued on A while A is physically open.
+      expect(queue.mock.calls.filter(([peer]) => peer === 'core-a')).toHaveLength(2);
+      expect(askedAt).toHaveLength(1);
+      expect(active.get('core-a')).toBe(1);
+      release.resolve(); await vi.advanceTimersByTimeAsync(0);
+      if (firstOutcome === 'responder-busy') {
+        // The queued call must recheck the hold established after it joined the queue.
+        expect(askedAt).toHaveLength(1);
+        await vi.advanceTimersByTimeAsync(14_999);
+        expect(askedAt).toHaveLength(1);
+      }
+      await vi.runAllTimersAsync();
+      expect((await job).committed).toEqual(new Set(assets));
+      expect(peak).toBe(1);
+      expect(askedAt.length).toBeGreaterThanOrEqual(2);
+      if (firstOutcome === 'responder-busy') expect(askedAt[1]! - askedAt[0]!).toBeGreaterThanOrEqual(15_000);
+    } finally { release.resolve(); caller.abort(); await job.catch(() => undefined); }
   });
 
   it('shares a busy supplier hold across lanes, including queued attempts', async () => {

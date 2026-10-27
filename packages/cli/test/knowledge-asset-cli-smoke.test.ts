@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const execFileAsync = promisify(execFile);
-const invocationSignals = new WeakMap<NodeJS.ProcessEnv, AbortSignal>();
+interface CliInvocation { readonly env: NodeJS.ProcessEnv; readonly signal: AbortSignal; }
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const REPO_ROOT = join(__dirname, '..', '..', '..');
 const TSX_LOADER = join(REPO_ROOT, 'node_modules', 'tsx', 'dist', 'loader.mjs');
@@ -275,26 +275,58 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     if (dkgHome) await rm(dkgHome, { recursive: true, force: true });
   });
 
+  it('preserves invocation cancellation through copied environment overrides', async () => {
+    let finish!: () => void, entered!: () => void, disconnected!: () => void;
+    const arrived = new Promise<void>(resolve => { entered = resolve; });
+    const closed = new Promise<void>(resolve => { disconnected = resolve; });
+    let requests = 0;
+    const pendingServer = createServer(req => {
+      requests++; req.socket.once('close', disconnected); entered();
+    });
+    await new Promise<void>((resolve, reject) => {
+      pendingServer.once('error', reject); pendingServer.listen(0, '127.0.0.1', resolve);
+    });
+    const cleanup = async () => {
+      pendingServer.closeAllConnections();
+      if (pendingServer.listening) await new Promise<void>(resolve => pendingServer.close(() => resolve()));
+    };
+    onTestFinished(cleanup);
+    const invocation = testInvocation(dkgHome, smokeApiPort, callback => { finish = callback; onTestFinished(callback); });
+    const address = pendingServer.address();
+    if (!address || typeof address === 'string') throw new Error('Expected a TCP smoke endpoint');
+    const overridden = { ...invocation, env: { ...invocation.env, DKG_API_PORT: String(address.port) } };
+    try {
+      const cancelled = expect(runCli(['ka', 'query', 'paper', '-c', 'research'], overridden))
+        .rejects.toMatchObject({ name: 'AbortError' });
+      await arrived; finish();
+      await cancelled; await closed;
+      expect(overridden.signal.aborted).toBe(true);
+      await expect(runCli(['--help'], { ...overridden, env: { ...overridden.env, SOME_FLAG: '1' } }))
+        .rejects.toMatchObject({ name: 'AbortError' });
+      expect(requests).toBe(1);
+    } finally { finish(); await cleanup(); }
+  });
+
   it('registers canonical command and ka alias help', async () => {
-    const env = testEnv(dkgHome, smokeApiPort);
-    const top = await runCli(['--help'], env);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
+    const top = await runCli(['--help'], invocation);
     expect(top.stdout).toContain('knowledge-asset');
 
-    const canonical = await runCli(['knowledge-asset', '--help'], env);
+    const canonical = await runCli(['knowledge-asset', '--help'], invocation);
     expect(canonical.stdout).toContain('Knowledge Asset lifecycle commands');
     expect(canonical.stdout).toContain('publish-async');
 
-    const alias = await runCli(['ka', 'create', '--help'], env);
+    const alias = await runCli(['ka', 'create', '--help'], invocation);
     expect(alias.stdout).toContain('--input-file <path>');
     expect(alias.stdout).toContain('--share');
     expect(alias.stdout).not.toContain('alsoPublishVm');
 
-    const publish = await runCli(['ka', 'publish', '--help'], env);
+    const publish = await runCli(['ka', 'publish', '--help'], invocation);
     expect(publish.stdout).toContain('--publish-epochs <count>');
     expect(publish.stdout).toContain('--pricing-policy <policy>');
     expect(publish.stdout).not.toContain('--clear-after');
 
-    const publishAsync = await runCli(['ka', 'publish-async', '--help'], env);
+    const publishAsync = await runCli(['ka', 'publish-async', '--help'], invocation);
     expect(publishAsync.stdout).toContain('--publish-epochs <count>');
     expect(publishAsync.stdout).toContain('--pricing-policy <policy>');
     expect(publishAsync.stdout).not.toContain('--clear-after');
@@ -302,9 +334,9 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('rejects one-shot share without payload before contacting the daemon', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
-    await expect(runCli(['ka', 'create', 'paper', '-c', 'research', '--share'], env))
+    await expect(runCli(['ka', 'create', 'paper', '-c', 'research', '--share'], invocation))
       .rejects.toMatchObject({
         stderr: expect.stringContaining('--share requires non-empty payload quads and finalize enabled'),
       });
@@ -313,7 +345,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('maps file-backed one-shot create/share into the KA lifecycle request body', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
     const created = await runCli([
       'ka',
@@ -324,7 +356,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       '--input-file',
       join(dkgHome, 'paper.nt'),
       '--share',
-    ], env);
+    ], invocation);
 
     expect(created.stdout).toContain('Parsed 1 quad(s)');
     expect(created.stdout).toContain('Knowledge asset create complete:');
@@ -348,7 +380,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('preserves named graph metadata when the first parsed quad is default graph', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
     await runCli([
       'ka',
@@ -359,7 +391,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       '--input-file',
       join(dkgHome, 'mixed-graphs.nq'),
       '--no-finalize',
-    ], env);
+    ], invocation);
 
     const createCall = calls.find((call) => call.url === '/api/knowledge-assets');
     expect(createCall?.body.quads).toEqual([
@@ -380,7 +412,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('treats an idempotent zero-promote one-shot create/share as successful no-op guidance', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
     const created = await runCli([
       'ka',
@@ -391,7 +423,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       '--input-file',
       join(dkgHome, 'paper.nt'),
       '--share',
-    ], env);
+    ], invocation);
 
     expect(created.stdout).toContain('Knowledge asset create complete:');
     expect(created.stdout).toContain('No new triples promoted');
@@ -401,10 +433,10 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('maps draft-only create and rejects incompatible draft share before contacting the daemon', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
     const triples = JSON.stringify([{ subject: 'urn:company:acme', predicate: 'http://schema.org/name', object: '"Acme"' }]);
 
-    await runCli(['ka', 'create', 'draft', '-c', 'research', '--triples', triples, '--no-finalize'], env);
+    await runCli(['ka', 'create', 'draft', '-c', 'research', '--triples', triples, '--no-finalize'], invocation);
 
     expect(calls.find((call) => call.url === '/api/knowledge-assets')?.body)
       .toMatchObject({ name: 'draft', finalize: false });
@@ -412,7 +444,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       .toBeUndefined();
 
     calls = [];
-    await expect(runCli(['ka', 'create', 'draft-share', '-c', 'research', '--triples', triples, '--share', '--no-finalize'], env))
+    await expect(runCli(['ka', 'create', 'draft-share', '-c', 'research', '--triples', triples, '--share', '--no-finalize'], invocation))
       .rejects.toMatchObject({
         stderr: expect.stringContaining('--share requires non-empty payload quads and finalize enabled'),
       });
@@ -421,17 +453,17 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('rejects malformed positive integer flags before daemon requests', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
-    await expect(runCli(['ka', 'publish', 'paper', '-c', 'research', '--publish-epochs', '1e6'], env))
+    await expect(runCli(['ka', 'publish', 'paper', '-c', 'research', '--publish-epochs', '1e6'], invocation))
       .rejects.toMatchObject({
         stderr: expect.stringContaining('--publish-epochs must be a positive integer'),
       });
-    await expect(runCli(['ka', 'publish-async', 'paper', '-c', 'research', '--publish-epochs', '3abc'], env))
+    await expect(runCli(['ka', 'publish-async', 'paper', '-c', 'research', '--publish-epochs', '3abc'], invocation))
       .rejects.toMatchObject({
         stderr: expect.stringContaining('--publish-epochs must be a positive integer'),
       });
-    await expect(runCli(['ka', 'finalize', 'paper', '-c', 'research', '--scheme-version', '2.5'], env))
+    await expect(runCli(['ka', 'finalize', 'paper', '-c', 'research', '--scheme-version', '2.5'], invocation))
       .rejects.toMatchObject({
         stderr: expect.stringContaining('--scheme-version must be a positive integer'),
       });
@@ -440,16 +472,16 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('forwards valid pricing policy and rejects invalid policy before daemon requests', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
     await runCli([
       'ka', 'publish', 'paper', '-c', 'research',
       '--pricing-policy', 'full-content',
-    ], env);
+    ], invocation);
     await runCli([
       'ka', 'publish-async', 'paper', '-c', 'research',
       '--pricing-policy', 'full-content',
-    ], env);
+    ], invocation);
 
     expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/vm/publish')?.body)
       .toMatchObject({ options: { pricingPolicy: 'full-content' } });
@@ -460,7 +492,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     await expect(runCli([
       'ka', 'publish', 'paper', '-c', 'research',
       '--pricing-policy', 'caller-reported',
-    ], env)).rejects.toMatchObject({
+    ], invocation)).rejects.toMatchObject({
       stderr: expect.stringContaining('--pricing-policy must be "full-content" when supplied'),
     });
     expect(calls).toEqual([]);
@@ -468,7 +500,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     await expect(runCli([
       'ka', 'publish-async', 'paper', '-c', 'research',
       '--pricing-policy', 'caller-reported',
-    ], env)).rejects.toMatchObject({
+    ], invocation)).rejects.toMatchObject({
       stderr: expect.stringContaining('--pricing-policy must be "full-content" when supplied'),
     });
     expect(calls).toEqual([]);
@@ -476,7 +508,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('maps author attestation flags through CLI parsing and rejects conflicts', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
     const triples = JSON.stringify([{ subject: 'urn:company:acme', predicate: 'http://schema.org/name', object: '"Acme"' }]);
 
     await runCli([
@@ -491,7 +523,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       JSON.stringify(PRE_SIGNED_AUTHOR_ATTESTATION),
       '--scheme-version',
       '2',
-    ], env);
+    ], invocation);
 
     const createCall = calls.find((call) => call.url === '/api/knowledge-assets');
     expect(createCall?.body).toMatchObject({
@@ -512,7 +544,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       join(dkgHome, 'attestation.json'),
       '--scheme-version',
       '2',
-    ], env);
+    ], invocation);
     const fileBackedFinalize = calls.find((call) => call.url === '/api/knowledge-assets/paper/wm/finalize');
     expect(fileBackedFinalize?.body).toMatchObject({
       contextGraphId: 'research',
@@ -531,7 +563,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       AUTHOR_AGENT_ADDRESS,
       '--scheme-version',
       '1',
-    ], env);
+    ], invocation);
     const authorAddressFinalize = calls.find((call) => call.url === '/api/knowledge-assets/paper/wm/finalize');
     expect(authorAddressFinalize?.body).toMatchObject({
       contextGraphId: 'research',
@@ -551,7 +583,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       AUTHOR_AGENT_ADDRESS,
       '--pre-signed-author-attestation',
       join(dkgHome, 'attestation.json'),
-    ], env))
+    ], invocation))
       .rejects.toMatchObject({
         stderr: expect.stringContaining('--author-agent-address and --pre-signed-author-attestation are mutually exclusive'),
       });
@@ -560,9 +592,9 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('treats an idempotent zero-promote sync share as successful no-op guidance', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
-    const shared = await runCli(['ka', 'share', 'paper', '-c', 'already-shared'], env);
+    const shared = await runCli(['ka', 'share', 'paper', '-c', 'already-shared'], invocation);
 
     expect(shared.stdout).toContain('Knowledge asset shared to SWM:');
     expect(shared.stdout).toContain('Triples:        0');
@@ -574,7 +606,7 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('exits non-zero for partial create/share and sync share lifecycle responses', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
     await expect(runCli([
       'ka',
@@ -585,13 +617,13 @@ describe.sequential('knowledge-asset CLI smoke', () => {
       '--input-file',
       join(dkgHome, 'paper.nt'),
       '--share',
-    ], env))
+    ], invocation))
       .rejects.toMatchObject({
         stdout: expect.not.stringContaining('Knowledge asset create complete:'),
         stderr: expect.stringMatching(/create\/share completed partially.*curator acknowledgement timed out/),
       });
 
-    await expect(runCli(['ka', 'share', 'paper', '-c', 'partial-share'], env))
+    await expect(runCli(['ka', 'share', 'paper', '-c', 'partial-share'], invocation))
       .rejects.toMatchObject({
         stdout: expect.not.stringContaining('Knowledge asset shared to SWM:'),
         stderr: expect.stringMatching(/share completed partially.*curator acknowledgement timed out/),
@@ -605,20 +637,20 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('reports VM publish partial context-graph binding and keeps named publish cleanup out of KA commands', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
-    await expect(runCli(['ka', 'publish', 'paper', '-c', 'partial-binding'], env))
+    await expect(runCli(['ka', 'publish', 'paper', '-c', 'partial-binding'], invocation))
       .rejects.toMatchObject({
         stdout: expect.not.stringContaining('Knowledge asset VM publish complete:'),
         stderr: expect.stringContaining('context graph binding failed'),
       });
 
-    await expect(runCli(['ka', 'publish', 'paper', '-c', 'research', '--clear-after'], env))
+    await expect(runCli(['ka', 'publish', 'paper', '-c', 'research', '--clear-after'], invocation))
       .rejects.toMatchObject({
         stderr: expect.stringContaining("unknown option '--clear-after'"),
       });
 
-    await expect(runCli(['ka', 'publish-async', 'paper', '-c', 'research', '--clear-after'], env))
+    await expect(runCli(['ka', 'publish-async', 'paper', '-c', 'research', '--clear-after'], invocation))
       .rejects.toMatchObject({
         stderr: expect.stringContaining("unknown option '--clear-after'"),
       });
@@ -632,10 +664,10 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('creates, writes, finalizes, shares, and publishes through lifecycle-native KA commands', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
     const triples = JSON.stringify([{ subject: 'urn:company:acme', predicate: 'http://schema.org/name', object: '"Acme"' }]);
 
-    const created = await runCli(['ka', 'create', 'paper', '--context-graph-id', 'research', '--triples', triples, '--share', '--await-curator-ack'], env);
+    const created = await runCli(['ka', 'create', 'paper', '--context-graph-id', 'research', '--triples', triples, '--share', '--await-curator-ack'], invocation);
     expect(created.stdout).toContain('Knowledge asset create complete:');
 
     const createCall = calls.find((call) => call.url === '/api/knowledge-assets');
@@ -647,23 +679,23 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     });
     expect(createCall?.body.alsoPublishVm).toBeUndefined();
 
-    await runCli(['knowledge-asset', 'write', 'paper', '-c', 'research', '--subject', 'urn:company:acme', '--predicate', 'http://schema.org/description', '--object', 'Logistics'], env);
-    await runCli(['ka', 'finalize', 'paper', '-c', 'research'], env);
-    await runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'wm'], env);
-    await expect(runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'swm'], env))
+    await runCli(['knowledge-asset', 'write', 'paper', '-c', 'research', '--subject', 'urn:company:acme', '--predicate', 'http://schema.org/description', '--object', 'Logistics'], invocation);
+    await runCli(['ka', 'finalize', 'paper', '-c', 'research'], invocation);
+    await runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'wm'], invocation);
+    await expect(runCli(['ka', 'finalize', 'paper', '-c', 'research', '--layer', 'swm'], invocation))
       .rejects.toMatchObject({ stderr: expect.stringContaining('Legacy root-scoped Knowledge Assets are read-only') });
-    await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--entity', 'urn:company:acme'], env))
+    await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--entity', 'urn:company:acme'], invocation))
       .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--entity'") });
-    await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--skip-seal'], env))
+    await expect(runCli(['ka', 'share', 'paper', '-c', 'research', '--skip-seal'], invocation))
       .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--skip-seal'") });
-    const shared = await runCli(['ka', 'share', 'paper', '-c', 'research', '--await-curator-ack'], env);
+    const shared = await runCli(['ka', 'share', 'paper', '-c', 'research', '--await-curator-ack'], invocation);
     expect(shared.stdout).toContain('Next:');
-    await runCli(['ka', 'publish', 'paper', '-c', 'research', '--publish-epochs', '3', '--publisher-node-identity-id', '7'], env);
-    await runCli(['ka', 'publish-async', 'paper', '-c', 'research', '--publish-epochs', '4', '--json'], env);
-    await runCli(['ka', 'pull-from', 'paper', '-c', 'research', '--layer', 'swm', '--on-conflict', 'replace', '--json'], env);
-    await runCli(['ka', 'discard', 'paper', '-c', 'research'], env);
-    await runCli(['ka', 'query', 'paper', '-c', 'research'], env);
-    await runCli(['ka', 'history', 'paper', '-c', 'research'], env);
+    await runCli(['ka', 'publish', 'paper', '-c', 'research', '--publish-epochs', '3', '--publisher-node-identity-id', '7'], invocation);
+    await runCli(['ka', 'publish-async', 'paper', '-c', 'research', '--publish-epochs', '4', '--json'], invocation);
+    await runCli(['ka', 'pull-from', 'paper', '-c', 'research', '--layer', 'swm', '--on-conflict', 'replace', '--json'], invocation);
+    await runCli(['ka', 'discard', 'paper', '-c', 'research'], invocation);
+    await runCli(['ka', 'query', 'paper', '-c', 'research'], invocation);
+    await runCli(['ka', 'history', 'paper', '-c', 'research'], invocation);
 
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/wm/write');
     expect(calls.map((call) => call.url)).toContain('/api/knowledge-assets/paper/wm/finalize');
@@ -707,32 +739,32 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('passes a pinned exact recovery and refuses incomplete or destructive combinations', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
     const flags = ['ka', 'pull-from', 'paper', '-c', 'research', '--layer', 'swm'];
     await runCli([...flags, '--recover-exact-ual', 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1',
-      '--recover-exact-version', '1', '--recover-exact-root', `0x${'ab'.repeat(32)}`, '--json'], env);
+      '--recover-exact-version', '1', '--recover-exact-root', `0x${'ab'.repeat(32)}`, '--json'], invocation);
     expect(calls.at(-1)?.body.recoverExact).toMatchObject({ assertionVersion: '1', kaUal: expect.any(String) });
     const before = calls.length;
     for (const args of [ ['--recover-exact-version', '1'], ['--recover-exact-ual', 'some-ual'],
       ['--recover-exact-ual', 'some-ual', '--recover-exact-version', '1', '--on-conflict', 'replace'] ]) {
-      await expect(runCli([...flags, ...args], env)).rejects.toMatchObject({ stderr: expect.stringContaining('Exact recovery requires') });
+      await expect(runCli([...flags, ...args], invocation)).rejects.toMatchObject({ stderr: expect.stringContaining('Exact recovery requires') });
     }
     expect(calls.length).toBe(before);
   }, 60000);
 
   it('wraps document import, extraction status, and async SWM share job routes', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
 
-    await runCli(['ka', 'import-file', 'paper-doc', '-c', 'research', '--input-file', join(dkgHome, 'paper.md')], env);
-    await runCli(['ka', 'extraction-status', 'paper-doc', '-c', 'research'], env);
-    await runCli(['ka', 'share-async', 'paper', '-c', 'research'], env);
-    await expect(runCli(['ka', 'share-async', 'paper', '-c', 'research', '--entity', 'urn:company:acme'], env))
+    await runCli(['ka', 'import-file', 'paper-doc', '-c', 'research', '--input-file', join(dkgHome, 'paper.md')], invocation);
+    await runCli(['ka', 'extraction-status', 'paper-doc', '-c', 'research'], invocation);
+    await runCli(['ka', 'share-async', 'paper', '-c', 'research'], invocation);
+    await expect(runCli(['ka', 'share-async', 'paper', '-c', 'research', '--entity', 'urn:company:acme'], invocation))
       .rejects.toMatchObject({ stderr: expect.stringContaining("unknown option '--entity'") });
-    await runCli(['ka', 'share-jobs', '-c', 'research', '--state', 'queued', '--limit', '5'], env);
-    await runCli(['ka', 'share-job', 'share-job-1'], env);
-    await runCli(['ka', 'cancel-share-job', 'share-job-1'], env);
-    await runCli(['ka', 'recover-share-job', 'share-job-1'], env);
+    await runCli(['ka', 'share-jobs', '-c', 'research', '--state', 'queued', '--limit', '5'], invocation);
+    await runCli(['ka', 'share-job', 'share-job-1'], invocation);
+    await runCli(['ka', 'cancel-share-job', 'share-job-1'], invocation);
+    await runCli(['ka', 'recover-share-job', 'share-job-1'], invocation);
 
     const importCall = calls.find((call) => call.url === '/api/knowledge-assets/paper-doc/wm/import-file');
     expect(importCall?.contentType).toContain('multipart/form-data; boundary=');
@@ -749,19 +781,17 @@ describe.sequential('knowledge-asset CLI smoke', () => {
   }, 60000);
 });
 
-function testEnv(dkgHome: string, apiPort: string): NodeJS.ProcessEnv {
+function testInvocation(dkgHome: string, apiPort: string, onFinished: (cleanup: () => void) => void = onTestFinished): CliInvocation {
   const env = { ...process.env, DKG_HOME: dkgHome, DKG_API_PORT: apiPort };
   const lifetime = new AbortController();
-  invocationSignals.set(env, lifetime.signal);
   // A timed-out sequence must neither keep its child alive nor issue the
   // remaining commands against the following test's HTTP request collector.
-  onTestFinished(() => lifetime.abort());
-  return env;
+  onFinished(() => lifetime.abort());
+  return { env, signal: lifetime.signal };
 }
 
-async function runCli(args: string[], env: NodeJS.ProcessEnv): Promise<{ stdout: string; stderr: string }> {
-  const signal = invocationSignals.get(env);
-  signal?.throwIfAborted();
+async function runCli(args: string[], { env, signal }: CliInvocation): Promise<{ stdout: string; stderr: string }> {
+  signal.throwIfAborted();
   return execFileAsync('node', ['--import', TSX_LOADER_URL, CLI_SOURCE, ...args], { env, signal });
 }
 
