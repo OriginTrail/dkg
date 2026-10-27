@@ -44,13 +44,14 @@ describe('unchanged by default', () => {
     expect(formatAsyncAdmissionUsageLine({ ...base(), retention: undefined })).toBe(plain);
     expect(formatAsyncAdmissionUsageLine({ ...base(), retention: [] })).toBe(plain);
     expect(plain).not.toContain('retention');
-    expect(plain.endsWith(' lift_failed=0')).toBe(true);
+    // The fixed line ends with the write preflight's fields (P12); the retention fields come after them, so nothing a reader already parses moves.
+    expect(plain.endsWith(' preflight_direct=-')).toBe(true);
   });
 
   it('with a sweep the line is the plain line plus the retention fields at the end: nothing before them moves', () => {
     const plain = formatAsyncAdmissionUsageLine(base());
     const with_ = formatAsyncAdmissionUsageLine({ ...base(), retention: [reportView()] });
-    expect(with_.startsWith(`${plain} `)).toBe(true);
+    expect(with_.startsWith(`${plain} share_retention=report `)).toBe(true);
   });
 });
 
