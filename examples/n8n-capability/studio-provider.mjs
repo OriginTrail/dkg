@@ -28,6 +28,7 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
     return JSON.parse(bytes);
   }
   const installGrant = grant => {
+    if (grant.kind === 'program-workflow-v1') return;
     const flows = config.n8nNative.workflows;
     const current = flows.find(w => w.workflowId === grant.workflowId && w.contextGraphId === graphId && w.executorAgentAddress === owner);
     if (current && current.workflowSha256 !== grant.workflowSha256) throw error('An installed native workflow revision changed.');
@@ -42,6 +43,11 @@ export function createStudioProvider({ state, config, graphId, owner, headerCred
       if (Number(db.prepare('SELECT COUNT(*) AS n FROM workflows').get().n) >= 24) throw error('The PoC supports 24 saved graph revisions.');
       db.prepare('INSERT INTO workflows (ka_ref,name,created_at) VALUES (?,?,?)').run(compiled.kaRef, compiled.workflowName, Date.now());
       saved = row(compiled.kaRef);
+    }
+    if (compiled.executor === 'dkg') {
+      if (saved.grant_json && JSON.parse(saved.grant_json).kind !== 'program-workflow-v1') throw error('The saved workflow executor changed.');
+      db.prepare('UPDATE workflows SET grant_json=? WHERE ka_ref=?').run(JSON.stringify(compiled.grant), compiled.kaRef);
+      return compiled;
     }
     if (!saved.provider_id) {
       let cursor, found = [];

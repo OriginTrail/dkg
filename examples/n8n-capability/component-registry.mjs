@@ -1,6 +1,7 @@
 /** Public component descriptors. Credentials and operator endpoints never enter this registry. */
 import { resolveComponentValue, validateComponentUrl } from './component-values.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
+import { programDescriptor } from './program-block.mjs';
 const text = (label, value = '', extra = {}) => ({ type: 'string', label, default: value, maxLength: 256, ...extra });
 const field = (label, value) => text(label, value, { pattern: 'field', maxLength: 64 });
 const number = (label, value, min = 1, max = 20) => ({ type: 'integer', label, default: value, min, max });
@@ -54,6 +55,7 @@ export const componentRegistry = [
 ].map(value => Object.freeze(value));
 
 export function component(id) {
+  if (id === 'run-program') return programDescriptor;
   const value = componentRegistry.find(item => item.id === id);
   if (!value) throw Object.assign(new Error('Unknown component.'), { code: 'INVALID_COMPONENT', status: 400 });
   return value;

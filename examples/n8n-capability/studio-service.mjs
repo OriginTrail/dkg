@@ -5,6 +5,7 @@ import { component as componentV1, normalizeComponentInput as normalizeComponent
 import { normalizeStudio, readStudio, studioProgramSource, validateStudioCapabilities } from './studio-definition.mjs';
 import { workflowUuid } from './workflow-definition.mjs';
 import { n8nObservationScope, n8nExecutionMatches } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
+import { programWorkflowReceipt } from './program-workflow-receipt.mjs';
 
 const reference = (source, graphId) => ({ graphId, programIri: source.programIri, programLayer: 'wm', authorAgentAddress: source.authorAgentAddress, sourceHash: source.sourceHash });
 const reject = message => Object.assign(new Error(message), { code: 'INVALID_WORKFLOW', status: 400 });
@@ -24,7 +25,8 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const compiled = readStudio(source.source);
     if (compiled.kaRef !== kaRef || sourceHash && sourceHash !== source.sourceHash) throw reject('The saved graph revision changed.');
     return { compiled, source, workflow: { definition: compiled.definition, kaRef, sourceHash: source.sourceHash, graphId,
-      mode: compiled.mode, approved: await approved(kaRef, source.sourceHash), requiresExportAuthorization: compiled.requiresExportAuthorization,
+      mode: compiled.mode, approved: await approved(kaRef, source.sourceHash),
+      requiresExportAuthorization: compiled.requiresExportAuthorization || !!JSON.parse(provider.row(kaRef).grant_json).requiresExportAuthorization,
       activation: (({ active, count, expiresAt }) => ({ active, count, expiresAt }))(activation(kaRef)), readbackVerified: true } };
   }
   async function list() {
@@ -35,8 +37,12 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     return workflows;
   }
   async function save(value, authorize) {
-    const definition = normalizeStudio(value); validateStudioCapabilities(definition, (await listCapabilities()).filter(c => !c.retired));
-    if (definition.nodes.some(n => component(n.componentId).writes)) authorize();
+    const definition = normalizeStudio(value);
+    let capabilities = (await listCapabilities()).filter(c => !c.retired);
+    validateStudioCapabilities(definition, capabilities);
+    const needsExport = () => definition.nodes.some(n => component(n.componentId).writes
+      || capabilities.some(c => c.kaRef === n.kaRef && c.sourceHash === n.sourceHash && c.requiresExportAuthorization));
+    if (needsExport()) authorize();
     const key = JSON.stringify(definition); if (saving.has(key)) return saving.get(key);
     const pending = (async () => {
       const compiled = await provider.provision(definition), sourceText = studioProgramSource(compiled);
@@ -46,16 +52,22 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
       catch (e) { if (e.code !== 'PROGRAM_NOT_FOUND') throw e; }
       if (!source) {
         await client.programs.upload({ graphId, programIri: compiled.kaRef, name: 'studio-' + sourceHash.slice(0, 24), label: definition.name,
-          language: 'typescript-v1', version: '1.0.0', source: sourceText, requiredTools: ['urn:dkg:tool:n8n'],
-          permittedPrograms: [...new Set(definition.nodes.map(n => n.kaRef))], requestedPermissions: { graphId, n8n: compiled.grant } });
+          language: 'typescript-v1', version: '1.0.0', source: sourceText, requiredTools: compiled.executor === 'dkg' ? [] : ['urn:dkg:tool:n8n'],
+          permittedPrograms: [...new Set(definition.nodes.map(n => n.kaRef))],
+          ...(compiled.executor === 'dkg' ? {} : { requestedPermissions: { graphId, n8n: compiled.grant } }) });
         source = await client.programs.getSource({ graphId, programIri: compiled.kaRef, programLayer: 'wm' });
       }
       if (source.sourceHash !== sourceHash || source.source !== sourceText) throw reject('The graph source differs from its saved revision.');
-      validateStudioCapabilities(definition, (await listCapabilities()).filter(c => !c.retired));
-      if (compiled.requiresExportAuthorization) authorize();
+      capabilities = (await listCapabilities()).filter(c => !c.retired);
+      validateStudioCapabilities(definition, capabilities);
+      if (compiled.requiresExportAuthorization || needsExport()) authorize();
+      if (compiled.executor === 'dkg') provider.db.prepare('UPDATE workflows SET grant_json=? WHERE ka_ref=?')
+        .run(JSON.stringify({ ...compiled.grant, requiresExportAuthorization: needsExport() }), compiled.kaRef);
       if (!await approved(compiled.kaRef, sourceHash)) await client.programs.approve({ graphId, operationIri: compiled.kaRef,
-        program: reference(source, graphId), allowedCallers: [owner], n8n: compiled.grant,
-        typescript: { children: [...new Set(definition.nodes.map(n => n.kaRef))].map(operationIri => ({ graphId, operationIri })), maxCalls: 16, maxConcurrency: 1, timeoutMs: 60000 } });
+        program: reference(source, graphId), allowedCallers: [owner], ...(compiled.executor === 'dkg' ? {} : { n8n: compiled.grant }),
+        typescript: { children: [...new Map(definition.nodes.map(n => [n.kaRef, { graphId,
+          operationIri: n.componentId === 'run-program' ? n.params.operationIri : n.kaRef }])).values()],
+        maxCalls: compiled.executor === 'dkg' ? 256 : 16, maxConcurrency: 1, timeoutMs: 60000 } });
       return (await get(compiled.kaRef, sourceHash)).workflow;
     })();
     saving.set(key, pending); try { return await pending; } finally { saving.delete(key); }
@@ -65,14 +77,17 @@ export function createStudioService({ graphId, owner, client, provider, listCapa
     const invocationId = workflowUuid(value.invocationId), { compiled, workflow } = await get(value.kaRef, value.sourceHash);
     if (!workflow.approved) throw reject('This graph is not approved.');
     if (compiled.mode === 'schedule' && !activation(workflow.kaRef).active) throw reject('Activate this Schedule workflow before running it.');
-    validateStudioCapabilities(compiled.definition, await listCapabilities());
-    if (workflow.requiresExportAuthorization) authorize();
+    const capabilities = await listCapabilities();
+    validateStudioCapabilities(compiled.definition, capabilities);
+    if (workflow.requiresExportAuthorization || compiled.definition.nodes.some(n => capabilities.some(c => c.kaRef === n.kaRef && c.sourceHash === n.sourceHash && c.requiresExportAuthorization))) authorize();
     const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
     const descriptor = { ...(compiled.legacy ? componentV1 : component)(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
     let input; try { input = (compiled.legacy ? normalizeComponentInputV1 : normalizeComponentInput)(descriptor, { itemsJson: value.itemsJson, paramsJson: JSON.stringify(root.params), executionId: '' }); }
     catch (e) { throw reject(e.message); }
     const result = await client.programs.invoke({ graphId, operationIri: workflow.kaRef, invocationId, inputs: [input] });
     if (!isDeepStrictEqual(await loadOutputs(result.executionIri), result.rawOutputs)) throw new Error('The DKG receipt readback differs.');
+    if (compiled.executor === 'dkg') return { kaRef: workflow.kaRef, sourceHash: workflow.sourceHash, invocationId, executionIri: result.executionIri,
+      ...await programWorkflowReceipt(compiled, result, input, loadOutputs) };
     const output = result.outputs[0];
     if (output?.kind !== 'n8n-result' || output.workflowSha256 !== compiled.grant.workflowSha256 || !output.output || typeof output.output.traceJson !== 'string') throw new Error('Native graph evidence is incomplete.');
     const trace = JSON.parse(output.output.traceJson);

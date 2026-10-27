@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from 'node:crypto';
+import { execFileSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -373,6 +374,42 @@ describe('TypeScript direct tools through shared authorization and effects', () 
     const result = await f.manager.programs.invoke(operation);
     expect(result.outputs).toEqual([6]); expect(result.trace?.calls).toEqual([expect.objectContaining({ kind: 'program', target: f.program.programIri,
       status: 'succeeded', result: 6, durationMs: expect.any(Number), executionIri: expect.stringMatching(/^urn:sr:execution:/) })]);
+  });
+
+  it('executes the Studio Run Program KA compiler with mapped inputs, exact child grants and durable replay', async () => {
+    const f = await toolFixture('export function run(input: { value: number; factor: number }) { return { result: input.value * input.factor }; }', { graphId: graph }, []);
+    const child = await f.approve({ allowedCallers: [owner] });
+    const definition = { id: randomUUID(), name: 'Run approved Program', entryId: 'program', nodes: [{
+      id: 'program', componentId: 'run-program', kaRef: f.program.programIri, sourceHash: f.program.sourceHash,
+      params: { operationIri: f.operation.operationIri, version: '1.0.0', inputMode: 'each-item', inputMapping: { value: '{{ $json.incoming.amount }}', factor: 3 } }, x: 40, y: 80,
+    }], edges: [] };
+    // Generate in the same native ESM context as the PoC server: Vite rewrites imported
+    // identifiers inside functions that the compiler deliberately embeds with toString().
+    const generated = JSON.parse(execFileSync(process.execPath, ['--input-type=module', '-e',
+      `import { readFileSync } from 'node:fs'; import { compileStudio, studioProgramSource } from ${JSON.stringify(new URL('../../../examples/n8n-capability/studio-definition.mjs', import.meta.url).href)};
+       const compiled = compileStudio(JSON.parse(readFileSync(0, 'utf8'))); console.log(JSON.stringify({ source: studioProgramSource(compiled), params: compiled.ordered[0].params }));`],
+    { input: JSON.stringify(definition), encoding: 'utf8', maxBuffer: 262144 }));
+    const parent = await f.manager.programs.upload({ graphId: sourceGraph, language: 'typescript-v1', requiredTools: [],
+      permittedPrograms: [f.program.programIri], source: generated.source });
+    const operation = { graphId: graph, operationIri: 'urn:test:studio-run-program' };
+    await f.manager.programs.approve({ ...operation, program: parent, allowedCallers: [owner, member],
+      typescript: { children: [f.operation], maxCalls: 256, maxConcurrency: 1, timeoutMs: 60000 } });
+    const input = { itemsJson: '[{"incoming":{"amount":7}}]', paramsJson: JSON.stringify(generated.params), executionId: '' };
+    const prepared = f.manager.programs.prepareInvocation({ ...operation, inputs: [input] });
+    const result = await f.manager.programs.invoke(prepared);
+    expect((result.outputs[0] as any).output).toEqual({ ok: true, itemsJson: '[{"result":21}]', portsJson: '{}', error: '' });
+    expect(result.trace?.calls).toEqual([expect.objectContaining({ kind: 'program', target: f.program.programIri,
+      status: 'succeeded', executionIri: expect.stringMatching(/^urn:sr:execution:/) })]);
+    const writes = f.agent.assertion.create.mock.calls.length;
+    expect(await f.manager.programs.invoke(prepared)).toEqual(result);
+    expect(f.agent.assertion.create.mock.calls.length).toBe(writes);
+    await expect(f.manager.programs.invoke({ ...prepared, inputs: [{ ...input, itemsJson: '[{"incoming":{"amount":8}}]' }] })).rejects.toMatchObject({ status: 409 });
+    const denied = await request(f.target, 'member', 'POST', '/api/programs/execute', { contextGraphId: graph,
+      operationIri: operation.operationIri, invocationId: randomUUID(), inputs: [input] });
+    expect(denied.status).toBe(403); expect(denied.body.code).toBe('PROGRAM_CHILD_FORBIDDEN');
+    await f.manager.programs.revoke({ ...f.operation, expectedRevision: child.revision });
+    await expect(f.manager.programs.invoke({ ...operation, inputs: [input] })).rejects.toMatchObject({ status: 403 });
+    expect(f.agent.assertion.create.mock.calls.length).toBe(writes);
   });
 
   it('invokes an n8n-backed Program KA from a signed client and a parent Program, with durable replay and revocation', async () => {

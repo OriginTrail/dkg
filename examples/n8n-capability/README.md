@@ -296,6 +296,49 @@ than a standalone node dashboard.
 
 ## Execution boundaries
 
+### Run Program KA
+
+The Studio palette also offers **Programs → Run Program KA**. Select a Program
+and a version, then pass input unchanged or configure typed field mappings
+(`{{ $json.field }}`), nested JSON or a whole input reference. **Each item** calls
+the Program with one mapped argument per record; **All items** calls it once,
+with the complete input array available as `{{ $json }}`. Object outputs become
+records, arrays become record batches and scalar outputs use a `value` field.
+Connect the block's main output to another action block, save the workflow KA,
+and run its saved version. The selected program is inspected with the same
+**View KA in DKG** action.
+
+The selector reads current, enabled local approvals for the original account
+owner and exact private Working Memory source pins in this PoC's Context Graph.
+Program IRI, approved operation, version and source hash are saved together.
+It does not upload arbitrary editor code or grant additional tools. New versions
+use new Program IRIs; versions with the same label and author share a selector
+group, while the hash and IRI identify each selected revision. The PoC installs
+two pure **Scale number** examples (1.0.0 and 2.0.0). Other owner-approved Programs
+in the same graph appear automatically. **Program KA example** demonstrates
+Edit Fields → Run Program KA → Edit Fields and produces `answer: 42`.
+
+Workflows containing this block currently support one linear path of up to eight
+action blocks. Graph Computer invokes native n8n component KAs and selected
+Programs as explicit children, pins their current approvals, retains the
+original caller and records separate child execution receipts. Every child
+result is read back before returning the result. No n8n execution ID is invented
+for DKG computation. Native-only graphs continue to use the original n8n compiler
+for branching, loops and events. The existing native-only safe-resume rules are
+unchanged; an interrupted mixed workflow is retained for inspection and is never
+automatically restarted with a new identity. Google authorization also applies
+when a selected Program transitively calls a protected export capability.
+
+Verification:
+
+```sh
+node --test examples/n8n-capability/program-workflow.test.mjs
+# From packages/cli, using the unit config (no Hardhat):
+pnpm exec vitest run --config vitest.unit.config.ts test/semantic-runtime-configuration-api.test.ts
+```
+
+### Native adapter verification
+
 The tenant approval and the operator installation must agree on graph, executor,
 workflow ID and digest. The adapter checks the published definition before
 dispatch. Native receipts bind the execution's provider-reported version ID to

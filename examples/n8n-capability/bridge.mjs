@@ -10,12 +10,14 @@ import { createStudioProvider } from './studio-provider.mjs';
 import { createStudioService } from './studio-service.mjs';
 import { normalizeComponentInput } from './component-registry.mjs';
 import { STUDIO_PREFIX } from './studio-definition.mjs';
+import { createProgramCatalog } from './program-catalog.mjs';
 
 const SR = 'https://origintrail.io/semantic-runtime/v1#';
 const prefix = '/spike/ka/accounts/account-a/capabilities';
 const json = (res, status, value) => { res.writeHead(status, { 'content-type': 'application/json', 'cache-control': 'no-store' }); res.end(JSON.stringify(value)); };
 
 export function createCapabilityBridge({ agent, client, graphId, owner, config, definitions = [], exportTokenFile, studioOptions }) {
+  const listPrograms = createProgramCatalog({ graphId, owner, client, definitions });
   function authorizeExport(req) {
     const supplied = req.headers['x-dkg-export-token'];
     let authorized = false;
@@ -65,7 +67,8 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner),
   });
   const provider = studioOptions ? createStudioProvider({ ...studioOptions, config, graphId, owner }) : null;
-  const studio = provider ? createStudioService({ graphId, owner, client, provider, exportTokenFile, listCapabilities: list,
+  const studio = provider ? createStudioService({ graphId, owner, client, provider, exportTokenFile,
+    listCapabilities: async () => [...await list(), ...await listPrograms()],
     loadOutputs: executionIri => loadExecutionOutputs(agent, graphId, executionIri, 'wm', owner) }) : null;
   async function invoke(capability, input, invocationId) {
     const result = await client.programs.invoke({ graphId, operationIri: capability.kaRef, inputs: [input], invocationId });
@@ -100,7 +103,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
     try {
       if (studio && path.startsWith(prefix + '/studio')) {
         const route = path.slice((prefix + '/studio').length), authorize = () => authorizeExport(req);
-        if (route === '' && req.method === 'GET') json(res, 200, { capabilities: (await list()).filter(c => c.kind === 'component'), workflows: await studio.list(), canInvoke: identity === 'Bearer l1-owner-a' });
+        if (route === '' && req.method === 'GET') json(res, 200, { capabilities: [...(await list()).filter(c => c.kind === 'component'), ...await listPrograms()], workflows: await studio.list(), canInvoke: identity === 'Bearer l1-owner-a' });
         else if (route === '/history' && req.method === 'GET') {
           const params = new URL(req.url, 'http://127.0.0.1:4631').searchParams; json(res, 200, await studio.history(params.get('kaRef')));
         } else if (['/save', '/run', '/invoke', '/activation'].includes(route) && req.method === 'POST') {
@@ -128,7 +131,7 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
         if (!sourceHash || !/^[a-f0-9]{64}$/.test(sourceHash)) { json(res, 400, { error: 'An exact KA revision is required.' }); return true; }
         const selected = kaRef?.startsWith(STUDIO_PREFIX) && studio ? (await studio.get(kaRef, sourceHash)).workflow
           : kaRef?.startsWith(WORKFLOW_PREFIX) ? (await workflows.get(kaRef, sourceHash)).workflow
-          : (await list()).find(item => item.kaRef === kaRef && item.sourceHash === sourceHash);
+          : [...await list(), ...await listPrograms()].find(item => item.kaRef === kaRef && item.sourceHash === sourceHash);
         if (!selected) { json(res, 404, { error: 'KA revision unavailable.' }); return true; }
         const source = await client.programs.getSource({ graphId, programIri: kaRef, programLayer: 'wm' });
         if (source.sourceHash !== sourceHash) { json(res, 409, { error: 'KA revision changed.' }); return true; }
@@ -158,5 +161,5 @@ export function createCapabilityBridge({ agent, client, graphId, owner, config, 
       error: ['INVALID_WORKFLOW', 'WORKFLOW_CAPABILITY_CHANGED'].includes(error.code) ? error.message : 'The DKG request did not confirm a result' }); }
     return true;
   }
-  return { list, invoke, workflows, studio, handle, close() { studio?.stop(); provider?.close(); } };
+  return { list, listPrograms, invoke, workflows, studio, handle, close() { studio?.stop(); provider?.close(); } };
 }

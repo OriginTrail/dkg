@@ -18,6 +18,7 @@ import { createCapabilityBridge } from './bridge.mjs';
 import { csvProgramSource } from './csv-workflows.mjs';
 import { componentProgramSource } from './component-registry.mjs';
 import { componentProgramSource as componentProgramSourceV1 } from './component-registry-v1.mjs';
+import { installProgramExamples } from './program-catalog.mjs';
 
 const require = createRequire(new URL('../../packages/cli/package.json', import.meta.url));
 const { Wallet } = require('ethers');
@@ -104,11 +105,13 @@ try {
       typescript: { children: [], maxCalls: 1, maxConcurrency: 1, timeoutMs: 30000 } });
   }
   const keyFile = join(state, 'caller-key');
+  await installProgramExamples(client, graphId, owner);
   writeFileSync(keyFile, signer.privateKey, { mode: 0o600 });
   writeFileSync(join(state, 'client.json'), JSON.stringify({ nodeUrl, peerId: agent.peerId, graphId, kaRef, keyFile }, null, 2), { mode: 0o600 });
   const capabilities = await bridge.list();
   if (!capabilities.length) throw new Error('Capability KA is missing from DKG query results');
   console.log(JSON.stringify({ ready: true, nodeUrl, capabilities: capabilities.length,
+    programVersions: (await bridge.listPrograms()).length,
     nativeComponents: capabilities.filter(c => c.kind === 'component' && !c.retired).length, nativeAvailable: capabilities.filter(c => c.kind === 'component' && !c.retired && c.available).length,
     chain: 'MockChainAdapter; private Working Memory; no on-chain transactions' }));
   let stopping = false;

@@ -4,6 +4,7 @@ import { readStudio as readStudioV1 } from './studio-definition-v1.mjs';
 import { componentPiece, nativeNode, editNode, wire, expression, nativeLiteral } from './component-workflows.mjs';
 import { n8nWorkflowSha256, n8nObservationScope } from '../../packages/cli/dist/semantic-runtime-n8n-contract.js';
 import { workflowUuid } from './workflow-definition.mjs';
+import { compileProgramWorkflow, programWorkflowSource, readProgramWorkflow, PROGRAM_STUDIO_MARKER } from './program-workflow.mjs';
 
 export const STUDIO_PREFIX = 'urn:demo:nos:studio:';
 const marker = '// nos-n8n-studio-v2:';
@@ -20,7 +21,7 @@ export function normalizeStudio(value) {
   const nodes = value.nodes.map(n => {
     closed(n, ['id', 'componentId', 'kaRef', 'sourceHash', 'params', 'x', 'y']);
     const descriptor = component(n.componentId);
-    if (typeof n.kaRef !== 'string' || !/^urn:demo:n8n:component:[a-z0-9:-]{1,100}$/.test(n.kaRef)
+    if (typeof n.kaRef !== 'string' || (n.componentId === 'run-program' ? !/^[a-z][a-z0-9+.-]*:[^\s<>"{}\\]{1,220}$/i.test(n.kaRef) : !/^urn:demo:n8n:component:[a-z0-9:-]{1,100}$/.test(n.kaRef))
       || typeof n.sourceHash !== 'string' || !/^[a-f0-9]{64}$/.test(n.sourceHash)) fail('Choose a pinned component KA.');
     if (![n.x, n.y].every(p => Number.isInteger(p) && p >= 0 && p <= 10000)) fail('Invalid block position.');
     let params;
@@ -76,13 +77,15 @@ export function normalizeStudio(value) {
 
 export function validateStudioCapabilities(definition, capabilities) {
   for (const n of definition.nodes) {
-    const c = capabilities.find(c => c.kaRef === n.kaRef && c.sourceHash === n.sourceHash && c.descriptor?.id === n.componentId);
-    if (!c?.available) throw Object.assign(new Error('A component KA version is unavailable. Reconnect it or choose its current revision.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
+    const c = capabilities.find(c => c.kaRef === n.kaRef && c.sourceHash === n.sourceHash && c.descriptor?.id === n.componentId
+      && (n.componentId !== 'run-program' || c.operationIri === n.params.operationIri));
+    if (!c?.available || n.componentId === 'run-program' && n.params.version !== c.version) throw Object.assign(new Error('A selected KA version is unavailable. Refresh the catalog and choose an approved revision.'), { code: 'WORKFLOW_CAPABILITY_CHANGED', status: 409 });
   }
 }
 
 export function compileStudio(value, { graphId, owner, headerCredential, credentials = {}, fixture = false, providerId } = {}) {
   const definition = normalizeStudio(value);
+  if (definition.nodes.some(n => n.componentId === 'run-program')) return compileProgramWorkflow(definition);
   const revision = createHash('sha256').update(JSON.stringify({ compiler: 2, definition })).digest('hex');
   const kaRef = STUDIO_PREFIX + definition.id + ':' + revision.slice(0, 20), workflowName = 'nOS Studio ' + revision;
   const workflowId = providerId ?? 'nos_studio_' + createHash('sha256').update(JSON.stringify([graphId, owner, 2, definition])).digest('hex').slice(0, 32);
@@ -139,6 +142,7 @@ export function compileStudio(value, { graphId, owner, headerCredential, credent
 }
 
 export function studioProgramSource(compiled, grant = compiled.grant) {
+  if (compiled.executor === 'dkg') return programWorkflowSource(compiled);
   const metadata = { definition: compiled.definition, grant, mode: compiled.mode };
   const root = compiled.definition.nodes.find(n => n.id === compiled.definition.entryId);
   const descriptor = { ...component(root.componentId), ...(compiled.mode === 'schedule' ? { mode: 'action' } : {}) };
@@ -148,6 +152,7 @@ export function studioProgramSource(compiled, grant = compiled.grant) {
 }
 
 export function readStudio(source) {
+  if (typeof source === 'string' && source.startsWith(PROGRAM_STUDIO_MARKER)) return readProgramWorkflow(source, normalizeStudio);
   if (typeof source === 'string' && source.startsWith('// nos-n8n-studio-v1:')) return { ...readStudioV1(source), legacy: true };
   if (typeof source !== 'string' || !source.startsWith(marker) || source.length > 65536) fail('Saved Studio source is invalid.');
   const data = JSON.parse(Buffer.from(source.split('\n')[0].slice(marker.length), 'base64').toString('utf8'));
