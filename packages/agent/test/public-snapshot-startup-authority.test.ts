@@ -1,3 +1,4 @@
+import { recordPersistedSubscriptionActivation } from '../src/context-graph-subscription-activation-state.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
@@ -32,11 +33,33 @@ function fixture() {
   };
   return { a, active, replace };
 }
+function coldIntent(a: any) {
+  const row = { id: graph, subscribed: true, syncScoped: true, synced: false, metaSynced: false, sharedMemorySynced: false };
+  a.subscribedContextGraphs.clear();
+  a.config = { contextGraphSubscriptionStore: { load: async () => ({ ...row }) } };
+  return row;
+}
 const run = (a: any, signal?: AbortSignal) => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a,
   { contextGraphId: graph, onChainId: '1', mode: 'core-cache', trustedCorePeerIds: ['core'], signal });
 afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
 describe('snapshot waits for persisted startup authority', () => {
+  it('waits for the lifecycle to commit a legacy unbound intent before reading an inventory', async () => {
+    vi.useFakeTimers();
+    const { a, active } = fixture(), intent = coldIntent(a);
+    const pending = run(a);
+    await vi.advanceTimersByTimeAsync(2500);
+    expect(a.router.send).not.toHaveBeenCalled();
+    const committed = active();
+    a.subscribedContextGraphs.set(graph, committed);
+    recordPersistedSubscriptionActivation(a.contextGraphSubscriptionDormancyById, intent, committed as any);
+    a.contextGraphSubscriptionDormancyById.delete(graph);
+    await vi.advanceTimersByTimeAsync(2500);
+    await expect(pending).resolves.toMatchObject({ assets: 0, current: true });
+    expect(a.router.send).toHaveBeenCalledTimes(2);
+    expect(a.workLifetime.physicalRuns.size).toBe(0);
+  });
+
   it('does not capture a provisional row that a failed activation rolls back', async () => {
     vi.useFakeTimers();
     const { a, active, replace } = fixture();
@@ -57,9 +80,10 @@ describe('snapshot waits for persisted startup authority', () => {
     expect(a.workLifetime.physicalRuns.size).toBe(0);
   });
 
-  it.each(['caller', 'shutdown', 'deadline'] as const)('starts no read or write after %s ends the wait', async cause => {
+  it.each((['caller', 'shutdown', 'deadline'] as const).flatMap(cause => [false, true].map(cold => ({ cause, cold }))))('starts no read or write after $cause ends the wait, unbound=$cold', async ({ cause, cold }) => {
     vi.useFakeTimers();
     const { a } = fixture(), caller = new AbortController();
+    if (cold) coldIntent(a);
     const pending = run(a, caller.signal);
     const rejected = expect(pending).rejects.toThrow('Snapshot job ownership changed');
     await vi.advanceTimersByTimeAsync(0);

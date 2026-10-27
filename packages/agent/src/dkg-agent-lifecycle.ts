@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { finalizePersistedSubscriptionActivation } from './context-graph-subscription-activation-finalization.js';
-import { isCommittedSubscription, waitForSubscriptionActivation } from './context-graph-subscription-activation-state.js';
+import { cancelUnboundSubscriptionActivation, recordPersistedSubscriptionActivation, isCommittedSubscription, waitForSubscriptionActivation } from './context-graph-subscription-activation-state.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -8052,6 +8052,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   nextContextGraphSubscriptionPersistRevision(this: DKGAgent, contextGraphId: string): number {
+    cancelUnboundSubscriptionActivation(this.contextGraphSubscriptionDormancyById, contextGraphId);
     const revision = (this.contextGraphSubscriptionPersistRevisions.get(contextGraphId) ?? 0) + 1;
     this.contextGraphSubscriptionPersistRevisions.set(contextGraphId, revision);
     return revision;
@@ -8906,7 +8907,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /** Await an in-flight authority activation within the caller's existing lifetime. */
   waitForContextGraphSubscriptionActivation(this: DKGAgent, id: string, signal: AbortSignal): Promise<void> {
-    return waitForSubscriptionActivation(this.workLifetime, () => this.started, this.subscribedContextGraphs, this.contextGraphSubscriptionDormancyById, id, signal);
+    return waitForSubscriptionActivation(this.workLifetime, () => this.started, this.subscribedContextGraphs, this.contextGraphSubscriptionDormancyById, id, signal, this.config?.contextGraphSubscriptionStore);
   }
 
   /** Commit the activation transaction; its owner finalizes bookkeeping and publication. */
@@ -8957,6 +8958,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         return committed;
       },
     }, options);
+    recordPersistedSubscriptionActivation(this.contextGraphSubscriptionDormancyById, row, activated);
     return activated;
   }
 

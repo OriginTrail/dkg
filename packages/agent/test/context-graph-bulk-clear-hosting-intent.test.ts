@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
 import { DKGAgent } from '../src/index.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord, ContextGraphSubscriptionStore } from '../src/dkg-agent-types.js';
 
@@ -23,11 +24,11 @@ afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
-async function fixture(hosted: boolean) {
+async function fixture(hosted: boolean, unbound = false) {
   const original: ContextGraphSubscriptionRecord = {
     id: LOCAL, subscribed: true, coreHosted: hosted, synced: true,
     sharedMemorySynced: true, metaSynced: true, syncScoped: true,
-    onChainId: '582', onChainHash: HASH, lastReconciledOrdinal: 7,
+    ...(unbound ? {} : { onChainId: '582', onChainHash: HASH }), lastReconciledOrdinal: 7,
   };
   const rows = new Map([[LOCAL, { ...original }]]);
   const save = vi.fn(async (row: ContextGraphSubscriptionRecord) => { rows.set(row.id, { ...row }); });
@@ -40,18 +41,56 @@ async function fixture(hosted: boolean) {
   const chain = new MockChainAdapter('mock:31337', undefined, { initialContextGraphId: 582n });
   await chain.createOnChainContextGraph({ nameHash: HASH, accessPolicy: 0, publishPolicy: 1 });
   const agent = await DKGAgent.create({ name: 'BulkClearHostedIntent', nodeRole: 'edge', chainAdapter: chain,
-    contextGraphSubscriptionRehydrationEnabled: false, rfc64CatalogActivation: { enabled: false },
+    contextGraphSubscriptionRehydrationEnabled: unbound, rfc64CatalogActivation: { enabled: false },
     contextGraphSubscriptionStore: store });
   agents.push(agent);
   const state = agent as unknown as State;
   state.node = { peerId: '12D3KooWBulkClearSavedCore', libp2p: { getPeers: () => [] } };
   state.gossip = { subscribe() {}, unsubscribe() {}, onMessage() {} };
+  if (unbound) vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockResolvedValue({
+    outcome: 'unavailable', source: 'registered-chain', reason: 'temporary-authority-outage', metadataBootstrap: 'eligible',
+  });
   await agent.rehydrateContextGraphSubscriptions(null);
   const drain = () => state.enqueueContextGraphSubscriptionPersistWrite(LOCAL, async () => undefined);
   return { agent, state, store, original, rows, save, remove, drain };
 }
 
 describe('bulk clear preserves independent saved Core hosting', () => {
+  it.each(['recover', 'clear', 'replace'] as const)('owns unbound persisted activation through %s', async action => {
+    const f = await fixture(false, true), state = f.agent as any;
+    expect(state.subscribedContextGraphs.has(LOCAL)).toBe(false);
+    expect(state.contextGraphSubscriptionDormancyById.get(LOCAL)).toBe('authorityUnavailable');
+    const signal = new AbortController().signal;
+    const runtime = new CoalescingRecurringTask({ retryIntervalMs: 30_000, runPass: async () => 'idle',
+      onError: error => { throw error; }, closingMessage: 'test closed' });
+    vi.spyOn(runtime, 'owns').mockImplementation(candidate => candidate === signal);
+    state.contextGraphSubscriptionAuthorityRecoveryRuntime = runtime;
+    state.started = true;
+    vi.useFakeTimers();
+    let settled = false;
+    const outcome = state.waitForContextGraphSubscriptionActivation(LOCAL, signal)
+      .then(() => { settled = true; return 'activated'; }, (error: Error) => { settled = true; return error; });
+    try {
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(settled).toBe(false);
+      if (action === 'clear') await f.agent.clearContextGraphSubscriptions();
+      else {
+        if (action === 'replace') await f.store.save({ ...f.original, onChainId: '583' });
+        vi.mocked(f.agent.resolveContextGraphSubscriptionBootstrapAuthority).mockResolvedValue({
+          outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible',
+          onChainId: action === 'replace' ? 583n : 582n,
+        });
+        await f.agent.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+      }
+      await vi.advanceTimersByTimeAsync(2500);
+      if (action === 'recover') {
+        expect(await outcome).toBe('activated');
+        expect(state.subscribedContextGraphs.get(LOCAL)).toMatchObject({ subscribed: true, onChainId: '582' });
+      } else expect(await outcome).toMatchObject({ message: 'Subscription activation ownership changed' });
+      expect(state.workLifetime.physicalRuns.size).toBe(0);
+    } finally { state.started = false; vi.useRealTimers(); }
+  });
+
   it.each([false, true])('fences pending snapshot activation after real clear, recreated=%s', async recreate => {
     const f = await fixture(false);
     const state = f.agent as any;
