@@ -893,13 +893,17 @@ function publisherChecks(p, measureMs) {
  * but 0 (a missing field included) leaves the reconciliation unresolved and the run invalid.
  * P2b: `queue` is the run's stream(s): 'share' (default; the idle publisher runs beside it), 'lift' or 'both'. A lift
  * run has no share stream, so the share checks are left out; `publisher` (see publisherChecks) adds the publisher
- * stream's; `load` = { probes, ack, statusProbes, metricsProbes, probesUnfinished, acksStarted, acksUnfinished }
- * (probes.mjs loadEvidence) requires the probe and ACK load that was switched on to have run (probesRan, acksRan): the
- * counts are probes and ACKs STARTED in the measure window whatever their result, so a probe that got no answer still
- * ran (the answers are reported in summary.probes.noAnswer, not checked here). `probesUnfinished` = the metrics probes
- * and `acksUnfinished` the ACKs the end-of-run drain left running, whatever window they started in
- * (summary.probes.metricsUnfinished, summary.ack.acksUnfinished): their latency is only a lower bound, censored at the
- * drain, so a run with any has incomplete evidence (probesFinished, acksFinished; a missing count fails it).
+ * stream's; `load` = { probes, ack, statusMs, metricsMs, ackMs, statusProbes, metricsProbes, probesUnfinished,
+ * acksStarted, acksUnfinished } (probes.mjs loadEvidence) requires the probe and ACK load that was switched on to have
+ * run (probesRan, acksRan): the counts are probes and ACKs STARTED in the measure window whatever their result, so a
+ * probe that got no answer still ran (the answers are reported in summary.probes.noAnswer, not checked here). A cadence
+ * of 0 switches that probe (or the ACK stream) off, as the scheduler reads it: its evidence is not required (a
+ * --probes run with --probe-status-ms 0 needs only the metrics probes), and `statusProbesOff`, `metricsProbesOff` and
+ * `acksOff` say so in the result (true only, never a failed check). A cadence that is missing, like a count, is not 0:
+ * the probe is taken as on and its evidence required. `probesUnfinished` = the metrics probes and `acksUnfinished` the
+ * ACKs the end-of-run drain left running, whatever window they started in (summary.probes.metricsUnfinished,
+ * summary.ack.acksUnfinished): their latency is only a lower bound, censored at the drain, so a run with any has
+ * incomplete evidence (probesFinished, acksFinished; a missing count fails it).
  * `liftSeedFileVerified` is the lift seed file's hash check. Without these the result is the P2a one.
  */
 export function validity({
@@ -923,6 +927,10 @@ export function validity({
   const expected = (lambda * measureMs) / 1000;
   const w = worker ?? {};
   const withShare = queue !== 'lift';
+  // a 0 cadence switches that load off (fixedSchedule); only a 0 does: a cadence that is missing leaves the load on
+  const statusOff = Boolean(load?.probes) && load.statusMs === 0;
+  const metricsOff = Boolean(load?.probes) && load.metricsMs === 0;
+  const acksOff = Boolean(load?.ack) && load.ackMs === 0;
   const checks = {
     // a window so short that its expected arrivals fit the 4-sigma band of zero (--measure 0.1) can pass the check
     // below with no request at all: the run then has nothing to compare
@@ -949,13 +957,14 @@ export function validity({
     ...(liftSeedFileVerified === undefined ? {} : { liftSeedFileVerified: liftSeedFileVerified === true }),
     // a run with a publisher stream and no evidence from it is no run
     ...(publisher ? publisherChecks(publisher, measureMs) : queue === 'share' ? {} : { publisherEvidence: false }),
+    // evidence only from the load that was switched on, and only from the probes of it that its cadences left on
     ...(load?.probes
       ? {
-          probesRan: load.statusProbes > 0 && load.metricsProbes > 0,
+          probesRan: (statusOff || load.statusProbes > 0) && (metricsOff || load.metricsProbes > 0),
           probesFinished: load.probesUnfinished === 0,
         }
       : {}),
-    ...(load?.ack ? { acksRan: load.acksStarted > 0, acksFinished: load.acksUnfinished === 0 } : {}),
+    ...(load?.ack ? { acksRan: acksOff || load.acksStarted > 0, acksFinished: load.acksUnfinished === 0 } : {}),
   };
   return {
     arrivalsMeasured: measured,
@@ -963,6 +972,10 @@ export function validity({
     ...(publisher
       ? { publishArrivalsMeasured: publisher.measured, publishArrivalsExpected: r2((publisher.mu * measureMs) / 1000) }
       : {}),
+    // the load a 0 cadence switched off (true only: this is a record, not a check)
+    ...(statusOff ? { statusProbesOff: true } : {}),
+    ...(metricsOff ? { metricsProbesOff: true } : {}),
+    ...(acksOff ? { acksOff: true } : {}),
     ...checks,
     ok: Object.values(checks).every(Boolean),
   };

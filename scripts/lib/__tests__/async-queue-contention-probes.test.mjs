@@ -399,15 +399,40 @@ test('loadEvidence hands validity the switches and the counts of the run, the un
     probes: { nStatus: 18, nMetrics: 6, metricsUnfinished: 2 },
     ack: { acksStarted: 45, acksUnfinished: 1 },
   };
-  assert.deepEqual(loadEvidence({ probes: true, ack: false }, pa), {
+  const factors = { probes: true, ack: false, statusMs: 10_000, metricsMs: 30_000, ackMs: null };
+  assert.deepEqual(loadEvidence(factors, pa), {
     probes: true,
     ack: false,
+    statusMs: 10_000,
+    metricsMs: 30_000,
+    ackMs: null,
     statusProbes: 18,
     metricsProbes: 6,
     probesUnfinished: 2,
     acksStarted: 45,
     acksUnfinished: 1,
   });
+});
+
+test('a --probes run with the status cadence at 0 passes the probe checks on the metrics probes alone, end to end', async () => {
+  const gate = storeWithGatedHealth(Infinity);
+  const { load } = await startTwoSampleMetricsLoad(gate);
+  await load.drain(60);
+  const pa = probeAckSummary({ probeState: load.state, from: 0, to: 1e9 });
+  const check = (factors) =>
+    validity({
+      lambda: 1,
+      measureMs: 1000,
+      measured: 1,
+      stillInflight: 0,
+      load: loadEvidence(factors, pa),
+    });
+  // the load above runs metrics probes only (startTwoSampleMetricsLoad leaves the status cadence at 0)
+  assert.deepEqual([pa.probes.nStatus, pa.probes.nMetrics > 0], [0, true]);
+  const off = check({ probes: true, ack: false, statusMs: 0, metricsMs: 100 });
+  assert.deepEqual([off.probesRan, off.probesFinished, off.statusProbesOff], [true, true, true]);
+  // the same samples are not enough for a run that asked for status probes too
+  assert.equal(check({ probes: true, ack: false, statusMs: 10_000, metricsMs: 100 }).probesRan, false);
 });
 
 /** A store that answers everything at once except the full-store COUNT, which settles when the test says so. */

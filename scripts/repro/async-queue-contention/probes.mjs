@@ -531,14 +531,18 @@ export function probeAckSummary({ probeState, ackState, from, to }) {
 }
 
 /**
- * What validity() (verdict.mjs) is given of the background load: which of the two loads the run switched on
- * (`loadFactors`), and the counts probeAckSummary made of them (`pa` = its result). The runner builds `load` here, so
- * a count the checks need cannot be left out of it unnoticed.
+ * What validity() (verdict.mjs) is given of the background load: which of the two loads the run switched on and with
+ * which cadences (`loadFactors`), and the counts probeAckSummary made of them (`pa` = its result). The runner builds
+ * `load` here, so a count the checks need cannot be left out of it unnoticed.
  */
 export function loadEvidence(loadFactors, pa) {
   return {
     probes: loadFactors.probes,
     ack: loadFactors.ack,
+    // the cadences, because a 0 switches that probe off and validity then asks no evidence of it
+    statusMs: loadFactors.statusMs,
+    metricsMs: loadFactors.metricsMs,
+    ackMs: loadFactors.ackMs,
     statusProbes: pa.probes.nStatus,
     metricsProbes: pa.probes.nMetrics,
     probesUnfinished: pa.probes.metricsUnfinished,

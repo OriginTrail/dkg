@@ -27,7 +27,9 @@
 //                                            lift|both only: a wallet is held for the hold while a job "publishes"
 //   --probes --ack-load                      the status-probe and ACK load (cadences: --probe-status-ms 10000,
 //                                            --probe-metrics-ms 30000, --probe-count-ms 60000, --ack-interval-ms 4000,
-//                                            --ack-payload 32); off by default, ON in every G0/G0b and G1b-rehearsal run
+//                                            --ack-payload 32); off by default, ON in every G0/G0b and G1b-rehearsal run.
+//                                            A probe cadence of 0 switches that probe off: the run's validity then asks
+//                                            no evidence of it (statusProbesOff, metricsProbesOff in the result)
 //   --observer default|paged|none            the list observer's call; --observer-ms 5000 its polling period. paged
 //                                            needs the paged call of each stream the run has (the share queue's:
 //                                            P8a/P9b, the publisher's: P9a/P9b): a --queue lift run needs only the

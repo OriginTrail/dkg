@@ -415,6 +415,72 @@ test('the probes and ACKs that were switched on must have run, and a lift seed f
   assert.equal('liftSeedFileVerified' in run(null), false);
 });
 
+test('a probe or ACK stream a 0 cadence switched off needs no evidence, one that is on and silent still fails the run', () => {
+  const run = (load) => validity({ ...base, queue: 'both', publisher, worker: shareWorker, load });
+  // --probes --probe-status-ms 0: the status probes are off, the metrics probes ran
+  const metricsOnly = {
+    probes: true,
+    ack: false,
+    statusMs: 0,
+    metricsMs: 30_000,
+    statusProbes: 0,
+    metricsProbes: 6,
+    probesUnfinished: 0,
+  };
+  const ok = run(metricsOnly);
+  assert.deepEqual([ok.probesRan, ok.probesFinished, ok.ok], [true, true, true]);
+  assert.equal(ok.statusProbesOff, true, 'the result records that the status probes were off');
+  assert.equal('metricsProbesOff' in ok, false);
+  // --probe-metrics-ms 0: the other way round
+  const statusOnly = { ...metricsOnly, statusMs: 10_000, metricsMs: 0, statusProbes: 18, metricsProbes: 0 };
+  const noMetrics = run(statusOnly);
+  assert.deepEqual([noMetrics.probesRan, noMetrics.ok, noMetrics.metricsProbesOff], [true, true, true]);
+  // both off (the count probe may still be on): nothing is asked of the probes, the load is recorded as off
+  const noneOn = { ...metricsOnly, metricsMs: 0, statusProbes: 0, metricsProbes: 0 };
+  const off = run(noneOn);
+  assert.deepEqual([off.ok, off.statusProbesOff, off.metricsProbesOff], [true, true, true]);
+  // the probes that ARE on still have to show up: a silent metrics probe fails, whichever is off
+  const silentMetrics = run({ ...metricsOnly, metricsProbes: 0 });
+  assert.deepEqual([silentMetrics.probesRan, silentMetrics.ok], [false, false]);
+  const silentStatus = run({ ...statusOnly, statusProbes: 0 });
+  assert.deepEqual([silentStatus.probesRan, silentStatus.ok], [false, false]);
+  // a cadence that is not given is not a 0: the probe is taken as on, its evidence is required
+  const unknown = run({ ...metricsOnly, statusMs: undefined });
+  assert.deepEqual([unknown.probesRan, unknown.ok, 'statusProbesOff' in unknown], [false, false, false]);
+  // a probe that is off but was unfinished at the drain still fails the probesFinished check
+  assert.equal(run({ ...metricsOnly, probesUnfinished: 1 }).probesFinished, false);
+  // an off record is no failed check: the record of the run lists no check for it and the run is valid
+  const rec = extractRecord({
+    meta: { cell: { queue: 'lift', repeat: 1, mu: 0.4 } },
+    validity: ok,
+    submission: { F: 0, latencyMs: { p95: 1 } },
+    publish: { F: 0, latencyMs: { p95: 1 }, pickup: { p50: 1 } },
+  });
+  assert.deepEqual([rec.valid, rec.failedChecks], [true, []]);
+  // the ACK stream: a 0 interval is off, a positive one that started nothing fails, as before
+  const ackLoad = { probes: false, ack: true, ackMs: 4000, acksStarted: 45, acksUnfinished: 0 };
+  assert.equal(run(ackLoad).ok, true);
+  const silentAck = run({ ...ackLoad, acksStarted: 0 });
+  assert.deepEqual([silentAck.acksRan, silentAck.ok], [false, false]);
+  const ackOff = run({ ...ackLoad, ackMs: 0, acksStarted: 0 });
+  assert.deepEqual([ackOff.acksRan, ackOff.ok, ackOff.acksOff], [true, true, true]);
+  // a run that switched neither load on is valid, and so is one that switched both on and 0'd every cadence
+  assert.equal(run({ probes: false, ack: false }).ok, true);
+  const allOff = run({
+    probes: true,
+    ack: true,
+    statusMs: 0,
+    metricsMs: 0,
+    ackMs: 0,
+    statusProbes: 0,
+    metricsProbes: 0,
+    probesUnfinished: 0,
+    acksStarted: 0,
+    acksUnfinished: 0,
+  });
+  assert.equal(allOff.ok, true);
+});
+
 // ---------------------------------------------------------------- the record
 const summaryOf = ({
   queue = 'both',
