@@ -14,7 +14,6 @@ import {
 } from '../../repro/async-queue-contention/fixture.mjs';
 import { finalizeRequests, validity } from '../../repro/async-queue-contention/verdict.mjs';
 import {
-  OBSERVER_CALLS,
   beginEpoch,
   classifyError,
   createIdlePublisher,
@@ -54,6 +53,17 @@ const world = (cfg, extra = {}) => ({
   ...extra,
 });
 const jobNumber = (name) => Number(String(name).split('-s')[1]);
+/**
+ * Blocks the event loop for ms and returns when the stall began and ended on the producers' own clock (ms since
+ * world.t0, the origin of every `intended`, `started` and `ended`): the bounds their timestamps can be compared with.
+ * The stall length itself is not one, since an arrival issued before the stall began is stamped earlier than it.
+ */
+function stallDriver(w, ms) {
+  const clock = () => performance.now() - w.t0;
+  const start = clock();
+  while (clock() < start + ms);
+  return { start, end: clock() };
+}
 
 test('mulberry32 and poissonArrivals are deterministic and shaped like a Poisson process', () => {
   const rng = mulberry32(1);
@@ -281,22 +291,47 @@ test('a stalled driver issues the late arrivals at once and the latency counts f
 test('a stall across the final boundary still issues every overdue arrival, latency counted from its intended time', async () => {
   const w = world({ lambda: 100, warmupMs: 0, measureMs: 200, cooldownMs: 100 });
   w.queue = { enqueue: async ({ assertionName }) => `job-${jobNumber(assertionName)}` };
-  const schedule = poissonArrivals(7, 100, 300);
+  const horizon = 300;
+  const schedule = poissonArrivals(7, 100, horizon);
   assert.ok(schedule.length >= 15 && schedule.at(-1) > 250, 'the schedule reaches the final boundary');
+  // the first two arrivals (0.1 and 0.8 ms) are issued inside startShareProducers whenever the setup since t0 outlasts
+  // them, which a loaded run does by chance: do it on purpose, so both kinds of arrival are in every run
+  while (performance.now() - w.t0 < 2);
   const producers = startShareProducers(w, async () => ({ ok: true }));
-  for (const end = performance.now() + 360; performance.now() < end;); // the driver stalls past the 300 ms horizon
-  producers.stop(); // and the run stops at once: the whole schedule is overdue
+  const issuedAtStart = w.requests.length;
+  assert.ok(issuedAtStart >= 2 && issuedAtStart < schedule.length, 'the producers issue what is already due, at once');
+  const stall = stallDriver(w, 360); // the driver stalls past the 300 ms horizon
+  producers.stop(); // and the run stops at once: every arrival not yet issued is overdue
+  assert.ok(stall.end > horizon, 'the stall ends past the horizon');
   assert.equal(await producers.drain(2000), 0);
   assert.deepEqual(
     w.requests.map((r) => r.intended),
     schedule,
     'every scheduled request is in the stats',
   );
-  assert.ok(w.requests.every((r) => r.outcome === 'success' && r.started >= 360 && r.ended >= r.started));
+  assert.ok(w.requests.every((r) => r.outcome === 'success' && r.started >= r.intended && r.ended >= r.started));
+  const onTime = w.requests.slice(0, issuedAtStart);
+  assert.ok(
+    onTime.every((r) => r.started <= stall.start),
+    'an arrival due before the stall began is issued before it',
+  );
+  const overdue = w.requests.slice(issuedAtStart);
+  assert.ok(
+    overdue.every((r) => r.started >= stall.end),
+    'an arrival due during the stall is issued once it ends',
+  );
+  assert.ok(
+    w.requests.every((r) => r.ended >= stall.end),
+    'the stall is in every request: none finishes before it ends',
+  );
   finalizeRequests(w.requests);
   assert.ok(
-    w.requests.every((r) => r.latMs === r.ended - r.intended && r.latMs >= 360 - r.intended),
-    'the stall is in every latency, counted from the intended time',
+    w.requests.every((r) => r.latMs === r.ended - r.intended),
+    'the latency counts from the intended time',
+  );
+  assert.ok(
+    overdue.every((r) => r.latMs >= stall.end - r.intended),
+    'and the stall is in every overdue arrival',
   );
 });
 
@@ -597,7 +632,7 @@ test('readers run closed-loop on the background lane and record failures by code
   assert.ok(w.readerEvents.filter((e) => e.kind === 'content').every((e) => e.ok && e.ms >= 0));
 });
 
-test('the observer polls sequentially, walks pages when the paged call exists and is a no-op for none', async () => {
+test('the observer polls sequentially, walks the queue\'s pages in paged mode and is a no-op for none', async () => {
   const w = world({});
   let listed = 0;
   w.queue = {
@@ -613,23 +648,21 @@ test('the observer polls sequentially, walks pages when the paged call exists an
   await obs.drain(1000);
   assert.ok(w.observerEvents.length >= 2 && w.observerEvents.length <= listed);
   assert.ok(w.observerEvents.every((e) => e.ok && e.rows === 3 && e.ms > 0));
-  assert.equal(OBSERVER_CALLS.paged, null);
-  for (const mode of ['none', 'paged'])
-    assert.equal(await startObserver(world({}), mode).drain(), 0, `${mode} is a no-op while the paged call is missing`);
+  assert.equal(await startObserver(world({}), 'none').drain(), 0, 'none is a no-op');
   const paged = world({});
-  paged.queue = {};
-  OBSERVER_CALLS.paged = async () => ({ rows: 7, pages: 2, pageMs: [3, 9] });
-  try {
-    const p = startObserver(paged, 'paged');
-    await sleep(40);
-    p.stop();
-    await p.drain(1000);
-  } finally {
-    OBSERVER_CALLS.paged = null;
-  }
+  paged.queue = {
+    listPage: async (_filter, request) => {
+      await sleep(1);
+      return request.cursor ? { jobs: [1, 2, 3, 4], complete: true } : { jobs: [1, 2, 3], nextCursor: 'c1', complete: false };
+    },
+  };
+  const p = startObserver(paged, 'paged');
+  await sleep(40);
+  p.stop();
+  await p.drain(1000);
   assert.ok(
     paged.observerEvents.length >= 1 &&
-      paged.observerEvents.every((e) => e.rows === 7 && e.pages === 2 && e.maxPageMs === 9),
+      paged.observerEvents.every((e) => e.ok && e.rows === 7 && e.pages === 2 && e.maxPageMs > 0),
   );
   const failing = world({});
   failing.queue = {

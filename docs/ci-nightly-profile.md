@@ -1,5 +1,30 @@
 # Primary CI nightly-equivalent profile
 
+## Nightly target and results
+
+The primary nightly target is **`testnet-canary`**, our development branch.
+`nightly-ci.yml` runs at **02:23 UTC daily** on the default branch and dispatches
+`ci.yml` at `testnet-canary` with `profile=nightly-equivalent`. GitHub only starts
+cron schedules from the default branch; the dispatch gives the test run the
+canary workflow, ref and commit together. GitHub may delay the scheduled start.
+The ordinary `main` and `testnet-canary` push, PR and merge-queue checks remain
+unchanged, as do release workflows.
+
+Open **Actions → Nightly CI (testnet-canary)** and follow the run link in its
+summary. The dispatcher waits for that specific CI run and fails when it fails
+or is cancelled. The linked **CI → CI gate** is the full test verdict; its
+artifacts contain the tested canary commit, browser reports and property receipts.
+The child appears as a `workflow_dispatch` run on `testnet-canary`, rather than
+as a `schedule` run on `main`. To start the same canary campaign manually, use
+**Run workflow** on the dispatcher or the command below with `testnet-canary`.
+
+This schedule change activates when both workflow changes reach `main` through
+normal promotion. Until then, the previous default-branch schedule remains in
+effect. No default-branch change, controller rotation or branch-protection change
+is needed.
+
+## Candidate validation
+
 Run the full primary workflow at a chosen candidate ref:
 
 ```sh
@@ -16,7 +41,7 @@ nightly runs default to the recorded workflow run number. Overrides accept signe
 planning. Ordinary PR/push/merge-group and standard dispatch retain 100 trials,
 seed 640905, and their existing lane selection and browser coverage.
 
-Schedule and `nightly-equivalent` dispatch both select the immutable controller's
+The scheduled dispatcher and manual `nightly-equivalent` dispatch select the immutable controller's
 full plan, four-node managed-local Playwright suite, and 1,000 property trials.
 Their setup, assertions, deadlines and aggregate requirements are identical.
 An ordinary run cannot cancel this campaign. Another campaign on the same ref
@@ -90,6 +115,7 @@ pnpm --filter @origintrail-official/dkg-publisher exec vitest run \
 
 Three clean focused UI runs and three property seeds are implementation evidence;
 they do not replace a complete hosted nightly-equivalent run with a passing
-`CI gate`. Three green scheduled nights after merge are a subsequent rollout check.
+`CI gate`. Three green scheduled canary campaigns after promotion of the dispatcher
+are a subsequent rollout check.
 Do not operate shared nodes, lower StorageACK quorum, alter coverage floors, or
 change branch protection to obtain a pass.

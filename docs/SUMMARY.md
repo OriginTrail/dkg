@@ -40,6 +40,7 @@
 * [Updates & Rollback](use-dkg/updates-and-rollback.md)
 * [Migrate to npm](use-dkg/migrate-to-npm.md)
 * [Backpressure Observability](use-dkg/backpressure-observability.md)
+* [Write Preflight Coalescing](use-dkg/write-preflight-coalescing.md)
 * [Troubleshooting](use-dkg/troubleshooting.md)
 
 ## Concepts

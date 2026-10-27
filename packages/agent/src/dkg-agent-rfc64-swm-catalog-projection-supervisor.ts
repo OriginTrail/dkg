@@ -53,7 +53,7 @@ import type { FinalizedRowHealCountsV1 } from './internal/finalized-row-heal.js'
 
 // Match the default background store lane; repair fanout must not flood its queue.
 const MAX_CONCURRENT_REPAIRS_V1 = 1;
-const DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1 = 5_000;
+export const DEFAULT_PROJECTION_RETRY_INTERVAL_MS_V1 = 5_000;
 
 export type Rfc64PublicCatalogAuthorRepairOutcomeV1 =
   | 'pending'

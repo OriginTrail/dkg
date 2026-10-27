@@ -55,6 +55,9 @@ export async function driveShareWorkload(recorder: ShareStoreRecorder, options: 
   await op('enqueue (same selector)', () => queue.enqueue(request('first')).catch((error: unknown) => error));
   await op('getStatus', () => queue.getStatus(first));
   await op('list', () => queue.list({ state: ['queued'] }));
+  const firstPage = await op('listPage', () => queue.listPage({ state: ['queued'] }, { pageSize: 2 }));
+  await op('listPage', () => queue.listPage({ state: ['queued'] }, { pageSize: 2, cursor: firstPage.nextCursor }));
+  await op('listForSelector', () => queue.listForSelector({ contextGraphId: 'cg-workload', assertionName: 'first', agentAddress: WORKLOAD_AGENT }));
   await op('getStats', () => queue.getStats());
 
   const claimedFirst = await claim('claimNext', 'worker-1');

@@ -193,11 +193,13 @@ describe('the share sweep over the production wiring', () => {
 });
 
 /** A real `DKGAgent` (production `store` field and `promoteQueue` getter) whose queue holds finished jobs, each admitted with certainty (a settled enqueue). */
-async function agentWithFinishedJobs(stores: OxigraphStore[], jobs: ReadonlyArray<{ id: string; ageMs: number; end: 'succeeded' | 'cancelled' }>) {
+async function agentWithFinishedJobs(
+  stores: OxigraphStore[], jobs: ReadonlyArray<{ id: string; ageMs: number; end: 'succeeded' | 'cancelled' }>, intercept?: Parameters<typeof wrapped>[1],
+) {
   const raw = new OxigraphStore();
   stores.push(raw);
   const agent = Object.create(DKGAgent.prototype) as DKGAgent & { store: TripleStore };
-  agent.store = wrapped(raw);
+  agent.store = wrapped(raw, intercept);
   let clock = Date.now();
   let nextId = '';
   agent.configurePromoteQueue({ now: () => clock, idGenerator: () => nextId } satisfies Partial<AsyncPromoteQueueConfig>);
@@ -349,6 +351,37 @@ describe('the share factory hands the operator\'s settings to the core and the c
       });
       expect(counters.errors).toEqual({ scan: 0, verify: 0, delete: 0 });
       expect(await jobPresent(raw, 'old-succeeded')).toBe(!(mode === 'delete'));
+    });
+
+    /** A store that fails the scan: the core counts it (`errors.scan`), the factory must pass that count on, and the timer's view and the line must print it. */
+    it('a failed scan is counted: errors.scan reaches the sweep counters and the usage line, and the timer logs the failed tick', async () => {
+      let failing = false;
+      const { agent } = await agentWithFinishedJobs(stores, [{ id: 'old', ageMs: 8 * DAY, end: 'succeeded' }], (name, run) => (name !== 'query' ? undefined : async (...args) => {
+        if (failing) throw new Error('store down');
+        return run(...args);
+      }));
+      const sweep = createShareRetentionSweep({ agent, settings: settingsFor('report'), log: vi.fn() })!;
+      expect(sweep.counters().errors).toEqual({ scan: 0, verify: 0, delete: 0 });
+      failing = true;
+      expect(await sweep.runBatch()).toMatchObject({ scanned: 0, error: { phase: 'scan', message: 'store down' } });
+      expect(sweep.counters().errors.scan).toBeGreaterThanOrEqual(1);              // the core's own count, not a constant
+      expect(sweep.counters().errors).toMatchObject({ verify: 0, delete: 0 });
+
+      const log = vi.fn();
+      const handle = startRetention({ runtime: 'daemon-admission', settings: settingsFor('report', { intervalMs: 1_000 }), agent, log });
+      try {
+        await vi.waitFor(() => expect(handle.usage()[0]?.ticks).toBeGreaterThanOrEqual(1), { timeout: 10_000, interval: 50 });
+        const view = handle.usage()[0]!;
+        expect(view.errors.scan).toBeGreaterThanOrEqual(1);
+        expect(view.errors).not.toHaveProperty('tick');                             // the core counted it; the batch did not throw
+        const line = formatAsyncAdmissionUsageLine({
+          intervalSeconds: 300, store: [], usage: emptyUsage(), depth: { share: null, lift: null, liftJournal: null }, depthErrors: 0, shareWorker: null, retention: handle.usage(),
+        });
+        expect(line).toMatch(/ share_retention_errors=scan:[1-9]\d* /);
+        expect(log.mock.calls.map(call => String(call[0])).filter(entry => entry.includes('tick failed'))[0]).toContain('scan phase: store down');
+      } finally {
+        await handle.stop();
+      }
     });
 
     /** The production timer and the production line: one complete report pass, then a forward clock step makes the next tick skip (clock_jump) for good. */

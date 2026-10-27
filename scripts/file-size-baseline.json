@@ -79,7 +79,7 @@
     "packages/cli/src/auth.ts": 1979,
     "packages/cli/src/catchup-runner-worker-impl.ts": 949,
     "packages/cli/src/catchup-runner.ts": 1070,
-    "packages/cli/src/config.ts": 2691,
+    "packages/cli/src/config.ts": 2688,
     "packages/cli/src/context-graph-readiness.ts": 1028,
     "packages/cli/src/daemon/auto-update.ts": 1648,
     "packages/cli/src/daemon/chain-reset-wipe.ts": 975,

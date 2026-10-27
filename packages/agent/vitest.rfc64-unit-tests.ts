@@ -25,6 +25,7 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-inventory-v1-candidates.test.ts",
   "test/rfc64-inventory-v1-applied-head.test.ts",
   "test/rfc64-swm-author-inventory-persistence-v1.test.ts",
+  "test/rfc64-owed-share-inventory-store-v1.test.ts",
   "test/rfc64-swm-author-inventory-producer-v1.test.ts",
   "test/rfc64-swm-catalog-durable-asset-resolver-v1.test.ts",
   "test/rfc64-swm-inventory-catalog-reconciler-v1.test.ts",
