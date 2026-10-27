@@ -3,20 +3,26 @@
  *
  * A job is deleted only when every rule below says it owns nothing and it is old enough. Three classes are deletable and nothing else is:
  *  - `succeeded`: 7 days after its `updatedAt` (the instant it finished);
- *  - `cancelled`: an operator-cancelled job that never started promote, after the benign window (7 days);
+ *  - `cancelled`: an operator-cancelled job that never started promote in ANY attempt, after the benign window (7 days);
  *  - `retired_no_effect`: a certified retired no-effect rejection, after the benign window (7 days).
  * Every other `failed` job is kept until an operator clears it: it may be needed for inspection or `recover`.
  *
  * A job is NEVER deleted when (checked from the payload, under the queue mutation lock, immediately before the delete):
  *  - its payload is unreadable, malformed, ambiguous (several payload triples), or carries a state this build does not recognise;
- *  - a benign-class candidate's commit marker holds a flag that is not a boolean, or lacks one, `promoteStarted` included (a bad or missing value is no evidence
- *    that promote never started);
+ *  - its `formatVersion`, when present, is not an integer from 0 up to this build's (`unreadable`: no coercion, "4" and `null` and 1.5 are no format a writer produced);
+ *    it was written by a newer queue format than this build understands (an integer above this build's: `newer_format`);
+ *  - a benign-class candidate's commit marker holds a flag that is not a boolean, or lacks one, `promoteStarted` included (a bad or missing flag says nothing about
+ *    whether promote started; a marker that is absent altogether is judged below);
  *  - a cancelled job's commit marker has ANY flag set (`wmCleaned`, `lifecycleStamped`, `gossiped` as well as `promoteStarted`, `swmInserted`): it ran, whatever `promoteStarted` says;
- *  - a cancelled job's `formatVersion` is not an integer from 2 (the first format whose workers record the whole marker before they enter promote) up to this build's:
- *    a row from before (absent, 0 or 1) may have started promote, so its history is uncertain, and retention does not infer the absence of effects from a missing
- *    legacy marker any more than the queue's own reclaim does. Any other value is no format a writer produced either;
+ *  - a cancelled job's `formatVersion` is below 2 (the first format whose workers record the whole marker before they enter promote): a row from before (absent, 0 or 1)
+ *    may have started promote, so its history is uncertain, and retention does not infer the absence of effects from a missing legacy marker any more than the queue's own
+ *    reclaim does;
+ *  - a cancelled job was CLAIMED and not every one of its attempts is proven unstarted. The marker, the format and the last error describe the LAST attempt only (every claim
+ *    resets the marker, a reclaim drops it and rewrites the format, a later failure overwrites the error), so a job whose first attempt entered promote, or may have committed,
+ *    and whose last attempt was reclaimed reads, once cancelled, exactly like a job that never ran. What describes the whole job is `attempt.count` against
+ *    `preparationAttempts`: the job is deletable only if nothing was ever claimed (count 0) or `preparationAttempts` covers every claim (equal to the count, at format 4);
+ *    see `everyAttemptProvenUnstarted`;
  *  - it has index triples but no payload, or its stored `state` triple is missing or differs from the payload's state;
- *  - it was written by a newer queue format than this build understands;
  *  - it is not terminal (`queued`, `running`, `failed_retrying`: a job that a worker holds, waits to retry or has not run);
  *  - it still owns an unfinished bound share obligation (`hasUnfinishedBoundObligation`): the recovery owner must survive;
  *  - it is `failed` and not one of the two benign classes: partial-promote ambiguity, legacy rows, post-commit failures (replay budget
@@ -24,6 +30,12 @@
  *  - a benign-class candidate carries a post-commit failure or needs manual inspection (a second, independent reason to keep);
  *  - an admission whose outcome is still uncertain refers to it (`hasPendingJob` on the queue's own admission coordinator);
  *  - it is younger than its window (by BOTH the stored `updatedAt` index triple and the payload's own `updatedAt`), or dated after `now`.
+ *
+ * STATED LIMIT (for the delete-gate owner and the operations document of P10b). Retention judges the row and nothing else, so it can only keep a job whose row still carries its
+ * history. An operator `recover()` resets `attempt.count` to 0 and drops the marker, the last error and `preparationAttempts`, so a job that DID run (a fatal error, a
+ * post-commit failure) and was then recovered and cancelled looks exactly like a job nobody ever claimed, and is deleted once the window has passed. The row cannot tell the two
+ * apart; an operator who recovers a job to inspect it and then cancels it should expect it to age out. The cancelled class is therefore "no attempt visible on the row", not "no
+ * attempt ever".
  */
 import { hasUnfinishedBoundObligation } from './async-promote-ownership.js';
 import { isAutomaticallyRecoverablePostCommitFailure, requiresManualInspection } from './async-promote-recovery-policy.js';
@@ -91,7 +103,8 @@ export function emptyClassCounts(): Record<PromoteRetentionJobClass, number> {
  * a pre-format-2 worker could enter promote without recording a marker, the only marker such a row can carry (four flags) is written when a worker claims the job,
  * and a pre-format-2 reclaim cleared the marker of a running job and kept its attempt count, so a later cancel leaves no marker on a job that may have run. The queue's
  * own reclaim sends every such row to manual inspection and never infers the absence of effects from a missing legacy marker. The parser does not validate
- * `formatVersion`, so this gate does: -1, 1.5, -0, 1e-300 and -Infinity (the JSON text -1e999) are numbers no writer produced, and so are a string, `null` or an object.
+ * `formatVersion`: `decidePromoteRetention` keeps a present value that is not an integer from 0 up to this build's (-1, 1.5, -0, 1e-300, -Infinity - the JSON text -1e999 -,
+ * a string, `null`, an object) before any class is asked, and this gate repeats the integer test so that it does not depend on that.
  */
 function isMarkerWriterFormat(version: unknown): boolean {
   return typeof version === 'number' && Number.isInteger(version) && version >= ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION;
@@ -100,8 +113,10 @@ function isMarkerWriterFormat(version: unknown): boolean {
 /**
  * The commit marker of a benign-class candidate is evidence the class rests on (`promoteStarted`, `swmInserted`), so every one of the five flags it holds must be a
  * boolean. The shared classifier checks four of the five and lets a bad `promoteStarted` through, and this gate does not lean on it for any of them. Absent is not bad
- * as a whole: a job that never ran has no marker. A marker WITHOUT a flag is: every writer from format 2 on stores all five, so a missing one is a mangled key and says
- * nothing about whether promote started. (The pre-format-2 shape, a marker without `promoteStarted`, is no readable evidence either: `isMarkerWriterFormat`.)
+ * as a whole: a job that was never claimed has no marker, and neither has a claimed job whose claim was reclaimed (a reclaim drops it), so an absent marker is no evidence
+ * either way - `everyAttemptProvenUnstarted` is what the cancelled class rests on. A marker WITHOUT a flag is bad: every writer from format 2 on stores all five, so a
+ * missing one is a mangled key and says nothing about whether promote started. (The pre-format-2 shape, a marker without `promoteStarted`, is no readable evidence either:
+ * `isMarkerWriterFormat`.)
  */
 function hasReadableCommitMarker(job: StructurallyValidPromoteJobPayload): boolean {
   const marker: unknown = job.commitMarker;

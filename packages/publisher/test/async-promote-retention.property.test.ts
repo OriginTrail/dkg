@@ -14,7 +14,7 @@ import type { PromoteRetentionJobClass } from '../src/async-promote-retention-po
 // from the generator's own knowledge of what it built (the KIND of each job), not from the product predicate. The PR budget is the repository default (100 runs,
 // fixed seed); the nightly profile raises it through DKG_PROPERTY_RUNS (1,000) and DKG_PROPERTY_SEED.
 //
-// The sweep runs over an engine that REPEATS scan rows (`repeatingScanRows`: about a third of the subjects come back two or three times, side by side, within the
+// The sweep runs over an engine that REPEATS scan rows (`repeatingScanRows`: about half of the subjects come back two to four times, side by side, within the
 // query's LIMIT, as an engine does that answers a subject once per equal-valued term), so the property also covers the collapse of a subject's rows to one judged
 // row: a repeat is no reordering and no stall, a subject is judged and deleted once, and a window of repeats still counts as full (the walk goes on after it). A quarter
 // of the jobs additionally carry a decimal `updatedAt` twin, which the scan ignores (it reads exact integer terms only): that is a check that a twin changes nothing, not

@@ -27,15 +27,17 @@
  *    reads back as a number the engine does not consider equal to it: `"100.0000000000000001"^^xsd:decimal` reads as 100, the tie walk at 100 does not return it (it
  *    is not equal to 100) and the range scan `> 100` does (it is greater), so the cursor would never leave it. An integer in that range is exact in a double, so
  *    the number the cursor holds IS the term (the queue writes nothing else).
- * A subject that is none of these (a blank node, an IRI elsewhere, a decimal, a double, a plain literal, a negative number, an integer after the cutoff) is not a
- * candidate: it is never read, judged, counted or deleted, so it is kept, and it stays in the graph until something else removes it.
+ * A subject that is none of these is not a candidate: it is never read, judged, counted or deleted, so it is kept. Six of those kinds never become one (a blank node, an IRI
+ * elsewhere, a decimal, a double, a plain literal, a negative number) and the subject stays in the graph until something else removes it (limit 1); the seventh, an integer
+ * after the cutoff, is only not a candidate YET: it is one as soon as the cutoff has passed it.
  *
  * REPEATED ROWS. One subject can still come back as SEVERAL rows: an engine that keeps two integer lexical forms of one value (`"100"`, `"0100"`) apart answers it
  * once per term, and both match. That is a conforming answer, not a reordering: the rows of a subject are collapsed to one judged row, a window of limit + 1 ROWS
  * counts as full however few subjects the repeats left in it, and the walk goes on after the last subject judged, so repeats cost calls and never stall.
  *
  * DOCUMENTED LIMITS (each fails closed: the scan keeps what it cannot read, and no row is deleted on the strength of a bad answer).
- *  1. A subject that is not a candidate (above) is never reclaimed by this sweep.
+ *  1. A subject that can never be a candidate (above: a blank node, an IRI outside the job prefix, a decimal, a double, a plain literal, a negative number) is never reclaimed
+ *     by this sweep.
  *  2. The scan relies on the engine honouring ORDER BY, LIMIT and FILTER. The result is checked (sorted, after the cursor, within the cutoff, at most limit + 1 rows)
  *     and a violation is counted in `anomalies` and never moves a cursor: the call still deletes the rows it judged (each is verified under the lock first), the
  *     pass that met it is never reported complete (its tally may count a re-judged row twice), and a batch may starve exactly like an unordered scan. It is a
@@ -44,8 +46,9 @@
  *     another order exactly when two ids first differ at a supplementary-plane character against a BMP character at or above U+E000. The queue's ids are ASCII
  *     (`isSafeJobId`), so only a foreign writer that stores such an id under the job prefix can cause it; the result is limit 2's: an anomaly on every call that
  *     meets the pair, and the class does not advance past it. (Out-of-prefix IRIs are not read, so they cannot cause it.)
- *  4. A subject whose index holds two DISTINCT integer `updatedAt` values (the queue never writes that) is a candidate at each of them: report mode judges it at
- *     both, delete mode removes it at the first.
+ *  4. A subject whose index holds two DISTINCT integer `updatedAt` values (the queue never writes that) is a candidate at each of them and is judged at each: a kept
+ *     subject is counted twice, a deletable one twice in report mode (which removes nothing) and once in delete mode, which removes it at the first value at which the
+ *     verification under the lock passes (the payload's own age and state decide, not the value that nominated it).
  *
  * The scan runs outside the queue lock, on the background lane (OT-RFC-73 §5.1 tagging table: it is not queue control work). It reads only the two stored
  * index triples; the payload is judged later, under the lock.
