@@ -296,17 +296,47 @@ test('promotion and direct stable publication cannot omit the decision or mutate
   }
 });
 
-for (const dryRun of [false, true]) test(`evidence invalidated during registry acquisition blocks ${dryRun ? 'dry-run planning' : 'every mutation'}`, async t => {
+for (const mode of ['promote', 'publish']) for (const dryRun of [false, true]) test(`${mode}: evidence invalidated during registry acquisition blocks ${dryRun ? 'dry-run planning' : 'every mutation'}`, async t => {
   const f = fixture(t);
   let verified = 0, acquired = 0, mutations = 0, valid = true;
-  const options = releaseOptions(f, { mode: 'promote', tags: ['mainnet'], dryRun, evidenceFile: 'decision.json',
+  const options = releaseOptions(f, { mode, tags: ['mainnet'], dryRun, evidenceFile: 'decision.json',
     prepareEvidence: () => { verified++; assert.ok(valid, 'qualification changed during acquisition'); },
     readTags: async () => ({}), askOtp: null, settle: 0,
-    readDist: pkg => { acquired++; valid = false; return { integrity: pkg.integrity }; },
+    readDist: pkg => { acquired++; valid = false; return mode === 'publish' ? null : { integrity: pkg.integrity }; },
     runner: () => { mutations++; },
   });
   await assert.rejects(preparedRelease(options), /qualification changed during acquisition/);
   assert.equal(verified, 2);
   assert.equal(acquired, f.manifest.packages.length);
   assert.equal(mutations, 0);
+});
+
+for (const channel of ['latest', 'mainnet']) for (const damage of ['certificate', 'changed report', 'missing report']) {
+  test(`direct ${channel} publication rechecks ${damage} after final evidence acquisition`, async t => {
+    const f = fixture(t);
+    let acquisitions = 0, mutations = 0;
+    const options = releaseOptions(f, { tags: [channel], readDist: () => null,
+      prepareEvidence: async () => {
+        if (++acquisitions === 2) {
+          if (damage === 'certificate') writeJson(f.receiptFile, {});
+          else if (damage === 'changed report') fs.appendFileSync(path.join(f.attempt, 'core-slot-report.json'), ' ');
+          else fs.unlinkSync(path.join(f.attempt, 'core-slot-report.json'));
+        }
+        return { recheckLocalIntegrity: () => {} };
+      },
+      runner: () => { mutations++; },
+    });
+    await assert.rejects(preparedRelease(options));
+    assert.equal(acquisitions, 2);
+    assert.equal(mutations, 0);
+  });
+}
+
+test('canary publication remains available without stable-release evidence', async t => {
+  const f = fixture(t); let mutations = 0;
+  await preparedRelease(releaseOptions(f, { evidenceFile: undefined,
+    prepareEvidence: () => { throw new Error('canary should not acquire stable-release evidence'); },
+    runner: () => { mutations++; },
+  }));
+  assert.equal(mutations, f.manifest.packages.length);
 });

@@ -233,8 +233,9 @@ export async function preparedRelease({
   const progress = { mode, dryRun, reused: state.filter(s => s.exists).map(s => s.pkg.name), completed: [], planned: operations.map(describe) };
   // Recheck package AND evidence bytes after acquisition and immediately before
   // mutation; no build-info generation/build/repack exists in this path.
+  const evidence = evidenceFile ? await prepareEvidence({ evidenceFile, expected, manifest, rootDir }) : undefined;
   verifyCertificate(bundle, receiptFile, expected);
-  if (evidenceFile) (await prepareEvidence({ evidenceFile, expected, manifest, rootDir })).recheckLocalIntegrity();
+  evidence?.recheckLocalIntegrity();
   try {
     for (const operation of operations) {
       const { pkg, channel, tarball, args } = operation;
