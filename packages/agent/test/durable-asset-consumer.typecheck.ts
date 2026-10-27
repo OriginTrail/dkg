@@ -13,3 +13,8 @@ declare const requestWithoutConsumer: Omit<FetchedDurableAssetSettlementRequest,
 // @ts-expect-error The shared loop cannot accept an optional capability bag.
 const invalid: FetchedDurableAssetSettlementRequest = requestWithoutConsumer;
 void invalid;
+
+import { runChallengeExactAssetFetch, type ChallengeExactAssetFetchContext } from '../src/sync/requester/durable-sync.js';
+declare const challengeWithoutAuthenticator: Omit<ChallengeExactAssetFetchContext, 'authenticateChallengePinnedAsset'>;
+// @ts-expect-error Mode selection cannot erase the challenge entry's required authenticator.
+void runChallengeExactAssetFetch(challengeWithoutAuthenticator);

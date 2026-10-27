@@ -1,3 +1,4 @@
+import { challengeAssetConsumer, materializedAssetConsumer, type DurableAssetConsumer, type DurableSettlementProgress } from './durable-asset-consumer.js';
 import { prepareDurableMetaPhase, type PreparedDurableMeta } from './durable-meta-phase.js';
 import { settleDurableVerifiedPage, type DurablePhaseSettlementOptions } from './durable-page-settlement.js';
 import { DurableGraphSettlementGuard } from './durable-prefix-proof.js';
@@ -366,13 +367,13 @@ export interface ChallengeExactAssetFetchContext extends DurableSyncCommonPorts,
 
 interface InternalDurableSyncContext extends Omit<
   NormalizedDurableSyncContext,
-  'exactAssetFetchPolicyFor'
+  'exactAssetFetchPolicyFor' | 'storeGraphScopedAsset'
 > {
-  exactAssetFetchPolicyFor?: (contextGraphId: string) => ExactAssetFetchSessionPolicy | undefined;
-  authenticateChallengePinnedAsset?: (
-    request: DurableSyncChallengePinnedAuthenticationRequest,
-  ) => Promise<ChallengePinnedGraphScopedAsset>;
-  proofOnlyChallengeFetch?: boolean;
+  selectAssetExecution(contextGraphId: string, progress: DurableSettlementProgress): {
+    readonly exactFetchPolicy?: ExactAssetFetchSessionPolicy;
+    readonly settleAsset: DurableAssetConsumer;
+  };
+  proofOnlyChallengeFetch: boolean;
   proofRequesterScope?: `challenge-exact:${string}`;
 }
 
@@ -387,6 +388,33 @@ type DurableDataPlan =
 interface DurableDataPolicy {
   readonly metaContinuation?: DurableMetaContinuation;
   selectDataPlan(meta: PreparedDurableMeta, settlement: DurableGraphSettlementGuard): Promise<DurableDataPlan>;
+}
+
+/** Bind durable writes at the ordinary/owned boundary, including lazy legacy failure. */
+function materializingAssetExecution(
+  context: Pick<DurableSyncContext, 'ctx' | 'signal' | 'logDebug' | 'logWarn' | 'storeGraphScopedAsset'>,
+  policyFor?: NormalizedDurableSyncContext['exactAssetFetchPolicyFor'],
+): InternalDurableSyncContext['selectAssetExecution'] {
+  const materialize = context.storeGraphScopedAsset ?? (async () => {
+    throw Object.assign(new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
+      { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
+  });
+  return (contextGraphId, progress) => {
+    const exactFetchPolicy = policyFor?.(contextGraphId);
+    if (exactFetchPolicy && exactFetchPolicy.selection.kind !== 'ual-only') {
+      throw new Error('Challenge-pinned exact retrieval requires the proof-only entry point');
+    }
+    return { exactFetchPolicy, settleAsset: materializedAssetConsumer({ context, materialize,
+      accumulator: progress.accumulator,
+      committedExactAssetUals: exactFetchPolicy ? progress.committedExactAssetUals : undefined }) };
+  };
+}
+
+function materializingSyncContext(context: DurableSyncContext | LegacyDurableSyncContext): InternalDurableSyncContext {
+  const normalized = normalizeDurableSyncContext(context);
+  const { storeGraphScopedAsset: _storeGraphScopedAsset, exactAssetFetchPolicyFor, ...ports } = normalized;
+  return { ...ports, proofOnlyChallengeFetch: false,
+    selectAssetExecution: materializingAssetExecution(normalized, exactAssetFetchPolicyFor) };
 }
 
 /** Physical DATA outcome; only the owned entry translates it into an owner decision. */
@@ -416,7 +444,7 @@ export function runDurableSync(
 export async function runDurableSync(
   context: DurableSyncContext | LegacyDurableSyncContext,
 ): Promise<InitializedDurableSyncResult> {
-  return (await runDurableSyncWithBudget(normalizeDurableSyncContext(context))).result;
+  return (await runDurableSyncWithBudget(materializingSyncContext(context))).result;
 }
 
 export function runDurableSyncDetailed(
@@ -428,16 +456,17 @@ export function runDurableSyncDetailed(
 export async function runDurableSyncDetailed(
   context: DurableSyncContext | LegacyDurableSyncContext,
 ): Promise<DetailedDurableSyncResult> {
-  return physicalDurableSyncResult(await runDurableSyncWithBudget(normalizeDurableSyncContext(context)));
+  return physicalDurableSyncResult(await runDurableSyncWithBudget(materializingSyncContext(context)));
 }
 
 /** One graph and its owner capabilities enter together; ordinary/exact inputs carry neither. */
 export async function runGraphOwnedDurableSyncDetailed(
   context: GraphOwnedDurableSyncContext,
 ): Promise<DurableRecoveryRoundOutcome> {
-  const { contextGraphId, recovery, ...sharedContext } = context;
+  const { contextGraphId, recovery, storeGraphScopedAsset: _storeGraphScopedAsset, ...sharedContext } = context;
   const graph = await executeDurableGraph(
-    { ...sharedContext, contextGraphId, remainingContextGraphs: 1 }, {
+    { ...sharedContext, contextGraphId, remainingContextGraphs: 1, proofOnlyChallengeFetch: false,
+      selectAssetExecution: materializingAssetExecution(context) }, {
       metaContinuation: recovery.meta,
       selectDataPlan: async (preparedMeta, settlement) => {
         const prepared = await prepareDurableHoldingsPhase({ context: sharedContext, contextGraphId,
@@ -470,8 +499,13 @@ export async function runChallengeExactAssetFetch(
   } = context;
   const detailed = await runDurableSyncWithBudget({
     ...sharedContext,
-    exactAssetFetchPolicyFor: (contextGraphId) => exactAssetFetchSessionPolicy(challengeSelectionFor(contextGraphId)),
-    authenticateChallengePinnedAsset,
+    selectAssetExecution: (contextGraphId, progress) => {
+      const selection = challengeSelectionFor(contextGraphId);
+      return { exactFetchPolicy: exactAssetFetchSessionPolicy(selection),
+        settleAsset: challengeAssetConsumer({ context: sharedContext, authenticate: authenticateChallengePinnedAsset,
+          commitments: new Map(selection.commitments.map(commitment => [commitment.assetUal, commitment])),
+          evidence: progress.authenticatedExactAssets }) };
+    },
     // Proof bytes are invocation-local. The proof-only entry point cannot
     // observe or mutate durable checkpoints, and the executor forces fresh
     // responder sessions for both phases.
@@ -543,9 +577,9 @@ async function executeDurableGraph(
     signal,
     fetchSyncPages,
     sinceBatchIdFor,
-    exactAssetFetchPolicyFor,
+    selectAssetExecution,
     stopOnBackoffWorthyFailure = false,
-    proofOnlyChallengeFetch = false,
+    proofOnlyChallengeFetch,
     proofRequesterScope,
     onVerifiedFullSnapshot,
     deleteCheckpoint,
@@ -711,12 +745,10 @@ async function executeDurableGraph(
       ? Math.min(contextGraphBudget.metaFetchDeadline ?? deadline, deadline)
       : deadline;
     const sinceBatchId = sinceBatchIdFor?.(pid);
-    const exactFetchPolicy = exactAssetFetchPolicyFor?.(pid);
+    const { exactFetchPolicy, settleAsset } = selectAssetExecution(pid,
+      { accumulator, committedExactAssetUals, authenticatedExactAssets });
     const exactAssetSelection = exactFetchPolicy?.selection;
     const isProofOnlyChallengeFetch = exactFetchPolicy?.kind === 'ephemeral-challenge';
-    if (isProofOnlyChallengeFetch && !proofOnlyChallengeFetch) {
-      throw new Error('Challenge-pinned exact retrieval requires the proof-only entry point');
-    }
     const exactAssetUals = exactAssetSelection === undefined
       ? undefined
       : exactAssetUalsForSelection(exactAssetSelection);
@@ -1029,8 +1061,8 @@ async function executeDurableGraph(
     }
     const storeStartedAt = Date.now();
     const outcome = await settleDurableVerifiedPage(verificationInput, processed,
-      { ...context, recordPhaseOutcome, onStoreStart: () => startPhase('store') },
-      { accumulator, committedExactAssetUals, authenticatedExactAssets },
+      { ...context, settleAsset, recordPhaseOutcome, onStoreStart: () => startPhase('store') },
+      accumulator,
       { contextGraphId: pid, metaResult, graphScopedManifest, exactFetchPolicy, sinceBatchId, skipAgentsMeta,
         settlement, contextGraphBudget, deadline, settlementSliceDeadline });
     endPhase();
