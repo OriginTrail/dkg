@@ -18,8 +18,8 @@
  * the same filters, so they select the same rows; the share scan has the same rules, async-promote-retention-scan.ts). A blank node has no `STR`, so `ORDER BY STR(?job)` leaves
  * its rows in engine order and the key check of the tie walk rejects them: an anomaly on every call, and the cursor never moves. An IRI outside the prefix is no job and could
  * only be kept; an ASCII one was harmless, but one that mixes astral and high BMP characters is ordered by code point in Oxigraph and by UTF-16 in the key check, with the same
- * effect. Neither is a candidate, so neither is read, judged or counted. (Under the prefix such an id needs a foreign writer, the queue's ids being ASCII, `isSafeJobId`; the
- * scan then fails closed as for any reordering: an anomaly on every call that meets the pair, no cursor moves, nothing is deleted on that answer.)
+ * effect. Neither is a candidate, so neither is read, judged or counted. (Under the prefix such an id needs a foreign writer, the queue's ids being ASCII, `isSafeJobId`; on
+ * an engine that orders by code point the tie walk then fails closed as for any reordering: an anomaly on every call that meets the pair, and the cursor does not move past it.)
  * The cursor holds a JS number and the engine compares terms exactly, so a term a double cannot represent reads back as a number the engine does not consider equal to it:
  * `"100.0000000000000001"^^xsd:decimal` reads as 100, the tie walk at 100 does not return it and the range scan `> 100` does, so the cursor would never leave it, and every
  * eligible job behind it would starve. An integer in [0, cutoff] is exact in a double, so the number the cursor holds IS the term (the queue writes nothing else). A job whose
