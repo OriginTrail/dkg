@@ -97,13 +97,8 @@ export interface GraphKnowledgeAssetStructure {
   merkleRoot: Uint8Array;
 }
 
-type MetadataRow = Pick<Quad, 'predicate' | 'object'> & Partial<Pick<Quad, 'graph'>>;
-export interface GraphKnowledgeAssetStructurePolicy {
-  /** Wire descriptors deduplicate lexical values; stored envelopes require exact RDF literals. */
-  syntax: 'wire' | 'stored';
-  /** Required admission verifies routing and rejects legacy root bindings. */
-  context: 'required' | 'external';
-}
+type MetadataRow = Pick<Quad, 'predicate' | 'object'>;
+type RoutedMetadataRow = Pick<Quad, 'predicate' | 'object' | 'graph'>;
 
 /** Decoding is complete before context admission or common structural validation. */
 interface DecodedGraphFields {
@@ -189,7 +184,7 @@ function decodeStoredGraphFields(rows: readonly MetadataRow[]): { fields: Decode
   return { fields, context: () => selected.optional('contextGraph') };
 }
 
-function admitGraphMetadataContext(rows: readonly MetadataRow[], contextGraph: string | undefined, expected?: string): string {
+function admitGraphMetadataContext(rows: readonly RoutedMetadataRow[], contextGraph: string | undefined, expected?: string): string {
   if (contextGraph === undefined) throw new Error('missing contextGraph metadata');
   const prefix = 'did:dkg:context-graph:';
   if (!contextGraph.startsWith(prefix)) throw new Error(`invalid contextGraph metadata: ${contextGraph}`);
@@ -229,32 +224,46 @@ function validateGraphStructure(fields: DecodedGraphFields, ual: string, context
     merkleRoot: fields.merkleRoot };
 }
 
-/** Boundary decoding, context admission and structural validation have distinct contracts. */
-export function parseGraphKnowledgeAssetStructure(
-  rows: readonly MetadataRow[], input: { ual: string; contextGraphId?: string },
-  policy: GraphKnowledgeAssetStructurePolicy,
+/** Wire descriptors carry their own context route and require every row's named graph. */
+export function parseWireGraphKnowledgeAssetStructure(
+  rows: readonly RoutedMetadataRow[], ual: string,
 ): GraphKnowledgeAssetStructure {
-  const decoded = policy.syntax === 'wire' ? decodeWireGraphFields(rows) : decodeStoredGraphFields(rows);
-  const contextGraphId = policy.context === 'required'
-    ? admitGraphMetadataContext(rows, decoded.context(), input.contextGraphId) : input.contextGraphId;
-  if (contextGraphId === undefined) throw new Error('missing context graph id');
-  const structure = validateGraphStructure(decoded.fields, input.ual, contextGraphId);
-  if (policy.context === 'required' && structure.ual !== input.ual) throw new Error(`non-canonical kaUal: expected ${structure.ual}`);
+  const decoded = decodeWireGraphFields(rows);
+  const contextGraphId = admitGraphMetadataContext(rows, decoded.context());
+  const structure = validateGraphStructure(decoded.fields, ual, contextGraphId);
+  if (structure.ual !== ual) throw new Error(`non-canonical kaUal: expected ${structure.ual}`);
   return structure;
 }
 
-/** Parse the exact envelope, preserving tentative status for explicit no-chain consumers. */
+/** Projected local readers supply the trusted context omitted from their bounded query. */
 export function parseGraphKnowledgeAssetMetadataEnvelope(
-  rows: readonly MetadataRow[],
-  input: { contextGraphId: string; ual: string },
-  admission: 'external-context' | 'stored-context' = 'external-context',
+  rows: readonly MetadataRow[], input: { contextGraphId: string; ual: string },
+): GraphKnowledgeAssetMetadataRead {
+  return parseMetadataEnvelope(rows, () =>
+    validateGraphStructure(decodeStoredGraphFields(rows).fields, input.ual, input.contextGraphId));
+}
+
+/** Held-content readers must bind stored rows to the requested context and named graph. */
+export function parseStoredGraphKnowledgeAssetMetadataEnvelope(
+  rows: readonly RoutedMetadataRow[], input: { contextGraphId: string; ual: string },
+): GraphKnowledgeAssetMetadataRead {
+  return parseMetadataEnvelope(rows, () => {
+    const decoded = decodeStoredGraphFields(rows);
+    const contextGraphId = admitGraphMetadataContext(rows, decoded.context(), input.contextGraphId);
+    const structure = validateGraphStructure(decoded.fields, input.ual, contextGraphId);
+    if (structure.ual !== input.ual) throw new Error(`non-canonical kaUal: expected ${structure.ual}`);
+    return structure;
+  });
+}
+
+function parseMetadataEnvelope(
+  rows: readonly MetadataRow[], readStructure: () => GraphKnowledgeAssetStructure,
 ): GraphKnowledgeAssetMetadataRead {
   const objects = metadataObjectsByPredicate(rows);
   if ((objects.get(`${DKG}contentScopeVersion`) ?? []).length === 0) return { state: 'absent' };
   let structure: GraphKnowledgeAssetStructure;
   try {
-    structure = parseGraphKnowledgeAssetStructure(rows, input,
-      { syntax: 'stored', context: admission === 'stored-context' ? 'required' : 'external' });
+    structure = readStructure();
   } catch { return { state: 'invalid' }; }
   const batchId = unsignedIntegerLiteral(singleMetadataObject(objects, `${DKG}batchId`));
   const status = rdfLiteralLexicalValue(singleMetadataObject(objects, `${DKG}status`) ?? '');

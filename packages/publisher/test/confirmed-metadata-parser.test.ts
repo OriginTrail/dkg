@@ -1,4 +1,4 @@
-import { parseGraphKnowledgeAssetStructure } from '../src/graph-metadata-envelope.js';
+import { parseWireGraphKnowledgeAssetStructure, parseStoredGraphKnowledgeAssetMetadataEnvelope } from '../src/graph-metadata-envelope.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri,
@@ -112,10 +112,10 @@ describe('shared structural parsing policies', () => {
       if (fault === 'leading-zero') version.object = '"03"';
       if (fault === 'bare-number') version.object = '3';
       if (fault === 'scope-version') rows.find(row => row.predicate === `${DKG}contentScopeVersion`)!.object = '"999"';
-      const wire = parseGraphKnowledgeAssetStructure(rows, input, { syntax: 'wire', context: 'required' });
+      const wire = parseWireGraphKnowledgeAssetStructure(rows, input.ual);
       expect(wire).toMatchObject({ assertionVersion: '3', contextGraphId: input.contextGraphId,
         publicTripleCount: 2, privateTripleCount: 2, subGraphName: 'documents' });
-      const stored = parseGraphKnowledgeAssetMetadataEnvelope(rows, input, 'stored-context');
+      const stored = parseStoredGraphKnowledgeAssetMetadataEnvelope(rows, input);
       expect(stored.state).toBe(fault === 'canonical' ? 'confirmed' : 'invalid');
       if (stored.state === 'confirmed') {
         expect(stored.envelope.merkleRoot).toEqual(wire.merkleRoot);
@@ -131,7 +131,7 @@ describe('shared structural parsing policies', () => {
       else if (fault === 'wrong-meta-graph') rows = rows.map(row => ({ ...row, graph: 'urn:wrong' }));
       else rows.push({ ...rows[0]!, predicate: `${DKG}${fault}`, object: 'urn:legacy' });
       expect(parseGraphKnowledgeAssetMetadataEnvelope(rows, input).state).toBe('confirmed');
-      expect(parseGraphKnowledgeAssetMetadataEnvelope(rows, input, 'stored-context')).toEqual({ state: 'invalid' });
-      expect(() => parseGraphKnowledgeAssetStructure(rows, input, { syntax: 'wire', context: 'required' })).toThrow();
+      expect(parseStoredGraphKnowledgeAssetMetadataEnvelope(rows, input)).toEqual({ state: 'invalid' });
+      expect(() => parseWireGraphKnowledgeAssetStructure(rows, input.ual)).toThrow();
     });
 });

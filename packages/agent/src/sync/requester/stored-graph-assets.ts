@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri, DEFAULT_MAX_READ_BYTES } from '@origintrail-official/dkg-core';
-import { workspacePublicQuadsDigest, GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
+import { workspacePublicQuadsDigest, GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
@@ -58,8 +58,8 @@ export async function readHeldGraphScopedAssets(
     const confirmed = new Set<string>();
     const eligible = chunk.filter(descriptor => {
       const rows = rowsBySubject.get(descriptor.ual) ?? [];
-      const stored = parseGraphKnowledgeAssetMetadataEnvelope(rows.map(row => ({ ...row, graph: metaGraph })),
-        { contextGraphId: request.contextGraphId, ual: descriptor.ual }, 'stored-context');
+      const stored = parseStoredGraphKnowledgeAssetMetadataEnvelope(rows.map(row => ({ ...row, graph: metaGraph })),
+        { contextGraphId: request.contextGraphId, ual: descriptor.ual });
       if (stored.state === 'confirmed') confirmed.add(descriptor.ual);
       return holdsDescriptor(descriptor, stored, confirmation);
     });
