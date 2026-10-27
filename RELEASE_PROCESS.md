@@ -200,11 +200,20 @@ The initial receipt is written before execution, so SIGKILL or host loss also
 leaves non-passing evidence, but cannot guarantee cleanup. Inspect resources
 named `dkg-cert-<receipt.runId>-*` after a forced termination. `*-data/` contains disposable local wallet keys and is
 local diagnosis only: exclude it from uploads. Portable evidence is the complete
-bundle plus attempt top-level JSON/JSONL/log files. The separately named manual
-`package-certification.yml` workflow uploads those files, with no npm credentials.
-It is opt-in and does not run global npm installs on unrelated PRs. Availability
-of workflow dispatch depends on the workflow reaching the default branch.
-It does not change the immutable planner, required checks or branch protections.
+bundle plus attempt top-level JSON/JSONL/log files. The separately named
+`package-certification.yml` workflow runs automatically on every push to `main`,
+including release PR merges, and certifies the exact pushed commit. It prepares
+the full package set, certifies both installation layouts, verifies the receipt,
+and runs the missing-UI negative control. Package bytes and attempt evidence are
+uploaded for 14 days, including evidence from failed attempts, with no npm
+credentials or publication. A failed run marks that commit's certification check
+as failed; it does not undo the merge or automatically promote a release.
+
+Maintainers can also dispatch a manual rehearsal for a full candidate SHA once
+the workflow reaches the default branch. The workflow does not run on unrelated
+PRs. Both automatic and manual runs use the selected SHA consistently for checkout,
+certification, verification and artifact naming. This post-merge check does not
+change the immutable planner, required checks or branch protections.
 Required script tests continue through `pnpm test:scripts`; any activation as a
 required candidate gate needs a separately reviewed trusted-controller pin/route
 update and maintainer branch-protection decision.
@@ -229,6 +238,9 @@ pnpm release:publish-prepared --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt
   --tag "v$VERSION" --dist-tag canary
 pnpm release:verify-published --bundle "$BUNDLE" --commit "$COMMIT" --version "$VERSION" \
   --profile installed-local-rdf-v1 --tags canary
+# Promotion reads every package's dist-tags first, then asks for one npm
+# one-time code (typing is hidden) and moves every remaining tag with it.
+# --otp or NPM_CONFIG_OTP skips the question; --dry-run shows the plan only.
 pnpm release:promote --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
   --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 \
   --tag "v$VERSION" --tags testnet
@@ -255,12 +267,24 @@ Publication orders internal runtime dependencies before their consumers, so an
 exposed CLI tag never depends on candidate packages still awaiting publication.
 Cycles fail before mutation. Dry-run and execution use the same ordered plan.
 Promotion requires all versions to exist with matching integrity before its first
-tag update. Both paths recheck package/evidence bytes immediately before mutation.
+tag update. It then reads every package's dist-tags and plans only the tags not on
+the version yet, reporting how many already are. Only after those reads does it
+ask for the one-time code, so the code is fresh when the writes start; it asks in
+a terminal, unless `--otp` or `NPM_CONFIG_OTP` supplies one. npm runs with stdin
+closed, so it cannot fall back to its web authentication prompt, and receives the
+code in its environment, never its arguments. The first write goes alone, so a
+stale or mistyped code is refused once; then eight packages are written at a time,
+each package's tags in sequence (two writes to one package's dist-tags at once can
+fail with E409 Conflict). On a stale code (EOTP) or a rate limit (E429) no new write
+starts, and the command reports what moved and what to do: take a fresh code, or
+wait about ten minutes. It then reads the registry again and lists every tag still
+not on the version, because npm has accepted tag writes before that never showed.
+Both paths recheck package/evidence bytes immediately before mutation.
 Cross-package changes are **not atomic**: failures report exact completed/reused
-packages and tags. Re-running promotion is idempotent after the complete integrity
-preflight; obtain a fresh OTP if it expired. Dry-run performs reads only and never
-prints OTPs or registry credentials. The supported wrapper cannot prevent a
-credential holder bypassing it with direct npm commands.
+packages and tags, and re-running promotion after the complete integrity preflight
+moves only the tags still missing. Dry-run performs reads only, asks for no code
+and never prints OTPs or registry credentials. The supported wrapper cannot prevent
+a credential holder bypassing it with direct npm commands.
 
 ### 6c) Create the GitHub Release (manual)
 

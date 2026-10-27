@@ -52,8 +52,9 @@ function databaseStem(databasePath: string): string {
   return basename(databasePath).replace(/\.sqlite3$/, '');
 }
 
+// Every character of the database's stem matches only itself; `suffix` is a pattern.
 function copyNamePattern(databasePath: string, suffix = ''): RegExp {
-  const stem = databaseStem(databasePath).replace(/[.]/g, '\\.');
+  const stem = databaseStem(databasePath).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
   return new RegExp(`^${stem}\\.schema-v(\\d+)-to-v(\\d+)\\.pre-migration(\\.pending)?\\.sqlite3${suffix}$`);
 }
 

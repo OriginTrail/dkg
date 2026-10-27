@@ -28,6 +28,11 @@
       "import": "./dist/write-preflight-attribution.js",
       "default": "./dist/write-preflight-attribution.js"
     },
+    "./write-preflight-unresolved-window": {
+      "types": "./dist/write-preflight-unresolved-window.d.ts",
+      "import": "./dist/write-preflight-unresolved-window.js",
+      "default": "./dist/write-preflight-unresolved-window.js"
+    },
     "./chain-authority-read-budgets": {
       "types": "./dist/chain-authority-read-budgets.d.ts",
       "import": "./dist/chain-authority-read-budgets.js",
@@ -106,6 +111,7 @@
     "./dist/rfc64/catalog-applied-head-coordinator-v1.js": null,
     "./dist/rfc64/catalog-synchronization-evidence-v1.js": null,
     "./dist/rfc64/finalized-private-placement-repair-store-v1.js": null,
+    "./dist/rfc64/owed-share-inventory-store-v1.js": null,
     "./dist/rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js": null,
     "./dist/rfc64/catalog-native-scoped-read-capability-v1-internal.js": null,
     "./dist/rfc64/catalog-native-scoped-read-provider-v1.js": null,

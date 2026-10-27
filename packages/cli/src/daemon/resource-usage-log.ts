@@ -7,10 +7,11 @@ import {
   type BackpressureRegistry,
   type BackpressureSnapshot,
 } from '@origintrail-official/dkg-core';
+import { STORE_CONTROL_SCHEDULER_ID_PREFIX } from '@origintrail-official/dkg-storage';
 
 /**
  * One `resource_usage` line every five minutes: the daemon's memory, the store
- * scheduler's lanes and the sync slots in flight.
+ * scheduler's lanes, the queue control path and the sync slots in flight.
  *
  * The daemon logged no such figures, so the log of a node that was killed for
  * memory could not show how its memory grew or what its store and sync work
@@ -25,12 +26,17 @@ import {
  *     store_normal=1/2 store_normal_queued=3 store_normal_active=agent.query.select:0.4s
  *     store_background=1/1 store_background_queued=12
  *     store_background_active=agent.durableSync.graphScopedMaterialization:9.8s
+ *     store_control_publisher=1/2 store_control_publisher_queued=0 store_control_publisher_active=publisher.asyncLift.claim:0.2s
+ *     store_control_share=0/1 store_control_share_queued=0
  *     sync=3/3 sync_queued=0/16 sync_active=durable:vm-recovery:62.0s,durable:control-plane*2:0.3s
  *
  * `<lane>=a/b` is work running against the lane's ceiling, `_queued` work
  * waiting, and `_active` each operation holding a slot (`*n` when n of it do)
  * with the age of its oldest run, oldest first. The sync figures count the
- * reserved slots too. A scheduler that never registered is left out.
+ * reserved slots too. `store_control_<queue>` is the same for a queue's own
+ * control scheduler (one lane; its ceiling is the queue's slots, on top of the
+ * shared scheduler's). A scheduler that never registered is left out, so the
+ * control figures are absent while the control path is off.
  */
 export const RESOURCE_USAGE_LOG_INTERVAL_MS = 5 * 60_000;
 
@@ -45,6 +51,8 @@ export interface ResourceUsageSample {
   heapLimitBytes: number;
   externalBytes: number;
   store?: BackpressureSnapshot;
+  /** The queue control path's schedulers (one per queue), if it is on. */
+  control?: readonly BackpressureSnapshot[];
   sync?: BackpressureSnapshot;
 }
 
@@ -59,6 +67,7 @@ export function captureResourceUsage(
     heapLimitBytes: getHeapStatistics().heap_size_limit,
     externalBytes: memory.external,
     store: schedulers.find((scheduler) => scheduler.scheduler === 'store'),
+    control: schedulers.filter((scheduler) => scheduler.scheduler.startsWith(STORE_CONTROL_SCHEDULER_ID_PREFIX)),
     sync: schedulers.find((scheduler) => scheduler.scheduler === 'sync-global'),
   };
 }
@@ -112,6 +121,12 @@ export function formatResourceUsageLine(sample: ResourceUsageSample): string {
     if (lane.activeOperations.length > 0) {
       fields.push(`${key}_active=${activeOperations(lane.activeOperations)}`);
     }
+  }
+  for (const { scheduler, totals, lanes } of sample.control ?? []) {
+    const key = scheduler.replace(/\W/g, '_');
+    fields.push(`${key}=${ofLimit(totals.inflight, totals.inflightLimit)}`, `${key}_queued=${totals.queued}`);
+    const active = lanes.flatMap((lane) => lane.activeOperations);
+    if (active.length > 0) fields.push(`${key}_active=${activeOperations(active)}`);
   }
   if (sample.sync) {
     const { totals, lanes } = sample.sync;

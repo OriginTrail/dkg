@@ -1,5 +1,5 @@
 import { assertCanonicalDigest, assertCanonicalEvmAddress, parseCanonicalDecimalU64, parseDeterministicKnowledgeAssetUal, validateAssertionName } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DEFAULT_PROMOTE_CONTROL_GRAPH_URI, PROMOTE_CONTEXT_GRAPH_ID, PROMOTE_PAYLOAD,
   jobSubject, parseLiteral, normalizePromoteAgentLane, parseJobPayload } from './async-promote-queue-utils.js';
 import { readShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
@@ -79,7 +79,7 @@ export async function reconcileRetainedShareUnlocked(
       ?job ?predicate ?object .
       OPTIONAL { ?job <${PROMOTE_PAYLOAD}> ?payload }
       OPTIONAL { ?job <${PROMOTE_CONTEXT_GRAPH_ID}> ?indexedContext }
-    } } LIMIT ${limit + 1}`, { source: 'publisher.asyncPromote.reconcile', signal: AbortSignal.timeout(10_000) });
+    } } LIMIT ${limit + 1}`, { ...controlStoreOptions('share', 'publisher.asyncPromote.reconcile'), signal: AbortSignal.timeout(10_000) });
     if (result.type !== 'bindings') return unproven('incomplete_inventory', false);
     rows = result.bindings;
   } catch { return unproven('unavailable', false); }

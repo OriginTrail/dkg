@@ -157,7 +157,7 @@ Keep baseline files local unless a PR explicitly needs to share benchmark artifa
 Use the same machine, Node version, and terminal session shape for both runs.
 
 ```bash
-git checkout main
+git checkout testnet-canary
 pnpm install --frozen-lockfile
 pnpm bench:baseline
 
@@ -165,6 +165,8 @@ git checkout <feature-branch>
 pnpm install --frozen-lockfile
 pnpm bench:compare
 ```
+
+Pull requests target `testnet-canary`, so it is the baseline branch.
 
 `pnpm bench:compare` reads `bench/results/baseline.json`, writes the current run to `bench/results/compare.json`, and writes an HTML report to `bench/results/compare.html`. ESBench includes the previous-run diff in the text and HTML reports.
 
