@@ -104,6 +104,8 @@ export default defineConfig({
       "test/promote-async-default-agent.test.ts",
       "test/queued-share-scoped-recovery.test.ts",
       'test/durable-share-inventory.test.ts',
+      'test/owed-share-inventory.test.ts',
+      'test/owed-share-inventory-owner.test.ts',
       'test/committed-share-handoff.test.ts',
       'test/promote-lifecycle-partial-commit.test.ts',
       "test/promote-durable-root-companion.test.ts",
@@ -465,6 +467,7 @@ export default defineConfig({
       // equal-count version change safe.
       "test/swm-materialization-witness.test.ts",
       "test/replace-subject-agent-wrapper.test.ts",
+      "test/mutation-observed-store-control-options.test.ts",
       "test/replace-subject-and-insert-agent-wrapper.test.ts",
       "test/recipient-key-route-fence.test.ts",
       "test/recipient-key-route-fence-wrapper.test.ts",

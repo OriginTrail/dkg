@@ -94,6 +94,7 @@ export default defineConfig({
           'test/daemon-pca-routes.test.ts',
           'test/knowledge-assets-error-mapping.test.ts',
           'test/promote-admission-route.test.ts',
+          'test/async-share-control-busy-admission.test.ts',
           'test/daemon-identity-wallet-routes.test.ts',
           // The dashboard shell carries the operator token only for trusted
           // local requests (loopback socket and loopback Host). Pure helpers
@@ -172,6 +173,7 @@ export default defineConfig({
           'test/node-runtime-preflight.test.ts',
           'test/outbound-brotli-refusal.test.ts',
           'test/dkg-doctor.test.ts',
+          'test/doctor-command-config.test.ts',
           'test/metrics-collector-config.test.ts',
           'test/init.test.ts',
           'test/init-command.test.ts',
