@@ -4,7 +4,7 @@ import type { StoreRecoveryGenerationReader } from '@origintrail-official/dkg-st
 import type { StoreMutation, StoreMutationExecution, StoreMutationOutcome, StoreMutationObserver } from './store-mutation.js';
 
 export interface StoreContentScope {
-  readonly assertionGraphs: readonly string[];
+  readonly graphs: readonly string[];
   readonly metadataGraph: string;
   readonly subjects: readonly string[];
 }
@@ -45,7 +45,7 @@ function mutationEffect(mutation: StoreMutation): ContentEffect {
 }
 
 function scopeEffect(scope: StoreContentScope): ContentEffect {
-  const graphs = new Map<string, GraphEffect>(scope.assertionGraphs.map(graph => [graph, { kind: 'graph' }]));
+  const graphs = new Map<string, GraphEffect>(scope.graphs.map(graph => [graph, { kind: 'graph' }]));
   if (!graphs.has(scope.metadataGraph)) graphs.set(scope.metadataGraph, { kind: 'subjects', subjects: new Set(scope.subjects) });
   return { kind: 'graphs', graphs };
 }

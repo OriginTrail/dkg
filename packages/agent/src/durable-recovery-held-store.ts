@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { LOCAL_TRUSTED_KA_CONTROLS_GRAPH, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { StoreContentFence } from './internal/store-content-fence.js';
 import { heldGraphScopedAssetsReader, type HeldGraphScopedAssetsRequest } from './sync/requester/stored-graph-assets.js';
@@ -22,7 +22,7 @@ export function createDurableHeldStore(
 ): DurableRecoveryHost['heldStore'] {
   if (!fence) return undefined;
   return { prove: async request => {
-    const proof = fence.openScope({ assertionGraphs: request.descriptors.map(d => d.assertionGraph),
+    const proof = fence.openScope({ graphs: [...request.descriptors.map(d => d.assertionGraph), LOCAL_TRUSTED_KA_CONTROLS_GRAPH],
       metadataGraph: contextGraphMetaUri(request.contextGraphId), subjects: request.descriptors.map(d => d.ual) });
     if (!proof) return undefined;
     try {

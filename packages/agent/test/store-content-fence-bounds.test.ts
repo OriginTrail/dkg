@@ -3,7 +3,7 @@ import { StoreContentFence, STORE_CONTENT_EFFECT_MAX_GRAPHS as GRAPH_LIMIT,
   STORE_CONTENT_EFFECT_MAX_SUBJECTS_PER_GRAPH as SUBJECT_LIMIT } from '../src/internal/store-content-fence.js';
 
 const quad = (graph: string, subject: string) => ({ graph, subject, predicate: 'urn:p', object: '"value"' });
-const scope = (graph: string, subject = 'urn:never-written') => ({ assertionGraphs: [], metadataGraph: graph, subjects: [subject] });
+const scope = (graph: string, subject = 'urn:never-written') => ({ graphs: [], metadataGraph: graph, subjects: [subject] });
 function expectOpen(fence: StoreContentFence, graph: string, subject?: string) {
   const proof = fence.openScope(scope(graph, subject));
   expect(proof).toBeDefined(); proof!.assertCurrent(); proof!.close();

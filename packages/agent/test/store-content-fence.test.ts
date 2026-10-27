@@ -7,7 +7,7 @@ import { createMutationObservedStore } from '../src/internal/context-graph-cache
 import { StoreContentFence } from '../src/internal/store-content-fence.js';
 import { createObservedStoreMutation } from '../src/internal/observed-store-mutation.js';
 
-const scope = { assertionGraphs: ['urn:assertion'], metadataGraph: 'urn:meta', subjects: ['urn:asset'] };
+const scope = { graphs: ['urn:assertion'], metadataGraph: 'urn:meta', subjects: ['urn:asset'] };
 const quad = { subject: 'urn:s', predicate: 'urn:p', object: '"value"', graph: 'urn:assertion' };
 function fixture() {
   const raw = new OxigraphStore();
@@ -83,7 +83,7 @@ it.each(['lifecycle', 'ledger'] as const)('composes the production %s writer wit
   const subject = kind === 'ledger' ? 'urn:ledger' : assertionLifecycleUri(input.contextGraphId, input.agentAddress, input.name);
   const metadataGraph = kind === 'ledger' ? STORAGE_ACK_LEDGER_GRAPH : contextGraphMetaUri(input.contextGraphId);
   try {
-    await composed.heldContent.withScope({ assertionGraphs: [], metadataGraph, subjects: [subject] }, async assertCurrent => {
+    await composed.heldContent.withScope({ graphs: [], metadataGraph, subjects: [subject] }, async assertCurrent => {
       const update = raw.update.bind(raw);
       vi.spyOn(raw, 'update').mockImplementation(async (...args) => {
         expect(assertCurrent).toThrow('Held assertion content changed');
@@ -112,7 +112,7 @@ it('isolates indeterminate graph and metadata-subject writes from unrelated proo
       }
     });
     expect(await f.fence.withScope(scope, async check => { check(); return true; })).toBe(true);
-    expect(f.fence.openScope({ ...scope, assertionGraphs: ['urn:unrelated'] })).toBeUndefined();
+    expect(f.fence.openScope({ ...scope, graphs: ['urn:unrelated'] })).toBeUndefined();
     expect(f.fence.openScope({ ...scope, subjects: ['urn:other-asset'] })).toBeUndefined();
   } finally { await f.store.close(); }
 });
