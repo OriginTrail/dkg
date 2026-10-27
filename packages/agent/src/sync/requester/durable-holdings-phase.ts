@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import type { GraphScopedDurableManifestPlan } from '../durable-integrity.js';
 import type { DurableSyncAccumulator } from '../durable-progress.js';
 import type { DurableRecoveryRoundDecision } from '../durable-recovery-round.js';
@@ -29,14 +28,20 @@ export async function attemptDurableHoldingsPhase(input: {
   const held = recovery?.held;
   if (!manifest) return { strategy: 'legacy' };
   if (!held) return full;
-  const outcome = await held.withStoreFence({
-    assertionGraphs: manifest.descriptors.map(descriptor => descriptor.assertionGraph),
-    metadataGraph: contextGraphMetaUri(contextGraphId), subjects: manifest.descriptors.map(descriptor => descriptor.ual),
-  }, async (assertStoreCurrent): Promise<DurableRecoveryRoundDecision> => {
-    const assertCurrent = () => { held.assertCurrent(); assertStoreCurrent(); };
+  let proof;
+  try { proof = await held.prove({ contextGraphId, descriptors: manifest.descriptors, signal: context.signal }); }
+  catch (error) {
+    context.signal?.throwIfAborted();
+    if (error instanceof Error && error.name === 'AbortError') throw error;
+    context.logWarn(context.ctx, `Could not prove held content for "${contextGraphId}": ${String(error)}`);
+    return { strategy: 'full', continuation: 'reconsider-holdings' };
+  }
+  if (!proof) return full;
+  try {
+    const assertCurrent = () => { held.assertCurrent(); proof.assertCurrent(); };
     assertCurrent();
     const plan = await planDurableDataFromLocalHoldings({
-      contextGraphId, manifest, options: recovery.holdings, holdings: held.reader,
+      contextGraphId, manifest, options: recovery.holdings, holdings: { read: async () => proof.held, confirmCurrent: held.confirmCurrent },
       signal: context.signal, logWarn: message => context.logWarn(context.ctx, message),
     });
     if (plan.kind === 'full') return { strategy: 'full', continuation: plan.continuation };
@@ -51,6 +56,5 @@ export async function attemptDurableHoldingsPhase(input: {
     return plan.kind === 'held'
       ? { strategy: 'held' }
       : { strategy: 'exact-missing', batches: plan.batches };
-  });
-  return outcome ?? full;
+  } finally { proof.close(); }
 }

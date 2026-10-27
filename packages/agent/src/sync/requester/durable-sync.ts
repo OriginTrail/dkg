@@ -1295,7 +1295,9 @@ async function runDurableSyncWithBudget(
             logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
           }
         }
-        settlement.assertCurrent();
+        // Preserve a physically settled first prefix on cancellation. A reused
+        // prefix still must pass its ownership/content proof before advancing.
+        settlement.assertPrefixCurrent();
         const settledCheckpoint = checkpointSettledManifestGraph?.(asset.assertionGraph);
         if (settledCheckpoint) mayYieldAtSettledManifestBoundary = true;
         if (settledCheckpoint?.numericAdvance && !incrementalCheckpointAdvanceRecorded) {

@@ -1,3 +1,8 @@
+import { createDurableHeldStore } from '../../src/durable-recovery-held-store.js';
+import { runAdmittedDurableGraph } from '../../src/durable-recovery-graph.js';
+import type { DurableRecoveryHost } from '../../src/durable-recovery-host.js';
+import { exactAssetFetchSessionPolicy } from '../../src/sync/requester/exact-durable-fetch.js';
+import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import { StoreContentFence } from '../../src/internal/store-content-fence.js';
 import { createObservedStoreMutation } from '../../src/internal/observed-store-mutation.js';
 import { createMutationObservedStore } from '../../src/internal/context-graph-cache-invalidating-store.js';
@@ -31,7 +36,7 @@ import {
   type DurableMetaContinuation,
   type DurableSyncContext,
 } from '../../src/sync/requester/durable-sync.js';
-import { materializeVerifiedGraphScopedAsset } from '../../src/sync/requester/graph-scoped-materialization.js';
+import { authenticateVerifiedGraphScopedAsset, materializeVerifiedGraphScopedAsset } from '../../src/sync/requester/graph-scoped-materialization.js';
 import { deleteSyncPageCheckpoint, fetchSyncPages } from '../../src/sync/requester/page-fetch.js';
 import { processDurableBatchForWire } from '../../src/sync-verify-worker-impl.js';
 import type { DurableBatchVerificationMode } from '../../src/sync-verify-worker.js';
@@ -159,7 +164,7 @@ type ServingPeer = ReturnType<typeof servingPeer>;
  */
 export function node(
   serving: ServingPeer | Record<string, ServingPeer>,
-  options: { recoveryGeneration?: () => number | undefined; holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
+  options: { failAssetStore?: () => boolean; noChain?: boolean; exactPaging?: boolean; recoveryGeneration?: () => number | undefined; holdingsUnreadable?: boolean; chain?: () => readonly AssetFixture[]; subscriptionId?: () => string; bindingGeneration?: () => number; disablePrefixProof?: () => boolean; subscription?: () => ContextGraphSub | undefined; beforeChainRead?: () => Promise<void>; beforeVerify?: () => Promise<void>; afterAssetStore?: () => Promise<void>; holdingsShortcut?: boolean; beforeMetaStore?: () => Promise<void> } = {},
 ) {
   const peers: Record<string, ServingPeer> = 'send' in serving ? { [PEER]: serving as ServingPeer } : serving;
   const chain = options.chain ?? (() => Object.values(peers)[0]!.current());
@@ -209,7 +214,8 @@ export function node(
     checkpointStore: MemorySyncCheckpointStore,
     remotePeerId: string,
     roundOptions: Pick<DurableSyncContext, 'graphRecovery' | 'exactAssetSelectionFor' | 'settlementSliceDeadline'>,
-  ) => materialization.withHeldAssetFence(fence => runDurableSyncDetailed({
+  ) => materialization.withHeldAssetFence(async fence => {
+    const context: DurableSyncContext = {
     ctx,
     remotePeerId,
     contextGraphIds: [CG],
@@ -246,17 +252,21 @@ export function node(
       logDebug: () => {},
     }),
     ...roundOptions,
-    storedPrefix: options.disablePrefixProof?.() ? undefined : { read: heldGraphScopedAssetsReader(store), openScope: contentFence.openScope.bind(contentFence), assertCurrent: fence.assertCurrent },
+    storedPrefix: options.disablePrefixProof?.() ? undefined : { prove: createDurableHeldStore(store, contentFence, async () => {}, () => options.noChain ? 'integrity-only' : 'confirmed')!.prove, assertCurrent: fence.assertCurrent },
     graphRecovery: roundOptions.graphRecovery ? { ...roundOptions.graphRecovery, held: options.holdingsShortcut === false ? undefined : {
-      reader: holdings(fence.binding)!, assertCurrent: fence.assertCurrent,
-      withStoreFence: contentFence.withScope.bind(contentFence),
+      confirmCurrent: holdings(fence.binding)!.confirmCurrent, assertCurrent: fence.assertCurrent,
+      prove: async request => {
+        if (holdingsUnreadable) throw new Error('store queue wait timeout');
+        return createDurableHeldStore(store, contentFence, async () => {})!.prove(request);
+      },
     } } : undefined,
     processDurableBatchInWorker: async (...args) => { await options.beforeVerify?.(); return processBatch(...args); },
     storeInsert: async ({ quads }) => { await options.beforeMetaStore?.(); await store.insert(quads); },
     storeGraphScopedAsset: async ({ asset: verified }) => {
+      if (options.failAssetStore?.()) throw new Error('authentication budget expired before next asset');
       writes.push(verified.ual);
       // As chain authentication leaves it: confirmed, written with its rows in one replacement.
-      const metadataQuads = overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
+      const metadataQuads = options.noChain ? (await authenticateVerifiedGraphScopedAsset({ chainId: 'none' } as ChainAdapter, verified)).asset.metadataQuads : overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(
         verified.metadataQuads,
         { ual: verified.ual, metaGraph: verified.metaGraph, receivedAt: new Date(0) },
         {
@@ -279,7 +289,27 @@ export function node(
     logInfo: (_ctx, message) => { info.push(message); },
     logWarn: (_ctx, message) => { info.push(message); },
     logDebug: () => {},
-  }));
+    };
+    if (!options.exactPaging) return runDurableSyncDetailed(context);
+    const selection = createUalOnlyExactAssetSelection(peers[remotePeerId]!.current().map(f => f.ual));
+    if (selection.kind !== 'ual-only') throw new Error('Expected UAL selection');
+    const host: DurableRecoveryHost = {
+      owner: {}, policy: () => ({}), admission: { run: request => request.work() },
+      transport: { fetchPages: request => context.fetchSyncPages(request), stream: () => ({} as ReturnType<DurableRecoveryHost['transport']['stream']>) },
+      verification: { processBatch: context.processDurableBatchInWorker, parseAndFilter: peers[remotePeerId]!.parseAndFilter },
+      storeInsert: context.storeInsert, checkpoints: { deleteCheckpoint: context.deleteCheckpoint, setCheckpoint: context.setCheckpoint },
+      log: { info: context.logInfo, warn: context.logWarn, debug: context.logDebug },
+      reconcile: async () => {}, resolveOrdinaryAuthority: () => { throw new Error('supplied authority'); },
+      materialization: () => ({ ...materialization, storeGraphScopedAsset: context.storeGraphScopedAsset! }),
+      heldStore: createDurableHeldStore(store, contentFence, async () => {}),
+    };
+    return runAdmittedDurableGraph({ host, ctx, remotePeerId, contextGraphId: CG, remainingContextGraphs: 1,
+      authority: { coalescing: 'owner-only', admitVerifiedPage() {}, isRegisteredPublic: () => true,
+        authenticate: () => { throw new Error('supplied materialization'); } },
+      options: { exactAssetFetchPolicy: exactAssetFetchSessionPolicy(selection), exactRecoveryTransportMode: 'legacy',
+        settlementSliceTimeoutMs: roundOptions.settlementSliceDeadline === undefined ? undefined : 1 },
+    });
+  });
 
   /**
    * A process lifetime: a new owner and a new checkpoint store. With

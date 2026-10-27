@@ -214,3 +214,40 @@ it.each(['overlapping', 'unknown'])('recovers bounded DATA after confirmed backe
     descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors }))
     .toEqual(new Set(fixtures.map(f => f.ual)));
 });
+
+it('finishes bounded no-chain recovery while retaining tentative status', async () => {
+  const fixtures = generation();
+  const core = node(servingPeer(fixtures), { noChain: true });
+  let rounds = 0;
+  const result = await core.start({ sliceSpent: true, isRunning: () => rounds < 12, afterSlice: () => { rounds++; } }).recover();
+  expect(result.outcome).toBe('terminal');
+  expect(rounds).toBeGreaterThan(1);
+  expect(core.writes).toEqual(fixtures.map(f => f.ual));
+  const request = { contextGraphId: CG, descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors };
+  expect(await readHeldGraphScopedAssets(core.store, request)).toEqual(new Set());
+  expect(await readHeldGraphScopedAssets(core.store, request, undefined, undefined, 'integrity-only')).toEqual(new Set(fixtures.map(f => f.ual)));
+  for (const f of fixtures) expect(await core.store.query(`ASK { GRAPH <${f.meta[0]!.graph}> { <${f.ual}> <http://dkg.io/ontology/status> "tentative" } }`)).toEqual({ type: 'boolean', value: true });
+});
+
+it.each(['clean', 'deleted', 'corrupted'])('resumes production exact paging with a %s stored prefix', async change => {
+  const fixtures = generation(); let fail = true, attempts = 0;
+  const core = node(servingPeer(fixtures), { exactPaging: true, failAssetStore: () => fail && ++attempts > 1 });
+  const checkpoints = new MemorySyncCheckpointStore();
+  const first = await core.round(checkpoints, PEER, {});
+  expect(first.result.complete).toBe(false);
+  fail = false;
+  const prefix = fixtures.find(f => core.writes.includes(f.ual))!;
+  expect(prefix).toBeDefined();
+  if (change === 'deleted') await core.store.dropGraph(prefix.graph);
+  if (change === 'corrupted') {
+    await core.store.delete([prefix.payload[0]!]);
+    await core.store.insert([{ ...prefix.payload[0]!, object: '"corrupt"' }]);
+  }
+  let next = await core.round(checkpoints, PEER, {});
+  if (!next.result.complete) next = await core.round(checkpoints, PEER, {});
+  expect(next.result.complete).toBe(true);
+  expect(core.writes.filter(ual => ual === prefix.ual)).toHaveLength(change === 'clean' ? 1 : 2);
+  expect(await readHeldGraphScopedAssets(core.store, { contextGraphId: CG,
+    descriptors: createGraphScopedDurableManifestPlan(fixtures.flatMap(f => f.meta), CG)!.descriptors }))
+    .toEqual(new Set(fixtures.map(f => f.ual)));
+});

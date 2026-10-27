@@ -97,7 +97,7 @@ const heldCopyKey = (descriptor: GraphScopedDescriptor) =>
   `${descriptor.ual}\0${descriptor.assertionVersion}\0${descriptor.claimedRootHex}`;
 
 /** A store read and a chain read make a holdings reader; without either, rounds plan no shortcut. */
-export function currentHeldGraphScopedAssetsReader(input: {
+interface HeldAssetsReaderInput {
   readonly readHeld?: (request: HeldGraphScopedAssetsRequest) => Promise<ReadonlySet<string>>;
   /** Retry best-effort SWM housekeeping after every skipped copy is authenticated. */
   readonly reconcileHeld?: (request: HeldGraphScopedAssetsRequest, held: ReadonlySet<string>) => Promise<void>;
@@ -106,12 +106,16 @@ export function currentHeldGraphScopedAssetsReader(input: {
     deadline: number, signal?: AbortSignal) => Promise<GraphScopedAssetChainState>;
   /** The round's budget: the chain checks share one authentication deadline. */
   readonly budget: { createGraphScopedAuthenticationDeadline(): number };
-}): DurableHoldingsReader | undefined {
-  const { readHeld, readChainState } = input;
-  if (!readHeld || !readChainState) return undefined;
-  return {
-    read: readHeld,
-    confirmCurrent: async (request, held, confirmed) => {
+}
+export function currentHeldGraphScopedAssetsReader(input: HeldAssetsReaderInput): DurableHoldingsReader | undefined {
+  const confirmCurrent = currentHeldGraphScopedAssetsConfirmer(input);
+  return input.readHeld && confirmCurrent ? { read: input.readHeld, confirmCurrent } : undefined;
+}
+
+export function currentHeldGraphScopedAssetsConfirmer(input: Omit<HeldAssetsReaderInput, 'readHeld'>): DurableHoldingsReader['confirmCurrent'] | undefined {
+  const { readChainState } = input;
+  if (!readChainState) return undefined;
+  return async (request, held, confirmed) => {
       const deadline = Math.min(
         input.budget.createGraphScopedAuthenticationDeadline(),
         Date.now() + HELD_CHAIN_CHECK_BUDGET_MS,
@@ -154,7 +158,6 @@ export function currentHeldGraphScopedAssetsReader(input: {
       if (input.binding && bindingKey(input.binding()) !== capturedBinding) {
         throw new HeldGenerationNotCurrentError(`Local binding for "${contextGraphId}" changed during held-copy checks`);
       }
-    },
   };
 }
 

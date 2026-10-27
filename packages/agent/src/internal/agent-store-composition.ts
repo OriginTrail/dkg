@@ -23,17 +23,19 @@ export function createAgentStoreComposition(
     },
   });
   const store = createMutationObservedStore(raw, executeMutation);
-  return {
-    store, heldContent,
     // This canonical writer removes operation subjects only in the named SWM
     // metadata graph. Observe that scope before dispatch, including failures.
-    storageAckCopyCleanupWriter: (async input => {
+  const storageAckCopyCleanupWriter: StorageAckCopyCleanupWriter = async input => {
       if (input.cleanedOperations.length === 0) return;
       const update = storageAckCopiesDischargeUpdate(input);
       if (!raw.update) throw new Error('Storage ACK cleanup requires store.update');
       await executeMutation(() => raw.update!(update, { source: 'publisher.storageAckCopyCleanup', touchedGraphs: [input.metaGraph] }),
         () => true, { removals: [{ graph: input.metaGraph }] }, 'update');
-    }) satisfies StorageAckCopyCleanupWriter,
+  };
+
+  return {
+    store, heldContent,
+    storageAckCopyCleanupWriter,
     publishedLifecycleWriter: createPublishedNamedKaVmLifecycleWriter({
       updateStore: raw, fallbackStore: store, executeMutation,
     }),

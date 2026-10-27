@@ -73,3 +73,18 @@ describe('provenance resolution', () => {
     expect(node.provenance).toMatchObject({ generatedByName: 'missing-agent', generatedAt: '2026-01-02T00:00:00Z' });
   });
 });
+
+it('resolves anonymous generators and source names across edges and direct metadata', () => {
+  const model = new GraphModel();
+  model.addTriples([
+    triple('urn:item', `${prov}wasDerivedFrom`, 'https://example.test/unnamed'),
+    triple('https://example.test/unnamed', rdfType, `${vocab}DataSource`),
+    triple('https://example.test/named', 'https://schema.org/name', 'Named'),
+    triple('https://example.test/generator', rdfType, `${prov}Agent`),
+  ]);
+  const item = model.getNode('urn:item')!;
+  item.metadata.set(`${prov}wasGeneratedBy`, [{ value: 'https://example.test/generator' }]);
+  item.properties.set(`${vocab}dataSource`, [{ value: 'https://example.test/named' }, { value: 'https://example.test/generator' }]);
+  new ProvenanceResolver().resolve(model);
+  expect(item.provenance).toMatchObject({ generatedBy: 'https://example.test/generator', generatedByName: undefined, sources: ['https://example.test/unnamed', 'https://example.test/named', 'https://example.test/generator'], sourceNames: ['unnamed', 'Named', 'generator'] });
+});

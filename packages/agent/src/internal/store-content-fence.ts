@@ -9,75 +9,86 @@ export interface StoreContentScope {
   readonly subjects: readonly string[];
 }
 
-/** A proof watches only its assertion graphs and descriptor subjects, from before
- * the first read until synchronous settlement. Writes invalidate before dispatch;
- * unresolved writes block only scopes they might still change. Unknown writes
- * remain global until a supervised backend replacement proves termination.
- * Reading or rewriting alone cannot prove a timed-out backend write settled.
+/** Explicit content effects shared by active writes, watches and uncertain outcomes. */
+type GraphEffect = { kind: 'graph' } | { kind: 'subjects'; subjects: Set<string> };
+type ContentEffect = { kind: 'global' } | { kind: 'graphs'; graphs: Map<string, GraphEffect> };
+
+function mutationEffect(mutation: StoreMutation): ContentEffect {
+  if (mutation.everything) return { kind: 'global' };
+  const graphs = new Map<string, GraphEffect>();
+  for (const { graph, subject } of [...mutation.quads ?? [], ...mutation.removals ?? []]) {
+    if (!graph || !isSafeIri(graph)) return { kind: 'global' };
+    if (!subject || subject.startsWith('_:')) { graphs.set(graph, { kind: 'graph' }); continue; }
+    const effect = graphs.get(graph);
+    if (effect?.kind === 'graph') continue;
+    const subjects = effect?.subjects ?? new Set<string>();
+    subjects.add(subject); graphs.set(graph, { kind: 'subjects', subjects });
+  }
+  return { kind: 'graphs', graphs };
+}
+
+function scopeEffect(scope: StoreContentScope): ContentEffect {
+  const graphs = new Map<string, GraphEffect>(scope.assertionGraphs.map(graph => [graph, { kind: 'graph' }]));
+  if (!graphs.has(scope.metadataGraph)) graphs.set(scope.metadataGraph, { kind: 'subjects', subjects: new Set(scope.subjects) });
+  return { kind: 'graphs', graphs };
+}
+
+function overlaps(left: ContentEffect, right: ContentEffect): boolean {
+  if (left.kind === 'global' || right.kind === 'global') return true;
+  for (const [graph, effect] of left.graphs) {
+    const other = right.graphs.get(graph);
+    if (!other) continue;
+    if (effect.kind === 'graph' || other.kind === 'graph') return true;
+    for (const subject of effect.subjects) if (other.subjects.has(subject)) return true;
+  }
+  return false;
+}
+
+function combine(left: ContentEffect, right: ContentEffect): ContentEffect {
+  if (left.kind === 'global' || right.kind === 'global') return { kind: 'global' };
+  for (const [graph, effect] of right.graphs) {
+    const old = left.graphs.get(graph);
+    if (!old || effect.kind === 'graph') left.graphs.set(graph, effect);
+    else if (old.kind === 'subjects') for (const subject of effect.subjects) old.subjects.add(subject);
+  }
+  return left;
+}
+
+/** Invalidates before dispatch and retains uncertain outcomes until a supervised
+ * backend replacement confirms termination. Reading or rewriting is not proof.
  */
 export class StoreContentFence implements StoreMutationObserver {
-  private readonly pending = new Set<{ mutation: StoreMutation; generation: number | undefined }>();
-  private readonly watches = new Set<{ touches(mutation: StoreMutation): boolean; valid: boolean }>();
-  private readonly uncertain = new Map<number | undefined, { everywhere: boolean; subjects: Map<string, Set<string> | undefined> }>();
+  private readonly pending = new Set<{ effect: ContentEffect; generation: number | undefined }>();
+  private readonly watches = new Set<{ effect: ContentEffect; valid: boolean }>();
+  private readonly uncertain = new Map<number | undefined, ContentEffect>();
 
   constructor(private readonly recoveryGeneration?: StoreRecoveryGenerationReader) {}
 
-
-  private rememberUncertain(mutation: StoreMutation, generation: number | undefined): void {
-    const uncertainty = this.uncertain.get(generation) ?? { everywhere: false, subjects: new Map<string, Set<string> | undefined>() };
-    this.uncertain.set(generation, uncertainty);
-    const remember = (graph?: string, subject?: string) => {
-      if (!graph || !isSafeIri(graph)) { uncertainty.everywhere = true; return; }
-      if (!subject || subject.startsWith('_:')) { uncertainty.subjects.set(graph, undefined); return; }
-      if (uncertainty.subjects.has(graph) && uncertainty.subjects.get(graph) === undefined) return;
-      const subjects = uncertainty.subjects.get(graph) ?? new Set<string>();
-      subjects.add(subject); uncertainty.subjects.set(graph, subjects);
-    };
-    if (mutation.everything) uncertainty.everywhere = true;
-    for (const quad of mutation.quads ?? []) remember(quad.graph, quad.subject);
-    for (const removal of mutation.removals ?? []) remember(removal.graph, removal.subject);
-  }
-
-  private isUncertain(scope: StoreContentScope, generation: number | undefined): boolean {
-    for (const [epoch, uncertainty] of this.uncertain) {
-      // Only a confirmed newer backend can retire an indeterminate old write.
-      // An unbound epoch (unsupported/unknown backend) stays fail-closed.
-      if (epoch !== undefined && generation !== undefined && epoch < generation) { this.uncertain.delete(epoch); continue; }
-      if (uncertainty.everywhere || scope.assertionGraphs.some(graph => uncertainty.subjects.has(graph))) return true;
-      if (!uncertainty.subjects.has(scope.metadataGraph)) continue;
-      const subjects = uncertainty.subjects.get(scope.metadataGraph);
-      if (subjects === undefined || scope.subjects.some(subject => subjects.has(subject))) return true;
-    }
-    return false;
-  }
-
   begin(mutation: StoreMutation): (outcome: StoreMutationOutcome) => void {
-    const pending = { mutation, generation: this.recoveryGeneration?.() };
+    const pending = { effect: mutationEffect(mutation), generation: this.recoveryGeneration?.() };
     this.pending.add(pending);
-    for (const watch of this.watches) if (watch.touches(mutation)) watch.valid = false;
+    for (const watch of this.watches) if (overlaps(watch.effect, pending.effect)) watch.valid = false;
     return outcome => {
       this.pending.delete(pending);
-      if (outcome === 'indeterminate') this.rememberUncertain(mutation, pending.generation);
+      if (outcome === 'indeterminate') this.uncertain.set(pending.generation,
+        combine(this.uncertain.get(pending.generation) ?? { kind: 'graphs', graphs: new Map() }, pending.effect));
     };
   }
 
   openScope(scope: StoreContentScope): { assertCurrent(): void; close(): void } | undefined {
     const generation = this.recoveryGeneration?.();
     if (this.recoveryGeneration && generation === undefined) return undefined;
-    const graphs = new Set(scope.assertionGraphs), subjects = new Set(scope.subjects);
-    const touches = (mutation: StoreMutation) => mutation.everything === true
-      || mutation.quads?.some(quad => !isSafeIri(quad.graph) || graphs.has(quad.graph)
-        || (quad.graph === scope.metadataGraph && (quad.subject.startsWith('_:') || subjects.has(quad.subject)))) === true
-      || mutation.removals?.some(removal => !removal.graph || !isSafeIri(removal.graph) || graphs.has(removal.graph)
-        || (removal.graph === scope.metadataGraph && (!removal.subject || removal.subject.startsWith('_:') || subjects.has(removal.subject)))) === true;
-    // A client-side operation can span a backend restart and dispatch more work.
-    // Only settled indeterminate outcomes can be retired by a newer generation.
-    if (this.isUncertain(scope, generation) || [...this.pending].some(pending => touches(pending.mutation))) return undefined;
-    const watch = { touches, valid: true };
+    const effect = scopeEffect(scope);
+    for (const [epoch, uncertain] of this.uncertain) {
+      // Unbound epochs stay fail-closed. Active client operations can span a
+      // restart, so only settled indeterminate outcomes may be retired.
+      if (epoch !== undefined && generation !== undefined && epoch < generation) this.uncertain.delete(epoch);
+      else if (overlaps(effect, uncertain)) return undefined;
+    }
+    for (const pending of this.pending) if (overlaps(effect, pending.effect)) return undefined;
+    const watch = { effect, valid: true };
     this.watches.add(watch);
     return {
-      // begin() invalidates before dispatch; no need to rescan the full prefix
-      // for each suffix write after the initial uncertainty/pending check.
       assertCurrent: () => {
         if (!watch.valid || this.recoveryGeneration?.() !== generation) throw Object.assign(
           new Error('Held assertion content changed during recovery'), { name: 'AbortError' });

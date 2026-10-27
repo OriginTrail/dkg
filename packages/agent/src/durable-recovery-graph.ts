@@ -9,7 +9,7 @@ import { runChallengeExactAssetFetch, runDurableSync, runDurableSyncDetailed, ty
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
-import { currentHeldGraphScopedAssetsReader } from './sync/requester/durable-data-holdings.js';
+import { currentHeldGraphScopedAssetsConfirmer } from './sync/requester/durable-data-holdings.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from './dkg-agent-constants.js';
 
 import type { DurableGraphOptions, PhysicalDurableSyncResult } from './durable-recovery-types.js';
@@ -151,27 +151,28 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     switch (outcome.kind) {
       case 'settled': return outcome.detailed;
       case 'not-selected':
-      case 'unsupported-before-start': return runDurableSyncDetailed(durableContext);
+      case 'unsupported-before-start': break; // Paging uses the same stored-prefix proof as full-graph recovery.
     }
   }
+  if (exactAssetSelection !== undefined && !host.heldStore) return runDurableSyncDetailed(durableContext);
   if (onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
   if (!host.heldStore && !graphRecovery) return { result: await runDurableSync(durableContext) };
   if (!host.heldStore) return runDurableSyncDetailed({ ...durableContext, graphRecovery });
   return materialization.withHeldAssetFence(fence => {
-    const storedPrefix = host.heldStore && { read: host.heldStore.read, openScope: host.heldStore.openScope, assertCurrent: fence.assertCurrent };
+    const storedPrefix = host.heldStore && { prove: host.heldStore.prove, assertCurrent: fence.assertCurrent };
     if (!graphRecovery) return runDurableSyncDetailed({ ...durableContext, storedPrefix });
     // An unbound subscription must authenticate and persist its numeric binding
     // through the existing materialization owner before it can skip DATA.
-    const reader = fence.binding().onChainId === undefined ? undefined : currentHeldGraphScopedAssetsReader({
-      readHeld: host.heldStore?.read, binding: fence.binding,
+    const confirmCurrent = fence.binding().onChainId === undefined ? undefined : currentHeldGraphScopedAssetsConfirmer({
+      binding: fence.binding,
       reconcileHeld: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve(),
       readChainState: authority.readHeldAssetChainState?.bind(authority), budget: contextGraphBudget,
     });
     return runDurableSyncDetailed({ ...durableContext,
       storedPrefix,
       graphRecovery: { ...graphRecovery,
-      held: reader && host.heldStore ? { reader, assertCurrent: fence.assertCurrent,
-        withStoreFence: host.heldStore.withScope } : undefined,
+      held: confirmCurrent && host.heldStore ? { confirmCurrent, assertCurrent: fence.assertCurrent,
+        prove: host.heldStore.prove } : undefined,
     } });
   }, signal);
 }

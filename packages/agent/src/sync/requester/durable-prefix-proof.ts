@@ -1,12 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
-import type { StoreContentFence } from '../../internal/store-content-fence.js';
-import type { HeldGraphScopedAssetsRequest } from './stored-graph-assets.js';
+import type { ProveHeldAssets } from '../../durable-recovery-held-store.js';
 import { graphScopedDurableManifestPrefixAtOffset, type GraphScopedDurableManifestPlan } from '../durable-integrity.js';
 
 export interface StoredDurablePrefix {
-  read(request: HeldGraphScopedAssetsRequest): Promise<ReadonlySet<string>>;
-  readonly openScope: StoreContentFence['openScope'];
+  readonly prove: ProveHeldAssets;
   assertCurrent(): void;
 }
 
@@ -22,15 +19,13 @@ export async function proveStoredDurablePrefix(
   const prefix = graphScopedDurableManifestPrefixAtOffset(manifest, offset);
   if (!prefix || !capability) throw new Error('Cannot prove stored durable prefix');
   const descriptors = manifest.descriptors.slice(0, prefix.descriptorCount);
-  const proof = capability.openScope({
-    assertionGraphs: descriptors.map(descriptor => descriptor.assertionGraph),
-    metadataGraph: contextGraphMetaUri(manifest.contextGraphId), subjects: descriptors.map(descriptor => descriptor.ual),
-  });
+  capability.assertCurrent();
+  const proof = await capability.prove({ contextGraphId: manifest.contextGraphId, descriptors, signal });
   if (!proof) throw new Error('Cannot prove stored durable prefix');
   const assertCurrent = () => { capability.assertCurrent(); proof.assertCurrent(); signal?.throwIfAborted(); };
   try {
     assertCurrent();
-    const held = await capability.read({ contextGraphId: manifest.contextGraphId, descriptors, signal });
+    const held = proof.held;
     assertCurrent();
     if (descriptors.some(descriptor => !held.has(descriptor.ual))) throw new Error('Stored durable prefix is missing or corrupt');
     return { assertCurrent, close: proof.close, covers: ual => held.has(ual) };
@@ -50,11 +45,12 @@ export class DurableGraphSettlementGuard {
     catch (error) { reject(); throw error; }
   }
 
-  readonly assertCurrent = (): void => {
+  readonly assertPrefixCurrent = (): void => {
     try { this.current?.proof.assertCurrent(); }
     catch (error) { this.current?.reject(); throw error; }
-    this.assertNotAborted();
   };
+
+  readonly assertCurrent = (): void => { this.assertPrefixCurrent(); this.assertNotAborted(); };
 
   covers(ual: string): boolean { return this.current?.proof.covers(ual) ?? false; }
 

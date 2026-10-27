@@ -1,4 +1,3 @@
-import { StoreContentFence } from '../src/internal/store-content-fence.js';
 import { describe, expect, it } from 'vitest';
 import {
   MemoryLayer,
@@ -95,8 +94,7 @@ function manifest(meta: readonly Quad[]) {
 
 /** The fixture's previously materialized copies, independent of this round's writes. */
 function storedPrefix(fixtures: readonly AssetFixture[]) {
-  const fence = new StoreContentFence();
-  return { read: async () => new Set(fixtures.map(f => f.ual)), assertCurrent: () => {}, openScope: fence.openScope.bind(fence) };
+  return { prove: async () => ({ held: new Set(fixtures.map(f => f.ual)), assertCurrent: () => {}, close: () => {} }), assertCurrent: () => {} };
 }
 
 function pageResult(
