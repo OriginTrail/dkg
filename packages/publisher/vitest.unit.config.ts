@@ -93,6 +93,10 @@ export default defineConfig({
       'test/query-source-coverage.test.ts',
       'test/subject-atomic-write.test.ts',
       'test/queue-graph-source-labels.test.ts',
+      // OT-RFC-73 P5: the publisher queue's AC1 boundary oracle, static IRI coverage and AC2 lane trace.
+      'test/async-lift-queue-boundary-oracle.test.ts',
+      'test/async-lift-queue-graph-coverage.test.ts',
+      'test/async-lift-queue-lane-trace.test.ts',
       'test/async-queue-depth.test.ts',
       'test/async-queue-usage-hooks.test.ts',
       'test/async-lift-terminal-clear.test.ts',
