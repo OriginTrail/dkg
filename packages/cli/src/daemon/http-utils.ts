@@ -1,6 +1,7 @@
 import { classifyWritePreflightFailure } from '@origintrail-official/dkg-agent/write-preflight-attribution';
 import { recordWritePreflightUnavailable, type WritePreflightDiagnosticFailure, type WritePreflightDiagnostics, type WritePreflightRescueOutcome } from './write-preflight-diagnostics.js';
 import { evaluateExactWritePreflight, rescueWriteTargetWithoutStore } from './write-context-graph-preflight.js';
+import type { CoalescingProbeAgent } from './write-preflight-coalescing.js';
 export { WRITE_PREFLIGHT_CHAIN_RESCUE_TIMEOUT_MS } from './write-context-graph-preflight.js';
 import { classifyReconcileUnavailable } from './reconcile-unavailable.js';
 export { classifyReconcileUnavailable } from './reconcile-unavailable.js';
@@ -28,10 +29,7 @@ import {
   type OperationContext,
 } from '@origintrail-official/dkg-core';
 import { enrichEvmError, isChainRpcTransportError } from '@origintrail-official/dkg-chain';
-import {
-  type DKGAgent,
-  type ContextGraphWritePreflightProbe,
-} from '@origintrail-official/dkg-agent';
+import { type DKGAgent } from '@origintrail-official/dkg-agent';
 import {
   STORE_OPERATION_TIMEOUT_CODE,
   isStoreSchedulerBusyError,
@@ -860,8 +858,9 @@ function rejectUnknownContextGraph(
  * and resolved once more (`context-graph-write-readiness.ts`).
  */
 export function resolveRequiredWriteContextGraphId(...args: Parameters<typeof resolveWriteContextGraphIdOnce>): Promise<string | null> {
-  const [agent, , res] = args;
-  return admissionStep(res, 'write_preflight', () => resolveAwaitingWriteReadiness(agent, () => resolveWriteContextGraphIdOnce(...args),
+  const [agent, contextGraphId, res, opts] = args;
+  return admissionStep(res, 'write_preflight', () => resolveAwaitingWriteReadiness(agent,
+    (afterWait) => resolveWriteContextGraphIdOnce(agent, contextGraphId, res, afterWait ? { ...opts, freshProbe: true } : opts),
     (raw, outcome) => rejectKnownNonWritableContextGraph(res, raw, outcome), res));
 }
 
@@ -873,10 +872,9 @@ async function resolveWriteContextGraphIdOnce(
     }): Promise<ExistingContextGraphRow[]>;
     contextGraphHasLocalContent?: (contextGraphId: string) => Promise<boolean>;
     contextGraphExists?: (contextGraphId: string) => Promise<boolean>;
-    probeContextGraphWritePreflight?: (
-      contextGraphId: string,
-      opts?: { callerAgentAddress?: string | null },
-    ) => Promise<ContextGraphWritePreflightProbe>;
+    probeContextGraphWritePreflight?: CoalescingProbeAgent['probeContextGraphWritePreflight'];
+    /** Lets concurrent calls share one probe (`write-preflight-coalescing.ts`); absent, every call probes. */
+    writePreflightIdentity?: CoalescingProbeAgent['writePreflightIdentity'];
     /**
      * High-level store-outage rescue decision (owns the on-chain
      * active+public policy semantics). The daemon calls ONLY this method for
@@ -907,6 +905,8 @@ async function resolveWriteContextGraphIdOnce(
     chainRescueTimeoutMs?: number;
     /** Internal observer seam; exceptions cannot change validation outcomes. */
     writePreflightDiagnostics?: WritePreflightDiagnostics;
+    /** Set by the re-resolve after a readiness wait: the exact probe must not share one that began before it. */
+    freshProbe?: boolean;
   } = {},
 ): Promise<string | KnownNotWritable | null> {
   if (!validateRequiredContextGraphId(contextGraphId, res)) return null;
@@ -934,6 +934,7 @@ async function resolveWriteContextGraphIdOnce(
     requireLocalWritable,
     isBareCandidateId,
     allowLocalExactFallback: opts.allowLocalExactFallback === true,
+    freshProbe: opts.freshProbe,
   });
   if (exactDecision.kind === "accept") return candidateId;
   if (exactDecision.kind === "rejectUnknown") {
@@ -1024,6 +1025,7 @@ async function resolveWriteContextGraphIdOnce(
     try {
       exactWritable = await contextGraphRowIsWritable(agent, exact);
     } catch (err) {
+      if (respondIfStoreUnavailable(res, err)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local writability: ${message}`,
@@ -1097,6 +1099,7 @@ async function resolveWriteContextGraphIdOnce(
         return candidateId;
       }
     } catch (err) {
+      if (respondIfStoreUnavailable(res, err)) return null;
       const message = err instanceof Error ? err.message : String(err);
       jsonResponse(res, 500, {
         error: `Failed to validate contextGraphId local existence: ${message}`,

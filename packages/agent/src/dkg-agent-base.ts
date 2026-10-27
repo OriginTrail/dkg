@@ -8,6 +8,7 @@ import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
 import { createDurableHeldStore } from './durable-recovery-held-store.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
+import { VersionedSubscriptionRegistry } from './internal/versioned-subscription-registry.js';
 import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
@@ -459,7 +460,6 @@ import {
   type PeerConnectionSnapshot,
   type PeerDiagnostics,
   type ChatSendResult,
-  type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
@@ -1502,7 +1502,7 @@ export class DKGAgentBase {
    * (restart contract on {@link DKGAgentBase}): only the gossip wiring derived
    * from it is session-scoped and re-established by `start()`.
    */
-  protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  protected readonly subscribedContextGraphs = new VersionedSubscriptionRegistry();
   /**
    * Process-local fence for a registration operation whose durable marker has
    * moved (or is about to move) to `pending`. Authority and policy readers use
