@@ -1153,12 +1153,17 @@ describe('durable synchronous share ownership', () => {
       expect(success.status).toBe(200);
       const original = await success.json();
       const jobs = await agent.promoteQueue.list();
-      if (!readable) vi.spyOn(agent.promoteQueue, 'list').mockRejectedValue(new Error('queue observation unavailable'));
+      // OT-RFC-73 P8a: the owner is read through the selector's own key, never by listing the whole context graph.
+      const wide = vi.spyOn(agent.promoteQueue, 'list'), lookup = vi.spyOn(agent.promoteQueue, 'listForSelector');
+      if (!readable) lookup.mockRejectedValue(new Error('queue observation unavailable'));
       releaseSecond();
       const conflict = await stale, body = await conflict.json();
       expect(conflict.status).toBe(409);
       expect(jobs).toHaveLength(1);
       expect(body).toMatchObject({ code: 'SHARE_ADMISSION_STALE', retryable: false });
+      expect(lookup).toHaveBeenCalledTimes(1);
+      expect(lookup).toHaveBeenCalledWith(expect.objectContaining({ contextGraphId: CG, assertionName: NAME, agentAddress: jobs[0].request.agentAddress }));
+      expect(wide).not.toHaveBeenCalled();
       if (readable) expect(body).toMatchObject({ recoveryState: 'completed', recoveryJobId: jobs[0].jobId });
       else expect(body).not.toHaveProperty('recoveryJobId');
       expect(body).not.toHaveProperty('recoveryBinding'); expect(body).not.toHaveProperty('claimToken');
