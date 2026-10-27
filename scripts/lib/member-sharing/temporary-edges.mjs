@@ -45,6 +45,7 @@ export class TemporaryEdges {
     // member 2's dial until it is stopped).
     this.feederRunning = false;
     this.feederUp = false;
+    this.feederFailed = false;
     // Every node this run added: the cleanup stops and removes these only.
     this.started = [];
     // The starts still running, each with what cancels it.
@@ -54,7 +55,7 @@ export class TemporaryEdges {
   get nodes() { return [this.owner, this.member1, this.member2]; }
   get members() { return [this.member1, this.member2]; }
   /** The node that writes case 6's next large graph: the feeder while it runs, else the owner. */
-  get largeAuthor() { return this.feederUp ? this.feeder : this.owner; }
+  get largeAuthor() { return this.feederUp && !this.feederFailed ? this.feeder : this.owner; }
   /** Whether a node number is one of the temporary nodes. */
   isTemporary(number) { return [...this.nodes, this.feeder].some(node => node?.number === number); }
 
@@ -168,15 +169,58 @@ export class TemporaryEdges {
    * that worked); the cleanup removes it either way.
    */
   async startFeeder() {
-    await this.start(this.feeder);
-    this.feederRunning = true;
     try {
+      await this.start(this.feeder);
+      this.feederRunning = true;
       await this.dial(this.member2, this.feeder);
+      this.feederUp = true;
     } catch (error) {
+      // addnode can launch the daemon before readiness or identity fails.
+      // Only our current claim permits rollback; a competing suite stays untouched.
+      this.feederRunning = this.claims(this.feeder);
+      this.feederUp = false;
       await this.stopFeeder().catch(() => {});
       throw error;
     }
-    this.feederUp = true;
+  }
+
+  /** Report uncertain or active public participation before its evidence is removed. */
+  async auditFeederIsolation(publicGraph, when, { following, fail }) {
+    const fed = await following(this.feeder, publicGraph);
+    if (fed.state === 'following') fail(2, `${when} the feeder ${this.feeder.label} follows the public graph: its gossip may have carried writes`);
+    else if (fed.state !== 'not-following') fail(2, `${when} it is not known whether the feeder ${this.feeder.label} follows the public graph (${fed.reason ?? fed.state})`);
+  }
+
+  /** Own the retry lifecycle and return the author; failed activation is never reused. */
+  async prepareLargeGraphAuthor(attempt, beforeRelease) {
+    if (attempt === 1 || !this.feeder || this.feederFailed) return this.owner;
+    try {
+      if (this.feederRunning) {
+        await beforeRelease();
+        await this.renewFeeder();
+      } else await this.startFeeder();
+      return this.feeder;
+    } catch (error) {
+      this.feederFailed = true;
+      this.feederUp = false;
+      this.log.note(`the feeder could not be set up (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts`);
+      return this.owner;
+    }
+  }
+
+  /** Audit the outgoing participant before removing evidence; always attempt shutdown twice. */
+  async finishFeeder(beforeRelease, failed) {
+    if (!this.feederRunning) return;
+    try {
+      await beforeRelease();
+    } finally {
+      const error = await this.stopFeeder().catch(() => this.stopFeeder()).then(() => null, cause => cause);
+      if (error) failed(error);
+    }
+  }
+
+  async redialFeeder() {
+    if (this.largeAuthor === this.feeder) await this.dial(this.member2, this.feeder);
   }
 
   /**
@@ -191,6 +235,7 @@ export class TemporaryEdges {
     const { feeder } = this;
     await this.stopFeeder();
     if (existsSync(this.devnet.nodeDir(feeder.number))) {
+      if (!this.claims(feeder)) throw new Error(`node${feeder.number} is no longer this run's; it is left as it is`);
       const problem = this.removeOwnNode(feeder.number);
       if (problem) throw new Error(problem);
     }
@@ -211,6 +256,11 @@ export class TemporaryEdges {
    */
   async stopFeeder() {
     if (!this.feederRunning) return;
+    if (!this.claims(this.feeder)) {
+      this.feederRunning = false;
+      this.feederUp = false;
+      throw new Error(`node${this.feeder.number} is no longer this run's; it is left as it is`);
+    }
     await this.stop(this.feeder);
     this.feederRunning = false;
     this.feederUp = false;

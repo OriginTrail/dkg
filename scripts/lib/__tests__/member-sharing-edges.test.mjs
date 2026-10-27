@@ -276,3 +276,93 @@ test('cancelling the real devnet.sh call stops the script while the node comes u
   assert.equal(existsSync(join(dir, 'node7', 'started')), false, 'the step after the wait ran: the script was not stopped');
   assert.equal(readFileSync(join(dir, 'node8', 'config.json'), 'utf8'), '{"theirs":true}');
 });
+
+test('case 6 preparation owns author selection, audits before renewal and stops before later cases', async t => {
+  const devnet = fakeDevnet(t);
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  const audit = async () => { devnet.calls.push('audit feeder'); };
+  assert.equal(await edges.prepareLargeGraphAuthor(1, audit), edges.owner);
+  assert.equal(devnet.calls.length, 0, 'first-attempt success needs no feeder');
+  assert.equal(await edges.prepareLargeGraphAuthor(2, audit), edges.feeder);
+  assert.equal(await edges.prepareLargeGraphAuthor(3, audit), edges.feeder);
+  assert.ok(devnet.calls.indexOf('audit feeder') < devnet.calls.indexOf('stop-node 10'));
+  const events = [];
+  await edges.finishFeeder(async () => { events.push('audit'); }, () => events.push('failed'));
+  events.push('case 5');
+  assert.deepEqual(events, ['audit', 'case 5']);
+  assert.equal(edges.feederRunning, false);
+});
+
+test('failed renewal selects the owner permanently while shutdown remains retryable', async t => {
+  let refuse = true;
+  const devnet = fakeDevnet(t, { stopStatus: () => refuse ? 1 : 0 });
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  assert.equal(await edges.prepareLargeGraphAuthor(2, async () => {}), edges.feeder);
+  assert.equal(await edges.prepareLargeGraphAuthor(3, async () => {}), edges.owner);
+  assert.equal(edges.feederRunning, true);
+  assert.equal(edges.largeAuthor, edges.owner);
+  const adds = devnet.calls.filter(call => call.startsWith('addnode')).length;
+  assert.equal(await edges.prepareLargeGraphAuthor(4, async () => {}), edges.owner);
+  assert.equal(devnet.calls.filter(call => call.startsWith('addnode')).length, adds);
+  const failures = [];
+  await edges.finishFeeder(async () => {}, error => failures.push(error.message));
+  assert.equal(failures.length, 1, 'two rejected stops must report failed isolation');
+  assert.equal(edges.feederRunning, true);
+  refuse = false;
+  await edges.finishFeeder(async () => {}, () => assert.fail('shutdown must recover'));
+  assert.equal(edges.feederRunning, false);
+});
+
+test('partial startup is rolled back, failed rollback stays tracked, and foreign claims are untouched', async t => {
+  let refuse = true;
+  const devnet = fakeDevnet(t, { stopStatus: () => refuse ? 1 : 0 });
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  edges.identify = async () => { throw new Error('identity failed after launch'); };
+  assert.equal(await edges.prepareLargeGraphAuthor(2, async () => {}), edges.owner);
+  assert.ok(devnet.calls.includes('stop-node 10'));
+  assert.equal(edges.feederRunning, true);
+  assert.equal(edges.feederUp, false);
+  refuse = false;
+  await edges.finishFeeder(async () => {}, () => assert.fail('shutdown must recover'));
+  assert.equal(edges.feederRunning, false);
+  const rival = fakeDevnet(t);
+  const foreignEdges = new TemporaryEdges(rival, { stamp: 'S', log: { say() {}, note() {} } });
+  foreignEdges.allocate({ relay1: 'r1', relay2: 'r2' });
+  foreign(rival, 10);
+  assert.equal(await foreignEdges.prepareLargeGraphAuthor(2, async () => {}), foreignEdges.owner);
+  assert.ok(untouched(rival, 10));
+  assert.ok(!rival.calls.includes('stop-node 10'));
+});
+
+test('an isolation audit error still shuts down its owned feeder', async t => {
+  const devnet = fakeDevnet(t);
+  const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+  edges.allocate({ relay1: 'r1', relay2: 'r2' });
+  await edges.prepareLargeGraphAuthor(2, async () => {});
+  await assert.rejects(edges.finishFeeder(async () => { throw new Error('unknown membership'); }, () => {}), /unknown membership/);
+  assert.equal(edges.feederRunning, false);
+});
+
+for (const state of ['following', 'unknown', 'not-following']) {
+  test(`outgoing feeder ${state} is audited before replacement and shutdown`, async t => {
+    const devnet = fakeDevnet(t);
+    const edges = new TemporaryEdges(devnet, { stamp: 'S', log: { say() {}, note() {} } });
+    edges.allocate({ relay1: 'r1', relay2: 'r2' });
+    const failures = [];
+    const audit = () => edges.auditFeederIsolation('public', 'before removal', {
+      following: async () => { devnet.calls.push('audit'); return { state }; },
+      fail: (id, message) => { failures.push([id, message]); devnet.calls.push('verdict'); },
+    });
+    await edges.prepareLargeGraphAuthor(2, audit);
+    await edges.prepareLargeGraphAuthor(3, audit);
+    assert.ok(devnet.calls.indexOf('audit') < devnet.calls.indexOf('stop-node 10'));
+    if (state !== 'not-following') assert.ok(devnet.calls.indexOf('verdict') < devnet.calls.indexOf('stop-node 10'));
+    await edges.finishFeeder(audit, () => assert.fail('stop succeeds'));
+    assert.equal(failures.length, state === 'not-following' ? 0 : 2);
+    assert.ok(failures.every(([id]) => id === 2));
+    assert.equal(edges.feederRunning, false);
+  });
+}

@@ -232,14 +232,11 @@ async function precondition(caseId, when) {
   return false;
 }
 
-// Whether the feeder could not be set up for a later attempt of case 6 (it is not tried again).
-let feederFailed = false;
-
 /** A feeder that ran must not follow the public graph (`publicGraph`), as no Core may: its gossip could carry writes. */
 async function feederOutOf(publicGraph, when) {
-  const fed = await graphs.following(edges.feeder, publicGraph);
-  if (fed.state === 'following') fail(2, `${when} the feeder ${edges.feeder.label} follows the public graph: its gossip may have carried writes`);
-  else if (fed.state !== 'not-following') fail(2, `${when} it is not known whether the feeder ${edges.feeder.label} follows the public graph (${fed.reason ?? fed.state})`);
+  await edges.auditFeederIsolation(publicGraph, when, {
+    following: (node, graph) => graphs.following(node, graph), fail,
+  });
 }
 
 /**
@@ -252,19 +249,9 @@ async function feederOutOf(publicGraph, when) {
  * the large graphs of several attempts. Without a feeder the owner writes it.
  */
 async function largeGraph(attempt, size, publicGraph) {
-  if (attempt > 1 && edges.feeder && !feederFailed) {
-    try {
-      if (edges.feederRunning) {
-        await feederOutOf(publicGraph, `before attempt ${attempt} of case 6`);
-        await edges.renewFeeder();
-      } else await edges.startFeeder();
-      say(`feeder ${edges.feeder.label} up, holding nothing yet, and dialed by member2 (${elapsed()})`);
-    } catch (error) {
-      note(`the feeder could not be set up (${error?.message ?? error}): the owner writes the large graphs of case 6's later attempts`);
-      feederFailed = true;
-    }
-  }
-  const author = edges.largeAuthor;
+  const author = await edges.prepareLargeGraphAuthor(attempt,
+    () => feederOutOf(publicGraph, `before attempt ${attempt} of case 6`));
+  if (author === edges.feeder) say(`feeder ${author.label} up, holding nothing yet, and dialed by member2 (${elapsed()})`);
   const graph = await graphs.createGraph(attempt === 1 ? 'large' : `large${attempt}`, { accessPolicy: 0, publishPolicy: 1, register: false }, { by: author });
   await graphs.keepCoresOut(graph);
   const started = Date.now();
@@ -353,7 +340,7 @@ async function run() {
   // owner again and member 2 the feeder (a dial of a node already connected changes nothing).
   const redial = async () => {
     for (const member of members) await edges.dialOwner(member);
-    if (edges.feederUp) await edges.dial(member2, edges.feeder);
+    await edges.redialFeeder();
   };
   if (big) {
     const nextLargeGraph = (attempt, size) => largeGraph(attempt, size, pub.graph);
@@ -362,11 +349,10 @@ async function run() {
   // A feeder that ran must not have followed the public graph, as no Core may; then it stops, and the cases
   // after case 6 run with the owner and the members alone, as before it. One that cannot be stopped (asked
   // twice) fails case 6: the cases after it would run beside it.
-  if (edges.feederRunning) {
-    await feederOutOf(pub.graph, 'after case 6');
-    const stopped = await edges.stopFeeder().catch(() => edges.stopFeeder()).then(() => null, error => error);
-    if (stopped) fail(6, `the feeder ${edges.feeder.label} could not be stopped after case 6, so the cases after it run beside it: ${stopped?.message ?? stopped}`);
-  }
+  await edges.finishFeeder(
+    () => feederOutOf(pub.graph, 'after case 6'),
+    error => fail(6, `the feeder ${edges.feeder.label} could not be stopped after case 6, so the cases after it run beside it: ${error?.message ?? error}`),
+  );
 
   // Case 5: members that subscribed LATER_MS ago (after case 6, the members dial the owner again, as above).
   const since = Math.max(...members.map(member => pub.subscribedAt.get(member)));
