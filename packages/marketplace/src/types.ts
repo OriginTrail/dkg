@@ -11,6 +11,10 @@
  *   - Identity ids are `bigint` capped to `uint72`.
  */
 
+import type { ModelProvenanceClass } from './model-id.js';
+import type { SellerStanding } from './recount.js';
+import type { TokenizerKind } from './token-engines.js';
+
 export type MarketplaceServiceType = 'inference' | 'query' | 'reasoning' | 'graph-ml';
 
 export type MarketplaceUnit = 'token' | 'query-unit';
@@ -36,6 +40,53 @@ export interface MarketplaceOffer {
   expiresAt?: number;
   region?: string;
   transports?: string[];
+  /** Request/result shape the offer serves; absent for raw `{prompt}`/`{sparql}` executors. */
+  apiShape?: ChatApiShape;
+  /** How tool calls reach the seller's model (chat offers). */
+  toolTransport?: ToolTransport;
+  /** Tokenizer + template pin, or the provider-reported label (chat offers). */
+  metering?: OfferMetering;
+  /** Published model facts (chat offers). */
+  model?: OfferModelFacts;
+  /** Query cost schedule pin (`local-query` offers). */
+  queryCost?: OfferQueryCost;
+  /** `restricted` iff the seller serves an allow-listed set of buyers; absent means open. */
+  access?: 'open' | 'restricted';
+}
+
+/** The only chat request/result shape: OpenAI chat completions, schema `openai-chat/v1`. */
+export type ChatApiShape = 'openai-chat/v1';
+
+export type ToolTransport = 'native' | 'prompt' | 'none';
+
+/** The metering commitment an offer publishes. */
+export type OfferMetering =
+  | {
+      basis: 'pinned';
+      tokenizer: { kind: TokenizerKind; digest: string };
+      /** Required for `apiShape` `openai-chat/v1`. */
+      chatTemplate?: { id: 'openai-chat-count/v1'; digest: string };
+    }
+  | { basis: 'provider-reported' };
+
+/** The query cost schedule an offer pins (`dkg-mkt-query-cost/1` + its digest). */
+export interface OfferQueryCost {
+  schedule: string;
+  digest: string;
+}
+
+/** Model facts a chat offer publishes; never endpoints, paths, or secrets. */
+export interface OfferModelFacts {
+  provenanceClass?: ModelProvenanceClass;
+  family?: string;
+  displayName?: string;
+  contextLength?: bigint;
+  quantization?: string;
+  /** llamacpp: `sha256:` digest of the GGUF. */
+  weightsDigest?: string;
+  upstreamModel?: string;
+  servingSeed?: bigint;
+  servingTemperature?: string;
 }
 
 /** A live quote returned by a seller over the quote protocol. */
@@ -159,12 +210,27 @@ export interface DeliveryStats {
 export interface RouteRequest {
   serviceType: MarketplaceServiceType;
   modelId?: string;
-  /** uint64 — worst-case units the authorization will grant. */
+  /**
+   * uint64 — worst-case units the authorization will grant. Ignored when
+   * `maxUnitsFor` is set (the grant is then sized per offer).
+   */
   maxUnits: bigint;
   /** Injected clock (unix seconds) for offer-expiry checks. */
   nowSeconds: number;
   /** Optional delivery history by `sellerPeerId` for tie-breaking. */
   deliveryHistory?: ReadonlyMap<string, DeliveryStats>;
+  /**
+   * Per-offer grant (two offers for one model can pin different tokenizers).
+   * When set, the global max-units early return is skipped and each offer is
+   * rejected `max-units` when its grant is ≤ 0 or above the bucket cap.
+   */
+  maxUnitsFor?: (offer: MarketplaceOffer) => bigint;
+  /** Symmetric: an offer routes only when `offer.apiShape === requireApiShape` (both undefined is equal). */
+  requireApiShape?: ChatApiShape;
+  /** Tools requested (tool_choice ≠ 'none') or tool history present. */
+  requiresTools?: boolean;
+  /** Local recount standing keyed by `sellerIdentityId` decimal; absent = `trusted`. */
+  sellerStanding?: ReadonlyMap<string, SellerStanding>;
 }
 
 export type RouteRejectionReason =
@@ -177,7 +243,12 @@ export type RouteRejectionReason =
   | 'unavailable'
   | 'price-cap'
   | 'capacity'
-  | 'soft-ceiling';
+  | 'soft-ceiling'
+  | 'max-units'
+  | 'api-shape'
+  | 'tools-unsupported'
+  | 'recount-denied'
+  | 'restricted';
 
 export interface RouteRejection {
   offerId: string;
@@ -200,6 +271,8 @@ export type RouteDecision =
       askPerUnitWei: bigint;
       /** `maxUnits * askPerUnitWei` — the exposure the meter must reserve. */
       worstCaseCostWei: bigint;
+      /** The grant the authorization carries: `request.maxUnits`, or `maxUnitsFor(offer)`. */
+      maxUnits: bigint;
       /** Index into `policy.buckets` / `meter.buckets`. */
       bucketIndex: number;
       rejections: RouteRejection[];

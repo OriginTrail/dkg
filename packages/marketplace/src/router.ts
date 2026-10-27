@@ -18,7 +18,7 @@ import type {
 } from './types.js';
 
 /** First policy bucket admitting the request, or -1. */
-export function matchPolicyBucket(policy: PlanPolicy, request: RouteRequest): number {
+export function matchPolicyBucket(policy: PlanPolicy, request: Pick<RouteRequest, 'serviceType' | 'modelId'>): number {
   return policy.buckets.findIndex(
     (bucket) =>
       bucket.match.serviceType === request.serviceType &&
@@ -36,13 +36,21 @@ interface Candidate {
   offer: MarketplaceOffer;
   askPerUnitWei: bigint;
   worstCaseCostWei: bigint;
+  maxUnits: bigint;
+  /** Standing tier: 0 = trusted, 1 = deprioritized (denied never becomes a candidate). */
+  tier: number;
 }
 
 /**
- * Deterministic candidate ordering: lowest live ask first, ties broken by
- * better local delivery history (net successes), then lexicographic peer id.
+ * Deterministic candidate ordering: standing tier (trusted first), then the
+ * lowest worst-case cost (`units × live ask` — asks alone are not comparable
+ * across offers pinning different tokenizers), then the lowest live ask,
+ * then better local delivery history (net successes), then lexicographic
+ * peer id. With uniform units this orders exactly as lowest-ask-first.
  */
 function preferCandidate(a: Candidate, b: Candidate, history: RouteRequest['deliveryHistory']): boolean {
+  if (a.tier !== b.tier) return a.tier < b.tier;
+  if (a.worstCaseCostWei !== b.worstCaseCostWei) return a.worstCaseCostWei < b.worstCaseCostWei;
   if (a.askPerUnitWei !== b.askPerUnitWei) return a.askPerUnitWei < b.askPerUnitWei;
   const scoreA = deliveryScore(history?.get(a.offer.sellerPeerId));
   const scoreB = deliveryScore(history?.get(b.offer.sellerPeerId));
@@ -50,36 +58,54 @@ function preferCandidate(a: Candidate, b: Candidate, history: RouteRequest['deli
   return a.offer.sellerPeerId < b.offer.sellerPeerId;
 }
 
+interface EvaluationContext {
+  policy: PlanPolicy;
+  bucket: PolicyBucket;
+  meterBucket: MeterState['buckets'][number];
+  softCeilingBps: number;
+  request: RouteRequest;
+}
+
+/** Per-offer checks in normative order; the first failing check names the rejection. */
 function evaluateOffer(
   offer: MarketplaceOffer,
   quote: MarketplaceQuote | undefined,
-  policy: PlanPolicy,
-  bucket: PolicyBucket,
-  meterBucket: MeterState['buckets'][number],
-  softCeilingBps: number,
-  request: RouteRequest,
+  ctx: EvaluationContext,
 ): Candidate | RouteRejection {
-  if (offer.serviceType !== request.serviceType) return { offerId: offer.offerId, reason: 'service-mismatch' };
-  if (request.modelId !== undefined && offer.modelId !== request.modelId) {
-    return { offerId: offer.offerId, reason: 'model-mismatch' };
+  const { policy, bucket, request } = ctx;
+  const reject = (reason: RouteRejection['reason']): RouteRejection => ({ offerId: offer.offerId, reason });
+  if (offer.serviceType !== request.serviceType) return reject('service-mismatch');
+  if (request.modelId !== undefined && offer.modelId !== request.modelId) return reject('model-mismatch');
+  // Symmetric: a raw `{prompt}`/`{sparql}` request never reaches a chat offer, and vice versa.
+  if (offer.apiShape !== request.requireApiShape) return reject('api-shape');
+  if (request.requiresTools && offer.toolTransport !== 'native' && offer.toolTransport !== 'prompt') {
+    return reject('tools-unsupported');
   }
-  if (offer.expiresAt !== undefined && offer.expiresAt <= request.nowSeconds) {
-    return { offerId: offer.offerId, reason: 'offer-expired' };
+  if (offer.expiresAt !== undefined && offer.expiresAt <= request.nowSeconds) return reject('offer-expired');
+  if (offer.access === 'restricted' && !policy.sellerAllow?.includes(offer.sellerIdentityId)) return reject('restricted');
+  if (policy.sellerDeny?.includes(offer.sellerIdentityId)) return reject('deny-list');
+  if (policy.sellerAllow && !policy.sellerAllow.includes(offer.sellerIdentityId)) return reject('allow-list');
+  const standing = request.sellerStanding?.get(offer.sellerIdentityId.toString()) ?? 'trusted';
+  if (standing === 'denied') return reject('recount-denied');
+  let units = request.maxUnits;
+  if (request.maxUnitsFor) {
+    units = request.maxUnitsFor(offer);
+    if (units <= 0n || units > bucket.maxUnitsPerCall) return reject('max-units');
   }
-  if (policy.sellerDeny?.includes(offer.sellerIdentityId)) return { offerId: offer.offerId, reason: 'deny-list' };
-  if (policy.sellerAllow && !policy.sellerAllow.includes(offer.sellerIdentityId)) {
-    return { offerId: offer.offerId, reason: 'allow-list' };
-  }
-  if (!quote) return { offerId: offer.offerId, reason: 'no-quote' };
-  if (!quote.available) return { offerId: offer.offerId, reason: 'unavailable' };
-  if (quote.askPerUnitWei > bucket.priceCapWeiPerUnit) return { offerId: offer.offerId, reason: 'price-cap' };
+  if (!quote) return reject('no-quote');
+  if (!quote.available) return reject('unavailable');
+  if (quote.askPerUnitWei > bucket.priceCapWeiPerUnit) return reject('price-cap');
   const capacity = quote.capacityUnitsPerMin ?? offer.capacityUnitsPerMin;
-  if (capacity !== undefined && capacity < request.maxUnits) return { offerId: offer.offerId, reason: 'capacity' };
-  const worstCaseCostWei = request.maxUnits * quote.askPerUnitWei;
-  if (worstCaseCostWei > softCeilingAllowanceWei(meterBucket, softCeilingBps)) {
-    return { offerId: offer.offerId, reason: 'soft-ceiling' };
-  }
-  return { offer, askPerUnitWei: quote.askPerUnitWei, worstCaseCostWei };
+  if (capacity !== undefined && capacity < units) return reject('capacity');
+  const worstCaseCostWei = units * quote.askPerUnitWei;
+  if (worstCaseCostWei > softCeilingAllowanceWei(ctx.meterBucket, ctx.softCeilingBps)) return reject('soft-ceiling');
+  return {
+    offer,
+    askPerUnitWei: quote.askPerUnitWei,
+    worstCaseCostWei,
+    maxUnits: units,
+    tier: standing === 'deprioritized' ? 1 : 0,
+  };
 }
 
 /**
@@ -104,16 +130,22 @@ export function selectRoute(
   const bucketIndex = matchPolicyBucket(policy, request);
   if (bucketIndex < 0) return { ok: false, reason: 'no-bucket', rejections };
   const bucket = policy.buckets[bucketIndex];
-  if (request.maxUnits <= 0n || request.maxUnits > bucket.maxUnitsPerCall) {
+  if (!request.maxUnitsFor && (request.maxUnits <= 0n || request.maxUnits > bucket.maxUnitsPerCall)) {
     return { ok: false, reason: 'max-units', rejections };
   }
-  const softCeilingBps = policy.softCeilingBps ?? DEFAULT_SOFT_CEILING_BPS;
+  const ctx: EvaluationContext = {
+    policy,
+    bucket,
+    meterBucket: meter.buckets[bucketIndex],
+    softCeilingBps: policy.softCeilingBps ?? DEFAULT_SOFT_CEILING_BPS,
+    request,
+  };
   const quoteByKey = new Map(quotes.map((quote) => [`${quote.offeringId}:${quote.sellerIdentityId}`, quote]));
 
   let best: Candidate | undefined;
   for (const offer of offers) {
     const quote = quoteByKey.get(`${offer.offeringId}:${offer.sellerIdentityId}`);
-    const outcome = evaluateOffer(offer, quote, policy, bucket, meter.buckets[bucketIndex], softCeilingBps, request);
+    const outcome = evaluateOffer(offer, quote, ctx);
     if ('reason' in outcome) {
       rejections.push(outcome);
       continue;
@@ -129,6 +161,7 @@ export function selectRoute(
     offer: best.offer,
     askPerUnitWei: best.askPerUnitWei,
     worstCaseCostWei: best.worstCaseCostWei,
+    maxUnits: best.maxUnits,
     bucketIndex,
     rejections,
   };

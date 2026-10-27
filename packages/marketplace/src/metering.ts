@@ -65,6 +65,10 @@ export function countTokens(text: string): bigint {
  * Static query-unit schedule: `10 + ceil(queryUtf8Bytes / 100) + rowCount`.
  * The constant 10 is the per-query admission floor; bytes approximate parse
  * cost and rows approximate result transfer.
+ *
+ * @deprecated Placeholder schedule. Query offers meter with the
+ * content-addressed `QUERY_COST_SCHEDULE_V1` (`queryAdmissionUnits` +
+ * `queryDeliveryUnits`, see `query-cost.ts`).
  */
 export function queryUnits(sparql: string, rowCount: bigint | number): bigint {
   const rows = typeof rowCount === 'bigint' ? rowCount : BigInt(rowCount);

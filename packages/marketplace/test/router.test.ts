@@ -246,3 +246,194 @@ describe('selectRoute policy matrix', () => {
     expect(() => selectRoute([offer()], [], policy, foreign, request())).toThrow('bucket mismatch');
   });
 });
+
+describe('selectRoute: chat offers, per-offer units and standing (sellers + gateway)', () => {
+  const chatOffer = (overrides: Partial<MarketplaceOffer> = {}): MarketplaceOffer =>
+    offer({ modelId: 'stub-chat', apiShape: 'openai-chat/v1', toolTransport: 'native', ...overrides });
+  const chatRequest = (overrides: Partial<RouteRequest> = {}): RouteRequest =>
+    request({ modelId: 'stub-chat', requireApiShape: 'openai-chat/v1', ...overrides });
+
+  it('reports decision.maxUnits = request.maxUnits on the generic path', () => {
+    const a = offer();
+    const policy = policyWith();
+    const decision = selectRoute([a], [quoteFor(a)], policy, meterFor(policy), request({ maxUnits: 777n }));
+    expect(decision.ok && decision.maxUnits).toBe(777n);
+  });
+
+  it('api-shape is symmetric: generic requests skip chat offers and chat requests skip raw offers', () => {
+    const chat = chatOffer({ offerId: 'ual:chat', modelId: 'devnet-llm' });
+    const raw = offer({ offerId: 'ual:raw', sellerIdentityId: 2n, sellerPeerId: 'peer-b' });
+    const policy = policyWith();
+    const quotes = [quoteFor(chat), quoteFor(raw)];
+    const generic = selectRoute([chat, raw], quotes, policy, meterFor(policy), request());
+    expect(generic.ok && generic.offer.offerId).toBe('ual:raw');
+    expect(generic.rejections).toEqual([{ offerId: 'ual:chat', reason: 'api-shape' }]);
+    const chatOnly = selectRoute([chat, raw], quotes, policy, meterFor(policy), request({ requireApiShape: 'openai-chat/v1' }));
+    expect(chatOnly.ok && chatOnly.offer.offerId).toBe('ual:chat');
+    expect(chatOnly.rejections).toEqual([{ offerId: 'ual:raw', reason: 'api-shape' }]);
+  });
+
+  it('tools-unsupported unless the offer transports tools natively or by prompt', () => {
+    const none = chatOffer({ offerId: 'ual:none', toolTransport: 'none' });
+    const absent = chatOffer({ offerId: 'ual:absent', toolTransport: undefined, sellerIdentityId: 2n });
+    const prompt = chatOffer({ offerId: 'ual:prompt', toolTransport: 'prompt', sellerIdentityId: 3n });
+    const policy = policyWith();
+    const offers = [none, absent, prompt];
+    const quotes = offers.map((o) => quoteFor(o));
+    const withTools = selectRoute(offers, quotes, policy, meterFor(policy), chatRequest({ requiresTools: true }));
+    expect(withTools.ok && withTools.offer.offerId).toBe('ual:prompt');
+    expect(withTools.rejections).toEqual([
+      { offerId: 'ual:none', reason: 'tools-unsupported' },
+      { offerId: 'ual:absent', reason: 'tools-unsupported' },
+    ]);
+    const plain = selectRoute(offers, quotes, policy, meterFor(policy), chatRequest());
+    expect(plain.ok).toBe(true);
+    expect(plain.rejections).toEqual([]);
+  });
+
+  it('restricted offers route only for buyers who allow-list the seller; restricted ranks before deny-list', () => {
+    const restricted = chatOffer({ offerId: 'ual:restricted', access: 'restricted', sellerIdentityId: 7n });
+    const policy = policyWith();
+    const open = selectRoute([restricted], [quoteFor(restricted)], policy, meterFor(policy), chatRequest());
+    expect(open.rejections).toEqual([{ offerId: 'ual:restricted', reason: 'restricted' }]);
+    const allowPolicy = policyWith({ sellerAllow: [7n] });
+    const allowed = selectRoute([restricted], [quoteFor(restricted)], allowPolicy, meterFor(allowPolicy), chatRequest());
+    expect(allowed.ok).toBe(true);
+    const denyPolicy = policyWith({ sellerDeny: [7n] });
+    const denied = selectRoute([restricted], [quoteFor(restricted)], denyPolicy, meterFor(denyPolicy), chatRequest());
+    expect(denied.rejections).toEqual([{ offerId: 'ual:restricted', reason: 'restricted' }]);
+    const openAccess = chatOffer({ access: 'open' });
+    expect(selectRoute([openAccess], [quoteFor(openAccess)], policy, meterFor(policy), chatRequest()).ok).toBe(true);
+  });
+
+  it('rejects recount-denied sellers and prefers trusted over a cheaper deprioritized seller', () => {
+    const cheap = chatOffer({ offerId: 'ual:cheap', sellerIdentityId: 1n, sellerPeerId: 'peer-a' });
+    const pricey = chatOffer({ offerId: 'ual:pricey', sellerIdentityId: 3n, sellerPeerId: 'peer-c' });
+    const policy = policyWith();
+    const quotes = [quoteFor(cheap), quoteFor(pricey, { askPerUnitWei: 800_000_000_000n })];
+    const meter = meterFor(policy);
+    expect(selectRoute([cheap, pricey], quotes, policy, meter, chatRequest()).ok && 'cheapest wins').toBe('cheapest wins');
+    const deprioritized = selectRoute(
+      [cheap, pricey],
+      quotes,
+      policy,
+      meter,
+      chatRequest({ sellerStanding: new Map([['1', 'deprioritized']]) }),
+    );
+    expect(deprioritized.ok && deprioritized.offer.offerId).toBe('ual:pricey');
+    const denied = selectRoute([cheap, pricey], quotes, policy, meter, chatRequest({ sellerStanding: new Map([['1', 'denied']]) }));
+    expect(denied.ok && denied.offer.offerId).toBe('ual:pricey');
+    expect(denied.rejections).toEqual([{ offerId: 'ual:cheap', reason: 'recount-denied' }]);
+    const bothDeprioritized = selectRoute(
+      [cheap, pricey],
+      quotes,
+      policy,
+      meter,
+      chatRequest({ sellerStanding: new Map([['1', 'deprioritized'], ['3', 'deprioritized']]) }),
+    );
+    expect(bothDeprioritized.ok && bothDeprioritized.offer.offerId).toBe('ual:cheap');
+  });
+
+  it('sizes the grant per offer and prefers the lowest worst-case cost over the lowest ask', () => {
+    // A pins a tokenizer that counts this prompt at 3000 units; B at 1000.
+    const a = chatOffer({ offerId: 'ual:a', sellerIdentityId: 1n, sellerPeerId: 'peer-a' });
+    const b = chatOffer({ offerId: 'ual:b', sellerIdentityId: 2n, sellerPeerId: 'peer-b' });
+    const units = new Map([
+      ['ual:a', 3000n],
+      ['ual:b', 1000n],
+    ]);
+    const policy = policyWith();
+    const quotes = [quoteFor(a, { askPerUnitWei: 400_000_000_000n }), quoteFor(b, { askPerUnitWei: 600_000_000_000n })];
+    const decision = selectRoute([a, b], quotes, policy, meterFor(policy), chatRequest({ maxUnits: 0n, maxUnitsFor: (o) => units.get(o.offerId)! }));
+    expect(decision.ok).toBe(true);
+    if (!decision.ok) return;
+    expect(decision.offer.offerId).toBe('ual:b');
+    expect(decision.maxUnits).toBe(1000n);
+    expect(decision.askPerUnitWei).toBe(600_000_000_000n);
+    expect(decision.worstCaseCostWei).toBe(1000n * 600_000_000_000n);
+  });
+
+  it('per-offer max-units: skips the global early return, rejects ≤ 0 or above the bucket cap, and is evaluated after the cheap checks', () => {
+    const big = chatOffer({ offerId: 'ual:big', sellerIdentityId: 1n });
+    const zero = chatOffer({ offerId: 'ual:zero', sellerIdentityId: 2n });
+    const fits = chatOffer({ offerId: 'ual:fits', sellerIdentityId: 3n });
+    const wrongModel = chatOffer({ offerId: 'ual:model', modelId: 'other', sellerIdentityId: 4n });
+    const units = new Map([
+      ['ual:big', 4097n],
+      ['ual:zero', 0n],
+      ['ual:fits', 4096n],
+    ]);
+    const asked: string[] = [];
+    const maxUnitsFor = (o: MarketplaceOffer) => {
+      asked.push(o.offerId);
+      return units.get(o.offerId)!;
+    };
+    const policy = policyWith();
+    const offers = [big, zero, fits, wrongModel];
+    const decision = selectRoute(
+      offers,
+      offers.map((o) => quoteFor(o)),
+      policy,
+      meterFor(policy),
+      chatRequest({ maxUnits: 999_999n, maxUnitsFor }),
+    );
+    expect(decision.ok && decision.maxUnits).toBe(4096n);
+    expect(decision.rejections).toEqual([
+      { offerId: 'ual:big', reason: 'max-units' },
+      { offerId: 'ual:zero', reason: 'max-units' },
+      { offerId: 'ual:model', reason: 'model-mismatch' },
+    ]);
+    expect(asked).toEqual(['ual:big', 'ual:zero', 'ual:fits']);
+    const allTooBig = selectRoute([big], [quoteFor(big)], policy, meterFor(policy), chatRequest({ maxUnitsFor }));
+    expect(allTooBig).toMatchObject({ ok: false, reason: 'no-eligible-offer', rejections: [{ offerId: 'ual:big', reason: 'max-units' }] });
+  });
+
+  it('checks capacity and the soft ceiling against the per-offer units', () => {
+    const a = chatOffer();
+    const policy = policyWith();
+    const tight = selectRoute(
+      [a],
+      [quoteFor(a, { capacityUnitsPerMin: 1500n })],
+      policy,
+      meterFor(policy),
+      chatRequest({ maxUnits: 1n, maxUnitsFor: () => 2000n }),
+    );
+    expect(tight.rejections).toEqual([{ offerId: 'ual:offer-a', reason: 'capacity' }]);
+    const settledWei = 6n * TRAC - 400_000_000_000_000n;
+    const snapshot = {
+      ...meterFor(policy),
+      totalSettledWei: settledWei,
+      buckets: [
+        { budgetWei: 6n * TRAC, settledWei, reservedWei: 0n },
+        { budgetWei: 4n * TRAC, settledWei: 0n, reservedWei: 0n },
+      ],
+    };
+    expect(selectRoute([a], [quoteFor(a)], policy, snapshot, chatRequest({ maxUnitsFor: () => 760n })).ok).toBe(true);
+    expect(selectRoute([a], [quoteFor(a)], policy, snapshot, chatRequest({ maxUnitsFor: () => 761n })).rejections).toEqual([
+      { offerId: 'ual:offer-a', reason: 'soft-ceiling' },
+    ]);
+  });
+
+  it('applies the normative check order (api-shape before expiry, restricted before allow-list, denied before quotes)', () => {
+    const expiredRaw = offer({ offerId: 'ual:expired-raw', modelId: 'stub-chat', expiresAt: 1 });
+    const restrictedOutsideAllow = chatOffer({ offerId: 'ual:restricted', access: 'restricted', sellerIdentityId: 9n });
+    const deniedUnquoted = chatOffer({ offerId: 'ual:denied', sellerIdentityId: 5n });
+    const policy = policyWith({ sellerAllow: [5n] });
+    const decision = selectRoute(
+      [expiredRaw, restrictedOutsideAllow, deniedUnquoted],
+      [],
+      policy,
+      meterFor(policy),
+      chatRequest({ sellerStanding: new Map([['5', 'denied']]) }),
+    );
+    expect(decision.rejections).toEqual([
+      { offerId: 'ual:expired-raw', reason: 'api-shape' },
+      { offerId: 'ual:restricted', reason: 'restricted' },
+      { offerId: 'ual:denied', reason: 'recount-denied' },
+    ]);
+  });
+
+  it('matchPolicyBucket accepts just the service type and model', () => {
+    expect(matchPolicyBucket(policyWith(), { serviceType: 'query' })).toBe(1);
+  });
+});

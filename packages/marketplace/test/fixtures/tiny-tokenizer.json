@@ -1,0 +1,8 @@
+{
+  "version": "1.0",
+  "model": {
+    "type": "BPE",
+    "vocab": { "a": 0, "b": 1, "c": 2, "Ġ": 3, "ab": 4, "abc": 5, "Ġa": 6 },
+    "merges": ["a b", "ab c", "Ġ a"]
+  }
+}
