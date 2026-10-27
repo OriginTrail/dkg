@@ -91,6 +91,43 @@ export function genPopulation(r: () => number): Rec[] {
       recs[recs.indexOf(b)] = { ...b, spec: { ...b.spec, finalizedAt: swap } };
     }
   }
+  // finished at the same instant: now and then two or three old finalized records of one key share one finish time, preferably in the run of old records a key
+  // starts with (where the sweep can reach them). The scan walks the rows of one finish time in subject order, so half the time their ids are renamed to sort against
+  // the key's order and the walk meets the NEWEST of them first.
+  if (r() < 0.4) {
+    const byKey = new Map<string, Rec[]>(), leading = new Map<string, { open: boolean; run: Rec[] }>();
+    for (const rec of recs) {
+      if (rec.spec.kind === 'raw') continue;
+      if (rec.kind === 'old') byKey.set(rec.spec.key, [...(byKey.get(rec.spec.key) ?? []), rec]);
+      const lead = leading.get(rec.spec.key) ?? { open: true, run: [] };
+      if (lead.open && rec.kind === 'old') lead.run.push(rec); else lead.open = false;
+      leading.set(rec.spec.key, lead);
+    }
+    const reachable = [...leading.values()].map((lead) => lead.run).filter((run) => run.length >= 2);
+    const groups = reachable.length > 0 ? reachable : [...byKey.values()].filter((group) => group.length >= 2);
+    if (groups.length > 0) {
+      const group = pick(r, groups);                                                          // in acceptance order (recs are pushed so)
+      const start = Math.floor(r() * (group.length - 1));
+      const tied = group.slice(start, start + (group.length - start >= 3 && r() < 0.3 ? 3 : 2));
+      const finish = Math.max(...tied.map((rec) => rec.spec.finalizedAt!));
+      const newestFirst = r() < 0.5;
+      tied.forEach((rec, i) => {
+        const id = newestFirst ? `${rec.spec.key.replace('key', 'k')}-t${tied.length - i}-${rec.spec.id}` : rec.spec.id;
+        recs[recs.indexOf(rec)] = { ...rec, spec: { ...rec.spec, id, finalizedAt: finish } };
+      });
+    }
+  }
   return recs;
 }
+
+/** Keys two of whose finalized records finished at the same instant. */
+export const tiedKeys = (recs: readonly Rec[]): Set<string> => {
+  const seen = new Set<string>(), tied = new Set<string>();
+  for (const { spec } of recs) {
+    if (spec.state !== 'finalized' || spec.kind === 'raw') continue;
+    const mark = `${spec.key}\u0000${spec.finalizedAt}`;
+    if (seen.has(mark)) tied.add(spec.key); else seen.add(mark);
+  }
+  return tied;
+};
 

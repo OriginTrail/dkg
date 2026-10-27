@@ -26,12 +26,15 @@ export function newRetention(publisher: TripleStoreAsyncLiftPublisher, over: Par
   });
 }
 
-/** Call `runBatch()` until the pass is over (nothing left to judge) or `max` calls were made; returns every result. */
-export async function drain(retention: PublisherRetention, max = 200): Promise<PublisherRetentionBatchResult[]> {
+/** Call `runBatch()` until the pass is over (nothing left to judge) or `max` calls were made; returns every result. `afterBatch` runs after each call. */
+export async function drain(
+  retention: PublisherRetention, max = 200, afterBatch?: (res: PublisherRetentionBatchResult) => Promise<void>,
+): Promise<PublisherRetentionBatchResult[]> {
   const results: PublisherRetentionBatchResult[] = [];
   for (let i = 0; i < max; i++) {
     const res = await retention.runBatch();
     results.push(res);
+    await afterBatch?.(res);
     if (res.error || (!res.hasMore && res.scanned === 0)) break;
   }
   return results;

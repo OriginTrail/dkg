@@ -7,7 +7,8 @@
  *  - the sweep KEEPS the older record for a reason that can pass (it is dated after now, an older failed job stood in front of it, the key could not be read) and the
  *    scan moves on: the reason passes between two batches of ONE pass and the newer record, judged by a later batch, is no longer held back;
  *  - the older record is one the sweep can NEVER delete (a pre-upgrade payload it does not rewrite, a stored index the scan does not match): nothing held the newer
- *    record back at all.
+ *    record back at all;
+ *  - the two finished at the same instant, and the scan, which walks the rows of one finish time in subject order, meets the newer one first.
  * A newer record goes only behind an older one the sweep deletes first. Binding never changes in these cases (what is left in front is finalized), which is why the
  * binding view is asserted too, but it is the ORDER that these tests are about.
  */
@@ -168,5 +169,82 @@ describe('a record the sweep reads through another job\'s subject', () => {
     expect(results.every((r) => r.error === undefined)).toBe(true);
     expect(deletedIds(results)).toEqual([]);
     expect(await present(w.store, 'm')).not.toBe('');
+  });
+});
+
+describe('records of one key that finished at the same instant', () => {
+  // The key's order is by acceptance (then job id); the scan walks by finish time, and the rows of ONE finish time in subject order (a group larger than a batch is
+  // walked by subject across batches). So a pass lets a key's records go only up to the first one whose finish time is not STRICTLY later than the one before it:
+  // a record that tied with an older one may be met first, and then it waits, with every record behind it. A strict `>` there is what these cases pin.
+
+  /** What is left of a key (`order`: its records oldest first) is a suffix of it, and its newest record is there until the last one goes. */
+  async function expectSuffix(w: World, order: readonly string[], when: string): Promise<void> {
+    const left = new Set(await idsOf(w));
+    const remaining = order.filter((id) => left.has(id));
+    expect(remaining, `${when}: what is left of the key is a suffix of its order`).toEqual(order.slice(order.length - remaining.length));
+    if (remaining.length > 0) expect(left.has(order.at(-1)!), `${when}: the newest record is still there`).toBe(true);
+  }
+  /** `drain`, with the suffix asserted after every batch. */
+  async function walk(retention: ReturnType<typeof newRetention>, w: World, order: readonly string[], label: string): Promise<PublisherRetentionBatchResult[]> {
+    const results: PublisherRetentionBatchResult[] = [];
+    for (let i = 0; i < 50; i++) {
+      const res = await retention.runBatch();
+      results.push(res);
+      expect(res.error, `${label} batch ${i}`).toBeUndefined();
+      await expectSuffix(w, order, `${label} batch ${i}`);
+      if (!res.hasMore && res.scanned === 0) break;
+    }
+    return results;
+  }
+
+  it('the scan meets the newer of two tied records first: it is kept, the older one goes, and the newer one goes in the next pass', async () => {
+    // b-old accepted on day 10, a-new on day 20, both finished on day 30: the tie walk meets a-new first (subject order), with b-old still in front of it in the key
+    const order = ['b-old', 'a-new'];
+    const specs = [fin('b-old', 'k', 10, 30), fin('a-new', 'k', 20, 30)];
+    let t = NOW;
+    const w = await world(specs);
+    const retention = newRetention(w.publisher, { batchSize: 1, now: () => t, rescanIntervalMs: 24 * HOUR });
+    const first = await retention.runBatch();
+    expect(first.scanned).toBe(1);
+    expect(deletedIds([first])).toEqual([]);                                       // a-new must not go while b-old stays
+    expect(kept([first])).toEqual({ older_sibling_pending: 1 });
+    expect(await idsOf(w)).toEqual(['a-new', 'b-old']);
+    await expectSuffix(w, order, 'after the first batch');
+    const rest = await walk(retention, w, order, 'pass 1');
+    expect(deletedIds(rest)).toEqual(['b-old']);
+    expect(await idsOf(w)).toEqual(['a-new']);
+    t = NOW + 30 * HOUR;                                                           // the next pass: nothing stands in front of a-new
+    expect(deletedIds(await walk(retention, w, order, 'pass 2'))).toEqual(['a-new']);
+    expect(await idsOf(w)).toEqual([]);
+    // report mode names the same first pass
+    const reportWorld = await world(specs);
+    expect(wouldDeleteIds(await drain(newRetention(reportWorld.publisher, { mode: 'report', batchSize: 1 })))).toEqual(['b-old']);
+  });
+
+  it.each([
+    ['one batch each', { batchSize: 1 }],
+    ['all in one hold', {}],
+  ])('three records, a strict rise then a tie the scan meets newest first (%s): the newest waits, the two in front of it go', async (_name, over) => {
+    // c1 (day 5, finished 25), c2 (day 10, finished 30), b3 (day 20, finished 30): the walk meets c1, then b3 before c2
+    const order = ['c1', 'c2', 'b3'];
+    const w = await world([fin('c1', 'k', 5, 25), fin('c2', 'k', 10, 30), fin('b3', 'k', 20, 30)]);
+    const results = await walk(newRetention(w.publisher, over), w, order, 'pass 1');
+    expect(deletedIds(results)).toEqual(['c1', 'c2']);
+    expect(kept(results)).toEqual({ older_sibling_pending: 1 });
+    expect(await idsOf(w)).toEqual(['b3']);
+  });
+
+  it('the scan meets the OLDER of two tied records first, a batch apart: delete takes both in one pass, in order; report names the older one only', async () => {
+    // a-old accepted on day 10, b-new on day 20, both finished on day 30. Delete removes a-old in batch 1, so b-new leads the key when batch 2 meets it. Report removes
+    // nothing: a-old is still in front of b-new and the tie keeps b-new. This is the one place report can name fewer records than the first delete pass removes; it
+    // never names one that delete keeps, and delete never removes one out of order.
+    const order = ['a-old', 'b-new'];
+    const specs = [fin('a-old', 'k', 10, 30), fin('b-new', 'k', 20, 30)];
+    const w = await world(specs);
+    expect(deletedIds(await walk(newRetention(w.publisher, { batchSize: 1 }), w, order, 'delete'))).toEqual(['a-old', 'b-new']);
+    const reportWorld = await world(specs);
+    const report = await drain(newRetention(reportWorld.publisher, { mode: 'report', batchSize: 1 }));
+    expect(wouldDeleteIds(report)).toEqual(['a-old']);
+    expect(kept(report)).toEqual({ older_sibling_pending: 1 });
   });
 });

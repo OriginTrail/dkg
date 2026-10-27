@@ -21,7 +21,8 @@
  *     interleave. A hold has a time budget (default 50 ms): no further delete starts once the next one would exceed it, and the slice size adapts. The store flush runs
  *     after the transaction is closed;
  *  4. only after every slice succeeded does the cursor move past the judged rows.
- * `report` mode runs steps 1 to 3 unchanged and removes nothing: the rows it counts as `wouldDelete` are exactly the rows `delete` would remove from the same snapshot.
+ * `report` mode runs steps 1 to 3 unchanged and removes nothing: the rows it counts as `wouldDelete` are exactly the rows `delete` would remove from the same snapshot,
+ * save one case in which `delete` removes more: two records of one key that finished at the same instant (see planDeletions). Report never names a row delete keeps.
  * It never throws for a store failure: the result carries the phase that failed and what completed before it (no cursor moves, so the next call judges the same rows
  * again - deleted ones are gone). Throws only for invalid configuration.
  *
@@ -457,9 +458,11 @@ class PublisherRetentionImpl implements PublisherRetention {
       const refused = await this.refusedSiblings(siblings, key, ordered);
       const plan = planKeyDeletion(siblings, key, record => (refused.has(record.jobId) ? 'index_mismatch' : judgeFinalizedRecord(record, now, this.cfg.policy)));
       const inKey = new Set(plan.order.map(record => record.jobId));
-      // Records leave a key oldest first, and the scan walks by finish time: so the records of the plan that go in THIS pass are those from the oldest up to the first whose finish
-      // is not strictly later than the one before it. A record accepted earlier but finished later (or at the same instant) would be met after its successors: it, and every record
-      // behind it, waits for the next pass, when the ones in front are gone. The rule reads the records alone: no slice boundary, batch or mode can change the answer.
+      // Records leave a key oldest first, and the scan walks by finish time (the rows of one finish time in subject order, not the key's): so the records of the plan that go in
+      // THIS pass are those from the oldest up to the first whose finish is not strictly later than the one before it. A record accepted earlier but finished later (or at the same
+      // instant) may be met after its successors: it, and every record behind it, waits for the next pass, when the ones in front are gone. The rule reads the records stored now,
+      // so a slice or batch boundary, or the mode, changes the answer in one case only: two records that finished at the same instant, the older one met a hold earlier. Delete
+      // has removed it by then and the newer one leads the key; report, which removes nothing, still finds the tie and keeps the newer one. Nothing leaves out of order.
       const inOrder = new Set<string>();
       for (let last = Number.NEGATIVE_INFINITY, i = 0; i < plan.prefix.length && plan.prefix[i]!.timestamps.finalizedAt! > last; i++) {
         last = plan.prefix[i]!.timestamps.finalizedAt!;

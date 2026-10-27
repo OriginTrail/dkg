@@ -7,25 +7,25 @@ import {
   DAY, NOW, WINDOW, createRetentionTemplates, faultyStore, pick, present, rng, seedKeyed, type KeyedSpec, type RetentionTemplates,
 } from './_helpers/lift-retention-fixtures.js';
 import { drain, newRetention } from './_helpers/lift-retention-sweep.js';
-import { bindingOracle, genPopulation, keyedOf, prefixOracle } from './_helpers/lift-retention-population.js';
+import { bindingOracle, genPopulation, keyedOf, prefixOracle, tiedKeys } from './_helpers/lift-retention-population.js';
 
 // AC7 (OT-RFC-73) for the publisher queue: retention never deletes a job that is not finalized (so never a failed, held, non-terminal or recoverable one), deletes only what D-6
 // allows (a finalized job 7 days after it finished), never a job dated after `now`, never changes the binding decision of a lifecycle key, and keeps a key's newest record in
 // every intermediate state. Each fast-check run is one random population of lifecycle keys with random histories (every state the queue has, old and young finalized
-// records, records dated in the future, records that finished out of order), a random mode, batch and slice size, and a store that may fail in the middle of a delete;
-// it replays from the integer seed fast-check prints. The oracle is written from the generator's own knowledge of what it built (the STATE of each record and the order of
-// the key), not from the product's predicates: its binding rule is re-stated from the documented admission rule, not imported. The PR budget is the repository default
+// records, records dated in the future, records that finished out of order or at the same instant), a random mode, batch and slice size, and a store that may fail in
+// the middle of a delete; it replays from the integer seed fast-check prints. The oracle is written from the generator's own knowledge of what it built (the STATE of
+// each record and the order of the key), not from the product's predicates: its binding rule is re-stated from the documented admission rule, not imported. The PR budget is the repository default
 // (100 runs, fixed seed); the nightly profile raises it through DKG_PROPERTY_RUNS (1,000) and DKG_PROPERTY_SEED.
 // The healthy passes are RESTLESS first: between two batches of one pass the clock moves on (a record dated after now stops being so) and an operator clears a terminal failed job
 // (a record an older failed job held back is free), and the population holds records the sweep can never delete (a pre-upgrade payload, a record without its finish-time index).
-// The suffix rule is asserted after every batch: nothing may be deleted ahead of an older record of its key that stays.
+// The suffix rule is asserted after every batch that deleted anything, in the first run too: nothing may be deleted ahead of an older record of its key that stays.
 
 const options = propertyOptions();
 const GRAPH = 'urn:dkg:publisher:control-plane';
 
 interface Tally {
   cases: number; deleted: number; keptBehindFailed: number; inversions: number; futureDated: number; faultsInjected: number; keys: number; reportEqualsDelete: number; clockSkips: number;
-  heldByUnreachable: number; midPassClears: number; clockPassedFutureUpdate: number;
+  heldByUnreachable: number; midPassClears: number; clockPassedFutureUpdate: number; tiedPrefixes: number; tiedNewestFirst: number; reportShortOnTie: number;
 }
 
 async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally): Promise<void> {
@@ -33,6 +33,7 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
   const recs = genPopulation(r);
   const specs = recs.map((rec) => rec.spec);
   const byKey = keyedOf(recs);
+  const ties = tiedKeys(recs);
   const batchSize = pick(r, [1, 2, 5, 100]);
   const sliceSize = pick(r, [1, 3, 10]);
   const injectFault = r() < 0.5;
@@ -77,24 +78,7 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
     for (const key of byKey.keys()) initialView.set(key, await view(publisher, key));
     for (const [key, ids] of bindingBefore) expect(initialView.get(key), `the production binding of ${key} before`).toEqual(ids);
 
-    let faultAt = -1;
-    if (injectFault) {
-      // count the calls of a clean run on a copy to pick a call that is really part of it
-      const probe = new OxigraphStore();
-      try {
-        await seedKeyed(probe, templates, specs);
-        let calls = 0;
-        const counting = faultyStore(probe, () => { calls++; return undefined; });
-        await drain(newRetention(publisherOver(counting as OxigraphStore), { batchSize, sliceSize }));
-        faultAt = Math.floor(r() * Math.max(1, calls));
-      } finally { await probe.close(); }
-    }
-    let n = 0;
-    const target = injectFault ? faultyStore(store, () => (n++ === faultAt ? new Error('injected') : undefined)) : store;
-    const first = await drain(newRetention(publisherOver(target as OxigraphStore), { batchSize, sliceSize }));
-    if (injectFault && first.some((res) => res.error !== undefined)) tally.faultsInjected += 1;
-
-    // the state right after the (possibly failed) first run: AC7 holds at every stage. `time` is the clock of the latest batch: what is gone must be allowed by then.
+    // AC7 holds at every stage. `time` is the clock of the latest batch: what is gone must be allowed by then.
     const stage = async (time: number, deep = true) => {                  // `deep` also reads every record back and asks the production binding selector: too slow after every batch
       const present_ = await left(publisher);
       const allowed = allowedAt(time);
@@ -116,6 +100,25 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
         if (deep) expect(await view(publisher, key), `${key}: production binding`).toEqual(bindingBefore.get(key));
       }
     };
+
+    let faultAt = -1;
+    if (injectFault) {
+      // count the calls of a clean run on a copy to pick a call that is really part of it
+      const probe = new OxigraphStore();
+      try {
+        await seedKeyed(probe, templates, specs);
+        let calls = 0;
+        const counting = faultyStore(probe, () => { calls++; return undefined; });
+        await drain(newRetention(publisherOver(counting as OxigraphStore), { batchSize, sliceSize }));
+        faultAt = Math.floor(r() * Math.max(1, calls));
+      } finally { await probe.close(); }
+    }
+    let n = 0;
+    const target = injectFault ? faultyStore(store, () => (n++ === faultAt ? new Error('injected') : undefined)) : store;
+    const first = await drain(newRetention(publisherOver(target as OxigraphStore), { batchSize, sliceSize }), 200, async (res) => { if (res.deleted > 0) await stage(NOW, false); });
+    if (injectFault && first.some((res) => res.error !== undefined)) tally.faultsInjected += 1;
+
+    // the state right after the (possibly failed) first run
     await stage(NOW);
 
     // restless passes: between two batches of one pass the clock moves on and an operator clears a terminal failed job that has a newer record (it binds nothing)
@@ -148,10 +151,16 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
     }
     const finalLeft = await left(publisher);
     expect(new Set(specs.filter((s) => !finalLeft.has(s.id) && !cleared.has(s.id)).map((s) => s.id)), 'exactly what the spec says is gone').toEqual(allowedAt(tEnd));
-    // report names what the first pass of delete removes from the same snapshot (a record that finished out of order waits for the next pass in both modes)
+    // report names what the first pass of delete removes from the same snapshot (a record that finished out of order waits for the next pass in both modes). The one
+    // exception is a key two of whose records finished at the same instant: when the walk meets the older one a hold before the newer, delete has removed it by then
+    // and takes the newer one (and what is behind it) in the same pass, while report, which removes nothing, keeps finding the older one in front. Report never names more.
     for (const id of wouldDelete) expect(expectedDeleted.has(id), `${id} reported but not allowed`).toBe(true);
     if (!injectFault) {
-      expect(new Set(first.flatMap((res) => res.deletedJobs.map((j) => j.jobId))), 'report == the first delete pass, on the same snapshot').toEqual(wouldDelete);
+      const deletedFirst = new Set(first.flatMap((res) => res.deletedJobs.map((j) => j.jobId)));
+      for (const id of wouldDelete) expect(deletedFirst.has(id), `${id} reported but kept by the first delete pass`).toBe(true);
+      const untied = (ids: ReadonlySet<string>) => new Set(specs.filter((s) => ids.has(s.id) && !ties.has(s.key)).map((s) => s.id));
+      expect(untied(deletedFirst), 'report == the first delete pass, on the same snapshot, for every key without a tie').toEqual(untied(wouldDelete));
+      if (deletedFirst.size > wouldDelete.size) tally.reportShortOnTie += 1;
       tally.reportEqualsDelete += 1;
     }
 
@@ -178,6 +187,8 @@ async function oneCase(seed: number, templates: RetentionTemplates, tally: Tally
       if (firstBlocker >= 0 && ordered.slice(firstBlocker + 1).some((s) => s.state === 'finalized' && NOW - (s.finalizedAt ?? NOW) >= WINDOW && s.updatedAt === undefined)) tally.keptBehindFailed += 1;
       const prefix = prefixOracle(ordered, NOW);
       if (prefix.some((p, i) => prefix.slice(0, i).some((q) => q.finalizedAt! >= p.finalizedAt!))) tally.inversions += 1;
+      const tie = prefix.findIndex((p, i) => i > 0 && prefix[i - 1]!.finalizedAt === p.finalizedAt);
+      if (tie > 0) { tally.tiedPrefixes += 1; if (prefix[tie]!.id < prefix[tie - 1]!.id) tally.tiedNewestFirst += 1; }
       tally.keys += 1;
     }
     tally.deleted += expectedDeleted.size;
@@ -192,7 +203,7 @@ it('retention never deletes anything but old finalized records, never changes th
   const templates = await createRetentionTemplates();
   const tally: Tally = {
     cases: 0, deleted: 0, keptBehindFailed: 0, inversions: 0, futureDated: 0, faultsInjected: 0, keys: 0, reportEqualsDelete: 0, clockSkips: 0,
-    heldByUnreachable: 0, midPassClears: 0, clockPassedFutureUpdate: 0,
+    heldByUnreachable: 0, midPassClears: 0, clockPassedFutureUpdate: 0, tiedPrefixes: 0, tiedNewestFirst: 0, reportShortOnTie: 0,
   };
   // Count the turns the event loop takes while the cases run (the floor below). Every term Oxigraph hands back from a query is a wasm object that is freed by a
   // FinalizationRegistry callback, and V8 runs those callbacks as tasks between two turns of the loop. A case is microtasks from start to end (the in-memory store never
@@ -221,7 +232,9 @@ it('retention never deletes anything but old finalized records, never changes th
       expect(tally.heldByUnreachable).toBeGreaterThan(5);                                // old records really held behind one the sweep can never delete
       expect(tally.midPassClears).toBeGreaterThan(5);                                    // failed jobs really cleared between two batches
       expect(tally.clockPassedFutureUpdate).toBeGreaterThan(5);                          // records dated after now that the clock really passed during the walk
+      expect(tally.tiedNewestFirst).toBeGreaterThan(0);                                  // keys whose deletable run holds a tie the walk meets newest first
+      expect(tally.tiedPrefixes).toBeGreaterThan(tally.tiedNewestFirst);                 // and ties it meets oldest first
     }
   }
-  console.log(`publisher retention AC7 property: seed=${options.seed} runs=${tally.cases} deleted=${tally.deleted} keys=${tally.keys} held-back-keys=${tally.keptBehindFailed} out-of-order-keys=${tally.inversions} future-dated=${tally.futureDated} faults=${tally.faultsInjected} unreachable-held=${tally.heldByUnreachable} mid-pass-clears=${tally.midPassClears} clock-passed=${tally.clockPassedFutureUpdate}`);
+  console.log(`publisher retention AC7 property: seed=${options.seed} runs=${tally.cases} deleted=${tally.deleted} keys=${tally.keys} held-back-keys=${tally.keptBehindFailed} out-of-order-keys=${tally.inversions} future-dated=${tally.futureDated} faults=${tally.faultsInjected} unreachable-held=${tally.heldByUnreachable} mid-pass-clears=${tally.midPassClears} clock-passed=${tally.clockPassedFutureUpdate} tied-keys=${tally.tiedPrefixes} tied-newest-first=${tally.tiedNewestFirst} report-short-on-tie=${tally.reportShortOnTie}`);
 }, 600_000);
