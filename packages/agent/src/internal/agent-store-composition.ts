@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { asStoreRecoveryGenerationReader, type TripleStore } from '@origintrail-official/dkg-storage';
+import { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import { createPublishedNamedKaVmLifecycleWriter } from '../named-ka-vm-lifecycle.js';
 import { createMutationObservedStore } from './context-graph-cache-invalidating-store.js';
 import { createObservedStoreMutation } from './observed-store-mutation.js';
@@ -22,8 +23,19 @@ export function createAgentStoreComposition(
     },
   });
   const store = createMutationObservedStore(raw, executeMutation);
+  // The publisher owns validation, query construction and update options. This
+  // port contributes only the known mutation scope at its dispatch boundary.
+  const storageAckCopyCleanupWriter: StorageAckCopyCleanupWriter = input =>
+    clearDischargedStorageAckCopies({
+      update: raw.update === undefined ? undefined : (sparql, options) => executeMutation(
+        () => raw.update!(sparql, options), () => true,
+        { removals: [{ graph: input.metaGraph }] }, 'update',
+      ),
+    }, input);
+
   return {
     store, heldContent,
+    storageAckCopyCleanupWriter,
     publishedLifecycleWriter: createPublishedNamedKaVmLifecycleWriter({
       updateStore: raw, fallbackStore: store, executeMutation,
     }),

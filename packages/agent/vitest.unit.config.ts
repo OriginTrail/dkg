@@ -192,6 +192,7 @@ export default defineConfig({
       "test/durable-recovery-resume.test.ts",
       "test/durable-recovery-slice-yield.test.ts",
       "test/durable-recovery-stored-prefix.test.ts",
+      "test/durable-prefix-production.test.ts",
       "test/store-content-fence.test.ts",
       "test/store-lane-yield.test.ts",
       "test/durable-progress.test.ts",
