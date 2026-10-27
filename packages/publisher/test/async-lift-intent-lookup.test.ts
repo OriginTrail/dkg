@@ -591,11 +591,7 @@ describe('#1828 async lift intent lookup', () => {
     };
     restartProcess();
     const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
-    const candidates = await selectors.vmPublishAdmissionCandidates(
-      knowledgeAssetVmPublishLifecycleKey(request),
-      (job) => job.request.jobType === 'knowledge-asset-vm-publish'
-        ? knowledgeAssetVmPublishLifecycleKey(job.request.knowledgeAssetVmPublish) : null,
-    );
+    const candidates = await selectors.vmPublishAdmissionCandidates(knowledgeAssetVmPublishLifecycleKey(request));
     expect(candidates).toHaveLength(1);
     expect(candidates[0]?.timestamps.updatedAt).toBe(legacy.timestamps.updatedAt);
   });
