@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { assertSafeIri, contextGraphMetaUri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, contextGraphMetaUri, DEFAULT_MAX_READ_BYTES } from '@origintrail-official/dkg-core';
 import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, parseGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
@@ -66,6 +66,11 @@ export async function readHeldGraphScopedAssets(
       const content = await verifyExactGraphContent(store, {
         graphUri: descriptor.assertionGraph,
         publicTripleCount: descriptor.publicTripleCount,
+        // Durable recovery permits one whole asset beyond its round budget. Each
+        // accepted row fits a bounded wire response; the descriptor bounds how
+        // many such rows this proof can retain. Do not inherit export defaults.
+        readLimits: { maxQuadCount: descriptor.publicTripleCount,
+          maxNQuadsBytes: Math.min(Number.MAX_SAFE_INTEGER, descriptor.publicTripleCount * DEFAULT_MAX_READ_BYTES) },
         privateMerkleRoot: descriptor.privateRoot,
         expectedMerkleRoot: Buffer.from(descriptor.claimedRootHex, 'hex'),
         source: 'agent.durableSync.heldAssetContent', queryOptions: options,

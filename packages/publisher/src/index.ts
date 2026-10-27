@@ -458,15 +458,18 @@ export {
   type PromoteFailureClassification,
   type PromoteFailureTransition,
   type PromoteJob,
+  type PromoteJobPage,
   type PromoteJobState,
   type PromoteLease,
   type PromoteListFilter,
+  type PromoteListPageRequest,
   type PromotePostCommitRecoveryEvent,
   type PromoteRecoverySummary,
   type PromoteRequest,
   type BoundPromoteRequest,
   type BoundPromoteJob,
   type PromoteResult,
+  type PromoteSelector,
   type PromoteStats,
   type PromoteTerminalJobClearer, type PromoteShareReconciler,
 } from './async-promote-queue.js';
@@ -563,6 +566,7 @@ export { classifyQueuedSharePreparation } from './bind-promote-recovery.js';
 export type { ACKDiagnosticSummary } from './ack-diagnostics.js';
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
 
+export { PromoteListRequestError, PROMOTE_LIST_DEFAULT_PAGE_SIZE, PROMOTE_LIST_MAX_PAGE_SIZE, type PromoteListRequestErrorCode } from './promote-list-cursor.js';
 export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';
 
 export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
@@ -576,3 +580,16 @@ export { readShareQueueDepth, readLiftQueueDepth, readLiftJournalEntryCount, typ
 
 export { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';
 export { parseGraphKnowledgeAssetStructure, type GraphKnowledgeAssetStructure, type GraphKnowledgeAssetStructurePolicy } from './graph-metadata-envelope.js';
+export {
+  LIFT_JOB_PAGE_DEFAULT_LIMIT,
+  LIFT_JOB_PAGE_MAX_LIMIT,
+  LiftJobPageError,
+  decodeLiftJobPageCursor,
+  encodeLiftJobPageCursor,
+  liftJobPageLimit,
+  type LiftJobPage,
+  type LiftJobPageErrorCode,
+  type LiftJobPageKey,
+  type LiftJobPageRequest,
+  type VmPublishJobPager,
+} from './lift-job-page.js';
