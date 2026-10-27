@@ -102,6 +102,7 @@ export default defineConfig({
       'test/async-promote-share-control-static.test.ts',
       'test/async-promote-share-lane-trace.test.ts',
       'test/async-promote-claim-order.test.ts',
+      'test/async-promote-listing-characterization.test.ts',
       'test/lift-job-types.test.ts',
       'test/lift-job-committed.test.ts',
       'test/lift-job-chain-observations.test.ts',
