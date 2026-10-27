@@ -1,4 +1,3 @@
-import { withoutSyncCheckpointResponderSession } from '@origintrail-official/dkg-core';
 import type {
   DurableManifestDigest,
   DurableManifestPrefixDigest,
@@ -20,7 +19,7 @@ export type ManifestCheckpointDecision =
 
 /** Pure generation/prefix decision for one persisted durable DATA checkpoint. */
 export function resolveManifestCheckpointDecision(input: {
-  readonly checkpoint?: SyncCheckpointEntry;
+  readonly checkpoint?: Pick<SyncCheckpointEntry, 'offset' | 'manifestDigest' | 'manifestPrefixDigest' | 'terminal' | 'responderSessionOffset'>;
   readonly manifestDigest?: DurableManifestDigest;
   readonly prefixDigestAtOffset?: DurableManifestPrefixDigest;
   readonly hasExactAssetFilter: boolean;
@@ -76,7 +75,7 @@ export type ResponderResumeDecision =
 
 /** Keep verified manifest and raw responder coordinates distinct. */
 export function resolveResponderResumeDecision(input: {
-  readonly checkpoint?: SyncCheckpointEntry;
+  readonly checkpoint?: Pick<SyncCheckpointEntry, 'offset'>;
   readonly usesPageSession: boolean;
   readonly savedResponderSessionOffset?: number;
   readonly manifestCheckpointDecision: ManifestCheckpointDecision;
@@ -127,14 +126,18 @@ export function resolveResponderSessionLossCleanup(input: {
     : 'clear-checkpoint';
 }
 
-type ManifestBoundCheckpoint = SyncCheckpointEntry & { readonly manifestDigest: DurableManifestDigest };
+/** Only fields accepted by the checkpoint persistence boundary; it owns record construction. */
+export interface ManifestCheckpointUpdate {
+  readonly offset: number;
+  readonly manifestDigest: DurableManifestDigest;
+  readonly manifestPrefixDigest?: DurableManifestPrefixDigest;
+  readonly nowMs: number;
+}
 type CheckpointTransition =
-  | { readonly checkpointAction: 'reset'; readonly checkpoint?: undefined; readonly seeded: false }
-  | { readonly checkpointAction: 'keep'; readonly checkpoint?: SyncCheckpointEntry; readonly seeded: false }
-  | { readonly checkpointAction: 'replace'; readonly checkpoint: ManifestBoundCheckpoint; readonly seeded: boolean }
-  | { readonly checkpointAction: 'upgrade'; readonly checkpoint: ManifestBoundCheckpoint; readonly seeded: false };
+  | { readonly checkpointAction: 'reset' | 'keep'; readonly seeded: false }
+  | { readonly checkpointAction: 'replace'; readonly update: ManifestCheckpointUpdate; readonly seeded: boolean }
+  | { readonly checkpointAction: 'upgrade'; readonly update: ManifestCheckpointUpdate; readonly seeded: false };
 
-/** Replacing/upgrading always carries the final manifest binding required by persistence. */
 export type ManifestResumePlan = CheckpointTransition & { readonly resume: ResponderResumeDecision };
 
 export function resolveManifestResumePlan(input: {
@@ -151,37 +154,38 @@ export function resolveManifestResumePlan(input: {
 }): ManifestResumePlan {
   const reset = (resume: ResponderResumeDecision = { kind: 'fresh', verifiedOffset: 0, rawOffset: 0 }): ManifestResumePlan =>
     ({ checkpointAction: 'reset', seeded: false, resume });
-  const finish = (transition: CheckpointTransition, decision: ManifestCheckpointDecision): ManifestResumePlan => {
-    const resume = resolveResponderResumeDecision({ checkpoint: transition.checkpoint, usesPageSession: input.usesPageSession,
+  const finish = (transition: CheckpointTransition, offset: number, decision: ManifestCheckpointDecision): ManifestResumePlan => {
+    const resume = resolveResponderResumeDecision({ checkpoint: { offset }, usesPageSession: input.usesPageSession,
       savedResponderSessionOffset: transition.checkpointAction === 'replace' ? undefined : input.savedResponderSessionOffset,
       manifestCheckpointDecision: decision });
     return resume.kind === 'reset-unmappable' ? reset(resume) : { ...transition, resume };
   };
   if (input.forceFreshSession) return reset();
-  const decide = (checkpoint: SyncCheckpointEntry | undefined) => resolveManifestCheckpointDecision({
+  const decide = (checkpoint: Parameters<typeof resolveManifestCheckpointDecision>[0]['checkpoint']) => resolveManifestCheckpointDecision({
     checkpoint, manifestDigest: input.manifestDigest,
     prefixDigestAtOffset: checkpoint ? input.prefixDigestAtOffset?.(checkpoint.offset) : undefined,
     hasExactAssetFilter: input.hasExactAssetFilter,
   });
   if (input.manifestDigest && !input.hasExactAssetFilter && input.proposedCheckpoint) {
-    const proposed = withoutSyncCheckpointResponderSession(input.proposedCheckpoint);
-    const decision = decide(proposed);
+    const source = input.proposedCheckpoint;
+    // A source proves an offset and binding, never another peer's responder coordinate.
+    const decision = decide({ offset: source.offset, manifestDigest: source.manifestDigest,
+      manifestPrefixDigest: source.manifestPrefixDigest, terminal: source.terminal });
     if (decision.kind !== 'reset') return finish({ checkpointAction: 'replace', seeded: true,
-      checkpoint: { ...proposed, manifestDigest: input.manifestDigest, terminal: undefined,
+      update: { offset: source.offset, manifestDigest: input.manifestDigest, nowMs: source.updatedAtMs,
         manifestPrefixDigest: decision.kind === 'rebind-and-prime' ? decision.prefixDigest
-          : decision.prefixUpgrade ?? proposed.manifestPrefixDigest } }, decision);
+          : decision.prefixUpgrade ?? source.manifestPrefixDigest } }, source.offset, decision);
   }
   const checkpoint = input.checkpoint;
   const decision = decide(checkpoint);
   if (decision.kind === 'reset') return reset();
   if (checkpoint && input.manifestDigest) {
-    const refreshed = { ...checkpoint, manifestDigest: input.manifestDigest, terminal: undefined,
-      updatedAtMs: input.nowMs, expiresAtMs: input.nowMs + checkpoint.expiresAtMs - checkpoint.updatedAtMs };
     if (decision.kind === 'rebind-and-prime') return finish({ checkpointAction: 'replace', seeded: false,
-      checkpoint: { ...withoutSyncCheckpointResponderSession(refreshed), manifestDigest: input.manifestDigest,
-        manifestPrefixDigest: decision.prefixDigest } }, decision);
+      update: { offset: checkpoint.offset, manifestDigest: input.manifestDigest, nowMs: input.nowMs,
+        manifestPrefixDigest: decision.prefixDigest } }, checkpoint.offset, decision);
     if (decision.prefixUpgrade) return finish({ checkpointAction: 'upgrade', seeded: false,
-      checkpoint: { ...refreshed, manifestPrefixDigest: decision.prefixUpgrade } }, decision);
+      update: { offset: checkpoint.offset, manifestDigest: input.manifestDigest, nowMs: input.nowMs,
+        manifestPrefixDigest: decision.prefixUpgrade } }, checkpoint.offset, decision);
   }
-  return finish({ checkpointAction: 'keep', checkpoint, seeded: false }, decision);
+  return finish({ checkpointAction: 'keep', seeded: false }, checkpoint?.offset ?? 0, decision);
 }

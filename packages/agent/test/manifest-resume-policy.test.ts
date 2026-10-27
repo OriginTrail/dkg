@@ -190,9 +190,9 @@ describe('one checkpoint resume plan', () => {
       hasExactAssetFilter: false, usesPageSession: true, savedResponderSessionOffset: 512, nowMs: 5000 });
     expect(plan.checkpointAction).toBe('replace');
     expect(plan.seeded).toBe(true);
-    expect(plan.checkpoint).toMatchObject({ offset: 1024, manifestDigest: MANIFEST_B,
-      manifestPrefixDigest: PREFIX, updatedAtMs: proposed.updatedAtMs, expiresAtMs: proposed.expiresAtMs });
-    expect(plan.checkpoint?.responderSessionId).toBeUndefined();
+    if (plan.checkpointAction !== 'replace') throw new Error('expected replacement');
+    expect(plan.update).toEqual({ offset: 1024, manifestDigest: MANIFEST_B,
+      manifestPrefixDigest: PREFIX, nowMs: proposed.updatedAtMs });
     expect(plan.resume).toEqual({ kind: 'prime', verifiedOffset: 1024, rawOffset: 1024 });
   });
 
@@ -204,7 +204,17 @@ describe('one checkpoint resume plan', () => {
       hasExactAssetFilter: false, usesPageSession: true, savedResponderSessionOffset: 512, nowMs: 5000 });
     expect(plan.checkpointAction).toBe('keep');
     expect(plan.seeded).toBe(false);
-    expect(plan.checkpoint).toBe(destination);
+    expect(plan).not.toHaveProperty('update');
     expect(plan.resume).toEqual({ kind: 'resume', verifiedOffset: 512, rawOffset: 512 });
   });
+});
+
+
+it('upgrades a legacy prefix without replacing its live raw responder coordinate', () => {
+  const plan = resolveManifestResumePlan({ checkpoint: checkpoint({ manifestPrefixDigest: undefined, responderSessionOffset: 640 }),
+    manifestDigest: MANIFEST_A, prefixDigestAtOffset: () => PREFIX,
+    hasExactAssetFilter: false, usesPageSession: true, savedResponderSessionOffset: 640, nowMs: 5000 });
+  expect(plan).toEqual({ checkpointAction: 'upgrade', seeded: false,
+    update: { offset: 512, manifestDigest: MANIFEST_A, manifestPrefixDigest: PREFIX, nowMs: 5000 },
+    resume: { kind: 'resume', verifiedOffset: 512, rawOffset: 640 } });
 });
