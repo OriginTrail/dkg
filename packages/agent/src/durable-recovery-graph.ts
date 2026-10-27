@@ -5,7 +5,7 @@ import { type OperationContext } from '@origintrail-official/dkg-core';
 import { exactAssetUalsForSelection } from './sync/exact-assets.js';
 import { MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
 import { createDurableSyncBudget, normalizeDurableSyncTimeoutMs } from './sync/requester/durable-sync-budget.js';
-import { runChallengeExactAssetFetch, runDurableSync, runDurableSyncDetailed, type ChallengeExactAssetFetchContext, type DurableSyncContext } from './sync/requester/durable-sync.js';
+import { runChallengeExactAssetFetch, runDurableSyncDetailed, type ChallengeExactAssetFetchContext, type DurableSyncContext } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
@@ -153,12 +153,14 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
       case 'unsupported-before-start': break; // Paging uses the same stored-prefix proof as full-graph recovery.
     }
   }
-  if (exactAssetSelection !== undefined && !host.heldStore) return runDurableSyncDetailed(durableContext);
-  if (onVerifiedFullSnapshot) return { result: await runDurableSync(durableContext) };
-  if (!host.heldStore && !durableMetaContinuation) return { result: await runDurableSync(durableContext) };
-  if (!host.heldStore) return runDurableSyncDetailed({ ...durableContext, durableMetaContinuation, durableResumeBoundary });
-  return materialization.withHeldAssetFence(fence => runDurableSyncDetailed({
-    ...durableContext, durableMetaContinuation, durableResumeBoundary,
-    storedPrefix: host.heldStore && { read: host.heldStore.read, openScope: host.heldStore.openScope, assertCurrent: fence.assertCurrent },
-  }), signal);
+  // Resolve continuation policy once; snapshots own a fresh full walk.
+  const continuation = onVerifiedFullSnapshot ? {} : { durableMetaContinuation, durableResumeBoundary };
+  const runPaging = (fence?: Parameters<Parameters<typeof materialization.withHeldAssetFence>[0]>[0]) =>
+    runDurableSyncDetailed({ ...durableContext, ...continuation,
+      storedPrefix: host.heldStore && fence ? {
+        read: host.heldStore.read, openScope: host.heldStore.openScope, assertCurrent: fence.assertCurrent,
+      } : undefined,
+    });
+  return host.heldStore && !onVerifiedFullSnapshot
+    ? materialization.withHeldAssetFence(runPaging, signal) : runPaging();
 }
