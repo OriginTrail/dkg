@@ -108,8 +108,15 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
   // A prior failed/paused invocation may disclose authorized diagnostics only:
   // the existing-state branch below rejects it before guest or receipt work.
   const expectedStatus = priorExecution?.status ?? 'active';
+  let joiningInvocation = false;
   const checkCapability = () => {
-    if (executionAuthorityRequired) assertExecutionCapabilityAuthorized(runtime, executionIri, expectedStatus);
+    if (executionAuthorityRequired) {
+      // A joined invocation can finish while its caller awaits grant checks;
+      // this branch only reads its result and cannot start receipt mutations.
+      const status = joiningInvocation && runtime.store.execution(executionIri)?.status === 'completed'
+        ? 'completed' : expectedStatus;
+      assertExecutionCapabilityAuthorized(runtime, executionIri, status);
+    }
   };
   const check = async () => {
     checkCapability();
@@ -137,6 +144,7 @@ export async function invokeTypeScriptProgram(agent: DKGAgent, runtime: Configur
   const existing = runtime.inFlight.get(key);
   if (existing) {
     if (existing.requestIdentity !== identity) throw new SemanticProgramError('INVOCATION_LAYER_CONFLICT', 'Invocation already has different inputs or authority', 409);
+    joiningInvocation = true;
     await check();
     return existing.promise;
   }

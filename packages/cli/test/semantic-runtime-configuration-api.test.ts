@@ -322,6 +322,85 @@ describe('bound durable execution capability authority', () => {
     expect(receiptMutationCounts(f.agent)).toEqual(mutations);
     expect(f.agent.assertion.create.mock.calls.filter(([, name]: any) => name.startsWith('program-asset-'))).toHaveLength(1);
   });
+  it.each([false, true])('rechecks capability when an in-flight TypeScript result is released to another waiter, revoked=%s', async revoked => {
+    const f = await capabilityFixture('typescript', 'vm');
+    const runtime = f.target.runtime!;
+    const execute = runtime.typescript!.execute.bind(runtime.typescript);
+    let reached!: () => void, release!: () => void;
+    const guestDone = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const guest = vi.spyOn(runtime.typescript!, 'execute').mockImplementation(async (...args) => {
+      const result = await execute(...args);
+      reached();
+      await gate;
+      return result;
+    });
+    const first = f.invoke();
+    await guestDone;
+    const key = `${graph}\0${f.id}`;
+    const running = runtime.inFlight.get(key)!;
+    // Authority changes at the shared-result handoff, after the primary work's
+    // final check. Every waiter still needs its own current disclosure gate.
+    running.promise = running.promise.then(result => {
+      if (revoked) expect(runtime.store.revokeCapability(`urn:sr:capability:${f.id}`, Date.now())).toBe(true);
+      return result;
+    });
+    const lookup = vi.spyOn(runtime.inFlight, 'get');
+    const joined = f.invoke();
+    try { await vi.waitFor(() => expect(lookup).toHaveBeenCalledWith(key)); }
+    finally { release(); }
+    await first;
+    const result = await joined;
+    if (revoked) {
+      expect(result.status).toBe(403);
+      expect(result.body).toMatchObject({ code: 'PROGRAM_AUTHORITY_REVOKED' });
+      expect(result.body.outputs).toBeUndefined();
+      expect(result.body.trace).toBeUndefined();
+    } else expect(result.body).toMatchObject({ persisted: true, executionLayer: 'vm' });
+    expect(guest).toHaveBeenCalledTimes(1);
+    expect(f.agent.assertion.create.mock.calls.filter(([, name]: any) => name.startsWith('program-asset-'))).toHaveLength(1);
+  });
+
+  it('withholds a shared failed trace when capability is revoked at the error handoff', async () => {
+    const f = await toolFixture(`import { invoke_tool } from '${toolApi}';
+      export async function run() {
+        await invoke_tool('${tool}', { sparql: ${JSON.stringify(readQuery)} });
+        return invoke_tool('${tool}', { sparql: 'DELETE WHERE { ?s ?p ?o }' });
+      }`);
+    await f.approve({ allowedCallers: [owner] });
+    const runtime = f.target.runtime!, id = randomUUID();
+    const execute = runtime.typescript!.execute.bind(runtime.typescript);
+    let reached!: () => void, release!: () => void;
+    const failed = new Promise<void>(resolve => { reached = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    const guest = vi.spyOn(runtime.typescript!, 'execute').mockImplementation(async (...args) => {
+      try { return await execute(...args); }
+      catch (error) { reached(); await gate; throw error; }
+    });
+    const invoke = () => request(f.target, 'owner', 'POST', '/api/programs/execute', {
+      contextGraphId: graph, operationIri: f.operation.operationIri, invocationId: id,
+    });
+    const first = invoke();
+    await failed;
+    const key = `${graph}\0${id}`;
+    const running = runtime.inFlight.get(key)!;
+    running.promise = running.promise.catch(error => {
+      expect(runtime.store.revokeCapability(`urn:sr:capability:${id}`, Date.now())).toBe(true);
+      throw error;
+    });
+    const lookup = vi.spyOn(runtime.inFlight, 'get');
+    const joined = invoke();
+    try { await vi.waitFor(() => expect(lookup).toHaveBeenCalledWith(key)); }
+    finally { release(); }
+    await first;
+    const denied = await joined;
+    expect(denied.status).toBe(403);
+    expect(denied.body.trace).toBeUndefined();
+    expect(denied.body.outputs).toBeUndefined();
+    expect(guest).toHaveBeenCalledTimes(1);
+    expect(f.agent.query.mock.calls.filter(([, opts]: any) => opts?.source === 'semantic-runtime-sparql-read')).toHaveLength(1);
+  });
+
 });
 
 describe('TypeScript direct tools through shared authorization and effects', () => {

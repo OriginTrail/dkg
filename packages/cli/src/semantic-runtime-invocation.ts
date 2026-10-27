@@ -56,8 +56,26 @@ export async function invokeBoundSemanticProgram(
   };
   await assertAuthorized();
   if (binding.typescript) {
-    return invokeTypeScriptProgram(agent, runtime, binding, digest, invocationId, config, authenticatedCaller,
-      inputs ?? [], assertAuthorized, composition);
+    const assertDisclosure = async (executionIri: string, status: 'active' | 'completed' | 'failed') => {
+      await assertAuthorized();
+      await assertBoundQueryDefinition(agent, binding);
+      assertExecutionCapabilityAuthorized(runtime, executionIri, status);
+    };
+    try {
+      const result = await invokeTypeScriptProgram(agent, runtime, binding, digest, invocationId, config, authenticatedCaller,
+        inputs ?? [], assertAuthorized, composition);
+      // Every waiter needs a current gate after the shared promise settles.
+      await assertDisclosure(result.executionIri, 'completed');
+      return result;
+    } catch (error) {
+      if (error instanceof SemanticProgramError && error.trace !== undefined) {
+        const executionIri = `urn:sr:execution:${invocationId.toLowerCase()}`;
+        const status = runtime.store.execution(executionIri)?.status;
+        try { await assertDisclosure(executionIri, status === 'failed' ? 'failed' : status === 'completed' ? 'completed' : 'active'); }
+        catch (denied) { error.trace = undefined; throw denied; }
+      }
+      throw error;
+    }
   }
   if (inputs !== undefined && (!Array.isArray(inputs) || inputs.length !== 0)) {
     throw new SemanticProgramError('PROGRAM_INPUTS_UNSUPPORTED', 'S-expression Programs do not accept runtime arguments', 400);
