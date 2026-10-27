@@ -23,6 +23,33 @@ it('verifies unchanged held content once and skips payload reconciliation withou
   expect(h.dataRequests()).toBe(0);
 }, 15_000);
 
+it.each(['missing', 'wrong'])('repairs a %s named-subgraph route before reporting held readiness', async fault => {
+  const h = await createHeldProductionHarness();
+  vi.spyOn(h.chain, 'getContextGraphAccessPolicy').mockResolvedValue(0);
+  vi.spyOn(h.chain, 'isContextGraphActiveOnChain').mockResolvedValue(true);
+  const ns = 'http://dkg.io/ontology/', metaGraph = h.meta[0]!.graph;
+  await h.internal.store.deleteByPattern({ graph: metaGraph, subject: h.ual, predicate: ns + 'authenticatedSubGraphName' });
+  await h.internal.store.deleteByPattern({ graph: metaGraph,
+    predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: ns + 'SubGraph' });
+  if (fault === 'wrong') await h.internal.store.insert([{ graph: metaGraph, subject: h.ual,
+    predicate: ns + 'authenticatedSubGraphName', object: '"other"' }]);
+  const query = () => h.agent.query('SELECT ?value WHERE { GRAPH ?g { <urn:held:subject> <urn:held:value> ?value } }',
+    { contextGraphId: CG, view: 'verifiable-memory' });
+  expect((await query()).bindings).toEqual([]);
+  h.fetchMissingData();
+  const recovered = await h.run();
+  expect(recovered.outcome).toBe('terminal');
+  expect(recovered.result.verifiedHeldAssets ?? 0).toBe(0);
+  expect(h.dataRequests()).toBeGreaterThan(0);
+  expect((await query()).bindings).toEqual([{ value: '"held"' }]);
+  const dataRequests = h.dataRequests();
+  const held = await h.run();
+  expect(held.outcome).toBe('terminal');
+  expect(held.result.verifiedHeldAssets).toBe(1);
+  expect(h.dataRequests()).toBe(dataRequests);
+  expect((await query()).bindings).toEqual([{ value: '"held"' }]);
+}, 15_000);
+
 it('preserves a held META write during cancellation without publishing terminal readiness', async () => {
   const h = await createHeldProductionHarness();
   const controller = new AbortController();

@@ -5,7 +5,9 @@ import { exactAssetCommitmentsForSelection, exactAssetUalsForSelection } from '.
 import { settleDurableDataFromHoldings } from './durable-data-holdings.js';
 import { settleFetchedDurableAssets, type FetchedDurableAssetSettlementRequest } from './durable-fetched-assets.js';
 import type { DurableGraphSettlementGuard } from './durable-prefix-proof.js';
-import type { DurableSyncContext } from './durable-sync.js';
+import type { DurableSyncContext, DurableSyncChallengePinnedAuthenticationRequest } from './durable-sync.js';
+import type { ChallengePinnedGraphScopedAsset } from './graph-scoped-materialization.js';
+import { challengeAssetConsumer, materializedAssetConsumer, type DurableSettlementProgress, type DurableAssetConsumer } from './durable-asset-consumer.js';
 import type { SyncPageResult } from './page-fetch.js';
 import { prepareDurableVerifiedPage, persistDurableRemainingMetadata, type PreparedDurableVerificationInput } from './durable-verified-page.js';
 import { classifyExactDurableFetch, classifyExactAssetResponderCapability,
@@ -20,7 +22,8 @@ export interface DurablePhaseSettlementOptions {
   readonly terminal?: boolean;
 }
 type SettlementPorts = FetchedDurableAssetSettlementRequest['context'] &
-  Pick<DurableSyncContext, 'admitVerifiedPage' | 'deleteCheckpoint' | 'logInfo' | 'onVerifiedFullSnapshot' | 'remotePeerId'> & {
+  Pick<DurableSyncContext, 'ctx' | 'logDebug' | 'logWarn' | 'storeGraphScopedAsset' | 'admitVerifiedPage' | 'deleteCheckpoint' | 'logInfo' | 'onVerifiedFullSnapshot' | 'remotePeerId'> & {
+  readonly authenticateChallengePinnedAsset?: (request: DurableSyncChallengePinnedAuthenticationRequest) => Promise<ChallengePinnedGraphScopedAsset>;
   recordPhaseOutcome(result: SyncPageResult, options: DurablePhaseSettlementOptions): void;
   onStoreStart(): void;
 };
@@ -44,7 +47,7 @@ export async function settleDurableVerifiedPage(
   input: PreparedDurableVerificationInput,
   processed: Awaited<ReturnType<DurableSyncContext['processDurableBatchInWorker']>>,
   ports: SettlementPorts,
-  progress: FetchedDurableAssetSettlementRequest['progress'],
+  progress: DurableSettlementProgress,
   options: SettlementOptions,
 ): Promise<SettlementOutcome> {
   const { contextGraphId, metaResult, graphScopedManifest, exactFetchPolicy, sinceBatchId,
@@ -93,11 +96,28 @@ export async function settleDurableVerifiedPage(
     ports.onStoreStart();
     const partitioned = prepareDurableVerifiedPage(ports, contextGraphId, processed, input);
     if (input.kind === 'fetched') {
+      // Metadata-only pages need no asset capability. A nonempty page must
+      // select a complete consumer before entering the shared checkpoint loop.
+      let settleAsset: DurableAssetConsumer = async () => {};
+      if (partitioned.assets.length > 0) {
+        if (exactAssetSelection?.kind === 'challenge-pinned') {
+          if (!ports.authenticateChallengePinnedAsset) throw Object.assign(
+            new Error('Challenge-pinned durable sync requires a proof-only authentication path'),
+            { code: 'VM_CHALLENGE_AUTHENTICATION_UNSUPPORTED' });
+          settleAsset = challengeAssetConsumer({ context: ports, authenticate: ports.authenticateChallengePinnedAsset,
+            commitments: new Map((exactAssetCommitmentsForSelection(exactAssetSelection) ?? [])
+              .map(commitment => [commitment.assetUal, commitment])), evidence: progress.authenticatedExactAssets });
+        } else {
+          if (!ports.storeGraphScopedAsset) throw Object.assign(
+            new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
+            { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
+          settleAsset = materializedAssetConsumer({ context: ports, materialize: ports.storeGraphScopedAsset,
+            accumulator, committedExactAssetUals: exactAssetSelection === undefined ? undefined : progress.committedExactAssetUals });
+        }
+      }
       const assets = await settleFetchedDurableAssets({ context: ports, graphScopedManifest,
         dataResult: input.dataResult, updateDataCheckpoint, descriptorCoverageComplete: input.descriptorCoverageComplete,
-        exactAssetSelection, challengeCommitments: new Map((exactAssetSelection
-          ? exactAssetCommitmentsForSelection(exactAssetSelection) ?? [] : []).map(commitment => [commitment.assetUal, commitment])),
-        progress, settlement, contextGraphBudget, deadline, settlementSliceDeadline }, partitioned);
+        settleAsset, accumulator, settlement, contextGraphBudget, deadline, settlementSliceDeadline }, partitioned);
       checkpointAdvanceRecorded = assets.checkpointAdvanceRecorded;
       if (assets.kind === 'yielded') {
         logInfo(ctx, `Yielding durable recovery for "${contextGraphId}" at an authenticated manifest boundary after the settlement slice expired`);

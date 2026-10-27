@@ -12,19 +12,19 @@ import { materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph
 const stores: OxigraphStore[] = [];
 afterEach(async () => { for (const store of stores.splice(0)) await store.close(); });
 const contextGraphId = 'held-controls', ns = 'http://dkg.io/ontology/';
-async function fixture(trusted = false) {
+async function fixture(trusted = false, subGraphName?: string) {
   const store = new OxigraphStore(); stores.push(store);
   const ual = 'did:dkg:hardhat:31337/0x00000000000000000000000000000000000000ef/7';
-  const graph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, '1'));
+  const graph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, createGraphKnowledgeAssetScope(ual, '1'), subGraphName);
   const data = [{ subject: 'urn:subject', predicate: 'urn:value', object: '"content"', graph }];
   const root = computeFlatKCRootV10(data, []);
   const meta = generateGraphKnowledgeAssetMetadata({ ual, contextGraphId, merkleRoot: root,
-    assertionVersion: '1', assertionGraph: graph, publicTripleCount: 1, privateTripleCount: 0,
+    assertionVersion: '1', assertionGraph: graph, subGraphName, publicTripleCount: 1, privateTripleCount: 0,
     accessPolicy: 'public', publisherPeerId: 'untrusted-peer', timestamp: new Date(0),
   }, { status: 'tentative' });
   const asset = partitionVerifiedGraphScopedAssets(contextGraphId, data, meta, [graph]).assets[0]!;
   const metadataQuads = overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1(asset.metadataQuads,
-    { ual, metaGraph: asset.metaGraph, receivedAt: new Date(1234) },
+    { ual, metaGraph: asset.metaGraph, subGraphName, receivedAt: new Date(1234) },
     { status: 'confirmed', materializedVersion: { blockNumber: 1, txIndex: 0 }, confirmation: { kind: 'finalized-materialization' } });
   if (trusted) await replaceLocallyTrustedKnowledgeAssetControlEnvelope(store, ual,
     { assertionVersion: '1', merkleRoot: root },
@@ -60,4 +60,17 @@ it('preserves a matching trusted override and repairs its divergent materialized
   expect(await f.read()).toEqual(new Set([f.ual]));
   expect(await f.store.query(`ASK { GRAPH <${f.metaGraph}> { <${f.ual}> <${ns}accessPolicy> "ownerOnly" } }`))
     .toEqual({ type: 'boolean', value: true });
+});
+
+it.each(['missing', 'wrong'])('requires replay for a confirmed named asset with a %s routing attestation', async fault => {
+  const f = await fixture(false, 'reports');
+  expect(await f.read()).toEqual(new Set([f.ual]));
+  await f.store.deleteByPattern({ graph: f.metaGraph, subject: f.ual, predicate: ns + 'authenticatedSubGraphName' });
+  if (fault === 'wrong') await f.store.insert([{ graph: f.metaGraph, subject: f.ual,
+    predicate: ns + 'authenticatedSubGraphName', object: '"other"' }]);
+  expect(await f.read()).toEqual(new Set());
+  await f.replay();
+  expect(await f.read()).toEqual(new Set([f.ual]));
+  expect(await f.store.query(`SELECT ?name WHERE { GRAPH <${f.metaGraph}> { <${f.ual}> <${ns}authenticatedSubGraphName> ?name } }`))
+    .toMatchObject({ bindings: [{ name: '"reports"' }] });
 });

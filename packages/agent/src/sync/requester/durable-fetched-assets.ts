@@ -1,28 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { ExactAssetCommitment, ExactAssetSelection } from '../exact-assets.js';
 import type { GraphScopedDurableManifestPlan } from '../durable-integrity.js';
 import { recordDurableSyncDiagnostics, type DurableSyncAccumulator } from '../durable-progress.js';
-import type { DurableSyncContext, DurableSyncChallengePinnedAuthenticationRequest } from './durable-sync.js';
+import type { DurableSyncContext } from './durable-sync.js';
 import type { DurableSyncContextGraphBudget } from './durable-sync-budget.js';
-import type { ChallengePinnedGraphScopedAsset } from './graph-scoped-materialization.js';
+import type { DurableAssetConsumer } from './durable-asset-consumer.js';
 import type { DurableGraphSettlementGuard } from './durable-prefix-proof.js';
 import type { SyncPageResult } from './page-fetch.js';
 import type { partitionVerifiedGraphScopedAssets } from './verified-asset-preparation.js';
 import { createManifestSettlementCheckpointer } from './manifest-settlement-checkpointer.js';
 
 export interface FetchedDurableAssetSettlementRequest {
-  readonly context: Pick<DurableSyncContext, 'ctx' | 'signal' | 'logDebug' | 'logWarn' | 'storeInsert' | 'storeGraphScopedAsset' | 'setCheckpoint'> & {
-    readonly authenticateChallengePinnedAsset?: (request: DurableSyncChallengePinnedAuthenticationRequest) => Promise<ChallengePinnedGraphScopedAsset>;
-  };
+  readonly context: Pick<DurableSyncContext, 'signal' | 'storeInsert' | 'setCheckpoint'>;
+  readonly settleAsset: DurableAssetConsumer;
   readonly graphScopedManifest: GraphScopedDurableManifestPlan | null;
   readonly dataResult: SyncPageResult;
   readonly updateDataCheckpoint: boolean;
   readonly descriptorCoverageComplete: boolean;
-  readonly exactAssetSelection?: ExactAssetSelection;
-  readonly challengeCommitments: ReadonlyMap<string, ExactAssetCommitment>;
-  /** Physical evidence is recorded immediately, including when a later write fails. */
-  readonly progress: { accumulator: DurableSyncAccumulator; committedExactAssetUals: string[];
-    authenticatedExactAssets: ChallengePinnedGraphScopedAsset[] };
+  readonly accumulator: DurableSyncAccumulator;
   readonly settlement: Pick<DurableGraphSettlementGuard, 'covers' | 'assertCurrent' | 'assertPrefixCurrent'>;
   readonly contextGraphBudget: DurableSyncContextGraphBudget;
   readonly deadline: number;
@@ -39,18 +33,9 @@ export async function settleFetchedDurableAssets(
   partitioned: ReturnType<typeof partitionVerifiedGraphScopedAssets>,
 ): Promise<FetchedDurableAssetSettlementOutcome> {
   const { graphScopedManifest, dataResult, updateDataCheckpoint, descriptorCoverageComplete,
-    exactAssetSelection, challengeCommitments, settlement, contextGraphBudget, deadline,
-    settlementSliceDeadline } = request;
-  const { ctx, signal, logDebug, logWarn, storeInsert, storeGraphScopedAsset,
-    authenticateChallengePinnedAsset, setCheckpoint } = request.context;
-  const { accumulator, committedExactAssetUals, authenticatedExactAssets } = request.progress;
+    settleAsset, settlement, contextGraphBudget, deadline, settlementSliceDeadline, accumulator } = request;
+  const { signal, storeInsert, setCheckpoint } = request.context;
   let incrementalCheckpointAdvanceRecorded = false;
-  if (partitioned.assets.length && exactAssetSelection?.kind !== 'challenge-pinned' && !storeGraphScopedAsset)
-    throw Object.assign(new Error('Verified graph-scoped durable sync requires an exact materialization store path'),
-      { code: 'VM_ATOMIC_REPLACE_UNSUPPORTED' });
-  if (partitioned.assets.length && exactAssetSelection?.kind === 'challenge-pinned' && !authenticateChallengePinnedAsset)
-    throw Object.assign(new Error('Challenge-pinned durable sync requires a proof-only authentication path'),
-      { code: 'VM_CHALLENGE_AUTHENTICATION_UNSUPPORTED' });
   // A rootless manifest contains only exact graph assets in the DATA
   // ordering. When there are no deferred legacy rows, each authenticated
   // atomic materialization is therefore a durable continuation boundary.
@@ -93,41 +78,7 @@ export async function settleFetchedDurableAssets(
       break;
     }
     settlement.assertCurrent();
-    const challengeCommitment = challengeCommitments.get(asset.ual);
-    if (exactAssetSelection?.kind === 'challenge-pinned') {
-      if (challengeCommitment === undefined) {
-        throw new Error(`Challenge-pinned durable sync returned unselected asset ${asset.ual}`);
-      }
-      const authenticated = await authenticateChallengePinnedAsset!({
-        asset,
-        commitment: challengeCommitment,
-        authenticationDeadline: graphScopedAuthenticationDeadline,
-        signal,
-      });
-      authenticatedExactAssets.push(authenticated);
-      logDebug(ctx, `Authenticated challenge-scoped exact asset ${asset.ual}`);
-    } else {
-      const outcome = await storeGraphScopedAsset!({
-        asset,
-        authenticationDeadline: graphScopedAuthenticationDeadline,
-        signal,
-      });
-      if (outcome === 'applied') {
-        if (exactAssetSelection !== undefined) committedExactAssetUals.push(asset.ual);
-        // Materialization is atomic per asset, not per fetched page. Account
-        // for each committed asset immediately so a later asset failure does
-        // not erase truthful progress from the returned summary.
-        recordDurableSyncDiagnostics(accumulator, {
-          insertedDataTriples: asset.dataQuads.length,
-          insertedMetaTriples: asset.metadataQuads.length,
-          insertedTriples: asset.dataQuads.length + asset.metadataQuads.length,
-        });
-      } else if (outcome === 'stale') {
-        logDebug(ctx, `Skipped stale graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
-      } else {
-        logWarn(ctx, `Quarantined graph-scoped durable assertion ${asset.ual} v${asset.assertionVersion}`);
-      }
-    }
+    await settleAsset(asset, graphScopedAuthenticationDeadline);
     // Preserve a physically settled first prefix on cancellation. A reused
     // prefix still must pass its ownership/content proof before advancing.
     settlement.assertPrefixCurrent();

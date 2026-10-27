@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri, DEFAULT_MAX_READ_BYTES } from '@origintrail-official/dkg-core';
 import { workspacePublicQuadsDigest, GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
+import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { heldMetadataControlsMatchReplay } from './held-metadata-controls.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
@@ -9,6 +10,7 @@ import { commitmentFromDescriptor, type FinalizedVmAssetCommitment } from './fin
 
 /** Assets per store read: one VALUES list of exact metadata subjects. */
 const HOLDINGS_READ_CHUNK = 200;
+const AUTHENTICATED_SUB_GRAPH = 'http://dkg.io/ontology/authenticatedSubGraphName';
 
 export interface HeldGraphScopedAssetsRequest {
   readonly contextGraphId: string;
@@ -35,7 +37,7 @@ export async function readHeldGraphScopedAssets(
 
 ): Promise<Set<string>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
-  const predicates = [...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `http://dkg.io/ontology/${name}`)].map((predicate) => `<${predicate}>`).join(' ');
+  const predicates = [AUTHENTICATED_SUB_GRAPH, ...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `http://dkg.io/ontology/${name}`)].map((predicate) => `<${predicate}>`).join(' ');
   const options = { priority: 'background' as const, signal: request.signal };
   const held = new Set<string>();
   for (let start = 0; start < request.descriptors.length; start += chunkSize) {
@@ -59,10 +61,17 @@ export async function readHeldGraphScopedAssets(
     const confirmed = new Set<string>();
     const eligible = chunk.filter(descriptor => {
       const rows = rowsBySubject.get(descriptor.ual) ?? [];
-      const stored = parseStoredGraphKnowledgeAssetMetadataEnvelope(rows.map(row => ({ ...row, graph: metaGraph })),
+      const stored = parseStoredGraphKnowledgeAssetMetadataEnvelope(
+        rows.map(row => ({ ...row, graph: metaGraph })),
         { contextGraphId: request.contextGraphId, ual: descriptor.ual });
       if (stored.state === 'confirmed') confirmed.add(descriptor.ual);
-      return holdsDescriptor(descriptor, stored, confirmation);
+      // Authenticated replay restores this receiver-owned route. A named copy
+      // without it can be complete in storage yet invisible to scoped queries.
+      const routes = rows.filter(row => row.predicate === AUTHENTICATED_SUB_GRAPH);
+      const expectedRoute = stored.state === 'confirmed' ? descriptor.subGraphName : undefined;
+      const routingMatches = expectedRoute === undefined ? routes.length === 0
+        : routes.length === 1 && parseRdfLiteralTerm(routes[0]!.object)?.value === expectedRoute;
+      return routingMatches && holdsDescriptor(descriptor, stored, confirmation);
     });
     for (const descriptor of eligible) {
       request.signal?.throwIfAborted();
