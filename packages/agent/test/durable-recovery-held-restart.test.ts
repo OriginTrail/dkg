@@ -6,13 +6,13 @@ import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
 import { classifyDurableProgress } from '../src/sync/durable-progress.js';
 import { readHeldGraphScopedAssets } from '../src/sync/requester/stored-graph-assets.js';
-import { CG, PEER, SECOND_PEER, asset, servingPeer, node, generation, rowsOf } from './_helpers/durable-recovery-store.js';
+import { CG, PEER, SECOND_PEER, asset, servingPeer, createRequesterHarness, generation, rowsOf } from './_helpers/durable-recovery-store.js';
 
 describe('a recovery whose rounds outlast their slices', () => {
   it('resumes each round at its settled boundary under a complete manifest', async () => {
     const graph = Array.from({ length: 12 }, (_, index) => asset(index + 1));
     const peer = servingPeer(graph);
-    const core = node(peer);
+    const core = createRequesterHarness(peer);
 
     // Every round writes past its slice's soft deadline, so it yields at the first settled boundary it can.
     const recovered = await core.start({ sliceSpent: true }).recover();
@@ -31,7 +31,7 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
   it.each(['clean', 'deleted', 'corrupted'])('checks a live source checkpoint after the prefix is %s', async change => {
     const fixtures = generation();
     const a = servingPeer(fixtures), b = servingPeer(fixtures);
-    const core = node({ [PEER]: a, [SECOND_PEER]: b });
+    const core = createRequesterHarness({ [PEER]: a, [SECOND_PEER]: b });
     let running = true, first = true, activePeer = PEER;
     const lifetime = core.start({ sliceSpent: () => first, exactRequests: false,
       isRunning: () => running, peerIds: () => [activePeer],
@@ -72,7 +72,7 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
 describe('a restarted Core and a graph it has already recovered', () => {
   it('transfers no DATA rows when the graph is unchanged', async () => {
     const peer = servingPeer(generation());
-    const core = node(peer);
+    const core = createRequesterHarness(peer);
 
     const first = await core.start().recover();
     expect(first.outcome).toBe('terminal');
@@ -115,10 +115,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
       const resumed = new Promise<void>(resolve => { release = resolve; });
       let pause = false;
       const suspend = async (at: string) => { if (pause && stage === at) { entered(); await resumed; } };
-      const core = node(peer, { subscription: () => subscription,
-        beforeChainRead: () => suspend('chain'), beforeVerify: () => suspend('verification'),
-        beforeMetaStore: () => suspend('metadata-store'),
-      });
+      const core = createRequesterHarness(peer, { lifecycle: { subscription: () => subscription }, chain: { beforeRead: () => suspend('chain') }, mutations: { beforeVerify: () => suspend('verification'), beforeMetaStore: () => suspend('metadata-store') } });
       expect((await core.start().recover()).outcome).toBe('terminal');
       peer.current()[0]!.meta.push({ subject: 'urn:held-restart:lifecycle',
         predicate: 'http://dkg.io/ontology/operationId', object: '"new-operation"',
@@ -155,7 +152,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
   it.each([false, true])('stores new admissible META while skipping held DATA (missing asset: %s)', async (missing) => {
     const graph = generation();
     const peer = servingPeer(graph);
-    const core = node(peer);
+    const core = createRequesterHarness(peer);
     expect((await core.start().recover()).outcome).toBe('terminal');
     const metaGraph = graph[0]!.meta[0]!.graph;
     const additions: Quad[] = [
@@ -179,7 +176,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
   it('cannot use a held copy from another numeric graph slot as terminal proof', async () => {
     const peer = servingPeer(generation());
     let subscriptionId = '323';
-    const core = node(peer, { subscriptionId: () => subscriptionId });
+    const core = createRequesterHarness(peer, { lifecycle: { subscriptionId: () => subscriptionId } });
     expect((await core.start().recover()).outcome).toBe('terminal');
     // Both slots commit the same name; the chain name-binding proof still succeeds.
     subscriptionId = '582';
@@ -194,7 +191,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
 
   it('fetches an asset again when its rows were removed and its envelope kept', async () => {
     const peer = servingPeer(generation());
-    const core = node(peer);
+    const core = createRequesterHarness(peer);
     expect((await core.start().recover()).outcome).toBe('terminal');
 
     // A removed sub-graph drops the rows and keeps the confirmed envelope.
@@ -213,7 +210,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
     const behind = servingPeer(generation());
     const current = servingPeer(generation());
     let onChain = generation();
-    const core = node({ [PEER]: behind, [SECOND_PEER]: current }, { chain: () => onChain });
+    const core = createRequesterHarness({ [PEER]: behind, [SECOND_PEER]: current }, { chain: { assets: () => onChain } });
     expect((await core.start().recover()).outcome).toBe('terminal');
 
     // Asset 3 is updated on chain; only the second peer serves the new version.
@@ -234,7 +231,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
 
   it('transfers only the updated asset when one asset has a new version', async () => {
     const peer = servingPeer(generation());
-    const core = node(peer);
+    const core = createRequesterHarness(peer);
     expect((await core.start().recover()).outcome).toBe('terminal');
 
     peer.publish(generation('2'));
@@ -257,7 +254,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
 
   it('still recovers a changed generation with full-graph rounds when exact requests are unavailable', async () => {
     const peer = servingPeer(generation());
-    const core = node(peer);
+    const core = createRequesterHarness(peer);
     expect((await core.start().recover()).outcome).toBe('terminal');
 
     peer.publish(generation('2'));
@@ -272,7 +269,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
 
   it('falls back to full-graph rounds when the store cannot say what it holds', async () => {
     const peer = servingPeer(generation());
-    const core = node(peer);
+    const core = createRequesterHarness(peer);
     expect((await core.start().recover()).outcome).toBe('terminal');
 
     core.failHoldingsReads(true);
@@ -287,7 +284,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
   it('settles a large held graph over several rounds when the chain answers only part of its checks in each', async () => {
     const large = Array.from({ length: 120 }, (_, index) => asset(index + 1));
     const peer = servingPeer(large);
-    const core = node(peer);
+    const core = createRequesterHarness(peer);
     expect((await core.start().recover()).outcome).toBe('terminal');
 
     // A throttled endpoint: each round's checks run out of budget after 50 assets, and with them its slice.
@@ -305,7 +302,7 @@ describe('a restarted Core and a graph it has already recovered', () => {
   it('fetches only an updated asset of a large graph when the chain answers part of the checks in each round', async () => {
     const large = (updated = '1') => Array.from({ length: 120 }, (_, index) => asset(index + 1, index === 2 ? updated : '1'));
     const peer = servingPeer(large());
-    const core = node(peer);
+    const core = createRequesterHarness(peer);
     expect((await core.start().recover()).outcome).toBe('terminal');
 
     peer.publish(large('2'));
@@ -324,10 +321,10 @@ describe('a restarted Core and a graph it has already recovered', () => {
 
   it('pulls the graph again when the store no longer holds it', async () => {
     const peer = servingPeer(generation());
-    expect((await node(peer).start().recover()).outcome).toBe('terminal');
+    expect((await createRequesterHarness(peer).start().recover()).outcome).toBe('terminal');
 
     // A replaced data directory: nothing records the earlier completion except the store itself.
-    const replaced = node(peer);
+    const replaced = createRequesterHarness(peer);
     peer.served.dataRows = 0;
     const recovered = await replaced.start().recover();
 

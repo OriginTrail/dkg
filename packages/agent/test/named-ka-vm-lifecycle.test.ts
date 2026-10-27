@@ -155,7 +155,7 @@ describe('named KA VM lifecycle batching', () => {
     const remove = vi.spyOn(raw, 'deleteByPatternWithoutCount');
     await expect(writer(input)).rejects.toBe(failure);
     expect(remove).not.toHaveBeenCalled(); expect(invalidate).toHaveBeenCalledOnce();
-    expect(settle).toHaveBeenCalledExactlyOnceWith('indeterminate');
+    expect(settle).toHaveBeenCalledExactlyOnceWith('indeterminate', undefined);
     expect(await all(raw)).toEqual(rows().map(quadToNQuad).sort());
   });
 

@@ -62,12 +62,13 @@ it('retains newer SWM content during held recovery', async () => {
   expect(h.dataRequests()).toBe(0);
 }, 15_000);
 
-it.each(['chain', 'worker'].flatMap(phase =>
+it.each(['chain', 'worker', 'reconcile'].flatMap(phase =>
   ['clean', 'deactivate', 'recreate', 'equivalent', 'drop-graph', 'remove-subgraph'].map(change => [phase, change] as const)))(
   'fences held readiness through paused %s verification: %s', async (phase, change) => {
     const h = await createHeldProductionHarness();
     const { internal, subscription, entered, release, graph, agent } = h;
-    h.pause(phase as 'chain' | 'worker');
+    if (phase === 'reconcile') await h.seedSwmTwin('1');
+    h.pause(phase as 'chain' | 'worker' | 'reconcile');
     const run = h.run();
     try {
       await Promise.race([entered.promise, run.then(result => { throw new Error('Recovery ended before the paused verification: ' + JSON.stringify(result)); })]);

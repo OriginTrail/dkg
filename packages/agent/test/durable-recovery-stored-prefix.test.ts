@@ -1,3 +1,4 @@
+import { createAdmittedGraphHarness } from './_helpers/durable-recovery-admitted-graph.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -10,7 +11,7 @@ import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/che
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
 import { classifyDurableProgress } from '../src/sync/durable-progress.js';
 import { readHeldGraphScopedAssets } from '../src/sync/requester/stored-graph-assets.js';
-import { CG, PEER, SECOND_PEER, asset, servingPeer, node, generation, rowsOf } from './_helpers/durable-recovery-store.js';
+import { CG, PEER, SECOND_PEER, asset, servingPeer, createRequesterHarness, generation, rowsOf } from './_helpers/durable-recovery-store.js';
 
 import { deleteSyncPageCheckpoint } from '../src/sync/requester/page-fetch.js';
 import type { AssetFixture } from './_helpers/durable-recovery-store.js';
@@ -26,10 +27,7 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
       changed = true;
       await core.store.dropGraph(prefix.graph);
     };
-    const core = node({ [PEER]: a, [SECOND_PEER]: b }, { holdingsShortcut: false,
-      beforeVerify: change === 'during-verification' ? mutate : undefined,
-      afterAssetStore: change === 'during-store' ? mutate : undefined,
-    });
+    const core = createRequesterHarness({ [PEER]: a, [SECOND_PEER]: b }, { holdings: { enabled: false }, mutations: { beforeVerify: change === 'during-verification' ? mutate : undefined, afterAssetStore: change === 'during-store' ? mutate : undefined } });
     const lifetime = core.start({ exactRequests: false, sliceSpent: () => first,
       isRunning: () => running, peerIds: () => [activePeer],
       afterSlice: () => { if (first) running = false; },
@@ -92,7 +90,7 @@ describe('cross-peer recovery keeps the actually stored prefix', () => {
 describe('resumed-prefix edge cases', () => {
   it('settles mixed public/private manifests without rewriting the proven private prefix', async () => {
     const fixtures = [asset(1), asset(2, '1', true), asset(3), asset(4)];
-    const core = node(servingPeer(fixtures), { holdingsShortcut: false });
+    const core = createRequesterHarness(servingPeer(fixtures), { holdings: { enabled: false } });
     let rounds = 0;
     const recovered = await core.start({ exactRequests: false, sliceSpent: true, isRunning: () => rounds < 12, afterSlice: () => { rounds++; } }).recover();
     expect(recovered.outcome).toBe('terminal');
@@ -104,7 +102,7 @@ describe('resumed-prefix edge cases', () => {
 
   it.each([false, true])('repairs ordinary tokenless resumes (proof unavailable: %s)', async unavailable => {
     const fixtures = generation(); let disableProof = false;
-    const core = node(servingPeer(fixtures), { disablePrefixProof: () => disableProof });
+    const core = createRequesterHarness(servingPeer(fixtures), { storage: { disablePrefixProof: () => disableProof } });
     const checkpoints = new MemorySyncCheckpointStore();
     const first = await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() });
     expect(first.result.complete).toBe(false);
@@ -130,15 +128,12 @@ describe('resumed-prefix edge cases', () => {
   it.each(['generation', 'subscription'])('refuses prefix reuse after %s ownership changes', async change => {
     const fixtures = generation(); let first = true, running = true, bindingGeneration = 0;
     let subscription: ContextGraphSub = { syncMode: 'always-on', subscribed: true, synced: true, onChainId: '323' };
-    const core = node(servingPeer(fixtures), { holdingsShortcut: false,
-      bindingGeneration: () => bindingGeneration, subscription: () => subscription,
-      beforeVerify: async () => {
+    const core = createRequesterHarness(servingPeer(fixtures), { holdings: { enabled: false }, lifecycle: { bindingGeneration: () => bindingGeneration, subscription: () => subscription }, mutations: { beforeVerify: async () => {
         if (first) return;
         if (change === 'generation') bindingGeneration++;
         else subscription = { ...subscription };
         running = false;
-      },
-    });
+      } } });
     const lifetime = core.start({ exactRequests: false, sliceSpent: () => first, isRunning: () => running,
       afterSlice: () => { if (first) running = false; } });
     await lifetime.recover();
@@ -156,7 +151,7 @@ describe('resumed-prefix edge cases', () => {
 
 it.each(['other-graph', 'other-metadata-subject'])('completes bounded recovery after an unrelated indeterminate write (%s)', async scope => {
   const fixtures = generation();
-  const core = node(servingPeer(fixtures), { holdingsShortcut: false });
+  const core = createRequesterHarness(servingPeer(fixtures), { holdings: { enabled: false } });
   if (scope === 'other-graph') {
     vi.spyOn(core.rawStore, 'dropGraph').mockRejectedValueOnce(new Error('lost response'));
     await expect(core.store.dropGraph('urn:unrelated-failed-write')).rejects.toThrow('lost response');
@@ -186,7 +181,7 @@ it('continues the prefix between independently materialized replicas', async () 
   const left = replica(new Date('2026-01-01T00:00:00Z'));
   const right = replica(new Date('2026-02-01T00:00:00Z'));
   expect(left[0]!.meta).not.toEqual(right[0]!.meta);
-  const core = node({ [PEER]: servingPeer(left), [SECOND_PEER]: servingPeer(right) }, { holdingsShortcut: false });
+  const core = createRequesterHarness({ [PEER]: servingPeer(left), [SECOND_PEER]: servingPeer(right) }, { holdings: { enabled: false } });
   let first = true, running = true, activePeer = PEER;
   const lifetime = core.start({ exactRequests: false, sliceSpent: () => first, isRunning: () => running,
     peerIds: () => [activePeer], afterSlice: () => { if (first) running = false; } });
@@ -202,7 +197,7 @@ it('continues the prefix between independently materialized replicas', async () 
 
 it.each(['overlapping', 'unknown'])('recovers bounded DATA after confirmed backend replacement (%s uncertain write)', async scope => {
   const fixtures = generation(); let epoch: number | undefined = 0;
-  const core = node(servingPeer(fixtures), { recoveryGeneration: () => epoch === undefined ? undefined : { generation: epoch, ready: true }, holdingsShortcut: false });
+  const core = createRequesterHarness(servingPeer(fixtures), { storage: { recoveryGeneration: () => epoch === undefined ? undefined : { generation: epoch, ready: true } }, holdings: { enabled: false } });
   if (scope === 'overlapping') {
     vi.spyOn(core.rawStore, 'dropGraph').mockRejectedValueOnce(new Error('lost response'));
     await expect(core.store.dropGraph(fixtures[0]!.graph)).rejects.toThrow('lost response');
@@ -230,7 +225,7 @@ it.each(['overlapping', 'unknown'])('recovers bounded DATA after confirmed backe
 
 it('finishes bounded no-chain recovery while retaining tentative status', async () => {
   const fixtures = generation();
-  const core = node(servingPeer(fixtures), { noChain: true });
+  const core = createRequesterHarness(servingPeer(fixtures), { noChain: true });
   let rounds = 0;
   const result = await core.start({ sliceSpent: true, isRunning: () => rounds < 12, afterSlice: () => { rounds++; } }).recover();
   expect(result.outcome).toBe('terminal');
@@ -244,7 +239,7 @@ it('finishes bounded no-chain recovery while retaining tentative status', async 
 
 it.each(['clean', 'deleted', 'corrupted', 'unavailable'])('resumes production exact paging with a %s stored prefix', async change => {
   const fixtures = generation(); let fail = true, attempts = 0;
-  const core = node(servingPeer(fixtures), { exactPaging: true, disablePrefixProof: () => change === 'unavailable', failAssetStore: () => fail && ++attempts > 1 });
+  const core = createAdmittedGraphHarness(servingPeer(fixtures), { storage: { disablePrefixProof: () => change === 'unavailable' }, mutations: { failAssetStore: () => fail && ++attempts > 1 } });
   const checkpoints = new MemorySyncCheckpointStore();
   const first = await core.round(checkpoints, PEER, {});
   expect(first.result.complete).toBe(false);
@@ -268,7 +263,7 @@ it.each(['clean', 'deleted', 'corrupted', 'unavailable'])('resumes production ex
 it('reuses a bounded prefix after an uncertain write rejects during supervised recovery', async () => {
   const fixtures = generation(); let epoch = 0, recovering = false;
   const read = () => ({ generation: epoch, ready: !recovering });
-  const core = node(servingPeer(fixtures), { recoveryGeneration: read });
+  const core = createRequesterHarness(servingPeer(fixtures), { storage: { recoveryGeneration: read } });
   vi.spyOn(core.rawStore, 'dropGraph').mockImplementationOnce(async () => {
     epoch = 1; recovering = true;
     throw new Error('worker replacing');
@@ -287,10 +282,7 @@ it('reuses a bounded prefix after an uncertain write rejects during supervised r
 it('preserves a verified prefix when a resumed round is cancelled during verification', async () => {
   const fixtures = generation();
   let controller: AbortController | undefined, cancel = false;
-  const core = node(servingPeer(fixtures), {
-    signal: () => controller?.signal,
-    beforeVerify: async () => { if (cancel) controller!.abort(new Error('caller cancelled')); },
-  });
+  const core = createRequesterHarness(servingPeer(fixtures), { lifecycle: { signal: () => controller?.signal }, mutations: { beforeVerify: async () => { if (cancel) controller!.abort(new Error('caller cancelled')); } } });
   const checkpoints = new MemorySyncCheckpointStore();
   await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() });
   const dataKey = getSyncCheckpointKey(PEER, CG, false, 'data');
@@ -313,7 +305,7 @@ it('finishes bounded recovery after one worker replacement with an in-flight wri
   const raw = new OxigraphWorkerStore(join(directory, 'store.nq'));
   try {
     const fixtures = generation();
-    const core = node(servingPeer(fixtures), { store: raw });
+    const core = createRequesterHarness(servingPeer(fixtures), { storage: { store: raw } });
     const checkpoints = new MemorySyncCheckpointStore();
     const first = await core.round(checkpoints, PEER, { settlementSliceDeadline: Date.now() });
     expect(first.result.complete).toBe(false);

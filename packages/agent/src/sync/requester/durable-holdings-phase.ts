@@ -46,6 +46,17 @@ export async function attemptDurableHoldingsPhase(input: {
     });
     if (plan.kind === 'full') return { strategy: 'full', continuation: plan.continuation };
     assertCurrent();
+    try {
+      context.signal?.throwIfAborted();
+      await held.reconcile?.({ contextGraphId, descriptors: manifest.descriptors, signal: context.signal }, proof.held);
+    } catch (error) {
+      context.signal?.throwIfAborted();
+      assertCurrent();
+      if (error instanceof Error && error.name === 'AbortError') throw error;
+      context.logWarn(context.ctx, `Could not reconcile held content for "${contextGraphId}": ${String(error)}`);
+      return { strategy: 'full', continuation: 'reconsider-holdings' };
+    }
+    assertCurrent(); context.signal?.throwIfAborted();
     await persistDurableHoldingsMetadata(context, contextGraphId, meta, accumulator, assertCurrent);
     assertCurrent();
     input.recordMetaPhase();

@@ -163,14 +163,14 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     const confirmCurrent = continuation && fence && fence.binding().onChainId !== undefined
       ? currentHeldGraphScopedAssetsConfirmer({
           binding: fence.binding,
-          reconcileHeld: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve(),
           authenticateHeld: authority.authenticateHeld?.bind(authority), budget: contextGraphBudget,
         }) : undefined;
     return runDurableSyncDetailed({ ...durableContext,
       storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
       graphRecovery: continuation ? { ...continuation,
         held: confirmCurrent && host.heldStore && fence
-          ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent } : undefined,
+          ? { prove: host.heldStore.prove, confirmCurrent, assertCurrent: fence.assertCurrent,
+              reconcile: (request, held) => host.heldStore?.reconcile?.(request, held, ctx) ?? Promise.resolve() } : undefined,
       } : undefined,
     });
   };

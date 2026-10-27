@@ -56,6 +56,7 @@ export async function createHeldProductionHarness(options: { finalizedCleanup?: 
   expect(internal.store).not.toHaveProperty('mutationOwner');
   expect(await readHeldGraphScopedAssets(internal.store, { contextGraphId: CG, descriptors: createGraphScopedDurableManifestPlan(meta, CG)!.descriptors })).toEqual(new Set([ual]));
   const swmGraph = knowledgeAssetLayerGraphUri(CG, MemoryLayer.SharedWorkingMemory, createGraphKnowledgeAssetScope(ual, '1'), 'reports');
+  const retireTwin = internal.retireFinalizedSwmTwinCandidate.bind(internal);
   const retire = vi.spyOn(internal, 'retireFinalizedSwmTwinCandidate');
   const seedSwmTwin = async (version: '1' | '2') => {
     const ns = 'http://dkg.io/ontology/';
@@ -76,11 +77,15 @@ export async function createHeldProductionHarness(options: { finalizedCleanup?: 
     ]);
   };
   const entered = deferred(), release = deferred();
-  let phase: 'chain' | 'worker' | undefined;
+  let phase: 'chain' | 'worker' | 'reconcile' | undefined;
   let fetchData = false;
   vi.spyOn(chain, 'getLatestMerkleRoot').mockImplementation(async () => {
     if (phase === 'chain') { entered.resolve(); await release.promise; }
     return root;
+  });
+  retire.mockImplementation(async (...args: unknown[]) => {
+    if (phase === 'reconcile') { entered.resolve(); await release.promise; }
+    return retireTwin(...args);
   });
   const processBatch = internal.processDurableBatchInWorker.bind(internal);
   vi.spyOn(internal, 'processDurableBatchInWorker').mockImplementation(async (...args: unknown[]) => {
@@ -103,5 +108,5 @@ export async function createHeldProductionHarness(options: { finalizedCleanup?: 
   });
   return { agent, internal, chain, markPublished, savedBindings, persist, subscription, ual, graph, data, meta, swmGraph, retire,
     seedSwmTwin, entered, release, run, dataRequests: () => dataRequests,
-    pause: (at: 'chain' | 'worker') => { phase = at; }, fetchMissingData: () => { fetchData = true; } };
+    pause: (at: 'chain' | 'worker' | 'reconcile') => { phase = at; }, fetchMissingData: () => { fetchData = true; } };
 }

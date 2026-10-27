@@ -90,8 +90,6 @@ const heldCopyKey = (descriptor: GraphScopedDescriptor) =>
 
 /** Chain confirmation for content already owned by an acquired store proof. */
 interface HeldAssetsConfirmationInput {
-  /** Retry best-effort SWM housekeeping after every skipped copy is authenticated. */
-  readonly reconcileHeld?: (request: HeldGraphScopedAssetsRequest, held: ReadonlySet<string>) => Promise<void>;
   readonly binding?: () => Readonly<{ onChainId?: string; generation: number }>;
   readonly authenticateHeld?: DurableRecoveryAuthority['authenticateHeld'];
   /** The round's budget: the chain checks share one authentication deadline. */
@@ -132,7 +130,6 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
         confirmed?.add(cacheKey(descriptor));
       },
     );
-    await input.reconcileHeld?.(request, held);
     if (input.binding && bindingKey(input.binding()) !== capturedBinding) {
       throw new HeldGenerationNotCurrentError(`Local binding for "${contextGraphId}" changed during held-copy checks`);
     }
