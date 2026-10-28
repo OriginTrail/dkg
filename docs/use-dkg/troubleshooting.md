@@ -39,8 +39,8 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agent/identity
 - A `503` with `retryable: true` from `share-async` or `publish-async` usually
   means the node is busy. Wait for the `Retry-After` header. If the body names a
   job (`jobId` or `existingJobId`), follow that job instead of resending. Resend
-  a publish only if the answer says `jobCreated: false`; otherwise find the job
-  with `GET /api/publisher/job-by-intent`. Never resend under a new name. What each answer means:
+  a publish only if the answer says `jobCreated: false`; otherwise
+  [find the job](../build/async-jobs.md#retry-safely) first. Never resend under a new name. What each answer means:
   [Async Share and Publish Jobs](../build/async-jobs.md).
 - To see whether admission, the store or the workers are slow, read the
   `async_admission_usage` line in `dkg logs`. The daemon writes it every five

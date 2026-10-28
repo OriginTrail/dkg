@@ -51,7 +51,7 @@ All publisher wallets share the daemon's RPC request budget. For rate sizing,
 the restart requirement and diagnosing local wait versus provider latency, see
 [RPC Request Budget](rpc-request-budget.md).
 
-Before `vm/publish-async` creates a job, it checks the shared snapshot. Store pressure gets a retryable `503`: retry the same request, without sharing again. `jobCreated: false` means this request created no job, but an earlier one may exist. For `409 PUBLISH_INTENT_STALE`, see [Stale update intents](#stale-update-intents).
+Before `vm/publish-async` creates a job, it checks the shared snapshot. Store pressure gets a retryable `503`. Resend the same request, without sharing again, only if it says `jobCreated: false`; otherwise a job may exist, so [find it first](../build/async-jobs.md#retry-safely). For `409 PUBLISH_INTENT_STALE`, see [Stale update intents](#stale-update-intents).
 
 ## Clearing finished jobs
 
