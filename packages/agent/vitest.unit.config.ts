@@ -33,6 +33,7 @@ export default defineConfig({
       "test/snapshot-checkpoint-files.test.ts",
       "test/snapshot-native-store.test.ts",
       "test/public-snapshot-checkpoint-audit.test.ts",
+      "test/sync-verify-worker-lifecycle.test.ts",
       "test/public-checkpoint-job-ownership.test.ts",
       "test/finalized-placement-decision.test.ts",
       "test/finalized-placement-mixed-lanes.test.ts",

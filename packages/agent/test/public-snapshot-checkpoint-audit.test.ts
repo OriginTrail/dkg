@@ -25,6 +25,22 @@ async function fixture(mode: 'rpc-only' | 'core-cache' = 'rpc-only') {
 }
 
 describe('full native journal readback', () => {
+  it.each(['bare', 'plain', 'typed'] as const)('accepts %s metadata bindings using the shared literal decoder', async representation => {
+    const f = await fixture(), query = f.store.query.bind(f.store);
+    const literal = (value: string, datatype: string) => representation === 'bare' ? value
+      : JSON.stringify(value) + (representation === 'typed' ? `^^<http://www.w3.org/2001/XMLSchema#${datatype}>` : '');
+    vi.spyOn(f.store, 'query').mockImplementation(async (sparql, options) => {
+      const result = await query(sparql, options);
+      if (result.type === 'bindings' && sparql.includes('SELECT ?ual ?root ?version')) {
+        for (const row of result.bindings) {
+          row.root = literal(`0x${f.manifest.assets[0]!.root}`, 'string'); row.version = literal('1', 'integer');
+        }
+      }
+      if (result.type === 'bindings' && sparql.includes('COUNT(*) AS ?n')) result.bindings[0]!.n = literal('1', 'integer');
+      return result;
+    });
+    await expect(auditSnapshotCheckpoint(f.store, f.manifest, f.signal)).resolves.toEqual({ assets: 1, publicQuads: 1, fullReadback: true });
+  });
   it.each(['rpc-only', 'core-cache'] as const)('verifies every asset, total coverage and bounded queries in %s mode', async mode => {
     const f = await fixture(mode); const query = vi.spyOn(f.store, 'query');
     await expect(auditSnapshotCheckpoint(f.store, f.manifest, f.signal)).resolves.toEqual({ assets: 1, publicQuads: 1, fullReadback: true });
