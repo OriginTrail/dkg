@@ -71,10 +71,11 @@ An update of an already-published KA can only be published as **one above the KA
 
 Recovery, per KA:
 
-1. If a failed job for the KA is still listed (`GET /api/publisher/jobs?status=failed`), clear it by id: `POST /api/publisher/clear-job { "jobId": "…" }`. `POST /api/publisher/retry` skips a job whose retry budget is spent, a re-submit of the stale request is refused at admission (so it never reaches the job), and the job keeps owning the KA until it is cleared; a corrected publish is otherwise refused with `409` and the job's `existingJobId`.
-2. `POST /api/knowledge-assets/{name}/wm/pull-from { "layer": "swm" }` re-opens the shared content as a draft (add `"onConflict": "replace"` if a WM draft already exists). If the message says the **published version moved on** (the sealed number is *below* the required one), use `"layer": "vm"` instead and re-apply your edits.
-3. `wm/finalize` — check that the returned `assertionVersion` equals the number the message asked for.
-4. `swm/share`, then `vm/publish-async` (or `vm/publish`).
+1. If you sent this publish before, read that job first ([Retry safely](../build/async-jobs.md#retry-safely)). If it is `finalized` and carries your seal, the update is published: stop.
+2. If a failed job still holds the KA (a corrected publish gets `409` with its `existingJobId`), read it with `GET /api/publisher/job?id=<id>`. A `retryState.waitingReason` of `pending_chain_proof` or `recovery` means it may have sent a transaction, perhaps the one that moved the version on: follow [Held jobs](#held-jobs) and do not clear it. Otherwise clear it by id: `POST /api/publisher/clear-job { "jobId": "…" }`.
+3. `POST /api/knowledge-assets/{name}/wm/pull-from { "layer": "swm" }` re-opens the shared content as a draft (add `"onConflict": "replace"` if a WM draft already exists). If the message says the **published version moved on** (the sealed number is *below* the required one), use `"layer": "vm"` instead and re-apply your edits.
+4. `wm/finalize` — check that the returned `assertionVersion` equals the number the message asked for.
+5. `swm/share`, then `vm/publish-async` (or `vm/publish`).
 
 A core that already ACK-signed the abandoned draft declines its replacement transiently until the pending window ends (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, 5 minutes by default), so retry the publish after that. Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Memory until the update is published: a re-share carrying the same or a lower number than a draft a peer already holds is not applied there, and with `swmAwaitCuratorAck` on a curator that holds the earlier draft rejects the re-share before it commits. Finalizing a replacement draft also replaces the private payload sealed under that number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Memory once its replacement is finalized.
 
