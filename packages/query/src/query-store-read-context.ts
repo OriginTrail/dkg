@@ -64,7 +64,7 @@ export interface QueryStoreReadContext extends StoreReadLane {
   readonly materializationBudget: QueryMaterializationBudget | undefined;
   readonly catalog: StoreReadLane;
   withWithheldGraphRoots(roots: readonly string[]): StoreReadLane;
-  readonly shared: StoreReadLane & {
+  readonly shared: {
     readonly cacheKey: string;
     measure<T>(load: (reads: StoreReadLane) => Promise<T>): Promise<MeasuredDiscovery<T>>;
     replay<T>(discovery: MeasuredDiscovery<T>): T;
@@ -98,7 +98,6 @@ export function createQueryStoreReadContext(
     ? undefined : new QueryMaterializationBudget(queryOptions.maxMaterializedBytes));
   const lane = createStoreReadLane(store, options, budget);
   const sharedOptions = sharedDiscoveryStoreOptions(options);
-  const sharedLane = createStoreReadLane(store, sharedOptions);
   const catalogOptions = { ...sharedOptions, signal: options?.signal };
   const measure = async <T>(load: (reads: StoreReadLane) => Promise<T>): Promise<MeasuredDiscovery<T>> => {
     let byteCount = 0;
@@ -119,7 +118,6 @@ export function createQueryStoreReadContext(
     withWithheldGraphRoots: roots => createStoreReadLane(store, { ...options, withheldGraphRoots: [...roots] }, budget),
     catalog: createStoreReadLane(store, catalogOptions, budget),
     shared: {
-      ...sharedLane,
       measure,
       replay<T>(discovery: MeasuredDiscovery<T>): T {
         budget?.consumeBytes(discovery.byteCount);
