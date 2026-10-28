@@ -1,96 +1,14 @@
+import { readNamedGraphStatisticsBatch, NAMED_GRAPH_STATS_BATCH_SIZE } from '../src/named-graph-statistics.js';
 import { describe, expect, it, vi } from 'vitest';
 import { OxigraphStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../src/dkg-query-engine.js';
 
 const ROOT = 'did:dkg:context-graph:large';
 const WM = `${ROOT}/_working_memory/0xagent/1`;
-const SWM = `${ROOT}/_shared_memory/0xagent/1`;
-const VM = `${ROOT}/_verifiable_memory/0xagent/1`;
-const options = { contextGraphId: 'large', includeContextGraphPartitions: true, exactContextGraphPartitions: true };
+const options = { contextGraphId: 'large', includeContextGraphPartitions: true };
 
-describe('exact context-graph partition reads', () => {
-  it('uses the registered public partition policy and executes one concrete query without VALUES or fan-out', async () => {
-    const store = new OxigraphStore();
-    try {
-      await store.insert([
-        { subject: 'urn:assertion', predicate: 'http://dkg.io/ontology/assertionGraph', object: WM, graph: `${ROOT}/_meta` },
-        ...[WM, SWM, VM].map(graph => ({ subject: `urn:${graph.split('/')[3]}`, predicate: 'urn:p', object: '"visible"', graph })),
-        { subject: 'urn:secret', predicate: 'urn:p', object: '"secret"', graph: `${ROOT}/_private/1` },
-        { subject: 'urn:unregistered', predicate: 'urn:p', object: '"hidden"', graph: `${ROOT}/_working_memory/0xother/2` },
-      ]);
-      const engine = new DKGQueryEngine(store);
-      const graphs = (await engine.listContextGraphQueryPartitionReads('large')).map(partition => partition.graph);
-      expect(graphs).toEqual(expect.arrayContaining([WM, SWM, VM]));
-      expect(graphs).not.toContain(`${ROOT}/_private/1`);
-      expect(graphs).not.toContain(`${ROOT}/_working_memory/0xother/2`);
-      const query = `SELECT ?s ?g WHERE { { GRAPH <${WM}> { ?s ?p ?o } BIND(<${WM}> AS ?g) } UNION { GRAPH <${SWM}> { ?s ?p ?o } BIND(<${SWM}> AS ?g) } }`;
-      const spy = vi.spyOn(store, 'query');
-      const result = await engine.query(query, options);
-      expect(result.bindings).toHaveLength(2);
-      const submitted = spy.mock.calls.filter(([sparql]) => sparql.includes('SELECT ?s ?g'));
-      expect(submitted).toHaveLength(1);
-      expect(submitted[0][0]).not.toMatch(/\bVALUES\b|GRAPH\s+\?/i);
-      for (const graph of [`${ROOT}/_private/1`, `${ROOT}/_working_memory/0xother/2`, 'did:dkg:context-graph:other']) {
-        await expect(engine.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, options)).rejects.toThrow(/Scoped query violation/);
-      }
-    } finally { await store.close(); }
-  });
-
-  it('rejects expression graph patterns before the physical default-graph sentinel can be read', async () => {
-    const store = new OxigraphStore();
-    try {
-      await store.insert([
-        { subject: 'urn:visible', predicate: 'urn:p', object: '"visible"', graph: ROOT },
-        { subject: 'urn:secret', predicate: 'urn:p', object: '"secret"', graph: '' },
-      ]);
-      const engine = new DKGQueryEngine(store), spy = vi.spyOn(store, 'query');
-      const exists = 'EXISTS { <urn:secret> <urn:p> "secret" }';
-      const where = `GRAPH <${ROOT}> { ?s ?p ?o }`;
-      for (const query of [
-        `SELECT (${exists} AS ?leak) WHERE { ${where} }`,
-        `SELECT ?leak WHERE { { SELECT (${exists} AS ?leak) WHERE { ${where} } } }`,
-        `SELECT ?s WHERE { ${where} } ORDER BY (${exists})`,
-        `SELECT (COUNT(*) AS ?n) WHERE { ${where} } HAVING (${exists})`,
-      ]) {
-        await expect(engine.query(query, options)).rejects.toThrow(/Exact partition reads do not support EXISTS/);
-        expect(spy.mock.calls.some(([submitted]) => submitted === query)).toBe(false);
-      }
-      expect((await engine.query(`SELECT (COUNT(*) AS ?n) WHERE { ${where} }`, options)).bindings).toHaveLength(1);
-      expect((await engine.query(`SELECT ("EXISTS" AS ?label) WHERE { ${where} }`, options)).bindings).toHaveLength(1);
-    } finally { await store.close(); }
-  });
-
-  it('rejects graphless, variable, mixed-default, and unscoped forms', async () => {
-    const store = new OxigraphStore();
-    try {
-      const engine = new DKGQueryEngine(store);
-      for (const sparql of [
-        'SELECT ?s WHERE { ?s ?p ?o }',
-        'SELECT ?s WHERE { GRAPH ?g { ?s ?p ?o } }',
-        `SELECT ?s WHERE { { GRAPH <${ROOT}> { ?s ?p ?o } } UNION { ?s ?p ?o } }`,
-      ]) await expect(engine.query(sparql, options)).rejects.toThrow(/Exact/);
-      await expect(engine.query(`SELECT ?s WHERE { GRAPH <${ROOT}> { ?s ?p ?o } }`, { exactContextGraphPartitions: true })).rejects.toThrow(/Exact/);
-    } finally { await store.close(); }
-  });
-
-
-  it('rejects DESCRIBE through exact admission before private or foreign descriptions can execute', async () => {
-    const store = new OxigraphStore();
-    try {
-      await store.insert([
-        { subject: 'urn:described', predicate: 'urn:public', object: '"visible"', graph: ROOT },
-        { subject: 'urn:described', predicate: 'urn:private', object: '"private sentinel"', graph: `${ROOT}/_private/1` },
-        { subject: 'urn:described', predicate: 'urn:foreign', object: '"foreign sentinel"', graph: 'did:dkg:context-graph:other' },
-      ]);
-      const spy = vi.spyOn(store, 'query');
-      await expect(new DKGQueryEngine(store).query(
-        `DESCRIBE <urn:described> WHERE { GRAPH <${ROOT}> { <urn:described> ?p ?o } }`, options,
-      )).rejects.toThrow(/Exact partition reads do not support DESCRIBE/);
-      expect(spy.mock.calls.some(([sparql]) => /^DESCRIBE\b/i.test(sparql))).toBe(false);
-    } finally { await store.close(); }
-  });
-
-  it('authorizes each exact batch from bounded live metadata without enumerating the CG again', async () => {
+describe('typed named-graph statistics', () => {
+  it('authorizes each statistics batch from bounded live metadata without enumerating the CG again', async () => {
     const inner = new OxigraphStore();
     const submitted: string[] = [];
     const enumerate = vi.fn();
@@ -117,15 +35,14 @@ describe('exact context-graph partition reads', () => {
       await engine.listContextGraphQueryPartitionReads('large');
       enumerate.mockClear();
       submitted.length = 0;
-      const query = `SELECT ?s WHERE { GRAPH <${WM}> { ?s ?p ?o } }`;
-      expect((await engine.query(query, options)).bindings).toHaveLength(1);
+      expect((await readNamedGraphStatisticsBatch(store, 'large', [WM], options))).toHaveLength(1);
       expect(enumerate).not.toHaveBeenCalled();
       expect(submitted.every(sparql => !/GRAPH\s+\?/i.test(sparql))).toBe(true);
       expect(submitted.filter(sparql => sparql.includes('assertionGraph')).every(sparql => sparql.replace(/\s+/g, " ").includes(`VALUES ?assertionGraph { <${WM}> }`))).toBe(true);
 
       // External stores cannot authorize later batches from a completed cache.
       await inner.deleteByPattern({ subject: 'urn:assertion', predicate: 'http://dkg.io/ontology/assertionGraph', graph: `${ROOT}/_meta` });
-      await expect(engine.query(query, options)).rejects.toThrow(/Scoped query violation/);
+      await expect(readNamedGraphStatisticsBatch(store, 'large', [WM], options)).rejects.toThrow(/Scoped query violation/);
       expect(enumerate).not.toHaveBeenCalled();
     } finally { await inner.close(); }
   });
@@ -135,7 +52,7 @@ describe('exact context-graph partition reads', () => {
     const code = `${ROOT}/code`;
     const codeWm = `${code}/_working_memory/author/1`;
     const named = `${codeWm}/_named_graph/urn%3Adata`;
-    const read = (engine: DKGQueryEngine, graph: string) => engine.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, options);
+    const read = (_engine: DKGQueryEngine, graph: string) => readNamedGraphStatisticsBatch(store, 'large', [graph], options);
     try {
       await store.insert([
         { subject: code, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${ROOT}/_meta` },
@@ -144,11 +61,11 @@ describe('exact context-graph partition reads', () => {
         ...[code, codeWm, named, `${ROOT}/unknown`, `${ROOT}/code/_private/1`, `${ROOT}/_verifiable_memory/staging/1`].map(graph => ({ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph })),
       ]);
       const engine = new DKGQueryEngine(store);
-      for (const graph of [code, codeWm, named]) expect((await read(engine, graph)).bindings).toHaveLength(1);
+      for (const graph of [code, codeWm, named]) expect((await read(engine, graph))).toHaveLength(1);
       for (const graph of [`${ROOT}/unknown`, `${ROOT}/code/_private/1`, `${ROOT}/_verifiable_memory/staging/1`]) await expect(read(engine, graph)).rejects.toThrow(/Scoped query violation/);
       // A stray declaration in the parent's meta graph is not canonical.
       await store.insert([{ subject: code, predicate: 'https://dkg.network/ontology#registrationStatus', object: '"registered"', graph: `${ROOT}/_meta` }]);
-      expect((await read(engine, code)).bindings).toHaveLength(1);
+      expect((await read(engine, code))).toHaveLength(1);
       await store.insert([{ subject: code, predicate: 'https://dkg.network/ontology#registrationStatus', object: '"registered"', graph: `${code}/_meta` }]);
       for (const graph of [code, codeWm, named]) await expect(read(engine, graph)).rejects.toThrow(/Scoped query violation/);
     } finally { await store.close(); }
@@ -156,7 +73,7 @@ describe('exact context-graph partition reads', () => {
 
   it('retains named-subgraph and SWM-only routing without admitting private, rules, staging, or sibling graphs', async () => {
     const store = new OxigraphStore();
-    const read = (engine: DKGQueryEngine, graph: string, opts: object = {}) => engine.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, { ...options, ...opts });
+    const read = (_engine: DKGQueryEngine, graph: string, opts: object = {}) => readNamedGraphStatisticsBatch(store, (opts as { contextGraphId?: string }).contextGraphId ?? 'large', [graph], { ...options, ...opts });
     const code = `${ROOT}/code`;
     try {
       await store.insert([
@@ -165,8 +82,8 @@ describe('exact context-graph partition reads', () => {
         ...[code, `${code}/_shared_memory/author/1`, `${ROOT}/_shared_memory/author/1`, `${ROOT}/_verifiable_memory/author/1`].map(graph => ({ subject: 'urn:s', predicate: 'urn:p', object: '"v"', graph })),
       ]);
       const engine = new DKGQueryEngine(store);
-      expect((await read(engine, code)).bindings).toHaveLength(1);
-      expect((await read(engine, `${code}/_shared_memory/author/1`, { subGraphName: 'code', graphSuffix: '_shared_memory' })).bindings).toHaveLength(1);
+      expect((await read(engine, code))).toHaveLength(1);
+      expect((await read(engine, `${code}/_shared_memory/author/1`, { subGraphName: 'code', graphSuffix: '_shared_memory' }))).toHaveLength(1);
       for (const graph of [ROOT, `${ROOT}/_shared_memory/author/1`, `${ROOT}/_verifiable_memory/author/1`]) await expect(read(engine, graph, { subGraphName: 'code' })).rejects.toThrow(/Scoped query violation/);
       for (const graph of [`${ROOT}/_private/author/1`, `${ROOT}/_shared_memory/author/1/_private`, `${ROOT}/_rules/rule`, `${ROOT}/_shared_memory/staging/1`]) await expect(read(engine, graph, { graphSuffix: '_shared_memory' })).rejects.toThrow(/Scoped query violation/);
       await expect(read(engine, `${ROOT}/_private`, { includePrivate: true })).rejects.toThrow(/only admit public/);
@@ -175,7 +92,7 @@ describe('exact context-graph partition reads', () => {
 
   it('judges staging below the CG root, so a subgraph or CG ID segment named staging stays readable', async () => {
     const store = new OxigraphStore();
-    const read = (engine: DKGQueryEngine, graph: string, opts: object) => engine.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, { ...options, ...opts });
+    const read = (_engine: DKGQueryEngine, graph: string, opts: object) => readNamedGraphStatisticsBatch(store, (opts as { contextGraphId?: string }).contextGraphId ?? 'large', [graph], { ...options, ...opts });
     const sub = `${ROOT}/staging`;
     const walletId = '0x1111111111111111111111111111111111111111/staging';
     const wallet = `did:dkg:context-graph:${walletId}`;
@@ -200,7 +117,7 @@ describe('exact context-graph partition reads', () => {
         // Exact admission must accept every inventory graph the dashboard then reads.
         const inventory = (await engine.listContextGraphQueryPartitionReads(id, opts)).map(partition => partition.graph);
         expect(inventory).toEqual(expect.arrayContaining(readable));
-        for (const graph of readable) expect((await read(engine, graph, { ...opts, contextGraphId: id })).bindings).toHaveLength(1);
+        for (const graph of readable) expect((await read(engine, graph, { ...opts, contextGraphId: id }))).toHaveLength(1);
         for (const graph of forbidden) {
           expect(inventory).not.toContain(graph);
           await expect(read(engine, graph, { ...opts, contextGraphId: id })).rejects.toThrow(/Scoped query violation/);
@@ -219,10 +136,10 @@ describe('exact context-graph partition reads', () => {
       const original = store.query.bind(store);
       vi.spyOn(store, 'query').mockImplementation(async (sparql, opts) => {
         const result = await original(sparql, opts);
-        if (sparql.startsWith('SELECT ?s WHERE')) await store.deleteByPattern({ subject: 'urn:assertion', graph: `${ROOT}/_meta` });
+        if (sparql.startsWith('SELECT ?g (COUNT')) await store.deleteByPattern({ subject: 'urn:assertion', graph: `${ROOT}/_meta` });
         return result;
       });
-      await expect(new DKGQueryEngine(store).query(`SELECT ?s WHERE { GRAPH <${WM}> { ?s ?p ?o } }`, options)).rejects.toThrow(/admission changed/);
+      await expect(readNamedGraphStatisticsBatch(store, 'large', [WM], options)).rejects.toThrow(/admission changed/);
     } finally { await store.close(); }
   });
 
@@ -237,11 +154,32 @@ describe('exact context-graph partition reads', () => {
       const original = store.query.bind(store);
       const spy = vi.spyOn(store, 'query').mockImplementation(async (sparql, opts) => {
         const result = await original(sparql, opts);
-        if (sparql.startsWith('SELECT ?s WHERE')) await store.insert([{ subject: 'urn:other', predicate: 'urn:p', object: '"new"', graph: `${ROOT}/_verifiable_memory/other/1` }]);
+        if (sparql.startsWith('SELECT ?g (COUNT')) await store.insert([{ subject: 'urn:other', predicate: 'urn:p', object: '"new"', graph: `${ROOT}/_verifiable_memory/other/1` }]);
         return result;
       });
-      expect((await new DKGQueryEngine(store).query(`SELECT ?s WHERE { GRAPH <${WM}> { ?s ?p ?o } }`, { ...options, signal: controller.signal })).bindings).toHaveLength(1);
+      expect((await readNamedGraphStatisticsBatch(store, 'large', [WM], { ...options, signal: controller.signal }))).toHaveLength(1);
       expect(spy.mock.calls.every(([, opts]) => opts?.signal === controller.signal)).toBe(true);
     } finally { await store.close(); }
   });
+});
+
+
+it('owns eight-graph aggregate batches and excludes unscoped content', async () => {
+  const store = new OxigraphStore();
+  try {
+    const graphs = Array.from({ length: NAMED_GRAPH_STATS_BATCH_SIZE + 1 }, (_, i) => `${ROOT}/_verifiable_memory/a/${i}`);
+    await store.insert(graphs.flatMap(graph => [1, 2, 3].map(i => ({ graph, subject: `urn:s:${i % 2}`, predicate: `urn:p:${i}`, object: '"v"' }))));
+    await store.insert([{ graph: '', subject: 'urn:secret', predicate: 'urn:p', object: '"hidden"' }]);
+    const spy = vi.spyOn(store, 'query');
+    const stats = await new DKGQueryEngine(store).readContextGraphNamedGraphStats('large');
+    expect(stats).toHaveLength(graphs.length);
+    expect(stats.every(row => row.entityCount === 2 && row.tripleCount === 3)).toBe(true);
+    const aggregates = spy.mock.calls.map(([query]) => query).filter(query => query.startsWith('SELECT ?g (COUNT'));
+    expect(aggregates).toHaveLength(2);
+    for (const query of aggregates) {
+      expect([...query.matchAll(/GRAPH </g)].length).toBeLessThanOrEqual(8);
+      expect(query).not.toMatch(/GRAPH\s+\?|\bVALUES\b/);
+    }
+    await expect(readNamedGraphStatisticsBatch(store, 'large', graphs)).rejects.toThrow('eight graphs');
+  } finally { await store.close(); }
 });

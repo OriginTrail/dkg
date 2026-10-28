@@ -1,13 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphDataUri, contextGraphSharedMemoryMetaUri } from '@origintrail-official/dkg-core';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
-import { classifyScopedContentGraph, describeScopedContentGraph, isExcludedContentGraphTail } from './scoped-content-partition.js';
+import { classifyScopedContentGraph, isExcludedContentGraphTail } from './scoped-content-partition.js';
 import { resolveDraftAccessPolicy, selectContentPartitions } from './content-partition-policy.js';
 import type { ContentPartition, DraftAccessPolicy } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
 import type { ContextGraphPartitionRead } from './query-types.js';
-import { prepareGraphScope } from './sparql-graph-scope.js';
-import { prepareSparql } from '@origintrail-official/dkg-rdf-utils/sparql';
 
 /** Route selection owns admission labels, including static roots and metadata. */
 export function createScopedContentGraphRoutePolicy(contextGraphId: string, options: QueryOptions = {}) {
@@ -58,15 +56,4 @@ export function isScopedRoutePartition(policy: RoutePolicy,
   graph: string, registeredSubGraphs: Set<string>, registeredAssertionGraphs: Set<string>, children: Set<string>): boolean {
   const partition = classifyScopedContentGraph(graph, policy.contextGraphId, registeredSubGraphs, registeredAssertionGraphs, children);
   return selectScopedRoutePartitions(policy, partition ? [partition] : []).some(candidate => candidate.graph === graph);
-}
-/** Admission must also cover shared partitions named directly without convenience flags. */
-export function exactContextGraphReadRequiresSharedMemory(sparql: string, options: QueryOptions): boolean {
-  if (!options.exactContextGraphPartitions || !options.contextGraphId) return false;
-  const prepared = prepareSparql(sparql);
-  if (prepared.status !== 'valid') throw new Error('SPARQL rejected: malformed Unicode code-point escape');
-  return prepareGraphScope(prepared).graphTargets.some(target => {
-    if (target.kind !== 'iri') return false;
-    const description = describeScopedContentGraph(target.iri, options.contextGraphId!);
-    return description !== undefined && sharedKind(description.kind);
-  });
 }

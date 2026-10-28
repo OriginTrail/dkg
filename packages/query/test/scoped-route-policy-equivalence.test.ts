@@ -68,15 +68,13 @@ describe('scoped route policy equivalence', () => {
       const graphs = ordinary.bindings.map(row => row.g);
       expect(graphs).toEqual(expect.arrayContaining([mine, child]));
       for (const denied of [foreign, ...staged]) expect(graphs).not.toContain(denied);
-      for (const graph of [mine, child, foreign, ...staged]) {
-        const read = engine.query(`SELECT ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, { ...options, exactContextGraphPartitions: true });
-        if (graph === mine || graph === child) expect((await read).bindings).toEqual([{ o: '"caller"' }]);
-        else await expect(read).rejects.toThrow(/Scoped query violation/);
-      }
+      const stats = await engine.readContextGraphNamedGraphStats('route-equivalence', options);
+      expect(stats.map(row => row.graph)).toEqual(expect.arrayContaining([mine, child]));
+      for (const graph of [foreign, ...staged]) expect(stats.some(row => row.graph === graph)).toBe(false);
     } finally { await store.close(); }
   });
 
-  it.each(routes)('ordinary, inventory and exact reads agree for $name', async ({ options, expected }) => {
+  it.each(routes)('ordinary, inventory and typed statistics agree for $name', async ({ options, expected }) => {
     const store = new OxigraphStore();
     try {
       await store.insert([
@@ -94,12 +92,9 @@ describe('scoped route policy equivalence', () => {
       expect((await engine.listContextGraphQueryPartitionReads('route-equivalence', options)).map(partition => partition.graph).sort()).toEqual([...expected].sort());
       const ordinary = await engine.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', scoped);
       expect(ordinary.bindings.map(row => row.g).sort()).toEqual([...expected].sort());
-      for (const graph of CANDIDATES) {
-        const read = engine.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } }`,
-          { ...scoped, exactContextGraphPartitions: true });
-        if (expected.includes(graph)) expect((await read).bindings.length).toBeGreaterThan(0);
-        else await expect(read).rejects.toThrow(/Scoped query violation/);
-      }
+      const stats = await engine.readContextGraphNamedGraphStats('route-equivalence', options);
+      expect(stats.map(row => row.graph).sort()).toEqual([...expected].sort());
+      expect(stats.every(row => row.entityCount > 0 && row.tripleCount > 0)).toBe(true);
       if (options.graphSuffix === '_shared_memory' && !options.includeSharedMemory) {
         // Without combined execution, an explicit SWM suffix excludes the data root.
         const data = options.subGraphName ? CODE : ROOT;

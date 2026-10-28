@@ -1,15 +1,13 @@
 import type { QueryReadAdmissionCapability } from '@origintrail-official/dkg-storage';
 import { resolveDraftAccessPolicy, type DraftAccessPolicy } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
-import { assertExactGraphRead, type PreparedGraphScope } from './sparql-graph-scope.js';
-import { scopedPartitionPolicyFromRoute, scopedRouteContentPrefixes } from './scoped-content-graph-policy.js';
+import { type PreparedGraphScope } from './sparql-graph-scope.js';
+import { scopedRouteContentPrefixes } from './scoped-content-graph-policy.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 
 type ScopedRoute = ReturnType<typeof staticScopedRouteGraphs>;
 export type QueryReadPlan = { kind: 'unscoped' } | {
   kind: 'view'; options: QueryOptions & { contextGraphId: string; view: NonNullable<QueryOptions['view']> };
-} | {
-  kind: 'exact'; candidates: readonly string[]; policy: ReturnType<typeof scopedPartitionPolicyFromRoute>;
 } | {
   kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
   execution: ScopedRoute['execution']; draftAccess: DraftAccessPolicy; includeSharedMemoryMeta: boolean;
@@ -25,9 +23,6 @@ export type QueryReadPlan = { kind: 'unscoped' } | {
 /** Resolve route policy once; execution and admission consume the same decision. */
 export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOptions | undefined,
   completeAdmissionOwner: QueryReadAdmissionCapability | null): QueryReadPlan {
-  if (options?.exactContextGraphPartitions && (!options.contextGraphId || options.view
-    || options.includeContextGraphPartitions !== true || scope.graphVariables.length > 0))
-    throw new Error('Exact context-graph reads require a scoped, concrete GRAPH query with partition access');
   if (options?.view) {
     if (!options.contextGraphId) throw new Error(`view '${options.view}' requires a contextGraphId to scope the query`);
     return { kind: 'view', options: { ...options, contextGraphId: options.contextGraphId, view: options.view } };
@@ -35,12 +30,6 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
   if (!options?.contextGraphId) return { kind: 'unscoped' };
   const { execution, ...graphs } = staticScopedRouteGraphs(options.contextGraphId, options);
   const draftAccess = resolveDraftAccessPolicy(options);
-  if (options.exactContextGraphPartitions === true) {
-    assertExactGraphRead(scope);
-    if (options.includePrivate) throw new Error('Exact partition reads only admit public graphs');
-    return { kind: 'exact', candidates: scope.graphTargets.flatMap(target => target.kind === 'iri' ? [target.iri] : []),
-      policy: scopedPartitionPolicyFromRoute(options.contextGraphId, { ...graphs, execution }, draftAccess, options.includeSharedMemoryMeta === true) };
-  }
   const allowed = [...graphs.staticContentGraphs, ...graphs.metaAllowList, ...graphs.staticPrivateAllowList];
   const needsDiscovery = !scope.hasGraphClause
     || scope.graphTargets.some(target => target.kind !== 'iri' || !allowed.includes(target.iri));

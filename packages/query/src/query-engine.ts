@@ -37,10 +37,6 @@ export interface QueryOptions {
    * to their selected graph set unless this is true.
    */
   includeContextGraphPartitions?: boolean;
-  /** Execute concrete GRAPH IRIs from the same registered public partition set
-   * as broad count scans, without GRAPH-variable expansion or route fan-out.
-   * Requires includeContextGraphPartitions and rejects GRAPH variables and DESCRIBE. */
-  exactContextGraphPartitions?: boolean;
   /** Include registered subgraph SWM metadata in scoped GRAPH-variable expansion; requires includeContextGraphPartitions. */
   includeSharedMemoryMeta?: boolean;
   /** Internal draft policy derived from caller identity; never accept from HTTP input. */

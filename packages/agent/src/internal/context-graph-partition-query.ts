@@ -1,3 +1,5 @@
+import { assertPublicSnapshotQueryTrust } from '../public-snapshot-evidence.js';
+import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from '../swm-read-admission.js';
 import { resolveWorkingMemoryIdentityAliases } from '../working-memory-identity.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -10,6 +12,7 @@ export interface ContextGraphPartitionInventoryOptions {
   signal?: AbortSignal;
   priority?: import('@origintrail-official/dkg-storage').StoreWorkPriority;
   source?: string;
+  chainEvidenceMode?: import('../public-snapshot-evidence.js').PublicSnapshotMode;
 }
 export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
   /** Enumerate the authorized partitions with their required admission. */
@@ -27,6 +30,39 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
     const aliases = resolveWorkingMemoryIdentityAliases({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, owner, address => address.toLowerCase()).aliases ?? [];
     return this.queryEngine.listContextGraphQueryPartitionReads(contextGraphId, { ...options,
       draftAccess: owner ? { kind: 'owners', owners: [owner, ...aliases] } : { kind: 'none' } });
+  }
+
+  /** Caller-authorized statistics; the query layer owns inventory and aggregates. */
+  async readContextGraphNamedGraphStats(this: DKGAgent, contextGraphId: string,
+    options: ContextGraphPartitionInventoryOptions = {},
+  ): Promise<import('@origintrail-official/dkg-query').ContextGraphNamedGraphStats[]> {
+    const authorityFor = () => this.resolveContextGraphReadAuthority(contextGraphId, {
+      ...options, authorityReadMode: 'finalized-index', allowSubscriptionFallback: false,
+    });
+    const initial = await authorityFor();
+    if (initial.outcome === 'unavailable') throw new ContextGraphReadAuthorityUnavailableError(contextGraphId, initial);
+    if (initial.outcome !== 'allowed') return [];
+    const owner = options.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const aliases = resolveWorkingMemoryIdentityAliases({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, owner, address => address.toLowerCase()).aliases ?? [];
+    return this.queryEngine.readContextGraphNamedGraphStats(contextGraphId, { ...options,
+      draftAccess: owner ? { kind: 'owners', owners: [owner, ...aliases] } : { kind: 'none' } }, async (admission, read) => {
+      options.signal?.throwIfAborted();
+      const authority = await authorityFor();
+      if (authority.outcome === 'unavailable') throw new ContextGraphReadAuthorityUnavailableError(contextGraphId, authority);
+      if (authority.outcome !== 'allowed') return [];
+      if (admission === 'shared-memory') {
+        const shared = await this.resolveSharedMemoryReadAdmission(contextGraphId, {
+          callerAgentAddress: options.callerAgentAddress, readAuthority: authority, signal: options.signal,
+        });
+        if (shared.outcome === 'unavailable' && !sharedMemoryAdmissionFailsClosed(shared)) throw sharedMemoryAdmissionError(contextGraphId, shared);
+        if (shared.outcome !== 'allowed') return [];
+      }
+      await assertPublicSnapshotQueryTrust(this.store, contextGraphId, options.chainEvidenceMode, options);
+      const result = await read();
+      await assertPublicSnapshotQueryTrust(this.store, contextGraphId, options.chainEvidenceMode, options);
+      options.signal?.throwIfAborted();
+      return result;
+    });
   }
 
 }

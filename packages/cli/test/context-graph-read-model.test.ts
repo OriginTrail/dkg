@@ -1,34 +1,11 @@
+import { markCoreTrustedGraph } from '../../agent/src/public-snapshot-evidence.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { describe, expect, it, vi } from 'vitest';
-import type {
-  QueryOptions,
-  QueryResult,
-} from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
-import { QueryMethods } from '../../agent/src/dkg-agent-query.js';
-import {
-  EXACT_GRAPH_QUERY_BATCH_SIZE,
-  type ContextGraphReader,
-  readContextGraphNamedGraphStats,
-} from '../src/daemon/context-graph-read-model.js';
-
+import { ContextGraphPartitionQueryMethods } from '../../agent/src/internal/context-graph-partition-query.js';
+import { readContextGraphNamedGraphStats } from '../src/daemon/context-graph-read-model.js';
 const CG = 'large-cg';
 const ROOT = `did:dkg:context-graph:${CG}`;
-
-function exactGraphs(sparql: string): string[] {
-  return [...sparql.matchAll(/GRAPH <([^>]+)>/g)].map((match) => match[1]);
-}
-
-function mockReader(
-  graphs: string[],
-  queryImpl: (sparql: string, options?: QueryOptions) => Promise<QueryResult>,
-): ContextGraphReader {
-  return {
-    listPartitions: vi.fn(async () => graphs.map(graph => ({ graph, admission: 'public' as const }))),
-    query: vi.fn(queryImpl),
-  };
-}
-
 describe('context-graph exact stats read model', () => {
   it.each([false, true])('gates catalog SWM graph counts through canonical shared-memory authority (%s)', async allowed => {
     const store = new OxigraphStore();
@@ -46,15 +23,8 @@ describe('context-graph exact stats read model', () => {
         resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed' }),
         resolveSharedMemoryReadAdmission: sharedGate };
       const stats = await readContextGraphNamedGraphStats({
-        listPartitions: options => queryEngine.listContextGraphQueryPartitionReads(CG, options),
-        query: async (sparql, options, admission) => {
-          const result = await QueryMethods.prototype.query.call(agent as never, sparql, {
-            ...options, contextGraphId: CG, includeContextGraphPartitions: true,
-            exactContextGraphPartitions: true, includeSharedMemory: admission === 'shared-memory',
-            callerAgentAddress: '0xpublic-reader',
-          });
-          return { type: 'bindings', bindings: result.bindings };
-        },
+        statistics: options => ContextGraphPartitionQueryMethods.prototype.readContextGraphNamedGraphStats.call(agent as never, CG,
+          { ...options, callerAgentAddress: '0xpublic-reader' }),
       }, CG, { source: 'changed-diagnostic-label' });
       expect(stats.find(row => row.graph === ROOT)).toMatchObject({ tripleCount: 1 });
       expect(sharedGate).toHaveBeenCalled();
@@ -62,34 +32,41 @@ describe('context-graph exact stats read model', () => {
     } finally { await store.close(); }
   });
 
-  it('computes subgraph stats in exact-IRI batches', async () => {
-    const graphs = Array.from(
-      { length: EXACT_GRAPH_QUERY_BATCH_SIZE + 1 },
-      (_, index) => `${ROOT}/sg-${index}`,
-    );
-    const queries: string[] = [];
-    const reader = mockReader(graphs, async (sparql) => {
-      queries.push(sparql);
-      return {
-        type: 'bindings',
-        bindings: exactGraphs(sparql).map((graph) => ({
-          g: graph,
-          entities: '"2"^^http://www.w3.org/2001/XMLSchema#integer',
-          triples: '"3"^^http://www.w3.org/2001/XMLSchema#integer',
-        })),
-      };
-    });
-
-    const stats = await readContextGraphNamedGraphStats(reader, CG);
-
-    expect(stats).toHaveLength(graphs.length);
-    expect(stats[0]).toEqual({ graph: graphs[0], entityCount: 2, tripleCount: 3 });
-    expect(queries).toHaveLength(2);
-    for (const query of queries) {
-      expect(query).not.toMatch(/GRAPH\s+\?g/i);
-      expect(query).not.toMatch(/\bVALUES\b/i);
-      expect(exactGraphs(query).length).toBeLessThanOrEqual(EXACT_GRAPH_QUERY_BATCH_SIZE);
-    }
+  it('passes cancellation and lane metadata to the typed operation', async () => {
+    const controller = new AbortController();
+    const expected = [{ graph: ROOT, tripleCount: 3, entityCount: 2 }];
+    const statistics = vi.fn(async () => expected);
+    expect(await readContextGraphNamedGraphStats({ statistics }, CG, { signal: controller.signal })).toEqual(expected);
+    expect(statistics).toHaveBeenCalledWith({ signal: controller.signal, priority: 'background', source: 'node-ui.sub-graph-stats' });
   });
+});
 
+
+it.each(['revoked', 'marked-before', 'marked-during', 'aborted'] as const)('retains typed statistics admission and trust on %s', async mode => {
+  const store = new OxigraphStore();
+  const controller = new AbortController();
+  try {
+    await store.insert([{ graph: ROOT, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
+    if (mode === 'marked-before') await markCoreTrustedGraph(store, CG);
+    const authority = vi.fn(async () => ({ outcome: 'allowed' }));
+    if (mode === 'revoked') authority.mockResolvedValueOnce({ outcome: 'allowed' }).mockResolvedValue({ outcome: 'denied' });
+    const query = store.query.bind(store);
+    const spy = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      const result = await query(sparql, options);
+      if (sparql.startsWith('SELECT ?g (COUNT')) {
+        if (mode === 'marked-during') await markCoreTrustedGraph(store, CG);
+        if (mode === 'aborted') controller.abort(new Error('cancel statistics'));
+      }
+      return result;
+    });
+    const agent = { store, queryEngine: new DKGQueryEngine(store), resolveContextGraphReadAuthority: authority };
+    const read = ContextGraphPartitionQueryMethods.prototype.readContextGraphNamedGraphStats.call(agent as never, CG,
+      { callerAgentAddress: 'alice', signal: controller.signal });
+    if (mode === 'revoked') {
+      await expect(read).resolves.toEqual([]);
+      expect(spy.mock.calls.some(([sparql]) => sparql.startsWith('SELECT ?g (COUNT'))).toBe(false);
+    } else if (mode === 'aborted') await expect(read).rejects.toThrow('cancel statistics');
+    else await expect(read).rejects.toMatchObject({ code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
+    expect(authority).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: 'alice', signal: controller.signal }));
+  } finally { await store.close(); }
 });

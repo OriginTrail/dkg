@@ -511,23 +511,6 @@ function hasTopLevelDefaultGraphPattern(scope: PreparedGraphScope): boolean {
   );
 }
 
-/** Exact partition reads never use a physical default graph or a GRAPH variable. */
-export function assertExactGraphRead(scope: PreparedGraphScope): void {
-  // EXISTS can carry graph patterns in projections, nested SELECTs or solution
-  // modifiers. The exact fast path does not rewrite those expression datasets.
-  if (scope.prepared.tokens.some(token => token.kind === 'word' && token.upper === 'EXISTS')) {
-    throw new ScopedQueryViolationError('Exact partition reads do not support EXISTS expressions');
-  }
-
-  // DESCRIBE's implicit description dataset extends beyond its WHERE graphs.
-  if (scope.operation === 'DESCRIBE') {
-    throw new ScopedQueryViolationError('Exact partition reads do not support DESCRIBE');
-  }
-  if (!scope.hasGraphClause || scope.graphVariables.length > 0 || hasTopLevelDefaultGraphPattern(scope)) {
-    throw new ScopedQueryViolationError('Exact partition reads require only concrete GRAPH patterns');
-  }
-}
-
 function nextGroupOpening(
   scope: PreparedGraphScope,
   start: number,

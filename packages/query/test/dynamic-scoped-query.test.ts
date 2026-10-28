@@ -89,9 +89,9 @@ describe('fresh dynamic scoped query admission', () => {
       const partitions = await engine.listContextGraphQueryPartitionReads(OPTIONS.contextGraphId, OPTIONS);
       expect(partitions.map(read => read.graph)).toContain(publicGraph);
       expect(partitions.map(read => read.graph)).not.toContain(hidden);
-      const exact = (graph: string) => engine.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, { ...OPTIONS, exactContextGraphPartitions: true });
-      await expect(exact(hidden)).rejects.toThrow(/Scoped query violation/);
-      expect((await exact(publicGraph)).bindings).toHaveLength(1);
+      const stats = await engine.readContextGraphNamedGraphStats(OPTIONS.contextGraphId, OPTIONS);
+      expect(stats.find(row => row.graph === publicGraph)?.tripleCount).toBe(1);
+      expect(stats.some(row => row.graph === hidden)).toBe(false);
     } finally { await store.close(); }
   });
   it('uses one fresh inventory for combined VM and SWM variable routes', async () => {

@@ -98,3 +98,9 @@ export interface ContextGraphPartitionRead {
   readonly graph: string;
   readonly admission: 'public' | 'shared-memory';
 }
+
+export interface ContextGraphNamedGraphStats {
+  graph: string;
+  entityCount: number;
+  tripleCount: number;
+}

@@ -40,4 +40,4 @@ export {
   type EmptyQueryResultShape,
 } from './sparql-guard.js';
 
-export { exactContextGraphReadRequiresSharedMemory } from './scoped-content-graph-policy.js';
+export type { NamedGraphStatsBatchGate } from './named-graph-statistics.js';

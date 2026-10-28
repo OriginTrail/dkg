@@ -1,6 +1,6 @@
 import type { ContextGraphPartitionRead } from './query-types.js';
 import { createScopedContentGraphRoutePolicy, scopedPartitionPolicyFromRoute, selectScopedRoutePartitions, selectLegacyScopedRoutePartitions } from './scoped-content-graph-policy.js';
-import { authorizeExactContextGraphPartitions } from './exact-context-graph-partitions.js';
+import { readPartitionStatistics, type NamedGraphStatsBatchGate } from './named-graph-statistics.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { type ContentPartition } from './content-partition-policy.js';
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
@@ -337,7 +337,14 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const policy = createScopedContentGraphRoutePolicy(contextGraphId, opts);
     const reads = createQueryStoreReadContext(this.store, opts);
     const discovery = await this.resolveScopedContentGraphDiscovery(contextGraphId, reads);
-    return selectScopedRoutePartitions(policy, discovery.partitions);
+    return selectScopedRoutePartitions(policy, discovery.partitions).filter(read => discovery.inventory.includes(read.graph));
+  }
+
+  /** Inventory, bounded aggregates and fresh candidate admission have one owner. */
+  async readContextGraphNamedGraphStats(contextGraphId: string, options: QueryOptions = {}, aroundBatch?: NamedGraphStatsBatchGate) {
+    const opts = { ...options, includeSharedMemory: options.includeSharedMemory ?? options.includeWorkspace ?? true };
+    const partitions = await this.listContextGraphQueryPartitionReads(contextGraphId, opts);
+    return readPartitionStatistics(this.store, contextGraphId, partitions, opts, aroundBatch);
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -369,16 +376,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
     }
     switch (plan.kind) {
-      case 'exact': {
-        return authorizeExactContextGraphPartitions(this.store, reads.catalog, plan.policy, plan.candidates)
-          .then(async admission => {
-            assertExplicitGraphIrisAllowed(initialGraphScope, admission.allowed);
-            admission.assertUnchanged();
-            const result = await this.execAndNormalize(initialGraphScope, reads);
-            admission.assertUnchanged();
-            return result;
-          });
-      }
       case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
         plan.options.contextGraphId, plan.options, reads, reads.catalog);
