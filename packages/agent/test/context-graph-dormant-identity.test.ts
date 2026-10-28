@@ -841,7 +841,7 @@ describe('dormant durable Context Graph identity', () => {
     await f.chain.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: firstHash });
     // Isolate network activation only; numeric identity, fresh native authority,
     // install, persistence and cap selection remain the composed native owners.
-    vi.spyOn(f.agent, 'subscribeToContextGraph').mockResolvedValue(undefined);
+    vi.spyOn(f.agent, 'installContextGraphSubscription').mockImplementation(id => f.state.subscribedContextGraphs.get(id)!);
     const authority = vi.spyOn(f.agent, 'resolveContextGraphSubscriptionBootstrapAuthority');
     await f.agent.rehydrateContextGraphSubscriptions(null);
     f.agent.applyOnChainContextGraphObservation(observed(COLLISION), { source: 'event' });
@@ -860,7 +860,7 @@ describe('dormant durable Context Graph identity', () => {
 
   it('keeps cap0 as native uncapped activation with its fresh authority gate', async () => {
     const f = await cold([durable()], false, { enabled: true, cap: 0 });
-    vi.spyOn(f.agent, 'subscribeToContextGraph').mockResolvedValue(undefined);
+    vi.spyOn(f.agent, 'installContextGraphSubscription').mockImplementation(id => f.state.subscribedContextGraphs.get(id)!);
     const authority = vi.spyOn(f.agent, 'resolveContextGraphSubscriptionBootstrapAuthority');
     await f.agent.rehydrateContextGraphSubscriptions(null);
     expect(authority).toHaveBeenCalledTimes(1);

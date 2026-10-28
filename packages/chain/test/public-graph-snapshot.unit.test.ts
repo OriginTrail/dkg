@@ -4,6 +4,7 @@ import { ethers } from "ethers";
 import {
   sealPublicGraphSnapshot,
   decodePublicGraphSnapshot,
+  decodePublicGraphSnapshotResponse,
   normalizePublicGraphSnapshot,
   PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES,
 } from "../src/public-graph-snapshot.js";
@@ -108,6 +109,11 @@ describe("public graph snapshot contract", () => {
 
 describe.each([
   ["object", normalizePublicGraphSnapshot],
+  ["response", (input: unknown, scope: Parameters<typeof normalizePublicGraphSnapshot>[1]) => {
+    const response = decodePublicGraphSnapshotResponse(bytes(input), scope);
+    if (response.kind !== "snapshot") throw new Error("Expected snapshot");
+    return response.snapshot;
+  }],
   ["wire", (input: unknown, scope: Parameters<typeof normalizePublicGraphSnapshot>[1]) => decodePublicGraphSnapshot(bytes(input), scope)],
 ] as const)("%s snapshot validation parity", (_kind, normalize) => {
   it("canonicalizes field order and returns a detached frozen inventory", () => {
@@ -132,5 +138,26 @@ describe.each([
   it("enforces the size limit on in-process results too", () => {
     const deploymentId = "x".repeat(PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES);
     expect(() => normalize(reseal({deploymentId}),{...scope,deploymentId,now:2000})).toThrow("size");
+  });
+});
+
+
+describe("public graph snapshot response envelope", () => {
+  it("accepts only the explicit unavailable response", () => {
+    expect(decodePublicGraphSnapshotResponse(bytes({ unavailable: true }), { ...scope, now: 2000 }))
+      .toEqual({ kind: "unavailable" });
+  });
+  it.each([
+    { unavailable: false }, { unavailable: "true" }, { unavailable: true, extra: 1 },
+    { ...make(), unavailable: true }, [{ unavailable: true }], null,
+  ])("rejects an ambiguous unavailable envelope %j", response => {
+    expect(() => decodePublicGraphSnapshotResponse(bytes(response), { ...scope, now: 2000 })).toThrow();
+  });
+  it("keeps fatal UTF-8 and byte limits for unavailable and snapshot responses", () => {
+    for (const response of [
+      Buffer.alloc(0), Buffer.alloc(PUBLIC_GRAPH_SNAPSHOT_MAX_BYTES + 1, 32),
+      Buffer.concat([Buffer.from('{"unavailable":true,"'), Buffer.from([0xff]), Buffer.from('":0}')]),
+      bytes({ unavailable: true }).subarray(0, 10),
+    ]) expect(() => decodePublicGraphSnapshotResponse(response, { ...scope, now: 2000 })).toThrow();
   });
 });

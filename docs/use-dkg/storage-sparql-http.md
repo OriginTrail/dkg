@@ -164,6 +164,10 @@ Size the daemon service and Oxigraph scope independently, while keeping their co
 - **Apache Jena Fuseki:** Typically `http://host:3030/dataset/query` and `http://host:3030/dataset/update`.
 - **GraphDB, Neptune, Stardog:** Use the vendor’s SPARQL query and update URLs; add `auth` if required.
 
+### Store concurrency budget
+
+The node runs at most `DKG_STORE_MAX_CONCURRENT` store operations at once (4 by default), capped at the host's CPU count (but at least 2). One slot stays reserved for storage acknowledgements and one for health checks. A remote store that is slow because of request latency, not CPU, can sometimes do more at once. `DKG_STORE_CONCURRENCY_POLICY=configured` removes the CPU cap, so `DKG_STORE_MAX_CONCURRENT` becomes the exact total; the two reserved slots stay reserved. Raise it only after comparing queue waits, completed work and the store's own load before and after, on your store and workload. To roll back, remove the variables and restart.
+
 ### Blazegraph provisioned by `dkg init` (Docker)
 
 When you pick the `blazegraph` backend in `dkg init` and leave the URL blank, the CLI offers to provision a container itself. For new containers, the provisioner uses the pinned multi-architecture image and data path declared in `blazegraph-image.json`, stores the journal in a named Docker volume, and uses `--restart unless-stopped`. Blazegraph output uses Docker's compressed `local` log driver with a 4 GB rotation budget (`200m` × 20 files), so an unattended container cannot fill the host disk. The provisioner auto-bumps the host port if 9999 is taken and is idempotent — re-running `dkg init` against an already-provisioned namespace reuses the running container.

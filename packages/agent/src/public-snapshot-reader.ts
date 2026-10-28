@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { decodePublicGraphSnapshot, normalizePublicGraphSnapshot } from '@origintrail-official/dkg-chain';
+import { decodePublicGraphSnapshotResponse, normalizePublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { PublicSnapshotMode, PublicSnapshotObservation } from './public-snapshot-evidence.js';
+
+export class PublicSnapshotUnavailableError extends Error {}
 
 export const PUBLIC_GRAPH_SNAPSHOT_PROTOCOL = '/dkg/10.0.0/public-graph-snapshot/1';
 import type { SnapshotRequest } from './public-snapshot-policy.js';
@@ -9,7 +11,7 @@ export function createPublicSnapshotReader(options: {
   mode: PublicSnapshotMode;
   chain: Pick<ChainAdapter, 'readPublicGraphSnapshot'>; request: SnapshotRequest;
   peers: readonly string[]; signal: AbortSignal; assertCurrent(): void;
-  expected: Parameters<typeof decodePublicGraphSnapshot>[1];
+  expected: Parameters<typeof decodePublicGraphSnapshotResponse>[1];
 }): (refresh?: boolean) => Promise<PublicSnapshotObservation> {
   const {chain,request,signal,expected,assertCurrent}=options;
   if (options.mode === 'rpc-only') return async () => {
@@ -22,15 +24,22 @@ export function createPublicSnapshotReader(options: {
   };
   return async (refresh=false) => {
     let failure: unknown;
+    let unavailable = false;
     for (const peer of options.peers) {
       assertCurrent();
       try {
         const bytes = await request(peer, refresh, signal);
-        const snapshot=decodePublicGraphSnapshot(bytes,expected);
+        const response = decodePublicGraphSnapshotResponse(bytes, expected);
+        if (response.kind === 'unavailable') {
+          unavailable = true;
+          throw new PublicSnapshotUnavailableError('Snapshot temporarily unavailable');
+        }
+        const { snapshot } = response;
         assertCurrent();
         return {mode:'core-cache',snapshot,sourceCore:peer};
       } catch(error) { failure=error; signal.throwIfAborted(); }
     }
-    throw new Error('No configured core supplied a valid public snapshot',{cause:failure});
+    const Failure = unavailable ? PublicSnapshotUnavailableError : Error;
+    throw new Failure('No configured core supplied a valid public snapshot',{cause:failure});
   };
 }

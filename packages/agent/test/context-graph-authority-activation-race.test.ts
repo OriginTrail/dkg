@@ -46,7 +46,7 @@ it.each([
   let available = false;
   const activations: unknown[] = [];
   agent.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, event => activations.push(event));
-  const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+  const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
   let discoveryObservation: { sameRow: boolean; stillDormant: boolean } | undefined;
   vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority').mockImplementation(async () => available
     ? { outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 7n }

@@ -460,6 +460,12 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the agent memory-layer tests import the CLI markdown extractor',
   },
   {
+    patterns: [/^packages\/cli\/src\/publisher-chain-proof\.ts$/],
+    lanes: ['tornado_agent'],
+    evmScopes: [],
+    reason: 'the agent memory-layer tests load the CLI confirmed-publication proof helper',
+  },
+  {
     patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/],
     // The EPCIS lanes are Blazegraph and supporting; the CLI rule already
     // selects Blazegraph.
@@ -613,7 +619,7 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
   {
     // The devnet bootstrap: the browser suite's Playwright setup, the devnet
     // harnesses and the CLI's Blazegraph smoke fixture (which sources it) run it.
-    pattern: /^scripts\/devnet\.sh$/,
+    pattern: /^scripts\/(?:devnet\.sh|devnet-node-process-control\.mjs|lib\/devnet-node-process-control\.ts)$/,
     lanes: ['kosava_node_ui_e2e', 'tornado_agent', 'bura_cli'],
     reason: 'the browser suite, the devnet harnesses and the CLI Blazegraph smoke fixture run the devnet bootstrap',
   },

@@ -55,6 +55,7 @@ describe('yielding the store background lane between asset writes', () => {
       isBindingGenerationCurrent: () => true,
       track: () => {},
       recordDrops: () => {},
+      logTiming: () => {},
       reconcile: async () => {},
     } as unknown as RecoveryMaterializationPorts;
     const authority = {

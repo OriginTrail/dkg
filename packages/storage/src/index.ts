@@ -245,7 +245,11 @@ export {
   type BoundedGraphPayloadRefusalReason,
   type BoundedGraphPayloadResult,
 } from './bounded-rdf.js';
-export { StoreResponseTooLargeError } from './http-response-limit.js';
+export {
+  StoreResponseTooLargeError,
+  isStoreResponseTooLargeError,
+  type StoreResponseTooLargeErrorLike,
+} from './http-response-limit.js';
 export {
   MAX_RFC64_SEMANTIC_READ_TIMEOUT_MS_V1,
   Rfc64SemanticReadGatewayErrorV1,
@@ -378,3 +382,5 @@ export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSE
 export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';
 
 export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader, type StoreRecoveryState } from './store-recovery-generation.js';
+
+export { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';

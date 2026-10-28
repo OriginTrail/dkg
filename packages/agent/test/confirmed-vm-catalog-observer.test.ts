@@ -5,12 +5,12 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { describe, expect, it, vi } from 'vitest';
 import { Logger, createOperationContext, type SwmAuthorInventoryScopeV1 } from '@origintrail-official/dkg-core';
 import { SwmInventoryWriteFailure } from '../src/internal/swm-inventory-write.js';
-import { observeConfirmedVmTransfer, observeConfirmedVmCatalogV1, transferConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
+import { transferConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
 import { CatalogPlacementTimingV1, installCatalogPlacementTimingV1 } from '../src/internal/catalog-placement-timing.js';
 import { AUTHOR, AUTHOR_WALLET, CONTEXT_GRAPH_ID, NETWORK_ID, assertionSealV1, authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
 import { rfc64SwmInventoryAssetKeyV1, rfc64SwmInventoryShadowRuntimeV1 } from '../src/rfc64/swm-inventory-shadow-runtime-v1.js';
 
-type Dependencies = { -readonly [Key in keyof Parameters<typeof observeConfirmedVmCatalogV1>[0]]: Parameters<typeof observeConfirmedVmCatalogV1>[0][Key] };
+type Dependencies = { -readonly [Key in keyof Parameters<typeof transferConfirmedVmCatalogV1>[0]]: Parameters<typeof transferConfirmedVmCatalogV1>[0][Key] };
 
 async function fixture() {
   const deps: Dependencies = {
@@ -68,7 +68,6 @@ describe('confirmed VM catalog completion certificate', () => {
     deps.removeInventory = vi.fn(async () => ({ status, attempts: 0, snapshot: null }));
     deps.requestProjection = vi.fn(() => false);
     expect(await transferConfirmedVmCatalogV1(deps, params)).toBe('projection-pending');
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true); // Legacy committed-removal result.
     const readiness = new SwmCatalogAuthorityNotReady('policy-not-accepted');
     deps.requestProjection = vi.fn(() => { throw readiness; });
     const failure = await transferConfirmedVmCatalogV1(deps, params).catch(error => error);
@@ -85,7 +84,6 @@ describe('confirmed VM catalog completion certificate', () => {
     const transfer = () => Rfc64CatalogAutoPublishMethods.prototype.transferRfc64ConfirmedVmV1.call(
       { resolveRfc64CatalogAuthoringLaneV1: () => { throw refusal; } } as any, params);
     await expect(transfer()).rejects.toMatchObject({ phase: 'authority', cause: refusal });
-    expect(await observeConfirmedVmTransfer(deps.log, params, transfer)).toBe(false);
     deps.finalizedPrivateScopeBase = scopeBase;
     const disk = new Error('disk unavailable');
     deps.storeRepair = vi.fn(async () => { throw disk; });
@@ -117,7 +115,7 @@ describe('confirmed VM catalog completion certificate', () => {
       if (outcome === 'throws') throw new Error('removal unavailable');
       return { status: outcome, attempts: 1, snapshot: null };
     });
-    const pending = context.run('confirmation', () => observeConfirmedVmCatalogV1(deps, params));
+    const pending = context.run('confirmation', () => transferConfirmedVmCatalogV1(deps, params)).catch(error => error);
     try {
       // Registration is synchronous, including while this asset's previous work still runs.
       expect(runtime.hasInventoryWrites(lane)).toBe(true);
@@ -131,7 +129,8 @@ describe('confirmed VM catalog completion certificate', () => {
       expect(events).toEqual(['remove:confirmation']);
       expect(runtime.hasInventoryWrites(lane)).toBe(true);
       context.run('removal-release', releaseRemoval);
-      await expect(pending).resolves.toBe(outcome === 'applied');
+      if (outcome === 'applied') await expect(pending).resolves.toBe('owned');
+      else await expect(pending).resolves.toMatchObject({ boundary: 'removal' });
       await runtime.drain();
       expect(events).toEqual(['remove:confirmation', 'removal-settled', 'retire:retirement']);
       expect(runtime.hasInventoryWrites(lane)).toBe(false);
@@ -148,7 +147,7 @@ describe('confirmed VM catalog completion certificate', () => {
   it.each(['applied', 'absent', 'inactive'] as const)('reports public removal %s honestly', async (status) => {
     const { deps, params } = await fixture();
     deps.removeInventory = vi.fn(async () => (status === 'inactive' ? { status } : { status, attempts: 0, snapshot: null }));
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true);
+    expect(await transferConfirmedVmCatalogV1(deps, params)).toBe(status === 'inactive' ? 'inactive' : 'owned');
     expect(deps.storeRepair).not.toHaveBeenCalled();
     expect(deps.requestProjection).toHaveBeenCalledTimes(status === 'applied' || status === 'absent' ? 1 : 0);
   });
@@ -160,7 +159,7 @@ describe('confirmed VM catalog completion certificate', () => {
     let release!: () => void;
     deps.storeRepair = vi.fn(() => new Promise<void>((resolve) => { release = resolve; }));
     let settled = false;
-    const pending = observeConfirmedVmCatalogV1(deps, params).then((result) => { settled = true; return result; });
+    const pending = transferConfirmedVmCatalogV1(deps, params).then((result) => { settled = true; return result; });
     await Promise.resolve();
     expect(settled).toBe(false);
     expect(deps.storeRepair).toHaveBeenCalledWith(expect.objectContaining({
@@ -169,7 +168,7 @@ describe('confirmed VM catalog completion certificate', () => {
     expect(deps.removeInventory).not.toHaveBeenCalled();
     expect(deps.requestPlacement).not.toHaveBeenCalled();
     release();
-    expect(await pending).toBe(true); // Supervisor refusal leaves a durable independent owner.
+    expect(await pending).toBe('owned'); // Supervisor refusal leaves a durable independent owner.
     expect(deps.requestPlacement).toHaveBeenCalledOnce();
   });
 
@@ -177,23 +176,19 @@ describe('confirmed VM catalog completion certificate', () => {
     const { deps, params, scopeBase } = await fixture();
     deps.finalizedPrivateScopeBase = scopeBase;
     deps.requestPlacement = vi.fn(() => { throw new Error('supervisor unavailable'); });
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true);
+    expect(await transferConfirmedVmCatalogV1(deps, params)).toBe('owned');
     deps.storeRepair = vi.fn(async () => { throw new Error('disk unavailable'); });
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(false);
+    await expect(transferConfirmedVmCatalogV1(deps, params)).rejects.toMatchObject({ boundary: 'marker' });
   });
 
   it('does not certify an escaped public removal failure', async () => {
     const { deps, params } = await fixture();
     deps.removeInventory = vi.fn(async () => { throw new Error('store unavailable'); });
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(false);
+    await expect(transferConfirmedVmCatalogV1(deps, params)).rejects.toMatchObject({ boundary: 'removal' });
   });
 
-  it.each([
-    ['storeRepair', false, 'placement was not recorded, so nothing owes it'],
-    ['requestPlacement', true, 'placement could not be requested; its durable marker stays'],
-    ['removeInventory', false, 'SWM inventory shadow removal escaped its failure boundary'],
-    ['requestProjection', true, 'SWM inventory shadow removal escaped its failure boundary'],
-  ] as const)('keeps the durable verdict and ends timing when the %s getter throws', async (capability, expected, warning) => {
+  it.each(['storeRepair', 'requestPlacement', 'removeInventory', 'requestProjection'] as const)(
+    'preserves strict ownership and releases timing when the %s getter throws', async capability => {
     const { deps, params, scopeBase } = await fixture();
     const privateLane = capability === 'storeRepair' || capability === 'requestPlacement';
     deps.finalizedPrivateScopeBase = privateLane ? scopeBase : null;
@@ -207,10 +202,17 @@ describe('confirmed VM catalog completion certificate', () => {
     const warn = vi.spyOn(deps.log, 'warn').mockImplementation(() => {});
     const info = vi.spyOn(deps.log, 'info').mockImplementation(() => {});
 
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(expected);
-    expect(warn).toHaveBeenCalledOnce();
-    expect(warn.mock.calls[0]?.[1]).toContain(warning);
-    expect(warn.mock.calls[0]?.[1]).toContain('capability unavailable');
+    if (capability === 'requestPlacement') {
+      expect(await transferConfirmedVmCatalogV1(deps, params)).toBe('owned');
+      expect(warn).toHaveBeenCalledOnce();
+      expect(warn.mock.calls[0]?.[1]).toContain('durable marker stays');
+    } else {
+      await expect(transferConfirmedVmCatalogV1(deps, params)).rejects.toMatchObject({
+        boundary: capability === 'storeRepair' ? 'marker' : capability === 'requestProjection' ? 'projection' : 'removal',
+        cause: expect.objectContaining({ message: 'capability unavailable' }),
+      });
+      expect(warn).not.toHaveBeenCalled();
+    }
     expect(info).toHaveBeenCalledOnce();
     expect(info.mock.calls[0]?.[1]).toContain('rfc64_catalog_placement_wait ');
     expect(info.mock.calls[0]?.[1]).toContain(capability === 'requestPlacement'
@@ -220,15 +222,14 @@ describe('confirmed VM catalog completion certificate', () => {
     expect(removed).toHaveBeenCalledTimes(capability === 'requestProjection' ? 1 : 0);
   });
 
-  it.each(['applied', 'absent'] as const)('retains a committed public %s when projection notification throws', async (status) => {
+  it.each(['applied', 'absent'] as const)('retains recovery ownership after public %s when projection notification throws', async (status) => {
     const { deps, params } = await fixture();
     deps.removeInventory = vi.fn(async () => ({ status, attempts: 0, snapshot: null }));
     deps.requestProjection = vi.fn(() => { throw new Error('projection unavailable'); });
     const warn = vi.spyOn(deps.log, 'warn').mockImplementation(() => {});
-    expect(await observeConfirmedVmCatalogV1(deps, params)).toBe(true);
+    await expect(transferConfirmedVmCatalogV1(deps, params)).rejects.toMatchObject({ boundary: 'projection', cause: expect.objectContaining({ message: 'projection unavailable' }) });
     expect(deps.requestProjection).toHaveBeenCalledOnce();
-    expect(warn).toHaveBeenCalledOnce();
-    expect(warn.mock.calls[0]?.[1]).toContain('SWM inventory shadow removal escaped its failure boundary: projection unavailable');
+    expect(warn).not.toHaveBeenCalled();
   });
 
 });

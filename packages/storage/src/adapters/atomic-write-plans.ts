@@ -31,7 +31,7 @@ export function prepareAtomicGraphAndSubjectReplace(
 ) {
   validateLiterals(adapter, 'replaceGraphAndSubject', [...graphQuads, ...metadataQuads]);
   const plan = buildAtomicGraphAndSubjectReplaceUpdate(
-    graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
+    graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads, adapter === 'blazegraph' ? 'bounded-direct' : 'staged',
   );
   sparqlStatements(adapter).checkIris.replaceGraphAndSubject(
     graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
