@@ -43,7 +43,9 @@ export type MintAdoptionRefusalReason =
   /** The current-version view at the finality-depth block is missing, behind the mint, or contradicts it. */
   | 'version-view-unavailable'
   /** The node already holds a record of this KA that does not describe the sealed content. */
-  | 'existing-record-conflict';
+  | 'existing-record-conflict'
+  /** Mint receipts prove only the initial assertion version. */
+  | 'assertion-version-mismatch';
 
 /** Missing or not-yet-final evidence can appear later; a mismatch never changes. */
 const RETRYABLE_REFUSALS: ReadonlySet<MintAdoptionRefusalReason> = new Set([

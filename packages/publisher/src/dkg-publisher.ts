@@ -163,7 +163,7 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
-import { adoptMintForRecording, type MintOrAdoptOutcome } from './adopt-existing-mint.js';
+import { adoptMintForRecording, MintAdoptionRefusedError, type MintOrAdoptOutcome } from './adopt-existing-mint.js';
 import { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -3231,6 +3231,8 @@ export class DKGPublisher implements Publisher {
       const onChainResult = outcome.result;
       let ual = '';
       if (outcome.adopted && !graphPublish) throw new Error('Adopted mint recording requires a graph-scoped reservation');
+      if (outcome.adopted && BigInt(graphPublish!.scope.assertionVersion) !== 1n)
+        throw new MintAdoptionRefusedError('assertion-version-mismatch', graphPublish!.expectedPackedKaId, 'A mint receipt proves only initial assertion version 1');
       const recordDisposition = graphPublish !== undefined ? await classifyMintRecord(this.store, {
         contextGraphId, ual: graphPublish.scope.ual, assertionVersion: graphPublish.scope.assertionVersion,
         assertionGraph: knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, graphPublish.scope, target.subGraphName),

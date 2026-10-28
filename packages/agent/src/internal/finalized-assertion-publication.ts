@@ -1,7 +1,8 @@
+import { completeNamedMint } from './named-mint-completion.js';
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
 import { contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri,
-  GRAPH_KA_CONTENT_SCOPE_VERSION, buildAssertionPublishReceiptQuads, createOperationContext,
+  GRAPH_KA_CONTENT_SCOPE_VERSION, createOperationContext,
   type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, type SharedMemoryGraphScope, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -269,34 +270,38 @@ export function finalizedPublicationIdentity(prepared: PreparedFinalizedAssertio
     shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri };
 }
 
-/** Only local mint completion is shared; each caller owns its finalization failure policy. */
+/** Original publication alone creates the checkpoint; the completion protocol needs no resident content. */
 export async function completeFinalizedAssertionMint(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent,
   result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
-  const { opts, assertionUri, metaGraph, seal, rfc64WorkspaceHead, contextGraphId } = prepared;
-  const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
-  let checkpointReady = true;
-  if (result.status === 'confirmed') {
-    if (result.onChainResult) try {
-      await host.store.insert(buildAssertionPublishReceiptQuads({ assertionUri, metaGraph,
-        txHash: result.onChainResult.txHash ?? '', blockNumber: BigInt(result.onChainResult.blockNumber ?? 0),
-        kaId: result.onChainResult.batchId ?? 0n }));
-    } catch (err) { host.log.warn(ctx, `Failed to write publish receipt for <${assertionUri}>: ${err instanceof Error ? err.message : String(err)}`); }
-    // Only this original publication path knows recording, cleanup and gossip completed.
-    // Retry a transient readiness write before consuming the share marker; resumption
-    // can only consume persisted readiness and may never manufacture this proof.
-    const ready = () => beginNamedPublishFinalization(host.store,
-      { assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId },
-      () => host.catalogRequired(contextGraphId, opts?.subGraphName));
-    checkpointReady = false;
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try { await ready(); checkpointReady = true; break; }
-      catch (err) {
-        host.log.warn(ctx, `Failed to write publish checkpoint for <${assertionUri}>: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
+  if (result.status !== 'confirmed') {
+    await stampFinalizedPublicationLifecycle(host, prepared, result); return;
   }
-  await stampFinalizedPublicationLifecycle(host, prepared, result);
-  if (checkpointReady) await consumeFinalizedPublicationShare(host, prepared, result, recording);
+  const { opts, assertionUri, metaGraph, seal, rfc64WorkspaceHead, contextGraphId, graphScope, packedKaId, publisher, name, agentAddress } = prepared;
+  const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
+  // Only the original path proves content recording, cleanup and gossip. Resume may never create this proof.
+  const ready = () => beginNamedPublishFinalization(host.store,
+    { assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId },
+    () => host.catalogRequired(contextGraphId, opts?.subGraphName));
+  let checkpointReady = false;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { await ready(); checkpointReady = true; break; }
+    catch (err) { host.log.warn(ctx, `Failed to write publish checkpoint for <${assertionUri}>: ${err instanceof Error ? err.message : String(err)}`); }
+  }
+  if (opts?.clearSharedMemoryAfter === true) await publisher.clearRemainingSharedMemory(contextGraphId, opts?.subGraphName, ctx);
+  let catalogFailure: unknown;
+  await completeNamedMint({ store: host.store, stampPublishedLifecycle: host.publishedNamedKaVmLifecycleWriter,
+    completeFinalization: input => completeNamedPublishFinalization(host, input),
+    clearShareMarker: () => publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, recording?.heldLifecycle),
+  }, { reservation: { seal, scope: graphScope, kaId: packedKaId, assertionUri, metaGraph },
+    contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName, receipt: result.onChainResult }, {
+    consumeShare: checkpointReady,
+    onFailure: (stage, error) => {
+      if (stage === 'catalog') catalogFailure = error;
+      host.log.warn(ctx, `Failed named-mint ${stage} completion for <${assertionUri}>: ${error instanceof Error ? error.message : String(error)}`);
+    },
+  });
+  // Ordinary publication retains the confirmed result; record-only reconciliation requires catalog ownership.
+  if (recording && catalogFailure !== undefined) throw catalogFailure;
 }
 
 export async function publishFinalizedAssertionUpdate(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent): Promise<PublishResult> {

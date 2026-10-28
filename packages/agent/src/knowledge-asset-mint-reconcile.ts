@@ -1,3 +1,4 @@
+import { completeNamedMint } from './internal/named-mint-completion.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import type { CompleteNamedPublishFinalization } from './named-publish-finalization.js';
@@ -10,7 +11,6 @@ import type { ChainAdapter, OnChainPublishResult } from '@origintrail-official/d
 import {
   ASSERTION_PUBLISH_RECEIPT_PREDICATES,
   LegacyKnowledgeAssetReadOnlyError,
-  buildAssertionPublishReceiptQuads,
 } from '@origintrail-official/dkg-core';
 import {
   withMaterializationLock,
@@ -283,11 +283,12 @@ async function recordThroughPublish(host: KnowledgeAssetMintReconcileHost, targe
  */
 async function completeRecordedLifecycle(
   host: KnowledgeAssetMintReconcileHost,
-  { seal, scope, kaId, assertionUri, metaGraph }: SealedReservation,
+  reservation: SealedReservation,
   target: Target,
   mint: OnChainPublishResult,
   heldLifecycle: AssertionLifecycleWriteLease,
 ): Promise<OnChainPublishResult> {
+  const { seal, scope, kaId } = reservation;
   const record = await resolveConfirmedGraphScopedVm(host.store, {
     contextGraphId: target.contextGraphId,
     ual: scope.ual,
@@ -308,24 +309,9 @@ async function completeRecordedLifecycle(
   if (envelope.transactionHash !== undefined && envelope.transactionHash.toLowerCase() !== mint.txHash.toLowerCase()) {
     throw refused(`The local record of "${target.name}" names transaction ${envelope.transactionHash}, not the mint ${mint.txHash}.`);
   }
-  await host.store.insert(buildAssertionPublishReceiptQuads({
-    assertionUri, metaGraph, txHash: mint.txHash, blockNumber: BigInt(mint.blockNumber),
-  }));
-  const finalization = await host.completeFinalization({
-    contextGraphId: target.contextGraphId, subGraphName: target.subGraphName,
-    assertionCoordinate: target.name, seal, assertionUri,
-  });
-  if (finalization === 'pending') throw Object.assign(new Error('Named publish catalog finalization remains pending; retry to finish it'),
-    { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
-  await host.stampPublishedLifecycle({
-    contextGraphId: target.contextGraphId,
-    agentAddress: target.agentAddress,
-    name: target.name,
-    subGraphName: target.subGraphName,
-    publishedUal: scope.ual,
-    merkleRoot: ethers.hexlify(seal.merkleRoot),
-    packedKaId: kaId,
-  });
-  await host.clearSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName, heldLifecycle);
+  await completeNamedMint({ store: host.store, stampPublishedLifecycle: host.stampPublishedLifecycle,
+    completeFinalization: host.completeFinalization,
+    clearShareMarker: () => host.clearSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName, heldLifecycle),
+  }, { reservation, ...target, receipt: mint }, { consumeShare: true, onFailure: (_stage, error) => { throw error; } });
   return mint;
 }

@@ -768,3 +768,22 @@ it.each(['root', 'version'] as const)('refuses a conflicting tentative %s withou
     expect(status.type === 'bindings' && status.bindings.map(row => row.s)).toEqual(['"tentative"']);
   } finally { await f.store.close(); }
 });
+
+
+it.each(['explicit', 'duplicate-mint'] as const)('refuses a noninitial assertion version before %s recording changes VM or SWM', async mode => {
+  const f = await strandedPublishFixture();
+  try {
+    await f.strand();
+    const options = { ...f.publishOptions, assertionVersion: 2 };
+    const before = await f.store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }');
+    const operation = mode === 'explicit'
+      ? f.publisher.recordExistingMintFromSharedMemory(CONTEXT_GRAPH, 'all', {}, options)
+      : f.publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', options);
+    await expect(operation).rejects.toMatchObject({ code: 'KA_MINT_ADOPTION_REFUSED', reason: 'assertion-version-mismatch', retryable: false });
+    const after = await f.store.query('CONSTRUCT { ?s ?p ?o } WHERE { GRAPH ?g { ?s ?p ?o } }');
+    expect(after).toEqual(before);
+    expect(await f.graphSize(f.vmGraph)).toBe(0);
+    expect(await f.graphSize(f.swmGraph)).toBe(1);
+    expect(f.chain.broadcasts).toBe(0);
+  } finally { await f.store.close(); }
+});
