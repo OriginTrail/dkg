@@ -135,3 +135,18 @@ it.each(['json', 'ndjson'] as const)('retains the complete confirmed recovery re
   expect(publish).toHaveBeenCalledOnce();
   expect(query).not.toHaveBeenCalled();
 });
+
+
+it('retains JSON confirmation instead of a generic failure when historical recovery evidence is incompatible', () => {
+  const seal = { ...sealFor(75n), reservedKaId: undefined };
+  const txHash = `0x${'ab'.repeat(32)}`;
+  const error = new ConfirmedCatalogObligationErrorV1({ contextGraphId: CONTEXT_GRAPH_ID,
+    assertionCoordinate: 'asset', seal, assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, 'asset'),
+    ctx: createOperationContext('publish'), publicationLabel: 'publish' },
+  { txHash, blockNumber: 71, batchId: 75n }, new Error('canonical seal encoding refused'));
+  const response = JSON.parse(JSON.stringify(confirmedCatalogObligationResponse(error)));
+  expect(response).toMatchObject({ code: 'CONFIRMED_CATALOG_OBLIGATION_PENDING', status: 'confirmed',
+    catalogObligationPending: true, txHash, blockNumber: 71, confirmedTransaction: { batchId: '75' },
+    retryAction: 'repair_confirmed_catalog_evidence' });
+  expect(response).not.toHaveProperty('recovery'); expect(response).not.toHaveProperty('retryUrl');
+});

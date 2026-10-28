@@ -12,13 +12,14 @@ export function confirmedCatalogObligationResponse(error: unknown): ConfirmedCat
   if (!(error instanceof ConfirmedCatalogObligationErrorV1)) return null;
   const recovery = error.recoveryEvidence;
   const transaction = error.transaction;
-  if (recovery === undefined || transaction === undefined) return null;
-  return { code: error.code, error: error.message, status: 'confirmed' as const,
-    catalogObligationPending: true, ual: recovery.seal.kaUal,
-    authorAddress: recovery.seal.authorAddress, merkleRoot: recovery.seal.assertionMerkleRoot,
-    txHash: recovery.transactionHash, blockNumber: recovery.blockNumber,
+  if (transaction === undefined) return null;
+  const confirmed = { code: error.code, error: error.message, status: 'confirmed' as const,
+    catalogObligationPending: true as const, txHash: transaction.txHash, blockNumber: transaction.blockNumber,
     confirmedTransaction: { ...transaction, kaId: transaction.kaId?.toString(), batchId: transaction.batchId.toString(),
-      startKAId: transaction.startKAId?.toString(), endKAId: transaction.endKAId?.toString() }, recovery,
+      startKAId: transaction.startKAId?.toString(), endKAId: transaction.endKAId?.toString() } } as const;
+  if (recovery === undefined) return { ...confirmed, retryAction: 'repair_confirmed_catalog_evidence' };
+  return { ...confirmed, ual: recovery.seal.kaUal,
+    authorAddress: recovery.seal.authorAddress, merkleRoot: recovery.seal.assertionMerkleRoot, recovery,
     retryAction: 'observe_confirmed_catalog_obligation',
     retryUrl: `/api/knowledge-assets/${encodeURIComponent(recovery.assertionCoordinate)}/vm/observe-confirmed` };
 }

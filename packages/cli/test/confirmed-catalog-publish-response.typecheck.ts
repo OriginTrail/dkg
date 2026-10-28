@@ -4,9 +4,12 @@ import { confirmedCatalogObligationResponse } from '../src/daemon/routes/confirm
 declare const response: KnowledgeAssetPublishResponse;
 if (response.catalogObligationPending === true) {
   const pending: ConfirmedCatalogObligationPendingResponseV1 = response;
-  const version: '1' | '2' = pending.recovery.seal.contentScopeVersion;
+  if (pending.retryAction === 'observe_confirmed_catalog_obligation') {
+    const version: '1' | '2' = pending.recovery.seal.contentScopeVersion;
+    void version;
+  }
   const id: string = pending.confirmedTransaction.batchId;
-  void [version, id, pending.retryUrl, pending.retryAction];
+  void [id, pending.retryUrl, pending.retryAction];
 }
 const produced: ConfirmedCatalogObligationPendingResponseV1 | null = confirmedCatalogObligationResponse(new Error());
 void produced;

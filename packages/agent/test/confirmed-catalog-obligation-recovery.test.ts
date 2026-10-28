@@ -230,3 +230,20 @@ it('does not observe if recovery is cancelled during the finality check', async 
   await expect(recoverConfirmedCatalogObligationV1(f.evidence, f.ports)).rejects.toBe(reason);
   expect(f.observe).not.toHaveBeenCalled();
 });
+
+
+it('preserves the confirmed transaction when an incompatible historical seal cannot be encoded', async () => {
+  const f = await fixture();
+  await recoverConfirmedCatalogObligationV1(f.evidence, f.ports);
+  const original = f.observe.mock.calls[0][0];
+  const seal = { ...original.seal, reservedKaId: undefined };
+  const cause = new Error('canonical observer conversion refused');
+  const error = new ConfirmedCatalogObligationErrorV1({ ...original, seal }, f.receipt, cause);
+  expect(error).toMatchObject({ code: 'CONFIRMED_CATALOG_OBLIGATION_PENDING', cause,
+    transaction: { txHash: f.receipt.txHash, blockNumber: f.receipt.blockNumber } });
+  expect(error.seal).toBeUndefined(); expect(error.recoveryEvidence).toBeUndefined();
+  expect(error.retryInput.seal).toEqual(seal);
+  seal.merkleRoot.fill(0);
+  expect(error.retryInput.seal.merkleRoot).not.toEqual(seal.merkleRoot);
+  expect(f.submit).not.toHaveBeenCalled();
+});

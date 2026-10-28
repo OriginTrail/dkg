@@ -9,21 +9,32 @@ export type ConfirmedCatalogTransactionResponseV1 = {
     JsonTransactionScalarV1<ConfirmedCatalogTransactionEvidenceV1[Key]>;
 };
 
-export interface ConfirmedCatalogObligationPendingResponseV1 {
+interface ConfirmedCatalogObligationPendingBaseV1 {
   readonly code: 'CONFIRMED_CATALOG_OBLIGATION_PENDING';
   readonly status: 'confirmed';
   readonly catalogObligationPending: true;
   readonly error: string;
-  readonly ual: string;
-  readonly authorAddress: string;
-  readonly merkleRoot: string;
   readonly txHash: string;
   readonly blockNumber: number;
   readonly confirmedTransaction: ConfirmedCatalogTransactionResponseV1;
+}
+
+/** An invalid historical seal retains confirmation without offering an unsafe automatic retry. */
+export type ConfirmedCatalogObligationPendingResponseV1 = ConfirmedCatalogObligationPendingBaseV1 & ({
+  readonly ual: string;
+  readonly authorAddress: string;
+  readonly merkleRoot: string;
   readonly recovery: Readonly<ConfirmedCatalogObligationRecoveryV1>;
   readonly retryAction: 'observe_confirmed_catalog_obligation';
   readonly retryUrl: string;
-}
+} | {
+  readonly ual?: never;
+  readonly authorAddress?: never;
+  readonly merkleRoot?: never;
+  readonly recovery?: never;
+  readonly retryUrl?: never;
+  readonly retryAction: 'repair_confirmed_catalog_evidence';
+});
 
 export type KnowledgeAssetPublishResponse = OrdinaryKnowledgeAssetPublishResponse | ConfirmedCatalogObligationPendingResponseV1;
 

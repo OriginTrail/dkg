@@ -4,7 +4,7 @@ import {
   assertAssertionCoordinateV1, assertContextGraphIdV1,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
-  type OperationContext, type Logger,
+  type OperationContext, type Logger, type AssertionSeal,
 } from '@origintrail-official/dkg-core';
 import {
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
@@ -57,6 +57,13 @@ export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmiss
     assertAssertionCoordinateV1(params.assertionCoordinate);
   } catch (error) { throw new CatalogPublicationAdmissionError(error); }
   return true;
+}
+
+/** Catalog-selected publications must have representable recovery evidence before a send. */
+export function assertConfirmedCatalogSealAdmissionV1(required: boolean, seal: AssertionSeal): void {
+  if (!required) return; // Preserve legacy publication on excluded lanes.
+  try { canonicalGraphScopedAuthorSealFromAssertionSealV1(seal); }
+  catch (cause) { throw new CatalogPublicationAdmissionError(cause); }
 }
 
 interface ConfirmationObserverPortsV1 {

@@ -62,7 +62,7 @@ export function parseConfirmedCatalogObligationRecoveryV1(input: unknown): Reado
 /** Chain confirmation succeeded, but local catalog completion is still owed. */
 export class ConfirmedCatalogObligationErrorV1 extends Error {
   readonly code = 'CONFIRMED_CATALOG_OBLIGATION_PENDING';
-  readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
+  readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1> | undefined;
   readonly transaction: ConfirmedCatalogTransactionEvidenceV1 | undefined;
   private readonly retry: Readonly<ObserveRfc64ConfirmedVmParamsV1>;
 
@@ -73,17 +73,21 @@ export class ConfirmedCatalogObligationErrorV1 extends Error {
   ) {
     super('Confirmed publication catalog obligation was not durably recorded; recovery is required', { cause });
     this.name = 'ConfirmedCatalogObligationErrorV1';
-    this.seal = Object.freeze(canonicalGraphScopedAuthorSealFromAssertionSealV1(input.seal));
     this.transaction = transaction === undefined ? undefined : Object.freeze({
       txHash: transaction.txHash, blockNumber: transaction.blockNumber,
       txIndex: transaction.txIndex, kaId: transaction.kaId, batchId: transaction.batchId,
       startKAId: transaction.startKAId, endKAId: transaction.endKAId,
     });
     this.retry = structuredClone({ ...input, catalogObligationRequired: true });
+    // Error reporting must not repeat the observer failure and discard chain evidence.
+    // An incompatible historical seal still has a confirmed transaction, but cannot
+    // advertise an authenticated observer-only HTTP retry until its evidence is repaired.
+    try { this.seal = Object.freeze(canonicalGraphScopedAuthorSealFromAssertionSealV1(this.retry.seal)); }
+    catch { this.seal = undefined; }
   }
 
   get recoveryEvidence(): Readonly<ConfirmedCatalogObligationRecoveryV1> | undefined {
-    if (this.transaction === undefined || this.retry.subGraphName != null) return undefined;
+    if (this.transaction === undefined || this.seal === undefined || this.retry.subGraphName != null) return undefined;
     return Object.freeze({ version: 1, contextGraphId: this.retry.contextGraphId,
       assertionCoordinate: this.retry.assertionCoordinate, assertionUri: this.retry.assertionUri, subGraphName: null,
       seal: this.seal, transactionHash: this.transaction.txHash, blockNumber: this.transaction.blockNumber });

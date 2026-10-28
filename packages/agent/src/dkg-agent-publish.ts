@@ -17,14 +17,13 @@ import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLoc
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-
 import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
 import { createContextGraphAuthorityError } from './internal/context-graph-authority/context-graph-authority.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, type FinalizedAssertionVmPublishOptions, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
-import { assertConfirmedCatalogPublicationAdmissionV1 } from './internal/confirmed-catalog-obligation.js';
+import { assertConfirmedCatalogPublicationAdmissionV1, assertConfirmedCatalogSealAdmissionV1 } from './internal/confirmed-catalog-obligation.js';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -4787,6 +4786,7 @@ export class PublishMethods extends DKGAgentBase {
     if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
+    assertConfirmedCatalogSealAdmissionV1(catalogObligationRequired, seal);
     if (
       seal.kaUal === undefined
       || seal.assertionVersion === undefined
@@ -4971,7 +4971,11 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<void> {
-    this.admitConfirmedCatalogPublicationV1({ contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
+    const catalogObligationRequired = this.admitConfirmedCatalogPublicationV1({ contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
+    if (catalogObligationRequired) {
+      if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) throw new LegacyKnowledgeAssetReadOnlyError();
+      assertConfirmedCatalogSealAdmissionV1(true, assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request));
+    }
     return preflightKnowledgeAssetVmPublishSnapshot({
       store: this.store, publicSnapshotStore: this.publicSnapshotStore, log: this.log, request,
     });
@@ -4982,7 +4986,11 @@ export class PublishMethods extends DKGAgentBase {
     request: KnowledgeAssetVmPublishRequest,
     opts?: { publisherOverride?: DKGPublisher },
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult> {
-    this.admitConfirmedCatalogPublicationV1({ contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
+    const catalogObligationRequired = this.admitConfirmedCatalogPublicationV1({ contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
+    if (catalogObligationRequired) {
+      if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) throw new LegacyKnowledgeAssetReadOnlyError();
+      assertConfirmedCatalogSealAdmissionV1(true, assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request));
+    }
     if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
@@ -5540,7 +5548,11 @@ export class PublishMethods extends DKGAgentBase {
       onPostConfirmationStep?: LiftJobTailStepObserver;
     },
   ): Promise<AsyncKnowledgeAssetVmPublishExecutionResult & { assertionUri: string; seal: AssertionSeal }> {
-    this.admitConfirmedCatalogPublicationV1({ contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
+    const catalogObligationRequired = this.admitConfirmedCatalogPublicationV1({ contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
+    if (catalogObligationRequired) {
+      if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) throw new LegacyKnowledgeAssetReadOnlyError();
+      assertConfirmedCatalogSealAdmissionV1(true, assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request));
+    }
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
     // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
@@ -5903,6 +5915,7 @@ export class PublishMethods extends DKGAgentBase {
     if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
+    assertConfirmedCatalogSealAdmissionV1(catalogObligationRequired, seal);
     if (
       seal.kaUal === undefined
       || seal.assertionVersion === undefined

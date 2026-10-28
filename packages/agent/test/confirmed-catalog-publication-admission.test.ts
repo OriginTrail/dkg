@@ -1,3 +1,4 @@
+import { buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri, ASSERTION_SEAL_PREDICATES } from '@origintrail-official/dkg-core';
 import { assertConfirmedCatalogPublicationAdmissionV1, normalizeConfirmedPublicationV1 } from '../src/internal/confirmed-catalog-obligation.js';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -39,7 +40,7 @@ function fixture(enabled = true) {
     chain: { publishToContextGraph: submit, updateKnowledgeAsset: submit },
     _buildPrecomputedUpdateAttestationForSeal: sign,
   }) as DKGAgent;
-  Object.defineProperty(agent, 'assertion', { value: { history: entered } });
+  Object.defineProperty(agent, 'assertion', { value: { history: entered }, configurable: true });
   return { agent, entered, submit, sign, consume, reserve };
 }
 describe('catalog-compatible named publication admission', () => {
@@ -116,4 +117,30 @@ it('refuses persisted root obligations attached to a named subgraph at both boun
   // The normalization guard runs before any seal, persistence or placement work.
   expect(() => normalizeConfirmedPublicationV1(identity as Parameters<typeof normalizeConfirmedPublicationV1>[0],
     () => { throw new Error('persisted selection must not be recomputed'); })).toThrow('root graph identity');
+});
+
+
+it.each(lanes)('$name rejects a catalog-incompatible legacy seal before sending', async lane => {
+  const f = fixture(), saved = request(CG, 'asset');
+  const assertionUri = contextGraphAssertionUri(CG, saved.agentAddress!, saved.name);
+  const rows = buildAssertionSealQuads({ assertionUri, metaGraph: contextGraphMetaUri(CG),
+    merkleRoot: new Uint8Array(32).fill(0xab), authorAddress: saved.seal.authorAddress,
+    authorAttestationR: new Uint8Array(32).fill(1), authorAttestationVS: new Uint8Array(32).fill(2),
+    authorSchemeVersion: 1, chainId: 31337n, kav10Address: saved.sealKav10Address,
+    reservedKaId: (BigInt(saved.seal.authorAddress) << 96n) | 1n,
+    finalizedAtIso: saved.sealFinalizedAtIso, contentScopeVersion: 2, kaUal: saved.kaUal!,
+    assertionVersion: '1', publicTripleCount: 1, privateTripleCount: 0 })
+    .filter(q => q.predicate !== ASSERTION_SEAL_PREDICATES.RESERVED_KA_ID);
+  const legacy = { ...saved, seal: { ...saved.seal, reservedKaId: undefined } };
+  Object.assign(f.agent, { resolveFinalizedAssertionPublishAuthor: async () => saved.agentAddress,
+    store: { query: vi.fn(async () => ({ type: 'quads', quads: rows })) } });
+  Object.defineProperty(f.agent, 'assertion', { value: { history: async () => ({}) }, configurable: true });
+  Object.assign(f.agent.publisher, { hasSwmShareComplete: async () => true });
+  const operation = lane.name === 'saved queue execution preflight' ? f.agent.preflightQueuedKnowledgeAssetVmPublishExecution(legacy)
+    : lane.name === 'saved queue snapshot admission' ? f.agent.preflightKnowledgeAssetVmPublishSnapshot(legacy)
+    : lane.name === 'saved queue direct execution' ? f.agent.publishQueuedKnowledgeAssetVmPublish(legacy, {})
+    : lane.run(f.agent, CG, 'asset');
+  await expect(operation).rejects.toMatchObject({ code: 'CATALOG_PUBLICATION_ADMISSION_INVALID' });
+  expect(f.submit).not.toHaveBeenCalled(); expect(f.sign).not.toHaveBeenCalled();
+  expect(f.consume).not.toHaveBeenCalled(); expect(f.reserve).not.toHaveBeenCalled();
 });
