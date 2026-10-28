@@ -251,3 +251,25 @@ it.each(['persistence', 'authority'])('contains a pending %s reset failure after
     expect(f.attempt.mock.calls.map(([row]) => row.assertionCoordinate)).toEqual(['active', 'healthy', 'before', 'active', 'after']);
   } finally { held.resolve(); }
 });
+
+it.each([false, true])('resets three sibling revisions once and retries an uncommitted edge (write failure=%s)', async fail => {
+  const rows = ['a', 'b', 'c'].map(id => repair(id));
+  const f = fixture(rows);
+  rows.forEach(row => f.records.set(row.assertionCoordinate, parked));
+  await f.pass();
+  expect(f.attempt).not.toHaveBeenCalled();
+  f.write.mockClear();
+  f.setActive(false); f.failWrites(fail);
+  f.owner.observeLaneAvailability(graph);
+  expect(f.write).toHaveBeenCalledTimes(1);
+  expect(f.write.mock.calls[0][0]).toHaveLength(3);
+  if (fail) {
+    rows.forEach(row => expect(f.records.get(row.assertionCoordinate)?.parked).toBe(true));
+    f.failWrites(false); f.owner.observeLaneAvailability(graph);
+    expect(f.write).toHaveBeenCalledTimes(2);
+  }
+  const writes = f.write.mock.calls.length;
+  f.owner.observeLaneAvailability(graph);
+  expect(f.write).toHaveBeenCalledTimes(writes);
+  rows.forEach(row => expect(f.records.get(row.assertionCoordinate)?.consecutiveFailures).toBe(0));
+});

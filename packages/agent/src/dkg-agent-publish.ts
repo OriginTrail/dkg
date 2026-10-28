@@ -4681,7 +4681,8 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
-    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId, assertionCoordinate: name, subGraphName: opts?.subGraphName });
+    const catalogObligationRequired = selectConfirmedCatalogObligationForAgentV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId, subGraphName: opts?.subGraphName }) === 'required';
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId, assertionCoordinate: name, subGraphName: opts?.subGraphName, catalogObligationRequired });
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     // GH#1778 — the ENQUEUING caller (token holder for the route path, or an
     // explicit author selector for a direct caller), persisted alongside the
@@ -4892,9 +4893,7 @@ export class PublishMethods extends DKGAgentBase {
       ...(callerAgentAddress ? { callerAgentAddress } : {}),
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       shareOperationId,
-      catalogObligationRequired: selectConfirmedCatalogObligationForAgentV1(this,
-        { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy },
-        { contextGraphId, subGraphName: opts?.subGraphName }) === 'required',
+      catalogObligationRequired,
       roots: [],
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       kaUal: seal.kaUal,
@@ -4969,7 +4968,7 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<void> {
-    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName });
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
     return preflightKnowledgeAssetVmPublishSnapshot({
       store: this.store, publicSnapshotStore: this.publicSnapshotStore, log: this.log, request,
     });
@@ -4980,7 +4979,7 @@ export class PublishMethods extends DKGAgentBase {
     request: KnowledgeAssetVmPublishRequest,
     opts?: { publisherOverride?: DKGPublisher },
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult> {
-    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName });
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
     if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
@@ -5538,7 +5537,7 @@ export class PublishMethods extends DKGAgentBase {
       onPostConfirmationStep?: LiftJobTailStepObserver;
     },
   ): Promise<AsyncKnowledgeAssetVmPublishExecutionResult & { assertionUri: string; seal: AssertionSeal }> {
-    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName });
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
     // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
@@ -5874,7 +5873,8 @@ export class PublishMethods extends DKGAgentBase {
     name: string,
     opts?: FinalizedAssertionVmPublishOptions,
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId, assertionCoordinate: name, subGraphName: opts?.subGraphName });
+    const catalogObligationRequired = selectConfirmedCatalogObligationForAgentV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId, subGraphName: opts?.subGraphName }) === 'required';
+    assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, { contextGraphId, assertionCoordinate: name, subGraphName: opts?.subGraphName, catalogObligationRequired });
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     const publisher = opts?.publisherOverride ?? this.publisher;
     const assertionUri = contextGraphAssertionUri(
@@ -6440,7 +6440,7 @@ export class PublishMethods extends DKGAgentBase {
     await this.afterConfirmedGraphScopedVmPublishV1({
       status: result.status,
       confirmedTransaction: result.onChainResult,
-      contextGraphId,
+      contextGraphId, catalogObligationRequired,
       subGraphName: opts?.subGraphName,
       assertionCoordinate: name,
       shareOperationId: rfc64WorkspaceHead?.shareOperationId,

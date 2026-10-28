@@ -96,10 +96,8 @@ export class FinalizedPrivatePlacementOwnerV1 {
     const lane = this.#lanes.get(contextGraphId);
     if (!lane) return;
     try {
-      for (const entry of lane.entries) {
-        const decision = this.#dependencies.resolveFinalizedPlacementDecision(entry.repair);
-        if (decision.status !== 'unavailable') this.#commitLaneReset(entry.repair, decision);
-      }
+      const first = lane.entries.values().next().value;
+      if (first) this.#commitLaneReset(first.repair);
     } catch (error) { this.#warn('catalog_private_repair_lane_reset_failed', error); }
   }
 
@@ -187,22 +185,24 @@ export class FinalizedPrivatePlacementOwnerV1 {
     if (!lane.entries.size) this.#lanes.delete(lane.id);
   }
 
-  #commitLaneReset(repair: Rfc64FinalizedPrivatePlacementRepairV1, decision: FinalizedPlacementDecisionV1): boolean {
+  #commitLaneReset(repair: Rfc64FinalizedPrivatePlacementRepairV1, supplied?: FinalizedPlacementDecisionV1): boolean {
     const lane = this.#lanes.get(repair.contextGraphId);
-    const entry = this.#retries.get(finalizedPrivateRepairKeyV1(repair));
-    if (!lane || !entry) return false;
-    const hint = finalizedPlacementRevisionV1(decision);
-    if (hint === undefined) return false;
-    const revision = JSON.stringify(hint);
-    if (entry.laneRevision === undefined) { entry.laneRevision = revision; return false; }
-    // A failed durable reset cannot consume the observed policy edge.
-    lane.resetPending ||= entry.laneRevision !== revision;
-    if (!lane.resetPending) return false;
-    const resets = [...lane.entries].map(sibling => this.#prepareReset(sibling.repair));
-    this.#commitResets(resets);
-    entry.laneRevision = revision;
+    if (!lane) return false;
+    const revisions: { entry: RetryEntry; revision: string }[] = [];
+    for (const entry of lane.entries) {
+      const decision = entry.repair === repair && supplied !== undefined ? supplied
+        : this.#dependencies.resolveFinalizedPlacementDecision(entry.repair);
+      if (decision.status === 'unavailable') throw decision.error;
+      const hint = finalizedPlacementRevisionV1(decision);
+      if (hint !== undefined) revisions.push({ entry, revision: JSON.stringify(hint) });
+    }
+    lane.resetPending ||= revisions.some(({ entry, revision }) => entry.laneRevision !== undefined && entry.laneRevision !== revision);
+    const reset = lane.resetPending;
+    if (reset) this.#commitResets([...lane.entries].map(sibling => this.#prepareReset(sibling.repair)));
+    // Advance the sibling observations together only after the graph-wide write.
+    for (const { entry, revision } of revisions) entry.laneRevision = revision;
     lane.resetPending = false;
-    return true;
+    return reset;
   }
 
   /** Unread evidence is not absence; a reset must resolve it before consuming its edge. */

@@ -13,14 +13,14 @@ import {
 import type { DKGAgent } from '../dkg-agent.js';
 import { selectRfc64ConfirmedCatalogObligationV1 } from '../rfc64/catalog-rollout-authority-v1.js';
 import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
-import { catalogPlacementTimingV1, type CatalogPlacementWaiterObserverV1 } from './catalog-placement-timing.js';
+import { type CatalogPlacementWaiterObserverV1 } from './catalog-placement-timing.js';
 
-import { rfc64SwmInventoryAssetKeyV1, rfc64SwmInventoryShadowRuntimeV1 } from '../rfc64/swm-inventory-shadow-runtime-v1.js';
+import { handoffConfirmedCatalogPlacementV1, withConfirmedCatalogTailV1 } from './confirmed-catalog-handoff.js';
 
-type CatalogPublicationIdentityV1 = Readonly<{ contextGraphId: string; assertionCoordinate: string; subGraphName?: string | null }>;
+type CatalogPublicationIdentityV1 = Readonly<{ contextGraphId: string; assertionCoordinate: string; subGraphName?: string | null; catalogObligationRequired?: boolean }>;
 type CatalogAdmissionConfigurationV1 = Pick<Parameters<typeof selectRfc64ConfirmedCatalogObligationV1>[0], 'plan' | 'authoring'>;
 type CatalogAdmissionHostV1 = {
-  readonly [Key in 'readRfc64CatalogResponsibilitiesV1' | 'resolveRfc64CatalogServingAuthorityV1']:
+  readonly [Key in 'readRfc64CatalogResponsibilitiesV1' | 'resolveRfc64CatalogServingAuthorityV1' | 'readAcceptedRfc64CatalogAccessSnapshotV1']:
     OmitThisParameter<DKGAgent[Key]>;
 };
 
@@ -32,13 +32,16 @@ export function selectConfirmedCatalogObligationForAgentV1(
     plan: config.plan, contextGraphId: params.contextGraphId,
     subGraphName: params.subGraphName ?? null, authoring: config.authoring,
     readResponsibilities: () => host.readRfc64CatalogResponsibilitiesV1(),
+    readAcceptedAccessPolicy: () => host.readAcceptedRfc64CatalogAccessSnapshotV1(params.contextGraphId)?.policy.accessPolicy,
     readServingAuthority: () => host.resolveRfc64CatalogServingAuthorityV1(params.contextGraphId),
   });
 }
 
 /** Refuse incompatible immutable identities before any publication preparation or submission. */
 export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmissionHostV1, config: CatalogAdmissionConfigurationV1, params: CatalogPublicationIdentityV1): void {
-  if (selectConfirmedCatalogObligationForAgentV1(host, config, params) === 'excluded') return;
+  // Persisted selection wins; older requests without evidence use current applicability.
+  if (params.catalogObligationRequired === false || (params.catalogObligationRequired === undefined
+    && selectConfirmedCatalogObligationForAgentV1(host, config, params) === 'excluded')) return;
   assertContextGraphIdV1(params.contextGraphId);
   assertAssertionCoordinateV1(params.assertionCoordinate);
 }
@@ -69,29 +72,14 @@ export async function observeConfirmedCatalogObligationV1(
     assertionVersion: confirmedSeal.assertionVersion, kaUal: confirmedSeal.kaUal,
     sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal), seal: confirmedSeal,
   });
-  const placementWait = catalogPlacementTimingV1(ports.owner).beginWait(confirmedSeal, params.ctx);
-  if (params.shareOperationId !== undefined) rfc64SwmInventoryShadowRuntimeV1(ports.owner).markVmConfirmed(
-    rfc64SwmInventoryAssetKeyV1({ contextGraphId, subGraphName: params.subGraphName ?? null,
-      authorAddress: confirmedSeal.authorAddress, assertionCoordinate: params.assertionCoordinate }),
-    confirmedSeal.assertionVersion, params.shareOperationId);
-  // No lane lookup precedes this atomic write. A write refusal must cross the completion
-  // boundary: the queue retains its confirmed transaction and immutable request for recovery.
-  try {
-    const persistence = ports.persistence;
-    if (persistence === undefined) throw new Error('RFC-64 persistence is unavailable');
-    await persistence.finalizedPrivatePlacementRepairs.put(repair);
-  } catch (cause) {
-    placementWait.observer.released();
-    placementWait.end(ports.log);
-    throw new Error('Confirmed publication catalog obligation was not durably recorded; recovery is required', { cause });
-  }
-  placementWait.requested();
-  try {
-    const request = ports.request(repair, params.ctx, placementWait.observer);
-    if (!request) ports.log.warn(params.ctx, `Confirmed ${params.publicationLabel} for <${params.assertionUri}>: the RFC-64 catalog supervisor did not accept its placement now; the durable marker stays for its next pass or start`);
-  } catch (cause) {
-    placementWait.observer.released();
-    ports.log.warn(params.ctx, `Confirmed ${params.publicationLabel} but RFC-64 finalized-private placement could not be requested; its durable marker stays for the next pass or start: ${cause instanceof Error ? cause.message : String(cause)}`);
-  }
-  placementWait.end(ports.log);
+  await withConfirmedCatalogTailV1(ports.owner, ports.log, params, confirmedSeal, wait =>
+    handoffConfirmedCatalogPlacementV1(params, repair, wait, {
+      log: ports.log,
+      persist: async record => {
+        if (!ports.persistence) throw new Error('RFC-64 persistence is unavailable');
+        await ports.persistence.finalizedPrivatePlacementRepairs.put(record);
+      },
+      request: observer => ports.request(repair, params.ctx, observer),
+      persistenceFailure: cause => new Error('Confirmed publication catalog obligation was not durably recorded; recovery is required', { cause }),
+    }));
 }

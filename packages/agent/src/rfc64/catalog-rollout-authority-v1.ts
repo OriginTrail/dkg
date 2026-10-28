@@ -225,6 +225,14 @@ export function resolveRfc64CatalogExecutionPlanModeV1(
     ?? plan.responsibilityDefaultMode;
 }
 
+/** Accepted private policy deliberately excludes the legacy public-only fallback. */
+export function isRfc64PublicOnlyAuthoringExclusionV1(
+  authoring: ResolvedRfc64CatalogAuthoringPolicyV1 | undefined, contextGraphId: string, acceptedAccessPolicy: number | undefined,
+): boolean {
+  return authoring?.publicDefault !== undefined && authoring.byContextGraph[contextGraphId] === undefined
+    && acceptedAccessPolicy === 1;
+}
+
 /** Desired confirmed work is independent of whether a catalog lane is ready now. */
 export function selectRfc64ConfirmedCatalogObligationV1(input: Readonly<{
   plan: Rfc64CatalogExecutionPlanV1;
@@ -233,10 +241,13 @@ export function selectRfc64ConfirmedCatalogObligationV1(input: Readonly<{
   authoring: ResolvedRfc64CatalogAuthoringPolicyV1 | undefined;
   readResponsibilities: () => readonly Rfc64CatalogResponsibilitySelectionV1[];
   readServingAuthority: () => Rfc64CatalogAuthorityPolicyV1;
+  readAcceptedAccessPolicy?: () => number | undefined;
 }>): 'required' | 'excluded' {
   const { plan, contextGraphId, authoring } = input;
   if (input.subGraphName !== null || plan.killSwitchActive
     || resolveRfc64CatalogExecutionPlanModeV1(plan, contextGraphId) === 'legacy') return 'excluded';
+  if (authoring?.publicDefault !== undefined && authoring.byContextGraph[contextGraphId] === undefined
+    && isRfc64PublicOnlyAuthoringExclusionV1(authoring, contextGraphId, input.readAcceptedAccessPolicy?.())) return 'excluded';
   if (authoring?.publicDefault !== undefined || authoring?.byContextGraph[contextGraphId] !== undefined
     || plan.selectedAuthority[contextGraphId]?.selected === true) return 'required';
   const responsible = input.readResponsibilities().some((entry) => entry.contextGraphId === contextGraphId

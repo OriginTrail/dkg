@@ -1,3 +1,4 @@
+import { CatalogRepairConditionErrorV1 } from '../rfc64/catalog-repair-diagnostics-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -53,7 +54,7 @@ export function resolveFinalizedPlacementDecisionV1<Lane extends PlacementLaneV1
       !== computeSwmAuthorInventoryScopeDigestV1(repair.inventoryScope)) {
       return Object.freeze({
         status: 'unavailable', capacityScope: pinnedCapacityScope,
-        error: new Error('RFC-64 finalized-private placement repair conflicts with a policy transition'),
+        error: new CatalogRepairConditionErrorV1('policy_conflict', 'RFC-64 finalized-private placement repair conflicts with a policy transition'),
       });
     }
     const inventoryScope = repair.version === 1 ? repair.inventoryScope : currentInventoryScope;

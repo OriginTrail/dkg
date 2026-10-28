@@ -72,3 +72,17 @@ describe('catalog-compatible named publication admission', () => {
     expect(f.entered).toHaveBeenCalledWith(identity.contextGraphId, identity.name, undefined);
   });
 });
+
+it.each(['snapshot', 'preflight', 'execute'] as const)('honors persisted exclusion after catalog enablement at %s', async boundary => {
+  const f = fixture(true);
+  const saved = { ...request(CG, '界'.repeat(100)), catalogObligationRequired: false };
+  const error = await (boundary === 'snapshot' ? f.agent.preflightKnowledgeAssetVmPublishSnapshot(saved)
+    : boundary === 'preflight' ? f.agent.preflightQueuedKnowledgeAssetVmPublishExecution(saved)
+    : f.agent.publishQueuedKnowledgeAssetVmPublish(saved, {})).catch(error => error);
+  expect(error).not.toMatchObject({ name: 'AuthorCatalogCodecError' });
+  const required = { ...saved, catalogObligationRequired: true };
+  Object.assign((f.agent as any).config, confirmedPublicationCatalogConfigV1(false));
+  await expect(boundary === 'snapshot' ? f.agent.preflightKnowledgeAssetVmPublishSnapshot(required)
+    : boundary === 'preflight' ? f.agent.preflightQueuedKnowledgeAssetVmPublishExecution(required)
+    : f.agent.publishQueuedKnowledgeAssetVmPublish(required, {})).rejects.toMatchObject({ name: 'AuthorCatalogCodecError' });
+});
