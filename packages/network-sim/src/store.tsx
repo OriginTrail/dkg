@@ -16,11 +16,17 @@ import { fetchDevnetConfig, fetchNodeStatus } from './api';
 import type { LiveOpMetrics } from './simulation-metrics';
 export type { LiveOpMetrics, PerTypeMetrics } from './simulation-metrics';
 
+export type SimulationTerminalOutcome =
+  | { kind: 'completed'; snapshot: DoneEvent }
+  | { kind: 'cancelled' }
+  | { kind: 'start-rejected' };
+
 export interface SimulationRun {
   id: string;
   name: string;
   startedAt: number;
   finishedAt?: number;
+  outcome?: SimulationTerminalOutcome;
   metrics: LiveOpMetrics;
   error?: string;
   diagnosticCount?: number;
@@ -58,7 +64,7 @@ type Action =
   | { type: 'START_SIMULATION'; id: string; name: string; config: SimulationRun['config'] }
   | { type: 'RECONCILE_SIMULATION'; id: string; snapshot: StatusEvent }
   | { type: 'SIMULATION_ERROR'; id: string; message: string }
-  | { type: 'COMPLETE_SIMULATION'; id: string; snapshot?: DoneEvent };
+  | { type: 'COMPLETE_SIMULATION'; id: string; outcome: SimulationTerminalOutcome };
 
 const MAX_ACTIVITIES = 200;
 
@@ -152,10 +158,11 @@ function reducer(state: StoredState, action: Action): StoredState {
     }
     case 'COMPLETE_SIMULATION': {
       if (action.id !== state.activeSimulationId) return state;
+      const snapshot = action.outcome.kind === 'completed' ? action.outcome.snapshot : undefined;
       const runs = state.simulationRuns.map(run => {
         if (run.id !== action.id) return run;
-        return { ...run, ...(action.snapshot ? snapshotRunAccounting(action.snapshot, run.metrics) : {}),
-          finishedAt: action.snapshot ? run.startedAt + action.snapshot.elapsedMs : Date.now(),
+        return { ...run, outcome: action.outcome, ...(snapshot ? snapshotRunAccounting(snapshot, run.metrics) : {}),
+          finishedAt: snapshot ? run.startedAt + snapshot.elapsedMs : Date.now(),
         };
       });
       return { ...state, activeSimulationId: null, simulationRuns: runs };
