@@ -113,15 +113,8 @@ export class ReplayRunEvidenceV1<Target> {
   get requested(): number { return this.#outcomes.filter(kind => kind === 'completed').length; }
   get providerFailures(): number { return this.#outcomes.filter(kind => kind === 'provider-failed').length; }
   get unanswered(): boolean { return this.#outcomes.some(kind => kind === 'provider-failed' || kind === 'local-unavailable'); }
-  get observationFailed(): boolean {
-    const value = this.#observation;
-    return value.kind === 'target-overflow' || (value.kind === 'parity' && value.outcome === 'failed')
-      || (value.kind === 'unobserved' && (value.reason === 'budget-exhausted' || value.reason === 'parity-error'));
-  }
   get peerFailures(): number { return this.#outcomes.filter(kind => kind === 'provider-failed' || kind === 'local-unavailable').length; }
-  get failed(): number { return Number(this.observationFailed) + this.peerFailures; }
   get unattributedProviderFailure(): boolean { return this.#unattributedProviderFailure; }
-  get requiresFullReplay(): boolean { return this.observationFailed || this.#unattributedProviderFailure; }
   constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[], readonly fullRequest = false) {}
   record(demand: Rfc64CatalogReplayPeerDemandV1, outcome: ReplayPeerOutcomeV1<Target>): void {
     this.#outcomes.push(outcome.kind);
@@ -139,4 +132,23 @@ export class ReplayRunEvidenceV1<Target> {
     this.#observation = targets.kind === 'overflow' ? { kind: 'target-overflow' }
       : { kind: 'parity', targets: targets.targets, outcome: failed ? 'failed' : 'complete' };
   }
+}
+
+
+/** One policy resolves recorded facts and queued ownership into a settlement. */
+export interface ReplayRunSettlementV1 {
+  readonly continueQueuedConnections: boolean;
+  readonly result: Readonly<{ requested: number; failed: number }>;
+  readonly requiresFullReplay: boolean;
+}
+export function resolveReplayRunSettlementV1<Target>(evidence: ReplayRunEvidenceV1<Target>,
+  continueQueuedConnections: boolean): ReplayRunSettlementV1 {
+  const observation = evidence.observation;
+  const observationFailed = observation.kind === 'target-overflow'
+    || (observation.kind === 'parity' && observation.outcome === 'failed')
+    || (observation.kind === 'unobserved' && (observation.reason === 'parity-error'
+      || (observation.reason === 'budget-exhausted' && !continueQueuedConnections)));
+  return { continueQueuedConnections,
+    result: Object.freeze({ requested: evidence.requested, failed: evidence.peerFailures + Number(observationFailed) }),
+    requiresFullReplay: observationFailed || evidence.unattributedProviderFailure };
 }

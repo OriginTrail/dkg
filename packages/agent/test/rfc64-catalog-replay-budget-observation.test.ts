@@ -1,3 +1,4 @@
+import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
 import { describe, expect, it, vi } from 'vitest';
 import { Rfc64CatalogReplayRecoveryRuntimeV1, RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from '../src/rfc64/catalog-limits-v1.js';
@@ -272,5 +273,100 @@ describe('RFC-64 replay recovery: the idle drain is bounded', () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+
+describe('joined connection ownership after an unobserved run', () => {
+  it.each(['drain-timeout', 'parity-error'] as const)('continues a connection queued during %s without another recovery request', async exit => {
+    const entered = Promise.withResolvers<void>(), finish = Promise.withResolvers<void>();
+    const requested: string[] = [];
+    let drains = 0, parities = 0, sleeps = 0;
+    const never = () => new Promise<void>(() => {});
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async (_cg, peer) => { requested.push(peer); return { status: 'completed', targets: [{ id: peer }] }; },
+      whenReceiverIdleForContextGraph: async () => {
+        if (++drains === 1 && exit === 'drain-timeout') { entered.resolve(); await never(); }
+      },
+      sleep: () => ++sleeps === 1 && exit === 'drain-timeout' ? finish.promise : never(),
+      targetIdentity: target => target.id,
+      parityFailed: async () => {
+        if (++parities === 1 && exit === 'parity-error') { entered.resolve(); await finish.promise; throw new Error('parity read refused'); }
+        return false;
+      },
+    });
+    const first = runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['a'] });
+    await entered.promise;
+    const lease = runtime.markPeerPending('cg', 'p', 'b')!;
+    let joinedDone = false;
+    const joined = runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: lease })
+      .then(result => { joinedDone = true; return result; });
+    try {
+      finish.resolve(); await first;
+      await vi.waitFor(() => expect(joinedDone).toBe(true), { timeout: 500 });
+      expect(requested).toEqual(['a', 'b']);
+      await expect(joined).resolves.toEqual({ requested: 1, failed: 0 });
+      expect(runtime.promisedTargets('cg', 'p')).toEqual([{ id: 'a' }, { id: 'b' }]);
+      expect(runtime.status('cg', 'p')).toMatchObject({ active: false, unverified: false, failed: false });
+    } finally {
+      finish.resolve();
+      // Ensure a regression cannot leave the test worker with a stranded promise.
+      if (!joinedDone) await runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'pending-recovery' });
+      lease.release(); await joined;
+    }
+  });
+
+  it('drains dispatcher shutdown after a timeout transfers a joined connection, retaining physical custody', async () => {
+    const owner = new Rfc64BackgroundWorkDispatcherV1();
+    const entered = Promise.withResolvers<void>(), timeout = Promise.withResolvers<void>(), transport = Promise.withResolvers<void>();
+    let drains = 0, sleeps = 0, joinedDone = false, closingDone = false;
+    const signals: (AbortSignal | undefined)[] = [];
+    const never = () => new Promise<void>(() => {});
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async (_cg, peer, signal) => {
+        if (peer === 'b') { signals.push(signal); await transport.promise; }
+        return { status: 'completed', targets: [] };
+      },
+      whenReceiverIdleForContextGraph: async () => { if (++drains === 1) { entered.resolve(); await never(); } },
+      sleep: () => ++sleeps === 1 ? timeout.promise : never(),
+      targetIdentity: target => target.id, parityFailed: async () => false,
+    });
+    const first = runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['a'] });
+    await entered.promise;
+    const lease = runtime.markPeerPending('cg', 'p', 'b')!;
+    let expectedSignal: AbortSignal | undefined;
+    const joined = owner.runAwaited(signal => {
+      expectedSignal = signal;
+      return runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: lease, signal });
+    }).then(() => { joinedDone = true; }, () => { joinedDone = true; });
+    try {
+      timeout.resolve(); await first;
+      await vi.waitFor(() => expect(signals).toHaveLength(1), { timeout: 500 });
+      expect(signals[0]).toBe(expectedSignal);
+      const closing = owner.closeAndDrain().then(() => { closingDone = true; });
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(joinedDone).toBe(false); expect(closingDone).toBe(false);
+      transport.resolve();
+      await vi.waitFor(() => expect(closingDone).toBe(true), { timeout: 500 });
+      await closing; await joined;
+      expect(runtime.status('cg', 'p')?.active).toBe(false);
+    } finally {
+      timeout.resolve(); transport.resolve();
+      if (!joinedDone) await runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'pending-recovery' });
+      await joined; lease.release(); await owner.closeAndDrain();
+    }
+  });
+
+  it('does not leave an already-cancelled command installed as the next run owner', async () => {
+    const controller = new AbortController(); controller.abort(new Error('already closed'));
+    const requestPeer = vi.fn(async () => ({ status: 'completed' as const, targets: [] }));
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({ requestPeer,
+      whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target.id, parityFailed: async () => false });
+    const lease = runtime.markPeerPending('cg', 'p', 'a')!;
+    await expect(runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: lease, signal: controller.signal }))
+      .rejects.toThrow('already closed');
+    expect(requestPeer).not.toHaveBeenCalled();
+    await expect(runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'pending-recovery' })).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(requestPeer).toHaveBeenCalledOnce(); lease.release();
   });
 });

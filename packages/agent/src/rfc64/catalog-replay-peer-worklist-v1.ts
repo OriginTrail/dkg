@@ -10,7 +10,7 @@ import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerReservationV
  * fail-closed when the run budget is exhausted.
  */
 export class Rfc64CatalogReplayPeerWorklistV1 {
-  readonly #pending = new Map<string, number>();
+  readonly #pending = new Map<string, { generation: number; continuation: { signal?: AbortSignal } | null }>();
   readonly #staged = new Map<string, number>();
   #nextGeneration = 0;
   #remaining = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
@@ -34,13 +34,13 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
       admit: () => {
         if (released || this.#staged.get(peerId) !== generation) return;
         this.#staged.delete(peerId);
-        this.#pending.set(peerId, generation);
+        this.#pending.set(peerId, { generation, continuation: null });
       },
       release: () => {
         if (released) return;
         released = true;
         if (this.#staged.get(peerId) === generation) this.#staged.delete(peerId);
-        if (this.#pending.get(peerId) === generation) this.#pending.delete(peerId);
+        if (this.#pending.get(peerId)?.generation === generation) this.#pending.delete(peerId);
 
       },
     });
@@ -57,14 +57,14 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     if (this.#staged.has(peerId)) return false;
     if (this.#pending.has(peerId)) return true;
     if (new Set([...this.#pending.keys(), ...this.#staged.keys()]).size >= RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) return false;
-    this.#pending.set(peerId, ++this.#nextGeneration);
+    this.#pending.set(peerId, { generation: ++this.#nextGeneration, continuation: null });
     return true;
   }
 
   /** Queue ownership only: recovery captures these generations for its own pass. */
   generation(peerId: string): Readonly<Rfc64CatalogReplayPeerDemandV1 & { staged: boolean }> | null {
     const staged = this.#staged.get(peerId);
-    const generation = staged ?? this.#pending.get(peerId);
+    const generation = staged ?? this.#pending.get(peerId)?.generation;
     return generation === undefined ? null : Object.freeze({ peerId, generation, staged: staged !== undefined });
   }
 
@@ -75,10 +75,10 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
 
   /** Seed the admitted generation once. The graph owner advances pending work
    * through a fresh bounded run when the current run spends its peer budget. */
-  seedDemand(demand: Rfc64CatalogReplayPeerDemandV1): void {
+  seedDemand(demand: Rfc64CatalogReplayPeerDemandV1, signal?: AbortSignal): void {
     const current = this.#pending.get(demand.peerId);
-    if (current === undefined || current < demand.generation) {
-      this.#pending.set(demand.peerId, demand.generation);
+    if (current === undefined || current.generation <= demand.generation) {
+      this.#pending.set(demand.peerId, { generation: demand.generation, continuation: { signal } });
     }
     this.#nextGeneration = Math.max(this.#nextGeneration, demand.generation);
   }
@@ -87,15 +87,20 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     if (this.#remaining === 0) return Object.freeze([]);
     const demands = [...this.#pending.entries()]
       .slice(0, this.#remaining)
-      .map(([peerId, generation]) => Object.freeze({ peerId, generation }));
+      .map(([peerId, entry]) => Object.freeze({ peerId, generation: entry.generation }));
     for (const demand of demands) {
-      if (this.#pending.get(demand.peerId) === demand.generation) {
+      if (this.#pending.get(demand.peerId)?.generation === demand.generation) {
         this.#pending.delete(demand.peerId);
       }
 
     }
     this.#remaining -= demands.length;
     return Object.freeze(demands);
+  }
+
+  /** Explicit connection execution owns another chunk independently of subscribers. */
+  get pendingContinuation(): Readonly<{ signal?: AbortSignal }> | null {
+    return [...this.#pending.values()].find(entry => entry.continuation !== null)?.continuation ?? null;
   }
 
   get hasStaged(): boolean { return this.#staged.size > 0; }
