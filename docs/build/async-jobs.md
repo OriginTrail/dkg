@@ -89,11 +89,11 @@ Every answer carries `mutationRetryAllowed: false`: no answer on its own makes a
 | `result` | Next step |
 | --- | --- |
 | `active` | Poll `job`. If it does not carry your seal, treat it as a [publish `409`](#when-the-answer-is-not-a-success) |
-| `superseded` | The listed `jobs` have ended. One `finalized` with your seal means you are done; otherwise check the journal before you resend |
-| `none` | No job is stored. That does not prove your publish never ran: a finished job may have been cleared or removed by cleanup. Check the journal before you resend |
+| `superseded` | The listed `jobs` have ended. One `finalized` with your seal means you are done; otherwise read the note below before you resend |
+| `none` | No job is stored. That does not prove your publish never ran: a finished job may have been cleared or removed by cleanup. Read the note below before you resend |
 | `conflict` | Ask an operator |
 
-The journal, `GET /api/publisher/journal` with the same parameters, keeps every publish attempt for the asset; clearing and cleanup never remove it. If an entry carries your seal's `merkleRoot` with a `txHash` or `ual`, your publish may have run: check that transaction, or the asset's published version (`dkg ka history <name>`), and do not resend. Resend only if no entry carries your seal.
+After `none`, or `superseded` without your seal, only the chain can tell you whether your publish ran. Check the asset's published state (`dkg ka history <name>`) and any transaction you know of. The journal, `GET /api/publisher/journal` with the same parameters, may list an earlier attempt and its `txHash`, but it is best effort: a missing entry proves nothing. Resend only when you are sure your content is not published and no earlier attempt can still land. If you are not sure, ask an operator.
 
 ### Reconcile reference
 
