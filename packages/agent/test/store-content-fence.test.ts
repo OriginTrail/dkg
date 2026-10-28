@@ -240,3 +240,31 @@ it('revokes a live proof when readiness closes within the same supervised epoch'
   expect(fence.openScope(scope)).toBeUndefined();
   proof.close();
 });
+
+
+it('narrows a live proof to the reused prefix without allowing suffix writes to invalidate it', () => {
+  const fence = new StoreContentFence();
+  const proof = fence.openScope({ ...scope, graphs: [...scope.graphs, 'urn:suffix'], subjects: [...scope.subjects, 'urn:suffix-asset'] })!;
+  proof.restrict(scope);
+  fence.begin({ removals: [{ graph: 'urn:suffix' }, { graph: 'urn:meta', subject: 'urn:suffix-asset' }] })('changed');
+  expect(proof.assertCurrent).not.toThrow();
+  fence.begin({ removals: [{ graph: 'urn:assertion' }] })('changed');
+  expect(proof.assertCurrent).toThrow('Held assertion content changed');
+  proof.close();
+});
+
+it.each([{ ...scope, graphs: [...scope.graphs, 'urn:new'] }, { ...scope, subjects: [...scope.subjects, 'urn:new'] }])(
+  'does not widen verified dependencies during projection: %j', widened => {
+    const proof = new StoreContentFence().openScope(scope)!;
+    expect(() => proof.restrict(widened)).toThrow('Cannot widen');
+    proof.close();
+  });
+
+it.each(['prefix', 'suffix', 'closed'])('cannot revive a %s-invalidated proof by narrowing its dependencies', change => {
+  const fence = new StoreContentFence();
+  const proof = fence.openScope({ ...scope, graphs: [...scope.graphs, 'urn:suffix'] })!;
+  if (change === 'closed') proof.close();
+  else fence.begin({ removals: [{ graph: change === 'prefix' ? 'urn:assertion' : 'urn:suffix' }] })('changed');
+  expect(() => proof.restrict(scope)).toThrow('Held assertion content changed');
+  proof.close();
+});

@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { VerifiedDurableBoundary } from './sync/durable-recovery-boundary-seed.js';
 import { type DurableRecoveryInput } from './durable-recovery-authority.js';
 import type { ExactBatchStreamOutcome, ExactRecoveryTransportMode } from './sync/requester/exact-recovery-transport.js';
 import { type DurableSyncAdmissionOutcome } from './sync/requester/admission-boundary.js';
 import { type ChallengePinnedGraphScopedAsset } from './sync/requester/graph-scoped-materialization.js';
 import { type PhaseCallback } from '@origintrail-official/dkg-publisher';
 import { type ExactAssetSelection } from './sync/exact-assets.js';
-import { type DurableMetaContinuation, type ExactAssetResponderCapability, type VerifiedFullSnapshot } from './sync/requester/durable-sync.js';
+import { type ExactAssetResponderCapability, type VerifiedFullSnapshot } from './sync/requester/durable-sync.js';
 import { type ExactAssetFetchSessionPolicy, type ExactDurableFetchDisposition } from './sync/requester/exact-durable-fetch.js';
 import { type SyncAdmissionSource } from './sync/policy.js';
 import { type DurableSyncResult } from './dkg-agent-types.js';
@@ -27,7 +26,7 @@ export type ExactKnowledgeAssetRefreshSyncOptions = ExactKnowledgeAssetSyncOptio
   exactFetchPurpose?: 'vm-update-refresh';
 };
 
-export type DurableRecoveryOptions = {
+export type DurableRecoverySchedulingOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   /**
    * Outer wall-clock budget for the complete legacy durable operation.
@@ -58,13 +57,6 @@ export type DurableRecoveryOptions = {
    * settlement boundary, not a generic progress callback.
    */
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
-  /** Selection-bound requester policy; a refresh always identifies its exact assets. */
-  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
-  /** Internal transport decision; required streams never replay an enlarged selection. */
-  exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-  /** Owner-private retained META prefix for bounded durable recovery. */
-  durableMetaContinuation?: DurableMetaContinuation;
-  durableResumeBoundary?: VerifiedDurableBoundary;
   /** Admission override for foreground VM recovery. */
   priority?: number;
   /**
@@ -80,6 +72,13 @@ export type DurableRecoveryOptions = {
    * The scheduler re-clamps anyway, as defence in depth.
    */
   source?: SyncAdmissionSource;
+};
+
+export type DurableRecoveryOptions = DurableRecoverySchedulingOptions & {
+  /** Selection-bound requester policy; a refresh always identifies its exact assets. */
+  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
+  /** Internal transport decision; required streams never replay an enlarged selection. */
+  exactRecoveryTransportMode?: ExactRecoveryTransportMode;
 };
 
 type LegacyExactAssetFetchOptions = {
@@ -116,24 +115,25 @@ export type AdmittedDurableSyncResult = PhysicalDurableSyncResult & {
   readonly admission: DurableSyncAdmissionOutcome;
 };
 
-export type DurableGraphOptions = {
+export interface DurableGraphCommonOptions {
   onPhase?: PhaseCallback;
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
   onAccessDenied?: (contextGraphId: string) => void;
-  sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
   stopOnBackoffWorthyFailure?: boolean;
-  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
   fetchTimeoutMs?: number;
-  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
   authenticationTimeoutMs?: number;
   operationFetchDeadline?: number;
   operationDeadline?: number;
   settlementSliceTimeoutMs?: number;
   signal?: AbortSignal;
   isCurrent?: () => boolean;
-  durableMetaContinuation?: DurableMetaContinuation;
-  durableResumeBoundary?: VerifiedDurableBoundary;
+}
+
+export interface DurableGraphOptions extends DurableGraphCommonOptions {
+  sinceBatchIdFor?: (contextGraphId: string) => string | undefined;
+  onVerifiedFullSnapshot?: (snapshot: VerifiedFullSnapshot) => Promise<void>;
+  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
   exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-};
+}
 
 export type LegacyDurableContextGraphOptions = DurableRecoveryInput & DurableGraphOptions & LegacyExactAssetFetchOptions;

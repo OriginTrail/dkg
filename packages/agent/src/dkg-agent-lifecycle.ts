@@ -1,4 +1,7 @@
+import { exactRecoveryActionOutcome } from './sync/durable-recovery-action.js';
+import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
 // SPDX-License-Identifier: Apache-2.0
+import type { DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -5070,6 +5073,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
+  async runGraphOwnedDurableRecoveryRound(this: DKGAgent, request: AgentGraphOwnedRecoveryRequest): Promise<DurableRecoveryRoundOutcome> {
+    const host = DKGAgentBase.createDurableRecoveryCapabilities(this);
+    return runGraphOwnedDurableRecovery({ ...request, host,
+      authority: host.resolveOrdinaryAuthority(request.ctx, {}) });
+  }
+
   async runLegacyDurableSyncDetailed(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
@@ -6599,22 +6608,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         isSyncCapable: (peerId) => this.waitForSyncProtocol({
           toString: () => peerId,
         }),
-        executeSlice: (peerId, durableMetaContinuation, durableResumeBoundary) => this.syncFromPeerDetailed(
-          peerId,
-          [contextGraphId],
-          undefined,
-          undefined,
-          undefined,
-          {
-            stopOnBackoffWorthyFailure: true,
-            totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
-            settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
-            signal: this.node.stopSignal ?? undefined,
-            priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
-            source: 'vm-recovery',
-            durableMetaContinuation, durableResumeBoundary,
-          },
-        ),
+        executeSlice: async (peerId, recovery) => {
+          if (!durableSyncEnabled(this.config) || !await this.canUseLegacyDurableSyncForContextGraphV1(contextGraphId)) {
+            return { result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' } };
+          }
+          return this.runGraphOwnedDurableRecoveryRound({ ctx, remotePeerId: peerId, contextGraphId,
+            recovery,
+            options: { stopOnBackoffWorthyFailure: true, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
+              settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
+              signal: this.node.stopSignal ?? undefined, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY, source: 'vm-recovery' },
+          });
+        },
+        executeExactSlice: async (peerId, assetUals) => {
+          const exact = await this.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
+            signal: this.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
+          });
+          return exactRecoveryActionOutcome(exact.result, exact.disposition === 'found');
+        },
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),
         logWarn: (message) => this.log.warn(ctx, message),
@@ -6623,8 +6633,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * The live connections' remote peers (one per peer id, in connection order)
-   * that pass network admission: the catch-up candidate set. A still-open
+   * Live remote peers passing network admission form the catch-up candidate set. A still-open
    * connection to a peer that failed the network-identity proof (another DKG
    * network's relay, say) must never become a sync peer. Both catch-up runners
    * (in-process and the CLI worker bridge) select from this one predicate.
@@ -7016,6 +7025,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const accessDeniedPeers = new Set<string>();
     let cleanDurableDataSynced = 0;
     let cleanDurablePrivateOnlyCompletions = 0;
+    /** Assets of clean durable rounds that found the whole generation already stored and current. */
+    let cleanDurableHeldAssets = 0;
     let cleanSharedMemoryDataSynced = 0;
     /** Assets of clean SWM rounds that found nothing missing: already held here. */
     let cleanSharedMemoryHeldAssets = 0;
@@ -7085,6 +7096,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         cleanDurableDataSynced += r.durable.insertedDataTriples;
         cleanDurablePrivateOnlyCompletions +=
           durableProgress.hasVerifiedPrivateOnlyResponse ? 1 : 0;
+        cleanDurableHeldAssets += r.durable.verifiedHeldAssets ?? 0;
       }
       if (sharedMemoryCompletedCleanly) {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
@@ -7269,7 +7281,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // deliver. A clean round that found nothing missing proves the plane too:
     // the node received those writes earlier and holds what that peer holds.
     const durableCompletedCleanly =
-      cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0;
+      cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0 || cleanDurableHeldAssets > 0;
     const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0 || cleanSharedMemoryHeldAssets > 0;
     if (durableCompletedCleanly || sharedMemoryCompletedCleanly) {
       this.markContextGraphSubscriptionState(contextGraphId, {
@@ -7284,6 +7296,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         dataSynced: cleanDurableDataSynced,
         sharedMemorySynced: cleanSharedMemoryDataSynced,
         sharedMemoryHeldAssets: cleanSharedMemoryHeldAssets,
+        durableHeldAssets: cleanDurableHeldAssets,
         verifiedPrivateOnlyResponses: cleanDurablePrivateOnlyCompletions,
       });
     }

@@ -1,3 +1,4 @@
+import * as contentVerifier from '../src/exact-graph-content-verifier.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { createOperationContext, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer } from '@origintrail-official/dkg-core';
 import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
@@ -9,7 +10,7 @@ import { CG, PEER, createHeldProductionHarness, stopHeldProductionAgents, storeC
 
 afterEach(async () => { await stopHeldProductionAgents(); vi.restoreAllMocks(); });
 
-it('keeps a proven VM prefix while materializing a suffix and retiring its SWM twin', async () => {
+it.each([false, true])('keeps a proven VM prefix while materializing a suffix and retiring its SWM twin (owned: %s)', async owned => {
   const h = await createHeldProductionHarness({ finalizedCleanup: true });
   await h.internal.store.delete(h.data); // The suffix is missing locally, but still has a matching SWM twin.
   await h.seedSwmTwin('1');
@@ -37,9 +38,14 @@ it('keeps a proven VM prefix while materializing a suffix and retiring its SWM t
     nextOffset: call.phase === 'data' ? data.length + h.data.length : generation.length,
     checkpointKey: getSyncCheckpointKey(PEER, CG, false, call.phase), completed: true, timedOut: false,
   }));
-  const { result } = await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(
-    h.agent, createOperationContext('sync'), PEER, [CG],
-  );
+  const verify = vi.spyOn(contentVerifier, 'verifyExactGraphContent');
+  const { result } = owned
+    ? await h.internal.runGraphOwnedDurableRecoveryRound({ ctx: createOperationContext('sync'), remotePeerId: PEER,
+        contextGraphId: CG, recovery: { meta: { requesterScope: 'durable-recovery-meta:production-prefix' },
+          holdings: { ownerFetchesMissingAssets: false } }, options: {} })
+    : await LifecycleSyncMethods.prototype.runLegacyDurableSyncDetailed.call(h.agent, createOperationContext('sync'), PEER, [CG]);
+  expect(verify.mock.calls.filter(([, request]) => request.graphUri === graph
+    && request.source === 'agent.durableSync.heldAssetContent')).toHaveLength(1);
   expect(result.complete).toBe(true);
   expect(result.failedPhases).toBe(0);
   expect(h.retire).toHaveBeenCalledOnce();
