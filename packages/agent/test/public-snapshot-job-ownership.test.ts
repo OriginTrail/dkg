@@ -1,5 +1,7 @@
+import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
+import * as snapshotRecovery from '../src/public-snapshot-exact.js';
 import * as recoveryGraph from '../src/durable-recovery-graph.js';
 
 vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
@@ -28,6 +30,8 @@ function fixture() {
   let generation = 0;
   const a: any = {
     started: true, vmReconcileRotationClosed: false, workLifetime: new AgentWorkLifetime(),
+    contextGraphSubscriptionDormancyById: new Map(),
+    waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
 
     subscribedContextGraphs: new Map(),
     getSubscribedContextGraphs: () => a.subscribedContextGraphs,
@@ -45,6 +49,35 @@ function fixture() {
 }
 const run = (a: any, mode: 'core-cache' | 'rpc-only') => PublicSnapshotMethods.prototype.syncPublicGraphSnapshot.call(a, {...request, mode});
 describe('public snapshot job ownership', () => {
+  it.each(['clear', 'unsubscribe-resubscribe'] as const)('a same-tick %s retires an already-active snapshot owner', async action => {
+    const chain = new MockChainAdapter();
+    Object.defineProperties(chain, { chainId: { value: 'evm:31337' }, deploymentId: { value: 'test' } });
+    const read = vi.fn(async () => snapshot());
+    Object.assign(chain, { readPublicGraphSnapshot: read });
+    const agent = await DKGAgent.create({ name: 'same-tick-snapshot-owner', listenHost: '127.0.0.1', listenPort: 0,
+      chainAdapter: chain, randomSamplingUseWorkerThread: false,
+      syncOnConnectEnabled: false, syncReconcilerEnabled: false, vmReconcilerEnabled: false });
+    try {
+      await agent.start();
+      agent.setContextGraphSubscription(graph, { subscribed: true, synced: false, syncMode: 'on-demand', onChainId: '1' }, { persist: false });
+      const insert = vi.spyOn((agent as any).store, 'insert');
+      const admit = vi.spyOn(agent, 'setContextGraphSubscription');
+      const pending = run(agent, 'rpc-only');
+      const rejection = expect(pending).rejects.toThrow('Snapshot job ownership changed');
+      // No yield between starting the snapshot and the operator mutation.
+      if (action === 'clear') await agent.clearContextGraphSubscriptions();
+      else {
+        agent.unsubscribeFromContextGraph(graph, { persist: false });
+        agent.setContextGraphSubscription(graph, { subscribed: true, synced: false, syncMode: 'on-demand', onChainId: '1' }, { persist: false });
+      }
+      const callsAfterOperator = admit.mock.calls.length;
+      await rejection;
+      expect(admit).toHaveBeenCalledTimes(callsAfterOperator);
+      expect(insert).not.toHaveBeenCalled();
+      if (action === 'clear') expect(agent.getSubscribedContextGraphs().has(graph)).toBe(false);
+    } finally { await agent.stop(); }
+  });
+
   it.each(['always-on', 'on-demand', 'core-hosted', 'inactive-core-hosted'] as const)('saves the complete binding according to %s intent after an empty job', async intent => {
     const saved = new Map<string, ContextGraphSubscriptionRecord>();
     const persistence = {
@@ -176,11 +209,16 @@ describe('public snapshot job ownership', () => {
     expect(a.subscribeToContextGraph).not.toHaveBeenCalled(); expect(a.store.insert).not.toHaveBeenCalled();
     expect(a.recoverSnapshotExactAssets).not.toHaveBeenCalled(); expect(a.workLifetime.physicalRuns.size).toBe(0);
   });
-  it.each(['core-cache', 'rpc-only'] as const)('keeps completed snapshot separate from changed current coverage in %s mode', async mode => {
+  it.each(['core-cache', 'rpc-only'] as const)('catches up changed coverage with fresh evidence in %s mode', async mode => {
     const {a} = fixture();
-    a.chain.readPublicGraphSnapshot.mockResolvedValueOnce(snapshot()).mockResolvedValueOnce(snapshot(true));
-    a.router.send.mockResolvedValueOnce(Buffer.from(JSON.stringify(snapshot()))).mockResolvedValueOnce(Buffer.from(JSON.stringify(snapshot(true))));
-    await expect(run(a, mode)).resolves.toMatchObject({ assets:0,committed:0,completeAsOfSnapshot:true,current:false });
+    const next = snapshot(true);
+    a.chain.readPublicGraphSnapshot.mockResolvedValueOnce(snapshot()).mockResolvedValue(next);
+    a.router.send.mockResolvedValueOnce(Buffer.from(JSON.stringify(snapshot()))).mockResolvedValue(Buffer.from(JSON.stringify(next)));
+    const recover = vi.spyOn(snapshotRecovery, 'recoverPublicSnapshotExact').mockImplementation(async (_host, options) => ({ committed: new Set(options.uals) }));
+    await expect(run(a, mode)).resolves.toMatchObject({ assets:1,committed:1,completeAsOfSnapshot:true,current:true,catchUpRounds:2 });
+    expect(recover).toHaveBeenCalledTimes(2);
+    expect(recover.mock.calls.map(([, options]) => options.evidence.snapshot.assets.length)).toEqual([0, 1]);
+    expect(recover.mock.calls[1]![1].deadline).toBe(recover.mock.calls[0]![1].deadline);
     if(mode === 'core-cache') expect(JSON.parse(new TextDecoder().decode(a.router.send.mock.calls[1][2]))).toMatchObject({refresh:true});
   });
   it('retains the initial supplier when final coverage falls back to another core', async () => {
@@ -211,6 +249,8 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
   it.each(['caller', 'binding'] as const)('keeps physical ownership and fences later assets after %s cancellation', async change => {
     vi.stubEnv('DKG_EXACT_BATCH_STREAM_ENABLED', '1');
     const f = createExactBatchHostFixture(transportCleanups), a = f.host;
+    a.contextGraphSubscriptionDormancyById = new Map();
+    a.waitForContextGraphSubscriptionActivation = LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation;
     a.router.send = vi.fn(async () => { throw new Error('RPC-only jobs must not request a core snapshot'); });
     a.started = true;
     a.subscribedContextGraphs.set(CG, { subscribed: true, onChainId: '14', onChainHash: ethers.id(CG) });

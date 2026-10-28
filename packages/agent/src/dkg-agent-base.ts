@@ -1,4 +1,5 @@
 import type { StoreContentFence } from './internal/store-content-fence.js';
+import { ContextGraphSubscriptionActivations } from './context-graph-subscription-activation-state.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
@@ -597,6 +598,7 @@ export class DKGAgentBase {
       verifyBinding: (id, onChainId, ctx, signal) => agent.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
       persistSubscription: (id, subscription, reason, isCurrent) => agent.persistContextGraphSyncStateStrict(id, subscription, reason, isCurrent),
       bindSubscription: (id, subscription, onChainId) => agent.bindSubscriptionOnChainId(id, subscription, onChainId),
+      logTiming: (ctx, message) => agent.log.debug(ctx, message),
       recordDrops: (drops, seam) => agent.oversizeTombstoneLog.record(drops, seam),
       reconcile,
     });
@@ -1531,6 +1533,18 @@ export class DKGAgentBase {
   /** Which waiting row rolling activation checks next, and how soon; made anew when a start retires the runtime before. */
   protected contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
+  protected readonly contextGraphSubscriptionActivations = new ContextGraphSubscriptionActivations({
+    subscribedContextGraphs: this.subscribedContextGraphs,
+    contextGraphSubscriptionDormancyById: this.contextGraphSubscriptionDormancyById,
+    contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
+    contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
+    contextGraphSubscriptionRehydrationAccountedIds: this.contextGraphSubscriptionRehydrationAccountedIds,
+    getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
+    setStatus: status => { this.contextGraphSubscriptionRehydrationStatus = status; },
+    slotReleased: () => this.contextGraphSubscriptionRehydrationPromotionRuntime?.request(),
+    clearPersistRevision: id => (this as unknown as DKGAgent).clearContextGraphSubscriptionPersistRevisionStateIfIdle(id),
+    publish: id => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }),
+  });
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
