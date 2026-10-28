@@ -5,6 +5,8 @@ import {
   contextGraphSharedMemoryUri,
   assertionLifecycleUri,
   contextGraphMetaUri,
+  contextGraphLayerUri,
+  MemoryLayer,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -13,6 +15,7 @@ import {
   VM_CURRENT_ASSERTION_PRED,
   computeFlatKCRootV10,
 } from '@origintrail-official/dkg-publisher';
+import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { DKGAgent } from '../src/dkg-agent.js';
 import {
   namedSharedMemoryScopeForFinalizedLifecycle,
@@ -294,7 +297,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(legacy).toMatchObject({ type: 'boolean', value: true });
   });
 
-  it('cleans only the finalized named lifecycle after a confirmed update', async () => {
+  it.each(['confirmed', 'tentative'] as const)('stamps the canonical lifecycle and update provenance for a %s update', async status => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
     const metaGraph = contextGraphMetaUri(CG);
@@ -319,6 +322,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const updateCalls: any[][] = [];
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.publishedNamedKaVmLifecycleWriter = vi.fn(input => applyPublishedNamedKaVmLifecycle(store, input));
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-update', configurable: true });
@@ -344,7 +348,8 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         ual: 'did:dkg:test/update/1',
         merkleRoot: MERKLE,
         kaManifest: [],
-        status: 'confirmed',
+        status,
+        ...(status === 'confirmed' ? { onChainResult: { kaId: RESERVED_KA_ID, blockNumber: 1, txHash: '0x01' } } : {}),
         publicQuads: [],
       };
     };
@@ -354,11 +359,22 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const transfer = vi.fn().mockRejectedValueOnce(new Error('temporary update catalog failure'));
     agent.transferRfc64ConfirmedVmV1 = transfer;
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
-    expect(transfer).toHaveBeenCalledOnce();
+    expect(transfer).toHaveBeenCalledTimes(status === 'confirmed' ? 1 : 0);
     const checkpoint = await store.query('SELECT ?s WHERE { GRAPH <urn:dkg:publisher:named-finalization> { ?s ?p ?o } }');
     expect(checkpoint.type === 'bindings' && checkpoint.bindings).toEqual([]);
 
-    expect(result.status).toBe('confirmed');
+    expect(result.status).toBe(status);
+    expect(agent.publishedNamedKaVmLifecycleWriter).toHaveBeenCalledOnce();
+    const metadata = await store.query(`SELECT ?p ?o WHERE { GRAPH <${metaGraph}> { <${lifecycleUri}> ?p ?o } }`);
+    expect(metadata.type === 'bindings' && metadata.bindings).toEqual(expect.arrayContaining([
+      { p: VM_CURRENT_ASSERTION_PRED, o: JSON.stringify(Buffer.from(MERKLE).toString('hex')) },
+      { p: 'http://dkg.io/ontology/memoryLayer', o: JSON.stringify('VM') },
+      { p: 'http://dkg.io/ontology/state', o: JSON.stringify('published') },
+      { p: 'http://dkg.io/ontology/publishedUal', o: JSON.stringify('did:dkg:test/update/1') },
+      { p: 'http://www.w3.org/ns/prov#wasRevisionOf', o: `${lifecycleUri}#assertion-prior` },
+      ...(status === 'confirmed' ? [{ p: 'http://dkg.io/ontology/assertionGraph',
+        o: contextGraphLayerUri(CG, MemoryLayer.VerifiableMemory, AGENT_B, 1n) }] : []),
+    ]));
     expect(updateCalls).toHaveLength(1);
     expect(updateCalls[0].slice(0, 2)).toEqual([RESERVED_KA_ID, CG]);
     expect(updateCalls[0][2]).toEqual([PUBLIC_QUAD]);
@@ -369,7 +385,8 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       publicTripleCount: 1,
       privateTripleCount: 0,
     });
-    expect(cleanupCalls).toHaveLength(1);
+    expect(cleanupCalls).toHaveLength(status === 'confirmed' ? 1 : 0);
+    if (status === 'confirmed') {
     expect(cleanupCalls[0][0]).toBe(CG);
     expect(cleanupCalls[0][1]).toEqual({
       kind: 'named-lifecycle',
@@ -379,10 +396,11 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(cleanupCalls[0][4]).toBe(KA_UAL);
     // The cleanup is bounded by the assertion version this update confirmed.
     expect(cleanupCalls[0][5]).toBe('2');
+    }
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
     const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
     expect(legacy).toMatchObject({ type: 'boolean', value: true });
-    expect(canonical).toMatchObject({ type: 'boolean', value: false });
+    expect(canonical).toMatchObject({ type: 'boolean', value: status === 'tentative' });
   });
 
   it('rejects a finalized seal whose packed KA id belongs to another author namespace', async () => {

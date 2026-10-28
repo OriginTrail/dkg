@@ -20,6 +20,8 @@ import {
   assertionLifecycleUri,
   buildAuthorAttestationTypedData,
   contextGraphAssertionUri,
+  contextGraphLayerUri,
+  MemoryLayer,
   contextGraphCatalogUri,
   contextGraphFinalizationTopic,
   contextGraphMetaUri,
@@ -446,7 +448,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
   });
 
-  it('refuses to complete a lifecycle when the share is gone and no verified record exists', async () => {
+  it('refuses a consumed share without a publish-owned checkpoint', async () => {
     const { agent, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
     await agent.publisher.clearSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR);
 
@@ -454,6 +456,30 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/no publish-owned checkpoint/) });
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
     expect(await history()).toMatchObject({ status: 'swm-shared' });
+  });
+
+  it.each(['missing', 'corrupt'] as const)('refuses checkpoint-backed recovery with %s VM content', async damage => {
+    const { agent, store, sealed, history, createKnowledgeAssets, updateKnowledgeCollection } =
+      await strandedAsset(new MockChainAdapter());
+    failNextLifecycleWrite(agent, store, VM_CURRENT_ASSERTION_PRED);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(false);
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).not.toEqual({ kind: 'legacy' });
+    const before = await history();
+    expect(before?.vmCurrentAssertion).toBeUndefined();
+    const graph = contextGraphLayerUri(CONTEXT_GRAPH, MemoryLayer.VerifiableMemory, AUTHOR.toLowerCase(), 7n);
+    expect(await store.query(`ASK { GRAPH <${graph}> { ?s ?p ?o } }`)).toMatchObject({ type: 'boolean', value: true });
+    await store.deleteByPattern({ graph });
+    if (damage === 'corrupt') await store.insert([{ ...QUADS[0]!, object: '"Changed after checkpoint"', graph }]);
+    const transfer = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1');
+    const stamp = vi.mocked(agent.publishedNamedKaVmLifecycleWriter); stamp.mockClear();
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({
+      code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/no verified record of the sealed content/),
+    });
+    expect(await history()).toEqual(before);
+    expect(stamp).not.toHaveBeenCalled(); expect(transfer).not.toHaveBeenCalled();
+    expect(createKnowledgeAssets).not.toHaveBeenCalled(); expect(updateKnowledgeCollection).not.toHaveBeenCalled();
   });
 
   it.each(['public', 'private'] as const)('resumes the %s catalog transition after VM lifecycle and share cleanup already completed', async kind => {
