@@ -4,6 +4,7 @@ import React, { act } from 'react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot, type Root } from 'react-dom/client';
 import { useMemoryEntities } from '../src/ui/hooks/useMemoryEntities.js';
+import { invalidateQueryCache } from '../src/ui/api.js';
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
 
@@ -42,7 +43,14 @@ function tripleBinding(subject: string, graph: string) {
   };
 }
 
-function wmBindings(contextGraphId: string, revision: number) {
+function bindingsForLayer(sparql: string, contextGraphId: string, revision: number) {
+  if (sparql.includes('FILTER(isBlank(?s) || isBlank(?o))')) return [];
+  const isVm = sparql.includes('_verifiable_memory_meta');
+  // PR #818 sweep 3 — WM SPARQL also contains STRENDS (for the
+  // `/_meta` exclusion); discriminate by the SWM-exclusive
+  // `/_shared_memory` tail check.
+  const isSwm = !isVm && sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
+  if (isVm || isSwm) return [];
   return Array.from({ length: revision }, (_, i) =>
     tripleBinding(
       `urn:test:${contextGraphId}:wm-${i + 1}`,
@@ -51,8 +59,9 @@ function wmBindings(contextGraphId: string, revision: number) {
   );
 }
 
-function Probe({ contextGraphId, includeQueryCatalog = false }: { contextGraphId: string; includeQueryCatalog?: boolean }) {
-  const memory = useMemoryEntities(contextGraphId, { includeQueryCatalog });
+let memory: ReturnType<typeof useMemoryEntities>;
+function Probe({ contextGraphId }: { contextGraphId: string }) {
+  memory = useMemoryEntities(contextGraphId);
   return React.createElement(
     'div',
     {
@@ -60,9 +69,6 @@ function Probe({ contextGraphId, includeQueryCatalog = false }: { contextGraphId
       'data-total': String(memory.counts.total),
       'data-wm': String(memory.counts.wm),
       'data-loading': String(memory.loading),
-      'data-error': String(memory.error),
-      'data-status': memory.layerStatus.wm,
-      'data-uris': memory.entityList.map(entity => entity.uri).sort().join(','),
     },
   );
 }
@@ -79,6 +85,7 @@ describe('useMemoryEntities live updates', () => {
   let revision = 1;
 
   beforeEach(() => {
+    invalidateQueryCache();
     vi.useFakeTimers();
     MockEventSource.instances = [];
     (globalThis as any).EventSource = MockEventSource;
@@ -89,15 +96,11 @@ describe('useMemoryEntities live updates', () => {
     root = createRoot(container);
 
     vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
-      const body = JSON.parse(String(init?.body ?? '{}')) as { contextGraphId?: string };
-      const contextGraphId = body.contextGraphId ?? 'unknown';
+      const body = JSON.parse(String(init?.body ?? '{}')) as { sparql?: string; contextGraphId?: string };
+      const bindings = bindingsForLayer(body.sparql ?? '', body.contextGraphId ?? 'unknown', revision);
       return {
         ok: true,
-        json: async () => ({ contextGraphId, layers: {
-          wm: { ok: true, truncated: false, bindings: wmBindings(contextGraphId, revision) },
-          swm: { ok: true, truncated: false, bindings: [] },
-          vm: { ok: true, truncated: false, bindings: [] },
-        } }),
+        json: async () => ({ result: { bindings } }),
       } as Response;
     }));
   });
@@ -115,7 +118,7 @@ describe('useMemoryEntities live updates', () => {
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(5);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
 
     revision = 2;
@@ -128,14 +131,14 @@ describe('useMemoryEntities live updates', () => {
       });
       vi.advanceTimersByTime(349);
     });
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(5);
 
     await act(async () => {
       vi.advanceTimersByTime(1);
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(fetch).toHaveBeenCalledTimes(10);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
   });
 
@@ -156,195 +159,55 @@ describe('useMemoryEntities live updates', () => {
     });
     await flush();
 
-    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(fetch).toHaveBeenCalledTimes(5);
     expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
   });
 
-  it('completes the current refresh after a StrictMode effect remount', async () => {
-    await act(async () => root.render(React.createElement(React.StrictMode, null,
-      React.createElement(Probe, { contextGraphId: 'project-strict' }))));
-    await flush();
-    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('false');
-    expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('1');
-  });
-
-  it.each(['graph', 'catalog'] as const)('clears the previous snapshot when a changed %s read fails', async change => {
-    await act(async () => root.render(React.createElement(Probe, {
-      contextGraphId: 'project-a', includeQueryCatalog: true,
-    })));
-    expect(container.querySelector('#probe')?.getAttribute('data-total')).toBe('1');
-    let rejectRead!: (error: Error) => void;
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>((_resolve, reject) => { rejectRead = reject; })));
-    await act(async () => root.render(React.createElement(Probe, {
-      contextGraphId: change === 'graph' ? 'project-b' : 'project-a', includeQueryCatalog: false,
-    })));
-    expect(container.querySelector('#probe')?.getAttribute('data-total')).toBe('0');
-    await act(async () => rejectRead(new Error('Authority unavailable')));
-    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('false');
-    expect(container.querySelector('#probe')?.getAttribute('data-error')).toBe('null');
-    expect(container.querySelector('#probe')?.getAttribute('data-status')).toBe('error');
-    expect(container.querySelector('#probe')?.getAttribute('data-total')).toBe('0');
-  });
-
-  it('discards a queued trailing refresh after unmount', async () => {
-    let resolveRead!: (response: Response) => void;
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { resolveRead = resolve; })));
-    await act(async () => root.render(React.createElement(Probe, { contextGraphId: 'project-a' })));
-    await act(async () => {
-      MockEventSource.instances[0].emit('memory_graph_changed', { contextGraphId: 'project-a', layers: ['wm'], operation: 'write' });
-      vi.advanceTimersByTime(350);
-    });
-    expect(fetch).toHaveBeenCalledTimes(1);
-    act(() => root.unmount());
-    await act(async () => resolveRead({ ok: true, json: async () => ({ contextGraphId: 'project-a', layers: {
-      wm: { ok: true, truncated: false, bindings: wmBindings('project-a', 1) },
-      swm: { ok: true, truncated: false, bindings: [] },
-      vm: { ok: true, truncated: false, bindings: [] },
-    } }) } as Response));
-    expect(fetch).toHaveBeenCalledTimes(1);
-  });
-
-  it.each(['graph', 'catalog'] as const)('rejects the pending old %s response and completes the queued current read', async change => {
-    const requests: Array<{ contextGraphId: string; includeQueryCatalog: boolean; resolve: (response: Response) => void }> = [];
-    vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => {
-      const scope = JSON.parse(String(init?.body)) as { contextGraphId: string; includeQueryCatalog: boolean };
-      return new Promise<Response>(resolve => requests.push({ ...scope, resolve }));
-    }));
-    const initialGraph = `pending-${change}-a`;
-    const currentGraph = change === 'graph' ? `pending-${change}-b` : initialGraph;
-    const respond = (request: typeof requests[number], subject: string) => request.resolve({
-      ok: true,
-      json: async () => ({ contextGraphId: request.contextGraphId, layers: {
-        wm: { ok: true, truncated: false, bindings: [tripleBinding(subject, `did:dkg:context-graph:${request.contextGraphId}/notes/assertion/agent/a`)] },
-        swm: { ok: true, truncated: false, bindings: [] },
-        vm: { ok: true, truncated: false, bindings: [] },
-      } }),
-    } as Response);
-    await act(async () => root.render(React.createElement(Probe, { contextGraphId: initialGraph, includeQueryCatalog: true })));
-    expect(requests).toHaveLength(1);
-    await act(async () => root.render(React.createElement(Probe, { contextGraphId: currentGraph, includeQueryCatalog: false })));
-    expect(requests).toHaveLength(1);
-    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('');
-    await act(async () => respond(requests[0], 'urn:stale-result'));
-    await flush();
-    expect(requests).toHaveLength(2);
-    expect(requests[1]).toMatchObject({ contextGraphId: currentGraph, includeQueryCatalog: false });
-    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('');
-    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('true');
-    await act(async () => respond(requests[1], 'urn:current-result'));
-    await flush();
-    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('urn:current-result');
-    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('false');
-  });
-
-  it('collapses events during an active read to one trailing refresh', async () => {
-    let resolveFirst!: (response: Response) => void;
-    let calls = 0;
-    vi.stubGlobal('fetch', vi.fn(async (_url: string, init?: RequestInit) => {
-      calls++;
-      const { contextGraphId = 'unknown' } = JSON.parse(String(init?.body ?? '{}')) as {
-        contextGraphId?: string;
-      };
-      const response = () => ({
-        ok: true,
-        json: async () => ({ contextGraphId, layers: {
-          wm: { ok: true, truncated: false, bindings: wmBindings(contextGraphId, calls) },
-          swm: { ok: true, truncated: false, bindings: [] },
-          vm: { ok: true, truncated: false, bindings: [] },
-        } }),
-      } as Response);
-      if (calls === 1) {
-        return new Promise<Response>((resolve) => { resolveFirst = resolve; });
+  it.each(['initial', 'continuation'])('retains one event refresh during a pending %s read', async mode => {
+    const graphNames = Array.from({ length: 6 }, (_, i) =>
+      `did:dkg:context-graph:project-a/_working_memory/0x1111111111111111111111111111111111111111/${i}`);
+    let release: (() => void) | undefined;
+    let held = false;
+    let normalReads = 0;
+    vi.mocked(fetch).mockImplementation(async (_url, init) => {
+      const { sparql } = JSON.parse(String(init?.body));
+      let bindings: unknown[] = [];
+      const working = !sparql.includes('_verifiable_memory_meta') && !sparql.includes('STRENDS(STR(?g), "/_shared_memory")');
+      if (working && sparql.includes('SELECT DISTINCT')) {
+        bindings = graphNames.filter(graph => !sparql.includes(`> ${JSON.stringify(graphNames[4])}`) || graph > graphNames[4])
+          .map(g => ({ g }));
+      } else if (working && sparql.includes('FILTER(!isBlank')) {
+        normalReads++;
+        const visible = graphNames.filter(graph => sparql.includes(`<${graph}>`));
+        bindings = visible.map(graph => tripleBinding(`urn:version:${revision}:${graphNames.indexOf(graph)}`, graph));
+        const shouldHold = mode === 'initial' || visible.includes(graphNames[5]);
+        if (!held && shouldHold) {
+          held = true;
+          await new Promise<void>(resolve => { release = resolve; });
+        }
       }
-      return response();
-    }));
-
-    await act(async () => {
-      root.render(React.createElement(Probe, { contextGraphId: 'project-a' }));
+      return new Response(JSON.stringify({ result: { type: 'bindings', bindings } }));
     });
-    expect(fetch).toHaveBeenCalledTimes(1);
-
+    await act(async () => root.render(React.createElement(Probe, { contextGraphId: 'project-a' })));
+    if (mode === 'continuation') {
+      expect(memory.counts.total).toBe(5);
+      await act(async () => memory.loadMore());
+    }
+    expect(release).toBeTypeOf('function');
+    const before = normalReads;
+    revision = 2;
     await act(async () => {
-      MockEventSource.instances[0].emit('memory_graph_changed', {
-        contextGraphId: 'project-a', layers: ['wm'], operation: 'write-1',
+      for (let i = 0; i < 20; i++) MockEventSource.instances[0].emit('memory_graph_changed', {
+        contextGraphId: 'project-a', layers: ['wm'], operation: 'assertion_written',
       });
       vi.advanceTimersByTime(350);
-      MockEventSource.instances[0].emit('memory_graph_changed', {
-        contextGraphId: 'project-a', layers: ['wm'], operation: 'write-2',
-      });
-      vi.advanceTimersByTime(350);
     });
-    expect(fetch).toHaveBeenCalledTimes(1);
-
-    await act(async () => {
-      resolveFirst({
-        ok: true,
-        json: async () => ({ contextGraphId: 'project-a', layers: {
-          wm: { ok: true, truncated: false, bindings: wmBindings('project-a', 1) },
-          swm: { ok: true, truncated: false, bindings: [] },
-          vm: { ok: true, truncated: false, bindings: [] },
-        } }),
-      } as Response);
-      await Promise.resolve();
-      await Promise.resolve();
-    });
-    await flush();
-
-    expect(fetch).toHaveBeenCalledTimes(2);
-    expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
-  });
-
-  it('keeps the current scope snapshot visible while its refresh is pending', async () => {
-    const contextGraphId = 'same-scope-refresh';
-    await act(async () => root.render(React.createElement(Probe, { contextGraphId })));
-    const originalUris = container.querySelector('#probe')?.getAttribute('data-uris');
-    let resolveRead!: (response: Response) => void;
-    vi.stubGlobal('fetch', vi.fn(() => new Promise<Response>(resolve => { resolveRead = resolve; })));
-    await act(async () => {
-      MockEventSource.instances[0].emit('memory_graph_changed', { contextGraphId, layers: ['wm'], operation: 'write' });
-      vi.advanceTimersByTime(350);
-    });
-    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('true');
-    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe(originalUris);
-    await act(async () => resolveRead({ ok: true, json: async () => ({ contextGraphId, layers: {
-      wm: { ok: true, truncated: false, bindings: wmBindings(contextGraphId, 2) },
-      swm: { ok: true, truncated: false, bindings: [] },
-      vm: { ok: true, truncated: false, bindings: [] },
-    } }) } as Response));
-    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('false');
-    expect(container.querySelector('#probe')?.getAttribute('data-wm')).toBe('2');
-  });
-
-  it.each(['graph', 'catalog'] as const)('rejects a retired response after returning to the same %s scope', async change => {
-    const requests: Array<{ contextGraphId: string; includeQueryCatalog: boolean; resolve: (response: Response) => void }> = [];
-    vi.stubGlobal('fetch', vi.fn((_url: string, init?: RequestInit) => {
-      const scope = JSON.parse(String(init?.body)) as { contextGraphId: string; includeQueryCatalog: boolean };
-      return new Promise<Response>(resolve => requests.push({ ...scope, resolve }));
-    }));
-    const original = { contextGraphId: `aba-${change}`, includeQueryCatalog: true };
-    const intermediate = { contextGraphId: change === 'graph' ? `${original.contextGraphId}-other` : original.contextGraphId,
-      includeQueryCatalog: change === 'catalog' ? false : true };
-    const respond = (request: typeof requests[number], subject: string) => request.resolve({
-      ok: true,
-      json: async () => ({ contextGraphId: request.contextGraphId, layers: {
-        wm: { ok: true, truncated: false, bindings: [tripleBinding(subject, `did:dkg:context-graph:${request.contextGraphId}/notes/assertion/agent/a`)] },
-        swm: { ok: true, truncated: false, bindings: [] }, vm: { ok: true, truncated: false, bindings: [] },
-      } }),
-    } as Response);
-    await act(async () => root.render(React.createElement(Probe, original)));
-    await act(async () => root.render(React.createElement(Probe, intermediate)));
-    await act(async () => root.render(React.createElement(Probe, original)));
-    // React retired both preceding owners; the canonical task must physically
-    // drain the first request before the latest owner can read the same scope.
-    expect(requests).toHaveLength(1);
-    await act(async () => respond(requests[0], 'urn:retired-same-scope'));
-    await flush();
-    expect(requests).toHaveLength(2);
-    expect(requests[1]).toMatchObject(original);
-    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('');
-    expect(container.querySelector('#probe')?.getAttribute('data-loading')).toBe('true');
-    await act(async () => respond(requests[1], 'urn:latest-same-scope'));
-    await flush();
-    expect(container.querySelector('#probe')?.getAttribute('data-uris')).toBe('urn:latest-same-scope');
+    expect(normalReads).toBe(before);
+    await act(async () => release!()); await flush();
+    expect(memory.loading).toBe(false);
+    expect(memory.counts.total).toBe(mode === 'initial' ? 5 : 6);
+    expect(memory.allTriples.every(triple => triple.subject.startsWith('urn:version:2:'))).toBe(true);
+    expect(normalReads).toBe(mode === 'initial' ? 2 : 4);
+    expect(memory.pageError).toBeNull();
   });
 });

@@ -13,6 +13,8 @@ import {
   ciphertextChunkStoreGraph,
   ciphertextChunkStoreSubject,
   CIPHERTEXT_CHUNK_PREDICATE,
+  computeGossipSigningPayloadV2,
+  decodeGossipEnvelope,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
   contextGraphDataUri,
@@ -37,6 +39,7 @@ import {
   type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { localGossipSigner } from '../src/external-author-signing.js';
 import { computeSwmSenderKeyRecipientRouteHash } from '../src/dkg-agent-swm-state.js';
 
 // Hand-rolled call recorder (replaces vitest spy factories): wraps an
@@ -88,7 +91,7 @@ async function verifyEntryPointEncryption(
   ));
   agent._resolveInlineEncryption = DKGAgent.prototype._resolveInlineEncryption;
   agent.gossipWireIdFor = (id: string) => id;
-  agent.resolveWorkspaceGossipSigningAgent = async () => ({ privateKey: wallet.privateKey, agentAddress: wallet.address });
+  agent.resolveWorkspaceGossipSigningAgent = async () => localGossipSigner(wallet.address, wallet.privateKey);
   agent.canonicalChunkStoreCgIdOrNull = () => null;
   agent.gossip = { publish: vi.fn(async () => undefined) };
   agent.store ??= { insert: vi.fn(async () => undefined) };
@@ -1048,6 +1051,7 @@ function makeQueuedAgentHarness(options: {
   agentLike.retireLegacySwmAfterConfirmedLocalPublish =
     (DKGAgent.prototype as any).retireLegacySwmAfterConfirmedLocalPublish;
   agentLike.retireLegacySwmAfterVerifiedVmTwin = recorder(async () => undefined);
+  agentLike.transferRfc64ConfirmedVmV1 = (DKGAgent.prototype as any).transferRfc64ConfirmedVmV1;
   agentLike.observeRfc64ConfirmedVmV1 =
     (DKGAgent.prototype as any).observeRfc64ConfirmedVmV1;
   agentLike.removeRfc64SwmAuthorInventoryShadowV1 = recorder(async () => ({
@@ -1119,6 +1123,10 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       ual: 'did:dkg:local/queued-swm-removal',
       publishStatus: 'confirmed',
     });
+    // This scenario exercises active public removal; the shared harness remains inactive.
+    agentLike.resolveRfc64CatalogAuthoringLaneV1 = () => ({
+      kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
+    });
     const removal = recorder(async () => ({
       status: 'applied',
       action: 'remove',
@@ -1126,7 +1134,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       headObjectDigest: null,
       error: null,
     }));
-    agentLike.removeRfc64SwmAuthorInventoryShadowV1 = removal;
+    agentLike.observeRfc64ConfirmedInventoryRemovalV1 = removal;
     const catalogAuthoring = recorder(async () => null);
     const legacyCatalogAuthoring = recorder(async () => null);
     agentLike.recordRfc64PublicCatalogAssetV1 = catalogAuthoring;
@@ -1186,7 +1194,11 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       ual: 'did:dkg:local/queued-swm-removal-failure',
       publishStatus: 'confirmed',
     });
-    agentLike.removeRfc64SwmAuthorInventoryShadowV1 = recorder(async () => {
+    // This scenario exercises active public removal; the shared harness remains inactive.
+    agentLike.resolveRfc64CatalogAuthoringLaneV1 = () => ({
+      kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
+    });
+    agentLike.observeRfc64ConfirmedInventoryRemovalV1 = recorder(async () => {
       throw new Error('simulated RFC-64 SWM removal failure');
     });
     const snapshotQuads = [{
@@ -1546,10 +1558,7 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
         chainKey: new Uint8Array(32).fill(7),
         aeadCgId: '42',
       })),
-      resolveWorkspaceGossipSigningAgent: recorder(async () => ({
-        privateKey: signer.privateKey,
-        agentAddress: signer.address,
-      })),
+      resolveWorkspaceGossipSigningAgent: recorder(async () => localGossipSigner(signer.address, signer.privateKey)),
     } as any;
 
     const encryptInlineChunked = await (DKGAgent.prototype as any)
@@ -1589,6 +1598,18 @@ describe('DKGAgent._resolveEncryptInlineChunked nonce domain', () => {
 
     expect(Buffer.from(first.ciphertextChunksRoot).toString('hex'))
       .not.toBe(Buffer.from(second.ciphertextChunksRoot).toString('hex'));
+
+    // Every chunk envelope is signed by the one resolved gossip signer, over its V2 payload.
+    const envelopes = agentLike.gossip.publish.calls.map(([, data]: [string, Uint8Array]) => decodeGossipEnvelope(data));
+    expect(envelopes.length).toBeGreaterThan(0);
+    for (const envelope of envelopes) {
+      expect(envelope.agentAddress).toBe(signer.address);
+      const signed = computeGossipSigningPayloadV2(
+        envelope.type, envelope.contextGraphId, envelope.timestamp, envelope.payload, envelope.swmMessageIndex ?? 0,
+      );
+      expect(ethers.verifyMessage(signed, ethers.hexlify(envelope.signature))).toBe(signer.address);
+    }
+    expect(agentLike.resolveWorkspaceGossipSigningAgent.calls).toHaveLength(1);
   });
 
 });
@@ -1602,7 +1623,7 @@ describe('curated inline context per publish attempt', () => {
       log: { info: vi.fn(), warn: vi.fn() },
       store: { insert: vi.fn(async () => undefined) }, gossip: { publish: vi.fn(async () => undefined) },
       canonicalChunkStoreCgIdOrNull: () => 'canonical-cg', gossipWireIdFor: (id: string) => id,
-      resolveWorkspaceGossipSigningAgent: vi.fn(async () => ({ privateKey: wallet.privateKey, agentAddress: wallet.address })),
+      resolveWorkspaceGossipSigningAgent: vi.fn(async () => localGossipSigner(wallet.address, wallet.privateKey)),
       _resolveCuratedChainKeyContext: vi.fn(async (..._args: unknown[]) => ({ chainKey, aeadCgId: '42', senderAddress: wallet.address })),
     };
   }

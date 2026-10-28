@@ -2,7 +2,6 @@
 
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import type { PublicMemoryLayersResponse } from '@origintrail-official/dkg-core/memory-layer-result';
-import { canAdministerNode } from '../../auth.js';
 import { readMemoryLayers, type ContextGraphReader } from '../context-graph-read-model.js';
 import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
 import { readBody, safeParseJson, jsonResponse, validateRequiredContextGraphId,
@@ -21,18 +20,6 @@ export function contextGraphReader(agent: DKGAgent, contextGraphId: string, call
   };
 }
 
-/** Read-only admission shares query evidence; subscription bootstrap stays live. */
-async function admitMemoryLayerRead(ctx: RequestContext, contextGraphId: string,
-  callerAgentAddress: string | undefined,
-): Promise<'allowed' | 'denied' | 'unavailable'> {
-  if (canAdministerNode(ctx.authentication)) return 'allowed';
-  try {
-    return (await ctx.agent.resolveContextGraphReadAuthority(contextGraphId, {
-      callerAgentAddress, allowSubscriptionFallback: false, authorityReadMode: 'finalized-index',
-    })).outcome;
-  } catch { return 'unavailable'; }
-}
-
 /** Serial, caller-admitted exact graph reads for dashboard memory layers. */
 export async function handleContextGraphMemoryLayerRoute(ctx: RequestContext): Promise<void> {
   const { req, res, agent } = ctx;
@@ -43,19 +30,6 @@ export async function handleContextGraphMemoryLayerRoute(ctx: RequestContext): P
   const contextGraphId = parsed.contextGraphId;
   if (!validateRequiredContextGraphId(contextGraphId, res)) return;
 
-  // Discover no graph names until the canonical admission boundary accepts
-  // this caller. Each batch then uses agent.query again to preserve read,
-  // shared-memory, and caller isolation if authority changes during the read.
-  const admission = await admitMemoryLayerRead(ctx, contextGraphId, actor.authenticatedAgentAddress);
-  if (admission === 'unavailable') {
-    res.setHeader('Retry-After', '2');
-    return jsonResponse(res, 503, { code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true, error: 'Context graph read authority unavailable' });
-  }
-  if (admission === 'denied') {
-    const empty = { bindings: [], ok: true, truncated: false };
-    const response: PublicMemoryLayersResponse = { contextGraphId, layers: { wm: empty, swm: empty, vm: empty } };
-    return jsonResponse(res, 200, response);
-  }
   const lifecycle = createStoreQueryRequestLifecycle(req, res, 'node-ui.memory-layers');
   try {
     const snapshot = await readMemoryLayers(contextGraphReader(agent, contextGraphId, actor.authenticatedAgentAddress), contextGraphId, {

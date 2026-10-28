@@ -253,6 +253,74 @@ describe('contextGraphFinalizedNameAbsenceAnchorHoldsV1', () => {
     expect(readCurrentFinalized).toHaveBeenCalledTimes(1);
   });
 
+  describe('a provider scan still inside its tick', () => {
+    const moved = async () => ({ number: ANCHOR.finalized.number + 1, hash: `0x${'8'.repeat(64)}` });
+    const SCAN_ORIGIN = Object.freeze({ kind: 'scan' as const });
+
+    it('answers a bounded read without asking the provider for the head', async () => {
+      const readCurrentFinalized = vi.fn(moved);
+      await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(
+        projection(SCAN_ORIGIN),
+        { freshness: 'bounded' },
+        { contractAddress: STORAGE, withinTick: true, readCurrentFinalized },
+      )).resolves.toBe(true);
+      expect(readCurrentFinalized).not.toHaveBeenCalled();
+    });
+
+    it('does not answer a bounded read once the tick is over', async () => {
+      for (const withinTick of [false, undefined]) {
+        const readCurrentFinalized = vi.fn(moved);
+        await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(
+          projection(SCAN_ORIGIN),
+          { freshness: 'bounded' },
+          { contractAddress: STORAGE, withinTick, readCurrentFinalized },
+        )).resolves.toBe(false);
+        expect(readCurrentFinalized).toHaveBeenCalledOnce();
+      }
+    });
+
+    it.each([{ freshness: 'live' as const }, {}])('never answers a live read (%j)', async (options) => {
+      const readCurrentFinalized = vi.fn(moved);
+      await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(
+        projection(SCAN_ORIGIN),
+        options,
+        { contractAddress: STORAGE, withinTick: true, readCurrentFinalized },
+      )).resolves.toBe(false);
+      expect(readCurrentFinalized).toHaveBeenCalledOnce();
+    });
+
+    it('does not stand in for the generation fence of a fold the tick has committed past', async () => {
+      const readCurrentFinalized = vi.fn(moved);
+      await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(
+        projection(LOG_ORIGIN),
+        { freshness: 'bounded' },
+        {
+          currentSource: source(async () => false),
+          contractAddress: STORAGE,
+          withinTick: true,
+          readCurrentFinalized,
+        },
+      )).resolves.toBe(false);
+      expect(readCurrentFinalized).toHaveBeenCalledOnce();
+    });
+
+    it('still honours a cancellation that arrives during the log check', async () => {
+      const controller = new AbortController();
+      const readCurrentFinalized = vi.fn(moved);
+      await expect(contextGraphFinalizedNameAbsenceAnchorHoldsV1(
+        projection(LOG_ORIGIN),
+        { freshness: 'bounded', signal: controller.signal },
+        {
+          currentSource: source(async () => { controller.abort(); return false; }),
+          contractAddress: STORAGE,
+          withinTick: true,
+          readCurrentFinalized,
+        },
+      )).rejects.toThrow();
+      expect(readCurrentFinalized).not.toHaveBeenCalled();
+    });
+  });
+
   it('falls back to the provider when the bounded local generation moved', async () => {
     const readCurrentFinalized = vi.fn(async () => ({
       number: ANCHOR.finalized.number + 1,

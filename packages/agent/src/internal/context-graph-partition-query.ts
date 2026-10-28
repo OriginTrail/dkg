@@ -1,3 +1,4 @@
+import { resolveWorkingMemoryIdentityAliases } from '../working-memory-identity.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import type { DKGAgent } from '../dkg-agent.js';
@@ -16,7 +17,10 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
     });
     if (authority.outcome === 'unavailable') throw new ContextGraphReadAuthorityUnavailableError(contextGraphId, authority);
     if (authority.outcome !== 'allowed') return [];
-    return this.queryEngine.listContextGraphQueryPartitions(contextGraphId, options);
+    const owner = options.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId;
+    const aliases = resolveWorkingMemoryIdentityAliases({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, owner, address => address.toLowerCase()).aliases ?? [];
+    return this.queryEngine.listContextGraphQueryPartitions(contextGraphId, { ...options,
+      draftAccess: owner ? { kind: 'owners', owners: [owner, ...aliases] } : { kind: 'none' } });
   }
 
 }

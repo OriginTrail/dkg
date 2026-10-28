@@ -1,3 +1,6 @@
+import { randomUUID } from './lib/randomUUID.js';
+import { executeQuery, invalidateQueryCache, fetchContextGraphs } from './query-api.js';
+export * from './query-api.js';
 import {
   BASE,
   authHeaders,
@@ -13,13 +16,6 @@ import {
   del,
   requestLongMutation,
 } from './http.js';
-import type { GetView } from '@origintrail-official/dkg-core';
-import { classifySparqlOperation } from '@origintrail-official/dkg-core/dist/sparql-operation.js';
-import type {
-  PublicQueryQuad,
-  PublicQueryResponse,
-  PublicQueryResult,
-} from '@origintrail-official/dkg-core/query-result';
 import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/query-catalog';
 
 // Re-export the shared transport so existing `../api.js` consumers of these
@@ -27,7 +23,6 @@ import type { QueryCatalogReadResponse } from '@origintrail-official/dkg-core/qu
 export { authHeaders, HttpError, OutcomeUnknownError } from './http.js';
 export * from './pca-api.js';
 export * from './identity-wallet-api.js';
-export * from './memory-layers-api.js';
 
 const CONTEXT_GRAPH_URI_PREFIX = 'did:dkg:context-graph:';
 const CONTEXT_GRAPH_LOAD_TIMEOUT_MS = 60000;
@@ -287,16 +282,6 @@ export const fetchNodeLog = (params: { lines?: number; q?: string } = {}) => {
   return get<{ lines: string[]; totalSize: number }>(`/api/node-log${q ? '?' + q : ''}`);
 };
 
-// --- Context graphs (V10) — legacy daemon paths keep working server-side redirects.
-export async function fetchContextGraphs(): Promise<{ contextGraphs: any[] }> {
-  const data = await getWithTimeout<{ contextGraphs?: any[] }>(
-    '/api/context-graph/list',
-    CONTEXT_GRAPH_LOAD_TIMEOUT_MS,
-  );
-  const list = data.contextGraphs ?? [];
-  return { contextGraphs: list.filter((p: any) => !p.isSystem) };
-}
-
 // --- Agent Identity ---
 export interface AgentIdentity {
   agentAddress: string;
@@ -307,7 +292,7 @@ export interface AgentIdentity {
   nodeIdentityId: string;
 }
 
-export const fetchCurrentAgent = () => get<AgentIdentity>('/api/agent/identity');
+export { fetchCurrentAgent } from './agent-identity-api.js';
 
 export async function createContextGraph(
   id: string,
@@ -343,7 +328,9 @@ export async function createContextGraph(
       const errBody = await res.json().catch(() => ({}));
       throw new Error((errBody as { error?: string })?.error ?? `HTTP ${res.status}`);
     }
-    return res.json() as Promise<{ created: string; uri: string; registered?: boolean; onChainId?: string; registerError?: string }>;
+    const result = await res.json() as { created: string; uri: string; registered?: boolean; onChainId?: string; registerError?: string };
+    invalidateQueryCache(id);
+    return result;
   } catch (err: any) {
     if (err.name === 'AbortError') {
       throw new Error('Creating project is taking longer than expected — it may still complete in the background. Refresh the page in a moment.');
@@ -471,7 +458,7 @@ export const submitJoinRequest = (
   }>(
     `/api/context-graph/${encodeURIComponent(contextGraphId)}/request-join`,
     req,
-  );
+  ).then(result => { invalidateQueryCache(contextGraphId); return result; });
 
 export const listJoinRequests = (contextGraphId: string) =>
   get<{ contextGraphId: string; requests: PendingJoinRequest[] }>(`/api/context-graph/${encodeURIComponent(contextGraphId)}/join-requests`);
@@ -605,110 +592,6 @@ export async function importFile(
     outcomeUnknownMessage(`Importing "${file.name}" into "${assertionName}"`),
   );
 }
-
-// In-flight POST /api/query dedup. Coalesces concurrent identical
-// requests so React strict-mode double-mounts and sibling views asking
-// the same SPARQL against the same CG share one underlying fetch.
-//
-// Scope is *strictly inflight*: the entry is deleted as soon as the
-// promise settles (success OR failure), so the next call always issues
-// a fresh request. No caching, no staleness window — this is purely
-// concurrent-coalescing, drop-in safe for every existing caller.
-//
-// Motivation: opening a project on the dashboard fires `useMemoryEntities`
-// from two mounted instances (Dashboard card + ProjectView), giving 6
-// identical `/api/query` POSTs for the WM/SWM/VM fan-out against a
-// multi-GB Oxigraph store. Each duplicate adds seconds of wall time on
-// large stores. Inflight dedup collapses the dupes to one.
-export type QueryExecutionResult = PublicQueryResult;
-export type QueryExecutionResponse = PublicQueryResponse;
-
-export function normalizeQueryExecutionResponse(
-  response: unknown,
-  sparql: string,
-): QueryExecutionResponse {
-  const envelope = response && typeof response === 'object' && !Array.isArray(response)
-    ? response as Record<string, unknown>
-    : {};
-  const candidate = envelope.result ?? envelope.results;
-  const raw = candidate && typeof candidate === 'object' && !Array.isArray(candidate)
-    ? candidate as Record<string, unknown>
-    : {};
-
-  if (raw.type === 'boolean' && typeof raw.value === 'boolean') {
-    return { result: { type: 'boolean', value: raw.value } };
-  }
-  if (raw.type === 'quads' && Array.isArray(raw.quads)) {
-    return { result: { type: 'quads', quads: raw.quads as PublicQueryQuad[] } };
-  }
-  if (raw.type === 'bindings' && Array.isArray(raw.bindings)) {
-    return { result: { type: 'bindings', bindings: raw.bindings as Array<Record<string, unknown>> } };
-  }
-
-  const operation = classifySparqlOperation(sparql);
-  const bindings = Array.isArray(raw.bindings)
-    ? raw.bindings as Array<Record<string, unknown>>
-    : [];
-  if (operation.kind === 'read' && operation.form === 'ASK') {
-    const term = bindings[0]?.result;
-    const value = term && typeof term === 'object' && !Array.isArray(term)
-      ? (term as { value?: unknown }).value
-      : term;
-    return { result: { type: 'boolean', value: String(value).toLowerCase() === 'true' } };
-  }
-  if (operation.kind === 'read' && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')) {
-    return {
-      result: {
-        type: 'quads',
-        quads: Array.isArray(raw.quads) ? raw.quads as PublicQueryQuad[] : [],
-      },
-    };
-  }
-  return { result: { type: 'bindings', bindings } };
-}
-
-const inflightQuery = new Map<string, Promise<QueryExecutionResponse>>();
-
-export function postQueryDeduped(body: Record<string, unknown>): Promise<QueryExecutionResponse> {
-  const key = JSON.stringify(body);
-  const existing = inflightQuery.get(key);
-  if (existing) return existing;
-  const promise = (async () => {
-    const res = await fetch(`${BASE}/api/query`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...authHeaders() },
-      body: key,
-    });
-    if (!res.ok) {
-      const errBody = await res.json().catch(() => ({}));
-      const msg = (errBody as { error?: string })?.error ?? `HTTP ${res.status}`;
-      throw new HttpError(res.status, msg, errBody);
-    }
-    return normalizeQueryExecutionResponse(await res.json(), String(body.sparql ?? ''));
-  })().finally(() => {
-    inflightQuery.delete(key);
-  });
-  inflightQuery.set(key, promise);
-  return promise;
-}
-
-export type QueryExecutionView = GetView;
-
-export interface QueryExecutionOptions {
-  contextGraphId?: string;
-  subGraphName?: string;
-  includeSharedMemory?: boolean;
-  graphSuffix?: '_shared_memory';
-  view?: QueryExecutionView;
-  /** Include assertion partitions for callers whose query constrains them. */
-  includeContextGraphPartitions?: boolean;
-}
-
-export const executeQuery = (
-  sparql: string,
-  options: QueryExecutionOptions = {},
-) =>
-  postQueryDeduped({ sparql, ...options });
 
 /**
  * Map of assertion name → deterministic Option-1 UAL (`dkg:reservedUal`,
@@ -1221,332 +1104,7 @@ export interface AssertionInfo {
   subGraph?: string;
 }
 
-/**
- * Discover assertions in a given memory layer.
- *
- * WM uses a cheap graph-listing query: the assertion graph URI shape is
- * `did:dkg:context-graph:<cg>/assertion/<agent>/<name>` and a WM assertion
- * still carries its triples there.
- *
- * SWM is different. When an assertion is promoted its triples move into
- * the single `/_shared_memory` graph, so the assertion graph itself becomes
- * empty and the WM-style listing returns nothing. The authoring node's
- * `_meta` graph also records full lifecycle entities (`dkg:state`,
- * `dkg:memoryLayer`, `prov:Activity` events). NOTE: `_meta` rows for a shared
- * (non-WM) assertion DO replicate to peers over the durable `_meta` sync lane —
- * that is how a curator learns a member-shared KA's name and seal (see GH#1778).
- * The context graph's data graphs and `_shared_memory_meta` partitions also
- * propagate over sync.
- *
- * What DOES land on every replica is one `dkg:ShareTransition` entity per
- * promote, authored by `generateShareTransitionMetadata()` in
- * `@origintrail-official/dkg-publisher`:
- *
- *   GRAPH <did:dkg:context-graph:<cg>[/<sg>]/_shared_memory_meta> {
- *     <urn:dkg:share:<opId>> a dkg:ShareTransition ;
- *                            dkg:source   "assertion/<agent>/<name>" ;
- *                            dkg:agent    did:dkg:agent:<address> ;
- *                            dkg:timestamp "…"^^xsd:dateTime .
- *   }
- *
- * So on every node — authoring or replica — we can enumerate promoted
- * assertions by listing ShareTransitions and reconstructing the lifecycle
- * URN that the UI already uses as `graphUri` elsewhere. We parse the
- * sub-graph suffix (if any) from the meta graph IRI itself so this keeps
- * working for sub-graph-scoped shares.
- */
-export async function listAssertions(
-  contextGraphId: string,
-  layer: 'wm' | 'swm' = 'wm',
-  opts: { includeQueryCatalog?: boolean } = {},
-): Promise<AssertionInfo[]> {
-  const includeQueryCatalog = opts.includeQueryCatalog ?? false;
-  const shouldIncludeMetaAssertion = (subGraph: string | undefined, name: string): boolean =>
-    subGraph !== 'meta' || (includeQueryCatalog && name.startsWith('query-catalog-'));
-  if (layer === 'swm') {
-    // SWM membership comes from the canonical `dkg:memoryLayer "SWM"` lifecycle
-    // marker in `<cg>/_meta` (flipped from "WM" by promote) — NOT from
-    // `dkg:ShareTransition` records in `_shared_memory_meta`. ShareTransitions
-    // are written by the ASYNC SWM share (key-setup/gossip) and therefore LAG
-    // the promote, so a publish fired right after promoting saw zero shared
-    // assertions ("nothing to publish") even though the content was already in
-    // SWM. The marker is synchronous and is the same source the WM listing uses.
-    // Parsing mirrors the WM branch: accept BOTH the lifecycle-URN and the
-    // data-graph-URI marker forms, dedupe by (subGraph, name), and exclude the
-    // reserved `meta` sub-graph.
-    const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-    const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
-    const urnPrefix = `urn:dkg:assertion:${contextGraphId}:`;
-    // Exclude assertions already PUBLISHED to VM. Publish records a
-    // `dkg:vmCurrentAssertion` pointer but (a backend gap — the
-    // generateAssertionPublishedMetadata flip's SPARQL gate never matches the
-    // lifecycle record) does NOT flip `dkg:memoryLayer` off "SWM", so published
-    // assertions would otherwise linger in the Shared-Memory list. The pointer
-    // lives on the lifecycle-URN form; key the exclusion by (subGraph, name) so
-    // the data-graph-URI marker row for the same assertion is dropped too.
-    const metaFilter = includeQueryCatalog
-      ? ''
-      : 'FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))';
-    const sparql = `SELECT ?g ?vm WHERE {
-      GRAPH <${metaGraph}> {
-        ?g <http://dkg.io/ontology/memoryLayer> "SWM"
-        OPTIONAL { ?g <http://dkg.io/ontology/vmCurrentAssertion> ?vm }
-      }
-      ${metaFilter}
-    }`;
-    const data = await executeQuery(sparql, { contextGraphId });
-    const bindings: any[] = data?.result?.bindings ?? [];
-    const published = new Set<string>();
-    const rows: Array<{ key: string; name: string; subGraph?: string; g: string }> = [];
-    for (const b of bindings) {
-      const g = typeof b.g === 'string' ? b.g : b.g?.value;
-      if (!g) continue;
-      const vm = typeof b.vm === 'string' ? b.vm : b.vm?.value;
-      let subGraph: string | undefined;
-      let name: string | undefined;
-      if (g.startsWith(cgPrefix)) {
-        const segments = g.slice(cgPrefix.length).split('/');
-        if (segments.length === 3 && segments[0] === 'assertion') {
-          name = segments[2];
-        } else if (segments.length === 4 && segments[1] === 'assertion') {
-          subGraph = segments[0];
-          name = segments[3];
-        } else {
-          continue;
-        }
-      } else if (g.startsWith(urnPrefix)) {
-        const rest = g.slice(urnPrefix.length);
-        let m = /^(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-        if (m) {
-          name = m[2];
-        } else {
-          m = /^([^:]+):(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-          if (m) { subGraph = m[1]; name = m[3]; }
-        }
-      } else {
-        continue;
-      }
-      if (!name) continue;
-      if (!shouldIncludeMetaAssertion(subGraph, name)) continue;
-      const key = `${subGraph ?? ''} ${name}`;
-      rows.push({ key, name, subGraph, g });
-      if (vm) published.add(key);
-    }
-    const seen = new Set<string>();
-    const result: AssertionInfo[] = [];
-    for (const r of rows) {
-      if (published.has(r.key) || seen.has(r.key)) continue;
-      seen.add(r.key);
-      result.push({ name: r.name, graphUri: r.g, subGraph: r.subGraph });
-    }
-    return result;
-  }
-
-  // layer === 'wm'
-  //
-  // #864 rc.12 follow-up — without `includeContextGraphPartitions`, the
-  // daemon's contextGraphId-scoped routing (DKGQueryEngine.query, the
-  // `effectiveContextGraphId && !options?.view` branch) restricts
-  // `GRAPH ?g { … }` reads to the static allow-list
-  //   { <cg>, <cg>/_meta, <cg>/_shared_memory_meta }
-  // via `constrainGraphVariablesToAllowedSet`. Every WM assertion lives
-  // in a content partition (`<cg>/assertion/<agent>/<name>` or the
-  // sub-graph variant `<cg>/<sg>/assertion/<agent>/<name>`) — none of
-  // which are in that allow-list — so this enumeration came back empty
-  // for any CG no matter how many assertions actually existed.
-  // Downstream that surfaced as:
-  //   - `AssertionsList` rendered "no assertions" right after import.
-  //   - `PromoteWidget` showed the correct "Promote N to SWM" badge
-  //     (the count comes from `useMemoryEntities`, which already opts
-  //     into `includeContextGraphPartitions`), but on click its promote
-  //     loop iterated zero times and hit the no-op
-  //     bulk-promote branch — the exact "0 triples promoted" symptom
-  //     the rc.12 issue reported even after the publisher-side
-  //     `AssertionNotPersistedError` fix landed.
-  // Opting into the same partition-aware scope `useMemoryEntities`
-  // already uses brings the assertion partitions back into `GRAPH ?g`
-  // expansion. Same `/api/query` route, same `postQueryDeduped` cache,
-  // same privacy/cost envelope as the dashboard counters.
-  // Codex review on #898 — listing WM by raw `GRAPH ?g { ?s ?p ?o }`
-  // counts re-listed promoted assertions because `assertionPromote`
-  // intentionally leaves daemon-owned `urn:dkg:file:*` /
-  // `urn:dkg:extraction:*` quads behind in the assertion data graph
-  // (publisher Bug 8 / Round 9 Bug 25 import-bookkeeping filter), so
-  // those graphs stay non-empty after promote even though the
-  // lifecycle in `_meta` has flipped to `dkg:memoryLayer "SWM"`. The
-  // UI was therefore offering Promote on assertions that were no
-  // longer in WM. Derive WM membership from the lifecycle marker the
-  // publisher itself owns: `<assertionGraphUri> dkg:memoryLayer "WM"`
-  // in `<cg>/_meta` (set by `assertionCreate`, flipped to "SWM" by
-  // `assertionPromote`). The OPTIONAL keeps WM rows visible even when
-  // the data graph is genuinely empty (fresh create with no writes
-  // yet), matching the prior listing semantics for that case.
-  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
-  const cgPrefix = `did:dkg:context-graph:${contextGraphId}/`;
-  // Two scoped queries instead of a single `OPTIONAL { GRAPH ?g { … } }`.
-  // The OPTIONAL nested a GRAPH *variable* below the top level of the
-  // WHERE block, which the scoped local-query path
-  // (`constrainGraphVariablesToAllowedSet`, PR #749) rejects with
-  // "GRAPH variables must appear at the top level of scoped local
-  // queries". Split the concern:
-  //   • `listSparql`  — authoritative WM membership from the fixed
-  //     `_meta` graph (no GRAPH variable at all). Includes assertions
-  //     whose data partition is still empty (fresh create, no writes),
-  //     preserving the prior listing semantics the OPTIONAL existed for.
-  //   • `countSparql` — per-partition triple counts with the GRAPH
-  //     variable at the top level (guard-safe). Both GRAPH clauses are
-  //     siblings at the top of the WHERE block, so the `?g` variable
-  //     stays top-level and the guard passes. The leading fixed-graph
-  //     join restricts counting to the WM-marked assertion graphs only —
-  //     without it the count fanned out over *every* partition under the
-  //     CG (SWM/VM/meta included), turning a small WM listing into a full
-  //     CG scan. In the UI `includeContextGraphPartitions: true` expands
-  //     the allow-list to the assertion partitions so these counts populate.
-  // Counts are merged by graph URI; a WM graph with no count row simply
-  // renders without a triple badge (the badge is `!= null`-guarded).
-  // The two queries fire in parallel, but the count is BEST-EFFORT: it feeds
-  // only the triple-count badge, so a count failure (timeout, a future
-  // scoped-query edge case) must not reject the whole listing and regress the
-  // promote flow back to "no assertions". Its rejection is swallowed to `null`
-  // (rows then render with `tripleCount: undefined`); the membership query
-  // stays authoritative and its rejection still propagates.
-  // Exclude the reserved `meta` namespace. Profile / query-catalog artifacts
-  // (prof:Profile, prof:SavedQuery, …) are published as WM-marked assertions
-  // under `<cg>/meta/assertion/<addr>/<name>`, so a bare `memoryLayer "WM"`
-  // join scoops them in alongside real user knowledge. Since this listing
-  // feeds the assertions table + bulk-promote, those UI-config drafts would
-  // otherwise be promotable into SWM. Match the reserved bucket by its path
-  // SHAPE (`/meta/assertion/`) rather than a `/_meta` suffix: a raw suffix
-  // match would also drop a perfectly valid WM assertion whose *name* is
-  // `_meta` (names may start with `_`). The parser below keys on the parsed
-  // sub-graph segment (`=== 'meta'`), which is fully name-safe.
-  const metaFilter = includeQueryCatalog
-    ? ''
-    : `FILTER(!CONTAINS(STR(?g), "/meta/assertion/"))`;
-  const listSparql = `SELECT ?g WHERE {
-    GRAPH <${metaGraph}> { ?g <http://dkg.io/ontology/memoryLayer> "WM" }
-    ${metaFilter}
-  }`;
-  // rc.17 per-KA WM: the data graph is …/_working_memory/{addr}/{number} (number-keyed),
-  // but the surviving list row is the lifecycle URN (name-keyed). Count the URN's data
-  // graph via its dkg:assertionGraph pointer and key by the URN too — else
-  // countByGraph.get(urn) is undefined and the triple-count badge is lost for every WM KA.
-  //
-  // The pointer (`dkg:assertionGraph`) is stamped ONLY on the lifecycle-URN
-  // subject form (`urn:dkg:assertion:…`), never on the data-graph-URI form, so
-  // a straight INNER join `?g assertionGraph ?dg . GRAPH ?dg { … }` yields exactly
-  // one count row per WM KA, already keyed by the URN that the parser keeps below.
-  // (The earlier `OPTIONAL { GRAPH <_meta> { … } } BIND(COALESCE(…)) GRAPH ?countGraph`
-  // shape was rejected 400 "expected OPTIONAL" by the node's SPARQL engine — the
-  // whole count query failed and every WM KA lost its triple badge.) A freshly
-  // created WM KA with no data graph yet simply produces no count row and renders
-  // without a badge — the badge is `!= null`-guarded, matching prior semantics.
-  const countSparql = `SELECT ?g (COUNT(*) AS ?cnt) WHERE {
-    GRAPH <${metaGraph}> {
-      ?g <http://dkg.io/ontology/memoryLayer> "WM" ;
-         <http://dkg.io/ontology/assertionGraph> ?dg
-    }
-    GRAPH ?dg { ?s ?p ?o }
-    ${metaFilter}
-  } GROUP BY ?g`;
-  const [listData, countData] = await Promise.all([
-    postQueryDeduped({ sparql: listSparql, contextGraphId, includeContextGraphPartitions: true }),
-    postQueryDeduped({ sparql: countSparql, contextGraphId, includeContextGraphPartitions: true })
-      .catch(() => null),
-  ]);
-  const bindings: any[] = listData?.result?.bindings ?? [];
-  const countByGraph = new Map<string, number>();
-  for (const b of (countData?.result?.bindings ?? [])) {
-    const g = bv(b.g);
-    const cntRaw = bv(b.cnt);
-    // The aggregate comes back as a typed RDF literal whose lexical form can be
-    // wrapped: `"21"^^<http://www.w3.org/2001/XMLSchema#integer>`. A bare
-    // `parseInt('"21"^^…')` reads the leading quote and yields NaN, which the
-    // `isFinite` guard then drops — losing the badge even when the query
-    // succeeds. Pull the leading digits past an optional quote, mirroring
-    // `listSwmEntities`' `^"?(\d+)` handling of the same value shape.
-    const cntMatch = typeof cntRaw === 'string' ? cntRaw.match(/^"?(\d+)/) : null;
-    const cnt = cntMatch ? parseInt(cntMatch[1], 10) : NaN;
-    if (g && Number.isFinite(cnt)) countByGraph.set(g, cnt);
-  }
-  // #706 fix — the prior `startsWith('did:dkg:context-graph:<cg>/assertion/')`
-  // shape silently dropped sub-graph-scoped WM assertions, whose graph
-  // URI is `did:dkg:context-graph:<cg>/<sg>/assertion/<agent>/<name>`
-  // (the sub-graph segment sits between `<cg>/` and `/assertion/`).
-  // We accept exactly two shapes, post-cgPrefix:
-  //   root-bucket : ['assertion', <agent>, <name>]            (3 segs)
-  //   sub-graph   : [<subGraphName>, 'assertion', <agent>, <name>] (4 segs)
-  // Anything else (extra segments on either side, internal meta
-  // graphs sharing the prefix, etc.) is silently dropped. The parse
-  // is deliberately strict so a row never gets admitted with a
-  // mis-derived name — promote/preview lookups key on `name` and
-  // would silently miss otherwise. The cgId itself is treated as
-  // opaque (it may contain `/assertion/` as a literal substring,
-  // per `validateContextGraphId`).
-  // The `dkg:memoryLayer "WM"` marker can sit on EITHER subject form:
-  //   • data-graph URI : did:dkg:context-graph:<cg>/[<sg>/]assertion/<agent>/<name>
-  //   • lifecycle URN  : urn:dkg:assertion:<cg>:[<sg>:]<agent>:<name>   (canonical,
-  //                      `assertionLifecycleUri`, written by every create path)
-  // Regular `create` writes BOTH; a FILE IMPORT writes ONLY the URN (the data-URI
-  // stamp is import-path-specific). The previous parser accepted only the data-URI
-  // form, so it silently dropped every file-imported WM assertion → the bulk-promote
-  // loop iterated zero times → "0 triples promoted" even though the content was
-  // fully promotable. Accept BOTH forms and dedupe by (subGraph, name).
-  const result: AssertionInfo[] = [];
-  const seen = new Set<string>();
-  const urnPrefix = `urn:dkg:assertion:${contextGraphId}:`;
-  // Data-URI rows first: the triple-count badge is keyed on the data graph in
-  // `countByGraph`, so preferring that form when both are present keeps the count.
-  const ordered = [...bindings].sort((a, b) => {
-    const ga = (typeof a.g === 'string' ? a.g : a.g?.value) ?? '';
-    const gb = (typeof b.g === 'string' ? b.g : b.g?.value) ?? '';
-    return (ga.startsWith(cgPrefix) ? 0 : 1) - (gb.startsWith(cgPrefix) ? 0 : 1);
-  });
-  for (const b of ordered) {
-    const g = typeof b.g === 'string' ? b.g : b.g?.value;
-    if (!g) continue;
-    let subGraph: string | undefined;
-    let name: string | undefined;
-    if (g.startsWith(cgPrefix)) {
-      const segments = g.slice(cgPrefix.length).split('/');
-      if (segments.length === 3 && segments[0] === 'assertion') {
-        name = segments[2];
-      } else if (segments.length === 4 && segments[1] === 'assertion') {
-        subGraph = segments[0];
-        name = segments[3];
-      } else {
-        continue;
-      }
-    } else if (g.startsWith(urnPrefix)) {
-      // `<agent>` is a 0x EVM address (no colons); `<name>` MAY contain ':'.
-      // Peel the agent deterministically — whatever precedes it (if anything)
-      // is the sub-graph segment, the greedy remainder is the name.
-      const rest = g.slice(urnPrefix.length);
-      let m = /^(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-      if (m) {
-        name = m[2];
-      } else {
-        m = /^([^:]+):(0x[0-9a-fA-F]{40}):(.+)$/.exec(rest);
-        if (m) { subGraph = m[1]; name = m[3]; }
-      }
-    } else {
-      continue;
-    }
-    if (!name) continue;
-    // Defense-in-depth for the meta-namespace exclusion above: the reserved
-    // `meta` sub-graph (`<cg>/meta/assertion/…` profile/query-catalog drafts)
-    // is UI configuration, not user knowledge, and must never reach the
-    // assertions table or the bulk-promote flow. The SPARQL `metaFilter`
-    // already drops these daemon-side; this guards the parser too.
-    if (!shouldIncludeMetaAssertion(subGraph, name)) continue;
-    const key = `${subGraph ?? ''}\0${name}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    const cnt = countByGraph.get(g);
-    result.push({ name, graphUri: g, tripleCount: cnt, subGraph });
-  }
-  return result;
-}
+export { listAssertions } from './assertions-page.js';
 
 /**
  * @deprecated Use `knowledgeAssetShare`; retained as a positional compatibility adapter.
@@ -2039,7 +1597,7 @@ function buildLocalAgentChatBody(
 ): Record<string, unknown> {
   return {
     text,
-    correlationId: opts?.correlationId ?? crypto.randomUUID(),
+    correlationId: opts?.correlationId ?? randomUUID(),
     ...(opts?.identity ? { identity: opts.identity } : {}),
     ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
     ...(opts?.profile ? { profile: opts.profile } : {}),
@@ -2362,7 +1920,7 @@ export async function sendLocalLlmChat(
   text: string,
   opts?: LocalAgentChatRequestOptions,
 ): Promise<LocalAgentChatResponse> {
-  const correlationId = opts?.correlationId ?? crypto.randomUUID();
+  const correlationId = opts?.correlationId ?? randomUUID();
   const res = await fetch('/api/local-llm/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...authHeaders() },
@@ -3281,7 +2839,7 @@ export const subscribeToContextGraph = (
   }>('/api/subscribe', {
     contextGraphId,
     syncMode: options?.syncMode ?? 'on-demand',
-  });
+  }).then(result => { invalidateQueryCache(contextGraphId); return result; });
 
 // --- Notifications (scoped pane wire contract — implementation-plan §3) ---
 //
@@ -3386,7 +2944,7 @@ export interface NotificationsFeedResponse {
 
 /** Fetch the scoped notifications feed (`GET /api/notifications`). */
 export const fetchNotificationsFeed = () =>
-  get<NotificationsFeedResponse>('/api/notifications');
+  getWithTimeout<NotificationsFeedResponse>('/api/notifications', 60_000);
 
 /** Mark notifications read by id. Accepts numeric row ids AND string
  *  `digestKey`s (the daemon resolves a digestKey to its underlying atomic

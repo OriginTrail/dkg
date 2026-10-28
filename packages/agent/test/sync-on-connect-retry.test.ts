@@ -1943,6 +1943,10 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
   });
 
   it('defers wrapped private shared-memory admission pressure without peer backoff', async () => {
+    // The refusal under test: with the reserved shared-memory slot (#3251) on,
+    // the recovery would run in it. A refusal there (its queue full, or its
+    // wait timed out) is the same busy error and is classified the same way.
+    process.env.DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT = '0';
     const agent = await DKGAgent.create({
       name: 'ReconcilerPrivateRecoveryBackpressure',
       listenHost: '127.0.0.1',
@@ -2011,6 +2015,7 @@ describe('DKGAgent sync retry — periodic reconciler', () => {
       expect(recoverContextGraphSwmFromPeer.calls).toEqual([]);
       expect(syncState(agent).snapshot(peerA).backoff !== undefined).toBe(false);
     } finally {
+      delete process.env.DKG_SYNC_SHARED_MEMORY_RESERVED_INFLIGHT;
       releaseOccupiedSlot?.();
       await occupiedSlot?.catch(() => {});
       await agent.stop().catch(() => {});

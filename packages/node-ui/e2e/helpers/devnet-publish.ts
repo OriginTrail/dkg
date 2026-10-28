@@ -40,10 +40,10 @@ export function buildTestQuads(cgId: string, stamp: number, label: string): Publ
   ];
 }
 
-export async function listContextGraphs(nodeNum = 1): Promise<Array<{ id: string; name: string }>> {
+export async function listContextGraphs(nodeNum = 1): Promise<Array<{ id: string; name: string; isSystem?: boolean }>> {
   const res = await devnetApiFetch('/api/context-graphs', { nodeNum });
   if (!res.ok) throw new Error(`context-graphs: ${res.status}`);
-  const json = (await res.json()) as { contextGraphs: Array<{ id: string; name: string }> };
+  const json = (await res.json()) as { contextGraphs: Array<{ id: string; name: string; isSystem?: boolean }> };
   return json.contextGraphs ?? [];
 }
 

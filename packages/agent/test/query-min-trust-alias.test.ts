@@ -37,6 +37,7 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
     log: { info() {}, warn() {}, debug() {}, error() {} },
     config: {},
     queryEngine: stubEngine,
+    store: { query: async () => ({ type: 'bindings', bindings: [] }) },
     // Production type is `Map<string, ContextGraphSub>`; a Set made
     // `resolveContextGraphReadAuthority` throw once the scoped gate started
     // consulting it directly instead of going through `canReadContextGraph`.

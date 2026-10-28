@@ -215,32 +215,22 @@ export async function readContextGraphStorageRangeV1(
   const ids: bigint[] = [];
   for (let id = fromId; id <= lastId; id += 1n) ids.push(id);
 
-  const slots: Array<ContextGraphStorageEntry | undefined> = Array.from({ length: ids.length });
-  // Nothing at or after `end.at` is returned, and no id beyond it is read.
-  const end = new ContextGraphStorageRangeEnd(ids.length);
-  const unanswered = await readAggregatedEntries(ports, ids, anchor.number, slots, end, signal);
-  let next = 0;
-  const worker = async (): Promise<void> => {
-    for (;;) {
-      signal?.throwIfAborted();
-      const index = unanswered[next++];
-      if (index === undefined || index >= end.at) return;
-      try {
-        const entry = await readEntry(ports, ids[index]!, anchor.number);
-        if (entry === null) end.stop(index);
-        else slots[index] = entry;
-      } catch (error) {
-        end.fail(index, error);
-      }
-    }
-  };
-  const workers = Math.min(CONTEXT_GRAPH_STORAGE_ENUMERATION_CONCURRENCY, unanswered.length);
-  await Promise.all(Array.from({ length: workers }, () => worker()));
+  const entries: ContextGraphStorageEntry[] = [];
+  let aggregating = ports.readEntriesBatch !== undefined;
+  for (let start = 0; start < ids.length; start += CONTEXT_GRAPH_STORAGE_ENUMERATION_IDS_PER_REQUEST) {
+    const run = await readContextGraphStorageRun(
+      ports,
+      ids.slice(start, start + CONTEXT_GRAPH_STORAGE_ENUMERATION_IDS_PER_REQUEST),
+      anchor.number,
+      aggregating,
+      signal,
+    );
+    if (entries.length === 0 && run.firstIdFailure !== undefined) throw run.firstIdFailure.error;
+    entries.push(...run.entries);
+    aggregating = run.aggregating;
+    if (!run.complete) break;
+  }
   signal?.throwIfAborted();
-  const firstIdFailure = end.firstIdFailure;
-  if (firstIdFailure !== undefined) throw firstIdFailure.error;
-
-  const entries = slots.slice(0, end.at) as ContextGraphStorageEntry[];
   return Object.freeze({
     storageAddress: ports.storageAddress.toLowerCase(),
     anchorBlockNumber: anchor.number,
@@ -252,54 +242,72 @@ export async function readContextGraphStorageRangeV1(
 }
 
 /**
- * Fill `slots` from aggregate requests, one per
- * {@link CONTEXT_GRAPH_STORAGE_ENUMERATION_IDS_PER_REQUEST} ids, in id order.
- * Returns the indexes, ascending, that are left to be read one by one: every
- * id when the adapter cannot aggregate, otherwise the ids a request did not
- * answer with an entry.
+ * Read one bounded run: aggregate/decode first, then resolve unanswered ids.
+ * Finish its longest readable prefix before any later run starts. Once the
+ * adapter has no aggregate answer, later runs stay on the individual path.
  */
-async function readAggregatedEntries(
+async function readContextGraphStorageRun(
   ports: ContextGraphStorageRangePorts,
   ids: readonly bigint[],
   blockTag: number,
-  slots: Array<ContextGraphStorageEntry | undefined>,
-  end: ContextGraphStorageRangeEnd,
+  aggregating: boolean,
   signal: AbortSignal | undefined,
-): Promise<number[]> {
+): Promise<{
+  entries: ContextGraphStorageEntry[];
+  complete: boolean;
+  aggregating: boolean;
+  firstIdFailure: { readonly error: unknown } | undefined;
+}> {
+  const slots: Array<ContextGraphStorageEntry | undefined> = Array.from({ length: ids.length });
+  // Nothing at or after `end.at` is returned, and no id beyond it is read.
+  const end = new ContextGraphStorageRangeEnd(ids.length);
   const unanswered: number[] = [];
-  let aggregating = ports.readEntriesBatch !== undefined;
-  for (
-    let start = 0;
-    start < end.at;
-    start += CONTEXT_GRAPH_STORAGE_ENUMERATION_IDS_PER_REQUEST
-  ) {
-    const chunk = ids.slice(start, start + CONTEXT_GRAPH_STORAGE_ENUMERATION_IDS_PER_REQUEST);
-    let batch: readonly ContextGraphStorageBatchedRead[] | undefined;
-    if (aggregating) {
-      signal?.throwIfAborted();
-      try {
-        batch = await ports.readEntriesBatch!(chunk, blockTag);
-      } catch (error) {
-        // Refused: the ids of this request, and those after it, were not read.
-        end.fail(start, error);
-        break;
-      }
-      // No answer once means none for the requests that would follow.
-      aggregating = batch !== undefined;
+  let batch: readonly ContextGraphStorageBatchedRead[] | undefined;
+  signal?.throwIfAborted();
+  if (aggregating) {
+    try {
+      batch = await ports.readEntriesBatch!(ids, blockTag);
+    } catch (error) {
+      // Refused: the ids of this request, and those after it, were not read.
+      end.fail(0, error);
     }
-    for (let offset = 0; offset < chunk.length; offset += 1) {
-      const index = start + offset;
-      const read = batch?.[offset];
-      if (read === 'nonexistent') {
-        end.stop(index);
-        break;
-      }
-      const entry = read === undefined ? undefined : entryFromBatchedRead(chunk[offset]!, read);
-      if (entry === undefined) unanswered.push(index);
-      else slots[index] = entry;
-    }
+    // No answer once means none for the requests that would follow.
+    aggregating = batch !== undefined;
   }
-  return unanswered;
+  for (let index = 0; index < end.at; index += 1) {
+    const read = batch?.[index];
+    if (read === 'nonexistent') {
+      end.stop(index);
+      break;
+    }
+    const entry = read === undefined ? undefined : entryFromBatchedRead(ids[index]!, read);
+    if (entry === undefined) unanswered.push(index);
+    else slots[index] = entry;
+  }
+  let next = 0;
+  const worker = async (): Promise<void> => {
+    for (;;) {
+      signal?.throwIfAborted();
+      const index = unanswered[next++];
+      if (index === undefined || index >= end.at) return;
+      try {
+        const entry = await readEntry(ports, ids[index]!, blockTag);
+        if (entry === null) end.stop(index);
+        else slots[index] = entry;
+      } catch (error) {
+        end.fail(index, error);
+      }
+    }
+  };
+  const workers = Math.min(CONTEXT_GRAPH_STORAGE_ENUMERATION_CONCURRENCY, unanswered.length);
+  await Promise.all(Array.from({ length: workers }, () => worker()));
+  signal?.throwIfAborted();
+  return {
+    entries: slots.slice(0, end.at) as ContextGraphStorageEntry[],
+    complete: end.at === ids.length,
+    aggregating,
+    firstIdFailure: end.firstIdFailure,
+  };
 }
 
 function entryFromBatchedRead(

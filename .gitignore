@@ -15,6 +15,8 @@ packages/local-llm/benchmark-results/
 .env
 .env.*
 .dkg/
+# Git updater quarantine contains discarded dependency copies, not source changes.
+/.dkg-stale-workspace-dependencies/
 .cache/
 data/
 
@@ -76,3 +78,6 @@ test-systems/.runtime/
 
 # Disposable regression proof artifacts
 .regression-proofs/
+
+# Isolated agent/testnet homes, credentials and raw local evidence.
+.tmp/

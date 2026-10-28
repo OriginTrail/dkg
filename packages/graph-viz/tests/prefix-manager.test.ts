@@ -55,3 +55,21 @@ describe('PrefixManager', () => {
     expect(pm.expand('schema:Person')).toBe('https://schema.org/Person');
   });
 });
+
+
+describe('PrefixManager snapshots and URI boundaries', () => {
+  it('maintains prefix snapshots and handles encoded and malformed URI tails', () => {
+    const manager = new PrefixManager({ ex: 'https://example.invalid/' });
+    manager.addPrefixes({ team: 'urn:team:' });
+    expect(manager.getPrefix('urn:team:')).toBe('team');
+    expect(manager.getPrefix('missing')).toBeUndefined();
+    const snapshot = manager.prefixes;
+    snapshot.team = 'changed';
+    expect(manager.getNamespace('team')).toBe('urn:team:');
+    expect(manager.compact('https://example.invalid/')).toBeNull();
+    expect(manager.expand('plain')).toBe('plain');
+    expect(manager.expand('unknown:value')).toBe('unknown:value');
+    expect(manager.expand('http://example.invalid/x')).toBe('http://example.invalid/x');
+    for (const [uri, expected] of [['urn:code:folder%2Ffile.ts', 'file.ts'], ['urn:code:folder%2ffile.ts', 'file.ts'], ['urn:code:bad%2F%ZZ', 'bad%2F%ZZ'], ['urn:ending:', 'urn:ending:'], ['plain', 'plain']]) expect(PrefixManager.localName(uri)).toBe(expected);
+  });
+});

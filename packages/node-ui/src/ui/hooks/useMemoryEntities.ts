@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
-import type { MemoryLayerApiResult } from '../api.js';
-import { useMemoryLayersSnapshot } from './useMemoryLayersSnapshot.js';
+import { useMemoryPages } from './useMemoryPages.js';
+import { isUri, canonicalEntityUri } from './memory-graph-query.js';
+export { canonicalEntityUri, rdfBindingValue, subGraphOf, readMemoryGraphPage, fetchMemoryEntity } from './memory-graph-query.js';
 import { MEMORY_LABEL_PREDICATES } from '../lib/memoryLabels.js';
 import { decodeRdfStringLiteral } from '../../rdf-literal.js';
 
@@ -55,6 +56,8 @@ export interface Triple {
   subject: string;
   predicate: string;
   object: string;
+  /** Physical source graph; blank labels are scoped to its loaded response. */
+  graph?: string;
   /** Sub-graph slug this triple was sourced from, if known (WM triples only). */
   subGraph?: string;
 }
@@ -63,48 +66,34 @@ export interface LayeredTriple extends Triple {
   layer: TrustLevel;
 }
 
+/** Memory reads always project their physical source graph. Rendering may use Triple. */
+export interface MemoryTriple extends Triple { graph: string }
+export interface LayeredMemoryTriple extends MemoryTriple { layer: TrustLevel }
+
 export interface MemoryData {
   entities: Map<string, MemoryEntity>;
   entityList: MemoryEntity[];
-  allTriples: LayeredTriple[];
+  allTriples: LayeredMemoryTriple[];
   graphTriples: Triple[];
   trustMap: Map<string, TrustLevel>;
   counts: { wm: number; swm: number; vm: number; total: number };
   loading: boolean;
   error: string | null;
-  /** True when counts are lower bounds because a layer failed or clipped at its query limit. */
+  /** True when reads are incomplete; later layers may change preview membership and counts. */
   partial: boolean;
   /** Per-layer query status so UI can distinguish a VM miss from WM/SWM failures. */
   layerStatus: Record<MemoryLayerKey, MemoryLayerStatus>;
   refresh: () => void;
+  hasMore: boolean;
+  /** A transient source failure can be retried without changing the query scope. */
+  canRetry: boolean;
+  loadMore: () => void;
+  pageError: string | null;
+  /** A deterministic read budget left relationships outside the preview. */
+  limitMessage: string | null;
 }
 
 const RDF_TYPE = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type';
-
-function bv(v: unknown): string | undefined {
-  if (v == null) return undefined;
-  if (typeof v === 'string') return v;
-  if (typeof v === 'object' && 'value' in (v as any)) return String((v as any).value);
-  return String(v);
-}
-
-function isUri(s: string): boolean {
-  const value = canonicalEntityUri(s);
-  if (!value || value.startsWith('"') || /\s/.test(value)) return false;
-  if (value.startsWith('_:')) return true;
-  return /^[A-Za-z][A-Za-z0-9+.-]*:/.test(value);
-}
-
-// Exported so consumers that look entities up directly (e.g.
-// useLayerTriples' residue filter) can canonicalise raw triple
-// subjects the same way `buildEntities` does — daemon results
-// sometimes ship wrapped (`<urn:...>`) URIs and a raw lookup
-// would miss the entity record.
-export function canonicalEntityUri(uri: string): string {
-  const trimmed = uri.trim();
-  if (trimmed.startsWith('"')) return trimmed;
-  return trimmed.startsWith('<') && trimmed.endsWith('>') ? trimmed.slice(1, -1) : trimmed;
-}
 
 function shortLabel(uri: string): string {
   if (!uri) return '—';
@@ -185,70 +174,35 @@ function deriveEntityLabel(entity: MemoryEntity): string {
   return readableFallbackLabel(entity);
 }
 
-// The daemon owns graph discovery and layer classification. It uses the
-// graph-set index followed by concrete GRAPH IRIs, preserving source-graph
-// attribution without exposing a broad GRAPH-variable query to Oxigraph.
-
-/**
- * Extract the sub-graph slug from a named-graph URI of the shape
- *   did:dkg:context-graph:<cg>/<subGraph>(/...)?
- * Returns undefined for graph URIs outside the expected project scope
- * (e.g. _meta, _shared_memory) so those triples stay un-bucketed.
- */
-export function subGraphOf(gUri: string, cgId: string): string | undefined {
-  const prefix = `did:dkg:context-graph:${cgId}/`;
-  if (!gUri.startsWith(prefix)) return undefined;
-  const tail = gUri.slice(prefix.length);
-  const slash = tail.indexOf('/');
-  const seg = slash >= 0 ? tail.slice(0, slash) : tail;
-  // `assertion` is the WM assertion-graph segment
-  // (`<cg>/assertion/<addr>/<name>`), not a user-facing sub-graph; leaking
-  // it as a slug surfaces a phantom "Assertion" sub-graph chip on entity
-  // detail pages. `meta` is the profile / bookkeeping graph
-  // (`<cg>/meta/_shared_memory`); it's filtered downstream by
-  // `RESERVED_SUB_GRAPH_SLUGS` so it never gets a chip, but pre-filter
-  // it here too so entities with ONLY a `meta` membership don't end up
-  // with `subGraphs = Set{'meta'}` — that produced the GH #806 SWM
-  // layer-mode gap where `All N · Root M` disagreed by the count of
-  // such entities. Filter alongside underscore-prefixed bookkeeping
-  // segments so `entity.subGraphs` stays semantically pure.
-  if (!seg || seg.startsWith('_') || seg === 'assertion' || seg === 'meta') return undefined;
-  return seg;
-}
-
-interface LayerResult { triples: Triple[]; ok: boolean; truncated: boolean }
-
-const LOADING_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
-  wm: 'loading',
-  swm: 'loading',
-  vm: 'loading',
-};
-
-const ERROR_LAYER_STATUS: Record<MemoryLayerKey, MemoryLayerStatus> = {
-  wm: 'error',
-  swm: 'error',
-  vm: 'error',
-};
-
-function normalizeLayer(
-  result: MemoryLayerApiResult | undefined,
-  contextGraphId: string,
-): LayerResult {
-  if (!result?.ok) return { triples: [], ok: false, truncated: false };
-  const triples = result.bindings
-    .map((row) => {
-      const graph = bv(row.g);
-      return {
-        subject: bv(row.s) ?? '',
-        predicate: bv(row.p) ?? '',
-        object: bv(row.o) ?? '',
-        subGraph: graph ? subGraphOf(graph, contextGraphId) : undefined,
-      };
-    })
-    .filter((triple: Triple) => triple.subject && triple.predicate && triple.object);
-  return { triples, ok: true, truncated: result.truncated };
-}
-
+// All three layer queries walk the named-graph space directly with a
+// FILTER on the graph URI, rather than going through the daemon's
+// built-in `view` helpers. Two wins from this:
+//   1. Coverage of per-sub-graph SWM/VM partitions (the built-in views
+//      only resolve to top-level graphs).
+//   2. `?g` projection — every triple comes back tagged with its
+//      source graph so we can assign the sub-graph slug, which drives
+//      SubGraphBar filtering and the Graph Overview grid across all
+//      three layers.
+//
+// The V10 named-graph layout we rely on (see `resolveViewGraphs`
+// in `@origintrail-official/dkg-query` and named KA lifecycle publish):
+//
+//   WM  (drafts)    : did:dkg:context-graph:<cg>/<sg>/assertion/<addr>/<name>
+//   SWM (proposed)  : did:dkg:context-graph:<cg>/<sg>/_shared_memory
+//                     did:dkg:context-graph:<cg>/_shared_memory     (default)
+//   VM  (committed) : did:dkg:context-graph:<cg>/<sg>              (per-sg)
+//                     did:dkg:context-graph:<cg>                   (root)
+//                     did:dkg:context-graph:<cg>/_verifiable_memory/*
+//
+// Key insight: in V10 the plain `<cg>/<sg>` graph IS the committed
+// (chain-attested) view of a sub-graph — that's where
+// publishing to VM (`POST /api/knowledge-assets/:name/vm/publish`) deposits
+// KAs after on-chain registration.
+// We treat it as VM, not WM. Pre-publish writes only exist in
+// `assertion/<addr>/<name>` graphs.
+//
+// Bounded pages replace a silent result cutoff. Later pages can promote an
+// entity to another layer, so per-layer counts describe the loaded preview.
 export function buildEntities(layered: LayeredTriple[]): Map<string, MemoryEntity> {
   const entities = new Map<string, MemoryEntity>();
   const connectionKeys = new Map<string, Set<string>>();
@@ -469,45 +423,12 @@ export function isFirstClassEntity(e: MemoryEntity): boolean {
   return e.types.length > 0 || e.properties.size > 0 || e.connections.length > 0;
 }
 
-const EMPTY_LAYERED_TRIPLES: LayeredTriple[] = [];
-
 export function useMemoryEntities(
   contextGraphId: string,
   opts?: { signalErrors?: boolean; includeQueryCatalog?: boolean },
 ): MemoryData {
-  // Off by default: every existing caller (ProjectView/MemoryStackView/
-  // AgentProfilePage) keeps the original "failed query → empty, never a
-  // hard error" behavior. Only the dashboard opts in so it alone gets
-  // the failed-vs-empty distinction it needs (Codex).
-  const signalErrors = opts?.signalErrors ?? false;
-  const includeQueryCatalog = opts?.includeQueryCatalog ?? false;
-  const { state, refresh } = useMemoryLayersSnapshot(contextGraphId, includeQueryCatalog);
-  const layers = useMemo(() => state.snapshot ? {
-    wm: normalizeLayer(state.snapshot.layers.wm, contextGraphId),
-    swm: normalizeLayer(state.snapshot.layers.swm, contextGraphId),
-    vm: normalizeLayer(state.snapshot.layers.vm, contextGraphId),
-  } : null, [state.snapshot, contextGraphId]);
-  const layeredTriples = useMemo<LayeredTriple[]>(() => layers ? [
-    ...layers.wm.triples.map(t => ({ ...t, layer: 'working' as const })),
-    ...layers.swm.triples.map(t => ({ ...t, layer: 'shared' as const })),
-    ...layers.vm.triples.map(t => ({ ...t, layer: 'verified' as const })),
-  ] : EMPTY_LAYERED_TRIPLES, [layers]);
-  const loading = state.phase === 'loading';
-  const layerStatus: Record<MemoryLayerKey, MemoryLayerStatus> = loading
-    ? LOADING_LAYER_STATUS : layers ? {
-      wm: layers.wm.ok ? 'ok' : 'error',
-      swm: layers.swm.ok ? 'ok' : 'error',
-      vm: layers.vm.ok ? 'ok' : 'error',
-    } : ERROR_LAYER_STATUS;
-  const results = layers ? Object.values(layers) : [];
-  const failed = results.filter(result => !result.ok).length;
-  // Counts remain lower bounds when a readable layer is clipped or another
-  // layer fails. Only the optional total-failure error depends on the caller.
-  const partial = !loading && ((failed > 0 && failed < 3) || results.some(result => result.truncated));
-  const error = !signalErrors || loading ? null : state.phase === 'failed'
-    ? state.failure : failed === 3 ? 'Failed to load memory data' : null;
-
-  const entities = useMemo(() => buildMemoryEntities(layeredTriples), [layeredTriples]);
+  const { triples: visibleTriples, error, ...paging } = useMemoryPages(contextGraphId, opts?.includeQueryCatalog ?? false);
+  const entities = useMemo(() => buildMemoryEntities(visibleTriples), [visibleTriples]);
 
   const entityList = useMemo(() =>
     [...entities.values()]
@@ -526,13 +447,13 @@ export function useMemoryEntities(
 
   const graphTriples = useMemo(() => {
     const seen = new Set<string>();
-    return layeredTriples.filter(t => {
+    return visibleTriples.filter(t => {
       const key = `${t.subject}|${t.predicate}|${t.object}`;
       if (seen.has(key)) return false;
       seen.add(key);
       return true;
     }).map(({ subject, predicate, object, subGraph }) => ({ subject, predicate, object, subGraph }));
-  }, [layeredTriples]);
+  }, [visibleTriples]);
 
   const trustMap = useMemo(() => {
     const m = new Map<string, TrustLevel>();
@@ -553,14 +474,11 @@ export function useMemoryEntities(
   return {
     entities,
     entityList,
-    allTriples: layeredTriples,
+    allTriples: visibleTriples,
     graphTriples,
     trustMap,
     counts,
-    loading,
-    error,
-    partial,
-    layerStatus,
-    refresh,
+    ...paging,
+    error: opts?.signalErrors ? error : null,
   };
 }

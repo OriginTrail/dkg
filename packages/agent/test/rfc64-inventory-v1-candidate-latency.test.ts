@@ -167,9 +167,10 @@ describe('RFC-64 SQL-1 candidate latency and indeterminate-commit boundaries', (
         'SELECT count(*) AS count FROM rfc64_candidate_bucket_loads_v1',
       ).get()?.count).toBe(1);
       inspector.close();
-      expect(() => inventory.purgeNextStartupStaleCandidateBatch()).toThrowError(
-        /unavailable after failed verified reopen/,
-      );
+      expect(inventory.purgeNextStartupStaleCandidateBatch()).toEqual({
+        deletedLoads: 1,
+        done: false,
+      });
     } finally {
       fixture.close();
     }
@@ -348,7 +349,7 @@ describe('RFC-64 SQL-1 candidate latency and indeterminate-commit boundaries', (
       probeAdvance: 10_001,
     },
     {
-      label: 'original 30-second absolute deadline',
+      label: '30-second repair deadline',
       providerAdvance: 25_000,
       probeAdvance: 6_000,
     },
@@ -413,6 +414,279 @@ describe('RFC-64 SQL-1 candidate latency and indeterminate-commit boundaries', (
       }
     });
   }
+});
+
+
+// Prospective regression: resource repair has a separate bounded lifetime;
+// the failed/committed business operation retains its original deadline/outcome.
+describe('RFC-64 SQL-1 repair after the original write deadline', () => {
+  it.each(['committed', 'begin', 'statement', 'rollback'] as const)(
+    'keeps a real Foundation usable after %s crosses the original deadline', async (mode) => {
+      const directory = realpathSync(mkdtempSync(join(tmpdir(), 'dkg-rfc64-repair-budget-')));
+      const foundation = await openInventoryV1(directory);
+      const seed = new DatabaseSync(foundation.databasePath);
+      try { insertEmptyHeader(seed); } finally { seed.close(); }
+      const execOriginal = DatabaseSync.prototype.exec;
+      const prepareOriginal = DatabaseSync.prototype.prepare;
+      const closeOriginal = DatabaseSync.prototype.close;
+      let time = 0;
+      let injected = false;
+      let initial = true;
+      let commits = 0;
+      let rollbacks = 0;
+      let abandoned: DatabaseSync | undefined;
+      let replacement: DatabaseSync | undefined;
+      const closed: DatabaseSync[] = [];
+      const rememberAbandoned = (database: DatabaseSync): void => { abandoned = database; };
+      const rememberReplacement = (database: DatabaseSync): void => { replacement = database; };
+      const clock = vi.spyOn(performance, 'now').mockImplementation(() => time);
+      const close = vi.spyOn(DatabaseSync.prototype, 'close').mockImplementation(function (this: DatabaseSync) {
+        closed.push(this);
+        return closeOriginal.call(this);
+      });
+      const exec = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (this: DatabaseSync, sql: string) {
+        const command = sql.trim().toUpperCase();
+        if (initial && command === 'COMMIT') commits += 1;
+        if (initial && command === 'ROLLBACK') rollbacks += 1;
+        execOriginal.call(this, sql);
+        if (!injected && ((mode === 'committed' && command === 'COMMIT')
+          || (mode === 'begin' && command === 'BEGIN IMMEDIATE')
+          || (mode === 'rollback' && command === 'ROLLBACK'))) {
+          injected = true;
+          rememberAbandoned(this);
+          time = 30_001;
+        }
+      });
+      const prepare = vi.spyOn(DatabaseSync.prototype, 'prepare').mockImplementation(function (this: DatabaseSync, sql: string): StatementSync {
+        if (sql.includes('rfc64_verified_reopen_probe')) rememberReplacement(this);
+        const statement = prepareOriginal.call(this, sql);
+        if (!initial || injected || !sql.includes('FROM rfc64_candidate_bucket_loads_v1')
+          || (mode !== 'statement' && mode !== 'rollback')) return statement;
+        return new Proxy(statement, {
+          get: (target, property) => {
+            if (property !== 'all') return Reflect.get(target, property, target);
+            const all = target.all.bind(target);
+            return (...parameters: Parameters<StatementSync['all']>) => {
+              const result = all(...parameters);
+              if (mode === 'rollback') throw new Error('injected operation failure before rollback');
+              injected = true;
+              rememberAbandoned(this);
+              time = 30_001;
+              return result;
+            };
+          },
+        });
+      });
+      try {
+        if (mode === 'committed') {
+          expect(foundation.purgeNextStartupStaleCandidateBatch()).toEqual({ deletedLoads: 1, done: false });
+        } else {
+          expect(() => foundation.purgeNextStartupStaleCandidateBatch()).toThrowError(
+            expect.objectContaining({ code: 'latency-budget-exceeded' }),
+          );
+        }
+        initial = false;
+        expect(injected).toBe(true);
+        expect(commits).toBe(mode === 'committed' ? 1 : 0);
+        expect(rollbacks).toBe(mode === 'committed' ? 0 : 1);
+        const inspector = new DatabaseSync(foundation.databasePath);
+        try {
+          expect(inspector.prepare('SELECT count(*) AS count FROM rfc64_candidate_bucket_loads_v1').get()?.count)
+            .toBe(mode === 'committed' ? 0 : 1);
+        } finally { inspector.close(); }
+        // Old code returns/throws the correct operation outcome but closes the
+        // healthy replacement solely because the previous deadline expired.
+        expect(foundation.closed).toBe(false);
+        expect(replacement).toBeDefined();
+        expect(replacement !== abandoned).toBe(true);
+        expect(closed.filter(handle => handle === abandoned).length).toBe(1);
+        expect(closed.some(handle => handle === replacement)).toBe(false);
+        expect(foundation.purgeNextStartupStaleCandidateBatch()).toEqual({
+          deletedLoads: mode === 'committed' ? 0 : 1, done: mode === 'committed',
+        });
+        expect(foundation.purgeNextStartupStaleCandidateBatch()).toEqual({ deletedLoads: 0, done: true });
+        expect(() => foundation.createCandidateSession()).not.toThrow();
+        let unexpectedOwner: Awaited<ReturnType<typeof openInventoryV1>> | undefined;
+        try {
+          await expect(openInventoryV1(directory).then(owner => {
+            unexpectedOwner = owner;
+            return owner;
+          })).rejects.toMatchObject({ code: 'database-busy' });
+        } finally { unexpectedOwner?.close(); }
+        foundation.close();
+        expect(closed.filter(handle => handle === replacement).length).toBe(1);
+        const nextOwner = await openInventoryV1(directory);
+        try { expect(nextOwner.closed).toBe(false); } finally { nextOwner.close(); }
+      } finally {
+        prepare.mockRestore(); exec.mockRestore(); close.mockRestore(); clock.mockRestore();
+        foundation.close();
+        rmSync(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.each([false, true])(
+    'does not resolve or replay an expired indeterminate COMMIT (actually committed=%s)', (actuallyCommitted) => {
+      let time = 0;
+      let firstCommit = true;
+      let commitAttempts = 0;
+      let afterReopen = false;
+      const readsAfterReopen: string[] = [];
+      const fixture = createReopenableLatencyDatabase({
+        exec(sql, exec) {
+          if (sql.trim().toUpperCase() === 'COMMIT') {
+            commitAttempts += 1;
+            if (firstCommit) {
+              firstCommit = false;
+              if (actuallyCommitted) exec(sql);
+              time = 30_001;
+              throw new Error('injected unknown COMMIT outcome after expired deadline');
+            }
+          }
+          exec(sql);
+        },
+        prepare(sql, prepare) {
+          if (afterReopen && !sql.includes('rfc64_verified_reopen_probe')) readsAfterReopen.push(sql);
+          return prepare(sql);
+        },
+      });
+      insertEmptyHeader(fixture.database());
+      const provider = vi.fn((previous: DatabaseSync): DatabaseSync => {
+        const replacement = fixture.reopen(previous);
+        afterReopen = true;
+        return replacement;
+      });
+      const inventory = new CandidateInventoryV1(fixture.facade, provider, () => time);
+      try {
+        expect(() => inventory.purgeNextStartupStaleCandidateBatch()).toThrowError(
+          expect.objectContaining({ code: 'latency-budget-exceeded' }),
+        );
+        // A newly verified handle does not extend the failed operation's budget.
+        expect(provider).toHaveBeenCalledOnce();
+        expect(commitAttempts).toBe(1);
+        expect(readsAfterReopen).toEqual([]);
+        const inspector = new DatabaseSync(fixture.path);
+        try {
+          expect(inspector.prepare('SELECT count(*) AS count FROM rfc64_candidate_bucket_loads_v1').get()?.count)
+            .toBe(actuallyCommitted ? 0 : 1);
+        } finally { inspector.close(); }
+        // A new independent operation may proceed; no claimed outcome was
+        // fabricated for the expired ambiguous attempt above.
+        expect(inventory.purgeNextStartupStaleCandidateBatch()).toEqual({
+          deletedLoads: actuallyCommitted ? 0 : 1, done: actuallyCommitted,
+        });
+      } finally { inventory.close(); fixture.close(); }
+    },
+  );
+
+
+  it('repairs again when an actual exact-key resolution read overruns, without replay', () => {
+    let time = 0;
+    let firstCommit = true;
+    let commitAttempts = 0;
+    let reopened = false;
+    let resolutionReads = 0;
+    const fixture = createReopenableLatencyDatabase({
+      exec(sql, exec) {
+        if (sql.trim().toUpperCase() === 'COMMIT') {
+          commitAttempts += 1;
+          if (firstCommit) {
+            firstCommit = false;
+            throw new Error('injected indeterminate COMMIT before execution');
+          }
+        }
+        exec(sql);
+      },
+      prepare(sql, prepare) {
+        const statement = prepare(sql);
+        if (!reopened || resolutionReads !== 0 || !sql.includes('FROM rfc64_candidate_bucket_loads_v1')) return statement;
+        return new Proxy(statement, {
+          get(target, property) {
+            if (property !== 'get') return Reflect.get(target, property, target);
+            const get = target.get.bind(target);
+            return (...parameters: Parameters<StatementSync['get']>) => {
+              const result = get(...parameters);
+              resolutionReads += 1;
+              time = 30_001;
+              return result;
+            };
+          },
+        });
+      },
+    });
+    insertEmptyHeader(fixture.database());
+    const provider = vi.fn((previous: DatabaseSync): DatabaseSync => {
+      const replacement = fixture.reopen(previous);
+      reopened = true;
+      return replacement;
+    });
+    const inventory = new CandidateInventoryV1(fixture.facade, provider, () => time);
+    try {
+      expect(() => inventory.purgeNextStartupStaleCandidateBatch()).toThrowError(
+        expect.objectContaining({ code: 'latency-budget-exceeded' }),
+      );
+      expect(resolutionReads).toBe(1);
+      expect(provider).toHaveBeenCalledTimes(2);
+      expect(commitAttempts).toBe(1);
+      expect(fixture.database().prepare('SELECT count(*) AS count FROM rfc64_candidate_bucket_loads_v1').get()?.count).toBe(1);
+      expect(inventory.purgeNextStartupStaleCandidateBatch()).toEqual({ deletedLoads: 1, done: false });
+    } finally { inventory.close(); fixture.close(); }
+  });
+
+  it.each(['slow-provider', 'slow-probe', 'invalid-probe'] as const)(
+    'rejects a %s replacement after a known committed overrun', (mode) => {
+      let time = 0;
+      let firstCommit = true;
+      let commits = 0;
+      let probeCalls = 0;
+      const fixture = createReopenableLatencyDatabase({
+        exec(sql, exec) {
+          exec(sql);
+          if (sql.trim().toUpperCase() === 'COMMIT') {
+            commits += 1;
+            if (firstCommit) { firstCommit = false; time = 30_001; }
+          }
+        },
+        prepare(sql, prepare) {
+          const statement = prepare(sql);
+          if (!sql.includes('rfc64_verified_reopen_probe')) return statement;
+          return new Proxy(statement, {
+            get(target, property) {
+              if (property !== 'get') return Reflect.get(target, property, target);
+              const get = target.get.bind(target);
+              return (...parameters: Parameters<StatementSync['get']>) => {
+                const row = get(...parameters);
+                probeCalls += 1;
+                if (mode === 'slow-probe') time += 10_001;
+                return mode === 'invalid-probe' ? { rfc64_verified_reopen_probe: 0 } : row;
+              };
+            },
+          });
+        },
+      });
+      let attached: DatabaseSync | null = null;
+      const provider = vi.fn((previous: DatabaseSync): DatabaseSync => {
+        attached = fixture.reopen(previous);
+        if (mode === 'slow-provider') time += 30_001;
+        return attached;
+      });
+      const reject = vi.fn((replacement: DatabaseSync): void => {
+        if (attached === replacement) attached = null;
+        replacement.close();
+      });
+      const inventory = new CandidateInventoryV1(fixture.facade, provider, () => time, reject);
+      try {
+        expect(inventory.purgeNextStartupStaleCandidateBatch()).toEqual({ deletedLoads: 0, done: true });
+        expect(inventory.committedOverruns).toBe(1);
+        expect(commits).toBe(1);
+        expect(provider).toHaveBeenCalledOnce();
+        expect(reject).toHaveBeenCalledOnce();
+        expect(attached).toBeNull();
+        expect(probeCalls).toBe(mode === 'slow-provider' ? 0 : 1);
+        expect(() => inventory.createCandidateSession()).toThrowError(/unavailable after failed verified reopen/);
+      } finally { inventory.close(); fixture.close(); }
+    },
+  );
 });
 
 interface DatabaseHooks {

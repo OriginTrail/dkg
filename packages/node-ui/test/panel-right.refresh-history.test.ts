@@ -5,7 +5,7 @@
 // is mocked per project policy).
 
 import React, { act } from 'react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createRoot } from 'react-dom/client';
 
 const fetchAgentsMock = vi.fn();
@@ -37,11 +37,17 @@ vi.mock('../src/ui/api-wrapper.js', () => ({
   api: {
     fetchMemorySessions: apiFetchMemorySessionsMock,
     fetchCurrentAgent: fetchCurrentAgentMock,
+    fetchContextGraphs: async () => {
+      const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+      return { contextGraphs: useProjectsStore.getState().contextGraphs };
+    },
   },
 }));
 
 describe('PanelRight chat history rehydration on mount (issue #255)', () => {
+  afterEach(() => vi.unstubAllGlobals());
   beforeEach(() => {
+    vi.stubGlobal('EventSource', class { addEventListener() {} close() {} });
     vi.clearAllMocks();
     (globalThis as any).IS_REACT_ACT_ENVIRONMENT = true;
     localStorage.clear();

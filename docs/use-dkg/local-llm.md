@@ -835,6 +835,21 @@ Use Qwen3-8B Q4_K_M, keep one model server running, reduce competing memory
 pressure, and preserve the 8192-token server context. Increase
 `--request-timeout-ms` only after confirming the model is still generating.
 
+### The model rejects the context size
+
+An explicit `exceed_context_size_error` response allows a bounded retry.
+The runtime first omits earlier conversation history, preserving the current
+question, selected Context Graph and completed tool results. It then tries a
+concise answer from those results without sending tool definitions. Completed
+tools are not run again. If the question depends on an identifier from the
+omitted history, the model is told to ask for it. Timeouts and other failures
+are not retried through this recovery path.
+
+A domain profile can declare `requiredTools`. Session initialization fails
+before inference when a required tool is unavailable in the permitted scope.
+Catalog reads with a `catalogSlug` filter select that catalog at the store,
+avoiding retrieval of unrelated historical catalog entries.
+
 ### Inspect the exact interaction
 
 Use `/log`, then open the printed file with `less`. The trace distinguishes

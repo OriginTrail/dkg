@@ -11,7 +11,7 @@ import {
   EXACT_GRAPH_QUERY_BATCH_SIZE,
   MEMORY_LAYER_LIMITS,
   type ContextGraphReader,
-  classifyMemoryGraph,
+  classifyMemoryGraph, planDiagnosticGraphReads,
   readContextGraphNamedGraphStats,
   readMemoryLayers,
 } from '../src/daemon/context-graph-read-model.js';
@@ -80,10 +80,10 @@ describe('context-graph read model', () => {
         { subject: 'urn:ordinary', predicate: 'urn:p', object: 'urn:o', graph: ROOT },
       ]);
       const queryEngine = new DKGQueryEngine(store);
-      const sharedGate = vi.fn(async () => allowed);
-      const agent = { log: { info() {} }, queryEngine,
+      const sharedGate = vi.fn(async () => ({ outcome: allowed ? 'allowed' : 'denied' }));
+      const agent = { store, log: { info() {} }, queryEngine,
         resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed' }),
-        canUseSharedMemoryForContextGraph: sharedGate };
+        resolveSharedMemoryReadAdmission: sharedGate };
       const stats = await readContextGraphNamedGraphStats({
         listGraphs: options => queryEngine.listContextGraphQueryPartitions(CG, options),
         query: async (sparql, options, policy) => {
@@ -149,7 +149,7 @@ describe('context-graph read model', () => {
     expect(classifyMemoryGraph(`${ROOT}-other/notes`, CG)?.layer).toBeUndefined();
   });
 
-  it('plans catalog visibility, qualification and stats authority in one target', () => {
+  it('keeps visible catalog qualification separate from raw diagnostic authority', () => {
     const wm = `${ROOT}/meta/_working_memory/0xabc/1`;
     const swm = `${ROOT}/meta/_shared_memory/0xabc/1`;
     expect(classifyMemoryGraph(wm, CG)).toBeUndefined();
@@ -159,12 +159,10 @@ describe('context-graph read model', () => {
     expect(classifyMemoryGraph(swm, CG, { includeQueryCatalog: true })).toEqual({
       graph: swm, layer: 'swm', catalogQualification: 'query-catalog',
     });
-    expect(classifyMemoryGraph(swm, CG, { purpose: 'named-graph-stats' })).toEqual({
-      graph: swm, layer: 'swm', catalogQualification: 'unqualified',
-    });
-    expect(classifyMemoryGraph(`${ROOT}/_meta`, CG, { purpose: 'named-graph-stats' })).toEqual({
-      graph: `${ROOT}/_meta`, layer: undefined, catalogQualification: 'unqualified',
-    });
+    expect(planDiagnosticGraphReads([swm, `${ROOT}/_meta`], CG)).toEqual([
+      { graph: `${ROOT}/_meta`, requiresSharedMemory: false },
+      { graph: swm, requiresSharedMemory: true },
+    ]);
   });
 
   it('uses graph-index discovery and small exact-IRI batches instead of GRAPH variables or VALUES', async () => {

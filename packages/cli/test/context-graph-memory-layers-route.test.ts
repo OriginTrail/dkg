@@ -84,23 +84,25 @@ describe('memory-layer route', () => {
 
 
   it.each(['denied', 'unavailable'])('does no partition discovery for %s authority', async outcome => {
-    const list = vi.fn();
+    const discover = vi.fn();
     const authority = vi.fn(async () => ({ outcome }));
-    const { ctx, res } = fixture({ resolveContextGraphReadAuthority: authority, listContextGraphQueryPartitions: list });
+    const agent = Object.assign(Object.create(DKGAgent.prototype), {
+      resolveContextGraphReadAuthority: authority, queryEngine: { listContextGraphQueryPartitions: discover },
+    });
+    const { ctx, res } = fixture(agent);
     await handleContextGraphRoutes(ctx);
-    expect(authority).toHaveBeenCalledWith(CG, { callerAgentAddress: '0xcaller', allowSubscriptionFallback: false, authorityReadMode: 'finalized-index' });
-    expect(list).not.toHaveBeenCalled();
+    expect(authority).toHaveBeenCalledTimes(1);
+    expect(authority).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: '0xcaller', allowSubscriptionFallback: false, authorityReadMode: 'finalized-index' }));
+    expect(discover).not.toHaveBeenCalled();
     expect(res.statusCode).toBe(outcome === 'denied' ? 200 : 503);
-    if (outcome === 'unavailable') {
-      expect(res.headers['Retry-After']).toBe('2');
-      expect(JSON.parse(res.body)).not.toHaveProperty('contextGraphId');
-    } else expect(JSON.parse(res.body).layers.wm.bindings).toEqual([]);
+    if (outcome === 'unavailable') expect(res.headers['Retry-After']).toBe('3');
+    else expect(JSON.parse(res.body).layers.wm.bindings).toEqual([]);
   });
 
   it.each(['allowed', 'read-denied', 'swm-denied'] as const)('reads through the real agent methods with %s authority', async permission => {
     const store = new OxigraphStore();
     try {
-      const wm = `${ROOT}/_working_memory/0xagent/1`;
+      const wm = `${ROOT}/_working_memory/0xcaller/1`;
       const swm = `${ROOT}/_shared_memory/0xagent/1`;
       await store.insert([
         { subject: 'urn:assertion', predicate: 'http://dkg.io/ontology/assertionGraph', object: wm, graph: `${ROOT}/_meta` },
@@ -112,7 +114,7 @@ describe('memory-layer route', () => {
         node: { peerId: 'test-node' }, log: { info() {} },
         resolveContextGraphSubscriptionBootstrapAuthority: vi.fn(async () => ({ outcome: 'allowed' })),
         resolveContextGraphReadAuthority: vi.fn(async () => ({ outcome: permission === 'read-denied' ? 'denied' : 'allowed' })),
-        canUseSharedMemoryForContextGraph: vi.fn(async () => permission !== 'swm-denied'),
+        resolveSharedMemoryReadAdmission: vi.fn(async () => ({ outcome: permission === 'swm-denied' ? 'denied' : 'allowed' })),
       }) as DKGAgent;
       const query = vi.spyOn(agent, 'query');
       const list = vi.spyOn(agent, 'listContextGraphQueryPartitions');
@@ -123,13 +125,13 @@ describe('memory-layer route', () => {
       expect([layers.wm.bindings.length, layers.swm.bindings.length, layers.vm.bindings.length])
         .toEqual(permission === 'read-denied' ? [0, 0, 0] : [1, permission === 'swm-denied' ? 0 : 1, 1]);
       if (permission !== 'read-denied') expect(list).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: '0xcaller' }));
-      else expect(list).not.toHaveBeenCalled();
+      else expect(list).toHaveBeenCalledTimes(1);
       expect(agent.resolveContextGraphReadAuthority).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: '0xcaller' }));
       if (permission === 'read-denied') {
         expect(query).not.toHaveBeenCalled();
         return;
       }
-      expect(agent.canUseSharedMemoryForContextGraph).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: '0xcaller' }));
+      expect(agent.resolveSharedMemoryReadAdmission).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: '0xcaller' }));
       expect(query).toHaveBeenCalledTimes(3);
       expect(query.mock.calls.map(([, options]) => options.includeSharedMemory)).toEqual([false, true, false]);
       for (const [sparql, options] of query.mock.calls) {
@@ -169,8 +171,6 @@ describe('memory-layer route', () => {
         resolveContextGraphReadAuthority: vi.fn(async () => ({ outcome: 'unavailable', source: 'registered-chain',
           reason: 'internal-chain-roster-failure', dependency: 'private-roster' })),
       }) as DKGAgent;
-      if (!operator) (agent.resolveContextGraphReadAuthority as ReturnType<typeof vi.fn>)
-        .mockResolvedValueOnce({ outcome: 'allowed' });
       const query = vi.spyOn(agent, 'query');
       const list = vi.spyOn(agent, 'listContextGraphQueryPartitions');
       const { ctx, res } = fixture(agent, undefined, operator);
@@ -186,6 +186,38 @@ describe('memory-layer route', () => {
       expect(res.body).not.toContain(CG);
       expect(res.body).not.toContain('registered-chain');
       expect(res.body).not.toContain('internal-chain-roster-failure');
+    } finally { await store.close(); }
+  });
+});
+
+
+describe('GET /api/sub-graph/list exact count integration', () => {
+  it.each([false, true])('returns aggregate seeded counts and preserves best-effort failure (fail=%s)', async fail => {
+    const store = new OxigraphStore();
+    try {
+      const graphs = [`${ROOT}/notes/_verifiable_memory/author/1`, `${ROOT}/notes/_verifiable_memory/author/2`];
+      await store.insert([
+        { subject: `${ROOT}/notes`, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: 'http://dkg.io/ontology/SubGraph', graph: `${ROOT}/_meta` },
+        { subject: `${ROOT}/notes`, predicate: 'http://schema.org/name', object: '"notes"', graph: `${ROOT}/_meta` },
+        ...graphs.flatMap((graph, i) => Array.from({ length: i + 2 }, (_, n) => ({ subject: `urn:note:${i}:${n}`, predicate: 'urn:p', object: '"v"', graph }))),
+        { subject: 'urn:unrelated', predicate: 'urn:p', object: '"hidden"', graph: `did:dkg:context-graph:unrelated/notes/_verifiable_memory/author/1` },
+      ]);
+      const metadata = { name: 'notes', uri: `${ROOT}/notes`, description: 'Saved notes', createdBy: '0xcaller', createdAt: '2026-10-28' };
+      const agent = Object.assign(Object.create(DKGAgent.prototype), { store, queryEngine: new DKGQueryEngine(store),
+        node: { peerId: 'test-node' }, log: { info() {} },
+        resolveContextGraphReadAuthority: vi.fn(async () => ({ outcome: 'allowed' })),
+        resolveSharedMemoryReadAdmission: vi.fn(async () => ({ outcome: 'allowed' })),
+        listSubGraphs: vi.fn(async () => [metadata]),
+      }) as DKGAgent;
+      if (fail) vi.spyOn(agent, 'query').mockRejectedValue(new Error('temporary store failure'));
+      const { ctx, req, res } = fixture(agent, {}, true);
+      Object.assign(req, { method: 'GET', url: `/api/sub-graph/list?contextGraphId=${CG}` });
+      Object.assign(ctx, { path: '/api/sub-graph/list', url: new URL(`http://localhost/api/sub-graph/list?contextGraphId=${CG}`) });
+      await handleContextGraphRoutes(ctx);
+      expect(res.statusCode).toBe(200);
+      expect(JSON.parse(res.body)).toEqual({ contextGraphId: CG, subGraphs: [
+        { ...metadata, entityCount: fail ? 0 : 5, tripleCount: fail ? 0 : 5 },
+      ] });
     } finally { await store.close(); }
   });
 });

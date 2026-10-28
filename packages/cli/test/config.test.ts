@@ -9,6 +9,7 @@ import { computeNetworkId } from '../../core/src/genesis.js';
 import {
   loadNetworkConfig,
   loadConfig,
+  assertAuthorityIndexConfigPlacement,
   DkgHomeFiles,
   removePid,
   removeApiPort,
@@ -45,6 +46,18 @@ import {
   resolveStorageAckTiming,
 } from '../src/config.js';
 import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
+
+describe('raw authority index placement', () => {
+  it.each([undefined, null, false, 3, 'core', []])('preserves non-mapping core behavior for %j', (core) => {
+    expect(() => assertAuthorityIndexConfigPlacement({ core })).not.toThrow();
+  });
+
+  it('rejects an own misplaced policy before config validation', () => {
+    expect(() => assertAuthorityIndexConfigPlacement({ core: { authorityIndex: {} } }))
+      .toThrow('core.authorityIndex is not supported');
+    expect(() => assertAuthorityIndexConfigPlacement({ core: {} })).not.toThrow();
+  });
+});
 
 describe('resolveContextGraphSubscriptionRehydrationEnabled', () => {
   it('defaults to enabled and preserves explicit config values', () => {
@@ -1595,7 +1608,7 @@ describe('resolveChainConfig (field-level merge)', () => {
     const overlays = [
       { name: 'mainnet-base', primary: 'https://mainnet.base.org', backups: ['https://base-rpc.publicnode.com', 'https://base.drpc.org'] },
       { name: 'mainnet-gnosis', primary: 'https://rpc.gnosischain.com', backups: ['https://gnosis-rpc.publicnode.com', 'https://gnosis.drpc.org'] },
-      { name: 'testnet', primary: 'https://sepolia.base.org', backups: ['https://base-sepolia-rpc.publicnode.com', 'https://base-sepolia.drpc.org'] },
+      { name: 'testnet', primary: 'https://sepolia.base.org', backups: ['https://base-sepolia-rpc.publicnode.com', 'https://base-testnet.api.pocket.network'] },
     ];
     for (const { name, primary, backups } of overlays) {
       _resetNetworkConfigCache();

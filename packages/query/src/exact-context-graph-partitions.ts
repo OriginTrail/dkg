@@ -1,3 +1,5 @@
+import { registeredSubGraphBranches } from './registered-sub-graphs.js';
+import { registeredAssertionGraphPattern, CHILD_CONTEXT_GRAPH_PREDICATES, decodePartitionMetadataFact } from './partition-metadata-facts.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import {
@@ -9,7 +11,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { asGraphWriteRevisionSource, type QueryResult, type TripleStore } from '@origintrail-official/dkg-storage';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
-import { createScopedContentGraphRoutePolicy, isExcludedContentGraphTail, isScopedRoutePartition } from './scoped-content-graph-policy.js';
+import { createScopedContentGraphRoutePolicy, isScopedRoutePartition } from './scoped-content-graph-policy.js';
 import type { QueryOptions } from './query-engine.js';
 
 const METADATA_BATCH_SIZE = 8;
@@ -34,7 +36,7 @@ export async function authorizeExactContextGraphPartitions(
   const relevant = [...new Set(candidates)].filter(graph => {
     if (metadata.has(graph) || graph === root) return true;
     // Judge exclusions below the root, as inventory does, so a CG ID or subgraph named `staging` stays readable.
-    return graph.startsWith(`${root}/`) && !isExcludedContentGraphTail(graph.slice(root.length + 1));
+    return graph.startsWith(`${root}/`);
   });
   const names = new Set<string>();
   const assertionParents = new Set<string>();
@@ -44,7 +46,7 @@ export async function authorizeExactContextGraphPartitions(
     const tail = graph.slice(root.length + 1);
     const first = tail.split('/')[0];
     if (!subGraph && validateSubGraphName(first).valid) names.add(first);
-    if (tail.startsWith('_working_memory/') || tail.includes('/_working_memory/')) {
+    if (tail.startsWith('_working_memory/') || tail.includes('/_working_memory/') || tail.startsWith('assertion/') || tail.includes('/assertion/')) {
       assertionParents.add(graph);
       let offset = graph.indexOf(ASSERTION_NAMED_GRAPH_PREFIX);
       while (offset >= 0) {
@@ -65,18 +67,19 @@ export async function authorizeExactContextGraphPartitions(
   const registeredNames = new Set(subGraph ? [subGraph] : []);
   const registeredAssertions = new Set<string>();
   const clauses = [
-    ...(names.size ? [`{ VALUES ?requestedName { ${[...names].map(name => `"${escapeSparqlLiteral(name)}"`).join(' ')} } ?subGraph a <http://dkg.io/ontology/SubGraph> ; <http://schema.org/name> ?name . FILTER(STR(?name) = ?requestedName) }`] : []),
-    ...(assertionParents.size ? [`{ ?assertion <http://dkg.io/ontology/assertionGraph> ?graph . VALUES ?graph { ${[...assertionParents].map(graph => `<${assertSafeIri(graph)}>`).join(' ')} } }`] : []),
+    ...(names.size ? registeredSubGraphBranches(contextGraphId).map(branch =>
+      `{ ${branch} FILTER(STR(?name) IN (${[...names].map(name => `"${escapeSparqlLiteral(name)}"`).join(', ')})) }`) : []),
+    ...(assertionParents.size ? [`{ ${registeredAssertionGraphPattern(contextGraphId)} VALUES ?assertionGraph {
+      ${[...assertionParents].map(graph => `<${assertSafeIri(graph)}>`).join(' ')} } }`] : []),
   ];
   if (clauses.length) {
-    const graph = contextGraphMetaUri(contextGraphId);
-    observe(graph);
-    const result = await reads.query(`SELECT DISTINCT ?name ?graph WHERE { GRAPH <${graph}> { ${clauses.join(' UNION ')} } }`);
+    observe(contextGraphMetaUri(contextGraphId));
+    const result = await reads.query(`SELECT DISTINCT ?name ?assertionGraph WHERE { ${clauses.join(' UNION ')} }`);
     if (result.type !== 'bindings') throw new Error('Exact partition admission expected SELECT bindings');
     for (const row of result.bindings) {
-      const name = row.name?.replace(/^"/, '').replace(/"(?:\^\^<[^>]+>|@[a-zA-Z-]+)?$/, '');
-      if (name && names.has(name)) registeredNames.add(name);
-      if (row.graph && assertionParents.has(row.graph)) registeredAssertions.add(row.graph);
+      const fact = decodePartitionMetadataFact(row);
+      if (fact.subGraphName && names.has(fact.subGraphName)) registeredNames.add(fact.subGraphName);
+      if (fact.assertionGraph && assertionParents.has(fact.assertionGraph)) registeredAssertions.add(fact.assertionGraph);
     }
   }
   const children = new Set<string>();
@@ -86,11 +89,15 @@ export async function authorizeExactContextGraphPartitions(
     const branches = batch.map(uri => {
       const graph = assertSafeIri(`${uri}/_meta`);
       observe(graph);
-      return `{ GRAPH <${graph}> { { <${uri}> a <https://dkg.network/ontology#ContextGraph> } UNION { <${uri}> <https://dkg.network/ontology#registrationStatus> ?status } } BIND(<${uri}> AS ?ctxGraph) }`;
+      return CHILD_CONTEXT_GRAPH_PREDICATES.map(pattern =>
+        `{ GRAPH <${graph}> { <${uri}> ${pattern} . } BIND(<${uri}> AS ?ctxGraph) }`).join(' UNION ');
     });
     const result = await reads.query(`SELECT DISTINCT ?ctxGraph WHERE { ${branches.join(' UNION ')} }`);
     if (result.type !== 'bindings') throw new Error('Exact partition child-CG admission expected SELECT bindings');
-    for (const row of result.bindings) if (row.ctxGraph && childCandidates.has(row.ctxGraph)) children.add(row.ctxGraph);
+    for (const row of result.bindings) {
+      const child = decodePartitionMetadataFact(row).childContextGraph;
+      if (child && childCandidates.has(child)) children.add(child);
+    }
   }
   return {
     allowed: relevant.filter(graph => isScopedRoutePartition(policy, graph,

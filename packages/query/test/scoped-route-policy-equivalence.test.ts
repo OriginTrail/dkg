@@ -31,15 +31,15 @@ const routes: { name: string; options: QueryOptions; expected: string[] }[] = [
   { name: 'subgraph', options: { subGraphName: 'code', includeSharedMemory: true },
     expected: [...CODE_CONTENT, METADATA[0], METADATA[2], METADATA[3]] },
   { name: 'root SWM-only with shared-memory flag', options: { graphSuffix: '_shared_memory', includeSharedMemory: true },
-    expected: [`${ROOT}/_shared_memory`, `${ROOT}/_shared_memory/author/1`, METADATA[1]] },
+    expected: [ROOT, `${ROOT}/_shared_memory`, `${ROOT}/_shared_memory/author/1`, METADATA[1]] },
   { name: 'subgraph SWM-only with shared-memory flag', options: { subGraphName: 'code', graphSuffix: '_shared_memory', includeSharedMemory: true },
-    expected: [`${CODE}/_shared_memory`, `${CODE}/_shared_memory/author/1`, METADATA[3]] },
+    expected: [CODE, `${CODE}/_shared_memory`, `${CODE}/_shared_memory/author/1`, METADATA[3]] },
 ];
 
 routes.push(...routes.map(route => ({
   name: `${route.name} without convenience shared-memory inclusion`,
   options: { ...route.options, includeSharedMemory: false },
-  expected: route.options.graphSuffix === '_shared_memory' ? route.expected
+  expected: route.options.graphSuffix === '_shared_memory' ? route.expected.filter(graph => graph !== (route.options.subGraphName ? CODE : ROOT))
     : route.expected.filter(graph => graph !== `${route.options.subGraphName ? CODE : ROOT}/_shared_memory`),
 })));
 
@@ -68,8 +68,8 @@ describe('scoped route policy equivalence', () => {
         if (expected.includes(graph)) expect((await read).bindings.length).toBeGreaterThan(0);
         else await expect(read).rejects.toThrow(/Scoped query violation/);
       }
-      if (options.graphSuffix === '_shared_memory') {
-        // The convenience inclusion flag cannot widen an explicit SWM-only route.
+      if (options.graphSuffix === '_shared_memory' && !options.includeSharedMemory) {
+        // Without combined execution, an explicit SWM suffix excludes the data root.
         const data = options.subGraphName ? CODE : ROOT;
         await expect(engine.query(`SELECT ?s WHERE { GRAPH <${data}> { ?s ?p ?o } }`, scoped))
           .rejects.toThrow(/Scoped query violation/);

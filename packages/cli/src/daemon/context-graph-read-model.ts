@@ -67,12 +67,11 @@ function isScopedGraph(graph: string, root: string): boolean {
 /** One admitted graph's complete read plan; builders never reclassify its URI. */
 export interface ContextGraphReadTarget {
   graph: string;
-  layer: MemoryLayerKey | undefined;
+  layer: MemoryLayerKey;
   catalogQualification: 'query-catalog' | 'unqualified';
 }
 
 interface GraphReadPlanningOptions {
-  purpose?: 'memory-layers' | 'named-graph-stats';
   includeQueryCatalog?: boolean;
 }
 
@@ -84,7 +83,6 @@ export function classifyMemoryGraph(
 ): ContextGraphReadTarget | undefined {
   const root = `did:dkg:context-graph:${contextGraphId}`;
   if (!isScopedGraph(graph, root)) return undefined;
-  const stats = options.purpose === 'named-graph-stats';
   const isMeta = graph === `${root}/meta` || graph.includes('/meta/');
   const isSharedMemory = graph.endsWith('/_shared_memory') || graph.includes('/_shared_memory/');
   const catalogTail = graph.startsWith(`${root}/meta/`) ? graph.slice(`${root}/meta/`.length) : '';
@@ -93,8 +91,7 @@ export function classifyMemoryGraph(
   let layer: MemoryLayerKey | undefined;
   let catalogQualification: ContextGraphReadTarget['catalogQualification'] = 'unqualified';
   if (isMeta) {
-    if (stats) layer = isSharedMemory ? 'swm' : catalogLayer;
-    else if (options.includeQueryCatalog && catalogLayer) {
+    if (options.includeQueryCatalog && catalogLayer) {
       layer = catalogLayer;
       catalogQualification = 'query-catalog';
     }
@@ -109,10 +106,7 @@ export function classifyMemoryGraph(
     && !graph.endsWith('/_meta') && !graph.includes('/_private') && !graph.includes('/_rules')) {
     layer = 'vm';
   }
-  // Diagnostic counts include every admitted graph; even hidden catalog SWM
-  // counts retain the same shared-memory authority requirement as layer reads.
-  if (stats && isSharedMemory) layer = 'swm';
-  if (!stats && layer === undefined) return undefined;
+  if (layer === undefined) return undefined;
   return { graph: assertSafeIri(graph), layer, catalogQualification };
 }
 
@@ -140,10 +134,17 @@ ${exactGraphUnion(targets)}${predicateFilter}
 LIMIT ${limit}`;
 }
 
-function buildStatsQuery(targets: readonly ContextGraphReadTarget[]): string {
+export function planDiagnosticGraphReads(graphs: readonly string[], contextGraphId: string) {
+  const root = `did:dkg:context-graph:${contextGraphId}`;
+  return [...new Set(graphs)].sort().filter(graph => isScopedGraph(graph, root)).map(graph => ({
+    graph: assertSafeIri(graph), requiresSharedMemory: graph.endsWith('/_shared_memory') || graph.includes('/_shared_memory/'),
+  }));
+}
+
+function buildStatsQuery(targets: readonly { graph: string }[]): string {
   return `SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
 WHERE {
-${exactGraphUnion(targets)}
+${targets.map(({ graph }) => `{ GRAPH <${graph}> { ?s ?p ?o } BIND(<${graph}> AS ?g) }`).join(" UNION ")}
 }
 GROUP BY ?g`;
 }
@@ -262,9 +263,9 @@ export async function readContextGraphNamedGraphStats(
     source: options.source ?? 'node-ui.sub-graph-stats',
   };
   const discovered = await reader.listGraphs(queryOptions);
-  const targets = planGraphReads(discovered, contextGraphId, { purpose: 'named-graph-stats' });
+  const targets = planDiagnosticGraphReads(discovered, contextGraphId);
   const stats: ContextGraphNamedGraphStats[] = [];
-  const groups = [targets.filter(target => target.layer !== 'swm'), targets.filter(target => target.layer === 'swm')];
+  const groups = [targets.filter(target => !target.requiresSharedMemory), targets.filter(target => target.requiresSharedMemory)];
   for (const [index, group] of groups.entries()) {
     for (let offset = 0; offset < group.length; offset += EXACT_GRAPH_QUERY_BATCH_SIZE) {
       throwIfAborted(queryOptions.signal);

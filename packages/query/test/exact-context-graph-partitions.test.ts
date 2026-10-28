@@ -97,7 +97,7 @@ describe('exact context-graph partition reads', () => {
       expect((await engine.query(query, options)).bindings).toHaveLength(1);
       expect(enumerate).not.toHaveBeenCalled();
       expect(submitted.every(sparql => !/GRAPH\s+\?/i.test(sparql))).toBe(true);
-      expect(submitted.filter(sparql => sparql.includes('assertionGraph')).every(sparql => sparql.includes(`VALUES ?graph { <${WM}> }`))).toBe(true);
+      expect(submitted.filter(sparql => sparql.includes('assertionGraph')).every(sparql => sparql.replace(/\s+/g, " ").includes(`VALUES ?assertionGraph { <${WM}> }`))).toBe(true);
 
       // External stores cannot authorize later batches from a completed cache.
       await inner.deleteByPattern({ subject: 'urn:assertion', predicate: 'http://dkg.io/ontology/assertionGraph', graph: `${ROOT}/_meta` });

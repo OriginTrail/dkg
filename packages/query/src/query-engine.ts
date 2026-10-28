@@ -1,3 +1,4 @@
+import type { DraftAccessPolicy } from './content-partition-policy.js';
 import type { Quad, StoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { GetView } from '@origintrail-official/dkg-core';
 import { TrustLevel } from '@origintrail-official/dkg-core';
@@ -10,6 +11,12 @@ export interface QueryResult {
 export interface QueryOptions {
   contextGraphId?: string;
   timeout?: number;
+  /** Reject compatibility routing that would omit selected graphs. */
+  requireCompleteGraphScope?: boolean;
+  /** Bound HTTP store responses before parsing; embedded stores remain post-checked. */
+  maxResponseBytes?: number;
+  /** Independent bound on hydrated literal bytes; defaults to maxResponseBytes. */
+  maxLiteralHydrationBytes?: number;
   /** Cancel queued and in-flight store work when the caller goes away. */
   signal?: AbortSignal;
   /** Store admission lane. External/API reads should use `background`. */
@@ -34,6 +41,10 @@ export interface QueryOptions {
    * as broad count scans, without GRAPH-variable expansion or route fan-out.
    * Requires includeContextGraphPartitions and rejects GRAPH variables and DESCRIBE. */
   exactContextGraphPartitions?: boolean;
+  /** Include registered subgraph SWM metadata in scoped GRAPH-variable expansion; requires includeContextGraphPartitions. */
+  includeSharedMemoryMeta?: boolean;
+  /** Internal draft policy derived from caller identity; never accept from HTTP input. */
+  draftAccess?: DraftAccessPolicy;
   /**
    * Opt-in: allow the scoped query to explicitly reference the context
    * graph's own `_private` partition (`<cg>/_private`, or the sub-graph
@@ -78,6 +89,13 @@ export interface QueryOptions {
    * queries that don't specify a contextGraphId.
    */
   excludeGraphPrefixes?: string[];
+  /**
+   * Graph IRIs a query without `contextGraphId` must not read, each with every
+   * graph below it (`<iri>/...`). The store answers over its default graph and
+   * every other named graph, whatever the query's patterns; FROM / FROM NAMED
+   * are refused with `WithheldGraphQueryError`. Rejected on scoped queries.
+   */
+  withheldGraphRoots?: readonly string[];
   /**
    * Per-subject trust floor for `verifiable-memory`. Values above
    * `SelfAttested` require every matched subject to carry an explicit
