@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { nonEmptyNamedGraphEnumerationPattern, type TripleStore } from '@origintrail-official/dkg-storage';
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { verifyExactGraphContent } from './exact-graph-content-verifier.js';
 import { assertPublicSnapshotQueryTrust } from './public-snapshot-evidence.js';
@@ -26,10 +26,18 @@ export async function auditSnapshotCheckpoint(store: TripleStore,
       source: 'publicCheckpoint.readback', queryOptions: deadline(30_000) });
     if (checked.status !== 'verified') throw new Error(`Checkpoint readback failed: ${checked.status}`);
   }
-  // sparql-scan-allow: R2 -- Full audit of the isolated read-only bootstrap journal, capped at 8 GiB expanded inputs; never a live Core/Edge store. Must detect unexpected graph content too.
-  const total = await store.query(`SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o }
-    FILTER(?g != <${contextGraphMetaUri(snapshot.contextGraphId)}> && ?g != <urn:dkg:local:public-snapshot-trust>) }`, deadline(30_000));
-  if (total.type !== 'bindings' || Number(stripMetadataLiteral(total.bindings[0]?.n ?? 'NaN')) !== manifest.assets.reduce((n, a) => n + a.publicQuads, 0))
+  // Each asset's exact count and root were read back above. The remaining proof
+  // is that no other nonempty public graph exists, not another scan of every quad.
+  const publicGraphs = new Set(manifest.assets.map(asset => asset.graph));
+  const reserved = [contextGraphMetaUri(snapshot.contextGraphId), 'urn:dkg:local:public-snapshot-trust'];
+  const expected = new Set(manifest.assets.filter(asset => asset.publicQuads > 0).map(asset => asset.graph));
+  const allowed = new Set([...expected, ...reserved]);
+  const graphs = await store.query(`SELECT ?g WHERE { ${nonEmptyNamedGraphEnumerationPattern()} } LIMIT ${allowed.size + 1}`, deadline(30_000));
+  if (publicGraphs.size !== manifest.assets.length || reserved.some(graph => publicGraphs.has(graph)) || graphs.type !== 'bindings')
+    throw new Error('Checkpoint total coverage mismatch');
+  const actual = new Set(graphs.bindings.map(row => row.g));
+  if (actual.size !== graphs.bindings.length || [...actual].some(graph => !graph || !allowed.has(graph))
+    || [...expected].some(graph => !actual.has(graph)))
     throw new Error('Checkpoint total coverage mismatch');
   const positive = await store.query(`ASK { GRAPH <${manifest.assets[0]!.graph}> { ?s ?p ?o } }`, deadline(2_000));
   const negative = await store.query('ASK { GRAPH <urn:dkg:checkpoint:absent> { ?s ?p ?o } }', deadline(2_000));

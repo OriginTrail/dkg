@@ -36,10 +36,31 @@ describe('full native journal readback', () => {
           row.root = literal(`0x${f.manifest.assets[0]!.root}`, 'string'); row.version = literal('1', 'integer');
         }
       }
-      if (result.type === 'bindings' && sparql.includes('COUNT(*) AS ?n')) result.bindings[0]!.n = literal('1', 'integer');
       return result;
     });
     await expect(auditSnapshotCheckpoint(f.store, f.manifest, f.signal)).resolves.toEqual({ assets: 1, publicQuads: 1, fullReadback: true });
+  });
+  it('checks bounded graph inventory without repeating the full quad count', async () => {
+    const f = await fixture(), query = f.store.query.bind(f.store);
+    const calls = vi.spyOn(f.store, 'query').mockImplementation((sparql, options) => {
+      if (sparql.includes('COUNT(*) AS ?n')) throw new Error('Unbounded repeated quad count');
+      return query(sparql, options);
+    });
+    await expect(auditSnapshotCheckpoint(f.store, f.manifest, f.signal)).resolves.toMatchObject({ fullReadback: true });
+    expect(calls.mock.calls.some(([sparql]) => sparql.startsWith('SELECT ?g WHERE') && sparql.endsWith('LIMIT 4'))).toBe(true);
+  });
+  it.each(['missing', 'duplicate', 'unbound', 'unexpected'] as const)('rejects %s graph inventory', async failure => {
+    const f = await fixture(), query = f.store.query.bind(f.store);
+    vi.spyOn(f.store, 'query').mockImplementation((sparql, options) => {
+      if (!sparql.startsWith('SELECT ?g WHERE')) return query(sparql, options);
+      const bindings = [{ g: f.data[0]!.graph }, { g: f.metaGraph }];
+      if (failure === 'missing') bindings.shift();
+      if (failure === 'duplicate') bindings.push(bindings[0]!);
+      if (failure === 'unbound') bindings.push({ g: undefined! });
+      if (failure === 'unexpected') bindings.push({ g: 'urn:unexpected' });
+      return Promise.resolve({ type: 'bindings' as const, bindings });
+    });
+    await expect(auditSnapshotCheckpoint(f.store, f.manifest, f.signal)).rejects.toThrow('coverage mismatch');
   });
   it.each(['rpc-only', 'core-cache'] as const)('verifies every asset, total coverage and bounded queries in %s mode', async mode => {
     const f = await fixture(mode); const query = vi.spyOn(f.store, 'query');
