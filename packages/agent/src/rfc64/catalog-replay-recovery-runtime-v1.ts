@@ -155,6 +155,12 @@ export interface Rfc64CatalogReplayRecoveryStatusV1 {
 }
 
 
+interface ReplayLaunchV1 {
+  readonly contextGraphId: string;
+  readonly initialFullRequest: boolean;
+  readonly owner: Rfc64CatalogReplayExecutionOwnerV1;
+}
+
 interface ReplayRunV1<Target> {
   readonly owner: Rfc64CatalogReplayExecutionOwnerV1;
   readonly evidence: ReplayRunEvidenceV1<Target>;
@@ -353,17 +359,18 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (droppedProviders) this.#bumpRevision(progress);
       return connectionWork?.subscribe(input.signal) ?? Promise.resolve(Object.freeze({ requested: 0, failed: 0 }));
     }
-    const completion = this.#launch(input, progress, connectionWork?.continuation ?? owner);
+    const completion = this.#launch({ contextGraphId: input.contextGraphId,
+      initialFullRequest: input.kind === 'full-connected-peers', owner: connectionWork?.continuation ?? owner }, progress);
     if (connectionWork) { void completion.catch(() => undefined); return connectionWork.subscribe(input.signal); }
     return completion;
   }
 
   /** Install ownership and completion before executing either launch path. */
-  #launch(input: Rfc64CatalogReplayRecoveryCommandV1, progress: ReplayProgressV1<Target>, owner: Rfc64CatalogReplayExecutionOwnerV1): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
+  #launch(input: ReplayLaunchV1, progress: ReplayProgressV1<Target>): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
     const run: ReplayRunV1<Target> = Object.freeze({
-      owner, evidence: new ReplayRunEvidenceV1<Target>((left, right) => this.#mergePromises(left, right), input.kind === 'full-connected-peers'),
+      owner: input.owner, evidence: new ReplayRunEvidenceV1<Target>((left, right) => this.#mergePromises(left, right), input.initialFullRequest),
       chunk: new CatalogReplayChunkV1(),
-      completion: Promise.resolve().then(() => this.#runOwned(input, progress, run)),
+      completion: Promise.resolve().then(() => this.#runOwned(input.contextGraphId, progress, run)),
     });
     progress.run = { kind: 'running', value: run };
     this.#bumpRevision(progress);
@@ -371,7 +378,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   /** One explicit run owns evidence, finite work, identity and completion. */
-  async #runOwned(input: Rfc64CatalogReplayRecoveryCommandV1, progress: ReplayProgressV1<Target>, run: ReplayRunV1<Target>): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
+  async #runOwned(contextGraphId: string, progress: ReplayProgressV1<Target>, run: ReplayRunV1<Target>): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
     const { evidence, chunk, owner } = run;
     let settlement: ReplayRunSettlementV1<Target> | undefined;
     let continuation: Rfc64CatalogReplayExecutionOwnerV1 | null = null;
@@ -386,7 +393,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
             for (let attempt = 0; attempt < 2; attempt += 1) {
               try {
                 owner.signal?.throwIfAborted();
-                const completion = await this.#ports.requestPeer(input.contextGraphId, peerId, owner.signal);
+                const completion = await this.#ports.requestPeer(contextGraphId, peerId, owner.signal);
                 owner.signal?.throwIfAborted();
                 if (completion.status === 'local-unavailable') {
                   // A local fault is not provider evidence: it may neither
@@ -422,7 +429,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           // The announcements admitted above still take their turn behind other
           // graphs' tasks for the receiver's shared slots.
           owner.signal?.throwIfAborted();
-          const drained = await this.#drainedWithinBudget(input.contextGraphId, owner.signal);
+          const drained = await this.#drainedWithinBudget(contextGraphId, owner.signal);
           owner.signal?.throwIfAborted();
           if (!drained) {
             // Budget spent without observing the drain. This says only that
@@ -441,7 +448,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
             // next pass re-arms. The corroboration contract still holds — this
             // pass may not CLEAR a witness, because it observed nothing.
             this.#ports.warn?.(
-              `RFC-64 catalog replay drain for ${input.contextGraphId} exceeded ` +
+              `RFC-64 catalog replay drain for ${contextGraphId} exceeded ` +
               `${RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1}ms; reporting the pass as ` +
               'UNVERIFIED and retaining its worklist. Parity was not observed; the retained ' +
               'heads are not presumed wrong, and no full replay is demanded.',
@@ -461,7 +468,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           owner.signal?.throwIfAborted();
           evidence.unobserved('pending');
           const parityFailed = promised.kind === 'overflow'
-            || await this.#ports.parityFailed(input.contextGraphId, promised.targets);
+            || await this.#ports.parityFailed(contextGraphId, promised.targets);
           owner.signal?.throwIfAborted();
           // A reconnect generation arriving during the durable parity read owns
           // another pass. The worklist budget keeps that fence finite.
@@ -492,7 +499,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       continuation = progress.peerWorklist.pendingContinuation;
       throw error;
     } finally {
-      if (this.#byContextGraph.get(input.contextGraphId) === progress && progress.run.kind === 'running' && progress.run.value === run) {
+      if (this.#byContextGraph.get(contextGraphId) === progress && progress.run.kind === 'running' && progress.run.value === run) {
         const retained = settlement ?? this.#settlement(progress, evidence, continuation !== null, owner.signal?.aborted === true);
         progress.promisedTargets = retained.promisedTargets;
         progress.fullPass = retained.fullPass;
@@ -504,7 +511,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         if (retained.continueQueuedConnections && continuation !== null) {
           // Transfer already-admitted generations without reseeding providers or
           // extending this caller's completion. Exact demand waiters survive.
-          const next = this.#launch({ ...input, kind: 'pending-recovery', signal: continuation.signal }, progress, continuation);
+          const next = this.#launch({ contextGraphId, initialFullRequest: false, owner: continuation }, progress);
           // The owner reports errors to retained waiters even if no new caller joins.
           void next.catch(() => undefined);
         }
