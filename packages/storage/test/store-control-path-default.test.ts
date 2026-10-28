@@ -119,6 +119,13 @@ describe('store.controlReservedSlots', () => {
     expect(config.warnings[0]).toContain('stays off');
   });
 
+  it('states a valid value on one line, normalized, whatever its spacing or case', () => {
+    expect(resolveStoreControlConfig(undefined, { configured: ' Share : 1 ,\n PUBLISHER:2 ' }).reason)
+      .toBe(`${CONFIG}=share:1,publisher:2`);
+    expect(resolveStoreControlConfig('\tpublisher:02\n').reason).toBe(`${STORE_CONTROL_RESERVED_SLOTS_ENV}=publisher:2`);
+    expect(resolveStoreControlConfig(`share:${'9'.repeat(400)}`).reason.length).toBeLessThan(80);
+  });
+
   it('says a blank value is blank, and bounds how much of a long one it repeats', () => {
     expect(resolveStoreControlConfig(undefined, { configured: ' ' }).warnings[0]).toContain('(set but blank)');
     expect(resolveStoreControlConfig(undefined, { configured: 'x'.repeat(500) }).warnings[0].length).toBeLessThan(250);

@@ -108,6 +108,7 @@ function parseStoreControlSetting(raw: string, setting: string, source: 'env' | 
   const slots: Record<StoreControlQueue, number> = { share: 0, publisher: 0 };
   const warnings: string[] = [];
   const seen = new Set<StoreControlQueue>();
+  const shown: string[] = []; // the value as set, normalized (case, spaces, line breaks) for the one-line log
   for (const entry of text.split(',')) {
     const match = /^\s*(share|publisher)\s*:\s*(\d+)\s*$/i.exec(entry);
     if (!match) return refused();
@@ -115,12 +116,13 @@ function parseStoreControlSetting(raw: string, setting: string, source: 'env' | 
     if (seen.has(queue)) return refused();
     seen.add(queue);
     const requested = Number(match[2]);
+    shown.push(`${queue}:${requested}`);
     slots[queue] = Math.min(requested, STORE_CONTROL_MAX_SLOTS[queue]);
     if (requested > STORE_CONTROL_MAX_SLOTS[queue]) {
       warnings.push(`${setting} ${queue}:${requested} is above the cap of ${STORE_CONTROL_MAX_SLOTS[queue]}; using ${slots[queue]}.`);
     }
   }
-  return { slots, source, reason: `${setting}=${text}`, warnings };
+  return { slots, source, reason: `${setting}=${shown.join(',')}`, warnings };
 }
 
 /**
@@ -267,7 +269,7 @@ export function configureStoreControlPath(
   const wanted: StoreControlPathSettings = { backend: next.backend, configured: next.configured };
   if (resolved) {
     const built = resolved.settings;
-    if (built && built.backend === wanted.backend && shownSetting(built.configured) === shownSetting(wanted.configured)) return true;
+    if (built && built.backend === wanted.backend && JSON.stringify(built.configured) === JSON.stringify(wanted.configured)) return true;
     logger.warn(
       `Store control path: configuration refused, the path was already built (${resolved.config.reason}). `
       + `Backend ${wanted.backend ?? 'unset'} and ${STORE_CONTROL_RESERVED_SLOTS_CONFIG_KEY} ${shownSetting(wanted.configured)} `
