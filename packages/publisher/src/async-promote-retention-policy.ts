@@ -46,13 +46,14 @@ import { isAutomaticallyRecoverablePostCommitFailure, requiresManualInspection }
 import { ASYNC_PROMOTE_QUEUE_FORMAT_VERSION, ASYNC_PROMOTE_QUEUE_MIN_AUTO_RECOVERABLE_FORMAT_VERSION, PROMOTE_COMMIT_MARKER_STEPS, PROMOTE_JOB_STATES, type PromoteJob } from './async-promote-queue-types.js';
 import { isPromotePostCommitAttemptError, type StructurallyValidPromoteJobPayload } from './async-promote-queue-utils.js';
 import { isRetiredBoundRejection } from './promote-no-effect-rejection.js';
+import { RETENTION_MODES, RETENTION_WINDOW_MS, type RetentionMode } from './retention-sweep-core.js';
 
 /** The D-6 window of both queues: a deletable job leaves 7 days after it finished. */
-export const SHARE_RETENTION_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+export const SHARE_RETENTION_WINDOW_MS = RETENTION_WINDOW_MS;
 
 /** `off` does nothing, `report` judges and counts what `delete` would remove and removes nothing, `delete` removes it. */
-export const SHARE_RETENTION_MODES = Object.freeze(['off', 'report', 'delete'] as const);
-export type ShareRetentionMode = (typeof SHARE_RETENTION_MODES)[number];
+export const SHARE_RETENTION_MODES = RETENTION_MODES;
+export type ShareRetentionMode = RetentionMode;
 
 export interface PromoteRetentionPolicy {
   /** A `succeeded` job whose `updatedAt` is at least this many ms old may be deleted. Positive, finite. */

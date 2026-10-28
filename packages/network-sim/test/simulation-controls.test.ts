@@ -62,7 +62,7 @@ describe('simulation form and streamed results', () => {
     await ui.click('Play Simulation');
     act(() => source().onerror?.());
     expect(source().close).not.toHaveBeenCalled(); // Leave native EventSource reconnection enabled.
-    expect(store.dispatch).not.toHaveBeenCalledWith({ type: 'COMPLETE_SIMULATION', id: runId() });
+    expect(store.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'COMPLETE_SIMULATION', id: runId() }));
     expect(ui.button('Stop Simulation').disabled).toBe(false);
     expect(ui.field('Total Ops').disabled).toBe(true);
     expect(ui.container.querySelector('[role="status"]')?.textContent).toContain('Connection lost');
@@ -73,6 +73,8 @@ describe('simulation form and streamed results', () => {
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('11/500');
     source().emit({ type: 'done', completed: 500, errors: 1, byOp: queryCounts(499, 1) });
     expect(ui.container.textContent).toContain('Simulation complete: 499 succeeded, 1 failed');
+    expect(store.state.simulationRuns.at(-1)?.outcome?.kind).toBe('completed');
+    expect(ui.field('Simulation Name').value).toBe('Simulation #2');
     expect(source().close).toHaveBeenCalledOnce();
     expect(ui.button('Play Simulation').disabled).toBe(false);
   });
@@ -83,11 +85,11 @@ describe('simulation form and streamed results', () => {
     fetchMock.mockImplementationOnce(() => new Promise<Response>(resolve => { confirm = resolve; }));
     await ui.click('Stop Simulation');
     expect(fetchMock).toHaveBeenLastCalledWith(`/sim/stop?runId=${runId()}`, expect.objectContaining({ method: 'POST', signal: expect.any(AbortSignal) }));
-    expect(store.dispatch).not.toHaveBeenCalledWith({ type: 'COMPLETE_SIMULATION', id: runId() });
+    expect(store.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'COMPLETE_SIMULATION', id: runId() }));
     expect(ui.button('Stop Simulation').disabled).toBe(false);
     await act(async () => confirm(Response.json({ stopped: true, runId: runId() })));
     expect(source().close).toHaveBeenCalledOnce();
-    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId() });
+    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId(), outcome: { kind: 'cancelled' } });
     expect(ui.button('Play Simulation').disabled).toBe(false);
   });
   it.each(['network', 'http'])('retains Stop after a %s cancellation failure and permits retry', async failure => {
@@ -97,13 +99,13 @@ describe('simulation form and streamed results', () => {
     else fetchMock.mockResolvedValueOnce(Response.json({ error: 'unavailable' }, { status: 503 }));
     await ui.click('Stop Simulation');
     expect(source().close).not.toHaveBeenCalled();
-    expect(store.dispatch).not.toHaveBeenCalledWith({ type: 'COMPLETE_SIMULATION', id: runId() });
+    expect(store.dispatch).not.toHaveBeenCalledWith(expect.objectContaining({ type: 'COMPLETE_SIMULATION', id: runId() }));
     expect(ui.button('Stop Simulation').disabled).toBe(false);
     expect(ui.container.querySelector('.sim-summary')).toBeNull();
     fetchMock.mockResolvedValueOnce(Response.json({ stopped: true, runId: runId() }));
     await ui.click('Stop Simulation');
     expect(source().close).toHaveBeenCalledOnce();
-    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId() });
+    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId(), outcome: { kind: 'cancelled' } });
     expect(ui.button('Play Simulation').disabled).toBe(false);
   });
   it.each([true, false])('ignores a late stop response and stream callbacks from a previous run (stopped: %s)', async stopped => {
@@ -149,7 +151,7 @@ describe('simulation form and streamed results', () => {
       await act(async () => stopped(Response.json({ stopped: true, runId: runId() })));
       await act(async () => started(Response.json({ started: true })));
     }
-    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId() });
+    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId(), outcome: { kind: 'cancelled' } });
     expect(ui.button('Play Simulation').disabled).toBe(false);
     expect(TestEventSource.instances.filter(stream => stream.close.mock.calls.length === 0)).toHaveLength(0);
     const calls = vi.mocked(store.dispatch).mock.calls.length;
@@ -237,7 +239,7 @@ describe('simulation form and streamed results', () => {
     expect(ui.container.querySelector('.sim-stat-value')?.textContent).toBe('1/1');
     await ui.click('Stop Simulation');
     expect(source().close).toHaveBeenCalledTimes(1);
-    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId() });
+    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId(), outcome: { kind: 'cancelled' } });
     expect(ui.button('Play Simulation').disabled).toBe(false);
   });
   it.each(['rejected', 'proxy', 'network'])('cleans up a %s start failure', async mode => {
@@ -246,7 +248,7 @@ describe('simulation form and streamed results', () => {
     await ui.click('Play Simulation');
     if (mode !== 'rejected') await act(async () => source().emit({ type: 'unavailable', message: 'Results for this simulation are no longer available.' }));
     else expect(TestEventSource.instances).toEqual([]);
-    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId() });
+    expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId(), outcome: { kind: mode === 'rejected' ? 'start-rejected' : 'cancelled' } });
     expect(ui.button('Play Simulation').disabled).toBe(false);
   });
 });
@@ -365,4 +367,22 @@ describe('run-scoped client recovery', () => {
     }
     expect(store.dispatch).toHaveBeenCalledTimes(calls);
   });
+});
+
+
+it.each(['cancelled', 'start-rejected'] as const)('stores %s without showing a completed summary or resetting the name', async kind => {
+  await ui.fill('Simulation Name', 'Recovery trial');
+  if (kind === 'start-rejected') fetchMock.mockResolvedValueOnce(Response.json({ error: 'rejected' }, { status: 409 }));
+  await ui.click('Play Simulation');
+  if (kind === 'cancelled') await ui.click('Stop Simulation');
+  expect(store.state.simulationRuns.at(-1)?.outcome).toEqual({ kind });
+  expect(store.state.activeSimulationId).toBeNull();
+  const alert = kind === 'cancelled' ? 'Cancellation confirmed' : 'could not be started';
+  expect(ui.container.querySelector('[role="alert"]')?.textContent).toContain(alert);
+  expect(ui.container.querySelector('.sim-summary')).toBeNull();
+  expect(ui.field('Simulation Name').value).toBe('Recovery trial');
+  await ui.click('Query'); await ui.click('Simulate');
+  expect(ui.container.querySelector('[role="alert"]')?.textContent).toContain(alert);
+  expect(ui.container.querySelector('.sim-summary')).toBeNull();
+  expect(ui.field('Simulation Name').value).toBe('Recovery trial');
 });

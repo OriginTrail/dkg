@@ -10,10 +10,13 @@
  *  - builds one sweep per queue whose mode is not `off` from the registered factories and hands them to the one timer (retention-timer.ts). A factory that fails
  *    does not stop the daemon: the failure is logged as an error and that queue runs no retention.
  *
- * P11 registers the publisher's sweep by adding its factory to `RETENTION_SWEEP_FACTORIES`; neither config.ts nor lifecycle.ts changes. Until then a publisher mode
- * other than `off` has no effect, and the starter says so in the log.
+ * Each queue registers its sweep by adding a factory to `RETENTION_SWEEP_FACTORIES`: the share queue's (P10b, retention-share-sweep.ts) and the publisher queue's (P11,
+ * retention-publisher-sweep.ts). A queue with a mode other than `off` and no factory (a build or a test registry without one) gets a warning in the log and no sweep.
+ * The publisher's sweep is built over the daemon's admission instance of the publisher queue, which the daemon hands in as `publisher`.
  */
+import type { VmPublishRetentionAccess } from '@origintrail-official/dkg-publisher';
 import type { ResolvedRetentionConfig } from '../retention-config.js';
+import { publisherRetentionSweepFactory } from './retention-publisher-sweep.js';
 import { shareRetentionSweepFactory } from './retention-share-sweep.js';
 import {
   startRetentionTimer,
@@ -26,8 +29,8 @@ export type RetentionRuntime = 'daemon-admission' | 'standalone-agent' | 'worker
 /** Every queue with a retention section; the registry below holds the factories that exist. */
 export const RETENTION_QUEUES: readonly RetentionQueueName[] = ['share', 'publisher'];
 
-/** One factory per queue. The publisher's (P11) is added here. */
-export const RETENTION_SWEEP_FACTORIES: readonly RetentionSweepFactory[] = [shareRetentionSweepFactory];
+/** One factory per queue. */
+export const RETENTION_SWEEP_FACTORIES: readonly RetentionSweepFactory[] = [shareRetentionSweepFactory, publisherRetentionSweepFactory];
 
 /** Thrown when a runtime other than the daemon's admission instance asks to start retention with a queue mode other than `off`. Nothing was created. */
 export class RetentionRuntimeRefusedError extends Error {
@@ -53,13 +56,15 @@ export interface RetentionStartInput {
   readonly runtime: RetentionRuntime;
   readonly settings: ResolvedRetentionConfig;
   readonly agent: RetentionAgent;
+  /** The daemon's admission instance of the publisher queue; a publisher mode other than `off` needs it (without it the publisher sweep is not started and the log says so). */
+  readonly publisher?: VmPublishRetentionAccess;
   readonly log: (message: string) => void;
   /** Tests only: the registry defaults to `RETENTION_SWEEP_FACTORIES`. */
   readonly factories?: readonly RetentionSweepFactory[];
 }
 
 export function startRetention(input: RetentionStartInput): RetentionHandle {
-  const { runtime, settings, agent, log, factories = RETENTION_SWEEP_FACTORIES } = input;
+  const { runtime, settings, agent, publisher, log, factories = RETENTION_SWEEP_FACTORIES } = input;
   const active = RETENTION_QUEUES.filter(queue => settings[queue].mode !== 'off');
   if (active.length === 0) return INERT;
   if (runtime !== 'daemon-admission') throw new RetentionRuntimeRefusedError(runtime, active);
@@ -72,7 +77,7 @@ export function startRetention(input: RetentionStartInput): RetentionHandle {
       continue;
     }
     try {
-      const sweep = factory.create({ agent, settings, log });
+      const sweep = factory.create({ agent, publisher, settings, log });
       if (sweep) sweeps.push(sweep);
     } catch (cause) {
       log(`[error] [retention] ${queue} retention (mode=${settings[queue].mode}) was NOT started: ${String((cause as Error)?.message ?? cause).slice(0, 300)}. The daemon keeps running with ${queue} retention off.`);

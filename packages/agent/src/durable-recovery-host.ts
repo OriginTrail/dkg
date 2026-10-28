@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { ProveHeldAssets } from './durable-recovery-held-store.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncAdmissionSource, SyncContextGraphPriorityConfig } from './sync/policy.js';
 import type { SyncOperationLane } from './sync/attempt-telemetry.js';
 import type { SyncCheckpointStore } from './sync/checkpoint/state.js';
 import type { DurableSyncContext, DurableSyncFetchRequest } from './sync/requester/durable-sync.js';
+import type { ProveHeldAssets } from './sync/requester/held-assets-contracts.js';
 import type { ExactBatchStreamDriverPorts } from './sync/requester/exact-batch-stream-driver.js';
 import type { DurableRecoveryAuthority, DurableRecoveryInput } from './durable-recovery-authority.js';
 import type { RecoveryMaterialization, RecoveryMaterializationScope, RecoveryMaterializationPorts } from './durable-recovery-materialization.js';

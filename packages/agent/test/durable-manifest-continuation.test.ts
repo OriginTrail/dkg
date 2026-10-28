@@ -28,6 +28,7 @@ import {
 } from '../src/sync/requester/page-fetch.js';
 import {
   runDurableSync,
+  runDurableSyncDetailed, runGraphOwnedDurableSyncDetailed, type DurableSyncContext,
   type DurableMetaContinuation,
   type DurableSyncFetchRequest,
   type DurableSyncGraphScopedStoreRequest,
@@ -207,16 +208,15 @@ function createTwoRoundHarness(
     logDebug: () => {},
   });
 
-  const run = async (round: Round, durableMetaContinuation?: DurableMetaContinuation, durableResumeBoundary?: VerifiedDurableBoundary) => {
+  const runDetailed = async (round: Round, durableMetaContinuation?: DurableMetaContinuation, durableResumeBoundary?: VerifiedDurableBoundary) => {
     currentRound = round;
-    return runDurableSync({
+    const context = {
       ctx,
       remotePeerId,
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
-      storedPrefix: async () => ({ assertCurrent() {}, close() {}, covers: ual => new Set(heldAssetUals).has(ual) }),
+      contentProofs: { assertOwnership() {}, prove: async () => ({ assertCurrent() {}, close() {}, retain() {}, held: new Set(heldAssetUals) }) },
       fetchSyncPages: fetch,
-      durableMetaContinuation, durableResumeBoundary,
       exactAssetSelectionFor: exactAssetUals
         ? () => ({ kind: 'ual-only', assetUals: exactAssetUals })
         : undefined,
@@ -249,10 +249,17 @@ function createTwoRoundHarness(
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
-    });
+    } satisfies DurableSyncContext;
+    if (durableMetaContinuation || durableResumeBoundary) {
+      const { contextGraphIds: _contextGraphIds, exactAssetSelectionFor: _exactAssetSelectionFor, ...shared } = context;
+      return runGraphOwnedDurableSyncDetailed({ ...shared, contextGraphId,
+        recovery: { meta: durableMetaContinuation ?? { requesterScope: 'candidate-test-meta' }, holdings: {}, boundary: durableResumeBoundary } });
+    }
+    return runDurableSyncDetailed(context);
   };
 
-  return { checkpointStore, dataRequests, storedAssetUals, heldAssetUals, run };
+  const run = async (...args: Parameters<typeof runDetailed>) => (await runDetailed(...args)).result;
+  return { checkpointStore, dataRequests, storedAssetUals, heldAssetUals, run, runDetailed };
 }
 
 function makeScenario(
@@ -570,14 +577,14 @@ describe('manifest-bound durable DATA continuation', () => {
 
     // This responder's rows at the boundary belong to the graph before it.
     const continuation: DurableMetaContinuation = { requesterScope: 'durable-recovery-meta:misaligned' };
-    const misaligned = await harness.run({
+    const misaligned = await harness.runDetailed({
       meta,
       dataPage: (offset) => offset === 0 ? [...prefix, ...x[1]!.payload] : offset === prefix.length ? prefix : [],
     }, continuation);
-    expect(misaligned.complete).toBe(false);
+    expect(misaligned.result.complete).toBe(false);
     expect(harness.checkpointStore.get(key)).toBeUndefined();
     // The round tells the recovery owner which boundary the peer's rows refused.
-    expect(continuation.rejectedResumeOffset).toBe(prefix.length);
+    expect('decision' in misaligned ? misaligned.decision.rejectedResumeOffset : undefined).toBe(prefix.length);
 
     harness.dataRequests.length = 0;
     const restarted = await harness.run({
@@ -768,11 +775,11 @@ describe('manifest-bound durable DATA continuation', () => {
     let round = 0;
     let dataFetches = 0;
 
-    const run = () => runDurableSync({
+    const run = async () => (await runGraphOwnedDurableSyncDetailed({
       ctx,
       remotePeerId,
-      contextGraphIds: [contextGraphId],
-      durableMetaContinuation: continuation,
+      contextGraphId,
+      recovery: { meta: continuation, holdings: {} },
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
       fetchSyncPages: async ({ phase, manifestDigest }) => {
         if (phase === 'meta') {
@@ -825,7 +832,7 @@ describe('manifest-bound durable DATA continuation', () => {
       logInfo: () => {},
       logWarn: () => {},
       logDebug: () => {},
-    });
+    })).result;
 
     const first = await run();
     expect(first.complete).toBe(false);
