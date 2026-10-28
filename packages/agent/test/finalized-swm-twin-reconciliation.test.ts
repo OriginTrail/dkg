@@ -17,10 +17,12 @@ import { OxigraphStore, type Quad, type TripleStore } from '@origintrail-officia
 import { ethers } from 'ethers';
 import {
   reconcileFinalizedSwmTwin,
+  reconcileFinalizedSwmTwinFromCommitment,
   reconcileFinalizedSwmTwinFromCatalogProjection,
   reconcileFinalizedSwmTwinFromDescriptor,
   type FinalizedSwmTwinRetirement,
 } from '../src/sync/requester/finalized-swm-twin-reconciliation.js';
+import { commitmentFromVmAsset } from '../src/sync/requester/finalized-vm-asset-commitment.js';
 import { parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
 import type { VerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 
@@ -69,6 +71,9 @@ function fixture(
   ));
   const metaGraph = `did:dkg:context-graph:${CG}/_meta`;
   const metadataQuads: Quad[] = [
+    { subject: UAL, predicate: `${DKG}contentScopeVersion`, object: `"${GRAPH_KA_CONTENT_SCOPE_VERSION}"`, graph: metaGraph },
+    { subject: UAL, predicate: `${DKG}kaUal`, object: UAL, graph: metaGraph },
+    { subject: UAL, predicate: `${DKG}contextGraph`, object: `did:dkg:context-graph:${CG}`, graph: metaGraph },
     { subject: UAL, predicate: `${DKG}assertionVersion`, object: `"3"^^<${XSD_INTEGER}>`, graph: metaGraph },
     { subject: UAL, predicate: `${DKG}assertionGraph`, object: vmGraph, graph: metaGraph },
     { subject: UAL, predicate: `${DKG}status`, object: '"confirmed"', graph: metaGraph },
@@ -773,6 +778,13 @@ describe('durable VM / SWM tier reconciliation', () => {
       descriptor: descriptorFor(input),
       retire,
     })).resolves.toBe('retired-head-residue');
+    // VM arrivals, including held recovery's compact proof, still reject an inexact head.
+    await expect(reconcileFinalizedSwmTwin({
+      store, writeLocks: new Map(), asset: input.asset, retire,
+    })).resolves.toBe('head-missing-or-ambiguous');
+    await expect(reconcileFinalizedSwmTwinFromCommitment({
+      store, writeLocks: new Map(), commitment: commitmentFromVmAsset(input.asset), retire,
+    })).resolves.toBe('head-missing-or-ambiguous');
     // Catalog receipts keep the outcome they had.
     await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
       store,

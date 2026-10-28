@@ -24,13 +24,16 @@ import {
   AsyncLiftRunner,
   QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
+  createPublisherRetention,
   type AsyncLiftPublisherConfig,
+  type PublisherRetentionMode,
 } from '../../src/index.js';
 import { CONTROL_LIFECYCLE_KEY, DEFAULT_CONTROL_GRAPH_URI } from '../../src/async-lift-control-plane.js';
 import { readLiftJournalEntryCount, readLiftQueueDepth } from '../../src/async-queue-depth.js';
 import { kaVmPublishRequest, stageKnowledgeAssetShareSnapshot } from '../../../../scripts/testing/ka-vm-publish.js';
 import { completeResult } from './journal-completion.js';
 import { recordLiftStore, type RecordedStoreCall } from './queue-boundary-oracle.js';
+import { NOW, at, createRetentionTemplates, fin, seedKeyed } from './lift-retention-fixtures.js';
 
 export type PublisherStack = 'atomic' | 'fallback';
 
@@ -247,6 +250,45 @@ export async function runPublisherWakeScenario(
       await runner.stop();
     }
     return { stack, calls, handlerObservations };
+  } finally {
+    await inner.close();
+  }
+}
+
+/**
+ * OT-RFC-73 P11: one retention pass on the same recorded store. Kept out of `runPublisherWorkload` for the same reason as the paging scenario: the base SHA has no
+ * retention. The population (seeded through the inner store, so only the sweep's own calls are recorded) has a key whose records all go, a key an older failed job
+ * keeps, a key with a live successor and a young record; the pass runs to the end of the scan, in slices of two.
+ */
+export async function runPublisherRetentionScenario(
+  stack: PublisherStack,
+  options: { mode: Exclude<PublisherRetentionMode, 'off'>; ambient?: StoreWorkPriority },
+): Promise<WorkloadRun & { readonly deleted: number; readonly wouldDelete: number }> {
+  const inner = new OxigraphStore();
+  try {
+    const { store, calls } = recordLiftStore(inner, stack === 'fallback' ? FALLBACK_HIDDEN : []);
+    await seedKeyed(inner, await createRetentionTemplates(), [
+      fin('a1', 'a', 10), fin('a2', 'a', 20), fin('a3', 'a', 30),
+      at('x', 'b', 'retryable', 10), fin('b1', 'b', 20),
+      fin('c1', 'c', 10), at('c2', 'c', 'accepted', 50),
+      fin('young', 'd', 99.99),
+    ]);
+    const publisher = new TripleStoreAsyncLiftPublisher(store, { ...clockAndIds().config, journalWrites: true });
+    const retention = createPublisherRetention({
+      access: publisher.retentionAccess(), mode: options.mode, intervalMs: 60_000, batchSize: 4, sliceSize: 2,
+      now: () => NOW, monotonicNow: () => 0, logger: { info: () => undefined, warn: () => undefined },
+    });
+    let deleted = 0, wouldDelete = 0;
+    const scope = <T>(work: () => Promise<T>): Promise<T> =>
+      options.ambient === undefined ? work() : withDefaultStoreWorkPriority(options.ambient, work);
+    await scope(async () => {
+      for (let i = 0; i < 6; i++) {
+        const result = await retention.runBatch();
+        deleted += result.deleted; wouldDelete += result.wouldDelete;
+        if (!result.hasMore && result.scanned === 0) break;
+      }
+    });
+    return { stack, calls, handlerObservations: [], deleted, wouldDelete };
   } finally {
     await inner.close();
   }

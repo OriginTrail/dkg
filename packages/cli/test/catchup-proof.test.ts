@@ -21,6 +21,24 @@ describe('catch-up plane proof predicates', () => {
   };
   const emptyPeers = { ...noEvidence, emptyPeers: 2 };
 
+  it('counts a durable round that found its whole generation held as held-content proof', () => {
+    const held = {
+      fetchedMetaTriples: 26,
+      completedPhases: 2,
+      resumedPhases: 1,
+      insertedDataTriples: 0,
+      fetchedDataTriples: 0,
+      verifiedHeldAssets: 6,
+    };
+
+    expect(catchupPeerPlaneEvidence(held, { plane: 'durable', complete: true }))
+      .toMatchObject({ verifiedDataPeers: 0, heldContentPeers: 1 });
+    // Not from an incomplete round, and not from a durable round without that evidence.
+    expect(catchupPeerPlaneEvidence(held, { plane: 'durable', complete: false }).heldContentPeers).toBeUndefined();
+    expect(catchupPeerPlaneEvidence({ ...held, verifiedHeldAssets: 0 }, { plane: 'durable', complete: true }))
+      .toMatchObject({ heldContentPeers: 0 });
+  });
+
   it('treats verified data and verified private-only completions as positive proof', () => {
     expect(catchupPlaneProvenByData({ ...noEvidence, verifiedDataPeers: 1 })).toBe(true);
     expect(catchupPlaneProvenByData({ ...noEvidence, verifiedPrivateOnlyPeers: 1 })).toBe(true);
