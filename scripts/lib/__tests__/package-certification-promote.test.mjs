@@ -313,3 +313,13 @@ test('delayed remote qualification finishes before OTP entry and only local chec
   assert.deepEqual(events, ['acquire', 'qualified', 'acquire', 'qualified', 'otp', 'local integrity']);
   assert.ok(npm.calls.length > 0);
 });
+
+test('promotion says when the release evidence names no nightly run', async t => {
+  for (const [nightly, said] of [[null, true], [{ runId: '123', attempt: 1 }, false]]) {
+    const f = fixture(t), npm = fakeNpm(f), lines = [];
+    await preparedRelease(options(f, npm, { log: line => lines.push(line),
+      prepareEvidence: () => ({ result: { outcome: 'PASS', nightly }, recheckLocalIntegrity: () => {} }) }));
+    assert.equal(lines.includes('Release evidence names no nightly run: it rests on the CI run and the harness profile'), said, lines.join('\n'));
+    assert.ok(npm.calls.length > 0);
+  }
+});

@@ -5,7 +5,33 @@ import path from 'node:path';
 import { prepareReleaseEvidence } from '../release-evidence.mjs';
 import { fixture } from './release-evidence-fixture.mjs';
 test('complete evidence binds package bytes, source, harness and authenticated nightly', t => {
-  assert.equal(fixture(t).verify().outcome, 'PASS');
+  const result = fixture(t).verify();
+  assert.equal(result.outcome, 'PASS');
+  assert.deepEqual(result.nightly, { runId: '123', attempt: 1 });
+});
+for (const nightly of [undefined, null]) {
+  test(`a decision without a nightly run qualifies on CI and the harness: ${nightly}`, t => {
+    const f = fixture(t);
+    f.decision.nightly = nightly;
+    f.options.readNightly = () => assert.fail('no nightly artifact to download');
+    const result = f.verify();
+    assert.equal(result.outcome, 'PASS');
+    assert.equal(result.nightly, null);
+  });
+}
+test('without a nightly run, a failed CI attempt is resolved only by the selected CI run', t => {
+  const f = fixture(t), read = f.options.readRun;
+  delete f.decision.nightly;
+  const old = { ...read('121', 1), conclusion: 'failure', run_started_at: '2026-10-26T10:00:00Z' };
+  f.options.readRunAttempts = () => [old];
+  f.options.readRun = (id, attempt) => String(id) === '121' ? old
+    : { ...read(id, attempt), run_started_at: '2026-10-26T11:00:00Z' };
+  const failure = { runId: '121', attempt: 1, classification: 'test',
+    issue: 'https://github.com/OriginTrail/dkg/issues/3502', supersededBy: { runId: '123', attempt: 1 } };
+  f.decision.priorCiFailures = [failure];
+  assert.throws(f.verify, /unresolved CI failure/);
+  failure.supersededBy = { runId: '122', attempt: 1 };
+  assert.equal(f.verify().outcome, 'PASS');
 });
 for (const [name, damage] of [
   ['stale commit', f => { f.decision.candidate.commit = 'f'.repeat(40); }],
@@ -32,15 +58,16 @@ for (const [name, damage] of [
   f.decision.nightly.receipt = f.write('nightly.json', f.nightly);
   assert.throws(f.verify);
 });
-for (const selected of ['ci', 'nightly']) for (const [field, value, reason] of [
+for (const [selected, withNightly] of [['ci', true], ['nightly', true], ['ci', false]]) for (const [field, value, reason] of [
   ['id', 999, /wrong run ID/],
   ['status', 'in_progress', /run is incomplete/], ['conclusion', 'failure', /run did not succeed/],
   ['head_sha', 'wrong', /different commit/], ['path', '.github/workflows/optional.yml', /wrong workflow/],
   ['run_attempt', 2, /wrong run attempt/], ['repository', { full_name: 'some/fork' }, /wrong run repository/],
   ['event', 'pull_request', /candidate directly/], ['event', 'merge_group', /candidate directly/],
 ]) {
-  test(`release independently refuses ${selected} ${field} mismatch: ${String(value)}`, t => {
+  test(`release independently refuses ${selected} ${field} mismatch${withNightly ? '' : ' without a nightly run'}: ${String(value)}`, t => {
     const f = fixture(t), read = f.options.readRun;
+    if (!withNightly) delete f.decision.nightly;
     f.options.readRun = (id, attempt) => ({ ...read(id, attempt),
       ...(String(id) === f.decision[selected].runId ? { [field]: value } : {}),
     });
@@ -187,7 +214,8 @@ for (const [name, damage] of [
   ['bad run ID', d => { d.ci.runId = '../other'; }],
   ['bad attempt', d => { d.ci.attempt = 0; }],
   ['unsafe attempt', d => { d.ci.attempt = Number.MAX_SAFE_INTEGER + 1; }],
-  ['missing nightly', d => { delete d.nightly; }],
+  ['non-object nightly', d => { d.nightly = 'none'; }],
+  ['nightly without a run ID', d => { delete d.nightly.runId; }],
   ['missing nightly receipt', d => { delete d.nightly.receipt; }],
   ['unsafe receipt path', d => { d.nightly.receipt.file = '../outside.json'; }],
   ['bad receipt hash', d => { d.nightly.receipt.sha256 = 'bad'; }],
@@ -221,3 +249,12 @@ for (const file of ['decision.json', 'nightly.json', 'suite.json']) {
     assert.equal(calls, 0);
   });
 }
+test('without a nightly run the local integrity check still covers the decision and harness receipts', t => {
+  const f = fixture(t);
+  delete f.decision.nightly;
+  f.verify();
+  const prepared = prepareReleaseEvidence(f.options);
+  prepared.recheckLocalIntegrity();
+  f.write('suite.json', {});
+  assert.throws(prepared.recheckLocalIntegrity, /changed evidence: suite\.json/);
+});
