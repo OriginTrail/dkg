@@ -616,4 +616,5 @@ export {
   type VmPublishJobPager,
 } from './lift-job-page.js';
 
+export { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from './workspace-operation-timestamp.js';
 export { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, projectGraphKnowledgeAssetReplayControls } from './graph-knowledge-asset-controls.js';
