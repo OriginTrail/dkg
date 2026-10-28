@@ -1,120 +1,11 @@
-import { inspectPsProcessSync } from '../../packages/cli/src/daemon/process-probe.js';
+import { inspectPsProcessSync, type SyncProcessInspector } from '../../packages/cli/src/daemon/process-probe.js';
 import { planDevnetShutdown, executeDevnetShutdown, parseProcessInventory, collectDevnetNodePids } from '../../scripts/lib/devnet-node-process-control.js';
-// No-devnet tests for the shared node-lifecycle helpers (node-lifecycle.ts): PID files,
-// the ownership rule (only this devnet's own, live PIDs, and only a daemon of this
-// checkout, are ever signalled), port resolution, the readiness probe, and the restart
-// wiring against a stand-in devnet.sh, and which processes the real devnet.sh stop phase signals.
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
-import { createServer, type IncomingHttpHeaders, type Server } from 'node:http';
-import type { AddressInfo } from 'node:net';
-import { tmpdir } from 'node:os';
+import { describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
+import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import {
-  DEFAULT_DEVNET_RPC,
-  clearDeadNodePidFiles,
-  devnetPortEnv,
-  isDaemonOfCheckout,
-  nodeReachable,
-  parsePid,
-  pidAlive,
-  processStateIsGone,
-  readNodePidEntries,
-  readNodePids,
-  readProcessCommandLine,
-  readProcessState,
-  restartNodeAndWait,
-  rpcUrlFromNode1Config,
-  sigkillNodeProcesses,
-  sigkillProcesses,
-  verifiedNodeProcesses,
-  stopNodeProcesses,
-  verifiedNodePids,
-  waitForPidsGone,
-  type DevnetPaths,
-} from './node-lifecycle.js';
-
-let root: string;
-let paths: DevnetPaths;
-const children: ChildProcess[] = [];
-const servers: Server[] = [];
-
-beforeEach(() => {
-  root = mkdtempSync(join(tmpdir(), 'dkg-node-lifecycle-'));
-  paths = { repoRoot: root, devnetDir: join(root, '.devnet') };
-  for (const n of [1, 2, 3, 4, 5]) mkdirSync(join(paths.devnetDir, `node${n}`), { recursive: true });
-});
-
-afterEach(async () => {
-  for (const child of children.splice(0)) {
-    try { child.kill('SIGKILL'); } catch { /* gone */ }
-  }
-  for (const server of servers.splice(0)) await new Promise<void>((resolve) => { server.closeAllConnections(); server.close(() => resolve()); });
-  rmSync(root, { recursive: true, force: true });
-});
-
-const pidFile = (n: number, name: 'daemon.pid' | 'devnet.pid') => join(paths.devnetDir, `node${n}`, name);
-
-/**
- * A live process that only sleeps. By default it looks like what `devnet.sh` leaves running for a
- * node: its command line ends in `<repoRoot>/packages/cli/dist/cli.js daemon-worker`. Pass `plain`
- * for an unrelated process (what a recycled PID would be), or `argv` for exactly the arguments that
- * follow the script (a process that runs from the checkout without being a daemon). `ignoreTerm`
- * makes it survive SIGTERM.
- */
-function sleeper(options: { plain?: boolean; entry?: string; argv?: string[]; ignoreTerm?: boolean } = {}): ChildProcess {
-  const args = ['-e', `${options.ignoreTerm ? "process.on('SIGTERM', () => {}); " : ''}setInterval(() => {}, 1000)`];
-  if (options.argv) args.push(...options.argv);
-  else if (!options.plain) args.push(options.entry ?? join(root, 'packages/cli/dist/cli.js'), 'daemon-worker');
-  const child = spawn(process.execPath, args, { stdio: 'ignore' });
-  children.push(child);
-  return child;
-}
-
-/**
- * A zombie: a process that has exited but has not been collected by its parent (a `sleep` that never
- * waits for it), which is what a just-SIGKILLed daemon is until its parent or init reaps it.
- */
-async function zombie(): Promise<number> {
-  const holder = spawn('sh', ['-c', 'sleep 0.1 & echo $!; exec sleep 60'], { stdio: ['ignore', 'pipe', 'ignore'] });
-  children.push(holder);
-  const pid = await new Promise<number>((resolve, reject) => {
-    holder.stdout!.once('data', (chunk) => resolve(parseInt(String(chunk).trim(), 10)));
-    holder.once('error', reject);
-  });
-  for (let i = 0; i < 50 && !readProcessState(pid)?.startsWith('Z'); i += 1) await new Promise((resolve) => setTimeout(resolve, 100));
-  expect(readProcessState(pid), 'the helper must leave a zombie').toMatch(/^Z/);
-  return pid;
-}
-
-/** A PID that is certainly dead: a child that has already exited and been reaped. */
-function deadPid(): number {
-  const result = spawnSync(process.execPath, ['-e', '0']);
-  return result.pid!;
-}
-
-async function exited(child: ChildProcess): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return true;
-  return new Promise<boolean>((resolve) => {
-    const timer = setTimeout(() => resolve(false), 5_000);
-    child.once('exit', () => { clearTimeout(timer); resolve(true); });
-  });
-}
-
-async function listen(handler: (headers: IncomingHttpHeaders, url: string) => { status: number; hang?: boolean }): Promise<{ port: number; seen: IncomingHttpHeaders[] }> {
-  const seen: IncomingHttpHeaders[] = [];
-  const server = createServer((req, res) => {
-    seen.push(req.headers);
-    const answer = handler(req.headers, req.url ?? '');
-    if (answer.hang) return; // never answers
-    res.writeHead(answer.status, { 'content-type': 'application/json' });
-    res.end('{}');
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  servers.push(server);
-  return { port: (server.address() as AddressInfo).port, seen };
-}
+import { clearDeadNodePidFiles, isDaemonOfCheckout, parsePid, pidAlive, processStateIsGone, readNodePidEntries, readNodePids, readProcessState, sigkillNodeProcesses, sigkillProcesses, verifiedNodeProcesses, stopNodeProcesses, verifiedNodePids, waitForPidsGone } from './node-lifecycle.js';
+import { root, paths, children, pidFile, sleeper, zombie, deadPid, exited, processIdentity } from './node-lifecycle-fixture.js';
 
 describe('PID files', () => {
   it('parsePid reads a pid and returns null for anything that is not one', () => {
@@ -335,7 +226,12 @@ describe('only a daemon of this checkout is ever signalled', () => {
     writeFileSync(pidFile(5, 'daemon.pid'), `${dead}\n`);
     writeFileSync(pidFile(5, 'devnet.pid'), `${dead}\n`);
     const read: number[] = [];
-    const reader = (pid: number) => { read.push(pid); return `${binary} ${join(root, 'packages/cli/dist/cli.js')} daemon-worker`; };
+    const reader: SyncProcessInspector = pid => {
+      const observed = inspectPsProcessSync(pid);
+      if (observed.state !== 'running') return observed;
+      read.push(pid);
+      return { state: 'running', process: { ...observed.process, command: `${binary} ${join(root, 'packages/cli/dist/cli.js')} daemon-worker` } };
+    };
 
     expect(verifiedNodePids(paths, 4, reader)).toEqual([worker.pid, supervisor.pid]);
     expect(read).toEqual([worker.pid, supervisor.pid]);
@@ -381,8 +277,8 @@ describe('only a daemon of this checkout is ever signalled', () => {
   it('a live PID whose command line cannot be read is refused rather than signalled or skipped', () => {
     const worker = sleeper();
     writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
-    expect(() => verifiedNodePids(paths, 4, () => null)).toThrow(`daemon.pid lists pid ${worker.pid}, which is alive but whose command line cannot be read`);
-    expect(() => sigkillNodeProcesses(paths, 4, { readCommandLine: () => null })).toThrow(/cannot be read/);
+    expect(() => verifiedNodePids(paths, 4, () => ({ state: 'unknown', reason: 'unreadable test identity' }))).toThrow(`daemon.pid lists pid ${worker.pid}, which is alive but whose command line cannot be read`);
+    expect(() => sigkillNodeProcesses(paths, 4, { inspect: () => ({ state: 'unknown', reason: 'unreadable test identity' }) })).toThrow(/cannot be read/);
     expect(pidAlive(worker.pid!)).toBe(true);
   });
 
@@ -390,8 +286,8 @@ describe('only a daemon of this checkout is ever signalled', () => {
     const recycled = sleeper({ plain: true });
     writeFileSync(pidFile(4, 'daemon.pid'), `${recycled.pid}\n`);
     const secret = 'super-secret-token-in-argv';
-    expect(() => verifiedNodePids(paths, 4, () => `/usr/bin/tool --token ${secret}`)).toThrow(/not a DKG daemon/);
-    try { verifiedNodePids(paths, 4, () => `/usr/bin/tool --token ${secret}`); } catch (err) {
+    expect(() => verifiedNodePids(paths, 4, () => ({ state: 'running', process: { ...processIdentity(recycled.pid!), command: `/usr/bin/tool --token ${secret}` } }))).toThrow(/not a DKG daemon/);
+    try { verifiedNodePids(paths, 4, () => ({ state: 'running', process: { ...processIdentity(recycled.pid!), command: `/usr/bin/tool --token ${secret}` } })); } catch (err) {
       expect((err as Error).message).not.toContain(secret);
     }
   });
@@ -401,16 +297,16 @@ describe('only a daemon of this checkout is ever signalled', () => {
     for (const entry of new Set([join(root, 'packages/cli/dist/cli.js'), join(real, 'packages/cli/dist/cli.js')])) {
       const worker = sleeper({ entry });
       writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
-      expect(readProcessCommandLine(worker.pid!)).toContain(`${entry} daemon-worker`);
+      expect(processIdentity(worker.pid!).command).toContain(`${entry} daemon-worker`);
       expect(verifiedNodePids(paths, 4)).toEqual([worker.pid]);
       expect(sigkillNodeProcesses(paths, 4)).toEqual([worker.pid]);
       expect(await exited(worker)).toBe(true);
     }
   });
 
-  it('with the real `ps`: readProcessCommandLine returns the argv of a live process and null for one that is gone', () => {
-    expect(readProcessCommandLine(process.pid)).toContain('node');
-    expect(readProcessCommandLine(deadPid())).toBeNull();
+  it('with the real `ps`: inspection returns a complete live identity and distinguishes gone processes', () => {
+    expect(inspectPsProcessSync(process.pid)).toMatchObject({ state: 'running', process: { command: expect.stringContaining('node'), start: expect.any(String), ppid: expect.any(Number) } });
+    expect(inspectPsProcessSync(deadPid())).toEqual({ state: 'gone' });
   });
 
   it('with the real `ps`: an unrelated live process in a PID file is refused and survives', () => {
@@ -489,10 +385,10 @@ describe('one validated devnet shutdown plan', () => {
 
   it('planning retains the exact identity that passed PID-file validation', async () => {
     const worker = sleeper(); writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
-    const original = readProcessCommandLine(worker.pid!)!;
+    const original = processIdentity(worker.pid!).command;
     let reads = 0;
-    const reader = (pid: number) => pid === worker.pid
-      ? (++reads === 1 ? original : 'unrelated replacement process') : readProcessCommandLine(pid);
+    const reader: SyncProcessInspector = pid => pid === worker.pid
+      ? { state: 'running', process: { ...processIdentity(pid), command: ++reads === 1 ? original : 'unrelated replacement process' } } : inspectPsProcessSync(pid);
     const plan = planDevnetShutdown(paths, [4], reader);
     expect(reads).toBe(1);
     expect(plan.identities.get(worker.pid!)).toMatchObject({ command: original });
@@ -503,9 +399,9 @@ describe('one validated devnet shutdown plan', () => {
 
   it('leaves an identity changed after planning alive and preserves its PID file', async () => {
     const worker = sleeper(); writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
-    const original = readProcessCommandLine(worker.pid!)!;
+    const original = processIdentity(worker.pid!).command;
     let identity = original;
-    const reader = (pid: number) => pid === worker.pid ? identity : readProcessCommandLine(pid);
+    const reader: SyncProcessInspector = pid => pid === worker.pid ? { state: 'running', process: { ...processIdentity(pid), command: identity } } : inspectPsProcessSync(pid);
     const plan = planDevnetShutdown(paths, [4], reader);
     identity = `${original} recycled`;
     await expect(executeDevnetShutdown(plan, { graceMs: 0, killWaitMs: 0 })).rejects.toThrow('did not stop');
@@ -520,8 +416,8 @@ describe('one validated devnet shutdown plan', () => {
       marker, join(root, 'packages/cli/dist/cli.js'), 'daemon-worker'], { stdio: ['ignore', 'pipe', 'ignore'] });
     children.push(worker); await new Promise(resolve => worker.stdout!.once('data', resolve));
     writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
-    const original = readProcessCommandLine(worker.pid!)!;
-    const reader = (pid: number) => pid === worker.pid && existsSync(marker) ? `${original} recycled` : readProcessCommandLine(pid);
+    const original = processIdentity(worker.pid!).command;
+    const reader: SyncProcessInspector = pid => pid === worker.pid && existsSync(marker) ? { state: 'running', process: { ...processIdentity(pid), command: `${original} recycled` } } : inspectPsProcessSync(pid);
     const plan = planDevnetShutdown(paths, [4], reader);
     await expect(executeDevnetShutdown(plan, { graceMs: 200, killWaitMs: 0 })).rejects.toThrow('did not stop');
     expect(readFileSync(marker, 'utf8')).toBe('term');
@@ -534,7 +430,7 @@ describe('one validated devnet shutdown plan', () => {
     writeFileSync(pidFile(4, 'daemon.pid'), String(daemon.pid));
     const home = join(paths.devnetDir, 'node4');
     const rows = [
-      [daemon.pid!, 1, '/Program Files/node', readProcessCommandLine(daemon.pid!)!],
+      [daemon.pid!, 1, '/Program Files/node', processIdentity(daemon.pid!).command],
       [detached.pid!, 1, '/tools/oxigraph-v1', `oxigraph --path ${home}/store`],
       [descendant.pid!, daemon.pid!, '/tools/helper', 'helper'],
       [bystander.pid!, 1, '/usr/bin/tail', `tail -f ${home}/daemon.log`],
@@ -545,11 +441,14 @@ describe('one validated devnet shutdown plan', () => {
       rows.map(([pid, parent, , command]) => `${pid} ${parent} S ${processIdentity(pid).start} ${command}`).join('\n'));
     expect(inventory.records.get(daemon.pid!)?.executable).toBe('node');
     expect(inventory.childrenByParent.get(daemon.pid!)).toEqual([descendant.pid]);
-    const consistent = (pid: number) => rows.find(row => row[0] === pid)?.[3] ?? null;
+    const consistent: SyncProcessInspector = pid => {
+      const record = inventory.records.get(pid);
+      return record ? { state: 'running', process: record } : { state: 'gone' };
+    };
     expect(collectDevnetNodePids(paths, 4, consistent, inventory).sort()).toEqual([daemon.pid, detached.pid, descendant.pid].sort());
     expect(pidAlive(bystander.pid!)).toBe(true);
     // The real command differs from both synthetic detached/helper inventory identities.
-    expect(collectDevnetNodePids(paths, 4, readProcessCommandLine, inventory)).toEqual([daemon.pid]);
+    expect(collectDevnetNodePids(paths, 4, inspectPsProcessSync, inventory)).toEqual([daemon.pid]);
     expect(pidAlive(detached.pid!)).toBe(true);
     expect(pidAlive(descendant.pid!)).toBe(true);
   });
@@ -659,366 +558,3 @@ describe('stopNodeProcesses', () => {
   });
 });
 
-describe('port resolution', () => {
-  const writeNode1Config = (config: unknown) => writeFileSync(join(paths.devnetDir, 'node1', 'config.json'), JSON.stringify(config));
-
-  it('rpcUrlFromNode1Config returns node1\'s chain.rpcUrl, else the devnet default (also for a missing file)', () => {
-    expect(rpcUrlFromNode1Config(paths.devnetDir)).toBe(DEFAULT_DEVNET_RPC); // no config file yet
-    writeNode1Config({ apiPort: 9201 });
-    expect(rpcUrlFromNode1Config(paths.devnetDir)).toBe(DEFAULT_DEVNET_RPC);
-    writeNode1Config({ chain: { rpcUrl: 'http://127.0.0.1:8600' } });
-    expect(rpcUrlFromNode1Config(paths.devnetDir)).toBe('http://127.0.0.1:8600');
-    writeFileSync(join(paths.devnetDir, 'node1', 'config.json'), '{ not json');
-    expect(rpcUrlFromNode1Config(paths.devnetDir)).toBe(DEFAULT_DEVNET_RPC);
-  });
-
-  it('devnetPortEnv takes the Hardhat port from the rpcUrl the suite passes and the API / libp2p bases from node1\'s config', () => {
-    writeNode1Config({ apiPort: 9301, listenPort: 10101, chain: { rpcUrl: 'http://127.0.0.1:8545' } });
-    // The suite's choice wins over what the config records (core-peers-features passes DEVNET_RPC).
-    expect(devnetPortEnv(paths.devnetDir, 'http://127.0.0.1:8600')).toEqual({
-      HARDHAT_PORT: '8600',
-      API_PORT_BASE: '9301',
-      LIBP2P_PORT_BASE: '10101',
-    });
-    // The other policy: the config's own RPC (swm-host-store-durability).
-    expect(devnetPortEnv(paths.devnetDir, rpcUrlFromNode1Config(paths.devnetDir)).HARDHAT_PORT).toBe('8545');
-  });
-
-  it('devnetPortEnv falls back to the devnet defaults for a URL without a port and for a config without the fields', () => {
-    writeNode1Config({});
-    expect(devnetPortEnv(paths.devnetDir, 'http://rpc.local')).toEqual({
-      HARDHAT_PORT: '8545',
-      API_PORT_BASE: '9201',
-      LIBP2P_PORT_BASE: '10001',
-    });
-  });
-
-  it('devnetPortEnv throws when node1\'s config is missing, so a restart cannot run with guessed ports', () => {
-    expect(() => devnetPortEnv(paths.devnetDir, DEFAULT_DEVNET_RPC)).toThrow(/config\.json/);
-  });
-});
-
-describe('nodeReachable', () => {
-  it('is true for a 200 from /api/status and sends the bearer token only when asked to', async () => {
-    const api = await listen((_headers, url) => ({ status: url === '/api/status' ? 200 : 404 }));
-
-    expect(await nodeReachable(api.port)).toBe(true);
-    expect(api.seen.at(-1)?.authorization).toBeUndefined();
-    // The request core-peers-features has always made: plain http GET with a JSON content type.
-    expect(api.seen.at(-1)?.['content-type']).toBe('application/json');
-
-    expect(await nodeReachable(api.port, { authToken: 'secret-token' })).toBe(true);
-    expect(api.seen.at(-1)?.authorization).toBe('Bearer secret-token');
-  });
-
-  it('is false for any other status and when nothing listens', async () => {
-    const unavailable = await listen(() => ({ status: 503 }));
-    expect(await nodeReachable(unavailable.port)).toBe(false);
-    const forbidden = await listen(() => ({ status: 401 }));
-    expect(await nodeReachable(forbidden.port, { authToken: 'x' })).toBe(false);
-
-    const closed = await listen(() => ({ status: 200 }));
-    await new Promise<void>((resolve) => { servers[servers.length - 1]!.close(() => resolve()); });
-    expect(await nodeReachable(closed.port)).toBe(false);
-  });
-
-  it('gives up on a node that accepts the connection but never answers once timeoutMs is set', async () => {
-    const hung = await listen(() => ({ status: 200, hang: true }));
-    const started = Date.now();
-    expect(await nodeReachable(hung.port, { timeoutMs: 300 })).toBe(false);
-    expect(Date.now() - started).toBeLessThan(3_000);
-  });
-});
-
-describe('restartNodeAndWait', () => {
-  let out: string;
-  let previousOut: string | undefined;
-
-  beforeEach(() => {
-    out = join(root, 'devnet-sh-call.txt');
-    previousOut = process.env.FAKE_DEVNET_OUT;
-    process.env.FAKE_DEVNET_OUT = out;
-    mkdirSync(join(root, 'scripts'));
-    writeFileSync(
-      join(root, 'scripts/devnet.sh'),
-      [
-        '#!/usr/bin/env bash',
-        '{',
-        '  echo "args=$*"',
-        '  echo "cwd=$(pwd -P)"',
-        '  echo "HARDHAT_PORT=$HARDHAT_PORT"',
-        '  echo "API_PORT_BASE=$API_PORT_BASE"',
-        '  echo "LIBP2P_PORT_BASE=$LIBP2P_PORT_BASE"',
-        '} > "$FAKE_DEVNET_OUT"',
-      ].join('\n'),
-    );
-    chmodSync(join(root, 'scripts/devnet.sh'), 0o755);
-    writeFileSync(
-      join(paths.devnetDir, 'node1', 'config.json'),
-      JSON.stringify({ apiPort: 9333, listenPort: 10222 }),
-    );
-  });
-
-  afterEach(() => {
-    if (previousOut === undefined) delete process.env.FAKE_DEVNET_OUT;
-    else process.env.FAKE_DEVNET_OUT = previousOut;
-  });
-
-  it('runs `devnet.sh restart-node <n>` from the repo root with the devnet port environment, then waits for the node', async () => {
-    const api = await listen(() => ({ status: 200 }));
-
-    await restartNodeAndWait(paths, {
-      num: 4,
-      apiPort: api.port,
-      rpcUrl: 'http://127.0.0.1:8777',
-      label: 'node4 back',
-      timeoutMs: 5_000,
-      pollIntervalMs: 50,
-      probe: { authToken: 'tok' },
-    });
-
-    expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual([
-      'args=start-node 4',
-      // pwd -P resolves the tmpdir symlink (/var -> /private/var on macOS).
-      `cwd=${spawnSync('bash', ['-c', 'pwd -P'], { cwd: root, encoding: 'utf8' }).stdout.trim()}`,
-      'HARDHAT_PORT=8777',
-      'API_PORT_BASE=9333',
-      'LIBP2P_PORT_BASE=10222',
-    ]);
-    expect(api.seen.at(-1)?.authorization).toBe('Bearer tok');
-  });
-
-  it('stops the node\'s verified daemons first, then runs `devnet.sh restart-node`, which finds no live PID-file entry left', async () => {
-    const worker = sleeper();
-    const supervisor = sleeper();
-    writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
-    writeFileSync(pidFile(4, 'devnet.pid'), `${supervisor.pid}\n`);
-    // The stand-in script records what the real one would have found to signal.
-    writeFileSync(
-      join(root, 'scripts/devnet.sh'),
-      [
-        '#!/usr/bin/env bash',
-        `for f in ${JSON.stringify(pidFile(4, 'daemon.pid'))} ${JSON.stringify(pidFile(4, 'devnet.pid'))}; do`,
-        '  [ -f "$f" ] && echo "left=$f" >> "$FAKE_DEVNET_OUT"',
-        'done',
-        'echo "args=$*" >> "$FAKE_DEVNET_OUT"',
-      ].join('\n'),
-    );
-    const api = await listen(() => ({ status: 200 }));
-
-    await restartNodeAndWait(paths, {
-      num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 back', timeoutMs: 5_000, pollIntervalMs: 50,
-    });
-
-    expect(await exited(worker)).toBe(true);
-    expect(await exited(supervisor)).toBe(true);
-    expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(['args=start-node 4']);
-  });
-
-  it('restarting right after a SIGKILL works: the killed daemon is a zombie for a moment, not an unrelated process', async () => {
-    writeFileSync(pidFile(4, 'daemon.pid'), `${await zombie()}\n`);
-    const api = await listen(() => ({ status: 200 }));
-
-    await restartNodeAndWait(paths, {
-      num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 back', timeoutMs: 5_000, pollIntervalMs: 50,
-    });
-
-    expect(readFileSync(out, 'utf8').split('\n')[0]).toBe('args=start-node 4');
-  });
-
-  it('a live unrelated PID in devnet.pid rejects the restart before devnet.sh runs, and leaves it and the legitimate worker alive', async () => {
-    const worker = sleeper();
-    const unrelated = sleeper({ plain: true }); // a recycled number
-    writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
-    writeFileSync(pidFile(4, 'devnet.pid'), `${unrelated.pid}\n`);
-    const api = await listen(() => ({ status: 200 }));
-
-    await expect(
-      restartNodeAndWait(paths, {
-        num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 back', timeoutMs: 1_000, pollIntervalMs: 50,
-      }),
-    ).rejects.toThrow(`node4: devnet.pid lists pid ${unrelated.pid}, which is alive but is not a DKG daemon`);
-
-    expect(existsSync(out), 'devnet.sh must not run, its stop phase would signal the recycled PID').toBe(false);
-    expect(api.seen).toEqual([]);
-    await new Promise((resolve) => setTimeout(resolve, 300));
-    expect(pidAlive(unrelated.pid!)).toBe(true);
-    expect(pidAlive(worker.pid!)).toBe(true);
-  });
-
-  it('polls until the node answers, and fails with the label and the timeout when it never does', async () => {
-    let answers = 0;
-    const flaky = await listen(() => ({ status: ++answers < 3 ? 503 : 200 }));
-    await restartNodeAndWait(paths, {
-      num: 4, apiPort: flaky.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 back', timeoutMs: 5_000, pollIntervalMs: 20,
-    });
-    expect(answers).toBeGreaterThanOrEqual(3);
-
-    const down = await listen(() => ({ status: 503 }));
-    await expect(
-      restartNodeAndWait(paths, {
-        num: 4, apiPort: down.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 never back', timeoutMs: 300, pollIntervalMs: 50,
-      }),
-    ).rejects.toThrow('timed out after 300ms waiting for: node4 never back');
-  });
-
-  it('does not wait on a node when devnet.sh itself fails', async () => {
-    writeFileSync(join(root, 'scripts/devnet.sh'), '#!/usr/bin/env bash\nexit 3\n');
-    const api = await listen(() => ({ status: 200 }));
-    await expect(
-      restartNodeAndWait(paths, {
-        num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'x', timeoutMs: 1_000, pollIntervalMs: 50,
-      }),
-    ).rejects.toThrow();
-    expect(api.seen).toEqual([]);
-  });
-});
-
-// The stop phase of `devnet.sh restart-node` (`stop_devnet_node_processes`) reaps the node's
-// processes by scanning the process table for the node's home directory. It must find the
-// node's own processes (daemon, helpers, a managed store binary) and nothing else: a
-// `tail -f <home>/daemon.log` (what `devnet.sh logs 4` runs) only mentions the home.
-describe('devnet.sh stop phase: which processes that mention the node home it signals', () => {
-  const devnetSh = join(import.meta.dirname, '../../scripts/devnet.sh');
-  const home = () => join(paths.devnetDir, 'node4');
-  const env = () => ({ ...process.env, DEVNET_DIR: paths.devnetDir });
-  const strayPids: number[] = [];
-
-  afterEach(() => {
-    for (const pid of strayPids.splice(0)) {
-      try { process.kill(pid, 'SIGKILL'); } catch { /* gone */ }
-    }
-  });
-
-  /** Sources the real script and runs `body`, without blocking this process (children of the test must still be reaped). */
-  const run = (body: string, extraEnv: Record<string, string> = {}) =>
-    new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-      const bash = spawn('bash', ['-c', `DEVNET_SOURCE_ONLY=1 source "${devnetSh}"; ${body}`], { env: { ...env(), ...extraEnv } });
-      let stdout = '';
-      let stderr = '';
-      bash.stdout.on('data', (chunk) => { stdout += chunk; });
-      bash.stderr.on('data', (chunk) => { stderr += chunk; });
-      bash.once('error', reject);
-      bash.once('close', (status) => resolve({ status, stdout, stderr }));
-    });
-
-  /** A `tail -f <home>/daemon.log`: names the home, is not part of the node. */
-  function logTail(): ChildProcess {
-    writeFileSync(join(home(), 'daemon.log'), 'line\n');
-    const child = spawn('tail', ['-f', join(home(), 'daemon.log')], { stdio: 'ignore' });
-    children.push(child);
-    return child;
-  }
-
-  /** A node process that mentions the home in its arguments (a daemon helper). */
-  const homeNode = () => sleeper({ argv: [join(home(), 'work')] });
-
-  /** A process named like the managed store binary (`oxigraph-v<version>`) working in the home. */
-  function homeStore(): ChildProcess {
-    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', join(home(), 'store')], {
-      argv0: 'oxigraph-v0.0.0',
-      stdio: 'ignore',
-    });
-    children.push(child);
-    return child;
-  }
-
-  const alive = (child: ChildProcess) => child.exitCode === null && child.signalCode === null && pidAlive(child.pid!);
-  it('collects and stops harmlessly before a devnet directory exists', async () => {
-    rmSync(paths.devnetDir, { recursive: true, force: true });
-    expect(await run('collect_devnet_node_pids')).toMatchObject({ status: 0, stdout: '\n' });
-    expect(await run('stop_devnet_node_processes')).toMatchObject({ status: 0 });
-    // Other filesystem faults remain visible.
-    writeFileSync(paths.devnetDir, 'not a directory');
-    expect((await run('collect_devnet_node_pids')).status).not.toBe(0);
-  });
-
-  const collected = async () => (await run('collect_devnet_node_pids 4')).stdout.split(/\s+/).filter(Boolean).map(Number);
-
-  it('stops a recorded alternate-version daemon in a separate invocation with a changed layout', async () => {
-    const entry = join(root, 'alternate build', 'packages/cli/dist/cli.js');
-    const worker = sleeper({ entry }); writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
-    expect(await run('record_node_cli_entry 4 "$TEST_CLI_ENTRY"', {
-      TEST_CLI_ENTRY: entry, DEVNET_VERSION_LAYOUT: 'all:current,edges:prev',
-    })).toMatchObject({ status: 0 });
-    const result = await run('unset DEVNET_VERSION_LAYOUT; stop_devnet_node_processes 4');
-    expect(result.status, result.stderr).toBe(0);
-    expect(await exited(worker)).toBe(true);
-    expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(false);
-  });
-
-  it('lists a node process and a managed store binary that mention the home, and not a log tail', async () => {
-    const node = homeNode();
-    const store = homeStore();
-    const tail = logTail();
-    const pids = await collected();
-    expect(pids).toEqual(expect.arrayContaining([node.pid, store.pid]));
-    expect(pids).not.toContain(tail.pid);
-  });
-
-  it('lists a node process whose executable path contains a space (a checkout under a directory with a space in its name)', async () => {
-    const spaced = join(root, 'my projects');
-    mkdirSync(spaced);
-    symlinkSync(process.execPath, join(spaced, 'node'));
-    const child = spawn(join(spaced, 'node'), ['-e', 'setInterval(() => {}, 1000)', join(home(), 'work')], { stdio: 'ignore' });
-    children.push(child);
-    expect(await collected()).toContain(child.pid);
-  });
-
-  it('does not list a process that mentions another node\'s home', async () => {
-    const other = sleeper({ argv: [join(paths.devnetDir, 'node5', 'work')] });
-    expect(await collected()).not.toContain(other.pid);
-  });
-
-  it('stops the node\'s own processes and leaves the log tail running', async () => {
-    const node = homeNode();
-    const store = homeStore();
-    const tail = logTail();
-    const result = await run('stop_devnet_node_processes 4');
-    expect(result.status, result.stderr).toBe(0);
-    expect(await exited(node), 'the node process is reaped').toBe(true);
-    expect(await exited(store), 'the managed store binary is reaped').toBe(true);
-    expect(alive(tail), 'the log tail is a bystander').toBe(true);
-  });
-
-  it('restartNodeAndWait, through the real script\'s restart-node, leaves a log tail alone', async () => {
-    // The real script's restart-node with only start_node replaced by a recorder.
-    mkdirSync(join(root, 'scripts'), { recursive: true });
-    writeFileSync(
-      join(root, 'scripts/devnet.sh'),
-      [
-        '#!/usr/bin/env bash',
-        `export DEVNET_DIR="${paths.devnetDir}"`,
-        `DEVNET_SOURCE_ONLY=1 source "${devnetSh}"`,
-        'start_node() { echo "start_node $1" >> "$DEVNET_DIR/start-node-called"; }',
-        'if [ "$1" = start-node ]; then start_node "$2"; else cmd_restart_node "$@"; fi',
-      ].join('\n'),
-    );
-    writeFileSync(join(paths.devnetDir, 'node1', 'config.json'), JSON.stringify({ apiPort: 9333, listenPort: 10222 }));
-    // restartNodeAndWait blocks this process while the script runs, so a child of ours that the
-    // script kills would stay a zombie (the script waits on it) until it returns. A node's own
-    // processes are not children of the caller: start the store from a launcher that exits.
-    const launcher = spawnSync(
-      process.execPath,
-      ['-e', "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', process.argv[1]], { argv0: 'oxigraph-v0.0.0', detached: true, stdio: 'ignore' }); c.unref(); console.log(c.pid)", join(home(), 'store')],
-      { encoding: 'utf8' },
-    );
-    const storePid = Number(launcher.stdout.trim());
-    strayPids.push(storePid);
-    expect(pidAlive(storePid), 'the stand-in store must be running before the restart').toBe(true);
-    const tail = logTail();
-    const api = await listen(() => ({ status: 200 }));
-    await restartNodeAndWait(paths, {
-      num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'x', timeoutMs: 5_000, pollIntervalMs: 50,
-    });
-    expect(readFileSync(join(paths.devnetDir, 'start-node-called'), 'utf8')).toBe('start_node 4\n');
-    expect(pidAlive(storePid), 'the managed store binary is reaped by the stop phase').toBe(false);
-    expect(alive(tail), 'the log tail survives the restart').toBe(true);
-  });
-});
-
-function processIdentity(pid: number) {
-  const observed = inspectPsProcessSync(pid);
-  if (observed.state !== 'running') throw new Error(`Test process ${pid} is not running`);
-  return observed.process;
-}

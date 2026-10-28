@@ -346,6 +346,7 @@ export default defineConfig({
           'test/oxigraph-orphan-policy.test.ts',
           'test/oxigraph-reclaim-policy.test.ts',
           'test/oxigraph-orphan-native.test.ts',
+          'test/process-inventory.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so

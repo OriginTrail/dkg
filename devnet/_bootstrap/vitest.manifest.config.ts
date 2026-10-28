@@ -12,11 +12,12 @@ const suiteManifestTest = resolve(import.meta.dirname, 'suite-manifest.test.ts')
 const harnessQueryTest = resolve(import.meta.dirname, 'harness-query.test.ts').replace(/\\/g, '/');
 const selectResponseTest = resolve(import.meta.dirname, 'select-response.test.ts').replace(/\\/g, '/');
 const queryNodeTest = resolve(import.meta.dirname, 'query-node.test.ts').replace(/\\/g, '/');
-const nodeLifecycleTest = resolve(import.meta.dirname, 'node-lifecycle.test.ts').replace(/\\/g, '/');
+const nodeLifecycleTests = ['ownership', 'readiness', 'shell'].map(suite =>
+  resolve(import.meta.dirname, `node-lifecycle-${suite}.test.ts`).replace(/\\/g, '/'));
 
 export default defineConfig({
   test: {
-    include: [suiteManifestTest, harnessJsonTest, harnessQueryTest, selectResponseTest, queryNodeTest, nodeLifecycleTest, resolve(import.meta.dirname, 'host-store-stats-evidence.test.ts')],
+    include: [suiteManifestTest, harnessJsonTest, harnessQueryTest, selectResponseTest, queryNodeTest, ...nodeLifecycleTests, resolve(import.meta.dirname, 'host-store-stats-evidence.test.ts')],
     globals: false,
   },
   resolve: {

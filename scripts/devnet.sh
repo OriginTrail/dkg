@@ -1210,7 +1210,23 @@ record_node_cli_entry() {
 }
 
 run_devnet_process_control() {
-  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs"     "$1" "$REPO_ROOT" "$DEVNET_DIR" "${2:-}"
+  local action="$1" selected="${2:-}" node_dir num entry
+  local entries=()
+  # Old launches have no durable entry record. Only their node-specific configured
+  # version may fill that gap; a launch record always owns the process identity.
+  if [ -n "$DEVNET_VERSION_LAYOUT" ]; then
+    for node_dir in "$DEVNET_DIR"/node*; do
+      [ -d "$node_dir" ] || continue
+      num="${node_dir##*/node}"
+      case "$num" in ''|*[!0-9]*) continue ;; esac
+      [ -z "$selected" ] || [ "$selected" = "$num" ] || continue
+      [ ! -e "$node_dir/.devnet-cli-entry" ] || continue
+      entry="$(node_cli_entry "$num")"
+      entries+=("$num" "$entry")
+    done
+  fi
+  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs" \
+    "$action" "$REPO_ROOT" "$DEVNET_DIR" "$selected" ${entries[@]+"${entries[@]}"}
 }
 
 collect_devnet_node_pids() {

@@ -5,9 +5,9 @@ import { readFileSync } from 'node:fs';
 import * as http from 'node:http';
 import { join } from 'node:path';
 import { waitFor } from './harness';
-import { stopNodeProcesses, DEFAULT_DEVNET_RPC, type DevnetPaths, type CommandLineReader } from '../../scripts/lib/devnet-node-process-control.js';
-export { NODE_PID_FILES, parsePid, readNodePidEntries, readNodePids, readProcessState, processStateIsGone, pidAlive, clearDeadNodePidFiles, sigkillProcesses, verifiedNodeProcesses, readProcessCommandLine, isDaemonOfCheckout, verifiedNodePids, sigkillNodeProcesses, waitForPidsGone, stopNodeProcesses, DEFAULT_DEVNET_RPC } from '../../scripts/lib/devnet-node-process-control.js';
-export type { DevnetPaths, NodePidEntry, CommandLineReader } from '../../scripts/lib/devnet-node-process-control.js';
+import { stopNodeProcesses, DEFAULT_DEVNET_RPC, type DevnetPaths, type SyncProcessInspector } from '../../scripts/lib/devnet-node-process-control.js';
+export { NODE_PID_FILES, parsePid, readNodePidEntries, readNodePids, readProcessState, processStateIsGone, pidAlive, clearDeadNodePidFiles, sigkillProcesses, verifiedNodeProcesses, inspectPsProcessSync, isDaemonOfCheckout, verifiedNodePids, sigkillNodeProcesses, waitForPidsGone, stopNodeProcesses, DEFAULT_DEVNET_RPC } from '../../scripts/lib/devnet-node-process-control.js';
+export type { DevnetPaths, NodePidEntry, SyncProcessInspector } from '../../scripts/lib/devnet-node-process-control.js';
 
 /**
  * The Hardhat RPC URL node1's config records (`chain.rpcUrl`), or the devnet
@@ -85,12 +85,12 @@ export interface RestartNodeOptions {
   pollIntervalMs: number;
   probe?: NodeProbe;
   /** Reads a process's command line for the ownership check (default: `ps`); for tests. */
-  readCommandLine?: CommandLineReader;
+  inspect?: SyncProcessInspector;
 }
 
 /** One checked stop, one start, then the caller's readiness probe. */
 export async function restartNodeAndWait(paths: DevnetPaths, options: RestartNodeOptions): Promise<void> {
-  await stopNodeProcesses(paths, options.num, { readCommandLine: options.readCommandLine });
+  await stopNodeProcesses(paths, options.num, { inspect: options.inspect });
   execFileSync('bash', [join(paths.repoRoot, 'scripts/devnet.sh'), 'start-node', String(options.num)], {
     cwd: paths.repoRoot,
     stdio: 'inherit',
