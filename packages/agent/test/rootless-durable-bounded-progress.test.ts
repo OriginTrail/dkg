@@ -1,4 +1,3 @@
-import { createStoredPrefixAcquirer } from '../src/durable-recovery-held-store.js';
 import { describe, expect, it } from 'vitest';
 import {
   MemoryLayer,
@@ -94,9 +93,9 @@ function manifest(meta: readonly Quad[]) {
 }
 
 /** The fixture's previously materialized copies, independent of this round's writes. */
-function storedPrefix(fixtures: readonly AssetFixture[]) {
-  return createStoredPrefixAcquirer(async () => ({ held: new Set(fixtures.map(f => f.ual)),
-    assertCurrent() {}, close() {} }), CONTEXT_GRAPH_ID, () => {});
+function contentProofs(fixtures: readonly AssetFixture[]) {
+  return { assertOwnership() {}, prove: async () => ({ held: new Set(fixtures.map(f => f.ual)),
+    retain() {}, assertCurrent() {}, close() {} }) };
 }
 
 function pageResult(
@@ -489,7 +488,7 @@ describe('bounded rootless durable progress', () => {
     const continuationMaterialized: string[] = [];
     const continuationCheckpoints: Array<{ offset: number; terminal?: boolean }> = [];
     const continuationSummary = await runDurableSync({
-      storedPrefix: storedPrefix(selected.slice(0, 1)),
+      contentProofs: contentProofs(selected.slice(0, 1)),
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],
@@ -923,7 +922,7 @@ describe('bounded rootless durable progress', () => {
     const checkpoints: Array<{ offset: number; terminal?: boolean }> = [];
 
     const summary = await runDurableSync({
-      storedPrefix: storedPrefix(fixtures.slice(0, 2)),
+      contentProofs: contentProofs(fixtures.slice(0, 2)),
       ctx,
       remotePeerId: 'peer-a',
       contextGraphIds: [CONTEXT_GRAPH_ID],

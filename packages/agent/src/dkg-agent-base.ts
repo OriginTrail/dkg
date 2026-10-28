@@ -1,7 +1,7 @@
 import type { StoreContentFence } from './internal/store-content-fence.js';
 import { ContextGraphSubscriptionActivations } from './context-graph-subscription-activation-state.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
-import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
+import { reconcileAfterMaterialization, reconcileAfterHeldAsset } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
@@ -479,7 +479,7 @@ import {
   type ReplicationEvent,
 } from './dkg-agent-types.js';
 import type { SyncCheckpointStore, ChangelogCursorStore } from './sync/checkpoint/state.js';
-import {
+import { readNonNegativeNumberEnv, readPositiveSafeIntegerEnv, readNonNegativeIntegerEnv,
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
@@ -524,18 +524,6 @@ import {
   type ChainAuthorityReadBudgets,
 } from './chain-authority-read-budgets.js';
 import type { DKGAgent } from './dkg-agent.js';
-
-function readNonNegativeNumberEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === '') return fallback;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
-}
-
-function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
-  const parsed = Number(process.env[name]);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 /**
  * Same-instance restart contract.
@@ -584,12 +572,10 @@ export class DKGAgentBase {
       retireFinalizedSwmTwinCandidate: (candidate, ctx) => agent.retireFinalizedSwmTwinCandidate(candidate, ctx),
       retireLegacySwmAfterVerifiedVmTwin: params => agent.retireLegacySwmAfterVerifiedVmTwin(params),
     };
-    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
-      reconcileAfterMaterialization(cleanup, asset, ctx);
-    const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
+    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) => reconcileAfterMaterialization(cleanup, asset, ctx);
+    const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, (commitment, ctx) => reconcileAfterHeldAsset(cleanup, commitment, ctx), () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
     const materialization = new RecoveryMaterializationOwner({
-      chain: () => agent.chain,
-      store: () => agent.store,
+      chain: () => agent.chain, store: () => agent.store,
       isClosed: () => agent.graphScopedStoreClosed,
       subscription: id => agent.subscribedContextGraphs.get(id),
       bindingGeneration: id => agent.contextGraphBindingState.capture(id),
@@ -957,13 +943,7 @@ export class DKGAgentBase {
    * (`source: 'allowlist'`) are NOT truncated by this cap — see
    * `chooseFanOutTier` jsdoc for the rationale.
    */
-  protected readonly swmSubstrateMaxMembers: number = (() => {
-    const raw = process.env.DKG_SWM_SUBSTRATE_MAX_MEMBERS;
-    if (!raw) return 100;
-    const n = Number.parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < 0) return 100;
-    return n;
-  })();
+  protected readonly swmSubstrateMaxMembers = readNonNegativeIntegerEnv('DKG_SWM_SUBSTRATE_MAX_MEMBERS', 100);
   /**
    * Per-send substrate timeout for SWM update fan-out. Matches the
    * 15s reliability SLO the messenger targets for chat. Kept as a
