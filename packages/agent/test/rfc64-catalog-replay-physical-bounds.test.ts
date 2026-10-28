@@ -64,6 +64,25 @@ describe('physical catalog replay capacity', () => {
     } finally { held.resolve(); }
   });
 
+  it('retains full overflow coverage when activation installs the peer first', async () => {
+    const replay = vi.fn(async (_cg: string, _demand: { peerId: string }) => ({ failed: 0 }));
+    const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['b'], selectContextGraphIds: () => ['old', 'new'],
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+      reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
+    }, 60_000, 1);
+    const occupying = runtime.prepareConnectionOpen('a')!;
+    runtime.prepareGraphActivation('b', 'new')!.admit();
+    runtime.prepareConnectionOpen('b')!.admit();
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(replay).not.toHaveBeenCalled();
+    occupying.reject();
+    await vi.waitFor(() => expect(replay).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
+    expect(replay.mock.calls.map(([cg]) => cg).sort()).toEqual(['new', 'old']);
+    expect(replay.mock.calls.map(([, demand]) => demand.peerId)).toEqual(['b', 'b']);
+    expect(runtime.status().peers).toHaveLength(1);
+  });
+
   it('wakes admitted overflow after every occupying reservation is rejected', async () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['a', 'b'], selectContextGraphIds: () => ['cg'],

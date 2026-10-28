@@ -219,8 +219,9 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
       if (graph !== null && !selected.has(graph)) { this.#overflowScans.delete(graph); continue; }
       for (const peerId of peers) {
         if (cursor.after !== undefined && peerId <= cursor.after) continue;
-        if (graph === null ? !this.#byPeer.has(peerId) : !this.#byPeer.get(peerId)?.scopes.has(graph)) {
-          const reservations = this.#reserveSelected(peerId, graph === null ? [...selected] : [graph], graph === null, Date.now());
+        const missing = (graph === null ? [...selected] : [graph]).filter(id => !this.#byPeer.get(peerId)?.scopes.has(id));
+        if (missing.length > 0) {
+          const reservations = this.#reserveSelected(peerId, missing, graph === null, Date.now());
           if (reservations === null) return;
           for (const reservation of reservations) reservation.admit();
         }
@@ -248,7 +249,9 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         if (peer === undefined) return;
         await this.#runTurn(peer, signal);
         // Move a completed turn behind the other ready peers.
-        this.#byPeer.delete(peer.peerId); this.#byPeer.set(peer.peerId, peer);
+        if (this.#byPeer.get(peer.peerId) === peer) {
+          this.#byPeer.delete(peer.peerId); this.#byPeer.set(peer.peerId, peer);
+        }
         if (!signal.aborted) { this.#resumeOverflow(); this.#schedule(); }
       } finally { if (signal.aborted) this.#retire(); }
     };

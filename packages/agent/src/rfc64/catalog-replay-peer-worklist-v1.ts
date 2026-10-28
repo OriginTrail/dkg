@@ -73,18 +73,8 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     this.#pending.delete(peerId);
   }
 
-  /**
-   * Deliberately unbounded, unlike `seedBounded`. Every demand here was already
-   * reserved then admitted by `reserve`, whose own bound is what limits concurrent reconnect
-   * ownership; refusing one at this point would silently cancel a live peer's
-   * replay with no retry, because the connection runtime debounces re-prepare
-   * for 60s. Re-seeding after `drain` freed the slot can therefore carry
-   * `#pending` past the bound, and `#remaining === 0 && hasPending` then trips
-   * the fail-closed `exhausted` fence into a full-replay witness for what was
-   * really run-budget exhaustion. That conflation is a known residual (review
-   * thread "the dead-dial / overflow problem"): fixing it means giving fresh
-   * demands their own budget or starting a follow-on run, not dropping them.
-   */
+  /** Seed the admitted generation once. The graph owner advances pending work
+   * through a fresh bounded run when the current run spends its peer budget. */
   seedDemand(demand: Rfc64CatalogReplayPeerDemandV1): void {
     const current = this.#pending.get(demand.peerId);
     if (current === undefined || current < demand.generation) {

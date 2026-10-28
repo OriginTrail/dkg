@@ -6,7 +6,7 @@ interface Target { readonly id: string; readonly scope?: string; readonly versio
 const run = (runtime: Rfc64CatalogReplayRecoveryRuntimeV1<Target>, policyDigest: string) => runtime.request({ contextGraphId: 'public-cg', policyDigest, kind: 'pending-recovery' });
 
 describe('replay budgets and unobserved evidence', () => {
-  it('continues an admitted connection demand after the real 64-peer run budget is spent', async () => {
+  it('continues multiple admitted connection demands after the real 64-peer run budget is spent', async () => {
     const held = Promise.withResolvers<void>();
     const started = Promise.withResolvers<void>();
     const peers = Array.from({ length: 64 }, (_, i) => `peer-${i}`);
@@ -23,17 +23,20 @@ describe('replay budgets and unobserved evidence', () => {
       kind: 'full-connected-peers', connectedPeerIds: peers });
     await started.promise;
     const lease = runtime.reservePeer('public-cg', 'p', 'new-peer');
+    const secondLease = runtime.reservePeer('public-cg', 'p', 'newer-peer')!; secondLease.admit();
     expect(lease).not.toBeNull(); lease!.admit();
     let atCompletion: { requested: boolean; targets: readonly Target[] | null } | undefined;
     const joined = runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p',
       kind: 'connection-demand', demand: lease! }).then(() => {
       atCompletion = { requested: requested.includes('new-peer'), targets: runtime.promisedTargets('public-cg', 'p') };
     });
+    const second = runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p', kind: 'connection-demand', demand: secondLease });
     try {
-      held.resolve(); await first; await joined;
-      expect(requested).toHaveLength(65);
+      held.resolve(); await first; await Promise.all([joined, second]);
+      expect(requested).toHaveLength(66);
+      expect(new Set(requested).size).toBe(66);
       expect(atCompletion).toEqual({ requested: true, targets: [{ id: 'new-head' }] });
-    } finally { held.resolve(); lease!.release(); }
+    } finally { held.resolve(); lease!.release(); secondLease.release(); }
   });
 
   it.each(['timeout', 'cancel'] as const)('retains overflow after an unobserved %s until a full corroborated replay', async mode => {

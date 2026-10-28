@@ -83,34 +83,44 @@ export class FullReplayPassV1<Target> {
   }
 }
 
-/** One run owns its provider responses and the exact observation they reached. */
+export type ReplayObservationV1<Target> =
+  | Readonly<{ kind: 'unobserved'; reason: 'pending' | 'drain-timeout' | 'budget-exhausted' | 'cancelled' | 'parity-error' }>
+  | Readonly<{ kind: 'target-overflow' }>
+  | Readonly<{ kind: 'parity'; targets: readonly Target[]; outcome: 'complete' | 'failed' }>;
+
+/** One run owns provider attribution separately from its single observation. */
 export class ReplayRunEvidenceV1<Target> {
   received: BoundedReplayTargetsV1<Target> = emptyReplayTargetsV1();
   readonly providers = new Map<string, number>();
   readonly #outcomes: ReplayPeerOutcomeV1<Target>['kind'][] = [];
-  #observationFailures = 0;
-  requiresFullReplay = false;
+  #unattributedProviderFailure = false;
+  #observation: ReplayObservationV1<Target> = { kind: 'unobserved', reason: 'pending' };
+  get observation(): ReplayObservationV1<Target> { return this.#observation; }
   get requested(): number { return this.#outcomes.filter(kind => kind === 'completed').length; }
   get providerFailures(): number { return this.#outcomes.filter(kind => kind === 'provider-failed').length; }
   get unanswered(): boolean { return this.#outcomes.some(kind => kind === 'provider-failed' || kind === 'local-unavailable'); }
-  get failed(): number { return this.#observationFailures + this.#outcomes.filter(kind => kind === 'provider-failed' || kind === 'local-unavailable').length; }
-  observation: Readonly<{ kind: 'unobserved' }> | Readonly<{ kind: 'overflow' }>
-    | Readonly<{ kind: 'parity'; targets: readonly Target[]; failed: boolean }> = { kind: 'unobserved' };
-  constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[], readonly fullRequest = false) {}
-  private completed(demand: Rfc64CatalogReplayPeerDemandV1, targets: readonly Target[]): void {
-    this.received = mergeReplayTargetsV1(this.received, { kind: 'bounded', targets }, this.merge);
-    this.providers.set(demand.peerId, demand.generation);
-    this.unobserved();
+  get observationFailed(): boolean {
+    const value = this.#observation;
+    return value.kind === 'target-overflow' || (value.kind === 'parity' && value.outcome === 'failed')
+      || (value.kind === 'unobserved' && (value.reason === 'budget-exhausted' || value.reason === 'parity-error'));
   }
+  get failed(): number { return Number(this.observationFailed) + this.#outcomes.filter(kind => kind === 'provider-failed' || kind === 'local-unavailable').length; }
+  get requiresFullReplay(): boolean { return this.observationFailed || this.#unattributedProviderFailure; }
+  constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[], readonly fullRequest = false) {}
   record(demand: Rfc64CatalogReplayPeerDemandV1, outcome: ReplayPeerOutcomeV1<Target>): void {
     this.#outcomes.push(outcome.kind);
-    if (outcome.kind === 'completed') this.completed(demand, outcome.targets);
-    if (outcome.kind === 'provider-failed' && !outcome.attributed) this.requiresFullReplay = true;
+    if (outcome.kind === 'completed') {
+      this.received = mergeReplayTargetsV1(this.received, { kind: 'bounded', targets: outcome.targets }, this.merge);
+      this.providers.set(demand.peerId, demand.generation);
+      this.unobserved('pending');
+    }
+    if (outcome.kind === 'provider-failed' && !outcome.attributed) this.#unattributedProviderFailure = true;
   }
-  failedObservation(): void { this.#observationFailures++; this.requiresFullReplay = true; }
-  unobserved(): void { this.observation = { kind: 'unobserved' }; }
+  unobserved(reason: Extract<ReplayObservationV1<Target>, { kind: 'unobserved' }>['reason']): void {
+    this.#observation = { kind: 'unobserved', reason };
+  }
   observe(targets: BoundedReplayTargetsV1<Target>, failed: boolean): void {
-    this.observation = targets.kind === 'overflow' ? { kind: 'overflow' } : { kind: 'parity', targets: targets.targets, failed };
-    if (targets.kind === 'overflow' || failed) this.failedObservation();
+    this.#observation = targets.kind === 'overflow' ? { kind: 'target-overflow' }
+      : { kind: 'parity', targets: targets.targets, outcome: failed ? 'failed' : 'complete' };
   }
 }
