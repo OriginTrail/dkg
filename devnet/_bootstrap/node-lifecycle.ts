@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 /** Devnet restart/readiness adapters over the shared checked process owner. */
-import { execFileSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 import { readFileSync } from 'node:fs';
 import * as http from 'node:http';
 import { join } from 'node:path';
 import { waitFor } from './harness';
-import { stopNodeProcesses, DEFAULT_DEVNET_RPC, type DevnetPaths, type SyncProcessInspector } from '../../scripts/lib/devnet-node-process-control.js';
+import { DEFAULT_DEVNET_RPC, type DevnetPaths } from '../../scripts/lib/devnet-node-process-control.js';
 export { NODE_PID_FILES, parsePid, readNodePidEntries, readNodePids, readProcessState, processStateIsGone, pidAlive, clearDeadNodePidFiles, sigkillProcesses, verifiedNodeProcesses, inspectPsProcessSync, isDaemonOfCheckout, verifiedNodePids, sigkillNodeProcesses, waitForPidsGone, stopNodeProcesses, DEFAULT_DEVNET_RPC } from '../../scripts/lib/devnet-node-process-control.js';
 export type { DevnetPaths, NodePidEntry, SyncProcessInspector } from '../../scripts/lib/devnet-node-process-control.js';
 
@@ -84,17 +85,13 @@ export interface RestartNodeOptions {
   timeoutMs: number;
   pollIntervalMs: number;
   probe?: NodeProbe;
-  /** Reads a process's command line for the ownership check (default: `ps`); for tests. */
-  inspect?: SyncProcessInspector;
 }
 
-/** One checked stop, one start, then the caller's readiness probe. */
+/** The restart command owns checked shutdown and start; the caller owns readiness. */
 export async function restartNodeAndWait(paths: DevnetPaths, options: RestartNodeOptions): Promise<void> {
-  await stopNodeProcesses(paths, options.num, { inspect: options.inspect });
-  execFileSync('bash', [join(paths.repoRoot, 'scripts/devnet.sh'), 'start-node', String(options.num)], {
+  await promisify(execFile)('bash', [join(paths.repoRoot, 'scripts/devnet.sh'), 'restart-node', String(options.num)], {
     cwd: paths.repoRoot,
-    stdio: 'inherit',
-    env: { ...process.env, ...devnetPortEnv(paths.devnetDir, options.rpcUrl) },
+    env: { ...process.env, DEVNET_DIR: paths.devnetDir, ...devnetPortEnv(paths.devnetDir, options.rpcUrl) },
   });
   await waitFor(options.label, options.timeoutMs, options.pollIntervalMs, async () =>
     (await nodeReachable(options.apiPort, options.probe)) ? true : null,

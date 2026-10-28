@@ -204,17 +204,13 @@ export class DurableFiles {
    * returned: the new directory state is visible, and the directory fsync
    * decides whether it is also durable. The change's generation is taken now,
    * synchronously, right after the call returned (nothing can interleave before
-   * it). If the fsync fails the target stays in `pendingDirSync` with that
-   * generation and the error is rethrown.
+   * it). A failure propagates without changing bookkeeping: the generation
+   * stays pending unless another successful fsync has already covered it.
    */
   private async syncDirectoryChange(targetPath: string): Promise<void> {
     const generation = (this.directoryChangeGeneration += 1);
-    try {
-      await this.syncDirectory(path.dirname(targetPath));
-    } catch (err) {
-      this.pendingDirSync.set(targetPath, generation);
-      throw err;
-    }
+    this.pendingDirSync.set(targetPath, generation);
+    await this.syncDirectory(path.dirname(targetPath));
   }
 
   /**
@@ -224,13 +220,10 @@ export class DurableFiles {
    * before it started. So the targets (with their generations) are snapshotted
    * BEFORE the fsync, and a target is deleted afterwards only if its entry
    * still has the snapshotted generation. A target that was changed again in
-   * the meantime and failed its own fsync has a newer generation and stays
-   * pending, even though its path was already in the map; a change that lands,
-   * and fails, while this fsync is in flight is not in the snapshot at all.
-   *
-   * Conservative in one direction only: a change that returned before this
-   * fsync started but whose own (failing) fsync only recorded it afterwards is
-   * not in the snapshot, so it is synced once more on retry.
+   * the meantime has a newer generation and stays pending, even though its
+   * path was already in the map. Every returned change is recorded before
+   * starting its fsync, so overlapping successes can clear all changes they
+   * cover even when another fsync later fails.
    */
   private async syncDirectory(dir: string): Promise<void> {
     const covered = [...this.pendingDirSync].filter(([target]) => path.dirname(target) === dir);

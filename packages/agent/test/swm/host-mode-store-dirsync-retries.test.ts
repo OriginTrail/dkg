@@ -305,10 +305,10 @@ describe('SwmHostModeStore durable writes', () => {
         const before = dirSyncCount();
         await store.markRegistered(x);
         expect(dirSyncCount() - before, `first ${order.first}, second ${order.second}`).toBe(0);
-        // The one that failed stays pending itself.
+        // B covers A because B started after A's rename. A cannot cover the later B.
         const failed = order.first === 'fail' ? a : b;
         await store.markRegistered(failed);
-        expect(dirSyncCount() - before, `the failed write (${failed}) must complete its own fsync`).toBe(1);
+        expect(dirSyncCount() - before, `the failed write (${failed}) retries only if no success covered it`).toBe(order.first === 'fail' ? 0 : 1);
       }
     });
 

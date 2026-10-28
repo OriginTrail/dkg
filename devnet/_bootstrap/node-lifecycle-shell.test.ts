@@ -151,13 +151,13 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
         `export DEVNET_DIR="${paths.devnetDir}"`,
         `DEVNET_SOURCE_ONLY=1 source "${devnetSh}"`,
         'start_node() { echo "start_node $1" >> "$DEVNET_DIR/start-node-called"; }',
-        'if [ "$1" = start-node ]; then start_node "$2"; else cmd_restart_node "$@"; fi',
+        'test "$1" = restart-node',
+        'cmd_restart_node "$@"',
       ].join('\n'),
     );
     writeFileSync(join(paths.devnetDir, 'node1', 'config.json'), JSON.stringify({ apiPort: 9333, listenPort: 10222 }));
-    // restartNodeAndWait blocks this process while the script runs, so a child of ours that the
-    // script kills would stay a zombie (the script waits on it) until it returns. A node's own
-    // processes are not children of the caller: start the store from a launcher that exits.
+    // Exercise cleanup of a managed store detached from the caller, as in a real node.
+    // The asynchronous restart also allows the caller to reap any direct children.
     const launcher = spawnSync(
       process.execPath,
       ['-e', "const c = require('node:child_process').spawn(process.argv[1], ['-e', 'setInterval(() => {}, 1000)', process.argv[2]], { detached: true, stdio: 'ignore' }); c.unref(); console.log(c.pid)", storeExecutable(), join(home(), 'store')],

@@ -92,6 +92,7 @@ describe('restartNodeAndWait', () => {
         '{',
         '  echo "args=$*"',
         '  echo "cwd=$(pwd -P)"',
+        '  echo "DEVNET_DIR=$DEVNET_DIR"',
         '  echo "HARDHAT_PORT=$HARDHAT_PORT"',
         '  echo "API_PORT_BASE=$API_PORT_BASE"',
         '  echo "LIBP2P_PORT_BASE=$LIBP2P_PORT_BASE"',
@@ -124,9 +125,10 @@ describe('restartNodeAndWait', () => {
     });
 
     expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual([
-      'args=start-node 4',
+      'args=restart-node 4',
       // pwd -P resolves the tmpdir symlink (/var -> /private/var on macOS).
       `cwd=${spawnSync('bash', ['-c', 'pwd -P'], { cwd: root, encoding: 'utf8' }).stdout.trim()}`,
+      `DEVNET_DIR=${paths.devnetDir}`,
       'HARDHAT_PORT=8777',
       'API_PORT_BASE=9333',
       'LIBP2P_PORT_BASE=10222',
@@ -134,22 +136,24 @@ describe('restartNodeAndWait', () => {
     expect(api.seen.at(-1)?.authorization).toBe('Bearer tok');
   });
 
-  it('stops the node\'s verified daemons first, then runs `devnet.sh restart-node`, which finds no live PID-file entry left', async () => {
+  function useCheckedRestart(): void {
+    const realScript = join(import.meta.dirname, '../../scripts/devnet.sh');
+    writeFileSync(join(paths.devnetDir, 'node4', '.devnet-cli-entry'), join(root, 'packages/cli/dist/cli.js'));
+    writeFileSync(join(root, 'scripts/devnet.sh'), [
+      '#!/usr/bin/env bash',
+      `DEVNET_SOURCE_ONLY=1 source "${realScript}"`,
+      'test "$1" = restart-node',
+      'start_node() { echo "args=restart-node $1" >> "$FAKE_DEVNET_OUT"; }',
+      'cmd_restart_node "$@"',
+    ].join('\n'));
+  }
+
+  it('lets the checked restart command stop the node daemons before starting it', async () => {
     const worker = sleeper();
     const supervisor = sleeper();
     writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
     writeFileSync(pidFile(4, 'devnet.pid'), `${supervisor.pid}\n`);
-    // The stand-in script records what the real one would have found to signal.
-    writeFileSync(
-      join(root, 'scripts/devnet.sh'),
-      [
-        '#!/usr/bin/env bash',
-        `for f in ${JSON.stringify(pidFile(4, 'daemon.pid'))} ${JSON.stringify(pidFile(4, 'devnet.pid'))}; do`,
-        '  [ -f "$f" ] && echo "left=$f" >> "$FAKE_DEVNET_OUT"',
-        'done',
-        'echo "args=$*" >> "$FAKE_DEVNET_OUT"',
-      ].join('\n'),
-    );
+    useCheckedRestart();
     const api = await listen(() => ({ status: 200 }));
 
     await restartNodeAndWait(paths, {
@@ -158,23 +162,25 @@ describe('restartNodeAndWait', () => {
 
     expect(await exited(worker)).toBe(true);
     expect(await exited(supervisor)).toBe(true);
-    expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(['args=start-node 4']);
+    expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(['args=restart-node 4']);
   });
 
   it('restarting right after a SIGKILL works: the killed daemon is a zombie for a moment, not an unrelated process', async () => {
     writeFileSync(pidFile(4, 'daemon.pid'), `${await zombie()}\n`);
+    useCheckedRestart();
     const api = await listen(() => ({ status: 200 }));
 
     await restartNodeAndWait(paths, {
       num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 back', timeoutMs: 5_000, pollIntervalMs: 50,
     });
 
-    expect(readFileSync(out, 'utf8').split('\n')[0]).toBe('args=start-node 4');
+    expect(readFileSync(out, 'utf8').split('\n')[0]).toBe('args=restart-node 4');
   });
 
-  it('a live unrelated PID in devnet.pid rejects the restart before devnet.sh runs, and leaves it and the legitimate worker alive', async () => {
+  it('a live unrelated PID makes the checked restart refuse before starting or signaling anything', async () => {
     const worker = sleeper();
     const unrelated = sleeper({ plain: true }); // a recycled number
+    useCheckedRestart();
     writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
     writeFileSync(pidFile(4, 'devnet.pid'), `${unrelated.pid}\n`);
     const api = await listen(() => ({ status: 200 }));
@@ -185,7 +191,7 @@ describe('restartNodeAndWait', () => {
       }),
     ).rejects.toThrow(`node4: devnet.pid lists pid ${unrelated.pid}, which is alive but is not a DKG daemon`);
 
-    expect(existsSync(out), 'devnet.sh must not run, its stop phase would signal the recycled PID').toBe(false);
+    expect(existsSync(out), 'checked shutdown must refuse before start_node').toBe(false);
     expect(api.seen).toEqual([]);
     await new Promise((resolve) => setTimeout(resolve, 300));
     expect(pidAlive(unrelated.pid!)).toBe(true);
