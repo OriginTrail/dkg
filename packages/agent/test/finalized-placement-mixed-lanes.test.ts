@@ -3,7 +3,9 @@ import { computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-offi
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 import { resolveFinalizedPlacementDecisionV1 } from '../src/internal/finalized-placement-decision.js';
 import { authorSealV1 } from './support/rfc64-local-catalog-repair-fixture.js';
-import { CG, ctx, fixture, privateRepair } from './support/catalog-repair-backoff-fixture.js';
+import { CG, ctx, fixture, privateRepair, setupCatalogRepairBackoffFixture } from './support/catalog-repair-backoff-fixture.js';
+setupCatalogRepairBackoffFixture();
+
 describe('mixed finalized placement lanes', () => {
   it('observes the exact V2 private/public decision without starting work or erasing unavailable cooldown', async () => {
     const f = fixture(0);

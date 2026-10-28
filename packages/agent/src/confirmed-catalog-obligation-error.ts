@@ -24,7 +24,7 @@ export interface ConfirmedCatalogObligationRecoveryV1 {
   readonly contextGraphId: string;
   readonly assertionCoordinate: string;
   readonly assertionUri: string;
-  readonly subGraphName: string | null;
+  readonly subGraphName: null;
   readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
   readonly transactionHash: string;
   readonly blockNumber: number;
@@ -83,9 +83,9 @@ export class ConfirmedCatalogObligationErrorV1 extends Error {
   }
 
   get recoveryEvidence(): Readonly<ConfirmedCatalogObligationRecoveryV1> | undefined {
-    if (this.transaction === undefined) return undefined;
+    if (this.transaction === undefined || this.retry.subGraphName != null) return undefined;
     return Object.freeze({ version: 1, contextGraphId: this.retry.contextGraphId,
-      assertionCoordinate: this.retry.assertionCoordinate, assertionUri: this.retry.assertionUri, subGraphName: this.retry.subGraphName ?? null,
+      assertionCoordinate: this.retry.assertionCoordinate, assertionUri: this.retry.assertionUri, subGraphName: null,
       seal: this.seal, transactionHash: this.transaction.txHash, blockNumber: this.transaction.blockNumber });
   }
 

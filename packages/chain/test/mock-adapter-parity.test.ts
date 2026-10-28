@@ -84,7 +84,7 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // TS-private receipt facts/history beneath the verifier and confirmation reader.
   // TypeScript erases private visibility on the prototype; the mock implements
   // the public capabilities from its event state without ethers logs or root history.
-  'decodeUpdateReceiptFacts',
+  'firstMatchingUpdateReceiptFacts',
   'authenticateUpdateReceipt',
   // Physical EVM contract-binding and one-log generation fences. These are
   // protected implementation details rather than ChainAdapter capabilities;

@@ -1,3 +1,4 @@
+import { pinnedPrivatePlacementAuthorityV1 } from './support/finalized-placement-decision-fixture.js';
 import { SwmCatalogAuthorityNotReady } from '../src/internal/swm-inventory-write.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
@@ -7,7 +8,9 @@ import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from '../src/r
 import { CatalogRepairIntegrityErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import { StoreSchedulerBusyError, StoreOperationTimeoutError, activeDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
-import { CG, AUTHOR, ctx, fixture, privateRepair } from './support/catalog-repair-backoff-fixture.js';
+import { CG, AUTHOR, ctx, fixture, privateRepair, setupCatalogRepairBackoffFixture } from './support/catalog-repair-backoff-fixture.js';
+setupCatalogRepairBackoffFixture();
+
 
 const retainedFailures = [
   ['integrity', () => new CatalogRepairIntegrityErrorV1('invalid seal')],
@@ -573,6 +576,7 @@ describe('RFC-64 unchanged repair backoff', () => {
       ...repair, inventoryScope: { ...repair.inventoryScope, era: '2' },
     } as Rfc64FinalizedPrivatePlacementRepairV1;
     f.setPrivateRepairs([replacement]);
+    f.readAuthority.mockImplementation(() => pinnedPrivatePlacementAuthorityV1(replacement));
     await f.owner.requestFinalizedPrivate({ repair: replacement, ctx }).whenAttempted;
     await oldWaiter.whenAttempted;
     expect(f.repairPrivate).toHaveBeenCalledTimes(3);

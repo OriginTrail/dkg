@@ -99,6 +99,7 @@ describe('RFC-64 finalized-private placement repair store', () => {
     const first = await openStore(dataDir);
     await first.put(repair);
     await first.put(confirmed);
+    await expect(first.put({ ...confirmed, subGraphName: 'team' } as unknown as Rfc64FinalizedPrivatePlacementRepairV1)).rejects.toThrow('root graphs only');
     inventories.pop()?.close();
     const restarted = await openStore(dataDir);
     expect(restarted.list()).toEqual(expect.arrayContaining([repair, confirmed]));

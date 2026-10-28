@@ -10,7 +10,6 @@ import {
   assertCanonicalEvmAddress,
   assertContextGraphIdV1,
   assertSwmAuthorInventoryScopeV1,
-  assertSubGraphNameV1,
   canonicalizeCanonicalGraphScopedAuthorSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   parseCanonicalGraphScopedAuthorSealV1,
@@ -23,7 +22,6 @@ import {
   type PositiveDecimalU64V1,
   type SwmAuthorInventoryScopeV1,
   type CanonicalGraphScopedAuthorSealV1,
-  type SubGraphNameV1,
 } from '@origintrail-official/dkg-core';
 
 import type { Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1 } from
@@ -51,7 +49,7 @@ interface ConfirmedCatalogPlacementRepairV2 extends Rfc64ConfirmedSwmAuthorInven
   readonly contextGraphId: ContextGraphIdV1;
   readonly authorAddress: EvmAddressV1;
   readonly inventoryScope: null;
-  readonly subGraphName: SubGraphNameV1 | null;
+  readonly subGraphName: null;
   readonly assertionCoordinate: AssertionCoordinateV1;
   readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
 }
@@ -119,7 +117,7 @@ export function snapshotRfc64FinalizedPrivatePlacementRepairV1(
     }
   } else {
     if (input.inventoryScope !== null) throw new TypeError('RFC-64 confirmed placement must be scope-independent');
-    if (input.subGraphName !== null) assertSubGraphNameV1(input.subGraphName);
+    if (input.subGraphName !== null) throw new TypeError('RFC-64 confirmed placement supports root graphs only');
   }
   assertAssertionCoordinateV1(input.assertionCoordinate, 'placement repair assertionCoordinate');
   parseCanonicalDecimalU64(input.assertionVersion, 'placement repair assertionVersion');

@@ -1,3 +1,4 @@
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import { resolveDurableGraphScopedAuthorSealCandidateV1, resolveConfirmedLifecycleSealEvidenceV1 } from '../src/durable-author-seal-resolver-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -160,7 +161,7 @@ describe('caller-retained confirmed catalog evidence', () => {
     expect(Object.isFrozen(error.recoveryEvidence)).toBe(true);
     expect(new ConfirmedCatalogObligationErrorV1(params, undefined, new Error('unconfirmed')).recoveryEvidence).toBeUndefined();
   });
-  it('retains the acceptance-time lifetime fence after the receipt read awaits', async () => {
+  it('checks inner-helper cancellation after the receipt read awaits', async () => {
     const f = await fixture(); const reason = new Error('generation retired');
     vi.mocked(f.chain.resolveCanonicalFinalizationReceipt).mockImplementation(async () => {
       f.controller.abort(reason); return { status: 'confirmed', receipt: f.receipt };
@@ -168,4 +169,33 @@ describe('caller-retained confirmed catalog evidence', () => {
     await expect(recoverConfirmedCatalogObligationV1(f.evidence, f.ports)).rejects.toBe(reason);
     expect(f.observe).not.toHaveBeenCalled();
   });
+  it.each(['binding', 'lifetime'] as const)('captures the production %s fence through the public recovery entry', async changed => {
+    const f = await fixture();
+    const gate = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
+    const entered = gate(), receipt = gate();
+    const state = new ContextGraphBindingState();
+    const observe = vi.fn(async () => true);
+    const agent = { chain: f.chain, store: f.store, workLifetime: f.controller,
+      contextGraphBindingState: state,
+      resolveContextGraphOnChainIdBinding: vi.fn(async () => ({ onChainId: '1' })),
+      observeRfc64ConfirmedVmV1: observe };
+    vi.mocked(f.chain.resolveCanonicalFinalizationReceipt).mockImplementation(async () => {
+      entered.resolve(); await receipt.promise;
+      return { status: 'confirmed', receipt: f.receipt };
+    });
+    const recovery = DKGAgent.prototype.recoverRfc64ConfirmedCatalogObligationV1.call(agent as never, f.evidence);
+    const rejected = expect(recovery).rejects.toThrow(changed === 'binding' ? 'graph binding changed' : 'original lifetime retired');
+    try {
+      await entered.promise;
+      if (changed === 'binding') state.invalidate(CONTEXT_GRAPH_ID);
+      else {
+        f.controller.abort(new Error('original lifetime retired'));
+        agent.workLifetime = new AbortController();
+      }
+      receipt.resolve(); await rejected;
+      expect(observe).not.toHaveBeenCalled();
+      expect(f.submit).not.toHaveBeenCalled();
+    } finally { receipt.resolve(); }
+  });
+
 });

@@ -10,14 +10,14 @@ export const AUTHOR = `0x${'11'.repeat(20)}` as EvmAddressV1;
 const owners: Rfc64SwmCatalogProjectionOwnerV1[] = [];
 export const ctx = createOperationContext('system');
 
-beforeEach(() => {
-  vi.useFakeTimers();
-  vi.setSystemTime(0);
-});
-afterEach(async () => {
-  await Promise.all(owners.splice(0).map((owner) => owner.close()));
-  vi.useRealTimers();
-});
+/** Scheduling suites opt in; pure data builders never install clock hooks. */
+export function setupCatalogRepairBackoffFixture(): void {
+  beforeEach(() => { vi.useFakeTimers(); vi.setSystemTime(0); });
+  afterEach(async () => {
+    await Promise.all(owners.splice(0).map(owner => owner.close()));
+    vi.useRealTimers();
+  });
+}
 
 export function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorParameters<typeof Rfc64SwmCatalogProjectionOwnerV1>[0]> = {}) {
   let revision: CatalogRepairRevisionHintV1 = { scopeIdentity: 'scope-1', headRevision: 'head-1' };
