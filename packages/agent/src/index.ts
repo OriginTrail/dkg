@@ -1,3 +1,4 @@
+export { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogTransactionEvidenceV1, type ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
 export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
 export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
@@ -262,6 +263,8 @@ export type {
   PublishAuthorCatalogGenesisParamsV1,
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogRuntimeSelectionStatusV1,
+  Rfc64CatalogSelectionV1,
+  Rfc64CatalogConnectionReplayStatusV1,
 } from './dkg-agent-rfc64-catalog.js';
 export type {
   ReconcileRfc64PublicRootCatalogExactSetParamsV1,
@@ -672,4 +675,5 @@ export { preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js
 export { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
 
 export { resumePublicCheckpointEdge } from './snapshot-resume-edge.js';
+export { CatalogPublicationAdmissionError, CATALOG_PUBLICATION_ADMISSION_CODE } from './catalog-publication-admission-error.js';
 export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';

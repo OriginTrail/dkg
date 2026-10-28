@@ -52,7 +52,7 @@ function fixture(reconcile: (signal: AbortSignal) => Promise<void>, queueLimit =
     listDurableInventoryScopes: () => [],
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
-    acceptsFinalizedPrivateLane: () => true,
+      readFinalizedPlacementAuthority: () => ({ status: 'inactive' as const }),
     readPrivateFailure: () => null,
     writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: () => [],

@@ -188,13 +188,12 @@ If a config has **no** `store` block at all, the runtime falls back to the embed
 
 ### Queue control slots (`store.controlReservedSlots`)
 
-The async share and publisher queues can run their own store calls on a few dedicated store slots (share 1, publisher 2), so queue bookkeeping does not wait behind client reads or data-plane work. They are **on by default** only for `"backend": "blazegraph"` on a host with more than 2 CPUs, and off by default for managed `oxigraph-server`, `sparql-http` (a Blazegraph reached through it included) and every other backend; the embedded `oxigraph-worker` never uses them. Set `controlReservedSlots` in the `store` block to override the default: `0` (or `"0"`) switches the slots off, and per-queue values such as `"share:1,publisher:2"` switch them on for any backend and host. `DKG_STORE_CONTROL_RESERVED_SLOTS`, when set, wins over it. A malformed value leaves the slots off with a warning. The daemon reads it once at start (restart after a change) and logs the result as `Store control path: ...`. `dkg init` and `dkg openclaw/hermes/mcp setup --store ...` keep it when they rewrite the `store` block; only a switch to the embedded store removes it with the block. Details, the log line and what to watch: [Queue control schedulers](backpressure-observability.md#queue-control-schedulers).
+The async share and publisher queues can run their own store calls on a few dedicated store slots (share 1, publisher 2), so queue bookkeeping does not wait behind client reads or data-plane work. They are **on by default** for `"backend": "blazegraph"` and for managed `"backend": "oxigraph-server"` (the default above) on a host with more than 2 CPUs, and off by default for `sparql-http` (any other SPARQL store, a Blazegraph reached through it included) and every other backend; the embedded `oxigraph-worker` never uses them. If share completion is slow under bursts of many concurrent shares, switch the slots off and report it. Set `controlReservedSlots` in the `store` block to override the default: `0` (or `"0"`) switches the slots off, and per-queue values such as `"share:1,publisher:2"` switch them on for any backend and host. `DKG_STORE_CONTROL_RESERVED_SLOTS`, when set, wins over it. A malformed value leaves the slots off with a warning. The daemon reads it once at start (restart after a change) and logs the result as `Store control path: ...`. `dkg init` and `dkg openclaw/hermes/mcp setup --store ...` keep it when they rewrite the `store` block; only a switch to the embedded store removes it with the block. Details, the log line and what to watch: [Queue control schedulers](backpressure-observability.md#queue-control-schedulers).
 
 ```json
 {
   "store": {
-    "backend": "blazegraph",
-    "options": { "url": "http://127.0.0.1:9999/blazegraph/namespace/dkg/sparql" },
+    "backend": "oxigraph-server",
     "controlReservedSlots": 0
   }
 }

@@ -940,7 +940,7 @@ export class DKGAgent extends DKGAgentBase {
     };
     this.rfc64SwmRecoveryRuntimeV1 = createRfc64SwmRecoveryRuntimeV1({
       authority: {
-        resolveRuntimeSelection: () => this.readRfc64CatalogRuntimeSelectionV1(),
+        resolveRuntimeSelection: () => this.readRfc64CatalogSelectionV1(),
         resolveConfigured: (contextGraphId) => (
           this.resolveRfc64CatalogServingAuthorityV1(contextGraphId)
         ),
@@ -1049,10 +1049,7 @@ export class DKGAgent extends DKGAgentBase {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
           return lane !== null;
         },
-        acceptsFinalizedPrivateLane: (contextGraphId) => (
-          this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null)
-            ?.acceptsFinalizedVmRepair === true
-        ),
+        readFinalizedPlacementAuthority: (contextGraphId) => this.resolveRfc64FinalizedPlacementAuthorityV1(contextGraphId),
         readFinalizedRowHealCounts: () => finalizedRowHealCountsV1(this),
         readRepairRevision: (contextGraphId, authorAddress) => {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);

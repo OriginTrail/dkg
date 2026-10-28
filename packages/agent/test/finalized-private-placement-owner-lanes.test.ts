@@ -1,3 +1,4 @@
+import { pinnedPrivatePlacementAuthorityV1 } from './support/finalized-placement-decision-fixture.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createOperationContext, type ContextGraphIdV1, type EvmAddressV1 } from '@origintrail-official/dkg-core';
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
@@ -37,7 +38,7 @@ function fixture(rows: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) {
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
     listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
-    acceptsFinalizedPrivateLane: id => { if (refuseAuthority && id === graph) throw new CatalogRepairConditionErrorV1('policy_conflict', 'authority unavailable'); return id === graph ? active : true; },
+    readFinalizedPlacementAuthority: contextGraphId => pinnedPrivatePlacementAuthorityV1(repair('authority', contextGraphId as ContextGraphIdV1), contextGraphId === graph ? active : true, refuseAuthority && contextGraphId === graph ? new CatalogRepairConditionErrorV1('policy_conflict', 'authority unavailable') : undefined),
     readRepairRevision: () => null, listFinalizedPrivateRepairs: () => pending,
     readPrivateFailure: row => records.get(row.assertionCoordinate) ?? null, writePrivateFailures: write,
     repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
@@ -249,4 +250,26 @@ it.each(['persistence', 'authority'])('contains a pending %s reset failure after
     f.failWrites(false); f.failAuthority(false); await f.pass();
     expect(f.attempt.mock.calls.map(([row]) => row.assertionCoordinate)).toEqual(['active', 'healthy', 'before', 'active', 'after']);
   } finally { held.resolve(); }
+});
+
+it.each([false, true])('resets three sibling revisions once and retries an uncommitted edge (write failure=%s)', async fail => {
+  const rows = ['a', 'b', 'c'].map(id => repair(id));
+  const f = fixture(rows);
+  rows.forEach(row => f.records.set(row.assertionCoordinate, parked));
+  await f.pass();
+  expect(f.attempt).not.toHaveBeenCalled();
+  f.write.mockClear();
+  f.setActive(false); f.failWrites(fail);
+  f.owner.observeLaneAvailability(graph);
+  expect(f.write).toHaveBeenCalledTimes(1);
+  expect(f.write.mock.calls[0][0]).toHaveLength(3);
+  if (fail) {
+    rows.forEach(row => expect(f.records.get(row.assertionCoordinate)?.parked).toBe(true));
+    f.failWrites(false); f.owner.observeLaneAvailability(graph);
+    expect(f.write).toHaveBeenCalledTimes(2);
+  }
+  const writes = f.write.mock.calls.length;
+  f.owner.observeLaneAvailability(graph);
+  expect(f.write).toHaveBeenCalledTimes(writes);
+  rows.forEach(row => expect(f.records.get(row.assertionCoordinate)?.consecutiveFailures).toBe(0));
 });

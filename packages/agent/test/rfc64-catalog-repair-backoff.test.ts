@@ -1,81 +1,16 @@
+import { pinnedPrivatePlacementAuthorityV1 } from './support/finalized-placement-decision-fixture.js';
 import { SwmCatalogAuthorityNotReady } from '../src/internal/swm-inventory-write.js';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
-  createOperationContext,
-  type ContextGraphIdV1,
   type EvmAddressV1,
 } from '@origintrail-official/dkg-core';
-import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import { CatalogRepairRetryV1, type CatalogRepairRevisionHintV1 } from '../src/rfc64/catalog-repair-retry-v1.js';
 import { CatalogRepairIntegrityErrorV1 } from '../src/rfc64/catalog-repair-diagnostics-v1.js';
 import { StoreSchedulerBusyError, StoreOperationTimeoutError, activeDefaultStoreWorkPriority } from '@origintrail-official/dkg-storage';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
+import { CG, AUTHOR, ctx, fixture, privateRepair, setupCatalogRepairBackoffFixture } from './support/catalog-repair-backoff-fixture.js';
+setupCatalogRepairBackoffFixture();
 
-const CG = 'repair-backoff' as ContextGraphIdV1;
-const AUTHOR = `0x${'11'.repeat(20)}` as EvmAddressV1;
-const owners: Rfc64SwmCatalogProjectionOwnerV1[] = [];
-const ctx = createOperationContext('system');
-
-beforeEach(() => {
-  vi.useFakeTimers();
-  vi.setSystemTime(0);
-});
-afterEach(async () => {
-  await Promise.all(owners.splice(0).map((owner) => owner.close()));
-  vi.useRealTimers();
-});
-
-function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorParameters<typeof Rfc64SwmCatalogProjectionOwnerV1>[0]> = {}) {
-  let revision: CatalogRepairRevisionHintV1 = { scopeIdentity: 'scope-1', headRevision: 'head-1' };
-  let available = true;
-  const durableScopes = vi.fn((): {contextGraphId: ContextGraphIdV1; authorAddress: EvmAddressV1}[] => []);
-  let privateRepairs: readonly Rfc64FinalizedPrivatePlacementRepairV1[] = [];
-  const reconcile = vi.fn(async (): Promise<null> => { throw new Error('unchanged repair failure'); });
-  const repairPrivate = vi.fn(async (_repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Promise<void> => {
-    throw new Error('unchanged private repair failure');
-  });
-  const readRevision = vi.fn(() => available ? revision : null);
-  const listPrivateRepairs = vi.fn(() => privateRepairs);
-  const warn = vi.fn();
-  const dependencies = {
-    resolvePartition: () => ({ retryIntervalMs, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
-    listDurableInventoryScopes: durableScopes,
-    listLocalAuthorAddresses: () => [AUTHOR],
-    acceptsPublicRootLane: () => available,
-    acceptsFinalizedPrivateLane: () => available,
-    readRepairRevision: readRevision,
-    readPrivateFailure: () => null,
-    writePrivateFailures: () => {},
-    listFinalizedPrivateRepairs: listPrivateRepairs,
-    repairFinalizedPrivatePlacement: repairPrivate,
-    reconcile,
-    warn,
-    ...overrides,
-  };
-  const owner = new Rfc64SwmCatalogProjectionOwnerV1(dependencies);
-  owners.push(owner);
-  return {
-    owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, warn, durableScopes,
-    request: () => owner.request({ contextGraphId: CG, authorAddress: AUTHOR, ctx }),
-    setRevision: (value: string | CatalogRepairRevisionHintV1) => { revision = typeof value === 'string' ? { scopeIdentity: 'scope-1', headRevision: value } : value; },
-    setAvailable: (value: boolean) => { available = value; },
-    setPrivateRepairs: (value: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) => { privateRepairs = value; },
-    advance: async (ms: number) => { await vi.advanceTimersByTimeAsync(ms); await owner.whenIdle(); },
-  };
-}
-
-function privateRepair(): Rfc64FinalizedPrivatePlacementRepairV1 {
-  return {
-    version: 1, contextGraphId: CG, authorAddress: AUTHOR,
-    inventoryScope: {
-      networkId: 'otp:20430', contextGraphId: CG, governanceChainId: null,
-      governanceContractAddress: null, ownershipTransitionDigest: null,
-      authorAddress: AUTHOR, subGraphName: null, era: '1',
-    },
-    assertionCoordinate: 'repair', assertionVersion: '1',
-    kaUal: `did:dkg:otp:20430/${AUTHOR}/1`, sealDigest: `0x${'22'.repeat(32)}`,
-  } as Rfc64FinalizedPrivatePlacementRepairV1;
-}
 
 const retainedFailures = [
   ['integrity', () => new CatalogRepairIntegrityErrorV1('invalid seal')],
@@ -495,7 +430,7 @@ describe('RFC-64 unchanged repair backoff', () => {
     f.setPrivateRepairs([repair]);
     await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
     await f.advance(1_000);
-    const other = { ...repair, assertionCoordinate: 'other', kaUal: `${repair.kaUal}-other` };
+    const other = { ...repair, assertionCoordinate: 'other', kaUal: `did:dkg:otp:20430/${AUTHOR}/2` };
     f.setPrivateRepairs([repair, other]);
     f.setRevision('scope-1:head-2');
     await f.owner.requestFinalizedPrivate({ repair: other, ctx }).whenAttempted;
@@ -560,7 +495,7 @@ describe('RFC-64 unchanged repair backoff', () => {
   it('uses one wake for the earliest private waiter deadline and preserves later waiters', async () => {
     const f = fixture(0);
     const repair = privateRepair();
-    const other = { ...repair, assertionCoordinate: 'other', kaUal: `${repair.kaUal}-other` };
+    const other = { ...repair, assertionCoordinate: 'other', kaUal: `did:dkg:otp:20430/${AUTHOR}/2` };
     f.setPrivateRepairs([repair]);
     await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
     await f.advance(1_000);
@@ -641,6 +576,7 @@ describe('RFC-64 unchanged repair backoff', () => {
       ...repair, inventoryScope: { ...repair.inventoryScope, era: '2' },
     } as Rfc64FinalizedPrivatePlacementRepairV1;
     f.setPrivateRepairs([replacement]);
+    f.readAuthority.mockImplementation(() => pinnedPrivatePlacementAuthorityV1(replacement));
     await f.owner.requestFinalizedPrivate({ repair: replacement, ctx }).whenAttempted;
     await oldWaiter.whenAttempted;
     expect(f.repairPrivate).toHaveBeenCalledTimes(3);
