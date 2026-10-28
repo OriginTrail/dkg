@@ -1,4 +1,4 @@
-import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication } from './prepared-publication.js';
+import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication, type PreparedPublicationInput } from './prepared-publication.js';
 import { recordTentativePublication } from './record-tentative-publication.js';
 import { acquirePreparedPublication, publicationAcquisitionFailure, type PublicationAcquisition } from './prepared-publication-acquisition.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
@@ -946,6 +946,67 @@ function isNoDataInSwmFailure(err: unknown): boolean {
   }
   return false;
 }
+
+export type SharedMemoryPublishOptions = PublishLifecycleHooks & Pick<PublishOptions, 'adoptExistingMint'> & {
+      operationCtx?: OperationContext;
+      clearSharedMemoryAfter?: boolean;
+      /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
+      publishContextGraphId?: string;
+      /** On-chain CG ID for the V10 chain tx (ACK digest + publishDirect). Does NOT trigger remap. */
+      onChainContextGraphId?: string;
+      contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
+      v10ACKProvider?: PublishOptions['v10ACKProvider'];
+      trustedNonManifestCatalogTriples?: PublishOptions['trustedNonManifestCatalogTriples'];
+      subGraphName?: string;
+      publisherPeerId?: string;
+      /**
+       * Per-call override for the on-chain attribution target — see
+       * `PublishOptions.publisherNodeIdentityIdOverride` for full semantics.
+       * Threaded into the inner `publish()` call below.
+       */
+      publisherNodeIdentityIdOverride?: bigint;
+      /**
+       * RFC-001 §9.x — pre-computed attestation captured at
+       * `agent.assertion.finalize()` time. See
+       * `PublishOptions.precomputedAttestation`. Required for
+       * on-chain publishes.
+       */
+      precomputedAttestation?: PublishOptions['precomputedAttestation'];
+      /**
+       * OT-RFC-38 / LU-5. When set, the inline ACK payload is AEAD-
+       * encrypted before being shipped to cores so curated-CG bytes
+       * are opaque on the wire. See `PublishOptions.encryptInlinePayload`
+       * for the full semantics.
+       */
+      encryptInlinePayload?: PublishOptions['encryptInlinePayload'];
+      /**
+       * OT-RFC-38 LU-11. Sibling of `encryptInlinePayload` — when set,
+       * the publisher routes through the chunked path that fans
+       * per-chunk ciphertexts via SWM gossip and ships only the
+       * commitment to cores via V2 ACK. See
+       * `PublishOptions.encryptInlineChunked` for the full
+       * semantics.
+       */
+      encryptInlineChunked?: PublishOptions['encryptInlineChunked'];
+      /** Per-publish on-chain lifetime override in epochs. */
+      publishEpochs?: number;
+      /**
+       * OT-RFC-43 A2 (decision 1) — precomputed packed kaId stamped at
+       * finalize. When set, `ensureReservedKaId` REUSES it instead of
+       * allocating again (single-source allocate-at-finalize). Undefined keeps
+       * the existing allocate-at-publish behavior.
+       */
+      reservedKaId?: bigint;
+      /** Explicit graph-family boundary; named lifecycles exclude bucket and siblings. */
+      sharedMemoryScope?: SharedMemoryGraphScope;
+      contentScopeVersion?: PublishOptions['contentScopeVersion'];
+      kaUal?: PublishOptions['kaUal'];
+      assertionVersion?: PublishOptions['assertionVersion'];
+      publicTripleCount?: PublishOptions['publicTripleCount'];
+      privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
+      privateTripleCount?: PublishOptions['privateTripleCount'];
+      pricingPolicy?: PublishOptions['pricingPolicy'];
+    };
 
 export class DKGPublisher implements Publisher {
   private readonly store: TripleStore;
@@ -1991,73 +2052,33 @@ export class DKGPublisher implements Publisher {
    *   sub-graph URIs of shape `/{contextGraphId}/{subGraphName}`. To publish from a sub-graph,
    *   omit `publishContextGraphId` (publish remains in the source CG's sub-graph).
    */
-  async publishFromSharedMemory(
-    contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] },
-    // r12 (3878010163) — the lifecycle hooks enter as the ONE shared contract (intersected,
-    // not re-declared field by field), so a hook added to PublishLifecycleHooks is available
-    // at this public entry point without editing this list.
-    options?: PublishLifecycleHooks & Pick<PublishOptions, 'adoptExistingMint'> & {
-      operationCtx?: OperationContext;
-      clearSharedMemoryAfter?: boolean;
-      /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
-      publishContextGraphId?: string;
-      /** On-chain CG ID for the V10 chain tx (ACK digest + publishDirect). Does NOT trigger remap. */
-      onChainContextGraphId?: string;
-      contextGraphSignatures?: Array<{ identityId: bigint; r: Uint8Array; vs: Uint8Array }>;
-      v10ACKProvider?: PublishOptions['v10ACKProvider'];
-      trustedNonManifestCatalogTriples?: PublishOptions['trustedNonManifestCatalogTriples'];
-      subGraphName?: string;
-      publisherPeerId?: string;
-      /**
-       * Per-call override for the on-chain attribution target — see
-       * `PublishOptions.publisherNodeIdentityIdOverride` for full semantics.
-       * Threaded into the inner `publish()` call below.
-       */
-      publisherNodeIdentityIdOverride?: bigint;
-      /**
-       * RFC-001 §9.x — pre-computed attestation captured at
-       * `agent.assertion.finalize()` time. See
-       * `PublishOptions.precomputedAttestation`. Required for
-       * on-chain publishes.
-       */
-      precomputedAttestation?: PublishOptions['precomputedAttestation'];
-      /**
-       * OT-RFC-38 / LU-5. When set, the inline ACK payload is AEAD-
-       * encrypted before being shipped to cores so curated-CG bytes
-       * are opaque on the wire. See `PublishOptions.encryptInlinePayload`
-       * for the full semantics.
-       */
-      encryptInlinePayload?: PublishOptions['encryptInlinePayload'];
-      /**
-       * OT-RFC-38 LU-11. Sibling of `encryptInlinePayload` — when set,
-       * the publisher routes through the chunked path that fans
-       * per-chunk ciphertexts via SWM gossip and ships only the
-       * commitment to cores via V2 ACK. See
-       * `PublishOptions.encryptInlineChunked` for the full
-       * semantics.
-       */
-      encryptInlineChunked?: PublishOptions['encryptInlineChunked'];
-      /** Per-publish on-chain lifetime override in epochs. */
-      publishEpochs?: number;
-      /**
-       * OT-RFC-43 A2 (decision 1) — precomputed packed kaId stamped at
-       * finalize. When set, `ensureReservedKaId` REUSES it instead of
-       * allocating again (single-source allocate-at-finalize). Undefined keeps
-       * the existing allocate-at-publish behavior.
-       */
-      reservedKaId?: bigint;
-      /** Explicit graph-family boundary; named lifecycles exclude bucket and siblings. */
-      sharedMemoryScope?: SharedMemoryGraphScope;
-      contentScopeVersion?: PublishOptions['contentScopeVersion'];
-      kaUal?: PublishOptions['kaUal'];
-      assertionVersion?: PublishOptions['assertionVersion'];
-      publicTripleCount?: PublishOptions['publicTripleCount'];
-      privateMerkleRoot?: PublishOptions['privateMerkleRoot'];
-      privateTripleCount?: PublishOptions['privateTripleCount'];
-      pricingPolicy?: PublishOptions['pricingPolicy'];
-    },
-  ): Promise<PublishResult> {
+  async publishFromSharedMemory(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
+    options?: SharedMemoryPublishOptions): Promise<PublishResult> {
+    if (options?.adoptExistingMint !== undefined) {
+      const { adoptExistingMint, ...content } = options;
+      return this.recordExistingMintFromSharedMemory(contextGraphId, selection, adoptExistingMint, content);
+    }
+    const content = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
+    let result: PublishResult;
+    try { result = await this.publish(content.options); }
+    catch (error) {
+      if (!isNoDataInSwmFailure(error)) throw error;
+      this.log.warn(content.ctx, 'publishFromSWM core-node verification failed with NO_DATA_IN_SWM; retrying via direct publish with inline quads');
+      result = await this.publish({ ...content.options, fromSharedMemory: false,
+        [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline' } as InternalPublishOptions);
+    }
+    return content.finalize(result);
+  }
+
+  async recordExistingMintFromSharedMemory(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
+    request: NonNullable<PublishOptions['adoptExistingMint']>,
+    options?: Omit<SharedMemoryPublishOptions, 'adoptExistingMint'>): Promise<PublishResult> {
+    const content = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
+    return content.finalize(await this.recordExistingMint(content.options, request));
+  }
+
+  private async prepareSharedMemoryPublication(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
+    options?: Omit<SharedMemoryPublishOptions, 'adoptExistingMint'>) {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
     const sharedMemoryScope: SharedMemoryGraphScope = options?.sharedMemoryScope
       ?? { kind: 'complete-family' };
@@ -2237,28 +2258,11 @@ export class DKGPublisher implements Publisher {
       privateMerkleRoot: options?.privateMerkleRoot,
       privateTripleCount: options?.privateTripleCount,
       pricingPolicy: options?.pricingPolicy,
-      adoptExistingMint: options?.adoptExistingMint,
       [INTERNAL_ORIGIN_TOKEN]: true,
       [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline-small-swm',
       ...(hasTrustedCatalogTriples ? { [TRUSTED_CATALOG_ORIGIN_TOKEN]: true } : {}),
     };
-    let publishResult: PublishResult;
-    try {
-      publishResult = await this.publish(internalPublishOptions);
-    } catch (err) {
-      if (!isNoDataInSwmFailure(err)) throw err;
-      this.log.warn(
-        ctx,
-        'publishFromSWM core-node verification failed with NO_DATA_IN_SWM; retrying via direct publish with inline quads',
-      );
-      const directRetryOptions: InternalPublishOptions = {
-        ...internalPublishOptions,
-        fromSharedMemory: false,
-        [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline',
-      };
-      publishResult = await this.publish(directRetryOptions);
-    }
-
+    const finalize = async (publishResult: PublishResult): Promise<PublishResult> => {
     // Per-cgId data promotion: copy quads + KA meta from the default
     // `<NAME>/data` + `<NAME>/_meta` graphs into `<NAME>/context/<cgId>/data`
     // + `<NAME>/context/<cgId>/_meta`. The RS prover's `extractV10KCFromStore`
@@ -2454,6 +2458,8 @@ export class DKGPublisher implements Publisher {
     // imperatively in dkg-agent-publish.ts.
 
     return publishResult;
+    };
+    return { options: internalPublishOptions, ctx, finalize };
   }
 
   /** @deprecated Use publishFromSharedMemory. Will be removed in V10.1. */
@@ -2531,6 +2537,51 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
+    if (options.adoptExistingMint !== undefined) {
+      const { adoptExistingMint, ...content } = options;
+      return this.recordExistingMint(content, adoptExistingMint);
+    }
+    const content = await this.preparePublicationContent(options);
+    const prepared = await preparePublication(content.preparation, content.ports);
+    if (prepared.kind === 'local') return content.record(prepared);
+    options.onPhase?.('chain', 'start');
+    try {
+      const receipt = await acquirePreparedPublication(prepared, {
+        chain: this.chain, log: this.log, ensureReservedKaId: this.ensureReservedKaId.bind(this),
+      });
+      return await content.record(receipt);
+    } finally { options.onPhase?.('chain', 'end'); }
+  }
+
+  /** Record verified mint evidence through the same prepared-content recorder as a live publish. */
+  async recordExistingMint(options: Omit<PublishOptions, 'adoptExistingMint'>,
+    request: NonNullable<PublishOptions['adoptExistingMint']>): Promise<PublishResult> {
+    const content = await this.preparePublicationContent(options);
+    const { target, payload } = content.preparation;
+    const { publisherContextGraphId, sealedAdoption, graphPublish, v10ChainId } = target;
+    await this.publisherPlanner.requireMintAdoptionTarget(publisherContextGraphId);
+    await content.ports.validateSealIntegrity();
+    const attestation = options.precomputedAttestation;
+    if (!sealedAdoption || !graphPublish || !attestation || publisherContextGraphId === undefined)
+      throw new Error('Recording an existing mint requires a sealed graph-scoped publish');
+    if (attestation.reservedKaId !== graphPublish.expectedPackedKaId)
+      throw new Error('Recording an existing mint requires the sealed reserved KA id');
+    if (!graphScopeTargetsChain(graphPublish.scope.chainId, this.chain.chainId, v10ChainId))
+      throw new Error('Graph-scoped publish UAL targets a different chain');
+    options.onPhase?.('chain', 'start');
+    try {
+      const outcome = await adoptMintForRecording(this.chain, {
+        kaId: attestation.reservedKaId, merkleRoot: payload.kcMerkleRoot,
+        contextGraphId: publisherContextGraphId, authorAddress: attestation.authorAddress,
+      }, sealedAdoption, request);
+      return await content.record({ kind: 'confirmed', outcome, reservedKaId: attestation.reservedKaId,
+        effectiveAuthorAddress: attestation.authorAddress });
+    } finally { options.onPhase?.('chain', 'end'); }
+  }
+
+  /** Content validation and the confirmed recorder are independent of receipt acquisition. */
+  private async preparePublicationContent(options: Omit<PublishOptions, 'adoptExistingMint'>) {
+
     const explicitPublishEpochs = resolvePublishEpochsOverride(options.publishEpochs);
     const pricingPolicyResult = parsePublicationPricingPolicy(options.pricingPolicy);
     if (!pricingPolicyResult.ok) {
@@ -3264,39 +3315,17 @@ export class DKGPublisher implements Publisher {
     };
 
 
-    let acquisition: PublicationAcquisition | PreparedLocalPublication;
-    if (options.adoptExistingMint !== undefined) {
-      await this.publisherPlanner.requireMintAdoptionTarget(publisherContextGraphId);
-      await validateSealIntegrity();
-      const attestation = options.precomputedAttestation;
-      if (!sealedAdoption || !graphPublish || !attestation || publisherContextGraphId === undefined)
-        throw new Error('Recording an existing mint requires a sealed graph-scoped publish');
-      if (attestation.reservedKaId !== graphPublish.expectedPackedKaId)
-        throw new Error('Recording an existing mint requires the sealed reserved KA id');
-      if (!graphScopeTargetsChain(graphPublish.scope.chainId, this.chain.chainId, v10ChainId))
-        throw new Error('Graph-scoped publish UAL targets a different chain');
-      onPhase?.('chain', 'start');
-      const outcome = await adoptMintForRecording(this.chain, {
-        kaId: attestation.reservedKaId, merkleRoot: kcMerkleRoot,
-        contextGraphId: publisherContextGraphId, authorAddress: attestation.authorAddress,
-      }, sealedAdoption, options.adoptExistingMint);
-      acquisition = { kind: 'confirmed', outcome, reservedKaId: attestation.reservedKaId,
-        effectiveAuthorAddress: attestation.authorAddress };
-    } else {
-      const prepared = await preparePublication({
+    const preparation: PreparedPublicationInput = {
         payload: { catalogCommitment, privateRoots, catalogByteSize, publicByteSize, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, publicNquadsBytes, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers, kaCount, entityCount },
         target: { publisherContextGraphId, graphPublish, v10CgDomain, contextGraphId, attributionIdentityId, hasAttributionOverride, v10ChainId, v10KavAddress, sealedAdoption },
         options, pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode: resolvePublicACKStagingMode(options),
-      }, {
+      };
+    const ports = {
         publisherPlanner: this.publisherPlanner, log: this.log,
         allocateOperationId: () => `${this.sessionId}-${++this.tentativeCounter}`,
         selectPublicStagingQuads, invokeV10ACKProvider, validateSealIntegrity,
-      });
-      acquisition = prepared.kind === 'local' ? prepared : await acquirePreparedPublication(prepared, {
-        chain: this.chain, log: this.log, ensureReservedKaId: this.ensureReservedKaId.bind(this),
-      });
-    }
-
+      };
+    const record = async (acquisition: PublicationAcquisition | PreparedLocalPublication): Promise<PublishResult> => {
     const onChainResult = acquisition.kind === 'confirmed' ? acquisition.outcome.result : undefined;
     const usedV10Path = acquisition.kind === 'confirmed';
     const localChainSkipReason = acquisition.kind === 'local' ? 'no-chain' : undefined;
@@ -3361,8 +3390,6 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain:metadata', 'end');
     }
 
-    onPhase?.('chain', 'end');
-
     const result: PublishResult = {
       kaId: graphPublish
         ? onChainResult?.kaId
@@ -3405,6 +3432,8 @@ export class DKGPublisher implements Publisher {
       tripleCount: allSkolemizedQuads.length,
     });
     return result;
+    };
+    return { preparation, ports, record };
   }
 
   /**

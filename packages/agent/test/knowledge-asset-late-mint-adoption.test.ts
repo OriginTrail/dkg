@@ -493,7 +493,9 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     });
     const keyed = agent as unknown as Record<string, (...args: unknown[]) => unknown>;
     vi.spyOn(agent, 'getLocalSigningAgentForAddress').mockReturnValue(null);
-    const publishFromSharedMemory = vi.spyOn(agent.publisher, 'publishFromSharedMemory');
+    const recordExistingMint = vi.spyOn(agent.publisher, 'recordExistingMintFromSharedMemory');
+    const livePublish = vi.spyOn(agent.publisher, 'publishFromSharedMemory');
+    const liveFinalizedPublish = vi.spyOn(agent, 'publishFromFinalizedAssertion');
     const senderKeyWork = ['_resolveCuratedChainKeyContext', '_resolveInlineEncryption', 'loadSwmSenderKeyState', 'createV10ACKProvider']
       .map((method) => vi.spyOn(keyed, method));
     for (const spy of senderKeyWork) spy.mockClear();
@@ -505,8 +507,11 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     // The curated catalog floor is recorded as the minting publish records it.
     const catalog = await store.query(`SELECT ?s WHERE { GRAPH <${contextGraphCatalogUri(CONTEXT_GRAPH)}> { ?s ?p ?o } }`);
     expect(catalog.type === 'bindings' && catalog.bindings.length).toBeGreaterThan(0);
-    const options = publishFromSharedMemory.mock.calls[0]?.[2];
-    expect(options?.adoptExistingMint).toEqual({ kind: 'prepared', evidence: expect.any(Object) });
+    expect(livePublish).not.toHaveBeenCalled();
+    expect(liveFinalizedPublish).not.toHaveBeenCalled();
+    expect(recordExistingMint).toHaveBeenCalledOnce();
+    expect(recordExistingMint.mock.calls[0]?.[2]).toEqual({ kind: 'prepared', evidence: expect.any(Object) });
+    const options = recordExistingMint.mock.calls[0]?.[3];
     expect(options?.trustedNonManifestCatalogTriples?.size ?? options?.trustedNonManifestCatalogTriples?.length).toBeGreaterThan(0);
     expect(options?.encryptInlinePayload).toBeUndefined();
     expect(options?.encryptInlineChunked).toBeUndefined();
@@ -718,7 +723,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
   it('fails retryably when the record-only publish does not confirm', async () => {
     const { agent } = await strandedAsset(new MockChainAdapter());
-    vi.spyOn(agent, 'publishFromFinalizedAssertion').mockResolvedValueOnce({ status: 'tentative' } as never);
+    vi.spyOn(agent, 'recordFinalizedAssertionMint').mockResolvedValueOnce({ status: 'tentative' } as never);
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE, message: expect.stringMatching(/ended tentative/) });

@@ -270,9 +270,9 @@ async function recordThroughPublish(agent: DKGAgent, host: KnowledgeAssetMintRec
   const lock = assertionLifecycleWriteLockKey(target.contextGraphId, target.name, target.agentAddress, target.subGraphName);
   return withAssertionLifecycleWriteLease(host.writeLocks, lock, async heldLifecycle => {
     await assertReservationUnchanged(agent, reservation, target);
-    const published = await agent.publishFromFinalizedAssertion(target.contextGraphId, target.name,
-      { heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress,
-        adoptExistingMint: { kind: 'prepared', evidence } });
+    const published = await agent.recordFinalizedAssertionMint(target.contextGraphId, target.name,
+      { kind: 'prepared', evidence },
+      { heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress });
     if (published.status !== 'confirmed' || !published.onChainResult) {
       throw Object.assign(new Error(`Recording the mint of "${target.name}" ended ${published.status}. Retry the reconcile.`), {
         code: KA_MINT_RECONCILE_INCOMPLETE_CODE,

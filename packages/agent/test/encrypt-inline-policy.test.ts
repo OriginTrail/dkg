@@ -857,6 +857,8 @@ describe('DKGAgent.publishFromSharedMemory inline encryption routing', () => {
         error: recorder(() => undefined),
         debug: recorder(() => undefined),
       },
+      runSharedMemoryPublication: (DKGAgent.prototype as any).runSharedMemoryPublication,
+      publishPreparedSharedMemory: (DKGAgent.prototype as any).publishPreparedSharedMemory,
       getContextGraphOnChainId: recorder(async () => onChainId),
       createV10ACKProvider: recorder(() => undefined),
       isPrivateContextGraph: recorder(async () => false),

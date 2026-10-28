@@ -357,16 +357,9 @@ export async function preparePublication(input: PreparedPublicationInput, ports:
     return { kind: 'local', publisherAddress, publishOperationId,
       reason: publisherContextGraphId === undefined ? 'no on-chain CG id' : 'chain not V10-ready' };
   }
-  const { attributionIdentityId, hasAttributionOverride, v10ChainId, v10KavAddress, sealedAdoption } = input.target;
-  onPhase?.('chain', 'start');
+  const { attributionIdentityId, v10ChainId, v10KavAddress, sealedAdoption } = input.target;
   await ports.validateSealIntegrity();
-  let signStarted = false, submitStarted = false;
   try {
-    onPhase?.('chain:sign', 'start'); signStarted = true;
-    ports.log.info(ctx, `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${finalizedPublisherPlan.signer.address}, source=${finalizedPublisherPlan.signer.source})`);
-    onPhase?.('chain:sign', 'end'); signStarted = false;
-    onPhase?.('chain:submit', 'start'); submitStarted = true;
-    ports.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, networkVisibleByteSize=${publicationPricing.networkVisibleByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, billableByteSize=${publicationPricing.billableByteSize}, pricingPolicy=${publicationPricing.policy}, tokenAmount=${precomputedTokenAmount})`);
   if (publisherContextGraphId === undefined || v10ChainId === undefined || v10KavAddress === undefined) {
     throw new Error('V10 publish requires a parsed context graph id, getEvmChainId() and getKnowledgeAssetsLifecycleAddress()');
   }
@@ -401,8 +394,6 @@ export async function preparePublication(input: PreparedPublicationInput, ports:
       pricingPolicy: publicationPricing.policy },
     hooks: { onPhase, onBroadcastAccepted: options.onBroadcastAccepted, onBeforeBroadcast: options.onBeforeBroadcast } };
   } catch (error) {
-    if (signStarted) onPhase?.('chain:sign', 'end');
-    if (submitStarted) onPhase?.('chain:submit', 'end');
     throw publicationAcquisitionFailure(error, ports.log, ctx, lifecycle, publisherContextGraphId ?? 0n, v10ACKs?.length ?? 0);
   }
 }

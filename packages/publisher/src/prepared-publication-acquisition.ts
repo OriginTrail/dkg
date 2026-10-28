@@ -23,7 +23,12 @@ export async function acquirePreparedPublication(input: PreparedOnChainPublicati
   const { onPhase, onBroadcastAccepted, onBeforeBroadcast } = input.hooks;
   const { contextGraphId, publisherAddress, entityCount, publicRecordCount, hiddenCommitmentCount } = diagnostics;
   const v10CgId = submission.contextGraphId;
+  onPhase?.('chain:sign', 'start');
+  try { ports.log.info(ctx, `Signing on-chain publish (attributionId=${submission.publisherNodeIdentityId}, signer=${submission.publisherAddress})`); }
+  finally { onPhase?.('chain:sign', 'end'); }
+  onPhase?.('chain:submit', 'start');
   try {
+    ports.log.info(ctx, `Submitting V10 on-chain publish tx (${submission.knowledgeAssetsAmount} KAs, networkVisibleByteSize=${submission.byteSize}, billableByteSize=${diagnostics.billableByteSize}, pricingPolicy=${diagnostics.pricingPolicy}, tokenAmount=${submission.tokenAmount})`);
     const reservedKaId = await ports.ensureReservedKaId(submission.author.address, submission.reservedKaId);
     if (graphPublish && reservedKaId !== undefined) {
       if (reservedKaId !== graphPublish.expectedPackedKaId) {
