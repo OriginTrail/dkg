@@ -474,6 +474,7 @@ describe('holding a copy only while it is current on chain', () => {
     confirmation = new HeldAssetsConfirmationRun(),
   ) {
     return confirmation.forRound({
+      binding: () => ({ onChainId: '9', generation: 0 }),
       authenticateHeld: async (descriptor, requiredBinding, deadline) => {
         const { ual } = descriptor;
         reads.push(ual);
@@ -642,15 +643,13 @@ describe('holding a copy only while it is current on chain', () => {
     expect(reads).toEqual([]);
   });
 
-  it('stops at an abort, and offers no confirmation without a chain', async () => {
+  it('stops at an abort', async () => {
     const manifest = generation();
     const aborted = new AbortController();
     aborted.abort(new Error('node stopping'));
     await expect(confirm(reader(new Map()), manifest, [manifest.descriptors[0]!.ual], aborted.signal))
       .rejects.toThrow('node stopping');
 
-    const budget = { createGraphScopedAuthenticationDeadline: () => 42 };
-    expect(currentHeldGraphScopedAssetsConfirmer({ budget })).toBeUndefined();
   });
 });
 

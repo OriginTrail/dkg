@@ -87,32 +87,31 @@ const heldCopyKey = (descriptor: GraphScopedDescriptor) =>
 
 /** Chain confirmation for content already owned by an acquired store proof. */
 interface HeldAssetsConfirmationInput {
-  readonly binding?: () => Readonly<{ onChainId?: string; generation: number }>;
-  readonly authenticateHeld?: AuthenticateHeldAsset;
+  readonly binding: () => Readonly<{ onChainId: string; generation: number }>;
+  readonly authenticateHeld: AuthenticateHeldAsset;
   /** The round's budget: the chain checks share one authentication deadline. */
   readonly budget: { createGraphScopedAuthenticationDeadline(): number };
 }
 /** Prior chain verdicts guide intermediate work, never terminal held readiness. */
 export class HeldAssetsConfirmationRun {
   private readonly confirmed = new Set<string>();
-  forRound(input: HeldAssetsConfirmationInput): ConfirmHeldAssetsCurrent | undefined {
+  forRound(input: HeldAssetsConfirmationInput): ConfirmHeldAssetsCurrent {
     return bindHeldAssetsConfirmer(input, this.confirmed);
   }
 }
-export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmationInput): ConfirmHeldAssetsCurrent | undefined {
+export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmationInput): ConfirmHeldAssetsCurrent {
   return new HeldAssetsConfirmationRun().forRound(input);
 }
-function bindHeldAssetsConfirmer(input: HeldAssetsConfirmationInput, confirmed: Set<string>): ConfirmHeldAssetsCurrent | undefined {
+function bindHeldAssetsConfirmer(input: HeldAssetsConfirmationInput, confirmed: Set<string>): ConfirmHeldAssetsCurrent {
   const { authenticateHeld } = input;
-  if (!authenticateHeld) return undefined;
   return async (request, held, options) => {
     const deadline = Math.min(
       input.budget.createGraphScopedAuthenticationDeadline(),
       Date.now() + HELD_CHAIN_CHECK_BUDGET_MS,
     );
     const { contextGraphId } = request;
-    const binding = input.binding?.();
-    const bindingKey = (value: typeof binding) => `${contextGraphId}\0${value?.generation ?? ''}\0${value?.onChainId ?? ''}`;
+    const binding = input.binding();
+    const bindingKey = (value: typeof binding) => `${contextGraphId}\0${value.generation}\0${value.onChainId}`;
     const capturedBinding = bindingKey(binding);
     const cacheKey = (descriptor: GraphScopedDescriptor) => `${capturedBinding}\0${heldCopyKey(descriptor)}`;
     await mapWithConcurrencyDrained(
@@ -123,7 +122,7 @@ function bindHeldAssetsConfirmer(input: HeldAssetsConfirmationInput, confirmed: 
         const { ual } = descriptor;
         let current: GraphScopedChainEvidence;
         try {
-          current = await authenticateHeld(descriptor, binding?.onChainId, deadline, request.signal);
+          current = await authenticateHeld(descriptor, binding.onChainId, deadline, request.signal);
         } catch (error) {
           request.signal?.throwIfAborted();
           throw new Error(
@@ -137,7 +136,7 @@ function bindHeldAssetsConfirmer(input: HeldAssetsConfirmationInput, confirmed: 
         confirmed.add(cacheKey(descriptor));
       },
     );
-    if (input.binding && bindingKey(input.binding()) !== capturedBinding) {
+    if (bindingKey(input.binding()) !== capturedBinding) {
       throw new HeldGenerationNotCurrentError(`Local binding for "${contextGraphId}" changed during held-copy checks`);
     }
   };

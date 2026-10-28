@@ -60,3 +60,18 @@ void exactTransport;
 // @ts-expect-error Graph owners cannot carry an ordinary exact-selection policy.
 const exactSelection: GraphOwnedDurableRecoveryRequest = { ...owned, options: { exactAssetFetchPolicy: undefined } };
 void exactSelection;
+
+import { HeldAssetsConfirmationRun, type ConfirmHeldAssetsCurrent } from '../src/sync/requester/durable-data-holdings.js';
+import type { AuthenticateHeldAsset } from '../src/sync/requester/held-assets-contracts.js';
+declare const authenticateHeld: AuthenticateHeldAsset;
+const confirmation = new HeldAssetsConfirmationRun();
+const budget = { createGraphScopedAuthenticationDeadline: () => 42 };
+// @ts-expect-error Capability selection belongs to composition, not an unbound confirmer.
+confirmation.forRound({ budget });
+// @ts-expect-error Authentication alone cannot identify cached confirmation evidence.
+confirmation.forRound({ budget, authenticateHeld });
+// @ts-expect-error A binding reader must return a required on-chain identity.
+confirmation.forRound({ budget, authenticateHeld, binding: () => ({ generation: 0 }) });
+const requiredConfirmer: ConfirmHeldAssetsCurrent = confirmation.forRound({ budget, authenticateHeld,
+  binding: () => ({ onChainId: '1', generation: 0 }) });
+void requiredConfirmer;

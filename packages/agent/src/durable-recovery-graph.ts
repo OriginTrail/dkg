@@ -9,7 +9,7 @@ import { runChallengeExactAssetFetch, runDurableSyncDetailed, runGraphOwnedDurab
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
-import { HeldAssetsConfirmationRun } from './sync/requester/durable-data-holdings.js';
+import { HeldAssetsConfirmationRun, HeldGenerationNotCurrentError } from './sync/requester/durable-data-holdings.js';
 import { SYNC_TOTAL_TIMEOUT_MS } from './dkg-agent-constants.js';
 
 import type { DurableGraphCommonOptions, DurableGraphOptions, PhysicalDurableSyncResult } from './durable-recovery-types.js';
@@ -175,9 +175,14 @@ export async function runAdmittedGraphOwnedDurableGraph(request: OwnedDurableGra
   const { ports, materialization, contextGraphBudget } = prepareDurableGraph({ ...request, remainingContextGraphs: 1 }, false);
   const runPaging = async (fence?: HeldAssetFence): Promise<DurableRecoveryRoundOutcome> => {
     // An unbound subscription must persist its numeric binding before skipping DATA.
-    const confirmCurrent = fence && fence.binding().onChainId !== undefined
-      ? (recovery.confirmation ?? new HeldAssetsConfirmationRun()).forRound({ binding: fence.binding,
-          authenticateHeld: authority.authenticateHeld?.bind(authority), budget: contextGraphBudget }) : undefined;
+    const confirmCurrent = fence && authority.authenticateHeld && fence.binding().onChainId !== undefined
+      ? (recovery.confirmation ?? new HeldAssetsConfirmationRun()).forRound({
+          binding: () => {
+            const binding = fence.binding();
+            if (binding.onChainId === undefined) throw new HeldGenerationNotCurrentError(`Local binding for "${contextGraphId}" was removed during held-copy checks`);
+            return { onChainId: binding.onChainId, generation: binding.generation };
+          },
+          authenticateHeld: authority.authenticateHeld.bind(authority), budget: contextGraphBudget }) : undefined;
     return runGraphOwnedDurableSyncDetailed({ ...ports, ...host.checkpoints,
       ...graphPageTransport(host, { forceFreshSession: false }), contextGraphId,
       storeGraphScopedAsset: materialization.storeGraphScopedAsset,

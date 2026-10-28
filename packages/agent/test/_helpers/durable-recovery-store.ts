@@ -23,7 +23,11 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
   let chainAnswersPerRound = Number.POSITIVE_INFINITY;
   let chainAnswersLeft = chainAnswersPerRound;
   const holdings = (binding: () => Readonly<{ onChainId?: string; generation: number }>, confirmation = new HeldAssetsConfirmationRun()) => confirmation.forRound({
-    binding,
+    binding: () => {
+      const current = binding();
+      if (current.onChainId === undefined) throw new Error('Held confirmation requires a bound graph');
+      return { onChainId: current.onChainId, generation: current.generation };
+    },
     authenticateHeld: async (descriptor, requiredBinding) => {
       const { ual } = descriptor;
       await options.chain?.beforeRead?.();
