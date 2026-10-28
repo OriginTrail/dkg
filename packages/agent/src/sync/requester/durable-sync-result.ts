@@ -10,18 +10,3 @@ export interface DetailedDurableSyncResult {
   /** Present when a clean legacy response proved the exact filter was ignored. */
   readonly exactResponderCapability?: ExactAssetResponderCapability;
 }
-
-
-/** Keep invocation-local challenge authentication evidence out of ordinary results. */
-export function physicalDurableSyncResult(detailed: DetailedDurableSyncResult): DetailedDurableSyncResult {
-  return {
-    result: detailed.result,
-    ...(detailed.committedExactAssetUals === undefined ? {} : { committedExactAssetUals: detailed.committedExactAssetUals }),
-    ...(detailed.exactFetchDisposition === undefined
-      ? {}
-      : { exactFetchDisposition: detailed.exactFetchDisposition }),
-    ...(detailed.exactResponderCapability === undefined
-      ? {}
-      : { exactResponderCapability: detailed.exactResponderCapability }),
-  };
-}

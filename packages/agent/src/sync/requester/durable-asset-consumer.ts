@@ -6,12 +6,6 @@ import type { VerifiedGraphScopedAsset, ChallengePinnedGraphScopedAsset } from '
 
 /** The shared write loop receives exactly one required consumer, selected before entry. */
 export type DurableAssetConsumer = (asset: VerifiedGraphScopedAsset, authenticationDeadline: number) => Promise<void>;
-export interface DurableSettlementProgress {
-  readonly accumulator: DurableSyncAccumulator;
-  readonly committedExactAssetUals: string[];
-  readonly authenticatedExactAssets: ChallengePinnedGraphScopedAsset[];
-}
-
 export function challengeAssetConsumer(input: {
   readonly context: Pick<DurableSyncContext, 'ctx' | 'signal' | 'logDebug'>;
   readonly authenticate: (request: DurableSyncChallengePinnedAuthenticationRequest) => Promise<ChallengePinnedGraphScopedAsset>;

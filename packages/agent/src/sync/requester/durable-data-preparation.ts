@@ -1,22 +1,19 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { DurableSyncContext } from './durable-sync.js';
+import type { DurableSyncContext, DurableSyncPhaseRequest } from './durable-sync.js';
 import type { PreparedDurableMeta } from './durable-meta-phase.js';
 import type { PreparedDurableDataStrategy } from './durable-holdings-phase.js';
 import type { PreparedDurableVerificationInput } from './durable-verified-page.js';
 import type { DurableGraphSettlementGuard } from './durable-prefix-proof.js';
 import type { DurableBatchVerificationMode } from '../../sync-verify-worker.js';
 import type { ExactAssetSelection } from '../exact-assets.js';
-import type { DurableManifestDigest, DurableManifestPrefixDigest } from '../checkpoint/state.js';
-import type { SyncPageProgress, SyncPageResult } from './page-fetch.js';
+import type { SyncPageResult } from './page-fetch.js';
 import { graphScopedDurableManifestPrefixAtOffset, isGraphScopedDurableManifestBoundary,
   planBoundedGraphScopedDurableBatch } from '../durable-integrity.js';
 import { filterExactAssetDurablePayload } from './exact-durable-fetch.js';
 import { createDurableDataRoundBoundary } from './durable-data-round.js';
 
 type PreparationContext = Pick<DurableSyncContext, 'ctx' | 'signal' | 'contentProofs' | 'deleteCheckpoint' | 'logInfo' | 'logWarn'>;
-type DataFetcher = (phase: 'data', graph: string, sinceBatchId?: string, manifestDigest?: DurableManifestDigest,
-  prefixAtOffset?: (offset: number) => DurableManifestPrefixDigest | undefined, forceFreshSession?: boolean,
-  shouldStopAfterPage?: (progress: SyncPageProgress) => boolean) => Promise<SyncPageResult>;
+
 
 /** Own DATA transport, coordinate projection and prefix-proof acquisition before shared verification. */
 export async function prepareDurableDataInput(context: PreparationContext, input: {
@@ -31,7 +28,7 @@ export async function prepareDurableDataInput(context: PreparationContext, input
   readonly exactAssetUals?: readonly string[];
   readonly settlementSliceDeadline?: number;
   readonly requireCompleteSnapshot: boolean;
-  readonly fetchData: DataFetcher;
+  readonly fetchData: (request: DurableSyncPhaseRequest) => Promise<SyncPageResult>;
   readonly settlement: DurableGraphSettlementGuard;
   readonly events: { peerResponded(): void; rejectResume(offset: number): void };
 }): Promise<PreparedDurableVerificationInput> {
@@ -46,28 +43,28 @@ export async function prepareDurableDataInput(context: PreparationContext, input
       mode: { kind: 'heldMetadata', descriptors: dataPlan.descriptors },
       holdings: dataPlan };
   } else {
-    const rawDataResult = await fetchPhase(
-      'data',
-      dataGraph,
+    const rawDataResult = await fetchPhase({
+      phase: 'data',
+      graphUri: dataGraph,
       sinceBatchId,
-      graphScopedManifest?.manifestDigest,
-      graphScopedManifest
+      manifestDigest: graphScopedManifest?.manifestDigest,
+      manifestPrefixDigestAtOffset: graphScopedManifest
         ? (offset) => graphScopedDurableManifestPrefixAtOffset(
           graphScopedManifest!,
           offset,
         )?.prefixDigest
         : undefined,
-      preparedMeta.forceFreshUnboundDataSession || (graphScopedManifest !== null && !context.contentProofs),
+      forceFreshSession: preparedMeta.forceFreshUnboundDataSession || (graphScopedManifest !== null && !context.contentProofs),
       // A full-graph round holds what it fetched until it is verified and
       // stored, so it ends at a checkpointable graph within a row/heap budget.
       // A caller that needs one complete snapshot from row 0 keeps one round.
-      graphScopedManifest && exactAssetUals === undefined && !requireCompleteSnapshot
+      shouldStopAfterPage: graphScopedManifest && exactAssetUals === undefined && !requireCompleteSnapshot
         ? createDurableDataRoundBoundary({ manifest: graphScopedManifest, settlementSliceDeadline,
             onHardLimit: ({ resumedFromOffset, nextOffset, acceptedQuads }) => logWarn(ctx,
               `Durable data round for "${pid}" reached its hard limit at ${acceptedQuads} rows `
                 + `(offset ${resumedFromOffset}->${nextOffset}) without a complete graph to checkpoint`) })
         : undefined,
-    );
+    });
     settlement.assertCurrent();
     events.peerResponded();
     const preparedPayload = prepareDurableVerificationPayload({
