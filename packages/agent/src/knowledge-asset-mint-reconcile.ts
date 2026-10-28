@@ -1,16 +1,12 @@
+import { readFinalizedAssertionReservation, FinalizedAssertionReservationError, type FinalizedAssertionReservation as SealedReservation } from './internal/finalized-assertion-reservation.js';
 import { readNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
 import type { ChainAdapter, OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import {
   ASSERTION_PUBLISH_RECEIPT_PREDICATES,
-  GRAPH_KA_CONTENT_SCOPE_VERSION,
+  LegacyKnowledgeAssetReadOnlyError,
   buildAssertionPublishReceiptQuads,
-  contextGraphAssertionUri,
-  contextGraphMetaUri,
-  createGraphKnowledgeAssetScope,
-  parseAssertionSealQuads,
-  type AssertionSeal,
 } from '@origintrail-official/dkg-core';
 import {
   readPreparedMintAdoption,
@@ -66,14 +62,6 @@ interface Target {
   subGraphName?: string;
   agentAddress: string;
   txHash?: string;
-}
-
-interface SealedReservation {
-  seal: AssertionSeal & { publicTripleCount: number };
-  scope: ReturnType<typeof createGraphKnowledgeAssetScope>;
-  kaId: bigint;
-  assertionUri: string;
-  metaGraph: string;
 }
 
 const bareRoot = (root: string) => root.toLowerCase().replace(/^0x/, '');
@@ -164,12 +152,12 @@ export async function reconcileLateMint(
   const evidence = await prepareMintAdoption(host.chain, expected, target.txHash);
   const lock = assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, subGraphName);
   const mint = await withAssertionLifecycleWriteLease(host.writeLocks, lock, async heldLifecycle => {
-    await assertReservationUnchanged(agent, reservation, target);
+    const lockedReservation = await assertReservationUnchanged(agent, reservation, target);
     const current = await lifecycle();
     const share = await readableShare(current);
     return share === 'resident'
-      ? recordThroughPublish(agent, target, evidence, heldLifecycle)
-      : completeRecordedLifecycle(agent, host, reservation, target, await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle);
+      ? recordThroughPublish(agent, target, evidence, heldLifecycle, lockedReservation)
+      : completeRecordedLifecycle(agent, host, lockedReservation, target, await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle);
   });
 
   const after = await lifecycle();
@@ -191,23 +179,12 @@ export async function reconcileLateMint(
 }
 
 async function readSealedReservation(agent: DKGAgent, target: Target): Promise<SealedReservation> {
-  const assertionUri = contextGraphAssertionUri(target.contextGraphId, target.agentAddress, target.name, target.subGraphName);
-  const metaGraph = contextGraphMetaUri(target.contextGraphId);
-  const meta = await agent.store.query(
-    `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
-    { source: 'agent.reconcileLateMint.seal' },
-  );
-  const seal = parseAssertionSealQuads(meta.type === 'quads' ? meta.quads : [], assertionUri);
-  if (!seal || seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION || seal.kaUal === undefined
-    || seal.assertionVersion === undefined || seal.publicTripleCount === undefined) {
-    throw refused(`"${target.name}" in context graph "${target.contextGraphId}" is not finalized as a graph-scoped asset.`);
+  try { return await readFinalizedAssertionReservation(agent.store, target, 'agent.reconcileLateMint.seal'); }
+  catch (error) {
+    if (error instanceof FinalizedAssertionReservationError || error instanceof LegacyKnowledgeAssetReadOnlyError)
+      throw refused(error.message);
+    throw error;
   }
-  const scope = createGraphKnowledgeAssetScope(seal.kaUal, seal.assertionVersion);
-  const kaId = (BigInt(scope.agentAddress) << 96n) | BigInt(scope.kaNumber);
-  if (seal.reservedKaId !== undefined && seal.reservedKaId !== kaId) {
-    throw refused(`The seal of "${target.name}" reserves KA ${seal.reservedKaId}, not its UAL's ${kaId}.`);
-  }
-  return { seal: { ...seal, publicTripleCount: seal.publicTripleCount }, scope, kaId, assertionUri, metaGraph };
 }
 
 /** The publish receipt (transaction and block) a confirmed mint leaves on the assertion. */
@@ -243,7 +220,7 @@ async function assertReservationUnchanged(
   agent: DKGAgent,
   { seal, scope }: Pick<SealedReservation, 'seal' | 'scope'>,
   target: Target,
-): Promise<void> {
+): Promise<SealedReservation> {
   let current: SealedReservation;
   try {
     current = await readSealedReservation(agent, target);
@@ -265,13 +242,14 @@ async function assertReservationUnchanged(
       throw refused(`The lifecycle of "${target.name}" changed while reconcile waited; nothing was written.`);
     }
   }
+  return current;
 }
 
 async function recordThroughPublish(agent: DKGAgent, target: Target,
-  evidence: PreparedMintAdoption, heldLifecycle: AssertionLifecycleWriteLease): Promise<OnChainPublishResult> {
+  evidence: PreparedMintAdoption, heldLifecycle: AssertionLifecycleWriteLease, reservation: SealedReservation): Promise<OnChainPublishResult> {
   const published = await agent.recordFinalizedAssertionMint(target.contextGraphId, target.name,
     { kind: 'prepared', evidence },
-    { heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress });
+    { heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress }, reservation);
   if (published.status !== 'confirmed' || !published.onChainResult) {
     throw Object.assign(new Error(`Recording the mint of "${target.name}" ended ${published.status}. Retry the reconcile.`), {
       code: KA_MINT_RECONCILE_INCOMPLETE_CODE,

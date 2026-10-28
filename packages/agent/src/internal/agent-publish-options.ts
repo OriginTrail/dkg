@@ -1,3 +1,4 @@
+import type { FinalizedAssertionReservation } from './finalized-assertion-reservation.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SharedMemoryGraphScope } from '@origintrail-official/dkg-storage';
@@ -112,6 +113,7 @@ export type FinalizedAssertionPublishOptions = {
     };
 type NamedMintFinalization = Parameters<DKGAgent['completeNamedPublishFinalization']>[0];
 export interface FinalizedAssertionPublicationOperations {
+  readonly reservation?: FinalizedAssertionReservation;
   assertPlan(plan: ReturnType<typeof planKnowledgeAssetVmPublication>): void;
   mint(contextGraphId: string, selection: 'all', options: AgentSharedMemoryPublishOptions): Promise<PublishResult>;
   finishMint(input: NamedMintFinalization, ctx: OperationContext): Promise<void>;

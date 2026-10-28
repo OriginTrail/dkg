@@ -20,7 +20,6 @@ import {isAgentRegistryContextGraph} from '@origintrail-official/dkg-core';
 import type { PreparedLocalPublication, GraphScopedPublishDescriptor } from './prepared-publication.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { KAMetadata } from './metadata.js';
-import type { PublishOptions } from './publisher.js';
 
 export interface TentativePublicationRecording {
   privateRoots: Uint8Array[]; kcMerkleRoot: Uint8Array;
@@ -29,7 +28,7 @@ export interface TentativePublicationRecording {
   graphPublish: GraphScopedPublishDescriptor | undefined;
   normalizedPublisherPeerId: string; dataGraph: string; contextGraphId: string;
   authorAddress: string | undefined; subGraphName: string | undefined; targetMetaGraphUri: string | undefined;
-  ctx: OperationContext; onPhase: PublishOptions['onPhase'];
+  ctx: OperationContext;
 }
 
 export interface TentativePublicationRecordingPorts {
@@ -44,8 +43,7 @@ export interface TentativePublicationRecordingPorts {
 export async function recordTentativePublication(outcome: PreparedLocalPublication, recording: TentativePublicationRecording,
   ports: TentativePublicationRecordingPorts): Promise<string> {
   const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads,
-    graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, subGraphName, targetMetaGraphUri, authorAddress, ctx, onPhase } = recording;
-  onPhase?.('chain', 'start');
+    graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, subGraphName, targetMetaGraphUri, authorAddress, ctx } = recording;
   ports.log.warn(ctx, `Skipping on-chain publish: ${outcome.reason}`);
   const ual = graphPublish?.scope.ual ?? `did:dkg:${ports.chainId}/${outcome.publisherAddress}/t${outcome.publishOperationId}`;
     for (const km of kaMetadata) {

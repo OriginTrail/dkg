@@ -22,7 +22,6 @@ export {
   type MintAdoptionExpectation,
   type MintAdoptionRefusalReason,
   type MintOrAdoptOutcome,
-  type MintRecording,
 } from './adopt-existing-mint.js';
 export { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 export * from './publication-payload-measurement.js';
@@ -620,6 +619,6 @@ export { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES, GRAPH_KNOWLEDGE_ASSET_R
 
 export { prepareMintAdoption, readPreparedMintAdoption } from './adopt-existing-mint.js';
 
-export { withAssertionLifecycleWriteLease, type AssertionLifecycleWriteLease } from './store-write-locks.js';
+export { withAssertionLifecycleWriteLease, assertAssertionLifecycleWriteLease, type AssertionLifecycleWriteLease } from './store-write-locks.js';
 
 export type { PreparedMintAdoption, MintAdoptionRequest } from './adopt-existing-mint.js';

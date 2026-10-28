@@ -18,17 +18,7 @@ import {
   type OnChainPublishResult,
   type V10PublishParams,
 } from '@origintrail-official/dkg-chain';
-import {
-  MemoryLayer,
-  knowledgeAssetLayerGraphUri,
-  type GraphKnowledgeAssetScope,
-} from '@origintrail-official/dkg-core';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
-import {
-  readConfirmedGraphKnowledgeAssetMetadataEnvelope,
-  type ConfirmedGraphKnowledgeAssetMetadataEnvelope,
-} from './metadata.js';
 
 export const MINT_ADOPTION_REFUSED_CODE = 'KA_MINT_ADOPTION_REFUSED';
 
@@ -166,60 +156,10 @@ async function assertMintCurrent(chain: ChainAdapter, expected: MintAdoptionExpe
   }
 }
 
-/** Adoption context for one sealed (graph-scoped) publish. */
-export interface SealedMintAdoption {
-  readonly store: TripleStore;
-  /** The confirmed record this publish writes, to recognize one that already exists. */
-  readonly record: { contextGraphId: string; ual: string }
-    & Omit<ConfirmedGraphKnowledgeAssetMetadataEnvelope, 'transactionHash' | 'subGraphName' | 'batchId' | 'merkleRoot'>;
-  readonly log: (message: string) => void;
-}
-
-/**
- * The adoption context of a publish, or `undefined` for one that is not
- * graph-scoped. Recording only an existing mint requires a sealed publish.
- */
-export function sealedMintAdoption(
-  store: TripleStore,
-  graphPublish: {
-    scope: GraphKnowledgeAssetScope;
-    publicTripleCount: number;
-    privateTripleCount: number;
-    expectedPrivateMerkleRoot?: Uint8Array;
-  } | undefined,
-  input: { contextGraphId: string; subGraphName?: string; log: (message: string) => void },
-): SealedMintAdoption | undefined {
-  if (!graphPublish) {
-    return undefined;
-  }
-  const { scope } = graphPublish;
-  return {
-    store,
-    log: input.log,
-    record: {
-      contextGraphId: input.contextGraphId,
-      ual: scope.ual,
-      assertionVersion: scope.assertionVersion,
-      assertionGraph: knowledgeAssetLayerGraphUri(input.contextGraphId, MemoryLayer.VerifiableMemory, scope, input.subGraphName),
-      publicTripleCount: graphPublish.publicTripleCount,
-      privateTripleCount: graphPublish.privateTripleCount,
-      ...(graphPublish.expectedPrivateMerkleRoot ? { privateMerkleRoot: graphPublish.expectedPrivateMerkleRoot } : {}),
-    },
-  };
-}
-
-/** How the publish records its chain step. */
-export interface MintRecording {
-  /** An existing mint was adopted: it keeps its original cost, not the retry's quote. */
-  readonly adopted: boolean;
-  /** The node already holds exactly this record, so the publish must not write it again. */
-  readonly keepsExistingRecord: boolean;
-}
-
 /** The chain step's result and how the publish records it. */
 export interface MintOrAdoptOutcome {
   readonly result: OnChainPublishResult;
-  readonly recording: MintRecording;
+  readonly adopted: boolean;
 }
 
 /**
@@ -233,7 +173,7 @@ export interface MintOrAdoptOutcome {
 export async function mintOrAdoptKnowledgeAssets(
   chain: ChainAdapter,
   params: V10PublishParams,
-  sealed: SealedMintAdoption | undefined,
+  sealed: boolean,
 ): Promise<MintOrAdoptOutcome> {
   const expected: MintAdoptionExpectation | undefined = sealed && params.reservedKaId !== undefined
     ? {
@@ -244,7 +184,7 @@ export async function mintOrAdoptKnowledgeAssets(
     }
     : undefined;
   try {
-    return { result: await chain.createKnowledgeAssets(params), recording: { adopted: false, keepsExistingRecord: false } };
+    return { result: await chain.createKnowledgeAssets(params), adopted: false };
   } catch (error) {
     const mintedKaId = expected ? kaIdAlreadyMintedFromError(error) : null;
     if (!sealed || !expected || mintedKaId === null) throw error;
@@ -252,7 +192,7 @@ export async function mintOrAdoptKnowledgeAssets(
       throw new MintAdoptionRefusedError('reserved-id-mismatch', expected.kaId,
         `the contract reports KA ${mintedKaId} already minted`, { cause: error });
     }
-    return adopted(sealed, expected, await adoptExistingMint(chain, expected, { revert: error }));
+    return { result: await adoptExistingMint(chain, expected, { revert: error }), adopted: true };
   }
 }
 
@@ -285,56 +225,12 @@ export async function readPreparedMintAdoption(token: PreparedMintAdoption, chai
   return publishResultFromMint(evidence.mint);
 }
 
-/** Verify receipt evidence directly; adoption never constructs transaction parameters. */
+/** Verify receipt evidence directly; local record policy belongs to the recorder. */
 export async function adoptMintForRecording(chain: ChainAdapter, expected: MintAdoptionExpectation,
-  sealed: SealedMintAdoption, request: MintAdoptionRequest): Promise<MintOrAdoptOutcome> {
-  return adopted(sealed, expected, request.kind === 'prepared'
+  request: MintAdoptionRequest): Promise<MintOrAdoptOutcome> {
+  return { result: request.kind === 'prepared'
     ? await readPreparedMintAdoption(request.evidence, chain, expected)
-    : await adoptExistingMint(chain, expected, { txHash: request.txHash }));
-}
-
-async function adopted(
-  sealed: SealedMintAdoption,
-  expected: MintAdoptionExpectation,
-  result: OnChainPublishResult,
-): Promise<MintOrAdoptOutcome> {
-  const keepsRecord = await adoptedMintAlreadyRecorded(sealed.store, { ...sealed.record, merkleRoot: expected.merkleRoot }, result);
-  sealed.log(`Adopted the existing mint of KA ${expected.kaId}: tx=${result.txHash} block=${result.blockNumber}`
-    + (keepsRecord ? '; keeping the record this node already holds' : ''));
-  return { result, recording: { adopted: true, keepsExistingRecord: keepsRecord } };
-}
-
-/**
- * Whether an adopted mint is already recorded locally. The run that minted it
- * may have recorded it before failing, or the node's chain reconcile may have
- * materialized it. Either record must describe exactly the sealed content and
- * this transaction; then the publish keeps it instead of adding a second set
- * of rows. Anything else refuses before the publish writes.
- */
-async function adoptedMintAlreadyRecorded(
-  store: TripleStore,
-  expected: SealedMintAdoption['record'] & { merkleRoot: Uint8Array },
-  mint: OnChainPublishResult,
-): Promise<boolean> {
-  const existing = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, expected);
-  if (existing.state === 'absent') return false;
-  const recorded = existing.state === 'confirmed' ? existing.envelope : undefined;
-  const hex = (bytes?: Uint8Array) => (bytes ? ethers.hexlify(bytes) : undefined);
-  if (
-    recorded
-    && recorded.assertionVersion === expected.assertionVersion
-    && recorded.assertionGraph === expected.assertionGraph
-    && recorded.publicTripleCount === expected.publicTripleCount
-    && recorded.privateTripleCount === expected.privateTripleCount
-    && hex(recorded.privateMerkleRoot) === hex(expected.privateMerkleRoot)
-    && hex(recorded.merkleRoot) === hex(expected.merkleRoot)
-    && recorded.batchId === (mint.kaId ?? mint.batchId)
-    && (recorded.transactionHash === undefined || recorded.transactionHash.toLowerCase() === mint.txHash.toLowerCase())
-  ) {
-    return true;
-  }
-  throw new MintAdoptionRefusedError('existing-record-conflict', mint.kaId ?? mint.batchId,
-    `the local record of ${expected.ual} is ${existing.state === 'invalid' ? 'unreadable' : 'for other content or another transaction'}`);
+    : await adoptExistingMint(chain, expected, { txHash: request.txHash }), adopted: true };
 }
 
 function publishResultFromMint(mint: KnowledgeAssetMintEvidence): OnChainPublishResult {

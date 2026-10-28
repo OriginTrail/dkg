@@ -19,7 +19,7 @@ interface PublicationAcquisitionPorts {
 }
 /** Acquire a receipt from validated submission parameters. Persistence belongs to recording. */
 export async function acquirePreparedPublication(input: PreparedOnChainPublication, ports: PublicationAcquisitionPorts): Promise<PublicationAcquisition> {
-  const { submission, graphPublish, chainId, sealedAdoption, diagnostics, lifecycle, ctx, v10ACKs } = input;
+  const { submission, graphPublish, chainId, diagnostics, lifecycle, ctx, v10ACKs } = input;
   const { onPhase, onBroadcastAccepted, onBeforeBroadcast } = input.hooks;
   const { contextGraphId, publisherAddress, entityCount, publicRecordCount, hiddenCommitmentCount } = diagnostics;
   const v10CgId = submission.contextGraphId;
@@ -54,8 +54,8 @@ export async function acquirePreparedPublication(input: PreparedOnChainPublicati
         onBroadcast: writeAhead.emitWriteAheadStart,
         onBroadcastAccepted: signal => onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
         ...(writeAhead.onBeforeReplacementBroadcast ? { onBeforeReplacementBroadcast: writeAhead.onBeforeReplacementBroadcast } : {}),
-      }, sealedAdoption);
-      if (!outcome.recording.adopted) outcome.result.tokenAmount = submission.tokenAmount;
+      }, graphPublish !== undefined);
+      if (!outcome.adopted) outcome.result.tokenAmount = submission.tokenAmount;
       return { kind: 'confirmed', outcome, reservedKaId, effectiveAuthorAddress: submission.author.address, v10ACKs };
     } finally {
       if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');

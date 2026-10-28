@@ -1,3 +1,4 @@
+import { adoptedMintAlreadyRecorded } from './adopted-mint-record.js';
 import type { MintAdoptionRequest } from './adopt-existing-mint.js';
 import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication, type PreparedPublicationContent } from './prepared-publication.js';
 import { recordTentativePublication } from './record-tentative-publication.js';
@@ -161,7 +162,7 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
-import { adoptMintForRecording, sealedMintAdoption, type MintOrAdoptOutcome } from './adopt-existing-mint.js';
+import { adoptMintForRecording, type MintOrAdoptOutcome } from './adopt-existing-mint.js';
 import { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -2541,9 +2542,9 @@ export class DKGPublisher implements Publisher {
       selectPublicStagingQuads, invokeV10ACKProvider,
       validateSealIntegrity: this.validatePublicationSeal.bind(this),
     });
-    if (prepared.kind === 'local') return this.recordPublication(content, prepared);
     options.onPhase?.('chain', 'start');
     try {
+      if (prepared.kind === 'local') return await this.recordPublication(content, prepared);
       const receipt = await acquirePreparedPublication(prepared, {
         chain: this.chain, log: this.log, ensureReservedKaId: this.ensureReservedKaId.bind(this),
       });
@@ -2556,11 +2557,11 @@ export class DKGPublisher implements Publisher {
     request: MintAdoptionRequest): Promise<PublishResult> {
     const content = await this.preparePublicationContent(options);
     const { target, payload } = content;
-    const { publisherContextGraphId, sealedAdoption, graphPublish, v10ChainId } = target;
+    const { publisherContextGraphId, graphPublish, v10ChainId } = target;
     await this.publisherPlanner.requireMintAdoptionTarget(publisherContextGraphId);
     await this.validatePublicationSeal(content);
     const attestation = options.precomputedAttestation;
-    if (!sealedAdoption || !graphPublish || !attestation || publisherContextGraphId === undefined)
+    if (!graphPublish || !attestation || publisherContextGraphId === undefined)
       throw new Error('Recording an existing mint requires a sealed graph-scoped publish');
     if (attestation.reservedKaId !== graphPublish.expectedPackedKaId)
       throw new Error('Recording an existing mint requires the sealed reserved KA id');
@@ -2571,7 +2572,7 @@ export class DKGPublisher implements Publisher {
       const outcome = await adoptMintForRecording(this.chain, {
         kaId: attestation.reservedKaId, merkleRoot: payload.kcMerkleRoot,
         contextGraphId: publisherContextGraphId, authorAddress: attestation.authorAddress,
-      }, sealedAdoption, request);
+      }, request);
       return await this.recordPublication(content, { kind: 'confirmed', outcome, reservedKaId: attestation.reservedKaId,
         effectiveAuthorAddress: attestation.authorAddress });
     } finally { options.onPhase?.('chain', 'end'); }
@@ -2639,8 +2640,6 @@ export class DKGPublisher implements Publisher {
     const normalizedPublisherPeerId = publisherPeerId.trim();
     const graphPublish = resolveGraphScopedPublishDescriptor({ kind: 'initial', options });
     // A sealed publish adopts its own late mint; explicit adoption records it and sends nothing.
-    const sealedAdoption = sealedMintAdoption(this.store, graphPublish, { contextGraphId, subGraphName: options.subGraphName,
-      log: (message) => this.log.info(ctx, message) });
     assertPublicationPricingPolicyApplicable(pricingPolicy, {
       kind: 'initial',
       graphScoped: graphPublish !== undefined,
@@ -3014,7 +3013,7 @@ export class DKGPublisher implements Publisher {
       },
       target: {
         publisherContextGraphId, graphPublish, v10CgDomain, contextGraphId, dataGraph,
-        attributionIdentityId, v10ChainId, v10KavAddress, sealedAdoption,
+        attributionIdentityId, v10ChainId, v10KavAddress,
         subGraphName: options.subGraphName, targetMetaGraphUri: options.targetMetaGraphUri,
       },
       execution: {
@@ -3122,7 +3121,7 @@ export class DKGPublisher implements Publisher {
     } else {
       ual = await recordTentativePublication(acquisition, {
         privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads,
-        graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, ctx, onPhase,
+        graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, ctx,
         subGraphName: target.subGraphName, targetMetaGraphUri: target.targetMetaGraphUri,
         authorAddress: options.precomputedAttestation?.authorAddress,
       }, {
@@ -3225,7 +3224,16 @@ export class DKGPublisher implements Publisher {
       const normalizedQuads = allSkolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
       const onChainResult = outcome.result;
       let ual = '';
-      const recording = outcome.recording;
+      if (outcome.adopted && !graphPublish) throw new Error('Adopted mint recording requires a graph-scoped reservation');
+      const keepsExistingRecord = outcome.adopted && graphPublish !== undefined && await adoptedMintAlreadyRecorded(this.store, {
+        contextGraphId, ual: graphPublish.scope.ual, assertionVersion: graphPublish.scope.assertionVersion,
+        assertionGraph: knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, graphPublish.scope, target.subGraphName),
+        merkleRoot: kcMerkleRoot, publicTripleCount: graphPublish.publicTripleCount,
+        privateTripleCount: graphPublish.privateTripleCount,
+        ...(graphPublish.expectedPrivateMerkleRoot ? { privateMerkleRoot: graphPublish.expectedPrivateMerkleRoot } : {}),
+      }, onChainResult);
+      if (outcome.adopted) this.log.info(ctx, `Adopted the existing mint of KA ${onChainResult.kaId ?? onChainResult.batchId}: tx=${onChainResult.txHash} block=${onChainResult.blockNumber}`
+        + (keepsExistingRecord ? '; keeping the record this node already holds' : ''));
       // GH#2359 item 2 — the receipt is confirmed and parsed; everything below is local
       // post-receipt work. Fire the scheduling hint NOW so a demand-driven reconciler can
       // start its own canonical proof instead of waiting out this tail. Non-fail-closed via
@@ -3338,7 +3346,7 @@ export class DKGPublisher implements Publisher {
           q.graph === defaultMeta ? { ...q, graph: target.targetMetaGraphUri! } : q,
         );
       }
-      if (graphPublish && !recording.keepsExistingRecord) {
+      if (graphPublish && !keepsExistingRecord) {
         await replaceLocallyTrustedKnowledgeAssetControls(
           this.store,
           graphPublish.scope.ual,
@@ -3378,7 +3386,7 @@ export class DKGPublisher implements Publisher {
       } else {
         await this.store.insert(vmQuads);
       }
-      if (!recording.keepsExistingRecord) await this.store.insert(confirmedQuads);
+      if (!keepsExistingRecord) await this.store.insert(confirmedQuads);
       // GH #1078 — supersede/persist private slices only now that the chain
       // has confirmed (before returning 'confirmed', so no read sees the KA
       // confirmed without its private data).

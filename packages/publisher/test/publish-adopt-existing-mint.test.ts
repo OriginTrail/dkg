@@ -41,7 +41,7 @@ import {
   mintOrAdoptKnowledgeAssets,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
 } from '../src/index.js';
-import { sealedMintAdoption, type SealedMintAdoption, prepareMintAdoption, adoptMintForRecording } from '../src/adopt-existing-mint.js';
+import { prepareMintAdoption, adoptMintForRecording } from '../src/adopt-existing-mint.js';
 import { PublisherPlanner } from '../src/publisher-planning.js';
 import { buildSeal, mockSealCtx } from './_helpers/seal.js';
 import { mockChainStubACKProvider } from './_helpers/acks.js';
@@ -478,16 +478,10 @@ describe('adoption refuses what the chain cannot prove', () => {
     const chain = { createKnowledgeAssets: async () => { throw kaIdAlreadyMintedRevert(kaId + 1n); } } as unknown as ChainAdapter;
     const params = { reservedKaId: kaId, merkleRoot, contextGraphId: 1n, author: { address: author } } as unknown as V10PublishParams;
 
-    const refusal = await mintOrAdoptKnowledgeAssets(chain, params, {} as SealedMintAdoption).catch((error: unknown) => error);
+    const refusal = await mintOrAdoptKnowledgeAssets(chain, params, true).catch((error: unknown) => error);
 
     expect(refusal).toMatchObject({ reason: 'reserved-id-mismatch', retryable: false, kaId });
     expect(kaIdAlreadyMintedFromError((refusal as Error).cause)).toBe(kaId + 1n);
-  });
-
-  it('does not create an adoption context for an unsealed publish', async () => {
-    const store = new OxigraphStore();
-    expect(sealedMintAdoption(store, undefined, { contextGraphId: CONTEXT_GRAPH, log: () => {} })).toBeUndefined();
-    await store.close();
   });
 
   it('admits receipt adoption only for an on-chain context graph on a V10-ready chain', async () => {
@@ -513,16 +507,14 @@ it('prepared receipt evidence is adapter/reservation-bound and avoids a second s
     const lookup = vi.spyOn(f.chain, 'resolveKnowledgeAssetMint');
     const evidence = await prepareMintAdoption(f.chain, expected, original.txHash);
     const request = { kind: 'prepared' as const, evidence };
-    const sealed = sealedMintAdoption(f.store, { scope, publicTripleCount: 1, privateTripleCount: 0 },
-      { contextGraphId: CONTEXT_GRAPH, log() {} })!;
-    await expect(adoptMintForRecording(f.chain, expected, sealed, request))
-      .resolves.toMatchObject({ result: { txHash: original.txHash }, recording: { adopted: true } });
+    await expect(adoptMintForRecording(f.chain, expected, request))
+      .resolves.toMatchObject({ result: { txHash: original.txHash }, adopted: true });
     expect(lookup).toHaveBeenCalledOnce();
-    await expect(adoptMintForRecording(f.chain, { ...expected, kaId: f.kaId + 1n }, sealed, request))
+    await expect(adoptMintForRecording(f.chain, { ...expected, kaId: f.kaId + 1n }, request))
       .rejects.toThrow(/does not match/);
-    await expect(adoptMintForRecording(new MockChainAdapter(), expected, sealed, request))
+    await expect(adoptMintForRecording(new MockChainAdapter(), expected, request))
       .rejects.toThrow(/does not match/);
-    await expect(adoptMintForRecording(f.chain, expected, sealed, { kind: 'prepared', evidence: {} as never })).rejects.toThrow(/does not match/);
+    await expect(adoptMintForRecording(f.chain, expected, { kind: 'prepared', evidence: {} as never })).rejects.toThrow(/does not match/);
     expect(lookup).toHaveBeenCalledOnce();
   } finally { await f.store.close(); }
 });
@@ -558,11 +550,26 @@ it.each(['superseded', 'reorged'] as const)('revalidates prepared mint evidence 
         newByteSize: 1n, newMerkleLeafCount: 1, authorAddress: ethers.ZeroAddress,
         authorR: new Uint8Array(32), authorVS: new Uint8Array(32) });
     } else vi.spyOn(f.chain, 'isReceiptBlockFinalAndCanonical').mockResolvedValue(false);
-    const sealed = sealedMintAdoption(f.store, { scope, publicTripleCount: 1, privateTripleCount: 0 },
-      { contextGraphId: CONTEXT_GRAPH, log() {} })!;
-    await expect(adoptMintForRecording(f.chain, expected, sealed, { kind: 'prepared', evidence }))
+    await expect(adoptMintForRecording(f.chain, expected, { kind: 'prepared', evidence }))
       .rejects.toMatchObject({ reason: stale === 'superseded' ? 'superseded' : 'mint-not-final' });
     expect(lookup).toHaveBeenCalledOnce();
     await expectNothingRecorded(f);
   } finally { await f.store.close(); }
+});
+
+
+it.each(['unresolved-graph', 'non-v10-adapter'] as const)('balances local publication chain callbacks for %s', async kind => {
+  const store = new OxigraphStore(), chain = new MockChainAdapter();
+  if (kind === 'non-v10-adapter') vi.spyOn(chain, 'isV10Ready').mockReturnValue(false);
+  const create = vi.spyOn(chain, 'createKnowledgeAssets');
+  const phases: [string, string][] = [];
+  const publisher = new DKGPublisher({ store, chain, eventBus: new TypedEventBus(), keypair: await generateEd25519Keypair() });
+  try {
+    const result = await publisher.publish({ contextGraphId: kind === 'unresolved-graph' ? 'local-graph' : '1',
+      quads: [LOT], onPhase: (phase, state) => { phases.push([phase, state]); } });
+    expect(result.status).toBe('tentative'); expect(result.onChainResult).toBeUndefined();
+    expect(create).not.toHaveBeenCalled();
+    expect(phases.filter(([phase]) => phase === 'chain')).toEqual([['chain', 'start'], ['chain', 'end']]);
+    expect((await store.listGraphs()).length).toBeGreaterThan(0);
+  } finally { await store.close(); }
 });

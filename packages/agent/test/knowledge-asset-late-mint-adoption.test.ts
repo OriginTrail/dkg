@@ -244,7 +244,11 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
   it('reconcile records the late mint without a publish wallet or chain write, and is idempotent', async () => {
     const { agent, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
 
+    const reads = vi.spyOn(agent.store, 'query');
     const reconciled = await agent.reconcileKnowledgeAssetMint(RECONCILE);
+    // One preflight snapshot and one locked revalidation; the recorder reuses the latter.
+    expect(reads.mock.calls.filter(([, options]) => options?.source === 'agent.reconcileLateMint.seal')).toHaveLength(2);
+    expect(reads.mock.calls.filter(([, options]) => options?.source === 'agent.vmPublish.seal')).toHaveLength(0);
 
     expect(reconciled).toEqual({
       status: 'adopted', ual: sealed.kaUal, kaId: RESERVED_KA_ID.toString(),

@@ -1,3 +1,5 @@
+import { readFinalizedAssertionReservation, type FinalizedAssertionReservation } from './internal/finalized-assertion-reservation.js';
+import { assertAssertionLifecycleWriteLease } from '@origintrail-official/dkg-publisher';
 import type { MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import type { AgentSharedMemoryPublishOptions, SharedMemoryPublicationContext, FinalizedAssertionPublishOptions, FinalizedAssertionPublicationOperations } from './internal/agent-publish-options.js';
 import { beginNamedPublishFinalization, finishNamedPublishFinalization } from './named-publish-finalization.js';
@@ -5806,9 +5808,10 @@ export class PublishMethods extends DKGAgentBase {
 
   /** Reconciliation enters recording directly, under the caller's existing lifecycle lease. */
   async recordFinalizedAssertionMint(this: DKGAgent, contextGraphId: string, name: string,
-    receipt: MintAdoptionRequest, opts?: FinalizedAssertionPublishOptions,
+    receipt: MintAdoptionRequest, opts?: FinalizedAssertionPublishOptions, reservation?: FinalizedAssertionReservation,
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     return this.runFinalizedAssertionPublication(contextGraphId, name, opts, {
+      reservation,
       assertPlan(plan) {
         if (plan.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
           { code: KA_MINT_RECONCILE_REFUSED_CODE });
@@ -5836,33 +5839,16 @@ export class PublishMethods extends DKGAgentBase {
     );
     const metaGraph = contextGraphMetaUri(contextGraphId);
 
-    // 1. Read the seal from _meta.
-    const metaResult = await this.store.query(
-      `CONSTRUCT { <${assertionUri}> ?p ?o } WHERE { GRAPH <${metaGraph}> { <${assertionUri}> ?p ?o } }`,
-      { source: 'agent.vmPublish.seal' },
-    );
-    const metaQuads = metaResult.type === 'quads' ? metaResult.quads : [];
-    const seal = parseAssertionSealQuads(metaQuads, assertionUri);
-    if (!seal) {
-      throw new Error(
-        `publishFromFinalizedAssertion: assertion <${assertionUri}> is not finalized. ` +
-          `Call /api/knowledge-assets/${name}/wm/finalize before publishing.`,
-      );
+    if (operations.reservation) {
+      if (!opts?.heldLifecycle) throw new Error('Prepared reservation requires its current lifecycle lease');
+      assertAssertionLifecycleWriteLease(opts.heldLifecycle, this.writeLocks,
+        assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, opts.subGraphName));
+      if (operations.reservation.assertionUri !== assertionUri || operations.reservation.metaGraph !== metaGraph)
+        throw new Error('Prepared reservation belongs to a different assertion');
     }
-    if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
-    if (
-      seal.kaUal === undefined
-      || seal.assertionVersion === undefined
-      || seal.publicTripleCount === undefined
-    ) {
-      throw new Error(`Graph-scoped assertion seal for <${assertionUri}> is incomplete`);
-    }
-    const graphScope = createGraphKnowledgeAssetScope(
-      seal.kaUal,
-      seal.assertionVersion,
-    );
+    const { seal, scope: graphScope, kaId: packedKaId } = operations.reservation
+      ?? await readFinalizedAssertionReservation(this.store,
+        { contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName }, 'agent.vmPublish.seal');
 
     // 2. Cross-check chain target — refuse to publish a sig signed
     //    against a different deployment than this daemon currently
@@ -5947,14 +5933,6 @@ export class PublishMethods extends DKGAgentBase {
     operations.assertPlan(operationPlan);
     const stampedNumberStr = stripLit(pointerRow?.['kaNum']);
 
-    if (graphScope.agentAddress.toLowerCase() !== seal.authorAddress.toLowerCase()) {
-      throw new Error(
-        `Graph-scoped seal author ${seal.authorAddress} does not match UAL author ${graphScope.agentAddress}`,
-      );
-    }
-    const packedKaId =
-      (BigInt(graphScope.agentAddress) << 96n)
-      | BigInt(graphScope.kaNumber);
     if (
       stampedNumberStr !== undefined
       && stampedNumberStr !== ''
@@ -5966,11 +5944,6 @@ export class PublishMethods extends DKGAgentBase {
     }
     const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
     const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
-    if (recoveredReservedKaId !== packedKaId) {
-      throw new Error(
-        `Graph-scoped seal reservedKaId ${recoveredReservedKaId} does not match UAL-derived kaId ${packedKaId}`,
-      );
-    }
     const sharedMemoryScope: SharedMemoryGraphScope = {
       kind: 'named-lifecycle',
       identity: {

@@ -19,7 +19,6 @@ import {resolvePublicationPricing} from './publication-pricing.js';
 import type {CanonicalPublicationPayloadMeasurement} from './publication-payload-measurement.js';
 import type {PublisherPlanner} from './publisher-planning.js';
 import type {PublishLifecycleLogger} from './publish-lifecycle-logger.js';
-import {type SealedMintAdoption} from './adopt-existing-mint.js';
 
 export interface GraphScopedPublishDescriptor {
   scope: GraphKnowledgeAssetScope;
@@ -59,7 +58,6 @@ export interface PreparedPublicationContent {
     attributionIdentityId: bigint;
     v10ChainId: bigint | undefined;
     v10KavAddress: string | undefined;
-    sealedAdoption: SealedMintAdoption | undefined;
   };
   execution: Pick<PublishOptions, 'onPhase' | 'onPublishConfirmed' | 'onBroadcastAccepted' | 'onBeforeBroadcast'
     | 'encryptInlinePayload' | 'encryptInlineChunked' | 'precomputedAttestation' | 'reservedKaId'
@@ -366,7 +364,7 @@ export async function preparePublication(input: PreparedPublicationContent, port
     return { kind: 'local', publisherAddress, publishOperationId,
       reason: publisherContextGraphId === undefined ? 'no on-chain CG id' : 'chain not V10-ready' };
   }
-  const { attributionIdentityId, v10ChainId, v10KavAddress, sealedAdoption } = input.target;
+  const { attributionIdentityId, v10ChainId, v10KavAddress } = input.target;
   await ports.validateSealIntegrity(input);
   try {
   if (publisherContextGraphId === undefined || v10ChainId === undefined || v10KavAddress === undefined) {
@@ -397,7 +395,7 @@ export async function preparePublication(input: PreparedPublicationContent, port
       ackSignatures: v10ACKs.map(ack => ({ identityId: ack.nodeIdentityId, r: ack.signatureR, vs: ack.signatureVS })),
       catalogRoot: useCuratedCatalog ? catalogCommitment?.root : undefined,
       catalogLeafCount: useCuratedCatalog ? catalogCommitment?.leafCount : undefined,
-    }, chainId: v10ChainId, graphPublish, sealedAdoption, v10ACKs, lifecycle, ctx,
+    }, chainId: v10ChainId, graphPublish, v10ACKs, lifecycle, ctx,
     diagnostics: { contextGraphId, publisherAddress, entityCount, publicRecordCount: allSkolemizedQuads.length,
       hiddenCommitmentCount: privateRoots.length, billableByteSize: publicationPricing.billableByteSize,
       pricingPolicy: publicationPricing.policy },
@@ -417,7 +415,6 @@ export interface PreparedOnChainPublication {
   submission: Omit<V10PublishParams, 'onBroadcast' | 'onBroadcastAccepted' | 'onBeforeReplacementBroadcast'>;
   chainId: bigint;
   graphPublish: GraphScopedPublishDescriptor | undefined;
-  sealedAdoption: SealedMintAdoption | undefined;
   v10ACKs: V10CoreNodeACK[];
   lifecycle: PublishLifecycleLogger;
   ctx: OperationContext;
