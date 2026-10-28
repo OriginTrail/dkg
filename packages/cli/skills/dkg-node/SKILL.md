@@ -858,7 +858,7 @@ The worker runs in-daemon and is **on by default**. Disable per node with `confi
 |---|---|---|
 | `POST` | `/api/knowledge-assets/{name}/swm/share-async` | Enqueue a promote. Body: `{ contextGraphId, subGraphName? }`; an `entities` array is refused with `400 KA_ATOMIC_SHARE_REQUIRED` (shares are atomic). Returns `200 { jobId, state: "queued" }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. `503 PROMOTE_ADMISSION_UNAVAILABLE` (`Retry-After: 1`, `retryable: true`): with `admissionOutcome: "not_admitted"` no job was written, so retry the same request; with `"indeterminate"` the body carries `jobId` and `statusPath`, so poll that job or repeat the SAME request, never under a new name. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`, every matching job. `pageSize=N` (1-1000; alone it asks for the first page) and `cursor=<nextCursor>` page it instead (not with `limit`): `{ jobs, nextCursor, complete }`, oldest first, until `complete`; `complete` means no further job when that page was read, not that none arrived since. A bad `cursor` or `pageSize` is `400` with `code: PROMOTE_LIST_CURSOR_INVALID` or `PROMOTE_LIST_PAGE_SIZE_INVALID`. |
-| `GET`  | `/api/knowledge-assets/swm/share-jobs/{jobId}` | Read one job (`state`, `attempt.count`, `commitMarker`, `result`, `attempt.lastError` with `classification: transient\|cap_exceeded\|fatal`; a retryable attempt that waited for context-graph authority also names it in `lastError.authorityReason`). `404` once the job was cleared or removed by finished-job cleanup. |
+| `GET`  | `/api/knowledge-assets/swm/share-jobs/{jobId}` | Read one job (`state`, `attempts`, `maxAttempts`, `nextRetryAt`, `entitiesPromoted`, `reason`, and `lastError` with `code: transient\|cap_exceeded\|fatal`, `message` and `retryable`; a retryable attempt that waited for context-graph authority also names it in `lastError.authorityReason`). `404` once the job was cleared or removed by finished-job cleanup. |
 | `DELETE` | `/api/knowledge-assets/swm/share-jobs/{jobId}` | Cancel a `queued` job: it is kept as `failed` with `reason: "cancelled"` → `200 { jobId, state: "failed" }`. Any other state gets `409` (`running`: let the lease expire; `failed_retrying`: it keeps retrying), and so does a job that still owns a durable share obligation. |
 | `POST` | `/api/knowledge-assets/swm/share-jobs/{jobId}/recover` | Re-queue a `failed` job after the operator has fixed whatever was wrong (restarted an upstream, etc.). To remove one finished job instead: `POST .../share-jobs/{jobId}/clear` → `200 { outcome: "cleared" \| "already_absent", jobId }`; `409` while it is not finished or still has recovery work to do. |
 
@@ -872,7 +872,7 @@ dkg ka cancel-share-job <job-id>
 dkg ka recover-share-job <job-id>
 ```
 
-Failure classifications you'll see in `attempt.lastError.classification`:
+Failure classifications you'll see in the job's `lastError.code`:
 
 | Classification | Retry? | Typical cause | Operator action |
 |---|---|---|---|

@@ -473,7 +473,7 @@ loop.
 |---|---|---|
 | `POST` | `/api/knowledge-assets/<name>/swm/share-async` | Enqueue. Body: `{ contextGraphId, subGraphName? }`; an `entities` array is refused with `400 KA_ATOMIC_SHARE_REQUIRED` (shares are atomic). Returns `200 { jobId, state: "queued" }`. Returns `409 { existingJobId }` if there is already an active job for the same `(contextGraphId, subGraphName, name)`. A retryable `503 PROMOTE_ADMISSION_UNAVAILABLE` with `admissionOutcome: "not_admitted"` wrote no job: send the same request again. With `"indeterminate"` it carries `jobId`: poll that job, or send the same request again, never under a new name. |
 | `GET`  | `/api/knowledge-assets/swm/share-jobs` | List jobs. Query: `state=queued,running,failed_retrying,succeeded,failed` (comma-separated), `contextGraphId=...`, `limit=N`. Returns `{ jobs: [...] }`, every matching job. `pageSize=N` (1-1000; alone it asks for the first page) and `cursor=<nextCursor>` page it instead (not with `limit`): `{ jobs, nextCursor, complete }`, oldest first, until `complete`; `complete` means no further job when that page was read, not that none arrived since. A bad `cursor` or `pageSize` is `400` with `code: PROMOTE_LIST_CURSOR_INVALID` or `PROMOTE_LIST_PAGE_SIZE_INVALID`. |
-| `GET`  | `/api/knowledge-assets/swm/share-jobs/<jobId>` | Read one job: `state`, `attempt.count`, `commitMarker`, `result`, `attempt.lastError` with `classification: transient\|cap_exceeded\|fatal`. |
+| `GET`  | `/api/knowledge-assets/swm/share-jobs/<jobId>` | Read one job: `state`, `attempts`, `maxAttempts`, `nextRetryAt`, `entitiesPromoted`, `reason`, and `lastError` with `code: transient\|cap_exceeded\|fatal`, `message` and `retryable`. |
 | `DELETE` | `/api/knowledge-assets/swm/share-jobs/<jobId>` | Cancel a `queued` job: it is kept as `failed` with `reason: "cancelled"` → `200 { jobId, state: "failed" }`. Any other state gets `409` (`running`: let the lease expire; `failed_retrying`: it keeps retrying), and so does a job that still owns a durable share obligation. |
 | `POST` | `/api/knowledge-assets/swm/share-jobs/<jobId>/recover` | Re-queue a `failed` job after fixing whatever was wrong (restart an upstream, etc.). |
 | `POST` | `/api/knowledge-assets/swm/share-jobs/<jobId>/clear` | Remove one finished job: `200 { outcome: "cleared" \| "already_absent", jobId }`; `409` while it is not finished or still has recovery work to do. |
@@ -516,7 +516,7 @@ for (const part of partitions) {
   metadata field and let a separate reconciliation pass at the end of the
   import walk all in-flight jobs to a terminal state.
 
-### Failure classification (`attempt.lastError.classification`)
+### Failure classification (`lastError.code`)
 
 The worker classifies every failure into one of three buckets. Read it from
 `GET /api/knowledge-assets/swm/share-jobs/<jobId>`:
@@ -626,8 +626,8 @@ promote job is queued / running.
 4. Reconciliation pass: for each in-flight jobId,
      GET /api/knowledge-assets/swm/share-jobs/<jobId> until state ∈ {succeeded, failed}.
      - succeeded → markPartitionStatus(..., 'done')
-     - failed + classification=cap_exceeded → split the content into smaller Knowledge Assets and enqueue each
-     - failed + classification=fatal → fix root cause + POST .../recover
+     - failed + lastError.code=cap_exceeded → split the content into smaller Knowledge Assets and enqueue each
+     - failed + lastError.code=fatal → fix root cause + POST .../recover
      - failed_retrying → wait; worker will auto-retry transient errors
 5. On crash: loadImportManifest → pendingPartitions → resume from step 3.
 6. (Optional, human-gated) per-KA /api/knowledge-assets/{name}/vm/publish mints a sealed KA SWM → VM.
