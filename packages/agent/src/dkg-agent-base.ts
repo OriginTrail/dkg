@@ -1,9 +1,11 @@
+import type { StoreContentFence } from './internal/store-content-fence.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
+import { createDurableHeldStore } from './durable-recovery-held-store.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
 import { VersionedSubscriptionRegistry } from './internal/versioned-subscription-registry.js';
@@ -583,6 +585,7 @@ export class DKGAgentBase {
     };
     const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
       reconcileAfterMaterialization(cleanup, asset, ctx);
+    const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
     const materialization = new RecoveryMaterializationOwner({
       chain: () => agent.chain,
       store: () => agent.store,
@@ -616,6 +619,7 @@ export class DKGAgentBase {
             signal: fetchContext.signal,
             manifestDigest: request.manifestDigest,
             manifestPrefixDigestAtOffset: request.manifestPrefixDigestAtOffset,
+            durableResumeBoundary: request.durableResumeBoundary,
             shouldStopAfterPage: request.shouldStopAfterPage,
             returnAcceptedPrefixOnRetryableTransportFailure: request.returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope: request.requesterScope,
@@ -652,6 +656,7 @@ export class DKGAgentBase {
       storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
         priority: 'background', source: 'agent.durableSync.storeInsert', signal,
       }),
+      heldStore,
       materialization: scope => materialization.forOperation(scope),
       checkpoints: {
         deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),
@@ -2089,6 +2094,7 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
     publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
     ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
+    private readonly heldStoreContentFence?: StoreContentFence,
   ) {
     this.config = config;
     this.wallet = wallet;

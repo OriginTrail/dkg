@@ -23,6 +23,7 @@ import {
 } from './durable-recovery-coordinator.js';
 import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
+import { DurableGraphResumePolicy, takeRejectedResumeOffset, type VerifiedDurableBoundary } from './durable-recovery-boundary-seed.js';
 
 export interface DurableRecoveryExecution {
   readonly outcome: DurableRecoveryContinuationOutcome;
@@ -63,6 +64,7 @@ export interface DurableRecoveryRunnerDependencies {
   executeSlice(
     peerId: string,
     metaContinuation: DurableMetaContinuation,
+    durableResumeBoundary?: VerifiedDurableBoundary,
   ): Promise<DurableSyncResult>;
   logDebug(message: string): void;
   logInfo(message: string): void;
@@ -120,6 +122,8 @@ export class DurableRecoveryRunner {
 
   private readonly healthByGraphPeer = new Map<string, MutableDurableRecoveryPeerHealth>();
 
+  private readonly resumePolicies = new Map<string, DurableGraphResumePolicy>();
+
   private metaScopeSequence = 0;
 
   run(input: {
@@ -172,6 +176,12 @@ export class DurableRecoveryRunner {
     const progressTotals = createProgressTotals();
     const attemptedWithoutProgress = new Set<string>();
     const incompatiblePeers = new Set<string>();
+    let policy = this.resumePolicies.get(contextGraphId);
+    if (!policy) {
+      policy = new DurableGraphResumePolicy();
+      this.resumePolicies.set(contextGraphId, policy);
+    }
+    const resume = policy.startRun(deps.checkpointStore);
     let slices = 0;
     let lastPeerId: string | undefined;
     let lastResult: DurableSyncResult = createIncompleteDurableSyncResult();
@@ -288,6 +298,8 @@ export class DurableRecoveryRunner {
       const canonicalManifestDigest = owner.manifestDigest
         ?? selectCanonicalDurableRecoveryManifest(candidates);
       if (canonicalManifestDigest) owner.bindManifest(canonicalManifestDigest);
+      resume.discover(candidates.map(candidate => ({ checkpoint: candidate.checkpoint,
+        checkpointKey: getSyncCheckpointKey(candidate.peerId, contextGraphId, false, 'data') })));
       return rankDurableRecoveryPeers(candidates, canonicalManifestDigest);
     };
 
@@ -312,6 +324,10 @@ export class DurableRecoveryRunner {
         false,
         'data',
       );
+      const seed = resume.seed(candidate.peerId, checkpointKey);
+      if (seed.kind === 'candidate') {
+        deps.logInfo(`Durable recovery for "${contextGraphId}" offers ${candidate.peerId.slice(-8)} verified offset ${seed.boundary.offset}`);
+      }
       const before = deps.checkpointStore.get(checkpointKey);
       const health = this.healthFor(contextGraphId, candidate.peerId);
       health.attempts += 1;
@@ -324,7 +340,7 @@ export class DurableRecoveryRunner {
           metaContinuation = this.createMetaContinuation();
           metaContinuations.set(candidate.peerId, metaContinuation);
         }
-        lastResult = await deps.executeSlice(candidate.peerId, metaContinuation);
+        lastResult = await deps.executeSlice(candidate.peerId, metaContinuation, seed.kind === 'candidate' ? seed.boundary : undefined);
       } catch (error) {
         lastResult = createFailedPeerDurableSyncResult();
         deps.logWarn(
@@ -335,6 +351,8 @@ export class DurableRecoveryRunner {
       accumulateProgress(progressTotals, lastResult);
       recordPeerSlice(candidate.peerId, lastResult);
       const after = deps.checkpointStore.get(checkpointKey);
+      resume.recordSlice({ peerId: candidate.peerId, checkpointKey, before, after,
+        rejectedOffset: takeRejectedResumeOffset(metaContinuations.get(candidate.peerId)), candidate: seed.kind === 'candidate' ? seed.boundary : undefined });
       const manifestDigest = after?.manifestDigest ?? before?.manifestDigest;
       const checkpointOffset = after?.offset ?? before?.offset ?? 0;
       if (manifestDigest && manifestDigest !== owner.manifestDigest) {
@@ -396,6 +414,11 @@ export class DurableRecoveryRunner {
         continue;
       }
 
+      if (resume.retryRejectedSlice(candidate.peerId)) {
+        // Its round discarded the checkpoint: retry the peer once, from its own state, without the boundary.
+        await owner.scheduleContinuation();
+        continue;
+      }
       attemptedWithoutProgress.add(candidate.peerId);
       if (outcome === 'incompatible') incompatiblePeers.add(candidate.peerId);
       if ((lastResult.timedOutPhases ?? 0) > 0) health.recentTimeouts += 1;

@@ -187,4 +187,3 @@ export function operationIdentityKey(rows: readonly Quad[]): string | null {
     },
   });
 }
-

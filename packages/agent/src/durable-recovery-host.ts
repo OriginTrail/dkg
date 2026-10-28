@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { ProveHeldAssets } from './durable-recovery-held-store.js';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SyncAdmissionSource, SyncContextGraphPriorityConfig } from './sync/policy.js';
 import type { SyncOperationLane } from './sync/attempt-telemetry.js';
@@ -52,6 +53,10 @@ export interface DurableRecoveryHost {
     readonly debug: DurableSyncContext['logDebug'];
   };
   readonly storeInsert: DurableSyncContext['storeInsert'];
+  /** Which assets of a verified generation the store holds; a graph-owned round skips their DATA. */
+  readonly heldStore?: {
+    readonly prove: ProveHeldAssets;
+  };
   materialization(scope: RecoveryMaterializationScope): RecoveryMaterialization;
   resolveOrdinaryAuthority(ctx: OperationContext, input: DurableRecoveryInput): DurableRecoveryAuthority;
 }
