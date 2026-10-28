@@ -234,6 +234,8 @@ test('diff mode fails only for net-new static D2 exclusions', (t) => {
   git('init', '-q');
   git('config', 'user.email', 'diff@example.invalid');
   git('config', 'user.name', 'diff');
+  // Commits otherwise start detached Git maintenance, which can outlive the test and race the fixture's removal.
+  git('config', 'maintenance.auto', 'false');
   fs.writeFileSync(path.join(fixtureRoot, 'vitest.config.ts'), [
     "import { defineConfig } from 'vitest/config';",
     'export default defineConfig({',
@@ -459,6 +461,7 @@ function semanticMoveSelfTest() {
     git('init', '-q');
     git('config', 'user.email', 'selftest@example.invalid');
     git('config', 'user.name', 'test-disable-lint-selftest');
+    git('config', 'maintenance.auto', 'false');
     mkdirSync(path.join(fixtureRoot, 'test'), { recursive: true });
     writeFileSync(
       path.join(fixtureRoot, 'test/original.test.ts'),
@@ -512,6 +515,7 @@ function semanticGrowthSelfTest() {
     git('init', '-q');
     git('config', 'user.email', 'selftest@example.invalid');
     git('config', 'user.name', 'test-disable-lint-selftest');
+    git('config', 'maintenance.auto', 'false');
     mkdirSync(path.join(fixtureRoot, 'test'), { recursive: true });
     const fixturePath = path.join(fixtureRoot, 'test/original.test.ts');
     const disabledTest = "test.skip('copied debt', () => {});\n";
@@ -655,6 +659,7 @@ function opaqueD2RatchetSelfTest() {
     git('init', '-q');
     git('config', 'user.email', 'selftest@example.invalid');
     git('config', 'user.name', 'test-disable-lint-selftest');
+    git('config', 'maintenance.auto', 'false');
     const configPath = path.join(fixtureRoot, 'vitest.config.ts');
     writeFileSync(configPath, [
       'export default {',
@@ -733,6 +738,7 @@ function destructuredD2RatchetSelfTest() {
     git('init', '-q');
     git('config', 'user.email', 'selftest@example.invalid');
     git('config', 'user.name', 'test-disable-lint-selftest');
+    git('config', 'maintenance.auto', 'false');
     const configPath = path.join(fixtureRoot, 'vitest.config.ts');
     const configSource = (exclusion) => [
       'const [legacyExclusion, replacementExclusion] = loadExclusions();',
