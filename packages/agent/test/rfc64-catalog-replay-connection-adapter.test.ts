@@ -21,7 +21,7 @@ describe('connection adapter current-policy capabilities', () => {
     const readAcceptedPolicy = vi.fn(() => accepted);
     const announce = vi.fn(async () => ({ failed: 0 }));
     const reservePeer = vi.fn((_cg: string, _digest: string, peerId: string) => ({
-      peerId, generation: 1, admit: vi.fn(), release: vi.fn(),
+      peerId, generation: 1, isCurrent: () => true, admit: vi.fn(), release: vi.fn(),
     }));
     const scheduled = new Map<0 | 1 | 'deadline', (signal: AbortSignal) => Promise<void>>();
     const controller = new AbortController();

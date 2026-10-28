@@ -41,7 +41,7 @@ export class FullReplayPassV1<Target> {
   get corroborated(): boolean { return this.#providers.size > 0; }
   constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[]) {}
 
-  include(demands: readonly (Rfc64CatalogReplayPeerDemandV1 & { staged: boolean })[], prior: BoundedReplayTargetsV1<Target> | null, run: ReplayRunEvidenceV1<Target>): boolean {
+  include(demands: readonly (Rfc64CatalogReplayPeerDemandV1 & { staged: boolean })[], prior: BoundedReplayTargetsV1<Target> | null, run?: ReplayRunEvidenceV1<Target>): boolean {
     if (new Set([...this.#expected.keys(), ...demands.map(demand => demand.peerId)]).size > RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) return false;
     this.#coverageValid = true;
     for (const demand of demands) {
@@ -53,8 +53,10 @@ export class FullReplayPassV1<Target> {
       this.replacesSnapshot = false;
       if (prior !== null) this.#retain(prior);
     }
-    this.#retain(run.received);
-    for (const [peer, generation] of run.providers) this.#providers.set(peer, generation);
+    if (run) {
+      this.#retain(run.received);
+      for (const [peer, generation] of run.providers) this.#providers.set(peer, generation);
+    }
     return true;
   }
   replace(demand: Rfc64CatalogReplayPeerDemandV1): void {

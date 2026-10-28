@@ -246,9 +246,11 @@ it.each(['clear', 'reset', 'policy replacement'] as const)('retires queued conne
 
 it.each(['policy replacement', 'clear', 'reset'] as const)('requests the newer head after stale admission crosses %s', async mode => {
   let policy = 'A', head = 'H1';
+  const held = deferred();
   const requested: string[] = [];
   const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<string>({
-    requestPeer: async (_cg, peer) => { requested.push(`${peer}:${head}`); return { status: 'completed', targets: [head] }; },
+    requestPeer: async (_cg, peer) => { requested.push(`${peer}:${head}`); if (head === 'H2') await held.promise;
+      return { status: 'completed', targets: [head] }; },
     whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false,
   });
   const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null,
@@ -256,6 +258,7 @@ it.each(['policy replacement', 'clear', 'reset'] as const)('requests the newer h
     reannounce: async () => ({ failed: 0 }),
     replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: policy, kind: 'connection-demand', demand, signal }),
     warn: vi.fn() });
+  try {
   const pending = connection.prepareConnectionOpen('peer')!;
   if (mode === 'clear') recovery.clear('cg');
   else if (mode === 'reset') recovery.reset();
@@ -265,10 +268,16 @@ it.each(['policy replacement', 'clear', 'reset'] as const)('requests the newer h
   head = 'H2';
   connection.disconnected('peer');
   const replacement = connection.prepareConnectionOpen('peer')!;
-  pending.reject(); // The fresh connection inherited custody; the old callback is inert.
+  expect(recovery.status('cg', policy)?.active).toBe(true);
+  pending.reject(); // The old callback cannot release the fresh owner's fence.
+  expect(recovery.status('cg', policy)?.active).toBe(true);
   replacement.admit();
+  await vi.waitFor(() => expect(requested).toEqual(['peer:H1', 'peer:H2']));
+  expect(recovery.status('cg', policy)?.active).toBe(true);
+  held.resolve();
   await vi.waitFor(() => expect(connection.status().pendingScopes).toBe(0));
   expect(requested).toEqual(['peer:H1', 'peer:H2']);
   expect(recovery.promisedTargets('cg', policy)).toContain('H2');
-  connection.reset();
+  expect(recovery.status('cg', policy)?.active).toBe(false);
+  } finally { held.resolve(); connection.reset(); }
 });

@@ -13,15 +13,9 @@ import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerReservationV
 export class Rfc64CatalogReplayPeerWorklistV1 {
   readonly #pending = new Map<string, CatalogReplayPeerWorkV1>();
   readonly #staged = new Map<string, number>();
-  #chunk: CatalogReplayChunkV1 | null = null;
   constructor(readonly allocateGeneration: () => number) {}
-  #remaining = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
   #overflowed = false;
 
-  beginRun(): CatalogReplayChunkV1 {
-    this.#remaining = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
-    return this.#chunk = new CatalogReplayChunkV1();
-  }
   failPending(error: unknown): void {
     for (const [peer, record] of this.#pending) {
       record.settle({ error });
@@ -52,6 +46,7 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     let released = false;
     return Object.freeze({
       peerId, generation,
+      isCurrent: () => !released && this.#staged.get(peerId) === generation,
       admit: () => {
         if (released || this.#staged.get(peerId) !== generation) return;
         this.#staged.delete(peerId);
@@ -97,8 +92,8 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
 
   /** Seed the admitted generation once. The graph owner advances pending work
    * through a fresh bounded run when the current run spends its peer budget. */
-  seedDemand(demand: Rfc64CatalogReplayPeerDemandV1, signal?: AbortSignal): CatalogReplayPeerWorkV1 {
-    const running = [...(this.#chunk?.records ?? [])].find(record => record.peerId === demand.peerId && record.generation === demand.generation);
+  seedDemand(demand: Rfc64CatalogReplayPeerDemandV1, chunk?: CatalogReplayChunkV1, signal?: AbortSignal): CatalogReplayPeerWorkV1 {
+    const running = [...(chunk?.records ?? [])].find(record => record.peerId === demand.peerId && record.generation === demand.generation);
     if (running) return running;
     let record = this.#pending.get(demand.peerId);
     if (record === undefined || record.generation !== demand.generation) {
@@ -113,13 +108,12 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     return record;
   }
 
-  drain(): readonly Rfc64CatalogReplayPeerDemandV1[] {
-    const records = [...this.#pending.values()].slice(0, this.#remaining);
+  drain(chunk: CatalogReplayChunkV1): readonly Rfc64CatalogReplayPeerDemandV1[] {
+    const records = [...this.#pending.values()].slice(0, chunk.remaining);
     for (const record of records) {
       this.#pending.delete(record.peerId);
-      this.#chunk!.take(record);
+      chunk.take(record);
     }
-    this.#remaining -= records.length;
     return records;
   }
 
@@ -134,8 +128,8 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     return this.#pending.size > 0;
   }
 
-  get exhausted(): boolean {
-    return this.#overflowed || (this.#remaining === 0 && this.hasPending);
+  exhausted(chunk: CatalogReplayChunkV1): boolean {
+    return this.#overflowed || (chunk.remaining === 0 && this.hasPending);
   }
 
   settleOverflow(): void {

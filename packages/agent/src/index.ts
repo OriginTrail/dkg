@@ -260,6 +260,8 @@ export type {
   PublishAuthorCatalogGenesisParamsV1,
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogRuntimeSelectionStatusV1,
+  Rfc64CatalogSelectionV1,
+  Rfc64CatalogConnectionReplayStatusV1,
 } from './dkg-agent-rfc64-catalog.js';
 export type {
   ReconcileRfc64PublicRootCatalogExactSetParamsV1,

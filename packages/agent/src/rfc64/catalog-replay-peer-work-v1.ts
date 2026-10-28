@@ -1,3 +1,4 @@
+import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './catalog-peers-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayRecoveryResultV1 as Result } from './catalog-replay-recovery-runtime-v1.js';
 
@@ -36,6 +37,7 @@ export class CatalogReplayPeerWorkV1 implements Rfc64CatalogReplayPeerDemandV1 {
 /** Explicit ownership of records consumed by one finite execution chunk. */
 export class CatalogReplayChunkV1 {
   readonly records = new Set<CatalogReplayPeerWorkV1>();
+  get remaining(): number { return RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 - this.records.size; }
   take(record: CatalogReplayPeerWorkV1): void { record.start(); this.records.add(record); }
   settle(outcome: Outcome): void { for (const record of this.records) record.settle(outcome); }
 }

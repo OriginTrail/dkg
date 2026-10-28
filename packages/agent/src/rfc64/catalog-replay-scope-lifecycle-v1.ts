@@ -37,7 +37,9 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
       || current.phase.state === 'queued' || current.phase.state === 'waiting-for-fence')) return null;
     // Transfer an unsampled fence to a fresh stable token. Old admission callbacks
     // cannot release or admit the replacement, even when there was no fence yet.
-    const lease = current?.phase.state === 'awaiting-admission' ? current.phase.lease : reserveFence();
+    const previous = current?.phase.state === 'awaiting-admission' ? current.phase.lease : null;
+    const lease = previous !== null && previous !== 'announcement-only' && previous.isCurrent() ? previous : reserveFence();
+    if (previous !== null && previous !== 'announcement-only' && previous !== lease) previous.release();
     this.#selection = { state: 'selected', generation: this.#selection.generation };
     const demand: DemandV1 = { connectionGeneration, selectionGeneration: this.#selection.generation,
       phase: { state: 'awaiting-admission', lease } };

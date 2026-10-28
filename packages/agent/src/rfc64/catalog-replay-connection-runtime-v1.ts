@@ -1,3 +1,4 @@
+import type { Rfc64CatalogConnectionReplayStatusV1 } from './catalog-selection-types-v1.js';
 import type { Rfc64CatalogConnectionReplayResultV1 } from './catalog-replay-run-reporter-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -117,11 +118,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     this.#overflowIntents.clear();
   }
 
-  status(): Readonly<{
-    activePeers: number; pendingScopes: number; suppressed: number;
-    peers: readonly Readonly<{ peerIdSuffix: string; started: number; failed: number;
-      startedLastMinute: number; nextEligibleAt: number }>[];
-  }> {
+  status(): Rfc64CatalogConnectionReplayStatusV1 {
     const now = Date.now();
     return Object.freeze({
       activePeers: [...this.#byPeer.values()].filter(peer => peer.active).length,

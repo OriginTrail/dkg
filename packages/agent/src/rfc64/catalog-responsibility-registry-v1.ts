@@ -1,3 +1,4 @@
+import type { Rfc64CatalogSelectionV1 } from './catalog-selection-types-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import type { Rfc64CatalogRolloutModeV1 } from './catalog-rollout-authority-v1.js';
@@ -213,7 +214,7 @@ export function projectRfc64CatalogRuntimeSelectionV1(input: Readonly<{
   configuredContextGraphIds: readonly string[];
   responsibilities: readonly Pick<Rfc64CatalogResponsibilitySelectionV1, 'contextGraphId'>[];
   subscriptions: ReadonlyMap<string, Readonly<{ subscribed: boolean }>>;
-}>): Readonly<{ subscriptionDriven: boolean; eligibleContextGraphs: readonly string[]; selectedContextGraphs: readonly string[] }> {
+}>): Rfc64CatalogSelectionV1 {
   const eligibleContextGraphs = Object.freeze([...new Set([
     ...input.configuredContextGraphIds,
     ...input.responsibilities.map(({ contextGraphId }) => contextGraphId),

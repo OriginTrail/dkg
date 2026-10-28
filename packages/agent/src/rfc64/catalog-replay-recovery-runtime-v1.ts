@@ -1,4 +1,4 @@
-import type { CatalogReplayPeerWorkV1 } from './catalog-replay-peer-work-v1.js';
+import { CatalogReplayChunkV1, type CatalogReplayPeerWorkV1 } from './catalog-replay-peer-work-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { FullReplayPassV1, ReplayRunEvidenceV1, resolveReplayRunSettlementV1, type ReplayRunSettlementV1, recordReplayPeerOutcomeV1, emptyReplayTargetsV1, mergeReplayTargetsV1, type BoundedReplayTargetsV1 } from './catalog-replay-evidence-v1.js';
 import { Rfc64CatalogReplayPeerWorklistV1 } from './catalog-replay-peer-worklist-v1.js';
@@ -50,6 +50,7 @@ export interface Rfc64CatalogReplayPeerFenceLeaseV1
 /** Completeness custody held until the connection owner permits execution. */
 export interface Rfc64CatalogReplayPeerReservationV1 extends Rfc64CatalogReplayPeerFenceLeaseV1 {
   admit(): void;
+  isCurrent(): boolean;
 }
 
 export type Rfc64CatalogReplayPeerResultV1<Target> = Readonly<{
@@ -172,12 +173,20 @@ export interface Rfc64CatalogReplayRecoveryStatusV1 {
 }
 
 
+interface ReplayRunV1<Target> {
+  readonly evidence: ReplayRunEvidenceV1<Target>;
+  readonly chunk: CatalogReplayChunkV1;
+  readonly completion: Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>>;
+}
+type ReplayExecutionV1<Target> = Readonly<{ kind: 'idle' }>
+  | Readonly<{ kind: 'running' | 'settled'; value: ReplayRunV1<Target> }>;
+
 interface ReplayProgressV1<Target> {
   readonly policyDigest: string;
   revisionToken: object;
   readonly peerWorklist: Rfc64CatalogReplayPeerWorklistV1;
   fullPass: FullReplayPassV1<Target> | null;
-  run: ReplayRunEvidenceV1<Target>;
+  run: ReplayExecutionV1<Target>;
   /**
    * Provider-specific failures survive later scoped connection runs, each with
    * its consecutive-failure count so retries stay bounded.
@@ -185,7 +194,6 @@ interface ReplayProgressV1<Target> {
   readonly unresolvedPeers: Map<string, number>;
   /** Unattributed parity/overflow failures require one successful full pass. */
   requiresFullReplay: boolean;
-  token: number;
   active: boolean;
   deferred: number;
   /** The last provider evidence has not yet corroborated applied rows. */
@@ -201,7 +209,6 @@ interface ReplayProgressV1<Target> {
    * so a later part cannot forget advertised but unchecked heads.
    */
   promisedTargets: BoundedReplayTargetsV1<Target> | null;
-  completion: Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> | null;
 
 }
 
@@ -287,7 +294,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (released) return; released = true; progress.deferred--;
       if (this.#byContextGraph.get(contextGraphId) !== progress) return;
       progress.active = progress.deferred > 0 || progress.peerWorklist.hasStaged
-        || progress.peerWorklist.hasPending || progress.completion !== null;
+        || progress.peerWorklist.hasPending || progress.run.kind === 'running';
       this.#bumpRevision(progress);
     } });
   }
@@ -302,6 +309,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     let released = false;
     return Object.freeze({
       peerId: lease.peerId, generation: lease.generation,
+      isCurrent: () => !released && this.#byContextGraph.get(contextGraphId) === progress && lease.isCurrent(),
       admit: () => { if (!released) lease.admit(); },
       release: () => {
         if (released) return;
@@ -310,7 +318,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         lease.release();
         if (this.#byContextGraph.get(contextGraphId) !== progress) return;
         if (!progress.peerWorklist.hasPending && !progress.peerWorklist.hasStaged
-          && progress.completion === null && progress.deferred === 0 && progress.active) {
+          && progress.run.kind !== 'running' && progress.deferred === 0 && progress.active) {
           progress.active = false;
           this.#bumpRevision(progress);
         }
@@ -353,16 +361,16 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (coverage.some(demand => demand === null)) progress.fullPass = null;
       else {
         progress.fullPass ??= new FullReplayPassV1((left, right) => this.#mergePromises(left, right));
-        if (!progress.fullPass.include(coverage.filter(demand => demand !== null), progress.promisedTargets, progress.run)) progress.fullPass = null;
+        if (!progress.fullPass.include(coverage.filter(demand => demand !== null), progress.promisedTargets, progress.run.kind === 'running' ? progress.run.value.evidence : undefined)) progress.fullPass = null;
       }
     } else {
-      if (input.kind === 'connection-demand') connectionWork = progress.peerWorklist.seedDemand(input.demand, input.signal);
+      if (input.kind === 'connection-demand') connectionWork = progress.peerWorklist.seedDemand(input.demand, progress.run.kind === 'idle' ? undefined : progress.run.value.chunk, input.signal);
       this.#seedRetainedProviders(progress);
     }
     // A drained worklist can still have an in-flight provider/parity pass.
-    if (progress.completion !== null) {
+    if (progress.run.kind === 'running') {
       if (droppedProviders) this.#bumpRevision(progress);
-      return connectionWork?.subscribe(input.signal) ?? progress.completion;
+      return connectionWork?.subscribe(input.signal) ?? progress.run.value.completion;
     }
     if (!progress.peerWorklist.hasPending) {
       // Only staged generations can carry coverage into a later connection
@@ -378,22 +386,24 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
 
   /** Install ownership and completion before executing either launch path. */
   #launch(input: Rfc64CatalogReplayRecoveryCommandV1, progress: ReplayProgressV1<Target>): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
-    const token = ++progress.token;
+    const run: ReplayRunV1<Target> = Object.freeze({
+      evidence: new ReplayRunEvidenceV1<Target>((left, right) => this.#mergePromises(left, right), input.kind === 'full-connected-peers'),
+      chunk: new CatalogReplayChunkV1(),
+      completion: Promise.resolve().then(() => this.#runOwned(input, progress, run)),
+    });
+    progress.run = { kind: 'running', value: run };
     progress.active = true; this.#bumpRevision(progress);
-    const completion = Promise.resolve().then(() => this.#runOwned(input, progress, token));
-    progress.completion = completion;
-    return completion;
+    return run.completion;
   }
 
-  /** One completion owns at most one finite transport budget. */
-  async #runOwned(input: Rfc64CatalogReplayRecoveryCommandV1, progress: ReplayProgressV1<Target>, token: number): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
-    const evidence = new ReplayRunEvidenceV1<Target>((left, right) => this.#mergePromises(left, right), input.kind === 'full-connected-peers');
-    const chunk = progress.peerWorklist.beginRun(); progress.run = evidence;
+  /** One explicit run owns evidence, finite work, identity and completion. */
+  async #runOwned(input: Rfc64CatalogReplayRecoveryCommandV1, progress: ReplayProgressV1<Target>, run: ReplayRunV1<Target>): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
+    const { evidence, chunk } = run;
     let settlement: ReplayRunSettlementV1<Target> | undefined;
     let continuation: Readonly<{ signal?: AbortSignal }> | null = null;
     try {
       input.signal?.throwIfAborted();
-      await this.#execute(input, progress);
+      await this.#execute(input, progress, run);
       continuation = progress.peerWorklist.pendingContinuation;
       settlement = this.#settlement(progress, evidence, continuation !== null, false);
       const result = settlement.result;
@@ -404,7 +414,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       progress.peerWorklist.failPending(error);
       throw error;
     } finally {
-      if (this.#byContextGraph.get(input.contextGraphId) === progress && progress.token === token) {
+      if (this.#byContextGraph.get(input.contextGraphId) === progress && progress.run.kind === 'running' && progress.run.value === run) {
         const retained = settlement ?? this.#settlement(progress, evidence, false, input.signal?.aborted === true);
         progress.promisedTargets = retained.promisedTargets;
         progress.fullPass = retained.fullPass;
@@ -412,8 +422,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         progress.unverified = retained.unverified;
         progress.peerWorklist.settleOverflow();
         progress.active = progress.peerWorklist.hasStaged || progress.deferred > 0;
-        progress.run = new ReplayRunEvidenceV1((left, right) => this.#mergePromises(left, right));
-        progress.completion = null;
+        progress.run = { kind: 'settled', value: run };
         this.#bumpRevision(progress);
         if (settlement?.continueQueuedConnections) {
           // Transfer already-admitted generations without reseeding providers or
@@ -429,12 +438,13 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   async #execute(
     input: Rfc64CatalogReplayRecoveryCommandV1,
     progress: ReplayProgressV1<Target>,
+    run: ReplayRunV1<Target>,
   ): Promise<void> {
-    const evidence = progress.run;
+    const evidence = run.evidence;
     try {
       input.signal?.throwIfAborted();
       for (;;) {
-        const replayDemands = progress.peerWorklist.drain();
+        const replayDemands = progress.peerWorklist.drain(run.chunk);
         const settled = await Promise.allSettled(replayDemands.map(async (demand) => {
           const { peerId } = demand;
           for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -503,7 +513,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           evidence.unobserved('drain-timeout');
           break;
         }
-        if (progress.peerWorklist.exhausted) {
+        if (progress.peerWorklist.exhausted(run.chunk)) {
           // Transport budget exhaustion has not overflowed the promise set.
           evidence.unobserved('budget-exhausted');
           break;
@@ -519,7 +529,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         input.signal?.throwIfAborted();
         // A reconnect generation arriving during the durable parity read owns
         // another pass. The worklist budget keeps that fence finite.
-        if (progress.peerWorklist.exhausted) {
+        if (progress.peerWorklist.exhausted(run.chunk)) {
           // Transport budget exhaustion has not overflowed the promise set.
           evidence.unobserved('budget-exhausted');
           break;
@@ -571,15 +581,13 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         revisionToken: Object.freeze({}),
         peerWorklist: new Rfc64CatalogReplayPeerWorklistV1(() => ++this.#nextPeerGeneration),
         fullPass: null,
-        run: new ReplayRunEvidenceV1((left, right) => this.#mergePromises(left, right)),
+        run: { kind: 'idle' },
         unresolvedPeers: new Map(),
         requiresFullReplay: false,
-        token: 0,
         active: false,
         deferred: 0,
         unverified: false,
         promisedTargets: null,
-        completion: null,
       };
       this.#byContextGraph.set(contextGraphId, progress);
     }

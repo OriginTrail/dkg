@@ -1,3 +1,5 @@
+import type { Rfc64CatalogSelectionV1, Rfc64CatalogRuntimeSelectionStatusV1 } from './rfc64/catalog-selection-types-v1.js';
+export type { Rfc64CatalogSelectionV1, Rfc64CatalogConnectionReplayStatusV1, Rfc64CatalogRuntimeSelectionStatusV1 } from './rfc64/catalog-selection-types-v1.js';
 import { selectCatalogReplayGraphsV1 } from './rfc64/catalog-replay-selection-v1.js';
 import { createCatalogReplayTransportV1, type CatalogReplayTransportV1 } from './rfc64/catalog-replay-transport-v1.js';
 import { Rfc64CatalogReplayRunReporterV1 } from './rfc64/catalog-replay-run-reporter-v1.js';
@@ -421,12 +423,6 @@ export type PublishOpenAuthorCatalogSuccessorAssetResultV1 =
 export type PublishOpenAuthorCatalogExactSetSuccessorResultV1 =
   PublishAuthorCatalogExactSetSuccessorResultV1;
 
-export interface Rfc64CatalogRuntimeSelectionStatusV1 {
-  readonly subscriptionDriven: boolean;
-  readonly eligibleContextGraphs: readonly string[];
-  readonly selectedContextGraphs: readonly string[];
-  readonly connectionReplay?: ReturnType<Rfc64CatalogReplayConnectionRuntimeV1['status']>;
-}
 
 export type Rfc64CatalogOperationalPhaseV1 =
   | 'inactive'
@@ -3967,7 +3963,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
   }
 
   /** Authority selection excludes connection-replay operational diagnostics. */
-  readRfc64CatalogSelectionV1(this: DKGAgent): Omit<Rfc64CatalogRuntimeSelectionStatusV1, 'connectionReplay'> {
+  readRfc64CatalogSelectionV1(this: DKGAgent): Rfc64CatalogSelectionV1 {
     return projectRfc64CatalogRuntimeSelectionV1({ nodeRole: this.config.nodeRole ?? 'edge',
       configuredContextGraphIds: Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
       responsibilities: this.readRfc64CatalogResponsibilitiesV1(), subscriptions: this.subscribedContextGraphs });
