@@ -1,3 +1,4 @@
+import type { AuthenticatedHeldMetadataDescriptor } from './sync/durable-integrity.js';
 import { Worker } from 'node:worker_threads';
 import { existsSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -42,7 +43,8 @@ export interface SharedMemoryBatchProcessResult {
 export type DurableBatchVerificationMode =
   | { kind: 'fullSnapshot' }
   | { kind: 'sinceBatchId'; sinceBatchId: string }
-  | { kind: 'changelogPage'; changedDataGraphs: readonly string[] };
+  | { kind: 'changelogPage'; changedDataGraphs: readonly string[] }
+  | { kind: 'heldMetadata'; descriptors: readonly AuthenticatedHeldMetadataDescriptor[] };
 
 export interface DurableBatchProcessResult {
   verifiedData: Quad[];

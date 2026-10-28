@@ -1,11 +1,12 @@
 /**
- * OT-RFC-73 P10b: starting retention. Mode `off` creates nothing and makes no store call in any runtime; any runtime but the daemon's admission instance refuses to
- * start a queue whose mode is not `off`; a factory that fails neither stops the daemon nor the other queue; a second queue's factory plugs into the same timer.
+ * OT-RFC-73 P10b, P11: starting retention. Mode `off` creates nothing and makes no store call in any runtime; any runtime but the daemon's admission instance refuses to
+ * start a queue whose mode is not `off`; a factory that fails neither stops the daemon nor the other queue; the share queue's factory and the publisher queue's plug into
+ * the same timer. (The two real factories are tested with their queues in retention-share-sweep.test.ts and retention-publisher-sweep.test.ts.)
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { resolveRetentionConfig, type ResolvedRetentionConfig } from '../src/retention-config.js';
 import {
-  RETENTION_SWEEP_FACTORIES, RetentionRuntimeRefusedError, startRetention, type RetentionRuntime,
+  RETENTION_QUEUES, RETENTION_SWEEP_FACTORIES, RetentionRuntimeRefusedError, startRetention, type RetentionRuntime,
 } from '../src/daemon/retention-sweeps.js';
 import type { RetentionAgent, RetentionSweep, RetentionSweepFactory } from '../src/daemon/retention-timer.js';
 
@@ -113,6 +114,19 @@ describe('only the daemon admission instance starts it', () => {
     expect(log.mock.calls.map(call => String(call[0])).join('\n')).toMatch(/share retention started in report mode.*it judges and counts, and deletes nothing/);
   });
 
+  it('hands the daemon\'s publisher admission instance to every factory it builds, and the factory of a queue that is off is never called', async () => {
+    const share = stubFactory('share'), publisher = stubFactory('publisher');
+    const admissionInstance = { retentionAccess: vi.fn() } as unknown as NonNullable<Parameters<typeof startRetention>[0]['publisher']>;
+    const handle = startRetention({
+      runtime: 'daemon-admission', settings: settings({ publisher: { mode: 'report' } }), agent: untouchable, publisher: admissionInstance, log: vi.fn(), factories: [share, publisher],
+    });
+    expect(share.create).not.toHaveBeenCalled();
+    expect(publisher.create).toHaveBeenCalledTimes(1);
+    expect(publisher.create.mock.calls[0]![0].publisher).toBe(admissionInstance);
+    expect(admissionInstance.retentionAccess).not.toHaveBeenCalled();                 // the starter only passes it on
+    await handle.stop();
+  });
+
   it('delete mode starts with a loud warning that it is irreversible and belongs behind the delete gate', async () => {
     const share = stubFactory('share');
     const log = vi.fn();
@@ -126,8 +140,9 @@ describe('only the daemon admission instance starts it', () => {
 });
 
 describe('the registry', () => {
-  it('holds the share factory and, until P11, no publisher factory', () => {
-    expect(RETENTION_SWEEP_FACTORIES.map(factory => factory.queue)).toEqual(['share']);
+  it('holds one factory per queue: the share queue\'s and the publisher queue\'s, each registered once', () => {
+    expect(RETENTION_SWEEP_FACTORIES.map(factory => factory.queue)).toEqual(['share', 'publisher']);
+    expect(RETENTION_SWEEP_FACTORIES.map(factory => factory.queue).sort()).toEqual([...RETENTION_QUEUES].sort());
   });
 
   it('a second queue\'s factory registers with the same timer: nothing else changes', async () => {
@@ -143,7 +158,7 @@ describe('the registry', () => {
     await handle.stop();
   });
 
-  it('a publisher mode that is not off, with no publisher sweep in the build, is said so in the log and runs nothing', async () => {
+  it('a queue whose mode is not off and that has no factory in the registry is said so in the log and runs nothing', async () => {
     const share = stubFactory('share');
     const log = vi.fn();
     const handle = startRetention({ runtime: 'daemon-admission', settings: settings({ publisher: { mode: 'report' } }), agent: untouchable, log, factories: [share] });

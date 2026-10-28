@@ -48,7 +48,12 @@ const CONTROL_SOURCES = PUBLISHER_TAGGING_ROWS.filter((row) => row.lane === 'con
 const FALLBACK_ONLY_SOURCE = 'publisher.asyncLift.writeJobRequest';
 /** The sources of the bounded page and COUNT reads (P9a). The scripted workload is the AC2 base and has none; their scenario is below. */
 const PAGE_SOURCES = ['publisher.asyncLift.listPage', 'publisher.asyncLift.stats'];
-const PAGE_ONLY_SOURCES = ['publisher.asyncLift.listPage'];
+/**
+ * The scripted workload is the AC2 base, which has no retention (P11): the sweep's five sources are driven by its own scenario
+ * (`async-lift-retention-control-oracle.test.ts`).
+ */
+const RETENTION_ONLY_SOURCES = ['scan', 'siblings', 'verify', 'walletLocks'].map((name) => `publisher.asyncLift.retention.${name}`);
+const PAGE_ONLY_SOURCES = ['publisher.asyncLift.listPage', ...RETENTION_ONLY_SOURCES];
 
 const synthetic = (over: Partial<RecordedStoreCall>): RecordedStoreCall => ({
   index: 0,
