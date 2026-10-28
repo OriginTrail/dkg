@@ -126,21 +126,77 @@ own budget beside the one of `store`, so with the path on a node can log up to
 16 timeout diagnostics per minute from each of the three schedulers (48 in all),
 not 16 in total.
 
-The path is switched by `DKG_STORE_CONTROL_RESERVED_SLOTS`, read once at daemon
-start (a change needs a restart). The daemon logs the effective geometry once
-at start (`Store control path: ...`).
+The path is switched by `DKG_STORE_CONTROL_RESERVED_SLOTS` or by the node
+config's `store.controlReservedSlots`, both read once at daemon start (a change
+needs a restart). The variable wins when it is set; otherwise the config value
+applies when the key is present; with neither, the default applies.
 
-| Value | Effect |
+**The default (OT-RFC-73 P14).** With neither setting, the path is **on**
+(share 1, publisher 2) on a node whose `store.backend` is `blazegraph` and whose
+host has more than 2 CPUs (`os.availableParallelism()`), and **off** everywhere
+else: on hosts with 2 or fewer CPUs, with managed Oxigraph (`oxigraph-server`,
+the `dkg init` default), with `sparql-http` (a Blazegraph reached through it
+included) and with any other backend, until that host class or backend has
+passed its own qualification run. The embedded `oxigraph-worker` store (a config
+without a `store` block) has no store scheduler and never uses the path,
+whatever the setting says.
+
+| Value (variable or config) | Effect |
 | --- | --- |
-| unset (the variable does not exist) | The built-in default. In this release the path is **off** |
-| set but blank (empty or only spaces) | Refused with a warning, and the path stays **off**. A blank value is a typo, never the default, so a mistyped rollback can not leave the path on once the default is switched on |
-| `0` | Off. No scheduler is built or registered, and a call that names its queue behaves exactly like one that does not |
-| `share:1,publisher:2` | The slots per queue, up to a cap of 1 for `share` and 2 for `publisher`. A queue left out gets 0. An explicit value is honoured on any host, hosts with 2 or fewer CPUs included |
+| not set (the variable does not exist and the config key is absent) | The default above |
+| `0` (in the config also the number `0`) | Off. No scheduler is built or registered, and a call that names its queue behaves exactly like one that does not, so the node schedules every store call exactly as before the control path existed |
+| `share:1,publisher:2` | The slots per queue, up to a cap of 1 for `share` and 2 for `publisher`. A queue left out gets 0. An explicit value is honoured on any host and with any backend, hosts with 2 or fewer CPUs and managed Oxigraph included |
 | a number above a queue's cap | Clamped to the cap, with a warning |
-| anything else | Refused with a warning, and the path stays **off** (as for `0`), so a mistyped rollback can never leave it on |
+| set but blank (empty or only spaces) | Refused with a warning, and the path stays **off**. A blank value is a typo, never the default, so a mistyped rollback can not leave the path on |
+| anything else (in the config also `null`, `true` or any number but `0`) | Refused with a warning that names the setting, and the path stays **off** (as for `0`). A malformed value never falls through to the other setting or to the default, so a mistyped rollback can never leave the path on |
 
-When the default is later switched on, hosts with 2 or fewer CPUs keep 0 added
-slots unless an explicit value is set.
+To switch the path off on one node, set either of them and restart the daemon:
+
+```jsonc
+// ~/.dkg/config.json
+"store": {
+  "backend": "blazegraph",
+  "options": { "url": "..." },
+  "controlReservedSlots": 0
+}
+```
+
+or `DKG_STORE_CONTROL_RESERVED_SLOTS=0` in the daemon's environment.
+
+`dkg init` and `dkg openclaw|hermes|mcp setup --store ...` keep
+`controlReservedSlots` when they rewrite the `store` block, whichever backend
+you pick. Only a switch to the embedded store (`--store oxigraph`, or picking it
+in `dkg init`) removes the block, and the key with it; that store never uses the
+path.
+
+The daemon logs the effective geometry once at start, with the setting that
+decided it:
+
+```text
+Store control path: on (added slots share=1 publisher=2; default for blazegraph, 8 CPUs; effective until daemon restart)
+Store control path: off (added slots share=0 publisher=0; default: 2 CPUs or fewer (blazegraph, 2 CPUs); effective until daemon restart)
+Store control path: off (added slots share=0 publisher=0; default for oxigraph-server; effective until daemon restart)
+Store control path: off (added slots share=0 publisher=0; config store.controlReservedSlots=0; effective until daemon restart)
+Store control path: off (added slots share=0 publisher=0; DKG_STORE_CONTROL_RESERVED_SLOTS=0, over config store.controlReservedSlots; effective until daemon restart)
+```
+
+A refused value adds a warning line before it (`Invalid config
+store.controlReservedSlots=...` or `Invalid DKG_STORE_CONTROL_RESERVED_SLOTS=...`)
+and the geometry line says `... refused as malformed`.
+
+Only the daemon reads the config value and applies the default. Any other
+process that uses the store (the `dkg publisher` commands while the daemon is
+stopped, scripts and benchmarks) honours the variable alone and otherwise keeps
+the path off.
+
+With the path on, watch the `async_admission_usage` line: control-path
+rejections in `store_rejections` (`store-control-share/control/...`,
+`store-control-publisher/control/...`), the share `503` rate in `http`,
+publisher pick-up (`lift_pickup_*`) and backlog (`lift_depth` `accepted`),
+heartbeat lateness (`share_hb_*`) and lease expiries
+(`share_reclaimed + share_abandoned`), and the ACK queue wait
+(`store_wait_p95_ms` for `store/ack`; `resource_usage` shows the control
+schedulers' slots in use).
 
 ### Attributing `sync-global` pressure to a trigger
 

@@ -122,11 +122,13 @@ export {
 } from './store-priority-scheduler.js';
 export type { StoreSchedulerPriority } from './store-scheduler-timeout-diagnostics.js';
 export {
+  STORE_CONTROL_DEFAULT_BACKENDS,
   STORE_CONTROL_MAX_SLOTS,
-  STORE_CONTROL_PATH_ON_BY_DEFAULT,
   STORE_CONTROL_QUEUES,
+  STORE_CONTROL_RESERVED_SLOTS_CONFIG_KEY,
   STORE_CONTROL_RESERVED_SLOTS_ENV,
   STORE_CONTROL_SCHEDULER_ID_PREFIX,
+  configureStoreControlPath,
   controlStoreOptions,
   defaultStoreControlSlots,
   describeStoreControlPath,
@@ -136,6 +138,8 @@ export {
   selectStoreScheduler,
   type StoreControlConfig,
   type StoreControlPath,
+  type StoreControlPathSettings,
+  type StoreControlResolveOptions,
   type StoreControlSlots,
 } from './store-control-path.js';
 /**
