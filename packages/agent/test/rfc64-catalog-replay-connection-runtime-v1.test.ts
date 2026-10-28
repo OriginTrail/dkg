@@ -1,33 +1,14 @@
-import { RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1 } from '../src/rfc64/public-catalog-transport-v1.js';
-import { createRfc64CatalogReplayConnectionRuntimeV1 } from '../src/rfc64/catalog-replay-connection-adapter-v1.js';
-import { buildOpenOwnerContextGraphPolicyV1, computeOpenContextGraphPolicyDigestV1 } from '../src/rfc64/open-catalog-policy-v1.js';
-import { RFC64_ROLLOUT_AUTHOR, RFC64_ROLLOUT_CONTEXT_GRAPH_ID, RFC64_ROLLOUT_NETWORK_ID } from './_helpers/rfc64-rollout-agent-harness.js';
-import { Rfc64CatalogReplayRecoveryRuntimeV1 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionRuntimePortsV1 } from
+
+
+
+
+import {Rfc64CatalogReplayRecoveryRuntimeV1} from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
+import {describe, expect, it, vi} from 'vitest';
+import {Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionRuntimePortsV1} from
   '../src/rfc64/catalog-replay-connection-runtime-v1.js';
-import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
+import {Rfc64BackgroundWorkDispatcherV1} from '../src/rfc64/background-work-dispatcher-v1.js';
 
-const owners: Rfc64BackgroundWorkDispatcherV1[] = [];
-afterEach(async () => {
-  await Promise.all(owners.splice(0).map(owner => owner.closeAndDrain()));
-  vi.useRealTimers();
-});
-
-function makeRuntime(ports: Omit<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait'>
-  & Partial<Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait'>>,
-  debounceMs?: number, maxPeers?: number): Rfc64CatalogReplayConnectionRuntimeV1 {
-  const owner = new Rfc64BackgroundWorkDispatcherV1(); owners.push(owner);
-  return new Rfc64CatalogReplayConnectionRuntimeV1({
-    schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
-    wait: (signal, delay) => new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, delay);
-      const abort = () => { clearTimeout(timer); reject(signal.reason); };
-      signal.addEventListener('abort', abort, { once: true });
-    }),
-    ...ports,
-  }, debounceMs, maxPeers);
-}
+import {makeRuntime, owners} from './_helpers/catalog-connection-runtime.js';
 
 describe('RFC-64 catalog replay connection debounce', () => {
   it('bounds a 59-graph reconnect burst to one stream per peer and two peers per node', async () => {
@@ -91,41 +72,24 @@ describe('RFC-64 catalog replay connection debounce', () => {
   });
 
   it('evicts only the oldest idle peer when the table reaches capacity', async () => {
+    vi.useFakeTimers(); vi.setSystemTime(10_000);
     const replay = vi.fn(async () => ({ failed: 0 }));
-    const runtime = makeRuntime({
-      selectContextGraphIds: () => ['public-cg'],
-      reserveFence: (_contextGraphId, peerId) => ({
-        peerId,
-        generation: 1,
-        admit: () => undefined,
-        release: vi.fn(),
-      }),
-      reannounce: vi.fn(async () => ({ failed: 0 })),
-      replay,
-      warn: vi.fn(),
-    }, 100, 2);
-
-    runtime.prepareConnectionOpen('peer-a', 0)?.admit();
-    await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
-    runtime.prepareConnectionOpen('peer-b', 1)?.admit();
-    await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
-    runtime.prepareConnectionOpen('peer-c', 2)?.admit();
-    await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
-
-    const coolingB = runtime.prepareConnectionOpen('peer-b', 3);
-    expect(coolingB).not.toBeNull(); coolingB?.reject();
-    const retriedA = runtime.prepareConnectionOpen('peer-a', 3);
-    expect(retriedA).not.toBeNull();
-    retriedA?.reject();
-    expect(replay).toHaveBeenCalledWith('public-cg', {
-      peerId: 'peer-a',
-      generation: 1,
-      admit: expect.any(Function),
-      release: expect.any(Function),
-    }, expect.any(AbortSignal));
-
-    runtime.reset();
-    expect(runtime.prepareConnectionOpen('peer-b', 4)).not.toBeNull();
+    const runtime = makeRuntime({ selectContextGraphIds: () => ['cg'],
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit: () => undefined, release: vi.fn() }),
+      reannounce: vi.fn(async () => ({ failed: 0 })), replay, warn: vi.fn() }, 100, 2);
+    runtime.prepareConnectionOpen('peer-a')!.admit(); await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(1);
+    runtime.prepareConnectionOpen('peer-b')!.admit(); await vi.advanceTimersByTimeAsync(0);
+    const before = runtime.status().peers.find(p => p.peerIdSuffix === 'peer-b')!;
+    await vi.advanceTimersByTimeAsync(1);
+    runtime.prepareConnectionOpen('peer-c')!.admit(); await vi.advanceTimersByTimeAsync(0);
+    expect(runtime.status().peers.map(p => p.peerIdSuffix).sort()).toEqual(['peer-b', 'peer-c']);
+    expect(runtime.status().peers.find(p => p.peerIdSuffix === 'peer-b')).toEqual(before);
+    runtime.prepareConnectionOpen('peer-b')!.admit();
+    await vi.advanceTimersByTimeAsync(98);
+    expect(replay.mock.calls.filter(call => call[1].peerId === 'peer-b')).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(replay.mock.calls.filter(call => call[1].peerId === 'peer-b')).toHaveLength(2);
   });
 });
 
@@ -909,260 +873,3 @@ describe('selection reactivation during receiver drain', () => {
 });
 
 
-describe('connection adapter current-policy capabilities', () => {
-  it('uses separate reservation and announcement snapshots without an agent dependency', async () => {
-    const initial = buildOpenOwnerContextGraphPolicyV1({ networkId: RFC64_ROLLOUT_NETWORK_ID,
-      contextGraphId: RFC64_ROLLOUT_CONTEXT_GRAPH_ID, ownerAddress: RFC64_ROLLOUT_AUTHOR });
-    const successor = Object.freeze({ ...initial, issuedAt: '1' as typeof initial.issuedAt });
-    const snapshot = (policy: typeof initial) => Object.freeze({ policy,
-      policyDigest: computeOpenContextGraphPolicyDigestV1(policy), roster: null });
-    let accepted: ReturnType<typeof snapshot> | null = snapshot(initial);
-    const initialDigest = accepted.policyDigest;
-    const readAcceptedPolicy = vi.fn(() => accepted);
-    const announce = vi.fn(async () => ({ failed: 0 }));
-    const reservePeer = vi.fn((_cg: string, _digest: string, peerId: string) => ({
-      peerId, generation: 1, admit: vi.fn(), release: vi.fn(),
-    }));
-    const scheduled = new Map<0 | 1 | 'deadline', (signal: AbortSignal) => Promise<void>>();
-    const controller = new AbortController();
-    const runtime = createRfc64CatalogReplayConnectionRuntimeV1({
-      capabilities: {
-        listActiveRfc64CatalogReplayContextGraphIdsV1: () => [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
-        readAcceptedRfc64CatalogAccessSnapshotV1: readAcceptedPolicy,
-        reannounceRfc64CatalogHeadsToPeerV1: announce,
-      },
-      reservePeer, replay: async () => ({ failed: 0 }), warn: vi.fn(),
-      schedule: (slot, work) => { scheduled.set(slot, work); return true; }, wait: async () => undefined,
-    });
-    runtime.prepareConnectionOpen('peer')!.admit();
-    expect(reservePeer).toHaveBeenCalledWith(RFC64_ROLLOUT_CONTEXT_GRAPH_ID, initialDigest, 'peer');
-    accepted = snapshot(successor);
-    await scheduled.get(0)!(controller.signal);
-    expect(announce).toHaveBeenCalledExactlyOnceWith('peer', {
-      kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1, networkId: RFC64_ROLLOUT_NETWORK_ID,
-      contextGraphId: RFC64_ROLLOUT_CONTEXT_GRAPH_ID, policyDigest: accepted.policyDigest,
-    }, controller.signal);
-    expect(readAcceptedPolicy).toHaveBeenCalledTimes(2);
-    expect(accepted.policyDigest).not.toBe(initialDigest);
-    accepted = null;
-    const unavailable = runtime.prepareConnectionOpen('unknown')!;
-    expect(reservePeer).toHaveBeenCalledOnce();
-    unavailable.reject(); runtime.reset();
-  });
-});
-
-
-import { Rfc64CatalogReplayRunReporterV1, type Rfc64CatalogConnectionReplayResultV1 } from '../src/rfc64/catalog-replay-run-reporter-v1.js';
-import type { Rfc64CatalogReplayPeerResultV1, Rfc64CatalogReplayRecoveryStatusV1 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
-import { Rfc64PublicCatalogTransportErrorV1 } from '../src/rfc64/public-catalog-transport-v1.js';
-const CG = 'public-cg';
-const POLICY = 'policy';
-type ReportPorts = Omit<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait' | 'warn'> & {
-  replayStatus(cg: string): Pick<Rfc64CatalogReplayRecoveryStatusV1, 'failed' | 'unresolvedPeerCount'> | null;
-  log(level: 'debug' | 'warn', message: string): void;
-};
-function reportingRuntime(ports: ReportPorts): Rfc64CatalogReplayConnectionRuntimeV1 {
-  const reporter = new Rfc64CatalogReplayRunReporterV1(ports);
-  return makeRuntime({ ...ports, warn: message => ports.log('warn', message),
-    reportRun: (cg, peer, result) => reporter.report(cg, peer, result) });
-}
-function ports(overrides: Partial<ReportPorts> = {}) {
-  return {
-    selectContextGraphIds: () => [CG],
-    reserveFence: (_contextGraphId: string, peerId: string) => ({
-      peerId,
-      generation: 1,
-      admit: () => undefined,
-      release: vi.fn(),
-    }),
-    reannounce: vi.fn(async () => ({ failed: 0 })),
-    replay: vi.fn(async (): Promise<Rfc64CatalogConnectionReplayResultV1> => ({ failed: 0 })),
-    replayStatus: vi.fn(() => ({ failed: false, unresolvedPeerCount: 0 })),
-    log: vi.fn(),
-    ...overrides,
-  };
-}
-
-/** Let every replay settle, and the line about it be logged. */
-async function settled(): Promise<void> {
-  for (let turn = 0; turn < 100; turn += 1) await Promise.resolve();
-}
-
-function lines(log: { mock: { calls: readonly (readonly unknown[])[] } }, level: 'warn' | 'debug') {
-  return log.mock.calls.filter(([logged]) => logged === level).map(([, message]) => String(message));
-}
-
-describe('RFC-64 catalog replay after a connection: what an unfinished run says', () => {
-  it('says nothing for a run that finished', async () => {
-    const connection = ports();
-    reportingRuntime(connection).prepareConnectionOpen('12D3KooWpeerAAAA')?.admit();
-    await settled();
-    expect(connection.log).not.toHaveBeenCalled();
-    expect(connection.replayStatus).not.toHaveBeenCalled();
-  });
-
-  it('logs at debug a run that only could not replay from some peers', async () => {
-    const connection = ports({
-      replay: vi.fn(async () => ({ requested: 1, failed: 2 })),
-      replayStatus: vi.fn(() => ({ failed: false, unresolvedPeerCount: 2 })),
-    });
-    reportingRuntime(connection).prepareConnectionOpen('12D3KooWpeerAAAA')?.admit();
-    await settled();
-    expect(connection.replayStatus).toHaveBeenCalledWith(CG);
-    expect(lines(connection.log, 'warn')).toEqual([]);
-    expect(lines(connection.log, 'debug')).toEqual([
-      `RFC-64 catalog replay for "${CG}" after peerAAAA connected could not replay from every peer `
-        + '(busy, no answer, or no local catalog service); later replays ask again '
-        + '(1 peer(s) answered, 2 failed, 2 retried later)',
-    ]);
-  });
-
-  it('keeps a warning, with its reason and counts, while the graph may lack heads its peers hold', async () => {
-    const connection = ports({
-      replay: vi.fn(async () => ({ requested: 2, failed: 1 })),
-      replayStatus: vi.fn(() => ({ failed: true, unresolvedPeerCount: 0 })),
-    });
-    reportingRuntime(connection).prepareConnectionOpen('12D3KooWpeerAAAA')?.admit();
-    await settled();
-    expect(lines(connection.log, 'debug')).toEqual([]);
-    expect(lines(connection.log, 'warn')).toEqual([
-      `RFC-64 catalog replay incomplete for "${CG}" after peerAAAA connected: this node may lack `
-        + 'catalog heads its peers hold until a full replay passes '
-        + '(2 peer(s) answered, 1 failed, 0 retried later)',
-    ]);
-  });
-
-  it('keeps a warning when the graph has no replay status to tell the two apart', async () => {
-    const connection = ports({
-      replay: vi.fn(async () => ({ failed: 1 })),
-      replayStatus: vi.fn(() => null),
-    });
-    reportingRuntime(connection).prepareConnectionOpen('12D3KooWpeerAAAA')?.admit();
-    await settled();
-    expect(lines(connection.log, 'warn')).toEqual([
-      `RFC-64 catalog replay incomplete for "${CG}" after peerAAAA connected: its replay status is `
-        + 'not available (0 peer(s) answered, 1 failed, unknown retried later)',
-    ]);
-  });
-
-  it('says a run shared by several connecting peers once', async () => {
-    const shared = Object.freeze({ requested: 0, failed: 3 });
-    const connection = ports({
-      replay: vi.fn(async () => shared),
-      replayStatus: vi.fn(() => ({ failed: true, unresolvedPeerCount: 3 })),
-    });
-    const runtime = reportingRuntime(connection);
-    for (const peerId of ['12D3KooWpeerAAAA', '12D3KooWpeerBBBB', '12D3KooWpeerCCCC']) {
-      runtime.prepareConnectionOpen(peerId)?.admit();
-    }
-    await settled();
-    expect(connection.replay).toHaveBeenCalledTimes(3);
-    expect(lines(connection.log, 'warn')).toHaveLength(1);
-    expect(lines(connection.log, 'warn')[0]).toContain('after peerAAAA connected');
-  });
-
-  it('still warns when a replay fails outright', async () => {
-    const connection = ports({ replay: vi.fn(async () => { throw new Error('replay unavailable'); }) });
-    reportingRuntime(connection).prepareConnectionOpen('12D3KooWpeerAAAA')?.admit();
-    await settled();
-    expect(lines(connection.log, 'warn')).toEqual([
-      'RFC-64 catalog replay failed after peerAAAA connected: replay unavailable',
-    ]);
-  });
-});
-
-/**
- * The same, with the production replay recovery runtime behind the
- * connection runtime: only the peers' answers and this node's applied heads
- * (the parity read) are scripted.
- */
-describe('RFC-64 catalog replay after a connection, with the replay recovery runtime', () => {
-  interface Target { readonly id: string }
-
-  function wired(options: {
-    requestPeer: (contextGraphId: string, peerId: string) => Promise<Rfc64CatalogReplayPeerResultV1<Target>>;
-    parityFailed?: () => Promise<boolean>;
-  }) {
-    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
-      requestPeer: vi.fn(options.requestPeer),
-      whenReceiverIdleForContextGraph: async () => undefined,
-      targetIdentity: (target) => target.id,
-      parityFailed: options.parityFailed ?? (async () => false),
-    });
-    const log = vi.fn();
-    const connection = reportingRuntime({
-      selectContextGraphIds: () => [CG],
-      reserveFence: (contextGraphId, peerId) => recovery.reservePeer(contextGraphId, POLICY, peerId),
-      reannounce: async () => ({ failed: 0 }),
-      replay: (contextGraphId, demand) => recovery.request({
-        contextGraphId, policyDigest: POLICY, kind: 'connection-demand', demand,
-      }),
-      replayStatus: (contextGraphId) => recovery.status(contextGraphId, POLICY),
-      log,
-    });
-    return { recovery, connection, log };
-  }
-
-  const completed = (targets: readonly Target[] = []) => Object.freeze({
-    status: 'completed' as const,
-    targets: Object.freeze([...targets]),
-  });
-  const busy = () => new Rfc64PublicCatalogTransportErrorV1(
-    'catalog-transport-overloaded',
-    'remote peer remained busy after 4 catalog-head replay attempt(s)',
-  );
-
-  it('keeps a peer that stayed busy out of the warnings, and asks it again later', async () => {
-    const { recovery, connection, log } = wired({ requestPeer: async () => { throw busy(); } });
-    connection.prepareConnectionOpen('12D3KooWbusyPEER')?.admit();
-    await vi.waitFor(() => expect(log).toHaveBeenCalled());
-    expect(lines(log, 'warn')).toEqual([]);
-    expect(lines(log, 'debug')).toEqual([expect.stringContaining('(0 peer(s) answered, 1 failed, 1 retried later)')]);
-    // Not evidence about this node's rows: the graph is not failed, the peer is retained.
-    expect(recovery.status(CG, POLICY)).toMatchObject({ failed: false, unresolvedPeerCount: 1 });
-  });
-
-  it('says nothing about a peer that does not serve the graph', async () => {
-    const { connection, log } = wired({ requestPeer: async () => ({ status: 'not-provider' as const }) });
-    connection.prepareConnectionOpen('12D3KooWnotSERVE')?.admit();
-    await settled();
-    await settled();
-    expect(log).not.toHaveBeenCalled();
-  });
-
-  it('warns when a peer promised a head this node has not applied', async () => {
-    const { recovery, connection, log } = wired({
-      requestPeer: async () => completed([{ id: 'head-v2' }]),
-      parityFailed: async () => true,
-    });
-    connection.prepareConnectionOpen('12D3KooWheadPEER')?.admit();
-    await vi.waitFor(() => expect(log).toHaveBeenCalled());
-    expect(lines(log, 'debug')).toEqual([]);
-    expect(lines(log, 'warn')).toEqual([
-      `RFC-64 catalog replay incomplete for "${CG}" after headPEER connected: this node may lack `
-        + 'catalog heads its peers hold until a full replay passes (1 peer(s) answered, 1 failed, 0 retried later)',
-    ]);
-    expect(recovery.status(CG, POLICY)).toMatchObject({ failed: true });
-  });
-
-  it('says once for a run that peers connecting together share', async () => {
-    let answer!: () => void;
-    const firstAnswer = new Promise<void>((resolve) => { answer = resolve; });
-    const { connection, log } = wired({
-      requestPeer: async (_contextGraphId, peerId) => {
-        if (peerId === '12D3KooWpeerAAAA') await firstAnswer;
-        throw busy();
-      },
-    });
-    // The second peer connects while the first one's replay is still out, and
-    // joins that run.
-    connection.prepareConnectionOpen('12D3KooWpeerAAAA')?.admit();
-    await settled();
-    connection.prepareConnectionOpen('12D3KooWpeerBBBB')?.admit();
-    answer();
-    await vi.waitFor(() => expect(log).toHaveBeenCalled());
-    await settled();
-    expect(log).toHaveBeenCalledTimes(1);
-    expect(lines(log, 'debug')).toEqual([expect.stringContaining('(0 peer(s) answered, 2 failed, 2 retried later)')]);
-  });
-});

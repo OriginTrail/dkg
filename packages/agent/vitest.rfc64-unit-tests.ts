@@ -119,6 +119,8 @@ export const RFC64_UNIT_TESTS = [
   "test/rfc64-unregistered-replica-authority.integration.test.ts",
   "test/rfc64-replay-worklist.integration.test.ts",
   "test/rfc64-catalog-replay-connection-runtime-v1.test.ts",
+  "test/rfc64-catalog-replay-connection-adapter.test.ts",
+  "test/rfc64-catalog-replay-run-reporter.test.ts",
   "test/rfc64-catalog-head-replay-peers.test.ts",
   "test/rfc64-unregistered-seed-fetch-agent.test.ts",
   "test/rfc64-catalog-replay-recovery-runtime-v1.test.ts",

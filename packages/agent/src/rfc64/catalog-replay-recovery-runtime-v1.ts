@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { FullReplayPassV1, ReplayRunEvidenceV1 } from './catalog-replay-evidence-v1.js';
+import { FullReplayPassV1, ReplayRunEvidenceV1, recordReplayPeerOutcomeV1 } from './catalog-replay-evidence-v1.js';
 import { Rfc64CatalogReplayPeerWorklistV1 } from './catalog-replay-peer-worklist-v1.js';
 
 import {
@@ -399,14 +399,13 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
                 // earlier provider failure recorded.
                 failed += 1;
                 unansweredPeers += 1;
-                progress.fullPass?.record(demand, [], true);
+                recordReplayPeerOutcomeV1(evidence, progress.fullPass, demand, { kind: 'unanswered' });
                 return;
               }
               progress.unresolvedPeers.delete(peerId);
-              if (completion.status === 'completed') {
-                evidence.completed(demand, completion.targets);
-                progress.fullPass?.record(demand, completion.targets, false, true);
-              } else progress.fullPass?.record(demand, [], false);
+              recordReplayPeerOutcomeV1(evidence, progress.fullPass, demand,
+                completion.status === 'completed' ? { kind: 'completed', targets: completion.targets }
+                  : { kind: 'not-provider' });
               return;
             } catch (error) {
               if (input.signal?.aborted) throw input.signal.reason ?? error;
@@ -415,7 +414,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
                 failed += 1;
                 providerFailures += 1;
                 unansweredPeers += 1;
-                progress.fullPass?.record(demand, [], true);
+                recordReplayPeerOutcomeV1(evidence, progress.fullPass, demand, { kind: 'unanswered' });
               }
             }
           }
@@ -530,7 +529,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       current.promisedTargets = null;
       requiresFullReplay = true;
     } else if (evidence.received.length > 0) {
-      this.#settlePromisedTargets(current, evidence.received, false);
+      if (!this.#settlePromisedTargets(current, evidence.received, false)) requiresFullReplay = true;
     }
     if (requiresFullReplay) current.requiresFullReplay = true;
     if (!requiresFullReplay && observed && corroborated && wasFullPass) current.requiresFullReplay = false;
@@ -557,9 +556,9 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     replaces: boolean,
   ): boolean {
     if (promised.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
-      // This run's parity read already failed on the same overflow.
+      // Overflow loses the retained promise set even when drain was unobserved.
       progress.promisedTargets = null;
-      return true;
+      return false;
     }
     if (replaces || progress.promisedTargets === null) {
       progress.promisedTargets = Object.freeze([...promised]);

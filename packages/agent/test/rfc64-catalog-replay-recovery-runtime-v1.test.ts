@@ -733,6 +733,35 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     ]);
   });
 
+  it.each(['timeout', 'cancel'] as const)('retains overflow after an unobserved %s until a full corroborated replay', async mode => {
+    const full = Array.from({ length: RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 }, (_, i) => ({ id: `head-${i}` }));
+    let targets = full, unobserved = false;
+    const controller = new AbortController();
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => ({ status: 'completed', targets }),
+      whenReceiverIdleForContextGraph: async () => {
+        if (!unobserved) return;
+        if (mode === 'cancel') { controller.abort(new Error('cancel drain')); throw controller.signal.reason; }
+        await new Promise<void>(() => undefined);
+      },
+      sleep: () => unobserved && mode === 'timeout' ? Promise.resolve() : new Promise(() => undefined),
+      targetIdentity: target => target.id, parityFailed: async () => false,
+    });
+    const fullPass = () => runtime.request({ contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'full-connected-peers', connectedPeerIds: ['peer'] });
+    await fullPass(); expect(runtime.promisedTargets('public-cg', 'policy')).toHaveLength(full.length);
+    targets = [{ id: 'extra-head' }]; unobserved = true;
+    runtime.markPeerPending('public-cg', 'policy', 'peer');
+    const pending = runtime.request({ contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'pending-recovery', signal: controller.signal });
+    if (mode === 'cancel') await expect(pending).rejects.toThrow('cancel drain'); else await pending;
+    expect(runtime.promisedTargets('public-cg', 'policy')).toBeNull();
+    expect(runtime.status('public-cg', 'policy')).toMatchObject({ failed: true, unverified: true });
+    unobserved = false;
+    runtime.markPeerPending('public-cg', 'policy', 'peer'); await run(runtime, 'policy');
+    expect(runtime.status('public-cg', 'policy')?.failed).toBe(true);
+    await fullPass(); expect(runtime.status('public-cg', 'policy')).toMatchObject({ failed: false, unverified: false });
+    expect(runtime.promisedTargets('public-cg', 'policy')).toEqual(targets);
+  });
+
   it('keeps a merged promise overflow latched on a full pass that may clear the witness', async () => {
     const half = RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 / 2;
     const heads = (prefix: string) => Array.from(

@@ -1309,9 +1309,10 @@ describe('RFC-64 rollout authority integration', () => {
 
   it('constructs recovery commands at the accepted agent boundary without eagerly enumerating peers', async () => {
     const edge = await startAgent({ name: 'replay-command-boundary', activation: activation('catalog') });
-    const peers = vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
-      { toString: () => 'connected-peer' },
-    ] as never);
+    // Startup metadata bootstrap owns an independent peer scan; keep this
+    // command-boundary assertion focused on the replay owner's enumeration.
+    vi.spyOn(edge, 'resolveRfc64UnregisteredAuthoritySeedPeersV1').mockReturnValue([]);
+    const peers = vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([{ toString: () => 'connected-peer' }] as never);
     const owner = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'request')
       .mockResolvedValue(Object.freeze({ requested: 1, failed: 0 }));
     const signal = new AbortController().signal;

@@ -3,6 +3,17 @@ import type { Rfc64CatalogReplayPeerDemandV1 } from './catalog-replay-recovery-r
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './catalog-peers-v1.js';
 import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './catalog-limits-v1.js';
 
+/** A provider result is recorded once in both the current run and retained pass. */
+export type ReplayPeerOutcomeV1<Target> =
+  | Readonly<{ kind: 'completed'; targets: readonly Target[] }>
+  | Readonly<{ kind: 'not-provider' | 'unanswered' }>;
+export function recordReplayPeerOutcomeV1<Target>(run: ReplayRunEvidenceV1<Target>,
+  pass: FullReplayPassV1<Target> | null, demand: Rfc64CatalogReplayPeerDemandV1,
+  outcome: ReplayPeerOutcomeV1<Target>): void {
+  if (outcome.kind === 'completed') run.completed(demand, outcome.targets);
+  pass?.record(demand, outcome);
+}
+
 /** Recovery owns expected generations, evidence and observation as one pass. */
 export class FullReplayPassV1<Target> {
   readonly #expected = new Map<string, { generation: number; replayed: boolean }>();
@@ -38,13 +49,13 @@ export class FullReplayPassV1<Target> {
     const expected = this.#expected.get(demand.peerId);
     return expected?.generation === demand.generation && !expected.replayed;
   }
-  record(demand: Rfc64CatalogReplayPeerDemandV1, targets: readonly Target[], unanswered: boolean, completed = false): void {
+  record(demand: Rfc64CatalogReplayPeerDemandV1, outcome: ReplayPeerOutcomeV1<Target>): void {
     const expected = this.#expected.get(demand.peerId);
     if (expected !== undefined && demand.generation >= expected.generation) expected.replayed = true;
-    this.unanswered ||= unanswered;
-    if (completed) this.#providers.set(demand.peerId, demand.generation);
+    this.unanswered ||= outcome.kind === 'unanswered';
+    if (outcome.kind === 'completed') this.#providers.set(demand.peerId, demand.generation);
     // Retain immediately after the provider response, BEFORE receiver drain.
-    this.#retain(targets);
+    if (outcome.kind === 'completed') this.#retain(outcome.targets);
   }
   #retain(targets: readonly Target[]): void {
     if (this.targets === null) return;

@@ -186,28 +186,23 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     }
   }
 
-  #runnable(peer: PeerV1, now: number): readonly ScopeV1[] {
-    return peer.window.runnable(now);
-  }
-
-  #ready(peer: PeerV1, now: number): boolean {
-    return !peer.active && this.#runnable(peer, now).length > 0;
-  }
-
+  #refresh(now: number): void { for (const peer of this.#byPeer.values()) peer.window.refresh(now); }
+  #ready(peer: PeerV1): boolean { return !peer.active && peer.window.snapshot.runnable.length > 0; }
   #nextDeadline(): number {
-    const now = Date.now();
-    return Math.min(...[...this.#byPeer.values()].map(peer => peer.window.nextWake(now)));
+    return Math.min(...[...this.#byPeer.values()].map(peer => peer.window.snapshot.nextWake));
   }
 
   #schedule(): void {
     if (this.#closed) return;
+    this.#refresh(Date.now());
     const worker = async (signal: AbortSignal): Promise<void> => {
       try {
         if (signal.aborted || this.#closed) return;
         const now = Date.now();
         const selected = new Set(this.#ports.selectContextGraphIds());
         for (const peer of this.#byPeer.values()) this.#continue(peer, selected);
-        const peer = [...this.#byPeer.values()].find(candidate => this.#ready(candidate, now));
+        this.#refresh(now);
+        const peer = [...this.#byPeer.values()].find(candidate => this.#ready(candidate));
         if (peer === undefined) return;
         await this.#runTurn(peer, signal);
         // Move a completed turn behind the other ready peers.
@@ -228,7 +223,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
           const now = Date.now();
           const selected = new Set(this.#ports.selectContextGraphIds());
           for (const peer of this.#byPeer.values()) this.#continue(peer, selected);
-          if ([...this.#byPeer.values()].some(peer => this.#ready(peer, now))) this.#schedule();
+        this.#refresh(now);
+          if ([...this.#byPeer.values()].some(peer => this.#ready(peer))) this.#schedule();
         }
       } finally { if (signal.aborted) this.#retire(); }
     })) this.#retire();
@@ -242,7 +238,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   async #runTurn(peer: PeerV1, signal: AbortSignal): Promise<void> {
     peer.active = true;
     try {
-      const scopes = this.#runnable(peer, Date.now()).slice(0, MAX_SCOPES_PER_TURN);
+      peer.window.refresh(Date.now());
+      const scopes = peer.window.snapshot.runnable.slice(0, MAX_SCOPES_PER_TURN);
       for (const scope of scopes) {
         if (signal.aborted || this.#closed) return;
         this.#pruneSelection(peer, new Set(this.#ports.selectContextGraphIds()));
