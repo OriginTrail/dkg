@@ -63,6 +63,11 @@ describe('generic registry contract', () => {
       { '@context': { alias: STREAMS }, 'alias:registeredByAgentAddress': 'attacker' },
       { registeredByAgentAddress: 'attacker', '@context': { '@vocab': STREAMS } },
       { who: 'attacker', '@context': { who: `${STREAMS}registeredByAgentAddress` } },
+      { who: 'attacker', '@context': { who: 'dkg-streams:registeredByAgentAddress' } },
+      { who: 'attacker', '@context': { who: 'next', next: 'dkg-streams:registeredByAgentAddress' } },
+      { who: 'attacker', '@context': { who: 'alias:registeredByAgentAddress', alias: 'dkg-streams:' } },
+      { registeredByAgentAddress: 'attacker', '@context': { '@vocab': 'dkg-streams:' } },
+      { who: 'attacker', '@context': { who: 'cycle', cycle: 'who' } },
     ]) {
       const merged = mergeAugmentFragment(original, fragment, new Set());
       expect(merged['dkg-streams:registeredByAgentAddress']).toBe(original['dkg-streams:registeredByAgentAddress']);

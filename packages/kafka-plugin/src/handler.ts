@@ -14,6 +14,7 @@ import {
   buildCountQuery,
   buildSingleByUalQuery,
   buildPageContentQuery,
+  buildPublisherQuery,
   bindingsToKa,
 } from './discovery.js';
 
@@ -316,6 +317,7 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
   let countBindings: Array<Record<string, unknown>>;
   let pageBindings: Array<Record<string, unknown>>;
   let contentBindings: Array<Record<string, unknown>> = [];
+  let publisherBindings: Array<Record<string, unknown>> = [];
   try {
     const fetchBindings = async (sparql: string): Promise<Array<Record<string, unknown>>> =>
       (await ctx.agent.query(sparql, queryOptions)).bindings;
@@ -330,7 +332,10 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
       return ual && root && contentGraph ? [{ ual, root, contentGraph }] : [];
     });
     if (targets.length > 0) {
-      contentBindings = await fetchBindings(buildPageContentQuery(targets));
+      [contentBindings, publisherBindings] = await Promise.all([
+        fetchBindings(buildPageContentQuery(targets)),
+        registryRequested ? fetchBindings(buildPublisherQuery(cgId, targets.map(target => target.ual))) : [],
+      ]);
     }
   } catch (err) {
     return queryFailedResponse(ctx.res, err);
@@ -354,7 +359,7 @@ async function handleGetList(ctx: KafkaPluginCtx, opts: CreateHandlerOptions): P
     const ka = bindingsToKa(subjectBindings);
     if (ka) {
       try {
-        items.push(withRegistry(ka, ual, cgId, pageBindings.filter(row => unwrapBindingValue(row.ual) === ual), registryRequested));
+        items.push(withRegistry(ka, ual, cgId, publisherBindings.filter(row => unwrapBindingValue(row.ual) === ual), registryRequested));
       } catch {
         return jsonResponse(ctx.res, 503, { error: 'RegistryDescriptorInvalid' });
       }
@@ -412,8 +417,16 @@ async function handleGetSingle(
       message: `UAL ${ual} not found in context graph ${cgId}`,
     });
   }
+  let publisherBindings: Array<Record<string, unknown>> = [];
+  if (registryRequested) {
+    try {
+      publisherBindings = (await ctx.agent.query(buildPublisherQuery(cgId, [ual]), discoveryQueryOptions(ctx, cgId, subGraphName))).bindings;
+    } catch (err) {
+      return queryFailedResponse(ctx.res, err);
+    }
+  }
   try {
-    return jsonResponse(ctx.res, 200, withRegistry(ka, ual, cgId, result.bindings, registryRequested));
+    return jsonResponse(ctx.res, 200, withRegistry(ka, ual, cgId, publisherBindings, registryRequested));
   } catch {
     return jsonResponse(ctx.res, 503, { error: 'RegistryDescriptorInvalid' });
   }

@@ -31,21 +31,22 @@ export function mergeAugmentFragment(
 ): KafkaStreamKa {
   // ADR 0004: `@type` and `@context` are extensible (multi-type / multi-prefix).
   // Every other key keeps the core-wins-with-log-once contract.
-  const merged: KafkaStreamKa = { ...baseKa };
+  // Use exactly the context we will publish, independently of fragment key order.
+  const context = mergeContexts(baseKa['@context'], augmentFragment['@context'], loggedCollisionKeys);
+  const merged: KafkaStreamKa = { ...baseKa, '@context': context };
   for (const [key, value] of Object.entries(augmentFragment)) {
     if (key === '@type') {
       merged['@type'] = mergeTypes(baseKa['@type'], value);
       continue;
     }
     if (key === '@context') {
-      merged['@context'] = mergeContexts(baseKa['@context'], value, loggedCollisionKeys);
       continue;
     }
     if (key.startsWith('@')) {
       logCollisionOnce(key, loggedCollisionKeys);
       continue;
     }
-    if (key in baseKa || isCoreProperty(key, baseKa['@context'], augmentFragment['@context'])) {
+    if (key in baseKa || isCoreProperty(key, context)) {
       logCollisionOnce(key, loggedCollisionKeys);
       continue;
     }
@@ -58,15 +59,29 @@ export function mergeAugmentFragment(
   return merged;
 }
 
-function isCoreProperty(key: string, base: Record<string, string>, extension: unknown): boolean {
-  const extra = extension && typeof extension === 'object' ? extension as Record<string, unknown> : {};
-  const context = { ...extra, ...base };
-  const colon = key.indexOf(':');
-  const resolved = colon === -1
-    ? context[key] ?? (typeof context['@vocab'] === 'string' ? context['@vocab'] + key : key)
-    : typeof context[key.slice(0, colon)] === 'string'
-      ? context[key.slice(0, colon)] + key.slice(colon + 1) : key;
-  return typeof resolved === 'string' && resolved.startsWith(STREAMS);
+function isCoreProperty(key: string, context: Record<string, string>): boolean {
+  // Context merging accepts only local string definitions. Follow term and
+  // compact-prefix chains without loading remote contexts; cycles fail closed.
+  const resolve = (term: string, vocab: boolean, seen = new Set<string>()): string | undefined => {
+    if (seen.has(term)) return undefined;
+    const next = new Set(seen).add(term);
+    if (Object.hasOwn(context, term)) return resolve(context[term], false, next);
+    const colon = term.indexOf(':');
+    if (colon !== -1) {
+      const prefix = term.slice(0, colon);
+      if (prefix === '_' || term.slice(colon + 1).startsWith('//')) return term;
+      if (!Object.hasOwn(context, prefix)) return term;
+      const namespace = resolve(prefix, false, next);
+      return namespace === undefined ? undefined : namespace + term.slice(colon + 1);
+    }
+    if (vocab && Object.hasOwn(context, '@vocab')) {
+      const namespace = resolve(context['@vocab'], false, next);
+      return namespace === undefined ? undefined : namespace + term;
+    }
+    return term;
+  };
+  const resolved = resolve(key, true);
+  return resolved === undefined || resolved.startsWith(STREAMS);
 }
 
 function mergeTypes(baseType: KafkaStreamKa['@type'], extType: unknown): string | string[] {
@@ -94,7 +109,7 @@ function mergeContexts(
   const merged: Record<string, string> = { ...baseCtx };
   for (const [prefix, iri] of Object.entries(extCtx as Record<string, unknown>)) {
     if (typeof iri !== 'string') continue;
-    if (prefix in baseCtx) {
+    if (prefix in baseCtx || (!prefix.startsWith('@') && isCoreProperty(prefix, baseCtx))) {
       logCollisionOnce(`@context:${prefix}`, loggedCollisionKeys);
       continue;
     }

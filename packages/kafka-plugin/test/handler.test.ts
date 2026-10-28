@@ -148,7 +148,8 @@ describe('generic registry route contract', () => {
     const { ctx, query } = mockCtx();
     query.mockResolvedValueOnce({ bindings: [{ count: '1' }] })
       .mockResolvedValueOnce({ bindings: [{ ual, root: 'urn:root', contentGraph: 'urn:private' }] })
-      .mockResolvedValueOnce({ bindings: streamRows.filter(row => !row.p.endsWith('kafkaTopicName')) });
+      .mockResolvedValueOnce({ bindings: streamRows.filter(row => !row.p.endsWith('kafkaTopicName')) })
+      .mockResolvedValueOnce({ bindings: [{ ual, publisher }] });
     await createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'catalog' })(attachRequest(ctx, request.req, request.res));
     expect(request.captured.statusCode).toBe(503);
     expect(request.captured.body).toEqual({ error: 'RegistryDescriptorInvalid' });
