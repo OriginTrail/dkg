@@ -239,7 +239,7 @@ export function selectRfc64ConfirmedCatalogObligationV1(input: Readonly<{
   contextGraphId: string;
   subGraphName: string | null;
   authoring: ResolvedRfc64CatalogAuthoringPolicyV1 | undefined;
-  readResponsibilities: () => readonly Rfc64CatalogResponsibilitySelectionV1[];
+  readResponsibility: () => Rfc64CatalogResponsibilitySelectionV1;
   readServingAuthority: () => Rfc64CatalogAuthorityPolicyV1;
   readAcceptedAccessPolicy?: () => number | undefined;
 }>): 'required' | 'excluded' {
@@ -250,8 +250,8 @@ export function selectRfc64ConfirmedCatalogObligationV1(input: Readonly<{
     && isRfc64PublicOnlyAuthoringExclusionV1(authoring, contextGraphId, input.readAcceptedAccessPolicy?.())) return 'excluded';
   if (authoring?.publicDefault !== undefined || authoring?.byContextGraph[contextGraphId] !== undefined
     || plan.selectedAuthority[contextGraphId]?.selected === true) return 'required';
-  const responsible = input.readResponsibilities().some((entry) => entry.contextGraphId === contextGraphId
-    && resolveRfc64CatalogResponsibilityAuthorityV1({ ...entry, killSwitchActive: plan.killSwitchActive }).authoringAllowed);
+  const entry = input.readResponsibility();
+  const responsible = resolveRfc64CatalogResponsibilityAuthorityV1({ ...entry, killSwitchActive: plan.killSwitchActive }).authoringAllowed;
   return responsible || input.readServingAuthority().authoringAllowed ? 'required' : 'excluded';
 }
 

@@ -40,24 +40,27 @@ describe('RFC-64 catalog rollout and compatibility merging', () => {
     const serving = vi.fn(() => resolveRfc64CatalogResponsibilityAuthorityV1({
       contextGraphId: PUBLIC_CG, responsible: false, active: false, mode: 'catalog', killSwitchActive: false,
     }));
-    const readResponsibilities = vi.fn(() => registry.snapshot());
-    const input = { plan, contextGraphId: PUBLIC_CG, subGraphName: null, authoring: undefined, readResponsibilities, readServingAuthority: serving };
+    const readResponsibility = vi.fn(() => registry.read(PUBLIC_CG));
+    const input = { plan, contextGraphId: PUBLIC_CG, subGraphName: null, authoring: undefined, readResponsibility, readServingAuthority: serving };
     expect(selectRfc64ConfirmedCatalogObligationV1(input)).toBe('excluded');
     registry.setResponsibility(PUBLIC_CG, 'core-public');
     expect(selectRfc64ConfirmedCatalogObligationV1(input)).toBe('required');
+    serving.mockImplementationOnce(() => { throw new Error('serving unavailable'); });
+    expect(selectRfc64ConfirmedCatalogObligationV1(input)).toBe('required');
+    serving.mockReset();
     registry.setResponsibility(PUBLIC_CG, null);
     serving.mockReturnValue(resolveRfc64CatalogResponsibilityAuthorityV1({
       contextGraphId: PUBLIC_CG, responsible: true, active: true, mode: 'catalog', killSwitchActive: false,
     }));
     expect(selectRfc64ConfirmedCatalogObligationV1(input)).toBe('required');
-    serving.mockClear(); readResponsibilities.mockClear();
+    serving.mockClear(); readResponsibility.mockClear();
     for (const excluded of [
       { ...input, subGraphName: 'unsupported' },
       { ...input, plan: { ...plan, killSwitchActive: true } },
       { ...input, plan: { ...plan, responsibilityDefaultMode: 'legacy' as const } },
     ]) expect(selectRfc64ConfirmedCatalogObligationV1(excluded)).toBe('excluded');
     expect(serving).not.toHaveBeenCalled();
-    expect(readResponsibilities).not.toHaveBeenCalled();
+    expect(readResponsibility).not.toHaveBeenCalled();
   });
 
   it('normalizes pre-defaultMode raw snapshots at the input boundary', () => {

@@ -21,7 +21,7 @@ import { handoffConfirmedCatalogPlacementV1, withConfirmedCatalogTailV1 } from '
 type CatalogPublicationIdentityV1 = Readonly<{ contextGraphId: string; assertionCoordinate: string; subGraphName?: string | null; catalogObligationRequired?: boolean }>;
 type CatalogAdmissionConfigurationV1 = Pick<Parameters<typeof selectRfc64ConfirmedCatalogObligationV1>[0], 'plan' | 'authoring'>;
 type CatalogAdmissionHostV1 = {
-  readonly [Key in 'readRfc64CatalogResponsibilitiesV1' | 'resolveRfc64CatalogServingAuthorityV1' | 'readAcceptedRfc64CatalogAccessSnapshotV1']:
+  readonly [Key in 'readRfc64CatalogResponsibilityV1' | 'resolveRfc64CatalogServingAuthorityV1' | 'readAcceptedRfc64CatalogAccessSnapshotV1']:
     OmitThisParameter<DKGAgent[Key]>;
 };
 
@@ -32,7 +32,7 @@ export function selectConfirmedCatalogObligationForAgentV1(
   return selectRfc64ConfirmedCatalogObligationV1({
     plan: config.plan, contextGraphId: params.contextGraphId,
     subGraphName: params.subGraphName ?? null, authoring: config.authoring,
-    readResponsibilities: () => host.readRfc64CatalogResponsibilitiesV1(),
+    readResponsibility: () => host.readRfc64CatalogResponsibilityV1(params.contextGraphId),
     readAcceptedAccessPolicy: () => host.readAcceptedRfc64CatalogAccessSnapshotV1(params.contextGraphId)?.policy.accessPolicy,
     readServingAuthority: () => host.resolveRfc64CatalogServingAuthorityV1(params.contextGraphId),
   });
