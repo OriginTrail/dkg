@@ -1646,3 +1646,17 @@ describe('GraphSetIndexStore', () => {
     await optedInStore.close();
   });
 });
+
+it('rejects an oversized periodic refresh instead of returning its smaller stale catalog', async () => {
+  let now = 1_000;
+  const inner = new OxigraphStore();
+  const store = new GraphSetIndexStore(inner, { revalidateMs: 100, now: () => now });
+  try {
+    await inner.insert([q('urn:small')]);
+    expect(await store.listGraphs({ maxResponseBytes: 64 })).toEqual(['urn:small']);
+    await inner.insert([q(`urn:${'large'.repeat(30)}`)]);
+    now += 100;
+    await expect(store.listGraphsByPrefix('urn:small', { maxResponseBytes: 64 }))
+      .rejects.toMatchObject({ code: 'STORE_RESPONSE_TOO_LARGE', maxBytes: 64 });
+  } finally { await store.close(); }
+});

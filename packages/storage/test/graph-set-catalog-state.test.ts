@@ -1,3 +1,4 @@
+import { measureGraphCatalogBytes } from '../src/graph-catalog-response-limit.js';
 import { createSortedUniqueStringCatalog } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import { GraphSetCatalogState } from '../src/graph-set-catalog-state.js';
@@ -8,6 +9,11 @@ vi.mock('@origintrail-official/dkg-core', async (importOriginal) => {
     ...actual,
     createSortedUniqueStringCatalog: vi.fn(actual.createSortedUniqueStringCatalog),
   };
+});
+
+vi.mock('../src/graph-catalog-response-limit.js', async importOriginal => {
+  const actual = await importOriginal<typeof import('../src/graph-catalog-response-limit.js')>();
+  return { ...actual, measureGraphCatalogBytes: vi.fn(actual.measureGraphCatalogBytes) };
 });
 
 describe('GraphSetCatalogState', () => {
@@ -97,4 +103,21 @@ describe('GraphSetCatalogState', () => {
     expect(createSortedCatalog).toHaveBeenCalledOnce();
     expect(state.sortedFor(members)).toEqual(['urn:keep', ...additions].sort());
   });
+});
+
+it('measures each immutable catalog once across caller ceilings and invalidates on membership changes', () => {
+  const measure = vi.mocked(measureGraphCatalogBytes); measure.mockClear();
+  const state = new GraphSetCatalogState(); state.replace(new Set(['urn:a']));
+  const members = state.current!;
+  const bytes = Buffer.byteLength(JSON.stringify(['urn:a']));
+  expect(state.sortedFor(members, bytes)).toEqual(['urn:a']);
+  expect(() => state.sortedFor(members, bytes - 1)).toThrow(/byte limit/);
+  expect(state.sortedFor(members, bytes + 1)).toEqual(['urn:a']);
+  expect(measure).toHaveBeenCalledOnce();
+  state.reconcile([{ graph: 'urn:b', present: true }]);
+  expect(() => state.sortedFor(members, bytes)).toThrow(/byte limit/);
+  expect(measure).toHaveBeenCalledTimes(2);
+  state.replace(new Set(['urn:c']));
+  expect(state.sortedFor(state.current!, bytes)).toEqual(['urn:c']);
+  expect(measure).toHaveBeenCalledTimes(3);
 });

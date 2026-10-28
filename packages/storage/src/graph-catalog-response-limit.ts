@@ -14,3 +14,14 @@ export function assertGraphCatalogWithinResponseLimit(
   }
   if (bytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, bytes);
 }
+
+/** One complete measurement for an immutable cached projection. */
+export function measureGraphCatalogBytes(graphs: readonly string[]): number {
+  return 2 + graphs.reduce((bytes, graph, index) => bytes + (index === 0 ? 0 : 1)
+    + Buffer.byteLength(JSON.stringify(graph), 'utf8'), 0);
+}
+
+export function assertMeasuredGraphCatalogWithinResponseLimit(bytes: number, maxBytes: number): void {
+  assertValidMaxResponseBytes(maxBytes);
+  if (bytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, bytes);
+}

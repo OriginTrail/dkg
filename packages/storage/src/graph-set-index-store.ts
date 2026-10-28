@@ -489,7 +489,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       );
     }
     const graphs = await this.loadCurrentSortedGraphs(options);
-    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
     return [...graphs];
   }
 
@@ -502,7 +501,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       ));
     }
     const graphs = await this.loadCurrentSortedGraphs(options);
-    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
     return graphs;
   }
 
@@ -520,7 +518,6 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       );
     }
     const graphs = await this.loadCurrentSortedGraphs(options);
-    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
     // startsWith() is defined over UTF-16 code units, while this catalog is
     // ordered by Unicode code point. A prefix ending in a high surrogate can
     // split an astral code point, so its matches are not guaranteed to be one
@@ -785,7 +782,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       // If another continuation invalidated/replaced the catalog after
       // ensureGraphSet() resolved, retry instead of manufacturing an empty or
       // stale enumeration from unrelated mutable state.
-      const sorted = this.catalog.sortedFor(members);
+      const sorted = this.catalog.sortedFor(members, options?.maxResponseBytes);
       if (sorted) return sorted;
       throwIfAborted(options?.signal);
     }

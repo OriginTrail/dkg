@@ -6,8 +6,9 @@ import {
   parseContextGraphUri,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, storeLaneInflightLimit, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, storeLaneInflightLimit, isStoreResponseTooLargeError, type TripleStore } from '@origintrail-official/dkg-storage';
 import type { QueryMaterializationBudget } from '@origintrail-official/dkg-query';
+import { QueryResultTooLargeError } from './query-result-too-large-error.js';
 import { runBoundedOperation } from './bounded-operation.js';
 import { strip } from './dkg-agent-utils.js';
 import { everyWithConcurrency } from './map-with-concurrency.js';
@@ -40,7 +41,7 @@ export async function canReadUnscopedQuery(
   return runBoundedOperation(async (signal) => {
     signal.throwIfAborted();
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const [result, storedIds] = await Promise.all([
+    const [result, storedIds] = await readAdmissionCatalog(opts.maxResponseBytes, () => Promise.all([
       deps.store.query(
         `SELECT ?cg WHERE {
           GRAPH <${ontologyGraph}> {
@@ -57,7 +58,7 @@ export async function canReadUnscopedQuery(
         signal,
         maxResponseBytes: opts.maxResponseBytes,
       }),
-    ]);
+    ]));
     signal.throwIfAborted();
     opts.materializationBudget?.consume(result);
     opts.materializationBudget?.consume(storedIds);
@@ -105,4 +106,16 @@ export async function canReadUnscopedQuery(
     label: 'Unscoped query admission; specify contextGraphId to limit the dataset',
     signal: opts.signal,
   });
+}
+
+async function readAdmissionCatalog<T>(maxResponseBytes: number | undefined, read: () => Promise<T>): Promise<T> {
+  try { return await read(); } catch (error) {
+      // These two reads use the caller's limit. Fixed internal authority limits
+      // and later permission reads retain their own failure classification.
+      if (maxResponseBytes !== undefined && isStoreResponseTooLargeError(error)
+        && error.maxBytes === maxResponseBytes) throw new QueryResultTooLargeError(error.maxBytes,
+          typeof error.actualBytes === 'bigint' ? Number(error.actualBytes > BigInt(Number.MAX_SAFE_INTEGER)
+            ? BigInt(Number.MAX_SAFE_INTEGER) : error.actualBytes) : error.actualBytes, { cause: error });
+      throw error;
+  }
 }

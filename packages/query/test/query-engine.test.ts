@@ -1,4 +1,4 @@
-import { createQueryStoreReadContext } from '../src/query-store-read-context.js';
+import { createQueryStoreReadContext, QueryMaterializationBudget } from '../src/query-store-read-context.js';
 import type { ScopedContentGraphDiscoverySnapshot } from '../src/scoped-content-graph-discovery-memo.js';
 import { describe, it, expect, beforeEach, expectTypeOf, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
@@ -380,10 +380,20 @@ describe('DKGQueryEngine', () => {
       expect(seen.signal).toBeUndefined();
     }
 
+    const charges: number[] = [];
+    class RecordingBudget extends QueryMaterializationBudget {
+      override consumeBytes(bytes: number): void { charges.push(bytes); super.consumeBytes(bytes); }
+    }
     await boundedEngine.query(sparql, {
-      ...commonOptions,
-      maxMaterializedBytes: 10 * 1024 * 1024,
+      ...commonOptions, materializationBudget: new RecordingBudget(10 * 1024 * 1024),
     });
+    const cachedBytes = Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: Array.from({ length: 64 }, () => ({})) }));
+    expect(charges).toContain(cachedBytes);
+    const totalBytes = charges.reduce((sum, bytes) => sum + bytes, 0);
+    const ceiling = totalBytes - 1;
+    expect(totalBytes - cachedBytes).toBeLessThan(ceiling); // Fresh reads alone fit.
+    await expect(boundedEngine.query(sparql, { ...commonOptions, maxMaterializedBytes: ceiling }))
+      .rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: ceiling });
     expect(boundedStore.sharedOptions).toHaveLength(1);
   });
 

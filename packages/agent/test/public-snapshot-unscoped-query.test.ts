@@ -1,3 +1,4 @@
+import { StoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
 import { QueryMaterializationBudget } from '@origintrail-official/dkg-query';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
@@ -90,4 +91,25 @@ it.each([false, true])('shares admission and execution bytes in a real unscoped 
     expect(observed).toHaveLength(3);
     await expect(agent.query(query, { maxResponseBytes: total })).resolves.toEqual(expected);
   } finally { spy.mockRestore(); }
+});
+
+it.each(['policy', 'inventory'] as const)('normalizes caller-capped %s admission errors at the agent boundary', async kind => {
+  const agent = await startAgent();
+  const error = new StoreResponseTooLargeError(64, 65);
+  const query = agent.store.query.bind(agent.store);
+  const querySpy = vi.spyOn(agent.store, 'query').mockImplementation((sparql, options) => {
+    if (kind === 'policy' && options?.source === 'agent.query.privateGraphAccessPolicy') {
+      expect(options.maxResponseBytes).toBe(64); throw error;
+    }
+    return query(sparql, options);
+  });
+  const inventory = agent.store.listGraphsByPrefix!.bind(agent.store);
+  const inventorySpy = vi.spyOn(agent.store, 'listGraphsByPrefix').mockImplementation((prefix, options) => {
+    if (kind === 'inventory' && options?.maxResponseBytes === 64) throw error;
+    return inventory(prefix, options);
+  });
+  try {
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { maxResponseBytes: 64 }))
+      .rejects.toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: 64, actualBytes: 65, cause: error });
+  } finally { querySpy.mockRestore(); inventorySpy.mockRestore(); }
 });

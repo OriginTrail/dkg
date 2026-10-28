@@ -643,3 +643,19 @@ it('continues scrubbing actual error responses independently of successful bindi
   expect(JSON.parse(res.body)).toEqual(Object.fromEntries(
     ['message', 'error', 'detail', 'details'].map(key => [key, 'failure at publish <redacted-path>'])));
 });
+
+it('keeps bounded v1 HTTP 422 for a real oversized result normalized by the agent', async () => {
+  const store = new OxigraphStore();
+  try {
+    await store.insert(Array.from({ length: 32 }, (_, index) => ({ subject: `urn:large:${index}`,
+      predicate: 'urn:p', object: JSON.stringify('x'.repeat(40_000)), graph: 'did:dkg:context-graph:test' })));
+    // Each stored literal is legal; the complete response exceeds 1 MiB.
+    const agent = composedAgent({ store, queryEngine: new DKGQueryEngine(store),
+      resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', source: 'system', reason: 'fixture', metadataBootstrap: 'eligible' }),
+      listPrivateContextGraphIdsNotReadableBy: async () => [], isPrivateContextGraph: async () => false });
+    const read = context(agent, { sparql: 'SELECT ?o WHERE { ?s <urn:p> ?o }', timeoutMs: 2000, maxRows: 100 });
+    await handleBoundedQueryRoutes(read.ctx);
+    expect(read.res.statusCode).toBe(422);
+    expect(JSON.parse(read.res.body)).toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE' });
+  } finally { await store.close(); }
+});
