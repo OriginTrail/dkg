@@ -220,7 +220,7 @@ it('retention never deletes anything but old finalized records, never changes th
     await fc.assert(fc.asyncProperty(fc.integer({ min: 0, max: 0x7fffffff }), async (seed) => { await oneCase(seed, templates, tally); await new Promise<void>((resolve) => setImmediate(resolve)); }),
       { seed: options.seed, numRuns: options.numRuns, endOnFailure: true, ...(options.path ? { path: options.path } : {}) });
   } finally { clearImmediate(ticker); }
-  // The generator must really reach what the claim is about. The floors apply from the 100-run default up (the two tie floors from 1,000, see below) and only to a
+  // The generator must really reach what the claim is about. The floors apply from the 100-run default up (the three tie floors, same-millisecond included, from 1,000, see below) and only to a
   // full run (a replay of one failing path executes just the cases along it).
   if (!options.path) {
     expect(tally.cases).toBe(options.numRuns);
