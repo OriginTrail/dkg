@@ -19,7 +19,7 @@ import type { LiftJob } from '../src/lift-job.js';
 import { LIFT_JOB_SUBJECT_PREFIX, buildLiftRetentionScanQuery, buildLiftRetentionTieQuery } from '../src/async-lift-retention-scan.js';
 import { LiftLegacyScanMemo } from '../src/lift-legacy-scan-memo.js';
 import { LiftJobPayloadUnreadableError } from '../src/lift-job-payload-unreadable.js';
-import { LiftJobStoreSelectors, lifecycleKeyOfJob } from '../src/lift-job-store-selectors.js';
+import { LiftJobStoreSelectors, lifecycleKeyOfJob, parseInventoryPayload } from '../src/lift-job-store-selectors.js';
 import { bindingJobIds } from '../src/async-lift-lifecycle-siblings.js';
 import {
   DAY, NOW, WINDOW, at, bySource, createRetentionTemplates, fin, graphFingerprint, keyedQuads, present, seedKeyed, seedWalletLock, spyStore, stampKeyed, type KeyedSpec, type RetentionTemplates,
@@ -798,21 +798,37 @@ describe('two records of one job id: the key is kept whole, whatever order the e
     if (decoded.kind !== 'compatibility') throw new Error(`fixture: ${spec.id}'s legacy-v0 failed payload decodes as ${decoded.kind}, not compatibility`);
     return quads;
   };
-  type RowOrder = 'engine' | 'ascending' | 'descending';
-  /** `store` with the rows of every sibling read (the one query that binds `?indexed`) in the engine's order or sorted by payload text: each of two payloads of one job id is the last row in one of the sorted orders. */
-  const siblingRowsIn = (store: OxigraphStore, order: RowOrder): OxigraphStore => (order === 'engine' ? store : spyStore(store, {
+  /** Job f's two payloads with every other job's rows between them: the rows of f's other payload first, then the other jobs', then those of f's payload in the named status. */
+  const SPLIT_ORDERS = ['split, f finalized last', 'split, f failed last'] as const;
+  type RowOrder = 'engine' | 'ascending' | 'descending' | (typeof SPLIT_ORDERS)[number];
+  const splitAroundF = (rows: Array<Record<string, string>>, order: (typeof SPLIT_ORDERS)[number]): Array<Record<string, string>> => {
+    const last = order === 'split, f finalized last' ? 'finalized' : 'failed';
+    const part = (row: Record<string, string>): number => { const job = parseInventoryPayload(row['payload']); return job?.jobId !== 'f' ? 1 : job.status === last ? 2 : 0; };
+    return [0, 1, 2].flatMap((n) => rows.filter((row) => part(row) === n));
+  };
+  /**
+   * `store` with the rows of every sibling read (the one query that binds `?indexed`) in the engine's order, sorted by payload text or split: each of two payloads of one job
+   * id is the last row in one of the sorted orders, which keep the rows of one id together, and a split order puts another job's rows between f's two payloads. `seen` gets
+   * the records of each answer the stub rewrites, in its order (`id:status`, one per run of rows with one payload).
+   */
+  const siblingRowsIn = (store: OxigraphStore, order: RowOrder, seen?: string[][]): OxigraphStore => (order === 'engine' ? store : spyStore(store, {
     rewrite: async (entry, run) => {
       const answer = await run();
       if (answer.type !== 'bindings' || !entry.text.includes('?indexed')) return answer;
       const sorted = [...answer.bindings].sort((a, b) => (a['payload']! < b['payload']! ? -1 : a['payload']! > b['payload']! ? 1 : 0));
-      return { ...answer, bindings: order === 'ascending' ? sorted : sorted.reverse() };
+      const bindings = order === 'ascending' ? sorted : order === 'descending' ? sorted.reverse() : splitAroundF(sorted, order);
+      seen?.push(bindings.filter((row, i) => row['payload'] !== bindings[i - 1]?.['payload']).map((row) => {
+        const job = parseInventoryPayload(row['payload']);
+        return job === null ? 'undecodable' : `${job.jobId}:${job.status}`;
+      }));
+      return { ...answer, bindings };
     },
   }).store);
-  /** Admission's own read of the key named `name` (`vmPublishAdmissionCandidates`) and the binding it answers with, in the two sorted row orders. */
-  const admissionViews = async (store: OxigraphStore, name: string): Promise<string[]> => {
+  /** Admission's own read of the key named `name` (`vmPublishAdmissionCandidates`) and the binding it answers with, in the given row orders (by default the two sorted ones). */
+  const admissionViews = async (store: OxigraphStore, name: string, orders: readonly RowOrder[] = ['ascending', 'descending']): Promise<string[]> => {
     const key = lifecycleKeyOfJob(stampKeyed(templates, fin('probe', name, 1)))!;
     const views: string[] = [];
-    for (const order of ['ascending', 'descending'] as const) {
+    for (const order of orders) {
       const records = await new LiftJobStoreSelectors(siblingRowsIn(store, order), DEFAULT_CONTROL_GRAPH_URI, (job) => job).vmPublishAdmissionCandidates(key);
       views.push(`records ${records.map((job) => `${job.jobId}:${job.status}`).sort().join(' ')}, binds ${bindingJobIds(records, key).join(' ') || 'nothing'}`);
     }
@@ -852,6 +868,32 @@ describe('two records of one job id: the key is kept whole, whatever order the e
         expect.soft(await graphFingerprint(store, DEFAULT_CONTROL_GRAPH_URI) === graph, `${where}: both records of the id stay, byte for byte`).toBe(true);
         expect.soft(await admissionViews(store, 'key'), `${where}: admission binds what it bound, in either row order`).toEqual(views);
       }
+    }
+  });
+
+  // Verification of round 3, second pass: every row above reaches the check with the two payloads of one id as adjacent rows, and two mutants of its two-payloads test
+  // passed them all (comparing each row only with the row before it, and forgetting the ids it has seen once it holds two). Here g's rows sit between f's two payloads.
+  it.each((['delete', 'report'] as const).flatMap((mode) => SPLIT_ORDERS.map((order) => [mode, order] as const)))('subject f holds two payloads of job f and the engine returns g\'s row between them, %s mode, sibling rows in %s order: every record stays and admission answers as before', async (mode, order) => {
+    const records = (): Quad[][] => [keyedQuads(templates, fin('g', 'key', 20)), keyedQuads(templates, fin('f', 'key', 30)), keyedQuads(templates, at('f', 'key', 'retryable', 10))];
+    const between = order === 'split, f finalized last' ? ['f:failed', 'g:finalized', 'f:finalized'] : ['f:finalized', 'g:finalized', 'f:failed'];
+    for (const insertion of ['as listed', 'reversed'] as const) {
+      const where = `inserted ${insertion}`;
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.createGraph(DEFAULT_CONTROL_GRAPH_URI);
+      for (const quads of insertion === 'as listed' ? records() : records().reverse()) await store.insert(quads);
+      const graph = await graphFingerprint(store, DEFAULT_CONTROL_GRAPH_URI);
+      const views = await admissionViews(store, 'key', SPLIT_ORDERS);
+      expect(views[0], `${where}: each split order shows admission the other record of f`).not.toBe(views[1]);
+      const seen: string[][] = [];
+      const results = await drain(newRetention(publisherOver(siblingRowsIn(store, order, seen)), { mode }));
+      expect(seen.length, `${where}: the sweep read the key`).toBeGreaterThan(0);
+      for (const read of seen) expect(read, `${where}: the sweep's read has g's record between f's two`).toEqual(between);
+      expect.soft(results.every((r) => r.error === undefined), where).toBe(true);
+      expect.soft([...deletedIds(results), ...wouldDeleteIds(results)], where).toEqual([]);
+      expect.soft(kept(results), where).toEqual({ unreadable: 1, siblings_unreadable: 1 });
+      expect.soft(await graphFingerprint(store, DEFAULT_CONTROL_GRAPH_URI) === graph, `${where}: every record stays, byte for byte`).toBe(true);
+      expect.soft(await admissionViews(store, 'key', SPLIT_ORDERS), `${where}: admission binds what it bound, in either split order`).toEqual(views);
     }
   });
 
