@@ -230,7 +230,8 @@ unknown, not as failed: the daemon keeps working after the client stops
 waiting, so check `dkg ka history` (MCP: `dkg_knowledge_asset_history`) before
 retrying. Any other request that times out fails with a `TimeoutError`.
 That includes `ka share-async`, `ka publish-async` and `publisher publish-async`,
-though a job may still exist: look it up before you run them again.
+though a job may still exist: find the job and follow
+[Retry safely](../build/async-jobs.md#retry-safely) instead of running them again.
 
 On a slow node or store, override the read and long deadlines, in
 milliseconds, with environment variables (for the MCP server, in the MCP
