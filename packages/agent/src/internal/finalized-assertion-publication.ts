@@ -1,6 +1,8 @@
+// SPDX-License-Identifier: Apache-2.0
+import { assertConfirmedCatalogSealAdmissionV1 } from './confirmed-catalog-obligation.js';
+import { ConfirmedCatalogObligationErrorV1, observeConfirmedPublicationWithRecoveryV1 } from '../confirmed-catalog-obligation-error.js';
 import { completeNamedPublishFinalization } from './complete-named-publish-finalization.js';
 import { completeNamedMint } from './named-mint-completion.js';
-// SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
 import { contextGraphAssertionUri, contextGraphMetaUri, assertionLifecycleUri,
   GRAPH_KA_CONTENT_SCOPE_VERSION, createOperationContext,
@@ -24,6 +26,7 @@ export interface FinalizedAssertionSelectionHost {
   readonly publisher: DKGPublisher;
   readonly chain: ChainAdapter;
   readonly writeLocks: Map<string, Promise<void>>;
+  readonly admitConfirmedCatalogPublicationV1: OmitThisParameter<DKGAgent['admitConfirmedCatalogPublicationV1']>;
   readonly resolveFinalizedAssertionPublishAuthor: OmitThisParameter<DKGAgent['resolveFinalizedAssertionPublishAuthor']>;
 }
 interface FinalizedAssertionLifecycleHost {
@@ -32,6 +35,7 @@ interface FinalizedAssertionLifecycleHost {
 }
 export interface FinalizedAssertionMintHost extends FinalizedAssertionLifecycleHost {
   readonly store: TripleStore;
+  readonly observeRfc64ConfirmedVmV1: OmitThisParameter<DKGAgent['observeRfc64ConfirmedVmV1']>;
   readonly transferRfc64ConfirmedVmV1: OmitThisParameter<DKGAgent['transferRfc64ConfirmedVmV1']>;
   catalogRequired(contextGraphId: string, subGraphName?: string): boolean;
 }
@@ -50,6 +54,7 @@ export interface FinalizedAssertionUpdateHost extends FinalizedAssertionLifecycl
 
 export async function selectFinalizedAssertionPublication(host: FinalizedAssertionSelectionHost, contextGraphId: string, name: string,
   opts: FinalizedAssertionPublishOptions | undefined, recording?: FinalizedAssertionRecordingContext) {
+  const catalogObligationRequired = host.admitConfirmedCatalogPublicationV1({ contextGraphId, assertionCoordinate: name, subGraphName: opts?.subGraphName });
   const agentAddress = await host.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
   const publisher = opts?.publisherOverride ?? host.publisher;
   const assertionUri = contextGraphAssertionUri(
@@ -70,6 +75,7 @@ export async function selectFinalizedAssertionPublication(host: FinalizedAsserti
     ?? await readFinalizedAssertionReservation(host.store,
       { contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName }, 'agent.vmPublish.seal');
 
+  assertConfirmedCatalogSealAdmissionV1(catalogObligationRequired, seal);
   const chainTargetMismatch = await sealChainTargetMismatch(host.chain, seal);
   if (chainTargetMismatch) throw new Error(`publishFromFinalizedAssertion: ${chainTargetMismatch}`);
 
@@ -118,7 +124,7 @@ export async function selectFinalizedAssertionPublication(host: FinalizedAsserti
     );
   }
   return { contextGraphId, name, opts, agentAddress, publisher, assertionUri, metaGraph, seal, graphScope,
-    packedKaId, rfc64WorkspaceHead, lifecycleUri, operationPlan };
+    packedKaId, rfc64WorkspaceHead, lifecycleUri, operationPlan, catalogObligationRequired };
 }
 type FinalizedAssertionSelection = Awaited<ReturnType<typeof selectFinalizedAssertionPublication>>;
 
@@ -283,6 +289,14 @@ export function finalizedPublicationIdentity(prepared: FinalizedAssertionMintPla
     shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri };
 }
 
+async function observeFinalizedPublicationCatalog(host: Pick<FinalizedAssertionMintHost, 'observeRfc64ConfirmedVmV1'>,
+  prepared: FinalizedAssertionMintPlan, result: PublishResult): Promise<void> {
+  return observeConfirmedPublicationWithRecoveryV1({ ...finalizedPublicationIdentity(prepared),
+    status: result.status, confirmedTransaction: result.onChainResult, catalogObligationRequired: prepared.catalogObligationRequired,
+    ctx: prepared.opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish',
+  }, host.observeRfc64ConfirmedVmV1);
+}
+
 /** Original publication alone creates the checkpoint; the completion protocol needs no resident content. */
 export async function completeFinalizedAssertionMint(host: FinalizedAssertionMintHost, prepared: FinalizedAssertionMintPlan,
   result: PublishResult): Promise<void> {
@@ -303,7 +317,11 @@ export async function completeFinalizedAssertionMint(host: FinalizedAssertionMin
   if (completion.status === 'incomplete') {
     for (const { stage, error } of completion.failures)
       host.log.warn(ctx, `Failed named-mint ${stage} completion for <${assertionUri}>: ${error instanceof Error ? error.message : String(error)}`);
+    const obligationFailure = completion.failures.find(failure => failure.error instanceof ConfirmedCatalogObligationErrorV1);
+    if (obligationFailure) throw obligationFailure.error;
   }
+  // Failure to persist our recovery checkpoint cannot waive the admitted catalog obligation.
+  if (!checkpointReady) await observeFinalizedPublicationCatalog(host, prepared, result);
 }
 
 /** Created only after resident content recording, cleanup and gossip have completed. */
@@ -314,7 +332,7 @@ export async function createFinalizedAssertionMintCheckpoint(host: Pick<Finalize
   // Only the original path proves content recording, cleanup and gossip. Resume may never create this proof.
   const ready = () => beginNamedPublishFinalization(host.store,
     { assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId },
-    () => host.catalogRequired(contextGraphId, opts?.subGraphName));
+    () => prepared.catalogObligationRequired || host.catalogRequired(contextGraphId, opts?.subGraphName));
   let checkpointReady = false;
   for (let attempt = 0; attempt < 2; attempt++) {
     try { await ready(); checkpointReady = true; break; }
@@ -404,7 +422,6 @@ export async function publishFinalizedAssertionUpdate(host: FinalizedAssertionUp
       `Failed to stamp update provenance for <${lifecycleUri}>: ${err instanceof Error ? err.message : String(err)}`); }
   }
   await consumeFinalizedPublicationShare(host, prepared, result);
-  if (result.status === 'confirmed') await host.observeRfc64ConfirmedVmV1({ ...finalizedPublicationIdentity(prepared),
-    ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
+  await observeFinalizedPublicationCatalog(host, prepared, result);
   return result;
 }

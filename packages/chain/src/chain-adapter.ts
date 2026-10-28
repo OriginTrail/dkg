@@ -1,3 +1,5 @@
+import type { CanonicalFinalizationReceiptReadOptions } from './canonical-finalization-receipt-options.js';
+export type { CanonicalFinalizationReceiptReadOptions } from './canonical-finalization-receipt-options.js';
 import type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
 export type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
 import type { ChainEvent } from './knowledge-asset-update-identity.js';
@@ -346,6 +348,8 @@ export interface CanonicalFinalizationReceipt {
   startKAId: bigint;
   endKAId: bigint;
   knowledgeAssetsContract?: string;
+  /** Receipt-block root-history position; opt-in V10 updates require an unambiguous append. */
+  assertionVersion?: bigint;
 }
 
 export type CanonicalFinalizationReceiptResolution =
@@ -427,11 +431,6 @@ export function isPendingPublishTransactionStatus(status: string): boolean {
   return status === 'pending-mempool' || status === 'pending-awaiting-confirmation';
 }
 
-export interface CanonicalFinalizationReceiptReadOptions extends ChainReadOptions {
-  /** Persisted block identity supplied during replay canonicality checks. */
-  expectedBlockHash?: string;
-  expectedBlockNumber?: number;
-}
 
 export interface UpdateKAParams {
   batchId: bigint;

@@ -1,3 +1,4 @@
+import { confirmedCatalogPendingFixture } from './_helpers/confirmed-catalog-response-fixture.js';
 import * as configModule from '../src/config.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
@@ -1656,6 +1657,18 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     await client.publishFromFinalizedAssertion('cg', 'plain');
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/plain/vm/publish`);
     expect(JSON.parse(calls[0].opts.body as string)).toEqual({ contextGraphId: 'cg' });
+  });
+
+  it.each(['publishAssertion', 'publishFromFinalizedAssertion'] as const)('%s retains the complete pending recovery response without republishing', async helper => {
+    const pending = confirmedCatalogPendingFixture();
+    const calls = track({ ...pending, assertionUri: pending.recovery.assertionUri });
+    const result = helper === 'publishAssertion'
+      ? await client.publishAssertion('cg', 'asset', [])
+      : await client.publishFromFinalizedAssertion('cg', 'asset');
+    expect(result).toEqual({ ...pending, assertionUri: pending.recovery.assertionUri });
+    expect(result.catalogObligationPending).toBe(true);
+    expect(calls).toHaveLength(helper === 'publishAssertion' ? 2 : 1);
+    expect(calls.filter(call => call.url.endsWith('/vm/publish'))).toHaveLength(1);
   });
 
   it('publishAssertion runs the create → per-KA /vm/publish two-call sequence', async () => {

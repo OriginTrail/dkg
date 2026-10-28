@@ -5,7 +5,8 @@ import type { RequestContext } from './context.js';
 import { requireNodeAdmin } from '../node-admin-guard.js';
 import { jsonResponse, readBody, safeParseJson, SMALL_BODY_BYTES, validateOptionalSubGraphName,
   resolveRequiredWriteContextGraphId, respondIfChainRpcTransportError, respondIfStoreUnavailable } from '../http-utils.js';
-import { respondAmbiguousAssertionAuthor, respondAuthorSelectionError, respondMintAdoptionRefused } from './knowledge-assets-error-mapping.js';
+import { respondAmbiguousAssertionAuthor, respondAuthorSelectionError, respondCatalogPublicationAdmissionError, respondMintAdoptionRefused } from './knowledge-assets-error-mapping.js';
+import { confirmedCatalogObligationResponse } from './confirmed-catalog-obligation.js';
 import { resolveSelectedAuthorAgentAddress } from './selected-author.js';
 
 const TX_HASH = /^0x[0-9a-fA-F]{64}$/;
@@ -44,6 +45,9 @@ export async function handleKnowledgeAssetMintReconcile(
       ...(selectedAuthor.value !== undefined ? { selectedAuthorAgentAddress: selectedAuthor.value } : {}),
     }));
   } catch (error: any) {
+    const obligation = confirmedCatalogObligationResponse(error);
+    if (obligation !== null) return jsonResponse(res, 207, obligation);
+    if (respondCatalogPublicationAdmissionError(res, error)) return;
     if (respondMintAdoptionRefused(res, error) || respondAmbiguousAssertionAuthor(res, error)) return;
     if (respondAuthorSelectionError(res, error)) return;
     if (respondIfStoreUnavailable(res, error) || respondIfChainRpcTransportError(res, error)) return;

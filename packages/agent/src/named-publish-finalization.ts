@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import { createHash } from 'node:crypto';
 import { type AssertionSeal } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -11,6 +12,7 @@ const COMPLETE = 'http://dkg.io/ontology/namedPublishFinalizationComplete';
 export interface NamedPublishFinalizationIdentity { assertionUri: string; seal: AssertionSeal }
 export interface NamedPublishFinalizationInput extends NamedPublishFinalizationIdentity {
   contextGraphId: string; subGraphName?: string; assertionCoordinate: string; shareOperationId?: string;
+  confirmedTransaction?: OnChainPublishResult;
 }
 export type CompleteNamedPublishFinalization = (input: NamedPublishFinalizationInput) => Promise<NamedPublishFinalizationOutcome>;
 interface PendingFinalization { version: 1; catalogRequired: boolean; shareOperationId?: string }
@@ -56,11 +58,11 @@ export async function beginNamedPublishFinalization(store: TripleStore, input: N
 export type NamedPublishFinalizationOutcome = 'complete' | 'pending';
 export async function finishNamedPublishFinalization(store: TripleStore, input: NamedPublishFinalizationIdentity & {
   shareOperationId?: string;
-}, ports: { transfer(shareOperationId?: string): Promise<ConfirmedVmOwnershipOutcome> }): Promise<NamedPublishFinalizationOutcome> {
+}, ports: { transfer(shareOperationId: string | undefined, catalogRequired: boolean): Promise<ConfirmedVmOwnershipOutcome> }): Promise<NamedPublishFinalizationOutcome> {
   const progress = await readNamedPublishFinalization(store, input);
   if (progress.kind === 'legacy') return 'pending';
   if (progress.kind === 'complete') return 'complete';
-  const outcome = await ports.transfer(progress.checkpoint.shareOperationId);
+  const outcome = await ports.transfer(progress.checkpoint.shareOperationId, progress.checkpoint.catalogRequired);
   if (outcome !== 'owned' && (progress.checkpoint.catalogRequired || outcome !== 'inactive')) {
     return 'pending';
   }

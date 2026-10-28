@@ -1,3 +1,4 @@
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 /**
  * Regression coverage for LU-5 inline-payload encryption policy.
  *
@@ -41,6 +42,7 @@ import {
   type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { PublishMethods } from '../src/dkg-agent-publish.js';
 import { localGossipSigner } from '../src/external-author-signing.js';
 import { computeSwmSenderKeyRecipientRouteHash } from '../src/dkg-agent-swm-state.js';
 
@@ -1027,6 +1029,9 @@ function makeQueuedAgentHarness(options: {
   }));
   const agentLike: any = {
     peerId: options.peerId,
+    admitConfirmedCatalogPublicationV1: PublishMethods.prototype.admitConfirmedCatalogPublicationV1,
+    config: confirmedPublicationCatalogConfigV1(),
+    readAcceptedRfc64CatalogAccessSnapshotV1: () => ({ policy: { accessPolicy: 0 } }),
     defaultAgentAddress: QUEUED_TEST_AUTHOR,
     chain: options.chain ?? {},
     store: {
@@ -1121,24 +1126,21 @@ async function makeQueuedPublishRequest(options: {
 }
 
 describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routing', () => {
-  it('uses a confirmed queued VM publish only to remove the RFC-64 SWM inventory row', async () => {
+  it('durably owes enabled confirmed catalog work without inline catalog authoring', async () => {
     const { agentLike } = makeQueuedAgentHarness({
       peerId: 'did:dkg:agent:queued-swm-removal',
       ual: 'did:dkg:local/queued-swm-removal',
       publishStatus: 'confirmed',
     });
-    // This scenario exercises active public removal; the shared harness remains inactive.
-    agentLike.resolveRfc64CatalogAuthoringLaneV1 = () => ({
-      kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
-    });
-    const removal = recorder(async () => ({
-      status: 'applied',
-      action: 'remove',
-      attempts: 1,
-      headObjectDigest: null,
-      error: null,
-    }));
-    agentLike.observeRfc64ConfirmedInventoryRemovalV1 = removal;
+    agentLike.config = confirmedPublicationCatalogConfigV1(true);
+    let releasePut!: () => void;
+    let markPutEntered!: () => void;
+    const putEntered = new Promise<void>((resolve) => { markPutEntered = resolve; });
+    const putGate = new Promise<void>((resolve) => { releasePut = resolve; });
+    const put = recorder(async () => { markPutEntered(); await putGate; });
+    const requested = recorder(() => ({ accepted: false, whenAttempted: Promise.resolve() }));
+    agentLike.rfc64PersistenceV1 = { finalizedPrivatePlacementRepairs: { put } };
+    agentLike.requestRfc64FinalizedPrivateCatalogPlacementRepairV1 = requested;
     const catalogAuthoring = recorder(async () => null);
     const legacyCatalogAuthoring = recorder(async () => null);
     agentLike.recordRfc64PublicCatalogAssetV1 = catalogAuthoring;
@@ -1150,27 +1152,30 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       graph: '',
     }];
     const request = await makeQueuedPublishRequest({
-      contextGraphId: 'public-cg',
+      contextGraphId: `${QUEUED_TEST_AUTHOR}/public-cg`,
       name: 'queued-public-ka',
       shareOperationId: 'share-op-catalog',
       intentByte: 'ad',
       quads: snapshotQuads,
     });
 
-    await (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
+    const publication = (DKGAgent.prototype as any).publishQueuedKnowledgeAssetVmPublish.call(
       bindInlineEncryptionFactory(agentLike),
       request,
       { contextGraphId: request.contextGraphId, quads: snapshotQuads },
     );
+    await putEntered;
+    expect(requested.calls).toHaveLength(0);
+    releasePut();
+    await publication;
 
-    expect(removal.calls).toHaveLength(1);
-    expect(removal.calls[0]?.[0]).toMatchObject({
-      contextGraphId: 'public-cg',
-      seal: {
-        authorAddress: QUEUED_TEST_AUTHOR,
-        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-      },
+    expect(put.calls).toHaveLength(1);
+    expect(put.calls[0]?.[0]).toMatchObject({ version: 2, inventoryScope: null,
+      contextGraphId: request.contextGraphId, assertionCoordinate: request.name,
+      seal: { authorAddress: QUEUED_TEST_AUTHOR, contentScopeVersion: String(GRAPH_KA_CONTENT_SCOPE_VERSION) },
     });
+    expect(requested.calls).toHaveLength(1);
+    expect(agentLike.removeRfc64SwmAuthorInventoryShadowV1.calls).toEqual([]);
     expect(catalogAuthoring.calls).toHaveLength(0);
     expect(legacyCatalogAuthoring.calls).toHaveLength(0);
   });
@@ -1181,7 +1186,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     const agentLike = {
       recordRfc64PublicCatalogAssetV1: canonicalCatalogAuthoring,
     };
-    const params = Object.freeze({ contextGraphId: 'public-cg' });
+    const params = Object.freeze({ contextGraphId: `${QUEUED_TEST_AUTHOR}/public-cg` });
 
     await expect(
       (DKGAgent.prototype as any).recordConfirmedRfc64PublicCatalogAssetV1.call(
@@ -1192,18 +1197,17 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     expect(canonicalCatalogAuthoring.calls).toEqual([[params]]);
   });
 
-  it('keeps a confirmed queued VM publish successful when SWM inventory removal fails', async () => {
+  it('keeps confirmed queued publication recoverable when placement requesting fails after its durable write', async () => {
     const { agentLike } = makeQueuedAgentHarness({
       peerId: 'did:dkg:agent:queued-swm-removal-failure',
       ual: 'did:dkg:local/queued-swm-removal-failure',
       publishStatus: 'confirmed',
     });
-    // This scenario exercises active public removal; the shared harness remains inactive.
-    agentLike.resolveRfc64CatalogAuthoringLaneV1 = () => ({
-      kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
-    });
-    agentLike.observeRfc64ConfirmedInventoryRemovalV1 = recorder(async () => {
-      throw new Error('simulated RFC-64 SWM removal failure');
+    agentLike.config = confirmedPublicationCatalogConfigV1(true);
+    const put = recorder(async () => undefined);
+    agentLike.rfc64PersistenceV1 = { finalizedPrivatePlacementRepairs: { put } };
+    agentLike.requestRfc64FinalizedPrivateCatalogPlacementRepairV1 = recorder(() => {
+      throw new Error('simulated RFC-64 placement request failure');
     });
     const snapshotQuads = [{
       subject: 'urn:test:queued-public-failure',
@@ -1212,7 +1216,7 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
       graph: '',
     }];
     const request = await makeQueuedPublishRequest({
-      contextGraphId: 'public-cg',
+      contextGraphId: `${QUEUED_TEST_AUTHOR}/public-cg`,
       name: 'queued-public-ka-failure',
       shareOperationId: 'share-op-catalog-failure',
       intentByte: 'ae',
@@ -1226,9 +1230,10 @@ describe('DKGAgent.publishQueuedKnowledgeAssetVmPublish inline encryption routin
     );
 
     expect(result).toMatchObject({ status: 'confirmed' });
+    expect(put.calls).toHaveLength(1);
     expect(agentLike.log.warn.calls.some((call: unknown[]) => (
-      String(call[1]).includes('RFC-64 SWM inventory shadow removal')
-      && String(call[1]).includes('simulated RFC-64 SWM removal failure')
+      String(call[1]).includes('durable marker stays')
+      && String(call[1]).includes('simulated RFC-64 placement request failure')
     ))).toBe(true);
   });
 

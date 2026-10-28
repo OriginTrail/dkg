@@ -41,7 +41,7 @@ export async function completeNamedMint(host: NamedMintCompletionHost, input: Na
   })));
   step('catalog', async () => {
     if (await host.completeFinalization({ contextGraphId: input.contextGraphId, subGraphName: input.subGraphName,
-      assertionCoordinate: input.name, seal, assertionUri }) === 'pending')
+      assertionCoordinate: input.name, seal, assertionUri, confirmedTransaction: receipt }) === 'pending')
       throw Object.assign(new Error('Named publish catalog finalization remains pending; retry to finish it'),
         { code: 'KA_MINT_RECONCILE_INCOMPLETE' });
   });

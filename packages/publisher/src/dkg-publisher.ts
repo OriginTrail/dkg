@@ -1,5 +1,5 @@
 import { bindConfirmedPublication, bindSealedGraphPublication, requireSealedGraphRecording, type PublicationRecording, type ConfirmedPublicationRecording } from './prepared-publication-recording.js';
-import type { MintRecordingOptions, SharedMemoryMintRecordingOptions } from './publisher.js';
+import type { MintRecordingOptions, SharedMemoryMintRecordingOptions, SealedMintRecordingTarget } from './publisher.js';
 import { replaceRecordedMintAccess, classifyMintRecord, writeMintMetadata } from './adopted-mint-record.js';
 import type { MintAdoptionRequest } from './adopt-existing-mint.js';
 import { preparePublication, assertPreparedPublicationContentSeal, type GraphScopedPublishDescriptor, type PreparedPublicationContent, type PublicationExecution } from './prepared-publication.js';
@@ -662,35 +662,11 @@ export type WriteConditionalToWorkspaceOptions = ConditionalShareOptions;
 // bare `urn:dkg:file:` (not `urn:dkg:file:keccak256:`) so any future
 // hash-algorithm variant (e.g., `urn:dkg:file:blake3:...`) is also
 // covered without a guard update.
-// Round 12 Bug 34: module-private token proving an internal caller
-// (specifically `publishFromSharedMemory`) is the origin of a
-// `publish()` call so the reserved-namespace guard can be bypassed
-// for legitimate internal promote→publish flows WITHOUT exposing a
-// public flag that external callers could set to bypass the guard.
-//
-// Round 9 Bug 25 used `options.fromSharedMemory` as the discriminator,
-// but `fromSharedMemory` is a public `PublishOptions` field with its
-// own user-facing semantic (signals to the V10 ACK path that data is
-// already in peers' SWM). Any external caller could set it `true` and
-// trivially bypass the guard, making `urn:dkg:file:*` writes possible
-// via the public API — the exact class of bypass Round 9 was supposed
-// to prevent. Codex Bug 34 caught this.
-//
-// The token is a module-scoped `Symbol` with no external references.
-// Only code in this file can mint it. Public callers cannot forge it.
-// Bypassing the guard therefore requires either being in this file
-// (and thus code-reviewed for correctness) or not calling the guarded
-// public entry points at all (the daemon's direct `store.insert`
-// bypass, which is the other legitimate non-guard path).
+// Only the internal shared-memory update path may carry protocol-owned metadata.
+// Initial shared-memory publications enter the private prepared-content pipeline directly.
 const INTERNAL_ORIGIN_TOKEN = Symbol('dkg-publisher:internal-origin');
 const TRUSTED_CATALOG_ORIGIN_TOKEN = Symbol('dkg-publisher:trusted-catalog-origin');
-const PUBLIC_ACK_STAGING_MODE_TOKEN = Symbol('dkg-publisher:public-ack-staging-mode');
-type PublicACKStagingMode = 'inline' | 'strict-swm' | 'inline-small-swm';
-type InternalPublishOptions = PublishOptions & {
-  [INTERNAL_ORIGIN_TOKEN]?: true;
-  [TRUSTED_CATALOG_ORIGIN_TOKEN]?: true;
-  [PUBLIC_ACK_STAGING_MODE_TOKEN]?: PublicACKStagingMode;
-};
+type PublicACKStagingMode = PreparedPublicationContent['publicStagingMode'];
 type InternalUpdateOptions = UpdateOptions & {
   [INTERNAL_ORIGIN_TOKEN]?: true;
   [TRUSTED_CATALOG_ORIGIN_TOKEN]?: true;
@@ -793,16 +769,24 @@ function resolveGraphScopedPublishDescriptor(
 }
 
 function isInternalOrigin(options: BasePublicationOptions): boolean {
-  return (options as InternalPublishOptions | InternalUpdateOptions)[INTERNAL_ORIGIN_TOKEN] === true;
+  return (options as InternalUpdateOptions)[INTERNAL_ORIGIN_TOKEN] === true;
 }
 
 function isTrustedCatalogInternalOrigin(options: BasePublicationOptions): boolean {
-  return (options as InternalPublishOptions | InternalUpdateOptions)[TRUSTED_CATALOG_ORIGIN_TOKEN] === true;
+  return (options as InternalUpdateOptions)[TRUSTED_CATALOG_ORIGIN_TOKEN] === true;
 }
 
-function resolvePublicACKStagingMode(options: PublishOptions): PublicACKStagingMode {
-  return (options as InternalPublishOptions)[PUBLIC_ACK_STAGING_MODE_TOKEN]
-    ?? (options.fromSharedMemory ? 'strict-swm' : 'inline');
+function assertPublicPublicationPayload(options: Pick<PublishOptions, 'quads' | 'privateQuads'>): void {
+  rejectUserAuthoredProtocolMetadata(options.quads);
+  if (options.privateQuads?.length) rejectUserAuthoredProtocolMetadata(options.privateQuads);
+}
+
+function assertSealedMintRecordingTarget(options: SealedMintRecordingTarget): void {
+  if (options.contentScopeVersion !== 2 || typeof options.reservedKaId !== 'bigint'
+    || options.reservedKaId <= 0n || options.precomputedAttestation?.reservedKaId !== options.reservedKaId
+    || !Number.isSafeInteger(options.publicTripleCount) || options.publicTripleCount < 0
+    || !Number.isSafeInteger(options.privateTripleCount) || options.privateTripleCount < 0)
+    throw new Error('Recording an existing mint requires a complete sealed graph reservation');
 }
 
 function selectPublicStagingQuads(
@@ -2057,27 +2041,30 @@ export class DKGPublisher implements Publisher {
    */
   async publishFromSharedMemory(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
     options?: SharedMemoryPublishOptions): Promise<PublishResult> {
-    const content = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
+    const prepared = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
+    const execution: PublicationExecution = { ...pickPublishLifecycleHooks(options ?? {}), fromSharedMemory: true,
+      v10ACKProvider: options?.v10ACKProvider, encryptInlinePayload: options?.encryptInlinePayload,
+      encryptInlineChunked: options?.encryptInlineChunked };
     let result: PublishResult;
-    try { result = await this.publish(content.options); }
+    try { result = await this.publishPreparedContent(prepared.content, execution); }
     catch (error) {
       if (!isNoDataInSwmFailure(error)) throw error;
-      this.log.warn(content.ctx, 'publishFromSWM core-node verification failed with NO_DATA_IN_SWM; retrying via direct publish with inline quads');
-      result = await this.publish({ ...content.options, fromSharedMemory: false,
-        [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline' } as InternalPublishOptions);
+      this.log.warn(prepared.content.ctx, 'publishFromSWM core-node verification failed with NO_DATA_IN_SWM; retrying via direct publish with inline quads');
+      result = await this.publishPreparedContent({ ...prepared.content, publicStagingMode: 'inline' },
+        { ...execution, fromSharedMemory: false });
     }
-    return content.finalize(result);
+    return prepared.finalize(result);
   }
 
   async recordExistingMintFromSharedMemory(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
     request: MintAdoptionRequest,
     options: SharedMemoryMintRecordingOptions): Promise<PublishResult> {
-    const content = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
-    // Content/routing preparation cannot widen or overwrite the sealed target.
-    return content.finalize(await this.recordExistingMint({ ...options, ...content.contentAndRouting }, request));
+    assertSealedMintRecordingTarget(options);
+    const prepared = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
+    return prepared.finalize(await this.recordPreparedMint(prepared.content, request, options));
   }
 
-  private async assertSharedMemoryGraphRegistration(contextGraphId: string, options: PublishOptions): Promise<void> {
+  private async assertSharedMemoryGraphRegistration(contextGraphId: string, options: Pick<PublishOptions, 'publishContextGraphId' | 'onChainContextGraphId'>): Promise<void> {
     // Guard: VM publishing requires an on-chain registered context graph.
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
     // Also skip when publishContextGraphId is set (remap flow) — the source
@@ -2235,27 +2222,17 @@ export class DKGPublisher implements Publisher {
     });
 
     this.log.info(ctx, `Publishing ${quads.length} public and ${privateQuads.length} private quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${chainCgId && !ctxGraphId ? ` (on-chain CG ${chainCgId})` : ''}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
-    const contentAndRouting = {
+    const contentOptions: PublishOptions = {
       contextGraphId, quads: quads.map((q) => ({ ...q, graph: '' })),
       ...(graphPublish ? { privateQuads } : {}), operationCtx: ctx,
       publishContextGraphId: chainCgId ?? undefined, fromSharedMemory: true,
-      [INTERNAL_ORIGIN_TOKEN]: true as const, [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline-small-swm' as const,
-      ...(hasTrustedCatalogTriples ? { [TRUSTED_CATALOG_ORIGIN_TOKEN]: true as const } : {}),
-    };
-    const internalPublishOptions: InternalPublishOptions = {
-      ...contentAndRouting,
-      // r12 (3878010163) — the hooks travel as one unit through the shared picker; the
-      // previous field-by-field list silently dropped onPublishConfirmed at this entry point.
-      ...pickPublishLifecycleHooks(options ?? {}),
+      onPhase: options?.onPhase,
       publisherPeerId: options?.publisherPeerId,
       accessPolicy: options?.accessPolicy, allowedPeers: options?.allowedPeers,
-      v10ACKProvider: options?.v10ACKProvider,
       trustedNonManifestCatalogTriples: options?.trustedNonManifestCatalogTriples,
       subGraphName: options?.subGraphName,
       publisherNodeIdentityIdOverride: options?.publisherNodeIdentityIdOverride,
       precomputedAttestation: options?.precomputedAttestation,
-      encryptInlinePayload: options?.encryptInlinePayload,
-      encryptInlineChunked: options?.encryptInlineChunked,
       publishEpochs: options?.publishEpochs,
       // OT-RFC-43 A2 — reuse the finalize-stamped kaId (no re-allocate).
       reservedKaId: options?.reservedKaId,
@@ -2267,6 +2244,11 @@ export class DKGPublisher implements Publisher {
       privateTripleCount: options?.privateTripleCount,
       pricingPolicy: options?.pricingPolicy,
     };
+    const content = await this.preparePublicationContent(contentOptions,
+      { allowCanonicalSkolemTerms: true, trustedCatalogOrigin: hasTrustedCatalogTriples });
+    // The shared-memory owner validates the sealed snapshot before registration can be requested.
+    await this.assertSharedMemoryGraphRegistration(contextGraphId, options ?? {});
+    content.publicStagingMode = 'inline-small-swm';
     const finalize = async (publishResult: PublishResult): Promise<PublishResult> => {
     // Per-cgId data promotion: copy quads + KA meta from the default
     // `<NAME>/data` + `<NAME>/_meta` graphs into `<NAME>/context/<cgId>/data`
@@ -2464,7 +2446,7 @@ export class DKGPublisher implements Publisher {
 
     return publishResult;
     };
-    return { options: internalPublishOptions, contentAndRouting, ctx, finalize };
+    return { content, finalize };
   }
 
   /** @deprecated Use publishFromSharedMemory. Will be removed in V10.1. */
@@ -2542,7 +2524,11 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
-    const content = await this.preparePublicationContent(options);
+    assertPublicPublicationPayload(options);
+    return this.publishPreparedContent(await this.preparePublicationContent(options), options);
+  }
+
+  private async publishPreparedContent(content: PreparedPublicationContent, options: PublicationExecution): Promise<PublishResult> {
     const prepared = await preparePublication(content, options, {
       publisherPlanner: this.publisherPlanner, log: this.log,
       allocateOperationId: () => `${this.sessionId}-${++this.tentativeCounter}`,
@@ -2562,14 +2548,13 @@ export class DKGPublisher implements Publisher {
   /** Record verified mint evidence through the same prepared-content recorder as a live publish. */
   async recordExistingMint(options: MintRecordingOptions,
     request: MintAdoptionRequest): Promise<PublishResult> {
-    // Validate the required recording target even for untyped callers; the
-    // shared content preparer then normalizes its graph and verifies the seal.
-    if (options.contentScopeVersion !== 2 || typeof options.reservedKaId !== 'bigint'
-      || options.reservedKaId <= 0n || options.precomputedAttestation?.reservedKaId !== options.reservedKaId
-      || !Number.isSafeInteger(options.publicTripleCount) || options.publicTripleCount < 0
-      || !Number.isSafeInteger(options.privateTripleCount) || options.privateTripleCount < 0)
-      throw new Error('Recording an existing mint requires a complete sealed graph reservation');
-    const prepared = await this.preparePublicationContent(options);
+    assertSealedMintRecordingTarget(options);
+    assertPublicPublicationPayload(options);
+    return this.recordPreparedMint(await this.preparePublicationContent(options), request, options);
+  }
+
+  private async recordPreparedMint(prepared: PreparedPublicationContent, request: MintAdoptionRequest,
+    options: Pick<PublicationExecution, 'onPhase' | 'onPublishConfirmed'>): Promise<PublishResult> {
     await this.publisherPlanner.requireMintAdoptionTarget(prepared.target.publisherContextGraphId);
     const content = requireSealedGraphRecording(prepared);
     await this.validatePublicationAttestation(content);
@@ -2589,7 +2574,7 @@ export class DKGPublisher implements Publisher {
   }
 
   /** Content validation and the confirmed recorder are independent of receipt acquisition. */
-  private async preparePublicationContent(options: PublishOptions): Promise<PreparedPublicationContent> {
+  private async preparePublicationContent(options: PublishOptions, policy = { allowCanonicalSkolemTerms: false, trustedCatalogOrigin: false }): Promise<PreparedPublicationContent> {
 
     const explicitPublishEpochs = resolvePublishEpochsOverride(options.publishEpochs);
     const pricingPolicyResult = parsePublicationPricingPolicy(options.pricingPolicy);
@@ -2628,19 +2613,6 @@ export class DKGPublisher implements Publisher {
       entityProofs = false,
       onPhase,
     } = options;
-    // Round 9 Bug 25 + Round 12 Bug 34: reject user-authored reserved-
-    // namespace subjects. The bypass is keyed on a module-private
-    // `INTERNAL_ORIGIN_TOKEN` Symbol (see its declaration near the top
-    // of the file) — NOT on the public `fromSharedMemory` flag. That
-    // means external callers cannot bypass this guard by setting a
-    // public option; only in-file code paths (specifically
-    // `publishFromSharedMemory`) can mint the token. Public
-    // `fromSharedMemory` retains its V10 ACK-path semantic
-    // independently.
-    if (!isInternalOrigin(options)) {
-      rejectUserAuthoredProtocolMetadata(quads);
-      if (privateQuads.length > 0) rejectUserAuthoredProtocolMetadata(privateQuads);
-    }
     rejectOversizedRdfLiterals(quads, 'publish.quads');
     if (privateQuads.length > 0) rejectOversizedRdfLiterals(privateQuads, 'publish.privateQuads');
     const ctx: OperationContext = operationCtx ?? createOperationContext('publish');
@@ -2719,7 +2691,7 @@ export class DKGPublisher implements Publisher {
       contextGraphId,
       trustedNonManifestCatalogTriples: options.trustedNonManifestCatalogTriples,
       onChainContextGraphId: publisherContextGraphId,
-      internalCatalogOrigin: isTrustedCatalogInternalOrigin(options),
+      internalCatalogOrigin: policy.trustedCatalogOrigin,
     });
     let canonical: ReturnType<typeof canonicalPublishPayload> | undefined;
     let canonicalPrivateQuads: Quad[] = [];
@@ -2728,7 +2700,7 @@ export class DKGPublisher implements Publisher {
     if (graphPublish) {
       assertNoKnowledgeAssetPayloadNamedGraphs(quads, privateQuads);
       const canonicalParts = await skolemizeKnowledgeAssetParts(quads, privateQuads, {
-        allowCanonicalSkolemTerms: isInternalOrigin(options),
+        allowCanonicalSkolemTerms: policy.allowCanonicalSkolemTerms,
       });
       allSkolemizedQuads = canonicalParts.publicQuads;
       canonicalPrivateQuads = canonicalParts.privateQuads;
@@ -3026,11 +2998,9 @@ export class DKGPublisher implements Publisher {
         subGraphName: options.subGraphName, targetMetaGraphUri: options.targetMetaGraphUri,
       },
       seal: options.precomputedAttestation, reservedKaId: options.reservedKaId,
-      pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode: resolvePublicACKStagingMode(options),
+      pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode: options.fromSharedMemory ? 'strict-swm' : 'inline',
     };
     assertPreparedPublicationContentSeal(content);
-    if (options.fromSharedMemory && isInternalOrigin(options))
-      await this.assertSharedMemoryGraphRegistration(contextGraphId, options);
     return content;
   }
 

@@ -3,6 +3,9 @@ import { Readable } from 'node:stream';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Command } from 'commander';
 import { MintAdoptionRefusedError } from '@origintrail-official/dkg-publisher';
+import { ConfirmedCatalogObligationErrorV1, CatalogPublicationAdmissionError } from '@origintrail-official/dkg-agent';
+import { contextGraphAssertionUri, createOperationContext } from '@origintrail-official/dkg-core';
+import { confirmedCatalogPendingFixture } from './_helpers/confirmed-catalog-response-fixture.js';
 import { ApiClient } from '../src/api-client.js';
 import type { AllowedHttpAuthentication } from '../src/auth.js';
 import { registerKnowledgeAssetCommand } from '../src/commands/knowledge-asset.js';
@@ -117,6 +120,34 @@ describe('POST /api/knowledge-assets/:name/vm/reconcile', () => {
     expect(result).toEqual({ status: 200, body: { status: 'already-published', ual: UAL } });
   });
 
+  it('retains the confirmed receipt and observer-only recovery when catalog persistence fails', async () => {
+    const pending = confirmedCatalogPendingFixture();
+    const failure = new ConfirmedCatalogObligationErrorV1({ contextGraphId: CG,
+      assertionCoordinate: 'lots-2026-08-12-083f0bc7e9b78e9c',
+      assertionUri: contextGraphAssertionUri(CG, AUTHOR, 'lots-2026-08-12-083f0bc7e9b78e9c'),
+      ctx: createOperationContext('publish'), publicationLabel: 'publish',
+      seal: { merkleRoot: new Uint8Array(32).fill(0xab), authorAddress: AUTHOR,
+        authorAttestationR: new Uint8Array(32).fill(1), authorAttestationVS: new Uint8Array(32).fill(2),
+        authorSchemeVersion: 1, chainId: 100n, kav10Address: `0x${'22'.repeat(20)}`,
+        reservedKaId: (BigInt(AUTHOR) << 96n) | 30013n,
+        finalizedAtIso: '2026-01-01T00:00:00.000Z', contentScopeVersion: 2,
+        kaUal: `did:dkg:evm:100/${AUTHOR}/30013`, assertionVersion: '1',
+        publicTripleCount: 1, privateTripleCount: 0, rootEntities: [] },
+    }, { txHash: TX_HASH, blockNumber: 48_853_001, batchId: 30013n }, new Error('marker write refused'));
+    const result = await callRoute(PATH, OPERATOR, { contextGraphId: CG }, stubAgent(async () => { throw failure; }));
+    expect(result.status).toBe(207);
+    expect(result.body).toMatchObject({ status: 'confirmed', catalogObligationPending: true,
+      txHash: TX_HASH, blockNumber: 48_853_001, confirmedTransaction: { batchId: '30013' },
+      retryAction: pending.retryAction, retryUrl: PATH.replace('/reconcile', '/observe-confirmed'),
+      recovery: { contextGraphId: CG, transactionHash: TX_HASH, blockNumber: 48_853_001 } });
+  });
+
+  it('preserves catalog admission failures as caller errors', async () => {
+    const agent = stubAgent(async () => { throw new CatalogPublicationAdmissionError('invalid sealed identity'); });
+    expect(await callRoute(PATH, OPERATOR, { contextGraphId: CG }, agent)).toEqual({ status: 400,
+      body: { code: 'CATALOG_PUBLICATION_ADMISSION_INVALID', error: 'invalid sealed identity' } });
+  });
+
   it('fails retryably when the lifecycle did not complete', async () => {
     const agent = stubAgent(async () => {
       throw Object.assign(new Error('lifecycle is not complete'), { code: 'KA_MINT_RECONCILE_INCOMPLETE' });
@@ -212,6 +243,16 @@ describe('dkg ka reconcile', () => {
       `  Tx hash: ${TX_HASH}`,
       '  Block:   48853001',
     ]);
+  });
+
+  it.each([{ flags: [] }, { flags: ['--json'] }])('retains pending catalog evidence and exits unsuccessfully with flags $flags', async ({ flags }) => {
+    const pending = confirmedCatalogPendingFixture();
+    const exit = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit requested'); });
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {});
+    await expect(reconcile(['asset', '-c', CG, ...flags], pending)).rejects.toThrow('exit requested');
+    expect(exit).toHaveBeenCalledWith(1);
+    expect(JSON.parse(lines.join('\n'))).toEqual(pending);
+    expect(errors).toHaveBeenCalledWith(expect.stringContaining('do not republish'));
   });
 
   it('reports an already published asset, and prints JSON on request', async () => {

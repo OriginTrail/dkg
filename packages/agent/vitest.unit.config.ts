@@ -18,6 +18,8 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/finalized-placement-decision.test.ts",
+      "test/finalized-placement-mixed-lanes.test.ts",
       "test/context-graph-lifecycle-cache.test.ts",
       "test/storage-ack-copy-cleanup-writer.test.ts",
       "test/held-metadata-controls.test.ts",
@@ -404,7 +406,6 @@ export default defineConfig({
       // #3081 — a confirmed publication is terminal once its placement is durably owed.
       "test/publication-terminal-before-catalog-placement.test.ts",
       "test/finalized-private-placement-ownership.test.ts",
-      "test/owed-placement-seals.test.ts",
       "test/next-turn-recurring-task.test.ts",
       "test/vm-recovery-transport-plan.test.ts",
       "test/vm-recovery-batch-timing-host.test.ts",

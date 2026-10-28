@@ -507,7 +507,7 @@ describe('late-mint adoption', () => {
     const transfer = vi.fn(async () => 'inactive' as const);
     await expect(finishNamedPublishFinalization(store, input, { transfer }))
       .resolves.toBe('pending');
-    expect(transfer).toHaveBeenCalledWith('original-share');
+    expect(transfer).toHaveBeenCalledWith('original-share', true);
     expect(await readNamedPublishFinalization(store, input)).toMatchObject({ kind: 'pending',
       checkpoint: { catalogRequired: true, shareOperationId: 'original-share' } });
     await finishNamedPublishFinalization(store, input, { transfer: async () => 'owned' });

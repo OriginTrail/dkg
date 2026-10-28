@@ -30,9 +30,11 @@ export default defineConfig({
           'test/mcp-config-metadata.test.ts',
           'test/api-client.test.ts',
           'test/finalized-publish-options.test.ts',
+          'test/confirmed-catalog-obligation-response.test.ts',
           'test/messenger-outbox-memory.test.ts',
           'test/live-daemon-isolation.test.ts',
           'test/async-vm-publish-registration.test.ts',
+          'test/catalog-publication-admission-route.test.ts',
           // #2892 — real in-memory queue and supervisor; no chain or daemon process.
           'test/async-promote-supervisor-bookkeeping.test.ts',
           'test/promote-queue-config.test.ts',

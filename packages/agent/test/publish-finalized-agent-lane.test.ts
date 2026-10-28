@@ -1,3 +1,4 @@
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
@@ -97,7 +98,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       .toThrow(/not in author .* namespace/);
   });
 
-  it('retains a failed confirmed-mint handoff for the explicitly selected non-default agent lane', async () => {
+  it('preserves the explicitly selected non-default agent lane with catalog execution disabled', async () => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
     const exactGraph = `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`;
@@ -119,6 +120,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = DEFAULT_AGENT;
     Object.defineProperty(agent, 'peerId', {
@@ -157,10 +159,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       rfc64SwmInventoryRemovalCalls.push(input);
       throw new Error('simulated escaped RFC-64 SWM inventory removal failure');
     };
-    // Keep the public catalog obligation active so the simulated removal failure is exercised.
-    agent.resolveRfc64CatalogAuthoringLaneV1 = () => ({
-      kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
-    });
 
     // GH#1778 — a genuinely absent name still yields "is not finalized":
     // resolveAssertionAuthor finds no seal, returns undefined, and the caller
@@ -208,18 +206,54 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(publishCalls[0]?.opts).not.toHaveProperty('clearSharedMemoryAfter');
     expect(remainingClearCalls).toHaveLength(1);
     expect(remainingClearCalls[0].slice(0, 2)).toEqual([CG, undefined]);
-    expect(rfc64SwmInventoryRemovalCalls).toHaveLength(1);
-    expect(rfc64SwmInventoryRemovalCalls[0]).toMatchObject({
-      contextGraphId: CG,
-      seal: {
-        authorAddress: AGENT_B,
-        reservedKaId: RESERVED_KA_ID,
-        kaUal: KA_UAL,
-      },
-    });
+    expect(rfc64SwmInventoryRemovalCalls).toEqual([]);
+    expect(warnings).not.toEqual(expect.arrayContaining([
+      expect.stringContaining('simulated escaped RFC-64 SWM inventory removal failure'),
+    ]));
     const checkpoint = await store.query('SELECT ?p WHERE { GRAPH <urn:dkg:publisher:named-finalization> { ?s ?p ?o } }');
     expect(checkpoint.type === 'bindings' && checkpoint.bindings.map(row => row.p))
-      .toEqual(['http://dkg.io/ontology/namedPublishFinalizationReady']);
+      .toEqual(expect.arrayContaining(['http://dkg.io/ontology/namedPublishFinalizationReady', 'http://dkg.io/ontology/namedPublishFinalizationComplete']));
+  });
+
+  it.each([false, true].flatMap(fails => [false, true].map(checkpointFails => ({ fails, checkpointFails }))))('retains the admitted catalog obligation across disabled execution (persistence fails=$fails, checkpoint fails=$checkpointFails)', async ({ fails, checkpointFails }) => {
+    const store = new OxigraphStore();
+    const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
+    await store.insert(buildGraphSeal(assertionUri));
+    if (checkpointFails) {
+      const insert = store.insert.bind(store);
+      vi.spyOn(store, 'insert').mockImplementation(async quads => {
+        if (quads.some(q => q.graph === 'urn:dkg:publisher:named-finalization')) throw new Error('checkpoint disk unavailable');
+        return insert(quads);
+      });
+    }
+    const oldTransfer = vi.fn(async () => 'inactive' as const);
+    const transaction = { batchId: RESERVED_KA_ID, kaId: RESERVED_KA_ID, startKAId: 1n, endKAId: 1n,
+      txHash: `0x${'ab'.repeat(32)}`, blockNumber: 7 };
+    const put = vi.fn(async () => { if (fails) throw new Error('catalog disk unavailable'); });
+    const publish = vi.fn(async () => ({ status: 'confirmed', kaId: RESERVED_KA_ID, ual: KA_UAL,
+      merkleRoot: MERKLE, kaManifest: [], publicQuads: [], onChainResult: transaction }));
+    const agent = Object.create(DKGAgent.prototype) as any;
+    Object.assign(agent, { store, config: confirmedPublicationCatalogConfigV1(), chain: {},
+      defaultAgentAddress: AGENT_B, log: makeLog(), publishFromSharedMemory: publish,
+      // Admission happened while the root was selected; execution is now disabled.
+      admitConfirmedCatalogPublicationV1: () => true,
+      resolveRfc64CatalogAuthoringLaneV1: () => null,
+      transferRfc64ConfirmedVmV1: oldTransfer,
+      rfc64PersistenceV1: { finalizedPrivatePlacementRepairs: { put } },
+      requestRfc64FinalizedPrivateCatalogPlacementRepairV1: () => ({ accepted: false }),
+      publishedNamedKaVmLifecycleWriter: (input: Parameters<typeof applyPublishedNamedKaVmLifecycle>[1]) => applyPublishedNamedKaVmLifecycle(store, input),
+      publisher: { hasSwmShareComplete: async () => true, clearSwmShareComplete: async () => {} },
+    });
+    const pending = agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
+    if (fails) await expect(pending).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_OBLIGATION_PENDING',
+      transaction, recoveryEvidence: { transactionHash: transaction.txHash, contextGraphId: CG, assertionCoordinate: NAME } });
+    else await expect(pending).resolves.toMatchObject({ status: 'confirmed' });
+    expect(publish).toHaveBeenCalledOnce();
+    expect(oldTransfer).not.toHaveBeenCalled();
+    expect(put).toHaveBeenCalledWith(expect.objectContaining({ version: 2, contextGraphId: CG,
+      assertionCoordinate: NAME, kaUal: KA_UAL }));
+    const receipt = await store.query(`ASK { GRAPH <${contextGraphMetaUri(CG)}> { <${assertionUri}> <http://dkg.io/ontology/publishedAtTx> "${transaction.txHash}" } }`);
+    expect(receipt).toMatchObject({ type: 'boolean', value: true });
   });
 
   it('maps an empty exact KA graph to the mint no-data precondition', async () => {
@@ -229,6 +263,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-source-empty', configurable: true });
@@ -279,6 +314,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishCalls = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-legacy-finalized', configurable: true });
@@ -325,6 +361,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
     agent.publishedNamedKaVmLifecycleWriter = vi.fn(input => applyPublishedNamedKaVmLifecycle(store, input));
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-update', configurable: true });
@@ -358,10 +395,9 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     // A confirmed v2 must retain existing best-effort update semantics: the
     // mint-only recovery command cannot resume a checkpoint for this update.
-    const transfer = vi.fn().mockRejectedValueOnce(new Error('temporary update catalog failure'));
-    agent.transferRfc64ConfirmedVmV1 = transfer;
+    const observe = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1');
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
-    expect(transfer).toHaveBeenCalledTimes(status === 'confirmed' ? 1 : 0);
+    expect(observe).toHaveBeenCalledTimes(status === 'confirmed' ? 1 : 0);
     const checkpoint = await store.query('SELECT ?s WHERE { GRAPH <urn:dkg:publisher:named-finalization> { ?s ?p ?o } }');
     expect(checkpoint.type === 'bindings' && checkpoint.bindings).toEqual([]);
 
@@ -415,6 +451,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishes = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-namespace', configurable: true });

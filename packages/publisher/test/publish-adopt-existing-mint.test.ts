@@ -253,6 +253,20 @@ async function expectNothingRecorded(fixture: Awaited<ReturnType<typeof stranded
 }
 
 describe('a sealed publish whose transaction mined after the node stopped waiting', () => {
+  it('retries missing SWM ACK data without preparing or loading the sealed content twice', async () => {
+    const f = await strandedPublishFixture();
+    const preparePhases: string[] = [];
+    f.acks.mockRejectedValueOnce(new Error('storage_ack_insufficient: STORAGE_ACK_DECLINE:NO_DATA_IN_SWM'));
+    const result = await f.publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', { ...f.publishOptions,
+      onPhase: (phase, status) => { if (status === 'start' && phase === 'prepare:partition') preparePhases.push(phase); } });
+    expect(result.status).toBe('confirmed');
+    expect(f.acks).toHaveBeenCalledTimes(2);
+    expect(f.chain.createCalls).toBe(1);
+    expect(preparePhases).toEqual(['prepare:partition']);
+    expect(await f.graphSize(f.swmGraph)).toBe(0);
+    expect(await f.graphSize(f.vmGraph)).toBe(1);
+  });
+
   it.each(['1', ' 1 ', '+1', '0x1'])('keeps graph ID %j consistent through planning, ACKs and submission', async (representation) => {
     const fixture = await strandedPublishFixture();
     const planning = vi.spyOn(fixture.chain, 'resolvePublisherPublishPlan');
