@@ -47,7 +47,8 @@ const SMALL_HOST_CPUS = 2;
 
 /**
  * The store backends (the node config's `store.backend`) whose nodes have the path on when nothing sets it
- * (OT-RFC-73 P14): Blazegraph and managed `oxigraph-server` (D-14; the configured name, which runs as `sparql-http`).
+ * (OT-RFC-73 P14): Blazegraph and managed `oxigraph-server` (the configured name, which runs as `sparql-http`; on the
+ * lead's 2026-10-28 decision after a live testnet A/B on a managed node, recorded as D-14 in the plan).
  * Generic `sparql-http` (any other SPARQL store, a Blazegraph reached through it included) and every other backend
  * keep it off by default; adding a backend here is that change. `defaultStoreControlSlots` applies the small-host
  * rule on top.
