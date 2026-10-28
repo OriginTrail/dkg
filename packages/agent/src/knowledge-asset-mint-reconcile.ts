@@ -168,11 +168,12 @@ export async function reconcileLateMint(
     const lockedReservation = await assertReservationUnchanged(host, reservation, target);
     const current = await lifecycle();
     const share = await readableShare(current);
-    return share === 'resident'
-      ? recordThroughPublish(host, target, evidence, heldLifecycle, lockedReservation)
-      : withMaterializationLock(lockedReservation.metaGraph, lockedReservation.scope.ual, async () =>
-        completeRecordedLifecycle(host, lockedReservation, target,
-          await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle));
+    if (share === 'resident') await recordThroughPublish(host, target, evidence, heldLifecycle, lockedReservation);
+    // Both paths converge after optional recording/cleanup/gossip and checkpoint creation.
+    // One owner reacquires VM custody, refreshes chain evidence and holds it through completion.
+    return withMaterializationLock(lockedReservation.metaGraph, lockedReservation.scope.ual, async () =>
+      completeRecordedLifecycle(host, lockedReservation, target,
+        await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle, share === 'resident' ? 'continue' : 'stop'));
   });
 
   const after = await lifecycle();
@@ -287,12 +288,16 @@ async function completeRecordedLifecycle(
   target: Target,
   mint: OnChainPublishResult,
   heldLifecycle: AssertionLifecycleWriteLease,
+  failureMode: 'stop' | 'continue',
 ): Promise<OnChainPublishResult> {
   await verifyNamedMintRecord(host.store, reservation, target, mint);
   const completion = await completeNamedMint({ store: host.store, stampPublishedLifecycle: host.stampPublishedLifecycle,
     completeFinalization: host.completeFinalization,
     clearShareMarker: () => host.clearSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName, heldLifecycle),
-  }, { reservation, ...target, receipt: mint }, { consumeShare: true, failureMode: 'stop' });
-  if (completion.status === 'incomplete') throw completion.failures[0].error;
+  }, { reservation, ...target, receipt: mint }, { consumeShare: true, failureMode });
+  if (completion.status === 'incomplete') {
+    const error = completion.failures[0].error;
+    throw Object.assign(error instanceof Error ? error : new Error(String(error)), { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+  }
   return mint;
 }

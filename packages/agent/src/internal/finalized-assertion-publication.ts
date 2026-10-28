@@ -1,6 +1,4 @@
 import { completeNamedPublishFinalization } from './complete-named-publish-finalization.js';
-import { verifyNamedMintRecord } from './verified-named-mint-record.js';
-import { withMaterializationLock, prepareMintAdoption, readPreparedMintAdoption, type MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import { completeNamedMint } from './named-mint-completion.js';
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
@@ -34,7 +32,6 @@ interface FinalizedAssertionLifecycleHost {
 }
 export interface FinalizedAssertionMintHost extends FinalizedAssertionLifecycleHost {
   readonly store: TripleStore;
-  readonly chain: ChainAdapter;
   readonly transferRfc64ConfirmedVmV1: OmitThisParameter<DKGAgent['transferRfc64ConfirmedVmV1']>;
   catalogRequired(contextGraphId: string, subGraphName?: string): boolean;
 }
@@ -269,11 +266,11 @@ async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionLifecy
 }
 
 async function consumeFinalizedPublicationShare(host: Pick<FinalizedAssertionLifecycleHost, 'log'>, prepared: FinalizedAssertionMintPlan,
-  result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
+  result: PublishResult): Promise<void> {
   if (result.status !== 'confirmed') return;
   const { contextGraphId, name, opts, publisher, agentAddress, lifecycleUri } = prepared;
   try {
-    await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, recording?.heldLifecycle);
+    await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName);
   } catch (err) {
     host.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
       `Failed to clear swmShareComplete after confirmed publish of <${lifecycleUri}>: ${err instanceof Error ? err.message : String(err)}`);
@@ -288,11 +285,31 @@ export function finalizedPublicationIdentity(prepared: FinalizedAssertionMintPla
 
 /** Original publication alone creates the checkpoint; the completion protocol needs no resident content. */
 export async function completeFinalizedAssertionMint(host: FinalizedAssertionMintHost, prepared: FinalizedAssertionMintPlan,
-  result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
+  result: PublishResult): Promise<void> {
   if (result.status !== 'confirmed') {
     await stampFinalizedPublicationLifecycle(host, prepared, result); return;
   }
-  const { opts, assertionUri, metaGraph, seal, rfc64WorkspaceHead, contextGraphId, graphScope, packedKaId, publisher, name, agentAddress } = prepared;
+  const { opts, assertionUri, metaGraph, seal, contextGraphId, graphScope, packedKaId, publisher, name, agentAddress } = prepared;
+  const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
+  const checkpointReady = await createFinalizedAssertionMintCheckpoint(host, prepared);
+  if (opts?.clearSharedMemoryAfter === true) await publisher.clearRemainingSharedMemory(contextGraphId, opts?.subGraphName, ctx);
+  const completion = await completeNamedMint({ store: host.store, stampPublishedLifecycle: host.publishedNamedKaVmLifecycleWriter,
+    completeFinalization: input => completeNamedPublishFinalization(host, input),
+    clearShareMarker: () => publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName),
+  }, { reservation: { seal, scope: graphScope, kaId: packedKaId, assertionUri, metaGraph },
+    contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName, receipt: result.onChainResult }, {
+    consumeShare: checkpointReady, failureMode: 'continue',
+  });
+  if (completion.status === 'incomplete') {
+    for (const { stage, error } of completion.failures)
+      host.log.warn(ctx, `Failed named-mint ${stage} completion for <${assertionUri}>: ${error instanceof Error ? error.message : String(error)}`);
+  }
+}
+
+/** Created only after resident content recording, cleanup and gossip have completed. */
+export async function createFinalizedAssertionMintCheckpoint(host: Pick<FinalizedAssertionMintHost, 'store' | 'log' | 'catalogRequired'>,
+  prepared: FinalizedAssertionMintPlan): Promise<boolean> {
+  const { opts, assertionUri, seal, rfc64WorkspaceHead, contextGraphId } = prepared;
   const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
   // Only the original path proves content recording, cleanup and gossip. Resume may never create this proof.
   const ready = () => beginNamedPublishFinalization(host.store,
@@ -303,40 +320,7 @@ export async function completeFinalizedAssertionMint(host: FinalizedAssertionMin
     try { await ready(); checkpointReady = true; break; }
     catch (err) { host.log.warn(ctx, `Failed to write publish checkpoint for <${assertionUri}>: ${err instanceof Error ? err.message : String(err)}`); }
   }
-  if (opts?.clearSharedMemoryAfter === true) await publisher.clearRemainingSharedMemory(contextGraphId, opts?.subGraphName, ctx);
-  const completion = await completeNamedMint({ store: host.store, stampPublishedLifecycle: host.publishedNamedKaVmLifecycleWriter,
-    completeFinalization: input => completeNamedPublishFinalization(host, input),
-    clearShareMarker: () => publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, recording?.heldLifecycle),
-  }, { reservation: { seal, scope: graphScope, kaId: packedKaId, assertionUri, metaGraph },
-    contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName, receipt: result.onChainResult }, {
-    consumeShare: checkpointReady, failureMode: 'continue',
-  });
-  if (completion.status === 'incomplete') {
-    for (const { stage, error } of completion.failures)
-      host.log.warn(ctx, `Failed named-mint ${stage} completion for <${assertionUri}>: ${error instanceof Error ? error.message : String(error)}`);
-    // Ordinary publication retains the confirmed result; record-only reconciliation requires catalog ownership.
-    const catalogFailure = completion.failures.find(failure => failure.stage === 'catalog');
-    if (recording && catalogFailure) throw catalogFailure.error;
-  }
-}
-
-/** Reacquire after the recorder's nested lock has drained; gossip never carries stale completion authority. */
-export async function completeRecordedAssertionMint(host: FinalizedAssertionMintHost, prepared: FinalizedAssertionMintPlan,
-  result: PublishResult, recording: FinalizedAssertionRecordingContext, receipt: MintAdoptionRequest,
-  onChainContextGraphId: string | null | undefined): Promise<void> {
-  if (result.status !== 'confirmed' || !result.onChainResult) return;
-  if (!onChainContextGraphId || !/^\d+$/.test(onChainContextGraphId))
-    throw Object.assign(new Error('Recorded mint completion requires its on-chain context graph'), { code: 'KA_MINT_RECONCILE_REFUSED' });
-  const reservation = recording.reservation;
-  const expected = { kaId: reservation.kaId, merkleRoot: reservation.seal.merkleRoot,
-    contextGraphId: BigInt(onChainContextGraphId), authorAddress: reservation.seal.authorAddress };
-  const evidence = receipt.kind === 'prepared' ? receipt.evidence : await prepareMintAdoption(host.chain, expected, receipt.txHash);
-  await withMaterializationLock(reservation.metaGraph, reservation.scope.ual, async () => {
-    const mint = await readPreparedMintAdoption(evidence, host.chain, expected);
-    await verifyNamedMintRecord(host.store, reservation,
-      { contextGraphId: prepared.contextGraphId, name: prepared.name, subGraphName: prepared.opts?.subGraphName }, mint);
-    await completeFinalizedAssertionMint(host, prepared, result, recording);
-  });
+  return checkpointReady;
 }
 
 export async function publishFinalizedAssertionUpdate(host: FinalizedAssertionUpdateHost, prepared: PreparedFinalizedAssertionContent): Promise<PublishResult> {

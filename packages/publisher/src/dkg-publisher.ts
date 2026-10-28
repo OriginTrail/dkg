@@ -165,7 +165,7 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
-import { adoptMintForRecording } from './adopt-existing-mint.js';
+import { adoptMintForRecording, readPreparedMintAdoption } from './adopt-existing-mint.js';
 import { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -2077,36 +2077,7 @@ export class DKGPublisher implements Publisher {
     return content.finalize(await this.recordExistingMint({ ...options, ...content.contentAndRouting }, request));
   }
 
-  private async prepareSharedMemoryPublication(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
-    options?: SharedMemoryPublishOptions) {
-    const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
-    const sharedMemoryScope: SharedMemoryGraphScope = options?.sharedMemoryScope
-      ?? { kind: 'complete-family' };
-    const graphPublish = resolveGraphScopedPublishDescriptor({
-      kind: 'initial',
-      options: {
-        contextGraphId,
-        quads: [],
-        contentScopeVersion: options?.contentScopeVersion,
-        kaUal: options?.kaUal,
-        assertionVersion: options?.assertionVersion,
-        publicTripleCount: options?.publicTripleCount,
-        privateMerkleRoot: options?.privateMerkleRoot,
-        privateTripleCount: options?.privateTripleCount,
-      },
-    });
-    if (graphPublish && (selection !== 'all' || sharedMemoryScope.kind !== 'named-lifecycle')) {
-      throw new Error(
-        'Graph-scoped KA publish requires selection "all" within one exact named-lifecycle SWM scope',
-      );
-    }
-    if (sharedMemoryScope.kind === 'named-lifecycle' && options?.clearSharedMemoryAfter === true) {
-      throw new Error(
-        'clearSharedMemoryAfter cannot be combined with a named-lifecycle shared-memory scope; ' +
-        'use complete-family scope for an explicit family-wide clear',
-      );
-    }
-
+  private async assertSharedMemoryGraphRegistration(contextGraphId: string, options: PublishOptions): Promise<void> {
     // Guard: VM publishing requires an on-chain registered context graph.
     // Skip for mock/none chains (unit tests) — only enforce on real chains.
     // Also skip when publishContextGraphId is set (remap flow) — the source
@@ -2118,11 +2089,11 @@ export class DKGPublisher implements Publisher {
     // can hold only the chain binding: an edge learns a public graph's id from
     // the ContextGraphCreated event, syncs no `ontology` graph, and never sees
     // the one-shot registration gossip if it missed it or joined later.
-    const resolvedOnChainContextGraphId = options?.onChainContextGraphId?.trim();
+    const resolvedOnChainContextGraphId = options.onChainContextGraphId === undefined ? undefined : String(options.onChainContextGraphId).trim();
     if (
       this.chain.chainId !== 'none'
       && !this.chain.chainId.startsWith('mock')
-      && !options?.publishContextGraphId
+      && !options.publishContextGraphId
       && !resolvedOnChainContextGraphId
     ) {
       const cgMetaUri = contextGraphMetaUri(contextGraphId);
@@ -2155,6 +2126,38 @@ export class DKGPublisher implements Publisher {
           );
         }
       }
+    }
+
+  }
+
+  private async prepareSharedMemoryPublication(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
+    options?: SharedMemoryPublishOptions) {
+    const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
+    const sharedMemoryScope: SharedMemoryGraphScope = options?.sharedMemoryScope
+      ?? { kind: 'complete-family' };
+    const graphPublish = resolveGraphScopedPublishDescriptor({
+      kind: 'initial',
+      options: {
+        contextGraphId,
+        quads: [],
+        contentScopeVersion: options?.contentScopeVersion,
+        kaUal: options?.kaUal,
+        assertionVersion: options?.assertionVersion,
+        publicTripleCount: options?.publicTripleCount,
+        privateMerkleRoot: options?.privateMerkleRoot,
+        privateTripleCount: options?.privateTripleCount,
+      },
+    });
+    if (graphPublish && (selection !== 'all' || sharedMemoryScope.kind !== 'named-lifecycle')) {
+      throw new Error(
+        'Graph-scoped KA publish requires selection "all" within one exact named-lifecycle SWM scope',
+      );
+    }
+    if (sharedMemoryScope.kind === 'named-lifecycle' && options?.clearSharedMemoryAfter === true) {
+      throw new Error(
+        'clearSharedMemoryAfter cannot be combined with a named-lifecycle shared-memory scope; ' +
+        'use complete-family scope for an explicit family-wide clear',
+      );
     }
 
     const swmGraph = this.graphManager.sharedMemoryUri(contextGraphId, options?.subGraphName);
@@ -2196,7 +2199,7 @@ export class DKGPublisher implements Publisher {
     const rootEntities = graphPublish ? [] : [...skolemizeByEntity(quads).keys()];
 
     const ctxGraphId = options?.publishContextGraphId;
-    const chainCgId = options?.onChainContextGraphId ?? ctxGraphId;
+    const chainCgId = options?.onChainContextGraphId?.trim() || ctxGraphId;
 
     const idToValidate = chainCgId ?? ctxGraphId;
     if (idToValidate !== undefined && idToValidate !== null) {
@@ -3026,6 +3029,8 @@ export class DKGPublisher implements Publisher {
       pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode: resolvePublicACKStagingMode(options),
     };
     assertPreparedPublicationContentSeal(content);
+    if (options.fromSharedMemory && isInternalOrigin(options))
+      await this.assertSharedMemoryGraphRegistration(contextGraphId, options);
     return content;
   }
 
@@ -3212,6 +3217,15 @@ export class DKGPublisher implements Publisher {
         allSkolemizedQuads, manifestEntries, publisherPeerId: normalizedPublisherPeerId } = payload;
       const { graphPublish, dataGraph, contextGraphId, publisherContextGraphId } = target;
       const normalizedQuads = allSkolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
+      // Evidence may have aged while waiting for the shared materialization lock.
+      // Revalidate before classification, VM writes or the caller's SWM cleanup.
+      if (recording.kind === 'sealed-graph' && outcome.adopted) {
+        await readPreparedMintAdoption(outcome.evidence, this.chain, {
+          kaId: recording.content.reservedKaId, merkleRoot: kcMerkleRoot,
+          contextGraphId: recording.content.target.publisherContextGraphId,
+          authorAddress: recording.content.seal.authorAddress,
+        });
+      }
       const onChainResult = outcome.result;
       let ual = '';
       const recordDisposition = graphPublish !== undefined ? await classifyMintRecord(this.store, {

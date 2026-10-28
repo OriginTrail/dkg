@@ -801,3 +801,29 @@ it('rejects changed sealed content before local staging when chain identity is u
   expect(f.chain.createCalls).toBe(0);
   await expectNothingRecorded(f);
 });
+
+
+for (const lane of ['explicit', 'duplicate-mint'] as const) {
+  it.each(['superseded', 'reorged'] as const)(`refuses ${lane} adoption made %s while waiting for the recording lock`, async stale => {
+    const f = await strandedPublishFixture();
+    await f.strand();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const acquired = new Promise<void>(resolve => { entered = resolve; });
+    const locking = withMaterializationLock(`did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`, f.ual, async () => { entered(); await held; });
+    await acquired;
+    const confirmed = vi.fn();
+    const pending = f.publish(lane === 'explicit' ? {} : undefined, confirmed)
+      .then(value => ({ value }), error => ({ error }));
+    try {
+      await vi.waitFor(() => expect(confirmed).toHaveBeenCalledOnce());
+      if (stale === 'superseded') await f.chain.updateKnowledgeCollectionV10({ kaId: f.kaId,
+        newMerkleRoot: new Uint8Array(32).fill(9), newByteSize: 1n, newMerkleLeafCount: 1,
+        authorAddress: ethers.ZeroAddress, authorR: new Uint8Array(32), authorVS: new Uint8Array(32) });
+      else vi.spyOn(f.chain, 'isReceiptBlockFinalAndCanonical').mockResolvedValue(false);
+      release();
+      expect(await pending).toMatchObject({ error: { reason: stale === 'superseded' ? 'superseded' : 'mint-not-final' } });
+      await expectNothingRecorded(f);
+    } finally { release(); await Promise.allSettled([pending, locking]); await f.store.close(); }
+  });
+}

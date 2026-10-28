@@ -3,7 +3,7 @@ import type { SharedMemoryMintRecordingOptions } from '@origintrail-official/dkg
 import type { MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import type { AgentSharedMemoryPublishOptions, SharedMemoryPublicationContext, FinalizedAssertionPublishOptions, FinalizedAssertionRecordingContext } from './internal/agent-publish-options.js';
 import { selectFinalizedAssertionPublication, prepareFinalizedAssertionUpdateContent, finalizedAssertionMintPlan,
-  finalizedMintContentOptions, finalizedMintOptions, completeFinalizedAssertionMint, completeRecordedAssertionMint,
+  finalizedMintContentOptions, finalizedMintOptions, completeFinalizedAssertionMint, createFinalizedAssertionMintCheckpoint,
   publishFinalizedAssertionUpdate, type FinalizedAssertionSelectionHost, type FinalizedAssertionMintHost, type FinalizedAssertionUpdateHost,
 } from './internal/finalized-assertion-publication.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -497,7 +497,7 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolvePublishTargetCuration } from './publish-target-curation.js';
 import {
-  KA_MINT_RECONCILE_REFUSED_CODE,
+  KA_MINT_RECONCILE_REFUSED_CODE, KA_MINT_RECONCILE_INCOMPLETE_CODE,
   reconcileLateMint,
   type KnowledgeAssetMintReconcileInput,
   type KnowledgeAssetMintReconcileResult,
@@ -6283,7 +6283,7 @@ function finalizedAssertionSelectionHost(this: DKGAgent): FinalizedAssertionSele
     resolveFinalizedAssertionPublishAuthor: this.resolveFinalizedAssertionPublishAuthor.bind(this) };
 }
 function finalizedAssertionMintHost(this: DKGAgent): FinalizedAssertionMintHost {
-  return { store: this.store, chain: this.chain, log: this.log,
+  return { store: this.store, log: this.log,
     publishedNamedKaVmLifecycleWriter: this.publishedNamedKaVmLifecycleWriter,
     transferRfc64ConfirmedVmV1: this.transferRfc64ConfirmedVmV1.bind(this),
     catalogRequired: (id, subGraphName) => this.resolveRfc64CatalogAuthoringLaneV1(id, subGraphName) !== null };
@@ -6309,7 +6309,9 @@ export async function recordFinalizedAssertionMint(this: DKGAgent, contextGraphI
     { code: KA_MINT_RECONCILE_REFUSED_CODE });
   const prepared = finalizedAssertionMintPlan(selected);
   const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintContentOptions(prepared, selected.operationPlan.pricingPolicy));
-  await completeRecordedAssertionMint(finalizedAssertionMintHost.call(this), prepared, result, recording, receipt, await this.getContextGraphOnChainId(contextGraphId));
+  if (result.status === 'confirmed' && !await createFinalizedAssertionMintCheckpoint(finalizedAssertionMintHost.call(this), prepared))
+    throw Object.assign(new Error('Recorded mint checkpoint could not be persisted; reconciliation cannot complete it.'),
+      { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
   return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
 }
 

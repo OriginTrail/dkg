@@ -1,3 +1,6 @@
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { buildSeal, mockSealCtx } from '../../publisher/test/_helpers/seal.js';
+import { DKGPublisher } from '@origintrail-official/dkg-publisher';
 /**
  * #1116 (review C + A1) — route error→HTTP mapping for the seal-by-default
  * share contract, driven over real HTTP against `handleKnowledgeAssetsRoutes`
@@ -16,7 +19,7 @@
  *     `code:'LEGACY_KA_READ_ONLY'` before invoking the engine.
  */
 
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { randomUUID } from 'node:crypto';
 import { TripleStoreAsyncPromoteQueue, CuratorRejectedError } from '@origintrail-official/dkg-publisher';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -27,7 +30,7 @@ import { join } from 'node:path';
 import { ethers } from 'ethers';
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
 import {
-  generateEd25519Keypair,
+  generateEd25519Keypair, TypedEventBus, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri, MemoryLayer,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MAX_UINT72_DECIMAL,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
@@ -2907,6 +2910,41 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         expect(String(res.body.error)).toContain('selection');
       }
       expect(publishCalls).toHaveLength(0);
+    });
+
+    it.each(['missing', 'changed', 'valid'] as const)('real publisher content validation precedes auto-registration for %s content', async state => {
+      const wallet = ethers.Wallet.createRandom();
+      const chain = new MockChainAdapter('evm:31337', wallet.address);
+      const store = new OxigraphStore();
+      const publisher = new DKGPublisher({ store, chain, eventBus: new TypedEventBus(),
+        keypair: await generateEd25519Keypair(), publisherNodeIdentityId: 1n });
+      const quads = [{ subject: 'urn:registration:asset', predicate: 'urn:registration:value', object: '"sealed"', graph: '' }];
+      const seal = await buildSeal({ quads, author: wallet, contextGraphId: '1', ctx: mockSealCtx() });
+      const kaNumber = seal.reservedKaId! & ((1n << 96n) - 1n);
+      const scope = createGraphKnowledgeAssetScope(`did:dkg:31337/${wallet.address}/${kaNumber}`, 1);
+      const graph = knowledgeAssetLayerGraphUri(CG_ID, MemoryLayer.SharedWorkingMemory, scope);
+      if (state !== 'missing') await store.insert(quads.map(q => ({ ...q, graph,
+        object: state === 'changed' ? '"mutated after seal"' : q.object })));
+      const register = vi.fn(async () => { throw new Error('registration reached'); });
+      const mint = vi.spyOn(chain, 'createKnowledgeAssets');
+      try {
+        await startWith({}, {
+          publishFromFinalizedAssertion: () => publisher.publishFromSharedMemory(CG_ID, 'all', {
+            sharedMemoryScope: { kind: 'named-lifecycle', identity: { agentAddress: wallet.address, kaNumber } },
+            contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION, kaUal: scope.ual, assertionVersion: 1,
+            publicTripleCount: 1, privateTripleCount: 0, reservedKaId: seal.reservedKaId,
+            precomputedAttestation: seal,
+          }),
+          ensureRegisteredForPublish: register,
+        });
+        const res = await post('vm/publish', { contextGraphId: CG_ID });
+        if (state === 'valid') expect(register).toHaveBeenCalledOnce();
+        else {
+          expect(register).not.toHaveBeenCalled();
+          expect(String(res.body.error)).toMatch(state === 'missing' ? /No quads in shared memory/ : /expectedMerkleRoot mismatch/);
+        }
+        expect(mint).not.toHaveBeenCalled();
+      } finally { await store.close(); }
     });
 
     it('on CG_NOT_REGISTERED: registers ONCE between TWO publish calls and returns the retry result', async () => {

@@ -291,8 +291,6 @@ describe('graph-scoped assertion finalization recovery', () => {
     const agent = await createAgent(chain);
     const contextGraphId = `rootless-vm-boundary-${Date.now()}`;
     await agent.createContextGraph({ id: contextGraphId, name: 'Rootless VM boundary' });
-    // Reach the publisher-owned content validator through a valid publication route.
-    await agent.registerContextGraph(contextGraphId);
     const mint = vi.spyOn(chain, 'createKnowledgeAssets');
     const author = agent.defaultAgentAddress ?? agent.peerId;
     const name = 'exact-vm-boundary';

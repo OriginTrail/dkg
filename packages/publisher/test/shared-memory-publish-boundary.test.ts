@@ -752,8 +752,15 @@ describe('publishFromSharedMemory VM registration guard', () => {
     return chain;
   }
 
+  async function makeRegistrationPublisher() {
+    const { publisher, store } = await makeRealPublisher(registrationGuardChain());
+    const publishSpy = recorder(publisher.publish.bind(publisher));
+    publisher.publish = publishSpy;
+    return { publisher, store, publishSpy };
+  }
+
   it('accepts a graph whose on-chain binding is only in its own _meta', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    const { publisher, store, publishSpy } = await makeRegistrationPublisher();
     await store.insert([
       q('urn:test:root:one'),
       {
@@ -771,20 +778,20 @@ describe('publishFromSharedMemory VM registration guard', () => {
   });
 
   it('rejects a graph with neither a registration status nor an on-chain binding', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    const { publisher, store } = await makeRegistrationPublisher();
     await store.insert([q('urn:test:root:one')]);
 
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all')).rejects.toMatchObject({
       code: 'CG_NOT_REGISTERED',
     });
-    expect(publishSpy.calls).toHaveLength(0);
+    expect(await store.countQuads(CONTEXT_GRAPH_URI)).toBe(0);
   });
 
   // An edge learns a public graph's id from the ContextGraphCreated event and
   // syncs no `ontology` graph, so its store can hold only the local bootstrap's
   // `unregistered` marker while the agent resolves the id from chain.
   it('accepts the on-chain id the caller resolved when the store has no binding', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    const { publisher, store, publishSpy } = await makeRegistrationPublisher();
     await store.insert([
       q('urn:test:root:one'),
       {
@@ -803,13 +810,13 @@ describe('publishFromSharedMemory VM registration guard', () => {
   });
 
   it('still rejects when the resolved on-chain id is blank', async () => {
-    const { publisher, store, publishSpy } = await makePublisher(registrationGuardChain());
+    const { publisher, store } = await makeRegistrationPublisher();
     await store.insert([q('urn:test:root:one')]);
 
     await expect(publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
       onChainContextGraphId: '  ',
     })).rejects.toMatchObject({ code: 'CG_NOT_REGISTERED' });
-    expect(publishSpy.calls).toHaveLength(0);
+    expect(await store.countQuads(CONTEXT_GRAPH_URI)).toBe(0);
   });
 });
 

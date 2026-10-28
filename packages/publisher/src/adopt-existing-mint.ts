@@ -159,10 +159,9 @@ async function assertMintCurrent(chain: ChainAdapter, expected: MintAdoptionExpe
 }
 
 /** The chain step's result and how the publish records it. */
-export interface MintOrAdoptOutcome {
-  readonly result: OnChainPublishResult;
-  readonly adopted: boolean;
-}
+export type MintOrAdoptOutcome =
+  | Readonly<{ result: OnChainPublishResult; adopted: false }>
+  | Readonly<{ result: OnChainPublishResult; adopted: true; evidence: PreparedMintAdoption }>;
 
 /**
  * The chain step of a publish. A sealed publish adopts its own existing mint
@@ -194,7 +193,8 @@ export async function mintOrAdoptKnowledgeAssets(
       throw new MintAdoptionRefusedError('reserved-id-mismatch', expected.kaId,
         `the contract reports KA ${mintedKaId} already minted`, { cause: error });
     }
-    return { result: await adoptExistingMint(chain, expected, { revert: error }), adopted: true };
+    const evidence = await prepareVerifiedMintAdoption(chain, expected, { revert: error });
+    return { result: await readPreparedMintAdoption(evidence, chain, expected), adopted: true, evidence };
   }
 }
 
@@ -206,8 +206,12 @@ export type MintAdoptionRequest = Readonly<{ kind?: 'lookup'; txHash?: string }>
 /** Read slow chain evidence before taking an assertion lifecycle write lock. */
 export async function prepareMintAdoption(chain: ChainAdapter, expected: MintAdoptionExpectation,
   txHash?: string): Promise<PreparedMintAdoption> {
+  return prepareVerifiedMintAdoption(chain, expected, { txHash });
+}
+async function prepareVerifiedMintAdoption(chain: ChainAdapter, expected: MintAdoptionExpectation,
+  options: { txHash?: string; revert?: unknown }): Promise<PreparedMintAdoption> {
   if (!chain.isReceiptBlockFinalAndCanonical) throw new MintAdoptionRefusedError('lookup-unsupported', expected.kaId, 'prepared mint evidence requires canonical block revalidation');
-  const mint = await resolveVerifiedMintEvidence(chain, expected, { txHash });
+  const mint = await resolveVerifiedMintEvidence(chain, expected, options);
   const token = Object.freeze({}) as PreparedMintAdoption;
   preparedEvidence.set(token, { chain, expected: { ...expected, merkleRoot: Uint8Array.from(expected.merkleRoot) }, mint: { ...mint, merkleRoot: Uint8Array.from(mint.merkleRoot) } });
   return token;
@@ -230,9 +234,8 @@ export async function readPreparedMintAdoption(token: PreparedMintAdoption, chai
 /** Verify receipt evidence directly; local record policy belongs to the recorder. */
 export async function adoptMintForRecording(chain: ChainAdapter, expected: MintAdoptionExpectation,
   request: MintAdoptionRequest): Promise<MintOrAdoptOutcome> {
-  return { result: request.kind === 'prepared'
-    ? await readPreparedMintAdoption(request.evidence, chain, expected)
-    : await adoptExistingMint(chain, expected, { txHash: request.txHash }), adopted: true };
+  const evidence = request.kind === 'prepared' ? request.evidence : await prepareMintAdoption(chain, expected, request.txHash);
+  return { result: await readPreparedMintAdoption(evidence, chain, expected), adopted: true, evidence };
 }
 
 function publishResultFromMint(mint: KnowledgeAssetMintEvidence): OnChainPublishResult {
