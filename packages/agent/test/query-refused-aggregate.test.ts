@@ -57,6 +57,17 @@ describe('a count the node refuses to read', () => {
     expect(query).not.toHaveBeenCalled();
   });
 
+  it.each(['_shared_memory/author/1', '_shared_memory', 'code/_shared_memory/author/1', '_shared_memory_meta', 'code/_shared_memory_meta'])
+    ('admits exact %s reads even when convenience shared-memory flags are omitted', async tail => {
+      const admission = vi.fn(async () => ({ outcome: 'denied' }));
+      const { agent, query } = node({ resolveSharedMemoryReadAdmission: admission });
+      expect(await agent.query(`SELECT ?s WHERE { GRAPH <did:dkg:context-graph:cg-1/${tail}> { ?s ?p ?o } }`, {
+        contextGraphId: 'cg-1', callerAgentAddress: OTHER, includeContextGraphPartitions: true, exactContextGraphPartitions: true,
+      })).toEqual({ bindings: [] });
+      expect(admission).toHaveBeenCalledOnce();
+      expect(query).not.toHaveBeenCalled();
+    });
+
   it('forwards metadata expansion only after shared-memory admission succeeds', async () => {
     const admission = vi.fn(async () => ({ outcome: 'allowed' }));
     const { agent, query } = node({ resolveSharedMemoryReadAdmission: admission });

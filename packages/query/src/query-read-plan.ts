@@ -2,7 +2,7 @@ import type { QueryReadAdmissionCapability } from '@origintrail-official/dkg-sto
 import { resolveDraftAccessPolicy, type DraftAccessPolicy } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
 import { assertExactGraphRead, type PreparedGraphScope } from './sparql-graph-scope.js';
-import { scopedPartitionPolicyFromRoute } from './scoped-content-graph-policy.js';
+import { scopedPartitionPolicyFromRoute, scopedRouteContentPrefixes } from './scoped-content-graph-policy.js';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 
 type ScopedRoute = ReturnType<typeof staticScopedRouteGraphs>;
@@ -46,12 +46,7 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     || scope.graphTargets.some(target => target.kind !== 'iri' || !allowed.includes(target.iri));
   const expandGraphVariables = options.includeContextGraphPartitions === true
     && scope.graphVariables.length > 0 && !graphs.isSwmOnlyRoute;
-  const targets = execution.kind === 'combined' ? [execution.data, execution.sharedMemory] : [execution.target];
-  // Authorization discovery has narrower precedence than combined execution:
-  // an explicit SWM suffix never admits VM partitions or root metadata.
-  const contentPrefixes = needsDiscovery ? targets
-    .filter(target => target.family !== 'data' || !graphs.isSwmOnlyRoute)
-    .map(({ root, family }) => ({ root, prefix: `${root}/${family === 'data' ? '_verifiable_memory/' : ''}` })) : [];
+  const contentPrefixes = needsDiscovery ? scopedRouteContentPrefixes({ ...graphs, execution }) : [];
   return { kind: 'scoped', contextGraphId: options.contextGraphId, graphs, execution,
     draftAccess, includeSharedMemoryMeta: options.includeSharedMemoryMeta === true,
     fallbackPolicy: options.requireCompleteGraphScope ? 'preserve-scope' : 'compatibility',

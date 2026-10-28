@@ -1,3 +1,4 @@
+import { exactContextGraphReadRequiresSharedMemory } from '@origintrail-official/dkg-query';
 import type { AgentQueryOptions } from './agent-query-options.js';
 import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -456,7 +457,8 @@ export class QueryMethods extends DKGAgentBase {
       opts.graphSuffix === '_shared_memory'
       || opts.includeSharedMemory === true
       || opts.includeSharedMemoryMeta === true
-      || opts.view === 'shared-working-memory';
+      || opts.view === 'shared-working-memory'
+      || exactContextGraphReadRequiresSharedMemory(sparql, opts);
 
     // A-1: Working-Memory isolation. When the caller is authenticated
     // (an outer layer like the daemon's `/api/query` route has resolved

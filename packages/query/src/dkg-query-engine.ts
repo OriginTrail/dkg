@@ -1,9 +1,9 @@
 import type { ContextGraphPartitionRead } from './query-types.js';
-import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions } from './scoped-content-graph-policy.js';
+import { createScopedContentGraphRoutePolicy, scopedPartitionPolicyFromRoute, selectScopedRoutePartitions, selectLegacyScopedRoutePartitions } from './scoped-content-graph-policy.js';
 import { authorizeExactContextGraphPartitions } from './exact-context-graph-partitions.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
-import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
-import { describeScopedContentGraph, classifyScopedContentGraph, isExcludedContentGraphTail, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
+import { type ContentPartition } from './content-partition-policy.js';
+import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { createQueryStoreReadContext, createStoreReadLane, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
@@ -337,11 +337,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const policy = createScopedContentGraphRoutePolicy(contextGraphId, opts);
     const reads = createQueryStoreReadContext(this.store, opts);
     const discovery = await this.resolveScopedContentGraphDiscovery(contextGraphId, reads);
-    const byGraph = new Map(discovery.partitions.map(partition => [partition.graph, partition]));
-    return selectScopedRoutePartitions(policy, discovery.partitions).map(graph => {
-      const kind = byGraph.get(graph)?.kind ?? describeScopedContentGraph(graph, contextGraphId)?.kind;
-      return { graph, admission: kind === 'shared' || kind === 'shared-root' ? 'shared-memory' : 'public' };
-    });
+    return selectScopedRoutePartitions(policy, discovery.partitions);
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -402,8 +398,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const execute = (discovery: ScopedContentGraphDiscoverySnapshot | null) => {
       const lane = discovery ? { query: reads.query,
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
-      const variableContentGraphs = discovery ? selectContentPartitions(
-        discovery.partitions, plan.draftAccess, plan.graphs.subGraphName, plan.includeSharedMemoryMeta) : [];
+      const policy = scopedPartitionPolicyFromRoute(plan.contextGraphId, { ...plan.graphs, execution: plan.execution }, plan.draftAccess, plan.includeSharedMemoryMeta);
+      const variableContentGraphs = discovery ? selectScopedRoutePartitions(policy, discovery.partitions).map(read => read.graph) : [];
       return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
     };
     switch (plan.discovery.catalog.kind) {
@@ -416,17 +412,17 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   private async executeScoped(initialGraphScope: PreparedGraphScope,
     plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane): Promise<QueryResult> {
-    const { staticContentGraphs, subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
+    const { subGraphName, staticPrivateAllowList } = plan.graphs;
     const partitions = new Map<string, string[]>();
     for (const { root, prefix } of plan.discovery.contentPrefixes) {
       partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
     }
-    const allowedGraphs = staticContentGraphs.flatMap(graph => [graph, ...(partitions.get(graph) ?? [])
-      .filter(candidate => !isExcludedContentGraphTail(candidate.slice(contextGraphDataUri(plan.contextGraphId).length + 1)))]);
+    const policy = scopedPartitionPolicyFromRoute(plan.contextGraphId, { ...plan.graphs, execution: plan.execution }, plan.draftAccess, plan.includeSharedMemoryMeta);
+    const allowedGraphs = selectLegacyScopedRoutePartitions(policy, partitions).map(read => read.graph);
     const privateAllowList = plan.discovery.privatePartitions
       ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.contextGraphId, catalogReads, subGraphName))]
       : staticPrivateAllowList;
-    const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
+    const explicitAllowedGraphs = [...allowedGraphs, ...privateAllowList];
     const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...variableContentGraphs])];
     // Explicit IRIs retain static route authority; only opted-in variables gain
     // classified same-CG content selected for this caller and sub-graph.

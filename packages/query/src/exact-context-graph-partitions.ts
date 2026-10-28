@@ -17,6 +17,7 @@ const METADATA_BATCH_SIZE = 8;
 
 interface ExactPartitionReads {
   query(sparql: string): Promise<QueryResult>;
+  listGraphsByPrefix(prefix: string): Promise<string[]>;
 }
 
 /** Candidate facts are reloaded for every exact batch, even on external stores. */
@@ -30,7 +31,10 @@ export async function authorizeExactContextGraphPartitions(
   const root = policy.rootGraph;
   const subGraph = policy.subGraphName;
   const metadata = new Set(policy.metadataGraphs);
+  const visible = store.graphEnumerationVisibility?.bind(store);
+  const enumerated = visible ? undefined : new Set(await reads.listGraphsByPrefix(root));
   const relevant = [...new Set(candidates)].filter(graph => {
+    if (!(visible ? visible(graph) : enumerated!.has(graph))) return false;
     if (metadata.has(graph) || graph === root) return true;
     // Judge exclusions below the root, as inventory does, so a CG ID or subgraph named `staging` stays readable.
     return graph.startsWith(`${root}/`);

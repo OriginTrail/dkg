@@ -78,13 +78,20 @@ describe('fresh dynamic scoped query admission', () => {
       expect((await base.query(`SELECT ?s WHERE { GRAPH <${hidden}> { ?s ?p ?o } }`)).type).toBe('bindings');
       expect(await store.listGraphs()).not.toContain(hidden);
       const query = vi.spyOn(store, 'query'), list = vi.spyOn(store, 'listGraphsByPrefix');
-      const result = await new DKGQueryEngine(store).query(QUERY, OPTIONS);
+      const engine = new DKGQueryEngine(store);
+      const result = await engine.query(QUERY, OPTIONS);
       expect(result.bindings).toEqual([{ g: publicGraph, name: '"value"' }]);
       if (kind === 'unknown') {
         expect(list).toHaveBeenCalledTimes(1);
         expect(query.mock.calls[0]![0]).not.toContain('GRAPH ?graph');
         expect(query.mock.calls[0]![0]).toContain('?assertionGraph');
       }
+      const partitions = await engine.listContextGraphQueryPartitionReads(OPTIONS.contextGraphId, OPTIONS);
+      expect(partitions.map(read => read.graph)).toContain(publicGraph);
+      expect(partitions.map(read => read.graph)).not.toContain(hidden);
+      const exact = (graph: string) => engine.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, { ...OPTIONS, exactContextGraphPartitions: true });
+      await expect(exact(hidden)).rejects.toThrow(/Scoped query violation/);
+      expect((await exact(publicGraph)).bindings).toHaveLength(1);
     } finally { await store.close(); }
   });
   it('uses one fresh inventory for combined VM and SWM variable routes', async () => {
