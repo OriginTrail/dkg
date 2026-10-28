@@ -222,6 +222,21 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
   });
 
+  it('reconcile treats a nonmatching transaction hash as a hint and adopts the real mint once', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(chain);
+    const lookup = vi.spyOn(chain, 'resolveKnowledgeAssetMint');
+    const hinted = { ...RECONCILE, txHash: `0x${'ab'.repeat(32)}` };
+    await expect(agent.reconcileKnowledgeAssetMint(hinted)).resolves.toMatchObject({
+      status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash,
+    });
+    expect(lookup).toHaveBeenCalledOnce();
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    await expect(agent.reconcileKnowledgeAssetMint(hinted)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+    expect(lookup).toHaveBeenCalledOnce();
+  });
+
   it('reconcile records the late mint without a publish wallet or chain write, and is idempotent', async () => {
     const { agent, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
 
@@ -491,7 +506,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     const catalog = await store.query(`SELECT ?s WHERE { GRAPH <${contextGraphCatalogUri(CONTEXT_GRAPH)}> { ?s ?p ?o } }`);
     expect(catalog.type === 'bindings' && catalog.bindings.length).toBeGreaterThan(0);
     const options = publishFromSharedMemory.mock.calls[0]?.[2];
-    expect(options?.adoptExistingMint).toEqual({});
+    expect(options?.adoptExistingMint).toEqual({ kind: 'prepared', evidence: expect.any(Object) });
     expect(options?.trustedNonManifestCatalogTriples?.size ?? options?.trustedNonManifestCatalogTriples?.length).toBeGreaterThan(0);
     expect(options?.encryptInlinePayload).toBeUndefined();
     expect(options?.encryptInlineChunked).toBeUndefined();

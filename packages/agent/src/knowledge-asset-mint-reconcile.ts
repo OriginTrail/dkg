@@ -15,7 +15,6 @@ import {
 import {
   adoptExistingMint,
   prepareMintAdoption,
-  withPreparedMintAdoption,
   withAssertionLifecycleWriteLease,
   assertionLifecycleWriteLockKey,
   graphScopeTargetsChain,
@@ -272,8 +271,8 @@ async function recordThroughPublish(agent: DKGAgent, host: KnowledgeAssetMintRec
   return withAssertionLifecycleWriteLease(host.writeLocks, lock, async heldLifecycle => {
     await assertReservationUnchanged(agent, reservation, target);
     const published = await agent.publishFromFinalizedAssertion(target.contextGraphId, target.name,
-      withPreparedMintAdoption({ heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress,
-        adoptExistingMint: target.txHash === undefined ? {} : { txHash: target.txHash } }, evidence));
+      { heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress,
+        adoptExistingMint: { kind: 'prepared', evidence } });
     if (published.status !== 'confirmed' || !published.onChainResult) {
       throw Object.assign(new Error(`Recording the mint of "${target.name}" ended ${published.status}. Retry the reconcile.`), {
         code: KA_MINT_RECONCILE_INCOMPLETE_CODE,

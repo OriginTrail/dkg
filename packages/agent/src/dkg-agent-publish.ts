@@ -1,4 +1,4 @@
-import { copyPreparedMintAdoption, type AssertionLifecycleWriteLease } from '@origintrail-official/dkg-publisher';
+import { type AssertionLifecycleWriteLease } from '@origintrail-official/dkg-publisher';
 import { beginNamedPublishFinalization, finishNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
@@ -6160,7 +6160,7 @@ export class PublishMethods extends DKGAgentBase {
       result = await this.publishFromSharedMemory(
         contextGraphId,
         'all',
-        copyPreparedMintAdoption(opts, {
+        {
           operationCtx: opts?.operationCtx,
           onPhase: opts?.onPhase,
           subGraphName: opts?.subGraphName,
@@ -6191,7 +6191,7 @@ export class PublishMethods extends DKGAgentBase {
           },
           publisherOverride: publisher,
           adoptExistingMint: opts?.adoptExistingMint,
-        }),
+        },
       );
 
       // On confirmed mint, stamp VM pointer + publish receipt on _meta.
@@ -6838,7 +6838,7 @@ export class PublishMethods extends DKGAgentBase {
     });
 
     const publisher = options?.publisherOverride ?? this.publisher;
-    const result = await publisher.publishFromSharedMemory(contextGraphId, selection, copyPreparedMintAdoption(options, {
+    const result = await publisher.publishFromSharedMemory(contextGraphId, selection, {
       operationCtx: ctx,
       clearSharedMemoryAfter: options?.clearSharedMemoryAfter,
       onPhase: options?.onPhase,
@@ -6865,7 +6865,7 @@ export class PublishMethods extends DKGAgentBase {
       encryptInlinePayload,
       encryptInlineChunked,
       adoptExistingMint: adoption,
-    }));
+    });
 
     if (
       result.status === 'confirmed'

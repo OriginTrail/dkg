@@ -248,8 +248,8 @@ export async function mintOrAdoptKnowledgeAssets(
 /** Opaque verified receipt, scoped to one adapter and sealed reservation. */
 export interface PreparedMintAdoption { readonly preparedMintAdoption: unique symbol }
 const preparedEvidence = new WeakMap<object, { chain: ChainAdapter; expected: MintAdoptionExpectation; result: OnChainPublishResult }>();
-const PREPARED_MINT = Symbol('prepared mint adoption');
-type EvidenceOptions = { [PREPARED_MINT]?: PreparedMintAdoption };
+export type MintAdoptionRequest = Readonly<{ kind?: 'lookup'; txHash?: string }>
+  | Readonly<{ kind: 'prepared'; evidence: PreparedMintAdoption }>;
 /** Read slow chain evidence before taking an assertion lifecycle write lock. */
 export async function prepareMintAdoption(chain: ChainAdapter, expected: MintAdoptionExpectation,
   txHash?: string): Promise<PreparedMintAdoption> {
@@ -258,34 +258,23 @@ export async function prepareMintAdoption(chain: ChainAdapter, expected: MintAdo
   preparedEvidence.set(token, { chain, expected: { ...expected, merkleRoot: Uint8Array.from(expected.merkleRoot) }, result: { ...result } });
   return token;
 }
-/** Internal capability propagation; no public publish option can manufacture evidence. */
-export function withPreparedMintAdoption<T extends object>(options: T, token: PreparedMintAdoption): T {
-  if (!preparedEvidence.has(token)) throw new Error('Invalid prepared mint evidence');
-  return Object.assign(options, { [PREPARED_MINT]: token });
-}
-export function copyPreparedMintAdoption<T extends object>(source: object | undefined, target: T): T {
-  const token = (source as EvidenceOptions | undefined)?.[PREPARED_MINT];
-  return token === undefined ? target : withPreparedMintAdoption(target, token);
-}
-function preparedReceipt(source: object | undefined, chain: ChainAdapter,
-  expected: MintAdoptionExpectation, txHash?: string): OnChainPublishResult | undefined {
-  const token = (source as EvidenceOptions | undefined)?.[PREPARED_MINT];
-  if (token === undefined) return undefined;
+function preparedReceipt(token: PreparedMintAdoption, chain: ChainAdapter,
+  expected: MintAdoptionExpectation): OnChainPublishResult {
   const evidence = preparedEvidence.get(token);
   if (!evidence || evidence.chain !== chain || evidence.expected.kaId !== expected.kaId
     || evidence.expected.contextGraphId !== expected.contextGraphId
     || evidence.expected.authorAddress.toLowerCase() !== expected.authorAddress.toLowerCase()
-    || ethers.hexlify(evidence.expected.merkleRoot) !== ethers.hexlify(expected.merkleRoot)
-    || (txHash !== undefined && evidence.result.txHash.toLowerCase() !== txHash.toLowerCase()))
+    || ethers.hexlify(evidence.expected.merkleRoot) !== ethers.hexlify(expected.merkleRoot))
     throw new Error('Prepared mint evidence does not match the current sealed reservation');
   return { ...evidence.result };
 }
 
 /** Verify receipt evidence directly; adoption never constructs transaction parameters. */
 export async function adoptMintForRecording(chain: ChainAdapter, expected: MintAdoptionExpectation,
-  sealed: SealedMintAdoption, txHash?: string, sourceOptions?: object): Promise<MintOrAdoptOutcome> {
-  return adopted(sealed, expected, preparedReceipt(sourceOptions, chain, expected, txHash)
-    ?? await adoptExistingMint(chain, expected, { txHash }));
+  sealed: SealedMintAdoption, request: MintAdoptionRequest): Promise<MintOrAdoptOutcome> {
+  return adopted(sealed, expected, request.kind === 'prepared'
+    ? preparedReceipt(request.evidence, chain, expected)
+    : await adoptExistingMint(chain, expected, { txHash: request.txHash }));
 }
 
 async function adopted(

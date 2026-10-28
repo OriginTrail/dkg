@@ -41,7 +41,7 @@ import {
   mintOrAdoptKnowledgeAssets,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
 } from '../src/index.js';
-import { sealedMintAdoption, type SealedMintAdoption, prepareMintAdoption, withPreparedMintAdoption, adoptMintForRecording } from '../src/adopt-existing-mint.js';
+import { sealedMintAdoption, type SealedMintAdoption, prepareMintAdoption, adoptMintForRecording } from '../src/adopt-existing-mint.js';
 import { PublisherPlanner } from '../src/publisher-planning.js';
 import { buildSeal, mockSealCtx } from './_helpers/seal.js';
 import { mockChainStubACKProvider } from './_helpers/acks.js';
@@ -493,17 +493,17 @@ it('prepared receipt evidence is adapter/reservation-bound and avoids a second s
     const expected = { kaId: f.kaId, merkleRoot: f.sealedRoot, contextGraphId: 1n, authorAddress: scope.agentAddress };
     const lookup = vi.spyOn(f.chain, 'resolveKnowledgeAssetMint');
     const evidence = await prepareMintAdoption(f.chain, expected, original.txHash);
-    const options = withPreparedMintAdoption({}, evidence);
+    const request = { kind: 'prepared' as const, evidence };
     const sealed = sealedMintAdoption(f.store, { scope, publicTripleCount: 1, privateTripleCount: 0 },
       { contextGraphId: CONTEXT_GRAPH, log() {} })!;
-    await expect(adoptMintForRecording(f.chain, expected, sealed, original.txHash, options))
+    await expect(adoptMintForRecording(f.chain, expected, sealed, request))
       .resolves.toMatchObject({ result: { txHash: original.txHash }, recording: { adopted: true } });
     expect(lookup).toHaveBeenCalledOnce();
-    await expect(adoptMintForRecording(f.chain, { ...expected, kaId: f.kaId + 1n }, sealed, original.txHash, options))
+    await expect(adoptMintForRecording(f.chain, { ...expected, kaId: f.kaId + 1n }, sealed, request))
       .rejects.toThrow(/does not match/);
-    await expect(adoptMintForRecording(new MockChainAdapter(), expected, sealed, original.txHash, options))
+    await expect(adoptMintForRecording(new MockChainAdapter(), expected, sealed, request))
       .rejects.toThrow(/does not match/);
-    expect(() => withPreparedMintAdoption({}, {} as never)).toThrow(/Invalid prepared mint evidence/);
+    await expect(adoptMintForRecording(f.chain, expected, sealed, { kind: 'prepared', evidence: {} as never })).rejects.toThrow(/does not match/);
     expect(lookup).toHaveBeenCalledOnce();
   } finally { await f.store.close(); }
 });
