@@ -1,4 +1,4 @@
-import type { Quad } from '@origintrail-official/dkg-storage';
+import type { SharedMemoryGraphScope, Quad } from '@origintrail-official/dkg-storage';
 import type { OnChainPublishResult, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 
 /**
@@ -470,6 +470,31 @@ export interface InitialPublishOptions extends BasePublicationOptions {
    */
   pricingPolicy?: PublicationPricingPolicy;
 }
+
+/** Required sealed identity for recording a mint that already exists on chain. */
+export interface SealedMintRecordingTarget {
+  contentScopeVersion: 2;
+  kaUal: string;
+  assertionVersion: string | number | bigint;
+  publicTripleCount: number;
+  privateTripleCount: number;
+  reservedKaId: bigint;
+  precomputedAttestation: PrecomputedPublishAttestation;
+}
+/** Content and local recording options; transaction/ACK/encryption capabilities belong to live publishing. */
+export type MintRecordingOptions = SealedMintRecordingTarget & Pick<BasePublicationOptions,
+  'contextGraphId' | 'quads' | 'privateQuads' | 'privateMerkleRoot' | 'publisherPeerId' |
+  'accessPolicy' | 'allowedPeers' | 'operationCtx' | 'onPhase' | 'onPublishConfirmed' |
+  'subGraphName' | 'publishContextGraphId' | 'onChainContextGraphId' |
+  'targetGraphUri' | 'targetMetaGraphUri' | 'trustedNonManifestCatalogTriples' | 'fromSharedMemory'>
+  & Pick<InitialPublishOptions, 'pricingPolicy'>;
+export type SharedMemoryMintRecordingOptions = Omit<MintRecordingOptions,
+  'contextGraphId' | 'quads' | 'privateQuads' | 'targetGraphUri' | 'targetMetaGraphUri' |
+  'fromSharedMemory' | 'onChainContextGraphId'> & {
+    sharedMemoryScope: SharedMemoryGraphScope;
+    onChainContextGraphId?: string;
+    clearSharedMemoryAfter?: boolean;
+  };
 
 /** Options for updating an existing asset. */
 export interface UpdateOptions extends BasePublicationOptions {

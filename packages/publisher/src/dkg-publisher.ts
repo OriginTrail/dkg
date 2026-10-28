@@ -1,3 +1,4 @@
+import type { MintRecordingOptions, SharedMemoryMintRecordingOptions } from './publisher.js';
 import { adoptedMintAlreadyRecorded } from './adopted-mint-record.js';
 import type { MintAdoptionRequest } from './adopt-existing-mint.js';
 import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication, type PreparedPublicationContent } from './prepared-publication.js';
@@ -950,6 +951,8 @@ function isNoDataInSwmFailure(err: unknown): boolean {
 }
 
 export type SharedMemoryPublishOptions = PublishLifecycleHooks & {
+      accessPolicy?: PublishOptions['accessPolicy'];
+      allowedPeers?: PublishOptions['allowedPeers'];
       operationCtx?: OperationContext;
       clearSharedMemoryAfter?: boolean;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
@@ -2070,9 +2073,16 @@ export class DKGPublisher implements Publisher {
 
   async recordExistingMintFromSharedMemory(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
     request: MintAdoptionRequest,
-    options?: SharedMemoryPublishOptions): Promise<PublishResult> {
+    options: SharedMemoryMintRecordingOptions): Promise<PublishResult> {
     const content = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
-    return content.finalize(await this.recordExistingMint(content.options, request));
+    // Required sealed fields come from the recording boundary, while content
+    // and target remapping come from the shared-memory preparation.
+    const recording: MintRecordingOptions = { ...options, ...content.options,
+      contentScopeVersion: options.contentScopeVersion, kaUal: options.kaUal,
+      assertionVersion: options.assertionVersion, publicTripleCount: options.publicTripleCount,
+      privateTripleCount: options.privateTripleCount, reservedKaId: options.reservedKaId,
+      precomputedAttestation: options.precomputedAttestation };
+    return content.finalize(await this.recordExistingMint(recording, request));
   }
 
   private async prepareSharedMemoryPublication(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
@@ -2237,6 +2247,7 @@ export class DKGPublisher implements Publisher {
       // previous field-by-field list silently dropped onPublishConfirmed at this entry point.
       ...pickPublishLifecycleHooks(options ?? {}),
       publisherPeerId: options?.publisherPeerId,
+      accessPolicy: options?.accessPolicy, allowedPeers: options?.allowedPeers,
       v10ACKProvider: options?.v10ACKProvider,
       trustedNonManifestCatalogTriples: options?.trustedNonManifestCatalogTriples,
       publishContextGraphId: chainCgId ?? undefined,
@@ -2553,8 +2564,15 @@ export class DKGPublisher implements Publisher {
   }
 
   /** Record verified mint evidence through the same prepared-content recorder as a live publish. */
-  async recordExistingMint(options: PublishOptions,
+  async recordExistingMint(options: MintRecordingOptions,
     request: MintAdoptionRequest): Promise<PublishResult> {
+    // Validate the required recording target even for untyped callers; the
+    // shared content preparer then normalizes its graph and verifies the seal.
+    if (options.contentScopeVersion !== 2 || typeof options.reservedKaId !== 'bigint'
+      || options.reservedKaId <= 0n || options.precomputedAttestation?.reservedKaId !== options.reservedKaId
+      || !Number.isSafeInteger(options.publicTripleCount) || options.publicTripleCount < 0
+      || !Number.isSafeInteger(options.privateTripleCount) || options.privateTripleCount < 0)
+      throw new Error('Recording an existing mint requires a complete sealed graph reservation');
     const content = await this.preparePublicationContent(options);
     const { target, payload } = content;
     const { publisherContextGraphId, graphPublish, v10ChainId } = target;

@@ -164,6 +164,7 @@ async function strandedPublishFixture() {
     trustedNonManifestCatalogTriples: generatedPrivateCatalogTripleKeys(CONTEXT_GRAPH),
     publisherPeerId: 'late-mint-publisher-peer',
     precomputedAttestation: seal,
+    reservedKaId: kaId,
     encryptInlinePayload: encrypt,
     v10ACKProvider: acks,
   };
@@ -665,4 +666,23 @@ it('keeps the adopted mint metadata when the delayed original publish receives i
     expect(await f.metadataValueCounts()).toEqual(before);
     expect(await f.graphSize(f.vmGraph)).toBe(1);
   } finally { release(); await original; }
+});
+
+
+it.each(['reservation', 'attestation', 'private-count'] as const)('rejects an untyped recording without its required %s before chain lookup', async missing => {
+  const f = await strandedPublishFixture();
+  try {
+    const lookup = vi.spyOn(f.chain, 'resolveKnowledgeAssetMint');
+    const options = { contextGraphId: CONTEXT_GRAPH, quads: [LOT], contentScopeVersion: 2 as const,
+      kaUal: f.ual, assertionVersion: 1, publicTripleCount: 1, privateTripleCount: 0,
+      reservedKaId: f.kaId, precomputedAttestation: f.seal };
+    const malformed = { ...options, ...(missing === 'reservation' ? { reservedKaId: undefined }
+      : missing === 'attestation' ? { precomputedAttestation: undefined } : { privateTripleCount: undefined }) };
+    await expect(f.publisher.recordExistingMint(malformed as unknown as Parameters<DKGPublisher['recordExistingMint']>[0], {}))
+      .rejects.toThrow('complete sealed graph reservation');
+    expect(lookup).not.toHaveBeenCalled();
+    expect(f.chain.createCalls).toBe(0);
+    expect(f.chain.planCalls).toBe(0);
+    await expectNothingRecorded(f);
+  } finally { await f.store.close(); }
 });

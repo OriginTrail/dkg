@@ -6,6 +6,9 @@ import type { DKGPublisher, PublishOptions, PhaseCallback, AssertionLifecycleWri
 import type { PreSignedAuthorAttestation } from '../dkg-agent-types.js';
 
 export type AgentSharedMemoryPublishOptions = {
+      accessPolicy?: PublishOptions['accessPolicy'];
+      allowedPeers?: PublishOptions['allowedPeers'];
+      publisherPeerId?: string;
       clearSharedMemoryAfter?: boolean;
       operationCtx?: OperationContext;
       onPhase?: PhaseCallback;

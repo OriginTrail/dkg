@@ -1,3 +1,6 @@
+import { TypedEventBus, generateEd25519Keypair, ed25519Sign, encodeAccessRequest, decodeAccessResponse, contextGraphSharedMemoryMetaUri } from '@origintrail-official/dkg-core';
+import { AccessHandler, resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
+import { GraphManager } from '@origintrail-official/dkg-storage';
 import { readFinalizedAssertionReservation } from '../src/internal/finalized-assertion-reservation.js';
 import { withAssertionLifecycleWriteLease, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import * as mintReconciliation from '../src/knowledge-asset-mint-reconcile.js';
@@ -54,7 +57,7 @@ const QUADS = [{ subject: 'urn:lot:2026-08-12', predicate: 'http://schema.org/na
 const MERKLE_ROOT = computeFlatKCRootV10(QUADS, []);
 const ZERO = new Uint8Array(32);
 
-interface AssetContent { quads: Quad[]; privateQuads: Quad[] }
+interface AssetContent { quads: Quad[]; privateQuads: Quad[]; accessPolicy?: 'public' | 'ownerOnly' | 'allowList'; allowedPeers?: string[] }
 
 /** The KC root finalize seals for this content: canonical public triples plus the private root. */
 async function sealedRootOf({ quads, privateQuads }: AssetContent): Promise<Uint8Array> {
@@ -117,8 +120,8 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     vi.spyOn(agent as unknown as { _resolveInlineEncryption(): Promise<object> }, '_resolveInlineEncryption')
       .mockResolvedValue({});
     const accessPolicy = vi.spyOn(agent, 'resolveOnChainAccessPolicyState').mockResolvedValue(0);
+    await agent.createContextGraph({ id: CONTEXT_GRAPH, name: CONTEXT_GRAPH });
     if (subGraphName) {
-      await agent.createContextGraph({ id: CONTEXT_GRAPH, name: CONTEXT_GRAPH });
       await agent.createSubGraph(CONTEXT_GRAPH, subGraphName);
     }
     const { sealed, lostMint, history } = await strandAuthorAsset(chain, wallet, subGraphName, content);
@@ -151,7 +154,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       await agent!.publisher.assertionWritePrivate(CONTEXT_GRAPH, NAME, agentAddress, content.privateQuads, subGraphName);
     }
     const sealed = await agent!.assertion.finalize(CONTEXT_GRAPH, NAME, { agentAddress, preSignedAuthorAttestation, subGraphName });
-    await agent!.assertion.promote(CONTEXT_GRAPH, NAME, { agentAddress, preSignedAuthorAttestation, entities: 'all', subGraphName });
+    await agent!.assertion.promote(CONTEXT_GRAPH, NAME, { agentAddress, preSignedAuthorAttestation, entities: 'all', subGraphName, accessPolicy: content.accessPolicy, allowedPeers: content.allowedPeers });
 
     // The first publish attempt's transaction, which mined after the node gave up on its receipt.
     const lostMint = await chain.createKnowledgeAssets({
@@ -775,6 +778,41 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/removed while reconcile waited/) });
     expect(await history()).toMatchObject({ state: 'created', memoryLayer: 'WM' });
+  });
+
+  it('preserves the persisted private allow-list and original publisher when reconciling a late mint', async () => {
+    const secret: Quad = { subject: 'urn:lot:2026-08-12', predicate: 'urn:private-note', object: '"allowed reader secret"', graph: '' };
+    const { agent, store, sealed, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter(), undefined, undefined,
+      { quads: QUADS, privateQuads: [secret], accessPolicy: 'allowList', allowedPeers: ['reader-peer'] });
+    // Model a retained share originating at another peer, now recovered by this node.
+    const graph = contextGraphSharedMemoryMetaUri(CONTEXT_GRAPH);
+    const predicate = 'http://dkg.io/ontology/publisherPeerId';
+    const metadata = await store.query(`CONSTRUCT { ?s <${predicate}> ?o } WHERE { GRAPH <${graph}> { ?s <${predicate}> ?o } }`);
+    if (metadata.type !== 'quads' || metadata.quads.length === 0) throw new Error('Missing persisted share publisher');
+    await store.deleteByPattern({ graph, predicate });
+    await store.insert(metadata.quads.map(q => ({ ...q, graph, object: '"original-share-peer"' })));
+    expect(await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store),
+      contextGraphId: CONTEXT_GRAPH, kaUal: sealed.kaUal! })).toMatchObject({ publisherPeerId: 'original-share-peer',
+      access: { accessPolicy: 'allowList', allowedPeers: ['reader-peer'] } });
+    const gossip = vi.spyOn((agent as any).gossip, 'publish');
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted' });
+    const finalization = gossip.mock.calls.filter(([topic]) => topic === contextGraphFinalizationTopic(CONTEXT_GRAPH))
+      .map(([, bytes]) => decodeFinalizationMessage(bytes as Uint8Array));
+    const owner = await store.query(`SELECT ?owner WHERE { GRAPH <${META_GRAPH}> { <${sealed.kaUal}> <${predicate}> ?owner } }`);
+    expect(owner).toMatchObject({ type: 'bindings', bindings: [{ owner: '"original-share-peer"' }] });
+    const handler = new AccessHandler(store, new TypedEventBus());
+    for (const [peer, allowed] of [['reader-peer', true], ['stranger-peer', false]] as const) {
+      const keypair = await generateEd25519Keypair();
+      const signature = await ed25519Sign(new TextEncoder().encode(sealed.kaUal!), keypair.secretKey);
+      const response = decodeAccessResponse(await handler.handler(encodeAccessRequest({ kaUal: sealed.kaUal!,
+        requesterPeerId: peer, paymentProof: new Uint8Array(0), requesterSignature: signature,
+        requesterPublicKey: keypair.publicKey }), peer as never));
+      expect(response.granted, response.rejectionReason).toBe(allowed);
+      if (allowed) expect(new TextDecoder().decode(response.nquads)).toContain('allowed reader secret');
+      else expect(response.rejectionReason).toMatch(/allow/i);
+    }
+    expect(finalization).toContainEqual(expect.objectContaining({ accessPolicy: 'allowList', allowedPeers: ['reader-peer'] }));
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
   });
 
   it('records a private-only late mint and resumes it, keeping the private content and its commitment', async () => {

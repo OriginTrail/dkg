@@ -1,3 +1,5 @@
+import type { SharedMemoryMintRecordingOptions } from '@origintrail-official/dkg-publisher';
+import type { NamedPublishFinalizationInput } from './named-publish-finalization.js';
 import { readFinalizedAssertionReservation } from './internal/finalized-assertion-reservation.js';
 import { assertAssertionLifecycleWriteLease } from '@origintrail-official/dkg-publisher';
 import type { MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
@@ -5054,7 +5056,7 @@ export class PublishMethods extends DKGAgentBase {
       chain: this.chain,
       writeLocks: this.writeLocks,
       stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter,
-      completeFinalization: this.completeNamedPublishFinalization.bind(this),
+      completeFinalization: completeNamedPublishFinalization.bind(this),
       recordMint: (target, evidence, recording) => recordFinalizedAssertionMint.call(this,
         target.contextGraphId, target.name, { kind: 'prepared', evidence }, recording,
         { subGraphName: target.subGraphName, agentAddress: target.agentAddress }),
@@ -5811,26 +5813,9 @@ export class PublishMethods extends DKGAgentBase {
     if (result.status === 'confirmed') {
       const input = finalizedPublicationIdentity(prepared);
       await observeConfirmedVmTransfer(this.log, { ...input, ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' },
-        async () => await this.completeNamedPublishFinalization(input) === 'complete' ? 'owned' : 'pending');
+        async () => await completeNamedPublishFinalization.call(this, input) === 'complete' ? 'owned' : 'pending');
     }
     return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
-  }
-
-  /** Reconciliation enters recording directly, under the caller's existing lifecycle lease. */
-
-
-
-
-  async completeNamedPublishFinalization(this: DKGAgent, input: {
-    contextGraphId: string; subGraphName?: string; assertionCoordinate: string;
-    shareOperationId?: string; seal: AssertionSeal; assertionUri: string;
-  }): Promise<'complete' | 'pending'> {
-    return finishNamedPublishFinalization(this.store, input, {
-      catalogRequired: () => this.resolveRfc64CatalogAuthoringLaneV1(input.contextGraphId, input.subGraphName) !== null,
-      transfer: shareOperationId => this.transferRfc64ConfirmedVmV1({
-        ...input, shareOperationId, ctx: createOperationContext('publishFromSWM'), publicationLabel: 'publish',
-      }),
-    });
   }
 
   private async afterConfirmedGraphScopedVmPublishV1(
@@ -6145,7 +6130,8 @@ export class PublishMethods extends DKGAgentBase {
       onChainContextGraphId: onChainId,
       contextGraphSignatures: options?.contextGraphSignatures,
       v10ACKProvider,
-      publisherPeerId: this.peerId,
+      publisherPeerId: options?.publisherPeerId ?? this.peerId,
+      accessPolicy: options?.accessPolicy, allowedPeers: options?.allowedPeers,
       trustedNonManifestCatalogTriples,
       subGraphName: options?.subGraphName,
       publisherNodeIdentityIdOverride: options?.publisherNodeIdentityIdOverride,
@@ -6292,6 +6278,15 @@ export class PublishMethods extends DKGAgentBase {
 }
 
 // Implementation-only publication stages; absent from the exported DKGAgent surface.
+async function completeNamedPublishFinalization(this: DKGAgent, input: NamedPublishFinalizationInput): Promise<'complete' | 'pending'> {
+    return finishNamedPublishFinalization(this.store, input, {
+      catalogRequired: () => this.resolveRfc64CatalogAuthoringLaneV1(input.contextGraphId, input.subGraphName) !== null,
+      transfer: shareOperationId => this.transferRfc64ConfirmedVmV1({
+        ...input, shareOperationId, ctx: createOperationContext('publishFromSWM'), publicationLabel: 'publish',
+      }),
+    });
+}
+
 async function selectFinalizedAssertionPublication(this: DKGAgent, contextGraphId: string, name: string,
   opts: FinalizedAssertionPublishOptions | undefined, recording?: FinalizedAssertionRecordingContext) {
   const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
@@ -6445,14 +6440,15 @@ async function prepareFinalizedAssertionContent(this: DKGAgent, selected: Finali
 }
 type PreparedFinalizedAssertionContent = Awaited<ReturnType<typeof prepareFinalizedAssertionContent>>;
 
-function finalizedMintOptions(prepared: PreparedFinalizedAssertionContent, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): AgentSharedMemoryPublishOptions {
+function finalizedMintContentOptions(prepared: PreparedFinalizedAssertionContent, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): SharedMemoryMintRecordingOptions & { publisherOverride: DKGPublisher } {
   const { opts, publisher, recoveredReservedKaId, sharedMemoryScope, graphScope, seal, privateMerkleRoot } = prepared;
   return {
         operationCtx: opts?.operationCtx,
         onPhase: opts?.onPhase,
         subGraphName: opts?.subGraphName,
-        publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
-        publishEpochs: opts?.publishEpochs,
+        accessPolicy: prepared.rfc64WorkspaceHead?.access.accessPolicy,
+        allowedPeers: prepared.rfc64WorkspaceHead ? [...prepared.rfc64WorkspaceHead.access.allowedPeers] : undefined,
+        publisherPeerId: prepared.rfc64WorkspaceHead?.publisherPeerId,
         pricingPolicy,
         reservedKaId: recoveredReservedKaId,
         sharedMemoryScope,
@@ -6461,7 +6457,7 @@ function finalizedMintOptions(prepared: PreparedFinalizedAssertionContent, prici
         assertionVersion: graphScope.assertionVersion,
         publicTripleCount: seal.publicTripleCount,
         ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
-        privateTripleCount: seal.privateTripleCount,
+        privateTripleCount: prepared.canonicalPrivateQuads.length,
         precomputedAttestation: {
           expectedMerkleRoot: seal.merkleRoot,
           authorAddress: seal.authorAddress,
@@ -6471,6 +6467,11 @@ function finalizedMintOptions(prepared: PreparedFinalizedAssertionContent, prici
         },
         publisherOverride: publisher,
   };
+}
+
+function finalizedMintOptions(prepared: PreparedFinalizedAssertionContent, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): AgentSharedMemoryPublishOptions {
+  return { ...finalizedMintContentOptions(prepared, pricingPolicy),
+    publisherNodeIdentityIdOverride: prepared.opts?.publisherNodeIdentityIdOverride, publishEpochs: prepared.opts?.publishEpochs };
 }
 
 async function stampFinalizedPublicationLifecycle(this: DKGAgent, prepared: PreparedFinalizedAssertionContent, result: PublishResult): Promise<boolean> {
@@ -6627,9 +6628,9 @@ export async function recordFinalizedAssertionMint(this: DKGAgent, contextGraphI
   if (selected.operationPlan.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
     { code: KA_MINT_RECONCILE_REFUSED_CODE });
   const prepared = await prepareFinalizedAssertionContent.call(this, selected);
-  const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintOptions(prepared, selected.operationPlan.pricingPolicy));
+  const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintContentOptions(prepared, selected.operationPlan.pricingPolicy));
   await completeFinalizedAssertionMint.call(this, prepared, result, recording);
-  if (result.status === 'confirmed' && await this.completeNamedPublishFinalization(finalizedPublicationIdentity(prepared)) === 'pending')
+  if (result.status === 'confirmed' && await completeNamedPublishFinalization.call(this, finalizedPublicationIdentity(prepared)) === 'pending')
     throw Object.assign(new Error('Named publish catalog finalization remains pending; retry to finish it'),
       { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
   return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
@@ -6770,7 +6771,7 @@ async function runSharedMemoryPublication(this: DKGAgent, contextGraphId: string
 
 async function recordMintFromSharedMemory(this: DKGAgent, contextGraphId: string,
   selection: 'all' | { rootEntities: string[] }, request: MintAdoptionRequest,
-  options?: AgentSharedMemoryPublishOptions): Promise<PublishResult> {
+  options: SharedMemoryMintRecordingOptions & { publisherOverride?: DKGPublisher }): Promise<PublishResult> {
   return runSharedMemoryPublication.call(this, contextGraphId, selection, options, async ({ ctx, ctxGraphIdStr, onChainId }) => {
     const curated = await resolvePublishTargetCuration(this, this.log, ctx,
       { contextGraphId, explicitPolicyTargetContextGraphId: ctxGraphIdStr, logPrefix: 'mint-recording' });
@@ -6778,7 +6779,7 @@ async function recordMintFromSharedMemory(this: DKGAgent, contextGraphId: string
       graphScoped: true, onChainContextGraphId: onChainId, curated });
     return (options?.publisherOverride ?? this.publisher).recordExistingMintFromSharedMemory(contextGraphId, selection, request, {
       ...options, operationCtx: ctx, onChainContextGraphId: onChainId, publishContextGraphId: ctxGraphIdStr,
-      publisherPeerId: this.peerId, trustedNonManifestCatalogTriples,
+      publisherPeerId: options.publisherPeerId ?? this.peerId, trustedNonManifestCatalogTriples,
     });
   });
 }

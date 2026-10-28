@@ -1,3 +1,4 @@
+import type { CompleteNamedPublishFinalization } from './named-publish-finalization.js';
 import type { FinalizedAssertionRecordingContext } from './internal/agent-publish-options.js';
 import { readFinalizedAssertionReservation, FinalizedAssertionReservationError, type FinalizedAssertionReservation as SealedReservation } from './internal/finalized-assertion-reservation.js';
 import { readNamedPublishFinalization } from './named-publish-finalization.js';
@@ -55,7 +56,7 @@ export interface KnowledgeAssetMintReconcileHost {
   readonly chain: ChainAdapter;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly stampPublishedLifecycle: PublishedNamedKaVmLifecycleWriter;
-  readonly completeFinalization: OmitThisParameter<DKGAgent['completeNamedPublishFinalization']>;
+  readonly completeFinalization: CompleteNamedPublishFinalization;
   recordMint(target: Target, evidence: PreparedMintAdoption, recording: FinalizedAssertionRecordingContext): Promise<PublishResult>;
 }
 

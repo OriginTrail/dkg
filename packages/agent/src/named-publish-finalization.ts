@@ -9,6 +9,10 @@ const GRAPH = 'urn:dkg:publisher:named-finalization';
 const READY = 'http://dkg.io/ontology/namedPublishFinalizationReady';
 const COMPLETE = 'http://dkg.io/ontology/namedPublishFinalizationComplete';
 export interface NamedPublishFinalizationIdentity { assertionUri: string; seal: AssertionSeal }
+export interface NamedPublishFinalizationInput extends NamedPublishFinalizationIdentity {
+  contextGraphId: string; subGraphName?: string; assertionCoordinate: string; shareOperationId?: string;
+}
+export type CompleteNamedPublishFinalization = (input: NamedPublishFinalizationInput) => Promise<NamedPublishFinalizationOutcome>;
 interface PendingFinalization { version: 1; catalogRequired: boolean; shareOperationId?: string }
 export type NamedPublishFinalizationProgress = { kind: 'legacy' }
   | { kind: 'pending'; checkpoint: PendingFinalization } | { kind: 'complete' };
