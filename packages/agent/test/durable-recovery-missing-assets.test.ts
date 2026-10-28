@@ -61,7 +61,7 @@ function runner(
     isPrivateContextGraph: async () => false,
     orderPeerIds: (peerIds) => [...peerIds],
     isSyncCapable: async () => true,
-    executeSlice: async (_peerId, _meta, continuation) => {
+    executeSlice: async (_peerId, { holdings: continuation }) => {
       offered.push(continuation.ownerFetchesMissingAssets === true);
       const next = rounds.shift();
       if (!next) throw new Error('no scripted round left');

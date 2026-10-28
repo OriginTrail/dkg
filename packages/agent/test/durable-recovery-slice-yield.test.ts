@@ -197,7 +197,7 @@ async function recoverWithSpentSlices(peer: ReturnType<typeof servingPeer>) {
     isPrivateContextGraph: async () => false,
     orderPeerIds: (peerIds) => [...peerIds],
     isSyncCapable: async () => true,
-    executeSlice: async (_peerId, continuation) => {
+    executeSlice: async (_peerId, { meta: continuation }) => {
       const detailed = await round(continuation);
       return detailed;
     },

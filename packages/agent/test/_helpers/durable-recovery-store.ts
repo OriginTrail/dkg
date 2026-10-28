@@ -5,7 +5,7 @@ import { createUalOnlyExactAssetSelection } from '../../src/sync/exact-assets.js
 import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../../src/sync/durable-recovery-runner.js';
 import { HeldAssetsConfirmationRun } from '../../src/sync/requester/durable-data-holdings.js';
 import type { GraphOwnedRecoveryContext } from '../../src/sync/requester/graph-owned-recovery.js';
-import { runDurableSyncDetailed, runGraphOwnedDurableSyncDetailed, type DurableMetaContinuation, type DurableSyncContext } from '../../src/sync/requester/durable-sync.js';
+import { runDurableSyncDetailed, runGraphOwnedDurableSyncDetailed, type DurableSyncContext } from '../../src/sync/requester/durable-sync.js';
 import { CG, createRecoveryFixture, type RecoveryFixtureOptions, type RecoveryPeers, type AssetFixture } from './durable-recovery-fixture.js';
 export { CG, PEER, SECOND_PEER, asset, servingPeer, generation, rowsOf, type AssetFixture } from './durable-recovery-fixture.js';
 
@@ -81,10 +81,10 @@ export function createRequesterHarness(serving: RecoveryPeers, options: Requeste
       isPrivateContextGraph: async () => false,
       orderPeerIds: (peerIds) => [...peerIds],
       isSyncCapable: async () => true,
-      executeSlice: async (peerId, durableMetaContinuation: DurableMetaContinuation, durableRecoveryRound, durableResumeBoundary, confirmation) => {
+      executeSlice: async (peerId, recovery) => {
         chainAnswersLeft = chainAnswersPerRound;
         const detailed = await round(checkpointStore, peerId, {
-          recovery: { meta: durableMetaContinuation, holdings: durableRecoveryRound, boundary: durableResumeBoundary, confirmation },
+          recovery,
           settlementSliceDeadline: (typeof startOptions.sliceSpent === 'function' ? startOptions.sliceSpent() : startOptions.sliceSpent) ? Date.now() : undefined,
         });
         startOptions.afterSlice?.();

@@ -1,7 +1,8 @@
+import type { GraphOwnedRecoveryInput } from './requester/graph-owned-recovery.js';
 import { recoveryActionDiagnostics, exactRecoveryActionOutcome, type DurableRecoveryDiagnostics, type ExactRecoveryActionOutcome } from './durable-recovery-action.js';
 import { accountDurableRecoveryAction, type DurableRecoveryAccounting, type MutableDurableRecoveryPeerHealth } from './durable-recovery-peer-health.js';
 import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from './durable-recovery-round.js';
-import { HeldAssetsConfirmationRun, type DurableHoldingsOptions } from './requester/durable-data-holdings.js';
+import { HeldAssetsConfirmationRun } from './requester/durable-data-holdings.js';
 import type { DurableSyncResult } from '../dkg-agent-types.js';
 import {
   createDurableSyncAccumulator,
@@ -26,7 +27,7 @@ import {
 } from './durable-recovery-coordinator.js';
 import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
-import { DurableGraphResumePolicy, type VerifiedDurableBoundary } from './durable-recovery-boundary-seed.js';
+import { DurableGraphResumePolicy } from './durable-recovery-boundary-seed.js';
 import { DurableRecoveryFetchPolicy, type DurableRecoveryAction } from './durable-recovery-fetch-policy.js';
 
 export interface DurableRecoveryExecution {
@@ -67,10 +68,7 @@ export interface DurableRecoveryRunnerDependencies {
   isSyncCapable(peerId: string): Promise<boolean>;
   executeSlice(
     peerId: string,
-    metaContinuation: DurableMetaContinuation,
-    holdings: DurableHoldingsOptions,
-    durableResumeBoundary?: VerifiedDurableBoundary,
-    confirmation?: HeldAssetsConfirmationRun,
+    recovery: GraphOwnedRecoveryInput,
   ): Promise<DurableRecoveryRoundOutcome>;
   /**
    * Fetch a selection with one exact request and report its disposition separately
@@ -351,9 +349,13 @@ export class DurableRecoveryRunner {
           metaContinuation = this.createMetaContinuation();
           metaContinuations.set(action.peerId, metaContinuation);
         }
-        round = await deps.executeSlice(action.peerId, metaContinuation,
-          fetchPolicy.holdings(deps.executeExactSlice !== undefined),
-          seed?.kind === 'candidate' ? seed.boundary : undefined, confirmation);
+        const recovery: GraphOwnedRecoveryInput = {
+          meta: metaContinuation,
+          holdings: fetchPolicy.holdings(deps.executeExactSlice !== undefined),
+          boundary: seed?.kind === 'candidate' ? seed.boundary : undefined,
+          confirmation,
+        };
+        round = await deps.executeSlice(action.peerId, recovery);
       } catch (error) { round = durableRecoveryRoundOutcome(failedSlice(action.peerId, error), { strategy: 'not-started' }); }
       const result = round.result;
       const after = deps.checkpointStore.get(checkpointKey);
