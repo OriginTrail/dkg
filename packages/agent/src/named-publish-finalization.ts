@@ -56,8 +56,9 @@ export async function beginNamedPublishFinalization(store: TripleStore, input: N
 export type NamedPublishFinalizationOutcome = 'complete' | 'pending';
 export async function finishNamedPublishFinalization(store: TripleStore, input: NamedPublishFinalizationIdentity & {
   shareOperationId?: string;
-}, ports: { catalogRequired(): boolean; transfer(shareOperationId?: string): Promise<ConfirmedVmOwnershipOutcome> }): Promise<NamedPublishFinalizationOutcome> {
-  const progress = await beginNamedPublishFinalization(store, input, ports.catalogRequired);
+}, ports: { transfer(shareOperationId?: string): Promise<ConfirmedVmOwnershipOutcome> }): Promise<NamedPublishFinalizationOutcome> {
+  const progress = await readNamedPublishFinalization(store, input);
+  if (progress.kind === 'legacy') return 'pending';
   if (progress.kind === 'complete') return 'complete';
   const outcome = await ports.transfer(progress.checkpoint.shareOperationId);
   if (outcome !== 'owned' && (progress.checkpoint.catalogRequired || outcome !== 'inactive')) {

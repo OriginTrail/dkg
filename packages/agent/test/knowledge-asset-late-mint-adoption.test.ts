@@ -467,6 +467,26 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
   });
 
+  it('fails closed without inventing completion when both readiness checkpoint writes fail', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, store, sealed } = await strandedAsset(chain);
+    const original = store.insert.bind(store);
+    const write = vi.spyOn(store, 'insert').mockImplementation(async quads => {
+      if (quads.some(q => q.predicate === 'http://dkg.io/ontology/namedPublishFinalizationReady')) throw new Error('checkpoint unavailable');
+      return original(quads);
+    });
+    const consume = vi.spyOn(agent.publisher, 'clearSwmShareComplete');
+    const submit = vi.spyOn(chain, 'createKnowledgeAssets');
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toThrow('checkpoint unavailable');
+    expect(consume).not.toHaveBeenCalled();
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'legacy' });
+    write.mockRestore();
+    // Completed VM recording alone cannot prove gossip completion after a process boundary.
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE });
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'legacy' });
+    expect(submit).not.toHaveBeenCalled();
+  });
+
   it('completes a publish receipt the publish path failed to write, instead of reporting success without it', async () => {
     const { agent, store, sealed, lostMint, history } = await strandedAsset(new MockChainAdapter());
     failNextLifecycleWrite(agent, store, PUBLISHED_AT_TX_PRED);
@@ -552,17 +572,26 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
   });
 
+  it('cannot manufacture a missing readiness checkpoint during resumption', async () => {
+    const { store, sealed } = await strandedAsset(new MockChainAdapter());
+    const input = { assertionUri: ASSERTION, seal: sealed, shareOperationId: 'original-share' };
+    const transfer = vi.fn(async () => 'owned' as const), insert = vi.spyOn(store, 'insert');
+    await expect(finishNamedPublishFinalization(store, input, { transfer })).resolves.toBe('pending');
+    expect(transfer).not.toHaveBeenCalled(); expect(insert).not.toHaveBeenCalled();
+    expect(await readNamedPublishFinalization(store, input)).toEqual({ kind: 'legacy' });
+  });
+
   it('retains a publish-owned completion checkpoint when catalog execution is disabled before retry', async () => {
     const { store, sealed } = await strandedAsset(new MockChainAdapter());
     const input = { assertionUri: ASSERTION, seal: sealed, shareOperationId: 'original-share' };
     await beginNamedPublishFinalization(store, input, () => true);
     const transfer = vi.fn(async () => 'inactive' as const);
-    await expect(finishNamedPublishFinalization(store, input, { catalogRequired: () => false, transfer }))
+    await expect(finishNamedPublishFinalization(store, input, { transfer }))
       .resolves.toBe('pending');
     expect(transfer).toHaveBeenCalledWith('original-share');
     expect(await readNamedPublishFinalization(store, input)).toMatchObject({ kind: 'pending',
       checkpoint: { catalogRequired: true, shareOperationId: 'original-share' } });
-    await finishNamedPublishFinalization(store, input, { catalogRequired: () => true, transfer: async () => 'owned' });
+    await finishNamedPublishFinalization(store, input, { transfer: async () => 'owned' });
     expect(await readNamedPublishFinalization(store, input)).toEqual({ kind: 'complete' });
   });
 
