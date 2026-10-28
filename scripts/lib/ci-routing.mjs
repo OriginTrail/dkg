@@ -613,7 +613,7 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
   {
     // The devnet bootstrap: the browser suite's Playwright setup, the devnet
     // harnesses and the CLI's Blazegraph smoke fixture (which sources it) run it.
-    pattern: /^scripts\/devnet\.sh$/,
+    pattern: /^scripts\/(?:devnet\.sh|devnet-node-process-control\.mjs|lib\/devnet-node-process-control\.ts)$/,
     lanes: ['kosava_node_ui_e2e', 'tornado_agent', 'bura_cli'],
     reason: 'the browser suite, the devnet harnesses and the CLI Blazegraph smoke fixture run the devnet bootstrap',
   },
