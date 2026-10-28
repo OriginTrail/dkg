@@ -26,7 +26,7 @@ export interface SimulationRun {
   name: string;
   startedAt: number;
   finishedAt?: number;
-  outcome?: SimulationTerminalOutcome;
+  outcome?: { kind: SimulationTerminalOutcome['kind'] };
   metrics: LiveOpMetrics;
   error?: string;
   diagnosticCount?: number;
@@ -161,7 +161,7 @@ function reducer(state: StoredState, action: Action): StoredState {
       const snapshot = action.outcome.kind === 'completed' ? action.outcome.snapshot : undefined;
       const runs = state.simulationRuns.map(run => {
         if (run.id !== action.id) return run;
-        return { ...run, outcome: action.outcome, ...(snapshot ? snapshotRunAccounting(snapshot, run.metrics) : {}),
+        return { ...run, outcome: { kind: action.outcome.kind }, ...(snapshot ? snapshotRunAccounting(snapshot, run.metrics) : {}),
           finishedAt: snapshot ? run.startedAt + snapshot.elapsedMs : Date.now(),
         };
       });

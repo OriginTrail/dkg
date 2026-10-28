@@ -208,7 +208,8 @@ describe('public store operations', () => {
     act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'recovering', outcome: { kind: 'completed', snapshot: { ...snapshot, type: 'done' } } }));
     expect(store.state.activeSimulationId).toBeNull();
     expect(store.state.simulationRuns[1].finishedAt).toBe(previous.startedAt + snapshot.elapsedMs);
-    expect(store.state.simulationRuns[1].outcome).toEqual({ kind: 'completed', snapshot: { ...snapshot, type: 'done' } });
+    expect(store.state.simulationRuns[1].outcome).toEqual({ kind: 'completed' });
+    expect(store.state.simulationRuns[1].outcome).not.toHaveProperty('snapshot');
     const finishedAt = store.state.simulationRuns[1].finishedAt;
     vi.setSystemTime(Date.now() + 5_000);
     act(() => store.dispatch({ type: 'COMPLETE_SIMULATION', id: 'recovering', outcome: { kind: 'cancelled' } }));
