@@ -143,7 +143,7 @@ Never removed, whatever its age:
 
 - Share: `GET /api/knowledge-assets/swm/share-jobs/{jobId}` answers `404`. Share reconciliation answers `absent_or_pruned`, which never authorizes a retry: a never-admitted share and a pruned one cannot be told apart.
 - Publish: `GET /api/publisher/job` answers `404`, and `GET /api/publisher/job-by-intent` answers `none`, or lists one job fewer as `superseded`.
-- A client that lost every reply and replays the same request after the window is admitted as a new job. (A succeeded share job never blocked a replay in the first place.) The window therefore has to be longer than any client's polling and replay horizon.
+- A replay after a job finished is never joined to it, removed or not: a share replay is admitted as a new job, and a publish replay is refused at intent resolution (`409 PUBLISH_INTENT_STALE` or `PUBLISH_NOT_FULL_SHARE`). The window only sets how long status reads, `job-by-intent` and reconciliation can find the job, so it has to be longer than any client's polling and reconciliation horizon. It never protects a replay.
 
 ### Limits
 
