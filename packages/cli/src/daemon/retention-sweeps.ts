@@ -86,9 +86,9 @@ export function startRetention(input: RetentionStartInput): RetentionHandle {
   if (sweeps.length === 0) return INERT;
   for (const sweep of sweeps) {
     log(sweep.mode === 'report'
-      ? `[retention] ${sweep.queue} retention started in report mode (first tick in ${sweep.intervalMs} ms, then every ${sweep.intervalMs} ms): it judges and counts, and deletes nothing. See docs/promote-queue-operations.md`
+      ? `[retention] ${sweep.queue} retention started in report mode (first tick in ${sweep.intervalMs} ms, then every ${sweep.intervalMs} ms): it judges and counts, and deletes nothing. See docs/use-dkg/async-queue-operations.md`
       : `[warn] [retention] ${sweep.queue} retention started in DELETE mode (first tick in ${sweep.intervalMs} ms, then every ${sweep.intervalMs} ms): finished jobs older than their window are removed and cannot be restored. `
-        + 'Delete mode belongs only on a node that has passed the delete gate in docs/promote-queue-operations.md');
+        + 'Delete mode belongs only on a node that has gone through "Before you switch to delete" in docs/use-dkg/async-queue-operations.md');
   }
   const timer = startRetentionTimer(sweeps, log);
   return { usage: () => timer.usage(), stop: () => timer.stop() };
