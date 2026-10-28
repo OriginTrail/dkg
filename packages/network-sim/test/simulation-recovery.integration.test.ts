@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events';
 import { Readable } from 'node:stream';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { SIMULATION_START_WINDOW_MS } from '../src/simulation-protocol';
 import { ControlPanel } from '../src/components/ControlPanel';
 import * as api from '../src/api';
 import { mountUi, type MountedUi } from './ui-test-support';
@@ -110,6 +111,45 @@ const runId = () => new URL(String(transport.mock.calls.find(([url]) => String(u
 const status = async (id: string) => (await http(`/sim/status?runId=${id}`)).json();
 
 describe('simulation UI with real server recovery', () => {
+  it.each([false, true])('recovers from exhausted cancellation capacity without admitting delayed starts (expiring reservations: %s)', async expiring => {
+    const deadline = Date.now() + SIMULATION_START_WINDOW_MS;
+    const reserved = Array.from({ length: 100 }, (_, i) => expiring ? `sim-v1-${deadline}-reserved-${i}` : `reserved-${i}`);
+    for (const id of reserved) expect((await (await http(`/sim/stop?runId=${id}`, { method: 'POST' })).json()).stopped).toBe(true);
+    const original = transport.getMockImplementation()!;
+    // This request never reaches the handler. Recovery and all Stop attempts
+    // still go through the real server, including its full reservation table.
+    transport.mockImplementation((input, init) => String(input).startsWith('/sim/start')
+      ? Promise.reject(new Error('request lost before server arrival')) : original(input, init));
+    await ui.click('Play Simulation');
+    const id = runId();
+    expect(store.state.activeSimulationId).toBe(id);
+    expect(ui.button('Stop Simulation').disabled).toBe(false);
+    expect(ui.container.querySelector('[role="alert"]')?.textContent).toContain('retry automatically');
+    await ui.click('Stop Simulation');
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    await ui.click('Stop Simulation');
+    expect(store.state.activeSimulationId).toBe(id);
+    expect(ui.field('Total Ops').disabled).toBe(true);
+    expect(transport.mock.calls.filter(([url]) => String(url).startsWith('/sim/stop'))).toHaveLength(3);
+    // The server's admission window closes; the scheduled retry confirms
+    // cancellation without evicting an unexpired or legacy reservation.
+    await act(async () => vi.advanceTimersByTimeAsync(SIMULATION_START_WINDOW_MS));
+    expect(store.state.activeSimulationId).toBeNull();
+    expect(ui.button('Play Simulation').disabled).toBe(false);
+    expect(ui.field('Total Ops').disabled).toBe(false);
+    expect(transport.mock.calls.filter(([url]) => String(url).startsWith('/sim/stop'))).toHaveLength(4);
+    const config = JSON.stringify({ opCount: 2, opsPerSec: 1, enabledOps: ['query'] });
+    for (const late of [id, ...reserved]) {
+      expect((await http(`/sim/start?runId=${late}`, { method: 'POST', body: config })).status).toBe(409);
+    }
+    expect(transport.mock.calls.filter(([url]) => String(url).endsWith('/api/query'))).toHaveLength(0);
+    transport.mockImplementation(original);
+    await ui.click('Play Simulation'); await accepted.promise;
+    await act(async () => vi.advanceTimersByTimeAsync(2500));
+    expect(ui.container.textContent).toContain('Simulation complete: 2 succeeded, 0 failed');
+    expect(ui.button('Play Simulation').disabled).toBe(false);
+  });
+
   it.each([{ retry: false, proxy: false }, { retry: true, proxy: false }, { retry: false, proxy: true }])('cancels ambiguous startup before relinquishing control when recovery overtakes admission (%j)', async ({ retry, proxy }) => {
     arrivalGate = deferred();
     const original = transport.getMockImplementation()!;

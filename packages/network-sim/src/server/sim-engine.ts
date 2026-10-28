@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { SimulationRuns, type SimulationRun } from './simulation-runs.js';
-import { SIMULATION_OPERATIONS, isSimOp, type SimOp, type SimulationSettings, type OpEvent, type SimEvent } from '../simulation-protocol.js';
+import { SIMULATION_OPERATIONS, isSimOp, type SimOp, type SimulationSettings, type OpEvent } from '../simulation-protocol.js';
 
 const DEVNET_NUM_NODES = 6;
 const DEVNET_API_PORT_BASE = 9201;
@@ -423,7 +423,6 @@ async function ensureContextGraph(nodes: NodeInfo[], contextGraphId: string, sig
 async function runSimulation(config: SimConfig, run: SimulationRun) {
   const { stats } = run;
   const signal = run.abort.signal;
-  const broadcast = (event: Exclude<SimEvent, { type: 'error' }>) => runs.emit(run, event);
   const nodes = getNodes();
 
   await loadNodeTokens(nodes);
@@ -438,12 +437,12 @@ async function runSimulation(config: SimConfig, run: SimulationRun) {
   }
 
   if (signal.aborted) return;
-  broadcast({ type: 'status', ...runs.status(run) });
+  runs.publishStatus(run);
 
   // Periodic status broadcaster
   const statusInterval = setInterval(() => {
     if (signal.aborted) return;
-    broadcast({ type: 'status', ...runs.status(run) });
+    runs.publishStatus(run);
   }, 500);
 
   const executors: Record<SimOp, (node: NodeInfo) => Promise<OpEvent>> = {

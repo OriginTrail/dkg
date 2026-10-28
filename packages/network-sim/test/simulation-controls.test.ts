@@ -106,7 +106,7 @@ describe('simulation form and streamed results', () => {
     expect(store.dispatch).toHaveBeenLastCalledWith({ type: 'COMPLETE_SIMULATION', id: runId() });
     expect(ui.button('Play Simulation').disabled).toBe(false);
   });
-  it('ignores a late stop response and stream callbacks from a previous run', async () => {
+  it.each([true, false])('ignores a late stop response and stream callbacks from a previous run (stopped: %s)', async stopped => {
     await ui.click('Play Simulation');
     const oldSource = source();
     let confirm!: (response: Response) => void;
@@ -115,11 +115,15 @@ describe('simulation form and streamed results', () => {
     oldSource.emit({ type: 'done', completed: 500, errors: 0, byOp: queryCounts(500, 0) });
     await ui.click('Play Simulation');
     act(() => source().onerror?.());
-    await act(async () => confirm(Response.json({ stopped: true, runId: oldSource.runId })));
+    await act(async () => confirm(Response.json({ stopped, runId: oldSource.runId, retryAfterMs: 1000 })));
     expect(ui.button('Stop Simulation').disabled).toBe(false);
     expect(ui.container.querySelector('[role="status"]')?.textContent).toContain('Connection lost');
     expect(source().close).not.toHaveBeenCalled();
     expect(store.dispatch).toHaveBeenLastCalledWith(expect.objectContaining({ type: 'START_SIMULATION' }));
+    expect(ui.container.querySelector('[role="alert"]')).toBeNull();
+    const requests = fetchMock.mock.calls.length;
+    await act(async () => vi.advanceTimersByTimeAsync(1000));
+    expect(fetchMock).toHaveBeenCalledTimes(requests);
     act(() => oldSource.onopen?.());
     expect(ui.container.querySelector('[role="status"]')?.textContent).toContain('Connection lost');
     act(() => source().onopen?.());

@@ -52,7 +52,7 @@ export type SimEvent = OpEvent | StatusEvent | DoneEvent | ErrorEvent | { type: 
 export type ScopedSimEvent = SimEvent & { runId: string };
 export type ScopedDoneEvent = DoneEvent & { runId: string };
 export type RunStatus = Omit<StatusEvent, 'type'> & { runId: string; running: boolean };
-export interface CancellationResult { stopped: boolean; runId?: string; snapshot?: ScopedDoneEvent; reason?: string }
+export interface CancellationResult { stopped: boolean; runId?: string; snapshot?: ScopedDoneEvent; reason?: string; retryAfterMs?: number }
 
 export interface OpStats {
   ok: number;
@@ -68,3 +68,13 @@ export interface OpStats {
 
 /** Normalize the legacy error envelope before consumers account for diagnostics. */
 export function isCountedDiagnostic(event: ErrorEvent): boolean { return event.counted !== false; }
+
+/** New UI starts have a bounded admission window, independent of cancellation capacity.
+ * The deadline is part of the ID so an arbitrarily delayed request cannot renew it.
+ * Legacy IDs keep their existing reservation semantics.
+ */
+export const SIMULATION_START_WINDOW_MS = 30_000;
+export function simulationStartExpiresAt(id: string): number | undefined {
+  const match = /^sim-v1-(\d{13})-[a-zA-Z0-9_-]+$/.exec(id);
+  return match ? Number(match[1]) : undefined;
+}

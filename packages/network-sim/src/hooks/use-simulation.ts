@@ -1,4 +1,4 @@
-import { isCountedDiagnostic } from '../simulation-protocol';
+import { isCountedDiagnostic, SIMULATION_START_WINDOW_MS } from '../simulation-protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
 import type { CancellationResult, DoneEvent, ScopedSimEvent, SimulationSettings } from '../simulation-protocol';
@@ -12,6 +12,7 @@ interface ClientRun {
   startAbort: AbortController;
   stream: EventSource | null;
   cancelling?: boolean;
+  cancellationRetry?: ReturnType<typeof setTimeout>;
 }
 
 export function useSimulation(onComplete: () => void) {
@@ -31,6 +32,7 @@ export function useSimulation(onComplete: () => void) {
   const finish = useCallback((run: ClientRun, result: DoneEvent | string) => {
     if (active.current !== run) return;
     active.current = null;
+    clearTimeout(run.cancellationRetry);
     run.stream?.close();
     run.startAbort.abort();
     setDisconnected(false); setFailure(typeof result === 'string' ? result : null);
@@ -43,6 +45,7 @@ export function useSimulation(onComplete: () => void) {
   const cancel = useCallback(async (run: ClientRun) => {
     if (active.current !== run || run.cancelling) return;
     run.cancelling = true;
+    clearTimeout(run.cancellationRetry);
     const controller = new AbortController();
     let timeout: ReturnType<typeof setTimeout>;
     try {
@@ -55,6 +58,15 @@ export function useSimulation(onComplete: () => void) {
           return response.json() as Promise<CancellationResult>;
         }), deadline,
       ]);
+      if (active.current !== run) return;
+      if (!result.stopped && result.runId === run.id && Number.isFinite(result.retryAfterMs) && result.retryAfterMs! > 0) {
+        // The server will reject this ID after its start window. Keep control
+        // until it confirms cancellation; manual Stop retries remain available.
+        const retryAfter = Math.min(result.retryAfterMs!, 60_000);
+        setFailure('Waiting for the start window to close. Cancellation will retry automatically.');
+        run.cancellationRetry = setTimeout(() => { void cancel(run); }, retryAfter);
+        return;
+      }
       if (!result.stopped || result.runId !== run.id || (result.snapshot && result.snapshot.runId !== run.id)) throw new Error('Cancellation was not confirmed');
       finish(run, result.snapshot ?? 'Cancellation confirmed. Final results are unavailable.');
     } catch {
@@ -68,7 +80,7 @@ export function useSimulation(onComplete: () => void) {
 
   const start = useCallback(async (options: SimulationOptions) => {
     if (active.current) return;
-    const id = `sim-${crypto.randomUUID()}`;
+    const id = `sim-v1-${Date.now() + SIMULATION_START_WINDOW_MS}-${crypto.randomUUID()}`;
     const { name, contextGraphId, ...config } = options;
     const startAbort = new AbortController();
     const run: ClientRun = {
@@ -134,6 +146,7 @@ export function useSimulation(onComplete: () => void) {
   useEffect(() => () => {
     const run = active.current;
     active.current = null;
+    clearTimeout(run?.cancellationRetry);
     run?.stream?.close();
     run?.startAbort.abort();
   }, []);

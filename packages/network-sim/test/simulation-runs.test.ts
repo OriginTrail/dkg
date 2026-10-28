@@ -1,5 +1,5 @@
 import type { ServerResponse } from 'node:http';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SimulationRuns } from '../src/server/simulation-runs';
 import type { ScopedSimEvent } from '../src/simulation-protocol';
 
@@ -29,5 +29,30 @@ describe('run registry failure finalization', () => {
     expect(events).toHaveLength(3);
     expect(registry.active?.id).toBe('successor');
     expect(registry.active?.stats).toMatchObject({ completed: 0, errors: 0 });
+  });
+});
+
+describe('expiring start admission', () => {
+  afterEach(() => vi.useRealTimers());
+  it('never reopens an expired start window after the server clock rolls back', () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01'));
+    const registry = new SimulationRuns();
+    const now = Date.now();
+    const id = `sim-v1-${now + 30_000}-expired`;
+    vi.setSystemTime(now + 30_000);
+    expect(registry.cancel(id)).toEqual({ stopped: true, runId: id });
+    vi.setSystemTime(now);
+    expect(registry.admit(id, 1).accepted).toBe(false);
+  });
+  it('still cancels an accepted run after its admission window closes', () => {
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-01-01'));
+    const id = `sim-v1-${Date.now() + 30_000}-accepted`;
+    const registry = new SimulationRuns();
+    const admitted = registry.admit(id, 1);
+    expect(admitted.accepted).toBe(true);
+    vi.advanceTimersByTime(30_000);
+    expect(registry.cancel(id)).toMatchObject({ stopped: true, runId: id, snapshot: { type: 'done', completed: 0 } });
+    expect(registry.active).toBeNull();
+    if (admitted.accepted) expect(admitted.run.abort.signal.aborted).toBe(true);
   });
 });

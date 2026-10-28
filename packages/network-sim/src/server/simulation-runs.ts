@@ -1,7 +1,8 @@
+import { simulationStartExpiresAt } from '../simulation-protocol.js';
 import type { ServerResponse } from 'node:http';
 import { accumulateMetric, opStatsFromMetrics, type PerTypeMetrics } from '../simulation-metrics.js';
 
-import type { CancellationResult, DoneEvent, OpEvent, OpStats, SimOp, RunStatus, SimEvent, ScopedSimEvent } from '../simulation-protocol.js';
+import type { CancellationResult, DoneEvent, OpEvent, OpStats, SimOp, RunStatus, ScopedSimEvent } from '../simulation-protocol.js';
 
 export interface RunStats {
   total: number;
@@ -34,12 +35,26 @@ export class SimulationRuns {
   private runs = new Map<string, SimulationRun>();
   private cancelledStarts = new Set<string>();
   private processedCancellations = new Set<string>();
+  private admissionClock = 0;
   private clients = new Map<ServerResponse, string | undefined>();
+
+  private admissionTime(): number {
+    // Once an admission window has closed it cannot reopen on a clock rollback.
+    this.admissionClock = Math.max(this.admissionClock, Date.now());
+    for (const id of this.cancelledStarts) {
+      const expiresAt = simulationStartExpiresAt(id);
+      if (expiresAt !== undefined && expiresAt <= this.admissionClock) this.cancelledStarts.delete(id);
+    }
+    return this.admissionClock;
+  }
 
   get(id: string) { return this.runs.get(id); }
 
   admit(id: string, total: number): { accepted: true; run: SimulationRun } | { accepted: false; error: string } {
-    // Pending reservations are never evicted. Once their start has arrived,
+    const expiresAt = simulationStartExpiresAt(id);
+    const now = this.admissionTime();
+    if (expiresAt !== undefined && expiresAt <= now) return { accepted: false, error: 'Simulation start window expired' };
+    // Unexpired pending reservations are never evicted. Once their start has arrived,
     // retain only a bounded replay tombstone and release the pending capacity.
     if (this.cancelledStarts.delete(id)) {
       this.processedCancellations.add(id);
@@ -94,9 +109,13 @@ export class SimulationRuns {
     if (!run.terminal) this.publish(run.id, { type: 'error', runId: run.id, message, counted: false });
   }
 
-  emit(run: SimulationRun, event: Exclude<SimEvent, { type: 'error' }>) {
+  publishStatus(run: SimulationRun) {
+    if (!run.terminal) this.publish(run.id, { type: 'status', ...this.status(run) });
+  }
+
+  private emit(run: SimulationRun, event: OpEvent) {
     if (run.terminal) return;
-    if (event.type === 'op' && !event.success && run.errorLogCount < 20) {
+    if (!event.success && run.errorLogCount < 20) {
       run.errorLogCount++;
       console.error(`[sim] error #${run.errorLogCount}: ${event.opType} node${event.nodeId} — ${event.detail}`);
     }
@@ -119,13 +138,18 @@ export class SimulationRuns {
   }
 
   cancel(id?: string): CancellationResult {
+    const now = this.admissionTime();
     const run = id ? this.get(id) : this.active;
     if (!run) {
       if (!id) return { stopped: false, reason: 'No simulation running' };
+      const expiresAt = simulationStartExpiresAt(id);
+      // This ID can no longer be admitted, even without a stored reservation.
+      if (expiresAt !== undefined && expiresAt <= now) return { stopped: true, runId: id };
       if (this.processedCancellations.has(id)) return { stopped: true, runId: id };
       // A stop may arrive before the corresponding start body has been read.
       if (!this.cancelledStarts.has(id) && this.cancelledStarts.size >= 100) {
-        return { stopped: false, runId: id, reason: 'Pending cancellation limit reached; retry after start is accepted' };
+        return { stopped: false, runId: id, reason: 'Pending cancellation limit reached; retry after start is accepted or expires',
+          ...(expiresAt === undefined ? {} : { retryAfterMs: expiresAt - now }) };
       }
       this.cancelledStarts.add(id);
       return { stopped: true, runId: id };
