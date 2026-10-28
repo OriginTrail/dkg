@@ -50,7 +50,7 @@ class ControlledStream extends EventTarget {
 function fixture() {
   vi.useFakeTimers();
   const stream = new ControlledStream();
-  const dialProtocol = vi.fn(async () => stream as unknown as Stream);
+  const dialProtocol = vi.fn(async (_peer: string, _protocol: string) => stream as unknown as Stream);
   const node = { stopSignal: new AbortController().signal,
     libp2p: { getConnections: () => [], peerStore: { get: async () => ({ addresses: [] }) } },
   } as unknown as DKGNode;
@@ -105,7 +105,7 @@ describe('bulk graph read-idle and original total deadlines', () => {
     expect(stream.returned).toHaveBeenCalledOnce();
   });
 
-  it.each(protocols)('%s keeps an exchange active beyond 120 seconds while frames arrive, then closes and disposes it', async (_name, _protocol, exchange) => {
+  it.each(protocols)('%s keeps an exchange active beyond 120 seconds while frames arrive, then closes and disposes it', async (_name, protocol, exchange) => {
     const { stream, router, dialProtocol } = fixture();
     const result = exchange(router, PEER, new Uint8Array([1]), bulkGraphTransportOptions(300_000), async session => {
       const received = [];
@@ -119,6 +119,7 @@ describe('bulk graph read-idle and original total deadlines', () => {
     }
     await expect(result).resolves.toEqual([frame, frame, frame]);
     expect(dialProtocol).toHaveBeenCalledOnce();
+    expect(dialProtocol.mock.calls[0]?.[1]).toBe(protocol);
     expect(stream.send).toHaveBeenCalledOnce();
     expect(stream.close).toHaveBeenCalledOnce();
     expect(stream.returned).toHaveBeenCalledOnce();

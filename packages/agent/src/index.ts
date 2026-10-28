@@ -2,6 +2,7 @@ export type { ContextGraphPartitionRead, ContextGraphNamedGraphStats } from '@or
 export type { ContextGraphPartitionInventoryOptions } from './internal/context-graph-partition-query.js';
 export { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogTransactionEvidenceV1, type ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
 export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSourceOptions, PublicCheckpointSourceOptions, PublicCheckpointPreparationOptions } from './public-snapshot-options.js';
 export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
 export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';

@@ -13,7 +13,7 @@ import type { PreparedSnapshotCheckpoint, VerifiedNativeSnapshotCheckpoint } fro
 import { nativeCheckpointShaFile } from './snapshot-checkpoint-files.js';
 import { CHECKPOINT_PROFILE as PROFILE } from './snapshot-checkpoint-profile.js';
 import { checkpointLifetime } from './snapshot-checkpoint-lifetime.js';
-import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
+import { normalizePublicSnapshotSyncOptions, type PublicCheckpointSourceOptions } from './public-snapshot-options.js';
 import { writeCheckpointFile, syncCheckpointDirectory } from './snapshot-checkpoint-files.js';
 
 interface FreshCheckpointEdgeOptions {
@@ -21,7 +21,7 @@ interface FreshCheckpointEdgeOptions {
   prepared: PreparedSnapshotCheckpoint;
   native: VerifiedNativeSnapshotCheckpoint;
   runtime: { java: string; jar: string; jarSha256: string };
-  sync: PublicSnapshotSyncOptions;
+  sync: PublicCheckpointSourceOptions;
   signal: AbortSignal;
 }
 

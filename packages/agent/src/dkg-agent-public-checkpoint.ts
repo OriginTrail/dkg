@@ -4,7 +4,7 @@ import { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import type { DKGAgent } from './dkg-agent.js';
-import type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
+import type { PublicCheckpointPreparationOptions } from './public-snapshot-options.js';
 import type { PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';
 import { preparePublicSnapshotCheckpoint, assertCheckpointInventoryUnchanged } from './public-snapshot-checkpoint.js';
 
@@ -18,7 +18,7 @@ export class PublicCheckpointMethods extends PublicSnapshotSessionMethods {
     if (activation) (await activation).assertCurrent();
     signal.throwIfAborted();
   }
-  async preparePublicGraphCheckpoint(this: DKGAgent, options: PublicSnapshotSyncOptions, nativeBuild = false): Promise<PublicCheckpointPreparationResult> {
+  async preparePublicGraphCheckpoint(this: DKGAgent, options: PublicCheckpointPreparationOptions, nativeBuild = false): Promise<PublicCheckpointPreparationResult> {
     const runtime = nativeBuild ? { java: process.env.DKG_PUBLIC_CHECKPOINT_JAVA ?? '',
       jar: process.env.DKG_PUBLIC_CHECKPOINT_JAR ?? '', jarSha256: process.env.DKG_PUBLIC_CHECKPOINT_JAR_SHA256 ?? '' } : undefined;
     if (runtime && (!runtime.java || !runtime.jar || !/^[a-f0-9]{64}$/.test(runtime.jarSha256)))

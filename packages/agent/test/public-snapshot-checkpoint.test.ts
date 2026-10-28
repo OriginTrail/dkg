@@ -13,11 +13,14 @@ describe('isolated public checkpoint', () => {
   it('negotiates the new protocol, verifies every asset, persists trust, and never writes live coverage', async () => {
     const f = await checkpointFixture({ payloadBytes: [14, 4000, 14] });
     const probe = vi.spyOn(f.router, 'probeProtocol');
+    const transfer = vi.spyOn(f.router, 'withDuplexStream');
     const result = await f.run();
     expect(result).toMatchObject({ committed: 0, current: false });
     expect(result.manifest.assets.map(a => a.ual)).toEqual(f.uals);
     expect(result.manifest.assets.every(a => a.publicQuads > 0)).toBe(true);
     expect(probe.mock.calls[0]?.[1]).toBe(PUBLIC_CHECKPOINT_PROTOCOL);
+    expect(transfer).toHaveBeenCalled();
+    expect(transfer.mock.calls.every(([, protocol]) => protocol === PUBLIC_CHECKPOINT_PROTOCOL)).toBe(true);
     expect(await readFile(join(result.directory, 'load/trust.nq'), 'utf8')).toContain('chainEvidenceMode');
     expect(JSON.parse(await readFile(join(result.directory, 'manifest.json'), 'utf8')).state).toBe('verified-unpublished');
   });

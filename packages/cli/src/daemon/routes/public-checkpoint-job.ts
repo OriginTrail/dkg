@@ -23,7 +23,8 @@ export async function handlePublicCheckpointJob({ req, res, agent }: RequestCont
   } catch (error) {
     jsonResponse(res, isPayloadTooLargeError(error) ? 413 : 400, { error: 'Invalid checkpoint request' }); return;
   }
-  const job = jobs.start(agent, {}, () => agent.preparePublicGraphCheckpoint(input, native));
+  const { transport: _transport, ...preparation } = input;
+  const job = jobs.start(agent, {}, () => agent.preparePublicGraphCheckpoint(preparation, native));
   if (!job) { jsonResponse(res, 409, { error: 'Checkpoint preparation already running' }); return; }
   jsonResponse(res, 202, job);
 }

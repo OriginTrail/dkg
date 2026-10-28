@@ -4,7 +4,7 @@ import { CheckpointInventory } from './snapshot-checkpoint-inventory.js';
 import { constants } from 'node:fs';
 import { lstat, open, readFile, statfs } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
-import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
+import { normalizePublicSnapshotSyncOptions, type PublicCheckpointSourceOptions } from './public-snapshot-options.js';
 import { nativeCheckpointShaFile } from './snapshot-checkpoint-files.js';
 import { CHECKPOINT_PROFILE as PROFILE } from './snapshot-checkpoint-profile.js';
 import { checkpointLifetime } from './snapshot-checkpoint-lifetime.js';
@@ -15,7 +15,7 @@ import { startCheckpointEdgeSession, type CheckpointEdgeConfig } from './snapsho
 export async function resumePublicCheckpointEdge(options: {
   config: CheckpointEdgeConfig;
   runtime: { java: string; jarSha256: string };
-  sync: PublicSnapshotSyncOptions;
+  sync: PublicCheckpointSourceOptions;
   signal: AbortSignal;
 }) {
   const { config, runtime } = options;
