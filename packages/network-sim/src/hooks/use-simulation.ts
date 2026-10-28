@@ -1,7 +1,8 @@
+import { requestSimulationCancellation } from '../simulation-cancellation';
 import { isCountedDiagnostic, SIMULATION_START_WINDOW_MS } from '../simulation-protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useStore } from '../store';
-import type { CancellationResult, DoneEvent, ScopedSimEvent, SimulationSettings } from '../simulation-protocol';
+import type { DoneEvent, ScopedSimEvent, SimulationSettings } from '../simulation-protocol';
 
 interface SimulationOptions extends SimulationSettings {
   name: string; contextGraphId: string;
@@ -53,22 +54,19 @@ export function useSimulation(onComplete: () => void) {
         timeout = setTimeout(() => { controller.abort(); reject(new Error('Cancellation timed out')); }, 10_000);
       });
       const result = await Promise.race([
-        fetch(`/sim/stop?runId=${run.id}`, { method: 'POST', signal: controller.signal }).then(async response => {
-          if (!response.ok) throw new Error('Cancellation failed');
-          return response.json() as Promise<CancellationResult>;
-        }), deadline,
+        requestSimulationCancellation(run.id, controller.signal), deadline,
       ]);
       if (active.current !== run) return;
-      if (!result.stopped && result.runId === run.id && Number.isFinite(result.retryAfterMs) && result.retryAfterMs! > 0) {
-        // The server will reject this ID after its start window. Keep control
-        // until it confirms cancellation; manual Stop retries remain available.
-        const retryAfter = Math.min(result.retryAfterMs!, 60_000);
-        setFailure('Waiting for the start window to close. Cancellation will retry automatically.');
-        run.cancellationRetry = setTimeout(() => { void cancel(run); }, retryAfter);
-        return;
+      switch (result.kind) {
+        case 'retry':
+          // Keep control until the server confirms cancellation; Stop stays available.
+          setFailure('Waiting for the start window to close. Cancellation will retry automatically.');
+          run.cancellationRetry = setTimeout(() => { void cancel(run); }, Math.min(result.retryAfterMs, 60_000));
+          break;
+        case 'completed': finish(run, result.snapshot); break;
+        case 'cancelled': finish(run, 'Cancellation confirmed. Final results are unavailable.'); break;
+        case 'unconfirmed': throw new Error(result.reason);
       }
-      if (!result.stopped || result.runId !== run.id || (result.snapshot && result.snapshot.runId !== run.id)) throw new Error('Cancellation was not confirmed');
-      finish(run, result.snapshot ?? 'Cancellation confirmed. Final results are unavailable.');
     } catch {
       if (active.current === run) setFailure('Unable to confirm cancellation. Use Stop Simulation to retry.');
     } finally { clearTimeout(timeout!); run.cancelling = false; }

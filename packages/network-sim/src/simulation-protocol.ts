@@ -52,7 +52,22 @@ export type SimEvent = OpEvent | StatusEvent | DoneEvent | ErrorEvent | { type: 
 export type ScopedSimEvent = SimEvent & { runId: string };
 export type ScopedDoneEvent = DoneEvent & { runId: string };
 export type RunStatus = Omit<StatusEvent, 'type'> & { runId: string; running: boolean };
-export interface CancellationResult { stopped: boolean; runId?: string; snapshot?: ScopedDoneEvent; reason?: string; retryAfterMs?: number }
+export type LegacyCancellationResult = ({ stopped: true; reason?: never } | { stopped: false; reason: string }) & {
+  runId?: never; snapshot?: never; retryAfterMs?: never;
+};
+export type ScopedCancellationResult =
+  | { stopped: true; runId: string; snapshot: ScopedDoneEvent; retryAfterMs?: never; reason?: never }
+  | { stopped: true; runId: string; snapshot?: never; retryAfterMs?: never; reason?: never }
+  | { stopped: false; runId: string; reason: string; retryAfterMs: number; snapshot?: never }
+  | { stopped: false; runId: string; reason: string; retryAfterMs?: never; snapshot?: never };
+export type CancellationResult = LegacyCancellationResult | ScopedCancellationResult;
+
+/** Validated scoped outcomes consumed by the session owner. */
+export type ScopedCancellationOutcome =
+  | { kind: 'completed'; runId: string; snapshot: ScopedDoneEvent }
+  | { kind: 'cancelled'; runId: string }
+  | { kind: 'retry'; runId: string; retryAfterMs: number; reason: string }
+  | { kind: 'unconfirmed'; runId: string; reason: string };
 
 export interface OpStats {
   ok: number;

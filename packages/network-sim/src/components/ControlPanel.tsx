@@ -2,7 +2,7 @@ import { SIMULATION_OPERATIONS, type SimOp } from '../simulation-protocol';
 import { useState, useCallback, useEffect } from 'react';
 import { useStore } from '../store';
 import * as api from '../api';
-import { useSimulation } from '../hooks/use-simulation';
+import { useSimulationController } from '../hooks/use-simulation-controller';
 import { OP_COLORS, type OperationType } from '../types';
 
 type Tab = 'setup' | 'simulate' | 'sharedMemory' | 'publish' | 'query' | 'chat' | 'access' | 'stake' | 'fairswap' | 'conviction';
@@ -24,7 +24,7 @@ const SIM_TAB: { id: Tab; label: string; op: OperationType } = { id: 'simulate',
 export function ControlPanel() {
   const { state, dispatch } = useStore();
   const [activeTab, setActiveTab] = useState<Tab>('publish');
-  const [simulationOpened, setSimulationOpened] = useState(false);
+  const simulation = useSimulationController();
 
   return (
     <div className="control-panel">
@@ -63,7 +63,7 @@ export function ControlPanel() {
         <button
           className={`tab-btn tab-btn-sim ${activeTab === SIM_TAB.id ? 'active' : ''}`}
           style={activeTab === SIM_TAB.id ? { borderColor: '#f59e0b' } : undefined}
-          onClick={() => { setActiveTab(SIM_TAB.id); setSimulationOpened(true); }}
+          onClick={() => setActiveTab(SIM_TAB.id)}
         >
           <span className="tab-dot" style={{ background: '#f59e0b' }} />
           {SIM_TAB.label}
@@ -72,7 +72,7 @@ export function ControlPanel() {
 
       <div className="tab-content">
         {activeTab === 'setup' && <SetupTab />}
-        <div hidden={activeTab !== 'simulate'}>{simulationOpened && <SimulateTab />}</div>
+        {activeTab === 'simulate' && <SimulateTab controller={simulation} />}
         {activeTab === 'sharedMemory' && <SharedMemoryTab />}
         {activeTab === 'publish' && <PublishTab />}
         {activeTab === 'query' && <QueryTab />}
@@ -246,35 +246,11 @@ const SIM_OP_LABELS: Record<SimOp, string> = {
 };
 const SIM_OPS = SIMULATION_OPERATIONS.map(id => ({ id, label: SIM_OP_LABELS[id] }));
 
-let simCounter = 0;
-
-function SimulateTab() {
-  const [simName, setSimName] = useState(() => `Simulation #${++simCounter}`);
-  const [opCount, setOpCount] = useState(500);
-  const [opsPerSec, setOpsPerSec] = useState(10);
-  const [concurrency, setConcurrency] = useState(10);
-  const [kasPerPublish, setKasPerPublish] = useState(1);
-  const [contextGraphId, setContextGraphId] = useState('devnet-test');
-  const [enabledOps, setEnabledOps] = useState<Set<SimOp>>(new Set(SIMULATION_OPERATIONS));
-  const { running, disconnected, failure, stats, start, stop: stopSimulation } = useSimulation(() => setSimName(`Simulation #${++simCounter}`));
+function SimulateTab({ controller }: { controller: ReturnType<typeof useSimulationController> }) {
+  const { simName, setSimName, opCount, setOpCount, opsPerSec, setOpsPerSec, concurrency, setConcurrency,
+    kasPerPublish, setKasPerPublish, contextGraphId, setContextGraphId, enabledOps, toggleOp,
+    running, disconnected, failure, stats, runSimulation, stopSimulation } = controller;
   const contextGraphIds = useContextGraphIds();
-
-  const toggleOp = useCallback((op: SimOp) => {
-    setEnabledOps((prev) => {
-      const next = new Set(prev);
-      if (next.has(op)) {
-        if (next.size > 1) next.delete(op);
-      } else {
-        next.add(op);
-      }
-      return next;
-    });
-  }, []);
-
-  const runSimulation = () => start({
-    name: simName || `Simulation #${simCounter}`,
-    opCount, opsPerSec, concurrency, kasPerPublish, contextGraphId, enabledOps: Array.from(enabledOps),
-  });
 
   const [, forceUpdate] = useState(0);
   useEffect(() => {

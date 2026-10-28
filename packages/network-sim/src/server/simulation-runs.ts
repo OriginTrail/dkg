@@ -2,7 +2,7 @@ import { simulationStartExpiresAt } from '../simulation-protocol.js';
 import type { ServerResponse } from 'node:http';
 import { accumulateMetric, opStatsFromMetrics, type PerTypeMetrics } from '../simulation-metrics.js';
 
-import type { CancellationResult, DoneEvent, OpEvent, OpStats, SimOp, RunStatus, ScopedSimEvent } from '../simulation-protocol.js';
+import type { CancellationResult, LegacyCancellationResult, ScopedCancellationResult, DoneEvent, OpEvent, OpStats, SimOp, RunStatus, ScopedSimEvent } from '../simulation-protocol.js';
 
 export interface RunStats {
   total: number;
@@ -137,6 +137,9 @@ export class SimulationRuns {
     return run.terminal;
   }
 
+  cancel(id: string): ScopedCancellationResult;
+  cancel(id?: undefined): LegacyCancellationResult;
+  cancel(id: string | undefined): CancellationResult;
   cancel(id?: string): CancellationResult {
     const now = this.admissionTime();
     const run = id ? this.get(id) : this.active;
@@ -148,8 +151,10 @@ export class SimulationRuns {
       if (this.processedCancellations.has(id)) return { stopped: true, runId: id };
       // A stop may arrive before the corresponding start body has been read.
       if (!this.cancelledStarts.has(id) && this.cancelledStarts.size >= 100) {
-        return { stopped: false, runId: id, reason: 'Pending cancellation limit reached; retry after start is accepted or expires',
-          ...(expiresAt === undefined ? {} : { retryAfterMs: expiresAt - now }) };
+        const reason = 'Pending cancellation limit reached; retry after start is accepted or expires';
+        return expiresAt === undefined
+          ? { stopped: false, runId: id, reason }
+          : { stopped: false, runId: id, reason, retryAfterMs: expiresAt - now };
       }
       this.cancelledStarts.add(id);
       return { stopped: true, runId: id };

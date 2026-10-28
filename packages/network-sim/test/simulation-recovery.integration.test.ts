@@ -250,6 +250,8 @@ describe('simulation UI with real server recovery', () => {
     await ui.click('Query', ui.container.querySelector('.tab-bar')!);
     expect(store.state.activeSimulationId).toBe(id);
     expect(LocalEventSource.instances).toHaveLength(1);
+    expect([...ui.container.querySelectorAll('label')].some(label => label.textContent === 'Total Ops')).toBe(false);
+    expect(ui.container.querySelector('[hidden]')).toBeNull();
     await ui.click('Simulate');
     expect(ui.field('Total Ops').value).toBe('2');
     expect(ui.container.textContent).toContain('1/2');
