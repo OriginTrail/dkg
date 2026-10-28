@@ -1199,6 +1199,13 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  /**
+   * The rest of a finalized twin's cleanup once its shared-memory copy is retired: the asset's row
+   * in its author's SWM inventory, and its legacy SWM boundary marker. Idempotent: the marker is
+   * retired only while one is outstanding (a process-local read decides, with no store I/O), and
+   * the row is removed only while the author's inventory still holds it. A caller that proves the
+   * twin retired again asks again, and what an earlier call left behind goes then.
+   */
   async retireLegacySwmAfterVerifiedVmTwin(
     this: DKGAgent,
     input: Readonly<{
@@ -9025,6 +9032,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
 
+      this.contextGraphSubscriptionActivations.beginRehydration(rows, {
+        rehydrationEnabled: this.config.contextGraphSubscriptionRehydrationEnabled,
+        systemExcluded: persistedRows.length - nonSystemRows.length,
+        activationCap: cap,
+      });
+
       // Restore exact saved identity before discovery, independently of every
       // activation gate (disabled, capped or authority-denied). Inactive rows
       // cannot admit gossip, sync or RFC-64 authority; installation owns no
@@ -9039,23 +9052,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       if (!this.config.contextGraphSubscriptionRehydrationEnabled) {
         for (const row of rows) this.transitionContextGraphSubscriptionDormancy(row.id, 'rehydrationDisabled');
-        this.contextGraphSubscriptionRehydrationAccountedIds.clear();
-        for (const row of rows) {
-          this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
-        }
-        const completedAt = Date.now();
-        this.contextGraphSubscriptionRehydrationStatus = {
-          rehydrationEnabled: false,
-          persistedTotal: rows.length,
-          systemExcluded: persistedRows.length - nonSystemRows.length,
-          hostedActivated: 0,
-          hostedActivatedIds: [],
-          activated: 0,
-          activationCap: cap,
-          capDisabled: cap === 0,
-          completedAt,
-          updatedAt: completedAt,
-        };
+        this.contextGraphSubscriptionActivations.completeRehydration();
         if (rows.length > 0) {
           this.log.info(
             ctx,
@@ -9113,7 +9110,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       const toActivate = [...hostedRows, ...userRows];
       const dormancyById = this.contextGraphSubscriptionDormancyById;
-      const activatedRows: ContextGraphSubscriptionRecord[] = [];
       let activatedUserRows = 0;
       // #2815: every row's authority may need a chain read, and start() (with
       // the daemon API behind it) waits for this loop. Past the budget, a row
@@ -9263,7 +9259,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
           continue;
         }
-        activatedRows.push(row);
         if (!row.coreHosted) activatedUserRows += 1;
         const restorePendingMeta = restrictedApprovalBootstrap;
         const healedOnChainId = readAuthority.outcome === 'allowed'
@@ -9315,31 +9310,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
       const skipped = dormancyById.size;
-      this.contextGraphSubscriptionRehydrationAccountedIds.clear();
-      for (const row of rows) {
-        this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
-      }
-      const completedAt = Date.now();
-      this.contextGraphSubscriptionRehydrationStatus = {
-        rehydrationEnabled: true,
-        persistedTotal: rows.length,
-        systemExcluded: persistedRows.length - nonSystemRows.length,
-        hostedActivated: activatedRows.filter((r) => r.coreHosted).length,
-        hostedActivatedIds: activatedRows.filter((r) => r.coreHosted).map((r) => r.id),
-        activated: activatedRows.length,
-        activationCap: cap,
-        capDisabled: cap === 0,
-        completedAt,
-        updatedAt: completedAt,
-      };
+      const status = this.contextGraphSubscriptionActivations.completeRehydration();
       const dormancy = projectContextGraphDormancy(dormancyById);
       if (rows.length > 0) {
         this.log.info(
           ctx,
-          `Rehydrated ${activatedRows.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
+          `Rehydrated ${status.activated} of ${rows.length} non-system persisted context-graph subscription(s)` +
             (skipped > 0
               ? ` (${skipped} left dormant; ` +
-                `${activatedRows.filter((r) => r.coreHosted).length} hosted restored)`
+                `${status.hostedActivated} hosted restored)`
               : ''),
         );
       }
@@ -9377,6 +9356,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch (err) {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
+      this.contextGraphSubscriptionActivations.abandonRehydration();
       authorityBudget?.dispose();
       startupPlan.finish();
     }

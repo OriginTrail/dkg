@@ -69,6 +69,29 @@ export interface SubscriptionActivationPorts {
 export class ContextGraphSubscriptionActivations {
   constructor(private readonly ports: SubscriptionActivationPorts) {}
   private readonly pending = new Map<string, ActivationAttempt>();
+  // Startup uses the same incremental transitions as retries, but only publishes
+  // the completed report once the startup lifecycle finishes its authority pass.
+  private startupAccounting: ContextGraphSubscriptionRehydrationInternalStatus | null = null;
+  beginRehydration(rows: readonly ContextGraphSubscriptionRecord[], options: {
+    rehydrationEnabled: boolean; systemExcluded: number; activationCap: number;
+  }): void {
+    this.ports.contextGraphSubscriptionRehydrationAccountedIds.clear();
+    this.startupAccounting = { ...options, persistedTotal: 0, activated: 0,
+      hostedActivated: 0, hostedActivatedIds: [], capDisabled: options.activationCap === 0,
+      completedAt: 0, updatedAt: Date.now() };
+    this.apply(rows.map(row => ({ id: row.id, kind: 'saved', persisted: true,
+      active: false, hosted: false,
+      reason: options.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled' })));
+  }
+  completeRehydration(): ContextGraphSubscriptionRehydrationInternalStatus {
+    if (!this.startupAccounting) throw new Error('Subscription rehydration accounting was not initialized');
+    const completedAt = Date.now();
+    const status = { ...this.startupAccounting, completedAt, updatedAt: completedAt };
+    this.startupAccounting = null;
+    this.ports.setStatus(status);
+    return status;
+  }
+  abandonRehydration(): void { this.startupAccounting = null; }
   reset(rows: readonly ContextGraphSubscriptionRecord[]): void {
     for (const id of this.pending.keys()) this.cancel(id);
     this.ports.contextGraphSubscriptionDormancyById.clear();
@@ -128,8 +151,12 @@ export class ContextGraphSubscriptionActivations {
       }
       return dormancy;
     });
-    const status = ports.getStatus();
-    if (status && changes.length) ports.setStatus(accountSubscriptionChanges(status, ports.contextGraphSubscriptionRehydrationAccountedIds, changes));
+    const status = this.startupAccounting ?? ports.getStatus();
+    if (status && changes.length) {
+      const next = accountSubscriptionChanges(status, ports.contextGraphSubscriptionRehydrationAccountedIds, changes);
+      if (this.startupAccounting) this.startupAccounting = next;
+      else ports.setStatus(next);
+    }
     for (const id of cleanup) ports.clearPersistRevision(id);
     if (released) ports.slotReleased();
     return transitions;

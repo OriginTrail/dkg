@@ -110,3 +110,34 @@ it('accounts mixed active and dormant clear/deactivation as one batch before can
   agent.recordContextGraphSubscriptionClear(ids.slice(0, 2), ids.slice(2));
   expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ persistedTotal: 2, activated: 0 });
 });
+
+it('uses one accounting owner for startup commits, durable clears and later retries while publishing only completed startup status', async () => {
+  const agent = fixture();
+  agent.contextGraphSubscriptionRehydrationStatus = null;
+  const owner: ContextGraphSubscriptionActivations = agent.contextGraphSubscriptionActivations;
+  const rows = ['hosted', 'retry', 'cleared'].map(intent);
+  owner.reset(rows);
+  owner.beginRehydration(rows, { rehydrationEnabled: true, systemExcluded: 2, activationCap: 1 });
+  const activate = async (id: string, hosted: boolean) => {
+    const live = subscription(hosted);
+    await owner.activate(intent(id), {
+      install: () => { agent.subscribedContextGraphs.set(id, live); return live; },
+      remove: key => { agent.subscribedContextGraphs.delete(key); },
+      rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {}, commit: () => live,
+    }, { claimRollingSlot: true });
+  };
+  await activate('hosted', true);
+  owner.transition({ id: 'cleared', kind: 'cleared' });
+  // Startup completion, not an activation event, exposes the report.
+  expect(agent.getContextGraphSubscriptionRehydrationStatus()).toBeNull();
+  expect(agent.eventBus.emit).toHaveBeenCalledTimes(1);
+  const startup = owner.completeRehydration();
+  expect(startup).toMatchObject({ persistedTotal: 2, activated: 1, hostedActivated: 1,
+    hostedActivatedIds: ['hosted'], systemExcluded: 2, activationCap: 1 });
+  expect([...agent.contextGraphSubscriptionRehydrationAccountedIds].sort()).toEqual(['hosted', 'retry']);
+  await activate('retry', false);
+  expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ persistedTotal: 2, activated: 2,
+    hostedActivated: 1, dormant: 0, completedAt: startup.completedAt });
+  expect([...agent.contextGraphSubscriptionRehydrationSlotIds]).toEqual(['retry']);
+  expect(agent.eventBus.emit).toHaveBeenCalledTimes(2);
+});

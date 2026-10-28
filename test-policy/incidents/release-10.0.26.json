@@ -1,0 +1,127 @@
+[
+  {
+    "id": "GH-3502",
+    "classification": "older-defect",
+    "affectedVersions": [
+      "10.0.25",
+      "10.0.26"
+    ],
+    "invariant": "A member write applied before follower replay causes a fresh owner pull when that follower returns.",
+    "scope": "Real replay/notice transport and receiver dispatch; ownership and expensive data pull are controlled. Full relay/devnet RDF recovery is still a distinct qualification obligation.",
+    "detectors": [
+      {
+        "file": "packages/agent/test/rfc64-catalog-head-replay-peers.test.ts",
+        "lane": "tornado-agent",
+        "suite": "an agent answering a peer's replay request it cannot serve now",
+        "title": "GH-3502: a change before the first replay after an empty owner restart triggers the real notice receiver"
+      }
+    ],
+    "status": "detector-proven",
+    "proof": {
+      "file": "test-policy/incidents/evidence/GH-3502/receipt.json",
+      "sha256": "040018d13cb6cdb53f17537f3f9c1f2a81d699aaa86b06771ec979cc64a8b1a9"
+    },
+    "owner": "packages/agent maintainers",
+    "links": [
+      "https://github.com/OriginTrail/dkg/pull/3502"
+    ]
+  },
+  {
+    "id": "GH-3475",
+    "classification": "regression",
+    "affectedVersions": [
+      "canary after #3380, before #3475"
+    ],
+    "invariant": "A Core retries a connect-time agents-graph pull until the remote peer profile becomes visible.",
+    "scope": "Real agent connect orchestration and local store; durable pull transport is controlled. Guard mutation demonstrates the retained follow-up invariant, not a historical release replay.",
+    "detectors": [
+      {
+        "file": "packages/agent/test/peer-profile-follow-up-agent.test.ts",
+        "lane": "tornado-agent",
+        "suite": "follow-up pull of a peer's own agent profile",
+        "title": "a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile"
+      }
+    ],
+    "status": "detector-proven",
+    "proof": {
+      "file": "test-policy/incidents/evidence/GH-3475/receipt.json",
+      "sha256": "e9e3fd64bb3fc615e01349c4065eacbe0a91b6b8e8904d263c64682fb0712bdc"
+    },
+    "owner": "packages/agent maintainers",
+    "links": [
+      "https://github.com/OriginTrail/dkg/pull/3475"
+    ]
+  },
+  {
+    "id": "GH-3467",
+    "classification": "older-defect",
+    "affectedVersions": [
+      "10.0.25 (observed); first affected unknown"
+    ],
+    "invariant": "A connected edge seed author beyond a full core-peer window gets a slot in the first bounded request window.",
+    "scope": "Seed peer-selection boundary, including the ninth peer; no claim of complete distributed subscribe replay.",
+    "detectors": [
+      {
+        "file": "packages/agent/test/rfc64-unregistered-seed-fetch-agent.test.ts",
+        "lane": "tornado-agent",
+        "suite": "Rfc64SeedFetchMethods replica peer selection",
+        "title": "reserves window slots for non-core peers so a lone edge author is asked in the first window"
+      }
+    ],
+    "status": "detector-proven",
+    "proof": {
+      "file": "test-policy/incidents/evidence/GH-3467/receipt.json",
+      "sha256": "44963aed0230464f005d55a70f5fb50576664fffe6a47d3e3f3ff323e4553403"
+    },
+    "owner": "packages/agent maintainers",
+    "links": [
+      "https://github.com/OriginTrail/dkg/pull/3467"
+    ]
+  },
+  {
+    "id": "GH-3421",
+    "classification": "older-defect",
+    "affectedVersions": [
+      "10.0.25 (observed); first affected unknown"
+    ],
+    "invariant": "Public curated graph members receive each other's named sub-graph writes through the owner across relay-only links.",
+    "scope": "Composite release incident; a component detector is tracked without claiming complete historical reproduction.",
+    "detectors": [
+      {
+        "file": "packages/agent/test/swm-shares-through-relay.test.ts",
+        "lane": "tornado-agent",
+        "suite": "a peer the node may send a share to directly",
+        "title": "is one reached only through a relay that grants what a Core node grants"
+      }
+    ],
+    "status": "open",
+    "gap": "Replay the complete old/new relay-only membership journey; component checks alone do not close the multi-boundary incident.",
+    "owner": "packages/agent maintainers",
+    "links": [
+      "https://github.com/OriginTrail/dkg/pull/3421"
+    ]
+  },
+  {
+    "id": "GH-3408",
+    "classification": "unknown",
+    "affectedVersions": [
+      "10.0.25 (reported); original stall cause unknown"
+    ],
+    "invariant": "Restart preserves subscription intent and resumes graph delivery.",
+    "scope": "Restart bookkeeping has executable coverage; the original stall is not causally reproduced.",
+    "detectors": [
+      {
+        "file": "packages/agent/test/agent-restart-gossip-resubscribe.test.ts",
+        "lane": "tornado-agent",
+        "suite": "DKGAgent same-instance restart re-subscribes gossip",
+        "title": "re-subscribes a subscribed context graph and the system graphs on the fresh manager, on every restart"
+      }
+    ],
+    "status": "open",
+    "gap": "Retain and reproduce the original stall evidence before claiming a regression or incident closure.",
+    "owner": "packages/agent maintainers",
+    "links": [
+      "https://github.com/OriginTrail/dkg/pull/3408"
+    ]
+  }
+]

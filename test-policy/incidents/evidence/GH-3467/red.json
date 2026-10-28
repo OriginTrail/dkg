@@ -1,0 +1,34 @@
+{
+  "command": [
+    "pnpm",
+    "--dir",
+    "packages/agent",
+    "exec",
+    "vitest",
+    "run",
+    "--config",
+    "vitest.unit.config.ts",
+    "test/rfc64-unregistered-seed-fetch-agent.test.ts",
+    "-t",
+    "reserves\\ window\\ slots\\ for\\ non\\-core\\ peers\\ so\\ a\\ lone\\ edge\\ author\\ is\\ asked\\ in\\ the\\ first\\ window",
+    "--reporter=json",
+    "--outputFile=<report>"
+  ],
+  "exitCode": 1,
+  "rawReportSha256": "5ef8418341d91b4da7a2bede835bf287a99ede22cb9ec855a0ad30af29db69f6",
+  "assertions": [
+    {
+      "ancestorTitles": [
+        "Rfc64SeedFetchMethods replica peer selection"
+      ],
+      "fullName": "Rfc64SeedFetchMethods replica peer selection reserves window slots for non-core peers so a lone edge author is asked in the first window",
+      "status": "failed",
+      "title": "reserves window slots for non-core peers so a lone edge author is asked in the first window",
+      "duration": 6.659417000000303,
+      "failureMessages": [
+        "AssertionError: expected 'peer-core-7' to be 'peer-edge-author' // Object.is equality\n    at <checkout>/packages/agent/test/rfc64-unregistered-seed-fetch-agent.test.ts:488:26\n    at file://<checkout>/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:145:11\n    at file://<checkout>/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:26\n    at file://<checkout>/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:1243:20\n    at new Promise (<anonymous>)\n    at runWithTimeout (file://<checkout>/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:1209:10)\n    at file://<checkout>/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:1653:37\n    at Traces.$ (file://<checkout>/node_modules/.pnpm/vitest@4.0.18_@opentelemetry+api@1.9.1_@types+node@22.19.11_happy-dom@20.8.9_bufferutil_ddadfdc33628ffd59cdc6252a2bc7a75/node_modules/vitest/dist/chunks/traces.CCmnQaNT.js:142:27)\n    at trace (file://<checkout>/node_modules/.pnpm/vitest@4.0.18_@opentelemetry+api@1.9.1_@types+node@22.19.11_happy-dom@20.8.9_bufferutil_ddadfdc33628ffd59cdc6252a2bc7a75/node_modules/vitest/dist/chunks/test.B8ej_ZHS.js:239:21)\n    at runTest (file://<checkout>/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:1653:12)"
+      ],
+      "meta": {}
+    }
+  ]
+}
