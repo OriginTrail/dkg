@@ -18,6 +18,7 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/held-metadata-controls.test.ts",
       "test/recipient-key-route-scopes.test.ts",
       "test/write-preflight-attribution.test.ts",
       // S4a: which writes move the policy generation, what makes two probe calls interchangeable.
@@ -193,7 +194,14 @@ export default defineConfig({
       "test/durable-recovery-coordinator.test.ts",
       "test/manifest-resume-policy.test.ts",
       "test/durable-data-round.test.ts",
+      "test/durable-recovery-resume.test.ts",
       "test/durable-recovery-slice-yield.test.ts",
+      "test/durable-recovery-stored-prefix.test.ts",
+      "test/durable-prefix-production.test.ts",
+      "test/durable-cross-peer-production.test.ts",
+      "test/durable-large-prefix-production.test.ts",
+      "test/store-content-fence.test.ts",
+      "test/store-content-fence-bounds.test.ts",
       "test/store-lane-yield.test.ts",
       "test/durable-progress.test.ts",
       "test/gossip-publish-handler.test.ts",

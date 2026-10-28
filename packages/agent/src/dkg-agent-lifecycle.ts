@@ -5630,7 +5630,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // an unfinished offset-zero requester session remains cached.
       forceFreshSession,
       manifestDigest,
-      manifestPrefixDigestAtOffset,
+      manifestPrefixDigestAtOffset, durableResumeBoundary,
       shouldStopAfterPage,
       workAdmission,
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
@@ -5780,7 +5780,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ephemeralRequesterState,
       forceFreshSession,
       manifestDigest,
-      manifestPrefixDigestAtOffset,
+      manifestPrefixDigestAtOffset, durableResumeBoundary,
       shouldStopAfterPage,
       workAdmission: effectiveWorkAdmission,
       buildSyncRequest: this.buildSyncRequest.bind(this),
@@ -6592,7 +6592,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         isSyncCapable: (peerId) => this.waitForSyncProtocol({
           toString: () => peerId,
         }),
-        executeSlice: (peerId, durableMetaContinuation) => this.syncFromPeerDetailed(
+        executeSlice: (peerId, durableMetaContinuation, durableResumeBoundary) => this.syncFromPeerDetailed(
           peerId,
           [contextGraphId],
           undefined,
@@ -6605,7 +6605,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
             signal: this.node.stopSignal ?? undefined,
             priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
             source: 'vm-recovery',
-            durableMetaContinuation,
+            durableMetaContinuation, durableResumeBoundary,
           },
         ),
         logDebug: (message) => this.log.debug(ctx, message),

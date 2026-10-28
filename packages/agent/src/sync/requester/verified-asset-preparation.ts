@@ -6,6 +6,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE,
+  GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES,
   readGraphKnowledgeAssetConfirmationKindV1,
 } from '@origintrail-official/dkg-publisher';
 import { parseGraphScopedDescriptor } from '../durable-integrity.js';
@@ -23,9 +24,7 @@ const TRANSACTION_HASH = `${DKG_NS}transactionHash`;
 const XSD_INTEGER = 'http://www.w3.org/2001/XMLSchema#integer';
 const PEER_UNTRUSTED_METADATA_PREDICATES = new Set([
   MATERIALIZED_VERSION,
-  `${DKG_NS}accessPolicy`,
-  `${DKG_NS}allowedPeer`,
-  `${DKG_NS}publisherPeerId`,
+  ...GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES,
   `${DKG_NS}status`,
 ]);
 const GRAPH_SCOPED_SYNC_METADATA_PREDICATES = new Set([
