@@ -10,6 +10,7 @@ import { Rfc64CatalogReplayScopeLifecycleV1, type Rfc64CatalogReplayScopeAdmissi
 
 export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
   selectContextGraphIds(): readonly string[];
+  connectedPeerIds(): readonly string[];
   reserveFence(contextGraphId: string, peerId: string): Rfc64CatalogReplayPeerReservationV1 | null;
   reannounce(peerId: string, contextGraphId: string, signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
   replay(contextGraphId: string, demand: Rfc64CatalogReplayPeerDemandV1,
@@ -60,6 +61,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   readonly #maxPeers: number;
   #closed = false;
   #suppressed = 0;
+  #overflowRescan: { after?: string } | null = null;
 
   constructor(ports: Rfc64CatalogReplayConnectionRuntimePortsV1,
     debounceMs = DEFAULT_DEBOUNCE_MS, maxPeers = DEFAULT_MAX_PEERS) {
@@ -76,6 +78,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
       }
     }
     this.#byPeer.clear();
+    this.#overflowRescan = null;
   }
 
   status(): Readonly<{
@@ -121,7 +124,21 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         const idle = [...this.#byPeer.values()].filter(candidate => !candidate.active
           && ![...candidate.scopes.values()].some(scope => scope.outstanding > 0))
           .sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
-        if (idle === undefined) { this.#suppressed++; return null; }
+        if (idle === undefined) {
+          this.#suppressed++;
+          let settled = false;
+          return Object.freeze({
+            reject: () => { settled = true; },
+            admit: () => {
+              if (settled || this.#closed) return;
+              settled = true;
+              // Topology owns peer identity storage. Retain only a bounded
+              // rescan cursor; no leases or per-graph state for overflow peers.
+              this.#overflowRescan = {};
+              this.#schedule();
+            },
+          });
+        }
         this.#byPeer.delete(idle.peerId);
       }
       peer = { peerId, scopes: new Map(), window: new Rfc64CatalogReplaySchedulingWindowV1(), active: false, lastUsedAt: nowMs,
@@ -186,6 +203,23 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     }
   }
 
+  #resumeOverflow(): void {
+    const cursor = this.#overflowRescan;
+    if (cursor === null || this.#closed) return;
+    const peers = [...new Set(this.#ports.connectedPeerIds())].sort();
+    for (const peerId of peers) {
+      if (cursor.after !== undefined && peerId <= cursor.after) continue;
+      if (!this.#byPeer.has(peerId)) {
+        const hasRoom = this.#byPeer.size < this.#maxPeers || [...this.#byPeer.values()].some(peer =>
+          !peer.active && ![...peer.scopes.values()].some(scope => scope.outstanding > 0));
+        if (!hasRoom) return;
+        this.#prepare(peerId, Date.now(), { kind: 'connection-open' })?.admit();
+      }
+      cursor.after = peerId;
+    }
+    if (this.#overflowRescan === cursor) this.#overflowRescan = null;
+  }
+
   #refresh(now: number): void { for (const peer of this.#byPeer.values()) peer.window.refresh(now); }
   #ready(peer: PeerV1): boolean { return !peer.active && peer.window.snapshot.runnable.length > 0; }
   #nextDeadline(): number {
@@ -207,7 +241,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         await this.#runTurn(peer, signal);
         // Move a completed turn behind the other ready peers.
         this.#byPeer.delete(peer.peerId); this.#byPeer.set(peer.peerId, peer);
-        if (!signal.aborted) this.#schedule();
+        if (!signal.aborted) { this.#resumeOverflow(); this.#schedule(); }
       } finally { if (signal.aborted) this.#retire(); }
     };
     for (const slot of [0, 1] as const) {

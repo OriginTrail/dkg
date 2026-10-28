@@ -15,7 +15,7 @@ import type {Rfc64CatalogReplayPeerResultV1, Rfc64CatalogReplayRecoveryStatusV1}
 import {Rfc64PublicCatalogTransportErrorV1} from '../src/rfc64/public-catalog-transport-v1.js';
 const CG = 'public-cg';
 const POLICY = 'policy';
-type ReportPorts = Omit<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait' | 'warn'> & {
+type ReportPorts = Omit<Rfc64CatalogReplayConnectionRuntimePortsV1, 'connectedPeerIds' | 'schedule' | 'wait' | 'warn'> & {
   replayStatus(cg: string): Pick<Rfc64CatalogReplayRecoveryStatusV1, 'failed' | 'unresolvedPeerCount'> | null;
   log(level: 'debug' | 'warn', message: string): void;
 };

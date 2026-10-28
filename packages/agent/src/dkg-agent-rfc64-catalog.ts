@@ -1113,6 +1113,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         log: (level, message) => this.log[level](createOperationContext('system'), message),
       });
       runtime = createRfc64CatalogReplayConnectionRuntimeV1({ capabilities: this,
+        connectedPeerIds: () => this.node.libp2p.getPeers().map(peer => peer.toString()),
+        runPeerTransport: (peer, signal, work) => this.rfc64CatalogReplayRecoveryRuntimeV1().runPeerTransport(peer, signal, work),
         reportRun: (id, peer, result) => reporter.report(id, peer, result),
         reservePeer: (id, digest, peer) => this.rfc64CatalogReplayRecoveryRuntimeV1().reservePeer(id, digest, peer),
         replay: (contextGraphId, demand, signal) => this.requestRfc64CatalogHeadReplayV1(contextGraphId, { kind: 'connection-demand', demand }, signal),

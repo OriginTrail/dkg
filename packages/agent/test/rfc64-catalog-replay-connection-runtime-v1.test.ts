@@ -196,7 +196,9 @@ describe('catalog reconnect work ownership', () => {
     try {
       runtime.prepareConnectionOpen('a')?.admit();
       await vi.waitFor(() => expect(runtime.status().activePeers).toBe(1));
-      expect(runtime.prepareConnectionOpen('b')).toBeNull();
+      const deferred = runtime.prepareConnectionOpen('b');
+      expect(deferred).not.toBeNull(); deferred?.reject();
+      expect(runtime.status().peers.map(peer => peer.peerIdSuffix)).toEqual(['a']);
       expect(release).not.toHaveBeenCalled();
     } finally {
       held.resolve();

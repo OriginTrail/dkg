@@ -7,11 +7,12 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-export function makeRuntime(ports: Omit<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait'>
-  & Partial<Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait'>>,
+export function makeRuntime(ports: Omit<Rfc64CatalogReplayConnectionRuntimePortsV1, 'connectedPeerIds' | 'schedule' | 'wait'>
+  & Partial<Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'connectedPeerIds' | 'schedule' | 'wait'>>,
   debounceMs?: number, maxPeers?: number): Rfc64CatalogReplayConnectionRuntimeV1 {
   const owner = new Rfc64BackgroundWorkDispatcherV1(); owners.push(owner);
   return new Rfc64CatalogReplayConnectionRuntimeV1({
+    connectedPeerIds: () => [],
     schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
     wait: (signal, delay) => new Promise((resolve, reject) => {
       const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, delay);

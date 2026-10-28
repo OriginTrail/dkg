@@ -6,11 +6,12 @@ import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './catalog
 /** A provider result is recorded once in both the current run and retained pass. */
 export type ReplayPeerOutcomeV1<Target> =
   | Readonly<{ kind: 'completed'; targets: readonly Target[] }>
-  | Readonly<{ kind: 'not-provider' | 'unanswered' }>;
+  | Readonly<{ kind: 'not-provider' | 'local-unavailable' }>
+  | Readonly<{ kind: 'provider-failed'; attributed: boolean }>;
 export function recordReplayPeerOutcomeV1<Target>(run: ReplayRunEvidenceV1<Target>,
   pass: FullReplayPassV1<Target> | null, demand: Rfc64CatalogReplayPeerDemandV1,
   outcome: ReplayPeerOutcomeV1<Target>): void {
-  if (outcome.kind === 'completed') run.completed(demand, outcome.targets);
+  run.record(demand, outcome);
   pass?.record(demand, outcome);
 }
 
@@ -52,7 +53,7 @@ export class FullReplayPassV1<Target> {
   record(demand: Rfc64CatalogReplayPeerDemandV1, outcome: ReplayPeerOutcomeV1<Target>): void {
     const expected = this.#expected.get(demand.peerId);
     if (expected !== undefined && demand.generation >= expected.generation) expected.replayed = true;
-    this.unanswered ||= outcome.kind === 'unanswered';
+    this.unanswered ||= outcome.kind === 'local-unavailable' || outcome.kind === 'provider-failed';
     if (outcome.kind === 'completed') this.#providers.set(demand.peerId, demand.generation);
     // Retain immediately after the provider response, BEFORE receiver drain.
     if (outcome.kind === 'completed') this.#retain(outcome.targets);
@@ -73,18 +74,30 @@ export class FullReplayPassV1<Target> {
 export class ReplayRunEvidenceV1<Target> {
   received: readonly Target[] = [];
   readonly providers = new Map<string, number>();
-  requested = 0;
+  readonly #outcomes: ReplayPeerOutcomeV1<Target>['kind'][] = [];
+  #observationFailures = 0;
+  requiresFullReplay = false;
+  get requested(): number { return this.#outcomes.filter(kind => kind === 'completed').length; }
+  get providerFailures(): number { return this.#outcomes.filter(kind => kind === 'provider-failed').length; }
+  get unanswered(): boolean { return this.#outcomes.some(kind => kind === 'provider-failed' || kind === 'local-unavailable'); }
+  get failed(): number { return this.#observationFailures + this.#outcomes.filter(kind => kind === 'provider-failed' || kind === 'local-unavailable').length; }
   observation: Readonly<{ kind: 'unobserved' }> | Readonly<{ kind: 'overflow' }>
     | Readonly<{ kind: 'parity'; targets: readonly Target[]; failed: boolean }> = { kind: 'unobserved' };
-  constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[]) {}
-  completed(demand: Rfc64CatalogReplayPeerDemandV1, targets: readonly Target[]): void {
+  constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[], readonly fullRequest = false) {}
+  private completed(demand: Rfc64CatalogReplayPeerDemandV1, targets: readonly Target[]): void {
     this.received = this.merge(this.received, targets);
     this.providers.set(demand.peerId, demand.generation);
-    this.requested++;
     this.unobserved();
   }
+  record(demand: Rfc64CatalogReplayPeerDemandV1, outcome: ReplayPeerOutcomeV1<Target>): void {
+    this.#outcomes.push(outcome.kind);
+    if (outcome.kind === 'completed') this.completed(demand, outcome.targets);
+    if (outcome.kind === 'provider-failed' && !outcome.attributed) this.requiresFullReplay = true;
+  }
+  failedObservation(): void { this.#observationFailures++; this.requiresFullReplay = true; }
   unobserved(): void { this.observation = { kind: 'unobserved' }; }
   observe(targets: readonly Target[] | null, failed: boolean): void {
     this.observation = targets === null ? { kind: 'overflow' } : { kind: 'parity', targets, failed };
+    if (targets === null || failed) this.failedObservation();
   }
 }

@@ -33,6 +33,7 @@ describe('approved private catalog readiness handoff', () => {
     await expect(f.run()).resolves.toBe(true);
     f.commit.mockClear();
     const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+      connectedPeerIds: () => [],
       selectContextGraphIds: () => [...Array.from({ length: 256 }, (_, i) => `a-${String(i).padStart(3, '0')}`), CG],
       reserveFence: (cg, peer) => f.state.replay.reservePeer(cg, POLICY, peer),
       schedule: () => false, wait: async () => undefined, warn: vi.fn(),
