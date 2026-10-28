@@ -3,6 +3,21 @@ import type { Rfc64CatalogReplayPeerDemandV1 } from './catalog-replay-recovery-r
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './catalog-peers-v1.js';
 import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './catalog-limits-v1.js';
 
+/** Capacity belongs to the promise set; identity merging/pruning belongs to its caller. */
+export type BoundedReplayTargetsV1<Target> = Readonly<{ kind: 'bounded'; targets: readonly Target[] }>
+  | Readonly<{ kind: 'overflow' }>;
+export function emptyReplayTargetsV1<Target>(): BoundedReplayTargetsV1<Target> {
+  return { kind: 'bounded', targets: Object.freeze([]) };
+}
+export function mergeReplayTargetsV1<Target>(left: BoundedReplayTargetsV1<Target>,
+  right: BoundedReplayTargetsV1<Target>,
+  mergeAndPrune: (left: readonly Target[], right: readonly Target[]) => readonly Target[]): BoundedReplayTargetsV1<Target> {
+  if (left.kind === 'overflow' || right.kind === 'overflow') return { kind: 'overflow' };
+  const live = mergeAndPrune(left.targets, right.targets);
+  return live.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 ? { kind: 'overflow' }
+    : { kind: 'bounded', targets: Object.freeze([...live]) };
+}
+
 /** A provider result is recorded once in both the current run and retained pass. */
 export type ReplayPeerOutcomeV1<Target> =
   | Readonly<{ kind: 'completed'; targets: readonly Target[] }>
@@ -18,14 +33,14 @@ export function recordReplayPeerOutcomeV1<Target>(run: ReplayRunEvidenceV1<Targe
 /** Recovery owns expected generations, evidence and observation as one pass. */
 export class FullReplayPassV1<Target> {
   readonly #expected = new Map<string, { generation: number; replayed: boolean }>();
-  targets: readonly Target[] | null = Object.freeze([]);
+  targets: BoundedReplayTargetsV1<Target> = emptyReplayTargetsV1();
   replacesSnapshot = true;
   unanswered = false;
   readonly #providers = new Map<string, number>();
   get corroborated(): boolean { return this.#providers.size > 0; }
   constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[]) {}
 
-  include(demands: readonly (Rfc64CatalogReplayPeerDemandV1 & { staged: boolean })[], prior: readonly Target[] | null, run: ReplayRunEvidenceV1<Target>): boolean {
+  include(demands: readonly (Rfc64CatalogReplayPeerDemandV1 & { staged: boolean })[], prior: BoundedReplayTargetsV1<Target> | null, run: ReplayRunEvidenceV1<Target>): boolean {
     if (new Set([...this.#expected.keys(), ...demands.map(demand => demand.peerId)]).size > RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) return false;
     for (const demand of demands) {
       if (this.#expected.get(demand.peerId)?.generation !== demand.generation) {
@@ -34,7 +49,7 @@ export class FullReplayPassV1<Target> {
     }
     if (demands.some(demand => demand.staged)) {
       this.replacesSnapshot = false;
-      this.#retain(prior ?? []);
+      if (prior !== null) this.#retain(prior);
     }
     this.#retain(run.received);
     for (const [peer, generation] of run.providers) this.#providers.set(peer, generation);
@@ -56,12 +71,10 @@ export class FullReplayPassV1<Target> {
     this.unanswered ||= outcome.kind === 'local-unavailable' || outcome.kind === 'provider-failed';
     if (outcome.kind === 'completed') this.#providers.set(demand.peerId, demand.generation);
     // Retain immediately after the provider response, BEFORE receiver drain.
-    if (outcome.kind === 'completed') this.#retain(outcome.targets);
+    if (outcome.kind === 'completed') this.#retain({ kind: 'bounded', targets: outcome.targets });
   }
-  #retain(targets: readonly Target[]): void {
-    if (this.targets === null) return;
-    const live = this.merge(this.targets, targets);
-    this.targets = live.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 ? null : Object.freeze([...live]);
+  #retain(targets: BoundedReplayTargetsV1<Target>): void {
+    this.targets = mergeReplayTargetsV1(this.targets, targets, this.merge);
   }
   get covered(): boolean { return [...this.#expected.values()].every(expected => expected.replayed); }
   /** Only a receiver-drained parity read observes the completed generations. */
@@ -72,7 +85,7 @@ export class FullReplayPassV1<Target> {
 
 /** One run owns its provider responses and the exact observation they reached. */
 export class ReplayRunEvidenceV1<Target> {
-  received: readonly Target[] = [];
+  received: BoundedReplayTargetsV1<Target> = emptyReplayTargetsV1();
   readonly providers = new Map<string, number>();
   readonly #outcomes: ReplayPeerOutcomeV1<Target>['kind'][] = [];
   #observationFailures = 0;
@@ -85,7 +98,7 @@ export class ReplayRunEvidenceV1<Target> {
     | Readonly<{ kind: 'parity'; targets: readonly Target[]; failed: boolean }> = { kind: 'unobserved' };
   constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[], readonly fullRequest = false) {}
   private completed(demand: Rfc64CatalogReplayPeerDemandV1, targets: readonly Target[]): void {
-    this.received = this.merge(this.received, targets);
+    this.received = mergeReplayTargetsV1(this.received, { kind: 'bounded', targets }, this.merge);
     this.providers.set(demand.peerId, demand.generation);
     this.unobserved();
   }
@@ -96,8 +109,8 @@ export class ReplayRunEvidenceV1<Target> {
   }
   failedObservation(): void { this.#observationFailures++; this.requiresFullReplay = true; }
   unobserved(): void { this.observation = { kind: 'unobserved' }; }
-  observe(targets: readonly Target[] | null, failed: boolean): void {
-    this.observation = targets === null ? { kind: 'overflow' } : { kind: 'parity', targets, failed };
-    if (targets === null || failed) this.failedObservation();
+  observe(targets: BoundedReplayTargetsV1<Target>, failed: boolean): void {
+    this.observation = targets.kind === 'overflow' ? { kind: 'overflow' } : { kind: 'parity', targets: targets.targets, failed };
+    if (targets.kind === 'overflow' || failed) this.failedObservation();
   }
 }

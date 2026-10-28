@@ -1,13 +1,12 @@
 import { CatalogReplayPeerLaneV1 } from './catalog-replay-peer-lane-v1.js';
 // SPDX-License-Identifier: Apache-2.0
-import { FullReplayPassV1, ReplayRunEvidenceV1, recordReplayPeerOutcomeV1 } from './catalog-replay-evidence-v1.js';
+import { FullReplayPassV1, ReplayRunEvidenceV1, recordReplayPeerOutcomeV1, emptyReplayTargetsV1, mergeReplayTargetsV1, type BoundedReplayTargetsV1 } from './catalog-replay-evidence-v1.js';
 import { Rfc64CatalogReplayPeerWorklistV1 } from './catalog-replay-peer-worklist-v1.js';
 
 import {
   RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1,
   snapshotRfc64PublicCatalogAnnouncementPeersV1,
 } from './catalog-peers-v1.js';
-import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './catalog-limits-v1.js';
 import { RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1 } from './public-catalog-receiver-v1.js';
 
 const MAX_UNRESOLVED_PEERS_V1 = 64;
@@ -200,7 +199,7 @@ interface ReplayProgressV1<Target> {
    * out also retains its manifest conservatively beside unverified status,
    * so a later part cannot forget advertised but unchecked heads.
    */
-  promisedTargets: readonly Target[] | null;
+  promisedTargets: BoundedReplayTargetsV1<Target> | null;
   completion: Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> | null;
 }
 
@@ -258,7 +257,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   promisedTargets(contextGraphId: string, policyDigest: string): readonly Target[] | null {
     const progress = this.#byContextGraph.get(contextGraphId);
     if (progress === undefined || progress.policyDigest !== policyDigest) return null;
-    return progress.promisedTargets;
+    return progress.promisedTargets?.kind === 'bounded' ? progress.promisedTargets.targets : null;
   }
 
   clear(contextGraphId: string): void {
@@ -462,23 +461,26 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           break;
         }
         if (progress.peerWorklist.exhausted) {
-          evidence.observe(null, true);
+          // Transport budget exhaustion has not overflowed the promise set.
+          evidence.failedObservation();
+          evidence.unobserved();
           break;
         }
         if (progress.peerWorklist.hasPending) continue;
 
-        const promised = progress.fullPass?.targets === null ? null
-          : this.#mergePromises(progress.fullPass?.targets ?? [], evidence.received);
+        const promised = mergeReplayTargetsV1(progress.fullPass?.targets ?? emptyReplayTargetsV1<Target>(),
+          evidence.received, (left, right) => this.#mergePromises(left, right));
         input.signal?.throwIfAborted();
         evidence.unobserved();
-        const parityFailed = promised === null || promised.length
-          > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1
-          || await this.#ports.parityFailed(input.contextGraphId, promised);
+        const parityFailed = promised.kind === 'overflow'
+          || await this.#ports.parityFailed(input.contextGraphId, promised.targets);
         input.signal?.throwIfAborted();
         // A reconnect generation arriving during the durable parity read owns
         // another pass. The worklist budget keeps that fence finite.
         if (progress.peerWorklist.exhausted) {
-          evidence.observe(null, true);
+          // Transport budget exhaustion has not overflowed the promise set.
+          evidence.failedObservation();
+          evidence.unobserved();
           break;
         }
         if (progress.peerWorklist.hasPending) continue;
@@ -517,15 +519,15 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     const corroborated = evidence.requested > 0 || (wasFullPass && (pass?.corroborated ?? false));
     current.active = current.peerWorklist.hasStaged;
     if (observation.kind === 'parity' && corroborated) {
-      if (!this.#settlePromisedTargets(current, observation.targets,
+      if (!this.#settlePromisedTargets(current, { kind: 'bounded', targets: observation.targets },
         pass !== null && wasFullPass && pass.replacesSnapshot && !pass.unanswered && !evidence.unanswered)) {
         requiresFullReplay = true;
       }
       requiresFullReplay ||= observation.failed;
     } else if (observation.kind === 'overflow') {
-      current.promisedTargets = null;
+      current.promisedTargets = { kind: 'overflow' };
       requiresFullReplay = true;
-    } else if (evidence.received.length > 0) {
+    } else if (evidence.received.kind === 'overflow' || evidence.received.targets.length > 0) {
       if (!this.#settlePromisedTargets(current, evidence.received, false)) requiresFullReplay = true;
     }
     if (requiresFullReplay) current.requiresFullReplay = true;
@@ -549,25 +551,12 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
    */
   #settlePromisedTargets(
     progress: ReplayProgressV1<Target>,
-    promised: readonly Target[],
+    promised: BoundedReplayTargetsV1<Target>,
     replaces: boolean,
   ): boolean {
-    if (promised.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
-      // Overflow loses the retained promise set even when drain was unobserved.
-      progress.promisedTargets = null;
-      return false;
-    }
-    if (replaces || progress.promisedTargets === null) {
-      progress.promisedTargets = Object.freeze([...promised]);
-      return true;
-    }
-    const live = this.#mergePromises(progress.promisedTargets, promised);
-    if (live.length > RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1) {
-      progress.promisedTargets = null;
-      return false;
-    }
-    progress.promisedTargets = Object.freeze([...live]);
-    return true;
+    const prior = replaces ? emptyReplayTargetsV1<Target>() : progress.promisedTargets ?? emptyReplayTargetsV1<Target>();
+    progress.promisedTargets = mergeReplayTargetsV1(prior, promised, (left, right) => this.#mergePromises(left, right));
+    return progress.promisedTargets.kind === 'bounded';
   }
 
   #mergePromises(left: readonly Target[], right: readonly Target[]): readonly Target[] {

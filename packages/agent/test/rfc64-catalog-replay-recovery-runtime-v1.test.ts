@@ -106,6 +106,36 @@ function run(
 }
 
 describe('RFC-64 catalog replay recovery runtime', () => {
+  it('continues an admitted connection demand after the real 64-peer run budget is spent', async () => {
+    const held = Promise.withResolvers<void>();
+    const started = Promise.withResolvers<void>();
+    const peers = Array.from({ length: 64 }, (_, i) => `peer-${i}`);
+    const requested: string[] = [];
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async (_cg, peer) => {
+        requested.push(peer); started.resolve(); await held.promise;
+        return { status: 'completed', targets: peer === 'new-peer' ? [{ id: 'new-head' }] : [] };
+      },
+      whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target.id,
+      parityFailed: async () => false,
+    });
+    const first = runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p',
+      kind: 'full-connected-peers', connectedPeerIds: peers });
+    await started.promise;
+    const lease = runtime.reservePeer('public-cg', 'p', 'new-peer');
+    expect(lease).not.toBeNull(); lease!.admit();
+    let atCompletion: { requested: boolean; targets: readonly Target[] | null } | undefined;
+    const joined = runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p',
+      kind: 'connection-demand', demand: lease! }).then(() => {
+      atCompletion = { requested: requested.includes('new-peer'), targets: runtime.promisedTargets('public-cg', 'p') };
+    });
+    try {
+      held.resolve(); await first; await joined;
+      expect(requested).toHaveLength(65);
+      expect(atCompletion).toEqual({ requested: true, targets: [{ id: 'new-head' }] });
+    } finally { held.resolve(); lease!.release(); }
+  });
+
   it('cancels a held peer replay request when its background owner closes', async () => {
     const onError = vi.fn();
     const dispatcher = new Rfc64BackgroundWorkDispatcherV1(onError);

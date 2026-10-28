@@ -61,7 +61,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   readonly #maxPeers: number;
   #closed = false;
   #suppressed = 0;
-  #overflowRescan: { after?: string } | null = null;
+  readonly #overflowScans = new Map<string | null, { after?: string }>();
 
   constructor(ports: Rfc64CatalogReplayConnectionRuntimePortsV1,
     debounceMs = DEFAULT_DEBOUNCE_MS, maxPeers = DEFAULT_MAX_PEERS) {
@@ -78,7 +78,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
       }
     }
     this.#byPeer.clear();
-    this.#overflowRescan = null;
+    this.#overflowScans.clear();
   }
 
   status(): Readonly<{
@@ -134,7 +134,9 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
               settled = true;
               // Topology owns peer identity storage. Retain only a bounded
               // rescan cursor; no leases or per-graph state for overflow peers.
-              this.#overflowRescan = {};
+              // One cursor per selected activation scope, plus a full-connection cursor.
+              // Topology retains peer identities; activation never widens to other graphs.
+              this.#overflowScans.set(event.kind === 'connection-open' ? null : event.contextGraphId, {});
               this.#schedule();
             },
           });
@@ -204,39 +206,41 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   }
 
   #resumeOverflow(): void {
-    const cursor = this.#overflowRescan;
-    if (cursor === null || this.#closed) return;
+    if (this.#closed) return;
+    const selected = new Set(this.#ports.selectContextGraphIds());
     const peers = [...new Set(this.#ports.connectedPeerIds())].sort();
-    for (const peerId of peers) {
-      if (cursor.after !== undefined && peerId <= cursor.after) continue;
-      if (!this.#byPeer.has(peerId)) {
-        const hasRoom = this.#byPeer.size < this.#maxPeers || [...this.#byPeer.values()].some(peer =>
-          !peer.active && ![...peer.scopes.values()].some(scope => scope.outstanding > 0));
-        if (!hasRoom) return;
-        this.#prepare(peerId, Date.now(), { kind: 'connection-open' })?.admit();
+    for (const [graph, cursor] of this.#overflowScans) {
+      if (graph !== null && !selected.has(graph)) { this.#overflowScans.delete(graph); continue; }
+      for (const peerId of peers) {
+        if (cursor.after !== undefined && peerId <= cursor.after) continue;
+        if (graph === null ? !this.#byPeer.has(peerId) : !this.#byPeer.get(peerId)?.scopes.has(graph)) {
+          const hasRoom = this.#byPeer.has(peerId) || this.#byPeer.size < this.#maxPeers
+            || [...this.#byPeer.values()].some(peer => !peer.active
+              && ![...peer.scopes.values()].some(scope => scope.outstanding > 0));
+          if (!hasRoom) return;
+          this.#prepare(peerId, Date.now(), graph === null ? { kind: 'connection-open' }
+            : { kind: 'graph-activated', contextGraphId: graph })?.admit();
+        }
+        cursor.after = peerId;
       }
-      cursor.after = peerId;
+      if (this.#overflowScans.get(graph) === cursor) this.#overflowScans.delete(graph);
     }
-    if (this.#overflowRescan === cursor) this.#overflowRescan = null;
   }
 
-  #refresh(now: number): void { for (const peer of this.#byPeer.values()) peer.window.refresh(now); }
-  #ready(peer: PeerV1): boolean { return !peer.active && peer.window.snapshot.runnable.length > 0; }
-  #nextDeadline(): number {
-    return Math.min(...[...this.#byPeer.values()].map(peer => peer.window.snapshot.nextWake));
+  #ready(peer: PeerV1, now: number): boolean { return !peer.active && peer.window.plan(now).runnable.length > 0; }
+  #nextDeadline(now: number): number {
+    return Math.min(...[...this.#byPeer.values()].map(peer => peer.window.plan(now).nextWake));
   }
 
   #schedule(): void {
     if (this.#closed) return;
-    this.#refresh(Date.now());
     const worker = async (signal: AbortSignal): Promise<void> => {
       try {
         if (signal.aborted || this.#closed) return;
         const now = Date.now();
         const selected = new Set(this.#ports.selectContextGraphIds());
         for (const peer of this.#byPeer.values()) this.#continue(peer, selected);
-        this.#refresh(now);
-        const peer = [...this.#byPeer.values()].find(candidate => this.#ready(candidate));
+        const peer = [...this.#byPeer.values()].find(candidate => this.#ready(candidate, now));
         if (peer === undefined) return;
         await this.#runTurn(peer, signal);
         // Move a completed turn behind the other ready peers.
@@ -247,18 +251,17 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     for (const slot of [0, 1] as const) {
       if (!this.#ports.schedule(slot, worker)) { this.#retire(); return; }
     }
-    if (this.#nextDeadline() !== Infinity && !this.#ports.schedule('deadline', async signal => {
+    if (this.#nextDeadline(Date.now()) !== Infinity && !this.#ports.schedule('deadline', async signal => {
       try {
         while (!signal.aborted && !this.#closed) {
-          const deadline = this.#nextDeadline();
+          const deadline = this.#nextDeadline(Date.now());
           if (deadline === Infinity) return;
           // One owned notifier; stream slots never wait for future eligibility.
           await this.#ports.wait(signal, Math.min(1_000, Math.max(1, deadline - Date.now())));
           const now = Date.now();
           const selected = new Set(this.#ports.selectContextGraphIds());
           for (const peer of this.#byPeer.values()) this.#continue(peer, selected);
-        this.#refresh(now);
-          if ([...this.#byPeer.values()].some(peer => this.#ready(peer))) this.#schedule();
+          if ([...this.#byPeer.values()].some(peer => this.#ready(peer, now))) this.#schedule();
         }
       } finally { if (signal.aborted) this.#retire(); }
     })) this.#retire();
@@ -272,8 +275,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   async #runTurn(peer: PeerV1, signal: AbortSignal): Promise<void> {
     peer.active = true;
     try {
-      peer.window.refresh(Date.now());
-      const scopes = peer.window.snapshot.runnable.slice(0, MAX_SCOPES_PER_TURN);
+      const scopes = peer.window.plan(Date.now()).runnable.slice(0, MAX_SCOPES_PER_TURN);
       for (const scope of scopes) {
         if (signal.aborted || this.#closed) return;
         this.#pruneSelection(peer, new Set(this.#ports.selectContextGraphIds()));

@@ -39,6 +39,30 @@ describe('physical catalog replay capacity', () => {
     } finally { held.resolve(); }
   });
 
+  it('keeps an overflow graph activation scoped to that graph', async () => {
+    const held = deferred();
+    const replay = vi.fn(async (_cg: string, demand: { peerId: string }) => {
+      if (demand.peerId === 'a') await held.promise;
+      return { failed: 0 };
+    });
+    const announce = vi.fn(async (_peer: string, _cg: string) => ({ failed: 0 }));
+    const runtime = makeRuntime({ connectedPeerIds: () => ['a', 'b'],
+      selectContextGraphIds: () => ['old', 'new'],
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+      reannounce: announce, replay, warn: vi.fn(),
+    }, 60_000, 1);
+    try {
+      runtime.prepareGraphActivation('a', 'new')!.admit();
+      await vi.waitFor(() => expect(replay).toHaveBeenCalledOnce());
+      runtime.prepareGraphActivation('b', 'new')!.admit();
+      held.resolve();
+      await vi.waitFor(() => expect(replay.mock.calls.some(([, demand]) => demand.peerId === 'b')).toBe(true));
+      await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
+      expect(replay.mock.calls.map(([cg]) => cg)).toEqual(['new', 'new']);
+      expect(announce.mock.calls.map(call => call[1])).toEqual(['new', 'new']);
+    } finally { held.resolve(); }
+  });
+
   it('limits actual announcement and recovery requests with retained provider fan-out across graphs', async () => {
     let seeding = true;
     let active = 0, peak = 0;

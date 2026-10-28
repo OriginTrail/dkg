@@ -6,8 +6,6 @@ export class Rfc64CatalogReplaySchedulingWindowV1 {
   readonly #members = new Set<Scope>();
   readonly #waiting = new Set<Scope>();
   readonly #yieldedCooldown = new WeakMap<Scope, number>();
-  #snapshot: Readonly<{ runnable: readonly Scope[]; nextWake: number }> = Object.freeze({ runnable: [], nextWake: Infinity });
-  get snapshot(): Readonly<{ runnable: readonly Scope[]; nextWake: number }> { return this.#snapshot; }
   constructor(readonly capacity = 256) {}
 
   add(scope: Scope): void {
@@ -40,7 +38,7 @@ export class Rfc64CatalogReplaySchedulingWindowV1 {
   }
 
   /** The only scheduling transition; inspection consumes this immutable view. */
-  refresh(now: number): void {
+  plan(now: number): Readonly<{ runnable: readonly Scope[]; nextWake: number }> {
     this.#advance(now);
     const all = [...this.#members, ...this.#waiting];
     const waiting = all.some(scope => scope.queued || scope.awaitingFence());
@@ -53,6 +51,6 @@ export class Rfc64CatalogReplaySchedulingWindowV1 {
         deadline = Math.min(deadline, scope.eligibleAt);
       }
     }
-    this.#snapshot = Object.freeze({ runnable: Object.freeze([...this.#members].filter(scope => scope.ready(now))), nextWake: deadline });
+    return Object.freeze({ runnable: Object.freeze([...this.#members].filter(scope => scope.ready(now))), nextWake: deadline });
   }
 }
