@@ -7,8 +7,25 @@ type Outcome = Readonly<{ result: Readonly<Result> }> | Readonly<{ error: unknow
 export class CatalogReplayPeerWorkV1 implements Rfc64CatalogReplayPeerDemandV1 {
   #phase: 'queued' | 'running' | Outcome = 'queued';
   readonly #subscribers = new Set<(outcome: Outcome) => void>();
-  continuation: Readonly<{ signal?: AbortSignal }> | null = null;
-  constructor(readonly peerId: string, readonly generation: number) {}
+  // Reserved custody waits for connection execution. Generic admitted recovery
+  // borrows the next run; execution custody carries its own connection signal.
+  #custody: Readonly<{ kind: 'retained' | 'reserved' | 'admitted' }> | Readonly<{ kind: 'execution'; signal?: AbortSignal }>;
+  constructor(readonly peerId: string, readonly generation: number, reserved = false) {
+    this.#custody = { kind: reserved ? 'reserved' : 'retained' };
+  }
+  get reserved(): boolean { return this.#custody.kind === 'reserved'; }
+  get owned(): boolean { return this.reserved || this.#custody.kind === 'admitted' || (this.#custody.kind === 'execution' && !this.#custody.signal?.aborted); }
+  get continuation(): Readonly<{ signal?: AbortSignal }> | null {
+    return this.#custody.kind === 'execution' && !this.#custody.signal?.aborted ? this.#custody : null;
+  }
+  retainRecovery(): void { if (this.#custody.kind === 'admitted') this.#custody = { kind: 'retained' }; }
+  admitRecovery(): void { this.#custody = { kind: 'admitted' }; }
+  admitExecution(signal?: AbortSignal): void {
+    if (this.#custody.kind !== 'execution') this.#custody = { kind: 'execution', signal };
+  }
+  runnable(signal?: AbortSignal): boolean {
+    return this.#custody.kind === 'retained' || this.#custody.kind === 'admitted' || (this.#custody.kind === 'execution' && this.#custody.signal === signal);
+  }
   start(): void { this.#phase = 'running'; }
   settle(outcome: Outcome): void {
     if (typeof this.#phase !== 'string') return;

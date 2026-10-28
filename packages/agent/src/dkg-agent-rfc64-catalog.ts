@@ -1123,7 +1123,17 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           this.readAcceptedRfc64CatalogAccessSnapshotV1(id)?.policyDigest ?? ''),
         log: (level, message) => this.log[level](createOperationContext('system'), message),
       });
-      runtime = createRfc64CatalogReplayConnectionRuntimeV1({ capabilities: this,
+      runtime = createRfc64CatalogReplayConnectionRuntimeV1({ capabilities: {
+        listActiveRfc64CatalogReplayContextGraphIdsV1: () => this.listActiveRfc64CatalogReplayContextGraphIdsV1(),
+        listServingRfc64CatalogReplayContextGraphIdsV1: () => this.listServingRfc64CatalogReplayContextGraphIdsV1(),
+        readAcceptedRfc64CatalogAccessSnapshotV1: id => this.readAcceptedRfc64CatalogAccessSnapshotV1(id),
+        resolveRfc64CatalogReceiverAuthorityV1: id => {
+          const authority = this.resolveRfc64CatalogReceiverAuthorityV1(id);
+          const selected = Object.hasOwn(this.config.rfc64CatalogExecutionPlan.selectedAuthority, id)
+            || this.readRfc64CatalogResponsibilityV1(id).responsible;
+          return { ...authority, active: selected && authority.active };
+        },
+      },
         reserveDeferred: contextGraphId => {
           const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
           return accepted ? this.rfc64CatalogReplayRecoveryRuntimeV1()
@@ -1189,11 +1199,14 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
 
   /** Canonical connection-replay targets after responsibility and authority policy. */
   listActiveRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
-    return selectCatalogReplayGraphsV1(this, 'receiver', Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority));
+    return selectCatalogReplayGraphsV1([...this.readRfc64CatalogResponsibilitiesV1().map(selection => selection.contextGraphId),
+      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)], id => this.resolveRfc64CatalogReceiverAuthorityV1(id));
   }
 
   listServingRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
-    return selectCatalogReplayGraphsV1(this, 'serving', Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority));
+    return selectCatalogReplayGraphsV1([...this.readRfc64CatalogResponsibilitiesV1().map(selection => selection.contextGraphId),
+      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
+      ...(rfc64DirectAcceptedCompatibilityV1.get(this) ?? [])], id => this.resolveRfc64CatalogServingAuthorityV1(id));
   }
 
   /** Constant-time point lookup for rollout-owned hot-path classification. */

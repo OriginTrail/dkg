@@ -8465,12 +8465,17 @@ function twoReplayGraphsActivation(): ReturnType<typeof activation> {
   };
 }
 
-it('announces durable serving B after unsubscribe while the edge receives A', async () => {
-  const { provider } = await startAppliedOpenReplayProvider('serving-only-connection', twoReplayGraphsActivation());
+it.each(['configured', 'compatibility'] as const)('announces durable serving B via %s while the edge receives A', async mode => {
   const graphA = `${AUTHOR}/receiving-a`;
+  const both = twoReplayGraphsActivation();
+  const input = mode === 'configured' ? both : { ...both,
+    rollout: { ...both.rollout, contextGraphModes: { [graphA]: 'catalog' as const } },
+    bootstrap: { ...both.bootstrap, acceptedPublicPolicies: both.bootstrap!.acceptedPublicPolicies!.slice(1) },
+  };
+  const { provider } = await startAppliedOpenReplayProvider('serving-only-connection-' + mode, input);
+  if (mode === 'compatibility') provider.acceptOpenContextGraphPolicyV1({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, ownerAddress: AUTHOR });
   provider.subscribeToContextGraph(graphA);
-  provider.subscribeToContextGraph(CONTEXT_GRAPH_ID);
-  provider.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID);
+  if (mode === 'configured') { provider.subscribeToContextGraph(CONTEXT_GRAPH_ID); provider.unsubscribeFromContextGraph(CONTEXT_GRAPH_ID); }
   await provider.whenRfc64PublicCatalogBootstrapIdleV1();
   expect(provider.listActiveRfc64CatalogReplayContextGraphIdsV1()).toContain(graphA);
   expect(provider.listActiveRfc64CatalogReplayContextGraphIdsV1()).not.toContain(CONTEXT_GRAPH_ID);
@@ -8481,7 +8486,7 @@ it('announces durable serving B after unsubscribe while the edge receives A', as
   const peer = '12D3KooWServingOnlyConnection';
   provider.prepareRfc64CatalogConnectionReplayV1(peer)!.admit();
   await vi.waitFor(() => expect(provider.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(0));
-  expect(sent).toHaveBeenCalled();
+  expect(sent.mock.calls.map(([, , data]) => parseRfc64PublicCatalogHeadAnnouncementV1(data).contextGraphId)).toContain(CONTEXT_GRAPH_ID);
   expect(request.mock.calls.some(([input]) => (input as { contextGraphId: string }).contextGraphId === CONTEXT_GRAPH_ID)).toBe(false);
 });
 

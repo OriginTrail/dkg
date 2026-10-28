@@ -16,8 +16,10 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
   constructor(readonly allocateGeneration: () => number) {}
   #overflowed = false;
 
-  failPending(error: unknown): void {
+  failPending(error: unknown, cancelledSignal?: AbortSignal): void {
     for (const [peer, record] of this.#pending) {
+      // A cancelled run cannot revoke another live connection owner.
+      if (cancelledSignal?.aborted && (record.reserved || (record.continuation !== null && record.continuation.signal !== cancelledSignal))) continue;
       record.settle({ error });
       // Cancellation releases this execution's subscribers, but unconsumed
       // generations remain available to an explicit later recovery command.
@@ -50,7 +52,7 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
       admit: () => {
         if (released || this.#staged.get(peerId) !== generation) return;
         this.#staged.delete(peerId);
-        this.#replacePending(new CatalogReplayPeerWorkV1(peerId, generation));
+        this.#replacePending(new CatalogReplayPeerWorkV1(peerId, generation, true));
       },
       release: () => {
         if (released) return;
@@ -60,6 +62,11 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
 
       },
     });
+  }
+
+  admitRecovery(demand: Rfc64CatalogReplayPeerDemandV1): void {
+    const record = this.#pending.get(demand.peerId);
+    if (record?.generation === demand.generation) record.admitRecovery();
   }
 
   /**
@@ -81,7 +88,7 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
   generation(peerId: string): Readonly<Rfc64CatalogReplayPeerDemandV1 & { staged: boolean }> | null {
     const staged = this.#staged.get(peerId);
     const generation = staged ?? this.#pending.get(peerId)?.generation;
-    return generation === undefined ? null : Object.freeze({ peerId, generation, staged: staged !== undefined });
+    return generation === undefined ? null : Object.freeze({ peerId, generation, staged: staged !== undefined || this.#pending.get(peerId)?.reserved === true });
   }
 
   /** Forget a queued demand for a peer that can no longer be replayed from. */
@@ -104,12 +111,12 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
       }
       this.#replacePending(record);
     }
-    record.continuation ??= { signal };
+    record.admitExecution(signal);
     return record;
   }
 
-  drain(chunk: CatalogReplayChunkV1): readonly Rfc64CatalogReplayPeerDemandV1[] {
-    const records = [...this.#pending.values()].slice(0, chunk.remaining);
+  drain(chunk: CatalogReplayChunkV1, signal?: AbortSignal): readonly Rfc64CatalogReplayPeerDemandV1[] {
+    const records = [...this.#pending.values()].filter(record => record.runnable(signal)).slice(0, chunk.remaining);
     for (const record of records) {
       this.#pending.delete(record.peerId);
       chunk.take(record);
@@ -122,7 +129,10 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     return [...this.#pending.values()].find(entry => entry.continuation !== null)?.continuation ?? null;
   }
 
-  get hasStaged(): boolean { return this.#staged.size > 0; }
+  get hasStaged(): boolean { return this.#staged.size > 0 || [...this.#pending.values()].some(record => record.reserved); }
+
+  get hasOwnedPending(): boolean { return [...this.#pending.values()].some(record => record.owned); }
+  hasRunnable(signal?: AbortSignal): boolean { return [...this.#pending.values()].some(record => record.runnable(signal)); }
 
   get hasPending(): boolean {
     return this.#pending.size > 0;
@@ -133,6 +143,7 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
   }
 
   settleOverflow(): void {
+    for (const record of this.#pending.values()) record.retainRecovery();
     this.#overflowed = false;
   }
 }

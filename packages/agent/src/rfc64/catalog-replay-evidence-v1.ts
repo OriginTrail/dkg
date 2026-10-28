@@ -153,7 +153,8 @@ export function resolveReplayRunSettlementV1<Target>(evidence: ReplayRunEvidence
     continueQueuedConnections: boolean; cancelled: boolean; hasStaged: boolean;
     isStaged(demand: Rfc64CatalogReplayPeerDemandV1): boolean;
   }>): ReplayRunSettlementV1<Target> {
-  const continueQueuedConnections = !ownership.cancelled && ownership.continueQueuedConnections;
+  // Continuation custody has already excluded cancelled connection owners.
+  const continueQueuedConnections = ownership.continueQueuedConnections;
   const observation = evidence.observation;
   const observationFailed = observation.kind === 'target-overflow'
     || (observation.kind === 'parity' && observation.outcome === 'failed')

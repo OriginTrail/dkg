@@ -194,7 +194,6 @@ interface ReplayProgressV1<Target> {
   readonly unresolvedPeers: Map<string, number>;
   /** Unattributed parity/overflow failures require one successful full pass. */
   requiresFullReplay: boolean;
-  active: boolean;
   deferred: number;
   /** The last provider evidence has not yet corroborated applied rows. */
   unverified: boolean;
@@ -244,7 +243,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     const progress = this.#byContextGraph.get(contextGraphId);
     if (progress === undefined || progress.policyDigest !== policyDigest) return null;
     return Object.freeze({
-      active: progress.active,
+      active: progress.run.kind === 'running' || progress.peerWorklist.hasStaged
+        || progress.peerWorklist.hasOwnedPending || progress.deferred > 0,
       // Derived, never stored. A mirrored field can only desync from the
       // witness it mirrors: a fence that activates the Context Graph and is
       // released without a run would otherwise report a witnessed graph clean.
@@ -282,19 +282,18 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   Rfc64CatalogReplayPeerFenceLeaseV1 | null {
     const reservation = this.reservePeer(contextGraphId, policyDigest, peerId);
     reservation?.admit();
+    if (reservation) this.#byContextGraph.get(contextGraphId)!.peerWorklist.admitRecovery(reservation);
     return reservation;
   }
 
   /** Graph-level custody for topology overflow, independent of the peer queue bound. */
   reserveDeferred(contextGraphId: string, policyDigest: string): Readonly<{ release(): void }> {
     const progress = this.#progressFor(contextGraphId, policyDigest);
-    progress.deferred++; progress.active = true; this.#bumpRevision(progress);
+    progress.deferred++; this.#bumpRevision(progress);
     let released = false;
     return Object.freeze({ release: () => {
       if (released) return; released = true; progress.deferred--;
       if (this.#byContextGraph.get(contextGraphId) !== progress) return;
-      progress.active = progress.deferred > 0 || progress.peerWorklist.hasStaged
-        || progress.peerWorklist.hasPending || progress.run.kind === 'running';
       this.#bumpRevision(progress);
     } });
   }
@@ -305,23 +304,19 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     const lease = progress.peerWorklist.reserve(peerId);
     if (lease === null) return null;
     progress.fullPass?.replace(lease);
-    if (!progress.active) { progress.active = true; this.#bumpRevision(progress); }
+    this.#bumpRevision(progress);
     let released = false;
     return Object.freeze({
       peerId: lease.peerId, generation: lease.generation,
       isCurrent: () => !released && this.#byContextGraph.get(contextGraphId) === progress && lease.isCurrent(),
-      admit: () => { if (!released) lease.admit(); },
+      admit: () => { if (!released) { lease.admit(); if (this.#byContextGraph.get(contextGraphId) === progress) this.#bumpRevision(progress); } },
       release: () => {
         if (released) return;
         released = true;
         if (progress.fullPass?.cancelled(lease)) progress.fullPass = null;
         lease.release();
         if (this.#byContextGraph.get(contextGraphId) !== progress) return;
-        if (!progress.peerWorklist.hasPending && !progress.peerWorklist.hasStaged
-          && progress.run.kind !== 'running' && progress.deferred === 0 && progress.active) {
-          progress.active = false;
-          this.#bumpRevision(progress);
-        }
+        this.#bumpRevision(progress);
       },
     });
   }
@@ -392,7 +387,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       completion: Promise.resolve().then(() => this.#runOwned(input, progress, run)),
     });
     progress.run = { kind: 'running', value: run };
-    progress.active = true; this.#bumpRevision(progress);
+    this.#bumpRevision(progress);
     return run.completion;
   }
 
@@ -411,20 +406,20 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       return result;
     } catch (error) {
       chunk.settle({ error });
-      progress.peerWorklist.failPending(error);
+      progress.peerWorklist.failPending(error, input.signal);
+      continuation = progress.peerWorklist.pendingContinuation;
       throw error;
     } finally {
       if (this.#byContextGraph.get(input.contextGraphId) === progress && progress.run.kind === 'running' && progress.run.value === run) {
-        const retained = settlement ?? this.#settlement(progress, evidence, false, input.signal?.aborted === true);
+        const retained = settlement ?? this.#settlement(progress, evidence, continuation !== null, input.signal?.aborted === true);
         progress.promisedTargets = retained.promisedTargets;
         progress.fullPass = retained.fullPass;
         progress.requiresFullReplay = retained.requiresFullReplay;
         progress.unverified = retained.unverified;
         progress.peerWorklist.settleOverflow();
-        progress.active = progress.peerWorklist.hasStaged || progress.deferred > 0;
         progress.run = { kind: 'settled', value: run };
         this.#bumpRevision(progress);
-        if (settlement?.continueQueuedConnections) {
+        if (retained.continueQueuedConnections) {
           // Transfer already-admitted generations without reseeding providers or
           // extending this caller's completion. Exact demand waiters survive.
           const next = this.#launch({ ...input, kind: 'pending-recovery', signal: continuation?.signal }, progress);
@@ -444,7 +439,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     try {
       input.signal?.throwIfAborted();
       for (;;) {
-        const replayDemands = progress.peerWorklist.drain(run.chunk);
+        const replayDemands = progress.peerWorklist.drain(run.chunk, input.signal);
         const settled = await Promise.allSettled(replayDemands.map(async (demand) => {
           const { peerId } = demand;
           for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -518,7 +513,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           evidence.unobserved('budget-exhausted');
           break;
         }
-        if (progress.peerWorklist.hasPending) continue;
+        if (progress.peerWorklist.hasRunnable(input.signal)) continue;
 
         const promised = mergeReplayTargetsV1(progress.fullPass?.targets ?? emptyReplayTargetsV1<Target>(),
           evidence.received, (left, right) => this.#mergePromises(left, right));
@@ -534,7 +529,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           evidence.unobserved('budget-exhausted');
           break;
         }
-        if (progress.peerWorklist.hasPending) continue;
+        if (progress.peerWorklist.hasRunnable(input.signal)) continue;
         // Nothing awaits between here and the settle block, so the
         // full-pass coverage it reads is the one this set was checked under.
         evidence.observe(promised, parityFailed);
@@ -584,7 +579,6 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         run: { kind: 'idle' },
         unresolvedPeers: new Map(),
         requiresFullReplay: false,
-        active: false,
         deferred: 0,
         unverified: false,
         promisedTargets: null,

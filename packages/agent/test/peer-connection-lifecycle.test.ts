@@ -15,6 +15,13 @@ function stubCatalogAuthorities(agent: DKGAgent, modes: Readonly<Record<string, 
     active: modes[contextGraphId] !== undefined && modes[contextGraphId] !== 'inactive',
     mode: modes[contextGraphId] === 'legacy' ? 'legacy' : 'catalog', killSwitchActive: false,
   });
+  vi.spyOn(agent, 'readRfc64CatalogResponsibilityV1').mockImplementation(contextGraphId => ({
+    contextGraphId, responsible: Object.hasOwn(modes, contextGraphId),
+    active: Object.hasOwn(modes, contextGraphId) && modes[contextGraphId] !== 'inactive',
+    mode: modes[contextGraphId] === 'legacy' ? 'legacy' : 'catalog',
+    responsibilityReason: Object.hasOwn(modes, contextGraphId) ? 'private-membership' : null,
+    selectionSource: 'default',
+  }));
   vi.spyOn(agent, 'resolveRfc64CatalogReceiverAuthorityV1').mockImplementation(resolve);
   vi.spyOn(agent, 'resolveRfc64CatalogServingAuthorityV1').mockImplementation(resolve);
 }

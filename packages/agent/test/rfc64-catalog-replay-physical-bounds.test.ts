@@ -281,3 +281,52 @@ it.each(['policy replacement', 'clear', 'reset'] as const)('requests the newer h
   expect(recovery.status('cg', policy)?.active).toBe(false);
   } finally { held.resolve(); connection.reset(); }
 });
+
+
+it.each([true, false])('keeps an independently owned reconnect after full replay cancellation=%s', async cancel => {
+  const held = deferred(), nextHeld = deferred(), controller = new AbortController();
+  const requested: string[] = [];
+  const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<string>({
+    requestPeer: async (_cg, peer) => { requested.push(peer); await (peer === 'old' ? held.promise : nextHeld.promise);
+      return { status: 'completed', targets: [peer === 'old' ? 'H1' : 'H2'] }; },
+    whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false,
+  });
+  const full = recovery.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['old'], signal: controller.signal });
+  const completion = cancel ? expect(full).rejects.toThrow('full cancelled') : expect(full).resolves.toMatchObject({ failed: 0 });
+  const replay = vi.fn((cg: string, demand: { peerId: string; generation: number }, signal: AbortSignal) =>
+    recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }));
+  const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null,
+    reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer), reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn() });
+  try {
+    await vi.waitFor(() => expect(requested).toEqual(['old']));
+    connection.prepareConnectionOpen('live')!.admit();
+    await vi.waitFor(() => expect(replay).toHaveBeenCalledOnce());
+    if (cancel) controller.abort(new Error('full cancelled'));
+    expect(recovery.status('cg', 'p')?.active).toBe(true);
+    expect(connection.status().activePeers).toBe(1);
+    held.resolve(); await completion;
+    await vi.waitFor(() => expect(requested).toEqual(['old', 'live']));
+    expect(recovery.status('cg', 'p')?.active).toBe(true);
+    expect(connection.status().activePeers).toBe(1);
+    nextHeld.resolve();
+    await vi.waitFor(() => expect(connection.status().pendingScopes).toBe(0));
+    expect(recovery.promisedTargets('cg', 'p')).toContain('H2');
+    expect(recovery.status('cg', 'p')?.active).toBe(false);
+  } finally { held.resolve(); nextHeld.resolve(); connection.reset(); await completion; }
+});
+
+
+it('derives idle status from custody while retaining budget-exhausted retry work', async () => {
+  let requested = 0;
+  const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+    requestPeer: async () => { requested++; recovery.markPeerPending('cg', 'p', 'peer'); return { status: 'completed', targets: [] }; },
+    whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false,
+  });
+  await recovery.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['peer'] });
+  expect(requested).toBe(64);
+  expect(recovery.status('cg', 'p')).toMatchObject({ active: false, failed: true });
+  const deferred = recovery.reserveDeferred('cg', 'p');
+  expect(recovery.status('cg', 'p')?.active).toBe(true);
+  deferred.release();
+  expect(recovery.status('cg', 'p')?.active).toBe(false);
+});
