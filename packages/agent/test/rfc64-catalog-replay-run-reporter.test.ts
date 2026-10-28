@@ -27,7 +27,7 @@ function reportingRuntime(ports: ReportPorts): Rfc64CatalogReplayConnectionRunti
 function ports(overrides: Partial<ReportPorts> = {}) {
   return {
     selectContextGraphIds: () => [CG],
-    reserveFence: (_contextGraphId: string, peerId: string) => ({
+    reserveDeferredFence: () => null, reserveFence: (_contextGraphId: string, peerId: string) => ({
       peerId,
       generation: 1,
       admit: () => undefined,
@@ -150,7 +150,7 @@ describe('RFC-64 catalog replay after a connection, with the replay recovery run
     const log = vi.fn();
     const connection = reportingRuntime({
       selectContextGraphIds: () => [CG],
-      reserveFence: (contextGraphId, peerId) => recovery.reservePeer(contextGraphId, POLICY, peerId),
+      reserveDeferredFence: () => null, reserveFence: (contextGraphId, peerId) => recovery.reservePeer(contextGraphId, POLICY, peerId),
       reannounce: async () => ({ failed: 0 }),
       replay: (contextGraphId, demand) => recovery.request({
         contextGraphId, policyDigest: POLICY, kind: 'connection-demand', demand,

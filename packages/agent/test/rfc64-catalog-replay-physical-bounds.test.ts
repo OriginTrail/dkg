@@ -21,7 +21,7 @@ describe('physical catalog replay capacity', () => {
       parityFailed: async () => false,
     });
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => peers, selectContextGraphIds: () => ['cg'],
-      reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer),
+      reserveDeferredFence: () => null, reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer),
       reannounce: async () => ({ failed: 0 }), warn: vi.fn(),
       replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }),
     });
@@ -49,7 +49,7 @@ describe('physical catalog replay capacity', () => {
     const announce = vi.fn(async (_peer: string, _cg: string) => ({ failed: 0 }));
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['a', 'b'],
       selectContextGraphIds: () => ['old', 'new'],
-      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
       reannounce: announce, replay, warn: vi.fn(),
     }, 60_000, 1);
     try {
@@ -67,7 +67,7 @@ describe('physical catalog replay capacity', () => {
   it('retains full overflow coverage when activation installs the peer first', async () => {
     const replay = vi.fn(async (_cg: string, _demand: { peerId: string }) => ({ failed: 0 }));
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['b'], selectContextGraphIds: () => ['old', 'new'],
-      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     }, 60_000, 1);
     const occupying = runtime.prepareConnectionOpen('a')!;
@@ -86,7 +86,7 @@ describe('physical catalog replay capacity', () => {
   it('wakes admitted overflow after every occupying reservation is rejected', async () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['a', 'b'], selectContextGraphIds: () => ['cg'],
-      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     }, 60_000, 1);
     const occupying = runtime.prepareConnectionOpen('a')!;
@@ -105,7 +105,7 @@ describe('physical catalog replay capacity', () => {
     const replay = vi.fn(async (_cg: string, _demand: { peerId: string }) => ({ failed: 0 }));
     const fences = vi.fn((_cg: string, peerId: string) => ({ peerId, generation: 1, admit() {}, release() {} }));
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => topology.filter(peer => accepted.has(peer)),
-      selectContextGraphIds: () => ['cg'], reserveFence: fences,
+      selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null, reserveFence: fences,
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     }, 60_000, 1);
     const occupying = runtime.prepareConnectionOpen('a')!;
@@ -176,7 +176,7 @@ describe('physical catalog replay capacity', () => {
     }
     seeding = false;
     const runtime = makeRuntime({ selectContextGraphIds: () => ['g1', 'g2'],
-      reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer), warn: vi.fn(),
+      reserveDeferredFence: () => null, reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer), warn: vi.fn(),
       reannounce: (peer, _cg, signal) => transport.reannounce(peer, {} as never, signal),
       replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }),
     });

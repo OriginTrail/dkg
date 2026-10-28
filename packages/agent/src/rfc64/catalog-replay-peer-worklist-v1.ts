@@ -1,3 +1,4 @@
+import { CatalogReplayPeerWorkV1, CatalogReplayChunkV1 } from './catalog-replay-peer-work-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './catalog-peers-v1.js';
 import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerReservationV1 } from './catalog-replay-recovery-runtime-v1.js';
@@ -10,14 +11,29 @@ import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerReservationV
  * fail-closed when the run budget is exhausted.
  */
 export class Rfc64CatalogReplayPeerWorklistV1 {
-  readonly #pending = new Map<string, { generation: number; continuation: { signal?: AbortSignal } | null }>();
+  readonly #pending = new Map<string, CatalogReplayPeerWorkV1>();
   readonly #staged = new Map<string, number>();
+  #chunk: CatalogReplayChunkV1 | null = null;
   #nextGeneration = 0;
   #remaining = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
   #overflowed = false;
 
-  beginRun(): void {
+  beginRun(): CatalogReplayChunkV1 {
     this.#remaining = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
+    return this.#chunk = new CatalogReplayChunkV1();
+  }
+  failPending(error: unknown): void {
+    for (const [peer, record] of this.#pending) {
+      record.settle({ error });
+      // Cancellation releases this execution's subscribers, but unconsumed
+      // generations remain available to an explicit later recovery command.
+      this.#pending.set(peer, new CatalogReplayPeerWorkV1(peer, record.generation));
+    }
+  }
+  #replacePending(record: CatalogReplayPeerWorkV1): void {
+    const prior = this.#pending.get(record.peerId);
+    if (prior && prior !== record) prior.settle({ error: new Error('Replay generation superseded') });
+    this.#pending.set(record.peerId, record);
   }
 
   reserve(peerId: string): Rfc64CatalogReplayPeerReservationV1 | null {
@@ -34,13 +50,13 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
       admit: () => {
         if (released || this.#staged.get(peerId) !== generation) return;
         this.#staged.delete(peerId);
-        this.#pending.set(peerId, { generation, continuation: null });
+        this.#replacePending(new CatalogReplayPeerWorkV1(peerId, generation));
       },
       release: () => {
         if (released) return;
         released = true;
         if (this.#staged.get(peerId) === generation) this.#staged.delete(peerId);
-        if (this.#pending.get(peerId)?.generation === generation) this.#pending.delete(peerId);
+        if (this.#pending.get(peerId)?.generation === generation) this.discard(peerId);
 
       },
     });
@@ -57,7 +73,7 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     if (this.#staged.has(peerId)) return false;
     if (this.#pending.has(peerId)) return true;
     if (new Set([...this.#pending.keys(), ...this.#staged.keys()]).size >= RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) return false;
-    this.#pending.set(peerId, { generation: ++this.#nextGeneration, continuation: null });
+    this.#replacePending(new CatalogReplayPeerWorkV1(peerId, ++this.#nextGeneration));
     return true;
   }
 
@@ -70,32 +86,37 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
 
   /** Forget a queued demand for a peer that can no longer be replayed from. */
   discard(peerId: string): void {
+    this.#pending.get(peerId)?.settle({ error: new Error('Replay generation retired before execution') });
     this.#pending.delete(peerId);
   }
 
   /** Seed the admitted generation once. The graph owner advances pending work
    * through a fresh bounded run when the current run spends its peer budget. */
-  seedDemand(demand: Rfc64CatalogReplayPeerDemandV1, signal?: AbortSignal): void {
-    const current = this.#pending.get(demand.peerId);
-    if (current === undefined || current.generation <= demand.generation) {
-      this.#pending.set(demand.peerId, { generation: demand.generation, continuation: { signal } });
+  seedDemand(demand: Rfc64CatalogReplayPeerDemandV1, signal?: AbortSignal): CatalogReplayPeerWorkV1 {
+    const running = [...(this.#chunk?.records ?? [])].find(record => record.peerId === demand.peerId && record.generation === demand.generation);
+    if (running) return running;
+    let record = this.#pending.get(demand.peerId);
+    if (record === undefined || record.generation !== demand.generation) {
+      record = new CatalogReplayPeerWorkV1(demand.peerId, demand.generation);
+      if ((this.#pending.get(demand.peerId)?.generation ?? 0) > demand.generation) {
+        record.settle({ error: new Error('Replay generation superseded') });
+        return record;
+      }
+      this.#replacePending(record);
     }
+    record.continuation ??= { signal };
     this.#nextGeneration = Math.max(this.#nextGeneration, demand.generation);
+    return record;
   }
 
   drain(): readonly Rfc64CatalogReplayPeerDemandV1[] {
-    if (this.#remaining === 0) return Object.freeze([]);
-    const demands = [...this.#pending.entries()]
-      .slice(0, this.#remaining)
-      .map(([peerId, entry]) => Object.freeze({ peerId, generation: entry.generation }));
-    for (const demand of demands) {
-      if (this.#pending.get(demand.peerId)?.generation === demand.generation) {
-        this.#pending.delete(demand.peerId);
-      }
-
+    const records = [...this.#pending.values()].slice(0, this.#remaining);
+    for (const record of records) {
+      this.#pending.delete(record.peerId);
+      this.#chunk!.take(record);
     }
-    this.#remaining -= demands.length;
-    return Object.freeze(demands);
+    this.#remaining -= records.length;
+    return records;
   }
 
   /** Explicit connection execution owns another chunk independently of subscribers. */

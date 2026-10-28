@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Rfc64CatalogReplayPeerReservationV1 } from './catalog-replay-recovery-runtime-v1.js';
 
-type FenceV1 = Rfc64CatalogReplayPeerReservationV1;
+export type Rfc64CatalogConnectionCustodyV1 = Rfc64CatalogReplayPeerReservationV1 | 'announcement-only';
+type FenceV1 = Rfc64CatalogConnectionCustodyV1;
 type PhaseV1 =
   | Readonly<{ state: 'awaiting-admission'; lease: FenceV1 | null }>
   | Readonly<{ state: 'waiting-for-fence' }>
@@ -99,7 +100,7 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
   #owns(demand: DemandV1): boolean { return demand === this.#current || demand === this.#successor; }
   #release(demand: DemandV1): void {
     if (!this.#owns(demand)) return;
-    if ('lease' in demand.phase) demand.phase.lease?.release();
+    if ('lease' in demand.phase && demand.phase.lease !== 'announcement-only') demand.phase.lease?.release();
     demand.phase = { state: 'retired' };
     if (demand === this.#successor) this.#successor = null;
     else { this.#current = this.#successor; this.#successor = null; }

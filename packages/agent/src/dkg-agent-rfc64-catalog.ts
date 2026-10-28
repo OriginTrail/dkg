@@ -1,3 +1,4 @@
+import { selectCatalogReplayGraphsV1 } from './rfc64/catalog-replay-selection-v1.js';
 import { createCatalogReplayTransportV1, type CatalogReplayTransportV1 } from './rfc64/catalog-replay-transport-v1.js';
 import { Rfc64CatalogReplayRunReporterV1 } from './rfc64/catalog-replay-run-reporter-v1.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -1127,6 +1128,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         log: (level, message) => this.log[level](createOperationContext('system'), message),
       });
       runtime = createRfc64CatalogReplayConnectionRuntimeV1({ capabilities: this,
+        reserveDeferred: contextGraphId => {
+          const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
+          return accepted ? this.rfc64CatalogReplayRecoveryRuntimeV1()
+            .reserveDeferred(contextGraphId, accepted.policyDigest) : null;
+        },
         admittedConnectedPeerIds: () => this.node.libp2p.getPeers().map(peer => peer.toString())
           .filter(peer => this.networkAdmissionCoordinator.isAcceptedPeer(peer)),
         reannounce: this.rfc64CatalogReplayTransportV1().reannounce,
@@ -1187,16 +1193,11 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
 
   /** Canonical connection-replay targets after responsibility and authority policy. */
   listActiveRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
-    const responsibilityIds = this.readRfc64CatalogResponsibilitiesV1()
-      .filter((selection) => selection.active && selection.mode !== 'legacy')
-      .map((selection) => selection.contextGraphId);
-    const configuredIds = Object.keys(
-      this.config.rfc64CatalogExecutionPlan.selectedAuthority,
-    ).filter((contextGraphId) => {
-      const authority = this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-      return authority.active && authority.mode !== 'legacy';
-    });
-    return Object.freeze([...new Set([...responsibilityIds, ...configuredIds])].sort());
+    return selectCatalogReplayGraphsV1(this, 'receiver', Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority));
+  }
+
+  listServingRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
+    return selectCatalogReplayGraphsV1(this, 'serving', Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority));
   }
 
   /** Constant-time point lookup for rollout-owned hot-path classification. */

@@ -135,20 +135,59 @@ export class ReplayRunEvidenceV1<Target> {
 }
 
 
-/** One policy resolves recorded facts and queued ownership into a settlement. */
-export interface ReplayRunSettlementV1 {
+/** The entire retained-state transition and caller result share one policy. */
+export interface ReplayRetainedStateV1<Target> {
+  promisedTargets: BoundedReplayTargetsV1<Target> | null;
+  requiresFullReplay: boolean;
+  unverified: boolean;
+  fullPass: FullReplayPassV1<Target> | null;
+}
+export interface ReplayRunSettlementV1<Target> extends ReplayRetainedStateV1<Target> {
   readonly continueQueuedConnections: boolean;
   readonly result: Readonly<{ requested: number; failed: number }>;
-  readonly requiresFullReplay: boolean;
 }
 export function resolveReplayRunSettlementV1<Target>(evidence: ReplayRunEvidenceV1<Target>,
-  continueQueuedConnections: boolean): ReplayRunSettlementV1 {
+  prior: ReplayRetainedStateV1<Target>, ownership: Readonly<{
+    continueQueuedConnections: boolean; cancelled: boolean; hasStaged: boolean;
+    isStaged(demand: Rfc64CatalogReplayPeerDemandV1): boolean;
+  }>): ReplayRunSettlementV1<Target> {
+  const continueQueuedConnections = !ownership.cancelled && ownership.continueQueuedConnections;
   const observation = evidence.observation;
   const observationFailed = observation.kind === 'target-overflow'
     || (observation.kind === 'parity' && observation.outcome === 'failed')
     || (observation.kind === 'unobserved' && (observation.reason === 'parity-error'
       || (observation.reason === 'budget-exhausted' && !continueQueuedConnections)));
-  return { continueQueuedConnections,
+  let requiresFullReplay = observationFailed || evidence.unattributedProviderFailure;
+  let promisedTargets = prior.promisedTargets;
+  const retain = (targets: BoundedReplayTargetsV1<Target>, replaces = false) => {
+    promisedTargets = mergeReplayTargetsV1(replaces ? emptyReplayTargetsV1<Target>()
+      : promisedTargets ?? emptyReplayTargetsV1<Target>(), targets, evidence.merge);
+    requiresFullReplay ||= promisedTargets.kind === 'overflow';
+  };
+  let fullPass = prior.fullPass;
+  const wasFullPass = fullPass?.covered ?? false;
+  const observed = observation.kind !== 'unobserved';
+  // A staged pass retains earlier corroboration even if the final peer is not a provider.
+  const corroborated = evidence.requested > 0 || (wasFullPass && (fullPass?.corroborated ?? false));
+  if (observation.kind === 'parity' && corroborated) {
+    // Coverage can clear a witness despite a failed provider, but cannot discard
+    // that provider's previously advertised heads by replacing the snapshot.
+    retain({ kind: 'bounded', targets: observation.targets }, fullPass !== null && wasFullPass
+      && fullPass.replacesSnapshot && !fullPass.unanswered && !evidence.unanswered);
+  } else if (observation.kind === 'target-overflow') promisedTargets = { kind: 'overflow' };
+  else if (evidence.received.kind === 'overflow' || evidence.received.targets.length > 0) retain(evidence.received);
+  let unverified = prior.unverified;
+  if (corroborated && observed) unverified = false;
+  else if (!observed || (evidence.fullRequest && evidence.providerFailures > 0)
+    || (wasFullPass && fullPass?.unanswered === true)) unverified = true;
+  if (wasFullPass && observed) fullPass = null;
+  if (ownership.cancelled && fullPass) {
+    retain(fullPass.targets);
+    fullPass.retireUnowned(ownership.isStaged);
+    if (!ownership.hasStaged) fullPass = null;
+  }
+  return { continueQueuedConnections, promisedTargets, fullPass, unverified,
     result: Object.freeze({ requested: evidence.requested, failed: evidence.peerFailures + Number(observationFailed) }),
-    requiresFullReplay: observationFailed || evidence.unattributedProviderFailure };
+    requiresFullReplay: requiresFullReplay || (prior.requiresFullReplay && !(observed && corroborated && wasFullPass)),
+  };
 }
