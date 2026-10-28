@@ -133,11 +133,10 @@ describe('the cursor codec', () => {
 
   it('never echoes the rejected input in the error', () => {
     const hostile = 'v1.<script>alert(1)</script>';
-    try { decodePromoteJobCursor(hostile); expect.unreachable(); } catch (error) {
-      expect(error).toBeInstanceOf(PromoteListRequestError);
-      expect((error as Error).message).not.toContain('script');
-      expect((error as Error).message).toBe('cursor is not a valid share job cursor');
-    }
+    const error = (() => { try { decodePromoteJobCursor(hostile); } catch (cause) { return cause; } })();
+    expect(error).toBeInstanceOf(PromoteListRequestError);
+    expect((error as Error).message).not.toContain('script');
+    expect((error as Error).message).toBe('cursor is not a valid share job cursor');
   });
 });
 

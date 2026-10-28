@@ -20,6 +20,34 @@ function chunkedResponse(
 }
 
 describe('SPARQL TSV SELECT decoding', () => {
+  it('preserves mixed terminators and empty cells at every transport boundary', async () => {
+    const body = '?a\t?__proto__\t?c\r\n<urn:a>\t\t"one"\r\t"safe"\t\n\t\t\r\n<urn:b>\t\t"last"';
+    const expected = {
+      type: 'bindings', variables: ['a', '__proto__', 'c'],
+      bindings: [{ a: 'urn:a', c: '"one"' }, JSON.parse('{"__proto__":"\\"safe\\""}'), {}, { a: 'urn:b', c: '"last"' }],
+    };
+    expect(decodeSparqlTsvSelectResult(body)).toEqual(expected);
+    const bytes = new TextEncoder().encode(body);
+    for (let split = 0; split <= bytes.length; split += 1) {
+      await expect(decodeSparqlTsvSelectResponse(chunkedResponse([
+        bytes.subarray(0, split), bytes.subarray(split),
+      ]))).resolves.toEqual(expected);
+    }
+  });
+
+  it('keeps precise lazy diagnostics and validates row arity before terms', () => {
+    expect(() => decodeSparqlTsvSelectResult('?a\t?b\n<urn:ok>\t"ok"\n\t<relative>\n'))
+      .toThrow('SPARQL TSV binding 1.b URI value must be an absolute safe IRI');
+    expect(() => decodeSparqlTsvSelectResult('?a\n"7"^^<relative>\n'))
+      .toThrow('SPARQL TSV binding 0.a datatype must be an absolute safe IRI');
+    expect(() => decodeSparqlTsvSelectResult('?a\n_:bad.\n'))
+      .toThrow('SPARQL TSV binding 0.a is not a valid RDF term');
+    expect(() => decodeSparqlTsvSelectResult('?a\ninvalid\t\t\n'))
+      .toThrow('SPARQL TSV row 0 has 3 columns; expected 1');
+    expect(() => decodeSparqlTsvSelectResult('\n\t\n'))
+      .toThrow('SPARQL TSV row 0 has 2 columns; expected 0');
+  });
+
   it.each(['language', 'typed', 'escaped'] as const)(
     'decodes a 16 MB %s literal without exhausting the regex stack', async (kind) => {
       const payload = 'x'.repeat(16_000_000);

@@ -15,10 +15,11 @@ import { createSwmTargetExecutorSessionFactoryForTest } from
 
 vi.mock('../src/sync/requester/durable-sync.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../src/sync/requester/durable-sync.js')>();
+  const runDurableSync = vi.fn(async (_context: unknown) => ({}));
   return {
     ...actual,
-    runDurableSync: vi.fn(async () => ({})),
-    runDurableSyncDetailed: vi.fn(async () => ({ result: {} })),
+    runDurableSync,
+    runDurableSyncDetailed: vi.fn(async context => ({ result: await runDurableSync(context) })),
   };
 });
 

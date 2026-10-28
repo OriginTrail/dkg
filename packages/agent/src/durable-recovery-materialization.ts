@@ -34,7 +34,11 @@ export interface RecoveryMaterializationScope {
   readonly isCurrent?: () => boolean;
   readonly onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
 }
+export interface HeldAssetFence {
+  assertCurrent(): void;
+}
 export interface RecoveryMaterialization {
+  withHeldAssetFence<T>(operation: (fence: HeldAssetFence) => Promise<T>, signal?: AbortSignal): Promise<T>;
   readonly authenticateChallengePinnedAsset: ChallengeExactAssetFetchContext['authenticateChallengePinnedAsset'];
   readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
 }
@@ -81,6 +85,15 @@ export class RecoveryMaterializationOwner {
     // How long this operation's last asset write held the store, if it wrote one.
     let previousWriteMs: number | undefined;
     return {
+      withHeldAssetFence: (operation, signal) => runGraphScopedOperation({
+        contextGraphId, signal,
+        closedError: () => asSyncFetchAbortError(new Error('Held asset recovery is closed for node shutdown')),
+        bindingChangedError: () => asSyncFetchAbortError(new Error(`Subscription for ${contextGraphId} changed during held recovery`)),
+        operation: control => {
+          const assertCurrent = () => { control.adoptEquivalentSubscription(); control.assertOwnershipCurrent(); };
+          return operation({ assertCurrent });
+        },
+      }),
       authenticateChallengePinnedAsset: ({
         asset,
         commitment,
