@@ -1,3 +1,4 @@
+import { beginNamedPublishFinalization, finishNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
@@ -488,7 +489,7 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
-import { adoptOnlyInlineHooks, resolvePublishTargetCuration } from './publish-target-curation.js';
+import { resolvePublishTargetCuration } from './publish-target-curation.js';
 import { KA_MINT_RECONCILE_REFUSED_CODE } from './knowledge-asset-mint-reconcile.js';
 import { sealChainTargetMismatch } from './seal-chain-target.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -767,6 +768,7 @@ export function resolveCuratedV2CatalogCapability(input: {
   graphScoped: boolean;
   onChainContextGraphId?: string | bigint;
   encryptInlinePayload: PublishOptions['encryptInlinePayload'];
+  curated?: boolean;
 }): PublishOptions['trustedNonManifestCatalogTriples'] {
   const hasOnChainContextGraphId = typeof input.onChainContextGraphId === 'bigint'
     ? input.onChainContextGraphId > 0n
@@ -775,7 +777,7 @@ export function resolveCuratedV2CatalogCapability(input: {
   if (
     !input.graphScoped
     || !hasOnChainContextGraphId
-    || typeof input.encryptInlinePayload !== 'function'
+    || !(input.curated ?? (typeof input.encryptInlinePayload === 'function'))
   ) {
     return undefined;
   }
@@ -6190,6 +6192,12 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
+    if (result.status === 'confirmed') {
+      await beginNamedPublishFinalization(this.store, {
+        assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId,
+      }, () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
+    }
+
     // Exact scope owns published-root cleanup. A caller's explicit request to
     // clear every remaining share is a separate family-wide destructive action
     // that runs only after a confirmed publish/update.
@@ -6344,19 +6352,24 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    await this.afterConfirmedGraphScopedVmPublishV1({
-      status: result.status,
-      contextGraphId,
-      subGraphName: opts?.subGraphName,
-      assertionCoordinate: name,
-      shareOperationId: rfc64WorkspaceHead?.shareOperationId,
-      seal,
-      assertionUri,
-      ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-      publicationLabel: 'publish',
+    if (result.status === 'confirmed') await this.completeNamedPublishFinalization({
+      contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
+      shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri,
     });
 
     return { ...result, assertionUri, seal };
+  }
+
+  async completeNamedPublishFinalization(this: DKGAgent, input: {
+    contextGraphId: string; subGraphName?: string; assertionCoordinate: string;
+    shareOperationId?: string; seal: AssertionSeal; assertionUri: string;
+  }): Promise<void> {
+    await finishNamedPublishFinalization(this.store, input, {
+      catalogRequired: () => this.resolveRfc64CatalogAuthoringLaneV1(input.contextGraphId, input.subGraphName) !== null,
+      transfer: shareOperationId => this.transferRfc64ConfirmedVmV1({
+        ...input, shareOperationId, ctx: createOperationContext('publishFromSWM'), publicationLabel: 'publish',
+      }),
+    });
   }
 
   private async afterConfirmedGraphScopedVmPublishV1(
@@ -6744,13 +6757,16 @@ export class PublishMethods extends DKGAgentBase {
     // decrypt — without this, remap publishes (source SWM cg != target
     // chain cg) produced undecryptable payloads.
     // Adopt-only resolves the access policy alone: the recorded catalog depends on it, sender keys do not.
-    const { encryptInlinePayload, encryptInlineChunked } = adoptOnly
-      ? await adoptOnlyInlineHooks(this, this.log, ctx, { contextGraphId, explicitPolicyTargetContextGraphId: ctxGraphIdStr, logPrefix: 'LU-5' })
-      : await this._resolveInlineEncryption(
+    const adoption = options?.adoptExistingMint === undefined ? undefined : {
+      ...options.adoptExistingMint,
+      curated: await resolvePublishTargetCuration(this, this.log, ctx,
+        { contextGraphId, explicitPolicyTargetContextGraphId: ctxGraphIdStr, logPrefix: 'LU-5' }),
+    };
+    const { encryptInlinePayload, encryptInlineChunked } = adoption ? {} : await this._resolveInlineEncryption(
         contextGraphId, options?.subGraphName, options?.authorAgentAddress, ctxGraphIdStr,
         onChainId ? { aeadBindingContextGraphId: onChainId } : undefined,
       );
-    if (encryptInlinePayload && !adoptOnly) {
+    if (encryptInlinePayload) {
       this.log.info(ctx, `LU-5: curated CG ${contextGraphId} — wrapping inline ACK payload with chain-key AEAD`);
     }
     if (encryptInlineChunked) {
@@ -6767,6 +6783,7 @@ export class PublishMethods extends DKGAgentBase {
       graphScoped: true,
       onChainContextGraphId: onChainId,
       encryptInlinePayload,
+      curated: adoption?.curated,
     });
 
     const publisher = options?.publisherOverride ?? this.publisher;
@@ -6796,7 +6813,7 @@ export class PublishMethods extends DKGAgentBase {
       privateTripleCount: options?.privateTripleCount,
       encryptInlinePayload,
       encryptInlineChunked,
-      adoptExistingMint: options?.adoptExistingMint,
+      adoptExistingMint: adoption,
     });
 
     if (

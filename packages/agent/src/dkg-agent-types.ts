@@ -1502,18 +1502,16 @@ export interface DKGAgentConfig {
    */
   networkRelays?: readonly string[];
   /**
-   * Relay multiaddrs declared by the OTHER DKG networks bundled with this
-   * build (the daemon derives them from network/*.json). With a network
-   * identity the node refuses to dial these peers, store their addresses or
-   * accept their connections. `relayPeers` win over this static list only: a
-   * `relayPeers` entry that fails the network-identity proof is refused like
-   * any other peer (`DKGNodeConfig.otherNetworkRelays`).
+   * Relay multiaddrs declared by the OTHER DKG networks bundled with this build
+   * (the daemon derives them from network/*.json). With a network identity the
+   * node refuses to dial these peers, store their addresses or accept their
+   * connections. `relayPeers` win over this static list only: a `relayPeers` entry
+   * that fails the network-identity proof is refused like any other peer (`DKGNodeConfig.otherNetworkRelays`).
    */
   otherNetworkRelays?: readonly string[];
   /**
-   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`).
-   * Default true; false is the operator kill switch, leaving other networks'
-   * peers to network admission alone.
+   * Transport-level network peer isolation (`DKGNodeConfig.networkPeerIsolation`). Default true; false is
+   * the operator kill switch, leaving other networks' peers to network admission alone.
    */
   networkPeerIsolation?: boolean;
   /** Legacy ACK candidate allowlist. When set, unlisted connected peers are not dialed for ACKs. */
@@ -1532,6 +1530,8 @@ export interface DKGAgentConfig {
   preferredACKPeerIds?: string[];
   /** Multiaddrs to announce to the network (for VPS/cloud nodes with a public IP not on the interface). */
   announceAddresses?: string[];
+  /** Announce public and relay addresses only, and take only a peer's public addresses for a direct route. Default false. */
+  publicAddressesOnly?: boolean;
   skills?: Array<{
     skillType: string;
     pricePerCall?: number;
@@ -1540,6 +1540,8 @@ export interface DKGAgentConfig {
   }>;
   dataDir?: string;
   store?: TripleStore;
+  /** Write-preflight unresolved-write window in ms (default 120 s; 0 = strict). A policy, not a store guarantee: see `dkg-agent-write-preflight.ts`. */
+  writePreflightUnresolvedWriteWindowMs?: number;
   /** Triple store backend configuration (e.g. oxigraph-worker, blazegraph). If omitted, defaults to oxigraph-worker when dataDir is set. */
   storeConfig?: TripleStoreConfig;
   /** Out-of-line storage for large public SWM RDF literal object terms. Defaults on for local Oxigraph-backed dataDir stores. */

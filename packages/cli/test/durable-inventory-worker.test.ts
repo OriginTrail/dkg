@@ -27,8 +27,8 @@ describe('bound worker owns the real inventory CAS', () => {
     const params={contextGraphId:CONTEXT_GRAPH_ID,assertionCoordinate:seeded.assertionCoordinate,shareOperationId:seeded.shareOperationId,
       seal:seeded.seal,assertionUri:'urn:confirmed:authority',ctx:createOperationContext('share'),publicationLabel:'queued publish' as const,
       expectedWorkspaceAccessPolicy:'public' as const};
-    const complete=async()=>{try{expect(await agent.transferRfc64ConfirmedVmV1(params)).toBe('owned');}
-      catch(error){return throwInventoryRecoveryFailure(error);}return {promotedCount:0,sealed:true,publishReady:false};};
+    const complete=async()=>{let transferred;try{transferred=await agent.transferRfc64ConfirmedVmV1(params);}
+      catch(error){return throwInventoryRecoveryFailure(error);}expect(transferred).toBe('owned');return {promotedCount:0,sealed:true,publishReady:false};};
     const runtime=rfc64SwmInventoryShadowRuntimeV1(agent), key=`${seeded.scopeDigest}\n${AUTHOR}`;
     let unlock!:()=>void; const blocked=new Promise<void>(r=>{unlock=r;});
     let entered!:()=>void;const acquired=new Promise<void>(r=>{entered=r;});

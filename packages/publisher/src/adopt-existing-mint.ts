@@ -254,6 +254,12 @@ export async function mintOrAdoptKnowledgeAssets(
   }
 }
 
+/** Verify receipt evidence directly; adoption never constructs transaction parameters. */
+export async function adoptMintForRecording(chain: ChainAdapter, expected: MintAdoptionExpectation,
+  sealed: SealedMintAdoption, txHash?: string): Promise<MintOrAdoptOutcome> {
+  return adopted(sealed, expected, await adoptExistingMint(chain, expected, { txHash }));
+}
+
 async function adopted(
   sealed: SealedMintAdoption,
   expected: MintAdoptionExpectation,

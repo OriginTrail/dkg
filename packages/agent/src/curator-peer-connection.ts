@@ -9,7 +9,10 @@ import { verifiedCuratorDialAddress } from './curator-dial-address.js';
 interface CuratorPeerConnectionAgent {
   readonly node: { libp2p: { getConnections(): Array<{ remotePeer: { toString(): string } }> } };
   readonly peerResolver: Pick<PeerResolver, 'connect'>;
-  readonly log: { warn(ctx: OperationContext, message: string): void };
+  readonly log: {
+    warn(ctx: OperationContext, message: string): void;
+    debug(ctx: OperationContext, message: string): void;
+  };
 }
 
 export function ensureCuratorConnected(
@@ -47,6 +50,8 @@ async function connectCurator(
       },
       perStepTimeoutMs: 5_000,
       candidateTimeoutMs: 5_000,
+      // Every route tried and why it failed; the warning below names the last one only.
+      log: (message) => agent.log.debug(ctx, message),
     });
     throwIfAborted(signal);
     return outcome.status === 'connected';

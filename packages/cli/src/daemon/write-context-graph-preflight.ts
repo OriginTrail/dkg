@@ -3,6 +3,7 @@ import { Logger, createOperationContext } from '@origintrail-official/dkg-core';
 import type { ContextGraphWritePreflightProbe } from '@origintrail-official/dkg-agent';
 import { classifyWritePreflightFailure } from '@origintrail-official/dkg-agent/write-preflight-attribution';
 import { sanitizeWritePreflightFailures, type WritePreflightDiagnosticFailure } from './write-preflight-attribution.js';
+import { canProbeWritePreflight, probeWritePreflight, type CoalescingProbeAgent } from './write-preflight-coalescing.js';
 
 function hasActiveSyncedSubscription(probe: ContextGraphWritePreflightProbe): boolean {
   return (
@@ -194,18 +195,15 @@ type ExactPreflightDecision =
  * Deliberately takes no `ServerResponse` — HTTP responses stay with the caller.
  */
 export async function evaluateExactWritePreflight(
-  agent: {
-    probeContextGraphWritePreflight?: (
-      contextGraphId: string,
-      opts?: { callerAgentAddress?: string | null },
-    ) => Promise<ContextGraphWritePreflightProbe>;
-  },
+  agent: Partial<CoalescingProbeAgent>,
   candidateId: string,
   opts: {
     callerAgentAddress: string | null;
     requireLocalWritable: boolean;
     isBareCandidateId: boolean;
     allowLocalExactFallback: boolean;
+    /** The second pass after a readiness wait: it must not join a probe that began before the wait ended. */
+    freshProbe?: boolean;
   },
 ): Promise<ExactPreflightDecision> {
   const {
@@ -214,24 +212,28 @@ export async function evaluateExactWritePreflight(
     isBareCandidateId,
     allowLocalExactFallback,
   } = opts;
-  if (!agent.probeContextGraphWritePreflight) {
+  if (!canProbeWritePreflight(agent)) {
     // Compatibility for narrow providers that do not expose the exact point
     // capability. Production agents do expose it; their canonical path below
     // never enumerates the catalog.
     return { kind: "listFallback" };
   }
   try {
-    const probe = await agent.probeContextGraphWritePreflight(candidateId, {
-      callerAgentAddress,
-    });
-    // Fast-accept wins even under a degraded store (it never rests on UNKNOWN
-    // store fields), so check it before any deny/unavailable interpretation.
-    if (exactProbeCanFastAccept(
-      probe,
+    const fastAccepts = (candidate: ContextGraphWritePreflightProbe): boolean => exactProbeCanFastAccept(
+      candidate,
       requireLocalWritable,
       callerAgentAddress,
       allowLocalExactFallback,
-    )) {
+    );
+    const exact = await probeWritePreflight(agent, candidateId, callerAgentAddress, {
+      accepts: fastAccepts,
+      fresh: opts.freshProbe,
+    });
+    const probe = exact.probe;
+    // Fast-accept wins even under a degraded store (it never rests on UNKNOWN
+    // store fields), so check it before any deny/unavailable interpretation.
+    if (fastAccepts(probe)) {
+      exact.fastAccepted();
       return { kind: "accept" };
     }
     const attribution = probeAttribution(probe);

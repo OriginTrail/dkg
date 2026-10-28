@@ -131,7 +131,6 @@ import { fetchAllEntries, resolveRegistryConfig } from '../../integrations/regis
 import type { IntegrationEntry, TrustTier } from '../../integrations/schema.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import { loadTokens, httpAuthGuard, extractBearerToken, canAdministerNode } from '../../auth.js';
-import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
 import {
   expectedBundledMarkItDownBuildMetadata,
@@ -773,6 +772,7 @@ export async function handleStatusRoutes(ctx: RequestContext): Promise<void> {
     return jsonResponse(res, 200, {
       name: config.name,
       version: nodeVersion,
+      runtime: canAdministerNode(actorFromRequestContext(ctx).authentication) ? { nodeVersion: process.version } : null,
       commit: buildInfo.commit !== "uncommitted"
         ? buildInfo.commit
         : (getCurrentCommitFull() ?? nodeCommit ?? null),

@@ -162,13 +162,19 @@ interface Rfc64LegacySwmFenceScopeStateV1 {
  * takes a turn on the node-wide chain as well, so one of them runs at a time
  * on the node, as before. The retirement of one asset does not: it waits for
  * the work of its own graph and for nothing else.
+ *
+ * The node-wide turns go in the order they were asked for, with one
+ * exception: work that yields its turn (a receiver lease that replays a head
+ * the node has applied already) waits behind every other work that asks while
+ * it waits. A graph the node just created or joined, or a newer head of any
+ * graph, then does not wait for the replays of other graphs.
  */
 export interface Rfc64LegacySwmFenceCoordinatorV1 {
   readonly scopes: Map<string, Rfc64LegacySwmFenceScopeStateV1>;
-  /** The node-wide chain of the leases and retirements that fence a whole graph. */
-  mutationTail: Promise<void>;
-  /** How many of them hold or await the node-wide turn. */
-  nodeWideTurnsPending: number;
+  /** Whether a lease or a retirement that fences a whole graph holds the node-wide turn. */
+  nodeWideTurnHeld: boolean;
+  /** The ones waiting for that turn, in the order they get it. */
+  readonly nodeWideWaiters: Rfc64LegacySwmNodeWideWaiterV1[];
   /** The turns of each graph that has a lease or a retirement waiting or at work. */
   readonly graphTurns: Rfc64SerializedScopeRuntimeV1;
   readonly waitLimitMs: number;
@@ -183,13 +189,19 @@ export interface Rfc64LegacySwmFenceCoordinatorV1 {
   promoteAdmissionWaiters: number;
 }
 
+/** A lease or a whole-graph retirement waiting for the node-wide turn. */
+interface Rfc64LegacySwmNodeWideWaiterV1 {
+  readonly yields: boolean;
+  readonly start: () => void;
+}
+
 export function createRfc64LegacySwmFenceCoordinatorV1(
   options: Rfc64LegacySwmFenceOptionsV1 = {},
 ): Rfc64LegacySwmFenceCoordinatorV1 {
   return {
     scopes: new Map(),
-    mutationTail: Promise.resolve(),
-    nodeWideTurnsPending: 0,
+    nodeWideTurnHeld: false,
+    nodeWideWaiters: [],
     graphTurns: new Rfc64SerializedScopeRuntimeV1('RFC-64 legacy SWM graph turn'),
     waitLimitMs: options.waitLimitMs ?? RFC64_LEGACY_SWM_FENCE_WAIT_LIMIT_MS,
     longFenceMs: options.longFenceMs ?? RFC64_LEGACY_SWM_FENCE_LONG_MS,
@@ -484,6 +496,11 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     kaUal?: string;
     /** The owner's lifetime: an abort ends a retirement that is still waiting. */
     signal?: AbortSignal;
+    /**
+     * Whole-graph work only: let work that asks for the node-wide turn later
+     * go first while this waits (see {@link Rfc64LegacySwmFenceCoordinatorV1}).
+     */
+    yieldsNodeWideTurn?: boolean;
   }>,
   work: (dropFence: () => void) => Promise<T>,
 ): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> {
@@ -562,17 +579,13 @@ export async function runRfc64LegacySwmRetirementV1<T>(
   const takeGraphTurn = (): Promise<Rfc64LegacySwmRetirementOutcomeV1<T>> => (
     fence.graphTurns.run(target.contextGraphId, run)
   );
-  let turn: Promise<Rfc64LegacySwmRetirementOutcomeV1<T>>;
-  if (target.kaUal !== undefined) {
-    turn = takeGraphTurn();
-  } else {
-    turn = fence.nodeWideTurnsPending === 0
-      ? takeGraphTurn()
-      : fence.mutationTail.then(() => (gaveUp ? notRun : takeGraphTurn()));
-    fence.nodeWideTurnsPending += 1;
-    fence.mutationTail = turn.then(() => undefined, () => undefined)
-      .then(() => { fence.nodeWideTurnsPending -= 1; });
-  }
+  const turn = target.kaUal !== undefined
+    ? takeGraphTurn()
+    : takeRfc64LegacySwmNodeWideTurnV1<Rfc64LegacySwmRetirementOutcomeV1<T>>(
+      fence,
+      target.yieldsNodeWideTurn === true,
+      () => (gaveUp ? Promise.resolve(notRun) : takeGraphTurn()),
+    );
   try {
     return await Promise.race([turn, abandoned.then(() => notRun)]);
   } finally {
@@ -580,6 +593,41 @@ export async function runRfc64LegacySwmRetirementV1<T>(
     target.signal?.removeEventListener('abort', stopWaiting);
     dropFence();
   }
+}
+
+/**
+ * Hold the node-wide turn for as long as `work` runs: at once when it is free,
+ * else once every waiter in front has had it.
+ */
+function takeRfc64LegacySwmNodeWideTurnV1<R>(
+  fence: Rfc64LegacySwmFenceCoordinatorV1,
+  yields: boolean,
+  work: () => Promise<R>,
+): Promise<R> {
+  const hold = (): Promise<R> => {
+    const held = work();
+    const passOn = (): void => passRfc64LegacySwmNodeWideTurnV1(fence);
+    void held.then(passOn, passOn);
+    return held;
+  };
+  if (!fence.nodeWideTurnHeld) {
+    fence.nodeWideTurnHeld = true;
+    return hold();
+  }
+  return new Promise<R>((resolve) => {
+    const waiters = fence.nodeWideWaiters;
+    const firstYielding = yields ? -1 : waiters.findIndex((waiter) => waiter.yields);
+    waiters.splice(firstYielding < 0 ? waiters.length : firstYielding, 0, {
+      yields,
+      start: () => resolve(hold()),
+    });
+  });
+}
+
+function passRfc64LegacySwmNodeWideTurnV1(fence: Rfc64LegacySwmFenceCoordinatorV1): void {
+  const next = fence.nodeWideWaiters.shift();
+  if (next === undefined) fence.nodeWideTurnHeld = false;
+  else next.start();
 }
 
 function reportFenceEvent(

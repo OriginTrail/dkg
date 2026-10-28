@@ -4,10 +4,7 @@ import {
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
-import type { PublishOptions } from '@origintrail-official/dkg-publisher';
 import type { DKGAgent } from './dkg-agent.js';
-
-type PublishTargetCurationInput = Parameters<typeof resolvePublishTargetCuration>[3];
 
 /**
  * Whether a publish into `contextGraphId` (or its explicit on-chain target)
@@ -115,24 +112,4 @@ export async function resolvePublishTargetCuration(
     );
   }
   return targetIsCurated;
-}
-
-/** Stands in for the member-encryption hook of a publish that only records an existing mint. */
-const refuseAdoptOnlyEncryption: NonNullable<PublishOptions['encryptInlinePayload']> = async () => {
-  throw new Error('Recording an existing mint never encrypts or distributes member payloads');
-};
-
-/**
- * The inline hooks of a publish that records an existing mint. Curation comes
- * from the access policy alone. A curated publish gets a hook that refuses to
- * run, so its catalog is recorded as the minting publish recorded it, while
- * no sender key, signing key or member ciphertext is involved.
- */
-export async function adoptOnlyInlineHooks(
-  agent: DKGAgent,
-  log: Logger,
-  ctx: OperationContext,
-  input: PublishTargetCurationInput,
-): Promise<Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked'>> {
-  return await resolvePublishTargetCuration(agent, log, ctx, input) ? { encryptInlinePayload: refuseAdoptOnlyEncryption } : {};
 }

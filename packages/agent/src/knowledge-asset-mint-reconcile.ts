@@ -1,3 +1,4 @@
+import { readNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
 import type { ChainAdapter, OnChainPublishResult } from '@origintrail-official/dkg-chain';
@@ -53,6 +54,7 @@ export interface KnowledgeAssetMintReconcileHost {
   readonly chain: ChainAdapter;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly stampPublishedLifecycle: PublishedNamedKaVmLifecycleWriter;
+  readonly completeFinalization: OmitThisParameter<DKGAgent['completeNamedPublishFinalization']>;
 }
 
 interface Target {
@@ -91,13 +93,11 @@ function isRecorded(lifecycle: AssertionHistoryDescriptor | null | undefined, se
  * against the seal, including that no update has superseded it. No transaction, ACK
  * request or member ciphertext is sent. While the share is still resident,
  * the synchronous publish path records the mint in adopt-only mode and
- * consumes the share. Once a publish has consumed the share and finished its
- * post-publish steps, only the lifecycle is left, and it is completed from
- * the verified VM record. A share consumed by a publish that stopped before
- * its finalization gossip and catalog transition refuses: those cannot be
- * finished from the VM record alone. Either way the reconcile succeeds only
- * once the lifecycle names the sealed root and the asset's UAL as published,
- * so an interrupted attempt is resumed by retrying.
+ * consumes the share. A publish-owned checkpoint proves that content recording,
+ * cleanup and finalization gossip completed; its retained catalog obligation
+ * must then transfer to a durable owner before the lifecycle can be terminal.
+ * Legacy shares consumed before that boundary remain ambiguous and refuse.
+ * Retrying resumes the explicit checkpoint without sending another mint.
  */
 export async function reconcileLateMint(
   agent: DKGAgent,
@@ -125,7 +125,8 @@ export async function reconcileLateMint(
   // A minted version is complete only with its publish receipt; the publish
   // path writes that receipt best-effort, so a missing one is completed here.
   const complete = async (state: AssertionHistoryDescriptor | null | undefined) => isRecorded(state, sealRoot, ual)
-    && (BigInt(reservation.scope.assertionVersion) !== 1n || await hasPublishReceipt(agent, reservation));
+    && (BigInt(reservation.scope.assertionVersion) !== 1n || await hasPublishReceipt(agent, reservation))
+    && (await readNamedPublishFinalization(agent.store, reservation)).kind === 'complete';
 
   const before = await lifecycle();
   if (await complete(before)) return { status: 'already-published', ual };
@@ -135,7 +136,9 @@ export async function reconcileLateMint(
   }
   // A VM pointer means an earlier attempt recorded the mint, consumed the share
   // and passed its finalization gossip; publishing again would plan an update.
-  const share = vmPointer === undefined ? await shareState(agent, reservation, target) : 'consumed';
+  const progress = await readNamedPublishFinalization(agent.store, reservation);
+  const share = progress.kind !== 'legacy' || vmPointer !== undefined
+    ? 'consumed' : await shareState(agent, reservation, target);
   if (share === 'interrupted') {
     throw refused(
       `An interrupted publish consumed the share of "${name}" before its finalization gossip and catalog transition. ` +
@@ -313,6 +316,10 @@ async function completeRecordedLifecycle(
     await agent.store.insert(buildAssertionPublishReceiptQuads({
       assertionUri, metaGraph, txHash: mint.txHash, blockNumber: BigInt(mint.blockNumber),
     }));
+    await host.completeFinalization({
+      contextGraphId: target.contextGraphId, subGraphName: target.subGraphName,
+      assertionCoordinate: target.name, seal, assertionUri,
+    });
     await host.stampPublishedLifecycle({
       contextGraphId: target.contextGraphId,
       agentAddress: target.agentAddress,

@@ -474,7 +474,7 @@ describe('adoption refuses what the chain cannot prove', () => {
       .rejects.toThrow(/requires a reserved KA id/);
   });
 
-  it('plans a record-only publish only for an on-chain context graph on a V10-ready chain', async () => {
+  it('admits receipt adoption only for an on-chain context graph on a V10-ready chain', async () => {
     const planner = new PublisherPlanner({
       chain: { chainId: 'none' } as ChainAdapter,
       resolvePublisherAddressSelection: vi.fn(),
@@ -483,7 +483,7 @@ describe('adoption refuses what the chain cannot prove', () => {
       log: { info: () => {}, warn: () => {} },
     });
 
-    await expect(planner.prepareMintAdoption(1n)).rejects.toThrow(/on-chain context graph id and a V10-ready chain/);
-    await expect(planner.prepareMintAdoption(undefined)).rejects.toThrow(/on-chain context graph id and a V10-ready chain/);
+    await expect(planner.requireMintAdoptionTarget(1n)).rejects.toThrow(/on-chain context graph id and a V10-ready chain/);
+    await expect(planner.requireMintAdoptionTarget(undefined)).rejects.toThrow(/on-chain context graph id and a V10-ready chain/);
   });
 });

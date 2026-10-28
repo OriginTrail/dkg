@@ -1,3 +1,7 @@
+import { transferConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
+import { beginNamedPublishFinalization, finishNamedPublishFinalization, readNamedPublishFinalization } from '../src/named-publish-finalization.js';
+import { NETWORK_ID } from './support/rfc64-local-catalog-repair-fixture.js';
+import { Logger, type ContextGraphIdV1 } from '@origintrail-official/dkg-core';
 /**
  * A named asset whose publish transaction mined after the node stopped
  * waiting, through the agent's real named-asset lifecycle: create, write,
@@ -342,6 +346,57 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await history()).toMatchObject({ status: 'swm-shared' });
   });
 
+  it.each(['public', 'private'] as const)('resumes the %s catalog transition after VM lifecycle and share cleanup already completed', async kind => {
+    const { agent, store, sealed, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
+    const inventoryGraph = 'urn:test:remaining-swm-inventory';
+    const repairGraph = 'urn:test:durable-private-placement';
+    await store.insert([{ subject: sealed.kaUal!, predicate: 'urn:test:advertised', object: '"SWM"', graph: inventoryGraph }]);
+    const transfer = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1')
+      .mockRejectedValueOnce(new Error('interrupted before catalog ownership transfer'))
+      .mockImplementation(params => transferConfirmedVmCatalogV1({
+        owner: agent, log: new Logger('late-mint-finalization-test'),
+        finalizedPrivateScopeBase: kind === 'private' ? {
+          networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH as ContextGraphIdV1,
+          governanceChainId: null, governanceContractAddress: null, ownershipTransitionDigest: null,
+          subGraphName: null, era: '1',
+        } : null,
+        storeRepair: async repair => { await store.insert([{ subject: repair.kaUal, predicate: 'urn:test:owed-placement',
+          object: JSON.stringify(repair.assertionCoordinate), graph: repairGraph }]); },
+        requestPlacement: () => ({ accepted: false }),
+        removeInventory: async () => { await store.deleteByPattern({ graph: inventoryGraph });
+          return { status: 'applied', attempts: 1, snapshot: null }; },
+        requestProjection: () => true,
+      }, params));
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toThrow('interrupted before catalog');
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(false);
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toMatchObject({ kind: 'pending' });
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted' });
+    expect(transfer).toHaveBeenCalledTimes(2);
+    const remaining = await store.query(`ASK { GRAPH <${inventoryGraph}> { ?s ?p ?o } }`);
+    const owed = await store.query(`ASK { GRAPH <${repairGraph}> { ?s ?p ?o } }`);
+    expect(remaining).toMatchObject({ type: 'boolean', value: kind === 'private' });
+    expect(owed).toMatchObject({ type: 'boolean', value: kind === 'private' });
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'already-published' });
+    expect(transfer).toHaveBeenCalledTimes(2);
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
+  });
+
+  it('retains a publish-owned completion checkpoint when catalog execution is disabled before retry', async () => {
+    const { store, sealed } = await strandedAsset(new MockChainAdapter());
+    const input = { assertionUri: ASSERTION, seal: sealed, shareOperationId: 'original-share' };
+    await beginNamedPublishFinalization(store, input, () => true);
+    const transfer = vi.fn(async () => 'inactive' as const);
+    await expect(finishNamedPublishFinalization(store, input, { catalogRequired: () => false, transfer }))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    expect(transfer).toHaveBeenCalledWith('original-share');
+    expect(await readNamedPublishFinalization(store, input)).toMatchObject({ kind: 'pending',
+      checkpoint: { catalogRequired: true, shareOperationId: 'original-share' } });
+    await finishNamedPublishFinalization(store, input, { catalogRequired: () => true, transfer: async () => 'owned' });
+    expect(await readNamedPublishFinalization(store, input)).toEqual({ kind: 'complete' });
+  });
+
   it('reconciles a curated asset from policy alone, without a signing key or sender-key setup', async () => {
     const chain = new MockChainAdapter();
     const { agent, store, sealed, lostMint, accessPolicy } = await strandedAsset(chain);
@@ -363,10 +418,10 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     // The curated catalog floor is recorded as the minting publish records it.
     const catalog = await store.query(`SELECT ?s WHERE { GRAPH <${contextGraphCatalogUri(CONTEXT_GRAPH)}> { ?s ?p ?o } }`);
     expect(catalog.type === 'bindings' && catalog.bindings.length).toBeGreaterThan(0);
-    // The curated hook the publisher received refuses to encrypt anything.
-    const encrypt = publishFromSharedMemory.mock.calls[0]?.[2]?.encryptInlinePayload;
-    expect(encrypt).toBeTypeOf('function');
-    await expect(encrypt!(new Uint8Array([1]))).rejects.toThrow(/never encrypts/);
+    const options = publishFromSharedMemory.mock.calls[0]?.[2];
+    expect(options?.adoptExistingMint).toMatchObject({ curated: true });
+    expect(options?.encryptInlinePayload).toBeUndefined();
+    expect(options?.encryptInlineChunked).toBeUndefined();
   });
 
   it('never routes a record-only publish onto the update path', async () => {

@@ -1102,6 +1102,24 @@ describe('ApiClient', () => {
       expect(JSON.parse(calls[0].opts.body as string)).toEqual({ address: '0x' + '1'.repeat(40) });
     });
 
+    it('requestJoin() POSTs the signed request, with reRequest only when asked for (#3421)', async () => {
+      const body = { ok: true, status: 'approved', joinState: 'approved-metadata-pending', delivered: 0 };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const delegation = { agentAddress: '0x' + '3'.repeat(40) };
+      await expect(client.requestJoin('owner/graph', delegation, '12D3KooWCurator')).resolves.toEqual(body);
+      await client.requestJoin('owner/graph', delegation, '12D3KooWCurator', 'joiner', { reRequest: true });
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/owner%2Fgraph/request-join`);
+      expect(calls[0].opts.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({ delegation, curatorPeerId: '12D3KooWCurator' });
+      expect(JSON.parse(calls[1].opts.body as string)).toEqual({
+        delegation,
+        curatorPeerId: '12D3KooWCurator',
+        agentName: 'joiner',
+        reRequest: true,
+      });
+    });
+
     it('removeOperationalWallet() DELETEs the address route', async () => {
       const addr = '0x' + '2'.repeat(40);
       const body = { address: addr, removed: true, txHash: '0xdef', blockNumber: 2 };

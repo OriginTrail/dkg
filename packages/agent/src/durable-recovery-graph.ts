@@ -1,11 +1,13 @@
+import { createStoredPrefixAcquirer } from './durable-recovery-held-store.js';
 // SPDX-License-Identifier: Apache-2.0
+import type { HeldAssetFence } from './durable-recovery-materialization.js';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import { type DurableRecoveryAuthority } from './durable-recovery-authority.js';
 import { type OperationContext } from '@origintrail-official/dkg-core';
 import { exactAssetUalsForSelection } from './sync/exact-assets.js';
 import { MemorySyncCheckpointStore } from './sync/checkpoint/state.js';
 import { createDurableSyncBudget, normalizeDurableSyncTimeoutMs } from './sync/requester/durable-sync-budget.js';
-import { runChallengeExactAssetFetch, runDurableSync, runDurableSyncDetailed, type ChallengeExactAssetFetchContext, type DurableSyncContext } from './sync/requester/durable-sync.js';
+import { runChallengeExactAssetFetch, runDurableSyncDetailed, type ChallengeExactAssetFetchContext, type DurableSyncContext } from './sync/requester/durable-sync.js';
 import { resolveSyncAgentsMeta } from './sync/agents-meta-policy.js';
 import { runExactBatchStreamDriver } from './sync/requester/exact-batch-stream-driver.js';
 import { resolveExactBatchStreamEnabled } from './sync/backpressure.js';
@@ -43,7 +45,7 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     settlementSliceTimeoutMs,
     signal,
     isCurrent,
-    durableMetaContinuation,
+    durableMetaContinuation, durableResumeBoundary,
   } = options;
   const exactAssetFetchPolicy = options.exactAssetFetchPolicy;
   const exactAssetSelection = exactAssetFetchPolicy?.selection;
@@ -92,7 +94,6 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     exactAssetFetchPolicyFor: exactAssetFetchPolicy?.kind !== 'ephemeral-challenge'
       ? () => exactAssetFetchPolicy
       : undefined,
-    durableMetaContinuation,
     stopOnBackoffWorthyFailure,
     admitVerifiedPage: page => authority.admitVerifiedPage(page),
     processDurableBatchInWorker: host.verification.processBatch,
@@ -151,8 +152,15 @@ export async function runAdmittedDurableGraph(request: DurableGraphRequest): Pro
     switch (outcome.kind) {
       case 'settled': return outcome.detailed;
       case 'not-selected':
-      case 'unsupported-before-start': return runDurableSyncDetailed(durableContext);
+      case 'unsupported-before-start': break; // Paging uses the same stored-prefix proof as full-graph recovery.
     }
   }
-  return { result: await runDurableSync(durableContext) };
+  // Resolve continuation policy once; snapshots own a fresh full walk.
+  const continuation = onVerifiedFullSnapshot ? {} : { durableMetaContinuation, durableResumeBoundary };
+  const runPaging = (fence?: HeldAssetFence) =>
+    runDurableSyncDetailed({ ...durableContext, ...continuation,
+      storedPrefix: fence ? createStoredPrefixAcquirer(host.heldStore?.prove, contextGraphId, fence.assertCurrent) : undefined,
+    });
+  return host.heldStore && !onVerifiedFullSnapshot
+    ? materialization.withHeldAssetFence(runPaging, signal) : runPaging();
 }
