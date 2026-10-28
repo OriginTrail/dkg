@@ -137,7 +137,7 @@
     "packages/publisher/src/async-lift-retry-disposition.ts": 931,
     "packages/publisher/src/async-promote-queue-impl.ts": 875,
     "packages/publisher/src/dkg-publisher.ts": 9294,
-    "packages/publisher/src/metadata.ts": 2438,
+    "packages/publisher/src/metadata.ts": 2221,
     "packages/publisher/src/publish-handler.ts": 1095,
     "packages/publisher/src/storage-ack-handler.ts": 2601,
     "packages/publisher/src/update-handler.ts": 968,

@@ -1,5 +1,5 @@
 import type { MintRecordingOptions, SharedMemoryMintRecordingOptions } from './publisher.js';
-import { replaceRecordedMintAccess, adoptedMintAlreadyRecorded } from './adopted-mint-record.js';
+import { replaceRecordedMintAccess, classifyMintRecord, writeMintMetadata } from './adopted-mint-record.js';
 import type { MintAdoptionRequest } from './adopt-existing-mint.js';
 import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication, type PreparedPublicationContent } from './prepared-publication.js';
 import { recordTentativePublication } from './record-tentative-publication.js';
@@ -3231,15 +3231,15 @@ export class DKGPublisher implements Publisher {
       const onChainResult = outcome.result;
       let ual = '';
       if (outcome.adopted && !graphPublish) throw new Error('Adopted mint recording requires a graph-scoped reservation');
-      const keepsExistingRecord = graphPublish !== undefined && await adoptedMintAlreadyRecorded(this.store, {
+      const recordDisposition = graphPublish !== undefined ? await classifyMintRecord(this.store, {
         contextGraphId, ual: graphPublish.scope.ual, assertionVersion: graphPublish.scope.assertionVersion,
         assertionGraph: knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, graphPublish.scope, target.subGraphName),
         merkleRoot: kcMerkleRoot, publicTripleCount: graphPublish.publicTripleCount,
         privateTripleCount: graphPublish.privateTripleCount,
         ...(graphPublish.expectedPrivateMerkleRoot ? { privateMerkleRoot: graphPublish.expectedPrivateMerkleRoot } : {}),
-      }, onChainResult);
+      }, onChainResult) : 'absent';
       if (outcome.adopted) this.log.info(ctx, `Adopted the existing mint of KA ${onChainResult.kaId ?? onChainResult.batchId}: tx=${onChainResult.txHash} block=${onChainResult.blockNumber}`
-        + (keepsExistingRecord ? '; keeping the record this node already holds' : ''));
+        + (recordDisposition === 'confirmed' ? '; keeping the record this node already holds' : ''));
       const kaId = onChainResult.kaId ?? onChainResult.batchId;
       if (reservedKaId !== undefined && kaId !== reservedKaId) {
         throw new Error(
@@ -3344,7 +3344,7 @@ export class DKGPublisher implements Publisher {
         );
       }
       if (graphPublish) {
-        if (keepsExistingRecord) await replaceRecordedMintAccess(this.store, contextGraphId, graphPublish.scope.ual, confirmedQuads);
+        if (recordDisposition === 'confirmed') await replaceRecordedMintAccess(this.store, contextGraphId, graphPublish.scope.ual, confirmedQuads);
         await replaceLocallyTrustedKnowledgeAssetControls(
           this.store,
           graphPublish.scope.ual,
@@ -3384,7 +3384,7 @@ export class DKGPublisher implements Publisher {
       } else {
         await this.store.insert(vmQuads);
       }
-      if (!keepsExistingRecord) await this.store.insert(confirmedQuads);
+      if (recordDisposition !== 'confirmed') await writeMintMetadata(this.store, contextGraphId, ual, confirmedQuads, recordDisposition);
       // GH #1078 — supersede/persist private slices only now that the chain
       // has confirmed (before returning 'confirmed', so no read sees the KA
       // confirmed without its private data).

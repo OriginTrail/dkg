@@ -241,7 +241,7 @@ async function strandedPublishFixture() {
   };
 
   return {
-    chain, store, publisher, publish, seal, strand, mintForeign, reconcileMaterialized, kaId, ual, swmGraph, vmGraph, acks, encrypt,
+    chain, store, publisher, publish, publishOptions, seal, strand, mintForeign, reconcileMaterialized, kaId, ual, swmGraph, vmGraph, acks, encrypt,
     graphSize, recordedTxHashes, metadataValueCounts, sealedRoot: seal.expectedMerkleRoot,
   };
 }
@@ -607,8 +607,8 @@ it('serializes adoption record checking and writes with a competing newer materi
   let entered!: () => void, resume!: () => void;
   const checking = new Promise<void>(resolve => { entered = resolve; });
   const continued = new Promise<void>(resolve => { resume = resolve; });
-  const check = adoptedRecord.adoptedMintAlreadyRecorded;
-  const spy = vi.spyOn(adoptedRecord, 'adoptedMintAlreadyRecorded').mockImplementation(async (...args) => {
+  const check = adoptedRecord.classifyMintRecord;
+  const spy = vi.spyOn(adoptedRecord, 'classifyMintRecord').mockImplementation(async (...args) => {
     const accepted = await check(...args); entered(); await continued; return accepted;
   });
   const adoption = f.publish({});
@@ -719,3 +719,52 @@ for (const lane of ['live', 'record-only'] as const) {
     } finally { release(); await Promise.allSettled([pending, ...(locking ? [locking] : [])]); read.mockRestore(); await f.store.close(); }
   });
 }
+
+it.each(['live', 'adopted', 'unresolved-graph'] as const)('confirms exact tentative publication metadata via %s', async mode => {
+  const f = await strandedPublishFixture();
+  const contextGraphId = mode === 'unresolved-graph' ? 'unregistered-local-graph' : CONTEXT_GRAPH;
+  const ready = vi.spyOn(f.chain, 'isV10Ready');
+  try {
+    if (mode !== 'unresolved-graph') ready.mockReturnValue(false);
+    const options = { ...f.publishOptions, trustedNonManifestCatalogTriples: mode === 'unresolved-graph' ? undefined : generatedPrivateCatalogTripleKeys(contextGraphId) };
+    const local = await f.publisher.publish({ ...options, contextGraphId, quads: [LOT],
+      onChainContextGraphId: mode === 'unresolved-graph' ? undefined : CONTEXT_GRAPH });
+    expect(local.status).toBe('tentative');
+    expect(f.chain.createCalls).toBe(0);
+    const before = await f.store.query(`SELECT ?s WHERE { GRAPH <did:dkg:context-graph:${contextGraphId}/_meta> { <${f.ual}> <${DKG}status> ?s } }`);
+    expect(before.type === 'bindings' && before.bindings.map(row => row.s)).toEqual(['"tentative"']);
+    ready.mockRestore();
+    const publish = () => f.publisher.publish({ ...options, contextGraphId, quads: [LOT], onChainContextGraphId: CONTEXT_GRAPH });
+    let confirmed;
+    if (mode === 'adopted') {
+      f.chain.loseNextReceipt = true;
+      await expect(publish()).rejects.toThrow('timed out waiting for a receipt');
+      confirmed = await f.publish({});
+    } else confirmed = await publish();
+    expect(confirmed.status).toBe('confirmed');
+    expect(f.chain.createCalls).toBe(1);
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store, { contextGraphId, ual: f.ual }))
+      .toMatchObject({ state: 'confirmed', envelope: { assertionVersion: '1', merkleRoot: f.sealedRoot,
+        transactionHash: f.chain.mintTxHashes[0], batchId: f.kaId } });
+    const rows = await f.store.query(`SELECT ?p (COUNT(?o) AS ?n) WHERE { GRAPH <did:dkg:context-graph:${contextGraphId}/_meta> { <${f.ual}> ?p ?o } } GROUP BY ?p`);
+    expect(rows.type === 'bindings' && rows.bindings.every(row => Number(String(row.n).replace(/^"(\d+)".*$/, '$1')) === 1)).toBe(true);
+  } finally { ready.mockRestore(); await f.store.close(); }
+});
+
+it.each(['root', 'version'] as const)('refuses a conflicting tentative %s without replacing it', async conflict => {
+  const f = await strandedPublishFixture();
+  try {
+    const ready = vi.spyOn(f.chain, 'isV10Ready').mockReturnValue(false);
+    await f.publisher.publish({ ...f.publishOptions, contextGraphId: CONTEXT_GRAPH, quads: [LOT] });
+    ready.mockRestore();
+    const graph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const predicate = `${DKG}${conflict === 'root' ? 'merkleRoot' : 'assertionVersion'}`;
+    await f.store.deleteByPattern({ graph, subject: f.ual, predicate });
+    const object = conflict === 'root' ? `"${'aa'.repeat(32)}"` : '"2"^^<http://www.w3.org/2001/XMLSchema#integer>';
+    await f.store.insert([{ graph, subject: f.ual, predicate, object }]);
+    await expect(f.publisher.publish({ ...f.publishOptions, contextGraphId: CONTEXT_GRAPH, quads: [LOT] }))
+      .rejects.toMatchObject({ reason: 'existing-record-conflict' });
+    const status = await f.store.query(`SELECT ?s WHERE { GRAPH <${graph}> { <${f.ual}> <${DKG}status> ?s } }`);
+    expect(status.type === 'bindings' && status.bindings.map(row => row.s)).toEqual(['"tentative"']);
+  } finally { await f.store.close(); }
+});
