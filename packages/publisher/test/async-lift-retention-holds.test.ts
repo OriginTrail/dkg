@@ -37,7 +37,12 @@ const kept = (results: ReadonlyArray<{ kept: Readonly<Record<string, number>> }>
   return total;
 };
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
-const settled = async (promise: Promise<unknown>, ms = 250): Promise<boolean> => Promise.race([promise.then(() => true, () => true), new Promise<boolean>((resolve) => setTimeout(() => resolve(false), ms))]);
+/** How `promise` ends within `ms`: its value, its error, or `timedOut` when it is still pending (a wait for a lock that is never released fails the test, it does not hang it). */
+const within = async <T>(promise: Promise<T>, ms = 2000): Promise<{ value?: T; error?: unknown; timedOut?: true }> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<{ timedOut: true }>((resolve) => { timer = setTimeout(() => resolve({ timedOut: true }), ms); });
+  try { return await Promise.race([promise.then((value) => ({ value }), (error: unknown) => ({ error })), timeout]); } finally { clearTimeout(timer); }
+};
 const viewOf = async (publisher: TripleStoreAsyncLiftPublisher, key: string): Promise<string> => {
   const lookup = await publisher.lookupKnowledgeAssetVmPublishJobByIntent({ contextGraphId: 'music-social', name: key });
   return lookup.kind === 'active' ? `active:${lookup.job.jobId}` : lookup.kind === 'conflict' ? 'conflict' : 'unbound';
@@ -100,17 +105,31 @@ describe('slices', () => {
     stores.push(raw);
     (raw as unknown as { flush: () => Promise<void> }).flush = async () => { flushes.push('flush'); };
     await seedKeyed(raw, templates, distinctKeys(5));
-    let admissionDuringFlush: Promise<string> | undefined;
-    const spy = spyStore(raw, {
-      before: (entry) => {
-        if (entry.kind === 'flush') admissionDuringFlush = new TripleStoreAsyncLiftPublisher(raw, { now: () => NOW, idGenerator: () => 'during-flush' }).enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'during-flush' }));
-      },
-    });
+    // the first flush is held open until the test lets it go (online review 4395740479)
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let flushStarted!: () => void;
+    const flushing = new Promise<void>((resolve) => { flushStarted = resolve; });
+    let flushCalls = 0;
+    const spy = spyStore(raw, { before: async (entry) => { if (entry.kind === 'flush' && ++flushCalls === 1) { flushStarted(); await gate; } } });
     const publisher = new TripleStoreAsyncLiftPublisher(spy.store, { now: () => NOW, idGenerator: () => 'x' });
-    await drain(newRetention(publisher, { sliceSize: 2 }));
+    let swept = false;
+    const sweep = drain(newRetention(publisher, { sliceSize: 2 })).finally(() => { swept = true; });
+    await flushing;
+    const other = new TripleStoreAsyncLiftPublisher(raw, { now: () => NOW, idGenerator: () => 'during-flush', journalWrites: false });
+    try {
+      // while that flush is pending, an admission and then a claim each take the claim lock and complete: the flush holds no lock
+      expect(await within(other.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'during-flush' })))).toEqual({ value: 'during-flush' });
+      const claimed = await within(other.claimNext('wallet-1'));
+      expect(claimed.value?.jobId, JSON.stringify(claimed)).toBe('during-flush');
+      expect(swept).toBe(false);                                                  // the sweep is still inside its first flush
+      expect(flushes).toEqual([]);
+    } finally {
+      release();
+    }
+    await sweep;
     expect(flushes).toHaveLength(3);
-    // the flush runs with the claim lock free: an admission started from inside it completes without waiting for the sweep
-    expect(await settled(admissionDuringFlush!)).toBe(true);
+    expect((await other.getStatus('during-flush'))?.status).toBe('claimed');
     // report mode and a hold that deleted nothing never flush
     flushes.length = 0;
     const idle = newRetention(publisher, { mode: 'report' });
