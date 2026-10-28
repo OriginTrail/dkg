@@ -194,13 +194,10 @@ export interface GraphScopedSwmRecoveryParseInput {
   readonly excludedSubGraphNames?: readonly string[];
 }
 export function parseGraphScopedSwmRecoveryDescriptors(params: GraphScopedSwmRecoveryParseInput): GraphScopedSwmRecoveryDescriptor[] {
-  return parseRecoveryHeads(params, 'strict').descriptors;
+  return parseGraphScopedSwmHeads(params, 'strict').descriptors;
 }
 export function parseGraphScopedSwmRecoveryHeadResults(params: GraphScopedSwmRecoveryParseInput) {
-  return parseRecoveryHeads(params, 'set-aside');
-}
-function parseRecoveryHeads(params: GraphScopedSwmRecoveryParseInput, mode: 'strict' | 'set-aside') {
-  return parseGraphScopedSwmHeads(params, mode);
+  return parseGraphScopedSwmHeads(params, 'set-aside');
 }
 function decodeHead(params: GraphScopedSwmRecoveryParseInput,
   { metaGraph, headSubject, headRows, operationReferences }: SwmRecoveryHead,
