@@ -296,8 +296,11 @@ async function completeRecordedLifecycle(
     clearShareMarker: () => host.clearSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName, heldLifecycle),
   }, { reservation, ...target, receipt: mint }, { consumeShare: true, failureMode });
   if (completion.status === 'incomplete') {
-    const error = completion.failures[0].error;
-    throw Object.assign(error instanceof Error ? error : new Error(String(error)), { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    if (failureMode === 'stop') throw completion.failures[0].error;
+    const catalogFailure = completion.failures.find(failure => failure.stage === 'catalog');
+    if (catalogFailure) throw catalogFailure.error;
+    // Resident publication retains best-effort writes; the final state check
+    // below reconcile's lease reports any missing receipt/lifecycle completion.
   }
   return mint;
 }
