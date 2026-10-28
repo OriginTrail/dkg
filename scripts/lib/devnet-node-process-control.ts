@@ -78,13 +78,13 @@ export function pidAlive(pid: number): boolean {
 export function clearDeadNodePidFiles(
   paths: DevnetPaths,
   num: number,
-  options: { removeUnparseable?: boolean } = {},
+  options: { removeUnparseable?: boolean; inspect?: SyncProcessInspector } = {},
 ): void {
   for (const file of NODE_PID_FILES) {
     const pidFile = join(nodeHome(paths, num), file);
     if (!existsSync(pidFile)) continue;
     const pid = parsePid(readFileSync(pidFile, 'utf8'));
-    if (pid === null ? !options.removeUnparseable : pidAlive(pid)) continue;
+    if (pid === null ? !options.removeUnparseable : (options.inspect ?? inspectPsProcessSync)(pid).state !== 'gone') continue;
     try { rmSync(pidFile); } catch { /* best-effort */ }
   }
 }
@@ -214,10 +214,10 @@ export function sigkillNodeProcesses(
 }
 
 /** Resolves `true` once every PID is gone, `false` if any is still alive after `timeoutMs`. */
-export async function waitForPidsGone(label: string, pids: readonly number[], timeoutMs: number): Promise<boolean> {
+export async function waitForPidsGone(label: string, pids: readonly number[], timeoutMs: number, inspect: SyncProcessInspector = inspectPsProcessSync): Promise<boolean> {
   try {
     const until = Date.now() + timeoutMs;
-    while (pids.some(pidAlive)) {
+    while (pids.some(pid => inspect(pid).state !== 'gone')) {
       if (Date.now() >= until) return false;
       await new Promise(resolve => setTimeout(resolve, Math.min(100, timeoutMs)));
     }
@@ -266,12 +266,12 @@ export async function executeDevnetShutdown(plan: DevnetShutdownPlan,
     if (!current(pid)) continue;
     try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
   }
-  if (pids.length && !(await waitForPidsGone('devnet processes stopped', pids, options.graceMs ?? 10_000))) {
+  if (pids.length && !(await waitForPidsGone('devnet processes stopped', pids, options.graceMs ?? 10_000, plan.inspect))) {
     sigkillProcesses([...plan.identities.values()], plan.inspect);
-    if (!(await waitForPidsGone('devnet processes killed', pids, options.killWaitMs ?? 10_000)))
+    if (!(await waitForPidsGone('devnet processes killed', pids, options.killWaitMs ?? 10_000, plan.inspect)))
       throw new Error(`Selected devnet processes did not stop`);
   }
-  for (const num of plan.numbers) clearDeadNodePidFiles(plan.paths, num, { removeUnparseable: options.removeUnparseable });
+  for (const num of plan.numbers) clearDeadNodePidFiles(plan.paths, num, { removeUnparseable: options.removeUnparseable, inspect: plan.inspect });
 }
 export async function stopNodeProcesses(paths: DevnetPaths, num: number,
   options: DevnetShutdownOptions = {}): Promise<void> {

@@ -1,6 +1,6 @@
 import { inspectPsProcessSync, type SyncProcessInspector } from '../../packages/cli/src/daemon/process-probe.js';
 import { planDevnetShutdown, executeDevnetShutdown, parseProcessInventory, collectDevnetNodePids } from '../../scripts/lib/devnet-node-process-control.js';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -368,6 +368,32 @@ describe('only a daemon of this checkout is ever signalled', () => {
 });
 
 describe('one validated devnet shutdown plan', () => {
+  it('uses the selected inspector for identity checks, unknown polling, escalation and PID cleanup', async () => {
+    const pid = 42424243;
+    const identity = { pid, ppid: 1, start: 'test-start', command: `${root}/packages/cli/dist/cli.js daemon-worker` };
+    writeFileSync(pidFile(4, 'daemon.pid'), String(pid));
+    let terminated = false, killed = false, unknownSeen = false;
+    const inspect = vi.fn<SyncProcessInspector>(observed => {
+      expect(observed).toBe(pid);
+      if (killed) return { state: 'gone' };
+      if (terminated && !unknownSeen) { unknownSeen = true; return { state: 'unknown', reason: 'temporary observation failure' }; }
+      return { state: 'running', process: identity };
+    });
+    const signal = vi.spyOn(process, 'kill').mockImplementation((observed, kind) => {
+      expect(observed).toBe(pid);
+      if (kind === 'SIGTERM') terminated = true;
+      if (kind === 'SIGKILL') killed = true;
+      return true;
+    });
+    try {
+      await stopNodeProcesses(paths, 4, { inspect, graceMs: 0, killWaitMs: 0 });
+      expect(signal.mock.calls.map(([, kind]) => kind)).toEqual(['SIGTERM', 'SIGKILL']);
+      expect(unknownSeen).toBe(true);
+      expect(inspect).toHaveBeenCalledTimes(6);
+      expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(false);
+    } finally { signal.mockRestore(); }
+  });
+
   it('accepts only the node-specific configured alternate checkout', async () => {
     const entry = join(root, '.devnet-versions', 'previous', 'packages/cli/dist/cli.js');
     const worker = sleeper({ entry });

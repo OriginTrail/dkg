@@ -19,9 +19,11 @@ import type { DurableFiles } from './host-store-durable-fs.js';
 import { scanLogFrames, type HostStoreLayout } from './host-store-format.js';
 import type { CgMetaState } from './host-store-types.js';
 
+type LogTailRecovery = { kind: 'unchecked' } | { kind: 'scanned'; validLength: number; byteLength: number } | { kind: 'complete' };
+
 export class HostStoreMetaLoader {
   /** Installed metadata is private to the loading/persistence owner. */
-  private readonly cache = new Map<string, { meta: CgMetaState; tail?: { validLength: number; byteLength: number } | null }>();
+  private readonly cache = new Map<string, { meta: CgMetaState; tail: LogTailRecovery }>();
   /**
    * Cold initialization in flight per CG (see `load`). It is deliberately
    * NOT behind the store's per-CG write lock: mutators hold that lock while
@@ -38,21 +40,21 @@ export class HostStoreMetaLoader {
   async prepareAppend(contextGraphId: string): Promise<CgMetaState> {
     const meta = await this.load(contextGraphId);
     const entry = this.cache.get(this.layout.cgKey(contextGraphId))!;
-    if (entry.tail === undefined) {
+    if (entry.tail.kind === 'unchecked') {
       const log = await this.scanLog(contextGraphId);
       meta.seqno = Math.max(meta.seqno, log.lastSeqno); // retain burned reservations
-      entry.tail = log;
+      entry.tail = { kind: 'scanned', validLength: log.validLength, byteLength: log.byteLength };
     }
-    if (entry.tail && entry.tail.validLength < entry.tail.byteLength)
+    if (entry.tail.kind === 'scanned' && entry.tail.validLength < entry.tail.byteLength)
       await this.files.truncateFileDurable(this.layout.logPath(contextGraphId), entry.tail.validLength);
-    entry.tail = null; // known complete; successful appends preserve this invariant
+    entry.tail = { kind: 'complete' }; // known complete; successful appends preserve this invariant
     return meta;
   }
 
   /** Failed appends or log replacement retain the cursor but require a fresh tail scan. */
   invalidateTail(contextGraphId: string): void {
     const entry = this.cache.get(this.layout.cgKey(contextGraphId));
-    if (entry) entry.tail = undefined;
+    if (entry) entry.tail = { kind: 'unchecked' };
   }
 
   /** Mutators hold the host store's per-graph write lock around this transition. */
@@ -60,7 +62,7 @@ export class HostStoreMetaLoader {
     const cgKey = this.layout.cgKey(contextGraphId);
     const cache = this.cache;
     const current = cache.get(cgKey);
-    cache.set(cgKey, { meta, tail: current?.tail });
+    cache.set(cgKey, { meta, tail: current?.tail ?? { kind: 'unchecked' } });
     // Authoritative write: a failure rejects so the caller sees it.
     try {
       await this.files.writeFileDurable(this.layout.metaPath(contextGraphId), JSON.stringify(meta));
@@ -169,7 +171,7 @@ export class HostStoreMetaLoader {
     if (parsed && state.seqno !== parsed.seqno) {
       await this.files.writeFileDurable(metaPath, JSON.stringify(state)).catch(() => { /* best-effort */ });
     }
-    this.cache.set(cgKey, { meta: state, tail: log });
+    this.cache.set(cgKey, { meta: state, tail: { kind: 'scanned', validLength: log.validLength, byteLength: log.byteLength } });
     return state;
   }
 

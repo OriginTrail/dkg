@@ -133,7 +133,7 @@ export interface DurabilityFixture {
   /** The real directory fsync, behind the `vi.fn` wrapper that the test file's `vi.mock` installs. */
   readonly actualDirFsync: typeof fsPolicy.fsyncRfc64DirectoryV1;
   /**
-   * Record open/sync/rename/directory-fsync calls the store makes, with the per-CG key and the
+   * Record completed writes and open/sync/rename/directory-fsync calls the store makes, with the per-CG key and the
    * unique temp suffix normalised so a single-CG test can assert the exact durability sequence.
    */
   traceDurability(): string[];
@@ -193,6 +193,15 @@ export function useDurabilityFixture(): DurabilityFixture {
         events.push(`open:${label(args[0])}`);
         return handle;
       }) as never);
+      for (const operation of ['appendFile', 'writeFile', 'truncate'] as const) {
+        const original = fileHandleProto[operation];
+        vi.spyOn(fileHandleProto, operation).mockImplementation((async function (this: FileHandle, ...args: unknown[]) {
+          const result = await (original as (...args: unknown[]) => Promise<unknown>).apply(this, args);
+          const name = names.get(this);
+          if (name !== undefined) events.push(`${operation}:complete:${name}`);
+          return result;
+        }) as never);
+      }
       const realSync = fileHandleProto.sync;
       vi.spyOn(fileHandleProto, 'sync').mockImplementation(async function (this: FileHandle) {
         // Handles the store did not open through fs.promises.open (the

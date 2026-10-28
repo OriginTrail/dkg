@@ -45,13 +45,29 @@ describe('SwmHostModeStore durable writes', () => {
 
       expect(events).toEqual([
         'open:K.log',
+        'appendFile:complete:K.log',
         'sync:K.log',
         'open:K.meta.tmp',
+        'writeFile:complete:K.meta.tmp',
         'sync:K.meta.tmp',
         'rename:K.meta.tmp->K.meta',
         'dirsync:dataDir',
       ]);
       expect(await tempFiles()).toEqual([]);
+    });
+
+    it('completes torn-tail truncation before fsync and before appending a new frame', async () => {
+      const cg = 'cg/truncate-order';
+      await newStore(fx.dir).append(cg, new Uint8Array([1]));
+      await fsp.appendFile(path.join(fx.dir, `${cgKey(cg)}.log`), new Uint8Array([9]));
+      const events = traceDurability();
+      await newStore(fx.dir).append(cg, new Uint8Array([2]));
+      expect(events).toEqual([
+        'open:K.log', 'truncate:complete:K.log', 'sync:K.log',
+        'open:K.log', 'appendFile:complete:K.log', 'sync:K.log',
+        'open:K.meta.tmp', 'writeFile:complete:K.meta.tmp', 'sync:K.meta.tmp',
+        'rename:K.meta.tmp->K.meta', 'dirsync:dataDir',
+      ]);
     });
 
     it('markRegistered / markHostModeSubscribed write metadata atomically and durably', async () => {
@@ -64,6 +80,7 @@ describe('SwmHostModeStore durable writes', () => {
 
       const oneWrite = [
         'open:K.meta.tmp',
+        'writeFile:complete:K.meta.tmp',
         'sync:K.meta.tmp',
         'rename:K.meta.tmp->K.meta',
         'dirsync:dataDir',
@@ -93,6 +110,7 @@ describe('SwmHostModeStore durable writes', () => {
       expect(result.cgsPruned).toBe(1);
       expect(events).toEqual([
         'open:K.log.tmp',
+        'writeFile:complete:K.log.tmp',
         'sync:K.log.tmp',
         'rename:K.log.tmp->K.log',
         'dirsync:dataDir',
@@ -134,9 +152,9 @@ describe('SwmHostModeStore durable writes', () => {
       await store.append(cg, new Uint8Array(40).fill(9));
 
       expect(events).toEqual([
-        'open:K.log', 'sync:K.log',
-        'open:K.meta.tmp', 'sync:K.meta.tmp', 'rename:K.meta.tmp->K.meta', 'dirsync:dataDir',
-        'open:K.log.tmp', 'sync:K.log.tmp', 'rename:K.log.tmp->K.log', 'dirsync:dataDir',
+        'open:K.log', 'appendFile:complete:K.log', 'sync:K.log',
+        'open:K.meta.tmp', 'writeFile:complete:K.meta.tmp', 'sync:K.meta.tmp', 'rename:K.meta.tmp->K.meta', 'dirsync:dataDir',
+        'open:K.log.tmp', 'writeFile:complete:K.log.tmp', 'sync:K.log.tmp', 'rename:K.log.tmp->K.log', 'dirsync:dataDir',
       ]);
       const log = await readFile(path.join(fx.dir, `${cgKey(cg)}.log`));
       const parsed = parseFrames(log);
@@ -294,7 +312,7 @@ describe('SwmHostModeStore durable writes', () => {
       expect(await second.getLastSeqno(cg)).toBe(3);
 
       expect(events).toEqual([
-        'open:K.meta.tmp', 'sync:K.meta.tmp', 'rename:K.meta.tmp->K.meta', 'dirsync:dataDir',
+        'open:K.meta.tmp', 'writeFile:complete:K.meta.tmp', 'sync:K.meta.tmp', 'rename:K.meta.tmp->K.meta', 'dirsync:dataDir',
       ]);
       expect(JSON.parse(await readFile(metaPath, 'utf8'))).toMatchObject({ seqno: 3, registered: true });
     });
