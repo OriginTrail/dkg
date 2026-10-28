@@ -112,7 +112,9 @@ export function projectListedLiftJobs(
   }).map(project).sort(compareAcceptedJobs);
 }
 
-export function compareAcceptedJobs(a: PersistedLiftJob, b: PersistedLiftJob): number {
+/** What the order of a lifecycle key reads of a record: when it was accepted, then its job id. */
+export type AcceptanceOrderKey = { readonly jobId: string; readonly timestamps: { readonly acceptedAt: number } };
+export function compareAcceptedJobs(a: AcceptanceOrderKey, b: AcceptanceOrderKey): number {
   const timeDelta = a.timestamps.acceptedAt - b.timestamps.acceptedAt;
   if (timeDelta !== 0) return timeDelta;
   return a.jobId.localeCompare(b.jobId);
