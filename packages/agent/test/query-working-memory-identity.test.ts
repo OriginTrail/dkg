@@ -19,7 +19,7 @@ function node(defaultAgentAddress: string | undefined = A) {
   Object.assign(agent, {
     defaultAgentAddress, config: {}, log: { info() {}, warn() {}, debug() {}, error() {} },
     store, queryEngine: { query }, subscribedContextGraphs: new Map(),
-    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', source: 'system', reason: 'test', metadataBootstrap: 'eligible' }),
+    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'system', reason: 'test', metadataBootstrap: 'eligible' }),
     canReadContextGraph: async () => true, isPrivateContextGraph: async () => false,
     listPrivateContextGraphIdsNotReadableBy: async () => [],
   });
@@ -99,4 +99,34 @@ it.each(['readable', 'trust-changes', 'cancelled'] as const)('runs real named-gr
   else if (mode === 'cancelled') await expect(stats).rejects.toBe(reason);
   else await expect(stats).resolves.toContainEqual({ graph, entityCount: 1, tripleCount: 2 });
   expect(reads.mock.calls.filter(([sparql]) => sparql.includes('COUNT(DISTINCT ?s)'))).toHaveLength(1);
+});
+
+
+it.each(['inventory', 'statistics'] as const)('refuses node-only authority for an unrelated %s caller before store reads', async mode => {
+  const { agent } = node();
+  Object.assign(agent, { resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'node' }) });
+  const inventory = vi.fn(async () => []), statistics = vi.fn(async () => []);
+  Object.assign(agent.queryEngine, { listContextGraphQueryPartitionReads: inventory, readContextGraphNamedGraphStats: statistics });
+  expect(await (mode === 'inventory' ? agent.listContextGraphQueryPartitionReads('private', { callerAgentAddress: B })
+    : agent.readContextGraphNamedGraphStats('private', { callerAgentAddress: B }))).toEqual([]);
+  expect(inventory).not.toHaveBeenCalled(); expect(statistics).not.toHaveBeenCalled();
+});
+
+it.each(['trusted-node', 'caller-downgraded'] as const)('checks caller scope for statistics batches: %s', async mode => {
+  const { agent } = node();
+  const graph = 'did:dkg:context-graph:stats-scope/_verifiable_memory/a/1';
+  await agent.store.insert([{ subject: 'urn:entity', predicate: 'urn:p', object: '"value"', graph }]);
+  const authority = vi.fn().mockResolvedValue({ outcome: 'allowed', grantScope: 'node' });
+  if (mode === 'caller-downgraded') authority.mockResolvedValueOnce({ outcome: 'allowed', grantScope: 'caller' });
+  Object.assign(agent, { queryEngine: new DKGQueryEngine(agent.store), resolveContextGraphReadAuthority: authority });
+  const reads = vi.spyOn(agent.store, 'query');
+  const callerAgentAddress = mode === 'trusted-node' ? undefined : B;
+  const result = await agent.readContextGraphNamedGraphStats('stats-scope', { callerAgentAddress });
+  const aggregates = reads.mock.calls.filter(([sparql]) => sparql.includes('COUNT(DISTINCT ?s)'));
+  if (mode === 'trusted-node') {
+    expect(result).toContainEqual({ graph, entityCount: 1, tripleCount: 1 });
+    expect(aggregates).toHaveLength(1);
+    expect(await agent.listContextGraphQueryPartitionReads('stats-scope')).toContainEqual(expect.objectContaining({ graph }));
+  } else { expect(result).toEqual([]); expect(aggregates).toHaveLength(0); }
+  expect(authority.mock.calls.length).toBeGreaterThanOrEqual(2);
 });

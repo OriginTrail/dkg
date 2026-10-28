@@ -23,7 +23,7 @@ function node(overrides: Record<string, unknown> = {}) {
   Object.assign(agent, {
     defaultAgentAddress: OWNER, config: {}, log: { info() {}, warn() {}, debug() {}, error() {} },
     store, queryEngine: { query }, subscribedContextGraphs: new Map(),
-    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', source: 'system', reason: 'test', metadataBootstrap: 'eligible' }),
+    resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'public', source: 'system', reason: 'test', metadataBootstrap: 'eligible' }),
     resolveSharedMemoryReadAdmission: async () => ({ outcome: 'allowed' }),
     ...overrides,
   });

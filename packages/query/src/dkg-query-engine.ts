@@ -337,7 +337,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const policy = createScopedContentGraphRoutePolicy(contextGraphId, opts);
     const reads = createQueryStoreReadContext(this.store, opts);
     const discovery = await this.resolveScopedContentGraphDiscovery(contextGraphId, reads);
-    return selectScopedRoutePartitions(policy, discovery.partitions).filter(read => discovery.inventory.includes(read.graph));
+    const inventory = new Set(discovery.inventory);
+    return selectScopedRoutePartitions(policy, discovery.partitions).filter(read => inventory.has(read.graph));
   }
 
   /** Inventory, bounded aggregates and fresh candidate admission have one owner. */

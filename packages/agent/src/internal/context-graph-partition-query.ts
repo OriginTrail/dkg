@@ -5,7 +5,7 @@ import { resolveCallerDraftAccess } from '../working-memory-identity.js';
 
 import type { DKGAgent } from '../dkg-agent.js';
 import { DKGAgentBase } from '../dkg-agent-base.js';
-import { ContextGraphReadAuthorityUnavailableError } from '../context-graph-read-authority.js';
+import { admitContextGraphReadCaller, ContextGraphReadAuthorityUnavailableError } from '../context-graph-read-authority.js';
 
 export interface ContextGraphPartitionInventoryOptions {
   callerAgentAddress?: string;
@@ -25,7 +25,7 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
       ...options, authorityReadMode: 'finalized-index', allowSubscriptionFallback: false,
     });
     if (authority.outcome === 'unavailable') throw new ContextGraphReadAuthorityUnavailableError(contextGraphId, authority);
-    if (authority.outcome !== 'allowed') return [];
+    if (admitContextGraphReadCaller(authority, options.callerAgentAddress).outcome !== 'admitted') return [];
     return this.queryEngine.listContextGraphQueryPartitionReads(contextGraphId, { ...options,
       draftAccess: resolveCallerDraftAccess({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, options.callerAgentAddress) });
   }
@@ -39,13 +39,13 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
     });
     const initial = await authorityFor();
     if (initial.outcome === 'unavailable') throw new ContextGraphReadAuthorityUnavailableError(contextGraphId, initial);
-    if (initial.outcome !== 'allowed') return [];
+    if (admitContextGraphReadCaller(initial, options.callerAgentAddress).outcome !== 'admitted') return [];
     return this.queryEngine.readContextGraphNamedGraphStats(contextGraphId, { ...options,
       draftAccess: resolveCallerDraftAccess({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, options.callerAgentAddress) }, async (admission, read) => {
       options.signal?.throwIfAborted();
       const authority = await authorityFor();
       if (authority.outcome === 'unavailable') throw new ContextGraphReadAuthorityUnavailableError(contextGraphId, authority);
-      if (authority.outcome !== 'allowed') return [];
+      if (admitContextGraphReadCaller(authority, options.callerAgentAddress).outcome !== 'admitted') return [];
       if (admission === 'shared-memory') {
         const shared = await this.resolveSharedMemoryReadAdmission(contextGraphId, {
           callerAgentAddress: options.callerAgentAddress, readAuthority: authority, signal: options.signal,
