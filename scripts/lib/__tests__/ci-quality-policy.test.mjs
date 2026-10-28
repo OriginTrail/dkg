@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import { spawnSync } from 'node:child_process';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 import { parse as parseYaml } from 'yaml';
@@ -320,4 +322,40 @@ test('CI keeps one explicit repository lint gate', () => {
   assert.deepEqual(lintSteps.map((step) => step.name), [
     'Lint source and repository tooling',
   ]);
+});
+
+
+test('required CI rejects a stale private workspace version before installing dependencies', (t) => {
+  const steps = parseRepositoryYaml('.github/workflows/ci.yml').jobs.build.steps;
+  const gate = steps.find((step) => step.name === 'Verify release workspace versions');
+  assert.ok(gate, 'required CI must check the complete release version set');
+  assert.equal(gate.if, undefined);
+  assert.notEqual(gate['continue-on-error'], true);
+  assert.ok(steps.indexOf(gate) < steps.findIndex((step) => step.name === 'Install dependencies'));
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'ci-version-gate-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  for (const file of [
+    'scripts/release-packages.mjs', 'scripts/lib/release-policy.mjs',
+    'scripts/lib/release-process.mjs', 'scripts/lib/build-info.mjs',
+    'scripts/copy-cli-runtime-assets.mjs', 'packages/cli/blazegraph-image-metadata.cjs',
+    'packages/storage/blazegraph-namespace-contract.cjs',
+  ]) {
+    fs.mkdirSync(path.dirname(path.join(root, file)), { recursive: true });
+    fs.copyFileSync(path.join(REPO_ROOT, file), path.join(root, file));
+  }
+  fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify({ name: 'dkg-v10', private: true, version: '1.2.3' }));
+  const manifest = path.join(root, 'packages/kafka-source/package.json');
+  fs.mkdirSync(path.dirname(manifest), { recursive: true });
+  const writeVersion = (version) => fs.writeFileSync(manifest, JSON.stringify({
+    name: '@origintrail-official/dkg-source-kafka', private: true, version,
+  }));
+  const execute = () => spawnSync('bash', ['-e', '-c', gate.run], { cwd: root, encoding: 'utf8' });
+  writeVersion('0.1.0');
+  const refused = execute();
+  assert.equal(refused.status, 1, refused.stderr);
+  assert.match(refused.stderr, /packages\/kafka-source\/package.json: 0\.1\.0/);
+  writeVersion('1.2.3');
+  const accepted = execute();
+  assert.equal(accepted.status, 0, accepted.stderr);
+  assert.match(accepted.stdout, /version check passed: 2 package.json files at 1\.2\.3/);
 });

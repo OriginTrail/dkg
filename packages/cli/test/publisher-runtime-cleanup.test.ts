@@ -44,7 +44,7 @@ it('passes the composed cleanup through the runtime to every wallet and its reti
     const author = '0x' + 'b'.repeat(40);
     const meta = 'did:dkg:context-graph:cleanup/_shared_memory_meta';
     for (const [i, { publisher, config }] of constructed.entries()) {
-      expect(config.storageAckCopyCleanup).toBe(cleanup);
+      expect(config.storageAckCopyCleanupWriter).toBe(cleanup);
       const ual = `did:dkg:evm:31337/${author}/${i + 1}`;
       const operation = `urn:share:cleanup:${i}`;
       await store.insert([

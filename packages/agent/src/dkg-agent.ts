@@ -1,5 +1,4 @@
 import type { StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
-import { createAgentMutationWriters } from './internal/agent-mutation-writers.js';
 import type { AssertionPullFromOptions, AssertionPullFromResult } from '@origintrail-official/dkg-publisher';
 import { StorageACKAdmission } from './storage-ack-admission.js';
 import { runStorageACKOperation } from './storage-ack-diagnostics.js';
@@ -470,7 +469,10 @@ import {
   deserializePendingSenderKeyEntry,
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import type { StoreContentFence } from './internal/store-content-fence.js';
+import { createAgentStoreComposition } from './internal/agent-store-composition.js';
 import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
+import { createProjectionMutationObserver } from './internal/projection-mutation-observer.js';
 import { catalogPlacementTimingV1 } from './internal/catalog-placement-timing.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { VmReconcileShutdownTimeoutError } from './vm-reconcile-service.js';
@@ -552,7 +554,7 @@ import { VmReconcileSchedulingMethods } from './dkg-agent-vm-reconcile-schedulin
 import { VmPromotionMethods } from './dkg-agent-vm-promotion.js';
 import { AgentsPhonebookMethods } from './dkg-agent-agents-phonebook.js';
 import { SwmChangeNoticeMethods } from './dkg-agent-swm-change-notice.js';
-import { WritePreflightIdentityMethods, attachWritePreflightGeneration } from './dkg-agent-write-preflight.js';
+import { WritePreflightGeneration, WritePreflightIdentityMethods, attachWritePreflightGeneration, withWritePreflightGeneration } from './dkg-agent-write-preflight.js';
 import { ContextGraphMethods } from './dkg-agent-context-graph.js';
 import { ContextGraphNameResolutionMethods } from './dkg-agent-cg-name-resolution.js';
 import { ContextGraphOnChainIdMethods } from './dkg-agent-cg-on-chain-id.js';
@@ -828,6 +830,7 @@ export class DKGAgent extends DKGAgentBase {
     workspaceOwnedEntities: Map<string, Map<string, string>>,
     writeLocks: Map<string, Promise<void>>,
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
+    heldStoreContentFence?: StoreContentFence,
   ) {
     super(
       config,
@@ -844,6 +847,7 @@ export class DKGAgent extends DKGAgentBase {
       publishedLifecycleWriter,
       ledgerTimestampWriter,
       storageAckCopyCleanup,
+      heldStoreContentFence,
     );
     this.initializeVmReconcilePublicCoreTransportPreferencePolicy();
     this.configureSwmTargetExecutorSessionsV1({
@@ -1503,17 +1507,18 @@ export class DKGAgent extends DKGAgentBase {
       !adapterCanPublishFromAdvertisedSigner &&
       (!configuredPublisherAddress || publisherAddressMatchesLegacyKey),
     );
-    const { agentStore, publishedLifecycleWriter, ledgerTimestampWriter, storageAckCopyCleanup, writePreflightGeneration } =
-      createAgentMutationWriters(store, () => agentRef?.invalidateListContextGraphsCache(),
-        () => agentRef?.contextGraphMetaProjection, config.writePreflightUnresolvedWriteWindowMs);
+    const writePreflightGeneration = new WritePreflightGeneration({ unresolvedWindowMs: config.writePreflightUnresolvedWriteWindowMs });
+    const { store: agentStore, publishedLifecycleWriter, ledgerTimestampWriter, heldContent, storageAckCopyCleanupWriter } = createAgentStoreComposition(
+      store, () => agentRef?.invalidateListContextGraphsCache(),
+      withWritePreflightGeneration(createProjectionMutationObserver(() => agentRef?.contextGraphMetaProjection), writePreflightGeneration),
+    );
 
     const publicSnapshotStore = config.publicSnapshotStore ?? (config.publicSnapshotStoreFactory
       ? config.publicSnapshotStoreFactory(agentStore)
       : createPublicSnapshotStore(config.dataDir, config.sharedMemoryPublicSnapshotStorage, agentStore));
 
     const publisher = new DKGPublisher({
-      store: agentStore,
-      storageAckCopyCleanup,
+      store: agentStore, storageAckCopyCleanupWriter,
       promoteOwnershipReader: request => TripleStoreAsyncPromoteQueue.ownershipReader(
         agentStore, agentRef?._promoteQueueConfig)(request),
       chain,
@@ -1612,8 +1617,8 @@ export class DKGAgent extends DKGAgentBase {
     const queryEngine = new DKGQueryEngine(agentStore);
 
     const agent = new DKGAgent(
-      resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, storageAckCopyCleanup, publisher, queryEngine, eventBus, chain,
-      workspaceOwnedEntities, writeLocks, publicSnapshotStore,
+      resolvedConfig, wallet, node, agentStore, publishedLifecycleWriter, ledgerTimestampWriter, storageAckCopyCleanupWriter, publisher, queryEngine, eventBus, chain,
+      workspaceOwnedEntities, writeLocks, publicSnapshotStore, heldContent,
     );
     agentRef = attachWritePreflightGeneration(agent, writePreflightGeneration);
     if (config.importedArtifactByteStore) {

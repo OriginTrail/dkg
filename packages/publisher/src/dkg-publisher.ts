@@ -1,4 +1,3 @@
-import type { StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
@@ -417,8 +416,7 @@ export interface DurableRootPromotionAtomicCompanionResolver {
 }
 
 export interface DKGPublisherConfig {
-  /** Closed cleanup composed by the agent with graph-scoped mutation observation. */
-  storageAckCopyCleanup?: StorageAckCopyCleanupWriter;
+  storageAckCopyCleanupWriter?: import('./storage-ack-copy-cleanup.js').StorageAckCopyCleanupWriter;
   store: TripleStore;
   /** Trusted queue ownership scope, explicitly supplied by the composing agent. */
   promoteOwnershipReader?: PromoteOwnershipReader;
@@ -451,7 +449,6 @@ export interface DKGPublisherConfig {
   workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
   /** Encrypts private/agent-gated SWM gossip with the node's Sender Key epoch state. */
   workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
-  /** Optional out-of-Oxigraph store for immutable public SWM operation snapshots. */
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /** Allocate packed mint IDs and reconcile the author floor on first use.
    * Optional for mocks; real EVM publishing requires a reserved ID. */
@@ -1093,7 +1090,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
-    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle, config.storageAckCopyCleanup);
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle, config.storageAckCopyCleanupWriter);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>

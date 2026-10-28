@@ -11,11 +11,8 @@ const STORAGE_ACK_COPY_UPDATE_TIMEOUT_MS = 10_000;
 
 /** Schedule only at the durable publication boundary, before removing SWM refs. */
 export class PublishedSnapshotRetirement {
-  constructor(
-    private readonly store: TripleStore,
-    private readonly lifecycle?: WorkspaceSnapshotLifecycle,
-    private readonly cleanupCopies: StorageAckCopyCleanupWriter = input => clearDischargedStorageAckCopies(store, input),
-  ) {
+  constructor(private readonly store: TripleStore, private readonly lifecycle?: WorkspaceSnapshotLifecycle,
+    private readonly clearCopies: StorageAckCopyCleanupWriter = input => clearDischargedStorageAckCopies(store, input)) {
     // The publisher builds this when it starts, so a lifecycle that breaks the contract fails there, loudly,
     // and not at the first publication.
     assertWorkspaceSnapshotLifecycle(lifecycle);
@@ -63,7 +60,7 @@ export class PublishedSnapshotRetirement {
     if (!this.lifecycle?.finalizedCleanupEnabled || cleanedOperations.length === 0) return;
     try {
       await withClientDeadline(
-        this.cleanupCopies({ metaGraph, kaUal, cleanedOperations }),
+        this.clearCopies({ metaGraph, kaUal, cleanedOperations }),
         STORAGE_ACK_COPY_UPDATE_TIMEOUT_MS,
         'Storage ACK copy cleanup timed out',
       );

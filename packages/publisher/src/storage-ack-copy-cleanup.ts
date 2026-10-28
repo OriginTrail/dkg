@@ -39,6 +39,8 @@ export interface StorageAckCopyCleanupInput {
   readonly cleanedOperations: readonly string[];
 }
 
+export type StorageAckCopyCleanupWriter = (input: StorageAckCopyCleanupInput) => Promise<void>;
+
 /** One operation of this asset with a share id and a version, bound to `operation`. */
 function assetOperationPattern(operation: string, shareId: string, version: string, kaUal: string): string {
   return `?${operation} <${F.type}> <${DKG}WorkspaceOperation> ;
@@ -111,8 +113,6 @@ export async function clearDischargedStorageAckCopies(
   }
   await store.update(plan.sparql, plan.options);
 }
-
-export type StorageAckCopyCleanupWriter = (input: StorageAckCopyCleanupInput) => Promise<void>;
 
 /** Closed query and scope, derived together before any observation or dispatch. */
 export function planStorageAckCopyCleanup(input: StorageAckCopyCleanupInput) {

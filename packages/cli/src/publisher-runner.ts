@@ -661,7 +661,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
           publisherNodeIdentityId: identityId,
           publisherPrivateKey: wallet.privateKey,
           publicSnapshotStore: args.publicSnapshotStore,
-          storageAckCopyCleanup: args.storageAckCopyCleanup,
+          storageAckCopyCleanupWriter: args.storageAckCopyCleanup,
         }),
       });
     }
