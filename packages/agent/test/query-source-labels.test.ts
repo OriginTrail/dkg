@@ -1,3 +1,4 @@
+import type { ContextGraphReadAuthorityDecision } from '../src/context-graph-read-authority.js';
 import { describe, expect, it, vi } from 'vitest';
 import type {
   ContextGraphIdV1,
@@ -43,7 +44,12 @@ describe('query caller-provided store labels', () => {
       ]));
       const queryEngine = new DKGQueryEngine(store);
       const inventory = vi.spyOn(queryEngine, 'listContextGraphQueryPartitionReads');
-      const authority = vi.fn(async () => ({ outcome, grantScope: outcome === 'allowed' ? 'caller' : 'none' }));
+      const authority = vi.fn(async (): Promise<ContextGraphReadAuthorityDecision> => ({
+        source: 'registered-chain', reason: 'test-authority', metadataBootstrap: 'forbidden',
+        ...(outcome === 'allowed' ? { outcome, grantScope: 'caller' }
+          : outcome === 'denied' ? { outcome, grantScope: 'none' }
+            : { outcome, dependency: 'chain' }),
+      }));
       const agent = Object.assign(Object.create(ContextGraphPartitionQueryMethods.prototype),
         { queryEngine, resolveContextGraphReadAuthority: authority }) as DKGAgent;
       const options = { callerAgentAddress: '0xreader', signal: new AbortController().signal, priority: 'background' as const, source: 'inventory-caller' };

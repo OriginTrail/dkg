@@ -3,17 +3,15 @@ import { contextGraphDataUri, contextGraphSharedMemoryMetaUri } from '@origintra
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 import { classifyScopedContentGraph, isExcludedContentGraphTail } from './scoped-content-partition.js';
 import { resolveDraftAccessPolicy, selectContentPartitions } from './content-partition-policy.js';
-import type { ContentPartition, DraftAccessPolicy } from './content-partition-policy.js';
+import type { ContentPartition } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
 import type { ContextGraphPartitionRead } from './query-types.js';
 
 /** Route selection owns admission labels, including static roots and metadata. */
 export function createScopedContentGraphRoutePolicy(contextGraphId: string, options: QueryOptions = {}) {
   const route = staticScopedRouteGraphs(contextGraphId, options);
-  return scopedPartitionPolicyFromRoute(contextGraphId, route, resolveDraftAccessPolicy(options), options.includeSharedMemoryMeta === true);
-}
-export function scopedPartitionPolicyFromRoute(contextGraphId: string, route: ReturnType<typeof staticScopedRouteGraphs>,
-  draftAccess: DraftAccessPolicy, includeSharedMemoryMeta: boolean) {
+  const draftAccess = resolveDraftAccessPolicy(options);
+  const includeSharedMemoryMeta = options.includeSharedMemoryMeta === true;
   return { ...route, contextGraphId, draftAccess, includeSharedMemoryMeta, rootGraph: contextGraphDataUri(contextGraphId),
     metadataGraphs: route.metaAllowList };
 }

@@ -1,4 +1,4 @@
-import { assertPublicSnapshotQueryTrust } from '../public-snapshot-evidence.js';
+import { withScopedPublicSnapshotTrust } from '../public-snapshot-evidence.js';
 import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from '../swm-read-admission.js';
 import { resolveCallerDraftAccess } from '../working-memory-identity.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -53,11 +53,7 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
         if (shared.outcome === 'unavailable' && !sharedMemoryAdmissionFailsClosed(shared)) throw sharedMemoryAdmissionError(contextGraphId, shared);
         if (shared.outcome !== 'allowed') return [];
       }
-      await assertPublicSnapshotQueryTrust(this.store, contextGraphId, options.chainEvidenceMode, options);
-      const result = await read();
-      await assertPublicSnapshotQueryTrust(this.store, contextGraphId, options.chainEvidenceMode, options);
-      options.signal?.throwIfAborted();
-      return result;
+      return withScopedPublicSnapshotTrust(this.store, contextGraphId, options.chainEvidenceMode, read, options);
     });
   }
 

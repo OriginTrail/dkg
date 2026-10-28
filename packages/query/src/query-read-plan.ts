@@ -1,16 +1,12 @@
 import type { QueryReadAdmissionCapability } from '@origintrail-official/dkg-storage';
-import { resolveDraftAccessPolicy, type DraftAccessPolicy } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
 import { type PreparedGraphScope } from './sparql-graph-scope.js';
-import { scopedRouteContentPrefixes } from './scoped-content-graph-policy.js';
-import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
+import { createScopedContentGraphRoutePolicy, scopedRouteContentPrefixes } from './scoped-content-graph-policy.js';
 
-type ScopedRoute = ReturnType<typeof staticScopedRouteGraphs>;
 export type QueryReadPlan = { kind: 'unscoped' } | {
   kind: 'view'; options: QueryOptions & { contextGraphId: string; view: NonNullable<QueryOptions['view']> };
 } | {
-  kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
-  execution: ScopedRoute['execution']; draftAccess: DraftAccessPolicy; includeSharedMemoryMeta: boolean;
+  kind: 'scoped'; policy: ReturnType<typeof createScopedContentGraphRoutePolicy>;
   fallbackPolicy: 'compatibility' | 'preserve-scope'; excludedGraphPrefixes: readonly string[];
   discovery: {
     catalog: { kind: 'none' | 'shared' }
@@ -28,16 +24,14 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     return { kind: 'view', options: { ...options, contextGraphId: options.contextGraphId, view: options.view } };
   }
   if (!options?.contextGraphId) return { kind: 'unscoped' };
-  const { execution, ...graphs } = staticScopedRouteGraphs(options.contextGraphId, options);
-  const draftAccess = resolveDraftAccessPolicy(options);
-  const allowed = [...graphs.staticContentGraphs, ...graphs.metaAllowList, ...graphs.staticPrivateAllowList];
+  const policy = createScopedContentGraphRoutePolicy(options.contextGraphId, options);
+  const allowed = [...policy.staticContentGraphs, ...policy.metaAllowList, ...policy.staticPrivateAllowList];
   const needsDiscovery = !scope.hasGraphClause
     || scope.graphTargets.some(target => target.kind !== 'iri' || !allowed.includes(target.iri));
   const expandGraphVariables = options.includeContextGraphPartitions === true
-    && scope.graphVariables.length > 0 && !graphs.isSwmOnlyRoute;
-  const contentPrefixes = needsDiscovery ? scopedRouteContentPrefixes({ ...graphs, execution }) : [];
-  return { kind: 'scoped', contextGraphId: options.contextGraphId, graphs, execution,
-    draftAccess, includeSharedMemoryMeta: options.includeSharedMemoryMeta === true,
+    && scope.graphVariables.length > 0 && !policy.isSwmOnlyRoute;
+  const contentPrefixes = needsDiscovery ? scopedRouteContentPrefixes(policy) : [];
+  return { kind: 'scoped', policy,
     fallbackPolicy: options.requireCompleteGraphScope ? 'preserve-scope' : 'compatibility',
     excludedGraphPrefixes: [...(options.excludeGraphPrefixes ?? [])],
     discovery: { contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,

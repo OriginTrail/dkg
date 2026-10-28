@@ -1,8 +1,13 @@
+import type { SettledContextGraphReadAuthorityDecision } from '../../agent/src/context-graph-read-authority.js';
 import { markCoreTrustedGraph } from '../../agent/src/public-snapshot-evidence.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import { ContextGraphPartitionQueryMethods } from '../../agent/src/internal/context-graph-partition-query.js';
+const authorityDecision = (allowed: boolean): SettledContextGraphReadAuthorityDecision => ({
+  source: 'registered-chain', reason: 'test-authority', metadataBootstrap: 'forbidden',
+  ...(allowed ? { outcome: 'allowed', grantScope: 'caller' } : { outcome: 'denied', grantScope: 'none' }),
+});
 const CG = 'large-cg';
 const ROOT = `did:dkg:context-graph:${CG}`;
 describe('context-graph exact stats read model', () => {
@@ -19,7 +24,7 @@ describe('context-graph exact stats read model', () => {
       const queryEngine = new DKGQueryEngine(store);
       const sharedGate = vi.fn(async () => ({ outcome: allowed ? 'allowed' : 'denied' }));
       const agent = { store, log: { info() {} }, queryEngine,
-        resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed' }),
+        resolveContextGraphReadAuthority: async () => authorityDecision(true),
         resolveSharedMemoryReadAdmission: sharedGate };
       const stats = await ContextGraphPartitionQueryMethods.prototype.readContextGraphNamedGraphStats.call(agent as never, CG,
         { source: 'changed-diagnostic-label', callerAgentAddress: '0xpublic-reader' });
@@ -39,8 +44,8 @@ it.each(['revoked', 'marked-before', 'marked-during', 'aborted'] as const)('reta
   try {
     await store.insert([{ graph: ROOT, subject: 'urn:s', predicate: 'urn:p', object: '"v"' }]);
     if (mode === 'marked-before') await markCoreTrustedGraph(store, CG);
-    const authority = vi.fn(async () => ({ outcome: 'allowed' }));
-    if (mode === 'revoked') authority.mockResolvedValueOnce({ outcome: 'allowed' }).mockResolvedValue({ outcome: 'denied' });
+    const authority = vi.fn(async () => authorityDecision(true));
+    if (mode === 'revoked') authority.mockResolvedValueOnce(authorityDecision(true)).mockResolvedValue(authorityDecision(false));
     const query = store.query.bind(store);
     const spy = vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
       const result = await query(sparql, options);
@@ -55,6 +60,8 @@ it.each(['revoked', 'marked-before', 'marked-during', 'aborted'] as const)('reta
       { callerAgentAddress: 'alice', signal: controller.signal });
     if (mode === 'revoked') {
       await expect(read).resolves.toEqual([]);
+      expect(authority).toHaveBeenCalledTimes(2);
+      expect(await authority.mock.results[0]!.value).toMatchObject({ outcome: 'allowed', grantScope: 'caller' });
       expect(spy.mock.calls.some(([sparql]) => sparql.startsWith('SELECT ?g (COUNT'))).toBe(false);
     } else if (mode === 'aborted') await expect(read).rejects.toThrow('cancel statistics');
     else await expect(read).rejects.toMatchObject({ code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
