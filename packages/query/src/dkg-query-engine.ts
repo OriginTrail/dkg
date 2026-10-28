@@ -1,7 +1,7 @@
-import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
+import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions } from './scoped-content-graph-policy.js';
 import { authorizeExactContextGraphPartitions } from './exact-context-graph-partitions.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
-import { resolveDraftAccessPolicy, selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
+import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
 import { classifyScopedContentGraph, isExcludedContentGraphTail, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { createQueryStoreReadContext, createStoreReadLane, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
@@ -333,13 +333,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   /** Enumerate the same caller-selected public dataset as scoped GRAPH variables. */
   async listContextGraphQueryPartitions(contextGraphId: string, options?: QueryOptions): Promise<string[]> {
     const opts = { ...options, includeSharedMemory: options?.includeSharedMemory ?? options?.includeWorkspace ?? true };
-    const route = staticScopedRouteGraphs(contextGraphId, opts);
+    const policy = createScopedContentGraphRoutePolicy(contextGraphId, opts);
     const reads = createQueryStoreReadContext(this.store, opts);
     const discovery = await this.resolveScopedContentGraphDiscovery(contextGraphId, reads);
-    const dynamic = route.isSwmOnlyRoute
-      ? discovery.inventory.filter(graph => graph.startsWith(`${route.sharedMemoryGraph}/`) && !isExcludedContentGraphTail(graph.slice(contextGraphDataUri(contextGraphId).length + 1)))
-      : selectContentPartitions(discovery.partitions, resolveDraftAccessPolicy(opts), route.subGraphName, opts.includeSharedMemoryMeta);
-    return [...new Set([...route.staticContentGraphs, ...route.metaAllowList, ...dynamic])];
+    return selectScopedRoutePartitions(policy, discovery.partitions);
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
@@ -371,6 +368,16 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       throw new Error('withheldGraphRoots applies only to queries without a contextGraphId');
     }
     switch (plan.kind) {
+      case 'exact': {
+        return authorizeExactContextGraphPartitions(this.store, reads.catalog, plan.policy, plan.candidates)
+          .then(async admission => {
+            assertExplicitGraphIrisAllowed(initialGraphScope, admission.allowed);
+            admission.assertUnchanged();
+            const result = await this.execAndNormalize(initialGraphScope, reads);
+            admission.assertUnchanged();
+            return result;
+          });
+      }
       case 'scoped': return this.queryScoped(initialGraphScope, options, plan, reads);
       case 'view': return this.queryWithView(initialGraphScope, plan.options.view,
         plan.options.contextGraphId, plan.options, reads, reads.catalog);
@@ -395,17 +402,6 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
     };
     switch (plan.discovery.catalog.kind) {
-      case 'exact': {
-        const exactPlan = plan.discovery.catalog;
-        return authorizeExactContextGraphPartitions(this.store, reads.catalog, exactPlan.policy, exactPlan.candidates)
-          .then(async admission => {
-            assertExplicitGraphIrisAllowed(scope, admission.allowed);
-            admission.assertUnchanged();
-            const result = await this.execAndNormalize(scope, reads);
-            admission.assertUnchanged();
-            return result;
-          });
-      }
       case 'none': return execute(null);
       case 'shared': return this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads).then(execute);
       case 'admission-owned': return plan.discovery.catalog.owner.withQueryReadAdmission(async () =>

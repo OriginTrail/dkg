@@ -16,7 +16,7 @@ const ROOT_CONTENT = [ROOT, `${ROOT}/_shared_memory`, WM,
 const CODE_CONTENT = [CODE, `${CODE}/_shared_memory`, CODE_WM,
   `${CODE_WM}/_named_graph/urn%3Adata`, `${CODE}/_shared_memory/author/1`,
   `${CODE}/_verifiable_memory/author/1`];
-const DENIED = [`${ROOT}/unknown`, `${ROOT}/_working_memory/author/2`,
+const DENIED = [`${ROOT}/unknown`, `${ROOT}/unknown/_shared_memory_meta`, `${CHILD}/_shared_memory_meta`, `${ROOT}/_working_memory/author/2`,
   `${ROOT}/_private`, `${ROOT}/_private/author/1`, `${ROOT}/_rules/rule`,
   `${ROOT}/_shared_memory/author/1/_private`, `${ROOT}/_shared_memory/staging/1`,
   `${ROOT}/_verifiable_memory/staging/1`, `${CODE}/_private/author/1`,
@@ -42,6 +42,9 @@ routes.push(...routes.map(route => ({
   expected: route.options.graphSuffix === '_shared_memory' ? route.expected.filter(graph => graph !== (route.options.subGraphName ? CODE : ROOT))
     : route.expected.filter(graph => graph !== `${route.options.subGraphName ? CODE : ROOT}/_shared_memory`),
 })));
+
+routes.push({ name: 'root with registered shared metadata', options: { includeSharedMemory: true, includeSharedMemoryMeta: true },
+  expected: [...ROOT_CONTENT, ...CODE_CONTENT.filter(graph => graph !== `${CODE}/_shared_memory`), METADATA[0], METADATA[1], METADATA[3]] });
 
 describe('scoped route policy equivalence', () => {
   it('preserves caller drafts named staging and rejects registered foreign drafts through every route', async () => {

@@ -9,13 +9,14 @@ type ScopedRoute = ReturnType<typeof staticScopedRouteGraphs>;
 export type QueryReadPlan = { kind: 'unscoped' } | {
   kind: 'view'; options: QueryOptions & { contextGraphId: string; view: NonNullable<QueryOptions['view']> };
 } | {
+  kind: 'exact'; candidates: readonly string[]; policy: ReturnType<typeof scopedPartitionPolicyFromRoute>;
+} | {
   kind: 'scoped'; contextGraphId: string; graphs: Omit<ScopedRoute, 'execution'>;
   execution: ScopedRoute['execution']; draftAccess: DraftAccessPolicy; includeSharedMemoryMeta: boolean;
   fallbackPolicy: 'compatibility' | 'preserve-scope'; excludedGraphPrefixes: readonly string[];
   discovery: {
     catalog: { kind: 'none' | 'shared' }
-      | { kind: 'admission-owned'; owner: QueryReadAdmissionCapability }
-      | { kind: 'exact'; candidates: readonly string[]; policy: ReturnType<typeof scopedPartitionPolicyFromRoute> };
+      | { kind: 'admission-owned'; owner: QueryReadAdmissionCapability };
     contentPrefixes: readonly { root: string; prefix: string }[];
     privatePartitions: boolean;
   };
@@ -34,10 +35,11 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
   if (!options?.contextGraphId) return { kind: 'unscoped' };
   const { execution, ...graphs } = staticScopedRouteGraphs(options.contextGraphId, options);
   const draftAccess = resolveDraftAccessPolicy(options);
-  const exact = options.exactContextGraphPartitions === true;
-  if (exact) {
+  if (options.exactContextGraphPartitions === true) {
     assertExactGraphRead(scope);
     if (options.includePrivate) throw new Error('Exact partition reads only admit public graphs');
+    return { kind: 'exact', candidates: scope.graphTargets.flatMap(target => target.kind === 'iri' ? [target.iri] : []),
+      policy: scopedPartitionPolicyFromRoute(options.contextGraphId, { ...graphs, execution }, draftAccess, options.includeSharedMemoryMeta === true) };
   }
   const allowed = [...graphs.staticContentGraphs, ...graphs.metaAllowList, ...graphs.staticPrivateAllowList];
   const needsDiscovery = !scope.hasGraphClause
@@ -57,9 +59,7 @@ export function resolveQueryReadPlan(scope: PreparedGraphScope, options: QueryOp
     discovery: { contentPrefixes, privatePartitions: !!options.includePrivate && needsDiscovery,
       // Complete dynamic routes use the catalog inventory for prefix reads;
       // private discovery adds metadata queries within the same owned admission.
-      catalog: exact ? { kind: 'exact', candidates: scope.graphTargets.flatMap(target => target.kind === 'iri' ? [target.iri] : []),
-        policy: scopedPartitionPolicyFromRoute(options.contextGraphId, { ...graphs, execution }, draftAccess, options.includeSharedMemoryMeta === true) }
-        : !expandGraphVariables ? { kind: 'none' }
+      catalog: !expandGraphVariables ? { kind: 'none' }
         : completeAdmissionOwner
           ? { kind: 'admission-owned', owner: completeAdmissionOwner } : { kind: 'shared' },
     },
