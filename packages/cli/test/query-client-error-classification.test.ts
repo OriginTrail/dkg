@@ -1,6 +1,34 @@
-import { describe, expect, it } from 'vitest';
+import type { ServerResponse } from 'node:http';
+import { describe, expect, it, vi } from 'vitest';
 import { SparqlHttpResponseError } from '@origintrail-official/dkg-storage';
-import { isClientQueryFailure } from '../src/daemon/routes/query-error.js';
+import { QueryResultTooLargeError } from '@origintrail-official/dkg-agent';
+import {
+  respondToQueryFailure,
+  isClientQueryFailure,
+} from '../src/daemon/routes/query-error.js';
+
+describe('respondToQueryFailure — bounded result policy', () => {
+  it('classifies the canonical agent error as a stable result-too-large response', () => {
+    const error = new QueryResultTooLargeError(10, 11);
+    const res = { writeHead: vi.fn(), end: vi.fn(), setHeader: vi.fn() };
+    expect(respondToQueryFailure(res as unknown as ServerResponse, error)).toBe(true);
+    expect(res.end).toHaveBeenCalledWith(expect.stringContaining('QUERY_RESULT_TOO_LARGE'));
+  });
+
+  it.each(['STORE_RESPONSE_TOO_LARGE', 'QUERY_MATERIALIZATION_TOO_LARGE'])
+    ('does not reach through the agent boundary for %s', (code) => {
+      expect(respondToQueryFailure({} as ServerResponse, Object.assign(new Error('lower-layer error'), {
+        code,
+        maxBytes: 10,
+        actualBytes: 11,
+      }))).toBe(false);
+    });
+
+  it('does not classify a lookalike message without a structural code', () => {
+    expect(respondToQueryFailure({} as ServerResponse, new Error('Triple-store response exceeds byte limit')))
+      .toBe(false);
+  });
+});
 
 // GH#1758 — invalid SPARQL was AGAIN reported as HTTP 500, a silent
 // re-regression of #889. #889's anchored `/^error at \d+:\d+:/` matched only

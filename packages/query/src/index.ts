@@ -5,6 +5,13 @@ export {
 } from './query-result-size-error.js';
 export * from './query-engine.js';
 export * from './query-types.js';
+export { QueryMaterializationBudget } from './query-store-read-context.js';
+export {
+  QUERY_MATERIALIZATION_TOO_LARGE,
+  QueryMaterializationTooLargeError,
+  isQueryMaterializationTooLargeError,
+  type QueryMaterializationTooLargeErrorLike,
+} from './query-materialization-error.js';
 export { DKGQueryEngine, resolveViewGraphs, type ViewResolution } from './dkg-query-engine.js';
 export {
   CALLER_SPARQL_REJECTED_CODE,

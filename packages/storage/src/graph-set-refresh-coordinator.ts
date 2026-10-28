@@ -3,6 +3,7 @@ import { storeWorkPriorityRank } from './store-priority-scheduler.js';
 
 export interface RefreshFlight<T> {
   readonly priority: StoreWorkPriority;
+  readonly sharingKey: string;
   readonly task: Promise<T>;
   lastScanSequence: number;
 }
@@ -18,15 +19,16 @@ interface RefreshScan {
  * fence both stale publication and stale failure handling.
  */
 export class RefreshCoordinator<T> {
-  private readonly flights = new Map<StoreWorkPriority, RefreshFlight<T>>();
+  private readonly flights = new Map<string, RefreshFlight<T>>();
   private nextScanSequence = 0;
   private latestPublishedScanSequence = 0;
 
   run(
     priority: StoreWorkPriority,
     start: (flight: RefreshFlight<T>) => Promise<T>,
+    sharingKey = '',
   ): Promise<T> {
-    const reusable = this.bestReusableFlight(priority);
+    const reusable = this.bestReusableFlight(priority, sharingKey);
     if (reusable) return reusable.task;
 
     // Register the flight before its work starts so even a re-entrant caller
@@ -37,15 +39,16 @@ export class RefreshCoordinator<T> {
       resolveTask = resolve;
       rejectTask = reject;
     });
-    const flight: RefreshFlight<T> = { priority, task, lastScanSequence: 0 };
-    this.flights.set(priority, flight);
+    const flight: RefreshFlight<T> = { priority, sharingKey, task, lastScanSequence: 0 };
+    const key = JSON.stringify([priority, sharingKey]);
+    this.flights.set(key, flight);
     void (async () => {
       try {
         resolveTask(await start(flight));
       } catch (error: unknown) {
         rejectTask(error);
       } finally {
-        if (this.flights.get(priority) === flight) this.flights.delete(priority);
+        if (this.flights.get(key) === flight) this.flights.delete(key);
       }
     })();
     return task;
@@ -67,10 +70,11 @@ export class RefreshCoordinator<T> {
     return flight.lastScanSequence >= this.latestPublishedScanSequence;
   }
 
-  private bestReusableFlight(priority: StoreWorkPriority): RefreshFlight<T> | undefined {
+  private bestReusableFlight(priority: StoreWorkPriority, sharingKey: string): RefreshFlight<T> | undefined {
     const requestedRank = storeWorkPriorityRank(priority);
     let best: RefreshFlight<T> | undefined;
     for (const candidate of this.flights.values()) {
+      if (candidate.sharingKey !== sharingKey) continue;
       const candidateRank = storeWorkPriorityRank(candidate.priority);
       if (candidateRank > requestedRank) continue;
       if (!best || candidateRank < storeWorkPriorityRank(best.priority)) best = candidate;
