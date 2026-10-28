@@ -56,7 +56,7 @@
     "packages/agent/src/sync/durable-integrity.ts": 1776,
     "packages/agent/src/sync/requester/durable-sync.ts": 1121,
     "packages/agent/src/sync/requester/page-fetch.ts": 1413,
-    "packages/agent/src/sync/requester/shared-memory-sync.ts": 2254,
+    "packages/agent/src/sync/requester/shared-memory-sync.ts": 1982,
     "packages/agent/src/sync/requester/swm-recovery.ts": 809,
     "packages/agent/src/sync/requester/swm-snapshot-materializer.ts": 928,
     "packages/agent/src/sync/responder/exact-graph-reader.ts": 885,
