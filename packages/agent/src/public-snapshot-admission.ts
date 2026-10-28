@@ -1,3 +1,6 @@
+/** Window for two physical inventory builds per authenticated peer. */
+export const PUBLIC_SNAPSHOT_ADMISSION_WINDOW_MS = 60_000;
+
 /** Charge physical inventory builds to the authenticated requesting peer. */
 export class PublicSnapshotAdmission {
   private readonly peers = new Map<string, { until: number; builds: number; active: boolean }>();
@@ -13,7 +16,7 @@ export class PublicSnapshotAdmission {
       throw new Error('Snapshot peer busy');
     if (!entry) {
       if (this.peers.size >= 1024) throw new Error('Snapshot admission busy');
-      entry = { until: now + 60_000, builds: 0, active: false };
+      entry = { until: now + PUBLIC_SNAPSHOT_ADMISSION_WINDOW_MS, builds: 0, active: false };
       this.peers.set(peer, entry);
     }
     // A cold build and a fresh post-transfer observation fit in one window.

@@ -1150,17 +1150,17 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(reconcile).toHaveBeenCalledWith('pending-b');
         rows.delete('pending-b');
         agent.deleteContextGraphSubscription('pending-b');
-        agent.updateContextGraphSubscriptionRehydrationStatusAfterClear(['pending-b']);
+        agent.recordContextGraphSubscriptionClear(['pending-b']);
         await vi.advanceTimersByTimeAsync(0);
         await rolling.whenIdle();
         expect(host.subscribedContextGraphs.get('pending-c')?.subscribed).toBe(true);
         expect(rollingPass).toHaveBeenCalledTimes(3);
-        agent.updateContextGraphSubscriptionRehydrationStatusAfterClear(['pending-b']);
+        agent.recordContextGraphSubscriptionClear(['pending-b']);
         await vi.advanceTimersByTimeAsync(0);
         await rolling.whenIdle();
         expect(rollingPass).toHaveBeenCalledTimes(3);
         agent.unsubscribeFromContextGraph('pending-c', { persist: false });
-        agent.updateContextGraphSubscriptionRehydrationStatusAfterClear([], ['pending-c']);
+        agent.recordContextGraphSubscriptionClear([], ['pending-c']);
         await vi.advanceTimersByTimeAsync(0);
         await rolling.whenIdle();
         expect(host.subscribedContextGraphs.get('pending-d')?.subscribed).toBe(true);
@@ -1201,7 +1201,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         ),
       ).resolves.toBe('idle');
       expect(missing.agent.contextGraphSubscriptionRehydrationPendingIds.size).toBe(0);
-      expect(missing.agent.updateContextGraphSubscriptionRehydrationStatusAfterClear)
+      expect(missing.agent.recordContextGraphSubscriptionClear)
         .toHaveBeenCalledWith(['missing']);
 
       const revoked = createPromotionHarness([{ id: 'revoked', subscribed: false, coreHosted: false }]);
@@ -1209,7 +1209,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         revoked.agent,
         new AbortController().signal,
       );
-      expect(revoked.agent.updateContextGraphSubscriptionRehydrationStatusAfterClear)
+      expect(revoked.agent.recordContextGraphSubscriptionClear)
         .toHaveBeenCalledWith([], ['revoked']);
 
       const alreadyActive = createPromotionHarness([{ id: 'already-active', subscribed: true }]);
@@ -1240,7 +1240,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         stale.agent,
         new AbortController().signal,
       );
-      expect(stale.agent.updateContextGraphSubscriptionRehydrationStatusAfterClear)
+      expect(stale.agent.recordContextGraphSubscriptionClear)
         .toHaveBeenCalledWith(['stale']);
 
       let currentBinding = {
@@ -1378,7 +1378,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           staleBeforePrepare.agent.subscribedContextGraphs.set(row.id, subscription);
           staleBeforePrepare.agent.contextGraphSubscriptionDormancyById
             .set(row.id, 'authorityUnavailable');
-          await options.prepare(subscription);
+          await options.prepare(subscription, vi.fn());
           return subscription;
         });
       await expect(
@@ -1414,7 +1414,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         .mockImplementation(async (row: any, options: any) => {
           const subscription = promotionSubscription({ subscribed: true, onChainId: options.onChainId });
           staleDuringRepair.agent.subscribedContextGraphs.set(row.id, subscription);
-          await options.prepare(subscription);
+          await options.prepare(subscription, (isCurrent: () => boolean) =>
+            staleDuringRepair.agent.persistContextGraphSubscriptionStrict(row.id, subscription, row.syncScoped, isCurrent));
           if (!options.isCurrent(subscription)) throw new Error('stale activation');
           staleDuringRepairNetworkEffects();
           return subscription;

@@ -18,6 +18,10 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/public-snapshot-catch-up.test.ts",
+      "test/public-snapshot-parallel-exact.test.ts",
+      "test/exact-batch-stream-pipeline.test.ts",
+      "test/host-mode-reconcile-priority.test.ts",
       "test/write-preflight-attribution.test.ts",
       "test/rfc64-manual-catalog-authority-scope-v1.test.ts",
       "test/sync-exact-export-admission.test.ts",

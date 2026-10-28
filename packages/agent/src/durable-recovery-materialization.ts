@@ -24,6 +24,7 @@ export interface RecoveryMaterializationPorts {
   verifyBinding(id: string, onChainId: string, ctx: OperationContext, signal?: AbortSignal): Promise<boolean>;
   persistSubscription(id: string, subscription: ContextGraphSub, reason: 'on-chain id binding', isCurrent: () => boolean): Promise<void>;
   bindSubscription(id: string, subscription: ContextGraphSub, onChainId: string): void;
+  logTiming(ctx: OperationContext, message: string): void;
   recordDrops: NonNullable<MaterializationOptions['oversizeHooks']>['recordDrops'];
   reconcile(asset: Parameters<typeof reconcileAfterMaterialization>[1], ctx: OperationContext): Promise<void>;
 }
@@ -123,12 +124,15 @@ export class RecoveryMaterializationOwner {
           `Context graph binding for ${asset.contextGraphId} changed during graph-scoped store`,
         )),
         operation: async (control): Promise<GraphScopedMaterializationOutcome> => {
+          const storeCallStartedAt = Date.now();
           // This operation's asset writes run back to back: let queued store work in between them.
           if (previousWriteMs !== undefined) {
             await yieldStoreBackgroundLane({ store: ports.store(), previousWriteMs, signal: operationSignal });
           }
           const { isBindingCurrent, recaptureBindingGeneration, assertCurrent } = control;
+          const authenticationStartedAt = Date.now();
           const authentication = await authority.authenticate(asset, authenticationDeadline, operationSignal);
+          const authenticationFinishedAt = Date.now();
           control.adoptEquivalentSubscription();
           assertCurrent();
           const subscription = control.subscription;
@@ -189,8 +193,13 @@ export class RecoveryMaterializationOwner {
               recordDrops: (drops, seam) => ports.recordDrops(drops, seam),
             },
           });
+          const storeFinishedAt = Date.now();
           if (outcome === 'applied') await ports.reconcile(authentication.asset, ctx);
           previousWriteMs = Date.now() - writeStartedAt;
+          ports.logTiming(ctx, `Recovery store timing: laneWait=${authenticationStartedAt - storeCallStartedAt}ms `
+            + `authentication=${authenticationFinishedAt - authenticationStartedAt}ms `
+            + `binding=${writeStartedAt - authenticationFinishedAt}ms store=${storeFinishedAt - writeStartedAt}ms `
+            + `reconcile=${Date.now() - storeFinishedAt}ms outcome=${outcome}`);
           return outcome;
         },
       }),

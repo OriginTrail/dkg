@@ -54,7 +54,7 @@ interface RestartInternals {
   wireSwmHostModeHandler(contextGraphId: string, source?: string, curated?: boolean): void;
   gossipWireIdFor(contextGraphId: string): string;
   rehydrateContextGraphsFromDurableState(): Promise<void>;
-  updateContextGraphSubscriptionRehydrationStatusAfterPersist(
+  recordContextGraphSubscriptionPersistence(
     contextGraphId: string,
     next?: { subscribed: boolean; coreHosted?: boolean },
   ): void;
@@ -96,7 +96,7 @@ function accountSaveAfterRehydration(internals: RestartInternals, contextGraphId
   const rehydrate = internals.rehydrateContextGraphsFromDurableState.bind(internals);
   vi.spyOn(internals, 'rehydrateContextGraphsFromDurableState').mockImplementation(async () => {
     await rehydrate();
-    internals.updateContextGraphSubscriptionRehydrationStatusAfterPersist(contextGraphId, { subscribed: true });
+    internals.recordContextGraphSubscriptionPersistence(contextGraphId, { subscribed: true });
   });
 }
 

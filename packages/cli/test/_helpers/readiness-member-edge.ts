@@ -147,6 +147,8 @@ export function memberEdge() {
     resolveContextGraphIdAlias: (contextGraphId: string) => node.aliases.get(contextGraphId) ?? null,
     listLocalAgents: () => node.localAgents.map((agentAddress) => ({ agentAddress })),
     subscribedContextGraphs: subscriptions,
+    contextGraphSubscriptionDormancyById: new Map(),
+    isContextGraphSubscriptionCommitted: DKGAgent.prototype.isContextGraphSubscriptionCommitted,
     getSubscribedContextGraphs: () => subscriptions,
     subscribeToContextGraph: (id: string, options?: { syncMode?: string }) => {
       const previous = subscriptions.get(id);

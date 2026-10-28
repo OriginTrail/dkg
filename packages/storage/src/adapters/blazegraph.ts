@@ -528,7 +528,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         'replaceGraphAndSubject',
       );
     } catch (error) {
-      await this.sparqlUpdate(
+      if (plan.cleanup) await this.sparqlUpdate(
         plan.cleanup,
         { ...options, source: 'blazegraph.replaceGraphAndSubject.cleanup' },
         'replaceGraphAndSubject',

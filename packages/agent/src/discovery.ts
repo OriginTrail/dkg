@@ -208,6 +208,7 @@ export class DiscoveryClient implements AgentPeerDiscovery {
     const result = await this.engine.query(sparql, {
       contextGraphId: AGENT_REGISTRY_CONTEXT_GRAPH,
       signal: options.signal,
+      source: 'discovery.findAgents',
     });
 
     const discovered = result.bindings.map((row) => ({
