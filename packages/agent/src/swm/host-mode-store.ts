@@ -41,8 +41,8 @@
  * acknowledges, and the sweep of leftover `<file>.tmp-*` siblings that `init()`
  * runs. This module decides what is written, and in which order; it adds, per
  * store instance, the retry rule that an idempotent no-op (a `mark*` whose flag
- * already matches, a prune that finds nothing left to drop) first completes such
- * a pending directory fsync (`completePendingDirSync`).
+ * already matches, a prune that finds nothing left to drop) completes pending
+ * directory fsyncs at the shared mutation boundary before returning successfully.
  *
  * Not guaranteed here: the unlinks of `init()`'s sweep of orphan logs and corrupt
  * metas (nothing acknowledges them: a resurrected orphan is reaped again by the
@@ -92,7 +92,6 @@ import {
   encodeFrame,
   planRetention,
   readEntriesSince,
-  scanLogFrames,
 } from './host-store-format.js';
 import { HostStoreMetaLoader } from './host-store-meta-loader.js';
 import { reconcileOrphanLogs } from './host-store-startup-reconcile.js';
@@ -145,7 +144,6 @@ export class SwmHostModeStore {
   private readonly metaLoader: HostStoreMetaLoader;
   private readonly inflightWrites = new Map<string, Promise<void>>();
   /** CGs whose log tail has been checked (and repaired) since this process started. */
-  private readonly verifiedLogTails = new Set<string>();
   private initialized = false;
   private lastStartupReconcileReport: SwmHostModeStartupReconcileReport | undefined;
 
@@ -206,7 +204,7 @@ export class SwmHostModeStore {
    * `inflightWrites` so the file-level seqno stays monotonic.
    */
   async append(contextGraphId: string, envelopeBytes: Uint8Array): Promise<number> {
-    return this.withCgWriteLock(contextGraphId, () => this.appendUnlocked(contextGraphId, envelopeBytes));
+    return this.withCgMutation(contextGraphId, () => this.appendUnlocked(contextGraphId, envelopeBytes));
   }
 
   /**
@@ -218,9 +216,10 @@ export class SwmHostModeStore {
    * immediately by `maybeMarkRegisteredForHostMode() → markRegistered()`
    * could see their `persistMeta` writes interleave and drop the
    * `hostModeSubscribed` flag. Routing every mutator through this helper
-   * keeps the `.meta` file consistent.
+   * keeps the `.meta` file consistent. Every successful mutation, including a
+   * no-op, completes pending metadata/log directory syncs before releasing the lock.
    */
-  private async withCgWriteLock<T>(
+  private async withCgMutation<T>(
     contextGraphId: string,
     fn: () => Promise<T>,
   ): Promise<T> {
@@ -229,13 +228,17 @@ export class SwmHostModeStore {
     const previous = this.inflightWrites.get(cgKey);
     let resolveOuter: () => void = () => {};
     const next = new Promise<void>((resolve) => { resolveOuter = resolve; });
-    this.inflightWrites.set(cgKey, previous ? previous.then(() => next) : next);
+    const tail = previous ? previous.then(() => next) : next;
+    this.inflightWrites.set(cgKey, tail);
     try {
       if (previous) await previous;
-      return await fn();
+      const result = await fn();
+      await this.files.completePendingDirSync(this.layout.metaPath(contextGraphId));
+      await this.files.completePendingDirSync(this.layout.logPath(contextGraphId));
+      return result;
     } finally {
       resolveOuter();
-      if (this.inflightWrites.get(cgKey) === next) this.inflightWrites.delete(cgKey);
+      if (this.inflightWrites.get(cgKey) === tail) this.inflightWrites.delete(cgKey);
     }
   }
 
@@ -243,8 +246,7 @@ export class SwmHostModeStore {
     if (envelopeBytes.length === 0) {
       throw new Error('SwmHostModeStore.append: refusing zero-length envelope');
     }
-    await this.repairLogTailOnce(contextGraphId);
-    const meta = await this.loadMeta(contextGraphId);
+    const meta = await this.metaLoader.prepareAppend(contextGraphId);
     const seqno = meta.seqno + 1;
     const timestampMs = this.now();
     const payload = encodeFrame(timestampMs, seqno, envelopeBytes);
@@ -261,7 +263,7 @@ export class SwmHostModeStore {
     } catch (err) {
       // A failed write (ENOSPC, EIO, ...) may have left a partial frame at
       // the tail; the next append must re-check it rather than write after it.
-      this.verifiedLogTails.delete(this.layout.cgKey(contextGraphId));
+      this.metaLoader.invalidateTail(contextGraphId);
       throw err;
     }
     await this.persistMeta(contextGraphId, meta);
@@ -355,20 +357,16 @@ export class SwmHostModeStore {
    * changed anything. When it did not (the flag already has the requested
    * value) nothing is rewritten, but the caller is still only told "done" once
    * the visible file is durable: if an earlier attempt renamed this file into
-   * place and then failed its directory fsync, that fsync is completed here
-   * first (and a failure of it rejects, keeping the pending mark).
+   * place and then failed its directory fsync, the shared mutation boundary
+   * completes it (and a failure rejects, keeping the pending mark).
    */
   private async mutateMeta(
     contextGraphId: string,
     apply: (meta: CgMetaState) => boolean,
   ): Promise<void> {
-    await this.withCgWriteLock(contextGraphId, async () => {
+    await this.withCgMutation(contextGraphId, async () => {
       const meta = await this.loadMeta(contextGraphId);
-      if (!apply(meta)) {
-        await this.files.completePendingDirSync(this.layout.metaPath(contextGraphId));
-        return;
-      }
-      await this.persistMeta(contextGraphId, meta);
+      if (apply(meta)) await this.persistMeta(contextGraphId, meta);
     });
   }
 
@@ -456,19 +454,8 @@ export class SwmHostModeStore {
   }
 
   private async pruneCg(contextGraphId: string): Promise<number> {
-    const cgKey = this.layout.cgKey(contextGraphId);
-    const previous = this.inflightWrites.get(cgKey);
-    let resolveOuter: () => void = () => {};
-    const next = new Promise<void>((resolve) => { resolveOuter = resolve; });
-    this.inflightWrites.set(cgKey, previous ? previous.then(() => next) : next);
-    try {
-      if (previous) await previous;
-      const limits = await this.activeLimits(contextGraphId);
-      return await this.pruneCgUnlocked(contextGraphId, limits);
-    } finally {
-      resolveOuter();
-      if (this.inflightWrites.get(cgKey) === next) this.inflightWrites.delete(cgKey);
-    }
+    return this.withCgMutation(contextGraphId, async () =>
+      this.pruneCgUnlocked(contextGraphId, await this.activeLimits(contextGraphId)));
   }
 
   private async pruneCgUnlocked(
@@ -476,23 +463,12 @@ export class SwmHostModeStore {
     limits: SwmHostModeStoreLimits,
   ): Promise<number> {
     const filePath = this.layout.logPath(contextGraphId);
-    if (!(await fileExists(filePath))) {
-      // No log. If an earlier prune unlinked it and then failed its directory
-      // fsync, this "already gone" view is not durable yet: finish that fsync
-      // before reporting done. (Free when nothing is pending.)
-      await this.files.completePendingDirSync(filePath);
-      return 0;
-    }
+    if (!(await fileExists(filePath))) return 0;
     const buf = await fs.readFile(filePath);
     const ttlCutoff = this.now() - limits.ttlMs;
     const { kept, bytesPruned } = planRetention(buf, ttlCutoff, limits.perCgByteCap);
-    if (bytesPruned === 0) {
-      // Nothing (left) to drop. If a previous attempt already renamed the pruned
-      // log into place but its directory fsync failed, this "already pruned"
-      // view is not durable yet: finish that fsync before reporting done.
-      await this.files.completePendingDirSync(filePath);
-      return 0;
-    }
+    if (bytesPruned === 0) return 0;
+    this.metaLoader.invalidateTail(contextGraphId);
     if (kept.length === 0) {
       // An unlink is a directory-entry change exactly like a rename: `unlinkDurable`
       // directory-syncs it, or a power loss could bring the expired ciphertext back.
@@ -532,35 +508,6 @@ export class SwmHostModeStore {
 
   private async persistMeta(contextGraphId: string, meta: CgMetaState): Promise<void> {
     await this.metaLoader.persist(contextGraphId, meta);
-  }
-
-  /**
-   * Once per CG per process (and again after a failed append), make sure the
-   * log ends on a frame boundary before anything is appended. A crash or
-   * power loss mid-append (or an `ENOSPC`) can leave a partial frame at the
-   * tail; appending after it would bury every later frame behind a header
-   * whose length swallows them, hiding acknowledged entries from `iterate`
-   * and recycling their seqnos. Truncating to the last complete frame is
-   * safe: readers already stop at that boundary, so those bytes were never
-   * servable. Runs under the per-CG write lock (callers: `appendUnlocked`).
-   */
-  private async repairLogTailOnce(contextGraphId: string): Promise<void> {
-    const cgKey = this.layout.cgKey(contextGraphId);
-    if (this.verifiedLogTails.has(cgKey)) return;
-    const filePath = this.layout.logPath(contextGraphId);
-    let buf: Buffer | undefined;
-    try {
-      buf = await fs.readFile(filePath);
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-    }
-    if (buf) {
-      const { validLength } = scanLogFrames(buf);
-      if (validLength < buf.length) {
-        await this.files.truncateFileDurable(filePath, validLength);
-      }
-    }
-    this.verifiedLogTails.add(cgKey);
   }
 
   private async listKnownCgs(): Promise<{ contextGraphId: string }[]> {

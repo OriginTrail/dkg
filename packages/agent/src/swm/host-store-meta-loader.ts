@@ -12,7 +12,7 @@
  *
  * Only a MISSING file is absent: no `.meta` loads the defaults, no `.log` means
  * no frames. Any other read error on either file rejects the load and nothing
- * is cached or persisted; see `initialize` and `recoverLastSeqnoFromLog`.
+ * is cached or persisted; see `initialize` and `scanLog`.
  */
 import { promises as fs } from 'node:fs';
 import type { DurableFiles } from './host-store-durable-fs.js';
@@ -21,7 +21,7 @@ import type { CgMetaState } from './host-store-types.js';
 
 export class HostStoreMetaLoader {
   /** Installed metadata is private to the loading/persistence owner. */
-  private readonly cache = new Map<string, CgMetaState>();
+  private readonly cache = new Map<string, { meta: CgMetaState; tail?: { validLength: number; byteLength: number } | null }>();
   /**
    * Cold initialization in flight per CG (see `load`). It is deliberately
    * NOT behind the store's per-CG write lock: mutators hold that lock while
@@ -34,11 +34,33 @@ export class HostStoreMetaLoader {
     private readonly files: DurableFiles,
   ) {}
 
+  /** Under the CG write lock, finish the same recovery whose cursor readers await. */
+  async prepareAppend(contextGraphId: string): Promise<CgMetaState> {
+    const meta = await this.load(contextGraphId);
+    const entry = this.cache.get(this.layout.cgKey(contextGraphId))!;
+    if (entry.tail === undefined) {
+      const log = await this.scanLog(contextGraphId);
+      meta.seqno = Math.max(meta.seqno, log.lastSeqno); // retain burned reservations
+      entry.tail = log;
+    }
+    if (entry.tail && entry.tail.validLength < entry.tail.byteLength)
+      await this.files.truncateFileDurable(this.layout.logPath(contextGraphId), entry.tail.validLength);
+    entry.tail = null; // known complete; successful appends preserve this invariant
+    return meta;
+  }
+
+  /** Failed appends or log replacement retain the cursor but require a fresh tail scan. */
+  invalidateTail(contextGraphId: string): void {
+    const entry = this.cache.get(this.layout.cgKey(contextGraphId));
+    if (entry) entry.tail = undefined;
+  }
+
   /** Mutators hold the host store's per-graph write lock around this transition. */
   async persist(contextGraphId: string, meta: CgMetaState): Promise<void> {
     const cgKey = this.layout.cgKey(contextGraphId);
     const cache = this.cache;
-    cache.set(cgKey, meta);
+    const current = cache.get(cgKey);
+    cache.set(cgKey, { meta, tail: current?.tail });
     // Authoritative write: a failure rejects so the caller sees it.
     try {
       await this.files.writeFileDurable(this.layout.metaPath(contextGraphId), JSON.stringify(meta));
@@ -53,7 +75,7 @@ export class HostStoreMetaLoader {
       // idempotent early return completes that fsync (see `mutateMeta`).
       // The re-read rejects when it cannot read the files; only a missing file
       // loads as absent (see `HostStoreMetaLoader`).
-      if (cache.get(cgKey) === meta) cache.delete(cgKey);
+      if (cache.get(cgKey)?.meta === meta) cache.delete(cgKey);
       throw err;
     }
   }
@@ -94,7 +116,7 @@ export class HostStoreMetaLoader {
   async load(contextGraphId: string): Promise<CgMetaState> {
     const cgKey = this.layout.cgKey(contextGraphId);
     const cached = this.cache.get(cgKey);
-    if (cached) return Promise.resolve(cached);
+    if (cached) return Promise.resolve(cached.meta);
     const pending = this.initializations.get(cgKey);
     if (pending) return pending;
     const initialization = this.initialize(contextGraphId, cgKey).finally(() => {
@@ -134,9 +156,9 @@ export class HostStoreMetaLoader {
         parsed = undefined;
       }
     }
-    const logSeqno = await this.recoverLastSeqnoFromLog(contextGraphId);
+    const log = await this.scanLog(contextGraphId);
     const state: CgMetaState = {
-      seqno: Math.max(parsed?.seqno ?? 0, logSeqno),
+      seqno: Math.max(parsed?.seqno ?? 0, log.lastSeqno),
       registered: parsed?.registered ?? false,
       contextGraphId,
       ...(parsed?.hostModeSubscribed === true ? { hostModeSubscribed: true } : {}),
@@ -147,7 +169,7 @@ export class HostStoreMetaLoader {
     if (parsed && state.seqno !== parsed.seqno) {
       await this.files.writeFileDurable(metaPath, JSON.stringify(state)).catch(() => { /* best-effort */ });
     }
-    this.cache.set(cgKey, state);
+    this.cache.set(cgKey, { meta: state, tail: log });
     return state;
   }
 
@@ -163,14 +185,14 @@ export class HostStoreMetaLoader {
    * a cursor that lags the log stand, and the next append would write
    * a seqno that is already in the log.
    */
-  private async recoverLastSeqnoFromLog(contextGraphId: string): Promise<number> {
+  private async scanLog(contextGraphId: string): Promise<{ lastSeqno: number; validLength: number; byteLength: number }> {
     let buf: Buffer;
     try {
       buf = await fs.readFile(this.layout.logPath(contextGraphId));
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
-      return 0;
+      return { lastSeqno: 0, validLength: 0, byteLength: 0 };
     }
-    return scanLogFrames(buf).lastSeqno;
+    return { ...scanLogFrames(buf), byteLength: buf.length };
   }
 }

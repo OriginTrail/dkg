@@ -37,6 +37,20 @@ describe('SwmHostModeStore durable writes', () => {
   const { tempFiles, seedLaggingMeta } = fx;
 
   describe('cold metadata initialization has a single owner per CG', () => {
+    it('the first append shares its cursor recovery and torn-tail scan with cold readers', async () => {
+      const cg = 'cg/init-append-single-scan';
+      await seedLaggingMeta(cg);
+      const log = path.join(fx.dir, `${cgKey(cg)}.log`);
+      await fsp.appendFile(log, Buffer.from([1, 2, 3]));
+      const store = newStore(fx.dir);
+      await store.init();
+      vi.spyOn(fsp, 'readFile');
+      await store.getLastSeqno(cg);
+      expect(await store.append(cg, new Uint8Array([4]))).toBe(4);
+      expect(readCalls('.log')).toBe(1);
+      expect((await store.iterate(cg, 0)).map(entry => entry.seqno)).toEqual([1, 2, 3, 4]);
+    });
+
     it('a delayed cold-load reconcile cannot restore a flag a later mutation cleared: a fresh store reads the mutation', async () => {
       const cg = 'cg/init-stale-rename';
       const metaPath = await seedLaggingMeta(cg, { hostModeSubscribed: true });

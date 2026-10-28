@@ -47,23 +47,27 @@ export function encodeFrame(timestampMs: number, seqno: number, envelopeBytes: U
   return Buffer.concat([header, Buffer.from(envelopeBytes)]);
 }
 
-/**
- * Walk the frames of a log buffer. `validLength` is the offset just past the
- * last complete frame; any bytes after it are an unparseable tail (a partial
- * header, or a header whose length overruns the file).
- */
-export function scanLogFrames(buf: Buffer): { lastSeqno: number; validLength: number } {
-  let lastSeqno = 0;
-  let offset = 0;
-  while (offset + ENTRY_HEADER_BYTES <= buf.length) {
-    const seqno = Number(buf.readBigUInt64BE(offset + 8));
-    const len = buf.readUInt32BE(offset + 16);
-    const end = offset + ENTRY_HEADER_BYTES + len;
-    if (end > buf.length) break;
-    if (seqno > lastSeqno) lastSeqno = seqno;
-    offset = end;
+/** One canonical frame walk: incomplete headers or payloads terminate the log. */
+function* frames(buf: Buffer): Generator<FrameRange & { payloadStart: number; timestampMs: number; seqno: number }> {
+  let start = 0;
+  while (start + ENTRY_HEADER_BYTES <= buf.length) {
+    const payloadStart = start + ENTRY_HEADER_BYTES;
+    const end = payloadStart + buf.readUInt32BE(start + 16);
+    if (end > buf.length) return;
+    yield { start, end, payloadStart, timestampMs: Number(buf.readBigUInt64BE(start)),
+      seqno: Number(buf.readBigUInt64BE(start + 8)) };
+    start = end;
   }
-  return { lastSeqno, validLength: offset };
+}
+
+/** Recover the highest cursor and the end of the last complete frame. */
+export function scanLogFrames(buf: Buffer): { lastSeqno: number; validLength: number } {
+  let lastSeqno = 0, validLength = 0;
+  for (const frame of frames(buf)) {
+    lastSeqno = Math.max(lastSeqno, frame.seqno);
+    validLength = frame.end;
+  }
+  return { lastSeqno, validLength };
 }
 
 /**
@@ -72,40 +76,20 @@ export function scanLogFrames(buf: Buffer): { lastSeqno: number; validLength: nu
  */
 export function readEntriesSince(buf: Buffer, sinceSeqno: number, limit?: number): SwmHostModeEntry[] {
   const out: SwmHostModeEntry[] = [];
-  let offset = 0;
-  while (offset + ENTRY_HEADER_BYTES <= buf.length) {
-    const timestampMs = Number(buf.readBigUInt64BE(offset));
-    const seqno = Number(buf.readBigUInt64BE(offset + 8));
-    const len = buf.readUInt32BE(offset + 16);
-    const payloadStart = offset + ENTRY_HEADER_BYTES;
-    const payloadEnd = payloadStart + len;
-    if (payloadEnd > buf.length) {
-      break;
-    }
-    if (seqno > sinceSeqno) {
-      out.push({
-        seqno,
-        timestampMs,
-        envelopeBytes: new Uint8Array(buf.subarray(payloadStart, payloadEnd)),
-      });
+  for (const frame of frames(buf)) {
+    if (frame.seqno > sinceSeqno) {
+      out.push({ seqno: frame.seqno, timestampMs: frame.timestampMs,
+        envelopeBytes: new Uint8Array(buf.subarray(frame.payloadStart, frame.end)) });
       if (limit !== undefined && out.length >= limit) break;
     }
-    offset = payloadEnd;
   }
   return out;
 }
 
 /** The number of complete frames in a log buffer. */
 export function countFrames(buf: Buffer): number {
-  let offset = 0;
   let entries = 0;
-  while (offset + ENTRY_HEADER_BYTES <= buf.length) {
-    const len = buf.readUInt32BE(offset + 16);
-    const end = offset + ENTRY_HEADER_BYTES + len;
-    if (end > buf.length) break;
-    entries += 1;
-    offset = end;
-  }
+  for (const _frame of frames(buf)) entries += 1;
   return entries;
 }
 
@@ -128,16 +112,8 @@ export function planRetention(
 ): { kept: FrameRange[]; bytesPruned: number } {
   // First pass: locate TTL cut point + total post-TTL size.
   const survivors: FrameRange[] = [];
-  let offset = 0;
-  while (offset + ENTRY_HEADER_BYTES <= buf.length) {
-    const timestampMs = Number(buf.readBigUInt64BE(offset));
-    const len = buf.readUInt32BE(offset + 16);
-    const end = offset + ENTRY_HEADER_BYTES + len;
-    if (end > buf.length) break;
-    if (timestampMs >= ttlCutoff) {
-      survivors.push({ start: offset, end });
-    }
-    offset = end;
+  for (const frame of frames(buf)) {
+    if (frame.timestampMs >= ttlCutoff) survivors.push({ start: frame.start, end: frame.end });
   }
   let survivorBytes = survivors.reduce((sum, s) => sum + (s.end - s.start), 0);
   let dropIndex = 0;
