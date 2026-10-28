@@ -1,7 +1,6 @@
 import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
-import { createQueryStoreReadContext, createStoreReadLane, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
 import { resolveLegacyRouteScope } from './legacy-route-scope.js';
@@ -70,6 +69,11 @@ import {
 import { injectMinTrustFilter } from './sparql-min-trust.js';
 import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
+import {
+  createQueryStoreReadContext,
+  type QueryStoreReadContext,
+  type StoreReadLane,
+} from './query-store-read-context.js';
 
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { assertWithheldGraphQuery } from './withheld-graph-scope.js';
@@ -365,7 +369,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         const withheld = options?.withheldGraphRoots ?? [];
         if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
         return this.execWithExclusions(initialGraphScope, withheld.length
-          ? createStoreReadLane(this.store, { ...storeOptions(options), withheldGraphRoots: withheld }) : reads,
+          ? reads.withWithheldGraphRoots(withheld) : reads,
         options?.excludeGraphPrefixes);
       }
     }
@@ -868,16 +872,15 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     reads: QueryStoreReadContext,
   ): Promise<ScopedContentGraphDiscoverySnapshot> {
     const graphPrefix = `did:dkg:context-graph:${contextGraphId}`;
-    return this.scopedContentGraphDiscoveryMemo.get({
+    const discovery = await this.scopedContentGraphDiscoveryMemo.get({
       contextKey: contextGraphId,
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
-      load: () => this.discoverScopedContentGraphDiscovery(
-        contextGraphId,
-        reads.shared,
-      ),
+      load: () => reads.shared.measure(discoveryReads =>
+        this.discoverScopedContentGraphDiscovery(contextGraphId, discoveryReads)),
     });
+    return reads.shared.replay(discovery);
   }
 
   private async discoverScopedContentGraphDiscovery(

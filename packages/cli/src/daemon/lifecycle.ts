@@ -2482,6 +2482,7 @@ async function runDaemonInnerWithStartupOwnership(
           }),
           publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
           knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
+          storageAckCopyCleanup: agent.storageAckCopyCleanup,
           publicSnapshotStore,
           log,
           startupSignal: publisherStartupController.signal,

@@ -137,6 +137,8 @@ export default defineConfig({
           // A persisted subscription restored unsynced gets a catch-up job
           // (#3251). Agent double and stub runner; no hardhat.
           'test/context-graph-activation-catchup.test.ts',
+          'test/context-graph-activation-committed.test.ts',
+      'test/context-graph-activation-provisional.test.ts',
           // A write into a graph this node is still catching up waits for the
           // catch-up, bounded; a restarted owner's first write into its own
           // registered graph goes through. Same worker and fake thread.
@@ -265,6 +267,7 @@ export default defineConfig({
           'test/rpc-usage-log.test.ts',
           'test/rpc-usage-snapshot-route.test.ts',
           'test/publisher-runner-rpc-usage.test.ts',
+          'test/publisher-runtime-cleanup.test.ts',
           'test/publisher-startup-admission.test.ts',
           'test/publisher-startup-lifecycle.test.ts',
           'test/daemon-publisher-startup-cancellation.test.ts',
@@ -350,6 +353,7 @@ export default defineConfig({
           'test/oxigraph-orphan-policy.test.ts',
           'test/oxigraph-reclaim-policy.test.ts',
           'test/oxigraph-orphan-native.test.ts',
+          'test/process-inventory.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so

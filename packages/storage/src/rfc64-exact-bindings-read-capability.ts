@@ -14,6 +14,7 @@ import {
   type TripleStore,
 } from './triple-store.js';
 import { SparqlResultsShapeError } from './sparql-results-shape-error.js';
+import { isStoreResponseTooLargeError } from './http-response-limit.js';
 import {
   readOwnEnumerableDataProperty,
   snapshotDenseDataArray,
@@ -79,6 +80,12 @@ export async function executeRfc64ExactBindingsReadCapabilityV1(
     if (cause instanceof SparqlResultsShapeError) {
       throw new Rfc64ExactBindingsReadResultErrorV1(
         'exact-bindings read received malformed SPARQL results',
+        { cause },
+      );
+    }
+    if (isStoreResponseTooLargeError(cause)) {
+      throw new Rfc64ExactBindingsReadResultErrorV1(
+        'exact-bindings read exceeded its response-byte ceiling',
         { cause },
       );
     }

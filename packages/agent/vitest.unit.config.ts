@@ -18,8 +18,14 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/context-graph-lifecycle-cache.test.ts",
+      "test/storage-ack-copy-cleanup-writer.test.ts",
       "test/held-metadata-controls.test.ts",
       "test/recipient-key-route-scopes.test.ts",
+      "test/public-snapshot-catch-up.test.ts",
+      "test/public-snapshot-parallel-exact.test.ts",
+      "test/exact-batch-stream-pipeline.test.ts",
+      "test/host-mode-reconcile-priority.test.ts",
       "test/write-preflight-attribution.test.ts",
       // S4a: which writes move the policy generation, what makes two probe calls interchangeable.
       "test/write-preflight-generation.test.ts",
@@ -164,7 +170,14 @@ export default defineConfig({
       "test/exact-asset-wire-parse.test.ts",
       "test/swm/host-catchup-sign.test.ts",
       "test/swm/host-catchup-wire.test.ts",
+      "test/swm/host-catchup-requester.test.ts",
       "test/swm/host-mode-store.test.ts",
+      "test/swm/host-mode-store-durable-writes.test.ts",
+      "test/swm/host-mode-store-tail-recovery.test.ts",
+      "test/swm/host-mode-store-cold-init.test.ts",
+      "test/swm/host-mode-store-dirsync-retries.test.ts",
+      "test/swm/host-mode-store-dirsync-model.test.ts",
+      "test/swm/host-mode-store-crash.e2e.test.ts",
       "test/swm/host-mode-key-canonicalization.test.ts",
       "test/swm/host-mode-strip-ciphertext.test.ts",
       "test/rs-heal-stranded-kc-decorated.test.ts",
@@ -236,6 +249,7 @@ export default defineConfig({
       "test/context-graph-dormant-admission-boundary.test.ts",
       "test/context-graph-automatic-discovery-binding.test.ts",
       "test/context-graph-activation-custody.test.ts",
+      "test/context-graph-activation-completion.test.ts",
       "test/context-graph-dormant-predecessor-retirement.test.ts",
       "test/swm-host-dormancy.test.ts",
       "test/context-graph-subscription-rolling-checks.test.ts",
@@ -488,6 +502,9 @@ export default defineConfig({
       // #3296 — a newer stored head proves an asset held only with its content.
       "test/swm-stored-head-proof.test.ts",
       "test/swm-head-identity-preservation.test.ts",
+      // One publishedAt per share operation, and a defective head set aside
+      // instead of every descriptor of its graph.
+      "test/swm-operation-published-at.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count
       // gate that keeps it self-healing, and the digest binding that makes an
       // equal-count version change safe.

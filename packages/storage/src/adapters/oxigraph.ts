@@ -1,7 +1,9 @@
+import { assertJsonResponseWithinLimit, mapBoundedSelectResult, mapBoundedConstructResult } from './bounded-query-result.js';
 import type { QueryOptions } from '../triple-store.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
 import { NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY } from './graph-enumeration-query.js';
+import { assertGraphCatalogWithinResponseLimit } from '../graph-catalog-response-limit.js';
 import { withheldGraphQueryDataset } from './withheld-graph-dataset.js';
 import { existsSync, renameSync } from 'node:fs';
 import { mkdir, open, rename } from 'node:fs/promises';
@@ -51,6 +53,9 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
+import {
+  assertValidMaxResponseBytes,
+} from '../http-response-limit.js';
 
 /** Every SPARQL statement this adapter builds by interpolation. */
 const statements = sparqlStatements('oxigraph');
@@ -319,6 +324,9 @@ export class OxigraphStore implements TripleStore {
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
     throwIfAborted(options?.signal);
+    if (options?.maxResponseBytes !== undefined) {
+      assertValidMaxResponseBytes(options.maxResponseBytes);
+    }
     // The embedded Oxigraph binding executes synchronously, so a caller abort
     // cannot interrupt this native call mid-flight. Use oxigraph-worker or an
     // HTTP backend when long sync queries need prompt cancellation.
@@ -329,11 +337,15 @@ export class OxigraphStore implements TripleStore {
     throwIfAborted(options?.signal);
 
     if (typeof result === 'boolean') {
-      return { type: 'boolean', value: result } satisfies AskResult;
+      const answer = { type: 'boolean', value: result } satisfies AskResult;
+      assertJsonResponseWithinLimit(answer, options?.maxResponseBytes);
+      return answer;
     }
 
     if (typeof result === 'string') {
-      return { type: 'bindings', bindings: [] } satisfies SelectResult;
+      const empty = { type: 'bindings', bindings: [] } satisfies SelectResult;
+      assertJsonResponseWithinLimit(empty, options?.maxResponseBytes);
+      return empty;
     }
 
     if (!Array.isArray(result) || result.length === 0) {
@@ -342,26 +354,35 @@ export class OxigraphStore implements TripleStore {
         operation.kind === 'read'
         && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE')
       ) {
-        return { type: 'quads', quads: [] } satisfies ConstructResult;
+        const empty = { type: 'quads', quads: [] } satisfies ConstructResult;
+        assertJsonResponseWithinLimit(empty, options?.maxResponseBytes);
+        return empty;
       }
-      return { type: 'bindings', bindings: [] } satisfies SelectResult;
+      const empty = { type: 'bindings', bindings: [] } satisfies SelectResult;
+      assertJsonResponseWithinLimit(empty, options?.maxResponseBytes);
+      return empty;
     }
 
     const first = result[0];
     if (first instanceof Map) {
-      const bindings = (result as Map<string, OxTerm>[]).map((row) => {
-        const obj: Record<string, string> = {};
-        for (const [key, term] of row.entries()) {
-          obj[key] = termToString(term);
-        }
-        return obj;
-      });
-      return { type: 'bindings', bindings } satisfies SelectResult;
+      return mapBoundedSelectResult(
+        result as Map<string, OxTerm>[],
+        (row) => {
+          const obj: Record<string, string> = {};
+          for (const [key, term] of row.entries()) {
+            obj[key] = termToString(term);
+          }
+          return obj;
+        },
+        options?.maxResponseBytes,
+      );
     }
 
-
-    const quads = (result as OxQuad[]).map(fromOxQuad);
-    return { type: 'quads', quads } satisfies ConstructResult;
+    return mapBoundedConstructResult(
+      result as OxQuad[],
+      fromOxQuad,
+      options?.maxResponseBytes,
+    );
   }
 
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
@@ -570,15 +591,19 @@ export class OxigraphStore implements TripleStore {
     // NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY.
     const result = this.store.query(NON_EMPTY_NAMED_GRAPH_ENUMERATION_QUERY);
     throwIfAborted(options?.signal);
-    if (typeof result === 'boolean' || typeof result === 'string') return [];
-    if (!Array.isArray(result)) return [];
-    return (result as Map<string, OxTerm>[])
+    if (typeof result === 'boolean' || typeof result === 'string' || !Array.isArray(result)) {
+      assertGraphCatalogWithinResponseLimit([], options?.maxResponseBytes);
+      return [];
+    }
+    const graphs = (result as Map<string, OxTerm>[])
       .filter((row): row is Map<string, OxTerm> => row instanceof Map)
       .map((row) => {
         const g = row.get('g');
         return g ? g.value : '';
       })
       .filter(this.graphEnumerationVisibility);
+    assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
+    return graphs;
   }
 
   async deleteBySubjectPrefix(

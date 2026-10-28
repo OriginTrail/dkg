@@ -4,7 +4,8 @@ import { appendFile } from 'node:fs/promises';
 import {
   readApiPort, loadConfig, apiPortPath, removeApiPort, logPath, ensureDkgDir,
 } from './config.js';
-import { DAEMON_EXIT_CODE_RESTART, decodeForcedExitCode } from './daemon.js';
+import { DAEMON_EXIT_CODE_RESTART } from './daemon/manifest.js';
+import { decodeForcedExitCode } from './daemon/shutdown.js';
 import {
   isLivenessProbeEnabled,
   startLivenessWatcher,

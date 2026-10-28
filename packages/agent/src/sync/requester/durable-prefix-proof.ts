@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 import { graphScopedDurableManifestPrefixAtOffset, type GraphScopedDurableManifestPlan } from '../durable-integrity.js';
+import { runBoundedOperation } from '../../bounded-operation.js';
 import type { HeldAssetsProof, HeldAssetContentSource } from './held-assets-contracts.js';
+
+/** Optional whole-manifest optimization must leave most of the recovery lifetime for DATA. */
+export const DURABLE_HOLDINGS_SCAN_BUDGET_MS = 30_000;
 
 /** Owns the graph's content proof from its first read through settlement or failure. */
 export class DurableGraphSettlementGuard {
@@ -15,15 +19,25 @@ export class DurableGraphSettlementGuard {
     this.source.assertOwnership(); this.assertNotAborted(); signal?.throwIfAborted();
     const proof = await this.source.prove({ contextGraphId: manifest.contextGraphId, descriptors, signal });
     if (!proof) return undefined;
-    this.current = { manifest, proof };
-    try { this.assertCurrent(); signal?.throwIfAborted(); return proof; }
-    catch (error) { this.close(); throw error; }
+    try {
+      // A timed-out scan can finish after DATA owns a different prefix proof.
+      // Retire only this late result; never replace or close the new owner.
+      signal?.throwIfAborted(); this.source.assertOwnership(); this.assertNotAborted();
+      if (this.current) throw new Error('Graph settlement already owns a content proof');
+      this.current = { manifest, proof };
+      this.assertCurrent(); return proof;
+    } catch (error) {
+      if (this.current?.proof === proof) this.current = undefined;
+      proof.close(); throw error;
+    }
   }
 
   /** Planning borrows evidence; only this scope can narrow or dispose its proof. */
   async proveHoldings(manifest: GraphScopedDurableManifestPlan, signal?: AbortSignal):
     Promise<Pick<HeldAssetsProof, 'held' | 'reconcile'> | undefined> {
-    return this.prove(manifest, manifest.descriptors, signal);
+    return runBoundedOperation(scanSignal => this.prove(manifest, manifest.descriptors, scanSignal), {
+      signal, timeoutMs: DURABLE_HOLDINGS_SCAN_BUDGET_MS, label: 'Durable holdings preflight',
+    });
   }
 
   /** A fresh DATA round replaces its own assets and needs no reused-prefix watch. */

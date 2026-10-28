@@ -33,6 +33,8 @@ export interface MissingDurableAsset {
 export interface DurableHoldingsOptions {
   /** Set by the owner when it fetches missing assets itself. */
   readonly ownerFetchesMissingAssets?: boolean;
+  /** A prior round committed this recovery owner to fetching full DATA rounds. */
+  readonly skipHoldingsPreflight?: boolean;
 
 }
 
