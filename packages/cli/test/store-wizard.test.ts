@@ -766,7 +766,8 @@ describe('applyStoreFlagsToConfig', () => {
 // The documented off switch for the async queues' store control path is a key of the `store` block. A helper that
 // rewrites the block must carry it over, or a re-run of `dkg init` or of a setup command with `--store` turns the
 // path back on at the next restart. Any value is carried verbatim, a malformed one included: the daemon refuses
-// that and keeps the path off, while a dropped key would mean the default (on for Blazegraph on more than 2 CPUs).
+// that and keeps the path off, while a dropped key would mean the default (on for Blazegraph and managed
+// oxigraph-server on more than 2 CPUs).
 describe('store.controlReservedSlots survives a rewrite of the store block (OT-RFC-73 P14)', () => {
   const url = 'http://blaze.test/sparql';
   const reachable = () => mockFetch(() => new Response(JSON.stringify({ boolean: true }), { status: 200 })).fn;

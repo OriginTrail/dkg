@@ -48,6 +48,7 @@ import {
   type CatalogPlacementWaiterObserverV1,
   type FinalizedPrivatePlacementQueueStatusV1,
 } from './internal/catalog-placement-timing.js';
+import type { FinalizedPlacementAuthorityV1 } from './internal/finalized-placement-decision.js';
 import { retainOwedPlacementSealV1 } from './internal/owed-placement-seals.js';
 import type { FinalizedRowHealCountsV1 } from './internal/finalized-row-heal.js';
 
@@ -129,7 +130,7 @@ interface ProjectionOwnerDependenciesV1 {
   readonly listDurableInventoryScopes: () => readonly Readonly<{ contextGraphId: ContextGraphIdV1; authorAddress: EvmAddressV1 }>[];
   readonly listLocalAuthorAddresses: () => readonly EvmAddressV1[];
   readonly acceptsPublicRootLane: (contextGraphId: ContextGraphIdV1) => boolean;
-  readonly acceptsFinalizedPrivateLane: (contextGraphId: ContextGraphIdV1) => boolean;
+  readonly readFinalizedPlacementAuthority: (contextGraphId: string) => FinalizedPlacementAuthorityV1;
   /** GH#3134 — the sweep counts of finalized assets' inventory rows, once the node has run a sweep. */
   readonly readFinalizedRowHealCounts?: () => FinalizedRowHealCountsV1 | undefined;
   readonly readRepairRevision: (
@@ -596,9 +597,10 @@ export class Rfc64SwmCatalogProjectionSupervisorMethods extends DKGAgentBase {
       readonly repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>;
       readonly ctx?: OperationContext;
     }>,
+    observer?: CatalogPlacementWaiterObserverV1,
   ): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
     return projectionOwnerV1(this).requestFinalizedPrivate({
-      repair: params.repair,
+      repair: params.repair, observer,
       ctx: params.ctx ?? createOperationContext('system'),
     });
   }

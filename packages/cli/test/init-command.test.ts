@@ -184,9 +184,20 @@ describe('init wizard chain persistence', () => {
   });
 
   // OT-RFC-73 P14: `store.controlReservedSlots: 0` is the documented way to switch the control path off on a node. A
-  // re-run of `dkg init` that keeps the Blazegraph store (Enter on the backend and on its URL) must keep it, or the
-  // next restart applies the default, which is on for Blazegraph on more than 2 CPUs.
+  // re-run of `dkg init` that keeps the store (Enter through its prompts) must keep it, or the next restart applies
+  // the default, which is on for Blazegraph and managed oxigraph-server on more than 2 CPUs.
   describe('store block', () => {
+    it('keeps store.controlReservedSlots when a re-run keeps the managed oxigraph-server store, so the path stays off', async () => {
+      mocks.realStoreWizard = true;
+      const store = { backend: 'oxigraph-server', options: {}, controlReservedSlots: 0 };
+      mocks.loadConfig.mockResolvedValue({ name: 'node', apiPort: 9200, networkConfig: 'testnet', store });
+
+      const saved = await runInit();
+      expect(saved.store).toEqual(store);
+      expect(resolveStoreControlConfig(undefined, { cpus: 8, backend: saved.store!.backend, configured: saved.store!.controlReservedSlots }))
+        .toMatchObject({ slots: { share: 0, publisher: 0 }, source: 'config' });
+    });
+
     it('keeps store.controlReservedSlots when a re-run keeps the Blazegraph store, so the path stays off', async () => {
       const url = 'http://blaze.test/bigdata/namespace/kb/sparql';
       mocks.realStoreWizard = true;

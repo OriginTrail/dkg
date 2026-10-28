@@ -1,6 +1,7 @@
 /**
  * OT-RFC-73 P14: the control path's default and its node config setting. The default is on (share 1, publisher 2)
- * only for a node whose store backend is Blazegraph on a host with more than 2 CPUs; the setting is
+ * only for a node whose store backend is Blazegraph or managed oxigraph-server on a host with more than 2 CPUs (generic
+ * sparql-http stays off); the setting is
  * DKG_STORE_CONTROL_RESERVED_SLOTS when set, else the config's `store.controlReservedSlots`, else that default. A
  * malformed value from either setting leaves the path off with a warning that names it. Only the daemon configures
  * the backend and the config value (`configureStoreControlPath`, before anything builds the path); a process that
@@ -48,13 +49,14 @@ afterEach(() => {
 
 describe('the default (nothing set)', () => {
   it.each([
-    [1, OFF], [2, OFF], [3, ON], [8, ON],
-  ])('is %i CPUs with Blazegraph -> %o', (cpus, slots) => {
-    expect(resolveStoreControlConfig(undefined, { cpus, backend: 'blazegraph' })).toMatchObject({ slots, source: 'default' });
+    ['blazegraph', 1, OFF], ['blazegraph', 2, OFF], ['blazegraph', 3, ON], ['blazegraph', 8, ON],
+    ['oxigraph-server', 1, OFF], ['oxigraph-server', 2, OFF], ['oxigraph-server', 3, ON], ['oxigraph-server', 8, ON],
+  ] as const)('is %s on %i CPUs -> %o', (backend, cpus, slots) => {
+    expect(resolveStoreControlConfig(undefined, { cpus, backend })).toMatchObject({ slots, source: 'default' });
   });
 
-  it.each(['oxigraph-server', 'sparql-http', 'oxigraph-worker', 'oxigraph', 'oxigraph-persistent', 'some-other-store'])(
-    'is off for %s on any host, until its own G2 cell passes',
+  it.each(['sparql-http', 'oxigraph-worker', 'oxigraph', 'oxigraph-persistent', 'some-other-store'])(
+    'is off for %s on any host',
     (backend) => {
       for (const cpus of [1, 2, 3, 8, 64]) {
         expect(resolveStoreControlConfig(undefined, { cpus, backend }))
@@ -67,15 +69,20 @@ describe('the default (nothing set)', () => {
     expect(resolveStoreControlConfig(undefined, { cpus: 8, backend: 'blazegraph' }).reason).toBe('default for blazegraph, 8 CPUs');
     expect(resolveStoreControlConfig(undefined, { cpus: 2, backend: 'blazegraph' }).reason)
       .toBe('default: 2 CPUs or fewer (blazegraph, 2 CPUs)');
+    expect(resolveStoreControlConfig(undefined, { cpus: 8, backend: 'oxigraph-server' }).reason).toBe('default for oxigraph-server, 8 CPUs');
+    expect(resolveStoreControlConfig(undefined, { cpus: 2, backend: 'oxigraph-server' }).reason)
+      .toBe('default: 2 CPUs or fewer (oxigraph-server, 2 CPUs)');
     expect(resolveStoreControlConfig(undefined, { cpus: 8 }).reason).toBe('default: no store backend configured');
   });
 });
 
 describe('store.controlReservedSlots', () => {
   it('turns the path off with 0 or "0", on a host and backend where the default is on', () => {
-    for (const value of [0, '0', ' 0 ']) {
-      expect(resolveStoreControlConfig(undefined, { cpus: 8, backend: 'blazegraph', configured: value }))
-        .toEqual({ slots: OFF, source: 'config', reason: `${CONFIG}=0`, warnings: [] });
+    for (const backend of ['blazegraph', 'oxigraph-server']) {
+      for (const value of [0, '0', ' 0 ']) {
+        expect(resolveStoreControlConfig(undefined, { cpus: 8, backend, configured: value }))
+          .toEqual({ slots: OFF, source: 'config', reason: `${CONFIG}=0`, warnings: [] });
+      }
     }
   });
 
@@ -88,8 +95,8 @@ describe('store.controlReservedSlots', () => {
       .toEqual({ share: 1, publisher: 0 });
   });
 
-  it('may turn the path on where the default is off: a small host, managed oxigraph-server, any backend', () => {
-    for (const [cpus, backend] of [[1, 'blazegraph'], [2, 'blazegraph'], [8, 'oxigraph-server'], [2, 'oxigraph-server'], [8, 'sparql-http']] as const) {
+  it('may turn the path on where the default is off: a small host, generic sparql-http, any backend', () => {
+    for (const [cpus, backend] of [[1, 'blazegraph'], [2, 'blazegraph'], [2, 'oxigraph-server'], [8, 'sparql-http'], [8, 'some-other-store']] as const) {
       expect(resolveStoreControlConfig(undefined, { cpus, backend, configured: 'share:1,publisher:2' }), `${backend} ${cpus}`)
         .toMatchObject({ slots: ON, source: 'config', warnings: [] });
     }
@@ -188,9 +195,21 @@ describe('the startup line, per source', () => {
     );
   });
 
-  it('states the default of a backend that is not on by default, and that embedded Oxigraph never uses the path', () => {
+  it('states the managed oxigraph-server default with the CPU count, and the small-host rule', () => {
+    host.cpus = 8;
     expect(lineFor({ backend: 'oxigraph-server' }).info[0]).toBe(
-      'Store control path: off (added slots share=0 publisher=0; default for oxigraph-server; effective until daemon restart)',
+      'Store control path: on (added slots share=1 publisher=2; default for oxigraph-server, 8 CPUs; effective until daemon restart)',
+    );
+    host.cpus = 2;
+    expect(lineFor({ backend: 'oxigraph-server' }).info[0]).toBe(
+      'Store control path: off (added slots share=0 publisher=0; default: 2 CPUs or fewer (oxigraph-server, 2 CPUs); '
+      + 'effective until daemon restart)',
+    );
+  });
+
+  it('states the default of a backend that is not on by default, and that embedded Oxigraph never uses the path', () => {
+    expect(lineFor({ backend: 'sparql-http' }).info[0]).toBe(
+      'Store control path: off (added slots share=0 publisher=0; default for sparql-http; effective until daemon restart)',
     );
     expect(lineFor({ backend: 'oxigraph-worker' }).info[0]).toBe(
       'Store control path: off (added slots share=0 publisher=0; default for oxigraph-worker; '
@@ -248,13 +267,13 @@ describe('configureStoreControlPath', () => {
 
   it('refuses a configuration after the path was built, loudly, and leaves the path as it was', () => {
     vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, undefined);
-    configureStoreControlPath({ backend: 'oxigraph-server' });
+    configureStoreControlPath({ backend: 'sparql-http' });
     const path = getStoreControlPath();
     const before = describeStoreControlPath();
     const { warn, logger } = capture();
     expect(configureStoreControlPath({ backend: 'blazegraph', configured: 'share:1,publisher:2' }, logger)).toBe(false);
     expect(warn).toEqual([
-      'Store control path: configuration refused, the path was already built (default for oxigraph-server). '
+      'Store control path: configuration refused, the path was already built (default for sparql-http). '
       + 'Backend blazegraph and store.controlReservedSlots "share:1,publisher:2" take effect only after a restart.',
     ]);
     expect(getStoreControlPath()).toBe(path);
@@ -266,8 +285,8 @@ describe('configureStoreControlPath', () => {
   // Each half of the repeat check on its own: a late configuration that differs from the built one in one setting
   // only is refused like any other, never accepted as a repeat while the path stays as it was.
   it.each([
-    ['only the backend', { backend: 'oxigraph-server' }, { backend: 'blazegraph' },
-      '(default for oxigraph-server). Backend blazegraph and store.controlReservedSlots absent'],
+    ['only the backend', { backend: 'sparql-http' }, { backend: 'blazegraph' },
+      '(default for sparql-http). Backend blazegraph and store.controlReservedSlots absent'],
     ['only the config value', { backend: 'blazegraph', configured: 0 }, { backend: 'blazegraph', configured: 'share:1,publisher:2' },
       '(config store.controlReservedSlots=0). Backend blazegraph and store.controlReservedSlots "share:1,publisher:2"'],
   ] as const)('refuses a late configuration that changes %s', (_name, built, late, stated) => {
@@ -335,7 +354,9 @@ describe('a process that never configures the path (tools, benchmarks, tests)', 
 describe('off restores today exactly (AC2), whichever setting turned it off', () => {
   it.each([
     ['the small-host default', { backend: 'blazegraph' }, undefined, 2],
-    ['the oxigraph-server default', { backend: 'oxigraph-server' }, undefined, 8],
+    ['the oxigraph-server small-host default', { backend: 'oxigraph-server' }, undefined, 2],
+    ['the sparql-http default', { backend: 'sparql-http' }, undefined, 8],
+    ['config 0 on oxigraph-server', { backend: 'oxigraph-server', configured: 0 }, undefined, 8],
     ['config 0', { backend: 'blazegraph', configured: 0 }, undefined, 8],
     ['config "0"', { backend: 'blazegraph', configured: '0' }, undefined, 8],
     ['a malformed config value', { backend: 'blazegraph', configured: 'on' }, undefined, 8],

@@ -65,12 +65,14 @@ describe('DKG_STORE_CONTROL_RESERVED_SLOTS', () => {
     },
   );
 
-  it('is share 1 + publisher 2 for Blazegraph, with no added slots on hosts of 2 or fewer CPUs', () => {
-    expect(STORE_CONTROL_DEFAULT_BACKENDS).toEqual(['blazegraph']);
-    expect(defaultStoreControlSlots(8, 'blazegraph')).toEqual({ share: 1, publisher: 2 });
-    expect(defaultStoreControlSlots(3, 'blazegraph')).toEqual({ share: 1, publisher: 2 });
-    for (const cpus of [1, 2]) expect(defaultStoreControlSlots(cpus, 'blazegraph')).toEqual({ share: 0, publisher: 0 });
-    expect(defaultStoreControlSlots(8, 'oxigraph-server')).toEqual({ share: 0, publisher: 0 });
+  it('is share 1 + publisher 2 for Blazegraph and managed oxigraph-server, with no added slots on hosts of 2 or fewer CPUs', () => {
+    expect(STORE_CONTROL_DEFAULT_BACKENDS).toEqual(['blazegraph', 'oxigraph-server']);
+    for (const backend of ['blazegraph', 'oxigraph-server']) {
+      expect(defaultStoreControlSlots(8, backend)).toEqual({ share: 1, publisher: 2 });
+      expect(defaultStoreControlSlots(3, backend)).toEqual({ share: 1, publisher: 2 });
+      for (const cpus of [1, 2]) expect(defaultStoreControlSlots(cpus, backend)).toEqual({ share: 0, publisher: 0 });
+    }
+    expect(defaultStoreControlSlots(8, 'sparql-http')).toEqual({ share: 0, publisher: 0 });
     expect(defaultStoreControlSlots(8)).toEqual({ share: 0, publisher: 0 });
 
     expect(resolveStoreControlConfig(undefined, { cpus: 4, backend: 'blazegraph' }))
