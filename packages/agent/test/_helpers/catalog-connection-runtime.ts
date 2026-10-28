@@ -12,7 +12,7 @@ export function makeRuntime(ports: Omit<Rfc64CatalogReplayConnectionRuntimePorts
   debounceMs?: number, maxPeers?: number): Rfc64CatalogReplayConnectionRuntimeV1 {
   const owner = new Rfc64BackgroundWorkDispatcherV1(); owners.push(owner);
   return new Rfc64CatalogReplayConnectionRuntimeV1({
-    connectedPeerIds: () => [],
+    admittedConnectedPeerIds: () => [],
     schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
     wait: (signal, delay) => new Promise((resolve, reject) => {
       const timer = setTimeout(() => { signal.removeEventListener('abort', abort); resolve(); }, delay);

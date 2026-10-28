@@ -385,6 +385,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(1);
 
     // A local fault neither attributes a new provider nor clears a retained one.
+    // With no fresh provider response, retained rows are no longer corroborated.
     localFault = true;
     await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
       .resolves.toEqual({ requested: 0, failed: 2 });
@@ -392,7 +393,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: false,
       unresolvedPeerCount: 1,
-      unverified: false,
+      unverified: true,
     });
   });
 

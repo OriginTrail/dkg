@@ -26,7 +26,7 @@ describe('connection adapter current-policy capabilities', () => {
     const scheduled = new Map<0 | 1 | 'deadline', (signal: AbortSignal) => Promise<void>>();
     const controller = new AbortController();
     const runtime = createRfc64CatalogReplayConnectionRuntimeV1({
-      connectedPeerIds: () => [],
+      admittedConnectedPeerIds: () => [],
       reannounce: announce,
       capabilities: {
         listActiveRfc64CatalogReplayContextGraphIdsV1: () => [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],

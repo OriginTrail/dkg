@@ -10,7 +10,8 @@ import { Rfc64CatalogReplayScopeLifecycleV1, type Rfc64CatalogReplayScopeAdmissi
 
 export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
   selectContextGraphIds(): readonly string[];
-  connectedPeerIds(): readonly string[];
+  /** Current topology filtered by completed network admission; never pending/rejected peers. */
+  admittedConnectedPeerIds(): readonly string[];
   reserveFence(contextGraphId: string, peerId: string): Rfc64CatalogReplayPeerReservationV1 | null;
   reannounce(peerId: string, contextGraphId: string, signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
   replay(contextGraphId: string, demand: Rfc64CatalogReplayPeerDemandV1,
@@ -118,47 +119,21 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     const selected = event.kind === 'connection-open' ? active
       : active.includes(event.contextGraphId) ? [event.contextGraphId] : [];
     if (selected.length === 0) return null;
-    let peer = this.#byPeer.get(peerId);
-    if (peer === undefined) {
-      if (this.#byPeer.size >= this.#maxPeers) {
-        const idle = [...this.#byPeer.values()].filter(candidate => !candidate.active
-          && ![...candidate.scopes.values()].some(scope => scope.outstanding > 0))
-          .sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
-        if (idle === undefined) {
-          this.#suppressed++;
-          let settled = false;
-          return Object.freeze({
-            reject: () => { settled = true; },
-            admit: () => {
-              if (settled || this.#closed) return;
-              settled = true;
-              // Topology owns peer identity storage. Retain only a bounded
-              // rescan cursor; no leases or per-graph state for overflow peers.
-              // One cursor per selected activation scope, plus a full-connection cursor.
-              // Topology retains peer identities; activation never widens to other graphs.
-              this.#overflowScans.set(event.kind === 'connection-open' ? null : event.contextGraphId, {});
-              this.#schedule();
-            },
-          });
-        }
-        this.#byPeer.delete(idle.peerId);
-      }
-      peer = { peerId, scopes: new Map(), window: new Rfc64CatalogReplaySchedulingWindowV1(), active: false, lastUsedAt: nowMs,
-        started: 0, failed: 0, windowStartedAt: nowMs, windowStarted: 0,
-        connected: true, connectionGeneration: 1 };
-      this.#byPeer.set(peerId, peer);
-    }
-    peer.lastUsedAt = nowMs;
-    if (event.kind === 'connection-open' && !peer.connected) {
-      peer.connected = true; peer.connectionGeneration++;
-    }
-    const reservations: Rfc64CatalogReplayScopeAdmissionV1[] = [];
-    for (const id of selected) {
-      const scope = this.#scope(peer, id);
-      peer.window.add(scope);
-      const reservation = scope.reserve(peer.connectionGeneration, () => this.#ports.reserveFence(id, peer.peerId));
-      if (reservation === null) this.#suppressed++;
-      else reservations.push(reservation);
+    const reservations = this.#reserveSelected(peerId, selected, event.kind === 'connection-open', nowMs);
+    if (reservations === null) {
+      this.#suppressed++;
+      let settled = false;
+      return Object.freeze({
+        reject: () => { settled = true; },
+        admit: () => {
+          if (settled || this.#closed) return;
+          settled = true;
+          // Topology retains peer identities and admission. Cursors retain only
+          // the replay intent: full connection scope or one exact activation.
+          this.#overflowScans.set(event.kind === 'connection-open' ? null : event.contextGraphId, {});
+          this.#schedule();
+        },
+      });
     }
     if (reservations.length === 0) return null;
     let settled = false;
@@ -173,6 +148,37 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         this.#schedule();
       },
     });
+  }
+
+  /** Synchronous reservation mutation; callers own admission and worker notification. */
+  #reserveSelected(peerId: string, selected: readonly string[], connectionOpen: boolean, nowMs: number): Rfc64CatalogReplayScopeAdmissionV1[] | null {
+    let peer = this.#byPeer.get(peerId);
+    if (peer === undefined) {
+      if (this.#byPeer.size >= this.#maxPeers) {
+        const idle = [...this.#byPeer.values()].filter(candidate => !candidate.active
+          && ![...candidate.scopes.values()].some(scope => scope.outstanding > 0))
+          .sort((left, right) => left.lastUsedAt - right.lastUsedAt)[0];
+        if (idle === undefined) return null;
+        this.#byPeer.delete(idle.peerId);
+      }
+      peer = { peerId, scopes: new Map(), window: new Rfc64CatalogReplaySchedulingWindowV1(), active: false, lastUsedAt: nowMs,
+        started: 0, failed: 0, windowStartedAt: nowMs, windowStarted: 0,
+        connected: true, connectionGeneration: 1 };
+      this.#byPeer.set(peerId, peer);
+    }
+    peer.lastUsedAt = nowMs;
+    if (connectionOpen && !peer.connected) {
+      peer.connected = true; peer.connectionGeneration++;
+    }
+    const reservations: Rfc64CatalogReplayScopeAdmissionV1[] = [];
+    for (const id of selected) {
+      const scope = this.#scope(peer, id);
+      peer.window.add(scope);
+      const reservation = scope.reserve(peer.connectionGeneration, () => this.#ports.reserveFence(id, peer.peerId));
+      if (reservation === null) this.#suppressed++;
+      else reservations.push(reservation);
+    }
+    return reservations;
   }
 
   /** Only the lifecycle's last-live-connection close opens a new generation. */
@@ -208,18 +214,15 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   #resumeOverflow(): void {
     if (this.#closed || this.#overflowScans.size === 0) return;
     const selected = new Set(this.#ports.selectContextGraphIds());
-    const peers = [...new Set(this.#ports.connectedPeerIds())].sort();
+    const peers = [...new Set(this.#ports.admittedConnectedPeerIds())].sort();
     for (const [graph, cursor] of this.#overflowScans) {
       if (graph !== null && !selected.has(graph)) { this.#overflowScans.delete(graph); continue; }
       for (const peerId of peers) {
         if (cursor.after !== undefined && peerId <= cursor.after) continue;
         if (graph === null ? !this.#byPeer.has(peerId) : !this.#byPeer.get(peerId)?.scopes.has(graph)) {
-          const hasRoom = this.#byPeer.has(peerId) || this.#byPeer.size < this.#maxPeers
-            || [...this.#byPeer.values()].some(peer => !peer.active
-              && ![...peer.scopes.values()].some(scope => scope.outstanding > 0));
-          if (!hasRoom) return;
-          this.#prepare(peerId, Date.now(), graph === null ? { kind: 'connection-open' }
-            : { kind: 'graph-activated', contextGraphId: graph })?.admit();
+          const reservations = this.#reserveSelected(peerId, graph === null ? [...selected] : [graph], graph === null, Date.now());
+          if (reservations === null) return;
+          for (const reservation of reservations) reservation.admit();
         }
         cursor.after = peerId;
       }

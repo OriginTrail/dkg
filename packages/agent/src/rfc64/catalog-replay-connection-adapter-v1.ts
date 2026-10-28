@@ -13,10 +13,10 @@ interface Rfc64CatalogReplayConnectionCapabilitiesV1 {
 export function createRfc64CatalogReplayConnectionRuntimeV1(input:
   Readonly<{ capabilities: Rfc64CatalogReplayConnectionCapabilitiesV1; reservePeer(contextGraphId: string, policyDigest: string, peerId: string): ReturnType<Rfc64CatalogReplayConnectionRuntimePortsV1['reserveFence']> }>
     & Pick<CatalogReplayTransportV1<never>, 'reannounce'>
-    & Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'connectedPeerIds' | 'schedule' | 'wait' | 'warn' | 'replay' | 'reportRun'>,
+    & Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'admittedConnectedPeerIds' | 'schedule' | 'wait' | 'warn' | 'replay' | 'reportRun'>,
 ): Rfc64CatalogReplayConnectionRuntimeV1 {
   return new Rfc64CatalogReplayConnectionRuntimeV1({
-    connectedPeerIds: input.connectedPeerIds,
+    admittedConnectedPeerIds: input.admittedConnectedPeerIds,
     selectContextGraphIds: () => input.capabilities.listActiveRfc64CatalogReplayContextGraphIdsV1(),
     reserveFence: (contextGraphId, peerId) => {
       const accepted = input.capabilities.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);

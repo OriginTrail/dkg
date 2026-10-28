@@ -528,7 +528,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     if (!requiresFullReplay && observed && corroborated && wasFullPass) current.requiresFullReplay = false;
     if (wasFullPass && observed) current.fullPass = null;
     if (corroborated && observed) current.unverified = false;
-    else if (!observed || (evidence.fullRequest && evidence.providerFailures > 0)) current.unverified = true;
+    else if (!observed || ((evidence.fullRequest && evidence.providerFailures > 0) || (wasFullPass && pass?.unanswered === true))) current.unverified = true;
   }
 
   /**

@@ -1,6 +1,32 @@
 import { describe, expect, it } from 'vitest';
 import { Rfc64CatalogReplayRecoveryRuntimeV1 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 describe('staged full replay corroboration across runs', () => {
+  it.each(['provider-failed', 'local-unavailable', 'not-provider'] as const)
+    ('retains staged full-pass freshness intent through %s outcomes', async outcome => {
+      let initial = true;
+      const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<string>({
+        requestPeer: async () => {
+          if (initial) return { status: 'completed', targets: ['old-head'] };
+          if (outcome === 'provider-failed') throw new Error('provider unreachable');
+          return { status: outcome };
+        },
+        whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target,
+        parityFailed: async () => false,
+      });
+      const full = () => runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['a', 'b'] });
+      await full(); initial = false;
+      const leases = ['a', 'b'].map(peer => runtime.reservePeer('cg', 'p', peer)!);
+      await expect(full()).resolves.toEqual({ requested: 0, failed: 0 });
+      for (const lease of leases) {
+        lease.admit();
+        await runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: lease });
+        lease.release();
+      }
+      expect(runtime.status('cg', 'p')).toEqual({ active: false, failed: false,
+        unverified: outcome !== 'not-provider', unresolvedPeerCount: outcome === 'provider-failed' ? 2 : 0 });
+      expect(runtime.promisedTargets('cg', 'p')).toEqual(['old-head']);
+    });
+
   for (const order of [['provider', 'nonprovider'], ['nonprovider', 'provider']]) {
     for (const finalObservation of ['clean', 'failed', 'unobserved'] as const) {
       it(`${order.join(' then ')} retains evidence with ${finalObservation} final parity`, async () => {

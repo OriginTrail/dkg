@@ -20,7 +20,7 @@ describe('physical catalog replay capacity', () => {
       whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target,
       parityFailed: async () => false,
     });
-    const runtime = makeRuntime({ connectedPeerIds: () => peers, selectContextGraphIds: () => ['cg'],
+    const runtime = makeRuntime({ admittedConnectedPeerIds: () => peers, selectContextGraphIds: () => ['cg'],
       reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer),
       reannounce: async () => ({ failed: 0 }), warn: vi.fn(),
       replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }),
@@ -47,7 +47,7 @@ describe('physical catalog replay capacity', () => {
       return { failed: 0 };
     });
     const announce = vi.fn(async (_peer: string, _cg: string) => ({ failed: 0 }));
-    const runtime = makeRuntime({ connectedPeerIds: () => ['a', 'b'],
+    const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['a', 'b'],
       selectContextGraphIds: () => ['old', 'new'],
       reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
       reannounce: announce, replay, warn: vi.fn(),
@@ -66,7 +66,7 @@ describe('physical catalog replay capacity', () => {
 
   it('wakes admitted overflow after every occupying reservation is rejected', async () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
-    const runtime = makeRuntime({ connectedPeerIds: () => ['a', 'b'], selectContextGraphIds: () => ['cg'],
+    const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['a', 'b'], selectContextGraphIds: () => ['cg'],
       reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     }, 60_000, 1);
@@ -78,6 +78,28 @@ describe('physical catalog replay capacity', () => {
     occupying.reject();
     await vi.waitFor(() => expect(replay.mock.calls.some(([, demand]) => demand.peerId === 'b')).toBe(true));
     await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
+  });
+
+  it.each(['pending', 'rejected'] as const)('does not resume %s topology peers when another overflow peer is admitted', async state => {
+    const accepted = new Set<string>();
+    const topology = ['a', 'b', 'c'];
+    const replay = vi.fn(async (_cg: string, _demand: { peerId: string }) => ({ failed: 0 }));
+    const fences = vi.fn((_cg: string, peerId: string) => ({ peerId, generation: 1, admit() {}, release() {} }));
+    const runtime = makeRuntime({ admittedConnectedPeerIds: () => topology.filter(peer => accepted.has(peer)),
+      selectContextGraphIds: () => ['cg'], reserveFence: fences,
+      reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
+    }, 60_000, 1);
+    const occupying = runtime.prepareConnectionOpen('a')!;
+    const other = runtime.prepareConnectionOpen('b')!;
+    if (state === 'rejected') other.reject();
+    const admitted = runtime.prepareConnectionOpen('c')!;
+    accepted.add('c'); admitted.admit();
+    occupying.reject();
+    await vi.waitFor(() => expect(replay).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
+    expect(replay.mock.calls.map(([, demand]) => demand.peerId)).toEqual(['c']);
+    expect(fences.mock.calls.map(([, peer]) => peer)).not.toContain('b');
+    other.reject();
   });
 
   it('retains replay completion and active state until aborted running transports drain', async () => {
