@@ -12,11 +12,11 @@ import { receiveSnapshotCheckpointChunk } from './snapshot-checkpoint-receive.js
 import { reserveSnapshotCheckpoint, syncCheckpointDirectory, writeCheckpointFile, checkpointSha256,
   type SnapshotCheckpointEntry } from './snapshot-checkpoint-files.js';
 import { verifySnapshotCheckpoint } from './snapshot-checkpoint-verify.js';
+import { publicSnapshotSuppliers, type PublicSnapshotSupplierHost } from './public-snapshot-suppliers.js';
 
 /** A prepared checkpoint is not installed, current, or permission to replace a store. */
-export async function preparePublicSnapshotCheckpoint(host: {
+export async function preparePublicSnapshotCheckpoint(host: PublicSnapshotSupplierHost & {
   router: Pick<ProtocolRouter, 'probeProtocol' | 'withDuplexStream'>;
-  ensurePeerConnected(peer: string, options: { signal: AbortSignal }): Promise<void>;
 }, options: {
   initial: PublicSnapshotObservation; readFresh(): Promise<PublicSnapshotObservation>;
   peerBatches(): AsyncIterable<readonly string[]>; dataDir: string;
@@ -37,17 +37,9 @@ export async function preparePublicSnapshotCheckpoint(host: {
   const budget = { encodedBytes: 0, plainBytes: 0, maxEncodedBytes: PROFILE.maxEncodedBytes,
     maxPlainBytes: PROFILE.maxPlainBytes, minFreeBytes: PROFILE.diskReserveBytes };
   let selected: string | undefined;
-  for await (const peers of options.peerBatches()) {
-    for (const peer of peers) {
-      assertLive();
-      try {
-        await host.ensurePeerConnected(peer, { signal });
-        const supported = await host.router.probeProtocol(peer, PUBLIC_CHECKPOINT_PROTOCOL, Math.min(3_000, deadline - Date.now()), signal);
-        assertLive();
-        if (supported === 'supported') { selected = peer; break; }
-      } catch { assertLive(); }
-    }
-    if (selected) break;
+  for await (const peer of publicSnapshotSuppliers(host, { ...options, protocol: PUBLIC_CHECKPOINT_PROTOCOL,
+    deadlineMessage: 'Checkpoint job deadline exceeded' })) {
+    selected = peer; break;
   }
   if (!selected) throw new Error('No compatible public checkpoint core; use incremental recovery');
   // Once bytes arrive a failure is terminal; partial attempts never become a
