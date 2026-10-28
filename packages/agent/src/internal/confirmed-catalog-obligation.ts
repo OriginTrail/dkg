@@ -47,6 +47,9 @@ export function selectConfirmedCatalogObligationForAgentV1(
 
 /** Refuse incompatible immutable identities before any publication preparation or submission. */
 export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmissionHostV1, config: CatalogAdmissionConfigurationV1, params: CatalogPublicationIdentityV1): boolean {
+  // Empty names are dropped by workspace/queue routing. Refuse them before
+  // selection so a named-lane exclusion cannot become a root publication.
+  if (params.subGraphName === '') throw new CatalogPublicationAdmissionError(new Error('Publication subGraphName must be non-empty or omitted'));
   // Persisted selection wins; older requests without evidence use current applicability.
   const required = params.catalogObligationRequired
     ?? (selectConfirmedCatalogObligationForAgentV1(host, config, params) === 'required');
@@ -78,6 +81,7 @@ interface ConfirmationObserverPortsV1 {
 /** Resolve legacy selection once and narrow the durable writer to validated root identities. */
 export function normalizeConfirmedPublicationV1(params: ObserveRfc64ConfirmedVmParamsV1,
   select: () => 'required' | 'excluded'): RequiredConfirmedPublicationV1 | undefined {
+  if (params.subGraphName === '') throw new CatalogPublicationAdmissionError(new Error('Publication subGraphName must be non-empty or omitted'));
   const required = params.catalogObligationRequired ?? (select() === 'required');
   if (!required) return undefined;
   if (params.subGraphName != null) throw new CatalogPublicationAdmissionError(

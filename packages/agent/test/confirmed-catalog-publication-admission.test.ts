@@ -144,3 +144,21 @@ it.each(lanes)('$name rejects a catalog-incompatible legacy seal before sending'
   expect(f.submit).not.toHaveBeenCalled(); expect(f.sign).not.toHaveBeenCalled();
   expect(f.consume).not.toHaveBeenCalled(); expect(f.reserve).not.toHaveBeenCalled();
 });
+
+
+it.each([true, false])('refuses empty subgraphs before publication preparation (catalog enabled=%s)', async enabled => {
+  const f = fixture(enabled);
+  const operations = [
+    () => f.agent.publishFromFinalizedAssertion(CG, 'asset', { subGraphName: '' }),
+    () => f.agent.resolveFinalizedAssertionVmPublishIntent(CG, 'asset', { subGraphName: '' }),
+    ...[undefined, false, true].flatMap(catalogObligationRequired => {
+      const saved = { ...request(CG, 'asset'), subGraphName: '', catalogObligationRequired };
+      return [() => f.agent.preflightQueuedKnowledgeAssetVmPublishExecution(saved),
+        () => f.agent.preflightKnowledgeAssetVmPublishSnapshot(saved),
+        () => f.agent.publishQueuedKnowledgeAssetVmPublish(saved, {})];
+    }),
+  ];
+  for (const operation of operations) await expect(operation()).rejects.toMatchObject({ code: 'CATALOG_PUBLICATION_ADMISSION_INVALID' });
+  expect(f.entered).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+  expect(f.sign).not.toHaveBeenCalled(); expect(f.consume).not.toHaveBeenCalled(); expect(f.reserve).not.toHaveBeenCalled();
+});

@@ -92,6 +92,8 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
     });
 
     Object.assign(agent.config, confirmedPublicationCatalogConfigV1(enabled));
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, assertionName, { subGraphName: '' }))
+      .rejects.toMatchObject({ code: 'CATALOG_PUBLICATION_ADMISSION_INVALID' });
     const intent = await agent.resolveFinalizedAssertionVmPublishIntent(CG, assertionName);
     expect(intent.catalogObligationRequired).toBe(enabled);
     const queue = new TripleStoreAsyncLiftPublisher(store);
@@ -110,6 +112,15 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
       seal: parseAssertionSealQuads(sealFor(MEMBER, assertionName), contextGraphAssertionUri(CG, MEMBER, assertionName))!,
       assertionUri: contextGraphAssertionUri(CG, MEMBER, assertionName), ctx: createOperationContext('publish'), publicationLabel: 'queued publish' });
     expect(put).toHaveBeenCalledTimes(enabled ? 1 : 0);
+    if (enabled) {
+      put.mockRejectedValueOnce(new Error('durable obligation write refused'));
+      await expect(agent.observeRfc64ConfirmedVmV1({ contextGraphId: CG, assertionCoordinate: assertionName,
+        catalogObligationRequired: persisted.catalogObligationRequired, shareOperationId: persisted.shareOperationId,
+        seal: parseAssertionSealQuads(sealFor(MEMBER, assertionName), contextGraphAssertionUri(CG, MEMBER, assertionName))!,
+        assertionUri: contextGraphAssertionUri(CG, MEMBER, assertionName), ctx: createOperationContext('publish'), publicationLabel: 'queued publish' }))
+        .rejects.toThrow('not durably recorded');
+    }
+
     expect(intent.shareOperationId).toBe(originalId);
     await expect(agent.preflightQueuedKnowledgeAssetVmPublishExecution(intent))
       .resolves.toEqual({ action: 'execute' });
