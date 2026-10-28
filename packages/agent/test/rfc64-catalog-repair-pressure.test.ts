@@ -1,4 +1,3 @@
-import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext, type ContextGraphIdV1, type EvmAddressV1 } from '@origintrail-official/dkg-core';
 import { StorePriorityScheduler, type StoreWorkPriority } from '@origintrail-official/dkg-storage';
@@ -53,7 +52,7 @@ function fixture(reconcile: (signal: AbortSignal) => Promise<void>, queueLimit =
     listDurableInventoryScopes: () => [],
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
-      resolveFinalizedPlacementDecision: pinnedPrivatePlacementDecisionV1,
+      readFinalizedPlacementAuthority: () => ({ status: 'inactive' as const }),
     readPrivateFailure: () => null,
     writePrivateFailures: () => {},
     listFinalizedPrivateRepairs: () => [],

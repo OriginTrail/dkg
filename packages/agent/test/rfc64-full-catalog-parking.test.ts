@@ -1,4 +1,4 @@
-import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
+import { pinnedPrivatePlacementAuthorityV1, pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
 /**
  * GH#3134 — what the catalog supervisor does about an author catalog at its row cap, through the
  * real supervisor owner over a model of the catalogs.
@@ -141,13 +141,13 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
   let laneUnavailable: Error | undefined;
   const warn = vi.fn();
   const reconcile = vi.fn(async (): Promise<null> => null);
-  const resolvePlacement = vi.fn((repair: Marker) => pinnedPrivatePlacementDecisionV1(repair, laneActive, laneUnavailable));
+  const resolvePlacement = vi.fn((contextGraphId: string) => pinnedPrivatePlacementAuthorityV1(model.state.markers.find(row => row.contextGraphId === contextGraphId)!, laneActive, laneUnavailable));
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 5_000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }) as never,
     listDurableInventoryScopes: () => [],
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
-    resolveFinalizedPlacementDecision: resolvePlacement,
+    readFinalizedPlacementAuthority: resolvePlacement,
     readRepairRevision: () => revision,
     readPrivateFailure: () => null,
     writePrivateFailures: () => {},

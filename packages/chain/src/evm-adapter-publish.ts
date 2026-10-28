@@ -1,4 +1,4 @@
-import type { UpdateReceiptFacts, UpdateReceiptSelection } from './update-receipt-facts.js';
+import { decodeV9UpdateReceiptLog, decodeV10UpdateReceiptLog, type UpdateReceiptFacts } from './update-receipt-facts.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -362,7 +362,7 @@ export class PublishMethods extends EVMChainAdapterBase {
     try {
       const receipt = await this.getTransactionReceiptWithFailover(txHash, { signal: options.signal });
       if (!receipt || receipt.status !== 1) return { verified: false };
-      const facts = await this.decodeUpdateReceiptFacts(receipt, { kind: 'first-matching', kaId: batchId });
+      const facts = await this.firstMatchingUpdateReceiptFacts(receipt, batchId);
       return facts ? await this.authenticateUpdateReceipt(receipt, facts, publisherAddress, options) : { verified: false };
     } catch (error) {
       if (isChainRpcTransportError(error)) throw error;
@@ -370,35 +370,25 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
   }
 
-  /** Receipt-bound facts shared by the legacy verifier and the strict V10 confirmation reader. */
-  private async decodeUpdateReceiptFacts(
-    receipt: ethers.TransactionReceipt,
-    selection: UpdateReceiptSelection,
-  ): Promise<UpdateReceiptFacts | null> {
-    const candidates = selection.kind === 'single-v10'
-      ? [[this.contracts.knowledgeAssetStorage, 'KnowledgeAssetUpdated', 'id', 'merkleRoot']] as const
-      : [[this.contracts.knowledgeAssetsStorage, 'KnowledgeBatchUpdated', 'batchId', 'newMerkleRoot'],
-        [this.contracts.knowledgeAssetStorage, 'KnowledgeAssetUpdated', 'id', 'merkleRoot']] as const;
-    const matches: UpdateReceiptFacts[] = [];
-    for (const [storage, eventName, idField, rootField] of candidates) {
-      if (!storage) continue;
-      const address = selection.kind === 'single-v10' ? String(storage.target) : await storage.getAddress();
+  /** The legacy verifier preserves V9-first matching for the requested asset. */
+  private async firstMatchingUpdateReceiptFacts(receipt: ethers.TransactionReceipt, kaId: bigint): Promise<UpdateReceiptFacts | null> {
+    const v9 = this.contracts.knowledgeAssetsStorage;
+    if (v9) {
+      const address = await v9.getAddress();
       for (const log of receipt.logs) {
-        if (log.address.toLowerCase() !== address.toLowerCase()) continue;
-        try {
-          const parsed = storage.interface.parseLog({ topics: [...log.topics], data: log.data });
-          if (parsed?.name !== eventName) continue;
-          const kaId = BigInt(parsed.args[idField]);
-          if (selection.kind === 'first-matching' && kaId !== selection.kaId) continue;
-          const facts = { kaId, merkleRoot: ethers.getBytes(parsed.args[rootField]),
-            ...(eventName === 'KnowledgeAssetUpdated' ? { authorAddress: String(parsed.args.author) } : {}),
-            knowledgeAssetsContract: address };
-          if (selection.kind === 'first-matching') return facts;
-          matches.push(facts);
-        } catch { /* An unrelated or malformed log cannot authenticate an update. */ }
+        const facts = decodeV9UpdateReceiptLog(log, v9, address);
+        if (facts?.kaId === kaId) return facts;
       }
     }
-    return matches.length === 1 ? matches[0] : null;
+    const v10 = this.contracts.knowledgeAssetStorage;
+    if (v10) {
+      const address = await v10.getAddress();
+      for (const log of receipt.logs) {
+        const facts = decodeV10UpdateReceiptLog(log, v10, address);
+        if (facts?.kaId === kaId) return facts;
+      }
+    }
+    return null;
   }
 
   /** Authenticate already-decoded facts against this receipt's history without refetching it. */
@@ -829,8 +819,9 @@ export class PublishMethods extends EVMChainAdapterBase {
     }
 
     const storage = this.contracts.knowledgeAssetStorage;
-    const updateFacts = !parsedPublish && options.includeKnowledgeAssetUpdates === true
-      ? await this.decodeUpdateReceiptFacts(receipt, { kind: 'single-v10' }) : null;
+    const updates = !parsedPublish && options.includeKnowledgeAssetUpdates === true && storage
+      ? receipt.logs.flatMap(log => { const facts = decodeV10UpdateReceiptLog(log, storage, String(storage.target)); return facts ? [facts] : []; }) : [];
+    const updateFacts = updates.length === 1 ? updates[0] : null;
     const confirmation = parsedPublish ?? (updateFacts ? { batchId: updateFacts.kaId, kaId: updateFacts.kaId,
       startKAId: updateFacts.kaId, endKAId: updateFacts.kaId,
       merkleRoot: updateFacts.merkleRoot, authorAddress: updateFacts.authorAddress,

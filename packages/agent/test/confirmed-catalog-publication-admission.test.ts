@@ -46,7 +46,7 @@ describe('catalog-compatible named publication admission', () => {
     it.each(invalidIdentities)(`${lane.name} rejects $name/$contextGraphId before publication preparation`, async identity => {
       const f = fixture();
       await expect(lane.run(f.agent, identity.contextGraphId, identity.name)).rejects.toMatchObject({
-        name: 'AuthorCatalogCodecError',
+        name: 'CatalogPublicationAdmissionError', code: 'CATALOG_PUBLICATION_ADMISSION_INVALID',
       });
       expect(f.entered).not.toHaveBeenCalled();
       expect(f.submit).not.toHaveBeenCalled(); expect(f.sign).not.toHaveBeenCalled();
@@ -57,7 +57,7 @@ describe('catalog-compatible named publication admission', () => {
     const f = fixture();
     const exists = vi.fn(); Object.assign(f.agent, { contextGraphExists: exists });
     await expect(f.agent.publishAsync(invalidIdentities[3].contextGraphId, { publicQuads: [], privateQuads: [] }))
-      .rejects.toMatchObject({ name: 'AuthorCatalogCodecError' });
+      .rejects.toMatchObject({ name: 'CatalogPublicationAdmissionError', code: 'CATALOG_PUBLICATION_ADMISSION_INVALID' });
     expect(exists).not.toHaveBeenCalled(); expect(f.reserve).not.toHaveBeenCalled();
   });
   it.each(['界'.repeat(85), '界'.repeat(85) + 'a', 'é', 'a'.repeat(256)])('keeps the exact valid UTF8/NFC identity %s', async name => {
@@ -79,10 +79,10 @@ it.each(['snapshot', 'preflight', 'execute'] as const)('honors persisted exclusi
   const error = await (boundary === 'snapshot' ? f.agent.preflightKnowledgeAssetVmPublishSnapshot(saved)
     : boundary === 'preflight' ? f.agent.preflightQueuedKnowledgeAssetVmPublishExecution(saved)
     : f.agent.publishQueuedKnowledgeAssetVmPublish(saved, {})).catch(error => error);
-  expect(error).not.toMatchObject({ name: 'AuthorCatalogCodecError' });
+  expect(error).not.toMatchObject({ name: 'CatalogPublicationAdmissionError', code: 'CATALOG_PUBLICATION_ADMISSION_INVALID' });
   const required = { ...saved, catalogObligationRequired: true };
   Object.assign((f.agent as any).config, confirmedPublicationCatalogConfigV1(false));
   await expect(boundary === 'snapshot' ? f.agent.preflightKnowledgeAssetVmPublishSnapshot(required)
     : boundary === 'preflight' ? f.agent.preflightQueuedKnowledgeAssetVmPublishExecution(required)
-    : f.agent.publishQueuedKnowledgeAssetVmPublish(required, {})).rejects.toMatchObject({ name: 'AuthorCatalogCodecError' });
+    : f.agent.publishQueuedKnowledgeAssetVmPublish(required, {})).rejects.toMatchObject({ name: 'CatalogPublicationAdmissionError', code: 'CATALOG_PUBLICATION_ADMISSION_INVALID' });
 });

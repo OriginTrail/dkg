@@ -92,6 +92,7 @@ import { authenticatedAgentAddress } from '../../auth.js';
 import {
   respondAssertionError,
   respondAssertionCodeError,
+  respondCatalogPublicationAdmissionError,
   respondPromoteRecoveryError,
   respondAmbiguousAssertionAuthor,
   respondAuthorSelectionError,
@@ -1407,6 +1408,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
             ...(!enqueueStarted ? { jobCreated: false } : {}),
           }, undefined, { 'Retry-After': '1' });
         }
+        if (!enqueueStarted && respondCatalogPublicationAdmissionError(res, err)) return;
         if (respondPublicationPricingPolicyError(res, err)) return;
         if (err instanceof AsyncLiftJobConflictError) {
           return jsonResponse(res, 409, {
@@ -1581,6 +1583,7 @@ export async function handleKnowledgeAssetsRoutes(ctx: RequestContext): Promise<
         // GH#1786 — must precede the precondition branch below, which would otherwise
         // relabel an author-selection failure whose message happens to contain
         // "is not finalized" as a generic VM_PUBLISH_PRECONDITION.
+        if (respondCatalogPublicationAdmissionError(res, e)) return;
         if (respondPublicationPricingPolicyError(res, e)) return;
         if (respondAuthorSelectionError(res, e)) return;
         if (respondIfStoreUnavailable(res, e)) return;

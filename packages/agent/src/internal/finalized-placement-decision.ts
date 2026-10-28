@@ -10,7 +10,7 @@ import type { CatalogRepairRevisionHintV1 } from '../rfc64/catalog-repair-retry-
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../rfc64/finalized-private-placement-repair-store-v1.js';
 import type { Rfc64CatalogAuthoringLaneDecisionV1 } from '../dkg-agent-rfc64-swm-catalog-projection.js';
 
-interface PlacementLaneV1 {
+export interface PlacementLaneV1 {
   readonly kind: 'private' | 'public';
   readonly acceptsFinalizedVmRepair: boolean;
   readonly scopeBase: Readonly<Omit<SwmAuthorInventoryScopeV1, 'authorAddress'>>;
@@ -68,10 +68,18 @@ export function resolveFinalizedPlacementDecisionV1<Lane extends PlacementLaneV1
   }
 }
 
-/** Scope changes wake a repair; unrelated inventory edits do not reset its backoff. */
-export function finalizedPlacementRevisionV1(decision: FinalizedPlacementDecisionV1): CatalogRepairRevisionHintV1 | null | undefined {
-  if (decision.status === 'unavailable') return undefined;
-  return decision.status === 'ready' ? {
-    scopeIdentity: JSON.stringify([decision.action, computeSwmAuthorInventoryScopeDigestV1(decision.inventoryScope)]), headRevision: 'active',
-  } : null;
+/** A graph transition is independent of any marker's pinned compatibility. */
+export type FinalizedPlacementAuthorityV1<Lane extends PlacementLaneV1 = PlacementLaneV1> = Rfc64CatalogAuthoringLaneDecisionV1<Lane>;
+export function readFinalizedPlacementAuthorityV1(read: () => FinalizedPlacementAuthorityV1): FinalizedPlacementAuthorityV1 {
+  try { return read(); }
+  catch (error) { return { status: 'unavailable', error: error instanceof Error ? error : new Error(String(error)) }; }
+}
+export function finalizedPlacementAuthorityRevisionV1(authority: FinalizedPlacementAuthorityV1): CatalogRepairRevisionHintV1 | null | undefined {
+  if (authority.status === 'unavailable') return undefined;
+  if (authority.status === 'inactive') return null;
+  const { lane } = authority;
+  const scope = lane.scopeBase;
+  return { scopeIdentity: JSON.stringify([lane.kind, lane.acceptsFinalizedVmRepair,
+    scope.networkId, scope.contextGraphId, scope.governanceChainId, scope.governanceContractAddress,
+    scope.ownershipTransitionDigest, scope.subGraphName, scope.era]), headRevision: 'active' };
 }

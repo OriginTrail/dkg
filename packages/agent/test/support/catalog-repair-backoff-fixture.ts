@@ -3,8 +3,8 @@ import { createOperationContext, type ContextGraphIdV1, type EvmAddressV1 } from
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
 import type { CatalogRepairRevisionHintV1 } from '../../src/rfc64/catalog-repair-retry-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../../src/rfc64/finalized-private-placement-repair-store-v1.js';
-import type { FinalizedPlacementDecisionV1 } from '../../src/internal/finalized-placement-decision.js';
-import { pinnedPrivatePlacementDecisionV1 } from './finalized-placement-decision-fixture.js';
+import type { FinalizedPlacementAuthorityV1 } from '../../src/internal/finalized-placement-decision.js';
+import { pinnedPrivatePlacementAuthorityV1 } from './finalized-placement-decision-fixture.js';
 export const CG = 'repair-backoff' as ContextGraphIdV1;
 export const AUTHOR = `0x${'11'.repeat(20)}` as EvmAddressV1;
 const owners: Rfc64SwmCatalogProjectionOwnerV1[] = [];
@@ -30,8 +30,8 @@ export function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorP
   });
   const readRevision = vi.fn(() => available ? revision : null);
   const listPrivateRepairs = vi.fn(() => privateRepairs);
-  const resolvePlacement = vi.fn<(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => FinalizedPlacementDecisionV1>(
-    (repair) => pinnedPrivatePlacementDecisionV1(repair, available),
+  const readAuthority = vi.fn<(contextGraphId: string) => FinalizedPlacementAuthorityV1>(
+    () => pinnedPrivatePlacementAuthorityV1(privateRepair(), available),
   );
   const warn = vi.fn();
   const dependencies = {
@@ -39,7 +39,7 @@ export function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorP
     listDurableInventoryScopes: durableScopes,
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => available,
-    resolveFinalizedPlacementDecision: resolvePlacement,
+    readFinalizedPlacementAuthority: readAuthority,
     readRepairRevision: readRevision,
     readPrivateFailure: () => null,
     writePrivateFailures: () => {},
@@ -52,7 +52,7 @@ export function fixture(retryIntervalMs = 5_000, overrides: Partial<ConstructorP
   const owner = new Rfc64SwmCatalogProjectionOwnerV1(dependencies);
   owners.push(owner);
   return {
-    owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, resolvePlacement, warn, durableScopes,
+    owner, reconcile, repairPrivate, readRevision, listPrivateRepairs, readAuthority, warn, durableScopes,
     request: () => owner.request({ contextGraphId: CG, authorAddress: AUTHOR, ctx }),
     setRevision: (value: string | CatalogRepairRevisionHintV1) => { revision = typeof value === 'string' ? { scopeIdentity: 'scope-1', headRevision: value } : value; },
     setAvailable: (value: boolean) => { available = value; },

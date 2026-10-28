@@ -1,3 +1,4 @@
+import { CatalogPublicationAdmissionError } from '../catalog-publication-admission-error.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
   assertAssertionCoordinateV1, assertContextGraphIdV1,
@@ -43,8 +44,10 @@ export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmiss
   const required = params.catalogObligationRequired
     ?? (selectConfirmedCatalogObligationForAgentV1(host, config, params) === 'required');
   if (!required) return false;
-  assertContextGraphIdV1(params.contextGraphId);
-  assertAssertionCoordinateV1(params.assertionCoordinate);
+  try {
+    assertContextGraphIdV1(params.contextGraphId);
+    assertAssertionCoordinateV1(params.assertionCoordinate);
+  } catch (error) { throw new CatalogPublicationAdmissionError(error); }
   return true;
 }
 

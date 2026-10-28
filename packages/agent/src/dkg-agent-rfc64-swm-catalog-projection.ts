@@ -320,8 +320,12 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   }
 
   /** Current authority, action and scope shared by repair admission and execution. */
+  protected resolveRfc64FinalizedPlacementAuthorityV1(this: DKGAgent, contextGraphId: string) {
+    return this.resolveRfc64CatalogAuthoringLaneDecisionV1(contextGraphId, null);
+  }
+
   protected resolveRfc64FinalizedPlacementDecisionV1(this: DKGAgent, repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) {
-    return resolveFinalizedPlacementDecisionV1(repair, () => this.resolveRfc64CatalogAuthoringLaneDecisionV1(repair.contextGraphId, null));
+    return resolveFinalizedPlacementDecisionV1(repair, () => this.resolveRfc64FinalizedPlacementAuthorityV1(repair.contextGraphId));
   }
 
   requiresRfc64ShareInventoryV1(this: DKGAgent, contextGraphId: string, subGraphName: string | undefined): boolean {

@@ -1048,7 +1048,7 @@ export class DKGAgent extends DKGAgentBase {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);
           return lane !== null;
         },
-        resolveFinalizedPlacementDecision: (repair) => this.resolveRfc64FinalizedPlacementDecisionV1(repair),
+        readFinalizedPlacementAuthority: (contextGraphId) => this.resolveRfc64FinalizedPlacementAuthorityV1(contextGraphId),
         readFinalizedRowHealCounts: () => finalizedRowHealCountsV1(this),
         readRepairRevision: (contextGraphId, authorAddress) => {
           const lane = this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, null);

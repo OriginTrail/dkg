@@ -17,21 +17,21 @@ describe('mixed finalized placement lanes', () => {
       sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal), seal,
     };
     let lane: 'private' | 'public' | 'inactive' | 'unavailable' = 'private';
-    f.resolvePlacement.mockImplementation((selected) => resolveFinalizedPlacementDecisionV1(selected, () => {
+    f.readAuthority.mockImplementation(() => {
       if (lane === 'unavailable') return { status: 'unavailable', error: new Error('authority is unavailable') };
       if (lane === 'inactive') return { status: 'inactive' };
       return { status: 'active', lane: { kind: lane, acceptsFinalizedVmRepair: lane === 'private', scopeBase: legacy.inventoryScope } };
-    }));
+    });
     f.setPrivateRepairs([repair]);
     await f.owner.requestFinalizedPrivate({ repair, ctx }).whenAttempted;
     expect(f.repairPrivate).toHaveBeenCalledTimes(1);
 
     lane = 'public';
     f.setAvailable(false); // Public retirement has no finalized-private lane.
-    f.resolvePlacement.mockClear();
+    f.readAuthority.mockClear();
     f.owner.observeLaneAvailability(CG);
-    expect(f.resolvePlacement).toHaveBeenCalledOnce();
-    expect(f.resolvePlacement).toHaveBeenLastCalledWith(repair);
+    expect(f.readAuthority).toHaveBeenCalledOnce();
+    expect(f.readAuthority).toHaveBeenLastCalledWith(CG);
     expect(f.repairPrivate).toHaveBeenCalledTimes(1);
     f.owner.start(ctx);
     await f.owner.whenIdle();
@@ -66,10 +66,10 @@ describe('mixed finalized placement lanes', () => {
       authorAddress: seal.authorAddress, kaUal: seal.kaUal, assertionVersion: seal.assertionVersion,
       sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal), seal };
     let era = '1';
-    f.resolvePlacement.mockImplementation(row => resolveFinalizedPlacementDecisionV1(row, () => ({
+    f.readAuthority.mockImplementation(() => ({
       status: 'active', lane: { kind: 'private', acceptsFinalizedVmRepair: true,
         scopeBase: { ...legacy.inventoryScope, era } },
-    })));
+    }));
     f.setPrivateRepairs(v2First ? [current, legacy] : [legacy, current]);
     f.owner.start(ctx); await f.owner.whenIdle();
     expect(f.repairPrivate).toHaveBeenCalledTimes(2);
@@ -84,8 +84,8 @@ describe('mixed finalized placement lanes', () => {
     expect(f.repairPrivate).toHaveBeenCalledOnce();
     expect(f.repairPrivate).toHaveBeenCalledWith(current, expect.anything());
     expect(f.listPrivateRepairs()).toEqual([legacy]);
-    expect(f.resolvePlacement(legacy)).toMatchObject({ status: 'unavailable' });
-    expect(f.resolvePlacement(current)).toMatchObject({ status: 'ready', inventoryScope: { era: '2' } });
+    expect(resolveFinalizedPlacementDecisionV1(legacy, () => f.readAuthority(CG))).toMatchObject({ status: 'unavailable' });
+    expect(resolveFinalizedPlacementDecisionV1(current, () => f.readAuthority(CG))).toMatchObject({ status: 'ready', inventoryScope: { era: '2' } });
   });
 
   it('evaluates a thousand unchanged cooling repairs in linear work', async () => {
@@ -94,11 +94,11 @@ describe('mixed finalized placement lanes', () => {
       sameKindFailures: 2, firstFailedAtMs: 0, lastFailedAtMs: 0, nextAttemptAtMs: 10_000, parked: false }) });
     f.setPrivateRepairs(rows);
     f.owner.start(ctx); await f.owner.whenIdle();
-    f.resolvePlacement.mockClear();
+    f.readAuthority.mockClear();
     f.owner.start(ctx); await f.owner.whenIdle();
     expect(f.repairPrivate).not.toHaveBeenCalled();
-    expect(f.resolvePlacement.mock.calls.length).toBeGreaterThanOrEqual(rows.length);
-    expect(f.resolvePlacement.mock.calls.length).toBeLessThanOrEqual(3 * rows.length);
+    expect(f.readAuthority.mock.calls.length).toBeGreaterThanOrEqual(rows.length);
+    expect(f.readAuthority.mock.calls.length).toBeLessThanOrEqual(3 * rows.length);
   });
 
 });

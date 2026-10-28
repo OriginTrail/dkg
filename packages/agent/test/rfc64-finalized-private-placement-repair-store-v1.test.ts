@@ -1,4 +1,4 @@
-import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
+import { pinnedPrivatePlacementAuthorityV1 } from './support/finalized-placement-decision-fixture.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finalized-private-placement-repair-store-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -222,7 +222,7 @@ it('restores real SQLite failure age, cooldown and parking, then retries only by
       resolvePartition: () => ({ retryIntervalMs: 5000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
       listDurableInventoryScopes: () => [],
       listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
-      resolveFinalizedPlacementDecision: pinnedPrivatePlacementDecisionV1, readRepairRevision: () => null,
+      readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair), readRepairRevision: () => null,
       listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
       writePrivateFailures: entries => store.writeFailures(entries),
       repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
@@ -314,7 +314,7 @@ it.each(['availability', 'refused request'] as const)('persists a %s lane reset 
     const owner = new Rfc64SwmCatalogProjectionOwnerV1({
       resolvePartition: () => ({ retryIntervalMs: 5000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
       listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
-      resolveFinalizedPlacementDecision: row => pinnedPrivatePlacementDecisionV1(row, laneActive), readRepairRevision: () => null,
+      readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair, laneActive), readRepairRevision: () => null,
       listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
       writePrivateFailures: entries => store.writeFailures(entries),
       repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
@@ -356,7 +356,7 @@ it('keeps all lane observations unchanged when SQLite rejects the reset batch, t
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
     listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
-    resolveFinalizedPlacementDecision: row => pinnedPrivatePlacementDecisionV1(row, laneActive), readRepairRevision: () => null,
+    readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair, laneActive), readRepairRevision: () => null,
     listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
     writePrivateFailures: entries => store.writeFailures(entries),
     repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
@@ -406,7 +406,7 @@ it.each(['availability', 'refused request'] as const)(
     const owner = new Rfc64SwmCatalogProjectionOwnerV1({
       resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
       listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
-      resolveFinalizedPlacementDecision: row => pinnedPrivatePlacementDecisionV1(row, laneActive), readRepairRevision: () => null,
+      readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair, laneActive), readRepairRevision: () => null,
       listFinalizedPrivateRepairs: () => store.list(), readPrivateFailure: row => store.readFailure(row),
       writePrivateFailures: entries => store.writeFailures(entries),
       repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
@@ -460,7 +460,7 @@ it.each([
     const owner = new Rfc64SwmCatalogProjectionOwnerV1({
       resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
       listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
-      resolveFinalizedPlacementDecision: row => pinnedPrivatePlacementDecisionV1(row, laneActive), readRepairRevision: () => null,
+      readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair, laneActive), readRepairRevision: () => null,
       listFinalizedPrivateRepairs: () => store.list(),
       readPrivateFailure: row => { if (readUnavailable) throw new Error('diagnostic read unavailable'); return store.readFailure(row); },
       writePrivateFailures: entries => store.writeFailures(entries),
@@ -504,7 +504,7 @@ it('keeps unread SQLite history intact while runtime backoff continues, until op
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
     listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
-    resolveFinalizedPlacementDecision: pinnedPrivatePlacementDecisionV1, readRepairRevision: () => null,
+    readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(repair), readRepairRevision: () => null,
     listFinalizedPrivateRepairs: () => store.list(),
     readPrivateFailure: row => { if (readUnavailable) throw new Error('diagnostic read unavailable'); return store.readFailure(row); },
     writePrivateFailures: entries => store.writeFailures(entries),

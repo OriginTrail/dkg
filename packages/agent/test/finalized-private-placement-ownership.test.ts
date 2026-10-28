@@ -1,4 +1,4 @@
-import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
+import { pinnedPrivatePlacementAuthorityV1 } from './support/finalized-placement-decision-fixture.js';
 /**
  * GH#3081 — the catalog supervisor alone owns a confirmed private placement once the observer has
  * stored its marker and asked for it. Nothing waits for the placement, so these rows pin what the
@@ -107,7 +107,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
       listDurableInventoryScopes: () => [],
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
-      resolveFinalizedPlacementDecision: (repair) => pinnedPrivatePlacementDecisionV1(repair, state.laneActive, state.laneUnavailable),
+      readFinalizedPlacementAuthority: () => pinnedPrivatePlacementAuthorityV1(marker(1), state.laneActive, state.laneUnavailable),
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
       readPrivateFailure: () => null,
       writePrivateFailures: () => {},

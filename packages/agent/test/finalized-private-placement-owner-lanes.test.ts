@@ -1,4 +1,4 @@
-import { pinnedPrivatePlacementDecisionV1 } from './support/finalized-placement-decision-fixture.js';
+import { pinnedPrivatePlacementAuthorityV1 } from './support/finalized-placement-decision-fixture.js';
 import { afterEach, beforeEach, expect, it, vi } from 'vitest';
 import { createOperationContext, type ContextGraphIdV1, type EvmAddressV1 } from '@origintrail-official/dkg-core';
 import { Rfc64SwmCatalogProjectionOwnerV1 } from '../src/dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
@@ -38,7 +38,7 @@ function fixture(rows: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) {
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
     listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
-    resolveFinalizedPlacementDecision: row => pinnedPrivatePlacementDecisionV1(row, row.contextGraphId === graph ? active : true, refuseAuthority && row.contextGraphId === graph ? new CatalogRepairConditionErrorV1('policy_conflict', 'authority unavailable') : undefined),
+    readFinalizedPlacementAuthority: contextGraphId => pinnedPrivatePlacementAuthorityV1(repair('authority', contextGraphId as ContextGraphIdV1), contextGraphId === graph ? active : true, refuseAuthority && contextGraphId === graph ? new CatalogRepairConditionErrorV1('policy_conflict', 'authority unavailable') : undefined),
     readRepairRevision: () => null, listFinalizedPrivateRepairs: () => pending,
     readPrivateFailure: row => records.get(row.assertionCoordinate) ?? null, writePrivateFailures: write,
     repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
