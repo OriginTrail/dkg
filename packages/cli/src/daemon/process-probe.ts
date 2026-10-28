@@ -165,10 +165,10 @@ export function procProcessInspector(read: ProcReader = (path) => readFile(path,
     try {
       const stat = await read(`/proc/${pid}/stat`);
       const parsed = parseProcStat(pid, stat);
-      if (parsed.state !== 'running') return parsed;
+      if (parsed.state !== 'observed') return parsed;
       const argv = (await read(`/proc/${pid}/cmdline`)).split('\0');
       if (argv.at(-1) === '') argv.pop();
-      return { state: 'running', process: { ...parsed.process, argv, command: argv.join(' ') } };
+      return { state: 'running', process: { ...parsed.identity, argv, command: argv.join(' ') } };
     } catch (error) {
       return procEntryGone(error) ? { state: 'gone' } : { state: 'unknown', reason: errorReason(error) };
     }
@@ -327,12 +327,16 @@ export function readProcessInventorySync(): ProcessInventory {
     read(['-A', '-o', 'pid=,ppid=,comm=']), observations);
 }
 
-function parseProcStat(pid: number, stat: string): ProcessLookup {
+/** Stat observes process identity only; command evidence is still required. */
+type ProcStatLookup =
+  | { state: 'observed'; identity: Pick<ProcessInstance, 'pid' | 'start' | 'ppid'> }
+  | Extract<ProcessLookup, { state: 'gone' | 'unknown' }>;
+function parseProcStat(pid: number, stat: string): ProcStatLookup {
   const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
   if (processStateIsGone(fields[0] ?? null)) return { state: 'gone' };
   const ppid = Number(fields[1]), start = fields[19];
   if (!Number.isInteger(ppid) || !start) return { state: 'unknown', reason: `unexpected /proc/${pid}/stat contents` };
-  return { state: 'running', process: { pid, start, ppid, argv: null, command: '' } };
+  return { state: 'observed', identity: { pid, start, ppid } };
 }
 function psLookupFailure(error: unknown): ProcessLookup {
   const failed = error as { code?: unknown; status?: unknown; signal?: unknown; stdout?: unknown; stderr?: unknown; killed?: boolean };
