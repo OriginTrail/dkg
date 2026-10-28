@@ -45,7 +45,7 @@ it.each([false, true])('returns a completed activation and publishes once with r
 
 it.each(['cancelled', 'prepare', 'subscribe'] as const)('never publishes a %s activation', async failure => {
   const { a, id, row, events } = await fixture();
-  if (failure === 'subscribe') vi.spyOn(a, 'subscribeToContextGraph').mockImplementation(() => { throw new Error('subscribe'); });
+  if (failure === 'subscribe') vi.spyOn(a, 'installContextGraphSubscription').mockImplementation(() => { throw new Error('subscribe'); });
   await expect(a.activatePersistedContextGraphSubscriptionRecord(row, {
     prepare: async () => { if (failure === 'prepare') throw new Error('prepare'); },
     isCurrent: () => failure !== 'cancelled',
@@ -65,7 +65,7 @@ it.each(['prepare', 'subscribe'] as const)('persists repaired intent and retains
   const wait = a.contextGraphSubscriptionActivations.wait(id, new AbortController().signal);
   let settled = false, persistRepair!: PersistSubscriptionActivationRepair;
   void wait.then(() => { settled = true; });
-  if (failure === 'subscribe') vi.spyOn(a, 'subscribeToContextGraph').mockImplementationOnce(() => { throw new Error('retryable network failure'); });
+  if (failure === 'subscribe') vi.spyOn(a, 'installContextGraphSubscription').mockImplementationOnce(() => { throw new Error('retryable network failure'); });
   await expect(a.activatePersistedContextGraphSubscriptionRecord(row, {
     onChainId: '8',
     prepare: async (_sub: unknown, persist: PersistSubscriptionActivationRepair) => {
@@ -114,7 +114,7 @@ it('preserves a replacement subscription and gossip when preparation resumes wit
   a.subscribeToContextGraph(id, { persist: false, deferSharedMemoryGossipSubscribe: true });
   const replacement = a.subscribedContextGraphs.get(id), replacementTopics = new Set(topics);
   expect(replacement.subscribed).toBe(true); expect(topics.size).toBeGreaterThan(0);
-  const subscribe = vi.spyOn(a, 'subscribeToContextGraph'), unsubscribe = vi.spyOn(a, 'unsubscribeFromContextGraph');
+  const subscribe = vi.spyOn(a, 'installContextGraphSubscription'), unsubscribe = vi.spyOn(a, 'unsubscribeFromContextGraph');
   release(); await rejection;
   expect(a.subscribedContextGraphs.get(id)).toBe(replacement);
   expect(topics).toEqual(replacementTopics);

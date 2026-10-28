@@ -8,7 +8,6 @@ import { resolvePrivateRootLegacyLaneAdmission, type PrivateRootLegacyLaneAdmiss
  * lazily-constructed gossip/shared-memory/update/finalization handlers.
  * Methods take `this: DKGAgent` and resolve cross-calls on the composed class.
  */
-import type { ContextGraphSubscriptionRollbackSlotRelease } from './context-graph-subscription-authority-recovery.js';
 import { isLocalPrivateMember } from './internal/local-private-member.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -406,7 +405,7 @@ import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
 import { projectRfc64CatalogTransportStateV1 } from
   './rfc64/catalog-rollout-authority-v1.js';
 
-import type { ContextGraphSubscribeOptions } from './context-graph-subscription-writer.js';
+import type { ContextGraphSubscribeOptions, ContextGraphUnsubscribeOptions } from './context-graph-subscription-writer.js';
 export type { ContextGraphSubscribeOptions } from './context-graph-subscription-writer.js';
 
 export class SwmSubstrateMethods extends DKGAgentBase {
@@ -419,15 +418,9 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // the subscription: nothing may keep running under the hash id.
     if (options?.deferWireAdoption !== true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     const subscription = this.installContextGraphSubscription(contextGraphId, options);
-    if (!options?.activationWrite) this.contextGraphSubscriptionActivations.replaceLiveIntent(contextGraphId, subscription);
+    this.contextGraphSubscriptionActivations.replaceLiveIntent(contextGraphId, subscription);
     // An explicit subscribe, not a start-up restore: the graph is in use here (#3251).
     if (options?.persist !== false) this.recentSharedMemoryPulls?.noteActivity(contextGraphId);
-    // The row is installed, so the phonebook check sees the subscription it
-    // qualifies against. An Edge keeps no durable `agents` phonebook, so the
-    // curator tier of a public wallet-scoped graph cannot reach its owner's
-    // holders: ask for one bounded fetch. Startup rehydration subscribes
-    // through here too. The request is O(1) and does its checks detached.
-    this.requestOnDemandAgentsPhonebook(contextGraphId, 'subscribe');
     return subscription;
   }
 
@@ -441,7 +434,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       if (!session.active || subscription?.subscribed !== true || subscription.pendingMeta
         || systemContextGraphs.has(contextGraphId) || session.gossipRegistered.has(contextGraphId)) continue;
       try {
-        this.subscribeToContextGraph(contextGraphId, {
+        this.installContextGraphSubscription(contextGraphId, {
           trackSyncScope: false,
           persist: false,
           syncMode: intent.syncMode,
@@ -462,7 +455,19 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * Install one subscription after alias adoption: the row, its sync scope
    * and its gossip handlers, or the RFC-64 catalog-owned equivalent.
    */
-  protected installContextGraphSubscription(
+  /** Internal activation/startup primitive: installs effects without replacing user intent. */
+  installContextGraphSubscription(this: DKGAgent, contextGraphId: string, options?: ContextGraphSubscribeOptions): ContextGraphSub {
+    const subscription = this.installContextGraphSubscriptionState(contextGraphId, options);
+    // The row is installed, so the phonebook check sees the subscription it
+    // qualifies against. An Edge keeps no durable `agents` phonebook, so the
+    // curator tier of a public wallet-scoped graph cannot reach its owner's
+    // holders: ask for one bounded fetch. Startup rehydration subscribes
+    // through here too. The request is O(1) and does its checks detached.
+    this.requestOnDemandAgentsPhonebook(contextGraphId, 'subscribe');
+    return subscription;
+  }
+
+  protected installContextGraphSubscriptionState(
     this: DKGAgent,
     contextGraphId: string,
     options?: ContextGraphSubscribeOptions,
@@ -501,7 +506,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       const subscription = this.setContextGraphSubscription(
         contextGraphId,
         nextSubscription(),
-        { persist, deferWireAdoption: options?.deferWireAdoption, activationWrite: options?.activationWrite },
+        { persist, deferWireAdoption: options?.deferWireAdoption },
       );
       if (options?.deferSharedMemoryGossipSubscribe !== true) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
@@ -539,7 +544,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         return this.setContextGraphSubscription(
           contextGraphId,
           nextSubscription(),
-          { persist, deferWireAdoption: options?.deferWireAdoption, activationWrite: options?.activationWrite },
+          { persist, deferWireAdoption: options?.deferWireAdoption },
         );
       }
       return existing;
@@ -555,7 +560,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const subscription = this.setContextGraphSubscription(
       contextGraphId,
       nextSubscription(),
-      { persist, deferWireAdoption: options?.deferWireAdoption, activationWrite: options?.activationWrite },
+      { persist, deferWireAdoption: options?.deferWireAdoption },
     );
 
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
@@ -601,17 +606,15 @@ export class SwmSubstrateMethods extends DKGAgentBase {
    * devnet where storage cores otherwise auto-subscribe to everything they
    * host, masking the host-only fill path.
    */
-  unsubscribeFromContextGraph(this: DKGAgent,
-    contextGraphId: string,
-    options?: {
-      persist?: boolean;
-      updateRehydrationStatus?: boolean;
-      rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
-      activationWrite?: boolean;
-      /** The cleartext id that supersedes this name-hash id (adoption). */
-      supersededBy?: string;
-    },
-  ): void {
+  unsubscribeFromContextGraph(this: DKGAgent, contextGraphId: string, options?: ContextGraphUnsubscribeOptions): void {
+    this.removeContextGraphSubscriptionNetwork(contextGraphId, options);
+    const subscription = this.subscribedContextGraphs.get(contextGraphId);
+    if (subscription) this.contextGraphSubscriptionActivations.replaceLiveIntent(contextGraphId, subscription);
+    else this.contextGraphSubscriptionActivations.transition({ id: contextGraphId, kind: 'deactivated' });
+  }
+
+  /** Internal rollback primitive: removes network effects while retaining the activation owner. */
+  removeContextGraphSubscriptionNetwork(this: DKGAgent, contextGraphId: string, options?: ContextGraphUnsubscribeOptions): void {
     const existing = this.subscribedContextGraphs.get(contextGraphId);
     if (!existing) return;
 
@@ -664,7 +667,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.setContextGraphSubscription(
       contextGraphId,
       { ...existing, subscribed: false },
-      { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus, rollbackSlotRelease: options?.rollbackSlotRelease, activationWrite: options?.activationWrite },
+      { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus, rollbackSlotRelease: options?.rollbackSlotRelease },
     );
 
     void this.reconcileSwmHostModeSubscription(contextGraphId).catch((err) => {

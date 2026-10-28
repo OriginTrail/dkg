@@ -7860,7 +7860,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (previousWireId !== nextWireId && this.wireIdToLocalCgId.get(previousWireId) === contextGraphId)
       this.wireIdToLocalCgId.delete(previousWireId);
     this.subscribedContextGraphs.set(contextGraphId, canonicalNext);
-    if (!options?.activationWrite) this.contextGraphSubscriptionActivations.replaceLiveIntent(contextGraphId, canonicalNext);
     const wireOwnerId = this.wireIdToLocalCgId.get(nextWireId);
     const wireOwner = wireOwnerId === undefined ? undefined : this.subscribedContextGraphs.get(wireOwnerId);
     const preserveWireOwner = options?.deferWireAdoption === true || (
@@ -8738,25 +8737,25 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           lastReconciledOrdinal: record.lastReconciledOrdinal,
           coreHosted: record.coreHosted,
         }, {
-          persist: false, activationWrite: true, deferWireAdoption: true,
+          persist: false, deferWireAdoption: true,
           updateRehydrationStatus: input.updateRehydrationStatus,
         });
         return installed;
       },
       remove: (contextGraphId) => this.deleteContextGraphSubscription(contextGraphId),
       restoreInactive: (id, previous) => {
-        const restored = this.setContextGraphSubscription(id, previous, { persist: false, activationWrite: true, preserveAdmittedWireBinding: true });
+        const restored = this.setContextGraphSubscription(id, previous, { persist: false, preserveAdmittedWireBinding: true });
         // Transaction rollback restores the same durable intent. An operator
         // clear followed by a new subscribe must still start a separate line.
         continueContextGraphSubscriptionLine(previous, restored);
       },
-      rollbackNetworkEffects: (contextGraphId, rollbackSlotRelease) => this.unsubscribeFromContextGraph(
-        contextGraphId, { persist: false, activationWrite: true, updateRehydrationStatus: false, rollbackSlotRelease },
+      rollbackNetworkEffects: (contextGraphId, rollbackSlotRelease) => this.removeContextGraphSubscriptionNetwork(
+        contextGraphId, { persist: false, updateRehydrationStatus: false, rollbackSlotRelease },
       ),
       trackSync: (contextGraphId) => this.trackSyncContextGraph(contextGraphId),
-      subscribe: (contextGraphId) => this.subscribeToContextGraph(contextGraphId, {
+      subscribe: (contextGraphId) => this.installContextGraphSubscription(contextGraphId, {
         trackSyncScope: false,
-        persist: false, activationWrite: true, deferWireAdoption: true,
+        persist: false, deferWireAdoption: true,
         syncMode: 'always-on',
       }),
       persistMembership: (id) => this.persistLocalNodeMembership(id, 'rehydrated-subscription'),
@@ -8764,7 +8763,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         this.persistContextGraphSubscriptionStrict(id, subscription, syncScoped, isCurrent),
       commit: (id) => {
         const { subscription, adoptedWire } = this.writeContextGraphSubscription(id, this.subscribedContextGraphs.get(id)!, {
-          persist: false, activationWrite: true, preserveAdmittedWireBinding: true, retireNamePlaceholder: true,
+          persist: false, preserveAdmittedWireBinding: true, retireNamePlaceholder: true,
         });
         if (adoptedWire) void this.persistContextGraphSubscription(id, { retiredNamePredecessor: adoptedWire });
         return subscription;
