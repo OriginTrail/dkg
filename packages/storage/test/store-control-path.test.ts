@@ -10,8 +10,8 @@ import {
   takeStoreSchedulerStatsReports,
 } from '../src/store-scheduler-stats.js';
 import {
+  STORE_CONTROL_DEFAULT_BACKENDS,
   STORE_CONTROL_MAX_SLOTS,
-  STORE_CONTROL_PATH_ON_BY_DEFAULT,
   STORE_CONTROL_RESERVED_SLOTS_ENV,
   buildStoreControlPath,
   controlStoreOptions,
@@ -35,11 +35,10 @@ afterEach(() => {
 });
 
 describe('DKG_STORE_CONTROL_RESERVED_SLOTS', () => {
-  it('is off by default in this release, on any host', () => {
-    expect(STORE_CONTROL_PATH_ON_BY_DEFAULT).toBe(false);
+  it('is off by default in a process that configured no backend, on any host', () => {
     for (const cpus of [1, 2, 3, 4, 64]) {
       expect(resolveStoreControlConfig(undefined, { cpus })).toEqual({
-        slots: { share: 0, publisher: 0 }, source: 'default', warnings: [],
+        slots: { share: 0, publisher: 0 }, source: 'default', reason: 'default: no store backend configured', warnings: [],
       });
     }
   });
@@ -49,10 +48,10 @@ describe('DKG_STORE_CONTROL_RESERVED_SLOTS', () => {
     (blank) => {
       // Set-but-blank is a typo (`VAR=` from a template or a shell), not "unset": it must not mean the default,
       // or a mistyped rollback would leave the path on once the default is switched on.
-      for (const onByDefault of [false, true]) {
+      for (const backend of [undefined, 'blazegraph', 'oxigraph-server']) {
         for (const cpus of [1, 2, 8, 64]) {
-          const config = resolveStoreControlConfig(blank, { cpus, onByDefault });
-          expect(config.slots, `${cpus} CPUs, onByDefault ${onByDefault}`).toEqual({ share: 0, publisher: 0 });
+          const config = resolveStoreControlConfig(blank, { cpus, backend });
+          expect(config.slots, `${cpus} CPUs, backend ${backend}`).toEqual({ share: 0, publisher: 0 });
           expect(config.source).toBe('refused');
           expect(config.warnings).toHaveLength(1);
           expect(config.warnings[0]).toContain(STORE_CONTROL_RESERVED_SLOTS_ENV);
@@ -61,35 +60,37 @@ describe('DKG_STORE_CONTROL_RESERVED_SLOTS', () => {
         }
       }
       // Only a truly unset value means the default.
-      expect(resolveStoreControlConfig(undefined, { cpus: 8, onByDefault: true }))
+      expect(resolveStoreControlConfig(undefined, { cpus: 8, backend: 'blazegraph' }))
         .toMatchObject({ slots: { share: 1, publisher: 2 }, source: 'default', warnings: [] });
     },
   );
 
-  it('would, once the default is switched on, be share 1 + publisher 2 with no added slots on hosts of 2 or fewer CPUs', () => {
-    expect(defaultStoreControlSlots(8, true)).toEqual({ share: 1, publisher: 2 });
-    expect(defaultStoreControlSlots(3, true)).toEqual({ share: 1, publisher: 2 });
-    for (const cpus of [1, 2]) expect(defaultStoreControlSlots(cpus, true)).toEqual({ share: 0, publisher: 0 });
-    expect(defaultStoreControlSlots(8, false)).toEqual({ share: 0, publisher: 0 });
+  it('is share 1 + publisher 2 for Blazegraph, with no added slots on hosts of 2 or fewer CPUs', () => {
+    expect(STORE_CONTROL_DEFAULT_BACKENDS).toEqual(['blazegraph']);
+    expect(defaultStoreControlSlots(8, 'blazegraph')).toEqual({ share: 1, publisher: 2 });
+    expect(defaultStoreControlSlots(3, 'blazegraph')).toEqual({ share: 1, publisher: 2 });
+    for (const cpus of [1, 2]) expect(defaultStoreControlSlots(cpus, 'blazegraph')).toEqual({ share: 0, publisher: 0 });
+    expect(defaultStoreControlSlots(8, 'oxigraph-server')).toEqual({ share: 0, publisher: 0 });
     expect(defaultStoreControlSlots(8)).toEqual({ share: 0, publisher: 0 });
 
-    expect(resolveStoreControlConfig(undefined, { cpus: 4, onByDefault: true }))
+    expect(resolveStoreControlConfig(undefined, { cpus: 4, backend: 'blazegraph' }))
       .toMatchObject({ slots: { share: 1, publisher: 2 }, source: 'default' });
-    expect(resolveStoreControlConfig(undefined, { cpus: 2, onByDefault: true }))
+    expect(resolveStoreControlConfig(undefined, { cpus: 2, backend: 'blazegraph' }))
       .toMatchObject({ slots: { share: 0, publisher: 0 }, source: 'default' });
     // The caps are the hard maximum: 3 added slots in total.
     expect(STORE_CONTROL_MAX_SLOTS).toEqual({ share: 1, publisher: 2 });
   });
 
   it('turns the whole path off with 0', () => {
-    expect(resolveStoreControlConfig('0', { cpus: 8, onByDefault: true }))
-      .toEqual({ slots: { share: 0, publisher: 0 }, source: 'env', warnings: [] });
-    expect(resolveStoreControlConfig(' 0 ', { cpus: 8, onByDefault: true }).slots).toEqual({ share: 0, publisher: 0 });
+    expect(resolveStoreControlConfig('0', { cpus: 8, backend: 'blazegraph' })).toEqual({
+      slots: { share: 0, publisher: 0 }, source: 'env', reason: `${STORE_CONTROL_RESERVED_SLOTS_ENV}=0`, warnings: [],
+    });
+    expect(resolveStoreControlConfig(' 0 ', { cpus: 8, backend: 'blazegraph' }).slots).toEqual({ share: 0, publisher: 0 });
   });
 
   it('takes per-queue values, and a queue left out gets 0', () => {
     expect(resolveStoreControlConfig('share:1,publisher:2')).toEqual({
-      slots: { share: 1, publisher: 2 }, source: 'env', warnings: [],
+      slots: { share: 1, publisher: 2 }, source: 'env', reason: `${STORE_CONTROL_RESERVED_SLOTS_ENV}=share:1,publisher:2`, warnings: [],
     });
     expect(resolveStoreControlConfig('publisher:1').slots).toEqual({ share: 0, publisher: 1 });
     expect(resolveStoreControlConfig('share:1').slots).toEqual({ share: 1, publisher: 0 });
@@ -99,7 +100,7 @@ describe('DKG_STORE_CONTROL_RESERVED_SLOTS', () => {
 
   it('honours an explicit value on a host of 2 or fewer CPUs', () => {
     for (const cpus of [1, 2]) {
-      expect(resolveStoreControlConfig('share:1,publisher:2', { cpus, onByDefault: true }))
+      expect(resolveStoreControlConfig('share:1,publisher:2', { cpus, backend: 'blazegraph' }))
         .toMatchObject({ slots: { share: 1, publisher: 2 }, source: 'env' });
       expect(resolveStoreControlConfig('share:1,publisher:2', { cpus }).slots).toEqual({ share: 1, publisher: 2 });
     }
@@ -124,7 +125,7 @@ describe('DKG_STORE_CONTROL_RESERVED_SLOTS', () => {
     'share:1;publisher:2', 'share:1 publisher:2', 'share:1,', ',', 'share:1,share:1', 'share:1,SHARE:0',
     'other:1', 'share:1,other:1', '00', '-1', '0,0', '0:1', 'share:1,publisher:2,share:1', 'NaN',
   ])('refuses the malformed value %j with a warning and leaves the path off', (raw) => {
-    const config = resolveStoreControlConfig(raw, { cpus: 8, onByDefault: true });
+    const config = resolveStoreControlConfig(raw, { cpus: 8, backend: 'blazegraph' });
     expect(config.slots).toEqual({ share: 0, publisher: 0 });
     expect(config.source).toBe('refused');
     expect(config.warnings).toHaveLength(1);

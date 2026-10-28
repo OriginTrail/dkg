@@ -230,15 +230,37 @@ attributes, the backpressure registry under `store-control-share` /
 `store-control-publisher`, and the queue-wait stats), whatever `priority` or
 ambient `withDefaultStoreWorkPriority` lane the caller has. When it is off, the
 call resolves exactly like the same call without the tag. Embedded Oxigraph
-backends ignore priority and so see no effect.
+backends run no store scheduler and so never use the path, whatever its
+setting.
 
-| Environment variable | Default | Purpose |
+| Setting | Default | Purpose |
 |---|---:|---|
-| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset (off) | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host; the default, when it is switched on, adds no slots on hosts with 2 or fewer CPUs. Read once at start. |
+| `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host and with any backend. Wins over the config value when set. Read once at start. |
+| node config `store.controlReservedSlots` | absent | The same values (also the number `0`), used when the variable is unset. A malformed value (`null`, `true`, any number but `0` included) is refused with a warning that names the key and leaves the path off. Read by the daemon only. |
 
-The daemon logs the effective geometry once at start
-(`logStoreControlPathGeometry`). Tests replace the process-wide path with
-`setStoreControlPathForTesting(buildStoreControlPath(...))`.
+With neither setting, the default (OT-RFC-73 P14) is share 1 + publisher 2 for
+a node whose configured backend is `blazegraph` (`STORE_CONTROL_DEFAULT_BACKENDS`)
+on a host with more than 2 CPUs (`availableParallelism()`), and off for every
+other node: 2 or fewer CPUs, managed `oxigraph-server`, `sparql-http` and any
+other backend. A malformed value never falls through to the other setting or
+to the default.
+
+The daemon calls `configureStoreControlPath({ backend, configured })` with the
+node's `store.backend` (the configured name, so managed Oxigraph is
+`oxigraph-server`, not its runtime `sparql-http` view) and
+`store.controlReservedSlots`, before any store call can build the path, and
+then logs the effective geometry and the setting that decided it once
+(`logStoreControlPathGeometry`), for example `Store control path: on (added
+slots share=1 publisher=2; default for blazegraph, 8 CPUs; effective until
+daemon restart)`. The path is built once; a configuration after that is
+refused with a warning (a repeat of the same settings is accepted). A process
+that never configures the path (a standalone tool, a benchmark, a test) has no
+backend and no config value, so only the variable can turn its path on.
+`resolveStoreControlConfig(env, { cpus, backend, configured })` is the pure
+resolver behind it. Tests replace the process-wide path with
+`setStoreControlPathForTesting(buildStoreControlPath(...))`, and
+`setStoreControlPathForTesting(undefined)` returns the process to the
+unconfigured state.
 
 Blazegraph's deadline can also be set per store, which takes precedence over
 the environment default:
