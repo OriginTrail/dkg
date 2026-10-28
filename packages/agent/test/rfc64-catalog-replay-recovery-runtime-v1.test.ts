@@ -807,3 +807,43 @@ describe('RFC-64 catalog replay recovery runtime', () => {
     expect(runtime.status('public-cg', 'policy')?.failed).toBe(false);
   });
 });
+
+it.each([false, true])('retires orphaned cancelled coverage while preserving staged custody (%s)', async staged => {
+  let failingParity = true;
+  let blockB = false;
+  const entered = Promise.withResolvers<void>();
+  const release = Promise.withResolvers<void>();
+  const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+    requestPeer: async (_cg, peer) => {
+      if (peer === 'peer-b' && blockB) { entered.resolve(); await release.promise; }
+      return { status: 'completed', targets: [{ id: `head-${peer}` }] };
+    },
+    whenReceiverIdleForContextGraph: async () => undefined,
+    targetIdentity: target => target.id,
+    parityFailed: async () => failingParity,
+  });
+  const full = (peers: string[], signal?: AbortSignal) => runtime.request({
+    contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'full-connected-peers', connectedPeerIds: peers, signal,
+  });
+  await full(['peer-a', 'peer-b']);
+  expect(runtime.status('public-cg', 'policy')?.failed).toBe(true);
+  blockB = true;
+  const reserved = staged ? runtime.reservePeer('public-cg', 'policy', 'peer-c') : null;
+  const controller = new AbortController();
+  const cancelled = full(staged ? ['peer-a', 'peer-b', 'peer-c'] : ['peer-a', 'peer-b'], controller.signal);
+  const rejection = expect(cancelled).rejects.toThrow('cancelled replay');
+  await entered.promise;
+  controller.abort(new Error('cancelled replay'));
+  release.resolve();
+  await rejection;
+  expect(runtime.promisedTargets('public-cg', 'policy')).toContainEqual({ id: 'head-peer-b' });
+  failingParity = false;
+  await expect(full(['peer-a'])).resolves.toEqual({ requested: 1, failed: 0 });
+  if (reserved) {
+    expect(runtime.status('public-cg', 'policy')).toMatchObject({ failed: true, active: true });
+    reserved.admit();
+    await runtime.request({ contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'connection-demand', demand: reserved });
+    reserved.release();
+  }
+  expect(runtime.status('public-cg', 'policy')).toMatchObject({ failed: false, active: false, unverified: false });
+});

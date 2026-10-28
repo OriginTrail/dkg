@@ -44,6 +44,8 @@ interface PeerV1 {
   connectionGeneration: number;
 }
 
+interface SchedulingSweepV1 { turns: Array<{ peer: PeerV1; scopes: readonly ScopeV1[] }>; nextWake: number }
+
 const DEFAULT_DEBOUNCE_MS = 60_000;
 const DEFAULT_MAX_PEERS = 256;
 const MAX_SCOPES_PER_TURN = 8;
@@ -231,23 +233,31 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     }
   }
 
-  #ready(peer: PeerV1, now: number): boolean { return !peer.active && peer.window.plan(now).runnable.length > 0; }
-  #nextDeadline(now: number): number {
-    return Math.min(...[...this.#byPeer.values()].map(peer => peer.window.plan(now).nextWake));
+  /** Advance each peer's scheduling window once for this synchronous sweep. */
+  #sweep(now: number): SchedulingSweepV1 {
+    const selected = new Set(this.#ports.selectContextGraphIds());
+    const turns: Array<{ peer: PeerV1; scopes: readonly ScopeV1[] }> = [];
+    let nextWake = Infinity;
+    for (const peer of this.#byPeer.values()) {
+      this.#continue(peer, selected);
+      const plan = peer.window.plan(now);
+      nextWake = Math.min(nextWake, plan.nextWake);
+      if (!peer.active && plan.runnable.length > 0) turns.push({ peer, scopes: plan.runnable.slice(0, MAX_SCOPES_PER_TURN) });
+    }
+    return { turns, nextWake };
   }
 
-  #schedule(): void {
+  #schedule(plan?: SchedulingSweepV1): void {
     if (this.#closed) return;
+    const scheduledPlan = plan ?? this.#sweep(Date.now());
     const worker = async (signal: AbortSignal): Promise<void> => {
       try {
         if (signal.aborted || this.#closed) return;
         this.#resumeOverflow();
-        const now = Date.now();
-        const selected = new Set(this.#ports.selectContextGraphIds());
-        for (const peer of this.#byPeer.values()) this.#continue(peer, selected);
-        const peer = [...this.#byPeer.values()].find(candidate => this.#ready(candidate, now));
-        if (peer === undefined) return;
-        await this.#runTurn(peer, signal);
+        const turn = this.#sweep(Date.now()).turns[0];
+        if (turn === undefined) return;
+        const { peer, scopes } = turn;
+        await this.#runTurn(peer, scopes, signal);
         // Move a completed turn behind the other ready peers.
         if (this.#byPeer.get(peer.peerId) === peer) {
           this.#byPeer.delete(peer.peerId); this.#byPeer.set(peer.peerId, peer);
@@ -258,17 +268,15 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     for (const slot of [0, 1] as const) {
       if (!this.#ports.schedule(slot, worker)) { this.#retire(); return; }
     }
-    if (this.#nextDeadline(Date.now()) !== Infinity && !this.#ports.schedule('deadline', async signal => {
+    if (scheduledPlan.nextWake !== Infinity && !this.#ports.schedule('deadline', async signal => {
       try {
-        while (!signal.aborted && !this.#closed) {
-          const deadline = this.#nextDeadline(Date.now());
-          if (deadline === Infinity) return;
+        let sweep = scheduledPlan;
+        while (!signal.aborted && !this.#closed && sweep.nextWake !== Infinity) {
           // One owned notifier; stream slots never wait for future eligibility.
-          await this.#ports.wait(signal, Math.min(1_000, Math.max(1, deadline - Date.now())));
-          const now = Date.now();
-          const selected = new Set(this.#ports.selectContextGraphIds());
-          for (const peer of this.#byPeer.values()) this.#continue(peer, selected);
-          if ([...this.#byPeer.values()].some(peer => this.#ready(peer, now))) this.#schedule();
+          await this.#ports.wait(signal, Math.min(1_000, Math.max(1, sweep.nextWake - Date.now())));
+          if (signal.aborted || this.#closed) return;
+          sweep = this.#sweep(Date.now());
+          if (sweep.turns.length > 0) this.#schedule(sweep);
         }
       } finally { if (signal.aborted) this.#retire(); }
     })) this.#retire();
@@ -279,10 +287,9 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     if (![...this.#byPeer.values()].some(peer => peer.active)) this.reset();
   }
 
-  async #runTurn(peer: PeerV1, signal: AbortSignal): Promise<void> {
+  async #runTurn(peer: PeerV1, scopes: readonly ScopeV1[], signal: AbortSignal): Promise<void> {
     peer.active = true;
     try {
-      const scopes = peer.window.plan(Date.now()).runnable.slice(0, MAX_SCOPES_PER_TURN);
       for (const scope of scopes) {
         if (signal.aborted || this.#closed) return;
         this.#pruneSelection(peer, new Set(this.#ports.selectContextGraphIds()));

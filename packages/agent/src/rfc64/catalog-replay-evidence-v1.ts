@@ -35,6 +35,7 @@ export class FullReplayPassV1<Target> {
   readonly #expected = new Map<string, { generation: number; replayed: boolean }>();
   targets: BoundedReplayTargetsV1<Target> = emptyReplayTargetsV1();
   replacesSnapshot = true;
+  #coverageValid = true;
   unanswered = false;
   readonly #providers = new Map<string, number>();
   get corroborated(): boolean { return this.#providers.size > 0; }
@@ -42,6 +43,7 @@ export class FullReplayPassV1<Target> {
 
   include(demands: readonly (Rfc64CatalogReplayPeerDemandV1 & { staged: boolean })[], prior: BoundedReplayTargetsV1<Target> | null, run: ReplayRunEvidenceV1<Target>): boolean {
     if (new Set([...this.#expected.keys(), ...demands.map(demand => demand.peerId)]).size > RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) return false;
+    this.#coverageValid = true;
     for (const demand of demands) {
       if (this.#expected.get(demand.peerId)?.generation !== demand.generation) {
         this.#expected.set(demand.peerId, { generation: demand.generation, replayed: false });
@@ -65,6 +67,18 @@ export class FullReplayPassV1<Target> {
     const expected = this.#expected.get(demand.peerId);
     return expected?.generation === demand.generation && !expected.replayed;
   }
+  /** Cancelled execution cannot retain expectations with no staged reservation owner.
+   * Keep promises and surviving reservations, but require a new full request to
+   * re-establish coverage after any expected generation was abandoned. */
+  retireUnowned(isStaged: (demand: Rfc64CatalogReplayPeerDemandV1) => boolean): void {
+    for (const [peerId, expected] of this.#expected) {
+      if (!expected.replayed && !isStaged({ peerId, generation: expected.generation })) {
+        this.#expected.delete(peerId);
+        this.#coverageValid = false;
+        this.replacesSnapshot = false;
+      }
+    }
+  }
   record(demand: Rfc64CatalogReplayPeerDemandV1, outcome: ReplayPeerOutcomeV1<Target>): void {
     const expected = this.#expected.get(demand.peerId);
     if (expected !== undefined && demand.generation >= expected.generation) expected.replayed = true;
@@ -76,7 +90,7 @@ export class FullReplayPassV1<Target> {
   #retain(targets: BoundedReplayTargetsV1<Target>): void {
     this.targets = mergeReplayTargetsV1(this.targets, targets, this.merge);
   }
-  get covered(): boolean { return [...this.#expected.values()].every(expected => expected.replayed); }
+  get covered(): boolean { return this.#coverageValid && [...this.#expected.values()].every(expected => expected.replayed); }
   /** Only a receiver-drained parity read observes the completed generations. */
   observe(): void {
     for (const [peer, expected] of this.#expected) if (expected.replayed) this.#expected.delete(peer);
@@ -104,7 +118,8 @@ export class ReplayRunEvidenceV1<Target> {
     return value.kind === 'target-overflow' || (value.kind === 'parity' && value.outcome === 'failed')
       || (value.kind === 'unobserved' && (value.reason === 'budget-exhausted' || value.reason === 'parity-error'));
   }
-  get failed(): number { return Number(this.observationFailed) + this.#outcomes.filter(kind => kind === 'provider-failed' || kind === 'local-unavailable').length; }
+  get peerFailures(): number { return this.#outcomes.filter(kind => kind === 'provider-failed' || kind === 'local-unavailable').length; }
+  get failed(): number { return Number(this.observationFailed) + this.peerFailures; }
   get requiresFullReplay(): boolean { return this.observationFailed || this.#unattributedProviderFailure; }
   constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[], readonly fullRequest = false) {}
   record(demand: Rfc64CatalogReplayPeerDemandV1, outcome: ReplayPeerOutcomeV1<Target>): void {

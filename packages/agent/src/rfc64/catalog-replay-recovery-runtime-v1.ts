@@ -151,6 +151,18 @@ export interface Rfc64CatalogReplayRecoveryResultV1 {
   readonly failed: number;
 }
 
+/** Execution reports counts separately from the graph owner's next action. */
+interface ReplayExecutionOutcomeV1 {
+  requested: number;
+  peerFailures: number;
+  completion: { kind: 'continue'; reason: 'budget-exhausted' | 'pending'; observationFailed: boolean }
+    | { kind: 'settled'; observationFailed: boolean };
+}
+function publicReplayResult(outcome: ReplayExecutionOutcomeV1): Readonly<Rfc64CatalogReplayRecoveryResultV1> {
+  return Object.freeze({ requested: outcome.requested,
+    failed: outcome.peerFailures + Number(outcome.completion.observationFailed) });
+}
+
 export interface Rfc64CatalogReplayRecoveryStatusV1 {
   readonly active: boolean;
   /**
@@ -380,25 +392,36 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     let requested = 0, failed = 0;
     try {
       let first = true;
+      let continuation: boolean;
       do {
         input.signal?.throwIfAborted();
         progress.peerWorklist.beginRun();
         progress.run = new ReplayRunEvidenceV1((left, right) => this.#mergePromises(left, right), first && input.kind === 'full-connected-peers');
         first = false;
-        const result = await this.#execute(input, progress, token);
+        const outcome = await this.#execute(input, progress, token);
+        const result = publicReplayResult(outcome);
         requested += result.requested;
-        const observation = progress.run.observation;
-        failed += result.failed - Number(progress.peerWorklist.hasPending && observation.kind === 'unobserved' && observation.reason === 'budget-exhausted');
+        failed += result.failed;
+        continuation = outcome.completion.kind === 'continue';
         for (const waiter of progress.waiters) {
           const pending = progress.peerWorklist.generation(waiter.demand.peerId);
           if (pending === null || pending.generation < waiter.demand.generation) waiter.complete(result);
         }
         // No command re-admission: retained providers and connection generations
         // were seeded once. Only already admitted pending work starts a new run.
-      } while (this.#byContextGraph.get(input.contextGraphId) === progress && progress.peerWorklist.hasPending);
+      } while (this.#byContextGraph.get(input.contextGraphId) === progress && continuation);
       return Object.freeze({ requested, failed });
     } finally {
       if (this.#byContextGraph.get(input.contextGraphId) === progress && progress.token === token) {
+        if (input.signal?.aborted && progress.fullPass) {
+          // Retain advertised heads independently of abandoned execution coverage.
+          if (!this.#settlePromisedTargets(progress, progress.fullPass.targets, false)) progress.requiresFullReplay = true;
+          progress.fullPass.retireUnowned(demand => {
+            const owned = progress.peerWorklist.generation(demand.peerId);
+            return owned?.staged === true && owned.generation === demand.generation;
+          });
+          if (!progress.peerWorklist.hasStaged) progress.fullPass = null;
+        }
         progress.active = progress.peerWorklist.hasStaged;
         progress.run = new ReplayRunEvidenceV1((left, right) => this.#mergePromises(left, right));
         progress.completion = null;
@@ -411,8 +434,18 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     input: Rfc64CatalogReplayRecoveryCommandV1,
     progress: ReplayProgressV1<Target>,
     token: number,
-  ): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
+  ): Promise<Readonly<ReplayExecutionOutcomeV1>> {
     const evidence = progress.run;
+    const outcome = (): ReplayExecutionOutcomeV1 => {
+      const observation = evidence.observation;
+      const budgetContinuation = progress.peerWorklist.hasPending
+        && observation.kind === 'unobserved' && observation.reason === 'budget-exhausted';
+      const observationFailed = evidence.observationFailed && !budgetContinuation;
+      return { requested: evidence.requested, peerFailures: evidence.peerFailures,
+        completion: progress.peerWorklist.hasPending
+          ? { kind: 'continue', reason: budgetContinuation ? 'budget-exhausted' : 'pending', observationFailed }
+          : { kind: 'settled', observationFailed } };
+    };
     try {
       input.signal?.throwIfAborted();
       for (;;) {
@@ -513,11 +546,11 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         progress.fullPass?.observe();
         break;
       }
-      return Object.freeze({ requested: evidence.requested, failed: evidence.failed });
+      return Object.freeze(outcome());
     } catch (error) {
       if (input.signal?.aborted) { evidence.unobserved('cancelled'); throw input.signal.reason ?? error; }
       evidence.unobserved('parity-error');
-      return Object.freeze({ requested: evidence.requested, failed: evidence.failed });
+      return Object.freeze(outcome());
     } finally {
       const current = this.#byContextGraph.get(input.contextGraphId);
       if (current === progress && current.token === token) {
