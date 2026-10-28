@@ -491,12 +491,14 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolvePublishTargetCuration } from './publish-target-curation.js';
 import {
+  KA_MINT_RECONCILE_INCOMPLETE_CODE,
   KA_MINT_RECONCILE_REFUSED_CODE,
   reconcileLateMint,
   type KnowledgeAssetMintReconcileInput,
   type KnowledgeAssetMintReconcileResult,
 } from './knowledge-asset-mint-reconcile.js';
 import { sealChainTargetMismatch } from './seal-chain-target.js';
+import { observeConfirmedVmTransfer } from './internal/confirmed-vm-catalog-observer.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -6370,10 +6372,28 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    if (result.status === 'confirmed') await this.completeNamedPublishFinalization({
-      contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
-      shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri,
-    });
+    if (result.status === 'confirmed') {
+      const finalization = {
+        contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
+        shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri,
+      };
+      // A record-only reconcile reports success only once the catalog transition completes, and its
+      // retry resumes the checkpoint. An ordinary publish or update is already confirmed, and nothing
+      // resumes an update's checkpoint, so its transition stays best-effort, as before the checkpoint.
+      if (opts?.adoptExistingMint !== undefined) await this.completeNamedPublishFinalization(finalization);
+      else await observeConfirmedVmTransfer(this.log, {
+        ...finalization, ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish',
+      }, async () => {
+        try {
+          await this.completeNamedPublishFinalization(finalization);
+          return 'owned';
+        } catch (error) {
+          // An unfinished transition stays pending in its checkpoint, which the observer does not report.
+          if ((error as { code?: string }).code === KA_MINT_RECONCILE_INCOMPLETE_CODE) return 'pending';
+          throw error;
+        }
+      });
+    }
 
     return { ...result, assertionUri, seal };
   }

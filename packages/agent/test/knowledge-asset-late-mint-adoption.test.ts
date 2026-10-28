@@ -204,6 +204,24 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
   });
 
+  it('keeps an ordinary publish confirmed while its catalog transition is unfinished, and reconcile resumes it', async () => {
+    const { agent, store, sealed, lostMint, history } = await strandedAsset(new WalletMockChain(), wallet.address);
+    vi.spyOn(agent as unknown as { createV10ACKProvider(cg: string): unknown }, 'createV10ACKProvider')
+      .mockReturnValue(async () => [{ peerId: 'stub-core', signatureR: ZERO, signatureVS: ZERO, nodeIdentityId: 1n }]);
+    // The catalog has not admitted the projection yet.
+    const transfer = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1').mockResolvedValueOnce('projection-pending');
+
+    await expect(agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR }))
+      .resolves.toMatchObject({ status: 'confirmed', ual: sealed.kaUal });
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toMatchObject({ kind: 'pending' });
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+    expect(transfer).toHaveBeenCalledTimes(2);
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
+  });
+
   it('reconcile records the late mint without a publish wallet or chain write, and is idempotent', async () => {
     const { agent, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
 
