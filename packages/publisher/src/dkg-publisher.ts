@@ -3219,7 +3219,7 @@ export class DKGPublisher implements Publisher {
       const onChainResult = outcome.result;
       let ual = '';
       if (outcome.adopted && !graphPublish) throw new Error('Adopted mint recording requires a graph-scoped reservation');
-      const keepsExistingRecord = outcome.adopted && graphPublish !== undefined && await adoptedMintAlreadyRecorded(this.store, {
+      const keepsExistingRecord = graphPublish !== undefined && await adoptedMintAlreadyRecorded(this.store, {
         contextGraphId, ual: graphPublish.scope.ual, assertionVersion: graphPublish.scope.assertionVersion,
         assertionGraph: knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, graphPublish.scope, target.subGraphName),
         merkleRoot: kcMerkleRoot, publicTripleCount: graphPublish.publicTripleCount,
@@ -3419,9 +3419,8 @@ export class DKGPublisher implements Publisher {
 
       return ual;
     };
-    if (!outcome.adopted) return record();
     const { graphPublish, contextGraphId, targetMetaGraphUri } = content.target;
-    if (!graphPublish) throw new Error('Adopted mint recording requires a graph-scoped reservation');
+    if (!graphPublish) return record();
     // The check and all VM/private/metadata writes share custody with updates and reconciliation.
     return withMaterializationLock(targetMetaGraphUri ?? contextGraphMetaUri(contextGraphId),
       graphPublish.scope.ual, record);

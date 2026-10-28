@@ -1,3 +1,5 @@
+import { readFinalizedAssertionReservation } from '../src/internal/finalized-assertion-reservation.js';
+import { withAssertionLifecycleWriteLease, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
 import * as mintReconciliation from '../src/knowledge-asset-mint-reconcile.js';
 import type { KnowledgeAssetMintReconcileHost } from '../src/knowledge-asset-mint-reconcile.js';
 import * as publicationStages from '../src/dkg-agent-publish.js';
@@ -600,7 +602,11 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     // A new complete share of the published asset, as an edit cycle leaves it.
     await store.insert([{ subject: LIFECYCLE, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: META_GRAPH }]);
 
-    await expect(publicationStages.recordFinalizedAssertionMint.call(agent, CONTEXT_GRAPH, NAME, {}, { agentAddress: AUTHOR }))
+    await expect(withAssertionLifecycleWriteLease((agent as any).writeLocks,
+      assertionLifecycleWriteLockKey(CONTEXT_GRAPH, NAME, AUTHOR), async heldLifecycle => {
+        const reservation = await readFinalizedAssertionReservation(store, { contextGraphId: CONTEXT_GRAPH, name: NAME, agentAddress: AUTHOR }, 'test');
+        return publicationStages.recordFinalizedAssertionMint.call(agent, CONTEXT_GRAPH, NAME, {}, { heldLifecycle, reservation }, { agentAddress: AUTHOR });
+      }))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE });
     expect(updateKnowledgeCollection).not.toHaveBeenCalled();
   });

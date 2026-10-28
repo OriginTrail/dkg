@@ -1,7 +1,7 @@
-import { readFinalizedAssertionReservation, type FinalizedAssertionReservation } from './internal/finalized-assertion-reservation.js';
+import { readFinalizedAssertionReservation } from './internal/finalized-assertion-reservation.js';
 import { assertAssertionLifecycleWriteLease } from '@origintrail-official/dkg-publisher';
 import type { MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
-import type { AgentSharedMemoryPublishOptions, SharedMemoryPublicationContext, FinalizedAssertionPublishOptions, FinalizedAssertionPublicationOperations } from './internal/agent-publish-options.js';
+import type { AgentSharedMemoryPublishOptions, SharedMemoryPublicationContext, FinalizedAssertionPublishOptions, FinalizedAssertionRecordingContext } from './internal/agent-publish-options.js';
 import { beginNamedPublishFinalization, finishNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
@@ -5055,9 +5055,9 @@ export class PublishMethods extends DKGAgentBase {
       writeLocks: this.writeLocks,
       stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter,
       completeFinalization: this.completeNamedPublishFinalization.bind(this),
-      recordMint: (target, evidence, heldLifecycle, reservation) => recordFinalizedAssertionMint.call(this,
-        target.contextGraphId, target.name, { kind: 'prepared', evidence },
-        { heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress }, reservation),
+      recordMint: (target, evidence, recording) => recordFinalizedAssertionMint.call(this,
+        target.contextGraphId, target.name, { kind: 'prepared', evidence }, recording,
+        { subGraphName: target.subGraphName, agentAddress: target.agentAddress }),
     }, input);
   }
 
@@ -5801,12 +5801,19 @@ export class PublishMethods extends DKGAgentBase {
 
   async publishFromFinalizedAssertion(this: DKGAgent, contextGraphId: string, name: string,
     opts?: FinalizedAssertionPublishOptions): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-    return runFinalizedAssertionPublication.call(this, contextGraphId, name, opts, {
-      assertPlan() {},
-      mint: (id, selection, options) => this.publishFromSharedMemory(id, selection, options),
-      finishMint: async (input, ctx) => { await observeConfirmedVmTransfer(this.log, { ...input, ctx, publicationLabel: 'publish' },
-        async () => await this.completeNamedPublishFinalization(input) === 'complete' ? 'owned' : 'pending'); },
-    });
+    const selected = await selectFinalizedAssertionPublication.call(this, contextGraphId, name, opts);
+    const prepared = await prepareFinalizedAssertionContent.call(this, selected);
+    if (prepared.operationPlan.kind === 'update') return {
+      ...await publishFinalizedAssertionUpdate.call(this, prepared), assertionUri: prepared.assertionUri, seal: prepared.seal,
+    };
+    const result = await this.publishFromSharedMemory(contextGraphId, 'all', finalizedMintOptions(prepared, prepared.operationPlan.pricingPolicy));
+    await completeFinalizedAssertionMint.call(this, prepared, result);
+    if (result.status === 'confirmed') {
+      const input = finalizedPublicationIdentity(prepared);
+      await observeConfirmedVmTransfer(this.log, { ...input, ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' },
+        async () => await this.completeNamedPublishFinalization(input) === 'complete' ? 'owned' : 'pending');
+    }
+    return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
   }
 
   /** Reconciliation enters recording directly, under the caller's existing lifecycle lease. */
@@ -6285,10 +6292,8 @@ export class PublishMethods extends DKGAgentBase {
 }
 
 // Implementation-only publication stages; absent from the exported DKGAgent surface.
-async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: string, name: string,
-  opts: FinalizedAssertionPublishOptions | undefined,
-  operations: FinalizedAssertionPublicationOperations,
-): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+async function selectFinalizedAssertionPublication(this: DKGAgent, contextGraphId: string, name: string,
+  opts: FinalizedAssertionPublishOptions | undefined, recording?: FinalizedAssertionRecordingContext) {
   const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
   const publisher = opts?.publisherOverride ?? this.publisher;
   const assertionUri = contextGraphAssertionUri(
@@ -6299,38 +6304,19 @@ async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: 
   );
   const metaGraph = contextGraphMetaUri(contextGraphId);
 
-  if (operations.reservation) {
-    if (!opts?.heldLifecycle) throw new Error('Prepared reservation requires its current lifecycle lease');
-    assertAssertionLifecycleWriteLease(opts.heldLifecycle, this.writeLocks,
-      assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, opts.subGraphName));
-    if (operations.reservation.assertionUri !== assertionUri || operations.reservation.metaGraph !== metaGraph)
+  if (recording?.reservation) {
+    assertAssertionLifecycleWriteLease(recording.heldLifecycle, this.writeLocks,
+      assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, opts?.subGraphName));
+    if (recording?.reservation.assertionUri !== assertionUri || recording?.reservation.metaGraph !== metaGraph)
       throw new Error('Prepared reservation belongs to a different assertion');
   }
-  const { seal, scope: graphScope, kaId: packedKaId } = operations.reservation
+  const { seal, scope: graphScope, kaId: packedKaId } = recording?.reservation
     ?? await readFinalizedAssertionReservation(this.store,
       { contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName }, 'agent.vmPublish.seal');
 
-  // 2. Cross-check chain target — refuse to publish a sig signed
-  //    against a different deployment than this daemon currently
-  //    points at. This is the cross-deployment safety the EIP-712
-  //    domain is buying us; surface as an early 4xx-equivalent
-  //    rather than a tx revert.
   const chainTargetMismatch = await sealChainTargetMismatch(this.chain, seal);
   if (chainTargetMismatch) throw new Error(`publishFromFinalizedAssertion: ${chainTargetMismatch}`);
 
-  // #1116 (round 9, reviewer 🔴 #1/#2) — MARKER GATE. A valid seal is no longer
-  // SUFFICIENT to publish: it must be backed by a LIVE complete full share
-  // resident in SWM (the swmShareComplete marker). This closes the whole
-  // seal-staleness class at the consumer: a stale full seal that survived a
-  // subset re-share (subset never re-seals) or an already-consumed share
-  // (confirmed publish drains SWM + clears the marker, round 9 step 3) would
-  // otherwise be publishable via the merkle-still-matches path under the KA
-  // name. Placed AFTER the seal-read (so a genuinely-unfinalized asset still
-  // throws "is not finalized" — preserving that precondition) and BEFORE the
-  // create-vs-update routing + SWM gather, so it covers BOTH the MINT and UPDATE
-  // paths. A legitimate full-share publish has the marker (assertionPromote set
-  // it on the full share); an UPDATE re-publish re-sets it via the required
-  // re-promote (a confirmed publish drained SWM, so a re-publish MUST re-share).
   if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
     throw Object.assign(
       new Error(
@@ -6341,10 +6327,6 @@ async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: 
       { code: 'PUBLISH_NOT_FULL_SHARE' },
     );
   }
-  // Current graph-scoped shares retain the operation identity needed to
-  // fence an exact late SWM replay. Older finalized fixtures and migrated
-  // stores may not have a workspace head, so confirmation remains valid
-  // without installing an over-broad tombstone for those records.
   const rfc64WorkspaceHead = await resolveKnowledgeAssetWorkspaceHead({
     store: this.store,
     graphManager: new GraphManager(this.store),
@@ -6352,30 +6334,8 @@ async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: 
     kaUal: graphScope.ual,
     subGraphName: opts?.subGraphName,
   });
-  // Merge note (PR #1107 ← main): #1097's "auto-promote a sealed-but-unstaged
-  // assertion before publish" was dropped here. main reworked the memory
-  // model so that publishing a finalized-but-unshared assertion is an
-  // explicit caller precondition — `publishFromFinalizedAssertion` surfaces
-  // the actionable "No quads in shared memory" error and the vm/publish route
-  // maps it to a clean 409 VM_PUBLISH_PRECONDITION (see
-  // packages/cli/test/knowledge-assets-route.test.ts). Auto-promoting here
-  // defeats that precondition (it stages the data, so the publish proceeds
-  // instead of returning 409), so main's explicit share→publish contract
-  // supersedes the PR's auto-promote approach to the same issue.
 
-  // ── OT-RFC-43 A2 (decision 3) — CREATE-VS-UPDATE ROUTING ──
-  //
-  // BEFORE minting, read the per-layer VM pointer + the stamped kaId off the
-  // LIFECYCLE URN. If dkg:vmCurrentAssertion is SET this name has already
-  // been confirmed on-chain → this is an UPDATE (publish the SAME name
-  // twice), so call the update path with the existing kaId instead of a
-  // fresh mint. Otherwise → MINT, reusing the finalize-stamped kaId.
-  //
-  // This is the LOCAL named-lifecycle path only; the gossip-receiver
-  // "Complexity C" path (resolveUalByBatchId / update-handler.ts) is
-  // untouched.
   const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
-  const xsdInt = 'http://www.w3.org/2001/XMLSchema#integer';
   const pointerRes = await this.store.query(
     `SELECT ?vm ?kaNum WHERE { GRAPH <${metaGraph}> {
       OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
@@ -6390,7 +6350,6 @@ async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: 
     vmCurrentAssertion: vmCurrent,
     pricingPolicy: opts?.pricingPolicy,
   });
-  operations.assertPlan(operationPlan);
   const stampedNumberStr = stripLit(pointerRow?.['kaNum']);
 
   if (
@@ -6402,6 +6361,13 @@ async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: 
       `Lifecycle kaId number ${stampedNumberStr} does not match graph-scoped UAL number ${graphScope.kaNumber}`,
     );
   }
+  return { contextGraphId, name, opts, agentAddress, publisher, assertionUri, metaGraph, seal, graphScope,
+    packedKaId, rfc64WorkspaceHead, lifecycleUri, operationPlan };
+}
+type FinalizedAssertionSelection = Awaited<ReturnType<typeof selectFinalizedAssertionPublication>>;
+
+async function prepareFinalizedAssertionContent(this: DKGAgent, selected: FinalizedAssertionSelection) {
+  const { contextGraphId, opts, graphScope, seal, packedKaId } = selected;
   const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
   const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
   const sharedMemoryScope: SharedMemoryGraphScope = {
@@ -6475,8 +6441,100 @@ async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: 
     );
   }
 
-  let result: PublishResult;
-  if (operationPlan.kind === 'update') {
+  return { ...selected, newMerkleHexBare, recoveredReservedKaId, sharedMemoryScope, canonicalSwmQuads, canonicalPrivateQuads, privateMerkleRoot };
+}
+type PreparedFinalizedAssertionContent = Awaited<ReturnType<typeof prepareFinalizedAssertionContent>>;
+
+function finalizedMintOptions(prepared: PreparedFinalizedAssertionContent, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): AgentSharedMemoryPublishOptions {
+  const { opts, publisher, recoveredReservedKaId, sharedMemoryScope, graphScope, seal, privateMerkleRoot } = prepared;
+  return {
+        operationCtx: opts?.operationCtx,
+        onPhase: opts?.onPhase,
+        subGraphName: opts?.subGraphName,
+        publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
+        publishEpochs: opts?.publishEpochs,
+        pricingPolicy,
+        reservedKaId: recoveredReservedKaId,
+        sharedMemoryScope,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: graphScope.ual,
+        assertionVersion: graphScope.assertionVersion,
+        publicTripleCount: seal.publicTripleCount,
+        ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+        privateTripleCount: seal.privateTripleCount,
+        precomputedAttestation: {
+          expectedMerkleRoot: seal.merkleRoot,
+          authorAddress: seal.authorAddress,
+          signature: { r: seal.authorAttestationR, vs: seal.authorAttestationVS },
+          schemeVersion: seal.authorSchemeVersion,
+          reservedKaId: recoveredReservedKaId ?? 0n,
+        },
+        publisherOverride: publisher,
+  };
+}
+
+async function stampFinalizedPublicationLifecycle(this: DKGAgent, prepared: PreparedFinalizedAssertionContent, result: PublishResult): Promise<boolean> {
+  const { contextGraphId, name, opts, publisher, agentAddress, packedKaId, lifecycleUri, newMerkleHexBare } = prepared;
+  const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
+  if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true)
+    await publisher.clearRemainingSharedMemory(contextGraphId, opts?.subGraphName, ctx);
+  if (result.status !== 'confirmed' && result.status !== 'tentative') return false;
+  try {
+    const vmKaId = result.onChainResult ? packedKaId ?? result.onChainResult.kaId ?? result.kaId : undefined;
+    await this.publishedNamedKaVmLifecycleWriter({ contextGraphId, agentAddress, name, subGraphName: opts?.subGraphName,
+      publishedUal: result.ual, merkleRoot: newMerkleHexBare,
+      ...(vmKaId === undefined || vmKaId === null ? {} : { packedKaId: BigInt(vmKaId) }),
+    });
+    return true;
+  } catch (err) {
+    this.log.warn(ctx, `Failed to stamp VM lifecycle marker for <${lifecycleUri}>: ${err instanceof Error ? err.message : String(err)}`);
+    return false;
+  }
+}
+
+async function consumeFinalizedPublicationShare(this: DKGAgent, prepared: PreparedFinalizedAssertionContent,
+  result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
+  if (result.status !== 'confirmed') return;
+  const { contextGraphId, name, opts, publisher, agentAddress, lifecycleUri } = prepared;
+  try {
+    await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, recording?.heldLifecycle);
+  } catch (err) {
+    this.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+      `Failed to clear swmShareComplete after confirmed publish of <${lifecycleUri}>: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+function finalizedPublicationIdentity(prepared: PreparedFinalizedAssertionContent) {
+  const { contextGraphId, name, opts, rfc64WorkspaceHead, seal, assertionUri } = prepared;
+  return { contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
+    shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri };
+}
+
+/** Only local mint completion is shared; each caller owns its finalization failure policy. */
+async function completeFinalizedAssertionMint(this: DKGAgent, prepared: PreparedFinalizedAssertionContent,
+  result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
+  const { opts, assertionUri, metaGraph, seal, rfc64WorkspaceHead, contextGraphId } = prepared;
+  const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
+  if (result.status === 'confirmed') {
+    if (result.onChainResult) try {
+      await this.store.insert(buildAssertionPublishReceiptQuads({ assertionUri, metaGraph,
+        txHash: result.onChainResult.txHash ?? '', blockNumber: BigInt(result.onChainResult.blockNumber ?? 0),
+        kaId: result.onChainResult.batchId ?? 0n }));
+    } catch (err) { this.log.warn(ctx, `Failed to write publish receipt for <${assertionUri}>: ${err instanceof Error ? err.message : String(err)}`); }
+    // Finalization retries this checkpoint before consuming its completion owner.
+    try {
+      await beginNamedPublishFinalization(this.store, { assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId },
+        () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
+    } catch (err) { this.log.warn(ctx, `Failed to write publish checkpoint for <${assertionUri}>: ${err instanceof Error ? err.message : String(err)}`); }
+  }
+  await stampFinalizedPublicationLifecycle.call(this, prepared, result);
+  await consumeFinalizedPublicationShare.call(this, prepared, result, recording);
+}
+
+async function publishFinalizedAssertionUpdate(this: DKGAgent, prepared: PreparedFinalizedAssertionContent): Promise<PublishResult> {
+  const { contextGraphId, opts, publisher, packedKaId, seal, graphScope, canonicalSwmQuads, canonicalPrivateQuads,
+    privateMerkleRoot, sharedMemoryScope, lifecycleUri, operationPlan, newMerkleHexBare, metaGraph } = prepared;
+  if (operationPlan.kind !== 'update') throw new Error('Expected a finalized update plan');
     // ── UPDATE PATH ──
     // The name already has a confirmed VM version. Reuse its kaId and call
     // the on-chain update primitive. The publisher's update path recomputes
@@ -6489,7 +6547,7 @@ async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: 
       seal,
       publisher,
     );
-    result = await this.update(
+    const result = await this.update(
       packedKaId,
       contextGraphId,
       updateQuads.map((q) => ({ ...q, graph: '' })),
@@ -6541,208 +6599,40 @@ async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: 
       }
     }
 
-  } else {
-    // ── MINT PATH ──
-    // Round 4 review §9 — scope the SWM CONSTRUCT to the seal's
-    // `rootEntities` instead of `'all'`. The seal's rootEntities were
-    // captured at finalize time so this selection deterministically yields
-    // the post-promote SWM slice the seal commits to.
-    //
-    // OT-RFC-43 A2 (decision 1) — REUSE the finalize-stamped kaId. We thread
-    // `reservedKaId: packedKaId` down so ensureReservedKaId short-circuits
-    // (no second allocation). When no allocator stamped one (mock/no-chain),
-    // packedKaId is undefined and the publisher keeps its existing behavior.
-    // §F2 / OT-RFC-43 A2 — recover the packed id the seal's signature
-    // committed to: prefer the persisted seal.reservedKaId, else the
-    // lifecycle-URN kaId re-packed above. Both are undefined only for a
-    // legacy seal that predates the §F2 binding AND was never stamped with a
-    // lifecycle kaId.
-    // #1116 (round 5) — no-data preflight BEFORE the inner publisher's
-    // CG-not-registered guard. `publishFromSharedMemory` checks registration
-    // (throws CG_NOT_REGISTERED) BEFORE its own no-quads check, so an
-    // UNregistered CG + valid seal + EMPTY sealed SWM would surface
-    // CG_NOT_REGISTERED first — the /vm/publish route then auto-registers
-    // (burning mint gas) and only the retry hits the no-quads 409. The legacy
-    // memory.ts publish path had a SWM preflight to avoid exactly this; mirror
-    // it here so the no-data precondition fires for ALL callers regardless of
-    // registration. Match the publisher's wording so the route's existing 409
-    // mapping (/No quads in shared memory/) still applies.
-    result = await operations.mint(
-      contextGraphId,
-      'all',
-      {
-        operationCtx: opts?.operationCtx,
-        onPhase: opts?.onPhase,
-        subGraphName: opts?.subGraphName,
-        publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
-        publishEpochs: opts?.publishEpochs,
-        pricingPolicy: operationPlan.pricingPolicy,
-        reservedKaId: recoveredReservedKaId,
-        sharedMemoryScope,
-        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-        kaUal: graphScope.ual,
-        assertionVersion: graphScope.assertionVersion,
-        publicTripleCount: seal.publicTripleCount,
-        ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
-        privateTripleCount: seal.privateTripleCount,
-        // Wired through to the inner publisher.publish() via
-        // publishFromSharedMemory's `precomputedAttestation` option.
-        // Skips the publisher's signing entirely.
-        precomputedAttestation: {
-          expectedMerkleRoot: seal.merkleRoot,
-          authorAddress: seal.authorAddress,
-          signature: { r: seal.authorAttestationR, vs: seal.authorAttestationVS },
-          schemeVersion: seal.authorSchemeVersion,
-          // §F2 — the exact packed id the seal's signature committed to. The
-          // throw above guarantees this is defined whenever the publish is
-          // going on-chain; the `?? 0n` only survives for mock/no-chain runs
-          // where it is never submitted.
-          reservedKaId: recoveredReservedKaId ?? 0n,
-        },
-        publisherOverride: publisher,
-      },
-    );
 
-    // On confirmed mint, stamp VM pointer + publish receipt on _meta.
-    if (result.status === 'confirmed' && result.onChainResult) {
-      try {
-        const receiptQuads = buildAssertionPublishReceiptQuads({
-          assertionUri,
-          metaGraph,
-          txHash: result.onChainResult.txHash ?? '',
-          blockNumber: BigInt(result.onChainResult.blockNumber ?? 0),
-          kaId: result.onChainResult.batchId ?? 0n,
-        });
-        await this.store.insert(receiptQuads);
-      } catch (err) {
-        this.log.warn(
-          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          `Failed to write publish receipt for <${assertionUri}>: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      }
-    }
-  }
-
-  if (result.status === 'confirmed' && operationPlan.kind !== 'update') {
-    // Best-effort like the receipt: the finalization below writes the checkpoint again before it
-    // completes, so a failed write here cannot strand a confirmed publish with its share consumed.
+  if (await stampFinalizedPublicationLifecycle.call(this, prepared, result)) {
     try {
-      await beginNamedPublishFinalization(this.store, {
-        assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId,
-      }, () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
-    } catch (err) {
-      this.log.warn(
-        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-        `Failed to write publish checkpoint for <${assertionUri}>: ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-    }
+      const priorBare = operationPlan.vmCurrentAssertion.replace(/^0x/, '');
+      const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
+      await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+      await this.store.insert([
+        { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
+        { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
+      ]);
+    } catch (err) { this.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+      `Failed to stamp update provenance for <${lifecycleUri}>: ${err instanceof Error ? err.message : String(err)}`); }
   }
-
-  // Exact scope owns published-root cleanup. A caller's explicit request to
-  // clear every remaining share is a separate family-wide destructive action
-  // that runs only after a confirmed publish/update.
-  if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true) {
-    await publisher.clearRemainingSharedMemory(
-      contextGraphId,
-      opts?.subGraphName,
-      opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-    );
-  }
-
-  // All publication kinds share the lifecycle mutation; updates then record their provenance.
-  if (result.status === 'confirmed' || result.status === 'tentative') {
-    try {
-      const vmKaId = result.onChainResult ? packedKaId ?? result.onChainResult.kaId ?? result.kaId : undefined;
-      await this.publishedNamedKaVmLifecycleWriter({
-        contextGraphId, agentAddress, name, subGraphName: opts?.subGraphName,
-        publishedUal: result.ual, merkleRoot: newMerkleHexBare,
-        ...(vmKaId === undefined || vmKaId === null ? {} : { packedKaId: BigInt(vmKaId) }),
-      });
-      // Update provenance follows the common lifecycle write; WM converges to VM.
-      if (operationPlan.kind === 'update') {
-        try {
-          const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
-            ? operationPlan.vmCurrentAssertion.slice(2)
-            : operationPlan.vmCurrentAssertion;
-          const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-          // Record the
-          // revision chain via prov:wasRevisionOf <prior>. RFC ka-metadata-trim
-          // Phase 2: WM converges back to VM after the update mint, so the
-          // divergence-only stamp DELETES any stale WM row instead of
-          // duplicating the new merkle (readers COALESCE missing wm → vm).
-          await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-          await this.store.insert([
-            { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
-            { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
-          ]);
-        } catch (err) {
-          this.log.warn(
-            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            `Failed to stamp update provenance for <${lifecycleUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-      }
-    } catch (err) {
-      this.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-        `Failed to stamp VM lifecycle marker for <${lifecycleUri}>: ${err instanceof Error ? err.message : String(err)}`);
-    }
-  }
-
-  // #1116 (round 9, reviewer 🔴 #2) — a CONFIRMED publish CONSUMES the SWM full
-  // share: the mint path (publishFromSharedMemory) and the update path both
-  // DRAIN the published roots from SWM after on-chain confirmation. The
-  // swmShareComplete marker asserts "a complete full share is resident in SWM",
-  // which no longer holds once SWM is drained. Clear it (best-effort, after the
-  // chain commit) so a post-publish finalize(layer:"swm") can't pass the gate
-  // against an empty SWM, and the next publish requires a fresh full share (which
-  // re-sets the marker via assertionPromote). Covers BOTH MINT and UPDATE.
-  if (result.status === 'confirmed') {
-    try {
-      await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, opts?.heldLifecycle);
-    } catch (err) {
-      this.log.warn(
-        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-        `Failed to clear swmShareComplete after confirmed publish of <${lifecycleUri}>: ` +
-          (err instanceof Error ? err.message : String(err)),
-      );
-    }
-  }
-
-  if (result.status === 'confirmed') {
-    const finalization = {
-      contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
-      shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri,
-    };
-    // Updates have no mint-recovery command: keep their existing observer
-    // and never create a mint-only checkpoint for an updated version.
-    if (operationPlan.kind === 'update') {
-      await this.observeRfc64ConfirmedVmV1({ ...finalization,
-        ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
-    } else await operations.finishMint(finalization, opts?.operationCtx ?? createOperationContext('publishFromSWM'));
-  }
-
-  return { ...result, assertionUri, seal };
+  await consumeFinalizedPublicationShare.call(this, prepared, result);
+  if (result.status === 'confirmed') await this.observeRfc64ConfirmedVmV1({ ...finalizedPublicationIdentity(prepared),
+    ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
+  return result;
 }
 
+/** Internal record-only entry: reservation and exact lifecycle lease are one required context. */
 export async function recordFinalizedAssertionMint(this: DKGAgent, contextGraphId: string, name: string,
-  receipt: MintAdoptionRequest, opts?: FinalizedAssertionPublishOptions, reservation?: FinalizedAssertionReservation,
+  receipt: MintAdoptionRequest, recording: FinalizedAssertionRecordingContext, opts?: FinalizedAssertionPublishOptions,
 ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-  return runFinalizedAssertionPublication.call(this, contextGraphId, name, opts, {
-    reservation,
-    assertPlan(plan) {
-      if (plan.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
-        { code: KA_MINT_RECONCILE_REFUSED_CODE });
-    },
-    mint: (id, selection, options) => recordMintFromSharedMemory.call(this, id, selection, receipt, options),
-    finishMint: async input => {
-      if (await this.completeNamedPublishFinalization(input) === 'pending')
-        throw Object.assign(new Error('Named publish catalog finalization remains pending; retry to finish it'),
-          { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
-    },
-  });
+  if (!recording?.reservation || !recording.heldLifecycle) throw new Error('Prepared recording requires its reservation and lifecycle lease');
+  const selected = await selectFinalizedAssertionPublication.call(this, contextGraphId, name, opts, recording);
+  if (selected.operationPlan.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
+    { code: KA_MINT_RECONCILE_REFUSED_CODE });
+  const prepared = await prepareFinalizedAssertionContent.call(this, selected);
+  const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintOptions(prepared, selected.operationPlan.pricingPolicy));
+  await completeFinalizedAssertionMint.call(this, prepared, result, recording);
+  if (result.status === 'confirmed' && await this.completeNamedPublishFinalization(finalizedPublicationIdentity(prepared)) === 'pending')
+    throw Object.assign(new Error('Named publish catalog finalization remains pending; retry to finish it'),
+      { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+  return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
 }
 
 async function runSharedMemoryPublication(this: DKGAgent, contextGraphId: string,

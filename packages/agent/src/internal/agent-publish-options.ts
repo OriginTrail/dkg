@@ -2,10 +2,8 @@ import type { FinalizedAssertionReservation } from './finalized-assertion-reserv
 // SPDX-License-Identifier: Apache-2.0
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { SharedMemoryGraphScope } from '@origintrail-official/dkg-storage';
-import type { DKGPublisher, PublishOptions, PublishResult, PhaseCallback, AssertionLifecycleWriteLease } from '@origintrail-official/dkg-publisher';
-import type { DKGAgent } from '../dkg-agent.js';
+import type { DKGPublisher, PublishOptions, PhaseCallback, AssertionLifecycleWriteLease } from '@origintrail-official/dkg-publisher';
 import type { PreSignedAuthorAttestation } from '../dkg-agent-types.js';
-import type { planKnowledgeAssetVmPublication } from './knowledge-asset-vm-publish-request.js';
 
 export type AgentSharedMemoryPublishOptions = {
       clearSharedMemoryAfter?: boolean;
@@ -108,14 +106,8 @@ export type FinalizedAssertionPublishOptions = {
       pricingPolicy?: PublishOptions['pricingPolicy'];
       clearSharedMemoryAfter?: boolean;
       publisherOverride?: DKGPublisher;
-      /** Internal reconciliation transaction; validated by the publisher at cleanup. */
-      heldLifecycle?: AssertionLifecycleWriteLease;
     };
-type NamedMintFinalization = Parameters<DKGAgent['completeNamedPublishFinalization']>[0];
-export interface FinalizedAssertionPublicationOperations {
-  readonly reservation?: FinalizedAssertionReservation;
-  assertPlan(plan: ReturnType<typeof planKnowledgeAssetVmPublication>): void;
-  mint(contextGraphId: string, selection: 'all', options: AgentSharedMemoryPublishOptions): Promise<PublishResult>;
-  finishMint(input: NamedMintFinalization, ctx: OperationContext): Promise<void>;
+export interface FinalizedAssertionRecordingContext {
+  readonly reservation: FinalizedAssertionReservation;
+  readonly heldLifecycle: AssertionLifecycleWriteLease;
 }
-

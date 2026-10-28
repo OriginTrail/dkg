@@ -1,3 +1,4 @@
+import type { FinalizedAssertionRecordingContext } from './internal/agent-publish-options.js';
 import { readFinalizedAssertionReservation, FinalizedAssertionReservationError, type FinalizedAssertionReservation as SealedReservation } from './internal/finalized-assertion-reservation.js';
 import { readNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -55,8 +56,7 @@ export interface KnowledgeAssetMintReconcileHost {
   readonly writeLocks: Map<string, Promise<void>>;
   readonly stampPublishedLifecycle: PublishedNamedKaVmLifecycleWriter;
   readonly completeFinalization: OmitThisParameter<DKGAgent['completeNamedPublishFinalization']>;
-  recordMint(target: Target, evidence: PreparedMintAdoption, heldLifecycle: AssertionLifecycleWriteLease,
-    reservation: SealedReservation): Promise<PublishResult>;
+  recordMint(target: Target, evidence: PreparedMintAdoption, recording: FinalizedAssertionRecordingContext): Promise<PublishResult>;
 }
 
 interface Target {
@@ -250,7 +250,7 @@ async function assertReservationUnchanged(
 
 async function recordThroughPublish(host: KnowledgeAssetMintReconcileHost, target: Target,
   evidence: PreparedMintAdoption, heldLifecycle: AssertionLifecycleWriteLease, reservation: SealedReservation): Promise<OnChainPublishResult> {
-  const published = await host.recordMint(target, evidence, heldLifecycle, reservation);
+  const published = await host.recordMint(target, evidence, { heldLifecycle, reservation });
   if (published.status !== 'confirmed' || !published.onChainResult) {
     throw Object.assign(new Error(`Recording the mint of "${target.name}" ended ${published.status}. Retry the reconcile.`), {
       code: KA_MINT_RECONCILE_INCOMPLETE_CODE,

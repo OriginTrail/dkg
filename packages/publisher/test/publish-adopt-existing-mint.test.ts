@@ -641,3 +641,28 @@ it('refuses adopted-mint writes when a newer version already owns the materializ
     expect(data.type === 'quads' && data.quads.map(q => q.object)).toEqual(['"Version two"']);
   } finally { await f.store.close(); }
 });
+
+
+it('keeps the adopted mint metadata when the delayed original publish receives its receipt', async () => {
+  const f = await strandedPublishFixture();
+  let entered!: () => void; let release!: () => void;
+  const mined = new Promise<void>(resolve => { entered = resolve; });
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const create = f.chain.createKnowledgeAssets.bind(f.chain);
+  vi.spyOn(f.chain, 'createKnowledgeAssets').mockImplementationOnce(async params => {
+    const result = await create(params); entered(); await held; return result;
+  });
+  const original = f.publish();
+  try {
+    await mined;
+    const adopted = await f.publish({});
+    expect(adopted.status).toBe('confirmed');
+    const before = await f.metadataValueCounts();
+    expect(before).toMatchObject({ 'dkg:publishedAt': 1, 'dkg:status': 1, 'dkg:transactionHash': 1, 'dkg:confirmationKind': 1 });
+    await new Promise(resolve => setTimeout(resolve, 10));
+    release();
+    await expect(original).resolves.toMatchObject({ status: 'confirmed', onChainResult: { txHash: adopted.onChainResult!.txHash } });
+    expect(await f.metadataValueCounts()).toEqual(before);
+    expect(await f.graphSize(f.vmGraph)).toBe(1);
+  } finally { release(); await original; }
+});
