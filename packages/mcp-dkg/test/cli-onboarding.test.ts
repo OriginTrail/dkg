@@ -153,33 +153,66 @@ describe('join through the real client and filesystem installer', () => {
     ).toBe(true);
   });
 
-  it.each(['explicit', 'environment', 'config', 'file', 'empty-file', 'missing-file'] as const)(
-    'resolves %s credentials before the first request',
-    async (mode) => {
-      write(path.join(home, '.dkg/config.yaml'), 'node:\n  token: config-token\n');
-      write(path.join(home, '.dkg/auth.token'), '# token\nfile-token\n');
-      const extra: string[] = ['--no-subscribe', '--dry-run'];
-      if (mode === 'explicit') extra.push('--token=explicit-token');
-      if (mode === 'environment') vi.stubEnv('DKG_TOKEN', 'env-token');
-      if (!['explicit', 'environment', 'config'].includes(mode))
-        fs.rmSync(path.join(home, '.dkg/config.yaml'));
-      if (mode === 'empty-file') write(path.join(home, '.dkg/auth.token'), '# only a comment\n');
-      if (mode === 'missing-file') fs.rmSync(path.join(home, '.dkg/auth.token'));
-      expect(await join(extra)).toBe(0);
-      const expected = {
-        explicit: 'explicit-token',
-        environment: 'env-token',
-        config: 'config-token',
-        file: 'file-token',
-        'empty-file': '',
-        'missing-file': '',
-      }[mode];
-      expect(fetcher.mock.calls[0][1]?.headers).toEqual(
-        expected ? { Authorization: `Bearer ${expected}` } : {},
-      );
-      expect(fs.existsSync(path.join(workspace, 'AGENTS.md'))).toBe(false);
+  it.each([
+    {
+      scenario: 'explicit CLI token overrides environment, config, and file',
+      cliArgs: ['--token=explicit-token'],
+      environmentToken: 'env-token',
+      configContents: 'node:\n  token: config-token\n',
+      tokenFileContents: '# token\nfile-token\n',
+      expectedAuthorization: { Authorization: 'Bearer explicit-token' },
     },
-  );
+    {
+      scenario: 'environment token overrides config and file',
+      cliArgs: [],
+      environmentToken: 'env-token',
+      configContents: 'node:\n  token: config-token\n',
+      tokenFileContents: '# token\nfile-token\n',
+      expectedAuthorization: { Authorization: 'Bearer env-token' },
+    },
+    {
+      scenario: 'config token overrides file',
+      cliArgs: [],
+      environmentToken: undefined,
+      configContents: 'node:\n  token: config-token\n',
+      tokenFileContents: '# token\nfile-token\n',
+      expectedAuthorization: { Authorization: 'Bearer config-token' },
+    },
+    {
+      scenario: 'token file is used when no higher-priority token is configured',
+      cliArgs: [],
+      environmentToken: undefined,
+      configContents: undefined,
+      tokenFileContents: '# token\nfile-token\n',
+      expectedAuthorization: { Authorization: 'Bearer file-token' },
+    },
+    {
+      scenario: 'comment-only token file sends no authorization header',
+      cliArgs: [],
+      environmentToken: undefined,
+      configContents: undefined,
+      tokenFileContents: '# only a comment\n',
+      expectedAuthorization: {},
+    },
+    {
+      scenario: 'missing token file sends no authorization header',
+      cliArgs: [],
+      environmentToken: undefined,
+      configContents: undefined,
+      tokenFileContents: undefined,
+      expectedAuthorization: {},
+    },
+  ])('resolves credentials before the first request: $scenario', async (fixture) => {
+    if (fixture.configContents !== undefined)
+      write(path.join(home, '.dkg/config.yaml'), fixture.configContents);
+    if (fixture.tokenFileContents !== undefined)
+      write(path.join(home, '.dkg/auth.token'), fixture.tokenFileContents);
+    vi.stubEnv('DKG_TOKEN', fixture.environmentToken);
+
+    expect(await join(['--no-subscribe', '--dry-run', ...fixture.cliArgs])).toBe(0);
+    expect(fetcher.mock.calls[0][1]?.headers).toEqual(fixture.expectedAuthorization);
+    expect(fs.existsSync(path.join(workspace, 'AGENTS.md'))).toBe(false);
+  });
 
   it.each([401, 503])(
     'stops on daemon HTTP %i before subscription or installation',

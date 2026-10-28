@@ -46,39 +46,65 @@ describe('workspace configuration boundaries', () => {
       sourcePath: path.join(root, 'child/.dkg/config.yaml'),
     });
   });
-  it.each(['relative', 'absolute', 'home', 'bare-home', 'missing', 'empty', 'comments'] as const)(
-    'resolves %s token paths without leaking them into diagnostics',
-    (kind) => {
-      const tokenFile =
-        kind === 'relative'
-          ? '../auth.token'
-          : kind === 'home'
-            ? '~/auth.token'
-            : kind === 'bare-home'
-              ? '~'
-              : path.join(root, 'auth.token');
-      if (kind !== 'missing')
-        write(
-          path.join(root, 'auth.token'),
-          kind === 'empty'
-            ? ''
-            : kind === 'comments'
-              ? '# no token\n\n'
-              : '# comment\n\n  secret-token  \nsecond-token\n',
-        );
-      write(path.join(root, '.dkg/config.yaml'), JSON.stringify({ node: { tokenFile } }));
-      vi.stubEnv('DKG_TOKEN', 'fallback-token');
-      const config = loadConfig(root);
-      expect(config.token).toBe(
-        ['bare-home', 'missing', 'empty', 'comments'].includes(kind)
-          ? 'fallback-token'
-          : 'secret-token',
-      );
-      const summary = describeConfig(config);
-      expect(summary).toContain('token=[set]');
-      expect(summary).not.toContain(config.token);
+  it.each([
+    {
+      scenario: 'relative path',
+      tokenPath: () => '../auth.token',
+      tokenFileContents: '# comment\n\n  secret-token  \nsecond-token\n',
+      expectedToken: 'secret-token',
     },
-  );
+    {
+      scenario: 'absolute path',
+      tokenPath: (home: string) => path.join(home, 'auth.token'),
+      tokenFileContents: '# comment\n\n  secret-token  \nsecond-token\n',
+      expectedToken: 'secret-token',
+    },
+    {
+      scenario: 'home-relative path',
+      tokenPath: () => '~/auth.token',
+      tokenFileContents: '# comment\n\n  secret-token  \nsecond-token\n',
+      expectedToken: 'secret-token',
+    },
+    {
+      scenario: 'bare home path points to a directory',
+      tokenPath: () => '~',
+      tokenFileContents: undefined,
+      expectedToken: 'fallback-token',
+    },
+    {
+      scenario: 'missing token file',
+      tokenPath: (home: string) => path.join(home, 'auth.token'),
+      tokenFileContents: undefined,
+      expectedToken: 'fallback-token',
+    },
+    {
+      scenario: 'empty token file',
+      tokenPath: (home: string) => path.join(home, 'auth.token'),
+      tokenFileContents: '',
+      expectedToken: 'fallback-token',
+    },
+    {
+      scenario: 'comment-only token file',
+      tokenPath: (home: string) => path.join(home, 'auth.token'),
+      tokenFileContents: '# no token\n\n',
+      expectedToken: 'fallback-token',
+    },
+  ])('resolves $scenario without leaking credentials into diagnostics', (fixture) => {
+    if (fixture.tokenFileContents !== undefined)
+      write(path.join(root, 'auth.token'), fixture.tokenFileContents);
+    write(
+      path.join(root, '.dkg/config.yaml'),
+      JSON.stringify({ node: { tokenFile: fixture.tokenPath(root) } }),
+    );
+    vi.stubEnv('DKG_TOKEN', 'fallback-token');
+
+    const config = loadConfig(root);
+    expect(config.token).toBe(fixture.expectedToken);
+    const summary = describeConfig(config);
+    expect(summary).toContain('token=[set]');
+    expect(summary).not.toContain(config.token);
+  });
+
   it.each([true, false, ' TRUE ', 'false', 12])(
     'honors capture preferences and explicit top-level autoShare %j',
     (autoShare) => {
