@@ -40,6 +40,14 @@ report hash; failure paths are normalized to `<checkout>`. These are mutation
 proofs, not assertions that an old release was executed. The existing
 `qa:prove-regression` command still exclusively runs historical-replay profiles.
 
+GH-3475 was refreshed against `e86331598c5de7709ec05e312ac043b9f5a41255`
+after lifecycle integration changed its source file, on Node 22.23.1 / pnpm
+10.28.1. The recorded guard substitution failed the named assertion and the
+restored source passed it. Its complete Vitest reports are retained alongside
+the summaries as `red-report.json` and `green-report.json`, with only checkout
+paths normalized and JSON formatted. Each summary records both the original
+report hash and the retained report's path, hash and normalization.
+
 To refresh a mutation proof, use an isolated checkout with dependencies built,
 apply exactly the receipt's single substitution, and run the recorded command
 with a new report path. Require exactly the named assertion to fail with an

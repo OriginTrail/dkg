@@ -1,6 +1,6 @@
+import { readHeldGraphScopedAssets } from './held-asset-membership.js';
 import { partitionVerifiedGraphScopedAssets } from '../../src/sync/requester/verified-asset-preparation.js';
 import { materializeVerifiedGraphScopedAsset } from '../../src/sync/requester/graph-scoped-materialization.js';
-import { readHeldGraphScopedAssets } from '../../src/sync/requester/stored-graph-assets.js';
 import { createGraphScopedDurableManifestPlan } from '../../src/sync/durable-integrity.js';
 import { expect, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
