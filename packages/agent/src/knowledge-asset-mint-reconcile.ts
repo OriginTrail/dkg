@@ -1,3 +1,5 @@
+import type { TripleStore } from '@origintrail-official/dkg-storage';
+import type { DKGPublisher } from '@origintrail-official/dkg-publisher';
 import type { CompleteNamedPublishFinalization } from './named-publish-finalization.js';
 import type { FinalizedAssertionRecordingContext } from './internal/agent-publish-options.js';
 import { readFinalizedAssertionReservation, FinalizedAssertionReservationError, type FinalizedAssertionReservation as SealedReservation } from './internal/finalized-assertion-reservation.js';
@@ -53,6 +55,13 @@ export type KnowledgeAssetMintReconcileResult =
 
 /** The agent internals reconcile writes through. */
 export interface KnowledgeAssetMintReconcileHost {
+  readonly store: TripleStore;
+  readonly resolveAuthor: OmitThisParameter<DKGAgent['resolveFinalizedAssertionPublishAuthor']>;
+  readonly history: DKGAgent['assertion']['history'];
+  readonly getContextGraphOnChainId: OmitThisParameter<DKGAgent['getContextGraphOnChainId']>;
+  readonly loadSelectedSwmQuads: OmitThisParameter<DKGAgent['_loadSelectedSWMQuads']>;
+  readonly hasSwmShareComplete: DKGPublisher['hasSwmShareComplete'];
+  readonly clearSwmShareComplete: DKGPublisher['clearSwmShareComplete'];
   readonly chain: ChainAdapter;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly stampPublishedLifecycle: PublishedNamedKaVmLifecycleWriter;
@@ -97,17 +106,16 @@ function isRecorded(lifecycle: AssertionHistoryDescriptor | null | undefined, se
  * sending another mint.
  */
 export async function reconcileLateMint(
-  agent: DKGAgent,
   host: KnowledgeAssetMintReconcileHost,
   input: KnowledgeAssetMintReconcileInput,
 ): Promise<KnowledgeAssetMintReconcileResult> {
   const { contextGraphId, name, subGraphName } = input;
-  const agentAddress = await agent.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, {
+  const agentAddress = await host.resolveAuthor(contextGraphId, name, {
     subGraphName,
     ...(input.selectedAuthorAgentAddress === undefined ? {} : { selectedAuthorAgentAddress: input.selectedAuthorAgentAddress }),
   });
   const target: Target = { contextGraphId, name, subGraphName, agentAddress, txHash: input.txHash };
-  const reservation = await readSealedReservation(agent, target);
+  const reservation = await readSealedReservation(host, target);
   const { ual } = reservation.scope;
   // Chain evidence only means something for the chain the reservation names,
   // compared as the publish path compares it (exact label or EIP-155 alias).
@@ -118,13 +126,13 @@ export async function reconcileLateMint(
   const chainTargetMismatch = await sealChainTargetMismatch(host.chain, reservation.seal);
   if (chainTargetMismatch) throw refused(`Cannot record "${name}": ${chainTargetMismatch}`);
   const sealRoot = bareRoot(ethers.hexlify(reservation.seal.merkleRoot));
-  const lifecycle = () => agent.assertion.history(contextGraphId, name, { agentAddress, subGraphName });
+  const lifecycle = () => host.history(contextGraphId, name, { agentAddress, subGraphName });
   // A minted version is complete only with its publish receipt; the publish
   // path writes that receipt best-effort, so a missing one is completed here.
   const complete = async (state: AssertionHistoryDescriptor | null | undefined) => isRecorded(state, sealRoot, ual)
-    && (BigInt(reservation.scope.assertionVersion) !== 1n || await hasPublishReceipt(agent, reservation))
-    && (await readNamedPublishFinalization(agent.store, reservation)).kind === 'complete'
-    && !(await agent.publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName));
+    && (BigInt(reservation.scope.assertionVersion) !== 1n || await hasPublishReceipt(host, reservation))
+    && (await readNamedPublishFinalization(host.store, reservation)).kind === 'complete'
+    && !(await host.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName));
 
   const before = await lifecycle();
   if (await complete(before)) return { status: 'already-published', ual };
@@ -135,9 +143,9 @@ export async function reconcileLateMint(
   const readableShare = async (current: AssertionHistoryDescriptor | null | undefined) => {
     // A promote retry can clear the marker after checking VM content without
     // sending finalization. Only a publish-owned checkpoint certifies that step.
-    const progress = await readNamedPublishFinalization(agent.store, reservation);
+    const progress = await readNamedPublishFinalization(host.store, reservation);
     const share = progress.kind !== 'legacy'
-      ? 'consumed' : await shareState(agent, reservation, target, current?.vmCurrentAssertion !== undefined);
+      ? 'consumed' : await shareState(host, reservation, target, current?.vmCurrentAssertion !== undefined);
     if (share === 'interrupted') {
       throw refused(`An interrupted publish consumed the share of "${name}", or its VM lifecycle was already stamped, ` +
         'but no publish-owned checkpoint proves its finalization gossip completed. A cleared share marker ' +
@@ -148,7 +156,7 @@ export async function reconcileLateMint(
   // Refuse an already interrupted local publish before any chain lookup, then
   // recheck under the lease after evidence preparation to cover concurrent changes.
   await readableShare(before);
-  const onChainId = await agent.getContextGraphOnChainId(contextGraphId);
+  const onChainId = await host.getContextGraphOnChainId(contextGraphId);
   if (!onChainId || !/^\d+$/.test(onChainId)) throw refused(`Context graph "${contextGraphId}" has no on-chain id.`);
   const expected = { kaId: reservation.kaId, merkleRoot: reservation.seal.merkleRoot,
     contextGraphId: BigInt(onChainId), authorAddress: reservation.seal.authorAddress };
@@ -156,12 +164,12 @@ export async function reconcileLateMint(
   const evidence = await prepareMintAdoption(host.chain, expected, target.txHash);
   const lock = assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, subGraphName);
   const mint = await withAssertionLifecycleWriteLease(host.writeLocks, lock, async heldLifecycle => {
-    const lockedReservation = await assertReservationUnchanged(agent, reservation, target);
+    const lockedReservation = await assertReservationUnchanged(host, reservation, target);
     const current = await lifecycle();
     const share = await readableShare(current);
     return share === 'resident'
       ? recordThroughPublish(host, target, evidence, heldLifecycle, lockedReservation)
-      : completeRecordedLifecycle(agent, host, lockedReservation, target, await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle);
+      : completeRecordedLifecycle(host, lockedReservation, target, await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle);
   });
 
   const after = await lifecycle();
@@ -182,8 +190,8 @@ export async function reconcileLateMint(
   };
 }
 
-async function readSealedReservation(agent: DKGAgent, target: Target): Promise<SealedReservation> {
-  try { return await readFinalizedAssertionReservation(agent.store, target, 'agent.reconcileLateMint.seal'); }
+async function readSealedReservation(host: KnowledgeAssetMintReconcileHost, target: Target): Promise<SealedReservation> {
+  try { return await readFinalizedAssertionReservation(host.store, target, 'agent.reconcileLateMint.seal'); }
   catch (error) {
     if (error instanceof FinalizedAssertionReservationError || error instanceof LegacyKnowledgeAssetReadOnlyError)
       throw refused(error.message);
@@ -192,8 +200,8 @@ async function readSealedReservation(agent: DKGAgent, target: Target): Promise<S
 }
 
 /** The publish receipt (transaction and block) a confirmed mint leaves on the assertion. */
-async function hasPublishReceipt(agent: DKGAgent, { assertionUri, metaGraph }: SealedReservation): Promise<boolean> {
-  const result = await agent.store.query(
+async function hasPublishReceipt(host: KnowledgeAssetMintReconcileHost, { assertionUri, metaGraph }: SealedReservation): Promise<boolean> {
+  const result = await host.store.query(
     `ASK { GRAPH <${metaGraph}> { <${assertionUri}> <${ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX}> ?tx } }`,
     { source: 'agent.reconcileLateMint.receipt' },
   );
@@ -202,17 +210,17 @@ async function hasPublishReceipt(agent: DKGAgent, { assertionUri, metaGraph }: S
 
 /** A resident share is safe to record; all other legacy states require positive finalization evidence. */
 async function shareState(
-  agent: DKGAgent,
+  host: KnowledgeAssetMintReconcileHost,
   { seal, scope }: SealedReservation,
   target: Target,
   vmStamped: boolean,
 ): Promise<'resident' | 'interrupted'> {
-  if (!(await agent.publisher.hasSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName))) {
+  if (!(await host.hasSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName))) {
     return 'interrupted';
   }
   if (vmStamped) return 'interrupted';
   if (seal.publicTripleCount === 0) return 'resident';
-  const shared = await agent._loadSelectedSWMQuads(target.contextGraphId, 'all', target.subGraphName, {
+  const shared = await host.loadSelectedSwmQuads(target.contextGraphId, 'all', target.subGraphName, {
     kind: 'named-lifecycle',
     identity: { agentAddress: scope.agentAddress, kaNumber: BigInt(scope.kaNumber) },
   });
@@ -221,13 +229,13 @@ async function shareState(
 
 /** Under the lifecycle write lock: the seal and lifecycle still describe the reservation reconcile verified. */
 async function assertReservationUnchanged(
-  agent: DKGAgent,
+  host: KnowledgeAssetMintReconcileHost,
   { seal, scope }: Pick<SealedReservation, 'seal' | 'scope'>,
   target: Target,
 ): Promise<SealedReservation> {
   let current: SealedReservation;
   try {
-    current = await readSealedReservation(agent, target);
+    current = await readSealedReservation(host, target);
   } catch (error) {
     if ((error as { code?: string }).code !== KA_MINT_RECONCILE_REFUSED_CODE) throw error;
     throw refused(`The seal of "${target.name}" was removed while reconcile waited, for example by pull-from; nothing was written.`);
@@ -237,7 +245,7 @@ async function assertReservationUnchanged(
     || bareRoot(ethers.hexlify(current.seal.merkleRoot)) !== sealRoot) {
     throw refused(`The seal of "${target.name}" changed while reconcile waited; nothing was written.`);
   }
-  const lifecycle = await agent.assertion.history(target.contextGraphId, target.name, {
+  const lifecycle = await host.history(target.contextGraphId, target.name, {
     agentAddress: target.agentAddress,
     subGraphName: target.subGraphName,
   });
@@ -269,14 +277,13 @@ async function recordThroughPublish(host: KnowledgeAssetMintReconcileHost, targe
  * attempts report the asset published.
  */
 async function completeRecordedLifecycle(
-  agent: DKGAgent,
   host: KnowledgeAssetMintReconcileHost,
   { seal, scope, kaId, assertionUri, metaGraph }: SealedReservation,
   target: Target,
   mint: OnChainPublishResult,
   heldLifecycle: AssertionLifecycleWriteLease,
 ): Promise<OnChainPublishResult> {
-  const record = await resolveConfirmedGraphScopedVm(agent.store, {
+  const record = await resolveConfirmedGraphScopedVm(host.store, {
     contextGraphId: target.contextGraphId,
     ual: scope.ual,
     assertionVersion: BigInt(scope.assertionVersion),
@@ -296,7 +303,7 @@ async function completeRecordedLifecycle(
   if (envelope.transactionHash !== undefined && envelope.transactionHash.toLowerCase() !== mint.txHash.toLowerCase()) {
     throw refused(`The local record of "${target.name}" names transaction ${envelope.transactionHash}, not the mint ${mint.txHash}.`);
   }
-  await agent.store.insert(buildAssertionPublishReceiptQuads({
+  await host.store.insert(buildAssertionPublishReceiptQuads({
     assertionUri, metaGraph, txHash: mint.txHash, blockNumber: BigInt(mint.blockNumber),
   }));
   const finalization = await host.completeFinalization({
@@ -314,6 +321,6 @@ async function completeRecordedLifecycle(
     merkleRoot: ethers.hexlify(seal.merkleRoot),
     packedKaId: kaId,
   });
-  await agent.publisher.clearSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName, heldLifecycle);
+  await host.clearSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName, heldLifecycle);
   return mint;
 }

@@ -1,5 +1,5 @@
 import type { MintRecordingOptions, SharedMemoryMintRecordingOptions } from './publisher.js';
-import { adoptedMintAlreadyRecorded } from './adopted-mint-record.js';
+import { replaceRecordedMintAccess, adoptedMintAlreadyRecorded } from './adopted-mint-record.js';
 import type { MintAdoptionRequest } from './adopt-existing-mint.js';
 import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication, type PreparedPublicationContent } from './prepared-publication.js';
 import { recordTentativePublication } from './record-tentative-publication.js';
@@ -2075,14 +2075,8 @@ export class DKGPublisher implements Publisher {
     request: MintAdoptionRequest,
     options: SharedMemoryMintRecordingOptions): Promise<PublishResult> {
     const content = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
-    // Required sealed fields come from the recording boundary, while content
-    // and target remapping come from the shared-memory preparation.
-    const recording: MintRecordingOptions = { ...options, ...content.options,
-      contentScopeVersion: options.contentScopeVersion, kaUal: options.kaUal,
-      assertionVersion: options.assertionVersion, publicTripleCount: options.publicTripleCount,
-      privateTripleCount: options.privateTripleCount, reservedKaId: options.reservedKaId,
-      precomputedAttestation: options.precomputedAttestation };
-    return content.finalize(await this.recordExistingMint(recording, request));
+    // Content/routing preparation cannot widen or overwrite the sealed target.
+    return content.finalize(await this.recordExistingMint({ ...options, ...content.contentAndRouting }, request));
   }
 
   private async prepareSharedMemoryPublication(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
@@ -2238,11 +2232,15 @@ export class DKGPublisher implements Publisher {
     });
 
     this.log.info(ctx, `Publishing ${quads.length} public and ${privateQuads.length} private quads from shared memory to ${ctxGraphId ? `context graph ${ctxGraphId}` : 'data graph'}${chainCgId && !ctxGraphId ? ` (on-chain CG ${chainCgId})` : ''}${options?.subGraphName ? ` (sub-graph: ${options.subGraphName})` : ''}`);
+    const contentAndRouting = {
+      contextGraphId, quads: quads.map((q) => ({ ...q, graph: '' })),
+      ...(graphPublish ? { privateQuads } : {}), operationCtx: ctx,
+      publishContextGraphId: chainCgId ?? undefined, fromSharedMemory: true,
+      [INTERNAL_ORIGIN_TOKEN]: true as const, [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline-small-swm' as const,
+      ...(hasTrustedCatalogTriples ? { [TRUSTED_CATALOG_ORIGIN_TOKEN]: true as const } : {}),
+    };
     const internalPublishOptions: InternalPublishOptions = {
-      contextGraphId,
-      quads: quads.map((q) => ({ ...q, graph: '' })),
-      ...(graphPublish ? { privateQuads } : {}),
-      operationCtx: ctx,
+      ...contentAndRouting,
       // r12 (3878010163) — the hooks travel as one unit through the shared picker; the
       // previous field-by-field list silently dropped onPublishConfirmed at this entry point.
       ...pickPublishLifecycleHooks(options ?? {}),
@@ -2250,8 +2248,6 @@ export class DKGPublisher implements Publisher {
       accessPolicy: options?.accessPolicy, allowedPeers: options?.allowedPeers,
       v10ACKProvider: options?.v10ACKProvider,
       trustedNonManifestCatalogTriples: options?.trustedNonManifestCatalogTriples,
-      publishContextGraphId: chainCgId ?? undefined,
-      fromSharedMemory: true,
       subGraphName: options?.subGraphName,
       publisherNodeIdentityIdOverride: options?.publisherNodeIdentityIdOverride,
       precomputedAttestation: options?.precomputedAttestation,
@@ -2267,9 +2263,6 @@ export class DKGPublisher implements Publisher {
       privateMerkleRoot: options?.privateMerkleRoot,
       privateTripleCount: options?.privateTripleCount,
       pricingPolicy: options?.pricingPolicy,
-      [INTERNAL_ORIGIN_TOKEN]: true,
-      [PUBLIC_ACK_STAGING_MODE_TOKEN]: 'inline-small-swm',
-      ...(hasTrustedCatalogTriples ? { [TRUSTED_CATALOG_ORIGIN_TOKEN]: true } : {}),
     };
     const finalize = async (publishResult: PublishResult): Promise<PublishResult> => {
     // Per-cgId data promotion: copy quads + KA meta from the default
@@ -2468,7 +2461,7 @@ export class DKGPublisher implements Publisher {
 
     return publishResult;
     };
-    return { options: internalPublishOptions, ctx, finalize };
+    return { options: internalPublishOptions, contentAndRouting, ctx, finalize };
   }
 
   /** @deprecated Use publishFromSharedMemory. Will be removed in V10.1. */
@@ -3358,7 +3351,8 @@ export class DKGPublisher implements Publisher {
           q.graph === defaultMeta ? { ...q, graph: target.targetMetaGraphUri! } : q,
         );
       }
-      if (graphPublish && !keepsExistingRecord) {
+      if (graphPublish) {
+        if (keepsExistingRecord) await replaceRecordedMintAccess(this.store, contextGraphId, graphPublish.scope.ual, confirmedQuads);
         await replaceLocallyTrustedKnowledgeAssetControls(
           this.store,
           graphPublish.scope.ual,

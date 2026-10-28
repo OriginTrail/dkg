@@ -5052,7 +5052,12 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     input: KnowledgeAssetMintReconcileInput,
   ): Promise<KnowledgeAssetMintReconcileResult> {
-    return reconcileLateMint(this, {
+    return reconcileLateMint({
+      store: this.store, resolveAuthor: this.resolveFinalizedAssertionPublishAuthor.bind(this),
+      history: this.assertion.history.bind(this.assertion), getContextGraphOnChainId: this.getContextGraphOnChainId.bind(this),
+      loadSelectedSwmQuads: this._loadSelectedSWMQuads.bind(this),
+      hasSwmShareComplete: this.publisher.hasSwmShareComplete.bind(this.publisher),
+      clearSwmShareComplete: this.publisher.clearSwmShareComplete.bind(this.publisher),
       chain: this.chain,
       writeLocks: this.writeLocks,
       stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter,

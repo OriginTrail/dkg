@@ -1,5 +1,5 @@
 import { TypedEventBus, generateEd25519Keypair, ed25519Sign, encodeAccessRequest, decodeAccessResponse, contextGraphSharedMemoryMetaUri } from '@origintrail-official/dkg-core';
-import { AccessHandler, resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
+import { AccessHandler, resolveKnowledgeAssetWorkspaceHead, generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import { GraphManager } from '@origintrail-official/dkg-storage';
 import { readFinalizedAssertionReservation } from '../src/internal/finalized-assertion-reservation.js';
 import { withAssertionLifecycleWriteLease, assertionLifecycleWriteLockKey } from '@origintrail-official/dkg-publisher';
@@ -314,9 +314,9 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(finalizations()).toHaveLength(1);
     const record = vi.fn<KnowledgeAssetMintReconcileHost['recordMint']>();
     const reconcile = mintReconciliation.reconcileLateMint;
-    vi.spyOn(mintReconciliation, 'reconcileLateMint').mockImplementation((agent, host, input) => {
+    vi.spyOn(mintReconciliation, 'reconcileLateMint').mockImplementation((host, input) => {
       record.mockImplementation(host.recordMint);
-      return reconcile(agent, { ...host, recordMint: record }, input);
+      return reconcile({ ...host, recordMint: record }, input);
     });
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted', txHash: lostMint.txHash });
     expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(false);
@@ -780,7 +780,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await history()).toMatchObject({ state: 'created', memoryLayer: 'WM' });
   });
 
-  it('preserves the persisted private allow-list and original publisher when reconciling a late mint', async () => {
+  it.each([false, true])('preserves the persisted private allow-list and original publisher (receiptless public metadata=%s)', async receiptless => {
     const secret: Quad = { subject: 'urn:lot:2026-08-12', predicate: 'urn:private-note', object: '"allowed reader secret"', graph: '' };
     const { agent, store, sealed, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter(), undefined, undefined,
       { quads: QUADS, privateQuads: [secret], accessPolicy: 'allowList', allowedPeers: ['reader-peer'] });
@@ -794,12 +794,24 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store),
       contextGraphId: CONTEXT_GRAPH, kaUal: sealed.kaUal! })).toMatchObject({ publisherPeerId: 'original-share-peer',
       access: { accessPolicy: 'allowList', allowedPeers: ['reader-peer'] } });
+    if (receiptless) {
+      const { publicQuads, privateQuads } = await skolemizeKnowledgeAssetParts(QUADS, [secret]);
+      const assertionGraph = contextGraphLayerUri(CONTEXT_GRAPH, MemoryLayer.VerifiableMemory, AUTHOR.toLowerCase(), 7n);
+      await store.insert([...publicQuads.map(q => ({ ...q, graph: assertionGraph })), ...generateGraphKnowledgeAssetMetadata({
+        ual: sealed.kaUal!, contextGraphId: CONTEXT_GRAPH, assertionGraph,
+        merkleRoot: sealed.merkleRoot, assertionVersion: 1, authorAddress: AUTHOR,
+        publisherPeerId: 'receiptless-chain-peer', accessPolicy: 'public', allowedPeers: [], timestamp: new Date(0),
+        publicTripleCount: publicQuads.length, privateTripleCount: privateQuads.length,
+        privateMerkleRoot: computePrivateRootV10(privateQuads)!,
+      }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
+        batchId: sealed.reservedKaId!, materializedVersion: { blockNumber: 1, txIndex: 0 },
+      } } })]);
+    }
     const gossip = vi.spyOn((agent as any).gossip, 'publish');
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted' });
     const finalization = gossip.mock.calls.filter(([topic]) => topic === contextGraphFinalizationTopic(CONTEXT_GRAPH))
       .map(([, bytes]) => decodeFinalizationMessage(bytes as Uint8Array));
     const owner = await store.query(`SELECT ?owner WHERE { GRAPH <${META_GRAPH}> { <${sealed.kaUal}> <${predicate}> ?owner } }`);
-    expect(owner).toMatchObject({ type: 'bindings', bindings: [{ owner: '"original-share-peer"' }] });
     const handler = new AccessHandler(store, new TypedEventBus());
     for (const [peer, allowed] of [['reader-peer', true], ['stranger-peer', false]] as const) {
       const keypair = await generateEd25519Keypair();
@@ -811,7 +823,12 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       if (allowed) expect(new TextDecoder().decode(response.nquads)).toContain('allowed reader secret');
       else expect(response.rejectionReason).toMatch(/allow/i);
     }
+    expect(owner).toMatchObject({ type: 'bindings', bindings: [{ owner: '"original-share-peer"' }] });
     expect(finalization).toContainEqual(expect.objectContaining({ accessPolicy: 'allowList', allowedPeers: ['reader-peer'] }));
+    if (receiptless) {
+      const retained = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, { contextGraphId: CONTEXT_GRAPH, ual: sealed.kaUal! });
+      expect(retained.state === 'confirmed' && retained.envelope.transactionHash).toBeUndefined();
+    }
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
   });
 
@@ -847,7 +864,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
   it('fails retryably when the record-only publish does not confirm', async () => {
     const { agent } = await strandedAsset(new MockChainAdapter());
     const reconcile = mintReconciliation.reconcileLateMint;
-    vi.spyOn(mintReconciliation, 'reconcileLateMint').mockImplementation((agent, host, input) => reconcile(agent,
+    vi.spyOn(mintReconciliation, 'reconcileLateMint').mockImplementation((host, input) => reconcile(
       { ...host, recordMint: vi.fn<KnowledgeAssetMintReconcileHost['recordMint']>().mockResolvedValueOnce({ status: 'tentative' } as never) }, input));
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))

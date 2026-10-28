@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
+import { assertSafeIri, contextGraphMetaUri, formatSparqlTerm } from '@origintrail-official/dkg-core';
+import { tryUpdateWithTouchedGraphs, type Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
@@ -38,3 +40,28 @@ export async function adoptedMintAlreadyRecorded(
     `the local record of ${expected.ual} is ${existing.state === 'invalid' ? 'unreadable' : 'for other content or another transaction'}`);
 }
 
+/** Preserve transaction provenance while replacing access controls from the retained share.
+ * This must finish before private slices are persisted. One backend operation
+ * replaces all three predicates, so readers never observe a permissive half-policy.
+ */
+export async function replaceRecordedMintAccess(store: TripleStore, contextGraphId: string, ual: string,
+  trustedMetadata: readonly Quad[]): Promise<void> {
+  const graph = assertSafeIri(contextGraphMetaUri(contextGraphId));
+  const subject = assertSafeIri(ual);
+  const predicates = ['accessPolicy', 'publisherPeerId', 'allowedPeer'].map(name => `http://dkg.io/ontology/${name}`);
+  const rows = trustedMetadata.filter(row => row.graph === graph && row.subject === subject && predicates.includes(row.predicate));
+  if (!predicates.slice(0, 2).every(predicate => rows.some(row => row.predicate === predicate)))
+    throw new Error('Recorded mint access replacement requires the complete trusted control envelope');
+  const terms = predicates.map(predicate => `<${predicate}>`).join(' ');
+  const existing = await store.query(`SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subject}> ?p ?o } VALUES ?p { ${terms} } }`);
+  if (existing.type !== 'bindings') throw new Error('Cannot read the recorded mint access policy');
+  const key = (predicate: string, object: string) => `${predicate}\u0000${object}`;
+  const desired = new Set(rows.map(row => key(row.predicate, row.object)));
+  if (existing.bindings.length === desired.size && existing.bindings.every(row => desired.has(key(row.p!, row.o!)))) return;
+  const triples = rows.map(row => `<${subject}> <${row.predicate}> ${formatSparqlTerm(row.object, { position: 'object' })} .`).join(' ');
+  const updated = await tryUpdateWithTouchedGraphs(store,
+    `DELETE { GRAPH <${graph}> { <${subject}> ?p ?o } } INSERT { GRAPH <${graph}> { ${triples} } }
+     WHERE { VALUES ?p { ${terms} } OPTIONAL { GRAPH <${graph}> { <${subject}> ?p ?o } } }`,
+    [graph], { source: 'publisher.recordedMint.access' });
+  if (!updated) throw new Error('Recording this mint requires atomic replacement of its access policy');
+}
