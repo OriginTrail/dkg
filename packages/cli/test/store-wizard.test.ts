@@ -758,3 +758,98 @@ describe('applyStoreFlagsToConfig', () => {
     expect(calls[0].url).toBe('http://server.test/query');
   });
 });
+
+// ---------------------------------------------------------------------
+// store.controlReservedSlots (OT-RFC-73 P14)
+// ---------------------------------------------------------------------
+
+// The documented off switch for the async queues' store control path is a key of the `store` block. A helper that
+// rewrites the block must carry it over, or a re-run of `dkg init` or of a setup command with `--store` turns the
+// path back on at the next restart. Any value is carried verbatim, a malformed one included: the daemon refuses
+// that and keeps the path off, while a dropped key would mean the default (on for Blazegraph on more than 2 CPUs).
+describe('store.controlReservedSlots survives a rewrite of the store block (OT-RFC-73 P14)', () => {
+  const url = 'http://blaze.test/sparql';
+  const reachable = () => mockFetch(() => new Response(JSON.stringify({ boolean: true }), { status: 200 })).fn;
+  const VALUES = [0, '0', 'share:1', 'on', null] as const;
+  const withSlots = (store: { backend: string; options?: Record<string, unknown> }, value: unknown) =>
+    ({ ...store, controlReservedSlots: value }) as NonNullable<DkgConfig['store']>;
+  const sparqlHttp = (queryEndpoint: string) =>
+    ({ backend: 'sparql-http', options: { queryEndpoint, updateEndpoint: queryEndpoint, managedByDkg: false } });
+
+  it.each(VALUES)('dkg init keeps %j when Enter keeps the same Blazegraph URL', async (value) => {
+    const result = await promptStoreBackend({
+      ask: mockAsk(['', '']),
+      existingStore: withSlots({ backend: 'blazegraph', options: { url } }, value),
+      fetch: reachable(),
+      log: () => {},
+    });
+    expect(result.storeBlock).toEqual({ backend: 'blazegraph', options: { url, managedByDkg: false }, controlReservedSlots: value });
+  });
+
+  it.each([
+    ['oxigraph-server', ['1'], { backend: 'oxigraph-server', options: {} }],
+    ['sparql-http', ['sparql-http', 'http://server.test/query'], sparqlHttp('http://server.test/query')],
+    ['another Blazegraph URL', ['', 'http://other.test/sparql'], { backend: 'blazegraph', options: { url: 'http://other.test/sparql', managedByDkg: false } }],
+  ] as const)('dkg init keeps it when the operator picks %s', async (_name, answers, block) => {
+    const result = await promptStoreBackend({
+      ask: mockAsk([...answers]),
+      existingStore: withSlots({ backend: 'blazegraph', options: { url } }, 0),
+      fetch: reachable(),
+      log: () => {},
+    });
+    expect(result.storeBlock).toEqual({ ...block, controlReservedSlots: 0 });
+  });
+
+  it('dkg init keeps it on an oxigraph-server Enter-through, beside the server options', async () => {
+    const existingStore = withSlots({ backend: 'oxigraph-server', options: { port: 7979 } }, 'share:1,publisher:2');
+    const result = await promptStoreBackend({ ask: mockAsk(['']), existingStore, log: () => {} });
+    expect(result.storeBlock).toEqual(existingStore);
+  });
+
+  it('dkg init keeps it when Docker provisions the Blazegraph', async () => {
+    const provisioned = 'http://127.0.0.1:9999/bigdata/namespace/mynode/sparql';
+    const result = await promptStoreBackend({
+      ask: mockAsk(['blazegraph', ' ', 'y']),
+      existingStore: withSlots({ backend: 'oxigraph-server', options: {} }, 0),
+      isDockerAvailable: async () => true,
+      provisionBlazegraphDocker: async () => ({
+        url: provisioned, port: 9999, containerName: 'dkg-blazegraph-mynode', managedByDkg: true, reused: false, namespaceCreated: true,
+      }),
+      log: () => {},
+    });
+    expect(result.storeBlock).toEqual({ backend: 'blazegraph', options: { url: provisioned, managedByDkg: true }, controlReservedSlots: 0 });
+  });
+
+  it('dkg init drops it with the block when the operator picks the embedded store, which never uses the path', async () => {
+    const result = await promptStoreBackend({
+      ask: mockAsk(['oxigraph']),
+      existingStore: withSlots({ backend: 'blazegraph', options: { url } }, 0),
+      log: () => {},
+    });
+    expect(result.storeBlock).toBeNull();
+  });
+
+  it.each(VALUES)('--store blazegraph with the same --store-url keeps %j', async (value) => {
+    const store = newMockConfig({ name: 'dkg-node', store: withSlots({ backend: 'blazegraph', options: { url } }, value) } as DkgConfig);
+    await applyStoreFlagsToConfig({ ...mockConfigIO(store), storeFlag: 'blazegraph', storeUrlFlag: url, fetch: reachable(), log: () => {} });
+    expect(store.saved.map((saved) => saved.store)).toEqual([
+      { backend: 'blazegraph', options: { url, managedByDkg: false }, controlReservedSlots: value },
+    ]);
+  });
+
+  it.each([
+    ['sparql-http', 'http://server.test/query', sparqlHttp('http://server.test/query')],
+    ['oxigraph-server', undefined, { backend: 'oxigraph-server', options: {} }],
+  ] as const)('--store %s keeps it too', async (storeFlag, storeUrlFlag, block) => {
+    const store = newMockConfig({ name: 'dkg-node', store: withSlots({ backend: 'blazegraph', options: { url } }, 0) } as DkgConfig);
+    await applyStoreFlagsToConfig({ ...mockConfigIO(store), storeFlag, storeUrlFlag, fetch: reachable(), log: () => {} });
+    expect(store.saved.map((saved) => saved.store)).toEqual([{ ...block, controlReservedSlots: 0 }]);
+  });
+
+  it('--store oxigraph-server keeps it beside the existing server options', async () => {
+    const existing = withSlots({ backend: 'oxigraph-server', options: { port: 7979 } }, '0');
+    const store = newMockConfig({ name: 'dkg-node', store: existing } as DkgConfig);
+    await applyStoreFlagsToConfig({ ...mockConfigIO(store), storeFlag: 'oxigraph-server', log: () => {} });
+    expect(store.saved.map((saved) => saved.store)).toEqual([existing]);
+  });
+});

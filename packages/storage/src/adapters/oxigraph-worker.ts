@@ -1,4 +1,5 @@
 import { oxigraphGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
+import { serializableQueryOptions } from './serializable-query-options.js';
 import { registerStoreRecoveryGeneration, storeWorkerExecutionFailure } from '../store-recovery-generation.js';
 import { runTrackedStoreWrite } from '../tracked-store-write.js';
 import { assertSubjectAndInsertPayload } from '../atomic-subject-insert.js';
@@ -828,8 +829,7 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    const withheld = options?.withheldGraphRoots?.length ? [{ withheldGraphRoots: [...options.withheldGraphRoots] }] : [];
-    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql, ...withheld);
+    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql, serializableQueryOptions(options));
   }
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);
@@ -842,7 +842,7 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
-    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
+    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs', serializableQueryOptions(options));
   }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
     return runTrackedStoreWrite(this.writeGen, { kind: 'graphs', graphs: [graphUri] }, () =>

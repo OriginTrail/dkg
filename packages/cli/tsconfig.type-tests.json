@@ -24,6 +24,7 @@
     "test/retention-publisher-sweep.test.ts",
     "test/retention-runtime-scope.test.ts",
     "test/daemon-queue-retention-live.test.ts",
-    "test/async-admission-usage-retention.test.ts"
+    "test/async-admission-usage-retention.test.ts",
+    "test/store-control-path-config.test.ts"
   ]
 }

@@ -1,3 +1,4 @@
+import { executeUnscopedQuery } from './unscoped-query-consistency.js';
 import type { AgentQueryOptions } from './agent-query-options.js';
 import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -20,7 +21,7 @@ import {
   prepareUnscopedContextGraphReadChecks,
   type ContextGraphReadCheck,
 } from './prepare-unscoped-context-graph-read-checks.js';
-import { executeUnscopedQuery } from './unscoped-query-consistency.js';
+import { executePublicQuery, publicQueryBudget } from './public-query-execution.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
   LibP2PNetwork, PeerResolver, StubNetworkStateRegistry,
@@ -631,6 +632,7 @@ export class QueryMethods extends DKGAgentBase {
     const wmAddressAliases = opts.view === 'working-memory'
       ? resolveWmIdentity(effectiveWmAddress).aliases : undefined;
 
+    const budget = publicQueryBudget(opts.maxResponseBytes);
     const execute = () => {
       opts.signal?.throwIfAborted();
       return queryWithPublicSnapshotTrust(this.store, this.queryEngine, sparql, {
@@ -646,6 +648,7 @@ export class QueryMethods extends DKGAgentBase {
       priority: opts.priority,
       source: opts.source,
       maxResponseBytes: opts.maxResponseBytes,
+      ...budget,
       maxLiteralHydrationBytes: opts.maxLiteralHydrationBytes,
       view: opts.view,
       agentAddress: effectiveWmAddress,
@@ -660,31 +663,33 @@ export class QueryMethods extends DKGAgentBase {
       minTrust: opts.minTrust ?? opts._minTrust,
       }, opts.chainEvidenceMode, { signal: opts.signal, priority: opts.priority, source: opts.source });
     };
-    // Arbitrary unscoped SPARQL can reveal private data through aggregates or
-    // projections without a graph column. The executor owns admission and both
-    // local consistency checks, including the release of the materialized result.
-    const result = opts.contextGraphId ? await execute() : await executeUnscopedQuery({
-      store: this.store,
-      readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
-      admit: () => canReadUnscopedQuery({
+    // The executor owns admission and consistency through result release.
+    const result = await executePublicQuery(() => opts.contextGraphId ? execute() : executeUnscopedQuery({
         store: this.store,
-        knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
-        canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
-          callerAgentAddress: callerAgentAddressStr,
-          signal,
+        readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
+        admit: () => canReadUnscopedQuery({
+          store: this.store,
+          knownContextGraphIds: QueryMethods.prototype.contextGraphReadAuthorityCandidateSeeds.call(this),
+          canReadContextGraph: (contextGraphId, signal) => this.canReadContextGraph(contextGraphId, {
+            callerAgentAddress: callerAgentAddressStr,
+            signal,
+          }),
+          prepareReadChecks: (ids, signal) => (
+            QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
+              this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
+            )
+          ),
+        }, {
+          signal: opts.signal,
+          maxResponseBytes: opts.maxResponseBytes,
+          materializationBudget: budget.materializationBudget,
         }),
-        prepareReadChecks: (ids, signal) => (
-          QueryMethods.prototype.prepareContextGraphReadAuthorityChecks.call(
-            this, ids, { callerAgentAddress: callerAgentAddressStr, signal },
-          )
-        ),
-      }, { signal: opts.signal }),
-      execute,
-      denied: () => {
-        this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
-        return deniedResult(sparql, opts.accessDenied);
-      },
-    });
+        execute,
+        denied: () => {
+          this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
+          return deniedResult(sparql, opts.accessDenied);
+        },
+    }));
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
   }

@@ -21,7 +21,10 @@
 //                                 so a 25 % band alone, about 67 ms, would be inside run-to-run noise)
 // Strict like every rule here: a cell needs all five repeats, valid, with the G0b setup AND the control path on (every
 // run must record DKG_STORE_CONTROL_RESERVED_SLOTS at the S1 geometry: a run with the variable unset, 0 or malformed ran
-// the path off and is not a G1b run); anything less is INCOMPLETE, never a PASS.
+// the path off and is not a G1b run); anything less is INCOMPLETE, never a PASS. "Unset is off" holds for this
+// benchmark's process, not for a daemon: since OT-RFC-73 P14 the daemon's default is on for Blazegraph on more than
+// 2 CPUs, but only the daemon configures the path with its backend (configureStoreControlPath); a process that never
+// does, like this one, honours the variable alone. So the variable is the whole record of the geometry a run used.
 import { median } from './verdict.mjs';
 
 /** The seeds of the five G0b repeats: 20262901 + repeat (specs/gate9.json). */
@@ -92,7 +95,8 @@ const queueOf = (r) => r.queue ?? 'share';
  * The setting takes per-queue values ("share:1,publisher:2"); "0" turns the whole path off, a malformed value leaves it
  * off (plan 5.1, no silent fallback), and a value above a queue's maximum is clamped to it. So only a value whose
  * effective share and publisher slots are G1B_SLOTS counts, and a variable the run did not record is no evidence that
- * the path was on.
+ * the path was on (in this benchmark's process, which never configures a backend, it was off; P14's Blazegraph
+ * default applies to the daemon only).
  */
 export function controlSlotsProblem(value) {
   const want = `G1b needs the control path on (${CONTROL_SLOTS_ENV}=${G1B_SLOTS_VALUE})`;

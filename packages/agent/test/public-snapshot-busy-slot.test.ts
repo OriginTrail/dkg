@@ -32,6 +32,8 @@ function makeAgent(assets: Asset[]) {
   const snapshot = () => sealSnapshotOf(graph, assets);
   const agent: any = {
     started: true, workLifetime: new AgentWorkLifetime(), store, node: {},
+    contextGraphSubscriptionDormancyById: new Map(),
+    waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
     config: { nodeRole: 'edge', syncGlobalMaxInflight: 1, syncGlobalQueueLimit: 0 },
     log: { info: vi.fn(), warn: vi.fn(), debug: vi.fn() },
     subscribedContextGraphs: new Map(),

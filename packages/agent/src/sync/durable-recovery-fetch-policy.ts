@@ -15,7 +15,7 @@ export class DurableRecoveryFetchPolicy {
   private fullGraph = false;
 
   holdings(exactAvailable: boolean): DurableHoldingsOptions {
-    return { ownerFetchesMissingAssets: exactAvailable && !this.fullGraph };
+    return { ownerFetchesMissingAssets: exactAvailable && !this.fullGraph, skipHoldingsPreflight: this.fullGraph };
   }
 
   nextExact(): Extract<DurableRecoveryAction, { kind: 'exact-batch' }> | undefined {
