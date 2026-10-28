@@ -61,6 +61,8 @@ const ASSERTION = contextGraphAssertionUri(CONTEXT_GRAPH, AUTHOR, NAME);
 const PUBLISHED_AT_TX_PRED = ASSERTION_PUBLISH_RECEIPT_PREDICATES.PUBLISHED_AT_TX;
 const META_GRAPH = contextGraphMetaUri(CONTEXT_GRAPH);
 const RECONCILE = { contextGraphId: CONTEXT_GRAPH, name: NAME };
+/** Where the synchronous publish keeps its checkpoints (named-publish-finalization.ts); a queued publish writes none. */
+const NAMED_FINALIZATION_GRAPH = 'urn:dkg:publisher:named-finalization';
 
 /** The mock chain with a real publish wallet, which the vm/publish path needs to sign. */
 class WalletMockChain extends MockChainAdapter {
@@ -305,6 +307,47 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(lookup).not.toHaveBeenCalled();
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
     expect(gossip.mock.calls.filter(([topic]) => topic === contextGraphFinalizationTopic(CONTEXT_GRAPH))).toHaveLength(0);
+  });
+
+  it('refuses a VM lifecycle stamped before its finalization gossip, as a queued publish stamps it, instead of reporting success', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, store, sealed, history } = await strandedAsset(chain);
+    await agent.reconcileKnowledgeAssetMint(RECONCILE);
+    // A queued publish records the VM content, drops the share and stamps the lifecycle, and only then gossips and
+    // clears the share marker. Stopped between the two, it leaves no publish checkpoint and the marker set.
+    await store.deleteByPattern({ graph: NAMED_FINALIZATION_GRAPH });
+    await store.insert([{ subject: LIFECYCLE, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: META_GRAPH }]);
+    const before = await history();
+    expect(before).toMatchObject({ publishedUal: sealed.kaUal, vmCurrentAssertion: ethers.hexlify(MERKLE_ROOT).slice(2) });
+    const lookup = vi.spyOn(chain, 'resolveKnowledgeAssetMint');
+    const transfer = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1');
+    const gossip = vi.spyOn(agent.gossip, 'publish');
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/share marker is still set/) });
+
+    expect(await history()).toEqual(before);
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'legacy' });
+    expect(lookup).not.toHaveBeenCalled();
+    expect(transfer).not.toHaveBeenCalled();
+    expect(gossip.mock.calls.filter(([topic]) => topic === contextGraphFinalizationTopic(CONTEXT_GRAPH))).toHaveLength(0);
+  });
+
+  it('completes a VM lifecycle stamped without a publish checkpoint once its share marker is cleared', async () => {
+    const { agent, store, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
+    await agent.reconcileKnowledgeAssetMint(RECONCILE);
+    // Either publish path clears the marker only after its finalization gossip, but a queued publish, or one from
+    // before the checkpoint existed, leaves no checkpoint for its catalog transition.
+    await store.deleteByPattern({ graph: NAMED_FINALIZATION_GRAPH });
+    expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(false);
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
   });
 
   it('writes the receipt before the lifecycle stamp, so a failed receipt write is retried', async () => {

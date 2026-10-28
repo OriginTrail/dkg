@@ -96,8 +96,10 @@ function isRecorded(lifecycle: AssertionHistoryDescriptor | null | undefined, se
  * consumes the share. A publish-owned checkpoint proves that content recording,
  * cleanup and finalization gossip completed; its retained catalog obligation
  * must then transfer to a durable owner before the lifecycle can be terminal.
- * Legacy shares consumed before that boundary remain ambiguous and refuse.
- * Retrying resumes the explicit checkpoint without sending another mint.
+ * Without a checkpoint, a share marker still set after the share was consumed
+ * is ambiguous and refuses, VM pointer or not: a queued publish stamps that
+ * pointer before its gossip. Retrying resumes the explicit checkpoint without
+ * sending another mint.
  */
 export async function reconcileLateMint(
   agent: DKGAgent,
@@ -134,16 +136,22 @@ export async function reconcileLateMint(
   if (vmPointer !== undefined && vmPointer !== sealRoot) {
     throw refused(`The lifecycle of "${name}" already records VM version ${vmPointer}, not the sealed ${sealRoot}.`);
   }
-  // A VM pointer means an earlier attempt recorded the mint, consumed the share
-  // and passed its finalization gossip; publishing again would plan an update.
+  // Only the publish-owned checkpoint proves a publish passed its finalization
+  // gossip. Without one the share marker decides, which both publish paths
+  // clear only after that gossip; a queued publish stamps the VM pointer before
+  // it, so the pointer alone proves nothing. With a pointer, publishing again
+  // would plan an update.
   const progress = await readNamedPublishFinalization(agent.store, reservation);
-  const share = progress.kind !== 'legacy' || vmPointer !== undefined
-    ? 'consumed' : await shareState(agent, reservation, target);
+  const share = progress.kind !== 'legacy'
+    ? 'consumed' : await shareState(agent, reservation, target, vmPointer !== undefined);
   if (share === 'interrupted') {
-    throw refused(
-      `An interrupted publish consumed the share of "${name}" before its finalization gossip and catalog transition. ` +
-        'Reconcile cannot finish those from the VM record alone, so it leaves the asset unrecorded.',
-    );
+    throw refused(vmPointer === undefined
+      ? `An interrupted publish consumed the share of "${name}" before its finalization gossip and catalog transition. ` +
+        'Reconcile cannot finish those from the VM record alone, so it leaves the asset unrecorded.'
+      : `The lifecycle of "${name}" records the sealed VM version, but its share marker is still set and no publish ` +
+        'checkpoint shows that its finalization gossip and catalog transition ran (a queued publish stamps the lifecycle ' +
+        'before both, and its job recovery finishes them). Reconcile cannot finish those from the VM record alone, ' +
+        'so it changes nothing.');
   }
   const mint = share === 'resident'
     ? await recordThroughPublish(agent, target)
@@ -200,16 +208,20 @@ async function hasPublishReceipt(agent: DKGAgent, { assertionUri, metaGraph }: S
  * Where the complete share a publish consumes stands: still `resident`;
  * `consumed` by a publish that went on to clear the share marker, which it
  * does only after its finalization gossip; or `interrupted`, consumed while
- * the marker stayed set because that publish stopped before those steps.
+ * the marker stayed set because that publish stopped before those steps. A
+ * stamped VM pointer with the marker set is `interrupted` whatever shared
+ * memory holds.
  */
 async function shareState(
   agent: DKGAgent,
   { seal, scope }: SealedReservation,
   target: Target,
+  vmStamped: boolean,
 ): Promise<'resident' | 'consumed' | 'interrupted'> {
   if (!(await agent.publisher.hasSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName))) {
     return 'consumed';
   }
+  if (vmStamped) return 'interrupted';
   if (seal.publicTripleCount === 0) return 'resident';
   const shared = await agent._loadSelectedSWMQuads(target.contextGraphId, 'all', target.subGraphName, {
     kind: 'named-lifecycle',

@@ -489,8 +489,9 @@ export const PATH_TRIGGERS = Object.freeze([
   {
     // packages/publisher/test/async-lift-queue-graph-coverage.test.ts scans every package's src for the publisher
     // queue's graphs and labels, and reads the storage routing test (which the storage rule already routes to
-    // this lane) to keep its list of routing-covered store methods in step. This names the one file outside the
-    // publisher's own closure that names a queue graph: the chain-reset wipe in cli.
+    // this lane) to keep its list of routing-covered store methods in step. This names the files outside the
+    // publisher's own closure that name the queue's graph family: the chain-reset wipe in cli, and the agent's
+    // named-publish finalization checkpoint, whose graph is in that family so a chain reset wipes it.
     //
     // It is deliberately NOT widened to packages/agent/src and packages/cli/src. That would send the publisher
     // lane (4 shards and the Hardhat artifacts) to every agent-only or cli-only PR (about a third of the PRs
@@ -505,7 +506,7 @@ export const PATH_TRIGGERS = Object.freeze([
     ],
     lanes: ['tornado_publisher'],
     evmScopes: [],
-    reason: 'the publisher queue graph coverage test asserts the chain-reset wipe reference',
+    reason: 'the publisher queue graph coverage test scans the files outside the publisher that name its graph family',
   },
 ]);
 
