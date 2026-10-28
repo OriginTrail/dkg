@@ -12,8 +12,10 @@ import {
 } from '../src/index.js';
 import { PromoteAdmissionCoordinator } from '../src/promote-admission.js';
 import {
-  CONTROL_FINALIZED_AT, CONTROL_LIFECYCLE_KEY, CONTROL_PAYLOAD, CONTROL_STATUS, DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI, jobSubject, requestSubject,
+  CONTROL_FINALIZED_AT, CONTROL_LIFECYCLE_KEY, CONTROL_PAYLOAD, CONTROL_STATUS, DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI, jobSubject, requestSubject, serializeJob,
 } from '../src/async-lift-control-plane.js';
+import { decodeLiftJobPayload } from '../src/lift-job-payload-codec.js';
+import type { LiftJob } from '../src/lift-job.js';
 import { LIFT_JOB_SUBJECT_PREFIX, buildLiftRetentionScanQuery, buildLiftRetentionTieQuery } from '../src/async-lift-retention-scan.js';
 import { LiftLegacyScanMemo } from '../src/lift-legacy-scan-memo.js';
 import { LiftJobPayloadUnreadableError } from '../src/lift-job-payload-unreadable.js';
@@ -779,12 +781,23 @@ describe('failures', () => {
 describe('two records of one job id: the key is kept whole, whatever order the engine returns its rows in (online review round 3: 4396325296)', () => {
   // Admission's read keeps one record per job id, the last row's. With two records of one id, the engine's row order decides which one admission sees, and the
   // sweep, which reads the key the same way, would judge the binding from that one alone: delete the record it saw, and the hidden one can bind the key.
-  /** The quads of `spec` stored under the subjects of job `subjectId`: its payload still names `spec.id`. */
-  const storedUnder = (spec: KeyedSpec, subjectId: string): Quad[] => keyedQuads(templates, spec).map((quad) => ({
+  /** The quads of `spec` (by default as `keyedQuads` writes them) stored under the subjects of job `subjectId`: its payload still names `spec.id`. */
+  const storedUnder = (spec: KeyedSpec, subjectId: string, quads = keyedQuads(templates, spec)): Quad[] => quads.map((quad) => ({
     ...quad,
     subject: quad.subject === jobSubject(spec.id) ? jobSubject(subjectId) : quad.subject === requestSubject(spec.id) ? requestSubject(subjectId) : quad.subject,
     object: quad.object === `<${requestSubject(spec.id)}>` ? `<${requestSubject(subjectId)}>` : quad.object,
   }));
+  /** The quads without their lifecycle-key triples: the record of a job stored before the key was indexed, which the read reaches through its legacy branch (on in a fresh store). */
+  const unkeyed = (quads: Quad[]): Quad[] => quads.filter((quad) => quad.predicate !== CONTROL_LIFECYCLE_KEY);
+  /** The quads of `spec`'s failed job written the pre-upgrade way (a legacy-v0 payload with no claim or validation), which the decoder reads as `compatibility`. */
+  const legacyV0Failed = (spec: KeyedSpec): Quad[] => {
+    const { claim: _claim, validation: _validation, ...job } = stampKeyed(templates, spec) as unknown as Record<string, unknown>;
+    const failure = { ...(job['failure'] as Record<string, unknown>), failedFromState: 'claimed' };
+    const quads = serializeJob({ ...job, failure } as unknown as LiftJob, DEFAULT_CONTROL_GRAPH_URI, { payloadSchema: 'legacy-v0' });
+    const decoded = decodeLiftJobPayload(quads.find((quad) => quad.predicate === CONTROL_PAYLOAD)?.object);
+    if (decoded.kind !== 'compatibility') throw new Error(`fixture: ${spec.id}'s legacy-v0 failed payload decodes as ${decoded.kind}, not compatibility`);
+    return quads;
+  };
   type RowOrder = 'engine' | 'ascending' | 'descending';
   /** `store` with the rows of every sibling read (the one query that binds `?indexed`) in the engine's order or sorted by payload text: each of two payloads of one job id is the last row in one of the sorted orders. */
   const siblingRowsIn = (store: OxigraphStore, order: RowOrder): OxigraphStore => (order === 'engine' ? store : spyStore(store, {
@@ -810,6 +823,14 @@ describe('two records of one job id: the key is kept whole, whatever order the e
       () => [keyedQuads(templates, fin('f', 'key', 10)), storedUnder(at('f', 'key', 'retryable', 5), 'z')], { siblings_unreadable: 1 }],
     ['one id with no subject mismatch: subject f holds two payloads of job f, a newer finalized one and an older retryable failed one, next to the old finalized g',
       () => [keyedQuads(templates, fin('g', 'key', 20)), keyedQuads(templates, fin('f', 'key', 30)), keyedQuads(templates, at('f', 'key', 'retryable', 10))], { unreadable: 1, siblings_unreadable: 1 }],
+    // Each row below pins one part of the check (verification of round 3): every row the read returns is checked, from either branch and whatever its payload's schema,
+    // and the refusal keeps every candidate of the key, not only the first.
+    ['the review\'s case with both records stored without their lifecycle-key triples, read through the legacy branch (its rows bind no ?indexed)',
+      () => [unkeyed(keyedQuads(templates, fin('f', 'key', 10))), unkeyed(storedUnder(at('f', 'key', 'retryable', 5), 'z'))], { siblings_unreadable: 1 }],
+    ['the review\'s case with z\'s failed payload of job f written the pre-upgrade way, which decodes as compatibility',
+      () => [keyedQuads(templates, fin('f', 'key', 10)), storedUnder(at('f', 'key', 'retryable', 5), 'z', legacyV0Failed(at('f', 'key', 'retryable', 5)))], { siblings_unreadable: 1 }],
+    ['the review\'s case with a second old finalized candidate in the key, g, finished before f: both candidates are kept',
+      () => [keyedQuads(templates, fin('g', 'key', 8)), keyedQuads(templates, fin('f', 'key', 10)), storedUnder(at('f', 'key', 'retryable', 5), 'z')], { siblings_unreadable: 2 }],
   ];
 
   it.each(CASES.flatMap(([label, records, reasons]) => (['delete', 'report'] as const).map((mode) => [label, mode, records, reasons] as const)))('%s, %s mode: every record stays and admission answers as before, in every row order', async (_label, mode, records, reasons) => {
