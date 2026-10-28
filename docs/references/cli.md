@@ -81,7 +81,7 @@ dkg publisher stats                      # job counts by status, as JSON
 dkg publisher cancel <job-id>            # remove a job that is still accepted
 dkg publisher retry                      # accept failed jobs again that are safe to re-run
 dkg publisher clear finalized|failed     # bulk clear; keeps jobs whose removal would change which job holds the KA
-# one finished job by ID: POST /api/publisher/clear-job (API only for now)
+# one finished job by ID, even a held one: POST /api/publisher/clear-job (API only; check a held job's transaction first)
 # publisher wallets need native gas plus PCA registration or TRAC; node identity is optional attribution
 
 # Code & memory indexing
@@ -229,6 +229,9 @@ shares or publishes, that gets no answer in time is reported as outcome
 unknown, not as failed: the daemon keeps working after the client stops
 waiting, so check `dkg ka history` (MCP: `dkg_knowledge_asset_history`) before
 retrying. Any other request that times out fails with a `TimeoutError`.
+That includes `ka share-async`, `ka publish-async` and `publisher publish-async`,
+though a job may still exist: find the job and follow
+[Retry safely](../build/async-jobs.md#retry-safely) instead of running them again.
 
 On a slow node or store, override the read and long deadlines, in
 milliseconds, with environment variables (for the MCP server, in the MCP
