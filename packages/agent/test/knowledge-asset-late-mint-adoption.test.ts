@@ -204,6 +204,24 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
   });
 
+  it('keeps an ordinary publish confirmed while its catalog transition is unfinished, and reconcile resumes it', async () => {
+    const { agent, store, sealed, lostMint, history } = await strandedAsset(new WalletMockChain(), wallet.address);
+    vi.spyOn(agent as unknown as { createV10ACKProvider(cg: string): unknown }, 'createV10ACKProvider')
+      .mockReturnValue(async () => [{ peerId: 'stub-core', signatureR: ZERO, signatureVS: ZERO, nodeIdentityId: 1n }]);
+    // The catalog has not admitted the projection yet.
+    const transfer = vi.spyOn(agent, 'transferRfc64ConfirmedVmV1').mockResolvedValueOnce('projection-pending');
+
+    await expect(agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR }))
+      .resolves.toMatchObject({ status: 'confirmed', ual: sealed.kaUal });
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toMatchObject({ kind: 'pending' });
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+    expect(transfer).toHaveBeenCalledTimes(2);
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
+  });
+
   it('reconcile records the late mint without a publish wallet or chain write, and is idempotent', async () => {
     const { agent, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
 
@@ -363,6 +381,17 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted', txHash: lostMint.txHash });
     expect(await receiptTxHashes(store)).toEqual([lostMint.txHash]);
+  });
+
+  it('records the mint when the first write of the publish checkpoint fails, instead of stranding the consumed share', async () => {
+    const { agent, store, sealed, lostMint, history } = await strandedAsset(new MockChainAdapter());
+    // The write the publish makes before it stamps the lifecycle and clears the share marker.
+    failNextLifecycleWrite(agent, store, 'http://dkg.io/ontology/namedPublishFinalizationReady');
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
   });
 
   it('completes a publish receipt the publish path failed to write, instead of reporting success without it', async () => {

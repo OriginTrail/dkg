@@ -492,12 +492,14 @@ import {
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolvePublishTargetCuration } from './publish-target-curation.js';
 import {
+  KA_MINT_RECONCILE_INCOMPLETE_CODE,
   KA_MINT_RECONCILE_REFUSED_CODE,
   reconcileLateMint,
   type KnowledgeAssetMintReconcileInput,
   type KnowledgeAssetMintReconcileResult,
 } from './knowledge-asset-mint-reconcile.js';
 import { sealChainTargetMismatch } from './seal-chain-target.js';
+import { observeConfirmedVmTransfer } from './internal/confirmed-vm-catalog-observer.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -6214,9 +6216,19 @@ export class PublishMethods extends DKGAgentBase {
     }
 
     if (result.status === 'confirmed' && operationPlan.kind !== 'update') {
-      await beginNamedPublishFinalization(this.store, {
-        assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId,
-      }, () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
+      // Best-effort like the receipt: the finalization below writes the checkpoint again before it
+      // completes, so a failed write here cannot strand a confirmed publish with its share consumed.
+      try {
+        await beginNamedPublishFinalization(this.store, {
+          assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId,
+        }, () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
+      } catch (err) {
+        this.log.warn(
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          `Failed to write publish checkpoint for <${assertionUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
     }
 
     // Exact scope owns published-root cleanup. A caller's explicit request to
@@ -6374,14 +6386,28 @@ export class PublishMethods extends DKGAgentBase {
     }
 
     if (result.status === 'confirmed') {
-      const finalization = { contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
-        shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri };
+      const finalization = {
+        contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
+        shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri,
+      };
+      // Updates have no mint-recovery command: keep their existing observer
+      // and never create a mint-only checkpoint for an updated version.
       if (operationPlan.kind === 'update') {
-        // Only initial mints have a verified recovery command. Preserve the
-        // existing update observer instead of leaving an unresumable checkpoint.
         await this.afterConfirmedGraphScopedVmPublishV1({ ...finalization, status: result.status,
           ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
-      } else await this.completeNamedPublishFinalization(finalization);
+      } else if (opts?.adoptExistingMint !== undefined) await this.completeNamedPublishFinalization(finalization);
+      else await observeConfirmedVmTransfer(this.log, {
+        ...finalization, ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish',
+      }, async () => {
+        try {
+          await this.completeNamedPublishFinalization(finalization);
+          return 'owned';
+        } catch (error) {
+          // An unfinished transition stays pending in its checkpoint, which the observer does not report.
+          if ((error as { code?: string }).code === KA_MINT_RECONCILE_INCOMPLETE_CODE) return 'pending';
+          throw error;
+        }
+      });
     }
 
     return { ...result, assertionUri, seal };

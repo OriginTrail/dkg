@@ -163,10 +163,12 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     // sole author AGENT_B — covered by publish-foreign-author-resolution.test.ts.)
     await expect(agent.publishFromFinalizedAssertion(CG, 'no-such-name')).rejects.toThrow(/is not finalized/);
 
-    await expect(agent.publishFromFinalizedAssertion(CG, NAME, {
+    const result = await agent.publishFromFinalizedAssertion(CG, NAME, {
       agentAddress: AGENT_B,
       clearSharedMemoryAfter: true,
-    })).rejects.toMatchObject({ cause: expect.objectContaining({ message: 'simulated escaped RFC-64 SWM inventory removal failure' }) });
+    });
+    expect(result.status).toBe('confirmed');
+    expect(result.assertionUri).toBe(assertionUri);
 
     expect(markerCalls).toEqual([{
       contextGraphId: CG,
