@@ -42,3 +42,39 @@ describe('query store-read materialization budget', () => {
       });
   });
 });
+
+describe('fallback inventory materialization', () => {
+  const graphs = Array.from({ length: 1000 }, (_, index) => `urn:unrelated:${index}:${'x'.repeat(500)}`);
+  const rawBytes = Buffer.byteLength(JSON.stringify(graphs), 'utf8');
+  const result = { type: 'bindings' as const, bindings: [{ value: '"ok"' }] };
+  const resultBytes = Buffer.byteLength(JSON.stringify(result), 'utf8');
+  const store = { listGraphs: async () => graphs, query: async () => result } as unknown as TripleStore;
+
+  it.each(['enumeration', 'catalog', 'withheld'] as const)('charges the full nonmatching inventory in the %s lane', async kind => {
+    const context = createQueryStoreReadContext(store, { maxMaterializedBytes: 1024 });
+    const lane = kind === 'enumeration' ? context : kind === 'catalog' ? context.catalog : context.withWithheldGraphRoots([]);
+    await expect(lane.listGraphsByPrefix('urn:absent:')).rejects.toMatchObject({
+      code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: 1024, actualBytes: rawBytes,
+    });
+  });
+
+  it('retains raw discovery cost for cache replay and caller-local cumulative charging', async () => {
+    const loader = createQueryStoreReadContext(store, { maxMaterializedBytes: rawBytes });
+    const discovery = await loader.shared.measure(reads => reads.listGraphsByPrefix('urn:absent:'));
+    expect(discovery).toEqual({ snapshot: [], byteCount: rawBytes });
+    expect(loader.shared.replay(discovery)).toEqual([]);
+    await expect(loader.query('SELECT * WHERE {}')).rejects.toMatchObject({ actualBytes: rawBytes + resultBytes });
+    const other = createQueryStoreReadContext(store, { maxMaterializedBytes: rawBytes + resultBytes });
+    expect(other.shared.replay(discovery)).toEqual([]);
+    await expect(other.query('SELECT * WHERE {}')).resolves.toEqual(result);
+    const small = createQueryStoreReadContext(store, { maxMaterializedBytes: 1024 });
+    expect(() => small.shared.replay(discovery)).toThrow(expect.objectContaining({ actualBytes: rawBytes }));
+  });
+
+  it('charges direct fallback enumeration once, then adds the query result', async () => {
+    const reads = createQueryStoreReadContext(store, { maxMaterializedBytes: rawBytes + resultBytes });
+    await expect(reads.listGraphsByPrefix('urn:absent:')).resolves.toEqual([]);
+    await expect(reads.query('SELECT * WHERE {}')).resolves.toEqual(result);
+    await expect(reads.query('SELECT * WHERE {}')).rejects.toMatchObject({ actualBytes: rawBytes + 2 * resultBytes });
+  });
+});

@@ -1,4 +1,4 @@
-import { assertJsonResponseWithinLimit, mapBoundedQueryArray, buildSelectResult, buildConstructResult } from './bounded-query-result.js';
+import { assertJsonResponseWithinLimit, mapBoundedSelectResult, mapBoundedConstructResult } from './bounded-query-result.js';
 import type { QueryOptions } from '../triple-store.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
@@ -365,7 +365,7 @@ export class OxigraphStore implements TripleStore {
 
     const first = result[0];
     if (first instanceof Map) {
-      return mapBoundedQueryArray(
+      return mapBoundedSelectResult(
         result as Map<string, OxTerm>[],
         (row) => {
           const obj: Record<string, string> = {};
@@ -374,15 +374,13 @@ export class OxigraphStore implements TripleStore {
           }
           return obj;
         },
-        buildSelectResult,
         options?.maxResponseBytes,
       );
     }
 
-    return mapBoundedQueryArray(
+    return mapBoundedConstructResult(
       result as OxQuad[],
       fromOxQuad,
-      buildConstructResult,
       options?.maxResponseBytes,
     );
   }

@@ -80,7 +80,12 @@ export function createStoreReadLane(
   };
   return {
     query: (sparql) => measured(() => store.query(sparql, options)),
-    listGraphsByPrefix: (prefix) => measured(() => listGraphsByPrefix(store, prefix, options)),
+    listGraphsByPrefix: async prefix => {
+      if (store.listGraphsByPrefix) return measured(() => store.listGraphsByPrefix!(prefix, options));
+      // Charge the decoded inventory, including unrelated graphs, before projection.
+      const graphs = await measured(() => store.listGraphs(options));
+      return graphs.filter(graph => graph.startsWith(prefix));
+    },
   };
 }
 
@@ -95,12 +100,19 @@ export function createQueryStoreReadContext(
   const sharedOptions = sharedDiscoveryStoreOptions(options);
   const sharedLane = createStoreReadLane(store, sharedOptions);
   const catalogOptions = { ...sharedOptions, signal: options?.signal };
+  const measure = async <T>(load: (reads: StoreReadLane) => Promise<T>): Promise<MeasuredDiscovery<T>> => {
+    let byteCount = 0;
+    const measured = createStoreReadLane(store, sharedOptions, {
+      consume(value) { byteCount += estimateMaterializedBytes(value); },
+    });
+    return { snapshot: await load(measured), byteCount };
+  };
   return {
     ...lane,
     // Enumeration may share an upstream refresh, but each caller owns its abort race.
     listGraphsByPrefix: async prefix => {
-      const graphs = await raceAgainstCallerAbort(sharedLane.listGraphsByPrefix(prefix), options?.signal);
-      budget?.consume(graphs); return graphs;
+      const discovery = await raceAgainstCallerAbort(measure(reads => reads.listGraphsByPrefix(prefix)), options?.signal);
+      budget?.consumeBytes(discovery.byteCount); return discovery.snapshot;
     },
     signal: options?.signal,
     materializationBudget: budget,
@@ -108,13 +120,7 @@ export function createQueryStoreReadContext(
     catalog: createStoreReadLane(store, catalogOptions, budget),
     shared: {
       ...sharedLane,
-      async measure<T>(load: (reads: StoreReadLane) => Promise<T>): Promise<MeasuredDiscovery<T>> {
-        let byteCount = 0;
-        const measured = createStoreReadLane(store, sharedOptions, {
-          consume(value) { byteCount += estimateMaterializedBytes(value); },
-        });
-        return { snapshot: await load(measured), byteCount };
-      },
+      measure,
       replay<T>(discovery: MeasuredDiscovery<T>): T {
         budget?.consumeBytes(discovery.byteCount);
         return discovery.snapshot;
@@ -127,10 +133,4 @@ export function createQueryStoreReadContext(
       ]),
     },
   };
-}
-
-async function listGraphsByPrefix(store: TripleStore, prefix: string, options?: StoreQueryOptions): Promise<string[]> {
-  return store.listGraphsByPrefix
-    ? store.listGraphsByPrefix(prefix, options)
-    : (await store.listGraphs(options)).filter(graph => graph.startsWith(prefix));
 }

@@ -1,4 +1,4 @@
-import { mapBoundedQueryArray, buildSelectResult } from '../src/adapters/bounded-query-result.js';
+import { mapBoundedSelectResult, mapBoundedConstructResult } from '../src/adapters/bounded-query-result.js';
 import { describe, expect, it, vi } from 'vitest';
 
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
@@ -140,17 +140,17 @@ describe('OxigraphStore query result contract', () => {
 
   it('stops normalization immediately when the next mapped row exceeds the ceiling', () => {
     const first = { value: 'fits' };
-    const limit = Buffer.byteLength(JSON.stringify(buildSelectResult([first])), 'utf8');
+    const limit = Buffer.byteLength(JSON.stringify({ type: 'bindings', bindings: [first] }), 'utf8');
     const mapped: number[] = [];
     const map = (value: number) => {
       mapped.push(value);
       if (value > 1) throw new Error('mapped beyond the overflowing row');
       return value === 0 ? first : { value: 'overflow' };
     };
-    expect(() => mapBoundedQueryArray([0, 1, 2, 3], map, buildSelectResult, limit))
+    expect(() => mapBoundedSelectResult([0, 1, 2, 3], map, limit))
       .toThrow(StoreResponseTooLargeError);
     expect(mapped).toEqual([0, 1]);
-    expect(mapBoundedQueryArray([0], map, buildSelectResult, limit)).toEqual(buildSelectResult([first]));
+    expect(mapBoundedSelectResult([0], map, limit)).toEqual({ type: 'bindings', bindings: [first] });
   });
 
   it('bounds normalized SELECT production at the local adapter boundary', async () => {
@@ -205,4 +205,16 @@ describe('OxigraphStore query result contract', () => {
       await store.close();
     }
   });
+});
+
+it('bounds CONSTRUCT normalization at the overflowing row with exact envelope bytes', () => {
+  const quad = { subject: 'urn:s', predicate: 'urn:p', object: '"é"', graph: '' };
+  const expected = { type: 'quads', quads: [quad] };
+  const limit = Buffer.byteLength(JSON.stringify(expected), 'utf8');
+  const calls: number[] = [];
+  const map = (value: number) => { calls.push(value); return quad; };
+  expect(() => mapBoundedConstructResult([0, 1, 2], map, limit)).toThrow(StoreResponseTooLargeError);
+  expect(calls).toEqual([0, 1]);
+  expect(mapBoundedConstructResult([0], map, limit)).toEqual(expected);
+  expect(() => mapBoundedConstructResult([0], map, limit - 1)).toThrow(StoreResponseTooLargeError);
 });

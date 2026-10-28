@@ -1,4 +1,4 @@
-import type { QueryResult, SelectResult, ConstructResult, Quad as DKGQuad } from '../triple-store.js';
+import type { SelectResult, ConstructResult, Quad as DKGQuad } from '../triple-store.js';
 import { StoreResponseTooLargeError } from '../http-response-limit.js';
 
 export function assertJsonResponseWithinLimit(value: unknown, maxBytes: number | undefined): void {
@@ -7,37 +7,37 @@ export function assertJsonResponseWithinLimit(value: unknown, maxBytes: number |
   if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
 }
 
-/**
- * Build one typed JSON-array result without retaining an unbounded second copy
- * of the native Oxigraph result. The same builder owns the returned envelope
- * and the fixed overhead used by exact byte accounting.
- */
-export function mapBoundedQueryArray<T, U, R extends QueryResult>(
-  values: T[],
-  map: (value: T) => U,
-  buildResult: (mapped: U[]) => R,
-  maxBytes: number | undefined,
-): R {
-  if (maxBytes === undefined) return buildResult(values.map(map));
-  const mapped: U[] = [];
-  // The empty result contains the same array brackets as the final result.
-  // Replacing [] with [row,...] adds only each row plus its separators.
-  let actualBytes = Buffer.byteLength(JSON.stringify(buildResult(mapped)), 'utf8');
-  if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
+/** Normalize only until the next row would exceed the fixed result envelope. */
+function appendBoundedRows<T, U>(
+  values: T[], map: (value: T) => U, mapped: U[],
+  emptyEnvelopeBytes: number, maxBytes: number | undefined,
+): void {
+  let actualBytes = emptyEnvelopeBytes;
+  if (maxBytes !== undefined && actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
   for (const value of values) {
     const next = map(value);
-    actualBytes += (mapped.length === 0 ? 0 : 1)
-      + Buffer.byteLength(JSON.stringify(next), 'utf8');
-    if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
+    if (maxBytes !== undefined) {
+      actualBytes += (mapped.length === 0 ? 0 : 1) + Buffer.byteLength(JSON.stringify(next), 'utf8');
+      if (actualBytes > maxBytes) throw new StoreResponseTooLargeError(maxBytes, actualBytes);
+    }
     mapped.push(next);
   }
-  return buildResult(mapped);
 }
 
-export function buildSelectResult(bindings: Array<Record<string, string>>): SelectResult {
-  return { type: 'bindings', bindings };
+/** Own both the SELECT envelope and its one incrementally normalized array. */
+export function mapBoundedSelectResult<T>(
+  values: T[], map: (value: T) => Record<string, string>, maxBytes: number | undefined,
+): SelectResult {
+  const result: SelectResult = { type: 'bindings', bindings: [] };
+  appendBoundedRows(values, map, result.bindings, Buffer.byteLength(JSON.stringify(result), 'utf8'), maxBytes);
+  return result;
 }
 
-export function buildConstructResult(quads: DKGQuad[]): ConstructResult {
-  return { type: 'quads', quads };
+/** Own both the CONSTRUCT envelope and its one incrementally normalized array. */
+export function mapBoundedConstructResult<T>(
+  values: T[], map: (value: T) => DKGQuad, maxBytes: number | undefined,
+): ConstructResult {
+  const result: ConstructResult = { type: 'quads', quads: [] };
+  appendBoundedRows(values, map, result.quads, Buffer.byteLength(JSON.stringify(result), 'utf8'), maxBytes);
+  return result;
 }
