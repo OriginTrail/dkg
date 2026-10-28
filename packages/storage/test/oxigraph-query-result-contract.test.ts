@@ -1,3 +1,4 @@
+import { mapBoundedQueryArray, buildSelectResult } from '../src/adapters/bounded-query-result.js';
 import { describe, expect, it, vi } from 'vitest';
 
 import { OxigraphStore } from '../src/adapters/oxigraph.js';
@@ -135,6 +136,21 @@ describe('OxigraphStore query result contract', () => {
     } finally {
       await store.close();
     }
+  });
+
+  it('stops normalization immediately when the next mapped row exceeds the ceiling', () => {
+    const first = { value: 'fits' };
+    const limit = Buffer.byteLength(JSON.stringify(buildSelectResult([first])), 'utf8');
+    const mapped: number[] = [];
+    const map = (value: number) => {
+      mapped.push(value);
+      if (value > 1) throw new Error('mapped beyond the overflowing row');
+      return value === 0 ? first : { value: 'overflow' };
+    };
+    expect(() => mapBoundedQueryArray([0, 1, 2, 3], map, buildSelectResult, limit))
+      .toThrow(StoreResponseTooLargeError);
+    expect(mapped).toEqual([0, 1]);
+    expect(mapBoundedQueryArray([0], map, buildSelectResult, limit)).toEqual(buildSelectResult([first]));
   });
 
   it('bounds normalized SELECT production at the local adapter boundary', async () => {

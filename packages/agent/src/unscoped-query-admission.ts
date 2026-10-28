@@ -57,11 +57,10 @@ export async function canReadUnscopedQuery(
       new GraphManager(deps.store).listStoredContextGraphOwnerCandidates({
         signal,
         maxResponseBytes: opts.maxResponseBytes,
-      }),
+      }, opts.materializationBudget),
     ]));
     signal.throwIfAborted();
     opts.materializationBudget?.consume(result);
-    opts.materializationBudget?.consume(storedIds);
     if (result.type !== 'bindings') {
       throw new Error('Cannot authorize unscoped query: invalid access-policy discovery result');
     }
