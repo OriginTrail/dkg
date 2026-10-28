@@ -212,7 +212,7 @@ const clearDeadNodePidFiles = (num: number): void =>
  * kill -9 every process that belongs to the node (the real worker is `daemon.pid`). The PID files
  * are read and every live PID is checked to be a daemon of this checkout first, which takes a
  * `ps` per process. The time-critical kill in the cycles does not use this: it calls
- * `lifecycle.verifiedNodePids` before its wait and `lifecycle.sigkillPids` at the kill point.
+ * `lifecycle.verifiedNodeProcesses` before its wait and `lifecycle.sigkillProcesses` at the kill point.
  */
 const sigkillNode = (num: number): number[] => lifecycle.sigkillNodeProcesses(PATHS, num);
 
@@ -429,16 +429,16 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
 
     for (let cycle = 1; cycle <= KILL_CYCLES; cycle += 1) {
       // Check who the host's processes are BEFORE the race (this throws if a PID file lists a live
-      // process that is not a daemon of this checkout), so the kill itself is immediate.
-      const hostPids = lifecycle.verifiedNodePids(PATHS, HOST);
-      expect(hostPids.length, `cycle ${cycle}: node${HOST} has no live process in its PID files`).toBeGreaterThan(0);
+      // process that is not a daemon of this checkout), then recheck the same process instance immediately before SIGKILL.
+      const hostProcesses = lifecycle.verifiedNodeProcesses(PATHS, HOST);
+      expect(hostProcesses.length, `cycle ${cycle}: node${HOST} has no live process in its PID files`).toBeGreaterThan(0);
       // Wait for a new frame, then kill the core at that instant.
       const baseSize = logSize(cgId);
       const killAt = Date.now() + 240_000;
       let killed: number[] = [];
       while (Date.now() < killAt) {
         if (logSize(cgId) > baseSize) {
-          killed = lifecycle.sigkillPids(hostPids);
+          killed = lifecycle.sigkillProcesses(hostProcesses);
           break;
         }
         await sleep(3);

@@ -1,3 +1,4 @@
+import { inspectPsProcessSync } from '../../packages/cli/src/daemon/process-probe.js';
 import { planDevnetShutdown, executeDevnetShutdown, parseProcessInventory, collectDevnetNodePids } from '../../scripts/lib/devnet-node-process-control.js';
 // No-devnet tests for the shared node-lifecycle helpers (node-lifecycle.ts): PID files,
 // the ownership rule (only this devnet's own, live PIDs, and only a daemon of this
@@ -26,7 +27,8 @@ import {
   restartNodeAndWait,
   rpcUrlFromNode1Config,
   sigkillNodeProcesses,
-  sigkillPids,
+  sigkillProcesses,
+  verifiedNodeProcesses,
   stopNodeProcesses,
   verifiedNodePids,
   waitForPidsGone,
@@ -227,16 +229,16 @@ describe('killing a node', () => {
     expect(pidAlive(bystander.pid!)).toBe(true);
   });
 
-  it('sigkillPids kills immediately and tolerates a PID that is already gone', async () => {
+  it('sigkillProcesses kills immediately and tolerates a PID that is already gone', async () => {
     const victim = sleeper();
-    expect(() => sigkillPids([deadPid(), victim.pid!])).not.toThrow();
+    expect(() => sigkillProcesses([{ ...processIdentity(victim.pid!), pid: deadPid() }, processIdentity(victim.pid!)])).not.toThrow();
     expect(await exited(victim)).toBe(true);
   });
 
   it('waitForPidsGone resolves true once the processes are gone and false if one survives the timeout', async () => {
     const victim = sleeper();
     const survivor = sleeper();
-    sigkillPids([victim.pid!]);
+    sigkillProcesses([processIdentity(victim.pid!)]);
     expect(await waitForPidsGone('victim gone', [victim.pid!], 5_000)).toBe(true);
     expect(await waitForPidsGone('survivor gone', [survivor.pid!], 600)).toBe(false);
   });
@@ -445,26 +447,26 @@ describe('only a daemon of this checkout is ever signalled', () => {
     expect(sigkillNodeProcesses(paths, 4)).toEqual([]);
   });
 
-  it('a time-critical caller verifies before its wait and signals the verified PIDs at the kill point: no command line is read then, and only live ones are signalled', async () => {
+  it('a time-critical caller verifies before its wait and signals the verified PIDs at the kill point: the original process identities are rechecked', async () => {
     const worker = sleeper();
     const supervisor = sleeper();
     const bystander = sleeper(); // not listed anywhere
     writeFileSync(pidFile(4, 'daemon.pid'), `${worker.pid}\n`);
     writeFileSync(pidFile(4, 'devnet.pid'), `${supervisor.pid}\n`);
-    const verified = verifiedNodePids(paths, 4);
-    expect(verified).toEqual([worker.pid, supervisor.pid]);
+    const verified = verifiedNodeProcesses(paths, 4);
+    expect(verified.map(record => record.pid)).toEqual([worker.pid, supervisor.pid]);
 
     // One of them exits between the check and the kill: it is not reported as signalled.
     supervisor.kill('SIGKILL');
     expect(await exited(supervisor)).toBe(true);
     const gone = deadPid();
-    expect(sigkillPids([...verified, gone])).toEqual([worker.pid]);
+    expect(sigkillProcesses([...verified, { ...verified[0]!, pid: gone }])).toEqual([worker.pid]);
     expect(await exited(worker)).toBe(true);
     expect(worker.signalCode).toBe('SIGKILL');
     expect(pidAlive(bystander.pid!)).toBe(true);
     // An empty list signals nothing and does not fall back to the PID files.
     writeFileSync(pidFile(4, 'daemon.pid'), `${bystander.pid}\n`);
-    expect(sigkillPids([])).toEqual([]);
+    expect(sigkillProcesses([])).toEqual([]);
     expect(pidAlive(bystander.pid!)).toBe(true);
   });
 });
@@ -493,7 +495,7 @@ describe('one validated devnet shutdown plan', () => {
       ? (++reads === 1 ? original : 'unrelated replacement process') : readProcessCommandLine(pid);
     const plan = planDevnetShutdown(paths, [4], reader);
     expect(reads).toBe(1);
-    expect(plan.identities.get(worker.pid!)).toBe(original);
+    expect(plan.identities.get(worker.pid!)).toMatchObject({ command: original });
     await expect(executeDevnetShutdown(plan, { graceMs: 0, killWaitMs: 0 })).rejects.toThrow('did not stop');
     expect(pidAlive(worker.pid!)).toBe(true);
     expect(readFileSync(pidFile(4, 'daemon.pid'), 'utf8')).toBe(String(worker.pid));
@@ -539,11 +541,28 @@ describe('one validated devnet shutdown plan', () => {
       [otherHome.pid!, 1, '/usr/bin/node', `node --path ${home}0/store`],
     ] as const;
     const inventory = parseProcessInventory(rows.map(([pid, , , command]) => `${pid} ${command}`).join('\n'),
-      rows.map(([pid, parent, executable]) => `${pid} ${parent} ${executable}`).join('\n'));
+      rows.map(([pid, parent, executable]) => `${pid} ${parent} ${executable}`).join('\n'),
+      rows.map(([pid, parent, , command]) => `${pid} ${parent} S ${processIdentity(pid).start} ${command}`).join('\n'));
     expect(inventory.records.get(daemon.pid!)?.executable).toBe('node');
     expect(inventory.childrenByParent.get(daemon.pid!)).toEqual([descendant.pid]);
-    expect(collectDevnetNodePids(paths, 4, readProcessCommandLine, inventory).sort()).toEqual([daemon.pid, detached.pid, descendant.pid].sort());
+    const consistent = (pid: number) => rows.find(row => row[0] === pid)?.[3] ?? null;
+    expect(collectDevnetNodePids(paths, 4, consistent, inventory).sort()).toEqual([daemon.pid, detached.pid, descendant.pid].sort());
     expect(pidAlive(bystander.pid!)).toBe(true);
+    // The real command differs from both synthetic detached/helper inventory identities.
+    expect(collectDevnetNodePids(paths, 4, readProcessCommandLine, inventory)).toEqual([daemon.pid]);
+    expect(pidAlive(detached.pid!)).toBe(true);
+    expect(pidAlive(descendant.pid!)).toBe(true);
+  });
+
+  it('refuses a recycled process at the delayed crash-test kill boundary', () => {
+    const worker = sleeper(); writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
+    const owned = verifiedNodeProcesses(paths, 4);
+    expect(sigkillProcesses(owned, pid => {
+      const observed = inspectPsProcessSync(pid);
+      return observed.state === 'running' ? { state: 'running', process: { ...observed.process, start: 'replacement-start' } } : observed;
+    })).toEqual([]);
+    expect(pidAlive(worker.pid!)).toBe(true);
+    expect(readFileSync(pidFile(4, 'daemon.pid'), 'utf8')).toBe(String(worker.pid));
   });
 
   it('signals all stubborn nodes before their shared grace period', async () => {
@@ -997,3 +1016,9 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
     expect(alive(tail), 'the log tail survives the restart').toBe(true);
   });
 });
+
+function processIdentity(pid: number) {
+  const observed = inspectPsProcessSync(pid);
+  if (observed.state !== 'running') throw new Error(`Test process ${pid} is not running`);
+  return observed.process;
+}

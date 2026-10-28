@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
-import { execFileSync } from 'node:child_process';
+import { inspectPsProcessSync, readProcessInventorySync, processDescendants, type ProcessInstance, type ProcessInventory, type SyncProcessInspector } from '../../packages/cli/src/daemon/process-probe.ts';
+export { readProcessState, processStateIsGone, parseProcessInventory, type ProcessInventory, type ProcessRecord } from '../../packages/cli/src/daemon/process-probe.ts';
 import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { dirname, join, isAbsolute } from 'node:path';
 
@@ -60,48 +61,9 @@ export function readNodePids(paths: DevnetPaths, num: number): number[] {
   return [...new Set(readNodePidEntries(paths, num).map((entry) => entry.pid))];
 }
 
-/**
- * `ps -o stat= -p <pid>`: the process state letters (`Z...` is a zombie), `null`
- * when the process is gone or `ps` cannot show it.
- */
-export function readProcessState(pid: number): string | null {
-  try {
-    const out = execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5_000,
-    });
-    return out.trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Whether a `ps` state (`readProcessState`) is that of a process that is not running any
- * more: a zombie (`Z...`, exited but not yet collected by its parent) or, on macOS, one
- * that is in the middle of exiting (`E` flag, "trying to exit", for example `?E`). A
- * `null` or ordinary state (`S`, `Ss+`, `R`, ...) is not.
- */
-export function processStateIsGone(state: string | null): boolean {
-  return state !== null && (state.startsWith('Z') || state.includes('E'));
-}
-
-/**
- * Whether the process is still running. A SIGKILLed daemon is, for a moment, a process in
- * the middle of exiting and then a zombie until its parent (or init) collects it: it
- * still answers signal 0 and `ps` shows its command line as `(node)`, yet nothing of the
- * daemon runs and nothing is left to signal. Such a process counts as gone, or a restart
- * right after a kill would refuse it as "not a daemon of this checkout". A state that
- * cannot be read counts as alive.
- */
+/** Unknown observations never prove that a process has exited. */
 export function pidAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-  } catch {
-    return false;
-  }
-  return !processStateIsGone(readProcessState(pid));
+  return inspectPsProcessSync(pid).state !== 'gone';
 }
 
 /**
@@ -127,38 +89,38 @@ export function clearDeadNodePidFiles(
   }
 }
 
-/**
- * kill -9 each PID at once and return the ones that were signalled (a PID that is
- * already gone is skipped, not an error). It does not check who a PID is: pass it
- * PIDs that `verifiedNodePids` returned.
- */
-export function sigkillPids(pids: readonly number[]): number[] {
+/** The command line (argv, no environment) of a process, or null when unreadable. */
+export type CommandLineReader = (pid: number) => string | null;
+export const readProcessCommandLine: CommandLineReader = pid => {
+  const observed = inspectPsProcessSync(pid);
+  return observed.state === 'running' ? observed.process.command : null;
+};
+
+/** Default lifecycle decisions use one typed observation for identity and liveness. */
+function processObserver(reader: CommandLineReader): SyncProcessInspector {
+  if (reader === readProcessCommandLine) return inspectPsProcessSync;
+  return pid => {
+    const observed = inspectPsProcessSync(pid);
+    if (observed.state !== 'running') return observed;
+    const command = reader(pid);
+    return command === null ? { state: 'unknown', reason: 'command line cannot be read' }
+      : { state: 'running', process: { ...observed.process, command } };
+  };
+}
+
+/** Immediate SIGKILL, with the original process instance rechecked at the signal boundary. */
+export function sigkillProcesses(processes: readonly ProcessInstance[], inspect: SyncProcessInspector = inspectPsProcessSync): number[] {
   const signalled: number[] = [];
-  for (const pid of pids) {
-    try {
-      process.kill(pid, 'SIGKILL');
-      signalled.push(pid);
-    } catch { /* may already be gone */ }
+  for (const owned of processes) {
+    const current = inspect(owned.pid);
+    if (current.state !== 'running' || !sameProcess(owned, current.process)) continue;
+    try { process.kill(owned.pid, 'SIGKILL'); signalled.push(owned.pid); } catch { /* already gone */ }
   }
   return signalled;
 }
-
-/** The command line (argv, no environment) of a process, or `null` when it cannot be read. */
-export type CommandLineReader = (pid: number) => string | null;
-
-/** `ps -ww -o command= -p <pid>`: the full argv of a process, `null` when it is gone or `ps` cannot show it. */
-export const readProcessCommandLine: CommandLineReader = (pid) => {
-  try {
-    const out = execFileSync('ps', ['-ww', '-o', 'command=', '-p', String(pid)], {
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'ignore'],
-      timeout: 5_000,
-    });
-    return out.trim() || null;
-  } catch {
-    return null;
-  }
-};
+function sameProcess(owned: ProcessInstance, current: ProcessInstance): boolean {
+  return owned.pid === current.pid && owned.start === current.start && owned.command === current.command;
+}
 
 /** The CLI entry point, relative to the checkout: what `resolveDaemonNodeCommand` puts before the subcommand. */
 const CLI_ENTRY_POINT = 'packages/cli/dist/cli.js';
@@ -211,14 +173,14 @@ function repoRootSpellings(repoRoot: string): string[] {
  * node running. A PID that is dead, or dies while it is being checked, is skipped.
  *
  * Reads the command lines through `ps`, which takes tens of milliseconds: call
- * it before a time-critical kill and pass the result to `sigkillNodeProcesses`.
+ * it before a time-critical kill; retain `verifiedNodeProcesses` for deferred signalling.
  */
-interface OwnedProcess { readonly pid: number; readonly commandLine: string }
+type OwnedProcess = ProcessInstance;
 export function verifiedNodePids(paths: DevnetPaths, num: number,
   readCommandLine: CommandLineReader = readProcessCommandLine): number[] {
   return verifiedNodeProcesses(paths, num, readCommandLine).map(record => record.pid);
 }
-function verifiedNodeProcesses(
+export function verifiedNodeProcesses(
   paths: DevnetPaths,
   num: number,
   readCommandLine: CommandLineReader = readProcessCommandLine,
@@ -231,24 +193,25 @@ function verifiedNodeProcesses(
   const roots = [...repoRootSpellings(paths.repoRoot),
     ...(alternate === undefined ? [] : repoRootSpellings(dirname(dirname(dirname(dirname(alternate))))))];
   const owned = new Map<number, OwnedProcess>();
+  const inspect = processObserver(readCommandLine);
   for (const { file, pid } of readNodePidEntries(paths, num)) {
-    if (owned.has(pid) || !pidAlive(pid)) continue;
-    const commandLine = readCommandLine(pid);
-    if (commandLine === null) {
-      if (!pidAlive(pid)) continue; // exited while it was being looked at
+    if (owned.has(pid)) continue;
+    const observed = inspect(pid);
+    if (observed.state === 'gone') continue;
+    if (observed.state === 'unknown') {
       throw new Error(
         `node${num}: ${file} lists pid ${pid}, which is alive but whose command line cannot be read, `
         + `so it cannot be shown to be a daemon of ${paths.repoRoot}; not signalling it`,
       );
     }
-    if (!isDaemonOfCheckout(commandLine, roots)) {
+    if (!isDaemonOfCheckout(observed.process.command, roots)) {
       if (!pidAlive(pid)) continue; // exited (and is waiting to be collected) while it was being looked at
       throw new Error(
         `node${num}: ${file} lists pid ${pid}, which is alive but is not a DKG daemon started from `
         + `${paths.repoRoot} (a stale PID file whose number was recycled?); not signalling it`,
       );
     }
-    owned.set(pid, { pid, commandLine });
+    owned.set(pid, observed.process);
   }
   return [...owned.values()];
 }
@@ -258,15 +221,16 @@ function verifiedNodeProcesses(
  * that were signalled (the real worker is `daemon.pid`). The PID files are read
  * and every live PID is checked first (`verifiedNodePids`, which throws before
  * anything is signalled). `ps` takes tens of milliseconds per process, so a
- * time-critical caller calls `verifiedNodePids` itself before its wait and
- * `sigkillPids` at the kill point.
+ * time-critical caller retains `verifiedNodeProcesses` before waiting and calls
+ * `sigkillProcesses` at the kill point, which rechecks that exact process instance.
  */
 export function sigkillNodeProcesses(
   paths: DevnetPaths,
   num: number,
   options: { readCommandLine?: CommandLineReader } = {},
 ): number[] {
-  return sigkillPids(verifiedNodePids(paths, num, options.readCommandLine));
+  return sigkillProcesses(verifiedNodeProcesses(paths, num, options.readCommandLine),
+    processObserver(options.readCommandLine ?? readProcessCommandLine));
 }
 
 /** Resolves `true` once every PID is gone, `false` if any is still alive after `timeoutMs`. */
@@ -299,28 +263,31 @@ export interface DevnetShutdownOptions {
 export interface DevnetShutdownPlan {
   readonly paths: DevnetPaths;
   readonly numbers: readonly number[];
-  readonly identities: ReadonlyMap<number, string>;
-  readonly readCommandLine: CommandLineReader;
+  readonly identities: ReadonlyMap<number, ProcessInstance>;
+  readonly inspect: SyncProcessInspector;
 }
 /** Validate every selected node before signalling anything, sharing one process inventory. */
 export function planDevnetShutdown(paths: DevnetPaths, numbers: readonly number[],
   readCommandLine: CommandLineReader = readProcessCommandLine): DevnetShutdownPlan {
-  const snapshot = readProcessInventory();
+  const snapshot = readProcessInventorySync();
   const identities = new Map(numbers.flatMap(num => collectOwnedNodeProcesses(paths, num, readCommandLine, snapshot))
-    .map(record => [record.pid, record.commandLine] as const));
-  return { paths, numbers: [...numbers], identities, readCommandLine };
+    .map(record => [record.pid, record] as const));
+  return { paths, numbers: [...numbers], identities, inspect: processObserver(readCommandLine) };
 }
 /** One TERM/grace/KILL flow for the whole validated set; recheck identity at each signal. */
 export async function executeDevnetShutdown(plan: DevnetShutdownPlan,
   options: Omit<DevnetShutdownOptions, 'readCommandLine'> = {}): Promise<void> {
   const pids = [...plan.identities.keys()];
-  const current = (pid: number) => pidAlive(pid) && plan.readCommandLine(pid) === plan.identities.get(pid);
+  const current = (pid: number) => {
+    const observed = plan.inspect(pid);
+    return observed.state === 'running' && sameProcess(plan.identities.get(pid)!, observed.process);
+  };
   for (const pid of pids) {
     if (!current(pid)) continue;
     try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
   }
   if (pids.length && !(await waitForPidsGone('devnet processes stopped', pids, options.graceMs ?? 10_000))) {
-    sigkillPids(pids.filter(current));
+    sigkillProcesses([...plan.identities.values()], plan.inspect);
     if (!(await waitForPidsGone('devnet processes killed', pids, options.killWaitMs ?? 10_000)))
       throw new Error(`Selected devnet processes did not stop`);
   }
@@ -334,70 +301,34 @@ export async function stopNodeProcesses(paths: DevnetPaths, num: number,
 
 /** Collect every owned process before signalling any, including detached stores. */
 export function collectDevnetNodePids(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader = readProcessCommandLine,
-  inventory: ProcessInventory = readProcessInventory()): number[] {
+  inventory: ProcessInventory = readProcessInventorySync()): number[] {
   return collectOwnedNodeProcesses(paths, num, readCommandLine, inventory).map(record => record.pid);
-}
-export interface ProcessRecord {
-  readonly pid: number;
-  readonly parentPid: number;
-  readonly commandLine: string;
-  readonly executable: string;
-}
-export interface ProcessInventory {
-  readonly records: ReadonlyMap<number, ProcessRecord>;
-  readonly childrenByParent: ReadonlyMap<number, readonly number[]>;
-}
-/** Normalize both OS snapshots once, including executable paths containing spaces. */
-export function parseProcessInventory(listings: string, metadata: string): ProcessInventory {
-  const commands = new Map<number, string>();
-  for (const line of listings.split('\n')) {
-    const match = /^\s*(\d+)\s+(.+)$/.exec(line);
-    if (match) commands.set(Number(match[1]), match[2]!);
-  }
-  const records = new Map<number, ProcessRecord>();
-  const childrenByParent = new Map<number, number[]>();
-  for (const line of metadata.split('\n')) {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
-    if (!match) continue;
-    const pid = Number(match[1]), parentPid = Number(match[2]);
-    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(parentPid) || parentPid < 0) continue;
-    const commandLine = commands.get(pid);
-    if (commandLine === undefined) continue; // Process exited between snapshots.
-    const executable = match[3]!.trim().split('/').at(-1)!;
-    records.set(pid, Object.freeze({ pid, parentPid, commandLine, executable }));
-    const children = childrenByParent.get(parentPid) ?? [];
-    children.push(pid); childrenByParent.set(parentPid, children);
-  }
-  return { records, childrenByParent };
-}
-function readProcessInventory(): ProcessInventory {
-  const listings = execFileSync('ps', ['axeww', '-o', 'pid=,command='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-  const metadata = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,comm='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-  return parseProcessInventory(listings, metadata);
 }
 function collectOwnedNodeProcesses(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader,
   inventory: ProcessInventory): OwnedProcess[] {
   const owned = new Map(verifiedNodeProcesses(paths, num, readCommandLine).map(record => [record.pid, record]));
-  // Resolve identity at discovery, retaining it through planning. A verified
-  // PID-file record must never be replaced by a later command observation.
+  const inspect = processObserver(readCommandLine);
+  // Ownership comes from the inventory's process instance, never a later replacement.
   const retain = (pid: number): void => {
-    if (owned.has(pid) || !pidAlive(pid)) return;
-    const commandLine = readCommandLine(pid);
-    if (commandLine !== null) owned.set(pid, { pid, commandLine });
-    else if (pidAlive(pid)) throw new Error(`Owned PID ${pid} has no readable command identity; not signalling it`);
+    if (owned.has(pid)) return;
+    const original = inventory.records.get(pid);
+    if (!original) return;
+    const current = inspect(pid);
+    if (current.state === 'unknown') throw new Error(`Owned PID ${pid} has no readable process identity; not signalling it`);
+    if (current.state === 'running' && sameProcess(original, current.process)) owned.set(pid, original);
   };
   const home = nodeHome(paths, num);
-  for (const { pid, commandLine, executable } of inventory.records.values()) {
+  for (const { pid, ownershipText: commandLine, executable } of inventory.records.values()) {
     if (pid === process.pid || !(commandLine.includes(`${home}/`) || commandLine.includes(`DKG_HOME=${home} `)
       || commandLine.endsWith(`DKG_HOME=${home}`))) continue;
     if (executable === 'node' || executable.startsWith('oxigraph')) retain(pid);
   }
-  const pending = [...owned.keys()];
-  for (let index = 0; index < pending.length; index++) {
-    for (const pid of inventory.childrenByParent.get(pending[index]!) ?? []) {
-      if (pid === process.pid || owned.has(pid)) continue;
-      retain(pid); if (owned.has(pid)) pending.push(pid);
-    }
+  for (const pid of processDescendants([...owned.keys()], inventory.childrenByParent)) {
+    if (pid === process.pid || owned.has(pid)) continue;
+    const record = inventory.records.get(pid);
+    const parent = record && owned.get(record.ppid);
+    const observedParent = record && inventory.records.get(record.ppid);
+    if (parent && observedParent && sameProcess(parent, observedParent)) retain(pid);
   }
   return [...owned.values()].filter(record => pidAlive(record.pid));
 }

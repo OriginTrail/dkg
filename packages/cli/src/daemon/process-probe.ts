@@ -8,7 +8,7 @@
  * Every variant is exported so tests can run each one on any host that
  * supports it, not only on the host that selects it by default.
  */
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { readdir, readFile, readlink } from 'node:fs/promises';
 import { promisify } from 'node:util';
 
@@ -124,7 +124,6 @@ export const linuxProcessTree: ProcessTreeWalker = async (rootPid) => {
 
 /** Descendants from one `ps` snapshot, for Unix hosts without `/proc`. */
 export const psProcessTree: ProcessTreeWalker = async (rootPid) => {
-  const pids = new Set<number>([rootPid]);
   const childrenOf = new Map<number, number[]>();
   try {
     const { stdout } = await execFileAsync('ps', ['-A', '-o', 'pid=,ppid='], { timeout: 2_000 });
@@ -138,15 +137,7 @@ export const psProcessTree: ProcessTreeWalker = async (rootPid) => {
   } catch {
     // Without a snapshot only the root itself is known.
   }
-  const pending = [rootPid];
-  while (pending.length > 0) {
-    for (const childPid of childrenOf.get(pending.pop()!) ?? []) {
-      if (pids.has(childPid)) continue;
-      pids.add(childPid);
-      pending.push(childPid);
-    }
-  }
-  return pids;
+  return new Set([rootPid, ...processDescendants([rootPid], childrenOf)]);
 };
 
 // `ps` prints lstart as five fields in the C locale: `Wed Sep  3 23:14:58 2026`.
@@ -173,16 +164,11 @@ export function procProcessInspector(read: ProcReader = (path) => readFile(path,
   return async (pid) => {
     try {
       const stat = await read(`/proc/${pid}/stat`);
-      const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
-      if (fields[0] === 'Z') return { state: 'gone' };
-      const ppid = Number(fields[1]);
-      const start = fields[19];
-      if (!Number.isInteger(ppid) || !start) {
-        return { state: 'unknown', reason: `unexpected /proc/${pid}/stat contents` };
-      }
+      const parsed = parseProcStat(pid, stat);
+      if (parsed.state !== 'running') return parsed;
       const argv = (await read(`/proc/${pid}/cmdline`)).split('\0');
       if (argv.at(-1) === '') argv.pop();
-      return { state: 'running', process: { pid, start, ppid, argv, command: argv.join(' ') } };
+      return { state: 'running', process: { ...parsed.process, argv, command: argv.join(' ') } };
     } catch (error) {
       return procEntryGone(error) ? { state: 'gone' } : { state: 'unknown', reason: errorReason(error) };
     }
@@ -207,18 +193,19 @@ export function psProcessInspector(run: PsRunner = runPs): ProcessInspector {
     try {
       ({ stdout } = await run(['-ww', '-o', 'ppid=,stat=,lstart=,command=', '-p', String(pid)]));
     } catch (error) {
-      const failed = error as { code?: unknown; signal?: unknown; stdout?: unknown; stderr?: unknown; killed?: boolean };
-      const noSuchProcess = failed.code === 1 && failed.killed !== true && failed.signal == null
-        && String(failed.stdout ?? '').trim() === '' && String(failed.stderr ?? '').trim() === '';
-      return noSuchProcess ? { state: 'gone' } : { state: 'unknown', reason: `ps: ${errorReason(error)}` };
+      return psLookupFailure(error);
     }
-    const match = /^\s*(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.*)$/s.exec(stdout.trimEnd());
-    if (!match) return { state: 'unknown', reason: 'ps: unexpected output' };
-    if (match[2].startsWith('Z')) return { state: 'gone' };
-    return {
-      state: 'running',
-      process: { pid, start: normalizeLstart(match[3]), ppid: Number(match[1]), argv: null, command: match[4] },
-    };
+    return parsePsProcess(pid, stdout);
+  };
+}
+
+function parsePsProcess(pid: number, stdout: string): ProcessLookup {
+  const match = /^\s*(\d+)\s+(\S+)\s+(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.*)$/s.exec(stdout.trimEnd());
+  if (!match) return { state: 'unknown', reason: 'ps: unexpected output' };
+  if (processStateIsGone(match[2])) return { state: 'gone' };
+  return {
+    state: 'running',
+    process: { pid, start: normalizeLstart(match[3]), ppid: Number(match[1]), argv: null, command: match[4] },
   };
 }
 
@@ -265,4 +252,102 @@ export function processTreeWalker(platform: NodeJS.Platform): ProcessTreeWalker 
 
 export function processInspector(platform: NodeJS.Platform): ProcessInspector {
   return platform === 'linux' ? procInspectProcess : psInspectProcess;
+}
+
+/** Shared Unix state policy, including macOS processes already trying to exit. */
+export function processStateIsGone(state: string | null): boolean {
+  return state !== null && (state.startsWith('Z') || state.includes('E'));
+}
+
+/** Diagnostic-only compatibility reader; lifecycle decisions use a complete observation. */
+export function readProcessState(pid: number): string | null {
+  try { return execFileSync('ps', ['-o', 'stat=', '-p', String(pid)], {
+    encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'], timeout: 2_000, env: PS_ENV,
+  }).trim() || null; } catch { return null; }
+}
+
+export type SyncProcessInspector = (pid: number) => ProcessLookup;
+export interface ProcessRecord extends ProcessInstance {
+  readonly executable: string;
+  /** Only used for ownership discovery; never becomes the signal identity. */
+  readonly ownershipText: string;
+}
+export interface ProcessInventory {
+  readonly records: ReadonlyMap<number, ProcessRecord>;
+  readonly childrenByParent: ReadonlyMap<number, readonly number[]>;
+}
+/** Join ownership hints to an earlier complete process observation without replacing its identity. */
+export function parseProcessInventory(listings: string, metadata: string, observations: string): ProcessInventory {
+  const hints = new Map<number, string>(), executables = new Map<number, string>();
+  for (const line of listings.split('\n')) {
+    const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+    if (match) hints.set(Number(match[1]), match[2]!);
+  }
+  for (const line of metadata.split('\n')) {
+    const match = /^\s*(\d+)\s+\d+\s+(.+)$/.exec(line);
+    if (match) executables.set(Number(match[1]), match[2]!.trim().split('/').at(-1)!);
+  }
+  const records = new Map<number, ProcessRecord>();
+  for (const line of observations.split('\n')) {
+    const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+    if (!match) continue;
+    const pid = Number(match[1]), lookup = parsePsProcess(pid, match[2]!);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || lookup.state !== 'running') continue;
+    const hint = hints.get(pid), executable = executables.get(pid);
+    if (hint === undefined || executable === undefined) continue;
+    // The environment listing must describe the command observed with this start identity.
+    if (hint !== lookup.process.command && !hint.startsWith(`${lookup.process.command} `)) continue;
+    records.set(pid, { ...lookup.process, ownershipText: hint, executable });
+  }
+  return { records, childrenByParent: indexProcessChildren(records.values()) };
+}
+
+function indexProcessChildren(processes: Iterable<Pick<ProcessInstance, 'pid' | 'ppid'>>): Map<number, number[]> {
+  const children = new Map<number, number[]>();
+  for (const { pid, ppid } of processes) {
+    const siblings = children.get(ppid) ?? []; siblings.push(pid); children.set(ppid, siblings);
+  }
+  return children;
+}
+
+export const inspectPsProcessSync: SyncProcessInspector = pid => {
+  try {
+    return parsePsProcess(pid, execFileSync('ps', ['-ww', '-o', 'ppid=,stat=,lstart=,command=', '-p', String(pid)], {
+      encoding: 'utf8', timeout: 2_000, env: PS_ENV,
+    }));
+  } catch (error) { return psLookupFailure(error); }
+};
+
+export function readProcessInventorySync(): ProcessInventory {
+  const read = (args: string[]) => execFileSync('ps', args, {
+    encoding: 'utf8', timeout: 5_000, maxBuffer: 16 * 1024 * 1024, env: PS_ENV,
+  });
+  const observations = read(['-Aww', '-o', 'pid=,ppid=,stat=,lstart=,command=']);
+  return parseProcessInventory(read(['axeww', '-o', 'pid=,command=']),
+    read(['-A', '-o', 'pid=,ppid=,comm=']), observations);
+}
+
+function parseProcStat(pid: number, stat: string): ProcessLookup {
+  const fields = stat.slice(stat.lastIndexOf(')') + 2).split(' ');
+  if (processStateIsGone(fields[0] ?? null)) return { state: 'gone' };
+  const ppid = Number(fields[1]), start = fields[19];
+  if (!Number.isInteger(ppid) || !start) return { state: 'unknown', reason: `unexpected /proc/${pid}/stat contents` };
+  return { state: 'running', process: { pid, start, ppid, argv: null, command: '' } };
+}
+function psLookupFailure(error: unknown): ProcessLookup {
+  const failed = error as { code?: unknown; status?: unknown; signal?: unknown; stdout?: unknown; stderr?: unknown; killed?: boolean };
+  const noSuchProcess = (failed.code === 1 || failed.status === 1) && failed.killed !== true && failed.signal == null
+    && String(failed.stdout ?? '').trim() === '' && String(failed.stderr ?? '').trim() === '';
+  return noSuchProcess ? { state: 'gone' } : { state: 'unknown', reason: `ps: ${errorReason(error)}` };
+}
+
+/** Breadth-first descendants of a fixed process snapshot; each PID appears once. */
+export function* processDescendants(roots: readonly number[], children: ReadonlyMap<number, readonly number[]>): Iterable<number> {
+  const seen = new Set(roots), pending = [...roots];
+  for (let index = 0; index < pending.length; index++) {
+    for (const pid of children.get(pending[index]!) ?? []) {
+      if (seen.has(pid)) continue;
+      seen.add(pid); pending.push(pid); yield pid;
+    }
+  }
 }

@@ -6,7 +6,7 @@ import * as http from 'node:http';
 import { join } from 'node:path';
 import { waitFor } from './harness';
 import { stopNodeProcesses, DEFAULT_DEVNET_RPC, type DevnetPaths, type CommandLineReader } from '../../scripts/lib/devnet-node-process-control.js';
-export { NODE_PID_FILES, parsePid, readNodePidEntries, readNodePids, readProcessState, processStateIsGone, pidAlive, clearDeadNodePidFiles, sigkillPids, readProcessCommandLine, isDaemonOfCheckout, verifiedNodePids, sigkillNodeProcesses, waitForPidsGone, stopNodeProcesses, DEFAULT_DEVNET_RPC } from '../../scripts/lib/devnet-node-process-control.js';
+export { NODE_PID_FILES, parsePid, readNodePidEntries, readNodePids, readProcessState, processStateIsGone, pidAlive, clearDeadNodePidFiles, sigkillProcesses, verifiedNodeProcesses, readProcessCommandLine, isDaemonOfCheckout, verifiedNodePids, sigkillNodeProcesses, waitForPidsGone, stopNodeProcesses, DEFAULT_DEVNET_RPC } from '../../scripts/lib/devnet-node-process-control.js';
 export type { DevnetPaths, NodePidEntry, CommandLineReader } from '../../scripts/lib/devnet-node-process-control.js';
 
 /**

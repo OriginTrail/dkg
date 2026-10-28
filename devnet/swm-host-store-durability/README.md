@@ -72,8 +72,8 @@ only runs from the checkout, such as the test runner, does not qualify). A live 
 that is not one (a stale file whose number an unrelated process has taken) makes the
 helper throw without signalling anything, instead of killing it or silently skipping
 it, which would leave the node running and turn the kill -9 into a graceful stop. The
-check runs before the wait for the next frame (`verifiedNodePids`), so the `SIGKILL`
-itself (`sigkillPids`) stays immediate. Restarts go through the same check: the
+check runs before the wait for the next frame (`verifiedNodeProcesses`), so the `SIGKILL`
+itself (`sigkillProcesses`) rechecks the retained identity and sends SIGKILL without a TERM/grace period. Restarts go through the same check: the
 suite's setup verifies both nodes before it edits a config, and `restartNodeAndWait`
 stops the node itself (verify, SIGTERM, SIGKILL after the grace period, remove the
 dead PID files) before it calls `devnet.sh restart-node`, whose own stop phase signals
