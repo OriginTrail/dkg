@@ -56,6 +56,7 @@ export default defineConfig({
       "test/manifest-bound-snapshot-walk.test.ts",
       "test/private-swm-recovery-budget.test.ts",
       "test/swm-target-executor.test.ts",
+      "test/finalized-swm-twin-memo.test.ts",
       "test/swm-sync-sub-graph-registration.test.ts",
       "test/registered-public-sub-graph-first-write.test.ts",
       "test/registered-private-empty-vm-agent.test.ts",
