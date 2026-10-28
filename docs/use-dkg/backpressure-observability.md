@@ -132,20 +132,25 @@ needs a restart). The variable wins when it is set; otherwise the config value
 applies when the key is present; with neither, the default applies.
 
 **The default (OT-RFC-73 P14).** With neither setting, the path is **on**
-(share 1, publisher 2) on a node whose `store.backend` is `blazegraph` and whose
-host has more than 2 CPUs (`os.availableParallelism()`), and **off** everywhere
-else: on hosts with 2 or fewer CPUs, with managed Oxigraph (`oxigraph-server`,
-the `dkg init` default), with `sparql-http` (a Blazegraph reached through it
-included) and with any other backend, until that host class or backend has
-passed its own qualification run. The embedded `oxigraph-worker` store (a config
-without a `store` block) has no store scheduler and never uses the path,
-whatever the setting says.
+(share 1, publisher 2) on a node whose `store.backend` is `blazegraph` or
+managed Oxigraph (`oxigraph-server`, the `dkg init` default) and whose host has
+more than 2 CPUs (`os.availableParallelism()`). It is **off** everywhere else:
+on hosts with 2 or fewer CPUs, with `sparql-http` (any other SPARQL store, a
+Blazegraph reached through it included) and with any other backend. The
+embedded `oxigraph-worker` store (a config without a `store` block) has no store
+scheduler and never uses the path, whatever the setting says.
+
+**Managed Oxigraph nodes get the path too.** In a testnet comparison on managed
+Oxigraph, the path made share and publish faster with the same results, but
+some bursts of many concurrent shares had multi-second tails. If share
+completion on your node is slow under such bursts, switch the path off as shown
+below and report it.
 
 | Value (variable or config) | Effect |
 | --- | --- |
 | not set (the variable does not exist and the config key is absent) | The default above |
 | `0` (in the config also the number `0`) | Off. No scheduler is built or registered, and a call that names its queue behaves exactly like one that does not, so the node schedules every store call exactly as before the control path existed |
-| `share:1,publisher:2` | The slots per queue, up to a cap of 1 for `share` and 2 for `publisher`. A queue left out gets 0. An explicit value is honoured on any host and with any backend, hosts with 2 or fewer CPUs and managed Oxigraph included |
+| `share:1,publisher:2` | The slots per queue, up to a cap of 1 for `share` and 2 for `publisher`. A queue left out gets 0. An explicit value is honoured on any host and with any backend, hosts with 2 or fewer CPUs and `sparql-http` included |
 | a number above a queue's cap | Clamped to the cap, with a warning |
 | set but blank (empty or only spaces) | Refused with a warning, and the path stays **off**. A blank value is a typo, never the default, so a mistyped rollback can not leave the path on |
 | anything else (in the config also `null`, `true` or any number but `0`) | Refused with a warning that names the setting, and the path stays **off** (as for `0`). A malformed value never falls through to the other setting or to the default, so a mistyped rollback can never leave the path on |
@@ -155,8 +160,7 @@ To switch the path off on one node, set either of them and restart the daemon:
 ```jsonc
 // ~/.dkg/config.json
 "store": {
-  "backend": "blazegraph",
-  "options": { "url": "..." },
+  "backend": "oxigraph-server",   // or "blazegraph" with its "options"
   "controlReservedSlots": 0
 }
 ```
@@ -175,7 +179,8 @@ decided it:
 ```text
 Store control path: on (added slots share=1 publisher=2; default for blazegraph, 8 CPUs; effective until daemon restart)
 Store control path: off (added slots share=0 publisher=0; default: 2 CPUs or fewer (blazegraph, 2 CPUs); effective until daemon restart)
-Store control path: off (added slots share=0 publisher=0; default for oxigraph-server; effective until daemon restart)
+Store control path: on (added slots share=1 publisher=2; default for oxigraph-server, 8 CPUs; effective until daemon restart)
+Store control path: off (added slots share=0 publisher=0; default for sparql-http; effective until daemon restart)
 Store control path: off (added slots share=0 publisher=0; config store.controlReservedSlots=0; effective until daemon restart)
 Store control path: off (added slots share=0 publisher=0; DKG_STORE_CONTROL_RESERVED_SLOTS=0, over config store.controlReservedSlots; effective until daemon restart)
 ```
