@@ -418,13 +418,15 @@ describe('a defective head is set aside, not its whole graph', () => {
     expect(result.setAside).toHaveLength(2);
   });
 
-  it.each([false, true].flatMap(first => ['operation', 'envelope'].map(kind => ({ first, kind }))))('withholds colliding $kind before replacing stored content (malformed first: $first)', async ({ first, kind }) => {
+  it.each([false, true].flatMap(first => ['operation', 'envelope', 'assertion-graph-duplicate', 'assertion-graph-mismatch', 'assertion-graph-missing'].map(kind => ({ first, kind }))))('withholds colliding $kind before replacing stored content (malformed first: $first)', async ({ first, kind }) => {
     const twin = fx.share({ version: 1, operationId: 'op-colliding-twin', marker: 'stored-twin', ual: `did:dkg:base:8453/${ADDRESS}/1` });
     expect(twin.assertionGraph).toBe(valid.assertionGraph);
-    const malformed = [...twin.meta,
+    const malformed = [...twin.meta.filter(row => !kind.startsWith('assertion-graph-m') || row.predicate !== `${DKG}assertionGraph` || row.subject !== twin.headSubject),
       kind === 'operation'
         ? { subject: twin.operationSubject, predicate: `${DKG}publisherPeerId`, object: '"peer-other"', graph: WS_META }
-        : { subject: twin.headSubject, predicate: `${DKG}assertionVersion`, object: '"2"', graph: WS_META }];
+        : kind === 'envelope' ? { subject: twin.headSubject, predicate: `${DKG}assertionVersion`, object: '"2"', graph: WS_META }
+        : kind === 'assertion-graph-missing' ? { subject: twin.headSubject, predicate: `${DKG}unrelated`, object: 'urn:extra', graph: WS_META }
+        : { subject: twin.headSubject, predicate: `${DKG}assertionGraph`, object: 'urn:extra', graph: WS_META }];
     const independent = fx.share({ version: 1, operationId: 'op-independent', marker: 'independent',
       ual: `did:dkg:hardhat:31337/${ADDRESS}/3` });
     const servedMeta = [...(first ? [...malformed, ...valid.meta] : [...valid.meta, ...malformed]), ...independent.meta];

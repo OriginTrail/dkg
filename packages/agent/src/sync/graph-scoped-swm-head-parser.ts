@@ -189,6 +189,9 @@ function parseGraphScopedSwmHeads(
       if (!claim) throw error;
       if (owners.get(claim.assertionGraph)!.size > 1) throw new Error(
         `Graph-scoped SWM assertion graph ${claim.assertionGraph} has multiple UAL owners`);
+      const declaredGraph = requireSingle(head.headRows, ASSERTION_GRAPH, 'assertionGraph');
+      if (declaredGraph !== claim.assertionGraph) throw new Error(
+        `Graph-scoped SWM head ${head.headSubject} assertionGraph mismatch: expected ${claim.assertionGraph}, found ${declaredGraph}`);
       const scopeVersion = requireSafeInteger(head.headRows, CONTENT_SCOPE_VERSION, 'contentScopeVersion');
       if (scopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) throw new Error(
         `Graph-scoped SWM head ${head.headSubject} has unsupported contentScopeVersion ${scopeVersion}`);
@@ -236,15 +239,7 @@ function decodeHeadGraphClaim(params: GraphScopedSwmRecoveryParseInput,
     scope,
     subGraphName,
   );
-  const assertionGraph = requireSingle(headRows, ASSERTION_GRAPH, 'assertionGraph');
-  if (assertionGraph !== expectedAssertionGraph) {
-    throw new Error(
-      `Graph-scoped SWM head ${headSubject} assertionGraph mismatch: ` +
-      `expected ${expectedAssertionGraph}, found ${assertionGraph}`,
-    );
-  }
-
-  return { ...head, scope, subGraphName, assertionGraph };
+  return { ...head, scope, subGraphName, assertionGraph: expectedAssertionGraph };
 }
 
 function decodeHeadOperation(params: GraphScopedSwmRecoveryParseInput,
