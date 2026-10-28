@@ -1,3 +1,4 @@
+import { stubDurableSync } from './_helpers/stub-durable-sync.js';
 /**
  * Sync-protocol readiness against the REAL libp2p peer store.
  *
@@ -164,6 +165,7 @@ describe('durable recovery on the real libp2p peer store', () => {
   it('lets the graph owner fail over to a live peer the store lists as sync-capable', async () => {
     const slicedPeerIds: string[] = [];
     const agentLike = {
+      config: {},
       started: true,
       node: {
         stopSignal: undefined,
@@ -188,6 +190,8 @@ describe('durable recovery on the real libp2p peer store', () => {
         return createIncompleteDurableSyncResult();
       },
     };
+
+    stubDurableSync(agentLike, agentLike.syncFromPeerDetailed);
 
     // The sync-on-connect / CLI catch-up shape: one pre-proven candidate and
     // no restriction, so the owner may also rank every live connection.

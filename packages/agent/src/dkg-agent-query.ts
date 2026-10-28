@@ -455,6 +455,7 @@ export class QueryMethods extends DKGAgentBase {
     const targetsSharedMemory =
       opts.graphSuffix === '_shared_memory'
       || opts.includeSharedMemory === true
+      || opts.includeSharedMemoryMeta === true
       || opts.view === 'shared-working-memory';
 
     // A-1: Working-Memory isolation. When the caller is authenticated
@@ -641,6 +642,7 @@ export class QueryMethods extends DKGAgentBase {
       graphSuffix: opts.graphSuffix,
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
+      includeSharedMemoryMeta: opts.includeSharedMemoryMeta,
       draftAccess: opts.excludeWorkingMemoryPartitions === true || !partitionOwner ? { kind: 'none' }
         : { kind: 'owners', owners: [partitionOwner, ...(resolveWmIdentity(partitionOwner).aliases ?? [])] },
       includePrivate: opts.includePrivate,

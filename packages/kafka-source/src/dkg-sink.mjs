@@ -1,6 +1,12 @@
 import { contextGraphLayerPrefixCandidates, MemoryLayer, isSafeIri, sparqlIri } from '@origintrail-official/dkg-core';
 import { content } from './asset.mjs';
 
+function retryLater(retryAt) {
+  const error = new Error('DKG_RETRY_LATER');
+  error.retryAt = retryAt;
+  return error;
+}
+
 export function createDkgSink(config, requestFetch = fetch) {
   const base = new URL(config.daemonUrl);
   if (!['http:', 'https:'].includes(base.protocol) || base.username || base.password)
@@ -27,22 +33,28 @@ export function createDkgSink(config, requestFetch = fetch) {
   }
   return {
     async ensure(source, asset, record, journal) {
-      // A definite rejected create has a durable cooldown. Wait before ANY
-      // HTTP request: the daemon can throttle reads as well as writes.
-      // An uncertain intent must still use readback recovery, never re-create.
-      const rejection = !record.intent && journal.rejection(record.position);
-      if (rejection?.retryAt > Date.now()) {
-        const error = new Error('DKG_RETRY_LATER');
-        error.retryAt = rejection.retryAt;
-        throw error;
+      const waitForCooldown = () => {
+        // Retain deadlines from older journals as well as read-request waits.
+        const rejection = !record.intent && journal.rejection(record.position);
+        const retryAt = Math.max(journal.httpRetryAt() ?? 0, rejection?.retryAt ?? 0);
+        if (retryAt > Date.now()) throw retryLater(retryAt);
+      };
+      async function readRequest(method, path, body) {
+        waitForCooldown();
+        try { return await request(method, path, body); }
+        catch (error) {
+          if (error.status !== 429) throw error;
+          journal.deferHttp(error.retryAt);
+          throw retryLater(error.retryAt);
+        }
       }
-      const graphs = await request('GET', '/api/context-graph/list');
+      const graphs = await readRequest('GET', '/api/context-graph/list');
       const graph = graphs?.contextGraphs?.find(graph => graph.id === source.contextGraphId);
       if (!graph || !['private', 1].includes(graph.accessPolicy)) throw new Error('DKG_PRIVATE_GRAPH_REQUIRED');
       const path = `/api/knowledge-assets/${encodeURIComponent(asset.name)}/wm`;
       const params = new URLSearchParams({ contextGraphId: source.contextGraphId, agentAddress: source.agentAddress });
       async function read() {
-        const status = await request('GET', `${path}?${params}`);
+        const status = await readRequest('GET', `${path}?${params}`);
         if (!status) return null;
         if (status.contextGraphId !== source.contextGraphId ||
           status.agentAddress?.toLowerCase() !== source.agentAddress.toLowerCase() ||
@@ -53,7 +65,7 @@ export function createDkgSink(config, requestFetch = fetch) {
           throw new Error('DKG_ASSERTION_GRAPH_MISMATCH');
         // /wm/quads reads the mutable draft, which is empty after sealing.
         // Verify the immutable graph named by the native sealed descriptor.
-        const data = await request('POST', '/api/query', {
+        const data = await readRequest('POST', '/api/query', {
           contextGraphId: source.contextGraphId, agentAddress: source.agentAddress,
           view: 'working-memory', includeContextGraphPartitions: true,
           sparql: `CONSTRUCT { ${sparqlIri(asset.subject)} ?p ?o } WHERE { GRAPH ${sparqlIri(status.assertionGraph)} { ${sparqlIri(asset.subject)} ?p ?o } } LIMIT ${asset.quads.length + 1}`,
@@ -78,6 +90,7 @@ export function createDkgSink(config, requestFetch = fetch) {
         });
       } catch (error) {
         journal.writeFailed(record.position, error);
+        if (error.status === 429) journal.deferHttp(error.retryAt);
         if (error.preMutation) {
           journal.rejected(record.position, error.message, error.retryAt);
           throw error;

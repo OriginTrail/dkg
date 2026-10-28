@@ -17,8 +17,10 @@ import { createTelemetryRuntime } from '../src/daemon/telemetry-runtime.js';
 
 const noRotation = async () => ({
   rotated: false,
+  trimmed: false,
   previousBytes: 0,
-  keptBytes: 0,
+  removedFiles: 0,
+  newestCutTo: null,
 });
 
 describe('startDaemonLogController', () => {
@@ -494,7 +496,7 @@ describe('startDaemonLogController', () => {
       maxBatchEntries: 1,
       rotate: async () => {
         events.push('rotate');
-        return { rotated: true, previousBytes: 10, keptBytes: 5 };
+        return { rotated: true, trimmed: false, previousBytes: 10, removedFiles: 1, newestCutTo: null };
       },
       append: async (data) => {
         appendCalls += 1;
@@ -531,8 +533,10 @@ describe('startDaemonLogController', () => {
     releaseFirstAppend();
     expect(await rotation).toEqual({
       rotated: true,
+      trimmed: false,
       previousBytes: 10,
-      keptBytes: 5,
+      removedFiles: 1,
+      newestCutTo: null,
     });
     await logFileWriter.shutdown();
 

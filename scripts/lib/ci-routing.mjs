@@ -320,7 +320,7 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
   /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
@@ -413,6 +413,12 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'Blazegraph provisioning contract changed',
   },
   {
+    patterns: [/^blazegraph-image\.json$/],
+    lanes: ['tornado_blazegraph'],
+    evmScopes: [],
+    reason: 'the Blazegraph job runs the share promote lookup differential on the pinned image (U+001F positive control)',
+  },
+  {
     patterns: IDENTITY_WALLET_EVM_PATTERNS,
     lanes: [],
     evmScopes: ['chain'],
@@ -431,10 +437,16 @@ export const PATH_TRIGGERS = Object.freeze([
     evmScopes: [],
     reason: 'the query security tests assert the query README',
   },
+  {
+    patterns: [/^docs\/use-dkg\/backpressure-observability\.md$/],
+    lanes: ['bura_cli'],
+    evmScopes: [],
+    reason: 'the CLI admission usage-log tests assert the backpressure observability document',
+  },
   // Files other packages load by relative path, outside their declared
   // dependencies.
   {
-    patterns: [/^packages\/publisher\/src\/(?:metadata|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
+    patterns: [/^packages\/publisher\/src\/(?:metadata|graph-metadata-envelope|graph-knowledge-asset-controls|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
     lanes: ['kosava_node_ui'],
     evmScopes: [],
     reason: 'the UI reserved-UAL regression loads the publisher metadata writer and its helpers',
@@ -452,7 +464,7 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the agent memory-layer tests import the CLI markdown extractor',
   },
   {
-    patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|entity-search\/types|oxigraph-memory-limits|runtime-assets)\.ts$/],
+    patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/],
     // The EPCIS lanes are Blazegraph and supporting; the CLI rule already
     // selects Blazegraph.
     lanes: ['kosava_supporting'],
@@ -477,6 +489,26 @@ export const PATH_TRIGGERS = Object.freeze([
     lanes: ['tornado_core'],
     evmScopes: [],
     reason: 'the chain RPC-site census asserts their authority call sites',
+  },
+  {
+    // packages/publisher/test/async-lift-queue-graph-coverage.test.ts scans every package's src for the publisher
+    // queue's graphs and labels, and reads the storage routing test (which the storage rule already routes to
+    // this lane) to keep its list of routing-covered store methods in step. This names the one file outside the
+    // publisher's own closure that names a queue graph: the chain-reset wipe in cli.
+    //
+    // It is deliberately NOT widened to packages/agent/src and packages/cli/src. That would send the publisher
+    // lane (4 shards and the Hardhat artifacts) to every agent-only or cli-only PR (about a third of the PRs
+    // merged since July 2026), and the agent layer is routed off this lane on purpose
+    // (ci-delta-routing.test.mjs). A path pattern cannot see what a file says, so the guard is a test instead:
+    // ci-delta-routing.test.mjs scans every workspace's src for the same vocabulary as the coverage test, and the
+    // build job runs it on every PR that changes code. A new reference anywhere fails that PR until its file is
+    // listed here, and listing it makes the coverage test run.
+    patterns: [
+      /^packages\/cli\/src\/daemon\/chain-reset-wipe\.ts$/,
+    ],
+    lanes: ['tornado_publisher'],
+    evmScopes: [],
+    reason: 'the publisher queue graph coverage test asserts the chain-reset wipe reference',
   },
 ]);
 
@@ -605,6 +637,11 @@ export const SUPPORT_PATH_ROUTES = Object.freeze([
     pattern: /^scripts\/sync-chain-abis\.mjs$/,
     lanes: ['tornado_core'],
     reason: 'the chain lane runs the ABI sync script against temporary directories',
+  },
+  {
+    pattern: /^scripts\/repro\/publisher-live-control-(?:restart\.test|worker)\.mts$/,
+    lanes: ['bura_cli'],
+    reason: 'the required CLI lane runs the five-start publisher control durability campaign',
   },
   ...BUILD_ONLY_SCRIPTS.map((family) => ({ pattern: scriptsPattern(family), lanes: [], reason: family.reason })),
   {

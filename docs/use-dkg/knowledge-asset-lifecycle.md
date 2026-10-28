@@ -121,7 +121,7 @@ Durable synchronous sharing requires an available share worker and a store suppo
 | `dkg ka finalize <name> -c <cg>` | Seal the WM draft |
 | `dkg ka share <name> -c <cg>` | Share finalized WM to SWM |
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
-| `dkg ka share-jobs [--context-graph-id <cg>] [--state <states>] [--limit <n>]` | List async share jobs |
+| `dkg ka share-jobs [--context-graph-id <cg>] [--state <states>] [--limit <n> \| --all \| --page-size <n> [--cursor <cursor>]]` | List async share jobs: all of them, up to `--limit`, every one by paging (`--all`), or one page at a time ([details](../references/api.md#listing-async-jobs)) |
 | `dkg ka share-job <job-id>` | Show one async share job |
 | `dkg ka cancel-share-job <job-id>` | Cancel a queued share job (a retrying one cannot be cancelled) |
 | `dkg ka recover-share-job <job-id>` | Recover a failed share job |

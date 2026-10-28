@@ -18,7 +18,7 @@ const residualCensus = [
   ['packages/agent/src/dkg-agent-lifecycle.ts', 'sharedMemoryRead', 'this.resolveContextGraphReadAuthority'],
   ['packages/agent/src/dkg-agent-cg-registry.ts', 'samplingBinding', 'this.readLiveOnChainAccessPolicy'],
   ['packages/agent/src/dkg-agent-join.ts', 'joinPolicyRoster', 'this.getMemberRecoveryRosterSource'],
-  ['packages/agent/src/dkg-agent-join.ts', 'joinAdmissionRoster', 'this.getMemberRecoveryRosterSource'],
+  ['packages/agent/src/dkg-agent-join.ts', 'joinAdmissionRoster', 'joinAdmissionActiveMembers'],
   ['packages/agent/src/dkg-agent-context-graph.ts', 'memberAdd', 'this.resolveRegisteredContextGraphAuthority'],
   ['packages/agent/src/dkg-agent-context-graph.ts', 'memberRemove', 'this.resolveRegisteredContextGraphAuthority'],
 ] as const;

@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "GH-3475",
+  "method": "guard-mutation",
+  "sourceCommit": "c52443c0b93d9385c17ce111a9188470dcf7f6cf",
+  "production": {
+    "file": "packages/agent/src/dkg-agent-lifecycle.ts",
+    "sha256": "1392e545a7a7fab3e0e445ad64452c1925582f2f28b311b5e7a4db9ec080b897"
+  },
+  "test": {
+    "file": "packages/agent/test/peer-profile-follow-up-agent.test.ts",
+    "sha256": "22af10cc7a347d95d1ad710976a538139aa35ad5c8a82466dff80a00be04bc4e",
+    "fullName": "follow-up pull of a peer's own agent profile a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile"
+  },
+  "mutation": {
+    "old": "if (ordinary.includes(SYSTEM_CONTEXT_GRAPHS.AGENTS)) this.followUpPeerAgentProfile(peerId, session);",
+    "new": "if (false) this.followUpPeerAgentProfile(peerId, session);"
+  },
+  "red": {
+    "file": "test-policy/incidents/evidence/GH-3475/red.json",
+    "sha256": "ff8c9d1d1bce7d300ce0efd8add334bdcc5ae7fc024963c7547f8dde05be2fab"
+  },
+  "green": {
+    "file": "test-policy/incidents/evidence/GH-3475/green.json",
+    "sha256": "1635a8d25332db753d92dfacc5587a8dc2d12ddc9f0c509fa21c7720136c637b"
+  }
+}

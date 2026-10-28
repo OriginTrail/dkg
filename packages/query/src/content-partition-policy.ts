@@ -19,12 +19,13 @@ interface ContentPartitionScope {
 export type ContentPartition = ContentPartitionScope & (
   // Null explicitly represents a registered historical draft without an owner segment.
   | { readonly kind: 'draft'; readonly draftOwner: string | null }
-  | { readonly kind: 'content' | 'shared' | 'verified'; readonly draftOwner?: never }
+  | { readonly kind: 'content' | 'shared' | 'verified' | 'shared-metadata'; readonly draftOwner?: never }
 );
 /** Apply caller policy to classified discovery, before merging static route graphs. */
 export function selectContentPartitions(partitions: readonly ContentPartition[],
-  draftAccess: DraftAccessPolicy, subGraphName?: string): string[] {
+  draftAccess: DraftAccessPolicy, subGraphName?: string, includeSharedMemoryMeta = false): string[] {
   return partitions.filter(partition => {
+    if (partition.kind === 'shared-metadata' && !includeSharedMemoryMeta) return false;
     if (subGraphName ? partition.subGraphName !== subGraphName : !partition.broadScopeEligible) return false;
     if (partition.kind !== 'draft' || draftAccess.kind === 'all') return true;
     const owner = partition.draftOwner;

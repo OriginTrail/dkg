@@ -1,4 +1,6 @@
 export { journalEntriesContextGraphId } from './async-lift-control-plane.js';
+export { parseExactPullSource } from './assertion-draft-recovery.js';
+export type { ExactPullSource, AssertionPullFromOptions, AssertionPullFromResult, AssertionDraftEvidence } from './assertion-draft-recovery.js';
 export {
   decodeEntityShareMetadata,
   ENTITY_SHARE_METADATA_PREDICATES,
@@ -115,7 +117,7 @@ export {
   type ValidationResult,
   type ValidationOptions,
 } from './validation.js';
-export { generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, normalizeGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetReceiptProvenanceV1, preserveGraphKnowledgeAssetReceiptProvenanceV1, mergeSameVersionGraphKnowledgeAssetMetadataV1, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, replaceLocallyTrustedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope, parseConfirmedGraphKnowledgeAssetMetadataEnvelope, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionWrittenMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type GraphKnowledgeAssetConfirmation, type GraphKnowledgeAssetConfirmationKind, type GraphKnowledgeAssetMetadataState, type GraphKnowledgeAssetReceiptProvenanceV1, type ConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionWrittenMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
+export { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, generateKCMetadata, generateTentativeMetadata, generateConfirmedFullMetadata, generateGraphKnowledgeAssetMetadata, normalizeGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetConfirmationKindV1, readGraphKnowledgeAssetReceiptProvenanceV1, preserveGraphKnowledgeAssetReceiptProvenanceV1, mergeSameVersionGraphKnowledgeAssetMetadataV1, GRAPH_KNOWLEDGE_ASSET_CONFIRMATION_KIND_PREDICATE, replaceLocallyTrustedKnowledgeAssetControls, replaceLocallyTrustedKnowledgeAssetControlEnvelope, readLocallyTrustedKnowledgeAssetControls, overlayLocallyTrustedKnowledgeAssetControls, readLocallyTrustedKnowledgeAssetControlEnvelope, readConfirmedGraphKnowledgeAssetMetadataEnvelope, parseConfirmedGraphKnowledgeAssetMetadataEnvelope, parseGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead, buildDeterministicTokenRows, compareRootIris, getTentativeStatusQuad, getConfirmedStatusQuad, generateOwnershipQuads, generateShareMetadata, generateWorkspaceMetadata, generateKnowledgeAssetShareMetadata, generateSubGraphRegistration, subGraphDeregistrationSparql, subGraphDiscoverySparql, subGraphWritersSparql, toHex, resolveUalByBatchId, updateMetaMerkleRoot, promoteUpdatedKaToPerCgId, restateKaPartition, restateLabelGraphForUpdate, readMaterializedVersion, shouldApplyMaterialization, writeMaterializedVersion, materializedVersionQuad, withMaterializationLock, compareMaterializedVersion, type MaterializedVersion, generateAssertionCreatedMetadata, generateAssertionWrittenMetadata, generateAssertionPromotedMetadata, generateAssertionUpdatedMetadata, generateAssertionDiscardedMetadata, assertionStateQuad, assertionLayerQuad, deriveStatus, assertionLayerPointerQuad, stampLayerPointerSparql, type LifecycleMetadataOptions, WM_CURRENT_ASSERTION_PRED, SWM_CURRENT_ASSERTION_PRED, VM_CURRENT_ASSERTION_PRED, KA_ID_PRED, RESERVED_UAL_PRED, PROV_WAS_REVISION_OF, type KaStatus, type StatusPointers, type KCMetadata, type KAMetadata, type GraphKnowledgeAssetMetadata, type GraphKnowledgeAssetConfirmation, type GraphKnowledgeAssetConfirmationKind, type GraphKnowledgeAssetMetadataState, type GraphKnowledgeAssetReceiptProvenanceV1, type ConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataRead, type LocallyTrustedKnowledgeAssetControlAnchor, type LocallyTrustedKnowledgeAssetControlEnvelope, type OnChainProvenance, type ShareMetadata, type WorkspaceMetadata, type KnowledgeAssetShareMetadata, type SubGraphRegistration, type AssertionCreatedMeta, type AssertionWrittenMeta, type AssertionPromotedMeta, type AssertionUpdatedMeta, type AssertionDiscardedMeta } from './metadata.js';
 export { ensureSubGraphRegistration, hasSubGraphRegistration, requireSubGraphRegistration, SubGraphNotFoundError, SUB_GRAPH_NOT_FOUND_CODE, type SubGraphRegistrationOutcome, type SubGraphRegistrationReadOptions, type UnregisteredSubGraphResolution, type UnregisteredSubGraphResolver } from './sub-graph-registration.js';
 export { pruneSupersededAgentRegistryMeta, insertBoundedAgentRegistryMeta } from './agent-registry-meta-retention.js';
 export { PROMOTE_STEP_NAMES, isPromoteStepName, type PromoteStepName } from './promote-step-tag.js';
@@ -456,15 +458,18 @@ export {
   type PromoteFailureClassification,
   type PromoteFailureTransition,
   type PromoteJob,
+  type PromoteJobPage,
   type PromoteJobState,
   type PromoteLease,
   type PromoteListFilter,
+  type PromoteListPageRequest,
   type PromotePostCommitRecoveryEvent,
   type PromoteRecoverySummary,
   type PromoteRequest,
   type BoundPromoteRequest,
   type BoundPromoteJob,
   type PromoteResult,
+  type PromoteSelector,
   type PromoteStats,
   type PromoteTerminalJobClearer, type PromoteShareReconciler,
 } from './async-promote-queue.js';
@@ -561,7 +566,30 @@ export { classifyQueuedSharePreparation } from './bind-promote-recovery.js';
 export type { ACKDiagnosticSummary } from './ack-diagnostics.js';
 export type { PromoteExecutionAuthority } from './assertion-promote-types.js';
 
+export {
+  PromoteListRequestError, PromoteListStoredRowError, PROMOTE_LIST_DEFAULT_PAGE_SIZE, PROMOTE_LIST_MAX_PAGE_SIZE,
+  type PromoteListRequestErrorCode, type PromoteListStoredRowErrorCode,
+} from './promote-list-cursor.js';
 export { PromoteAdmissionError, type PromoteAdmissionPhase, type PromoteAdmissionOutcome, type PromoteAdmissionEvidence } from './promote-admission.js';
+
+// Share-queue retention core (OT-RFC-73 P10a). Passive: the mode, the timer and the config that drive it are the daemon's (P10b); the mode defaults to off.
+export {
+  createShareRetention, ShareRetentionAdmissionUnavailableError, SHARE_RETENTION_DEFAULTS, SHARE_RETENTION_MODES, SHARE_RETENTION_WINDOW_MS,
+  type ShareRetention, type ShareRetentionBatchResult, type ShareRetentionConfig, type ShareRetentionCounters, type ShareRetentionJob,
+  type ShareRetentionLogger, type ShareRetentionMode, type ShareRetentionPassSummary, type ShareRetentionSkip,
+} from './async-promote-retention.js';
+export { PROMOTE_RETENTION_JOB_CLASSES, PROMOTE_RETENTION_KEEP_REASONS, type PromoteRetentionJobClass, type PromoteRetentionKeepReason } from './async-promote-retention-policy.js';
+
+// Publisher-queue retention core (OT-RFC-73 P11). Passive, like the share sweep: the mode, the timer and the config that drive it are the daemon's (P10b); the mode defaults to off.
+export {
+  createPublisherRetention, PUBLISHER_RETENTION_DEFAULTS, PUBLISHER_RETENTION_MODES, PUBLISHER_RETENTION_WINDOW_MS,
+  type PublisherRetention, type PublisherRetentionBatchResult, type PublisherRetentionConfig, type PublisherRetentionCounters, type PublisherRetentionJob,
+  type PublisherRetentionLogger, type PublisherRetentionMode, type PublisherRetentionPassSummary, type PublisherRetentionSkip,
+} from './async-lift-retention.js';
+export {
+  PUBLISHER_RETENTION_JOB_CLASSES, PUBLISHER_RETENTION_KEEP_REASONS, type PublisherRetentionJobClass, type PublisherRetentionKeepReason,
+} from './async-lift-retention-policy.js';
+export type { LiftRetentionAccess, LiftRetentionTransaction, VmPublishRetentionAccess } from './async-lift-retention-access.js';
 
 export { assertionLifecycleWriteLockKey } from './store-write-locks.js';
 
@@ -569,3 +597,23 @@ export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } 
 
 export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
 export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
+
+export { readShareQueueDepth, readLiftQueueDepth, readLiftJournalEntryCount, type AsyncQueueDepthOptions } from './async-queue-depth.js';
+
+export { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';
+export { parseWireGraphKnowledgeAssetStructure, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetStructure } from './graph-metadata-envelope.js';
+export {
+  LIFT_JOB_PAGE_DEFAULT_LIMIT,
+  LIFT_JOB_PAGE_MAX_LIMIT,
+  LiftJobPageError,
+  decodeLiftJobPageCursor,
+  encodeLiftJobPageCursor,
+  liftJobPageLimit,
+  type LiftJobPage,
+  type LiftJobPageErrorCode,
+  type LiftJobPageKey,
+  type LiftJobPageRequest,
+  type VmPublishJobPager,
+} from './lift-job-page.js';
+
+export { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, projectGraphKnowledgeAssetReplayControls } from './graph-knowledge-asset-controls.js';

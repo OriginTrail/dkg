@@ -782,7 +782,7 @@ import { z } from 'zod';
 describe('handler — POST /register with extension', () => {
   const extension = {
     schema: z.object({ externalRef: z.string(), sourceRef: z.string() }),
-    augment: (parsed: { externalRef: string; sourceRef: string }) => ({
+    augment: (parsed: Record<string, unknown>) => ({
       'vendor:externalRef': parsed.externalRef,
       'vendor:sourceRef': parsed.sourceRef,
     }),
@@ -882,7 +882,7 @@ describe('handler — extension runtime collision (one warn per unique key acros
     const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const ext = {
       schema: z.object({ externalRef: z.string() }),
-      augment: (_p: { externalRef: string }) => ({
+      augment: () => ({
         'schema:name': 'OVERRIDE_NAME',
         'dkg-streams:kafkaTopicName': 'OVERRIDE_TOPIC',
         'vendor:ok': 'ok',
@@ -912,4 +912,143 @@ describe('handler — extension runtime collision (one warn per unique key acros
     expect(allWarns.filter((m) => m.includes('dkg-streams:kafkaTopicName'))).toHaveLength(1);
     warnSpy.mockRestore();
   });
+});
+
+describe('handler boundary failures and alternate daemon results', () => {
+  const basePath = '/api/kafka/streams';
+  const contextGraphId = 'urn:cg:demo';
+
+  it.each([new Error('request disconnected'), 'body stream rejected'])('reports a body read failure without publishing: %s', async failure => {
+    const { res, captured } = mockReqRes('POST', `${basePath}/register`);
+    const req = Readable.from((async function* () { yield Buffer.from('{'); throw failure; })()) as IncomingMessage;
+    req.method = 'POST'; req.url = `${basePath}/register`; req.headers = { host: 'localhost' };
+    const { ctx, publishAsync } = mockCtx();
+    await createHandler({ basePath, contextGraphId })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(400);
+    expect(captured.body).toEqual({ error: 'InvalidContent', message: failure instanceof Error ? failure.message : failure });
+    expect(publishAsync).not.toHaveBeenCalled();
+  });
+
+  it('validates an empty body instead of treating it as successful registration', async () => {
+    const { req, res, captured } = mockReqRes('POST', `${basePath}/register`);
+    const { ctx, publishAsync } = mockCtx();
+    await createHandler({ basePath, contextGraphId })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(400);
+    expect(captured.body).toMatchObject({ error: 'InvalidContent', message: 'Request body failed schema validation' });
+    expect(publishAsync).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [{ code: 'ContextGraphNotFound', toString: (): string => 'missing graph' }, 404, 'ContextGraphNotFound', 'missing graph'],
+    [{ name: 'InvalidContentError', toString: (): string => 'invalid payload' }, 400, 'InvalidContent', 'invalid payload'],
+    ['publisher disconnected', 503, 'EnqueueFailed', 'publisher disconnected'],
+  ])('normalizes non-Error publisher rejections: %s', async (failure, status, error, message) => {
+    const { req, res, captured } = mockReqRes('POST', `${basePath}/register`, validBody);
+    const { ctx, publishAsync } = mockCtx(); publishAsync.mockRejectedValue(failure);
+    await createHandler({ basePath, contextGraphId })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(status);
+    expect(captured.body).toEqual({ error, message });
+  });
+
+  it('normalizes a non-Error extension failure before enqueueing', async () => {
+    const { req, res, captured } = mockReqRes('POST', `${basePath}/register`, validBody);
+    const { ctx, publishAsync } = mockCtx();
+    await createHandler({ basePath, contextGraphId, extension: { schema: z.object({}), augment() { throw 'extension rejected'; } } })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(400);
+    expect(captured.body).toEqual({ error: 'InvalidContent', message: 'extension rejected' });
+    expect(publishAsync).not.toHaveBeenCalled();
+  });
+
+  it('gets the capture graph from daemon configuration when the factory leaves it unset', async () => {
+    const { req, res, captured } = mockReqRes('GET', `${basePath}/register/cap`);
+    const { ctx, getStatus } = mockCtx({ config: { kafka: { contextGraphId } } });
+    getStatus.mockResolvedValue({ status: 'failed', request: { contextGraphId }, timestamps: { acceptedAt: 1_700_000_000_000 } });
+    await createHandler({ basePath })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(200);
+    expect(captured.body).toMatchObject({ state: 'failed', contextGraphId, error: 'Async capture failed' });
+  });
+
+  it('does not look up captures when the plugin is unconfigured', async () => {
+    const { req, res, captured } = mockReqRes('GET', `${basePath}/register/cap`);
+    const { ctx, getStatus } = mockCtx();
+    await createHandler({ basePath })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(503);
+    expect(captured.body).toMatchObject({ error: 'PluginMisconfigured' });
+    expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, null, 'invalid', {}, { contextGraphId: 42 }, { lift: {} }, { knowledgeAssetVmPublish: {} }])(
+    'does not disclose a capture whose request has no graph scope: %j', async request => {
+      const { req, res, captured } = mockReqRes('GET', `${basePath}/register/cap`);
+      const { ctx, getStatus } = mockCtx();
+      getStatus.mockResolvedValue({ status: 'accepted', request, timestamps: { acceptedAt: 1_700_000_000_000 } });
+      await createHandler({ basePath, contextGraphId })(attachRequest(ctx, req, res));
+      expect(captured.statusCode).toBe(404);
+      expect(captured.body).toEqual({ error: 'CaptureNotFound' });
+    },
+  );
+
+  it.each(['register/%E0%A4%A', '%E0%A4%A'])('rejects a malformed percent-encoded path without querying: %s', async suffix => {
+    const { req, res, captured } = mockReqRes('GET', `${basePath}/${suffix}`);
+    const { ctx, query, getStatus } = mockCtx();
+    await createHandler({ basePath, contextGraphId })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(404);
+    expect(query).not.toHaveBeenCalled(); expect(getStatus).not.toHaveBeenCalled();
+  });
+
+  it('returns a client error for an invalid UAL before querying', async () => {
+    const { req, res, captured } = mockReqRes('GET', `${basePath}/${encodeURIComponent('bad>ual')}`);
+    const { ctx, query } = mockCtx();
+    await createHandler({ basePath, contextGraphId })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(400);
+    expect(captured.body).toMatchObject({ error: 'InvalidContent' });
+    expect(query).not.toHaveBeenCalled();
+  });
+
+  it.each([[], [{}], [{ count: '' }], [{ count: 'not-a-count' }], [{ count: { value: 0 } }]].map(bindings => ({ bindings })))(
+    'treats absent or invalid count results as an empty page: $bindings', async ({ bindings }) => {
+      const { req, res, captured } = mockReqRes('GET', `${basePath}/`);
+      const { ctx, query } = mockCtx();
+      query.mockResolvedValueOnce({ bindings }).mockResolvedValueOnce({ bindings: [] });
+      await createHandler({ basePath: `${basePath}/`, contextGraphId })(attachRequest(ctx, req, res));
+      expect(captured.statusCode).toBe(200);
+      expect(captured.body).toEqual({ items: [], limit: 30, offset: 0, total: 0 });
+      expect(query).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it('unwraps RDF-shaped page results, preserves page order, and ignores content without a UAL', async () => {
+    const { req, res, captured } = mockReqRes('GET', basePath);
+    const { ctx, query } = mockCtx();
+    const row = (ual: string) => ({ ual: { value: ual }, root: { value: 'urn:root' }, contentGraph: { value: 'urn:private' } });
+    query.mockResolvedValueOnce({ bindings: [{ count: { value: '3' } }] })
+      .mockResolvedValueOnce({ bindings: [row('urn:b'), row('urn:a'), row('urn:b'), row('urn:missing'), { ual: null }, { ual: 3 }, { ual: {} }] })
+      .mockResolvedValueOnce({ bindings: [
+        { ual: { value: 'urn:a' }, p: 'https://schema.org/name', o: '"A"' },
+        { ual: { value: 'urn:b' }, p: 'https://schema.org/name', o: '"B"' },
+        { p: 'https://schema.org/name', o: '"unowned"' },
+      ] });
+    await createHandler({ basePath, contextGraphId })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(200);
+    const body = captured.body as { items: Array<Record<string, unknown>>; total: number };
+    expect(body.total).toBe(3);
+    expect(body.items.map(item => [item['@id'], item['schema:name']])).toEqual([['urn:b', 'B'], ['urn:a', 'A']]);
+    expect(query).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([basePath, `${basePath}/urn:stream`])('reports non-Error discovery failures for %s', async path => {
+    const { req, res, captured } = mockReqRes('GET', path);
+    const { ctx, query } = mockCtx(); query.mockRejectedValue('backend disconnected');
+    await createHandler({ basePath, contextGraphId })(attachRequest(ctx, req, res));
+    expect(captured.statusCode).toBe(503);
+    expect(captured.body).toEqual({ error: 'QueryFailed', message: 'backend disconnected' });
+  });
+});
+
+it('reports non-Error publisher-status failures without exposing a partial capture', async () => {
+  const { req, res, captured } = mockReqRes('GET', '/api/kafka/streams/register/cap');
+  const { ctx, getStatus } = mockCtx(); getStatus.mockRejectedValue('status backend disconnected');
+  await createHandler({ basePath: '/api/kafka/streams', contextGraphId: 'urn:cg:demo' })(attachRequest(ctx, req, res));
+  expect(captured.statusCode).toBe(503);
+  expect(captured.body).toEqual({ error: 'StatusLookupFailed', message: 'status backend disconnected' });
 });

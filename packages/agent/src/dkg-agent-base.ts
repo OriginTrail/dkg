@@ -1,11 +1,14 @@
+import type { StoreContentFence } from './internal/store-content-fence.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
-import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
+import { reconcileAfterMaterialization, reconcileAfterHeldAsset } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
 import { deleteSyncPageCheckpoint } from './sync/requester/page-fetch.js';
+import { createDurableHeldStore } from './durable-recovery-held-store.js';
 import { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { applyStorageAckLedgerTimestamp, type StorageAckLedgerTimestampWriter } from './internal/storage-ack-ledger-timestamp-writer.js';
+import { VersionedSubscriptionRegistry } from './internal/versioned-subscription-registry.js';
 import { applyPublishedNamedKaVmLifecycle, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 
 export { createListContextGraphsCacheInvalidatingStore } from './internal/context-graph-cache-invalidating-store.js';
@@ -28,6 +31,7 @@ import type { RecentSharedMemoryPullRuntime } from './recent-shared-memory-pull-
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
+import { controlPlaneRefusalSummary } from './sync/control-plane-refusals.js';
 import { PeerCapabilityRegistry } from './p2p/peer-capability.js';
 import { ACKCandidateDiscoveryCoordinator } from './p2p/ack-candidate-discovery.js';
 import type { StorageACKEndpoint } from './p2p/storage-ack-endpoint.js';
@@ -456,7 +460,6 @@ import {
   type PeerConnectionSnapshot,
   type PeerDiagnostics,
   type ChatSendResult,
-  type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type ContextGraphSubscriptionRehydrationInternalStatus,
   type ContextGraphSubscriptionStore,
@@ -580,11 +583,10 @@ export class DKGAgentBase {
       retireFinalizedSwmTwinCandidate: (candidate, ctx) => agent.retireFinalizedSwmTwinCandidate(candidate, ctx),
       retireLegacySwmAfterVerifiedVmTwin: params => agent.retireLegacySwmAfterVerifiedVmTwin(params),
     };
-    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
-      reconcileAfterMaterialization(cleanup, asset, ctx);
+    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) => reconcileAfterMaterialization(cleanup, asset, ctx);
+    const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, (commitment, ctx) => reconcileAfterHeldAsset(cleanup, commitment, ctx), () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
     const materialization = new RecoveryMaterializationOwner({
-      chain: () => agent.chain,
-      store: () => agent.store,
+      chain: () => agent.chain, store: () => agent.store,
       isClosed: () => agent.graphScopedStoreClosed,
       subscription: id => agent.subscribedContextGraphs.get(id),
       bindingGeneration: id => agent.contextGraphBindingState.capture(id),
@@ -615,6 +617,7 @@ export class DKGAgentBase {
             signal: fetchContext.signal,
             manifestDigest: request.manifestDigest,
             manifestPrefixDigestAtOffset: request.manifestPrefixDigestAtOffset,
+            durableResumeBoundary: request.durableResumeBoundary,
             shouldStopAfterPage: request.shouldStopAfterPage,
             returnAcceptedPrefixOnRetryableTransportFailure: request.returnAcceptedPrefixOnRetryableTransportFailure,
             requesterScope: request.requesterScope,
@@ -651,6 +654,7 @@ export class DKGAgentBase {
       storeInsert: ({ quads, signal }) => agent.insertSyncedQuadsAndInvalidateListCache(quads, {
         priority: 'background', source: 'agent.durableSync.storeInsert', signal,
       }),
+      heldStore,
       materialization: scope => materialization.forOperation(scope),
       checkpoints: {
         deleteCheckpoint: key => deleteSyncPageCheckpoint(agent.syncCheckpoints, key),
@@ -838,6 +842,8 @@ export class DKGAgentBase {
    */
   protected readonly reconciledKaAuthors = new Set<string>();
   protected readonly log = new Logger('DKGAgent');
+  /** Control-plane fetches refused for want of a sync slot: one warning per interval. */
+  readonly controlPlaneRefusals = controlPlaneRefusalSummary(this.log);
   /** Rate limit for the "Named KA recovery ... remains pending" warning. */
   protected readonly namedKaRecoveryPendingLog = new NamedKaRecoveryPendingLog();
 
@@ -1494,7 +1500,7 @@ export class DKGAgentBase {
    * (restart contract on {@link DKGAgentBase}): only the gossip wiring derived
    * from it is session-scoped and re-established by `start()`.
    */
-  protected readonly subscribedContextGraphs = new Map<string, ContextGraphSub>();
+  protected readonly subscribedContextGraphs = new VersionedSubscriptionRegistry();
   /**
    * Process-local fence for a registration operation whose durable marker has
    * moved (or is about to move) to `pending`. Authority and policy readers use
@@ -2086,6 +2092,7 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
     publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
     ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
+    private readonly heldStoreContentFence?: StoreContentFence,
   ) {
     this.config = config;
     this.wallet = wallet;

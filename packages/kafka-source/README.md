@@ -149,13 +149,21 @@ limit leads to manual review rather than dropping a poison message. Preparation
 failures are deferred into the native worker's processing catch so their retry
 state persists and unrelated sources continue. The adapter still uses the
 existing fingerprint/processing hooks; no general worker API refactor is added.
+An interrupted preparation reuses the last observed delivery fingerprint, so
+alternating broker outages and poison-record replay cannot reset that delivery's
+retry count. Successfully reading different delivery content establishes a new
+fingerprint and its own retry budget.
 
 The daemon ingress's specific `429 / Too many requests` rejection clears write
 intent transactionally and persists `Retry-After`. Waiting polls do not consume
 additional retry attempts or send HTTP requests, including preflight reads.
 The saved deadline survives handler restarts; after it expires, private graph
 validation and sealed readback run again before Kafka acknowledgement.
-Other HTTP errors and transport failures retain
+Throttling of graph preflight, sealed-descriptor reads or query readback also
+persists a source-wide HTTP deadline in the journal. These read cooldowns are
+separate from write intents: waiting preserves the retry count even for an
+uncertain write, and recovery must still verify its sealed KA before acknowledging.
+Other create errors and transport failures retain
 uncertain-write protection, with sanitized status codes stored in the journal;
 there is no blanket retry of arbitrary 4xx/5xx responses.
 

@@ -61,7 +61,10 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             // Defer the sanitized failure to processSource so native retries,
             // manual review and continuation to other sources still apply.
             const failure = new Error(/^KAFKA_[A-Z_]+$/.test(error.message) ? error.message : 'KAFKA_PREPARATION_FAILED');
-            const fingerprint = hash([source.id, 'preparation-failed']);
+            // A broker outage supplies no new content identity. Keep the
+            // pending delivery's retry budget instead of resetting it on
+            // every alternation between preparation and processing failure.
+            const fingerprint = previous?.fingerprint ?? hash([source.id, 'preparation-failed']);
             deliveries.set(source.id, { failure, fingerprint });
             return fingerprint;
           }
@@ -101,7 +104,8 @@ export function createHandler({ read = readKafka, sinkFactory = createDkgSink } 
             if (error.message !== 'DKG_RETRY_LATER') throw error;
             return { sourceId: source.id, skipped: true, reason: 'retry-after',
               nextState: { ..._state, fingerprint, lastRunAt: new Date().toISOString(),
-                lastStatus: 'retry-wait', retryAt: error.retryAt } };
+                lastStatus: 'retry-wait', retryAt: error.retryAt,
+                attemptCount: _state?.fingerprint === fingerprint ? _state.attemptCount ?? 0 : 0 } };
           } finally {
             deliveries.delete(source.id);
             await delivery.close().catch(() => {});

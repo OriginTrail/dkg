@@ -1,9 +1,12 @@
+import type { AuthenticateHeldAsset } from './sync/requester/held-assets-contracts.js';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { RegisteredContextGraphAuthority } from './registered-context-graph-authority.js';
-import { authenticateDurableGraphScopedAsset } from './durable-recovery-authentication.js';
+import { authenticateDurableGraphScopedAsset,
+  authenticateHeldGraphScopedAssetWithinDeadline } from './durable-recovery-authentication.js';
 import type { partitionVerifiedGraphScopedAssets } from './sync/requester/verified-asset-preparation.js';
 import type { VmRecoveryRegisteredPublicEvidence } from "./vm-recovery-pass-authority.js";
-import type { AuthenticatedGraphScopedAsset, VerifiedGraphScopedAsset } from './sync/requester/graph-scoped-materialization.js';
+import type { AuthenticatedGraphScopedAsset,
+  VerifiedGraphScopedAsset } from './sync/requester/graph-scoped-materialization.js';
 
 /** One policy owns public transport admission and authentication of recovered assets.
  * Exchange policy retains VM-pass freshness/revocation; a snapshot job is pinned
@@ -15,6 +18,8 @@ export interface DurableRecoveryAuthority {
   isRegisteredPublic(contextGraphId: string, signal?: AbortSignal): boolean | Promise<boolean>;
   authenticate(asset: VerifiedGraphScopedAsset, deadline: number, signal?: AbortSignal):
     AuthenticatedGraphScopedAsset | Promise<AuthenticatedGraphScopedAsset>;
+  /** Authenticate a proven local copy. An authenticated mismatch is a typed result; unavailable evidence rejects. */
+  readonly authenticateHeld?: AuthenticateHeldAsset;
 }
 
 /** Public compatibility evidence; authentication strategies remain internal. */
@@ -64,6 +69,9 @@ export function createRecoveryAuthority(
         `Retrying graph-scoped durable authentication for ${asset.ual} `
         + `after transient chain verification failure (${attempt}/${maxAttempts}): `
         + `${error instanceof Error ? error.message : String(error)}`),
+    }),
+    authenticateHeld: (copy, requiredBinding, deadline, signal) => authenticateHeldGraphScopedAssetWithinDeadline({
+      chain: dependencies.chain, copy, requiredBinding, verifyContextGraphBinding, deadline, signal,
     }),
   };
 }

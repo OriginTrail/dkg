@@ -19,8 +19,9 @@ import {
   type PromoteJob,
   type PromoteRequest, type PromoteExecutionAuthority,
 } from '@origintrail-official/dkg-publisher';
+import { asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import { createClaimFailureBackoff } from './claim-failure-backoff.js';
-import { logPromoteAttemptFailure } from './async-promote-attempt-diagnostics.js';
+import { logPromoteAttemptFailure, promoteAttemptAuthorityReason } from './async-promote-attempt-diagnostics.js';
 import {
   classifyPromoteError,
   safePromoteErrorIdentity,
@@ -295,7 +296,7 @@ export async function runPromoteJob<T extends { promotedCount: number; shareEvid
   if (heartbeatIntervalMs > 0) {
     heartbeatTimer = setInterval(() => {
       if (cancelled) return;
-      queue.heartbeat(job.jobId, claimToken).catch((err: unknown) => {
+      asyncAdmissionUsage.observeShareHeartbeat(queue.heartbeat(job.jobId, claimToken)).catch((err: unknown) => {
         if (err instanceof PromoteJobLeaseError) {
           // Expected when the job has already succeeded/failed and the lease was cleared.
           return;
@@ -342,14 +343,7 @@ export async function runPromoteJob<T extends { promotedCount: number; shareEvid
     throwIfShutdownInterrupted();
     const classified = classifyPromoteError(err, { boundRecovery: job.request.recoveryBinding !== undefined });
     const message = err instanceof Error ? err.message : String(err);
-    logPromoteAttemptFailure({
-      job,
-      err,
-      message,
-      classified,
-      promoteStarted,
-      log,
-    });
+    logPromoteAttemptFailure({ job, err, message, classified, promoteStarted, log });
     // Persist the producer-owned diagnostic code (closed set) so the
     // post-commit recovery sweep can key on it without parsing prose.
     const attemptError: PromoteAttemptError = {
@@ -359,6 +353,8 @@ export async function runPromoteJob<T extends { promotedCount: number; shareEvid
       recordedAt: now(),
       ...(classified.diagnostic ? { diagnosticCode: classified.diagnostic.code } : {}),
       ...('noEffectProof' in classified ? {noEffectProof: classified.noEffectProof} : {}),
+      // Which authority prerequisite a retryable attempt waited for, shown by the job view.
+      ...promoteAttemptAuthorityReason(err, classified),
     };
     try {
       const bookkeepingDeadlineAt = now() + Math.max(0, bookkeepingRetryBudgetMs);
@@ -609,7 +605,7 @@ export function createPromoteWorkerSupervisor(config: PromoteWorkerConfig): Prom
     if (!claimFailureBackoff.isDue()) return false;
     let claimed: PromoteJob | null;
     try {
-      claimed = await config.agent.promoteQueue.claimNext(slot.workerId);
+      claimed = await asyncAdmissionUsage.timeShareClaim(() => config.agent.promoteQueue.claimNext(slot.workerId));
       claimFailureBackoff.reset();
       clearClaimRetryTimer();
     } catch (err: unknown) {

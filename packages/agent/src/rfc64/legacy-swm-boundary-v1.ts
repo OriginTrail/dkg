@@ -320,10 +320,14 @@ export async function resolveRfc64LegacySwmBoundaryEvidenceV1(
  * evidence is read, and retirement runs inside the same serialized lease so
  * no newer root generation can appear between the version check and catalog
  * activation.
+ *
+ * `replay` names a lease for a head that is the durable applied head already:
+ * it lets leases that apply a new head go first for the node-wide turn.
  */
 export async function acquireRfc64LegacySwmBoundaryReceiverLeaseV1(
   owner: object,
   scope: Readonly<AuthorCatalogScopeV1>,
+  request: Readonly<{ replay?: boolean }> = {},
 ): Promise<Readonly<Rfc64LegacySwmBoundaryReceiverLeaseV1>> {
   assertAuthorCatalogScopeV1(scope);
   if (scope.subGraphName !== null) {
@@ -347,7 +351,11 @@ export async function acquireRfc64LegacySwmBoundaryReceiverLeaseV1(
   return new Promise<Readonly<Rfc64LegacySwmBoundaryReceiverLeaseV1>>((resolveAcquired, rejectAcquired) => {
     runRfc64LegacySwmRetirementV1(
       state.fence,
-      { source: 'receiver-lease', contextGraphId: scope.contextGraphId },
+      {
+        source: 'receiver-lease',
+        contextGraphId: scope.contextGraphId,
+        yieldsNodeWideTurn: request.replay === true,
+      },
       async (dropFence) => {
         const evidence = await resolveRfc64LegacySwmBoundaryEvidenceV1(owner, scope);
         resolveAcquired(Object.freeze({

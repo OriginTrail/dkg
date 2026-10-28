@@ -16,8 +16,11 @@ import {
 } from '@origintrail-official/dkg-storage';
 import {
   reconcileFinalizedSwmTwinFromDescriptor,
+  type FinalizedSwmTwinDescriptorReconciliationOutcome,
   type FinalizedSwmTwinRetirement,
 } from './finalized-swm-twin-reconciliation.js';
+import { FinalizedSwmTwinMemoV1 } from './finalized-swm-twin-memo.js';
+import type { GraphScopedSwmRecoveryDescriptor } from '../graph-scoped-swm-recovery.js';
 import type { RecoveryExecutionGuard } from './recovery-execution-guard.js';
 import {
   runSharedMemorySync,
@@ -79,6 +82,12 @@ export interface SwmTargetExecutorPortsV1 {
     retirement: FinalizedSwmTwinRetirement,
     ctx: OperationContext,
   ) => Promise<void>;
+  /**
+   * The rest of a finalized twin's cleanup, which its lifecycle owns: the
+   * legacy marker while one is outstanding, and the author's inventory row
+   * while one is left. Idempotent, so every round that proves the twin
+   * retired asks again.
+   */
   readonly retireLegacySwmAfterVerifiedVmTwin?: (input: Readonly<{
     contextGraphId: string;
     kaUal: string;
@@ -142,6 +151,7 @@ export class SwmTargetExecutorV1 {
   constructor(
     ports: SwmTargetExecutorPortsV1,
     private readonly privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
+    private readonly finalizedTwins = new FinalizedSwmTwinMemoV1(),
   ) {
     this.#ports = ports;
     this.#privateRecoveryBudgetMs = normalizePrivateSwmRecoveryBudgetMs(
@@ -309,48 +319,12 @@ export class SwmTargetExecutorV1 {
       ordinaryRootSnapshotApplyAllowed: this.#ports.ordinaryRootSnapshotApplyAllowed,
       resolveRootSnapshotAtomicCompanion:
         this.#ports.resolveRootSnapshotAtomicCompanion,
-      reconcileFinalizedTwin: async (contextGraphId, descriptor) => {
-        const retirement = await reconcileFinalizedSwmTwinFromDescriptor({
-          store: this.#ports.store,
-          writeLocks: this.#ports.writeLocks,
-          contextGraphId,
-          descriptor,
-          retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
-        });
-        const twinRetired = retirement === 'retired'
-          || retirement === 'already-retired-finalized';
-        if (twinRetired) {
-          // The twin's graph and head are already gone at this point. Marker
-          // retirement is a second, separate cleanup: if its failure escaped,
-          // the caller would treat the whole reconciliation as deferred, skip
-          // the suppression below, and its bulk append would write the retired
-          // head and operation rows back without their graph. A marker left
-          // behind is the conservative state (the graph stays reported as
-          // incomplete) until a later pass or a catalog replay retires it.
-          try {
-            await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
-              contextGraphId,
-              kaUal: descriptor.kaUal,
-              assertionVersion: descriptor.assertionVersion,
-              subGraphName: descriptor.subGraphName,
-            });
-          } catch (cause) {
-            this.#ports.logWarn(
-              target.ctx,
-              `Deferred legacy SWM boundary retirement after finalized VM twin cleanup for `
-                + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`,
-            );
-          }
-        }
-        if (retirement === 'retired') {
-          this.#ports.invalidateListContextGraphsCache();
-          this.#ports.logInfo(
-            target.ctx,
-            `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
-          );
-        }
-        return twinRetired ? 'suppress-metadata' : 'preserve';
-      },
+      reconcileFinalizedTwin: (contextGraphId, descriptor) => (
+        this.#retireFinalizedTwinAfterWrite(target, contextGraphId, descriptor)
+      ),
+      heldAsRetiredFinalizedTwin: (contextGraphId, descriptor) => (
+        this.#heldAsRetiredFinalizedTwin(target, contextGraphId, descriptor)
+      ),
       storeInsert,
       publicSnapshotStore: this.#ports.publicSnapshotStore,
       deleteCheckpoint: this.#ports.deletePublicCheckpoint,
@@ -360,6 +334,126 @@ export class SwmTargetExecutorV1 {
       logWarn: this.#ports.logWarn,
       logDebug: this.#ports.logDebug,
     });
+  }
+
+  /**
+   * Ask the twin's lifecycle for the rest of its cleanup: its legacy marker and
+   * its author's inventory row. A failure stays a warning: a marker left behind
+   * is the conservative state, retried by its own owner, by a later round that
+   * proves the twin retired again, or by the asset's next publication.
+   */
+  async #retireLegacyMarker(
+    target: PublicSwmTargetV1,
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<void> {
+    try {
+      await this.#ports.retireLegacySwmAfterVerifiedVmTwin?.({
+        contextGraphId,
+        kaUal: descriptor.kaUal,
+        assertionVersion: descriptor.assertionVersion,
+        subGraphName: descriptor.subGraphName,
+      });
+    } catch (cause) {
+      this.#ports.logWarn(
+        target.ctx,
+        `Deferred legacy SWM boundary retirement after finalized VM twin cleanup for `
+          + `${descriptor.kaUal}: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+  }
+
+  /**
+   * A snapshot this node proved finalized and retired in an earlier round
+   * (`finalized-swm-twin-memo.ts`) is held only once the same proof passes
+   * again: Verified Memory still holds that content, and the shared-memory copy
+   * is gone, head and all. The proof writes nothing unless a share brought the
+   * copy back, which it retires. When it fails, the entry is forgotten and the
+   * round takes the snapshot the usual way, as it does when the proof cannot
+   * run. Nothing of a held twin is written, and a named sub-graph is registered
+   * from the rows a round writes: it is registered here from the snapshot's
+   * verified rows instead, so a registration that failed in the round that
+   * retired the twin gets its next try, and its finalized content its reads.
+   */
+  async #heldAsRetiredFinalizedTwin(
+    target: PublicSwmTargetV1,
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<boolean> {
+    if (!this.finalizedTwins.retired(contextGraphId, descriptor)) return false;
+    const outcome = await this.#reconcileFinalizedTwin(target, contextGraphId, descriptor)
+      .catch((cause: unknown) => {
+        this.finalizedTwins.forget(contextGraphId, descriptor);
+        this.#ports.logWarn(
+          target.ctx,
+          `Taking the snapshot of retired finalized SWM twin ${descriptor.kaUal} again: its proof `
+            + `did not run: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+        return undefined;
+      });
+    // A partial head needs materialization even if the graph was retired.
+    if (outcome !== 'retired' && outcome !== 'already-retired-finalized') {
+      this.finalizedTwins.forget(contextGraphId, descriptor);
+      return false;
+    }
+    this.finalizedTwins.remember(contextGraphId, descriptor);
+    await this.#finishFinalizedTwinCleanup(target, contextGraphId, descriptor, outcome);
+    await this.#registerSyncedSubGraphs(target, descriptor.metadataQuads);
+    return true;
+  }
+
+  /** After writing, even a partial retired head must stay out of bulk metadata. */
+  async #retireFinalizedTwinAfterWrite(
+    target: PublicSwmTargetV1,
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<'suppress-metadata' | 'preserve'> {
+    const outcome = await this.#reconcileFinalizedTwin(target, contextGraphId, descriptor);
+    if (outcome !== 'retired' && outcome !== 'already-retired-finalized' && outcome !== 'retired-head-residue') {
+      this.finalizedTwins.forget(contextGraphId, descriptor);
+      return 'preserve';
+    }
+    this.finalizedTwins.remember(contextGraphId, descriptor);
+    await this.#finishFinalizedTwinCleanup(target, contextGraphId, descriptor, outcome);
+    return 'suppress-metadata';
+  }
+
+  /** Return proof/retirement facts; callers own memo and metadata policy. */
+  #reconcileFinalizedTwin(
+    target: PublicSwmTargetV1,
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+  ): Promise<FinalizedSwmTwinDescriptorReconciliationOutcome> {
+    return reconcileFinalizedSwmTwinFromDescriptor({
+      store: this.#ports.store,
+      writeLocks: this.#ports.writeLocks,
+      contextGraphId,
+      descriptor,
+      retire: (candidate) => this.#ports.retireFinalizedSwmTwin(candidate, target.ctx),
+    });
+  }
+
+  async #finishFinalizedTwinCleanup(
+    target: PublicSwmTargetV1,
+    contextGraphId: string,
+    descriptor: GraphScopedSwmRecoveryDescriptor,
+    retirement: FinalizedSwmTwinDescriptorReconciliationOutcome,
+  ): Promise<void> {
+    // The twin's graph and head are already gone at this point. The rest of
+    // its cleanup is separate: if its failure escaped, the caller would treat
+    // the whole reconciliation as deferred, skip the metadata suppression, and
+    // its bulk append would write the retired head and operation rows back
+    // without their graph. Its owner does only what is still owed, so every
+    // proof asks again, and a marker left behind, the conservative state (the
+    // graph stays reported as incomplete), has a way back in each such round.
+    await this.#retireLegacyMarker(target, contextGraphId, descriptor);
+    if (retirement === 'retired') {
+      this.#ports.invalidateListContextGraphsCache();
+      this.#ports.logInfo(
+        target.ctx,
+        `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${descriptor.kaUal}`,
+      );
+    }
   }
 
   /**
@@ -402,21 +496,27 @@ export class SwmTargetExecutorV1 {
   }
 }
 
-/** Stable typed composition with isolated session caches and shared manifest progress. */
+/**
+ * Stable typed composition with isolated session caches, shared manifest
+ * progress and the node's shared memo of retired finalized twins.
+ */
 export class SwmTargetExecutorSessionFactoryV1 {
   readonly #ports: SwmTargetExecutorPortsV1;
   readonly #privateSnapshotWalks: PrivateSwmSnapshotWalkRegistry;
+  readonly #finalizedTwins: FinalizedSwmTwinMemoV1;
 
   constructor(
     ports: SwmTargetExecutorPortsV1,
     privateSnapshotWalks = new PrivateSwmSnapshotWalkRegistry(),
+    finalizedTwins = new FinalizedSwmTwinMemoV1(),
   ) {
     this.#ports = ports;
     this.#privateSnapshotWalks = privateSnapshotWalks;
+    this.#finalizedTwins = finalizedTwins;
   }
 
   createSession(): SwmTargetExecutorV1 {
-    return new SwmTargetExecutorV1(this.#ports, this.#privateSnapshotWalks);
+    return new SwmTargetExecutorV1(this.#ports, this.#privateSnapshotWalks, this.#finalizedTwins);
   }
 }
 
