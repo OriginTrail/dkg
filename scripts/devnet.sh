@@ -1200,8 +1200,24 @@ start_node() {
   fi
 }
 
+run_devnet_process_control() {
+  local action="$1" selected="${2:-}" directory num
+  local entries=("$action" "$REPO_ROOT" "$DEVNET_DIR" "$selected")
+  if [ -n "$selected" ]; then
+    entries+=("$selected" "$(node_cli_entry "$selected")")
+  else
+    for directory in "$DEVNET_DIR"/node*; do
+      [ -d "$directory" ] || continue
+      num="${directory##*/node}"
+      [[ "$num" =~ ^[1-9][0-9]*$ ]] || continue
+      entries+=("$num" "$(node_cli_entry "$num")")
+    done
+  fi
+  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs" "${entries[@]}"
+}
+
 collect_devnet_node_pids() {
-  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs" collect "$REPO_ROOT" "$DEVNET_DIR" "${1:-}"
+  run_devnet_process_control collect "${1:-}"
 }
 
 refresh_node_pidfile() {
@@ -1251,7 +1267,7 @@ refresh_node_pidfile() {
 }
 
 stop_devnet_node_processes() {
-  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs" stop "$REPO_ROOT" "$DEVNET_DIR" "${1:-}"
+  run_devnet_process_control stop "${1:-}"
 }
 
 stop_devnet_nodes_only() {

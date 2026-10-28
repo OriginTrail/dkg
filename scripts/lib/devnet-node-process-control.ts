@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: Apache-2.0
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 
 export interface DevnetPaths {
   /** The repository root (where `scripts/devnet.sh` lives and restarts run from). */
   repoRoot: string;
   /** The devnet state directory (`<repoRoot>/.devnet`), holding `node<N>/`. */
   devnetDir: string;
+  /** Exact configured alternate entry for each mixed-version node. */
+  nodeCliEntries?: Readonly<Record<number, string>>;
 }
 
 /**
@@ -216,7 +218,10 @@ export function verifiedNodePids(
   num: number,
   readCommandLine: CommandLineReader = readProcessCommandLine,
 ): number[] {
-  const roots = repoRootSpellings(paths.repoRoot);
+  const alternate = paths.nodeCliEntries?.[num];
+  if (alternate !== undefined && !alternate.endsWith(`/${CLI_ENTRY_POINT}`)) throw new Error(`node${num}: invalid configured CLI entry`);
+  const roots = [...repoRootSpellings(paths.repoRoot),
+    ...(alternate === undefined ? [] : repoRootSpellings(dirname(dirname(dirname(dirname(alternate))))))];
   const pids: number[] = [];
   for (const { file, pid } of readNodePidEntries(paths, num)) {
     if (pids.includes(pid) || !pidAlive(pid)) continue;
@@ -277,39 +282,67 @@ export async function waitForPidsGone(label: string, pids: readonly number[], ti
  * remove the PID files whose PID is dead. Nothing is signalled that is not a
  * daemon of this checkout; a live PID of anything else rejects the whole stop.
  */
-export async function stopNodeProcesses(
-  paths: DevnetPaths,
-  num: number,
-  options: {
-    graceMs?: number;
-    killWaitMs?: number;
-    readCommandLine?: CommandLineReader;
-    removeUnparseable?: boolean;
-  } = {},
-): Promise<void> {
-  const pids = collectDevnetNodePids(paths, num, options.readCommandLine);
-  const identities = new Map(pids.map(pid => [pid, (options.readCommandLine ?? readProcessCommandLine)(pid)]));
-  const current = (pid: number) => pidAlive(pid) && identities.get(pid) !== null
-    && (options.readCommandLine ?? readProcessCommandLine)(pid) === identities.get(pid);
-  if (pids.length > 0) {
-    for (const pid of pids) {
-      if (!current(pid)) continue;
-      try { process.kill(pid, 'SIGTERM'); } catch { /* may already be gone */ }
-    }
-    if (!(await waitForPidsGone(`node${num} processes stopped`, pids, options.graceMs ?? 10_000))) {
-      sigkillPids(pids.filter(current));
-      if (!(await waitForPidsGone(`node${num} processes killed`, pids, options.killWaitMs ?? 10_000))) throw new Error(`node${num}: owned processes did not stop`);
-    }
+export interface DevnetShutdownOptions {
+  graceMs?: number;
+  killWaitMs?: number;
+  readCommandLine?: CommandLineReader;
+  removeUnparseable?: boolean;
+}
+export interface DevnetShutdownPlan {
+  readonly paths: DevnetPaths;
+  readonly numbers: readonly number[];
+  readonly identities: ReadonlyMap<number, string>;
+  readonly readCommandLine: CommandLineReader;
+}
+/** Validate every selected node before signalling anything, sharing one process inventory. */
+export function planDevnetShutdown(paths: DevnetPaths, numbers: readonly number[],
+  readCommandLine: CommandLineReader = readProcessCommandLine): DevnetShutdownPlan {
+  const snapshot = readProcessInventory();
+  const pids = new Set(numbers.flatMap(num => collectOwnedNodePids(paths, num, readCommandLine, snapshot)));
+  const identities = new Map<number, string>();
+  for (const pid of pids) {
+    const identity = readCommandLine(pid);
+    if (identity !== null) identities.set(pid, identity);
+    else if (pidAlive(pid)) throw new Error(`Owned PID ${pid} has no readable command identity; not signalling it`);
   }
-  clearDeadNodePidFiles(paths, num, { removeUnparseable: options.removeUnparseable });
+  return { paths, numbers: [...numbers], identities, readCommandLine };
+}
+/** One TERM/grace/KILL flow for the whole validated set; recheck identity at each signal. */
+export async function executeDevnetShutdown(plan: DevnetShutdownPlan,
+  options: Omit<DevnetShutdownOptions, 'readCommandLine'> = {}): Promise<void> {
+  const pids = [...plan.identities.keys()];
+  const current = (pid: number) => pidAlive(pid) && plan.readCommandLine(pid) === plan.identities.get(pid);
+  for (const pid of pids) {
+    if (!current(pid)) continue;
+    try { process.kill(pid, 'SIGTERM'); } catch { /* already gone */ }
+  }
+  if (pids.length && !(await waitForPidsGone('devnet processes stopped', pids, options.graceMs ?? 10_000))) {
+    sigkillPids(pids.filter(current));
+    if (!(await waitForPidsGone('devnet processes killed', pids, options.killWaitMs ?? 10_000)))
+      throw new Error(`Selected devnet processes did not stop`);
+  }
+  for (const num of plan.numbers) clearDeadNodePidFiles(plan.paths, num, { removeUnparseable: options.removeUnparseable });
+}
+export async function stopNodeProcesses(paths: DevnetPaths, num: number,
+  options: DevnetShutdownOptions = {}): Promise<void> {
+  await executeDevnetShutdown(planDevnetShutdown(paths, [num], options.readCommandLine), options);
 }
 
 
 /** Collect every owned process before signalling any, including detached stores. */
 export function collectDevnetNodePids(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader = readProcessCommandLine): number[] {
+  return collectOwnedNodePids(paths, num, readCommandLine, readProcessInventory());
+}
+function readProcessInventory() {
+  const listings = execFileSync('ps', ['axeww', '-o', 'pid=,command='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  const children = execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n')
+    .map(line => line.trim().split(/\s+/).map(Number));
+  return { listings, children };
+}
+function collectOwnedNodePids(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader,
+  { listings, children }: ReturnType<typeof readProcessInventory>): number[] {
   const owned = new Set(verifiedNodePids(paths, num, readCommandLine));
   const home = nodeHome(paths, num);
-  const listings = execFileSync('ps', ['axeww', '-o', 'pid=,command='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   for (const line of listings.split('\n')) {
     const match = /^\s*(\d+)\s+(.+)$/.exec(line);
     if (!match) continue;
@@ -322,8 +355,6 @@ export function collectDevnetNodePids(paths: DevnetPaths, num: number, readComma
     }
     if (executable === 'node' || executable.startsWith('oxigraph')) owned.add(pid);
   }
-  const children = execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n')
-    .map(line => line.trim().split(/\s+/).map(Number));
   let changed = true;
   while (changed) {
     changed = false;

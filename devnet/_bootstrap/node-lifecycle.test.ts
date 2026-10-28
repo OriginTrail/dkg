@@ -1,3 +1,4 @@
+import { planDevnetShutdown, executeDevnetShutdown } from '../../scripts/lib/devnet-node-process-control.js';
 // No-devnet tests for the shared node-lifecycle helpers (node-lifecycle.ts): PID files,
 // the ownership rule (only this devnet's own, live PIDs, and only a daemon of this
 // checkout, are ever signalled), port resolution, the readiness probe, and the restart
@@ -468,6 +469,43 @@ describe('only a daemon of this checkout is ever signalled', () => {
   });
 });
 
+describe('one validated devnet shutdown plan', () => {
+  it('accepts only the node-specific configured alternate checkout', async () => {
+    const entry = join(root, '.devnet-versions', 'previous', 'packages/cli/dist/cli.js');
+    const worker = sleeper({ entry });
+    const other = sleeper({ entry: join(root, '.devnet-versions', 'unrelated', 'packages/cli/dist/cli.js') });
+    writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
+    writeFileSync(pidFile(5, 'daemon.pid'), String(other.pid));
+    const configured = { ...paths, nodeCliEntries: { 4: entry } };
+    expect(verifiedNodePids(configured, 4)).toEqual([worker.pid]);
+    expect(() => planDevnetShutdown(configured, [4, 5])).toThrow(/not a DKG daemon/);
+    expect(pidAlive(worker.pid!)).toBe(true); // Complete preflight rejected before any signal.
+    await stopNodeProcesses(configured, 4);
+    expect(await exited(worker)).toBe(true);
+    expect(pidAlive(other.pid!)).toBe(true);
+  });
+
+  it('signals all stubborn nodes before their shared grace period', async () => {
+    const ready: Promise<void>[] = [];
+    const workers = [1, 2, 3].map(num => {
+      const marker = join(root, `term-${num}`);
+      const child = spawn(process.execPath, ['-e',
+        `process.on('SIGTERM', () => require('node:fs').writeFileSync(process.argv[1], String(Date.now()))); console.log('ready'); setInterval(() => {}, 1000)`,
+        marker, join(root, 'packages/cli/dist/cli.js'), 'daemon-worker'], { stdio: ['ignore', 'pipe', 'ignore'] });
+      children.push(child);
+      ready.push(new Promise(resolve => child.stdout!.once('data', () => resolve())));
+      writeFileSync(pidFile(num, 'daemon.pid'), String(child.pid));
+      return child;
+    });
+    await Promise.all(ready);
+    const plan = planDevnetShutdown(paths, [1, 2, 3]);
+    await executeDevnetShutdown(plan, { graceMs: 700, killWaitMs: 5000 });
+    const times = [1, 2, 3].map(num => Number(readFileSync(join(root, `term-${num}`), 'utf8')));
+    expect(Math.max(...times) - Math.min(...times)).toBeLessThan(700);
+    for (const worker of workers) { expect(await exited(worker)).toBe(true); expect(worker.signalCode).toBe('SIGKILL'); }
+  });
+});
+
 describe('stopNodeProcesses', () => {
   it('stops the worker and the supervisor with SIGTERM, leaves other processes and nodes alone, and removes the PID files of the dead', async () => {
     const worker = sleeper();
@@ -806,6 +844,15 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
   }
 
   const alive = (child: ChildProcess) => child.exitCode === null && child.signalCode === null && pidAlive(child.pid!);
+  it('collects and stops harmlessly before a devnet directory exists', async () => {
+    rmSync(paths.devnetDir, { recursive: true, force: true });
+    expect(await run('collect_devnet_node_pids')).toMatchObject({ status: 0, stdout: '\n' });
+    expect(await run('stop_devnet_node_processes')).toMatchObject({ status: 0 });
+    // Other filesystem faults remain visible.
+    writeFileSync(paths.devnetDir, 'not a directory');
+    expect((await run('collect_devnet_node_pids')).status).not.toBe(0);
+  });
+
   const collected = async () => (await run('collect_devnet_node_pids 4')).stdout.split(/\s+/).filter(Boolean).map(Number);
 
   it('lists a node process and a managed store binary that mention the home, and not a log tail', async () => {

@@ -170,7 +170,7 @@ describe('SwmHostModeStore survives kill -9 inside a durable write (real child p
     expect(parsed.validLength).toBe(log.length);
     expect(new Set(parsed.seqnos).size).toBe(parsed.seqnos.length);
     expect(parsed.seqnos).toEqual([...parsed.seqnos].sort((a, b) => a - b));
-    expect(parsed.seqnos.at(-1)).toBe(next);
+    expect(parsed.seqnos).toEqual([...expectedSeqnos, next]);
     // The file itself, parsed independently of the store: the retained frames are the child's exact
     // bytes and the last one is the frame just appended.
     expectPayloadsIntact(rawFrames(log), 'after restart + append (raw log)', next);
@@ -187,7 +187,7 @@ describe('SwmHostModeStore survives kill -9 inside a durable write (real child p
       pagedFrames.push(...page.map((e) => ({ seqno: e.seqno, bytes: e.envelopeBytes })));
       since = page[page.length - 1].seqno;
     }
-    expect(paged).toEqual(parsed.seqnos);
+    expect(paged).toEqual([...expectedSeqnos, next]);
     expectPayloadsIntact(pagedFrames, 'after restart + append (paged catch-up read)', next);
 
     // The very last frame is the one just appended, byte for byte.

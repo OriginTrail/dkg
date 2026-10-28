@@ -1,3 +1,4 @@
+import type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -8180,34 +8181,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
   async catchupSwmFromHost(this: DKGAgent,
     remotePeerId: string,
     contextGraphId: string,
-    options?: { sinceSeqno?: number; maxRounds?: number; maxEntriesPerRound?: number; reportEntries?: boolean },
-  ): Promise<{
-    rounds: number;
-    fetched: number;
-    /**
-     * Number of envelopes whose apply path returned `applied: true`.
-     * NOT the same as triples — one envelope can carry many quads.
-     * For triples-applied accounting, callers MUST sum
-     * {@link appliedTriples}. Codex PR #610 R2 caught the previous
-     * conflation where `memory.ts` aggregated this count into a
-     * field named `totalInsertedTriples`.
-     */
-    applied: number;
-    /**
-     * Total triples (N-Quads) inserted by successful replays.
-     * Summed from `SharedMemoryApplyOutcome.insertedTriples`.
-     */
-    appliedTriples: number;
-    skipped: number;
-    nextSeqno: number;
-    denied?: string;
-    /**
-     * With `reportEntries`: every envelope the host served, in the order it
-     * served them, as its seqno and the SHA-256 (hex) of its bytes. It is the
-     * evidence of what a host holds, whether or not the replay applied it.
-     */
-    entries?: Array<{ seqno: number; envelopeSha256: string }>;
-  }> {
+    options?: SwmHostCatchupOptions,
+  ): Promise<SwmHostCatchupResult> {
     const ctx = createOperationContext('share');
     let sinceSeqno = options?.sinceSeqno ?? 0;
     const maxRounds = Math.max(1, options?.maxRounds ?? 8);
@@ -8239,7 +8214,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     let appliedTriples = 0;
     let skipped = 0;
     let lastDenied: string | undefined;
-    const reported: Array<{ seqno: number; envelopeSha256: string }> | undefined = options?.reportEntries ? [] : undefined;
+    const reported: SwmHostCatchupEntryReport[] | undefined = options?.reportEntries ? [] : undefined;
     while (rounds < maxRounds) {
       rounds += 1;
       const signedReq = await mintSignedCatchupRequest({
@@ -8366,19 +8341,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
    */
   async catchupSwmFromConnectedHosts(this: DKGAgent,
     contextGraphId: string,
-    options?: { sinceSeqno?: number; maxRounds?: number; maxEntriesPerRound?: number; reportEntries?: boolean; peers?: string[] },
-  ): Promise<Array<{
-    peerId: string;
-    rounds: number;
-    fetched: number;
-    applied: number;
-    appliedTriples: number;
-    skipped: number;
-    nextSeqno: number;
-    denied?: string;
-    error?: string;
-    entries?: Array<{ seqno: number; envelopeSha256: string }>;
-  }>> {
+    options?: SwmConnectedHostCatchupOptions,
+  ): Promise<SwmConnectedHostCatchupResult[]> {
     const ctx = createOperationContext('share');
     const explicitPeers = options?.peers;
     const rawCandidates: string[] = (() => {
@@ -8401,18 +8365,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ctx,
       `host-catchup peer order for "${contextGraphId}": cores=${coreCount} total=${candidates.length}`,
     );
-    const results: Array<{
-      peerId: string;
-      rounds: number;
-      fetched: number;
-      applied: number;
-      appliedTriples: number;
-      skipped: number;
-      nextSeqno: number;
-      denied?: string;
-      error?: string;
-      entries?: Array<{ seqno: number; envelopeSha256: string }>;
-    }> = [];
+    const results: SwmConnectedHostCatchupResult[] = [];
     for (const peerId of candidates) {
       try {
         // Codex PR #610 round-2 #2: resume from the highest seqno we
