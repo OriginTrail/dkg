@@ -70,6 +70,25 @@ test('regeneration updates only tables and preserves prose edits and frontmatter
   assert.equal(f.run().status, 0);
 });
 
+test('a published page may not link to a docs page that SUMMARY.md does not publish', t => {
+  const f = fixture(t);
+  assert.equal(f.run('--write').status, 0);
+  const summary = f.read('docs/SUMMARY.md');
+  f.write('docs/SUMMARY.md', `${summary}\n* [Guide](use-dkg/guide.md)\n* [Archive](archive/v9/README.md)\n`);
+  f.write('docs/use-dkg/draft.md', '# Draft\n');
+  f.write('docs/archive/v9/old-plan.md', '# Old plan\n');
+  f.write('docs/archive/v9/README.md', '# Archive\n\n<a href="old-plan.md">Old plan</a>\n');
+  f.write('docs/use-dkg/guide.md', '# Guide\n\nSee [the draft](draft.md#setup).\n');
+  const refused = f.run();
+  assert.equal(refused.status, 1);
+  assert.match(refused.stderr, /docs\/use-dkg\/guide\.md: links to unpublished page draft\.md#setup/);
+  assert.doesNotMatch(refused.stderr, /archive/, 'The archive index may link unpublished archive pages');
+
+  f.write('docs/use-dkg/guide.md', '# Guide\n\nSee the [archive](../archive/v9/README.md) and the [reference](../references/availability.md).\n');
+  const accepted = f.run();
+  assert.equal(accepted.status, 0, accepted.stderr);
+});
+
 for (const [path, id] of pages) {
   for (const corruption of ['missing', 'duplicate', 'reversed']) {
     test(`${id}: ${corruption} markers fail without overwriting the page`, t => {
