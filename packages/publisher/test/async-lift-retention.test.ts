@@ -17,7 +17,8 @@ import {
 import { LIFT_JOB_SUBJECT_PREFIX, buildLiftRetentionScanQuery, buildLiftRetentionTieQuery } from '../src/async-lift-retention-scan.js';
 import { LiftLegacyScanMemo } from '../src/lift-legacy-scan-memo.js';
 import { LiftJobPayloadUnreadableError } from '../src/lift-job-payload-unreadable.js';
-import { lifecycleKeyOfJob } from '../src/lift-job-store-selectors.js';
+import { LiftJobStoreSelectors, lifecycleKeyOfJob } from '../src/lift-job-store-selectors.js';
+import { bindingJobIds } from '../src/async-lift-lifecycle-siblings.js';
 import {
   DAY, NOW, WINDOW, at, bySource, createRetentionTemplates, fin, graphFingerprint, keyedQuads, present, seedKeyed, seedWalletLock, spyStore, stampKeyed, type KeyedSpec, type RetentionTemplates,
 } from './_helpers/lift-retention-fixtures.js';
@@ -772,6 +773,77 @@ describe('failures', () => {
     expect(await present(store, 'a')).not.toBe('');
     fail = false;
     expect(deletedIds(await drain(retention))).toEqual(['a']);
+  });
+});
+
+describe('two records of one job id: the key is kept whole, whatever order the engine returns its rows in (online review round 3: 4396325296)', () => {
+  // Admission's read keeps one record per job id, the last row's. With two records of one id, the engine's row order decides which one admission sees, and the
+  // sweep, which reads the key the same way, would judge the binding from that one alone: delete the record it saw, and the hidden one can bind the key.
+  /** The quads of `spec` stored under the subjects of job `subjectId`: its payload still names `spec.id`. */
+  const storedUnder = (spec: KeyedSpec, subjectId: string): Quad[] => keyedQuads(templates, spec).map((quad) => ({
+    ...quad,
+    subject: quad.subject === jobSubject(spec.id) ? jobSubject(subjectId) : quad.subject === requestSubject(spec.id) ? requestSubject(subjectId) : quad.subject,
+    object: quad.object === `<${requestSubject(spec.id)}>` ? `<${requestSubject(subjectId)}>` : quad.object,
+  }));
+  type RowOrder = 'engine' | 'ascending' | 'descending';
+  /** `store` with the rows of every sibling read (the one query that binds `?indexed`) in the engine's order or sorted by payload text: each of two payloads of one job id is the last row in one of the sorted orders. */
+  const siblingRowsIn = (store: OxigraphStore, order: RowOrder): OxigraphStore => (order === 'engine' ? store : spyStore(store, {
+    rewrite: async (entry, run) => {
+      const answer = await run();
+      if (answer.type !== 'bindings' || !entry.text.includes('?indexed')) return answer;
+      const sorted = [...answer.bindings].sort((a, b) => (a['payload']! < b['payload']! ? -1 : a['payload']! > b['payload']! ? 1 : 0));
+      return { ...answer, bindings: order === 'ascending' ? sorted : sorted.reverse() };
+    },
+  }).store);
+  /** Admission's own read of the key named `name` (`vmPublishAdmissionCandidates`) and the binding it answers with, in the two sorted row orders. */
+  const admissionViews = async (store: OxigraphStore, name: string): Promise<string[]> => {
+    const key = lifecycleKeyOfJob(stampKeyed(templates, fin('probe', name, 1)))!;
+    const views: string[] = [];
+    for (const order of ['ascending', 'descending'] as const) {
+      const records = await new LiftJobStoreSelectors(siblingRowsIn(store, order), DEFAULT_CONTROL_GRAPH_URI, (job) => job).vmPublishAdmissionCandidates(key);
+      views.push(`records ${records.map((job) => `${job.jobId}:${job.status}`).sort().join(' ')}, binds ${bindingJobIds(records, key).join(' ') || 'nothing'}`);
+    }
+    return views;
+  };
+  const CASES: Array<readonly [string, () => Quad[][], Record<string, number>]> = [
+    ['subject z holds an older retryable failed payload of job f, subject f the old finalized job f (the review\'s case)',
+      () => [keyedQuads(templates, fin('f', 'key', 10)), storedUnder(at('f', 'key', 'retryable', 5), 'z')], { siblings_unreadable: 1 }],
+    ['one id with no subject mismatch: subject f holds two payloads of job f, a newer finalized one and an older retryable failed one, next to the old finalized g',
+      () => [keyedQuads(templates, fin('g', 'key', 20)), keyedQuads(templates, fin('f', 'key', 30)), keyedQuads(templates, at('f', 'key', 'retryable', 10))], { unreadable: 1, siblings_unreadable: 1 }],
+  ];
+
+  it.each(CASES.flatMap(([label, records, reasons]) => (['delete', 'report'] as const).map((mode) => [label, mode, records, reasons] as const)))('%s, %s mode: every record stays and admission answers as before, in every row order', async (_label, mode, records, reasons) => {
+    for (const insertion of ['as listed', 'reversed'] as const) {
+      for (const order of ['engine', 'ascending', 'descending'] as const) {
+        const where = `inserted ${insertion}, sibling rows in ${order} order`;
+        const store = new OxigraphStore();
+        stores.push(store);
+        await store.createGraph(DEFAULT_CONTROL_GRAPH_URI);
+        for (const quads of insertion === 'as listed' ? records() : records().reverse()) await store.insert(quads);
+        const graph = await graphFingerprint(store, DEFAULT_CONTROL_GRAPH_URI);
+        const views = await admissionViews(store, 'key');
+        expect(views[0], `${where}: each sorted order shows admission the other record of the id`).not.toBe(views[1]);
+        const results = await drain(newRetention(publisherOver(siblingRowsIn(store, order)), { mode }));
+        // soft: a failure names every insertion and row order that fails, not only the first
+        expect.soft(results.every((r) => r.error === undefined), where).toBe(true);
+        expect.soft([...deletedIds(results), ...wouldDeleteIds(results)], where).toEqual([]);
+        expect.soft(kept(results), where).toEqual(reasons);
+        expect.soft(await graphFingerprint(store, DEFAULT_CONTROL_GRAPH_URI) === graph, `${where}: both records of the id stay, byte for byte`).toBe(true);
+        expect.soft(await admissionViews(store, 'key'), `${where}: admission binds what it bound, in either row order`).toEqual(views);
+      }
+    }
+  });
+
+  it('the sweep\'s read refuses the key with the error type of an unreadable record; admission\'s read is unchanged and still answers', async () => {
+    const store = new OxigraphStore();
+    stores.push(store);
+    await seedKeyed(store, templates, [fin('f', 'key', 10)]);
+    await store.insert(storedUnder(at('f', 'key', 'retryable', 5), 'z'));
+    const key = lifecycleKeyOfJob(stampKeyed(templates, fin('f', 'key', 10)))!;
+    const refusal = await publisherOver(store).retentionAccess().runClaimTransaction((tx) => tx.siblings(key)).then(() => undefined, (cause: unknown) => cause);
+    expect(refusal).toBeInstanceOf(LiftJobPayloadUnreadableError);
+    expect((refusal as Error).message).toBe(`Malformed persisted LiftJob payload: subject ${jobSubject('z')} holds a payload of job f`);
+    expect((await admissionViews(store, 'key')).sort()).toEqual(['records f:failed, binds f', 'records f:finalized, binds nothing']);
   });
 });
 

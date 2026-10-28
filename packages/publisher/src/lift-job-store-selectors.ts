@@ -7,6 +7,7 @@ import {
   CONTROL_PAYLOAD,
   CONTROL_STATUS,
   integer,
+  jobSubject,
   knowledgeAssetVmPublishLifecycleKey,
   literal,
 } from './async-lift-control-plane.js';
@@ -110,8 +111,13 @@ export class LiftJobStoreSelectors {
     return this.vmPublishCandidates(lifecycleKey, controlStoreOptions('publisher', 'publisher.asyncLift.findActiveVmPublish'));
   }
 
-  /** The same read with the caller's options, so a sweep can label its own reads (OT-RFC-73 P11). Admission calls the one-argument method above: it has no policy argument. */
-  async vmPublishCandidates(lifecycleKey: string, options: QueryOptions): Promise<PersistedLiftJob[]> {
+  /**
+   * The same read with the caller's options, so a sweep can label its own reads (OT-RFC-73 P11). Admission calls the one-argument method above: it has no policy argument.
+   * `oneRecordPerJob` is the retention sweep's alone (online review 4396325296): the read keeps one record per job id, the last row's, so two records of one id leave the
+   * engine's row order to decide which one the caller sees. Admission keeps that answer; a caller that deletes records must not judge a key from it, and with the flag the
+   * read throws for such a key instead (`refuseTwoRecordsOfOneJob`).
+   */
+  async vmPublishCandidates(lifecycleKey: string, options: QueryOptions, oneRecordPerJob = false): Promise<PersistedLiftJob[]> {
     const scanLegacy = this.legacyScan.scanRequired();
     const indexedBranch = `{
           ?job <${CONTROL_LIFECYCLE_KEY}> ${literal(lifecycleKey)} ; <${CONTROL_PAYLOAD}> ?payload .
@@ -123,12 +129,13 @@ export class LiftJobStoreSelectors {
           FILTER NOT EXISTS { ?job <${CONTROL_LIFECYCLE_KEY}> ?lifecycleKey }
         }`;
     const result = await this.store.query(
-      `SELECT ?payload ?status ?indexed WHERE { GRAPH <${this.graphUri}> {
+      `SELECT ${oneRecordPerJob ? '?job ' : ''}?payload ?status ?indexed WHERE { GRAPH <${this.graphUri}> {
         ${scanLegacy ? `${indexedBranch} UNION ${legacyBranch}` : indexedBranch}
       } }`,
       options,
     );
     const rows = expectBindings(result);
+    if (oneRecordPerJob) refuseTwoRecordsOfOneJob(rows);
     const jobs = new Map<string, PersistedLiftJob>();
     // Decode the indexed branch first regardless of backend UNION row order.
     for (const row of rows) {
@@ -215,6 +222,28 @@ export class LiftJobStoreSelectors {
       contextGraphId,
       this.project,
     );
+  }
+}
+
+/**
+ * OT-RFC-73 P11 (online review 4396325296): throw when the rows of a sibling read hold two records of one job id, of which the read's collapse by job id would show one: a
+ * payload stored under a subject that is not its own job's (`jobSubject(jobId)`: the subject the serializer writes and a removal deletes), or one job stored with two payloads.
+ * One id under two subjects is the first case, since only one of them is the id's own. A row whose payload does not decode is no record of the read (it skips such a row or
+ * throws for it), and the same subject and payload twice (a repeated status triple) is one record.
+ */
+function refuseTwoRecordsOfOneJob(rows: ReadonlyArray<Record<string, string>>): void {
+  const payloads = new Map<string, string>();
+  for (const row of rows) {
+    const payload = row['payload'];
+    const job = parseInventoryPayload(payload);
+    if (job === null || payload === undefined) continue;
+    if (row['job'] !== jobSubject(job.jobId)) {
+      throw new LiftJobPayloadUnreadableError(`Malformed persisted LiftJob payload: subject ${row['job']} holds a payload of job ${job.jobId}`);
+    }
+    if ((payloads.get(job.jobId) ?? payload) !== payload) {
+      throw new LiftJobPayloadUnreadableError(`Malformed persisted LiftJob payload: job ${job.jobId} is stored with two payloads`);
+    }
+    payloads.set(job.jobId, payload);
   }
 }
 

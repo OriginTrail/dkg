@@ -7,7 +7,8 @@
  * A finalized job is NEVER deleted when (checked from the payload, under the claim lock, immediately before the delete):
  *  - its payload is unreadable, ambiguous (several payload triples), another job's, or carries no finish time;
  *  - its stored `status`, `finalizedAt` or lifecycle-key triples disagree with the payload, or its key does not lead to it (the sweep reads its siblings the way
- *    admission does, and a record admission cannot reach is one it cannot judge);
+ *    admission does, and a record admission cannot reach is one it cannot judge), or its key's records cannot be read or hold two records of one job id
+ *    (`siblings_unreadable`: admission sees only one of the two, and which one the engine's row order decides);
  *  - a wallet lock still names it (a bound obligation: the coordinator releases ownership of a finalized job, so a lock that survives means something is
  *    mid-flight);
  *  - its `finalizedAt` or `updatedAt` is dated after `now`, or it is younger than the window;

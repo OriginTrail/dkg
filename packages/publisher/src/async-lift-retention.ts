@@ -456,7 +456,7 @@ class PublisherRetentionImpl implements PublisherRetention {
       if (key === null) { for (const j of members) doom(j); continue; }              // no lifecycle key: no sibling can bind it
       let siblings: PersistedLiftJob[];
       try { siblings = await tx.siblings(key); } catch (cause) {
-        if (!isUndecodableSiblingError(cause)) throw cause;                               // a store failure ends the batch; an undecodable record keeps the key's candidates
+        if (!isUndecodableSiblingError(cause)) throw cause;                               // a store failure ends the batch; an undecodable record, or two of one job id, keeps the key's candidates
         b.kept.siblings_unreadable += members.length;
         for (const j of members) this.block(key, j.job);                                // the key may be readable by the time the scan reaches its next record
         continue;

@@ -7,7 +7,8 @@
  * gets onto that transaction; the publisher hands it out (`TripleStoreAsyncLiftPublisher.retentionAccess()`), so the sweep itself holds no claim machinery and no
  * second way to remove a job exists:
  *  - `siblings(key)` reads the records of a key exactly as admission reads them (`vmPublishAdmissionCandidates`, the control path), so the sweep judges the very
- *    records admission would bind;
+ *    records admission would bind; and it refuses a key whose read holds two records of one job id, of which admission sees the one the engine's row order puts last
+ *    (online review 4396325296);
  *  - `remove(jobId, confirm)` removes one job through the job's own transition scope (`commitRemoval`, the path `clear` and `clearTerminalJob` take): under the job lock,
  *    from a fresh read, and only if `confirm` accepts that read. The journal is never touched.
  * A job lock is taken per removal inside the claim transaction (never the claim lock again), in the global-claim-then-job order every other mutation uses.
@@ -23,7 +24,10 @@ export const LIFT_RETENTION_SIBLINGS_SOURCE = 'publisher.asyncLift.retention.sib
 export type LiftRetentionRemoval = 'removed' | 'missing' | 'changed';
 
 export interface LiftRetentionTransaction {
-  /** The records of one lifecycle key as admission reads them (all states, the control path). Throws when a record cannot be decoded, as admission does. */
+  /**
+   * The records of one lifecycle key as admission reads them (all states, the control path). Throws when a record cannot be decoded, as admission does, and when the read
+   * holds two records of one job id (a payload under a subject that is not its job's, or two payloads of one job), which admission does not: it shows one of them.
+   */
   siblings(lifecycleKey: string): Promise<PersistedLiftJob[]>;
   /** Remove one job under its job lock, from a fresh read: `missing` if it is gone, `changed` if `confirm` refused the fresh record. */
   remove(jobId: string, confirm: (current: LiftJob) => boolean): Promise<LiftRetentionRemoval>;
@@ -61,7 +65,7 @@ export function createLiftRetentionAccess(deps: LiftRetentionAccessDeps): LiftRe
     runClaimTransaction: (work) => deps.journal.runPublicOperation(async (owner) => {
       await deps.ensureGraph();
       return await deps.claims.runClaimTransaction(owner, async (section) => await work({
-        siblings: (lifecycleKey) => deps.selectors.vmPublishCandidates(lifecycleKey, controlStoreOptions('publisher', LIFT_RETENTION_SIBLINGS_SOURCE)),
+        siblings: (lifecycleKey) => deps.selectors.vmPublishCandidates(lifecycleKey, controlStoreOptions('publisher', LIFT_RETENTION_SIBLINGS_SOURCE), true),
         remove: (jobId, confirm) => deps.claims.runNestedJobTransaction(section, jobId, async (transaction): Promise<LiftRetentionRemoval> => {
           if (transaction.kind === 'missing') return 'missing';
           if (transaction.kind !== 'present' || !confirm(transaction.current)) return 'changed';
