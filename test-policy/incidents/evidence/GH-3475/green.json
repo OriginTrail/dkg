@@ -15,7 +15,12 @@
     "--outputFile=<report>"
   ],
   "exitCode": 0,
-  "rawReportSha256": "01ba4547eca4173e98ba6cc8d9cf6b8474427ed461553bbbe7e16977ac75e44d",
+  "rawReportSha256": "8a0d577653a9f057145e7dc56895e7b76f3b031a8d3865f0bbf2891262a636bc",
+  "retainedReport": {
+    "file": "test-policy/incidents/evidence/GH-3475/green-report.json",
+    "sha256": "8bb4412dff612a0ac6fe9216d70d7877d8a584233a16030e524f4ff34f6afea5",
+    "normalization": "Absolute checkout path replaced with <checkout>; JSON formatted."
+  },
   "assertions": [
     {
       "ancestorTitles": [
@@ -24,7 +29,7 @@
       "fullName": "follow-up pull of a peer's own agent profile a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
       "status": "passed",
       "title": "a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
-      "duration": 2676.469,
+      "duration": 2654.532625,
       "failureMessages": [],
       "meta": {}
     }
