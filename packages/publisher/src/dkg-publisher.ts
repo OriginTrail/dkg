@@ -3120,6 +3120,8 @@ export class DKGPublisher implements Publisher {
     const localChainSkipReason = acquisition.kind === 'local' ? 'no-chain' : undefined;
     const v10ACKs = acquisition.kind === 'confirmed' ? acquisition.v10ACKs : undefined;
     if (acquisition.kind === 'confirmed') {
+      // Receipt notification releases wallet custody independently of local materialization.
+      if (acquisition.outcome.result.txHash) bestEffortNotify(options.onPublishConfirmed, { txHash: acquisition.outcome.result.txHash });
       try {
         ual = await this.recordConfirmedPublication(content, acquisition.outcome, acquisition.reservedKaId, acquisition.effectiveAuthorAddress);
       } catch (error) {
@@ -3221,11 +3223,10 @@ export class DKGPublisher implements Publisher {
 
   private async recordConfirmedPublication(content: PreparedPublicationContent, outcome: MintOrAdoptOutcome, reservedKaId: bigint | undefined, effectiveAuthorAddress: string): Promise<string> {
     const record = async (): Promise<string> => {
-      const { payload, target, execution: options, lifecycle, ctx } = content;
+      const { payload, target, lifecycle, ctx } = content;
       const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata,
         allSkolemizedQuads, manifestEntries, publisherPeerId: normalizedPublisherPeerId } = payload;
       const { graphPublish, dataGraph, contextGraphId, publisherContextGraphId } = target;
-      const { onPublishConfirmed } = options;
       const normalizedQuads = allSkolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
       const onChainResult = outcome.result;
       let ual = '';
@@ -3239,15 +3240,6 @@ export class DKGPublisher implements Publisher {
       }, onChainResult);
       if (outcome.adopted) this.log.info(ctx, `Adopted the existing mint of KA ${onChainResult.kaId ?? onChainResult.batchId}: tx=${onChainResult.txHash} block=${onChainResult.blockNumber}`
         + (keepsExistingRecord ? '; keeping the record this node already holds' : ''));
-      // GH#2359 item 2 — the receipt is confirmed and parsed; everything below is local
-      // post-receipt work. Fire the scheduling hint NOW so a demand-driven reconciler can
-      // start its own canonical proof instead of waiting out this tail. Non-fail-closed via
-      // the one shared containment helper (r1 3877430465, r2 3877540214).
-      if (onChainResult?.txHash) {
-        bestEffortNotify(onPublishConfirmed, { txHash: onChainResult.txHash });
-      }
-
-
       const kaId = onChainResult.kaId ?? onChainResult.batchId;
       if (reservedKaId !== undefined && kaId !== reservedKaId) {
         throw new Error(

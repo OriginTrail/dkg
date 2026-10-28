@@ -168,9 +168,9 @@ async function strandedPublishFixture() {
     encryptInlinePayload: encrypt,
     v10ACKProvider: acks,
   };
-  const publish = (request?: { txHash?: string }) => request === undefined
-    ? publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', publishOptions)
-    : publisher.recordExistingMintFromSharedMemory(CONTEXT_GRAPH, 'all', request, publishOptions);
+  const publish = (request?: { txHash?: string }, onPublishConfirmed?: (input: { txHash: string }) => void | Promise<void>) => request === undefined
+    ? publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', { ...publishOptions, onPublishConfirmed })
+    : publisher.recordExistingMintFromSharedMemory(CONTEXT_GRAPH, 'all', request, { ...publishOptions, onPublishConfirmed });
 
   /** The node gave up on the first attempt's receipt, which then mined. */
   const strand = async () => {
@@ -686,3 +686,36 @@ it.each(['reservation', 'attestation', 'private-count'] as const)('rejects an un
     await expectNothingRecorded(f);
   } finally { await f.store.close(); }
 });
+
+
+for (const lane of ['live', 'record-only'] as const) {
+  it.each(['lock', 'blocked-read', 'failed-read'] as const)(`${lane} confirms exactly once before local %s`, async blocked => {
+    const f = await strandedPublishFixture();
+    if (lane === 'record-only') await f.strand();
+    let release!: () => void, entered!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const acquired = new Promise<void>(resolve => { entered = resolve; });
+    const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+    const query = f.store.query.bind(f.store);
+    const read = vi.spyOn(f.store, 'query').mockImplementation(async (sparql, options) => {
+      if (blocked !== 'lock' && sparql.includes('SELECT ?predicate ?object') && sparql.includes(`<${f.ual}>`)) {
+        entered();
+        if (blocked === 'failed-read') throw new Error('injected confirmed metadata read failure');
+        await held;
+      }
+      return query(sparql, options);
+    });
+    const locking = blocked === 'lock' ? withMaterializationLock(metaGraph, f.ual, async () => { entered(); await held; }) : undefined;
+    if (locking) await acquired;
+    const confirmed = vi.fn(async () => { throw new Error('observer failure must remain best-effort'); });
+    const pending = f.publish(lane === 'record-only' ? {} : undefined, confirmed)
+      .then(value => ({ value }), error => ({ error }));
+    try {
+      if (blocked !== 'lock') await acquired;
+      await vi.waitFor(() => expect(confirmed).toHaveBeenCalledExactlyOnceWith({ txHash: f.chain.mintTxHashes.at(-1)! }));
+      if (blocked === 'failed-read') expect(await pending).toMatchObject({ error: { message: 'injected confirmed metadata read failure' } });
+      else { release(); expect(await pending).toMatchObject({ value: { status: 'confirmed' } }); }
+      expect(confirmed).toHaveBeenCalledOnce();
+    } finally { release(); await Promise.allSettled([pending, ...(locking ? [locking] : [])]); read.mockRestore(); await f.store.close(); }
+  });
+}

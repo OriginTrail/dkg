@@ -2,6 +2,7 @@
 import { assertSafeIri, contextGraphMetaUri, formatSparqlTerm } from '@origintrail-official/dkg-core';
 import { tryUpdateWithTouchedGraphs, type Quad } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
+import { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES } from './graph-knowledge-asset-controls.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import { readConfirmedGraphKnowledgeAssetMetadataEnvelope, type ConfirmedGraphKnowledgeAssetMetadataEnvelope } from './metadata.js';
@@ -48,9 +49,10 @@ export async function replaceRecordedMintAccess(store: TripleStore, contextGraph
   trustedMetadata: readonly Quad[]): Promise<void> {
   const graph = assertSafeIri(contextGraphMetaUri(contextGraphId));
   const subject = assertSafeIri(ual);
-  const predicates = ['accessPolicy', 'publisherPeerId', 'allowedPeer'].map(name => `http://dkg.io/ontology/${name}`);
+  const predicates = GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES;
   const rows = trustedMetadata.filter(row => row.graph === graph && row.subject === subject && predicates.includes(row.predicate));
-  if (!predicates.slice(0, 2).every(predicate => rows.some(row => row.predicate === predicate)))
+  if (!['http://dkg.io/ontology/accessPolicy', 'http://dkg.io/ontology/publisherPeerId']
+    .every(predicate => rows.some(row => row.predicate === predicate)))
     throw new Error('Recorded mint access replacement requires the complete trusted control envelope');
   const terms = predicates.map(predicate => `<${predicate}>`).join(' ');
   const existing = await store.query(`SELECT ?p ?o WHERE { GRAPH <${graph}> { <${subject}> ?p ?o } VALUES ?p { ${terms} } }`);
