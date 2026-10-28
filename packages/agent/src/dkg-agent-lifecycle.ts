@@ -46,11 +46,6 @@ import {
 
 import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
-import {
-  reconcileLateMint,
-  type KnowledgeAssetMintReconcileInput,
-  type KnowledgeAssetMintReconcileResult,
-} from './knowledge-asset-mint-reconcile.js';
 import { captureExactBatchStreamRefusalScope } from './sync/exact-batch-stream-capability.js';
 import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
 import { isRedundantLimitedConnection, syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
@@ -1205,19 +1200,6 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 }
 
 export class LifecycleSyncMethods extends DKGAgentBase {
-  /** Record one named asset whose publish mined after this node stopped waiting; see {@link reconcileLateMint}. */
-  async reconcileKnowledgeAssetMint(
-    this: DKGAgent,
-    input: KnowledgeAssetMintReconcileInput,
-  ): Promise<KnowledgeAssetMintReconcileResult> {
-    return reconcileLateMint(this, {
-      chain: this.chain,
-      writeLocks: this.writeLocks,
-      stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter,
-      completeFinalization: this.completeNamedPublishFinalization.bind(this),
-    }, input);
-  }
-
   /**
    * The rest of a finalized twin's cleanup once its shared-memory copy is retired: the asset's row
    * in its author's SWM inventory, and its legacy SWM boundary marker. Idempotent: the marker is

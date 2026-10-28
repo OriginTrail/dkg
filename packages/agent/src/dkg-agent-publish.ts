@@ -490,7 +490,12 @@ import {
 } from './dkg-agent-swm-state.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import { resolvePublishTargetCuration } from './publish-target-curation.js';
-import { KA_MINT_RECONCILE_REFUSED_CODE } from './knowledge-asset-mint-reconcile.js';
+import {
+  KA_MINT_RECONCILE_REFUSED_CODE,
+  reconcileLateMint,
+  type KnowledgeAssetMintReconcileInput,
+  type KnowledgeAssetMintReconcileResult,
+} from './knowledge-asset-mint-reconcile.js';
 import { sealChainTargetMismatch } from './seal-chain-target.js';
 import type { DKGAgent } from './dkg-agent.js';
 import {
@@ -5034,6 +5039,19 @@ export class PublishMethods extends DKGAgentBase {
     }
 
     return { action: 'execute' };
+  }
+
+  /** Record one named asset whose publish mined after this node stopped waiting; see {@link reconcileLateMint}. */
+  async reconcileKnowledgeAssetMint(
+    this: DKGAgent,
+    input: KnowledgeAssetMintReconcileInput,
+  ): Promise<KnowledgeAssetMintReconcileResult> {
+    return reconcileLateMint(this, {
+      chain: this.chain,
+      writeLocks: this.writeLocks,
+      stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter,
+      completeFinalization: this.completeNamedPublishFinalization.bind(this),
+    }, input);
   }
 
   async repairPublishedKnowledgeAssetDescriptor(this: DKGAgent, input: PublishedDescriptorRepairInput) {
