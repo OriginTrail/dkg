@@ -149,10 +149,26 @@ describe('late-mint adoption', () => {
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted' });
   });
 
-  it.each(['live', 'record'] as const)('publisher owns sealed-content rejection for %s mint acquisition', async kind => {
-    const { agent, store, sealed, createKnowledgeAssets, updateKnowledgeCollection } = await strandedAsset(new WalletMockChain(), wallet.address);
-    vi.spyOn(agent as unknown as { createV10ACKProvider(cg: string): unknown }, 'createV10ACKProvider')
-      .mockReturnValue(async () => [{ peerId: 'stub-core', signatureR: ZERO, signatureVS: ZERO, nodeIdentityId: 1n }]);
+  it.each(['live', 'record'] as const)('resident %s mint does not construct update dependencies', async kind => {
+    const { agent } = await strandedAsset(new WalletMockChain(), wallet.address);
+    for (const key of ['update', '_buildPrecomputedUpdateAttestationForSeal'])
+      Object.defineProperty(agent, key, { configurable: true, get() { throw new Error(`mint must not construct ${key}`); } });
+    vi.spyOn(agent, 'createV10ACKProvider').mockReturnValue(async () => [
+      { peerId: 'stub-core', signatureR: ZERO, signatureVS: ZERO, nodeIdentityId: 1n }]);
+    if (kind === 'live') await expect(agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR }))
+      .resolves.toMatchObject({ status: 'confirmed' });
+    else await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted' });
+  });
+
+  it.each(['live', 'local', 'record'] as const)('publisher owns sealed-content rejection for %s mint acquisition', async kind => {
+    const chain = new WalletMockChain();
+    const { agent, store, sealed, history, createKnowledgeAssets, updateKnowledgeCollection } = await strandedAsset(chain, wallet.address);
+    if (kind === 'local') vi.spyOn(chain, 'isV10Ready').mockReturnValue(false);
+    const acks = vi.fn(async () => [{ peerId: 'stub-core', signatureR: ZERO, signatureVS: ZERO, nodeIdentityId: 1n }]);
+    const encrypt = vi.fn(async () => undefined);
+    vi.spyOn(agent, 'createV10ACKProvider').mockReturnValue(acks);
+    const publish = agent.publisher.publish.bind(agent.publisher);
+    vi.spyOn(agent.publisher, 'publish').mockImplementation(options => publish({ ...options, encryptInlinePayload: encrypt }));
     const graphs = (await store.listGraphs()).filter(graph => graph.startsWith(contextGraphSharedMemoryUri(CONTEXT_GRAPH)));
     let changed = 0;
     for (const graph of graphs) {
@@ -165,10 +181,12 @@ describe('late-mint adoption', () => {
       changed += payload.length;
     }
     expect(changed).toBeGreaterThan(0);
-    const operation = kind === 'live' ? agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR })
+    const operation = kind !== 'record' ? agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR })
       : agent.reconcileKnowledgeAssetMint(RECONCILE);
     await expect(operation).rejects.toThrow(/mismatch|does not match/);
     expect(createKnowledgeAssets).not.toHaveBeenCalled(); expect(updateKnowledgeCollection).not.toHaveBeenCalled();
+    expect(encrypt).not.toHaveBeenCalled(); expect(acks).not.toHaveBeenCalled();
+    expect(await history()).toMatchObject({ status: 'swm-shared' });
     expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, { contextGraphId: CONTEXT_GRAPH, ual: sealed.kaUal }))
       .not.toMatchObject({ state: 'confirmed' });
   });

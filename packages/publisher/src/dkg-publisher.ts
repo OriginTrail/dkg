@@ -1,9 +1,10 @@
+import { bindConfirmedPublication, bindSealedGraphPublication, requireSealedGraphRecording, type PublicationRecording, type ConfirmedPublicationRecording } from './prepared-publication-recording.js';
 import type { MintRecordingOptions, SharedMemoryMintRecordingOptions } from './publisher.js';
 import { replaceRecordedMintAccess, classifyMintRecord, writeMintMetadata } from './adopted-mint-record.js';
 import type { MintAdoptionRequest } from './adopt-existing-mint.js';
-import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication, type PreparedPublicationContent } from './prepared-publication.js';
+import { preparePublication, assertPreparedPublicationContentSeal, type GraphScopedPublishDescriptor, type PreparedPublicationContent, type PublicationExecution } from './prepared-publication.js';
 import { recordTentativePublication } from './record-tentative-publication.js';
-import { acquirePreparedPublication, publicationAcquisitionFailure, type PublicationAcquisition } from './prepared-publication-acquisition.js';
+import { acquirePreparedPublication, publicationAcquisitionFailure } from './prepared-publication-acquisition.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
@@ -164,7 +165,7 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
-import { adoptMintForRecording, MintAdoptionRefusedError, type MintOrAdoptOutcome } from './adopt-existing-mint.js';
+import { adoptMintForRecording } from './adopt-existing-mint.js';
 import { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -2539,19 +2540,19 @@ export class DKGPublisher implements Publisher {
 
   async publish(options: PublishOptions): Promise<PublishResult> {
     const content = await this.preparePublicationContent(options);
-    const prepared = await preparePublication(content, {
+    const prepared = await preparePublication(content, options, {
       publisherPlanner: this.publisherPlanner, log: this.log,
       allocateOperationId: () => `${this.sessionId}-${++this.tentativeCounter}`,
       selectPublicStagingQuads, invokeV10ACKProvider,
-      validateSealIntegrity: this.validatePublicationSeal.bind(this),
+      validateAttestation: this.validatePublicationAttestation.bind(this),
     });
     options.onPhase?.('chain', 'start');
     try {
-      if (prepared.kind === 'local') return await this.recordPublication(content, prepared);
+      if (prepared.kind === 'local') return await this.recordPublication({ kind: 'local', content, acquisition: prepared }, options);
       const receipt = await acquirePreparedPublication(prepared, {
         chain: this.chain, log: this.log, ensureReservedKaId: this.ensureReservedKaId.bind(this),
       });
-      return await this.recordPublication(content, receipt);
+      return await this.recordPublication(bindConfirmedPublication(content, receipt), options);
     } finally { options.onPhase?.('chain', 'end'); }
   }
 
@@ -2565,16 +2566,12 @@ export class DKGPublisher implements Publisher {
       || !Number.isSafeInteger(options.publicTripleCount) || options.publicTripleCount < 0
       || !Number.isSafeInteger(options.privateTripleCount) || options.privateTripleCount < 0)
       throw new Error('Recording an existing mint requires a complete sealed graph reservation');
-    const content = await this.preparePublicationContent(options);
-    const { target, payload } = content;
+    const prepared = await this.preparePublicationContent(options);
+    await this.publisherPlanner.requireMintAdoptionTarget(prepared.target.publisherContextGraphId);
+    const content = requireSealedGraphRecording(prepared);
+    await this.validatePublicationAttestation(content);
+    const { target, payload, seal: attestation } = content;
     const { publisherContextGraphId, graphPublish, v10ChainId } = target;
-    await this.publisherPlanner.requireMintAdoptionTarget(publisherContextGraphId);
-    await this.validatePublicationSeal(content);
-    const attestation = options.precomputedAttestation;
-    if (!graphPublish || !attestation || publisherContextGraphId === undefined)
-      throw new Error('Recording an existing mint requires a sealed graph-scoped publish');
-    if (attestation.reservedKaId !== graphPublish.expectedPackedKaId)
-      throw new Error('Recording an existing mint requires the sealed reserved KA id');
     if (!graphScopeTargetsChain(graphPublish.scope.chainId, this.chain.chainId, v10ChainId))
       throw new Error('Graph-scoped publish UAL targets a different chain');
     options.onPhase?.('chain', 'start');
@@ -2583,8 +2580,8 @@ export class DKGPublisher implements Publisher {
         kaId: attestation.reservedKaId, merkleRoot: payload.kcMerkleRoot,
         contextGraphId: publisherContextGraphId, authorAddress: attestation.authorAddress,
       }, request);
-      return await this.recordPublication(content, { kind: 'confirmed', outcome, reservedKaId: attestation.reservedKaId,
-        effectiveAuthorAddress: attestation.authorAddress });
+      return await this.recordPublication(bindSealedGraphPublication(content, { kind: 'confirmed', outcome, reservedKaId: content.reservedKaId,
+        effectiveAuthorAddress: attestation.authorAddress }), options);
     } finally { options.onPhase?.('chain', 'end'); }
   }
 
@@ -2627,7 +2624,6 @@ export class DKGPublisher implements Publisher {
       operationCtx,
       entityProofs = false,
       onPhase,
-      onPublishConfirmed,
     } = options;
     // Round 9 Bug 25 + Round 12 Bug 34: reject user-authored reserved-
     // namespace subjects. The bypass is keyed on a module-private
@@ -3013,7 +3009,7 @@ export class DKGPublisher implements Publisher {
 
 
 
-    return {
+    const content: PreparedPublicationContent = {
       payload: {
         catalogCommitment, catalogQuads, catalogByteSize, payloadMeasurement, encryptableNquadsStr,
         kcMerkleRoot, catalogNquadsStr, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy,
@@ -3026,27 +3022,24 @@ export class DKGPublisher implements Publisher {
         attributionIdentityId, v10ChainId, v10KavAddress,
         subGraphName: options.subGraphName, targetMetaGraphUri: options.targetMetaGraphUri,
       },
-      execution: {
-        onPhase, onPublishConfirmed, onBroadcastAccepted: options.onBroadcastAccepted,
-        onBeforeBroadcast: options.onBeforeBroadcast, encryptInlinePayload: options.encryptInlinePayload,
-        encryptInlineChunked: options.encryptInlineChunked, precomputedAttestation: options.precomputedAttestation,
-        reservedKaId: options.reservedKaId, v10ACKProvider: options.v10ACKProvider, fromSharedMemory: options.fromSharedMemory,
-      },
+      seal: options.precomputedAttestation, reservedKaId: options.reservedKaId,
       pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode: resolvePublicACKStagingMode(options),
     };
+    assertPreparedPublicationContentSeal(content);
+    return content;
   }
 
-  private async validatePublicationSeal(content: PreparedPublicationContent): Promise<void> {
+  private async validatePublicationAttestation(content: PreparedPublicationContent): Promise<void> {
       const { v10ChainId, v10KavAddress } = content.target;
       const { kcMerkleRoot } = content.payload;
-      const options = content.execution;
+      const attestation = content.seal;
       if (
-        options.precomputedAttestation &&
+        attestation &&
         v10ChainId !== undefined &&
         v10KavAddress !== undefined
       ) {
-        const effectiveAuthorAddress = options.precomputedAttestation.authorAddress;
-        const effectiveSchemeVersion = options.precomputedAttestation.schemeVersion;
+        const effectiveAuthorAddress = attestation.authorAddress;
+        const effectiveSchemeVersion = attestation.schemeVersion;
         // #1116: the seal is CG-independent — the AuthorAttestation no longer
         // binds the on-chain CG id. v10CgId is still submitted to the contract
         // (createKnowledgeAssets below) as the mint target / publisher-auth gate.
@@ -3055,23 +3048,13 @@ export class DKGPublisher implements Publisher {
           kav10Address: v10KavAddress,
           merkleRoot: kcMerkleRoot,
           authorAddress: effectiveAuthorAddress,
-          reservedKaId: options.precomputedAttestation.reservedKaId,
+          reservedKaId: attestation.reservedKaId,
           schemeVersion: effectiveSchemeVersion,
         });
         {
-          const expected = options.precomputedAttestation.expectedMerkleRoot;
-          if (expected.length !== kcMerkleRoot.length || !expected.every((b, i) => b === kcMerkleRoot[i])) {
-            throw new Error(
-              `precomputedAttestation.expectedMerkleRoot mismatch: ` +
-              `seal expects ${ethers.hexlify(expected)} but publish-time recompute yielded ${ethers.hexlify(kcMerkleRoot)}. ` +
-              `Either the assertion's quads were mutated after finalize, or the caller's merkle algorithm differs from the publisher's. Re-finalize the assertion.`,
-            );
-          }
-        }
-        {
           const sig = ethers.Signature.from({
-            r: ethers.hexlify(options.precomputedAttestation.signature.r),
-            yParityAndS: ethers.hexlify(options.precomputedAttestation.signature.vs),
+            r: ethers.hexlify(attestation.signature.r),
+            yParityAndS: ethers.hexlify(attestation.signature.vs),
           });
           const digest = ethers.TypedDataEncoder.hash(
             authorTypedData.domain,
@@ -3107,9 +3090,10 @@ export class DKGPublisher implements Publisher {
       }
   }
 
-  private async recordPublication(content: PreparedPublicationContent,
-    acquisition: PublicationAcquisition | PreparedLocalPublication): Promise<PublishResult> {
-    const { payload, target, execution: options, lifecycle, ctx } = content;
+  private async recordPublication(recording: PublicationRecording,
+    options: Pick<PublicationExecution, 'onPhase' | 'onPublishConfirmed'>): Promise<PublishResult> {
+    const { content, acquisition } = recording;
+    const { payload, target, lifecycle, ctx } = content;
     const { privateRoots, effectiveAccessPolicy, normalizedAllowedPeers, kcMerkleRoot, allSkolemizedQuads, manifestEntries } = payload;
     const { graphPublish, contextGraphId, publisherContextGraphId } = target;
     const { onPhase } = options;
@@ -3118,18 +3102,18 @@ export class DKGPublisher implements Publisher {
     const usedV10Path = acquisition.kind === 'confirmed';
     const localChainSkipReason = acquisition.kind === 'local' ? 'no-chain' : undefined;
     const v10ACKs = acquisition.kind === 'confirmed' ? acquisition.v10ACKs : undefined;
-    if (acquisition.kind === 'confirmed') {
+    if (recording.kind !== 'local') {
       // Receipt notification releases wallet custody independently of local materialization.
-      if (acquisition.outcome.result.txHash) bestEffortNotify(options.onPublishConfirmed, { txHash: acquisition.outcome.result.txHash });
+      if (recording.acquisition.outcome.result.txHash) bestEffortNotify(options.onPublishConfirmed, { txHash: recording.acquisition.outcome.result.txHash });
       try {
-        ual = await this.recordConfirmedPublication(content, acquisition.outcome, acquisition.reservedKaId, acquisition.effectiveAuthorAddress);
+        ual = await this.recordConfirmedPublication(recording);
       } catch (error) {
-        throw publicationAcquisitionFailure(error, this.log, ctx, lifecycle, publisherContextGraphId ?? 0n, acquisition.v10ACKs?.length ?? 0);
+        throw publicationAcquisitionFailure(error, this.log, ctx, lifecycle, publisherContextGraphId ?? 0n, recording.acquisition.v10ACKs?.length ?? 0);
       }
       onPhase?.('chain:metadata', 'start');
       this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult!.batchId} tx=${onChainResult!.txHash}`);
     } else {
-      ual = await recordTentativePublication(acquisition, content, {
+      ual = await recordTentativePublication(recording.acquisition, content, {
         chainId: this.chain.chainId, store: this.store, log: this.log,
         replaceExactKnowledgeAssetGraph: this.replaceExactKnowledgeAssetGraph.bind(this),
         persistFinalizedPrivateSlices: () => this.persistPublicationPrivateSlices(content),
@@ -3220,7 +3204,8 @@ export class DKGPublisher implements Publisher {
     return result;
   }
 
-  private async recordConfirmedPublication(content: PreparedPublicationContent, outcome: MintOrAdoptOutcome, reservedKaId: bigint | undefined, effectiveAuthorAddress: string): Promise<string> {
+  private async recordConfirmedPublication(recording: ConfirmedPublicationRecording): Promise<string> {
+    const { content, acquisition: { outcome, reservedKaId, effectiveAuthorAddress } } = recording;
     const record = async (): Promise<string> => {
       const { payload, target, lifecycle, ctx } = content;
       const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata,
@@ -3229,9 +3214,6 @@ export class DKGPublisher implements Publisher {
       const normalizedQuads = allSkolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
       const onChainResult = outcome.result;
       let ual = '';
-      if (outcome.adopted && !graphPublish) throw new Error('Adopted mint recording requires a graph-scoped reservation');
-      if (outcome.adopted && BigInt(graphPublish!.scope.assertionVersion) !== 1n)
-        throw new MintAdoptionRefusedError('assertion-version-mismatch', graphPublish!.expectedPackedKaId, 'A mint receipt proves only initial assertion version 1');
       const recordDisposition = graphPublish !== undefined ? await classifyMintRecord(this.store, {
         contextGraphId, ual: graphPublish.scope.ual, assertionVersion: graphPublish.scope.assertionVersion,
         assertionGraph: knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, graphPublish.scope, target.subGraphName),

@@ -59,27 +59,49 @@ export interface PreparedPublicationContent {
     v10ChainId: bigint | undefined;
     v10KavAddress: string | undefined;
   };
-  execution: Pick<PublishOptions, 'onPhase' | 'onPublishConfirmed' | 'onBroadcastAccepted' | 'onBeforeBroadcast'
-    | 'encryptInlinePayload' | 'encryptInlineChunked' | 'precomputedAttestation' | 'reservedKaId'
-    | 'v10ACKProvider' | 'fromSharedMemory'>;
+  seal: PublishOptions['precomputedAttestation'];
+  reservedKaId: bigint | undefined;
   pricingPolicy: PublishOptions['pricingPolicy'];
   lifecycle: PublishLifecycleLogger;
   ctx: OperationContext;
   explicitPublishEpochs: number | undefined;
   publicStagingMode: 'inline' | 'strict-swm' | 'inline-small-swm';
 }
+/** Checked before either local recording or live preparation can consume content. */
+export function assertPreparedPublicationContentSeal(content: PreparedPublicationContent): void {
+  if (!content.seal) return;
+  const expected = content.seal.expectedMerkleRoot;
+  const actual = content.payload.kcMerkleRoot;
+  if (expected.length !== actual.length || !expected.every((byte, index) => byte === actual[index])) {
+    throw new Error(`precomputedAttestation.expectedMerkleRoot mismatch: seal expects ${ethers.hexlify(expected)} `
+      + `but publish-time recompute yielded ${ethers.hexlify(actual)}. `
+      + "Either the assertion's quads were mutated after finalize, or the caller's merkle algorithm differs from the publisher's. Re-finalize the assertion.");
+  }
+}
+/** Live execution capabilities never enter the shared recording payload. */
+export type PublicationExecution = Pick<PublishOptions, 'onPhase' | 'onPublishConfirmed' | 'onBroadcastAccepted' | 'onBeforeBroadcast'
+  | 'encryptInlinePayload' | 'encryptInlineChunked' | 'v10ACKProvider' | 'fromSharedMemory'>;
+/** Recording a sealed graph preserves the validated reservation instead of optional target fields. */
+export interface PreparedSealedGraphPublicationContent extends PreparedPublicationContent {
+  target: PreparedPublicationContent['target'] & {
+    graphPublish: GraphScopedPublishDescriptor;
+    publisherContextGraphId: bigint;
+  };
+  seal: NonNullable<PublishOptions['precomputedAttestation']>;
+  reservedKaId: bigint;
+}
 export interface PublicationPreparationPorts {
   publisherPlanner: PublisherPlanner;
+  validateAttestation(content: PreparedPublicationContent): Promise<void>;
   log: Logger;
   allocateOperationId(): string;
-  validateSealIntegrity(content: PreparedPublicationContent): Promise<void>;
   selectPublicStagingQuads(mode: PreparedPublicationContent['publicStagingMode'], quads: Uint8Array): Uint8Array | undefined;
   invokeV10ACKProvider(provider: NonNullable<PublishOptions['v10ACKProvider']>, params: V10ACKProviderParams): Promise<V10CoreNodeACK[]>;
 }
-export async function preparePublication(input: PreparedPublicationContent, ports: PublicationPreparationPorts): Promise<PreparedPublication> {
+export async function preparePublication(input: PreparedPublicationContent, options: PublicationExecution, ports: PublicationPreparationPorts): Promise<PreparedPublication> {
   const { catalogCommitment, privateRoots, catalogByteSize, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers } = input.payload;
   const { publisherContextGraphId, graphPublish, v10CgDomain, contextGraphId } = input.target;
-  const { execution: options, pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode } = input;
+  const { pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode, seal, reservedKaId } = input;
   const { publicByteSize, publicBytes: publicNquadsBytes } = payloadMeasurement;
   const kaCount = 1;
   const entityCount = manifestEntries.length;
@@ -90,6 +112,7 @@ export async function preparePublication(input: PreparedPublicationContent, port
   let v10ACKs: V10CoreNodeACK[] | undefined;
   const publisherPlanning = await ports.publisherPlanner.prepare(publisherContextGraphId);
   const { canAttemptOnChainPublish } = publisherPlanning;
+  if (canAttemptOnChainPublish) await ports.validateAttestation(input);
   const inlineEncryptCb = options.encryptInlinePayload;
   const useEncryptedInline =
     typeof inlineEncryptCb === 'function'
@@ -145,12 +168,12 @@ export async function preparePublication(input: PreparedPublicationContent, port
     );
   }
 
-  if (canAttemptOnChainPublish && options.precomputedAttestation?.reservedKaId !== undefined) {
-    await lifecycle.rememberAssetUal(options.precomputedAttestation.reservedKaId);
+  if (canAttemptOnChainPublish && seal?.reservedKaId !== undefined) {
+    await lifecycle.rememberAssetUal(seal.reservedKaId);
     lifecycle.emit('identity', 'asset_ual_allocated', {
       metadata: {
         contextGraphId,
-        kaId: options.precomputedAttestation.reservedKaId.toString(),
+        kaId: seal.reservedKaId.toString(),
         publisherAddress,
         entityCount,
         publicRecordCount: allSkolemizedQuads.length,
@@ -206,7 +229,7 @@ export async function preparePublication(input: PreparedPublicationContent, port
     try {
       const rootEntities = manifestEntries.map(m => m.rootEntity);
       const reservedAckKaId =
-        options.reservedKaId ?? options.precomputedAttestation?.reservedKaId;
+        reservedKaId ?? seal?.reservedKaId;
       const assetUal = await lifecycle.rememberAssetUal(reservedAckKaId);
       const commonACKParams = {
         merkleRoot: kcMerkleRoot,
@@ -365,13 +388,12 @@ export async function preparePublication(input: PreparedPublicationContent, port
       reason: publisherContextGraphId === undefined ? 'no on-chain CG id' : 'chain not V10-ready' };
   }
   const { attributionIdentityId, v10ChainId, v10KavAddress } = input.target;
-  await ports.validateSealIntegrity(input);
   try {
   if (publisherContextGraphId === undefined || v10ChainId === undefined || v10KavAddress === undefined) {
     throw new Error('V10 publish requires a parsed context graph id, getEvmChainId() and getKnowledgeAssetsLifecycleAddress()');
   }
   if (!v10ACKs?.length) throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
-  const attestation = options.precomputedAttestation;
+  const attestation = seal;
   if (!attestation) throw new Error('Publish rejected: on-chain publish requires precomputedAttestation. Call agent.assertion.finalize(...) first.');
   buildAuthorAttestationTypedData({ chainId: v10ChainId, kav10Address: v10KavAddress,
     merkleRoot: kcMerkleRoot, authorAddress: attestation.authorAddress,
@@ -385,7 +407,7 @@ export async function preparePublication(input: PreparedPublicationContent, port
   return { kind: 'on-chain', submission: {
       publishOperationId, contextGraphId: publisherContextGraphId,
       publisherAddress: finalizedPublisherPlan.signer.address,
-      reservedKaId: options.reservedKaId ?? attestation.reservedKaId,
+      reservedKaId: reservedKaId ?? attestation.reservedKaId,
       merkleRoot: kcMerkleRoot, knowledgeAssetsAmount: kaCount,
       byteSize: publicationPricing.networkVisibleByteSize, epochs: publishEpochs,
       tokenAmount: precomputedTokenAmount, merkleLeafCount: kcMerkleLeafCount,

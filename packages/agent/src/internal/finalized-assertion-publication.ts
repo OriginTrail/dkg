@@ -20,27 +20,38 @@ import { sealChainTargetMismatch } from '../seal-chain-target.js';
 import { beginNamedPublishFinalization } from '../named-publish-finalization.js';
 import type { AgentSharedMemoryPublishOptions, FinalizedAssertionPublishOptions, FinalizedAssertionRecordingContext } from './agent-publish-options.js';
 
-/** Capabilities used by finalized mint/update stages; public entry points bind them once. */
-export interface FinalizedAssertionPublicationHost {
+/** Selection never constructs execution capabilities for either operation. */
+export interface FinalizedAssertionSelectionHost {
   readonly store: TripleStore;
   readonly publisher: DKGPublisher;
   readonly chain: ChainAdapter;
-  readonly log: Logger;
   readonly writeLocks: Map<string, Promise<void>>;
   readonly resolveFinalizedAssertionPublishAuthor: OmitThisParameter<DKGAgent['resolveFinalizedAssertionPublishAuthor']>;
-  readonly _loadSelectedSWMQuads: OmitThisParameter<DKGAgent['_loadSelectedSWMQuads']>;
+}
+interface FinalizedAssertionLifecycleHost {
+  readonly log: Logger;
   readonly publishedNamedKaVmLifecycleWriter: DKGAgent['publishedNamedKaVmLifecycleWriter'];
+}
+export interface FinalizedAssertionMintHost extends FinalizedAssertionLifecycleHost {
+  readonly store: TripleStore;
+  readonly chain: ChainAdapter;
+  readonly transferRfc64ConfirmedVmV1: OmitThisParameter<DKGAgent['transferRfc64ConfirmedVmV1']>;
+  catalogRequired(contextGraphId: string, subGraphName?: string): boolean;
+}
+export interface FinalizedAssertionUpdateContentHost {
+  readonly store: TripleStore;
+  readonly _loadSelectedSWMQuads: OmitThisParameter<DKGAgent['_loadSelectedSWMQuads']>;
+}
+export interface FinalizedAssertionUpdateHost extends FinalizedAssertionLifecycleHost, FinalizedAssertionUpdateContentHost {
   readonly _buildPrecomputedUpdateAttestationForSeal: OmitThisParameter<DKGAgent['_buildPrecomputedUpdateAttestationForSeal']>;
   readonly update: OmitThisParameter<DKGAgent['update']>;
   readonly _stampPointerIfDivergedFromVm: OmitThisParameter<DKGAgent['_stampPointerIfDivergedFromVm']>;
   readonly observeRfc64ConfirmedVmV1: OmitThisParameter<DKGAgent['observeRfc64ConfirmedVmV1']>;
-  readonly transferRfc64ConfirmedVmV1: OmitThisParameter<DKGAgent['transferRfc64ConfirmedVmV1']>;
-  catalogRequired(contextGraphId: string, subGraphName?: string): boolean;
   retireLegacySwm(contextGraphId: string, kaUal: string, assertionVersion: string,
     subGraphName: string | undefined, ctx: OperationContext): Promise<boolean>;
 }
 
-export async function selectFinalizedAssertionPublication(host: FinalizedAssertionPublicationHost, contextGraphId: string, name: string,
+export async function selectFinalizedAssertionPublication(host: FinalizedAssertionSelectionHost, contextGraphId: string, name: string,
   opts: FinalizedAssertionPublishOptions | undefined, recording?: FinalizedAssertionRecordingContext) {
   const agentAddress = await host.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
   const publisher = opts?.publisherOverride ?? host.publisher;
@@ -114,7 +125,7 @@ export async function selectFinalizedAssertionPublication(host: FinalizedAsserti
 }
 type FinalizedAssertionSelection = Awaited<ReturnType<typeof selectFinalizedAssertionPublication>>;
 
-export async function prepareFinalizedAssertionUpdateContent(host: FinalizedAssertionPublicationHost, selected: FinalizedAssertionSelection) {
+export async function prepareFinalizedAssertionUpdateContent(host: FinalizedAssertionUpdateContentHost, selected: FinalizedAssertionSelection) {
   const { contextGraphId, opts, graphScope, seal, packedKaId } = selected;
   const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
   const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
@@ -238,7 +249,7 @@ export function finalizedMintOptions(prepared: FinalizedAssertionMintPlan, prici
     publisherNodeIdentityIdOverride: prepared.opts?.publisherNodeIdentityIdOverride, publishEpochs: prepared.opts?.publishEpochs };
 }
 
-async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionPublicationHost, prepared: FinalizedAssertionMintPlan, result: PublishResult): Promise<boolean> {
+async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionLifecycleHost, prepared: FinalizedAssertionMintPlan, result: PublishResult): Promise<boolean> {
   const { contextGraphId, name, opts, publisher, agentAddress, packedKaId, lifecycleUri, newMerkleHexBare } = prepared;
   const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
   if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true)
@@ -257,7 +268,7 @@ async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionPublic
   }
 }
 
-async function consumeFinalizedPublicationShare(host: FinalizedAssertionPublicationHost, prepared: FinalizedAssertionMintPlan,
+async function consumeFinalizedPublicationShare(host: Pick<FinalizedAssertionLifecycleHost, 'log'>, prepared: FinalizedAssertionMintPlan,
   result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
   if (result.status !== 'confirmed') return;
   const { contextGraphId, name, opts, publisher, agentAddress, lifecycleUri } = prepared;
@@ -276,7 +287,7 @@ export function finalizedPublicationIdentity(prepared: FinalizedAssertionMintPla
 }
 
 /** Original publication alone creates the checkpoint; the completion protocol needs no resident content. */
-export async function completeFinalizedAssertionMint(host: FinalizedAssertionPublicationHost, prepared: FinalizedAssertionMintPlan,
+export async function completeFinalizedAssertionMint(host: FinalizedAssertionMintHost, prepared: FinalizedAssertionMintPlan,
   result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
   if (result.status !== 'confirmed') {
     await stampFinalizedPublicationLifecycle(host, prepared, result); return;
@@ -310,7 +321,7 @@ export async function completeFinalizedAssertionMint(host: FinalizedAssertionPub
 }
 
 /** Reacquire after the recorder's nested lock has drained; gossip never carries stale completion authority. */
-export async function completeRecordedAssertionMint(host: FinalizedAssertionPublicationHost, prepared: FinalizedAssertionMintPlan,
+export async function completeRecordedAssertionMint(host: FinalizedAssertionMintHost, prepared: FinalizedAssertionMintPlan,
   result: PublishResult, recording: FinalizedAssertionRecordingContext, receipt: MintAdoptionRequest,
   onChainContextGraphId: string | null | undefined): Promise<void> {
   if (result.status !== 'confirmed' || !result.onChainResult) return;
@@ -328,7 +339,7 @@ export async function completeRecordedAssertionMint(host: FinalizedAssertionPubl
   });
 }
 
-export async function publishFinalizedAssertionUpdate(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent): Promise<PublishResult> {
+export async function publishFinalizedAssertionUpdate(host: FinalizedAssertionUpdateHost, prepared: PreparedFinalizedAssertionContent): Promise<PublishResult> {
   const { contextGraphId, opts, publisher, packedKaId, seal, graphScope, canonicalSwmQuads, canonicalPrivateQuads,
     privateMerkleRoot, sharedMemoryScope, lifecycleUri, operationPlan, newMerkleHexBare, metaGraph } = prepared;
   if (operationPlan.kind !== 'update') throw new Error('Expected a finalized update plan');

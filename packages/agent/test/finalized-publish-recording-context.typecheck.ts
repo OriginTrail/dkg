@@ -10,3 +10,13 @@ const missingLease: FinalizedAssertionRecordingContext = { reservation: recordin
 // @ts-expect-error A held lease cannot travel without the reservation it protects.
 const missingReservation: FinalizedAssertionRecordingContext = { heldLifecycle: recording.heldLifecycle };
 void missingLease; void missingReservation;
+
+import type { FinalizedAssertionSelectionHost, FinalizedAssertionMintHost } from '../src/internal/finalized-assertion-publication.js';
+declare const selection: FinalizedAssertionSelectionHost;
+declare const mint: FinalizedAssertionMintHost;
+// @ts-expect-error Selection cannot execute an update.
+void selection.update;
+// @ts-expect-error Mint completion cannot construct update attestations.
+void mint._buildPrecomputedUpdateAttestationForSeal;
+// @ts-expect-error Mint completion does not load or canonicalize SWM content.
+void mint._loadSelectedSWMQuads;

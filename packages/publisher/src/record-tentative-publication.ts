@@ -6,7 +6,7 @@ import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
 import { generateGraphKnowledgeAssetMetadata, generateTentativeMetadata, replaceLocallyTrustedKnowledgeAssetControls } from './metadata.js';
 import type { PreparedLocalPublication, PreparedPublicationContent } from './prepared-publication.js';
 
-type TentativePublicationRecording = Pick<PreparedPublicationContent, 'payload' | 'target' | 'execution' | 'ctx'>;
+type TentativePublicationRecording = Pick<PreparedPublicationContent, 'payload' | 'target' | 'seal' | 'ctx'>;
 
 export interface TentativePublicationRecordingPorts {
   chainId: string;
@@ -23,7 +23,7 @@ export async function recordTentativePublication(outcome: PreparedLocalPublicati
     allSkolemizedQuads, publisherPeerId: normalizedPublisherPeerId } = recording.payload;
   const { graphPublish, dataGraph, contextGraphId, subGraphName, targetMetaGraphUri } = recording.target;
   const { ctx } = recording;
-  const authorAddress = recording.execution.precomputedAttestation?.authorAddress;
+  const authorAddress = recording.seal?.authorAddress;
   const normalizedQuads = allSkolemizedQuads.map(quad => ({ ...quad, graph: dataGraph }));
   ports.log.warn(ctx, `Skipping on-chain publish: ${outcome.reason}`);
   const ual = graphPublish?.scope.ual ?? `did:dkg:${ports.chainId}/${outcome.publisherAddress}/t${outcome.publishOperationId}`;

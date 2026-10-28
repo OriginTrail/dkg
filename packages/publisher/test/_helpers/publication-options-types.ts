@@ -93,3 +93,18 @@ void recorder.recordExistingMint({ ...sealedRecording, publisherNodeIdentityIdOv
 void recorder.recordExistingMintFromSharedMemory('1', 'all', {}, {});
 // @ts-expect-error Shared-memory recording cannot request live encryption.
 void recorder.recordExistingMintFromSharedMemory('1', 'all', {}, { ...sharedRecording, encryptInlinePayload: bytes => bytes });
+
+// Recording keeps the normalized sealed target and cannot carry live execution hooks.
+import type { PreparedPublicationContent, PreparedSealedGraphPublicationContent } from '../../src/prepared-publication.js';
+import { bindSealedGraphPublication } from '../../src/prepared-publication-recording.js';
+import type { PublicationAcquisition } from '../../src/prepared-publication-acquisition.js';
+declare const unselectedContent: PreparedPublicationContent;
+declare const sealedContent: PreparedSealedGraphPublicationContent;
+declare const acquiredMint: PublicationAcquisition;
+bindSealedGraphPublication(sealedContent, acquiredMint);
+// @ts-expect-error A broad/legacy target is not a validated sealed graph reservation.
+bindSealedGraphPublication(unselectedContent, acquiredMint);
+// @ts-expect-error Recording data cannot supply an encryption capability.
+void sealedContent.encryptInlinePayload;
+// @ts-expect-error Live execution capabilities are outside the recording payload.
+void sealedContent.execution;

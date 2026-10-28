@@ -4,7 +4,7 @@ import type { MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import type { AgentSharedMemoryPublishOptions, SharedMemoryPublicationContext, FinalizedAssertionPublishOptions, FinalizedAssertionRecordingContext } from './internal/agent-publish-options.js';
 import { selectFinalizedAssertionPublication, prepareFinalizedAssertionUpdateContent, finalizedAssertionMintPlan,
   finalizedMintContentOptions, finalizedMintOptions, completeFinalizedAssertionMint, completeRecordedAssertionMint,
-  publishFinalizedAssertionUpdate, type FinalizedAssertionPublicationHost,
+  publishFinalizedAssertionUpdate, type FinalizedAssertionSelectionHost, type FinalizedAssertionMintHost, type FinalizedAssertionUpdateHost,
 } from './internal/finalized-assertion-publication.js';
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
@@ -5806,15 +5806,16 @@ export class PublishMethods extends DKGAgentBase {
 
   async publishFromFinalizedAssertion(this: DKGAgent, contextGraphId: string, name: string,
     opts?: FinalizedAssertionPublishOptions): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-    const host = finalizedAssertionPublicationHost.call(this);
-    const selected = await selectFinalizedAssertionPublication(host, contextGraphId, name, opts);
+    const selected = await selectFinalizedAssertionPublication(finalizedAssertionSelectionHost.call(this), contextGraphId, name, opts);
     if (selected.operationPlan.kind === 'update') {
+      const host = finalizedAssertionUpdateHost.call(this, (kaId, cg, quads, privateQuads, updateOpts) =>
+        this.update(kaId, cg, quads, privateQuads, { ...updateOpts, [INTERNAL_ROOTLESS_UPDATE_ORIGIN]: true }));
       const prepared = await prepareFinalizedAssertionUpdateContent(host, selected);
       return { ...await publishFinalizedAssertionUpdate(host, prepared), assertionUri: prepared.assertionUri, seal: prepared.seal };
     }
     const prepared = finalizedAssertionMintPlan(selected);
     const result = await this.publishFromSharedMemory(contextGraphId, 'all', finalizedMintOptions(prepared, selected.operationPlan.pricingPolicy));
-    await completeFinalizedAssertionMint(host, prepared, result);
+    await completeFinalizedAssertionMint(finalizedAssertionMintHost.call(this), prepared, result);
     return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
   }
 
@@ -6277,22 +6278,25 @@ export class PublishMethods extends DKGAgentBase {
 
 }
 
-/** Bind agent-owned capabilities at the publication composition boundary. */
-function finalizedAssertionPublicationHost(this: DKGAgent): FinalizedAssertionPublicationHost {
-  return {
-    store: this.store, publisher: this.publisher, chain: this.chain, log: this.log, writeLocks: this.writeLocks,
-    resolveFinalizedAssertionPublishAuthor: this.resolveFinalizedAssertionPublishAuthor.bind(this),
+function finalizedAssertionSelectionHost(this: DKGAgent): FinalizedAssertionSelectionHost {
+  return { store: this.store, publisher: this.publisher, chain: this.chain, writeLocks: this.writeLocks,
+    resolveFinalizedAssertionPublishAuthor: this.resolveFinalizedAssertionPublishAuthor.bind(this) };
+}
+function finalizedAssertionMintHost(this: DKGAgent): FinalizedAssertionMintHost {
+  return { store: this.store, chain: this.chain, log: this.log,
+    publishedNamedKaVmLifecycleWriter: this.publishedNamedKaVmLifecycleWriter,
+    transferRfc64ConfirmedVmV1: this.transferRfc64ConfirmedVmV1.bind(this),
+    catalogRequired: (id, subGraphName) => this.resolveRfc64CatalogAuthoringLaneV1(id, subGraphName) !== null };
+}
+/** Constructed only after selection has dispatched an update. */
+function finalizedAssertionUpdateHost(this: DKGAgent, update: FinalizedAssertionUpdateHost['update']): FinalizedAssertionUpdateHost {
+  return { store: this.store, log: this.log, update,
     _loadSelectedSWMQuads: this._loadSelectedSWMQuads.bind(this),
     publishedNamedKaVmLifecycleWriter: this.publishedNamedKaVmLifecycleWriter,
     _buildPrecomputedUpdateAttestationForSeal: this._buildPrecomputedUpdateAttestationForSeal.bind(this),
-    update: (kaId, contextGraphId, quads, privateQuads, opts) => this.update(kaId, contextGraphId, quads, privateQuads,
-      { ...opts, [INTERNAL_ROOTLESS_UPDATE_ORIGIN]: true }),
     _stampPointerIfDivergedFromVm: this._stampPointerIfDivergedFromVm.bind(this),
     observeRfc64ConfirmedVmV1: this.observeRfc64ConfirmedVmV1.bind(this),
-    transferRfc64ConfirmedVmV1: this.transferRfc64ConfirmedVmV1.bind(this),
-    catalogRequired: (id, subGraphName) => this.resolveRfc64CatalogAuthoringLaneV1(id, subGraphName) !== null,
-    retireLegacySwm: (...args) => retireLegacySwmAfterConfirmedLocalPublish(this, this.log, ...args),
-  };
+    retireLegacySwm: (...args) => retireLegacySwmAfterConfirmedLocalPublish(this, this.log, ...args) };
 }
 
 /** Internal record-only entry: reservation and exact lifecycle lease are one required context. */
@@ -6300,13 +6304,12 @@ export async function recordFinalizedAssertionMint(this: DKGAgent, contextGraphI
   receipt: MintAdoptionRequest, recording: FinalizedAssertionRecordingContext, opts?: FinalizedAssertionPublishOptions,
 ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
   if (!recording?.reservation || !recording.heldLifecycle) throw new Error('Prepared recording requires its reservation and lifecycle lease');
-  const host = finalizedAssertionPublicationHost.call(this);
-  const selected = await selectFinalizedAssertionPublication(host, contextGraphId, name, opts, recording);
+  const selected = await selectFinalizedAssertionPublication(finalizedAssertionSelectionHost.call(this), contextGraphId, name, opts, recording);
   if (selected.operationPlan.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
     { code: KA_MINT_RECONCILE_REFUSED_CODE });
   const prepared = finalizedAssertionMintPlan(selected);
   const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintContentOptions(prepared, selected.operationPlan.pricingPolicy));
-  await completeRecordedAssertionMint(host, prepared, result, recording, receipt, await this.getContextGraphOnChainId(contextGraphId));
+  await completeRecordedAssertionMint(finalizedAssertionMintHost.call(this), prepared, result, recording, receipt, await this.getContextGraphOnChainId(contextGraphId));
   return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
 }
 

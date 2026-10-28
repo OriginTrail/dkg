@@ -787,3 +787,17 @@ it.each(['explicit', 'duplicate-mint'] as const)('refuses a noninitial assertion
     expect(f.chain.broadcasts).toBe(0);
   } finally { await f.store.close(); }
 });
+
+
+it('rejects changed sealed content before local staging when chain identity is unavailable', async () => {
+  const f = await strandedPublishFixture();
+  vi.spyOn(f.chain, 'isV10Ready').mockReturnValue(false);
+  vi.spyOn(f.chain, 'getEvmChainId').mockRejectedValue(new Error('No chain configured'));
+  await f.store.replaceGraph(f.swmGraph, [{ ...LOT, object: '"Changed after finalization"', graph: f.swmGraph }]);
+  await expect(f.publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+    ...f.publishOptions, trustedNonManifestCatalogTriples: undefined,
+  })).rejects.toThrow(/expectedMerkleRoot mismatch/);
+  expect(f.encrypt).not.toHaveBeenCalled(); expect(f.acks).not.toHaveBeenCalled();
+  expect(f.chain.createCalls).toBe(0);
+  await expectNothingRecorded(f);
+});
