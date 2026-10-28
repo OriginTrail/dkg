@@ -57,6 +57,29 @@ async function fixture(hosted: boolean, unbound = false) {
 }
 
 describe('bulk clear preserves independent saved Core hosting', () => {
+  it.each(['rehydrationDisabled', 'authorityDenied', 'deactivated'] as const)('explicit nonpersistent subscribe clears terminal %s dormancy', async reason => {
+    const f = await fixture(false), state = f.agent as any;
+    state.contextGraphSubscriptionActivations.transition({ id: LOCAL, kind: 'dormancy', reason });
+    expect(f.agent.isContextGraphSubscriptionCommitted(LOCAL)).toBe(false);
+    const before = f.agent.getContextGraphSubscriptionRehydrationStatus()!;
+    f.save.mockClear();
+    f.agent.subscribeToContextGraph(LOCAL, { persist: false });
+    expect(state.contextGraphSubscriptionDormancyById.has(LOCAL)).toBe(false);
+    expect(f.agent.isContextGraphSubscriptionCommitted(LOCAL)).toBe(true);
+    expect(f.agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ persistedTotal: before.persistedTotal, activated: 1 });
+    await f.drain(); expect(f.save).not.toHaveBeenCalled();
+  });
+
+  it('unknown unsubscribe does not create durable intent for a later on-demand subscription', async () => {
+    const f = await fixture(false), state = f.agent as any;
+    f.agent.unsubscribeFromContextGraph('never-seen');
+    expect(state.contextGraphSubscriptionDormancyById.has('never-seen')).toBe(false);
+    const subscription = f.agent.subscribeToContextGraph('never-seen', { syncMode: 'on-demand' });
+    expect(subscription.syncMode).toBe('on-demand');
+    await state.enqueueContextGraphSubscriptionPersistWrite('never-seen', async () => undefined);
+    expect(f.rows.has('never-seen')).toBe(false);
+  });
+
   it('settles owned binding repair without issuing or releasing a waiter-owned durable load', async () => {
     const f = await fixture(false, true), state = f.agent as any;
     const delayed = deferred(); let recoveryMayRead = false;
@@ -107,9 +130,10 @@ describe('bulk clear preserves independent saved Core hosting', () => {
     vi.mocked(f.agent.resolveContextGraphSubscriptionBootstrapAuthority).mockResolvedValue({
       outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'eligible', onChainId: 582n,
     });
-    vi.spyOn(f.agent, 'subscribeToContextGraph').mockImplementationOnce(() => { throw new Error('network activation failed'); });
+    const failedInstall = vi.spyOn(f.agent, 'installContextGraphSubscription').mockImplementationOnce(() => { throw new Error('network activation failed'); });
     try {
       await f.agent.retryUnavailableContextGraphSubscriptionAuthorities(signal);
+      expect(failedInstall).toHaveBeenCalledOnce();
       expect(f.rows.get(LOCAL)?.onChainId).toBe('582');
       expect(f.agent.isContextGraphSubscriptionCommitted(LOCAL)).toBe(false);
       expect(settled).toBe(false);

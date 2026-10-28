@@ -119,7 +119,8 @@ export class ContextGraphSubscriptionActivations {
   }
   /** A new live intent supersedes the dormant activation independently of disk I/O. */
   replaceLiveIntent(id: string, subscription: ContextGraphSub): void {
-    if (!this.pending.has(id)) return;
+    if (!this.pending.has(id) && (!this.ports.contextGraphSubscriptionDormancyById.has(id)
+      || (!subscription.subscribed && !subscription.coreHosted))) return;
     this.ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
     this.transition({ id, kind: 'saved',
       persisted: this.ports.contextGraphSubscriptionRehydrationAccountedIds.has(id),

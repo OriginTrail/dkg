@@ -610,7 +610,10 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.removeContextGraphSubscriptionNetwork(contextGraphId, options);
     const subscription = this.subscribedContextGraphs.get(contextGraphId);
     if (subscription) this.contextGraphSubscriptionActivations.replaceLiveIntent(contextGraphId, subscription);
-    else this.contextGraphSubscriptionActivations.transition({ id: contextGraphId, kind: 'deactivated' });
+    else if (this.contextGraphSubscriptionDormancyById.has(contextGraphId)
+      || this.contextGraphSubscriptionRehydrationPendingIds.has(contextGraphId)
+      || this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId))
+      this.contextGraphSubscriptionActivations.transition({ id: contextGraphId, kind: 'deactivated' });
   }
 
   /** Internal rollback primitive: removes network effects while retaining the activation owner. */
