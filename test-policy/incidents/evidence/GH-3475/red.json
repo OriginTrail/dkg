@@ -15,10 +15,10 @@
     "--outputFile=<report>"
   ],
   "exitCode": 1,
-  "rawReportSha256": "2b3e81d164e43d8c37e038d1d72c486474486259b4453ffda93870bd9855a8a1",
+  "rawReportSha256": "1f154c2cd40ea3893fbdd5ef74adb1ce8bb93282961d56c8c1132c29f89b51b7",
   "retainedReport": {
     "file": "test-policy/incidents/evidence/GH-3475/red-report.json",
-    "sha256": "ea895d0a6221f932caddf69cbeb23dcf459c357906d23b2f414aebfc9b091579",
+    "sha256": "3f2945296df221d152e93ae412885dae7ec5046c4d377fc4684aacaadc22f5ec",
     "normalization": "Absolute checkout path replaced with <checkout>; JSON formatted."
   },
   "assertions": [
@@ -29,7 +29,7 @@
       "fullName": "follow-up pull of a peer's own agent profile a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
       "status": "failed",
       "title": "a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
-      "duration": 2662.0252920000003,
+      "duration": 2661.2929580000005,
       "failureMessages": [
         "AssertionError: expected [ { \u2026(3) } ] to deeply equal [ { \u2026(3) }, { \u2026(3) } ]\n    at <checkout>/packages/agent/test/peer-profile-follow-up-agent.test.ts:74:38\n    at file://<checkout>/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
       ],
