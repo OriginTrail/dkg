@@ -53,6 +53,13 @@ export const PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE = 'PUBLISH_AUTHOR_NOT_CUSTODIAL';
 export const AMBIGUOUS_ASSERTION_AUTHOR_CODE = 'AMBIGUOUS_ASSERTION_AUTHOR';
 export const ASSERTION_AUTHOR_NOT_RESIDENT_CODE = 'ASSERTION_AUTHOR_NOT_RESIDENT';
 export const PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE = 'PUBLISH_AUTHOR_SELECTION_CONFLICT';
+/**
+ * GH#3294 — the queued VM publish lane cannot take another node's KA. A node
+ * that holds an author's seal and share (a curator keeps both from the share)
+ * does not hold the author's lifecycle record, which the queued lane checks;
+ * the synchronous `vm/publish` publishes from the seal and the share.
+ */
+export const ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE = 'ASYNC_PUBLISH_FOREIGN_AUTHOR';
 
 /** The literal prefix every InsufficientPublisherFundsError message starts with.
  *  The chain formatter builds the message from this; consumers that only have a
@@ -124,6 +131,14 @@ export function isRfc64LegacySwmBoundaryRetirementInProgressError(error: unknown
     return false;
   }
 }
+
+/**
+ * A committed synchronous share whose signed author-inventory handoff has not completed yet. The
+ * agent makes it the typed cause of a retryable promote failure, and the daemon names it in its
+ * share route and promote worker logs. Shared here because it crosses those packages; the wire
+ * value is part of the contract.
+ */
+export const SWM_INVENTORY_HANDOFF_PENDING_CODE = 'SWM_INVENTORY_HANDOFF_PENDING';
 
 /**
  * An unscoped query whose dataset or read-authority facts changed while it ran: the agent
@@ -217,4 +232,15 @@ export function hasErrorCode(err: unknown, code: string): boolean {
     'code' in err &&
     (err as NodeJS.ErrnoException).code === code
   );
+}
+
+/** Strict query denial is opt-in; legacy callers retain empty-per-form results. */
+export const QUERY_ACCESS_DENIED_CODE = 'QUERY_ACCESS_DENIED';
+export const QUERY_ACCESS_DENIED_MESSAGE = 'Context Graph read denied';
+export class QueryAccessDeniedError extends Error {
+  readonly code = QUERY_ACCESS_DENIED_CODE;
+  constructor() { super(QUERY_ACCESS_DENIED_MESSAGE); this.name = 'QueryAccessDeniedError'; }
+}
+export function isQueryAccessDeniedError(error: unknown): error is { code: typeof QUERY_ACCESS_DENIED_CODE } {
+  return typeof error === 'object' && error !== null && 'code' in error && error.code === QUERY_ACCESS_DENIED_CODE;
 }

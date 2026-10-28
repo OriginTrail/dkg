@@ -1,3 +1,5 @@
+import { Rfc64CatalogReplaySchedulingWindowV1 } from './catalog-replay-scheduling-window-v1.js';
+import type { Rfc64CatalogConnectionReplayResultV1 } from './catalog-replay-run-reporter-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
@@ -9,13 +11,14 @@ import { Rfc64CatalogReplayScopeLifecycleV1, type Rfc64CatalogReplayScopeAdmissi
 export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
   selectContextGraphIds(): readonly string[];
   reserveFence(contextGraphId: string, peerId: string): Rfc64CatalogReplayPeerReservationV1 | null;
-  reannounce(peerId: string, contextGraphId: string, signal: AbortSignal): Promise<Readonly<{ failed: number }>>;
+  reannounce(peerId: string, contextGraphId: string, signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
   replay(contextGraphId: string, demand: Rfc64CatalogReplayPeerDemandV1,
-    signal: AbortSignal): Promise<Readonly<{ failed: number }>>;
+    signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
   /** Two stream keys plus one independent, abortable eligibility notifier. */
   schedule(slot: 0 | 1 | 'deadline', work: (signal: AbortSignal) => Promise<void>): boolean;
   wait(signal: AbortSignal, delayMs: number): Promise<void>;
   warn(message: string): void;
+  reportRun?(contextGraphId: string, peerId: string, result: Rfc64CatalogConnectionReplayResultV1): void;
 }
 
 export interface Rfc64CatalogReplayConnectionReservationV1 {
@@ -28,6 +31,7 @@ type ScopeV1 = Rfc64CatalogReplayScopeLifecycleV1;
 interface PeerV1 {
   readonly peerId: string;
   readonly scopes: Map<string, ScopeV1>;
+  readonly window: Rfc64CatalogReplaySchedulingWindowV1;
   active: boolean;
   lastUsedAt: number;
   started: number;
@@ -40,7 +44,6 @@ interface PeerV1 {
 
 const DEFAULT_DEBOUNCE_MS = 60_000;
 const DEFAULT_MAX_PEERS = 256;
-const MAX_SCOPE_SELECTION_BATCH = 256;
 const MAX_SCOPES_PER_TURN = 8;
 /**
  * Owns reconnect replay admission, retained cooldowns and bounded physical work.
@@ -121,7 +124,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         if (idle === undefined) { this.#suppressed++; return null; }
         this.#byPeer.delete(idle.peerId);
       }
-      peer = { peerId, scopes: new Map(), active: false, lastUsedAt: nowMs,
+      peer = { peerId, scopes: new Map(), window: new Rfc64CatalogReplaySchedulingWindowV1(), active: false, lastUsedAt: nowMs,
         started: 0, failed: 0, windowStartedAt: nowMs, windowStarted: 0,
         connected: true, connectionGeneration: 1 };
       this.#byPeer.set(peerId, peer);
@@ -133,6 +136,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     const reservations: Rfc64CatalogReplayScopeAdmissionV1[] = [];
     for (const id of selected) {
       const scope = this.#scope(peer, id);
+      peer.window.add(scope);
       const reservation = scope.reserve(peer.connectionGeneration, () => this.#ports.reserveFence(id, peer.peerId));
       if (reservation === null) this.#suppressed++;
       else reservations.push(reservation);
@@ -163,6 +167,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     if (existing !== undefined) return existing;
     const scope = new Rfc64CatalogReplayScopeLifecycleV1(id, peer.peerId, this.#debounceMs);
     peer.scopes.set(id, scope);
+    peer.window.add(scope);
     return scope;
   }
 
@@ -170,7 +175,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     for (const [id, scope] of peer.scopes) {
       if (selected.has(id)) continue;
       scope.retireSelection();
-      if (!scope.executing) peer.scopes.delete(id);
+      if (!scope.executing) { peer.scopes.delete(id); peer.window.remove(scope); }
     }
   }
 
@@ -182,18 +187,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   }
 
   #runnable(peer: PeerV1, now: number): readonly ScopeV1[] {
-    // A scheduling batch, not a retained-state or lease limit. Earlier admission
-    // owners and cooldowns keep precedence; ready overflow takes positions of
-    // completed or cooled scopes, including reconnects queued during cooldown.
-    const scopes = [...peer.scopes.values()];
-    const retained = scopes.filter(scope => !scope.canEvict(now) && !scope.canDefer(now));
-    const selected = retained.slice(0, MAX_SCOPE_SELECTION_BATCH);
-    const occupied = new Set(selected);
-    for (const scope of [...scopes.filter(scope => scope.ready(now)), ...scopes.filter(scope => !scope.ready(now))]) {
-      if (selected.length === MAX_SCOPE_SELECTION_BATCH) break;
-      if (!occupied.has(scope)) selected.push(scope);
-    }
-    return selected.filter(scope => scope.ready(now));
+    return peer.window.runnable(now);
   }
 
   #ready(peer: PeerV1, now: number): boolean {
@@ -201,22 +195,9 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   }
 
   #nextDeadline(): number {
-    let deadline = Infinity;
     const now = Date.now();
-    for (const peer of this.#byPeer.values()) {
-      const waiting = [...peer.scopes.values()].some(scope => scope.queued || scope.awaitingFence());
-      const noRunnable = this.#runnable(peer, now).length === 0;
-      if (waiting && noRunnable) deadline = Math.min(deadline, now + 1_000);
-      for (const scope of peer.scopes.values()) {
-        if (scope.awaitingFence()) deadline = Math.min(deadline, now + 1_000);
-        if ((scope.queued || (waiting && noRunnable && scope.outstanding === 0)) && scope.eligibleAt > now) {
-          deadline = Math.min(deadline, scope.eligibleAt);
-        }
-      }
-    }
-    return deadline;
+    return Math.min(...[...this.#byPeer.values()].map(peer => peer.window.nextWake(now)));
   }
-
 
   #schedule(): void {
     if (this.#closed) return;
@@ -284,8 +265,12 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
           }
           signal.throwIfAborted();
           demand.admit();
-          failed = (await this.#ports.replay(scope.contextGraphId, demand, signal)).failed > 0 || failed;
-          if (failed) this.#ports.warn(`RFC-64 catalog replay incomplete for "${scope.contextGraphId}" after ${peer.peerId.slice(-8)} connected`);
+          const result = await this.#ports.replay(scope.contextGraphId, demand, signal);
+          failed = result.failed > 0 || failed;
+          if (result.failed > 0) {
+            if (this.#ports.reportRun) this.#ports.reportRun(scope.contextGraphId, peer.peerId, result);
+            else this.#ports.warn(`RFC-64 catalog replay incomplete for "${scope.contextGraphId}" after ${peer.peerId.slice(-8)} connected`);
+          }
         } catch (error) {
           failed = true;
           if (!signal.aborted) this.#ports.warn(`RFC-64 catalog replay failed after ${peer.peerId.slice(-8)} connected: ${error instanceof Error ? error.message : String(error)}`);

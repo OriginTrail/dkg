@@ -1,3 +1,5 @@
+import type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
+export type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
 import type { ChainEvent } from './knowledge-asset-update-identity.js';
 export type { ChainEvent } from './knowledge-asset-update-identity.js';
 import type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
@@ -1103,6 +1105,15 @@ export interface V10PublishParams {
    * undo an accepted transaction and therefore must not fail the chain write.
    */
   onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /**
+   * Opts this write into stuck-transaction speed-up (stuck-transaction-recovery.ts): re-signing
+   * it at the same nonce with higher fees. Awaited before each replacement is broadcast, never for
+   * the original; **fail-closed**: a throw means that replacement is not sent. The call resolves
+   * with whichever hash is mined, which may differ from the one {@link onBroadcast} saw, so a
+   * caller whose durable record holds one hash per transaction must omit it. Neither this hook
+   * nor a failed replacement ever becomes the call's error.
+   */
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
 
 export interface V10UpdateKAParams {
@@ -1156,6 +1167,8 @@ export interface V10UpdateKAParams {
   onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
   /** Post-send counterpart to {@link onBroadcast}; see V10PublishParams. */
   onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /** Stuck-transaction speed-up opt-in; see {@link V10PublishParams.onBeforeReplacementBroadcast}. */
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
 
 /**
@@ -1354,18 +1367,14 @@ export interface SignedTransactionEnvelope {
   readonly nonce?: number;
 }
 
-export interface PreBroadcastSignal {
-  /** The signed transaction's hash, known before it is sent. */
-  readonly txHash: string;
-  /**
-   * The account nonce the signed transaction reserved. Absent only when it could not be read —
-   * recovery treats that as "no proof of absence available" rather than guessing.
-   */
-  readonly nonce?: number;
-}
-
 export interface ChainReadOptions {
   signal?: AbortSignal;
+}
+
+/** Select identity-read ownership explicitly; cancellation never selects a cache policy. */
+export interface IdentityReadOptions extends ChainReadOptions {
+  /** Shared cached reads are the default; independent reads belong to this request. */
+  ownership?: 'shared' | 'independent';
 }
 
 /** Read options for resolving one publish transaction's receipt. */
@@ -1491,6 +1500,25 @@ export interface KnowledgeAssetUpdateContext {
   merkleLeafCount: number;
 }
 
+/** How a chain adapter's operational wallets, the payers of its transactions, sign. */
+export interface OperationalSigning {
+  /** An external signer signs for every operational wallet; the node holds none of their keys. */
+  readonly external: boolean;
+  /** The operational wallets, the first one primary. */
+  readonly payerAddresses: readonly string[];
+}
+
+/**
+ * The operational signing `chain` reports, or `undefined` for an adapter that
+ * does not report one (one without the capability): callers take such an
+ * adapter to sign with local wallets, and cannot list its payers.
+ */
+export function operationalSigningOf(
+  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
+): OperationalSigning | undefined {
+  return typeof chain?.operationalSigning === 'function' ? chain.operationalSigning() : undefined;
+}
+
 /**
  * Chain-agnostic adapter interface for interacting with the DKG Trust Layer.
  *
@@ -1498,6 +1526,9 @@ export interface KnowledgeAssetUpdateContext {
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
 export interface ChainAdapter {
+  /** Complete coherent public chain evidence for explicit snapshot recovery. */
+  readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
+
   chainType: 'evm' | 'solana';
   chainId: string;
   /**
@@ -1535,7 +1566,7 @@ export interface ChainAdapter {
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
-  getIdentityId(): Promise<bigint>;
+  getIdentityId(options?: IdentityReadOptions): Promise<bigint>;
   /**
    * OT-RFC-39 — resolve an arbitrary operational EOA to its on-chain
    * identityId. Returns 0n for addresses that are not registered
@@ -1896,7 +1927,7 @@ export interface ChainAdapter {
    * Sign an arbitrary message hash using the node's primary operational key.
    * Used for self-signing as receiver or context graph participant.
    */
-  signMessage?(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }>;
+  signMessage?(messageHash: Uint8Array, options?: ChainReadOptions): Promise<{ r: Uint8Array; vs: Uint8Array }>;
 
   /**
    * Sign EIP-712 typed data with the adapter's primary signer. Used by
@@ -1958,6 +1989,15 @@ export interface ChainAdapter {
     types: Record<string, Array<{ name: string; type: string }>>,
     value: Record<string, unknown>,
   ): Promise<string>;
+
+  /**
+   * How the operational wallets (the payers of transactions) sign, and which
+   * they are. When an external signer signs for them the node holds none of
+   * their keys, and such a paying wallet never authors an asset: callers must
+   * not fall back to it as the author. Optional: see {@link operationalSigningOf}
+   * for an adapter without it.
+   */
+  operationalSigning?(): OperationalSigning;
 
   /**
    * Return `true` iff `address` has deployed bytecode on this chain.
@@ -2061,7 +2101,7 @@ export interface ChainAdapter {
   isShardingTableMember?(identityId: bigint): Promise<boolean>;
 
   /** Verify that a recovered signer address is a registered operational key for the given identity. */
-  verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
+  verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint, options?: ChainReadOptions): Promise<boolean>;
 
   /**
    * Same gate as `verifyACKIdentity`, but returns the FAILING gate so callers
@@ -2077,6 +2117,7 @@ export interface ChainAdapter {
   verifyACKIdentityDetailed?(
     recoveredAddress: string,
     claimedIdentityId: bigint,
+    options?: ChainReadOptions,
   ): Promise<VerifyACKIdentityResult>;
 
   /** Idempotently register local operational wallets for an existing identity. */

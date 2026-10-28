@@ -1,6 +1,6 @@
 {
   "name": "dkg-v10",
-  "version": "10.0.24",
+  "version": "10.0.26",
   "private": true,
   "packageManager": "pnpm@10.28.1",
   "dkgBuild": {
@@ -31,7 +31,7 @@
     "bench:swm-triple-volume": "pnpm --filter @origintrail-official/dkg benchmark:swm-triple-volume --",
     "bench:baseline": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_RESULT=bench/results/baseline.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/baseline.html esbench --config bench/esbench.config.mjs",
     "bench:compare": "pnpm --filter @origintrail-official/dkg-storage build && ESBENCH_DIFF=bench/results/baseline.json ESBENCH_RESULT=bench/results/compare.json ESBENCH_HTML=1 ESBENCH_HTML_FILE=bench/results/compare.html esbench --config bench/esbench.config.mjs",
-    "lint": "node scripts/ci/check-tracked-text-nul.mjs && node scripts/ci/check-oxlint-baseline.mjs && node scripts/ci/check-incoming-copy-boundary.mjs && pnpm run lint:tests",
+    "lint": "node scripts/ci/check-tracked-text-nul.mjs && node scripts/ci/check-oxlint-baseline.mjs && node scripts/ci/check-incoming-copy-boundary.mjs && node scripts/check-libp2p-pins.mjs && pnpm run lint:tests",
     "check:file-size": "node scripts/audit-file-size.mjs",
     "lint:nul": "node scripts/ci/check-tracked-text-nul.mjs",
     "lint:baseline:update": "node scripts/ci/check-oxlint-baseline.mjs --write",
@@ -55,6 +55,7 @@
     "release:verify-tag": "node scripts/release-packages.mjs verify-tag",
     "release:verify-pack": "node scripts/release-packages.mjs verify-pack",
     "release:build-info": "node scripts/release-packages.mjs build-info",
+    "release:verify-evidence": "node scripts/release-packages.mjs verify-evidence",
     "release:promote": "node scripts/release-packages.mjs promote",
     "release:verify-published": "node scripts/release-packages.mjs verify-published",
     "index": "node packages/cli/dist/cli.js index",
@@ -133,15 +134,21 @@
     "test:devnet:pr1370-admin-op-wallet": "vitest run --config devnet/pr1370-admin-op-wallet/vitest.config.ts",
     "test:devnet:public-cg-hash-subscription": "vitest run --config devnet/public-cg-hash-subscription/vitest.config.ts",
     "test:devnet:manifest": "vitest run --config devnet/_bootstrap/vitest.manifest.config.ts",
-    "lint:tests": "node scripts/ci/check-disabled-tests.mjs",
+    "lint:tests": "node scripts/ci/check-swallowed-assertions.mjs && node scripts/ci/check-disabled-tests.mjs",
     "test:properties": "vitest run --config test-policy/vitest.properties.config.ts",
     "test:mutation": "stryker run test-policy/stryker.config.mjs",
     "test:inventory": "node scripts/ci/test-inventory.mjs",
     "test:conformance": "tsx --tsconfig test-systems/tsconfig.json --test test-systems/storage-conformance.test.ts",
     "test:regression-proofs": "node --test scripts/lib/__tests__/regression-proofs.test.mjs",
     "qa:check-regression-launcher": "node scripts/qa-check-regression-launcher.mjs",
+    "qa:boundary-checks": "node scripts/qa-boundary-checks.mjs",
+    "qa:incident-status": "node scripts/qa-incident-status.mjs",
     "qa:check-regressions": "node scripts/qa-check-regressions.mjs",
-    "qa:prove-regression": "node scripts/qa-prove-regression.mjs"
+    "qa:prove-regression": "node scripts/qa-prove-regression.mjs",
+    "release:prepare-packages": "node scripts/release-packages.mjs prepare-packages",
+    "release:certify-install": "node scripts/release-packages.mjs certify-install",
+    "release:verify-package-certificate": "node scripts/release-packages.mjs verify-package-certificate",
+    "release:publish-prepared": "node scripts/release-packages.mjs publish-prepared"
   },
   "devDependencies": {
     "@origintrail-official/dkg": "workspace:*",
@@ -180,8 +187,9 @@
       "undici@>=5.0.0 <6.24.0": "6.24.0",
       "cookie@<0.7.0": "0.7.0",
       "tmp@<0.2.4": "0.2.4",
-      "hono@>=4.0.0 <4.12.18": "4.12.18",
-      "@hono/node-server@>=1.0.0 <1.19.13": "1.19.13",
+      "hono@>=4.0.0 <4.13.13": "4.13.13",
+      "@hono/node-server@>=1.0.0 <1.19.17": "1.19.17",
+      "proxy-addr@>=2.0.0 <2.0.8": "2.0.8",
       "immutable@<4.3.8": "4.3.8",
       "handlebars@>=4.0.0 <4.7.9": "4.7.9",
       "fast-uri@>=3.0.0 <3.1.2": "3.1.2",
@@ -200,7 +208,7 @@
     },
     "patchedDependencies": {
       "hardhat@2.28.6": "patches/hardhat@2.28.6.patch",
-      "@libp2p/yamux@8.0.1": "patches/@libp2p__yamux@8.0.1.patch"
+      "kafkajs@2.2.4": "patches/kafkajs@2.2.4.patch"
     }
   }
 }

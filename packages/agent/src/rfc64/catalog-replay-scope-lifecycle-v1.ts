@@ -29,10 +29,6 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
   awaitingFence(): boolean {
     return [this.#current, this.#successor].some(demand => demand?.phase.state === 'waiting-for-fence');
   }
-  canEvict(now: number): boolean { return this.outstanding === 0 && this.#eligibleAt <= now; }
-  /** A cooled queued demand may yield scheduling precedence without retiring its fence. */
-  canDefer(now: number): boolean { return this.#eligibleAt !== 0 && this.ready(now); }
-
   reserve(connectionGeneration: number, reserveFence: () => FenceV1 | null): Rfc64CatalogReplayScopeAdmissionV1 | null {
     const current = this.#current;
     if (current !== null && ((current.connectionGeneration === connectionGeneration

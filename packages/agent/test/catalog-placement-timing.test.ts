@@ -554,10 +554,13 @@ describe('catalog placement timing through the finalized-private supervisor', ()
     });
     const owner = new Rfc64SwmCatalogProjectionOwnerV1({
       resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
+      listDurableInventoryScopes: () => [],
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
       acceptsFinalizedPrivateLane: () => true,
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
+      readPrivateFailure: () => null,
+      writePrivateFailures: () => {},
       listFinalizedPrivateRepairs: () => markers,
       repairFinalizedPrivatePlacement: repair,
       reconcile: async () => null,

@@ -5,6 +5,7 @@ import type {
   PreparedPrivateEmptyVmReadinessV1,
   SynchronousReadinessCommitResult,
 } from '@origintrail-official/dkg-agent';
+import * as core from '@origintrail-official/dkg-core';
 import { DKGEvent, TypedEventBus } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import {
@@ -71,10 +72,62 @@ function preparedProofAgent(proof: LegacyProof) {
 }
 
 describe('private empty-VM subscribe settlement', () => {
+  it('starts no subscribe proof once the node is stopping', async () => {
+    const stop = new AbortController();
+    stop.abort();
+    const proof = vi.fn(async () => ({ proven: false as const }));
+    const agent = { ...preparedProofAgent(proof), node: { stopSignal: stop.signal } } as unknown as DKGAgent;
+    expect(await settlePrivateEmptyVmAtSubscribe(agent, {} as DashboardDB, 'graph', PRIVATE_AUTHORITY, CALLER))
+      .toBe(false);
+    expect(proof).not.toHaveBeenCalled();
+  });
+
+  it('cancels an in-flight subscribe proof on node stop and never commits its late success', async () => {
+    const stop = new AbortController();
+    let answerLate!: () => void;
+    const delayed = new Promise<void>((resolve) => { answerLate = resolve; });
+    const writeReadiness = vi.fn();
+    const markSubscription = vi.fn();
+    const proof = vi.fn<LegacyProof>(async (_id, _caller, commit) => {
+      await delayed;
+      commit();
+      return { proven: true as const };
+    });
+    const agent = {
+      ...preparedProofAgent(proof), node: { stopSignal: stop.signal },
+      markContextGraphSubscriptionState: markSubscription,
+    } as unknown as DKGAgent;
+    const dashboard = {
+      getContextGraphReadinessProvenance: () => null,
+      setContextGraphReadinessProvenance: writeReadiness,
+    } as unknown as DashboardDB;
+    const settlement = settlePrivateEmptyVmAtSubscribe(agent, dashboard, 'graph', PRIVATE_AUTHORITY, CALLER);
+    await vi.waitFor(() => expect(proof).toHaveBeenCalledOnce());
+    stop.abort();
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const outcome = await Promise.race([
+        settlement,
+        new Promise((resolve) => { watchdog = setTimeout(() => resolve('still running'), 250); }),
+      ]);
+      expect(outcome).toBe(false);
+      expect(proof.mock.calls[0]?.[3]?.aborted).toBe(true);
+    } finally {
+      clearTimeout(watchdog);
+      answerLate();
+      await settlement;
+    }
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    expect(writeReadiness).not.toHaveBeenCalled();
+    expect(markSubscription).not.toHaveBeenCalled();
+  });
+
   it('does not start an agent proof when the deadline is already aborted', async () => {
     const deadline = new AbortController();
     deadline.abort();
-    vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    vi.spyOn(core, 'startRequestAbortLifecycle').mockReturnValue({
+      signal: deadline.signal, deadline: deadline.signal, release: () => {},
+    });
     const proof = vi.fn(async () => ({ proven: false as const }));
     const agent = preparedProofAgent(proof) as unknown as DKGAgent;
     expect(await settlePrivateEmptyVmAtSubscribe(
@@ -185,7 +238,9 @@ describe('private empty-VM subscribe settlement', () => {
 
   it('returns at its deadline even when a proof backend has not settled', async () => {
     const deadline = new AbortController();
-    vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    vi.spyOn(core, 'startRequestAbortLifecycle').mockReturnValue({
+      signal: deadline.signal, deadline: deadline.signal, release: () => {},
+    });
     let proofStarted!: () => void;
     const started = new Promise<void>((resolve) => { proofStarted = resolve; });
     let releaseProof!: () => void;
@@ -218,7 +273,9 @@ describe('private empty-VM subscribe settlement', () => {
 
   it('does not block catalog readiness while a proof backend remains pending', async () => {
     const deadline = new AbortController();
-    vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    vi.spyOn(core, 'startRequestAbortLifecycle').mockReturnValue({
+      signal: deadline.signal, deadline: deadline.signal, release: () => {},
+    });
     let proofStarted!: () => void;
     const started = new Promise<void>((resolve) => { proofStarted = resolve; });
     let releaseProof!: () => void;
@@ -264,7 +321,9 @@ describe('private empty-VM subscribe settlement', () => {
 
   it('settles a timed-out waiter before acquiring a busy readiness lock', async () => {
     const deadline = new AbortController();
-    vi.spyOn(AbortSignal, 'timeout').mockReturnValue(deadline.signal);
+    vi.spyOn(core, 'startRequestAbortLifecycle').mockReturnValue({
+      signal: deadline.signal, deadline: deadline.signal, release: () => {},
+    });
     let releaseOwner!: () => void;
     const ownerHeld = new Promise<void>((resolve) => { releaseOwner = resolve; });
     let ownerStarted!: () => void;
@@ -438,7 +497,7 @@ describe('private empty-VM settlement after join metadata', () => {
   });
 
   it('retries a transient refusal inside its own deadline, longer than a subscribe request has', async () => {
-    const deadlines = vi.spyOn(AbortSignal, 'timeout');
+    const deadlines = vi.spyOn(core, 'startRequestAbortLifecycle');
     const proof = vi.fn<LegacyProof>(async (id, caller, commit, signal) => (
       proof.mock.calls.length === 1
         ? { proven: false as const, retryable: true as const }
@@ -451,11 +510,11 @@ describe('private empty-VM settlement after join metadata', () => {
 
     expect(proof).toHaveBeenCalledTimes(2);
     expect(node.subscription()).toMatchObject({ synced: true });
-    expect(deadlines).toHaveBeenCalledWith(30_000);
+    expect(deadlines).toHaveBeenCalledWith(30_000, [undefined]);
 
     deadlines.mockClear();
     await settlePrivateEmptyVmAtSubscribe(node.agent, node.dashboard, 'graph', PRIVATE_AUTHORITY, CALLER);
-    expect(deadlines).toHaveBeenCalledWith(8_000);
+    expect(deadlines).toHaveBeenCalledWith(8_000, [undefined]);
   });
 
   it.each([

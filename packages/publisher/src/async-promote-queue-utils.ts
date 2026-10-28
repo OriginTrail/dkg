@@ -1,3 +1,4 @@
+import { isBoundPromoteRequest } from './bound-promote-request.js';
 /**
  * Async Promote Queue — utils.
  *
@@ -269,6 +270,9 @@ function isPromoteRequest(value: unknown): value is PromoteRequest {
   if (value['subGraphName'] !== undefined && typeof value['subGraphName'] !== 'string') return false;
   if (value['agentAddress'] !== undefined && typeof value['agentAddress'] !== 'string') return false;
   if (value['authorAgentAddress'] !== undefined && typeof value['authorAgentAddress'] !== 'string') return false;
+  if (value['recoveryBinding'] !== undefined) {
+    return isBoundPromoteRequest(value);
+  }
   const entities = value['entities'];
   if (entities === 'all') return true;
   return Array.isArray(entities) && entities.every((e) => typeof e === 'string' && e.length > 0);
@@ -328,6 +332,7 @@ export function classifyJobPayload(binding: string | undefined): PromoteJobParse
     // state), so — like every other malformed field — it is `malformed`, never `unknown`.
     if (typeof parsed['state'] !== 'string' || parsed['state'].length === 0) return { kind: 'malformed' };
     if (!isPromoteRequest(parsed['request'])) return { kind: 'malformed' };
+    if (parsed['request'].recoveryBinding !== undefined && parsed['formatVersion'] !== 4) return { kind: 'malformed' };
     if (!isFiniteNumber(parsed['enqueuedAt']) || !isFiniteNumber(parsed['updatedAt'])) return { kind: 'malformed' };
     if (!isRecord(parsed['attempt'])) return { kind: 'malformed' };
     if (!isFiniteNumber(parsed['attempt']['count']) || !isFiniteNumber(parsed['attempt']['maxRetries'])) {
@@ -382,12 +387,15 @@ export function postCommitRecoveryExhaustedReason(attempts: number): string {
 
 export { defaultBackoffMs, createDefaultPromoteBackoff } from './promote-retry-policy.js';
 
+/** The fields `comparePromoteJobs` ranks by, so a caller can keep these in place of whole jobs. */
+export type PromoteReadyOrder = Pick<PromoteJob, 'jobId' | 'enqueuedAt'> & { readonly attempt: Pick<PromoteJob['attempt'], 'nextRetryAt'> };
+
 /**
  * Stable sort key for queued/failed_retrying jobs: oldest `nextRetryAt`
  * (or `enqueuedAt` when no retry has been scheduled), then `jobId` as a
  * deterministic tie-breaker for same-millisecond enqueues.
  */
-export function comparePromoteJobs(a: PromoteJob, b: PromoteJob): number {
+export function comparePromoteJobs(a: PromoteReadyOrder, b: PromoteReadyOrder): number {
   const aReady = a.attempt.nextRetryAt ?? a.enqueuedAt;
   const bReady = b.attempt.nextRetryAt ?? b.enqueuedAt;
   if (aReady !== bReady) return aReady - bReady;

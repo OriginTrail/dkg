@@ -101,8 +101,9 @@ describe('ProtocolRouter.probeProtocol', () => {
     expect(await router.probeProtocol(PEER_ID, ACK_PROTOCOL, 5)).toBe('unavailable');
   });
 
-  it('propagates node shutdown instead of treating it as unsupported', async () => {
+  it.each(['node', 'caller'] as const)('propagates %s shutdown instead of treating it as unsupported', async owner => {
     const stop = new AbortController();
+    const caller = new AbortController();
     const dialProtocol = vi.fn((_peer, _protocol, options: { signal: AbortSignal }) =>
       new Promise((_resolve, reject) => {
         if (options.signal.aborted) reject(options.signal.reason);
@@ -112,9 +113,30 @@ describe('ProtocolRouter.probeProtocol', () => {
       libp2p: { dialProtocol }, stopSignal: stop.signal,
     } as unknown as ConstructorParameters<typeof ProtocolRouter>[0]);
 
-    const probe = router.probeProtocol(PEER_ID, ACK_PROTOCOL);
-    stop.abort(new Error('node stopped'));
-    await expect(probe).rejects.toThrow(/node stopped/);
+    const probe = router.probeProtocol(PEER_ID, ACK_PROTOCOL, 3_000, caller.signal);
+    await vi.waitFor(() => expect(dialProtocol).toHaveBeenCalledOnce());
+    (owner === 'node' ? stop : caller).abort(new Error(`${owner} stopped`));
+    await expect(probe).rejects.toThrow(`${owner} stopped`);
+  });
+
+  it('propagates caller cancellation during a live probe', async () => {
+    const external = new AbortController();
+    let signalReady!: () => void;
+    const dialStarted = new Promise<void>((resolve) => { signalReady = resolve; });
+    const dialProtocol = vi.fn((_peer, _protocol, options: { signal: AbortSignal }) =>
+      new Promise((_resolve, reject) => {
+        expect(options.signal.aborted).toBe(false);
+        options.signal.addEventListener('abort', () => reject(options.signal.reason), { once: true });
+        signalReady();
+      }));
+    const router = new ProtocolRouter({
+      libp2p: { dialProtocol }, stopSignal: new AbortController().signal,
+    } as unknown as ConstructorParameters<typeof ProtocolRouter>[0]);
+    const probe = router.probeProtocol(PEER_ID, ACK_PROTOCOL, 3_000, external.signal);
+    await dialStarted;
+    external.abort(new Error('caller cancelled'));
+    await expect(probe).rejects.toThrow('caller cancelled');
+    expect(dialProtocol).toHaveBeenCalledOnce();
   });
 
   it('discovers a handler registered after an existing libp2p connection', async () => {

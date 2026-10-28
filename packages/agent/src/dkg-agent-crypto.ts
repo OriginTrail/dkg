@@ -163,7 +163,7 @@ import {
   type SwmTransportAuthority,
 } from './internal/context-graph-authority/swm-transport-authority.js';
 import { noRosterFrom } from './internal/context-graph-authority/unanswered-authority-read.js';
-
+import { refuseUnlistedWorkspaceSigner } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
@@ -262,6 +262,7 @@ import {
   type KeystoreEntry,
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
+import { externalAuthorGossipSigner, localGossipSigner, signGossipEnvelopeInTime, type WorkspaceGossipSigner } from './external-author-signing.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
 import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
@@ -1917,8 +1918,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         }
         return {
           resolution: { requiresEncryption: true, recipients: [firstRecipient, ...remainingRecipients] },
-          stayedCurrent: () => projection.recipientKeyRouteFence.hasPendingWrites !== true
-            && attemptRevision === projection.recipientKeyRouteFence.revision
+          stayedCurrent: () => projection.recipientKeyRouteFence.isCurrentFor(attemptRevision, participantAgents)
             && attemptGate === projection.peerGateRevision.read(input.contextGraphId),
         };
       };
@@ -2074,6 +2074,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       !state
       || state.membershipHash !== membershipHash
       || state.recipientRouteHash !== recipientRouteHash
+      || state.chainKeyMatchesIndex !== true
     ) {
       const pruned = this.prunePendingSenderKeysForEpochRotation({
         contextGraphId: input.contextGraphId,
@@ -2107,8 +2108,13 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       });
     }
 
+    // Shares into one graph overlap. Each takes its key and index here, before the next
+    // await, so that no two encrypt with the same pair and the key keeps step with the index.
+    const { chainKey, nextMessageIndex: messageIndex } = state;
+    state.chainKey = ratchetSwmSenderChainKey(chainKey);
+    state.nextMessageIndex = messageIndex + 1;
     const encrypted = await encryptSwmSenderKeyMessage({
-      chainKey: state.chainKey,
+      chainKey,
       plaintext: input.plaintext,
       senderSigningSecretKey: state.senderSigningSecretKey,
       contextGraphId: state.contextGraphId,
@@ -2116,10 +2122,8 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       senderAgentAddress: state.senderAgentAddress,
       epochId: state.epochId,
       membershipHash: state.membershipHash,
-      messageIndex: state.nextMessageIndex,
+      messageIndex,
     });
-    state.chainKey = encrypted.nextChainKey;
-    state.nextMessageIndex += 1;
     await this.saveSwmSenderKeyState();
     this.logSwmSenderKeyDebugEncryptedPayload(ctx, encrypted.message);
 
@@ -2157,6 +2161,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
         subGraphName: input.subGraphName,
         recipients: input.recipients,
       }),
+      chainKeyMatchesIndex: true,
       chainKey,
       nextMessageIndex: 0,
       senderSigningSecretKey: senderSigningKeypair.secretKey,
@@ -3066,6 +3071,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       // Late deliveries now reach quorum the same way fast
       // ones do.
       this.maybeEmitSwmShareAck(outcome).catch(() => { /* swallowed; logged inside */ });
+      this.noticeSwmFollowersAfterApplyV1(outcome, fromPeerId, data);
       return new Uint8Array();
     }
     if (outcome.retryable) {
@@ -3707,15 +3713,15 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     await save;
   }
 
-  async resolveWorkspaceGossipSigningAgent(this: DKGAgent,
-    contextGraphId: string,
-  ): Promise<(AgentKeyRecord & { privateKey: string }) | null> {
+  async resolveWorkspaceGossipSigningAgent(this: DKGAgent, contextGraphId: string): Promise<WorkspaceGossipSigner | null> {
     const authority = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.signer,
       () => this.resolveContextGraphAgentGateAuthority(contextGraphId),
     );
     if (authority.kind === 'ungated') {
-      return this.getWorkspaceGossipSigningAgent();
+      const local = this.getWorkspaceGossipSigningAgent();
+      if (local) return localGossipSigner(local.agentAddress, local.privateKey);
+      return (await externalAuthorGossipSigner(this.config?.authorSigners, this.localAgents.values(), { preferred: this.defaultAgentAddress })) ?? null;
     }
     if (authority.kind === 'unavailable') {
       const message =
@@ -3736,18 +3742,16 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
     const allowedSet = new Set(allowedAgents.map((agent) => agent.toLowerCase()));
     for (const record of this.localAgents.values()) {
       if (record.privateKey && allowedSet.has(record.agentAddress.toLowerCase())) {
-        return { ...record, privateKey: record.privateKey };
+        return localGossipSigner(record.agentAddress, record.privateKey);
       }
     }
+    const external = await externalAuthorGossipSigner(this.config?.authorSigners, this.localAgents.values(), { allowed: allowedSet });
+    if (external) return external;
 
-    throw new Error(`Cannot gossip SWM write for agent-gated context graph "${contextGraphId}": no local allowed signing agent key`);
+    throw await refuseUnlistedWorkspaceSigner(this, contextGraphId);
   }
 
-  async encodeWorkspaceGossipMessage(this: DKGAgent,
-    contextGraphId: string,
-    message: Uint8Array,
-    resolvedSigner?: (AgentKeyRecord & { privateKey: string }) | null,
-  ): Promise<Uint8Array> {
+  async encodeWorkspaceGossipMessage(this: DKGAgent, contextGraphId: string, message: Uint8Array, resolvedSigner?: WorkspaceGossipSigner | null): Promise<Uint8Array> {
     const signer = resolvedSigner === undefined
       ? await this.resolveWorkspaceGossipSigningAgent(contextGraphId)
       : resolvedSigner;
@@ -3763,7 +3767,7 @@ export class WorkspaceCryptoMethods extends DKGAgentBase {
       timestamp,
       payload,
     );
-    const signature = await new ethers.Wallet(signer.privateKey).signMessage(signingPayload);
+    const signature = await signGossipEnvelopeInTime(signer, signingPayload, timestamp);
     return encodeGossipEnvelope({
       version: GOSSIP_ENVELOPE_VERSION,
       type: GOSSIP_TYPE_WORKSPACE_PUBLISH,

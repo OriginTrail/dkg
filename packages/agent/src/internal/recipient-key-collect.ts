@@ -29,10 +29,10 @@ export class RecipientKeyCollect {
 
   async resolve(agentAddress: string): Promise<WorkspaceAgentRecipient[]> {
     const agent = ethers.getAddress(agentAddress).toLowerCase();
-    if (!this.fence.cacheable) return this.load(agent);
+    if (!this.fence.cacheableFor([agent])) return this.load(agent);
     const revision = this.fence.revision;
     const current = this.agents.get(agent);
-    if (current?.revision === revision && current.expiresAt > this.now()) return copies(await current.promise);
+    if (current && this.fence.isCurrentFor(current.revision, [agent]) && current.expiresAt > this.now()) return copies(await current.promise);
 
     const collect: Collect = {
       revision, expiresAt: Infinity,
@@ -44,7 +44,7 @@ export class RecipientKeyCollect {
     try {
       const result = await collect.promise;
       if (this.agents.get(agent) === collect) {
-        if (this.fence.revision === revision && this.fence.cacheable) collect.expiresAt = this.now() + 1000;
+        if (this.fence.isCurrentFor(revision, [agent]) && this.fence.cacheableFor([agent])) collect.expiresAt = this.now() + 1000;
         else this.agents.delete(agent);
       }
       return copies(result);

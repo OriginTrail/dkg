@@ -12,7 +12,7 @@ interface Rfc64CatalogReplayConnectionCapabilitiesV1 {
 /** Bind current accepted policy at fence reservation and compatibility announcement. */
 export function createRfc64CatalogReplayConnectionRuntimeV1(input:
   Readonly<{ capabilities: Rfc64CatalogReplayConnectionCapabilitiesV1; reservePeer(contextGraphId: string, policyDigest: string, peerId: string): ReturnType<Rfc64CatalogReplayConnectionRuntimePortsV1['reserveFence']> }>
-    & Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait' | 'warn' | 'replay'>,
+    & Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'schedule' | 'wait' | 'warn' | 'replay' | 'reportRun'>,
 ): Rfc64CatalogReplayConnectionRuntimeV1 {
   return new Rfc64CatalogReplayConnectionRuntimeV1({
     selectContextGraphIds: () => input.capabilities.listActiveRfc64CatalogReplayContextGraphIdsV1(),
@@ -30,6 +30,6 @@ export function createRfc64CatalogReplayConnectionRuntimeV1(input:
         }, signal);
     },
     schedule: input.schedule, wait: input.wait, warn: input.warn,
-    replay: input.replay,
+    replay: input.replay, reportRun: input.reportRun,
   });
 }

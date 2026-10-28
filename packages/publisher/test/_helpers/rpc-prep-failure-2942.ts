@@ -10,7 +10,7 @@ import { ChainRpcTransportError, RpcEndpointsExhaustedError, createRpcTimeoutErr
 export const KEYED_RPC_URL = 'https://rpc.example/v2/SECRET-API-KEY';
 
 /**
- * `RpcFailoverClient.populateAndSign` exhaustion: every endpoint failed while the publish
+ * `RpcFailoverClient.prepareTransaction` exhaustion: every endpoint failed while the publish
  * transaction was being PREPARED. Names no transaction. The text deliberately says "timed out" —
  * the wording that used to select `tx_submit_timeout` — and quotes a keyed URL the way the
  * single-endpoint producer message used to (GH#2945: the producer now reduces it to its host, so

@@ -172,22 +172,8 @@ dkg start
 
 At that point `~/dkg/` contains only the renamed backup files (`.git.pre-npm-migration-...`, `package.json.pre-npm-migration-...`) and is safe to delete entirely.
 
-## Log rotation (cross-cutting recommendation)
+## Log rotation
 
-Unrelated to this migration but discovered by the same incident retrospective: beacon-01 accumulated **134 MB of `daemon.log` in 24 hours** during a shutdown deadlock, dominated by chain-provider polling spam. Independent of whether you migrate, set up log rotation:
+The daemon rotates `daemon.log` itself. When the file passes 50 MB it is renamed to `daemon.log.1`, and earlier rotated files move up one number (`daemon.log.2`, `daemon.log.3`, ...). A rotated file is removed once its newest line is 72 hours old, or sooner when the live file and the rotated files together would pass 512 MB. A busy node keeps at least 48 hours of log this way, and a restart does not trim the log.
 
-`/etc/logrotate.d/dkg`:
-
-```
-/home/<your-user>/.dkg/daemon.log {
-    daily
-    rotate 7
-    compress
-    delaycompress
-    missingok
-    notifempty
-    copytruncate
-}
-```
-
-`copytruncate` is required — the daemon does not respond to SIGHUP for log reopening, and renaming the file out from under it would silently lose subsequent writes. A future core-stability fix should reduce chain-provider log spam at the source.
+An external `logrotate` rule for `daemon.log` is not needed. Remove one if you added it: it writes the same numbered file names.

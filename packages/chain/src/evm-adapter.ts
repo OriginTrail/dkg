@@ -24,6 +24,7 @@ import { ConvictionMethods } from './evm-adapter-conviction.js';
 import { AckSignMethods } from './evm-adapter-ack-sign.js';
 import { RandomSamplingMethods } from './evm-adapter-random-sampling.js';
 import { StorageReadMethods } from './evm-adapter-storage-reads.js';
+import { PublicGraphSnapshotMethods } from './evm-adapter-public-graph-snapshot.js';
 import { EventsMethods } from './evm-adapter-events.js';
 
 // --- Re-exports preserving the previously module-local public API. ---
@@ -51,7 +52,7 @@ export {
   effectivePublishAllowance,
   V10_PUBLISH_ONCHAIN_MIN_ALLOWANCE,
 } from './evm-adapter-allowance.js';
-export type { EVMAdapterConfig } from './evm-adapter-types.js';
+export type { EVMAdapterConfig, EVMAdapterOptions } from './evm-adapter-types.js';
 
 /**
  * EVM chain adapter implementing the V9 ChainAdapter interface.
@@ -59,5 +60,5 @@ export type { EVMAdapterConfig } from './evm-adapter-types.js';
  */
 export class EVMChainAdapter extends EVMChainAdapterBase implements ChainAdapter {}
 type PublicConvictionMethods = Pick<ConvictionMethods, keyof ConvictionMethods>;
-export interface EVMChainAdapter extends IdentityMethods, PublishMethods, ContextGraphMethods, PublicConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods {}
-applyMixins(EVMChainAdapter, [IdentityMethods, PublishMethods, ContextGraphMethods, ConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods]);
+export interface EVMChainAdapter extends IdentityMethods, PublishMethods, ContextGraphMethods, PublicConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods {}
+applyMixins(EVMChainAdapter, [IdentityMethods, PublishMethods, ContextGraphMethods, ConvictionMethods, AckSignMethods, RandomSamplingMethods, StorageReadMethods, EventsMethods, PublicGraphSnapshotMethods]);

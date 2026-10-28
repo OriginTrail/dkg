@@ -617,7 +617,7 @@ export async function resolveKnowledgeAssetWorkspaceHead(
     `{ <${assertSafeIri(subject)}> ?p ?o . BIND(<${assertSafeIri(subject)}> AS ?s) } UNION ` +
     `{ <${assertSafeIri(subject)}> <${DKG}shareOperationId> ?id . ` +
     `?op <${DKG}shareOperationId> ?id ; ?p ?o . BIND(?op AS ?s) } } }`,
-    ...(params.queryOptions === undefined ? [] : [params.queryOptions]),
+    params.queryOptions ?? { source: 'publisher.workspaceHead.acquire' },
   );
   if (acquisition.type !== 'bindings') {
     throw new Error(

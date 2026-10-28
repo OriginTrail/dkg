@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg-agent",
-  "version": "10.0.24",
+  "version": "10.0.26",
   "type": "module",
   "engines": {
     "node": ">=22.13.0 <23.0.0 || >=23.4.0"
@@ -18,10 +18,30 @@
       "import": "./dist/rfc64/public-catalog-activation-config-v1.js",
       "default": "./dist/rfc64/public-catalog-activation-config-v1.js"
     },
+    "./rfc64/inventory-v1/rollback": {
+      "types": "./dist/rfc64/inventory-v1/rollback.d.ts",
+      "import": "./dist/rfc64/inventory-v1/rollback.js",
+      "default": "./dist/rfc64/inventory-v1/rollback.js"
+    },
+    "./write-preflight-attribution": {
+      "types": "./dist/write-preflight-attribution.d.ts",
+      "import": "./dist/write-preflight-attribution.js",
+      "default": "./dist/write-preflight-attribution.js"
+    },
+    "./write-preflight-unresolved-window": {
+      "types": "./dist/write-preflight-unresolved-window.d.ts",
+      "import": "./dist/write-preflight-unresolved-window.js",
+      "default": "./dist/write-preflight-unresolved-window.js"
+    },
     "./chain-authority-read-budgets": {
       "types": "./dist/chain-authority-read-budgets.d.ts",
       "import": "./dist/chain-authority-read-budgets.js",
       "default": "./dist/chain-authority-read-budgets.js"
+    },
+    "./public-snapshot-mode": {
+      "types": "./dist/public-snapshot-mode.d.ts",
+      "import": "./dist/public-snapshot-mode.js",
+      "default": "./dist/public-snapshot-mode.js"
     },
     "./package.json": "./package.json",
     "./dist/internal/*": null,
@@ -41,12 +61,17 @@
     "./dist/rfc64/swm-author-inventory-producer-v1.js": "./dist/rfc64/swm-author-inventory-producer-v1.js",
     "./dist/rfc64/swm-inventory-catalog-reconciler-v1.js": null,
     "./dist/rfc64/swm-catalog-durable-asset-resolver-v1.js": null,
+    "./dist/rfc64/catalog-projection-discovery-v1.js": null,
+    "./dist/rfc64/private-placement-failure-state-v1.js": null,
     "./dist/rfc64/catalog-repair-diagnostics-v1.js": null,
     "./dist/rfc64/catalog-repair-retry-v1.js": null,
     "./dist/rfc64/abort-v1.js": null,
     "./dist/rfc64/catalog-mutation-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-connection-runtime-v1.js": null,
     "./dist/rfc64/catalog-replay-connection-adapter-v1.js": null,
+    "./dist/rfc64/catalog-replay-evidence-v1.js": null,
+    "./dist/rfc64/catalog-replay-scheduling-window-v1.js": null,
+    "./dist/rfc64/catalog-replay-run-reporter-v1.js": null,
     "./dist/rfc64/catalog-replay-scope-lifecycle-v1.js": null,
     "./dist/rfc64/catalog-replay-generation-v1.js": null,
     "./dist/rfc64/catalog-replay-recovery-runtime-v1.js": null,
@@ -67,11 +92,13 @@
     "./dist/rfc64/unregistered-authority-seed-store-v1.js": null,
     "./dist/rfc64/unregistered-authority-transport-v1.js": null,
     "./dist/rfc64/swm-inventory-shadow-runtime-v1.js": null,
+    "./dist/rfc64/swm-inventory-observation-retry-v1.js": null,
     "./dist/rfc64/swm-inventory-settlement-outlook-v1.js": null,
     "./dist/rfc64/control-object-store-v1-internal.js": null,
     "./dist/rfc64/control-object-store-v1.js": null,
     "./dist/rfc64/catalog-access-policy-v1.js": null,
     "./dist/rfc64/catalog-authority-config-v1.js": null,
+    "./dist/rfc64/manual-catalog-authority-scope-v1.js": null,
     "./dist/rfc64/catalog-authority-refresh-binding-v1.js": null,
     "./dist/rfc64/catalog-authority-refresh-loop-v1.js": null,
     "./dist/rfc64/catalog-authority-revision-projection-v1.js": null,
@@ -86,9 +113,11 @@
     "./dist/rfc64/applied-catalog-authority-transition-v1.js": null,
     "./dist/rfc64/catalog-semantic-authority-transition-v1.js": null,
     "./dist/rfc64/public-catalog-native-errors-v1.js": null,
+    "./dist/rfc64/projection-store-read-back-v1.js": null,
     "./dist/rfc64/catalog-applied-head-coordinator-v1.js": null,
     "./dist/rfc64/catalog-synchronization-evidence-v1.js": null,
     "./dist/rfc64/finalized-private-placement-repair-store-v1.js": null,
+    "./dist/rfc64/owed-share-inventory-store-v1.js": null,
     "./dist/rfc64/finalized-swm-retirement-lifecycle-receipt-v1.js": null,
     "./dist/rfc64/catalog-native-scoped-read-capability-v1-internal.js": null,
     "./dist/rfc64/catalog-native-scoped-read-provider-v1.js": null,
@@ -107,6 +136,8 @@
     "./dist/rfc64/inventory-v1/swm-author-inventory-persistence.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-sql-codec.js": null,
     "./dist/rfc64/inventory-v1/swm-author-inventory-contracts.js": null,
+    "./dist/rfc64/inventory-persistence-failure.js": null,
+    "./dist/rfc64/inventory-v1/open-error.js": null,
     "./dist/rfc64/finalized-policy-agent-precommit-v1.js": null,
     "./dist/rfc64/finalized-policy-verifier-v1.js": null,
     "./dist/rfc64/finalized-vm-agent-precommit-v1.js": null,
@@ -131,6 +162,7 @@
     "./dist/rfc64/public-catalog-reconciliation-outcome-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-v1.js": null,
     "./dist/rfc64/public-catalog-receiver-task-lifecycle-v1.js": null,
+    "./dist/rfc64/announced-current-head-retry-v1.js": null,
     "./dist/rfc64/public-catalog-service-v1.js": null,
     "./dist/rfc64/public-catalog-head-delivery-v1.js": null,
     "./dist/rfc64/public-catalog-head-fanout-v1.js": null,
@@ -148,7 +180,11 @@
     "./dist/rfc64/legacy-swm-boundary-codec-v1.js": null,
     "./dist/rfc64/legacy-swm-boundary-fence-v1.js": null,
     "./dist/rfc64/catalog-operational-targets-v1.js": null,
-    "./dist/rfc64/private-read-roster-v1.js": null
+    "./dist/rfc64/private-read-roster-v1.js": null,
+    "./dist/rfc64/inventory-v1/finalized-private-repair-persistence.js": null,
+    "./dist/rfc64/inventory-v1/schema-migrations.js": null,
+    "./dist/rfc64/inventory-v1/pre-migration-copy.js": null,
+    "./dist/rfc64/inventory-v1/rollback.js": null
   },
   "scripts": {
     "build": "tsc && pnpm run test:types && pnpm run test:package-root",
@@ -169,8 +205,8 @@
   },
   "dependencies": {
     "@opentelemetry/api": "^1.9.1",
-    "@libp2p/peer-id": "^6.0.9",
-    "@multiformats/multiaddr": "^13.0.3",
+    "@libp2p/peer-id": "6.0.18",
+    "@multiformats/multiaddr": "13.0.3",
     "@noble/ciphers": "^2.2.0",
     "@noble/curves": "^2.2.0",
     "@noble/hashes": "^2.2.0",
@@ -186,7 +222,7 @@
     "jsonld": "^8.3.3"
   },
   "devDependencies": {
-    "@libp2p/crypto": "^5.1.18",
+    "@libp2p/crypto": "5.2.0",
     "@opentelemetry/sdk-metrics": "^2.8.0",
     "@types/js-yaml": "^4.0.9",
     "@vitest/coverage-v8": "^4.0.18",

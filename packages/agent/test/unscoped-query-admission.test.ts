@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { withDefaultStoreWorkPriority, type TripleStore, type StorePressureSnapshot } from '@origintrail-official/dkg-storage';
 import {
   canReadUnscopedQuery,
   type UnscopedQueryAdmissionDependencies,
@@ -33,6 +33,34 @@ function deferred<T>() {
 }
 
 describe('unscoped query admission', () => {
+  it.each([
+    ['normal', 2, 1, 2], ['background', 2, 1, 1],
+    ['normal', 8, 8, 4], ['normal', 0, 1, 4],
+  ] as const)('bounds %s authority checks to the advertised lane (%s, %s)', async (lane, normal, background, expected) => {
+    let active = 0;
+    let peak = 0;
+    const canRead = vi.fn(async () => {
+      active += 1;
+      peak = Math.max(peak, active);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      active -= 1;
+      return true;
+    });
+    const deps = admissionDependencies(canRead);
+    deps.store.getPressureSnapshot = () => ({ normalInflightLimit: normal, backgroundInflightLimit: background } as StorePressureSnapshot);
+    await expect(withDefaultStoreWorkPriority(lane, () => canReadUnscopedQuery(deps))).resolves.toBe(true);
+    expect(peak).toBe(expected);
+    expect(canRead).toHaveBeenCalledTimes(contextGraphIds.length);
+  });
+
+  it('still rejects a late private owner when reads use a single store slot', async () => {
+    const canRead = vi.fn(async (id: string) => id !== contextGraphIds.at(-1));
+    const deps = admissionDependencies(canRead);
+    deps.store.getPressureSnapshot = () => ({ normalInflightLimit: 1 } as StorePressureSnapshot);
+    await expect(canReadUnscopedQuery(deps)).resolves.toBe(false);
+    expect(canRead).toHaveBeenCalledTimes(contextGraphIds.length);
+  });
+
   it('starts independent discovery together and waits for the complete candidate union', async () => {
     const ontology = deferred<Awaited<ReturnType<ContextGraphQueryStore['query']>>>();
     const inventory = deferred<string[]>();

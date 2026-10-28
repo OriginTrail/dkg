@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { performance } from 'node:perf_hooks';
+import type { CatalogRepairFailureKindV1 } from './private-placement-failure-state-v1.js';
+export { CATALOG_REPAIR_FAILURE_KINDS_V1, isCatalogRepairFailureKindV1, type CatalogRepairFailureKindV1 } from './private-placement-failure-state-v1.js';
 import {
   ExactGraphReadError,
   isStoreOperationTimeoutError,
@@ -16,10 +18,7 @@ const SOURCES = {
   projection_validation: 'catalog.projection_validation',
 } as const;
 type CatalogRepairStageV1 = keyof typeof SOURCES;
-type CatalogRepairFailureKindV1 =
-  | 'queue_wait' | 'queue_full' | 'store_timeout_not_started'
-  | 'store_timeout_indeterminate' | 'transport' | 'cancelled'
-  | 'integrity' | 'lane_inactive' | 'catalog_full' | 'unknown';
+
 
 export interface CatalogRepairDiagnosticV1 {
   readonly kind: CatalogRepairFailureKindV1;
@@ -30,10 +29,18 @@ export interface CatalogRepairDiagnosticV1 {
 }
 
 export class CatalogRepairLaneInactiveErrorV1 extends Error {
-  constructor() { super('RFC-64 catalog repair lane is temporarily inactive'); }
+  constructor(message = 'RFC-64 catalog repair lane is temporarily inactive') { super(message); }
 }
 
 export class CatalogRepairIntegrityErrorV1 extends Error {}
+
+export type CatalogRepairConditionKindV1 =
+  | 'policy_conflict' | 'version_conflict' | 'signer_mismatch' | 'persistence_unavailable';
+
+/** Typed local guards; diagnostic output never reflects their internal message. */
+export class CatalogRepairConditionErrorV1 extends Error {
+  constructor(readonly kind: CatalogRepairConditionKindV1, message: string) { super(message); }
+}
 
 class CatalogRepairStageErrorV1 extends Error {
   constructor(
@@ -83,7 +90,11 @@ export function catalogRepairDiagnosticV1(error: unknown): Readonly<CatalogRepai
             ? Math.round(current.elapsedMs) : null;
         }
       }
-      if (current instanceof CatalogRepairLaneInactiveErrorV1) kind = 'lane_inactive';
+      if (current instanceof CatalogRepairConditionErrorV1) {
+        const condition = current.kind;
+        if (['policy_conflict', 'version_conflict', 'signer_mismatch', 'persistence_unavailable'].includes(condition)) kind = condition;
+      }
+      else if (current instanceof CatalogRepairLaneInactiveErrorV1) kind = 'lane_inactive';
       else if (current instanceof CatalogRepairIntegrityErrorV1
         || (current instanceof ExactGraphReadError && current.kind === 'integrity')) kind = 'integrity';
       else if (isStoreSchedulerBusyError(current)) kind = current.reason === 'queue_wait_timeout' ? 'queue_wait' : 'queue_full';

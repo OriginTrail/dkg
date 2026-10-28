@@ -166,28 +166,43 @@ async function advanceUntil(done: () => boolean, withinMs: number): Promise<numb
 }
 
 /**
- * Authority reads as a node issues them while it evaluates saved state at
- * start: several at once, each back in the queue as soon as it is answered.
+ * Foreground work that asks for more than the node's request budget admits:
+ * authority reads as a node issues them while it evaluates saved state at
+ * start (several at once, each back in the queue as soon as it is answered)
+ * and, beside them, ordinary reads of the node's other work.
+ *
+ * The authority reads go first. The ordinary ones take every other permit
+ * (the governor's fairness rule), in the order they queued. A read that
+ * queues behind them therefore waits for every one of them: with forty-eight
+ * ahead, about ten seconds.
  */
-function startAuthorityReads(governor: Governor, readers: number, roundTripMs: number) {
+function startQueuedReads(
+  governor: Governor,
+  readers: { authority: number; ordinary: number },
+  roundTripMs: number,
+) {
   const burst = new AbortController();
-  let admitted = 0;
-  const running = Array.from({ length: readers }, async () => {
+  let authorityAdmitted = 0;
+  const read = async (admissionPriority?: 'authority'): Promise<void> => {
     while (!burst.signal.aborted) {
       try {
         await withRpcRequestContext(
-          { requestClass: 'foreground', admissionPriority: 'authority', signal: burst.signal },
+          { requestClass: 'foreground', admissionPriority, signal: burst.signal },
           () => governor.acquireActiveRequest(),
         );
       } catch {
         return;
       }
-      admitted += 1;
+      if (admissionPriority === 'authority') authorityAdmitted += 1;
       await new Promise<void>((resolve) => { setTimeout(resolve, roundTripMs); });
     }
-  });
+  };
+  const running = [
+    ...Array.from({ length: readers.authority }, () => read('authority')),
+    ...Array.from({ length: readers.ordinary }, () => read()),
+  ];
   return {
-    admitted: () => admitted,
+    authorityAdmitted: () => authorityAdmitted,
     stop: async (): Promise<void> => {
       burst.abort(new Error('burst over'));
       await vi.advanceTimersByTimeAsync(roundTripMs);
@@ -195,6 +210,9 @@ function startAuthorityReads(governor: Governor, readers: number, roundTripMs: n
     },
   };
 }
+
+/** The mix every case below queues behind. */
+const QUEUED_READERS = { authority: 20, ordinary: 48 } as const;
 
 describe('one-log start that cannot complete for now', () => {
   const adapters: Adapter[] = [];
@@ -238,22 +256,22 @@ describe('one-log start that cannot complete for now', () => {
     await validateChainIds(adapter);
 
     // The start runs as ordinary foreground work. Part-way through the second
-    // contract's search, authority reads start to arrive faster than the node's
-    // request budget admits them. They go first, so the search's next read
-    // stays queued behind them.
-    let authorityReads: ReturnType<typeof startAuthorityReads> | undefined;
+    // contract's search, other foreground work starts to ask for more than the
+    // node's request budget admits. The search's next read queues behind the
+    // ordinary reads already waiting, which share every other permit.
+    let queuedReads: ReturnType<typeof startQueuedReads> | undefined;
     const answer = rpc.answer!;
     rpc.answer = (method, params) => {
       if (
-        authorityReads === undefined
+        queuedReads === undefined
         && method === 'eth_getCode'
         && String(params[0]).toLowerCase() === CG_STORAGE
         && Number(params[1]) === 16
       ) {
         // Issued by other work on the node, so outside this read's own context.
-        authorityReads = withDetachedRpcRequestContext(
+        queuedReads = withDetachedRpcRequestContext(
           'foreground',
-          () => startAuthorityReads(governor, 20, 100),
+          () => startQueuedReads(governor, QUEUED_READERS, 100),
         );
       }
       return answer(method, params);
@@ -261,7 +279,7 @@ describe('one-log start that cannot complete for now', () => {
 
     internals.startChainIndexRuntime();
     const starting = internals.chainIndexOwner.starting;
-    await advanceUntil(() => authorityReads !== undefined, 2_000);
+    await advanceUntil(() => queuedReads !== undefined, 2_000);
     expect(codeReads(HUB)).toEqual([64, 32, 16, 24, 20, 22, 21]);
     expect(codeReads(CG_STORAGE)).toEqual([64, 32, 16]);
 
@@ -284,11 +302,11 @@ describe('one-log start that cannot complete for now', () => {
     expect(indexLines(log)).toEqual([]);
     expect(adapter.chainEventLog).toBeUndefined();
     expect(governor.snapshot().cancelled).toBe(2);
-    expect(authorityReads!.admitted()).toBeGreaterThan(80);
+    expect(queuedReads!.authorityAdmitted()).toBeGreaterThan(60);
 
-    // The authority reads end. The third attempt, ten seconds after the
-    // second, is admitted, and the log attaches.
-    await authorityReads!.stop();
+    // The other work ends. The third attempt, ten seconds after the second,
+    // is admitted, and the log attaches.
+    await queuedReads!.stop();
     await advanceUntil(() => adapter.chainEventLog !== undefined, 12_000);
     await starting;
 
@@ -317,18 +335,19 @@ describe('one-log start that cannot complete for now', () => {
     await validateChainIds(adapter);
     rpc.roundTripMs = 300;
 
-    // Authority reads hold the queue until 150 ms before the probe's deadline.
-    // The probe is then admitted and sent, and its answer comes 150 ms too late.
-    const authorityReads = withDetachedRpcRequestContext(
+    // Other foreground work holds the queue until 150 ms before the probe's
+    // deadline. The probe is then admitted and sent, and its answer comes
+    // 150 ms too late.
+    const queuedReads = withDetachedRpcRequestContext(
       'foreground',
-      () => startAuthorityReads(governor, 20, 100),
+      () => startQueuedReads(governor, QUEUED_READERS, 100),
     );
     await vi.advanceTimersByTimeAsync(3_000);
     internals.startChainIndexRuntime();
     const starting = internals.chainIndexOwner.starting;
     await vi.advanceTimersByTimeAsync(3_850);
     expect(rpc.sent.filter(({ method }) => method === 'eth_blockNumber')).toEqual([]);
-    await authorityReads.stop();
+    await queuedReads.stop();
     await advanceUntil(() => indexLines(warn).length > 0, 200);
 
     // A timeout this time, not a refusal: the request did leave the node.
