@@ -9,6 +9,13 @@ export interface StoreContentScope {
   readonly subjects: readonly string[];
 }
 
+export interface StoreContentProof {
+  assertCurrent(): void;
+  /** Narrow an existing live watch; never reopen a watch after verification. */
+  restrict(scope: StoreContentScope): void;
+  close(): void;
+}
+
 /** Explicit content effects shared by active writes, watches and uncertain outcomes. */
 type GraphEffect = { kind: 'graph' } | { kind: 'subjects'; subjects: Set<string> };
 type ContentEffect = { kind: 'global' } | { kind: 'graphs'; graphs: Map<string, GraphEffect> };
@@ -59,6 +66,18 @@ function overlaps(left: ContentEffect, right: ContentEffect): boolean {
     for (const subject of effect.subjects) if (other.subjects.has(subject)) return true;
   }
   return false;
+}
+
+function containsEffect(outer: ContentEffect, inner: ContentEffect): boolean {
+  if (outer.kind === 'global') return true;
+  if (inner.kind === 'global') return false;
+  for (const [graph, effect] of inner.graphs) {
+    const covered = outer.graphs.get(graph);
+    if (!covered) return false;
+    if (covered.kind === 'graph') continue;
+    if (effect.kind === 'graph' || [...effect.subjects].some(subject => !covered.subjects.has(subject))) return false;
+  }
+  return true;
 }
 
 function combine(left: ContentEffect, right: ContentEffect): ContentEffect {
@@ -119,7 +138,7 @@ export class StoreContentFence implements StoreMutationObserver {
     }
   }
 
-  openScope(scope: StoreContentScope): { assertCurrent(): void; close(): void } | undefined {
+  openScope(scope: StoreContentScope): StoreContentProof | undefined {
     const state = this.recoveryGeneration?.();
     if (this.recoveryGeneration && !state?.ready) return undefined;
     const generation = state?.generation;
@@ -130,13 +149,21 @@ export class StoreContentFence implements StoreMutationObserver {
     for (const pending of this.pending) if (overlaps(effect, pending)) return undefined;
     const watch = { effect, valid: true };
     this.watches.add(watch);
+    let closed = false;
+    const assertCurrent = () => {
+      const current = this.recoveryGeneration?.();
+      if (closed || !watch.valid || (this.recoveryGeneration && (!current?.ready || current.generation !== generation))) throw Object.assign(
+        new Error('Held assertion content changed during recovery'), { name: 'AbortError' });
+    };
     return {
-      assertCurrent: () => {
-        const current = this.recoveryGeneration?.();
-        if (!watch.valid || (this.recoveryGeneration && (!current?.ready || current.generation !== generation))) throw Object.assign(
-          new Error('Held assertion content changed during recovery'), { name: 'AbortError' });
+      assertCurrent,
+      restrict: narrowed => {
+        assertCurrent();
+        const effect = scopeEffect(narrowed);
+        if (!containsEffect(watch.effect, effect)) throw new Error('Cannot widen a verified content scope');
+        watch.effect = effect;
       },
-      close: () => { this.watches.delete(watch); },
+      close: () => { closed = true; this.watches.delete(watch); },
     };
   }
 

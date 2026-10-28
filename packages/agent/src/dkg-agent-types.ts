@@ -1244,6 +1244,8 @@ export interface DurableSyncDiagnostics {
   metaOnlyResponses: number;
   /** Cryptographically verified V2 responses whose public graph is intentionally empty. */
   verifiedPrivateOnlyResponses: number;
+  /** Assets of a completed generation already stored here and current on chain; no DATA fetched for them. */
+  verifiedHeldAssets?: number;
   dataRejectedMissingMeta: number;
   rejectedKcs: number;
   failedPeers: number;
@@ -1263,10 +1265,8 @@ export interface DurableSyncResult extends DurableSyncDiagnostics {
   insertedTriples: number;
   deniedPhases: number;
   /**
-   * True only when every requested Context Graph reached a verified terminal
-   * state in this invocation. Committed prefixes remain observable through the
-   * counters while this stays false, so callers never have to infer whole-run
-   * completeness from per-phase progress.
+   * True only when every requested Context Graph reached a verified terminal state.
+   * Committed-prefix counters remain observable even when the whole run is incomplete.
    */
   complete: boolean;
 }

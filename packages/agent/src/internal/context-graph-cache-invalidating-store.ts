@@ -12,6 +12,8 @@ import type { StoreMutation, StoreMutationObserver } from './store-mutation.js';
 import { createObservedStoreMutation, type ObservedStoreMutation, type ProjectionDirtyCallback } from './observed-store-mutation.js';
 export type { ProjectionDirtyCallback } from './observed-store-mutation.js';
 
+type MutationObservedStore = TripleStore & Partial<SortedGraphSetSource>;
+
 // A commit the canonical plan refuses is refused by the store before dispatch too; until it is,
 // it may change anything.
 function describeCommit(input: Rfc64AuthorCommitCasInputV1): StoreMutation {
@@ -29,7 +31,7 @@ export function createListContextGraphsCacheInvalidatingStore(
   // names its target graph so deleted facts are fenced, not only inserted
   // ones) and the observer sees it before dispatch and again when it settles.
   observerOrCallback?: StoreMutationObserver | ProjectionDirtyCallback,
-): TripleStore & Partial<SortedGraphSetSource> {
+): MutationObservedStore {
   return createMutationObservedStore(innerStore, createObservedStoreMutation(invalidate, observerOrCallback));
 }
 
@@ -37,13 +39,12 @@ export function createListContextGraphsCacheInvalidatingStore(
 export function createMutationObservedStore(
   innerStore: TripleStore,
   invalidateAfterMutation: ObservedStoreMutation,
-): TripleStore & Partial<SortedGraphSetSource> {
+): MutationObservedStore {
   const sortedSource = typeof (innerStore as Partial<SortedGraphSetSource>).listGraphsSorted
     === 'function'
     ? innerStore as TripleStore & SortedGraphSetSource
     : null;
-  const wrapper: TripleStore
-    & Partial<SortedGraphSetSource>
+  const wrapper: MutationObservedStore
     & { readonly innerStore: TripleStore } = {
     innerStore,
     get queryCancellation() {
