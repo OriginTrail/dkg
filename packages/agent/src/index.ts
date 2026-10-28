@@ -1,3 +1,5 @@
+export type { ContextGraphPartitionRead } from '@origintrail-official/dkg-query';
+export type { ContextGraphPartitionInventoryOptions } from './internal/context-graph-partition-query.js';
 export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
 export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';

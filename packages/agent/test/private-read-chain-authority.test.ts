@@ -264,9 +264,9 @@ describe('private read authorization uses the on-chain participant roster', () =
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', {
       contextGraphId,
     })).resolves.toMatchObject({ bindings: [{ s: 'urn:finalized-visible' }] });
-    await expect(agent.listContextGraphQueryPartitions(contextGraphId, {
+    await expect(agent.listContextGraphQueryPartitionReads(contextGraphId, {
       callerAgentAddress: MEMBER,
-    })).resolves.toContain(root);
+    })).resolves.toContainEqual({ graph: root, admission: 'public' });
     expect(readIndex).toHaveBeenCalledWith(
       ['8'],
       expect.objectContaining({ signal: expect.any(AbortSignal) }),

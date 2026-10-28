@@ -47,10 +47,10 @@ describe('query caller-provided store labels', () => {
       const agent = Object.assign(Object.create(ContextGraphPartitionQueryMethods.prototype),
         { queryEngine, resolveContextGraphReadAuthority: authority }) as DKGAgent;
       const options = { callerAgentAddress: '0xreader', signal: new AbortController().signal, priority: 'background' as const, source: 'inventory-caller' };
-      const result = ContextGraphPartitionQueryMethods.prototype.listContextGraphQueryPartitions.call(agent, contextGraphId, options);
+      const result = ContextGraphPartitionQueryMethods.prototype.listContextGraphQueryPartitionReads.call(agent, contextGraphId, options);
       if (outcome === 'unavailable') await expect(result).rejects.toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' });
       else {
-        const graphs = await result;
+        const graphs = (await result).map(partition => partition.graph);
         if (outcome === 'allowed') {
           expect(graphs).toContain(root);
           expect(graphs).not.toContain(`${root}/_private`);

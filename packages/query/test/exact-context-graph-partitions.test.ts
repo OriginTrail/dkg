@@ -19,7 +19,7 @@ describe('exact context-graph partition reads', () => {
         { subject: 'urn:unregistered', predicate: 'urn:p', object: '"hidden"', graph: `${ROOT}/_working_memory/0xother/2` },
       ]);
       const engine = new DKGQueryEngine(store);
-      const graphs = await engine.listContextGraphQueryPartitions('large');
+      const graphs = (await engine.listContextGraphQueryPartitionReads('large')).map(partition => partition.graph);
       expect(graphs).toEqual(expect.arrayContaining([WM, SWM, VM]));
       expect(graphs).not.toContain(`${ROOT}/_private/1`);
       expect(graphs).not.toContain(`${ROOT}/_working_memory/0xother/2`);
@@ -33,6 +33,30 @@ describe('exact context-graph partition reads', () => {
       for (const graph of [`${ROOT}/_private/1`, `${ROOT}/_working_memory/0xother/2`, 'did:dkg:context-graph:other']) {
         await expect(engine.query(`SELECT ?s WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, options)).rejects.toThrow(/Scoped query violation/);
       }
+    } finally { await store.close(); }
+  });
+
+  it('rejects expression graph patterns before the physical default-graph sentinel can be read', async () => {
+    const store = new OxigraphStore();
+    try {
+      await store.insert([
+        { subject: 'urn:visible', predicate: 'urn:p', object: '"visible"', graph: ROOT },
+        { subject: 'urn:secret', predicate: 'urn:p', object: '"secret"', graph: '' },
+      ]);
+      const engine = new DKGQueryEngine(store), spy = vi.spyOn(store, 'query');
+      const exists = 'EXISTS { <urn:secret> <urn:p> "secret" }';
+      const where = `GRAPH <${ROOT}> { ?s ?p ?o }`;
+      for (const query of [
+        `SELECT (${exists} AS ?leak) WHERE { ${where} }`,
+        `SELECT ?leak WHERE { { SELECT (${exists} AS ?leak) WHERE { ${where} } } }`,
+        `SELECT ?s WHERE { ${where} } ORDER BY (${exists})`,
+        `SELECT (COUNT(*) AS ?n) WHERE { ${where} } HAVING (${exists})`,
+      ]) {
+        await expect(engine.query(query, options)).rejects.toThrow(/Exact partition reads do not support EXISTS/);
+        expect(spy.mock.calls.some(([submitted]) => submitted === query)).toBe(false);
+      }
+      expect((await engine.query(`SELECT (COUNT(*) AS ?n) WHERE { ${where} }`, options)).bindings).toHaveLength(1);
+      expect((await engine.query(`SELECT ("EXISTS" AS ?label) WHERE { ${where} }`, options)).bindings).toHaveLength(1);
     } finally { await store.close(); }
   });
 
@@ -90,7 +114,7 @@ describe('exact context-graph partition reads', () => {
         ...Array.from({ length: 80 }, (_, n) => ({ subject: `urn:vm:${n}`, predicate: 'urn:p', object: '"visible"', graph: `${ROOT}/_verifiable_memory/author/${n}` })),
       ]);
       const engine = new DKGQueryEngine(store);
-      await engine.listContextGraphQueryPartitions('large');
+      await engine.listContextGraphQueryPartitionReads('large');
       enumerate.mockClear();
       submitted.length = 0;
       const query = `SELECT ?s WHERE { GRAPH <${WM}> { ?s ?p ?o } }`;
@@ -174,7 +198,7 @@ describe('exact context-graph partition reads', () => {
       const engine = new DKGQueryEngine(store);
       for (const { id, opts, readable, forbidden } of cases) {
         // Exact admission must accept every inventory graph the dashboard then reads.
-        const inventory = await engine.listContextGraphQueryPartitions(id, opts);
+        const inventory = (await engine.listContextGraphQueryPartitionReads(id, opts)).map(partition => partition.graph);
         expect(inventory).toEqual(expect.arrayContaining(readable));
         for (const graph of readable) expect((await read(engine, graph, { ...opts, contextGraphId: id })).bindings).toHaveLength(1);
         for (const graph of forbidden) {

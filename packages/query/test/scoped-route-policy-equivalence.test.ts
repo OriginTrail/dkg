@@ -61,7 +61,7 @@ describe('scoped route policy equivalence', () => {
       const engine = new DKGQueryEngine(store);
       const options: QueryOptions = { contextGraphId: 'route-equivalence', includeSharedMemory: true,
         includeContextGraphPartitions: true, draftAccess: { kind: 'owners', owners: ['alice'] } };
-      const inventory = await engine.listContextGraphQueryPartitions('route-equivalence', options);
+      const inventory = (await engine.listContextGraphQueryPartitionReads('route-equivalence', options)).map(partition => partition.graph);
       expect(inventory).toEqual(expect.arrayContaining([mine, child]));
       for (const denied of [foreign, ...staged]) expect(inventory).not.toContain(denied);
       const ordinary = await engine.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', options);
@@ -91,7 +91,7 @@ describe('scoped route policy equivalence', () => {
       ]);
       const engine = new DKGQueryEngine(store);
       const scoped = { ...options, contextGraphId: 'route-equivalence', includeContextGraphPartitions: true };
-      expect((await engine.listContextGraphQueryPartitions('route-equivalence', options)).sort()).toEqual([...expected].sort());
+      expect((await engine.listContextGraphQueryPartitionReads('route-equivalence', options)).map(partition => partition.graph).sort()).toEqual([...expected].sort());
       const ordinary = await engine.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', scoped);
       expect(ordinary.bindings.map(row => row.g).sort()).toEqual([...expected].sort());
       for (const graph of CANDIDATES) {

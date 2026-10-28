@@ -1,13 +1,12 @@
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { ContextGraphPartitionRead } from '@origintrail-official/dkg-agent';
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { QueryOptions, QueryResult } from '@origintrail-official/dkg-storage';
 
-type PartitionRead = Awaited<ReturnType<DKGAgent['listContextGraphQueryPartitionReads']>>[number];
 /** Both operations belong to one admitted, caller-bound partition reader. */
 export interface ContextGraphReader {
-  listPartitions(options: QueryOptions): Promise<PartitionRead[]>;
-  query(sparql: string, options: QueryOptions, admission: PartitionRead['admission']): Promise<QueryResult>;
+  listPartitions(options: QueryOptions): Promise<ContextGraphPartitionRead[]>;
+  query(sparql: string, options: QueryOptions, admission: ContextGraphPartitionRead['admission']): Promise<QueryResult>;
 }
 
 export interface ContextGraphNamedGraphStats {
@@ -32,7 +31,7 @@ function isScopedGraph(graph: string, root: string): boolean {
 }
 
 
-export function planDiagnosticGraphReads(partitions: readonly PartitionRead[], contextGraphId: string) {
+export function planDiagnosticGraphReads(partitions: readonly ContextGraphPartitionRead[], contextGraphId: string) {
   const root = `did:dkg:context-graph:${contextGraphId}`;
   return [...partitions].sort((a, b) => a.graph.localeCompare(b.graph))
     .filter(partition => isScopedGraph(partition.graph, root))

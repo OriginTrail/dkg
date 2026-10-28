@@ -92,3 +92,9 @@ export interface QueryAccessConfig {
   contextGraphs?: Record<string, ContextGraphQueryPolicy>;
   rateLimitPerMinute?: number;
 }
+
+/** Authorized partition and the admission needed before reading its content. */
+export interface ContextGraphPartitionRead {
+  readonly graph: string;
+  readonly admission: 'public' | 'shared-memory';
+}

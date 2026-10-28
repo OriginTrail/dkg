@@ -93,12 +93,8 @@ export function useMemoryPages(contextGraphId: string, includeQueryCatalog: bool
           : emptySource(definition));
         if (mode === 'append' && !sources.some(canContinue)) return;
         commit({ key, contextGraphId, sources, loading: true });
-        const results: MemorySource[] = [];
-        for (const source of sources) {
-          if (signal.aborted) return;
-          results.push(mode === 'append' && !canContinue(source)
-            ? source : await readSource(source, mode, contextGraphId, signal));
-        }
+        const results = await Promise.all(sources.map(source => mode === 'append' && !canContinue(source)
+          ? source : readSource(source, mode, contextGraphId, signal)));
         if (!signal.aborted) commit({ key, contextGraphId, sources: results, loading: false });
       },
       onError: () => {

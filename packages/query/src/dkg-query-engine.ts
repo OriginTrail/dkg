@@ -1,3 +1,4 @@
+import type { ContextGraphPartitionRead } from './query-types.js';
 import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions } from './scoped-content-graph-policy.js';
 import { authorizeExactContextGraphPartitions } from './exact-context-graph-partitions.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
@@ -330,15 +331,8 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     );
   }
 
-  /** Enumerate the same caller-selected public dataset as scoped GRAPH variables. */
-  async listContextGraphQueryPartitions(contextGraphId: string, options?: QueryOptions): Promise<string[]> {
-    return (await this.listContextGraphQueryPartitionReads(contextGraphId, options)).map(partition => partition.graph);
-  }
-
   /** Carry admission requirements with the authorized inventory across caller boundaries. */
-  async listContextGraphQueryPartitionReads(contextGraphId: string, options?: QueryOptions): Promise<Readonly<{
-    graph: string; admission: 'public' | 'shared-memory';
-  }>[]> {
+  async listContextGraphQueryPartitionReads(contextGraphId: string, options?: QueryOptions): Promise<ContextGraphPartitionRead[]> {
     const opts = { ...options, includeSharedMemory: options?.includeSharedMemory ?? options?.includeWorkspace ?? true };
     const policy = createScopedContentGraphRoutePolicy(contextGraphId, opts);
     const reads = createQueryStoreReadContext(this.store, opts);
