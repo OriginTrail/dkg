@@ -283,3 +283,60 @@ test('cyclic internal runtime dependencies fail publication before mutation', as
   const f = fixture(t, { expected });
   await assert.rejects(preparedRelease(releaseOptions(f, { runner: () => assert.fail('cycle mutated') })), /cyclic internal publication dependency/);
 });
+
+
+test('promotion and direct stable publication cannot omit the decision or mutate after it fails', async t => {
+  const f = fixture(t);
+  for (const extra of [{ mode: 'promote' }, { tags: ['latest'] }, { tags: ['mainnet'] }]) {
+    const options = releaseOptions(f, { ...extra, evidenceFile: undefined, runner: () => assert.fail('mutated without decision') });
+    await assert.rejects(preparedRelease(options), /decision file is required/);
+    options.evidenceFile = 'decision.json';
+    options.prepareEvidence = () => { throw new Error('decision invalid'); };
+    await assert.rejects(preparedRelease(options), /decision invalid/);
+  }
+});
+
+for (const mode of ['promote', 'publish']) for (const dryRun of [false, true]) test(`${mode}: evidence invalidated during registry acquisition blocks ${dryRun ? 'dry-run planning' : 'every mutation'}`, async t => {
+  const f = fixture(t);
+  let verified = 0, acquired = 0, mutations = 0, valid = true;
+  const options = releaseOptions(f, { mode, tags: ['mainnet'], dryRun, evidenceFile: 'decision.json',
+    prepareEvidence: () => { verified++; assert.ok(valid, 'qualification changed during acquisition'); },
+    readTags: async () => ({}), askOtp: null, settle: 0,
+    readDist: pkg => { acquired++; valid = false; return mode === 'publish' ? null : { integrity: pkg.integrity }; },
+    runner: () => { mutations++; },
+  });
+  await assert.rejects(preparedRelease(options), /qualification changed during acquisition/);
+  assert.equal(verified, 2);
+  assert.equal(acquired, f.manifest.packages.length);
+  assert.equal(mutations, 0);
+});
+
+for (const channel of ['latest', 'mainnet']) for (const damage of ['certificate', 'changed report', 'missing report']) {
+  test(`direct ${channel} publication rechecks ${damage} after final evidence acquisition`, async t => {
+    const f = fixture(t);
+    let acquisitions = 0, mutations = 0;
+    const options = releaseOptions(f, { tags: [channel], readDist: () => null,
+      prepareEvidence: async () => {
+        if (++acquisitions === 2) {
+          if (damage === 'certificate') writeJson(f.receiptFile, {});
+          else if (damage === 'changed report') fs.appendFileSync(path.join(f.attempt, 'core-slot-report.json'), ' ');
+          else fs.unlinkSync(path.join(f.attempt, 'core-slot-report.json'));
+        }
+        return { recheckLocalIntegrity: () => {} };
+      },
+      runner: () => { mutations++; },
+    });
+    await assert.rejects(preparedRelease(options));
+    assert.equal(acquisitions, 2);
+    assert.equal(mutations, 0);
+  });
+}
+
+test('canary publication remains available without stable-release evidence', async t => {
+  const f = fixture(t); let mutations = 0;
+  await preparedRelease(releaseOptions(f, { evidenceFile: undefined,
+    prepareEvidence: () => { throw new Error('canary should not acquire stable-release evidence'); },
+    runner: () => { mutations++; },
+  }));
+  assert.equal(mutations, f.manifest.packages.length);
+});
