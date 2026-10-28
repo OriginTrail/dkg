@@ -188,7 +188,9 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       }
       expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'anonymous')).status).toBe(403);
       expect((await post(retry, { contextGraphId: cg, recovery: [] })).status).toBe(400);
-      expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence, assertionCoordinate: 'other' } })).status).toBe(400);
+      expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence, assertionCoordinate: 'other' } })).status).toBe(409);
+      expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence, assertionCoordinate: 'other',
+        assertionUri: contextGraphAssertionUri(cg, authorAddress, 'other') } })).status).toBe(400);
       expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence, seal: {} } })).status).toBe(409);
       if (creationTransaction) expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence, ...creationTransaction } })).status).toBe(409);
       if (priorUpdate) expect((await post(retry, { contextGraphId: cg, recovery: { ...evidence,
@@ -204,7 +206,7 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       const storedSeal = await agent.store.query(`CONSTRUCT { <${originalSubject}> ?p ?o } WHERE { GRAPH <${contextGraphMetaUri(cg)}> { <${originalSubject}> ?p ?o } }`);
       if (storedSeal.type !== 'quads' || storedSeal.quads.length === 0) throw new Error('missing original stored seal');
       await agent.store.insert(storedSeal.quads.map(q => ({ ...q, subject: otherSubject, graph: contextGraphMetaUri(otherCg) })));
-      expect((await post(retry, { contextGraphId: otherCg, recovery: { ...evidence, contextGraphId: otherCg } })).status).toBe(409);
+      expect((await post(retry, { contextGraphId: otherCg, recovery: { ...evidence, contextGraphId: otherCg, assertionUri: otherSubject } })).status).toBe(409);
       expect(observe).toHaveBeenCalledTimes(initialObservations); expect(repairs.list()).toEqual([]);
       const stillPending = await post(retry, { contextGraphId: cg, recovery: evidence });
       expect(stillPending.status).toBe(503); expect(stillPending.body.recovery).toEqual(evidence);
@@ -212,7 +214,7 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       const recovered = await post(retry, { contextGraphId: cg, recovery: evidence }, lane === 'curator-member' ? 'curator' : 'node');
       expect(recovered.status, JSON.stringify(recovered.body)).toBe(200);
       if (lane === 'curator-member') {
-        expect((await post(retry, { contextGraphId: otherCg, recovery: { ...evidence, contextGraphId: otherCg } }, 'curator')).status).toBe(409);
+        expect((await post(retry, { contextGraphId: otherCg, recovery: { ...evidence, contextGraphId: otherCg, assertionUri: otherSubject } }, 'curator')).status).toBe(409);
       }
       expect((await post(retry, { contextGraphId: cg, recovery: evidence }, 'author')).status).toBe(200);
       if (lane === 'curator-member') {

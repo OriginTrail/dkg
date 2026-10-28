@@ -38,12 +38,14 @@ export function selectConfirmedCatalogObligationForAgentV1(
 }
 
 /** Refuse incompatible immutable identities before any publication preparation or submission. */
-export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmissionHostV1, config: CatalogAdmissionConfigurationV1, params: CatalogPublicationIdentityV1): void {
+export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmissionHostV1, config: CatalogAdmissionConfigurationV1, params: CatalogPublicationIdentityV1): boolean {
   // Persisted selection wins; older requests without evidence use current applicability.
-  if (params.catalogObligationRequired === false || (params.catalogObligationRequired === undefined
-    && selectConfirmedCatalogObligationForAgentV1(host, config, params) === 'excluded')) return;
+  const required = params.catalogObligationRequired
+    ?? (selectConfirmedCatalogObligationForAgentV1(host, config, params) === 'required');
+  if (!required) return false;
   assertContextGraphIdV1(params.contextGraphId);
   assertAssertionCoordinateV1(params.assertionCoordinate);
+  return true;
 }
 
 interface ConfirmationObserverPortsV1 {

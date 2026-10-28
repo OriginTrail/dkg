@@ -525,6 +525,7 @@ describe('RFC-64 local SWM catalog projection lifecycle', () => {
     await agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(remove).toHaveBeenCalledOnce();
     expect(remove).toHaveBeenCalledWith({
+      contextGraphId: CONTEXT_GRAPH_ID,
       scope: expect.objectContaining({ networkId: NETWORK_ID, contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR }),
       expectedRow: expect.objectContaining({ version: 2, inventoryScope: null,
         assertionCoordinate: 'same-instance-share', assertionVersion: canonicalSeal.assertionVersion,

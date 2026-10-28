@@ -1,3 +1,4 @@
+import type { ContextGraphBindingState } from '../context-graph-binding-state.js';
 // SPDX-License-Identifier: Apache-2.0
 import {
   computeCanonicalGraphScopedAuthorSealDigestV1,
@@ -70,23 +71,30 @@ export async function recoverConfirmedCatalogObligationV1(
     ctx: createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
 }
 
+/** Keep capture and validation coupled to the same typed generation owner. */
+export function captureConfirmedCatalogRecoveryFenceV1(state: Pick<ContextGraphBindingState, 'capture' | 'isGenerationCurrent'>, graph: string): () => void {
+  const generation = state.capture(graph);
+  return () => {
+    if (!state.isGenerationCurrent(graph, generation)) throw new Error('Confirmed catalog recovery graph binding changed');
+  };
+}
+
 /** Capture the caller lifetime and graph generation before any evidence read awaits. */
 export async function recoverRetainedCatalogObligationV1(input: unknown, ports: {
   chain: ChainAdapter; store: TripleStore; signal(): AbortSignal;
-  capture(graph: string): unknown;
-  isCurrent(graph: string, generation: unknown): boolean;
+  captureFence(graph: string): () => void;
   resolveBinding(graph: string, signal: AbortSignal): Promise<{ onChainId: string } | null>;
   observe(params: ObserveRfc64ConfirmedVmParamsV1): Promise<boolean>;
 }): Promise<void> {
   const evidence = parseConfirmedCatalogObligationRecoveryV1(input);
   const signal = ports.signal();
-  const generation = ports.capture(evidence.contextGraphId);
+  const assertGeneration = ports.captureFence(evidence.contextGraphId);
   await recoverConfirmedCatalogObligationV1(evidence, {
     chain: ports.chain, store: ports.store, signal,
     resolveBinding: () => ports.resolveBinding(evidence.contextGraphId, signal),
     assertCurrent: () => {
       signal.throwIfAborted();
-      if (!ports.isCurrent(evidence.contextGraphId, generation)) throw new Error('Confirmed catalog recovery graph binding changed');
+      assertGeneration();
     },
     observe: async params => { await ports.observe(params); },
   });

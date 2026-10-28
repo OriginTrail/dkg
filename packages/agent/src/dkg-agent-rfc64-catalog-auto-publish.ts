@@ -52,7 +52,7 @@ import {
   workspaceHeadIncludesShareOperationId,
 } from '@origintrail-official/dkg-publisher';
 import { observeConfirmedCatalogObligationV1, selectConfirmedCatalogObligationForAgentV1 } from './internal/confirmed-catalog-obligation.js';
-import { recoverRetainedCatalogObligationV1 } from './internal/confirmed-catalog-obligation-recovery.js';
+import { captureConfirmedCatalogRecoveryFenceV1, recoverRetainedCatalogObligationV1 } from './internal/confirmed-catalog-obligation-recovery.js';
 import { observeDurableSwmPromotionV1 } from './internal/durable-swm-promotion-observer.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
@@ -656,8 +656,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   async recoverRfc64ConfirmedCatalogObligationV1(this: DKGAgent, input: unknown): Promise<void> {
     return recoverRetainedCatalogObligationV1(input, {
       chain: this.chain, store: this.store, signal: () => this.workLifetime.signal,
-      capture: graph => this.contextGraphBindingState.capture(graph),
-      isCurrent: (graph, generation) => this.contextGraphBindingState.isGenerationCurrent(graph, generation as ReturnType<typeof this.contextGraphBindingState.capture>),
+      captureFence: graph => captureConfirmedCatalogRecoveryFenceV1(this.contextGraphBindingState, graph),
       resolveBinding: (graph, signal) => this.resolveContextGraphOnChainIdBinding(graph, { signal }),
       observe: params => this.observeRfc64ConfirmedVmV1(params),
     });
