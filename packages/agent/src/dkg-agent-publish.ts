@@ -6213,9 +6213,19 @@ export class PublishMethods extends DKGAgentBase {
     }
 
     if (result.status === 'confirmed') {
-      await beginNamedPublishFinalization(this.store, {
-        assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId,
-      }, () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
+      // Best-effort like the receipt: the finalization below writes the checkpoint again before it
+      // completes, so a failed write here cannot strand a confirmed publish with its share consumed.
+      try {
+        await beginNamedPublishFinalization(this.store, {
+          assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId,
+        }, () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
+      } catch (err) {
+        this.log.warn(
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          `Failed to write publish checkpoint for <${assertionUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
     }
 
     // Exact scope owns published-root cleanup. A caller's explicit request to

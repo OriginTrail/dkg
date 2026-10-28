@@ -383,6 +383,17 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await receiptTxHashes(store)).toEqual([lostMint.txHash]);
   });
 
+  it('records the mint when the first write of the publish checkpoint fails, instead of stranding the consumed share', async () => {
+    const { agent, store, sealed, lostMint, history } = await strandedAsset(new MockChainAdapter());
+    // The write the publish makes before it stamps the lifecycle and clears the share marker.
+    failNextLifecycleWrite(agent, store, 'http://dkg.io/ontology/namedPublishFinalizationReady');
+
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
+  });
+
   it('completes a publish receipt the publish path failed to write, instead of reporting success without it', async () => {
     const { agent, store, sealed, lostMint, history } = await strandedAsset(new MockChainAdapter());
     failNextLifecycleWrite(agent, store, PUBLISHED_AT_TX_PRED);
