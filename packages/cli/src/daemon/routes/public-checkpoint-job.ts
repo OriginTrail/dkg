@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: Apache-2.0
-import { randomUUID } from 'node:crypto';
-import { normalizePublicSnapshotSyncOptions, type DKGAgent } from '@origintrail-official/dkg-agent';
+import { normalizePublicSnapshotSyncOptions } from '@origintrail-official/dkg-agent';
 import { readBody, jsonResponse, isPayloadTooLargeError } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
-import type { PublicCheckpointJob, RunningPublicCheckpointJob } from '../../public-checkpoint-contract.js';
-const jobs = new WeakMap<DKGAgent, Exclude<PublicCheckpointJob, { state: 'idle' }>>();
+import type { PublicCheckpointJob } from '../../public-checkpoint-contract.js';
+import { createSnapshotJobTracker } from './snapshot-job-tracker.js';
+type Result = Extract<PublicCheckpointJob, { state: 'complete' }>['result'];
+const jobs = createSnapshotJobTracker<Result, object, object>(() => ({}));
 
 /** Parent route enforces node-admin access. A completed preparation is never active coverage. */
 export async function handlePublicCheckpointJob({ req, res, agent }: RequestContext): Promise<void> {
   if (req.method === 'GET') { jsonResponse(res, 200, jobs.get(agent) ?? { state: 'idle' }); return; }
   if (req.method !== 'POST') { jsonResponse(res, 405, { error: 'Method not allowed' }); return; }
-  if (jobs.get(agent)?.state === 'running') { jsonResponse(res, 409, { error: 'Checkpoint preparation already running' }); return; }
+  if (jobs.isRunning(agent)) { jsonResponse(res, 409, { error: 'Checkpoint preparation already running' }); return; }
   let input: ReturnType<typeof normalizePublicSnapshotSyncOptions>, native: boolean;
   try {
     const raw = JSON.parse(await readBody(req, 4096));
@@ -22,12 +23,7 @@ export async function handlePublicCheckpointJob({ req, res, agent }: RequestCont
   } catch (error) {
     jsonResponse(res, isPayloadTooLargeError(error) ? 413 : 400, { error: 'Invalid checkpoint request' }); return;
   }
-  if (jobs.get(agent)?.state === 'running') { jsonResponse(res, 409, { error: 'Checkpoint preparation already running' }); return; }
-  const job: RunningPublicCheckpointJob = { id: randomUUID(), startedAt: Date.now(), state: 'running' };
-  jobs.set(agent, job);
-  void agent.preparePublicGraphCheckpoint(input, native).then(
-    result => { jobs.set(agent, { ...job, state: 'complete', result }); },
-    error => { jobs.set(agent, { ...job, state: 'failed', error: error instanceof Error ? error.message : String(error) }); },
-  );
+  const job = jobs.start(agent, {}, () => agent.preparePublicGraphCheckpoint(input, native));
+  if (!job) { jsonResponse(res, 409, { error: 'Checkpoint preparation already running' }); return; }
   jsonResponse(res, 202, job);
 }
