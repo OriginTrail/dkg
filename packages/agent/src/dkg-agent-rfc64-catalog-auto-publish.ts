@@ -966,22 +966,23 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
    */
   async removeRfc64SwmAuthorInventoryRowV1(
     this: DKGAgent,
-    params: Readonly<{
-      contextGraphId: string;
-      scope: SwmAuthorInventoryScopeV1;
-      expectedRow: Rfc64ConfirmedSwmAuthorInventoryRowIdentityV1;
-      /** A removal that its caller's cancellation ended rejects with it, uncounted. */
-      signal?: AbortSignal;
-    }>,
+    params: Parameters<DKGAgent['removeRfc64SwmAuthorInventoryRowStrictV1']>[0],
   ): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
-    const result = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1(params).then(
-      (removed) => shadowResult(removed.status, 'remove', removed.attempts, removed.snapshot?.head.objectDigest ?? null, null),
-      (cause: unknown) => {
-        if (params.signal?.aborted === true) throw cause;
-        return this.failRfc64SwmAuthorInventoryShadowV1('remove', cause);
-      },
-    );
-    return this.recordRfc64SwmAuthorInventoryShadowStatsV1(result, params.contextGraphId, params.expectedRow.kaUal);
+    try { return await this.removeRfc64SwmAuthorInventoryRowStrictV1(params); }
+    catch (cause) {
+      if (params.signal?.aborted === true) throw cause;
+      return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+        this.failRfc64SwmAuthorInventoryShadowV1('remove', cause), params.contextGraphId, params.expectedRow.kaUal);
+    }
+  }
+
+  /** Strict repair shares exact removal/accounting while preserving the original failure cause. */
+  async removeRfc64SwmAuthorInventoryRowStrictV1(this: DKGAgent,
+    params: Parameters<DKGAgent['removeRfc64SwmAuthorInventoryConfirmedRowV1']>[0] & { readonly contextGraphId: string }): Promise<Rfc64SwmAuthorInventoryShadowMutationResultV1> {
+    const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1(params);
+    return this.recordRfc64SwmAuthorInventoryShadowStatsV1(
+      shadowResult(removed.status, 'remove', removed.attempts, removed.snapshot?.head.objectDigest ?? null, null),
+      params.contextGraphId, params.expectedRow.kaUal);
   }
 
   /** Remove the exact confirmed row without requiring its transient AssertionSeal object. */

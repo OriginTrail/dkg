@@ -41,3 +41,19 @@ export interface OrdinaryKnowledgeAssetPublishResponse {
   contextGraphError?: unknown;
   [key: string]: unknown;
 }
+
+/** Compatibility helpers retain the pending discriminant and all recovery evidence. */
+export type FinalizedAssertionPublishResponse = ConfirmedCatalogObligationPendingResponseV1 | {
+    readonly catalogObligationPending?: false;
+
+    kaId: string;
+    status: 'tentative' | 'confirmed';
+    assertionUri: string;
+    authorAddress: string;
+    merkleRoot: string;
+    kas: Array<{ tokenId: string; rootEntity: string }>;
+    txHash?: string;
+    blockNumber?: number;
+    storageAckPeerIds?: string[];
+    contextGraphError?: string;
+  };

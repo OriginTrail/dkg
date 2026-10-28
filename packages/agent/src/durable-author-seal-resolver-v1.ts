@@ -10,7 +10,8 @@ import {
   contextGraphMetaUri,
   contextGraphPrivateUri,
   contextGraphSubGraphPrivateUri,
-  parseGraphScopedAssertionSealCandidate, parseContextGraphAssertionUri,
+  parseGraphScopedAssertionSealCandidate, parseGraphScopedAssertionSealStructure, parseContextGraphAssertionUri,
+  type AssertionSeal,
   type ContextGraphIdV1,
   type GraphScopedAssertionSealCandidate,
 } from '@origintrail-official/dkg-core';
@@ -26,11 +27,6 @@ export interface ResolveDurableGraphScopedAuthorSealCandidateParamsV1 {
   readonly source: string;
   /** Exact committed version; permit its archived seal after reopening for editing. */
   readonly sealDigest?: string;
-  /** Confirmed local publication may use a lifecycle owner distinct from its signer.
-   * Only exact digest recovery can opt into this identity; ordinary catalog reads
-   * continue requiring coordinate owner == signing author.
-   */
-  readonly confirmedPublicationAuthor?: string;
   readonly signal?: AbortSignal;
 }
 
@@ -43,6 +39,28 @@ export interface ResolveDurableGraphScopedAuthorSealCandidateParamsV1 {
 export async function resolveDurableGraphScopedAuthorSealCandidateV1(
   params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1,
 ): Promise<GraphScopedAssertionSealCandidate | undefined> {
+  return resolveDurableSeal(params, parseGraphScopedAssertionSealCandidate);
+}
+
+export interface ConfirmedLifecycleSealEvidenceV1 {
+  readonly seal: AssertionSeal;
+  readonly lifecycleCoordinate: GraphScopedAssertionSealCandidate['coordinate'];
+  readonly signingAuthor: string;
+}
+/** Exact-digest recovery authenticates a signer while preserving separate lifecycle placement. */
+export async function resolveConfirmedLifecycleSealEvidenceV1(params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1
+  & { readonly sealDigest: string; readonly signingAuthor: string }): Promise<ConfirmedLifecycleSealEvidenceV1 | undefined> {
+  return resolveDurableSeal(params, (rows, subject) => {
+    const seal = parseGraphScopedAssertionSealStructure(rows, subject);
+    const lifecycleCoordinate = parseContextGraphAssertionUri(subject);
+    if (!seal || !lifecycleCoordinate || seal.authorAddress.toLowerCase() !== params.signingAuthor.toLowerCase()) return undefined;
+    return { seal, lifecycleCoordinate, signingAuthor: seal.authorAddress };
+  });
+}
+type SealParser<T> = (rows: Parameters<typeof parseGraphScopedAssertionSealCandidate>[0], subject: string) => T | undefined;
+async function resolveDurableSeal<T extends { seal: AssertionSeal }>(
+  params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1, parse: SealParser<T>,
+): Promise<T | undefined> {
   const assertionUris = assertionUriSpellingsV1(params);
   const metaGraph = contextGraphMetaUri(params.contextGraphId);
   // sparql-scan-allow: R4 -- exact CG meta graph and at most two exact assertion IRIs are bound by VALUES
@@ -52,7 +70,7 @@ export async function resolveDurableGraphScopedAuthorSealCandidateV1(
   );
   const sealQuads = sealResult.type === 'quads' ? sealResult.quads : [];
   const candidates = assertionUris.flatMap((assertionUri) => {
-    const candidate = parseDurableSealCandidate(sealQuads, assertionUri, params);
+    const candidate = parse(sealQuads, assertionUri);
     return candidate === undefined ? [] : [candidate];
   });
   if (candidates.length > 1) {
@@ -60,10 +78,10 @@ export async function resolveDurableGraphScopedAuthorSealCandidateV1(
   }
   const active = candidates[0];
   if (params.sealDigest === undefined) return active;
-  const matches = (candidate: GraphScopedAssertionSealCandidate | undefined) => candidate !== undefined
+  const matches = (candidate: T | undefined) => candidate !== undefined
     && computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal)) === params.sealDigest;
   if (matches(active)) return active;
-  const archived = await resolveArchivedGraphScopedAuthorSealCandidateV1(params);
+  const archived = await resolveArchivedSeal(params, parse);
   return matches(archived) ? archived : undefined;
 }
 
@@ -78,6 +96,11 @@ export async function resolveDurableGraphScopedAuthorSealCandidateV1(
 export async function resolveArchivedGraphScopedAuthorSealCandidateV1(
   params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1,
 ): Promise<GraphScopedAssertionSealCandidate | undefined> {
+  return resolveArchivedSeal(params, parseGraphScopedAssertionSealCandidate);
+}
+async function resolveArchivedSeal<T extends { seal: AssertionSeal }>(
+  params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1, parse: SealParser<T>,
+): Promise<T | undefined> {
   const assertionUris = assertionUriSpellingsV1(params);
   const archiveOf = (assertionUri: string): string => `${assertionUri}/_recovery_seal`;
   const recoveryGraph = params.subGraphName === undefined
@@ -91,11 +114,11 @@ export async function resolveArchivedGraphScopedAuthorSealCandidateV1(
   const sealQuads = sealResult.type === 'quads' ? sealResult.quads : [];
   const candidates = assertionUris.flatMap((assertionUri) => {
     // The archive keeps the seal's predicates under its own subject; the seal itself is the assertion's.
-    const candidate = parseDurableSealCandidate(
+    const candidate = parse(
       sealQuads
         .filter((quad) => quad.subject === archiveOf(assertionUri))
         .map((quad) => ({ ...quad, subject: assertionUri })),
-      assertionUri, params,
+      assertionUri,
     );
     return candidate === undefined ? [] : [candidate];
   });
@@ -125,18 +148,3 @@ function assertionUriSpellingsV1(
   ])));
 }
 
-/** Keep physical lifecycle placement separate from the authenticated signing identity. */
-function parseDurableSealCandidate(
-  rows: Parameters<typeof parseGraphScopedAssertionSealCandidate>[0], assertionUri: string,
-  params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1,
-): GraphScopedAssertionSealCandidate | undefined {
-  if (params.confirmedPublicationAuthor === undefined) return parseGraphScopedAssertionSealCandidate(rows, assertionUri);
-  if (params.sealDigest === undefined) throw new Error('Delegated lifecycle recovery requires an exact seal digest');
-  const coordinate = parseContextGraphAssertionUri(assertionUri);
-  if (!coordinate) return undefined;
-  const signedSubject = contextGraphAssertionUri(params.contextGraphId, params.confirmedPublicationAuthor,
-    params.assertionCoordinate, params.subGraphName);
-  const candidate = parseGraphScopedAssertionSealCandidate(rows.filter(row => row.subject === assertionUri)
-    .map(row => ({ ...row, subject: signedSubject })), signedSubject);
-  return candidate === undefined ? undefined : { seal: candidate.seal, coordinate };
-}

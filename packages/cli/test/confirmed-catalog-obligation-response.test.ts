@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ConfirmedCatalogObligationErrorV1, type DKGAgent } from '@origintrail-official/dkg-agent';
-import { createOperationContext, type AssertionSeal } from '@origintrail-official/dkg-core';
+import { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type DKGAgent } from '@origintrail-official/dkg-agent';
+import { contextGraphAssertionUri, createOperationContext, type AssertionSeal } from '@origintrail-official/dkg-core';
 import { confirmedCatalogObligationResponse, handleConfirmedCatalogObligationRecovery } from '../src/daemon/routes/confirmed-catalog-obligation.js';
 import { createRequestActor, type RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -17,11 +17,13 @@ function sealFor(kaNumber: bigint, assertionVersion = '1'): AssertionSeal {
 }
 
 function recoveryEvidence() {
-  return new ConfirmedCatalogObligationErrorV1({ contextGraphId: CONTEXT_GRAPH_ID,
-    assertionCoordinate: 'asset', seal: sealFor(75n), assertionUri: 'urn:test:asset',
+  const evidence = new ConfirmedCatalogObligationErrorV1({ contextGraphId: CONTEXT_GRAPH_ID,
+    assertionCoordinate: 'asset', seal: sealFor(75n), assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, 'asset'),
     ctx: createOperationContext('publish'), publicationLabel: 'publish' },
   { txHash: `0x${'ab'.repeat(32)}`, blockNumber: 71, txIndex: 2, batchId: 75n },
   new Error('journal refused')).recoveryEvidence!;
+  expect(parseConfirmedCatalogObligationRecoveryV1(evidence)).toEqual(evidence);
+  return evidence;
 }
 
 function recoveryContext(authentication: Parameters<typeof requestAuthentication>[0]) {
@@ -45,7 +47,7 @@ describe('the shared confirmed catalog HTTP response contract', () => {
       batchId: seal.reservedKaId!, kaId: seal.reservedKaId!,
       ...(!update ? { startKAId: seal.reservedKaId!, endKAId: seal.reservedKaId! } : {}) };
     const error = new ConfirmedCatalogObligationErrorV1({ contextGraphId: CONTEXT_GRAPH_ID,
-      assertionCoordinate: 'asset', seal, assertionUri: 'urn:test:asset', ctx: createOperationContext('publish'), publicationLabel: 'publish' },
+      assertionCoordinate: 'asset', seal, assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, 'asset'), ctx: createOperationContext('publish'), publicationLabel: 'publish' },
     transaction, new Error('journal refused'));
     const response = confirmedCatalogObligationResponse(error)!;
     expect(response.catalogObligationPending).toBe(true);
@@ -63,7 +65,7 @@ describe('the shared confirmed catalog HTTP response contract', () => {
     expect(confirmedCatalogObligationResponse(new Error('not confirmed'))).toBeNull();
     const seal = sealFor(74n);
     expect(confirmedCatalogObligationResponse(new ConfirmedCatalogObligationErrorV1({ contextGraphId: CONTEXT_GRAPH_ID,
-      assertionCoordinate: 'asset', seal, assertionUri: 'urn:test:asset', ctx: createOperationContext('publish'), publicationLabel: 'publish' },
+      assertionCoordinate: 'asset', seal, assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, 'asset'), ctx: createOperationContext('publish'), publicationLabel: 'publish' },
     undefined, new Error('journal refused')))).toBeNull();
   });
   it.each(['author', 'curator'] as const)('preserves %s recovery authorization and observer-only success', async role => {
@@ -89,7 +91,7 @@ describe('the shared confirmed catalog HTTP response contract', () => {
   it.each([
     { name: 'missing evidence', value: undefined, status: 400 },
     { name: 'malformed seal', value: { ...recoveryEvidence(), seal: {} }, status: 409 },
-    { name: 'another graph', value: { ...recoveryEvidence(), contextGraphId: `${AUTHOR}/other` }, status: 400 },
+    { name: 'another graph', value: { ...recoveryEvidence(), contextGraphId: `${AUTHOR}/other`, assertionUri: contextGraphAssertionUri(`${AUTHOR}/other`, AUTHOR, 'asset') }, status: 400 },
   ])('preserves $name refusal before observer execution', async ({ value, status }) => {
     const f = recoveryContext({ kind: 'agent', agentAddress: AUTHOR });
     await handleConfirmedCatalogObligationRecovery(f.ctx, CONTEXT_GRAPH_ID, 'asset', { recovery: value });

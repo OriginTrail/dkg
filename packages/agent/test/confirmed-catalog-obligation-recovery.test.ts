@@ -1,10 +1,11 @@
+import { resolveDurableGraphScopedAuthorSealCandidateV1, resolveConfirmedLifecycleSealEvidenceV1 } from '../src/durable-author-seal-resolver-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter, type CanonicalFinalizationReceipt } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri,
-  contextGraphPrivateUri, createOperationContext } from '@origintrail-official/dkg-core';
+  contextGraphPrivateUri, createOperationContext, computeCanonicalGraphScopedAuthorSealDigestV1 } from '@origintrail-official/dkg-core';
 import { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1 } from '../src/confirmed-catalog-obligation-error.js';
 import { DKGAgent } from '../src/index.js';
 import { recoverConfirmedCatalogObligationV1 } from '../src/internal/confirmed-catalog-obligation-recovery.js';
@@ -55,6 +56,12 @@ describe('caller-retained confirmed catalog evidence', () => {
     }, f.receipt, new Error('marker write failed'));
     const retained = parseConfirmedCatalogObligationRecoveryV1(JSON.parse(JSON.stringify(error.recoveryEvidence)));
     expect(retained.seal.authorAddress).not.toBe(owner);
+    const query = { store: f.store, contextGraphId: CONTEXT_GRAPH_ID, agentAddress: owner,
+      assertionCoordinate: retained.assertionCoordinate, source: 'test.lifecycle-owner',
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(retained.seal) };
+    expect(await resolveDurableGraphScopedAuthorSealCandidateV1(query)).toBeUndefined();
+    expect(await resolveConfirmedLifecycleSealEvidenceV1({ ...query, signingAuthor: retained.seal.authorAddress }))
+      .toMatchObject({ lifecycleCoordinate: { agentAddress: owner }, signingAuthor: AUTHOR });
     await recoverConfirmedCatalogObligationV1(retained, f.ports);
     expect(f.observe).toHaveBeenCalledWith(expect.objectContaining({ assertionUri: f.evidence.assertionUri }));
     expect(f.submit).not.toHaveBeenCalled();

@@ -72,6 +72,9 @@ async function runIteration(args: {
       syncPayload.quads,
       { clearAfter: false },
     );
+    if (result.catalogObligationPending) {
+      throw Object.assign(new Error(result.error), { response: result });
+    }
     if (!result.kaId) {
       throw new Error('Synchronous publish response did not include kaId');
     }

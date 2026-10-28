@@ -9,7 +9,7 @@ import { ethers } from 'ethers';
 import { parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogObligationRecoveryV1 } from '../confirmed-catalog-obligation-error.js';
 import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
 import {
-  resolveDurableGraphScopedAuthorSealCandidateV1,
+  resolveConfirmedLifecycleSealEvidenceV1,
 } from '../durable-author-seal-resolver-v1.js';
 
 interface RecoveryPortsV1 {
@@ -39,7 +39,7 @@ export async function recoverConfirmedCatalogObligationV1(
     agentAddress: coordinate.agentAddress, assertionCoordinate: evidence.assertionCoordinate,
     source: 'agent.confirmedCatalogRecovery.seal', signal };
   const digest = computeCanonicalGraphScopedAuthorSealDigestV1(evidence.seal);
-  const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({ ...query, sealDigest: digest, confirmedPublicationAuthor: evidence.seal.authorAddress });
+  const candidate = await resolveConfirmedLifecycleSealEvidenceV1({ ...query, sealDigest: digest, signingAuthor: evidence.seal.authorAddress });
   if (candidate === undefined) throw invalidEvidence();
   const binding = await ports.resolveBinding();
   if (binding === null) throw invalidEvidence();

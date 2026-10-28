@@ -1,4 +1,4 @@
-import type { KnowledgeAssetPublishResponse } from './knowledge-asset-publish-response.js';
+import type { FinalizedAssertionPublishResponse, KnowledgeAssetPublishResponse } from './knowledge-asset-publish-response.js';
 export type { KnowledgeAssetPublishResponse, ConfirmedCatalogObligationPendingResponseV1, ConfirmedCatalogTransactionResponseV1 } from './knowledge-asset-publish-response.js';
 import type { QueryOptions } from './query-options.js';
 import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
@@ -1225,30 +1225,9 @@ export class ApiClient {
       pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
-  ): Promise<{
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    assertionUri: string;
-    authorAddress: string;
-    merkleRoot: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-    storageAckPeerIds?: string[];
-    contextGraphError?: string;
-  }> {
-    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<{
-      kaId: string;
-      status: 'tentative' | 'confirmed';
-      assertionUri: string;
-      authorAddress: string;
-      merkleRoot: string;
-      kas: Array<{ tokenId: string; rootEntity: string }>;
-      txHash?: string;
-      blockNumber?: number;
-      storageAckPeerIds?: string[];
-      contextGraphError?: string;
-    }>;
+  ): Promise<FinalizedAssertionPublishResponse> {
+    return this.knowledgeAssetPublish(contextGraphId, assertionName, options) as Promise<FinalizedAssertionPublishResponse>;
+
   }
 
   /**
@@ -1272,16 +1251,7 @@ export class ApiClient {
       pricingPolicy?: PublicationPricingPolicy;
       publisherNodeIdentityIdOverride?: bigint;
     },
-  ): Promise<{
-    assertionUri: string;
-    kaId: string;
-    status: 'tentative' | 'confirmed';
-    authorAddress: string;
-    merkleRoot: string;
-    kas: Array<{ tokenId: string; rootEntity: string }>;
-    txHash?: string;
-    blockNumber?: number;
-  }> {
+  ): Promise<FinalizedAssertionPublishResponse> {
     const created = await this.createAssertion(contextGraphId, name, {
       ...(options?.subGraphName ? { subGraphName: options.subGraphName } : {}),
       quads,
@@ -1316,6 +1286,7 @@ export class ApiClient {
           : {}),
       },
     );
+    if (published.catalogObligationPending) return published;
     return {
       assertionUri: created.assertionUri,
       kaId: published.kaId,

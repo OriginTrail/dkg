@@ -261,16 +261,12 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const { lane, currentInventoryScope, inventoryScope, scope, action } = decision;
     if (action === 'retire-public-row') {
       // Public VM discovery is chain-owned; this owed transition removes only the exact SWM row.
-      const removed = await this.removeRfc64SwmAuthorInventoryConfirmedRowV1({
-        scope: currentInventoryScope, expectedRow: params,
+      const removed = await this.removeRfc64SwmAuthorInventoryRowStrictV1({
+        contextGraphId: params.contextGraphId, scope: currentInventoryScope, expectedRow: params,
       });
       if (removed.status !== 'applied' && removed.status !== 'absent') {
         throw new Error('RFC-64 confirmed public inventory transition did not complete');
       }
-      rfc64SwmInventoryShadowRuntimeV1(this).record(Object.freeze({
-        status: removed.status, action: 'remove', attempts: removed.attempts,
-        headObjectDigest: removed.snapshot?.head.objectDigest ?? null, error: null,
-      }), params.contextGraphId, params.kaUal);
       this.requestRfc64SwmCatalogProjectionV1({
         contextGraphId: params.contextGraphId, authorAddress: params.authorAddress,
       });
