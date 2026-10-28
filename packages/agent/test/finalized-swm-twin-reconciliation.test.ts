@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -83,6 +84,7 @@ function fixture(
   ];
   return {
     asset: {
+      merkleRootHex: fixtureRoot(metadataQuads),
       contextGraphId: CG,
       ual: UAL,
       assertionVersion: 3n,
@@ -244,6 +246,29 @@ function catalogEvidenceFor(input: ReturnType<typeof fixture>) {
 }
 
 describe('durable VM / SWM tier reconciliation', () => {
+  for (const arrival of ['vm', 'swm', 'catalog'] as const) {
+    it.each(['absent', 'partial', 'ambiguous', 'exact', 'unexpected'] as const)(`${arrival} classifies %s head state with one read`, async state => {
+      const store = new OxigraphStore(), input = fixture();
+      await seedTwin(store, input); await store.dropGraph(input.swmGraph);
+      if (state === 'absent') await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject });
+      if (state === 'partial') await store.deleteByPattern({ graph: input.swmMetaGraph, subject: input.headSubject, predicate: `${DKG}shareOperationId` });
+      if (state === 'ambiguous') await store.insert([{ graph: input.swmMetaGraph, subject: input.headSubject,
+        predicate: `${DKG}assertionVersion`, object: '"999"' }]);
+      const original = store.query.bind(store);
+      const query = vi.spyOn(store, 'query').mockImplementation((sparql, options) =>
+        state === 'unexpected' && options?.source === 'agent.durableSync.finalizedSwmTwin.readHead'
+          ? Promise.resolve({ type: 'quads', quads: [] }) : original(sparql, options));
+      const retire = vi.fn(async () => {}), common = { store, retire, writeLocks: new Map<string, Promise<void>>() };
+      const outcome = arrival === 'vm' ? await reconcileFinalizedSwmTwin({ ...common, asset: input.asset })
+        : arrival === 'swm' ? await reconcileFinalizedSwmTwinFromDescriptor({ ...common, contextGraphId: CG, descriptor: descriptorFor(input) })
+        : await reconcileFinalizedSwmTwinFromCatalogProjection({ ...common, evidence: catalogEvidenceFor(input) });
+      expect(outcome).toBe(state === 'exact' ? 'retired' : arrival === 'vm' ? 'head-missing-or-ambiguous'
+        : arrival === 'swm' && state !== 'absent' ? 'retired-head-residue' : 'already-retired-finalized');
+      expect(retire).toHaveBeenCalledTimes(state === 'exact' ? 1 : 0);
+      expect(query.mock.calls.filter(([, options]) => options?.source === 'agent.durableSync.finalizedSwmTwin.readHead')).toHaveLength(1);
+    });
+  }
+
   it.each([undefined, 'code'])('does not reread finalized VM when no SWM head exists for subgraph %s', async (subGraphName) => {
     const store = new OxigraphStore();
     const input = fixture(subGraphName);
@@ -719,6 +744,40 @@ describe('durable VM / SWM tier reconciliation', () => {
       writeLocks: new Map(),
       contextGraphId: CG,
       descriptor: descriptorFor(input),
+      retire,
+    })).resolves.toBe('already-retired-finalized');
+    expect(retire).not.toHaveBeenCalled();
+  });
+
+  it('tells a head left in part from an absent copy on the descriptor path, and only there', async () => {
+    const store = new OxigraphStore();
+    const input = fixture();
+    await seedTwin(store, input);
+    await store.dropGraph(input.swmGraph);
+    await store.deleteByPattern({
+      graph: input.swmMetaGraph,
+      subject: `urn:dkg:share:${CG}:${OPERATION_ID}`,
+    });
+    // A partial replay left the head without its operation pointer: not exact, and not absent.
+    await store.deleteByPattern({
+      graph: input.swmMetaGraph,
+      subject: input.headSubject,
+      predicate: `${DKG}shareOperationId`,
+    });
+    const retire = vi.fn(async () => {});
+
+    await expect(reconcileFinalizedSwmTwinFromDescriptor({
+      store,
+      writeLocks: new Map(),
+      contextGraphId: CG,
+      descriptor: descriptorFor(input),
+      retire,
+    })).resolves.toBe('retired-head-residue');
+    // Catalog receipts keep the outcome they had.
+    await expect(reconcileFinalizedSwmTwinFromCatalogProjection({
+      store,
+      writeLocks: new Map(),
+      evidence: catalogEvidenceFor(input),
       retire,
     })).resolves.toBe('already-retired-finalized');
     expect(retire).not.toHaveBeenCalled();

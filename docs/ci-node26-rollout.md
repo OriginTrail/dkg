@@ -1,6 +1,6 @@
 # Required Node 26 chain-RPC execution
 
-This delivery stages lane `chain_rpc_node26`, job `chain-rpc-node26`, under the
+This delivery supplies lane `chain_rpc_node26`, job `chain-rpc-node26`, under the
 existing `CI gate`. It does not change required check names, branch protection,
 coverage floors, devnet parsing, or browser lifecycle policy.
 
@@ -48,8 +48,11 @@ lane in a validated plan permits its skipped execution.
 
 ## Two-change activation
 
-The implementation deliberately keeps the existing immutable controller pins.
-At inspection, canary used `dfb3460719c13d592e2bb4d7d3c29fe55567fbe3` in both
+The implementation merged through PR #3031 as protected canary commit
+`8af04a376332c17527ce0f7dffaac8432ba1a9b3`. The separate activation change pins
+that reviewed merged commit in all four trusted checkouts and removes the
+conservative planner-output fallback. Until the activation change itself merges,
+canary still uses `dfb3460719c13d592e2bb4d7d3c29fe55567fbe3` in both
 primary and EVM workflows; main used
 `4aca346d4818eb63e661c6028a4e2c1cbea2bd92`. Candidate source edits do not activate
 controller enforcement.
@@ -91,7 +94,39 @@ new controller against dependencies from a workflow without the lane. They also
 run a controlled failed-assertion record through the candidate aggregate CLI
 and require exit 1 even when the fixture's job result is success. Existing
 provenance tests reject unmerged feature revisions. These are local/candidate
-policy tests, not proof the active pinned controller already enforces the lane.
+policy tests, not proof the protected branch already enforces the lane. Activation
+tests additionally execute the actual configured merged controller's planner and
+aggregate CLI with relevant, irrelevant, full and merge-group fixtures, including
+green jobs with wrong-runtime, missing and skipped assertion evidence. Historical
+rollout snapshots remain fixed when pins rotate; shallow test checkouts fetch a
+missing immutable snapshot independently of the production provenance window.
+
+## Observe execution and enforcement
+
+1. Open the primary `CI` run for the exact revision. `Plan CI delta` must report
+   `chain_rpc_node26: true` for chain RPC, dependency/runtime and full/merge-group
+   changes. After activation, a docs-only or irrelevant delta PR must explicitly
+   report false and may skip the job. Missing selection is never equivalent to false.
+2. Open `chain-rpc-node26 / Chain RPC transport (Node 26)`. Its verification step
+   must pass. Download the `chain-rpc-node26` artifact from the run: the execution
+   evidence must show Node 26, bundled undici 8, `requireUndici8Fetch: true`, successful
+   execution, and all four required assertion names exactly once with status
+   `passed`, including the fresh-process first request. Inspect the accompanying
+   Vitest JSON report as well as the job's conclusion.
+3. Open `CI gate` and confirm its trusted-controller checkout is
+   `8af04a376332c17527ce0f7dffaac8432ba1a9b3` and the aggregate validation passes.
+   A green transport job under the legacy pin proves execution; it does not prove
+   skipped/missing assertion enforcement. The activation PR tests the new pin on
+   its candidate; a successful post-activation protected full/merge-group run
+   establishes it on that branch.
+4. Run `node --test scripts/lib/__tests__/chain-rpc-node26-ci.test.mjs` locally
+   under supported Node 22 or 26 to inspect routing, rollout and negative aggregate
+   fixtures. Each missing/skipped assertion and selected failed/cancelled/skipped/
+   missing job must be rejected. Run the actual transport collector with Node 26:
+   `DKG_REQUIRE_UNDICI8_FETCH=1 node scripts/ci/run-chain-rpc-node26.mjs /tmp/dkg-node26-validation`.
+   The collector uses local TLS/proxy fixtures and leaves evidence at that path.
+   Install dependencies first; Node 22 intentionally fails the collector's runtime
+   guard. Local tests establish policy behavior, not an actual GitHub queue run.
 
 ## Release-candidate invocation
 

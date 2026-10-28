@@ -4,9 +4,10 @@ import {
   DKG_ONTOLOGY, SYSTEM_CONTEXT_GRAPHS, contextGraphCatalogUri,
   contextGraphDataUri, contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, withDefaultStoreWorkPriority, type QueryOptions, type TripleStore, type StorePressureSnapshot } from '@origintrail-official/dkg-storage';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
 import { LOCAL_ID, NAME_HASH, selectedFixture } from './context-graph-registration-binding.fixture.js';
 import { createContextGraphRegistrationReadPlan } from
   '../src/context-graph-registration-read-plan.js';
@@ -603,11 +604,11 @@ describe('batched local read-authority facts', () => {
   )))('invalidates prepared absence after restricted access rights in %s via %s', async (source, operation) => {
     const rawStore = new OxigraphStore();
     const projection = new ContextGraphMetaProjection(rawStore);
-    const store = createListContextGraphsCacheInvalidatingStore(rawStore, () => {}, (quads, targetGraph) => {
-      if (targetGraph) projection.markDirtyForGraph(targetGraph);
-      else if (quads) projection.markDirtyFromQuads(quads);
-      else projection.markAllDirty();
-    });
+    const store = createListContextGraphsCacheInvalidatingStore(
+      rawStore,
+      () => {},
+      createProjectionMutationObserver(() => projection),
+    );
     const id = 'candidate';
     const deps = dependencies();
     deps.readMetadataRevision.mockImplementation(() => projection.readAuthorityFactsRevision);
@@ -663,6 +664,33 @@ describe('batched local read-authority facts', () => {
     expect(query).toHaveBeenCalledTimes(5);
     for (const [sparql] of query.mock.calls) expect((sparql.match(/\(<did:dkg:context-graph:/g) ?? []).length).toBeLessThanOrEqual(128);
     await store.close();
+  });
+
+  it.each([
+    ['normal', undefined, undefined, 2], ['background', undefined, undefined, 1],
+    ['background', 'normal', undefined, 2], ['normal', 'background', undefined, 1],
+    ['background', undefined, 'share', 4],
+  ] as const)('uses the %s ambient lane with %s priority and %s control queue for metadata batches', async (ambient, priority, controlQueue, expected) => {
+    let active = 0;
+    let peak = 0;
+    const seen: QueryOptions[] = [];
+    const query = vi.fn<TripleStore['query']>(async (_sparql, options) => {
+      active += 1;
+      peak = Math.max(peak, active);
+      seen.push(options!);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      active -= 1;
+      return { type: 'bindings', bindings: [] };
+    });
+    const store = { query, getPressureSnapshot: () => ({ normalInflightLimit: 2, backgroundInflightLimit: 1 } as StorePressureSnapshot) } as unknown as TripleStore;
+    const projection = new ContextGraphMetaProjection(store);
+    const ids = Array.from({ length: 1024 }, (_, i) => `candidate-${i}`);
+    const signal = new AbortController().signal;
+    await expect(withDefaultStoreWorkPriority(ambient, () => projection.findContextGraphIdsWithReadAuthorityFacts(ids, { priority, controlQueue, signal })))
+      .resolves.toEqual(new Set());
+    expect(peak).toBe(expected);
+    expect(query).toHaveBeenCalledTimes(8);
+    expect(seen.every(options => options.signal === signal && options.priority === priority && options.controlQueue === controlQueue)).toBe(true);
   });
 
   it('retains cached restrictive authority even if its original store facts have disappeared', async () => {

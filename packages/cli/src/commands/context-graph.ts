@@ -327,7 +327,11 @@ contextGraphCmd
     'forwarding (e.g. to hand off to the curator out-of-band), use ' +
     '`dkg context-graph sign-join` instead.',
   )
-  .action(async (contextGraphId: string, curatorPeerId: string) => {
+  .option(
+    '--re-request',
+    'Send a new request even when the curator has approved this agent and the graph\'s member list is still on its way',
+  )
+  .action(async (contextGraphId: string, curatorPeerId: string, opts: { reRequest?: boolean }) => {
     try {
       const client = await ApiClient.connect();
       // Step 1: sign-only. Returns the SignedAgentDelegation. Cheap and
@@ -337,14 +341,30 @@ contextGraphCmd
       // Step 2: forward via P2P. The daemon delivers the signed
       // delegation directly to the curator. Returns delivery count so we can
       // warn on no-curator.
-      const result = await client.requestJoin(contextGraphId, signed.delegation, curatorPeerId);
-      if (result.delivered === 0) {
+      const result = await client.requestJoin(
+        contextGraphId,
+        signed.delegation,
+        curatorPeerId,
+        undefined,
+        { reRequest: opts.reRequest === true },
+      );
+      if (result.joinState === 'approved-metadata-pending') {
+        console.log(`Join approved for "${contextGraphId}"; the graph's member list is still on its way from the curator.`);
+        console.log('  Shares are retried until it arrives. Check status with:');
+        console.log(`  dkg context-graph info ${contextGraphId}`);
+        return;
+      }
+      if (result.delivered === 0 && result.queued !== true) {
         console.error(`Could not deliver join request to curator for "${contextGraphId}". No reachable curator found.`);
         process.exit(1);
       }
       if (result.status === 'approved' || result.status === 'already-member' || result.autoApproved || result.alreadyMember) {
         console.log(`Join approved for "${contextGraphId}".`);
         console.log(`  Open it with: dkg context-graph info ${contextGraphId}`);
+      } else if (result.queued === true) {
+        console.log(`Join request queued for "${contextGraphId}". Delivery will retry automatically.`);
+        console.log('  Waiting for curator approval. Check status with:');
+        console.log(`  dkg context-graph info ${contextGraphId}`);
       } else {
         console.log(`Join request sent for "${contextGraphId}" (delivered to ${result.delivered} peer${result.delivered === 1 ? '' : 's'}).`);
         console.log('  Waiting for curator approval. Check status with:');

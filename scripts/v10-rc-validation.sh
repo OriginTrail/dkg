@@ -33,6 +33,7 @@ REPO_ROOT="${REPO_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 NUM_NODES="${NUM_NODES:-6}"
+source "$SCRIPT_DIR/devnet-privacy-helpers.sh"
 # shellcheck source=devnet-update-helpers.sh
 source "$SCRIPT_DIR/devnet-update-helpers.sh"
 if [ -n "${DKG_AUTH:-}" ]; then
@@ -147,9 +148,18 @@ for port in 9201 9202 9203 9204 9205; do
   fi
 done
 
-AGENTS=$(get 9201 /api/agents 2>/dev/null || echo '{}')
-PEER_COUNT=$(echo "$AGENTS" | pyfield "len(d.get('agents',[]))")
-if [ -z "$PEER_COUNT" ]; then PEER_COUNT=0; fi
+# Node 1 learns the other nodes' agent profiles with its first full sync
+# round, a few seconds after the last node has joined. `devnet.sh start`
+# returns when every node lists the two bootstrap graphs, which can be before
+# that round, so the list is read until it is filled instead of once.
+PEER_COUNT=0
+for _ in $(seq 1 "${AGENT_DISCOVERY_WAIT_S:-30}"); do
+  AGENTS=$(get 9201 /api/agents 2>/dev/null || echo '{}')
+  PEER_COUNT=$(echo "$AGENTS" | pyfield "len(d.get('agents',[]))")
+  if [ -z "$PEER_COUNT" ]; then PEER_COUNT=0; fi
+  if [ "$PEER_COUNT" -ge 4 ]; then break; fi
+  sleep 1
+done
 if [ "$PEER_COUNT" -ge 4 ]; then
   ok "Node 1 sees $PEER_COUNT peers (expected ≥4)"
 else
@@ -240,17 +250,7 @@ JSON
   echo ""
   echo "--- 4b: Private triples NOT visible on other nodes ---"
   for PORT in 9202 9203 9204; do
-    LEAK=$(post $PORT /api/query -H "Content-Type: application/json" -d "{
-      \"sparql\": \"SELECT ?o WHERE { <$BOB_URI> <http://schema.org/email> ?o }\",
-      \"contextGraphId\": \"$CG\"
-    }")
-    BINDINGS=$(echo "$LEAK" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-    [ -z "$BINDINGS" ] && BINDINGS=0
-    if [ "$BINDINGS" = "0" ]; then
-      ok "Node $PORT: no private triple leak"
-    else
-      fail "Node $PORT: private triple leaked! ($BINDINGS bindings)"
-    fi
+    rc_private_peer_privacy "http://127.0.0.1:$PORT" "$AUTH" "$BOB_URI" "$CG" "$PORT"
   done
 
   echo ""
@@ -268,17 +268,7 @@ JSON
   #       on the PUBLISHER itself — not just on §4b's peer nodes. This is
   #       the strongest "privacy boundary" assertion we can make without
   #       leaking the decryption key into a test fixture.
-  PUB_LEAK=$(post 9201 /api/query -H "Content-Type: application/json" -d "{
-    \"sparql\": \"SELECT ?o WHERE { <$BOB_URI> <http://schema.org/email> ?o }\",
-    \"contextGraphId\": \"$CG\"
-  }")
-  PUB_BINDINGS=$(echo "$PUB_LEAK" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-  [ -z "$PUB_BINDINGS" ] && PUB_BINDINGS=0
-  if [ "$PUB_BINDINGS" = "0" ]; then
-    ok "Publisher (node 9201) public view does NOT leak private email — privacy boundary intact"
-  else
-    fail "Publisher (node 9201) public view leaked private email ($PUB_BINDINGS bindings): $PUB_LEAK"
-  fi
+  rc_publisher_privacy "http://127.0.0.1:9201" "$AUTH" "$BOB_URI" "$CG"
 else
   warn "Skipping §4 — §3 publish did not yield a kaId (private-update path needs an existing KC)"
 fi
@@ -446,17 +436,7 @@ else
 fi
 
 echo "--- 7d: WM data NOT visible on other nodes (isolation) ---"
-WM_LEAK=$(post 9202 /api/query -H "Content-Type: application/json" -d "{
-  \"sparql\": \"SELECT ?name WHERE { <$FINDING_URI> <http://schema.org/name> ?name }\",
-  \"contextGraphId\": \"$CG\"
-}")
-WM_LEAK_COUNT=$(echo "$WM_LEAK" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-[ -z "$WM_LEAK_COUNT" ] && WM_LEAK_COUNT=0
-if [ "$WM_LEAK_COUNT" = "0" ]; then
-  ok "WM data correctly isolated — not visible on node 2"
-else
-  fail "WM data leaked to node 2 ($WM_LEAK_COUNT bindings)"
-fi
+rc_wm_privacy "http://127.0.0.1:9202" "$AUTH" "$FINDING_URI" "$CG"
 
 # ────────────────────────────────────────────────────────────────────────────
 section "8. PROMOTE WM → SWM"
@@ -535,17 +515,7 @@ else
 fi
 
 echo "--- 10d: Sub-graph data isolated from root graph ---"
-SG_ROOT=$(post 9201 /api/query -H "Content-Type: application/json" -d "{
-  \"sparql\": \"SELECT ?name WHERE { <$DECISION_URI> <http://schema.org/name> ?name }\",
-  \"contextGraphId\": \"$CG\"
-}")
-SG_ROOT_COUNT=$(echo "$SG_ROOT" | pyfield "len(d.get('result',{}).get('bindings',[]))")
-[ -z "$SG_ROOT_COUNT" ] && SG_ROOT_COUNT=0
-if [ "$SG_ROOT_COUNT" = "0" ]; then
-  ok "Sub-graph data correctly isolated from root graph"
-else
-  warn "Sub-graph data found in root graph ($SG_ROOT_COUNT bindings) — may be expected depending on query behavior"
-fi
+rc_subgraph_root_isolation "http://127.0.0.1:9201" "$AUTH" "$DECISION_URI" "$CG"
 
 # ────────────────────────────────────────────────────────────────────────────
 section "11. QUERY VIEWS"

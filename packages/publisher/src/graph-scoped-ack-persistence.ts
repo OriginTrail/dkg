@@ -147,6 +147,17 @@ export class GraphScopedACKPersistence {
 
   async execute(request: GraphScopedACKPersistenceRequest): Promise<GraphScopedACKPersistenceResult> {
     const copy = this.prepare(request);
+    // Before the write lock is taken: a retirement that fences this root write
+    // is given a short time to finish instead of being answered with a decline.
+    if (request.graphPublish.subGraphName === undefined) {
+      await this.dependencies.ports.runWhileLive(
+        () => this.dependencies.config.resolveDurableRootAtomicCompanion?.awaitAdmission?.({
+          contextGraphId: request.swmGraphId,
+          kaUal: request.graphPublish.scope.ual,
+        }),
+        request.signal,
+      );
+    }
     const locked = () => this.decideAndCommitUnderLock(copy);
     const locks = this.dependencies.config.workspaceWriteLocks;
     return locks

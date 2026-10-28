@@ -119,6 +119,9 @@ describe('PID files', () => {
     expect(parsePid('  42  ')).toBe(42);
     expect(parsePid('')).toBeNull();
     expect(parsePid('not-a-pid')).toBeNull();
+    for (const value of ['-1', '0', '42abc', '1.5', '9007199254740992']) {
+      expect(parsePid(value)).toBeNull();
+    }
     expect(parsePid('\n')).toBeNull();
   });
 
@@ -657,7 +660,7 @@ describe('restartNodeAndWait', () => {
     });
 
     expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual([
-      'args=restart-node 4',
+      'args=start-node 4',
       // pwd -P resolves the tmpdir symlink (/var -> /private/var on macOS).
       `cwd=${spawnSync('bash', ['-c', 'pwd -P'], { cwd: root, encoding: 'utf8' }).stdout.trim()}`,
       'HARDHAT_PORT=8777',
@@ -691,7 +694,7 @@ describe('restartNodeAndWait', () => {
 
     expect(await exited(worker)).toBe(true);
     expect(await exited(supervisor)).toBe(true);
-    expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(['args=restart-node 4']);
+    expect(readFileSync(out, 'utf8').split('\n').filter(Boolean)).toEqual(['args=start-node 4']);
   });
 
   it('restarting right after a SIGKILL works: the killed daemon is a zombie for a moment, not an unrelated process', async () => {
@@ -702,7 +705,7 @@ describe('restartNodeAndWait', () => {
       num: 4, apiPort: api.port, rpcUrl: DEFAULT_DEVNET_RPC, label: 'node4 back', timeoutMs: 5_000, pollIntervalMs: 50,
     });
 
-    expect(readFileSync(out, 'utf8').split('\n')[0]).toBe('args=restart-node 4');
+    expect(readFileSync(out, 'utf8').split('\n')[0]).toBe('args=start-node 4');
   });
 
   it('a live unrelated PID in devnet.pid rejects the restart before devnet.sh runs, and leaves it and the legitimate worker alive', async () => {
@@ -849,7 +852,7 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
         `export DEVNET_DIR="${paths.devnetDir}"`,
         `DEVNET_SOURCE_ONLY=1 source "${devnetSh}"`,
         'start_node() { echo "start_node $1" >> "$DEVNET_DIR/start-node-called"; }',
-        'cmd_restart_node "$@"',
+        'if [ "$1" = start-node ]; then start_node "$2"; else cmd_restart_node "$@"; fi',
       ].join('\n'),
     );
     writeFileSync(join(paths.devnetDir, 'node1', 'config.json'), JSON.stringify({ apiPort: 9333, listenPort: 10222 }));

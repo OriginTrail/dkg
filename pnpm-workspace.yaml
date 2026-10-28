@@ -4,6 +4,7 @@ packages:
   - "packages/cli/test-fixtures/sample-kafka-extension"
   - "demo"
   - "devnet/ack-candidate-isolation"
+  - "devnet/openclaw-persist-turn"
   - "devnet/agent-provenance"
   - "devnet/agent-restart-gossip"
   - "devnet/core-peers-features"

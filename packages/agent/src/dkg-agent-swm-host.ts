@@ -8,9 +8,16 @@
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
+import type { KnowledgeAssetUpdateIdentity } from '@origintrail-official/dkg-chain';
 import { orderVmRecoveryCandidates } from './vm-recovery-candidate-order.js';
+import {
+  isCanonicalAuthoritativeContextGraphId, localContextGraphIdMatchesCommittedNameHash,
+} from './context-graph-binding-state.js';
+import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
+import { normalizeContextGraphNameHash } from './context-graph-name-candidate.js';
 import { createHash, randomUUID } from 'node:crypto';
 import { createSwmHostModeHandler } from './internal/gossip/host-mode-handler.js';
+import { ensureCoreHostedDefinition } from './core-hosted-definition.js';
 import { Buffer } from 'node:buffer';
 import { VmRecoveryCoreTransportPreferencePolicy } from './vm-recovery-core-transport-preference.js';
 import { VmRecoveryPassAuthority, type VmRecoveryRegisteredPublicEvidence } from './vm-recovery-pass-authority.js';
@@ -275,6 +282,15 @@ import {
   isUnansweredVmReconcileReadAuthority,
   VmReconcileReadAuthorityUnansweredError,
 } from './internal/vm-reconcile-read-authority.js';
+import {
+  askVmReconcileAgainAfterLocalRpcRefusal,
+  VmReconcileLocalRpcRefusalError,
+  VmReconcileRefusedSliceReads,
+} from './internal/vm-reconcile-local-rpc-refusal.js';
+import {
+  askVmReconcileAgainAfterOvertakenPass,
+  VmReconcileOvertakenError,
+} from './internal/vm-reconcile-overtaken-pass.js';
 import type { ContextGraphReadAuthorityDecision } from './context-graph-read-authority.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 import { resolveVmRecoveryExperimentPolicy } from './vm-recovery-experiment-policy.js';
@@ -313,6 +329,7 @@ import type {
   VmRefreshQueue,
   VmRefreshTarget,
 } from './vm-refresh.js';
+import { readVmRefreshVersionView } from './vm-refresh-version-view.js';
 import { isBoundedOperationTimeoutError, runBoundedOperation } from './bounded-operation.js';
 
 /** Graph-scoped KA metadata marker; its presence names the metadata graph. */
@@ -599,6 +616,8 @@ type VmReconcileExecution = {
   persistWatermark: (localCgId: string, watermark: number) => void;
   /** Observation only; forwarded to the engine's pass-timing hook. */
   observePassTimings?: ChainReconcilerDeps['observePassTimings'];
+  /** Told of the chain reads that fail where the pass goes on without them. */
+  refusedReads?: VmReconcileRefusedSliceReads;
 };
 
 type VmReconcileOrdinalOptions = {
@@ -613,6 +632,8 @@ type VmReconcileOrdinalOptions = {
    * RPC requests per endpoint) there. Default true.
    */
   rememberFinalizedEvidence?: boolean;
+  /** Told of the chain read failure that left this ordinal for a later pass. */
+  onUnresolvable?: (error: unknown) => void;
 };
 
 /**
@@ -719,14 +740,6 @@ function rotatePeerIds(peerIds: readonly string[], offset: number): string[] {
   return [...peerIds.slice(start), ...peerIds.slice(0, start)];
 }
 
-/** Track the raw dependency even if an abort race releases its caller first. */
-function trackVmReconcilePhysicalRun<T>(runs: Set<Promise<unknown>>, run: Promise<T>): Promise<T> {
-  runs.add(run);
-  const retire = () => { runs.delete(run); };
-  void run.then(retire, retire);
-  return run;
-}
-
 export class SwmHostModeMethods extends DKGAgentBase {
   /**
    * OT-RFC-38 LU-6 — initialize the on-disk opaque ciphertext store
@@ -806,6 +819,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       `SWM host-mode store initialized at ${join(this.config.dataDir, 'swm-host')} (role=${role})`,
     );
 
+  }
+
+  /** Restore disk intent after the durable subscription admission plan exists. */
+  async restoreSwmHostModeSubscriptions(this: DKGAgent): Promise<void> {
+    if (!this.swmHostModeStore) return;
+    const session = this.gossipSession;
+    if (session.live() === null) return;
     // OT-RFC-38 LU-6 B3 — restore persisted host-mode subscriptions
     // BEFORE the chain-event poller starts. Chain events older than
     // the poller's lookback window would otherwise be silently lost
@@ -815,6 +835,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // shortcut that keeps the per-restart re-derivation cheap.
     try {
       const previouslySubscribed = await this.swmHostModeStore.listHostModeSubscribedCgs();
+      if (!session.active || this.gossipSession !== session) return;
       if (previouslySubscribed.length > 0) {
         // OT-RFC-49 WS-A — persisted host-mode subscriptions are curated by
         // construction (the curated check ran when each was first wired). With
@@ -843,6 +864,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
           // authority check on every envelope ingest still catches
           // revocations even if curator state has changed since.
           try {
+            if (!session.active || this.gossipSession !== session) return;
+            if (!this.automaticSwmHostModeAdmissionAllowed(cgId)) continue;
             this.wireSwmHostModeHandler(cgId, SUBSCRIPTION_SOURCES.RECONCILER, true);
             // Codex PR #620 R2: also re-probe registration state.
             // Without this, a host-only CG that was registered while
@@ -852,6 +875,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // sees local store graphs, so the periodic reconciler
             // can't heal it later either.
             await this.maybeMarkRegisteredForHostMode(cgId);
+            if (!session.active || this.gossipSession !== session) return;
+            this.automaticSwmHostModeAdmissionAllowed(cgId);
           } catch (err) {
             const msg = err instanceof Error ? err.message : String(err);
             this.log.warn(
@@ -884,6 +909,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const live = session.live();
     if (live === null) return;
     if (!this.swmHostModeStore) return;
+    if (!this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) return;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
       // Host reconciliation is a second, independent path into the same
@@ -918,44 +944,28 @@ export class SwmHostModeMethods extends DKGAgentBase {
       ) {
         // A manually hosted CG can become curated later. Upgrade the cached
         // classification so the existing handler starts stripping immediately.
-        if (!session.active || this.gossipSession !== session) return;
+        if (!session.active || this.gossipSession !== session
+          || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)
+          || this.swmHostModeAccessPolicy(contextGraphId) === 0) return;
         session.swmHostModeCurated.set(hostKey, true);
       }
+      if (!session.active || this.gossipSession !== session
+        || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
       await this.maybeMarkRegisteredForHostMode(contextGraphId);
+      if (!session.active || this.gossipSession !== session) return;
+      this.automaticSwmHostModeAdmissionAllowed(contextGraphId);
       return;
     }
 
     // Only host curated CGs. Public CGs already have plaintext SWM
     // distribution and don't need an opaque ciphertext custodian.
     //
-    // OT-RFC-38 / LU-6 Phase B — three-source curation probe in
-    // cheapest-first order. The local SPARQL probe (the original
-    // gate) only finds the access-policy triple for CGs the local
-    // node CREATED or JOINED with metadata; for a chain-event-
-    // driven host-only core OR a beacon-driven pre-reg auto-host,
-    // no local meta exists and `isPrivateContextGraph` returns
-    // false, stranding the subscription. We supplement it with:
-    //
-    //   (a) `subscribedContextGraphs[contextGraphId].onChainHash` —
-    //       set ONLY by code paths that already proved curation
-    //       (chain-event handler with accessPolicy==1, beacon
-    //       handler with accessPolicy==BEACON_ACCESS_POLICY_CURATED,
-    //       successful curator-side `registerContextGraph` on a
-    //       curated CG). Cheapest of the three.
-    //   (b) `onChainAccessPolicyCache` — populated by the chain-
-    //       event poller; keyed by on-chain numeric id. Falls
-    //       through to the existing per-CG cache for CGs whose
-    //       cleartext is unknown locally.
-    //
-    // Any of the three returning "curated" is sufficient. If all
-    // three return "not curated", we bail (same as before). The
-    // probe is shared with `enableSwmHostModeFor` via
-    // {@link isCuratedForHostMode} so the operator-hatch close
-    // (OT-RFC-49 WS-A) sees the SAME curation answer as auto-host —
-    // critically, the host-only-core case where there's no local
-    // `_meta` and `isPrivateContextGraph` alone returns false.
+    // A numeric policy, verified curated beacon or native private metadata
+    // proves curation. A name commitment alone does not prove access policy.
     const curated = await this.isCuratedForHostMode(contextGraphId);
-    if (!curated || !session.active || this.gossipSession !== session) return;
+    if (!curated || !session.active || this.gossipSession !== session
+      || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)
+      || this.swmHostModeAccessPolicy(contextGraphId) === 0) return;
 
     // OT-RFC-49 WS-A — the private-ciphertext strip. With `stripCiphertext`
     // ON (default), a core declines ALL host-mode custody for a curated CG:
@@ -980,8 +990,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     this.wireSwmHostModeHandler(contextGraphId, source, true);
     await this.awaitHostModePersistence(contextGraphId);
-
+    if (!session.active || this.gossipSession !== session
+      || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
     await this.maybeMarkRegisteredForHostMode(contextGraphId);
+    if (!session.active || this.gossipSession !== session
+      || !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
 
     this.log.info(
       createOperationContext('system'),
@@ -1000,34 +1013,71 @@ export class SwmHostModeMethods extends DKGAgentBase {
     return this.config.swmHostMode?.stripCiphertext ?? true;
   }
 
-  /**
-   * OT-RFC-38 / LU-6 Phase B — the three-source curation probe used to decide
-   * whether a CG warrants host-mode custody, in cheapest-first order:
-   *
-   *   (a) `subscribedContextGraphs[id].onChainHash` — set ONLY by paths that
-   *       already proved curation (chain-event handler with accessPolicy==1,
-   *       beacon handler with BEACON_ACCESS_POLICY_CURATED, curator-side
-   *       register of a curated CG);
-   *   (b) `onChainId` + `onChainAccessPolicyCache===1` — populated by the
-   *       chain-event poller, keyed by numeric on-chain id;
-   *   (c) `isPrivateContextGraph` — the local `_meta` accessPolicy/allowlist
-   *       read (the original gate; the only one a host-only core CANNOT
-   *       satisfy, since it never holds the cleartext `_meta`).
-   *
-   * Any positive ⇒ curated. A probe throw is treated as NOT curated (the same
-   * bail-out `reconcileSwmHostModeSubscription` had inline). Extracted so the
-   * OT-RFC-49 WS-A operator-hatch close in {@link enableSwmHostModeFor} sees
-   * the EXACT same curation answer as the auto-host path — without this, a
-   * host-only core (no local `_meta`) would fail an `isPrivateContextGraph`-only
-   * check, leaving the operator override open for precisely the case WS-A
-   * exists to close.
-   */
+  /** Exact local identity wins; absent raw wire requests use native routing. */
+  swmHostModeLocalId(this: DKGAgent, contextGraphId: string): string {
+    if (this.subscribedContextGraphs.has(contextGraphId)
+      || this.contextGraphSubscriptionDormancyById.has(contextGraphId)) return contextGraphId;
+    const wireId = normalizeContextGraphNameHash(contextGraphId);
+    if (wireId === null) return contextGraphId;
+    if (this.subscribedContextGraphs.has(wireId)
+      || this.contextGraphSubscriptionDormancyById.has(wireId)) return wireId;
+    return this.resolveContextGraphIdAlias(wireId) ?? wireId;
+  }
+
+  /** Automatic hosting cannot activate saved intent that admission left dormant. */
+  automaticSwmHostModeAdmissionAllowed(this: DKGAgent, contextGraphId: string): boolean {
+    const localId = this.swmHostModeLocalId(contextGraphId);
+    if (!this.contextGraphSubscriptionDormancyById.has(localId)
+      || isAdmittedContextGraphSubscription(this.subscribedContextGraphs.get(localId))) return true;
+    const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+    // Refusal of A cannot retire an operator handler or another slot's owner B.
+    if (this.swmHostModeSubscribed.get(hostKey) !== SUBSCRIPTION_SOURCES.MANUAL
+      && this.wireIdToLocalCgId.get(hostKey) === localId) this.unwireSwmHostModeHandler(contextGraphId);
+    return false;
+  }
+
+  /** Numeric policy is authoritative over metadata and same-hash beacon hints. */
+  swmHostModeAccessPolicy(this: DKGAgent, contextGraphId: string): number | undefined {
+    let sub = this.subscribedContextGraphs.get(this.swmHostModeLocalId(contextGraphId));
+    if (!sub?.onChainId && normalizeContextGraphNameHash(contextGraphId) !== null) {
+      const owner = this.wireIdToLocalCgId.get(this.canonicalSwmHostModeKey(contextGraphId));
+      sub = owner === undefined ? undefined : this.subscribedContextGraphs.get(owner);
+    }
+    return sub?.onChainId ? this.onChainAccessPolicyCache.get(sub.onChainId) : undefined;
+  }
+
+  /** Manual authority uses current identity, not a retired predecessor's status. */
+  manualSwmHostModeLocalId(this: DKGAgent, contextGraphId: string): string {
+    if (this.subscribedContextGraphs.has(contextGraphId)) return contextGraphId;
+    const wireId = normalizeContextGraphNameHash(contextGraphId);
+    if (wireId === null) return contextGraphId;
+    if (this.subscribedContextGraphs.has(wireId)) return wireId;
+    return this.resolveContextGraphIdAlias(wireId) ?? wireId;
+  }
+
+  /** Manual strip-on custody requires this exact routed slot's public proof. */
+  isExactPublicManualSwmHostMode(this: DKGAgent, contextGraphId: string, hostKey: string): boolean {
+    const localId = this.manualSwmHostModeLocalId(contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(localId);
+    const onChainId = subscription?.onChainId;
+    const wireOwner = this.wireIdToLocalCgId.get(hostKey);
+    return isCanonicalAuthoritativeContextGraphId(onChainId)
+      && normalizeContextGraphNameHash(subscription?.onChainHash) === hostKey
+      && localContextGraphIdMatchesCommittedNameHash(localId, hostKey, id => this.isWireIdKeyedSubscription(id))
+      && this.canonicalSwmHostModeKey(contextGraphId) === hostKey
+      && (wireOwner === undefined || wireOwner === localId)
+      && this.onChainAccessPolicyCache.get(onChainId) === 0;
+  }
+
+  /** Curation requires actual policy, signed beacon verification or private metadata. */
   async isCuratedForHostMode(this: DKGAgent, contextGraphId: string): Promise<boolean> {
-    const sub = this.subscribedContextGraphs.get(contextGraphId);
-    if (sub?.onChainHash) return true;
-    if (sub?.onChainId && this.onChainAccessPolicyCache.get(sub.onChainId) === 1) return true;
+    const policy = this.swmHostModeAccessPolicy(contextGraphId);
+    if (policy !== undefined) return policy === 1;
+    if (this.beaconCuratorByWireId.has(this.canonicalSwmHostModeKey(contextGraphId))) return true;
     try {
-      return await this.isPrivateContextGraph(contextGraphId);
+      const privateMetadata = await this.isPrivateContextGraph(this.swmHostModeLocalId(contextGraphId));
+      const currentPolicy = this.swmHostModeAccessPolicy(contextGraphId);
+      return currentPolicy === undefined ? privateMetadata : currentPolicy === 1;
     } catch {
       return false;
     }
@@ -1093,6 +1143,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
     const session = this.gossipSession;
     const live = session.live();
     if (live === null) return;
+    if (source !== SUBSCRIPTION_SOURCES.MANUAL
+      && !this.automaticSwmHostModeAdmissionAllowed(contextGraphId)) return;
     if (!this.rfc64LegacySwmGossipAllowedForContextGraph(contextGraphId)) {
       const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
       const hadRuntimeHostState = session.swmHostModeHandlers.has(hostKey)
@@ -1139,7 +1191,16 @@ export class SwmHostModeMethods extends DKGAgentBase {
     session.swmHostModeSubscribed.set(wireCgId, source);
     session.swmHostModeCurated.set(wireCgId, curated);
     live.manager.subscribe(swmTopic);
-    const handler = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId);
+    const delegate = createSwmHostModeHandler(this, this.log, session, contextGraphId, wireCgId);
+    // Manual public custody must remain proven after enable returns or yields.
+    // Automatic callbacks retain their existing positive-private admission.
+    const handler = source === SUBSCRIPTION_SOURCES.MANUAL
+      ? (topic: string, data: Uint8Array, from: string): void => {
+        if (this.swmHostModeStripCiphertext()
+          && !this.isExactPublicManualSwmHostMode(contextGraphId, wireCgId)) return;
+        delegate(topic, data, from);
+      }
+      : delegate;
     session.swmHostModeHandlers.set(wireCgId, handler);
     live.manager.onMessage(swmTopic, handler);
     // B3: persist the host-mode designation so a restart re-engages
@@ -2828,9 +2889,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
         }
       }
       const existing = this.subscribedContextGraphs.get(localCgId);
-      if (existing === undefined) {
-        return this.contextGraphSubscriptionDormancyById.has(localCgId) ? 'dormant' : undefined;
-      }
+      if (this.contextGraphSubscriptionDormancyById.has(localCgId)
+        && !isAdmittedContextGraphSubscription(existing)) return 'dormant';
+      if (existing === undefined) return undefined;
       if (!existing.subscribed) return undefined;
       if (existing.onChainId === undefined) {
         return options.namespaceVerified === true || localCgId === numericStr ? undefined : 'binding-pending';
@@ -2900,6 +2961,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
       `Phase D: marked public cg=${numericStr} as core-hosted under "${localCgId}" ` +
       '(will chain-reconcile to VM across restarts)',
     );
+    // A Core serves the owner's definition of the graphs it hosts to their
+    // subscribers; fetched in the background, retried while it is missing.
+    void ensureCoreHostedDefinition(this, localCgId, 'recorded');
     const outcome = options.durable === true
       ? await this.persistCoreHostedPublicCgStrict(localCgId, numericStr, recordingGeneration)
       : 'recorded';
@@ -3194,12 +3258,12 @@ export class SwmHostModeMethods extends DKGAgentBase {
     signal?: AbortSignal,
   ): Promise<string | null> {
     signal?.throwIfAborted();
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const lifecycleSignal = this.workLifetime?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
       && !signal?.aborted
       && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+      && this.workLifetime.generation === lifecycleGeneration;
     if (!isLifecycleCurrent()) return null;
     let targetOnChain: bigint | null = null;
     try { targetOnChain = BigInt(onChainId); } catch { targetOnChain = null; }
@@ -3294,38 +3358,18 @@ export class SwmHostModeMethods extends DKGAgentBase {
     kaId: bigint,
     merkleRoot: Uint8Array,
     ctx: OperationContext,
-    options: {
-      readonly blockNumber?: number;
-      readonly logIndex?: number;
-      readonly blockHash?: string;
-      readonly txHash?: string;
-      readonly signal?: AbortSignal;
-    } = {},
+    options: { readonly eventIdentity?: KnowledgeAssetUpdateIdentity; readonly signal?: AbortSignal } = {},
   ): Promise<VmRefreshTarget[]> {
     const { signal } = options;
-    const blockNumber = options.blockNumber !== undefined
-      && Number.isSafeInteger(options.blockNumber)
-      && options.blockNumber >= 0
-      ? options.blockNumber
-      : undefined;
-    const eventTxHash = typeof options.txHash === 'string' && options.txHash.length > 0
-      ? options.txHash.toLowerCase()
-      : undefined;
-    const logIndex = options.logIndex !== undefined
-      && Number.isSafeInteger(options.logIndex)
-      && options.logIndex >= 0
-      ? options.logIndex
-      : undefined;
-    const blockHash = typeof options.blockHash === 'string' && options.blockHash.length > 0
-      ? options.blockHash.toLowerCase()
-      : undefined;
+    const eventIdentity = Object.freeze(options.eventIdentity ? { ...options.eventIdentity } : { eventKind: 'legacy-unpositioned' as const });
+    const { blockNumber, blockHash, txHash: eventTxHash } = eventIdentity;
     signal?.throwIfAborted();
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const lifecycleSignal = this.workLifetime?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
       && !signal?.aborted
       && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+      && this.workLifetime.generation === lifecycleGeneration;
     if (!isLifecycleCurrent() || kaId <= 0n || merkleRoot.length !== 32) return [];
     this.expireVmRefreshTargets(ctx);
     const update = `update${blockNumber === undefined ? '' : ` at block ${blockNumber}`}`;
@@ -3400,10 +3444,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         ual,
         kaId,
         merkleRoot: eventRoot,
-        ...(blockNumber === undefined ? {} : { blockNumber }),
-        ...(logIndex === undefined ? {} : { logIndex }),
-        ...(blockHash === undefined ? {} : { blockHash }),
-        ...(eventTxHash === undefined ? {} : { txHash: eventTxHash }),
+        ...eventIdentity,
         ...(sameRoot ? { checkVersion: true } : {}),
       };
       const delayMs = local.staged ? DKGAgentBase.VM_REFRESH_STAGED_GRACE_MS : 0;
@@ -3657,7 +3698,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
     });
     workers.set(localCgId, worker);
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, worker);
+    this.workLifetime.track(worker);
     return worker;
   }
 
@@ -3803,7 +3844,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         peerWindowIndex: target.failures,
         // An update keeps the UAL. Its old responder session can outlive the
         // previous version, so every refresh attempt needs a new snapshot.
-        forceFreshExactSession: true,
+        exactFetchPurpose: 'vm-update-refresh',
         // A candidate that cannot be reached (after a restart, the curator
         // is often not connected yet) yields to the next one.
         peerStepTimeoutMs: DKGAgentBase.VM_REFRESH_PEER_STEP_TIMEOUT_MS,
@@ -3872,14 +3913,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       attempt: { outcome: 'current', detail: 'the copy holds the chain root and version' },
     } as const;
     if (typeof this.chain.readKnowledgeAssetVersionSnapshot !== 'function') return current;
-    const view = await this.chain.readKnowledgeAssetVersionSnapshot(target.kaId, { signal });
+    // Without a view the attempt retries, and says why the adapter had none when it reports that.
+    const versionRead = await readVmRefreshVersionView(
+      this.chain.readKnowledgeAssetVersionSnapshot.bind(this.chain), target.kaId, signal,
+    );
     if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
-    if (view === null) {
-      return {
-        kind: 'settled',
-        attempt: { outcome: 'retry', detail: 'no coherent chain view confirms the copy' },
-      };
-    }
+    if (versionRead.view === null) return { kind: 'settled', attempt: versionRead.retry };
+    const { view } = versionRead;
     const proofBlock = target.proofBlockNumber ?? target.blockNumber;
     if (proofBlock !== undefined && view.blockNumber < proofBlock) {
       return {
@@ -3938,14 +3978,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     if (!subscription?.subscribed && !subscription?.coreHosted) {
       throw new ContextGraphNotFoundError(localCgId);
     }
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const signal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const signal = this.workLifetime?.signal;
     const isCurrent = (): boolean => {
       const current = this.subscribedContextGraphs.get(localCgId);
       return !this.vmReconcileRotationClosed
         && !this.graphScopedStoreClosed
         && !signal?.aborted
-        && this.vmReconcileLifecycleGeneration === lifecycleGeneration
+        && this.workLifetime.generation === lifecycleGeneration
         && current === subscription
         && Boolean(current?.subscribed || current?.coreHosted);
     };
@@ -3968,7 +4008,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
         await this.chain.contextGraphAuthorityIndexRevisionReader?.whenIdle();
       }
     })();
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
+    this.workLifetime.track(authorityRead);
     const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) throw new ContextGraphNotFoundError(localCgId);
@@ -4019,6 +4059,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
        */
       peerStepTimeoutMs?: number;
       /** Start a new exact-asset snapshot for this update refresh attempt. */
+      exactFetchPurpose?: 'vm-update-refresh';
+      /** @deprecated Use exactFetchPurpose: 'vm-update-refresh'. */
       forceFreshExactSession?: boolean;
     },
   ): Promise<ContextGraphAssetFetchResult> {
@@ -4061,8 +4103,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
       isCurrent,
       getKAContextGraphId: (kaId, readSignal) =>
         getKAContextGraphId(kaId, { signal: readSignal }),
-      readKnowledgeAssetVersionSnapshot: (kaId, readSignal) =>
-        readKnowledgeAssetVersionSnapshot(kaId, { signal: readSignal }),
+      readKnowledgeAssetVersionSnapshot: (kaId, readSignal, onUnavailable) =>
+        readKnowledgeAssetVersionSnapshot(kaId, { signal: readSignal, onUnavailable }),
       verifyLocalContextGraph: (onChainCgId) =>
         this.requireLocalCgMatchesOnChainSlot(
           localCgId,
@@ -4159,7 +4201,8 @@ export class SwmHostModeMethods extends DKGAgentBase {
             // holds its older exact-asset page session. A refresh must start
             // from a new snapshot on every attempt; its pages still share one
             // session within this invocation.
-            forceFreshExactSession: options.forceFreshExactSession === true,
+            exactFetchPurpose: options.exactFetchPurpose,
+            forceFreshExactSession: options.forceFreshExactSession,
           },
         );
       },
@@ -4178,7 +4221,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       throw error;
     });
 
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
+    this.workLifetime.track(physicalRun);
     return raceVmReconcileAbort(physicalRun, signal);
   }
 
@@ -4205,7 +4248,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
           }
           // Reported where the graph was parked (executeVmReconcileForCg): it
           // is asked again shortly and does not wait for the sweep.
-          if (err instanceof VmReconcileReadAuthorityUnansweredError) return;
+          if (
+            err instanceof VmReconcileReadAuthorityUnansweredError
+            || err instanceof VmReconcileLocalRpcRefusalError
+            || err instanceof VmReconcileOvertakenError
+          ) return;
           this.log.warn(
             createOperationContext('system'),
             `VM reconcile for "${localCgId}" failed; retrying on the periodic sweep: ${err instanceof Error ? err.message : String(err)}`,
@@ -4229,11 +4276,11 @@ export class SwmHostModeMethods extends DKGAgentBase {
     localCgId: string,
     source: VmReconcileSource,
   ): Promise<ContextGraphReconcileResult> {
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
-    const lifecycleSignal = this.vmReconcileLifecycleController?.signal;
+    const lifecycleGeneration = this.workLifetime.generation;
+    const lifecycleSignal = this.workLifetime?.signal;
     const isLifecycleCurrent = () => !this.vmReconcileRotationClosed
       && !lifecycleSignal?.aborted
-      && this.vmReconcileLifecycleGeneration === lifecycleGeneration;
+      && this.workLifetime.generation === lifecycleGeneration;
     if (!isLifecycleCurrent()) throw new VmReconcileQueueClosedError();
     // Retired name-hash id: it names no local graph any more, the answer target
     // resolution would give without a chain read (see supersedingContextGraphIdFor).
@@ -4248,6 +4295,25 @@ export class SwmHostModeMethods extends DKGAgentBase {
         { requestClass: 'background', ...(lifecycleSignal ? { signal: lifecycleSignal } : {}) },
         () => withDefaultStoreWorkPriority('background', work),
       );
+    // A chain read attempt that the node's own RPC admission refused was
+    // never sent, so it says nothing about the graph. An automatic pass that
+    // meets one leaves the graph waiting to be asked again shortly, as after
+    // an unanswered read-authority check. Without that its next attempt is
+    // the graph's turn in the periodic sweep, and after a failed pass its
+    // live nudges are dropped until then. An operator's request, any other
+    // failure, and a graph the wait does not take end as they always did.
+    const askAgainAfterLocalRpcRefusal = (refusal: unknown, isCurrent: () => boolean): boolean =>
+      askVmReconcileAgainAfterLocalRpcRefusal({
+        contextGraphId: localCgId,
+        refusal,
+        automatic: source !== 'manual',
+        defer: () => this.vmReconcileScheduling?.deferForLocalRpcRefusal(localCgId, {
+          signal: lifecycleSignal,
+          isCurrent,
+          canAdmit: () => this.vmRecoverySyncAdmissionAvailable(localCgId),
+        }),
+        log: (level, message) => this.log[level](createOperationContext('system'), message),
+      });
     const physicalRun = runInLane(async (): Promise<ContextGraphReconcileResult> => {
       const passStartedAt = performance.now();
       const passGapMs = vmReconcilePassGapMs(this, localCgId, passStartedAt);
@@ -4300,6 +4366,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
       let pendingWatermark: number | undefined;
       let result: VmReconcileEngineResult;
       let engineTimings: ReconcilePassTimings | undefined;
+      const refusedReads = new VmReconcileRefusedSliceReads();
       try {
         result = await reconcileContextGraph(
           this.createVmReconcileDeps(
@@ -4311,6 +4378,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
               identityCursor: target.cursor,
               persistWatermark: (_lcg, watermark) => { pendingWatermark = watermark; },
               observePassTimings: (timings) => { engineTimings = timings; },
+              refusedReads,
             },
           ),
           workingCursor,
@@ -4374,6 +4442,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
             + `continue=${result.shouldContinueImmediately ? 1 : 0}`,
         );
       });
+      // A slice that met a refused read keeps the graph's ask-again window
+      // as it is, whichever way it continues below.
+      if (refusedReads.met) this.vmReconcileScheduling?.noteLocalRpcRefusal(localCgId);
       // The reconciler owns the continuation policy: productive slices, stale
       // bindings, and explicit provider rotations continue immediately, while
       // pending-only historical inventory yields to the periodic sweep.
@@ -4394,11 +4465,19 @@ export class SwmHostModeMethods extends DKGAgentBase {
           && isTargetCurrent()
           && this.vmReconcileScheduling?.yieldLocalAdmissionTurn(localCgId, localAdmissionWait) === true;
         if (!yielded) this.vmReconcileScheduling?.triggerLive(localCgId);
-      } else if (isTargetCurrent()) {
+      } else if (
+        isTargetCurrent()
+        && !askAgainAfterLocalRpcRefusal(
+          refusedReads.askAgainFor({ visited: result.processed, outstanding: result.pending }),
+          isTargetCurrent,
+        )
+      ) {
         // RS heal is bounded, best-effort maintenance. Run it only after the
         // useful VM slice completed and only when that slice has no urgent
         // continuation. Store pressure must defer maintenance, never erase the
-        // main reconcile result or prevent foreground ordinal progress.
+        // main reconcile result or prevent foreground ordinal progress. A slice
+        // that is asked again for the reads it went without has its
+        // continuation in that pass.
         if (target.kind === 'subscription') {
           try {
             await this.healStrandedScopedKCs(
@@ -4421,8 +4500,38 @@ export class SwmHostModeMethods extends DKGAgentBase {
       }
       noteVmReconcilePassEnd(this, localCgId, performance.now());
       return response;
+    }).catch((err: unknown): never => {
+      // The pass ended on the refused read itself, the asset count above all.
+      // It still ends as a failed pass, so live nudges from elsewhere stay
+      // held; only the wait's own nudge lifts that hold.
+      if (askAgainAfterLocalRpcRefusal(err, isLifecycleCurrent)) {
+        throw new VmReconcileLocalRpcRefusalError(err);
+      }
+      // The pass stopped because its target is no longer the graph's current
+      // one, on a node that is not shutting down: the graph's row was stored
+      // again under it with a change, by a catch-up or a sync round that
+      // ended, for one. That is not a failure of the graph. Asked again
+      // shortly, it gets a pass on the row as it is now; left as a failed pass
+      // it lost its live nudges until its turn in the periodic sweep. Only a
+      // graph the sweep would still select is asked again.
+      const stillReconciled = () => isLifecycleCurrent()
+        && this.isVmReconcileTargetSelected(localCgId);
+      const overtaken = askVmReconcileAgainAfterOvertakenPass({
+        contextGraphId: localCgId,
+        error: err,
+        automatic: source !== 'manual',
+        stillReconciled,
+        defer: () => this.vmReconcileScheduling?.deferForOvertakenPass(localCgId, {
+          signal: lifecycleSignal,
+          isCurrent: stillReconciled,
+          canAdmit: () => this.vmRecoverySyncAdmissionAvailable(localCgId),
+        }),
+        log: (level, message) => this.log[level](createOperationContext('system'), message),
+      });
+      if (overtaken) throw new VmReconcileOvertakenError(err);
+      throw err;
     });
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, physicalRun);
+    this.workLifetime.track(physicalRun);
     return raceVmReconcileAbort(physicalRun, lifecycleSignal);
   }
 
@@ -4537,7 +4646,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     );
     // Cancellation releases the dispatcher worker, but an underlying store/RPC
     // read may ignore it. Keep that physical dependency in the shutdown drain.
-    trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, authorityRead);
+    this.workLifetime.track(authorityRead);
     const canRead = await raceVmReconcileAbort(authorityRead, signal).catch(() => false);
     if (!isCurrent()) throw new VmReconcileQueueClosedError();
     if (!canRead) {
@@ -4796,7 +4905,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
   ): boolean {
     if (
       this.vmReconcileRotationClosed
-      || this.vmReconcileLifecycleGeneration !== lifecycleGeneration
+      || this.workLifetime.generation !== lifecycleGeneration
     ) return false;
     if (target.kind === 'rfc64-selected') {
       const current = this.selectedVmReconcileCursors.get(localCgId);
@@ -4892,6 +5001,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     execution?: VmReconcileExecution,
   ): ChainReconcilerDeps {
     const capturedCursor = execution?.identityCursor ?? target.cursor;
+    const refusedReads = execution?.refusedReads;
     const isTargetCurrent = (): boolean => this.isVmReconcileTargetCurrent(
       localCgId,
       target,
@@ -4917,7 +5027,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
         // Capability-absent chains disable the reorg gate; transient RPC
         // failures still throw so the durable watermark cannot advance.
         if (typeof this.chain.getBlockNumber !== 'function') return undefined;
-        const headBlock = await this.chain.getBlockNumber();
+        let headBlock: number;
+        try {
+          headBlock = await this.chain.getBlockNumber();
+        } catch (err) {
+          // The engine holds the watermark and ends the slice; its pass is told why.
+          refusedReads?.headBlockFailed(err);
+          throw err;
+        }
         if (!isTargetCurrent()) throw new VmReconcileQueueClosedError();
         return headBlock;
       },
@@ -4927,6 +5044,9 @@ export class SwmHostModeMethods extends DKGAgentBase {
           revalidateTarget,
           rememberFinalizedEvidence: context === undefined
             || context.headOrdinal - ordinal <= DKGAgentBase.VM_RECONCILE_BATCH_SIZE,
+          ...(refusedReads
+            ? { onUnresolvable: (err: unknown) => refusedReads.ordinalFailed(err) }
+            : {}),
         }),
       recoverPendingOrdinals: (lcg, ocg, targets, headBlock) =>
         this.recoverVmReconcileBatch(
@@ -4983,7 +5103,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     watermark: number,
     target: VmReconcileTarget,
   ): Promise<void> {
-    const lifecycleGeneration = this.vmReconcileLifecycleGeneration;
+    const lifecycleGeneration = this.workLifetime.generation;
     const isTargetCurrent = () => this.isVmReconcileTargetCurrent(
       localCgId,
       target,
@@ -5460,13 +5580,13 @@ export class SwmHostModeMethods extends DKGAgentBase {
       holderReuseEnabled: resolveExactBatchStreamEnabled,
       captureScope: (localCgId, candidatePeerIds) => typeof this.chain.deploymentId === 'string' ? {
         deploymentId: this.chain.deploymentId,
-        lifecycleGeneration: this.vmReconcileLifecycleGeneration,
+        lifecycleGeneration: this.workLifetime.generation,
         bindingGeneration: this.contextGraphBindingState.capture(localCgId),
         selectedBindingGeneration: this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration,
         candidatePeerIds: [...candidatePeerIds],
       } : undefined,
       scopeIsCurrent: (localCgId, scope) => this.chain.deploymentId === scope.deploymentId
-        && this.vmReconcileLifecycleGeneration === scope.lifecycleGeneration
+        && this.workLifetime.generation === scope.lifecycleGeneration
         && !this.vmReconcileRotationClosed
         && this.contextGraphBindingState.capture(localCgId) === scope.bindingGeneration
         && this.selectedVmReconcileCursors.get(localCgId)?.bindingGeneration === scope.selectedBindingGeneration
@@ -5944,8 +6064,6 @@ export class SwmHostModeMethods extends DKGAgentBase {
   }
 
   closeVmReconcileRotationState(this: DKGAgent): void {
-    this.vmReconcileLifecycleController?.abort();
-    this.vmReconcileLifecycleGeneration = (this.vmReconcileLifecycleGeneration ?? 0) + 1;
     this.vmReconcileRotationClosed = true;
     this.vmReconcileScheduling?.resetSweep();
     // Some lifecycle tests intentionally construct a narrow partial agent
@@ -5962,17 +6080,14 @@ export class SwmHostModeMethods extends DKGAgentBase {
     this.vmRefreshQueue?.clear();
     // Cancel speculative sizing reads and let shutdown wait for them to settle.
     const preparation = existingVmRecoveryPreparation(this);
-    if (preparation && this.vmReconcilePhysicalRuns) {
-      trackVmReconcilePhysicalRun(this.vmReconcilePhysicalRuns, preparation.close());
+    if (preparation && this.workLifetime) {
+      this.workLifetime.track(preparation.close());
     } else {
       void preparation?.close();
     }
   }
 
   openVmReconcileRotationState(this: DKGAgent): void {
-    if (!this.vmReconcileLifecycleController || this.vmReconcileLifecycleController.signal.aborted) {
-      this.vmReconcileLifecycleController = new AbortController();
-    }
     this.vmReconcileRotationClosed = false;
   }
 
@@ -6592,10 +6707,10 @@ export class SwmHostModeMethods extends DKGAgentBase {
     signal?: AbortSignal,
     revalidateTarget?: () => Promise<boolean>,
   ): Promise<PendingOrdinalRecoveryResult> {
-    const rotationGeneration = this.vmReconcileLifecycleGeneration;
+    const rotationGeneration = this.workLifetime.generation;
     const isRecoveryCurrent = () => !this.vmReconcileRotationClosed
       && !signal?.aborted
-      && this.vmReconcileLifecycleGeneration === rotationGeneration
+      && this.workLifetime.generation === rotationGeneration
       && isTargetCurrent();
     const ctx = createOperationContext('system');
     // Advisory sizing preparation (opt-in, default off). Created lazily and
@@ -7479,6 +7594,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
 
     const unresolvable = (err: unknown): OrdinalOutcome => {
       // RPC lag / unknown kaId — leave for the next sweep.
+      options.onUnresolvable?.(err);
       this.log.info(ctx, `Phase B: ordinal ${ordinal} of cg ${onChainCgId} not resolvable yet: ${err instanceof Error ? err.message : String(err)}`);
       return { status: 'pending' };
     };
@@ -8451,8 +8567,40 @@ export class SwmHostModeMethods extends DKGAgentBase {
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true, memberMode: true };
     }
     const hostKey = this.canonicalSwmHostModeKey(contextGraphId);
+    const localId = this.manualSwmHostModeLocalId(contextGraphId);
+    const subscription = this.subscribedContextGraphs.get(localId);
+    const onChainId = subscription?.onChainId;
+    const onChainHash = subscription?.onChainHash;
+    const generation = this.contextGraphBindingState.capture(localId);
+    const handler = session.swmHostModeHandlers.get(hostKey);
+    const source = session.swmHostModeSubscribed.get(hostKey);
+    const wireOwner = this.wireIdToLocalCgId.get(hostKey);
+    const requestIsCurrent = (): boolean => session.active && this.gossipSession === session
+      && this.manualSwmHostModeLocalId(contextGraphId) === localId
+      && this.subscribedContextGraphs.get(localId) === subscription
+      && subscription?.onChainId === onChainId && subscription?.onChainHash === onChainHash
+      && this.contextGraphBindingState.isGenerationCurrent(localId, generation)
+      && this.canonicalSwmHostModeKey(contextGraphId) === hostKey
+      && this.wireIdToLocalCgId.get(hostKey) === wireOwner;
     const curated = await this.isCuratedForHostMode(contextGraphId);
-    if (!session.active || this.gossipSession !== session) {
+    if (!requestIsCurrent()
+      || session.swmHostModeHandlers.get(hostKey) !== handler
+      || session.swmHostModeSubscribed.get(hostKey) !== source) {
+      return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
+    }
+    const strip = this.swmHostModeStripCiphertext();
+    const publicPolicy = this.isExactPublicManualSwmHostMode(contextGraphId, hostKey);
+    const ownsHandler = handler !== undefined && wireOwner === localId;
+    // Absence of private evidence is not public proof. Close only this owner's
+    // existing dispatch; retain its operator provenance and durable marker.
+    if (strip && !publicPolicy) {
+      if (ownsHandler) session.swmHostModeCurated.set(hostKey, true);
+      this.log.info(createOperationContext('system'),
+        `SWM host-mode subscribe REFUSED for "${contextGraphId}": private-ciphertext strip requires exact public access policy`,
+      );
+      return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
+    }
+    if (strip && (handler !== undefined || source !== undefined) && !ownsHandler) {
       return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     }
     if (this.swmHostModeSubscribed.has(hostKey)) {
@@ -8469,37 +8617,29 @@ export class SwmHostModeMethods extends DKGAgentBase {
       // this canonicalisation the second subscribe would wire a
       // duplicate gossip handler on the same topic and double every
       // host-mode ingest/persistence.
-      // Never downgrade a positive classification on a transient policy-read
-      // failure. A false -> true transition closes both dispatch branches.
+      // Exact public policy can reopen this owner after an unknown-policy
+      // refusal. Strip-off re-entry retains positive private classification.
       this.swmHostModeCurated.set(
         hostKey,
-        this.swmHostModeCurated.get(hostKey) === true || curated,
+        strip && ownsHandler && source === SUBSCRIPTION_SOURCES.MANUAL
+          ? false : this.swmHostModeCurated.get(hostKey) === true || curated,
       );
       await this.maybeMarkRegisteredForHostMode(contextGraphId);
+      if (!requestIsCurrent() || session.swmHostModeHandlers.get(hostKey) !== handler
+        || session.swmHostModeSubscribed.get(hostKey) !== source
+        || (strip && !this.isExactPublicManualSwmHostMode(contextGraphId, hostKey))) {
+        return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
+      }
       return { subscribed: false, alreadySubscribed: true, hostingEnabled: true };
     }
-    // OT-RFC-49 WS-A — CLOSE the operator hatch. With the private-ciphertext
-    // strip ON (default), the operator override must NOT re-introduce private
-    // custody for a CURATED CG: WS-A diverges from rung-1 (which deliberately
-    // left this manual path open) precisely here — there is no supported way
-    // back into private host-mode for a curated CG while the strip is on.
-    // Scoped to curated CGs via the SAME three-source probe the auto-host
-    // path uses ({@link isCuratedForHostMode}), NOT `isPrivateContextGraph`
-    // alone — a host-only core has no local `_meta`, so an
-    // `isPrivateContextGraph`-only check would return false and leave the
-    // hatch open for exactly the case WS-A closes. PUBLIC / bare-uncurated CGs
-    // are never affected (all three sources return not-curated → hatch stays
-    // open).
-    if (this.swmHostModeStripCiphertext() && curated) {
-      this.log.info(
-        createOperationContext('system'),
-        `SWM host-mode subscribe REFUSED for "${contextGraphId}": private-ciphertext strip is ON ` +
-        `(OT-RFC-49 WS-A — the operator override is closed for curated CGs; cores custody zero private SWM ciphertext)`,
-      );
-      return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
-    }
-    this.wireSwmHostModeHandler(contextGraphId, SUBSCRIPTION_SOURCES.MANUAL, curated);
+    this.wireSwmHostModeHandler(contextGraphId, SUBSCRIPTION_SOURCES.MANUAL, strip ? false : curated);
+    const createdHandler = session.swmHostModeHandlers.get(hostKey);
+    const createdIsCurrent = (): boolean => requestIsCurrent() && createdHandler !== undefined
+      && session.swmHostModeHandlers.get(hostKey) === createdHandler
+      && session.swmHostModeSubscribed.get(hostKey) === SUBSCRIPTION_SOURCES.MANUAL
+      && (!strip || this.isExactPublicManualSwmHostMode(contextGraphId, hostKey));
     await this.awaitHostModePersistence(contextGraphId);
+    if (!createdIsCurrent()) return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     // Codex PR #610 R1 comment 5: a core that only knows the CG by
     // topic id (the explicit /host-mode/subscribe entrypoint) must
     // still transition the store to the registered-CG limits as
@@ -8508,6 +8648,7 @@ export class SwmHostModeMethods extends DKGAgentBase {
     // forever and prune ciphertext from registered CGs much
     // earlier than intended.
     await this.maybeMarkRegisteredForHostMode(contextGraphId);
+    if (!createdIsCurrent()) return { subscribed: false, alreadySubscribed: false, hostingEnabled: true };
     this.log.info(
       createOperationContext('system'),
       `SWM host-mode subscription explicitly enabled for "${contextGraphId}" via API (role=${this.config.nodeRole ?? 'edge'})`,

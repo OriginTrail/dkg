@@ -11,6 +11,48 @@ import {
 import { finalizedAuthorityColdResolutionOf } from '../src/finalized-authority-cold-resolution.js';
 
 describe('Context Graph registration resolution deadlines', () => {
+  it.each(['ordinary', 'repair'] as const)('separates %s flights whose graph IDs or repair hints contain delimiters', async (mode) => {
+    const fixture = selectedFixture();
+    fixture.agent.subscribedContextGraphs.clear();
+    fixture.agent.wireIdToLocalCgId.clear();
+    const firstId = 'registration-flight';
+    const secondId = `${firstId}:${mode === 'ordinary' ? 'bounded' : 'bad'}`;
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const resolveFinalized = vi.fn(async (): Promise<bigint> => {
+      const result = resolveFinalized.mock.calls.length === 1 ? 42n : 43n;
+      if (result === 42n) { entered.resolve(); await release.promise; }
+      return result;
+    });
+    Object.assign(fixture.agent.chain, {
+      contextGraphAuthorityIndexRevisionReader: { resolveFinalizedContextGraphIdByNameHash: resolveFinalized },
+    });
+    const first = fixture.agent.resolveContextGraphRegistrationBinding(firstId, {
+      freshness: mode === 'ordinary' ? 'bounded' : 'live',
+      registrationTimeoutMs: 10_000,
+      ...(mode === 'repair' ? { durableSubscriptionBinding: {
+        contextGraphId: firstId, onChainId: 'bad:part', onChainHash: NAME_HASH,
+      } } : {}),
+    });
+    await entered.promise;
+    const second = fixture.agent.resolveContextGraphRegistrationBinding(secondId, {
+      freshness: 'live', registrationTimeoutMs: 10_000,
+      allowAcceptedRfc64FinalizedAbsence: true,
+      ...(mode === 'repair' ? { durableSubscriptionBinding: {
+        contextGraphId: secondId, onChainId: 'part', onChainHash: NAME_HASH,
+      } } : {}),
+    });
+    try {
+      await vi.waitFor(() => expect(finalizedAuthorityColdResolutionOf(fixture.agent).inFlightKeys).toHaveLength(2));
+    } finally {
+      release.resolve();
+      await Promise.allSettled([first, second]);
+    }
+    await expect(first).resolves.toMatchObject({ kind: 'registered', onChainId: 42n });
+    await expect(second).resolves.toMatchObject({ kind: 'registered', onChainId: 43n });
+    expect(resolveFinalized).toHaveBeenCalledTimes(2);
+  });
+
   it('returns fresh finalized bindings without registering unrelated global index drains', async () => {
     vi.useFakeTimers();
     let releaseDrain!: () => void;

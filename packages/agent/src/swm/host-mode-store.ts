@@ -531,26 +531,7 @@ export class SwmHostModeStore {
   }
 
   private async persistMeta(contextGraphId: string, meta: CgMetaState): Promise<void> {
-    const cgKey = this.layout.cgKey(contextGraphId);
-    const cache = this.metaLoader.cache;
-    cache.set(cgKey, meta);
-    // Authoritative write: a failure rejects so the caller sees it.
-    try {
-      await this.files.writeFileDurable(this.layout.metaPath(contextGraphId), JSON.stringify(meta));
-    } catch (err) {
-      // The caller mutated the cached object before calling us, so on failure
-      // the cache may be ahead of the disk. Drop it: the next access re-reads
-      // what is on disk (the cursor is re-derived from the log tail) and a retry
-      // of the same mutation actually retries the write instead of no-op'ing
-      // against a flag the disk never saw. If the failure was the directory
-      // fsync after the rename, the new file IS what the next access reads;
-      // `DurableFiles` has then recorded it as pending, and the retry's
-      // idempotent early return completes that fsync (see `mutateMeta`).
-      // The re-read rejects when it cannot read the files; only a missing file
-      // loads as absent (see `HostStoreMetaLoader`).
-      if (cache.get(cgKey) === meta) cache.delete(cgKey);
-      throw err;
-    }
+    await this.metaLoader.persist(contextGraphId, meta);
   }
 
   /**

@@ -1,3 +1,4 @@
+import { requireGraphFrameCount } from './stats-evidence.js';
 /**
  * SWM host-mode store durability - devnet validation.
  *
@@ -416,8 +417,8 @@ describe('SWM host-mode store survives kill -9 of the hosting core', () => {
     expect(log.seqnos[0]).toBe(1);
     // The API view agrees with the disk (cleartext or wire-id key).
     const stats = await hostStats();
-    const entries = Object.values(stats?.perCg ?? {}).reduce((sum, row) => sum + row.entries, 0);
-    expect(entries).toBeGreaterThanOrEqual(3);
+    const storedIdentity = JSON.parse(readFileSync(join(storeDir, `${cgKey(cgId)}.meta`), 'utf8')).contextGraphId as string;
+    requireGraphFrameCount(stats?.perCg, cgId, storedIdentity, log.frames.length);
     expect(readMetaSeqno(cgId)).toBe(log.seqnos.at(-1));
     console.log(`baseline: host stored ${log.seqnos.length} frames, last seqno ${log.seqnos.at(-1)}`);
   }, 600_000);

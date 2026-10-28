@@ -54,4 +54,40 @@ describe('context graph on-chain id binding query', () => {
     expect(graphs).toEqual(['did:dkg:context-graph:ontology', 'did:dkg:context-graph:team-b/_meta']);
     expect(query).not.toContain('team-a');
   });
+
+  it('exposes conflicts across both claim graphs after lexical deduplication', () => {
+    const query = contextGraphOnChainIdBindingQuery('team-a', { includeConflicts: true });
+    expect(query).toMatch(/^SELECT DISTINCT \(STR\(\?claimId\) AS \?id\) WHERE \{/);
+    expect([...query.matchAll(/GRAPH <([^>]+)>/g)].map((match) => match[1])).toEqual([
+      'did:dkg:context-graph:ontology',
+      'did:dkg:context-graph:team-a/_meta',
+    ]);
+    expect(query).toContain('UNION');
+    expect(query.match(new RegExp(`<${PREDICATE}> \\?claimId`, 'g'))).toHaveLength(2);
+    expect(query).not.toContain('COALESCE');
+    expect(query).not.toContain('FILTER(');
+    // Typed copies of one slot must be collapsed before the two-slot limit.
+    expect(query).toMatch(/\} LIMIT 2$/);
+  });
+
+  it('filters each conflict arm without hiding an allowed competing slot', () => {
+    const query = contextGraphOnChainIdBindingQuery('team-a', {
+      includeConflicts: true,
+      onChainIds: ['582', '323'],
+    });
+    expect(query.match(/FILTER\(STR\(\?claimId\) IN \("582", "323"\)\)/g)).toHaveLength(2);
+    expect(query).toContain('UNION');
+    const none = contextGraphOnChainIdBindingQuery('team-a', {
+      includeConflicts: true,
+      onChainIds: [],
+    });
+    expect(none.match(/\} FILTER\(false\) \}/g)).toHaveLength(2);
+    expect(none).not.toContain('IN (');
+  });
+
+  it('keeps explicit compatibility mode identical to the default query', () => {
+    expect(contextGraphOnChainIdBindingQuery('team-a', { includeConflicts: false })).toBe(
+      contextGraphOnChainIdBindingQuery('team-a'),
+    );
+  });
 });

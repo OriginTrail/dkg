@@ -338,7 +338,9 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
   }, 60_000);
 
   it.each(['member', 'host'] as const)('ignores retained %s callbacks after retirement and processes replacement callbacks', async (mode) => {
-    const boot = await createEdgeAgent(`RestartGossipRetained-${mode}`);
+    const boot = await createEdgeAgent(`RestartGossipRetained-${mode}`, {
+      swmHostMode: { stripCiphertext: false },
+    });
     agent = boot.agent;
     const { internals } = boot;
     await agent.start();

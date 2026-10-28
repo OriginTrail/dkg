@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { GossipSubManager, SubscriptionSource } from '@origintrail-official/dkg-core';
 import type { ContextGraphSub } from './dkg-agent-types.js';
+import { UnansweredAuthorityRecheck } from './internal/unanswered-authority-recheck.js';
 
 /** All bookkeeping belongs to the manager whose wiring it describes. */
 export class GossipSession {
@@ -53,5 +54,25 @@ export class GossipSession {
     });
   }
 
-  retire(): void { this.#retired = true; }
+  retire(): void {
+    this.#retired = true;
+    sharedMemoryAuthorityRechecks.get(this)?.close();
+  }
+}
+
+const sharedMemoryAuthorityRechecks = new WeakMap<object, UnansweredAuthorityRecheck>();
+
+/**
+ * The shared-memory subscriptions of one gossip session whose authority check
+ * got no answer. It is looked up by the session and not kept on it, so the
+ * reconcile needs nothing more of a session than it did; a session that
+ * retires closes its own.
+ */
+export function sharedMemoryAuthorityRecheckOf(session: object): UnansweredAuthorityRecheck {
+  let recheck = sharedMemoryAuthorityRechecks.get(session);
+  if (recheck === undefined) {
+    recheck = new UnansweredAuthorityRecheck();
+    sharedMemoryAuthorityRechecks.set(session, recheck);
+  }
+  return recheck;
 }

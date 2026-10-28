@@ -175,6 +175,13 @@ export {
   isPublicLikeAddress,
   isLocalOrInternalHostname,
 } from './node.js';
+export {
+  isIpLoopbackAddress,
+  isLocalhostAddress,
+  isLocalhostHostname,
+  isLoopbackAddress,
+  isUnspecifiedAddress,
+} from './network/address-policy.js';
 // Transport-level network isolation. `peerIdFromRelayAddress` is shared with
 // the CLI, which derives other-network relay ids from bundled network configs.
 export { peerIdFromRelayAddress } from './network-peer-dial-policy.js';
@@ -306,6 +313,7 @@ export {
   type RetryOptions,
 } from './retry.js';
 export { resolveWithinAbort } from './abort-boundary.js';
+export { isTransportTimeoutError, startRequestAbortLifecycle, type RequestAbortLifecycle } from './request-abort-lifecycle.js';
 export {
   RetryQueue,
   type RetryEntry,
@@ -425,6 +433,8 @@ export {
   SwmGossipPayloadTooLargeError,
   toErrorMessage,
   hasErrorCode,
+  PCA_FUNDING_UNKNOWN_CODE,
+  PCA_FUNDING_UNKNOWN_MESSAGE,
   NO_FUNDED_PUBLISHER_WALLET_CODE,
   NO_FUNDED_PUBLISHER_WALLET_MESSAGE_PREFIX,
   PUBLISH_AUTHOR_NOT_CUSTODIAL_CODE,
@@ -432,8 +442,14 @@ export {
   AMBIGUOUS_ASSERTION_AUTHOR_CODE,
   ASSERTION_AUTHOR_NOT_RESIDENT_CODE,
   PUBLISH_AUTHOR_SELECTION_CONFLICT_CODE,
+  ASYNC_PUBLISH_FOREIGN_AUTHOR_CODE,
   RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE,
+  SWM_INVENTORY_HANDOFF_PENDING_CODE,
   isRfc64LegacySwmBoundaryRetirementInProgressError,
+  QUERY_ACCESS_DENIED_CODE,
+  QUERY_ACCESS_DENIED_MESSAGE,
+  QueryAccessDeniedError,
+  isQueryAccessDeniedError,
   UNSCOPED_QUERY_INVALIDATED_CODE,
   UNSCOPED_QUERY_INVALIDATED_MESSAGE,
   messageIndicatesNoFundedPublisherWallet,
@@ -521,3 +537,10 @@ export * from './query-catalog-parameters.js';
 export * from './query-catalog.js';
 
 export { checkFdLimit, type FdLimitLogLevel } from './fd-limit.js';
+
+export * from './bulk-graph-wire.js';
+export * from './bulk-graph-transport.js';
+
+export { ProtocolReadLimitError } from './bounded-stream-read.js';
+
+export * from './async-admission-usage.js';

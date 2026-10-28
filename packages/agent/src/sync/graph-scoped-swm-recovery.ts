@@ -136,11 +136,11 @@ export interface MaterializedGraphScopedSwmRecoveryAsset
 }
 
 /**
- * Recoveries run immediately after admission, before the durable subgraph
- * registration projection is guaranteed to have landed locally. The
- * authenticated responder has already filtered SWM lanes to its registered
- * subgraphs, so bootstrap syntactically valid lane names from the response and
- * retain the local known-child exclusion as the final collision guard.
+ * Recovery and sync can run before this node holds a subgraph's registration
+ * (nothing syncs it for a catalog-authoritative graph; the public sync lane
+ * registers it once it stores its rows). The authenticated responder serves
+ * only its registered subgraphs, so bootstrap valid lane names from its answer
+ * and keep the local known-child exclusion as the final collision guard.
  */
 export function discoverSwmRecoverySubGraphNames(params: {
   readonly contextGraphId: string;

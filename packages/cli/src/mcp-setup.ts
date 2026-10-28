@@ -1,3 +1,5 @@
+import { canonicalEntry, clientMcpEntry } from './mcp-launch-command.js';
+import { detectMcpRuntime } from './mcp-runtime.js';
 import { detectClients, selectMcpClientTargets, mcpConfigClientNames, tildify, clientSkillPath, type ClientTarget, type McpConfigSelection } from './mcp-client-registry.js';
 import { readRegistration, classifyRegistration, writeRegistration, type DesiredRegistration } from './mcp-client-config.js';
 /**
@@ -145,10 +147,8 @@ export type SetupContext = 'installed' | 'monorepo';
  * mirrors the local enum the planning loop produces.
  */
 export type PlannedAction = 'register' | 'refresh' | 'skip';
-export interface PlannedItem {
-  s: ClientState;
-  action: PlannedAction;
-}
+type WritablePlannedItem = { s: ResolvedClientState; action: 'register' | 'refresh' };
+export type PlannedItem = WritablePlannedItem | { s: ClientState; action: 'skip' };
 
 /**
  * Dependency surface for `mcpSetupAction`. All bundled-flow primitives
@@ -160,6 +160,7 @@ export interface PlannedItem {
 export interface McpSetupActionDeps {
   /** Client discovery can be supplied by an isolated setup environment. */
   detectClients?: typeof detectClients;
+  detectMcpRuntime?: typeof detectMcpRuntime;
   loadNetworkConfig: typeof import('@origintrail-official/dkg-adapter-openclaw').loadNetworkConfig;
   /** Canonical persisted-config network resolver, injectable for tests. */
   resolveKnownNetworkConfigName: typeof resolveKnownNetworkConfigName;
@@ -185,7 +186,7 @@ export interface McpSetupActionDeps {
    * funding have wallets to target even if the daemon never fully boots.
    * Idempotent. From `@origintrail-official/dkg-agent`; injectable for tests.
    */
-  loadOpWallets: typeof import('@origintrail-official/dkg-agent').loadOpWallets;
+  loadOpWallets: (dataDir: string) => Promise<unknown>;
   /**
    * Shared best-effort faucet orchestrator — the SAME one openclaw/hermes use.
    * Reads `wallets.json` (with retry when the daemon was started this run),
@@ -225,119 +226,6 @@ export interface McpSetupActionDeps {
     planned: readonly PlannedItem[],
     opts: { yes: boolean },
   ) => Promise<PlannedItem[]>;
-}
-
-/**
- * The canonical MCP-server entry written into client config files.
- *
- * Codex Round-4 unification: BOTH installed and monorepo modes
- * register the SAME shape — `process.execPath` (absolute path to
- * the currently-running Node binary) as `command`, and the absolute
- * CLI script path as the first arg. This skips the `dkg` bin shim
- * entirely.
- *
- * Why this matters: F30 (round-1 of this PR) wrote the resolved
- * absolute `dkg` bin path expecting that to free GUI MCP clients
- * from PATH dependencies. But the `dkg` bin on POSIX is a
- * `#!/usr/bin/env node` script — `env` then needs `node` on PATH.
- * On Windows the `.cmd` shim invokes `node.exe` similarly. Both
- * still ENOENT in the GUI-client environment F30 was trying to
- * fix. Calling Node directly with the script path eliminates BOTH
- * PATH lookups (the `dkg` shim AND the `node` binary the shim
- * would have invoked). GUI clients spawn the registered command
- * with no PATH lookup at all.
- *
- * Installed-mode CLI script path: `realpathSync(process.argv[1])`.
- * `process.argv[1]` is the script Node is currently executing —
- * guaranteed valid and on disk. `realpathSync` canonicalises
- * symlinks (npm's bin-shim is typically a symlink on POSIX)
- * so the registered path is stable across `npm relink`.
- *
- * Monorepo-mode CLI script path: `<root>/packages/cli/dist/cli.js`.
- * Validated via `existsSync` to fail loudly on a fresh checkout
- * with no build (Codex Round-1 Bug 3 contract).
- */
-function canonicalEntry(
-  context: SetupContext,
-  monorepoRoot: string | null,
-  dkgHome: string,
-): DesiredRegistration {
-  let cliJsPath: string;
-  if (context === 'monorepo' && monorepoRoot) {
-    cliJsPath = join(monorepoRoot, 'packages', 'cli', 'dist', 'cli.js');
-    if (!existsSync(cliJsPath)) {
-      throw new Error(
-        `Local CLI dist not found at ${cliJsPath}. Run \`pnpm --filter @origintrail-official/dkg build\` first, then re-run \`dkg mcp setup\`.`,
-      );
-    }
-  } else {
-    // Installed mode: resolve the CLI script Node is currently
-    // executing. `process.argv[1]` points at the npm bin-shim's
-    // target (the actual cli.js file); `realpathSync` follows
-    // symlinks for stability across npm relink / version-manager
-    // rotations.
-    const installedCliPath = realpathSync(process.argv[1]);
-    // Codex Round-6 Fix 8: detect ephemeral package-manager cache
-    // paths (npx / pnpm dlx / yarn dlx / bunx). Persisting one of
-    // those into a client config means the registration silently
-    // breaks on the next cache cleanup. Throw an actionable error
-    // so the operator installs globally instead.
-    const ephemeralReason = detectEphemeralInstallPath(installedCliPath);
-    if (ephemeralReason) {
-      throw new Error(
-        `Detected ephemeral install path (${ephemeralReason}): ${installedCliPath}\n` +
-        `MCP client registrations must persist across runs. Install dkg globally first:\n` +
-        `  npm install -g @origintrail-official/dkg && dkg mcp setup`,
-      );
-    }
-    cliJsPath = installedCliPath;
-  }
-  // Codex Round-9 Fix 16: propagate the resolved bootstrap home
-  // via the standard `env: { DKG_HOME: <path> }` field on the MCP
-  // server entry. GUI clients (Claude Desktop, Cursor, VSCode +
-  // Copilot, Windsurf) all support this shape and DON'T inherit
-  // shell env when spawning the registered command — so without
-  // this propagation, an operator who set `DKG_HOME=/custom`
-  // would have setup write config / auth.token to `/custom` while
-  // the spawned MCP server fell back to `~/.dkg` and missed both.
-  // Always emitted (even for the default `~/.dkg`) so the
-  // registered entry is fully self-contained: operators can move
-  // / copy it between machines and it resolves identically without
-  // depending on shell state.
-  return {
-    command: process.execPath,
-    args: [cliJsPath, 'mcp', 'serve'],
-    env: { DKG_HOME: dkgHome },
-  };
-}
-
-/**
- * Codex Round-6 Fix 8: detect ephemeral package-manager cache paths
- * that would yield non-persistent MCP registrations. Returns a
- * short label of the matched cache pattern, or `null` if the path
- * looks persistent.
- *
- * Patterns matched (path is normalized to forward-slashes +
- * lower-case before matching, so Windows backslashes and casing
- * don't escape the heuristic):
- *   - npm  : `/_npx/`                                 (npx CLI cache)
- *   - pnpm : `/.pnpm/dlx-`, `/dlx-`                   (pnpm dlx cache)
- *   - yarn : `/.yarn/cache/`, `/.yarn/berry/cache/`   (yarn berry dlx)
- *   - bun  : `/.bun/install/cache/`                   (bunx cache)
- *
- * Heuristic posture: positive-allow-list-against-cache, not
- * negative-allow-list-of-globals. Globally installed bins always
- * live outside these cache paths, so any false-negative still
- * yields a working install. A false-positive throws and the
- * operator gets a clear hint to install globally — recoverable.
- */
-function detectEphemeralInstallPath(absPath: string): string | null {
-  const norm = absPath.replace(/\\/g, '/').toLowerCase();
-  if (norm.includes('/_npx/')) return 'npx cache';
-  if (norm.includes('/.pnpm/dlx-') || norm.includes('/dlx-')) return 'pnpm dlx cache';
-  if (norm.includes('/.yarn/cache/') || norm.includes('/.yarn/berry/cache/')) return 'yarn cache';
-  if (norm.includes('/.bun/install/cache/')) return 'bun cache';
-  return null;
 }
 
 /**
@@ -496,17 +384,22 @@ function detectContext(
 
 type RegistrationState = 'registered' | 'stale' | 'not-registered';
 
-interface ClientState {
+interface ResolvedClientState {
+  kind: 'classified';
   target: McpConfigSelection;
   state: RegistrationState;
+  entry: DesiredRegistration;
 }
+type ClientState = ResolvedClientState | {
+  kind: 'failed'; target: McpConfigSelection; state: 'not-registered';
+};
 
 function classify(
   target: McpConfigSelection,
   expected: DesiredRegistration,
-): ClientState {
+): ResolvedClientState {
   const current = readRegistration(target.file);
-  return { target, state: classifyRegistration(current, expected) };
+  return { kind: 'classified', target, state: classifyRegistration(current, expected), entry: expected };
 }
 
 /**
@@ -999,20 +892,20 @@ export async function mcpSetupAction(
   // emit a stderr warning, mark the target as failed, and force
   // the planner below to `skip` it so no write is attempted on a
   // client we couldn't read. Other clients continue unaffected.
-  const classifyFailed = new Set<McpConfigSelection>();
+  const runtime = (deps.detectMcpRuntime ?? detectMcpRuntime)();
   const states: ClientState[] = clients.map((c) => {
     try {
-      return classify(c, expectedEntry);
+      const entry = clientMcpEntry(expectedEntry, c, runtime);
+      return classify(c, entry);
     } catch (err: any) {
       process.stderr.write(
         `[setup] WARNING: ${mcpConfigClientNames(c)} classify failed (${err?.message ?? err}); skipping this client.\n`,
       );
-      classifyFailed.add(c);
-      return { target: c, state: 'not-registered' };
+      return { kind: 'failed', target: c, state: 'not-registered' };
     }
   });
   const planned: PlannedItem[] = states.map((s) => {
-    if (classifyFailed.has(s.target)) return { s, action: 'skip' };
+    if (s.kind === 'failed') return { s, action: 'skip' };
     if (force) return { s, action: 'refresh' };
     if (s.state === 'not-registered') return { s, action: 'register' };
     if (s.state === 'stale') return { s, action: 'refresh' };
@@ -1045,7 +938,7 @@ export async function mcpSetupAction(
     ? planned
     : await confirm(planned, { yes: opts.yes === true });
 
-  const writes = confirmed.filter((p) => p.action !== 'skip');
+  const writes = confirmed.filter((p): p is WritablePlannedItem => p.action !== 'skip');
   if (writes.length === 0) {
     if (planned.some((p) => p.action !== 'skip')) {
       // Codex Round-5 Fix 7: clarify the flag guidance. `--force`
@@ -1079,7 +972,7 @@ export async function mcpSetupAction(
     console.log('');
     for (const { s, action } of writes) {
       try {
-        writeRegistration(s.target.file, expectedEntry);
+        writeRegistration(s.target.file, s.entry);
         console.log(`  ${action === 'register' ? 'Registered' : 'Refreshed'} ${mcpConfigClientNames(s.target)} → ${s.target.file.displayPath}`);
         // RFC-41 §4.5: explicit SKILL.md delivery for Cursor + Claude Code,
         // which don't walk node_modules for skill discovery. Returns null
@@ -1131,7 +1024,7 @@ export async function mcpSetupAction(
   // failure).
   if (!dryRun) {
     const allFailures: { name: string; error: string }[] = [
-      ...Array.from(classifyFailed).map((target) => ({ name: mcpConfigClientNames(target), error: 'classify failed' })),
+      ...states.filter((s) => s.kind === 'failed').map((s) => ({ name: mcpConfigClientNames(s.target), error: 'classify failed' })),
       ...writeFailures,
     ];
     if (allFailures.length > 0) {

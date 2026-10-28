@@ -7,8 +7,8 @@
  * through. A cache hit is answered at once. A miss starts the CG's cold
  * initialization (read `.meta`, scan the log tail for its highest seqno, take
  * the max, best-effort persist the reconciled cursor, install the result in the
- * cache), and every concurrent caller awaits that same promise. The store owns
- * the writes that follow (it sets and drops cache entries through `cache`).
+ * cache), and every concurrent caller awaits that same promise. Authoritative
+ * persistence and failure eviction remain inside this same owner.
  *
  * Only a MISSING file is absent: no `.meta` loads the defaults, no `.log` means
  * no frames. Any other read error on either file rejects the load and nothing
@@ -20,8 +20,8 @@ import { scanLogFrames, type HostStoreLayout } from './host-store-format.js';
 import type { CgMetaState } from './host-store-types.js';
 
 export class HostStoreMetaLoader {
-  /** The metadata installed so far, by `cgKey`. The store sets and drops entries as it persists. */
-  readonly cache = new Map<string, CgMetaState>();
+  /** Installed metadata is private to the loading/persistence owner. */
+  private readonly cache = new Map<string, CgMetaState>();
   /**
    * Cold initialization in flight per CG (see `load`). It is deliberately
    * NOT behind the store's per-CG write lock: mutators hold that lock while
@@ -33,6 +33,30 @@ export class HostStoreMetaLoader {
     private readonly layout: HostStoreLayout,
     private readonly files: DurableFiles,
   ) {}
+
+  /** Mutators hold the host store's per-graph write lock around this transition. */
+  async persist(contextGraphId: string, meta: CgMetaState): Promise<void> {
+    const cgKey = this.layout.cgKey(contextGraphId);
+    const cache = this.cache;
+    cache.set(cgKey, meta);
+    // Authoritative write: a failure rejects so the caller sees it.
+    try {
+      await this.files.writeFileDurable(this.layout.metaPath(contextGraphId), JSON.stringify(meta));
+    } catch (err) {
+      // The caller mutated the cached object before calling us, so on failure
+      // the cache may be ahead of the disk. Drop it: the next access re-reads
+      // what is on disk (the cursor is re-derived from the log tail) and a retry
+      // of the same mutation actually retries the write instead of no-op'ing
+      // against a flag the disk never saw. If the failure was the directory
+      // fsync after the rename, the new file IS what the next access reads;
+      // `DurableFiles` has then recorded it as pending, and the retry's
+      // idempotent early return completes that fsync (see `mutateMeta`).
+      // The re-read rejects when it cannot read the files; only a missing file
+      // loads as absent (see `HostStoreMetaLoader`).
+      if (cache.get(cgKey) === meta) cache.delete(cgKey);
+      throw err;
+    }
+  }
 
   /**
    * Load (and cache) the per-CG metadata. A cold load reconciles the seqno

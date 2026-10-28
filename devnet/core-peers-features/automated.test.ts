@@ -183,7 +183,6 @@ const waitForPidsGone = lifecycle.waitForPidsGone;
 
 // Verified stop (every live PID-file entry must be a daemon of this checkout; SIGTERM, then SIGKILL
 // after 10 s, then the dead PID files are removed): shared with `restartNodeAndWait`.
-const stopNodeProcesses = (num: number): Promise<void> => lifecycle.stopNodeProcesses(PATHS, num);
 
 const restartNodeAndWait = (num: number, node: DevnetNode, label: string, timeoutMs: number): Promise<void> =>
   lifecycle.restartNodeAndWait(PATHS, {
@@ -198,7 +197,6 @@ const restartNodeAndWait = (num: number, node: DevnetNode, label: string, timeou
 
 async function restoreNodeIfDown(num: number, node: DevnetNode, label: string, timeoutMs: number): Promise<void> {
   if (await nodeReachable(node)) return;
-  await stopNodeProcesses(num);
   await restartNodeAndWait(num, node, label, timeoutMs);
 }
 

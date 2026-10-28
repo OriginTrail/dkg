@@ -1,3 +1,4 @@
+import { AgentWorkLifetime } from '../src/agent-work-lifetime.js';
 import { describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -8,6 +9,7 @@ import { StorageACKRegistrationRuntime } from '../src/p2p/storage-ack-registrati
 import { FinalizationRuntime } from '../src/finalization-runtime.js';
 import { SelectedSwmBootstrapAdmission } from '../src/sync/selected-swm-bootstrap-admission.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from '../src/rfc64/background-work-dispatcher-v1.js';
+import { ContextGraphBindingState } from '../src/context-graph-binding-state.js';
 import { ContextGraphMembershipPersistScheduler } from '../src/context-graph-membership-persist-scheduler.js';
 import {
   ContextGraphSubscriptionPersistQueueClosedError,
@@ -64,6 +66,7 @@ function persistenceAgent(config: Record<string, unknown> = {}): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   Object.assign(agent, {
     config,
+    contextGraphBindingState: new ContextGraphBindingState(),
     contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
     contextGraphSubscriptionPersistRevisions: new Map<string, number>(),
@@ -314,6 +317,7 @@ describe('persistJoinApprovalStateStrict nesting', () => {
 function shutdownAgent(overrides: Record<string, unknown> = {}): any {
   const agent = Object.create(DKGAgent.prototype) as any;
   agent.chain = new MockChainAdapter();
+  agent.workLifetime = new AgentWorkLifetime();
   agent.peerSyncSession = PeerSyncSession.stopped();
   agent.gossipSession = new GossipSession();
   agent.lastSyncDisconnectedAt = new Map();
@@ -324,6 +328,7 @@ function shutdownAgent(overrides: Record<string, unknown> = {}): any {
   const closeStore = vi.fn(async () => {});
   Object.assign(agent, {
     started: true,
+    config: { coreChainCacheNetworks: [] },
     chainPoller: null,
     contextGraphSubscriptionPersistence: new ContextGraphSubscriptionPersistScheduler(),
     contextGraphMembershipPersistence: new ContextGraphMembershipPersistScheduler(),
@@ -437,7 +442,7 @@ describe('DKGAgent.stop() subscription persistence drain', () => {
       await runGate.promise;
       await agent.enqueueContextGraphSubscriptionPersistWrite('cg', async () => { saved.push('cursor'); });
     })().then(() => { runOutcome = 'written'; }, (error: unknown) => { runOutcome = error; });
-    agent.graphScopedStorePhysicalRuns = new Set([run]);
+    agent.workLifetime.track(run);
 
     const stopping = agent.stop();
     await flush();

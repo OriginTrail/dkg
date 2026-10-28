@@ -178,4 +178,26 @@ describe('HubResolutionCache', () => {
     expect(cache.peek()).toBe('post-rotation-v2');
     expect(calls).toBe(2);
   });
+
+  it('keeps the resolve that replaced a cancelled one cached when the cancelled one answers last', async () => {
+    const answers: Array<(v: string) => void> = [];
+    const cache = new HubResolutionCache(
+      () => new Promise<string>((resolve) => { answers.push(resolve); }),
+    );
+    const owner = new AbortController();
+
+    const cancelled = cache.get(owner.signal);
+    // Its owner is cancelled, with no invalidation: the next caller resolves afresh.
+    owner.abort();
+    const replacement = cache.get();
+    expect(answers).toHaveLength(2);
+
+    answers[1]('CURRENT');
+    expect(await replacement).toBe('CURRENT');
+    answers[0]('RETIRED');
+    expect(await cancelled).toBe('RETIRED');
+    expect(cache.peek()).toBe('CURRENT');
+    expect(await cache.get()).toBe('CURRENT');
+    expect(answers).toHaveLength(2);
+  });
 });

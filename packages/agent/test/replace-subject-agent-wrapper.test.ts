@@ -27,6 +27,8 @@ import {
 } from '@origintrail-official/dkg-storage';
 import { contextGraphCatalogUri, contextGraphMetaGraphUri } from '@origintrail-official/dkg-core';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
+import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
+import { recordingObserver } from './_helpers/store-mutation-recorder.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
 
 const GRAPH = 'urn:dkg:publisher:control-plane';
@@ -64,18 +66,12 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       largeLiteralStorage: { enabled: true, directory: dir },
     });
     let invalidations = 0;
-    const projectionDirtyCalls: Array<{
-      quads?: readonly unknown[];
-      targetGraph?: string;
-      targetSubject?: string;
-    }> = [];
+    const { observer, committed } = recordingObserver();
     // ...then the agent wrapper on top — this is the publisher's `this.store`.
     const agentStore: TripleStore = createListContextGraphsCacheInvalidatingStore(
       inner,
       () => { invalidations += 1; },
-      (quads, targetGraph, targetSubject) => {
-        projectionDirtyCalls.push({ quads, targetGraph, targetSubject });
-      },
+      observer,
     );
 
     try {
@@ -114,10 +110,10 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       //   receives the target graph/subject (for deletions) and replacement
       //   quads (for inserted authority facts), so both halves are covered.
       expect(invalidations).toBeGreaterThan(invalidationsBefore);
-      expect(projectionDirtyCalls.some((c) => (
-        c.targetGraph === GRAPH
-        && c.targetSubject === JOB
-        && c.quads?.length === 1
+      expect(committed.some((mutation) => (
+        mutation.removals?.[0]?.graph === GRAPH
+        && mutation.removals[0].subject === JOB
+        && mutation.quads?.length === 1
       ))).toBe(true);
       // - ChangelogStore: the mutation was recorded (changelog plane changed).
       expect(await changelogSnapshot(agentStore)).not.toBe(changelogBefore);
@@ -176,24 +172,25 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
       }));
     Object.defineProperty(inner, 'replaceSubject', { value: replaceSubject });
     const invalidate = vi.fn();
-    const markProjectionDirty = vi.fn();
+    const { observer, committed, unchanged } = recordingObserver();
     const wrapped = createListContextGraphsCacheInvalidatingStore(
       inner,
       invalidate,
-      markProjectionDirty,
+      observer,
     );
 
     await expect(wrapped.replaceSubject!(GRAPH, JOB, [
       quad(JOB, 'urn:dkg:publisher:status', '"committed"'),
     ])).rejects.toThrow('response lost after commit');
     expect(invalidate).toHaveBeenCalledTimes(1);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(1);
+    expect(committed).toHaveLength(1);
 
     await expect(wrapped.replaceSubject!(GRAPH, JOB, [])).rejects.toBeInstanceOf(
       StoreOperationTimeoutError,
     );
     expect(invalidate).toHaveBeenCalledTimes(1);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(1);
+    expect(committed).toHaveLength(1);
+    expect(unchanged).toHaveLength(1);
   });
 
   it('fences both known replacement graphs even when their payloads are empty', async () => {
@@ -205,13 +202,7 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     const wrapped = createListContextGraphsCacheInvalidatingStore(
       inner,
       () => undefined,
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) {
-          projection.markDirtyForGraph(targetGraph);
-          if (quads) projection.markDirtyFromQuads(quads);
-        } else if (quads) projection.markDirtyFromQuads(quads);
-        else projection.markAllDirty();
-      },
+      createProjectionMutationObserver(() => projection),
     );
     const before = projection.readAuthorityFactsRevision;
     const unrelatedBefore = projection.readContextGraphAuthorityFactsRevision('unrelated-private-cg');
@@ -235,11 +226,7 @@ describe('#1863 replaceSubject through the agent store wrapper', () => {
     const wrapped = createListContextGraphsCacheInvalidatingStore(
       inner,
       () => undefined,
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) projection.markDirtyForGraph(targetGraph);
-        if (quads !== undefined) projection.markDirtyFromQuads(quads);
-        else if (targetGraph === undefined) projection.markAllDirty();
-      },
+      createProjectionMutationObserver(() => projection),
     );
     const contextGraphId = 'unrelated-private-cg';
     const before = projection.readContextGraphAuthorityFactsRevision(contextGraphId);

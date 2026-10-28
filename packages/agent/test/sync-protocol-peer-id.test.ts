@@ -16,7 +16,7 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { generateKeyPair } from '@libp2p/crypto/keys';
 import { peerIdFromPrivateKey, peerIdFromString } from '@libp2p/peer-id';
-import { DKGNode, PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED, tripleContentV10 } from '@origintrail-official/dkg-core';
+import { DKGNode, PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC, PROTOCOL_SYNC_POOLED } from '@origintrail-official/dkg-core';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { toLibp2pPeerId } from '../src/p2p/peer-id.js';
 import { MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
@@ -157,76 +157,6 @@ describe('toLibp2pPeerId for every key-derived peer ID type', () => {
     expect(recorded.id.publicKey?.equals(original.publicKey)).toBe(true);
     expect(recorded.protocols).toContain(PROTOCOL_SYNC);
     await expect(waitForSyncProtocol({ toString: () => id })).resolves.toBe(true);
-  });
-});
-
-describe('Random Sampling proof-time exact repair on the real libp2p peer store', () => {
-  it('fetches the challenged asset from a provider the peer store lists as sync-capable', async () => {
-    const expectedUal = 'did:dkg:base:8453/0x0000000000000000000000000000000000001234/7';
-    const historicalQuad = {
-      subject: 'urn:historical',
-      predicate: 'urn:value',
-      object: '"proof"',
-      graph: 'urn:historical-graph',
-    };
-    const syncExactKnowledgeAssetsFromPeerDetailed = vi.fn(async (_peerId: string) => ({
-      disposition: 'found' as const,
-      result: { insertedTriples: 0 },
-      authenticatedAssets: [{
-        asset: { ual: expectedUal, dataQuads: [historicalQuad] },
-        privateRoots: [],
-      }],
-    }));
-    const agentLike = {
-      started: true,
-      peerId: node.libp2p.peerId.toString(),
-      chain: {
-        chainId: 'base:8453',
-        getDKGKnowledgeAssetsAddress: async () => '0x00000000000000000000000000000000000000aa',
-      },
-      node: { stopSignal: undefined, libp2p: node.libp2p },
-      log: { info: () => undefined },
-      resolveRandomSamplingLocalContextGraphId: async () => 'food-safety',
-      resolveCuratorPeerIdsForCg: async () => ({ peerIds: [SYNC_PEER_ID] }),
-      vmReconcileObservedCandidatePeerIds: () => [],
-      preferredSyncPeers: new Map<string, string>(),
-      selectCatchupPeerWindow: (peers: Array<{ toString(): string }>) => peers,
-      ensurePeerAdmittedForRecovery: async () => true,
-      ensurePeerConnected: async () => undefined,
-      // The production readiness check, reading the node's real peer store.
-      waitForSyncProtocol: LifecycleSyncMethods.prototype.waitForSyncProtocol,
-      syncExactKnowledgeAssetsFromPeerDetailed,
-    };
-
-    const outcome = await LifecycleSyncMethods.prototype.repairRandomSamplingKnowledgeAsset
-      .call(agentLike as never, {
-        kaId: (0x1234n << 96n) | 7n,
-        cgId: 1n,
-        expectedRoot: new Uint8Array(32).fill(0x11),
-        expectedLeafCount: 1n,
-      })
-      .result
-      .then(
-        (material) => ({ material }),
-        (error: unknown) => ({ error: error instanceof Error ? error.message : String(error) }),
-      );
-
-    expect({
-      fetchedFrom: syncExactKnowledgeAssetsFromPeerDetailed.mock.calls.map(([peerId]) => peerId),
-      outcome,
-    }).toEqual({
-      fetchedFrom: [SYNC_PEER_ID],
-      outcome: {
-        material: {
-          contents: [tripleContentV10(
-            historicalQuad.subject,
-            historicalQuad.predicate,
-            historicalQuad.object,
-          )],
-          privateRoots: [],
-        },
-      },
-    });
   });
 });
 

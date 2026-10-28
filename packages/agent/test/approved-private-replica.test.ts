@@ -44,7 +44,10 @@ import type {
   ContextGraphSubscriptionRecord,
 } from '../src/index.js';
 import { TEST_SNAPSHOT_CONFIG } from '../../../scripts/testing/snapshot-storage.js';
+import { retainedAuthorityReaderFixture } from '../../chain/test/helpers/retained-authority-reader.js';
+import { RpcEndpointsExhaustedError } from '@origintrail-official/dkg-chain';
 import { isApprovedPrivateReplicaDelegationActive } from '../src/approved-private-replica.js';
+import { localGossipSigner } from '../src/external-author-signing.js';
 import { resolveRfc64WalletNamespaceOwnerV1 } from '../src/rfc64/unregistered-authority-seed-store-v1.js';
 import { createRfc64RolloutAgentHarness, RFC64_ROLLOUT_DEPLOYMENT } from './_helpers/rfc64-rollout-agent-harness.js';
 import { readinessApplied, readinessHead, readinessTarget } from './_helpers/private-catalog-readiness-fixture.js';
@@ -580,6 +583,80 @@ describe('approved private bare-name replica authorization', () => {
     expect(bootstrap).not.toHaveProperty('registration');
   });
 
+  it('uses retained finalized name absence for an approved private replica while the circuit is open, with zero RPC', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const retained = retainedAuthorityReaderFixture();
+    // Prime the production projection with a real indexed registration, not a
+    // mocked empty response. The next name is absent in that retained fold.
+    await expect(retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash))
+      .resolves.toBe(7n);
+    retained.providerRead.mockClear();
+    retained.initialize.mockClear();
+    const projection = vi.spyOn(retained.index, 'peekProjection');
+    Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = retained.reader;
+    const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
+    await expect(coordinator.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError('unrelated authority pool exhausted', { exhaustionKind: 'mixed', retryAfterMs: 30000 });
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    expect(fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1().state).toBe('open');
+    try {
+      await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+        allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+      })).resolves.toMatchObject({
+        kind: 'unregistered', unregisteredEvidence: 'approved-private-replica-finalized-absence',
+        approvedPrivateReplicaAuthority: { approvedAgentAddress: fixture.approvedAddress, ownerAddress: OWNER },
+      });
+      expect(projection).toHaveBeenCalled();
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
+      // Retained chain absence cannot stand in for the current private proof.
+      await fixture.receiver.writeRequesterJoinRequestState(CONTEXT_GRAPH_ID, fixture.approvedAddress, {
+        status: 'rejected', requestGeneration: `0x${'12'.repeat(32)}`,
+        curatorPeerId: CURATOR_PEER, curatorAgentAddress: OWNER, curatorAuthorityEra: '0',
+      });
+      await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+        allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+      })).resolves.toMatchObject({ kind: 'unavailable', reason: 'finalized-name-absence-unaccepted' });
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
+    } finally {
+      await retained.reader.snapshots.close();
+    }
+  });
+
+  it.each(['cold', 'expired', 'invalidated', 'unsupported'] as const)('defers repeated %s retained-projection misses throughout circuit cooldown without RPC', async (condition) => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const retained = retainedAuthorityReaderFixture();
+    if (condition !== 'cold' && condition !== 'unsupported') {
+      await retained.reader.resolveFinalizedContextGraphIdByNameHash!(retained.presentNameHash);
+      if (condition === 'expired') retained.advanceTime(30000);
+      else retained.invalidateAnchor();
+    }
+    retained.providerRead.mockClear();
+    retained.initialize.mockClear();
+    const normalRead = vi.fn(retained.reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes!.bind(retained.reader));
+    Reflect.get(fixture.receiver, 'chain').contextGraphAuthorityIndexRevisionReader = { ...retained.reader, resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes: normalRead,
+      ...(condition === 'unsupported' ? { peekFinalizedContextGraphAuthoritySnapshotsByNameHashes: undefined } : {}) };
+    const coordinator = Reflect.get(fixture.receiver, 'rfc64AuthorityReadCoordinatorV1');
+    await expect(coordinator.run(undefined, async () => {
+      throw new RpcEndpointsExhaustedError('authority pool exhausted', { exhaustionKind: 'mixed', retryAfterMs: 30000 });
+    })).rejects.toMatchObject({ code: 'RPC_ENDPOINTS_EXHAUSTED' });
+    const circuit = fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1();
+    try {
+      for (let i = 0; i < 3; i += 1) {
+        await expect(fixture.receiver.resolveContextGraphRegistrationBinding(CONTEXT_GRAPH_ID, {
+          allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded',
+        })).resolves.toMatchObject({ kind: 'unavailable', reason: 'authority-circuit-open' });
+      }
+      expect(normalRead).not.toHaveBeenCalled();
+      expect(retained.providerRead).not.toHaveBeenCalled();
+      expect(retained.initialize).not.toHaveBeenCalled();
+      expect(fixture.receiver.readRfc64AuthorityRpcCircuitSnapshotV1()).toEqual(circuit);
+    } finally {
+      await retained.reader.snapshots.close();
+    }
+  });
+
   it('does not downgrade registered metadata before a finalized-capable adapter checks its name index', async () => {
     const fixture = await approvedBareNameReplicaFixture({
       registrationStatus: 'registered',
@@ -757,7 +834,7 @@ describe('approved private bare-name replica authorization', () => {
       contextGraphId,
       encryptedPayload,
       createOperationContext('share'),
-      { ...curatorAgent, privateKey: curatorAgent.privateKey },
+      localGossipSigner(curatorAgent.agentAddress, curatorAgent.privateKey!),
       shareOperationId,
     );
     await curator.awaitInFlightSubstrateFanOuts();
@@ -1278,6 +1355,43 @@ describe('approved private bare-name replica authorization', () => {
       .toContain(revokedMember.address.toLowerCase());
     expect(projected?.revokedAgents?.map((address) => address.toLowerCase()))
       .toContain(revokedMember.address.toLowerCase());
+    expect(projected?.allowedPeers).toEqual([fixture.receiver.peerId]);
+  });
+
+  it('keeps the approved-private SWM metadata snapshot while only other graphs change (#2968)', async () => {
+    const additionalMember = new ethers.Wallet(`0x${'37'.repeat(32)}`);
+    const fixture = await approvedBareNameReplicaFixture({
+      additionalAllowedAgents: [additionalMember.address],
+      peerAllowlist: 'receiver-only',
+    });
+    const handler = fixture.receiver.getOrCreateSharedMemoryHandler();
+    const oracle = Reflect.get(handler, 'contextGraphMetaOracle') as undefined | ((
+      contextGraphId: string,
+    ) => Promise<{
+      allowedAgents?: readonly string[];
+      allowedPeers?: readonly string[];
+    } | null>);
+    if (oracle === undefined) throw new Error('shared-memory metadata oracle is not configured');
+
+    const projection = Reflect.get(fixture.receiver, 'contextGraphMetaProjection');
+    const originalOverride = fixture.receiver
+      .resolveApprovedPrivateReplicaSwmAllowedPeersOverride.bind(fixture.receiver);
+    let calls = 0;
+    vi.spyOn(fixture.receiver, 'resolveApprovedPrivateReplicaSwmAllowedPeersOverride')
+      .mockImplementation(async (contextGraphId) => {
+        calls += 1;
+        // A busy node: other graphs' metadata changes during every read of this one.
+        for (let write = 0; write < 20; write += 1) {
+          projection.markDirty(`other-context-graph-${calls}-${write}`);
+        }
+        return originalOverride(contextGraphId);
+      });
+
+    const projected = await oracle(CONTEXT_GRAPH_ID);
+
+    expect(calls).toBe(1);
+    expect(projected?.allowedAgents?.map((address) => address.toLowerCase()))
+      .toContain(additionalMember.address.toLowerCase());
     expect(projected?.allowedPeers).toEqual([fixture.receiver.peerId]);
   });
 
@@ -1855,6 +1969,19 @@ describe('approved private bare-name replica authorization', () => {
       expect.stringMatching(/^0x[0-9a-f]{64}$/u),
       { awaitsProviderAuthorization: true, retryIncompletePrivate: true },
     );
+  });
+
+  it('asks the rows that shares admitted behind the fence still owe to be written once the authority is accepted', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const drain = vi.spyOn(fixture.receiver, 'requestRfc64OwedShareInventoryDrainV1');
+
+    await fixture.receiver.reconcileRfc64CatalogAccessAuthorityV1(
+      CONTEXT_GRAPH_ID,
+      undefined,
+      { kind: 'finalized-absence' },
+    );
+
+    expect(drain).toHaveBeenCalledOnce();
   });
 
   it('refreshes an approved private catalog without depending on its own active recovery gate', async () => {
@@ -2566,5 +2693,222 @@ describe('approved private bare-name replica authorization', () => {
     // Participant approval never installs a reusable catalog policy snapshot.
     expect(fixture.receiver.readAcceptedRfc64CatalogAccessPolicyV1(CONTEXT_GRAPH_ID))
       .toBeNull();
+  });
+});
+
+describe('approved member read while its own proof is disturbed', () => {
+  type Fixture = Awaited<ReturnType<typeof approvedBareNameReplicaFixture>>;
+  const PROOF_SOURCE = 'agent.contextGraph.approvedPrivateReplica';
+  const REFUSED = { outcome: 'unavailable', source: 'registered-chain', reason: 'finalized-name-absence-unaccepted' };
+  const ALLOWED = { outcome: 'allowed', source: 'rfc64-private', reason: 'rfc64-participant' };
+
+  const memberRead = (fixture: Fixture) => fixture.receiver.resolveContextGraphReadAuthority(
+    CONTEXT_GRAPH_ID,
+    {
+      callerAgentAddress: fixture.memberAddress,
+      allowSubscriptionFallback: false,
+      authorityReadMode: 'finalized-index',
+    },
+  );
+  const binding = (fixture: Fixture) => fixture.receiver.resolveContextGraphRegistrationBinding(
+    CONTEXT_GRAPH_ID,
+    { allowApprovedPrivateReplicaFinalizedAbsence: true, freshness: 'bounded' },
+  );
+  const setProofTimeLimit = (fixture: Fixture, requestTimeoutMs: number) => {
+    Object.defineProperty(fixture.receiver, 'chainAuthorityReadBudgets', {
+      value: { ...fixture.receiver.chainAuthorityReadBudgets, requestTimeoutMs },
+    });
+  };
+  /** Every proof query of the receiver, with what happens while or after each one runs. */
+  const onProofQuery = (
+    fixture: Fixture,
+    hooks: { before?: (run: number) => unknown; after?: (run: number) => unknown },
+  ) => {
+    const originalQuery = fixture.receiver.store.query.bind(fixture.receiver.store);
+    const runs = { count: 0 };
+    vi.spyOn(fixture.receiver.store, 'query').mockImplementation(async (query, options) => {
+      if (options?.source !== PROOF_SOURCE) return originalQuery(query, options);
+      const run = runs.count += 1;
+      await hooks.before?.(run);
+      const result = await originalQuery(query, options);
+      await hooks.after?.(run);
+      return result;
+    });
+    return runs;
+  };
+  const furtherRuns = (fixture: Fixture) => {
+    const info = vi.spyOn(Reflect.get(fixture.receiver, 'log') as { info(ctx: unknown, message: string): void }, 'info');
+    return () => info.mock.calls.map(([, message]) => message).filter((message) => message.includes('runs again'));
+  };
+
+  it('answers the member when an unrelated write to the graph metadata lands while the proof reads', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const receipt = { graph: fixture.graph, subject: 'urn:test:share-receipt' };
+    await fixture.receiver.store.insert([{ ...receipt, predicate: 'urn:test:state', object: JSON.stringify('applied') }]);
+    const logged = furtherRuns(fixture);
+    // Another member's share replaces its own record in the graph's metadata
+    // after the first run has read its proof rows.
+    const runs = onProofQuery(fixture, {
+      after: (run) => run === 1 ? fixture.receiver.store.deleteByPattern(receipt) : undefined,
+    });
+
+    await expect(memberRead(fixture)).resolves.toMatchObject(ALLOWED);
+    expect(runs.count).toBe(2);
+    expect(logged()).toEqual([
+      `Approved member proof for "${CONTEXT_GRAPH_ID}" runs again (metadata-moved, run 2)`,
+    ]);
+  });
+
+  it('answers the member when one run of the proof outlasts its time limit', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    setProofTimeLimit(fixture, 500);
+    const logged = furtherRuns(fixture);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const runs = onProofQuery(fixture, { before: (run) => run === 1 ? held : undefined });
+
+    try {
+      await expect(memberRead(fixture)).resolves.toMatchObject(ALLOWED);
+    } finally {
+      release();
+    }
+    expect(runs.count).toBe(2);
+    expect(logged()).toContain(
+      `Approved member proof for "${CONTEXT_GRAPH_ID}" runs again (timeout, run 2)`,
+    );
+  });
+
+  it('refuses with the time limit once every permitted run has outlasted it', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    setProofTimeLimit(fixture, 150);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    const runs = onProofQuery(fixture, { before: () => held });
+
+    try {
+      await expect(binding(fixture)).resolves.toEqual({
+        kind: 'unavailable',
+        reason: 'finalized-name-absence-unaccepted',
+        detail: `resolveApprovedPrivateReplicaAuthority(${CONTEXT_GRAPH_ID}) timed out after 150ms`,
+        dependency: 'unknown',
+        detailCode: 'replica-proof-timeout',
+      });
+      // Every run that got as far as its proof query was held there.
+      expect(runs.count).toBeLessThanOrEqual(3);
+      await expect(memberRead(fixture)).resolves.toMatchObject({
+        ...REFUSED,
+        dependency: 'unknown',
+        detailCode: 'replica-proof-timeout',
+      });
+    } finally {
+      release();
+    }
+  });
+
+  it('refuses once the graph metadata has moved under every permitted run', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const projection = Reflect.get(fixture.receiver, 'contextGraphMetaProjection') as {
+      markDirty(contextGraphId: string): void;
+    };
+    const runs = onProofQuery(fixture, { after: () => projection.markDirty(CONTEXT_GRAPH_ID) });
+
+    await expect(binding(fixture)).resolves.toEqual({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+      detail: 'local private join approval has no current source-qualified replica proof',
+      detailCode: 'replica-metadata-moved',
+    });
+    expect(runs.count).toBe(3);
+    await expect(memberRead(fixture)).resolves.toMatchObject({
+      ...REFUSED,
+      dependency: 'chain',
+      detailCode: 'replica-metadata-moved',
+    });
+  });
+
+  it.each([
+    {
+      refusal: 'the join request is no longer approved',
+      detailCode: 'replica-proof-absent',
+      proofRuns: 0,
+      fixtureOptions: { requesterStatus: 'rejected' },
+    },
+    {
+      refusal: 'the request generation is replaced while the proof reads',
+      detailCode: 'replica-proof-absent',
+      proofRuns: 1,
+      duringProof: (fixture: Fixture) => fixture.receiver.writeRequesterJoinRequestState(
+        CONTEXT_GRAPH_ID,
+        fixture.approvedAddress,
+        {
+          status: 'approved',
+          requestGeneration: `0x${'34'.repeat(32)}`,
+          curatorPeerId: CURATOR_PEER,
+          curatorAgentAddress: OWNER,
+          curatorAuthorityEra: '0',
+        },
+      ),
+    },
+    {
+      refusal: 'a registration starts while the proof reads',
+      detailCode: 'replica-binding-changed',
+      proofRuns: 1,
+      duringProof: (fixture: Fixture) => {
+        (Reflect.get(fixture.receiver, 'contextGraphRegistrationsInFlight') as Set<string>)
+          .add(CONTEXT_GRAPH_ID);
+      },
+    },
+    {
+      refusal: 'the graph metadata claims a registration',
+      detailCode: 'replica-registered-metadata',
+      proofRuns: 1,
+      fixtureOptions: { registrationStatus: 'registered', registeredMetaOnChainIds: ['106'] },
+    },
+    {
+      refusal: 'the node holds no approval',
+      detailCode: 'no-accepted-authority',
+      proofRuns: 0,
+      fixtureOptions: { localApproval: false },
+    },
+  ] as const)('keeps the refusal when $refusal, and names it', async ({
+    detailCode, proofRuns, fixtureOptions, duringProof,
+  }) => {
+    const fixture = await approvedBareNameReplicaFixture(fixtureOptions ?? {});
+    const logged = furtherRuns(fixture);
+    const runs = onProofQuery(fixture, { after: () => duringProof?.(fixture) });
+
+    await expect(memberRead(fixture)).resolves.toMatchObject({ ...REFUSED, dependency: 'chain', detailCode });
+    expect(runs.count).toBe(proofRuns);
+    expect(logged()).toEqual([]);
+    (Reflect.get(fixture.receiver, 'contextGraphRegistrationsInFlight') as Set<string>)
+      .delete(CONTEXT_GRAPH_ID);
+  });
+
+  it('keeps the refusal when a proof read fails, and names it', async () => {
+    const fixture = await approvedBareNameReplicaFixture();
+    const runs = onProofQuery(fixture, { before: () => { throw new Error('store read failed'); } });
+
+    await expect(binding(fixture)).resolves.toEqual({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+      detail: 'store read failed',
+      dependency: 'unknown',
+      detailCode: 'replica-proof-error',
+    });
+    expect(runs.count).toBe(1);
+  });
+
+  it('carries the detail code on the scoped query error and nothing of the graph in it', async () => {
+    const fixture = await approvedBareNameReplicaFixture({ requesterStatus: 'rejected' });
+
+    await expect(fixture.receiver.query('SELECT ?s WHERE { ?s ?p ?o }', {
+      contextGraphId: CONTEXT_GRAPH_ID,
+      callerAgentAddress: fixture.memberAddress,
+    })).rejects.toMatchObject({
+      code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE',
+      reason: 'finalized-name-absence-unaccepted',
+      dependency: 'chain',
+      detailCode: 'replica-proof-absent',
+    });
   });
 });

@@ -242,3 +242,67 @@ describe('mergeAugmentFragment — Bug 1: @context object-merge', () => {
     warnSpy.mockRestore();
   });
 });
+
+describe('scalar extension wrappers and defensive merge boundaries', () => {
+  it.each([
+    ['default', z.string().default('fallback'), undefined, 'fallback'],
+    ['catch', z.number().catch(7), 'invalid number', 7],
+    ['refinement', z.string().refine(value => value.startsWith('safe-')), 'safe-value', 'safe-value'],
+    ['native enum', z.nativeEnum({ Ready: 'ready', Busy: 'busy' } as const), 'ready', 'ready'],
+    ['number literal', z.literal(42), 42, 42],
+    ['boolean literal', z.literal(false), false, false],
+  ])('accepts a %s wrapper that still produces scalar fields', (_name, field, input, expected) => {
+    const schema = z.object({ extra: field as z.ZodTypeAny });
+    expect(() => validateExtensionAgainstCore({ schema, augment: () => ({}) }, coreSchema)).not.toThrow();
+    expect(schema.parse({ extra: input })).toEqual({ extra: expected });
+  });
+
+  it.each([
+    z.string().nullable().default(null),
+    z.string().nullable().catch(null),
+    z.string().nullable().refine(() => true).optional(),
+  ])('rejects null hidden inside scalar wrappers', field => {
+    expect(() => validateExtensionAgainstCore({ schema: z.object({ hidden: field }), augment: () => ({}) }, coreSchema))
+      .toThrow(ExtensionSchemaUnsupportedFieldError);
+  });
+
+  it('rejects a non-object extension schema at the public validation boundary', () => {
+    const extension = { schema: z.string(), augment: () => ({}) } as unknown as KafkaPluginExtension<unknown>;
+    expect(() => validateExtensionAgainstCore(extension, coreSchema)).toThrow('must be a Zod object schema');
+  });
+
+  it('deduplicates an already multi-type KA and ignores invalid extension metadata', () => {
+    const base = { ...buildKa(baseSchema.parse({ name: 'n', kafkaBootstrapUrl: 'u', kafkaTopicName: 't' })),
+      '@type': ['dkg-streams:KafkaStream', 'vendor:Stream', 'vendor:Stream'] };
+    const before = structuredClone(base);
+    expect(mergeAugmentFragment(base, { '@type': { invalid: true }, '@context': null }, new Set())['@type'])
+      .toEqual(['dkg-streams:KafkaStream', 'vendor:Stream']);
+    const merged = mergeAugmentFragment(base, { '@type': [false, 'vendor:Stream', 'vendor:Extra'],
+      '@context': { invalid: 42, vendor: 'https://vendor.example/' } }, new Set());
+    expect(merged['@type']).toEqual(['dkg-streams:KafkaStream', 'vendor:Stream', 'vendor:Extra']);
+    expect(merged['@context']).toEqual({ ...base['@context'], vendor: 'https://vendor.example/' });
+    expect(base).toEqual(before);
+  });
+
+  it('logs repeated unsupported values and core collisions once across registrations', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    try {
+      const base = buildKa(baseSchema.parse({ name: 'n', kafkaBootstrapUrl: 'u', kafkaTopicName: 't' }));
+      const seen = new Set<string>();
+      for (let i = 0; i < 3; i++) {
+        const merged = mergeAugmentFragment(base, { nested: { secret: 'ignored' }, 'schema:name': 'overwrite',
+          '@context': ['not-a-context'], enabled: false, count: 0 }, seen);
+        expect(merged).toEqual({ ...base, enabled: false, count: 0 });
+      }
+      expect(warn).toHaveBeenCalledTimes(2);
+      expect(warn.mock.calls.flat().join('\n')).toContain('non-scalar key "nested"');
+      expect(warn.mock.calls.flat().join('\n')).toContain('colliding key "schema:name"');
+    } finally { warn.mockRestore(); }
+  });
+});
+
+it('preserves a scalar @type when an extension only repeats the baseline type', () => {
+  const base = buildKa(baseSchema.parse({ name: 'n', kafkaBootstrapUrl: 'u', kafkaTopicName: 't' }));
+  expect(mergeAugmentFragment(base, { '@type': ['dkg-streams:KafkaStream'] }, new Set())['@type'])
+    .toBe('dkg-streams:KafkaStream');
+});

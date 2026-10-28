@@ -3,42 +3,13 @@ import {
   OxigraphStore,
   UnsupportedTripleStoreCapabilityError,
   type QueryOptions,
-  type Rfc64AuthorCommitCasInputV1,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 import { createListContextGraphsCacheInvalidatingStore } from '../src/dkg-agent-base.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
-
-function input(): Rfc64AuthorCommitCasInputV1 {
-  const graph = 'did:dkg:context-graph:rfc64/_shared_memory';
-  const stateGraph = 'urn:test:rfc64:state';
-  const transition = (subject: string, predicate: string, oldValue: string, nextValue: string) => ({
-    graphUri: stateGraph,
-    subject,
-    predicate,
-    expectedObject: oldValue,
-    expectedQuads: [{ subject, predicate, object: oldValue, graph: stateGraph }],
-    quads: [{ subject, predicate, object: nextValue, graph: stateGraph }],
-  });
-  return {
-    sharedProjectionGraph: graph,
-    sharedProjectionQuads: [{ subject: 'urn:ka', predicate: 'urn:p', object: '"v"', graph }],
-    authorSealGraph: 'urn:seals',
-    authorSealSubject: 'urn:seal',
-    authorSealQuads: [{ subject: 'urn:seal', predicate: 'urn:p', object: '"seal"', graph: 'urn:seals' }],
-    currentHead: {
-      graphUri: 'urn:heads',
-      subject: 'urn:author',
-      predicate: 'urn:head',
-      expectedObject: 'urn:old',
-      expectedQuads: [{ subject: 'urn:author', predicate: 'urn:head', object: 'urn:old', graph: 'urn:heads' }],
-      quads: [{ subject: 'urn:author', predicate: 'urn:head', object: 'urn:new', graph: 'urn:heads' }],
-    },
-    subgraphMutationGeneration: transition('urn:subgraph-mutation', 'urn:generation', '"1"', '"2"'),
-    contextGraphMutationGeneration: transition('urn:cg-mutation', 'urn:generation', '"10"', '"11"'),
-    appliedSet: transition('urn:applied-set', 'urn:root', 'urn:old-root', 'urn:new-root'),
-  };
-}
+import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
+import { commitInput as input } from './_helpers/rfc64-commit-input.js';
+import { recordingObserver } from './_helpers/store-mutation-recorder.js';
 
 function overrideStore(base: TripleStore, overrides: Partial<TripleStore>): TripleStore {
   return new Proxy(base, {
@@ -63,38 +34,42 @@ describe('RFC-64 CAS through the agent cache wrapper', () => {
       ));
     const inner = overrideStore(new OxigraphStore(), { rfc64AuthorCommitCasV1: cas });
     const invalidate = vi.fn();
-    const markProjectionDirty = vi.fn();
+    const { observer, began, committed, unchanged } = recordingObserver();
     const store = createListContextGraphsCacheInvalidatingStore(
       inner,
       invalidate,
-      markProjectionDirty,
+      observer,
     );
     const manifest = input();
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options)).resolves.toBe('committed');
     expect(cas).toHaveBeenLastCalledWith(manifest, options);
     expect(invalidate).toHaveBeenCalledTimes(1);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(6);
-    expect(markProjectionDirty).toHaveBeenNthCalledWith(
-      1,
-      undefined,
-      manifest.sharedProjectionGraph,
-    );
-    expect(markProjectionDirty.mock.calls.every((call) => call[1] !== undefined)).toBe(true);
+    expect(committed).toHaveLength(1);
+    // The commit names every graph and subject it replaces and every quad it
+    // inserts, from the canonical plan.
+    expect(committed[0].removals).toHaveLength(6);
+    expect(committed[0].removals![0]).toEqual({ graph: manifest.sharedProjectionGraph });
+    expect(committed[0].removals!.every((removal) => removal.graph !== undefined)).toBe(true);
+    expect(committed[0].quads).toEqual(expect.arrayContaining(manifest.sharedProjectionQuads as never[]));
+    expect(committed[0].quads).toHaveLength(6);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options)).resolves.toBe('conflict');
     expect(invalidate).toHaveBeenCalledTimes(1);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(6);
+    expect(committed).toHaveLength(1);
+    expect(unchanged).toHaveLength(1);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options))
       .rejects.toThrow('response lost after commit');
     expect(invalidate).toHaveBeenCalledTimes(2);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(12);
+    expect(committed).toHaveLength(2);
 
     await expect(store.rfc64AuthorCommitCasV1!(manifest, options))
       .rejects.toBeInstanceOf(UnsupportedTripleStoreCapabilityError);
     expect(invalidate).toHaveBeenCalledTimes(2);
-    expect(markProjectionDirty).toHaveBeenCalledTimes(12);
+    expect(committed).toHaveLength(2);
+    expect(unchanged).toHaveLength(2);
+    expect(began).toHaveLength(4);
   });
 
   it('keeps an unrelated private proof current after an exact author commit', async () => {
@@ -105,11 +80,7 @@ describe('RFC-64 CAS through the agent cache wrapper', () => {
     const store = createListContextGraphsCacheInvalidatingStore(
       inner,
       vi.fn(),
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) projection.markDirtyForGraph(targetGraph);
-        if (quads !== undefined) projection.markDirtyFromQuads(quads);
-        else if (targetGraph === undefined) projection.markAllDirty();
-      },
+      createProjectionMutationObserver(() => projection),
     );
     const before = projection.readContextGraphAuthorityFactsRevision('unrelated-private-cg');
 
@@ -121,7 +92,7 @@ describe('RFC-64 CAS through the agent cache wrapper', () => {
 
   it('does not advertise a capability absent from the inner store', () => {
     const inner = overrideStore(new OxigraphStore(), { rfc64AuthorCommitCasV1: undefined });
-    const store = createListContextGraphsCacheInvalidatingStore(inner, vi.fn(), vi.fn());
+    const store = createListContextGraphsCacheInvalidatingStore(inner, vi.fn(), recordingObserver().observer);
     expect(store.rfc64AuthorCommitCasV1).toBeUndefined();
   });
 });

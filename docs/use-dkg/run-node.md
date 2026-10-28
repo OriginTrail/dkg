@@ -61,6 +61,10 @@ explicit subscribe/create/write operations remain unchanged. Remove the
 setting, set it to `true`, or use the environment override to restore normal
 default behavior on the next boot.
 
+## Signing With An External Signer
+
+An Edge Node can delegate EVM signing to an external signer (for example an HSM-backed signer or a separate signing service) so that it holds no operational private keys and creates no `wallets.json`. See [External Signer](external-signer.md).
+
 ## Core Node Profile Registration
 
 The two node roles are `edge` and `core`.
@@ -377,3 +381,30 @@ An explicit `0` disables extra recovery rounds while preserving the initial
 round and its existing transport deadline. The page and round count limits
 remain active for every setting. The public recovery lane retains its separate
 `DKG_SWM_CATCHUP_PASS_BUDGET_MS` setting.
+
+### Legacy ontology privacy during startup
+
+An upgraded node may retain old Context Graph bindings in its public `ontology` graph. The node withholds ontology sync, changelog sync and remote queries while any candidate is deferred or its public access policy remains unproven. Local-only startup inspection does not prove an unknown binding public. Later discovery passes classify at most 16 new slots per pass and reuse known slot classifications, moving or deleting curated metadata before serving resumes. Proven public bindings retain process-local progress tied to their exact slot IDs, independently of the bounded general classifier cache; progress is discarded when those bindings change or disappear.
+
+An unavailable classifier or a persistently unreadable slot can keep ontology unavailable indefinitely. This is an intentional privacy boundary: elapsed time does not authorize exposing a potentially curated graph's name or binding. Other graphs continue using their existing serving policies. Restore chain-read availability or correct the retained binding; ordinary bounded relocation passes then reopen ontology once every candidate is classified or relocated.
+
+## Author catalog memory
+
+A node that publishes into a context graph keeps one signed author catalog per
+author and graph, and every placement of an asset produces the catalog's next
+version from the current one. The node keeps the verified state of the catalogs
+it writes in memory, so a placement does not read and verify every row of the
+catalog again. Nothing of this is written to disk, and a restart starts empty:
+the first placement into each catalog after a start reads and verifies it in
+full.
+
+What is kept is bounded: at most 64 catalogs and 96 MiB in all, the least
+recently used catalog going first. One catalog at its 1,024-row limit takes
+about 16 MiB plus the bytes of its rows.
+
+`DKG_RFC64_CATALOG_MUTATION_MEMORY=0` switches the memory off: every placement
+then reads and verifies the durable catalog, as earlier versions did. Any other value,
+or none, leaves it on. The node reads the setting when it first writes a
+catalog, so restart the node after changing it. Catalogs are signed the same,
+byte for byte, with the memory on or off; only the time a placement takes
+differs.

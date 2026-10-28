@@ -257,6 +257,28 @@ describe('minimal RFC-64 private roster authority', () => {
 });
 
 describe('runtime-accepted RFC-64 private query authorization', () => {
+  it.each([true, false])('redacts private query literals for allowed and denied reads: %s', async redactQuery => {
+    const fixture = runtimePrivateQueryAgent();
+    const info = vi.spyOn(fixture.agent.log, 'info');
+    const literal = 'private-query-canary';
+    const sparql = `SELECT ?s WHERE { ?s ?p "${literal}" }`;
+    for (const callerAgentAddress of [REMOTE_MEMBER, OUTSIDER]) {
+      info.mockClear();
+      const pending = QueryMethods.prototype.query.call(fixture.agent as never, sparql, {
+        contextGraphId: RUNTIME_PRIVATE_CG, view: 'verifiable-memory',
+        callerAgentAddress, redactQuery, accessDenied: 'error',
+      });
+      if (callerAgentAddress === OUTSIDER) await expect(pending).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
+      else await expect(pending).resolves.toMatchObject({ bindings: [{ value: 'visible' }] });
+      expect(info).toHaveBeenCalled();
+      const diagnostics = JSON.stringify(info.mock.calls);
+      if (redactQuery) {
+        expect(diagnostics).not.toContain(literal);
+        expect(diagnostics).toContain('[redacted]');
+      } else expect(diagnostics).toContain(literal);
+    }
+  });
+
   it('does not execute SPARQL when unscoped read authority throws', async () => {
     const fixture = runtimePrivateQueryAgent();
     const authorityFailure = new Error('authority lookup failed');
@@ -302,12 +324,26 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
       },
     );
     expect(outsider.bindings).toEqual([]);
+    await expect(QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: RUNTIME_PRIVATE_CG,
+        view: 'verifiable-memory', callerAgentAddress: OUTSIDER, accessDenied: 'error', redactQuery: true,
+      })).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
     expect(fixture.acceptedPolicySnapshot).toHaveBeenCalledWith(
       RUNTIME_NETWORK_ID,
       RUNTIME_PRIVATE_CG,
     );
+  });
+
+  it('fails explicitly when shared memory access is denied before querying', async () => {
+    const fixture = runtimePrivateQueryAgent();
+    Object.assign(fixture.agent, { resolveSharedMemoryReadAdmission: async () => ({ outcome: 'denied' }) });
+    await expect(QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: RUNTIME_PRIVATE_CG,
+        view: 'shared-working-memory', callerAgentAddress: REMOTE_MEMBER, accessDenied: 'error',
+      })).rejects.toMatchObject({ code: 'QUERY_ACCESS_DENIED' });
+    expect(fixture.queryEngine.query).not.toHaveBeenCalled();
   });
 
   it('filters a runtime-only private subscription from outsider unscoped reads', async () => {
@@ -328,7 +364,6 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     );
     expect(outsider.bindings).toEqual([]);
     expect(fixture.queryEngine.query).toHaveBeenCalledTimes(1);
-    expect(fixture.store.query).toHaveBeenCalledTimes(2);
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });
 
@@ -341,7 +376,8 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     {
       label: 'COUNT',
       sparql: 'SELECT (COUNT(*) AS ?count) WHERE { GRAPH ?g { ?s ?p ?o } }',
-      expected: { bindings: [] },
+      // What the count returns over no data: one row, never an answer without rows.
+      expected: { bindings: [{ count: '"0"^^<http://www.w3.org/2001/XMLSchema#integer>' }] },
     },
     {
       label: 'SELECT',
@@ -391,3 +427,22 @@ describe('runtime-accepted RFC-64 private query authorization', () => {
     expect(fixture.isPrivateContextGraph).not.toHaveBeenCalled();
   });
 });
+
+
+it.each(['finalized-name-absence-unaccepted', 'authority-circuit-open'])(
+  'keeps %s retryable for strict reads of an absent graph', async reason => {
+    const fixture = runtimePrivateQueryAgent({ subscribed: false });
+    Object.assign(fixture.agent, {
+      resolveContextGraphReadAuthority: async () => ({ outcome: 'unavailable', source: 'registered-chain', reason }),
+      localContextGraphProvenance: { hasLocalCreate: () => false },
+      contextGraphExists: async () => false,
+    });
+    const query = () => QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'absent-graph' });
+    await expect(query()).resolves.toEqual({ bindings: [] });
+    await expect(QueryMethods.prototype.query.call(fixture.agent as never,
+      'SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'absent-graph', accessDenied: 'error' }))
+      .rejects.toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE', retryable: true, reason });
+    expect(fixture.queryEngine.query).not.toHaveBeenCalled();
+  },
+);

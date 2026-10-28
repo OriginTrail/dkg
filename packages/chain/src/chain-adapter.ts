@@ -1,15 +1,20 @@
+import type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
+export type { PreBroadcastSignal, ReplacementBroadcastSignal } from './transaction-broadcast-types.js';
+import type { ChainEvent } from './knowledge-asset-update-identity.js';
+export type { ChainEvent } from './knowledge-asset-update-identity.js';
+import type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
+export type { ContextGraphAuthorityIndexRevisionReader } from './context-graph-authority-index-reader.js';
 import type {
   RandomSamplingAvailability,
 } from './random-sampling-availability.js';
 import type { RandomSamplingReadContextReader } from './random-sampling-read-context.js';
+import type { KnowledgeAssetVersionSnapshotReadOptions } from './ka-version-snapshot-report.js';
 import type { ethers } from 'ethers';
 import type { RpcRequestClass } from './rpc-request-transport.js';
 import type { RpcUsageWindow } from './rpc-usage.js';
 import type { ContextGraphAuthorityIndexSnapshots } from './context-graph-authority-index-snapshot.js';
 import type { ContextGraphAuthorityProjectionServedEvidence } from
   './context-graph-authority-index-projection.js';
-import type { ContextGraphAuthorityIndexId } from
-  './context-graph-authority-index-id.js';
 export type { ContextGraphAuthorityIndexId } from
   './context-graph-authority-index-id.js';
 
@@ -502,12 +507,6 @@ export interface KAUpdateVerification {
   merkleRootCount?: bigint;
 }
 
-export interface ChainEvent {
-  type: string;
-  blockNumber: number;
-  data: Record<string, unknown>;
-}
-
 /**
  * A process-local, non-serializable lease over one conservative background
  * event-scan boundary. It has no chain-head, finality or authorization
@@ -646,65 +645,6 @@ export interface ContextGraphFinalizedCreation {
   readonly accessPolicy: 0 | 1;
 }
 
-/**
- * Logical finalized-authority capability. Callers provide the complete target
- * set for one operation; the chain implementation owns validation, projection,
- * and the single finalized anchor.
- */
-export interface ContextGraphAuthorityIndexRevisionReader {
-  /**
-   * Resolve one RFC-64 authority binding at the index's finalized anchor.
-   * This intentionally differs from the public current-state name resolver.
-   */
-  resolveFinalizedContextGraphIdByNameHash?(
-    nameHash: string,
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<bigint | null>;
-  /**
-   * Resolve many unique name commitments from one finalized index projection.
-   * Missing and zero-hash commitments are omitted; ambiguity fails closed.
-   */
-  resolveFinalizedContextGraphIdsByNameHashes?(
-    nameHashes: readonly string[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<string, bigint>>;
-  /**
-   * Resolve a name commitment and its complete authority state atomically at
-   * one finalized anchor. RFC-64 consumers should prefer this over composing
-   * the single-name ID resolver with a later snapshot read.
-   */
-  resolveFinalizedContextGraphAuthoritySnapshotByNameHash?(
-    nameHash: string,
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ContextGraphAuthoritySnapshot | null>;
-  /**
-   * Resolve many name commitments and their complete authority state from one
-   * finalized index projection. Missing and zero-hash commitments are omitted;
-   * ambiguity fails the whole projection closed.
-   */
-  resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes?(
-    nameHashes: readonly string[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<string, ContextGraphAuthoritySnapshot>>;
-  readContextGraphAuthorityIndexRevisions(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<ContextGraphAuthorityIndexId, string>>;
-  /**
-   * Read complete authority snapshots for many graphs at one finalized anchor.
-   * Responsibility selection and immediate authority acceptance share this
-   * projection. Optional so older/custom adapters retain their point-read path.
-   */
-  readContextGraphAuthorityIndexSnapshots?(
-    contextGraphIds: readonly ContextGraphAuthorityIndexId[],
-    options?: ContextGraphAuthorityReadOptions,
-  ): Promise<ReadonlyMap<
-    ContextGraphAuthorityIndexId,
-    ContextGraphAuthoritySnapshot
-  >>;
-  /** Await the physical shared-index scans underlying detached/cancelled waiters. */
-  whenIdle(): Promise<void>;
-}
 
 export class ContextGraphChainScanPartialError extends Error {
   readonly partialResults: ContextGraphOnChain[];
@@ -1165,6 +1105,15 @@ export interface V10PublishParams {
    * undo an accepted transaction and therefore must not fail the chain write.
    */
   onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /**
+   * Opts this write into stuck-transaction speed-up (stuck-transaction-recovery.ts): re-signing
+   * it at the same nonce with higher fees. Awaited before each replacement is broadcast, never for
+   * the original; **fail-closed**: a throw means that replacement is not sent. The call resolves
+   * with whichever hash is mined, which may differ from the one {@link onBroadcast} saw, so a
+   * caller whose durable record holds one hash per transaction must omit it. Neither this hook
+   * nor a failed replacement ever becomes the call's error.
+   */
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
 
 export interface V10UpdateKAParams {
@@ -1218,6 +1167,8 @@ export interface V10UpdateKAParams {
   onBroadcast?: (signal: PreBroadcastSignal) => Promise<void> | void;
   /** Post-send counterpart to {@link onBroadcast}; see V10PublishParams. */
   onBroadcastAccepted?: (signal: PreBroadcastSignal) => Promise<void> | void;
+  /** Stuck-transaction speed-up opt-in; see {@link V10PublishParams.onBeforeReplacementBroadcast}. */
+  onBeforeReplacementBroadcast?: (signal: ReplacementBroadcastSignal) => Promise<void> | void;
 }
 
 /**
@@ -1416,18 +1367,14 @@ export interface SignedTransactionEnvelope {
   readonly nonce?: number;
 }
 
-export interface PreBroadcastSignal {
-  /** The signed transaction's hash, known before it is sent. */
-  readonly txHash: string;
-  /**
-   * The account nonce the signed transaction reserved. Absent only when it could not be read —
-   * recovery treats that as "no proof of absence available" rather than guessing.
-   */
-  readonly nonce?: number;
-}
-
 export interface ChainReadOptions {
   signal?: AbortSignal;
+}
+
+/** Select identity-read ownership explicitly; cancellation never selects a cache policy. */
+export interface IdentityReadOptions extends ChainReadOptions {
+  /** Shared cached reads are the default; independent reads belong to this request. */
+  ownership?: 'shared' | 'independent';
 }
 
 /** Read options for resolving one publish transaction's receipt. */
@@ -1493,8 +1440,8 @@ export interface ContextGraphLiveAuthorityReadOptions extends ChainReadOptions {
   freshness?: 'live' | 'bounded';
 }
 
-/** Options honored only by finalized Context Graph authority projections. */
-export interface ContextGraphAuthorityReadOptions extends ChainReadOptions {
+/** Finalized authority projection reads; freshness defaults to live. */
+export interface ContextGraphAuthorityReadOptions extends ChainReadOptions, Pick<ContextGraphLiveAuthorityReadOptions, 'freshness'> {
   /**
    * Finalized Context Graph authority reads only: told how the read was
    * answered. FOUR ways, and a consumer that assumes three will read the
@@ -1553,6 +1500,25 @@ export interface KnowledgeAssetUpdateContext {
   merkleLeafCount: number;
 }
 
+/** How a chain adapter's operational wallets, the payers of its transactions, sign. */
+export interface OperationalSigning {
+  /** An external signer signs for every operational wallet; the node holds none of their keys. */
+  readonly external: boolean;
+  /** The operational wallets, the first one primary. */
+  readonly payerAddresses: readonly string[];
+}
+
+/**
+ * The operational signing `chain` reports, or `undefined` for an adapter that
+ * does not report one (one without the capability): callers take such an
+ * adapter to sign with local wallets, and cannot list its payers.
+ */
+export function operationalSigningOf(
+  chain: Pick<ChainAdapter, 'operationalSigning'> | undefined,
+): OperationalSigning | undefined {
+  return typeof chain?.operationalSigning === 'function' ? chain.operationalSigning() : undefined;
+}
+
 /**
  * Chain-agnostic adapter interface for interacting with the DKG Trust Layer.
  *
@@ -1560,6 +1526,9 @@ export interface KnowledgeAssetUpdateContext {
  * Publishers reserve ID ranges via their signer address, then batch-mint KAs from those ranges.
  */
 export interface ChainAdapter {
+  /** Complete coherent public chain evidence for explicit snapshot recovery. */
+  readPublicGraphSnapshot?(contextGraphId: string, onChainId: string, options?: ChainReadOptions): Promise<import('./public-graph-snapshot.js').PublicGraphSnapshot>;
+
   chainType: 'evm' | 'solana';
   chainId: string;
   /**
@@ -1597,7 +1566,7 @@ export interface ChainAdapter {
 
   // Identity
   registerIdentity(proof: IdentityProof): Promise<bigint>;
-  getIdentityId(): Promise<bigint>;
+  getIdentityId(options?: IdentityReadOptions): Promise<bigint>;
   /**
    * OT-RFC-39 — resolve an arbitrary operational EOA to its on-chain
    * identityId. Returns 0n for addresses that are not registered
@@ -1958,7 +1927,7 @@ export interface ChainAdapter {
    * Sign an arbitrary message hash using the node's primary operational key.
    * Used for self-signing as receiver or context graph participant.
    */
-  signMessage?(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }>;
+  signMessage?(messageHash: Uint8Array, options?: ChainReadOptions): Promise<{ r: Uint8Array; vs: Uint8Array }>;
 
   /**
    * Sign EIP-712 typed data with the adapter's primary signer. Used by
@@ -2020,6 +1989,15 @@ export interface ChainAdapter {
     types: Record<string, Array<{ name: string; type: string }>>,
     value: Record<string, unknown>,
   ): Promise<string>;
+
+  /**
+   * How the operational wallets (the payers of transactions) sign, and which
+   * they are. When an external signer signs for them the node holds none of
+   * their keys, and such a paying wallet never authors an asset: callers must
+   * not fall back to it as the author. Optional: see {@link operationalSigningOf}
+   * for an adapter without it.
+   */
+  operationalSigning?(): OperationalSigning;
 
   /**
    * Return `true` iff `address` has deployed bytecode on this chain.
@@ -2123,7 +2101,7 @@ export interface ChainAdapter {
   isShardingTableMember?(identityId: bigint): Promise<boolean>;
 
   /** Verify that a recovered signer address is a registered operational key for the given identity. */
-  verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean>;
+  verifyACKIdentity?(recoveredAddress: string, claimedIdentityId: bigint, options?: ChainReadOptions): Promise<boolean>;
 
   /**
    * Same gate as `verifyACKIdentity`, but returns the FAILING gate so callers
@@ -2139,6 +2117,7 @@ export interface ChainAdapter {
   verifyACKIdentityDetailed?(
     recoveredAddress: string,
     claimedIdentityId: bigint,
+    options?: ChainReadOptions,
   ): Promise<VerifyACKIdentityResult>;
 
   /** Idempotently register local operational wallets for an existing identity. */
@@ -2396,24 +2375,31 @@ export interface ChainAdapter {
    * or not at all. `null` means no endpoint could produce the view, and the caller must not
    * conclude anything from that.
    *
-   * PR #2300 r11 — it also carries the version's ATTRIBUTION, and it is taken from the MOST
-   * ADVANCED endpoint rather than the first that answers. Both follow from the same requirement:
-   * a caller deciding "is this recovered transaction still current" must not mix a root from one
-   * view with an author, a publisher or a block height from another, and a healthy-but-lagging
-   * endpoint answering first would make an old transaction look current.
+   * Attribution and block evidence belong to that same observation. Configured
+   * RPCs are primary-first fallbacks: the first endpoint supplying a complete
+   * view is authoritative, and unused fallbacks are not queried (GH#3098).
+   * This establishes currency at the selected endpoint's confirmation-depth
+   * block, not freshness against every configured RPC. Consumers still enforce
+   * their known receipt/event/version floors and defer when the view is behind.
    *
    * The pinned height uses `chain.finalityConfirmations`: confirmation 1 is the current head,
    * and larger values pin `head - confirmations + 1`.
+   *
+   * `options.onUnavailable` receives why a `null` was answered (each endpoint that was asked and
+   * supplied no view, host only, with a closed class). It is diagnostic: the `null` means the
+   * same without it.
    */
   readKnowledgeAssetVersionSnapshot?(
     kaId: bigint,
-    options?: ChainReadOptions,
+    options?: KnowledgeAssetVersionSnapshotReadOptions,
   ): Promise<KnowledgeAssetVersionSnapshot | null>;
 
   /**
    * Cheap lease validation for a previously-read coherent snapshot. A true
-   * result proves that the same finalized block hash and exact physical KAS
-   * binding generation are still current. Missing evidence is always false.
+   * result proves that the first usable configured endpoint still reports the
+   * same confirmation-depth block hash and exact physical KAS binding generation.
+   * A usable differing header returns false immediately; only unavailable or
+   * unusable endpoint evidence advances to a fallback. Missing evidence is false.
    */
   knowledgeAssetVersionSnapshotIsCurrent?(
     kaId: bigint,

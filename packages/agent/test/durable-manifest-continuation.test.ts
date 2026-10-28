@@ -1,3 +1,4 @@
+import { verifiedDurableBoundaryOf, type VerifiedDurableBoundary } from '../src/sync/durable-recovery-boundary-seed.js';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   MemoryLayer,
@@ -12,7 +13,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import { SYNC_PAGE_SIZE } from '../src/dkg-agent-constants.js';
 import {
-  createGraphScopedDurableManifestPlan,
+  createGraphScopedDurableManifestPlan, graphScopedDurableManifestPrefixAtOffset,
 } from '../src/sync/durable-integrity.js';
 import {
   getSyncCheckpointKey,
@@ -140,6 +141,7 @@ function createTwoRoundHarness(
   const parsedResponses = new Map<string, Quad[]>();
   const dataRequests: DataRequestEvidence[] = [];
   const storedAssetUals: string[] = [];
+  const heldAssetUals = new Set<string>();
 
   const fetch = async (request: DurableSyncFetchRequest): Promise<SyncPageResult> => fetchSyncPages({
     ctx: request.ctx,
@@ -160,6 +162,7 @@ function createTwoRoundHarness(
     forceFreshSession: request.forceFreshSession,
     manifestDigest: request.manifestDigest,
     manifestPrefixDigestAtOffset: request.manifestPrefixDigestAtOffset,
+    durableResumeBoundary: request.durableResumeBoundary,
     assetUals: request.exactAssetUals,
     buildSyncRequest: async (
       _contextGraphId,
@@ -204,21 +207,23 @@ function createTwoRoundHarness(
     logDebug: () => {},
   });
 
-  const run = async (round: Round) => {
+  const run = async (round: Round, durableMetaContinuation?: DurableMetaContinuation, durableResumeBoundary?: VerifiedDurableBoundary) => {
     currentRound = round;
     return runDurableSync({
       ctx,
       remotePeerId,
       contextGraphIds: [contextGraphId],
       durableSyncBudget: uniformDurableSyncBudget(() => Date.now() + 60_000),
+      storedPrefix: async () => ({ assertCurrent() {}, close() {}, covers: ual => new Set(heldAssetUals).has(ual) }),
       fetchSyncPages: fetch,
+      durableMetaContinuation, durableResumeBoundary,
       exactAssetSelectionFor: exactAssetUals
         ? () => ({ kind: 'ual-only', assetUals: exactAssetUals })
         : undefined,
       processDurableBatchInWorker: processBatch,
       storeInsert: async () => {},
       storeGraphScopedAsset: async (request: DurableSyncGraphScopedStoreRequest) => {
-        storedAssetUals.push(request.asset.ual);
+        storedAssetUals.push(request.asset.ual); heldAssetUals.add(request.asset.ual);
         return 'applied';
       },
       deleteCheckpoint: (key) => deleteSyncPageCheckpoint(checkpointStore, key),
@@ -247,7 +252,7 @@ function createTwoRoundHarness(
     });
   };
 
-  return { checkpointStore, dataRequests, storedAssetUals, run };
+  return { checkpointStore, dataRequests, storedAssetUals, heldAssetUals, run };
 }
 
 function makeScenario(
@@ -440,7 +445,70 @@ describe('manifest-bound durable DATA continuation', () => {
     expect(second.complete).toBe(false);
   });
 
-  it('restarts safely after the responder forgets a session coordinate', async () => {
+  it.each([false, true])('preserves the peer checkpoint when a shared seed is incompatible (same stored generation: %s)', async (sameStoredGeneration) => {
+    const { contextGraphId, remotePeerId, x, y } = makeScenario('incompatible-seed', (cg) => ({
+      x: ordered([asset(cg, 1), asset(cg, 3), asset(cg, 5)]),
+      y: ordered([asset(cg, 1), asset(cg, 4), asset(cg, 5)]),
+    }));
+    const harness = createTwoRoundHarness(contextGraphId, remotePeerId);
+    const meta = x.flatMap(a => a.meta);
+    await harness.run({ meta: sameStoredGeneration ? y.flatMap(a => a.meta) : meta, dataPage: () => x[0]!.payload });
+    const key = getSyncCheckpointKey(remotePeerId, contextGraphId, false, 'data');
+    const original = harness.checkpointStore.get(key)!;
+    const other = createGraphScopedDurableManifestPlan(y.flatMap(a => a.meta), contextGraphId)!;
+    const sourceKey = getSyncCheckpointKey('other-peer', contextGraphId, false, 'data');
+    const offset = y[0]!.payload.length + y[1]!.payload.length;
+    harness.checkpointStore.setManifestBoundOffset(sourceKey, offset,
+      other.manifestDigest, Date.now(),
+      graphScopedDurableManifestPrefixAtOffset(other, offset)!.prefixDigest);
+    const candidate = verifiedDurableBoundaryOf(harness.checkpointStore.get(sourceKey), sourceKey);
+    harness.dataRequests.length = 0;
+    const result = await harness.run({ meta, dataPage: () => x.slice(1).flatMap(a => a.payload) }, undefined, candidate);
+    if (sameStoredGeneration) {
+      expect(harness.dataRequests.map(r => r.offset)).toEqual([0, original.offset]);
+      expect(harness.dataRequests[0]!.syncSessionId).not.toBe(original.responderSessionId);
+    } else {
+      expect(harness.dataRequests[0]).toMatchObject({ offset: original.offset, syncSessionId: original.responderSessionId });
+    }
+    expect(result.complete).toBe(true);
+  });
+
+  it.each([false, true])('seeds over a live destination session directly into current META (cross generation: %s)', async crossGeneration => {
+    const { contextGraphId, remotePeerId, x } = makeScenario('live-session-seed', cg => ({
+      x: ordered([asset(cg, 1), asset(cg, 3), asset(cg, 5)]), y: [],
+    }));
+    const harness = createTwoRoundHarness(contextGraphId, remotePeerId);
+    const meta = x.flatMap(a => a.meta);
+    await harness.run({ meta, dataPage: () => x[0]!.payload });
+    const key = getSyncCheckpointKey(remotePeerId, contextGraphId, false, 'data');
+    const original = harness.checkpointStore.get(key)!;
+    expect(original.responderSessionId).toEqual(expect.any(String));
+    const manifest = createGraphScopedDurableManifestPlan(meta, contextGraphId)!;
+    const sourceManifest = crossGeneration
+      ? createGraphScopedDurableManifestPlan([...meta, ...asset(contextGraphId, 7).meta], contextGraphId)!
+      : manifest;
+    const offset = x[0]!.payload.length + x[1]!.payload.length;
+    // Model the second assertion already stored by the source peer.
+    harness.heldAssetUals.add(x[1]!.ual);
+    const sourceKey = getSyncCheckpointKey('source-peer', contextGraphId, false, 'data');
+    harness.checkpointStore.setManifestBoundOffset(sourceKey, offset, sourceManifest.manifestDigest, Date.now() - 60_000,
+      graphScopedDurableManifestPrefixAtOffset(manifest, offset)!.prefixDigest);
+    const candidate = verifiedDurableBoundaryOf(harness.checkpointStore.get(sourceKey), sourceKey);
+    const writes = vi.spyOn(harness.checkpointStore, 'setManifestBoundOffset');
+    harness.dataRequests.length = 0;
+    const result = await harness.run({ meta, dataPage: rawOffset => rawOffset === 0
+      ? x.flatMap(a => a.payload) : x[2]!.payload }, undefined, candidate);
+    expect(harness.dataRequests.map(r => r.offset)).toEqual([0, offset]);
+    expect(harness.dataRequests[0]!.syncSessionId).not.toBe(original.responderSessionId);
+    expect(harness.dataRequests[1]!.syncSessionId).toBe(harness.dataRequests[0]!.syncSessionId);
+    expect(result.complete).toBe(true);
+    const installed = writes.mock.calls.filter(([target, at]) => target === key && at === offset);
+    expect(installed.length).toBeGreaterThan(0);
+    expect(installed[0]!.slice(2, 5)).toEqual([manifest.manifestDigest, candidate!.updatedAtMs, candidate!.manifestPrefixDigest]);
+    expect(writes.mock.calls.filter(([target]) => target === key).every(([, , digest]) => digest === manifest.manifestDigest)).toBe(true);
+  });
+
+  it('continues a proven prefix through a primed session after the responder forgets a session coordinate', async () => {
     const { contextGraphId, remotePeerId, x } = makeScenario('responder-restart', (cg) => ({
       x: ordered([asset(cg, 1), asset(cg, 3)]),
       y: [],
@@ -462,23 +530,68 @@ describe('manifest-bound durable DATA continuation', () => {
     );
 
     harness.dataRequests.length = 0;
+    harness.storedAssetUals.length = 0;
     const second = await harness.run({
       meta,
       dataPage: (offset) => offset === 0
         ? [...prefix, ...x[1]!.payload]
-        : [],
+        : offset === prefix.length ? x[1]!.payload : [],
     });
 
-    expect(harness.dataRequests.map(({ offset }) => offset)).toEqual([0]);
+    // One discarded prime page on a fresh session, then the proven boundary.
+    expect(harness.dataRequests.map(({ offset }) => offset)).toEqual([0, prefix.length]);
     expect(harness.dataRequests[0]?.syncSessionId)
       .not.toBe(established.responderSessionId);
+    expect(harness.dataRequests[1]?.syncSessionId).toBe(harness.dataRequests[0]?.syncSessionId);
+    expect(harness.storedAssetUals).toEqual([x[1]!.ual]);
     expect(second.complete).toBe(true);
+  });
+
+  it('restarts from row 0 when the rows after a primed jump do not start the next graph', async () => {
+    const { contextGraphId, remotePeerId, x } = makeScenario('responder-misaligned', (cg) => ({
+      x: ordered([asset(cg, 1), asset(cg, 3)]),
+      y: [],
+    }));
+    const harness = createTwoRoundHarness(contextGraphId, remotePeerId);
+    const meta = x.flatMap((entry) => entry.meta);
+    const prefix = x[0]!.payload;
+
+    await harness.run({ meta, dataPage: () => prefix });
+    const key = getSyncCheckpointKey(remotePeerId, contextGraphId, false, 'data');
+    const established = harness.checkpointStore.get(key)!;
+    deleteSyncPageCheckpoint(harness.checkpointStore, key);
+    harness.checkpointStore.setManifestBoundOffset(
+      key,
+      established.offset,
+      established.manifestDigest!,
+      Date.now(),
+      established.manifestPrefixDigest,
+    );
+
+    // This responder's rows at the boundary belong to the graph before it.
+    const continuation: DurableMetaContinuation = { requesterScope: 'durable-recovery-meta:misaligned' };
+    const misaligned = await harness.run({
+      meta,
+      dataPage: (offset) => offset === 0 ? [...prefix, ...x[1]!.payload] : offset === prefix.length ? prefix : [],
+    }, continuation);
+    expect(misaligned.complete).toBe(false);
+    expect(harness.checkpointStore.get(key)).toBeUndefined();
+    // The round tells the recovery owner which boundary the peer's rows refused.
+    expect(continuation.rejectedResumeOffset).toBe(prefix.length);
+
+    harness.dataRequests.length = 0;
+    const restarted = await harness.run({
+      meta,
+      dataPage: (offset) => offset === 0 ? [...prefix, ...x[1]!.payload] : [],
+    });
+    expect(harness.dataRequests.map(({ offset }) => offset)).toEqual([0]);
+    expect(restarted.complete).toBe(true);
   });
 
   it.each([
     ['declared session expiry', 'sync session expired'],
     ['opaque transport reset before any resumed page', 'stream reset'],
-  ])('restarts safely after %s', async (_name, failureMessage) => {
+  ])('continues a proven prefix through a primed session after %s', async (_name, failureMessage) => {
     const { contextGraphId, remotePeerId, x } = makeScenario('responder-expired', (cg) => ({
       x: ordered([asset(cg, 1), asset(cg, 3)]),
       y: [],
@@ -512,10 +625,11 @@ describe('manifest-bound durable DATA continuation', () => {
       meta,
       dataPage: (offset) => offset === 0
         ? [...prefix, ...x[1]!.payload]
-        : [],
+        : offset === prefix.length ? x[1]!.payload : [],
     });
 
-    expect(harness.dataRequests.map(({ offset }) => offset)).toEqual([0]);
+    // The forgotten token is never reused; the verified prefix is.
+    expect(harness.dataRequests.map(({ offset }) => offset)).toEqual([0, prefix.length]);
     expect(harness.dataRequests[0]?.syncSessionId)
       .not.toBe(established.responderSessionId);
     expect(recovered.complete).toBe(true);

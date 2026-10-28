@@ -490,6 +490,7 @@ describe('caller deadline on the active-public chain proof', () => {
       store: {
         query: async () => ({ type: 'boolean', value: false }),
       } as unknown as TripleStore,
+      resolveMetadataConfirmation: LifecycleSyncMethods.prototype.resolveMetadataConfirmation,
       localApprovedAgentByCG: new Map(),
       subscribedContextGraphs: new Map(),
       resolveActivePublicContextGraphChainProof: resolveProof,

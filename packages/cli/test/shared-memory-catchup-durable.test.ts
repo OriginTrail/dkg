@@ -1134,6 +1134,53 @@ describe('POST /api/shared-memory/catchup durable leg', () => {
     ]);
   });
 
+  it('asks the graph owner on every catch-up, whatever it answered before (#3421)', async () => {
+    const cgId = '0x2222222222222222222222222222222222222222/owner-always-asked';
+    const holderPeer = 'peer-holder';
+    const ownerPeer = 'peer-owner';
+    let connected = [holderPeer];
+    // The holder serves data; the owner and the other peers answer with metadata only this time.
+    const syncSharedMemoryFromPeerDetailed = vi.fn(async (peerId: string) => (peerId === holderPeer
+      ? { insertedTriples: 3, insertedDataTriples: 3, fetchedDataTriples: 3, fetchedMetaTriples: 4 }
+      : { insertedTriples: 304, insertedDataTriples: 0, fetchedDataTriples: 0, fetchedMetaTriples: 304 }));
+    const agent = {
+      peerId: 'self-peer',
+      node: {
+        libp2p: {
+          getConnections: () => connected.map((peerId) => ({ remotePeer: { toString: () => peerId } })),
+        },
+      },
+      canUseSharedMemoryForContextGraph: vi.fn(async () => true),
+      getPeerProtocols: vi.fn(async () => [PROTOCOL_SYNC]),
+      isPrivateContextGraph: vi.fn(async () => false),
+      resolveCuratorPeerIdsForCg: vi.fn(async () => ({ curatorIsLocal: false, peerIds: [ownerPeer] })),
+      syncSharedMemoryFromPeerDetailed,
+      syncFromPeer: vi.fn(),
+    };
+    const catchup = async () => {
+      const { ctx, res } = buildCatchupCtx({ contextGraphId: cgId, hostCatchupFallback: false }, agent);
+      await handleMemoryRoutes(ctx);
+      expect(res.statusCode).toBe(200);
+    };
+
+    // The holder serves data while the owner is out of reach: a good source from now on.
+    await catchup();
+    expect(syncSharedMemoryFromPeerDetailed.mock.calls.map(([peerId]) => peerId)).toEqual([holderPeer]);
+
+    // Once the owner is connected it is asked on every catch-up, beside the
+    // holder and one peer not known yet, also after it answered with metadata only.
+    connected = [holderPeer, 'peer-a', 'peer-b', ownerPeer];
+    for (let round = 0; round < 2; round += 1) {
+      syncSharedMemoryFromPeerDetailed.mockClear();
+      await catchup();
+      const asked = syncSharedMemoryFromPeerDetailed.mock.calls.map(([peerId]) => peerId);
+      expect(asked, `round ${round + 1}`).toContain(ownerPeer);
+      expect(asked, `round ${round + 1}`).toContain(holderPeer);
+      expect(asked, `round ${round + 1}`).toHaveLength(3);
+    }
+    expect(agent.resolveCuratorPeerIdsForCg).toHaveBeenCalledWith(cgId, { maxPeerIds: 16 });
+  });
+
   it('uses selected recovery for an accepted public catalog graph and unwraps its result', async () => {
     const cgId = '0x1111111111111111111111111111111111111111/release-native-public';
     const peerId = 'peer-release-native-publisher';

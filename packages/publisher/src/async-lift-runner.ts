@@ -1,5 +1,5 @@
-import type { AsyncLiftPublisher } from './async-lift-publisher.js';
-import { assertNodeTimerDelayMs } from '@origintrail-official/dkg-core';
+import type { AsyncLiftPublisher, AsyncLiftClaimControl } from './async-lift-publisher.js';
+import { assertNodeTimerDelayMs, asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 
 export interface AsyncLiftRunnerConfig {
   readonly publisher: AsyncLiftPublisher;
@@ -18,7 +18,7 @@ export interface AsyncLiftRunnerConfig {
    * a consumer that already checks pending transactions faster than 5s keeps that rate.
    */
   readonly activeRecoveryIntervalMs?: number;
-  /** Start recovery, but do not claim accepted jobs until an operator restarts unpaused. */
+  /** Start recovery, but do not claim accepted jobs until the owner releases claims. */
   readonly startPaused?: boolean;
   readonly sleep?: (ms: number) => Promise<void>;
   readonly onError?: (error: unknown) => void | Promise<void>;
@@ -32,6 +32,7 @@ export class AsyncLiftRunner {
   private readonly activeRecoveryIntervalMs: number;
   private readonly sleep: (ms: number) => Promise<void>;
   private readonly onError?: (error: unknown) => void | Promise<void>;
+  private readonly ownedClaimControl?: AsyncLiftClaimControl;
   private started = false;
   private stopped = false;
   private running?: Promise<void>;
@@ -54,9 +55,9 @@ export class AsyncLiftRunner {
   /** Whether unresolved tx work remains, from the last pass outcome (boot-seeded); selects active vs idle cadence. */
   private pendingReconciliation = false;
   private unsubscribeScheduler?: () => void;
-  /** Wallet wake latch: a release poke landing while its loop is mid-processNext skips the next sleep. */
+  /** Wallet wake latch: work/release pokes during processNext skip the next idle sleep. */
   private readonly walletWakePending = new Set<string>();
-  /** At most one parked idle sleeper per wallet, resolvable by a release poke (or by stop()). */
+  /** At most one parked idle sleeper per wallet, resolvable by work/release pokes or stop(). */
   private readonly walletSleepers = new Map<string, () => void>();
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
@@ -72,6 +73,22 @@ export class AsyncLiftRunner {
     assertNodeTimerDelayMs(this.activeRecoveryIntervalMs, 'AsyncLiftRunner activeRecoveryIntervalMs');
     this.sleep = config.sleep ?? defaultSleep;
     this.onError = config.onError;
+    const control = config.publisher.claimControl;
+    if (control) this.ownedClaimControl = Object.freeze({
+      get state() { return control.state; },
+      hold: () => control.hold(),
+      close: () => control.close(),
+      release: async () => {
+        if (this.stopped) throw new Error('Publisher runner is stopped');
+        await control.release();
+      },
+    });
+  }
+
+  /** Same publisher control semantics, with this runner's release lifetime enforced. */
+  get claimControl(): AsyncLiftClaimControl {
+    if (!this.ownedClaimControl) throw new Error('Publisher does not support live claim control');
+    return this.ownedClaimControl;
   }
 
   async start(): Promise<void> {
@@ -109,17 +126,22 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
-    // ONE atomic scheduler attachment: reconciliation demand (a tx-bearing job left executor
-    // ownership — pull the next pass forward) and wallet release (the wallet is claimable NOW —
-    // let its loop claim instead of idling out the poll) take over together, so scheduling
-    // ownership can never be split between runner incarnations. Attaching after startup
-    // recovery loses nothing: no in-process work can settle before the wallet loops start.
+    // The usage line's worker-free pick-up needs the wallets that run workers.
+    asyncAdmissionUsage.setLiftWallets(this.config.walletIds);
+    // One atomic attachment for reconciliation demand, wallet release, and accepted work.
+    // Each callback invites its loop to recheck authoritative state; none grants ownership.
+    // All callbacks transfer together, so scheduling cannot split between runner incarnations.
+    // Attaching after startup recovery loses no accepted work: every wallet makes its initial
+    // claim attempt immediately, including for work admitted before this attachment.
     // Optional-chained on the METHOD too: a capability object built against the pre-scheduler
     // contract degrades to cadence-and-poll scheduling instead of failing start().
     this.unsubscribeScheduler = this.config.publisher.reconciliationScheduling
       ?.attachScheduler?.({
         onReconciliationDemand: () => this.demandTransactionReconciliation(),
         onWalletRelease: (walletId) => this.wakeWallet(walletId),
+        onWorkAvailable: () => {
+          for (const walletId of this.config.walletIds) this.wakeWallet(walletId);
+        },
       });
     this.scheduleTransactionReconciliation();
     this.running = Promise.all(
@@ -129,6 +151,7 @@ export class AsyncLiftRunner {
 
   async stop(): Promise<void> {
     this.stopped = true;
+    asyncAdmissionUsage.setLiftWallets([]);
     if (this.recoveryTimer) {
       clearTimeout(this.recoveryTimer);
       this.recoveryTimer = undefined;
@@ -150,6 +173,8 @@ export class AsyncLiftRunner {
   private async walletLoop(walletId: string): Promise<void> {
     while (!this.stopped) {
       try {
+        const gate = this.config.publisher.claimControl;
+        if (gate && gate.state !== 'running') { await this.idleWalletWait(walletId); continue; }
         const processed = await this.config.publisher.processNext(walletId);
         if (!processed && !this.stopped) {
           // Interruptible idle wait: a wallet-release poke ends it early, and one that landed
@@ -170,7 +195,7 @@ export class AsyncLiftRunner {
     }
   }
 
-  /** The publisher's poke that walletId's lock was deleted: its next claim attempt can run now. */
+  /** Work arrived or the wallet was released: invite a claim without bypassing its ownership. */
   private wakeWallet(walletId: string): void {
     if (this.stopped || !this.started) return;
     // A release for a wallet this runner does not drive must not accumulate latch state.

@@ -13,6 +13,7 @@ import {
   isContextGraphAuthorityUnavailableMarker,
   isRetryableContextGraphAuthorityUnavailableReason,
 } from '../context-graph-authority/context-graph-authority.js';
+import { isTransientInventorySignerFailure } from './share-inventory-signing-capability.js';
 import type { DKGAgent } from '../../dkg-agent.js';
 import type { AssertionPromoteOptions } from '../../dkg-agent-types.js';
 type GossipSigner = Awaited<
@@ -22,6 +23,7 @@ type GossipSigner = Awaited<
 type AssertionPromotePreCommitOptions = Pick<
   AssertionPromoteOptions,
   | 'subGraphName'
+  | 'authorAgentAddress'
   | 'awaitCuratorAck'
   | 'curatorAckTimeoutMs'
   | 'accessPolicy'
@@ -113,14 +115,16 @@ const REAL_PROMOTE_RECIPIENT_RETRY_TIMING: PromoteRecipientRetryTiming = Object.
  * Repeat a promote's recipient read while it fails with a retryable authority
  * outage and the bound allows.
  *
- * The recipient read accepts its roster only while the node-wide authority
- * facts revision stands still, and it gives up after a few attempts. Work that
+ * The recipient read accepts its roster only while the facts it depends on
+ * stand still, and it gives up after a few attempts. For a private roster those
+ * are the roster, the peer allowlist and the members' keys and routes (GH#3067);
+ * the other kinds also watch the node-wide authority facts revision. Work that
  * has nothing to do with this promote moves that revision: after a Context
  * Graph is registered the node reconciles the new graph's gossip subscription
- * several times within a few hundred milliseconds. A share sent straight after
- * a registration can therefore use up those attempts and report the roster as
- * temporarily unavailable, although no fact changed and the same read succeeds
- * moments later.
+ * several times within a few hundred milliseconds. A share of one of the other
+ * kinds sent straight after a registration can therefore use up those attempts
+ * and report the roster as temporarily unavailable, although no fact changed
+ * and the same read succeeds moments later.
  *
  * Repeating it is safe. It only reads authority and recipient keys, it fails
  * closed every time, and the publisher asks for it before the attempt claims
@@ -161,7 +165,11 @@ export async function prepareAssertionPromote(
   recipientRetryTiming?: PromoteRecipientRetryTiming,
 ): Promise<AssertionPromotePreCommitResult> {
   return resolvePromoteAuthority(async () => {
-    const gossipSigner = await host.resolveWorkspaceGossipSigningAgent(input.contextGraphId);
+    const gossipSigner = await host.resolveWorkspaceGossipSigningAgent(input.contextGraphId).catch(error => {
+      // Account discovery is read-only and precedes curator dispatch and publisher mutation.
+      if (isTransientInventorySignerFailure(error)) throw createPromoteRetryableFailure(error);
+      throw error;
+    });
     const confirmBeforeCommit = await host.buildCuratorAckConfirmer(
       input.contextGraphId,
       gossipSigner,
@@ -189,10 +197,11 @@ export async function prepareAssertionPromote(
           ? { subGraphName: input.options.subGraphName }
           : {}),
         publisherPeerId: input.publisherPeerId,
+        authorAgentAddress: input.options?.authorAgentAddress,
         senderAgentAddress: gossipSigner?.agentAddress,
         confirmBeforeCommit: confirmBeforeCommit === undefined
           ? undefined
-          : (message) => resolvePromoteAuthority(() => confirmBeforeCommit(message)),
+          : (message, payload) => resolvePromoteAuthority(() => confirmBeforeCommit(message, payload)),
         resolveWorkspaceRecipients: (request) => resolvePromoteAuthority(
           () => resolvePromoteRecipientsWithinBound(
             () => host.resolveWorkspaceRecipientsGated(request),
