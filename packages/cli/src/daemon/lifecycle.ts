@@ -2457,8 +2457,8 @@ async function runDaemonInnerWithStartupOwnership(
         postCommitRecoveryIntervalMs: promoteWorkerConfig?.postCommitRecoveryIntervalMs,
       },
     });
-    // Queue retention (off by default) runs only here, in the daemon's admission instance, over the queue's own store object.
-    daemonRetention = startRetention({ runtime: 'daemon-admission', settings: retentionSettings, agent, log });
+    // Queue retention (off by default) runs only here, in the daemon's admission instance, over each queue's own store object (the share queue's, and `publisherControl`'s).
+    daemonRetention = startRetention({ runtime: 'daemon-admission', settings: retentionSettings, agent, publisher: publisherControl, log });
 
     publisherStartupTimer = setTimeout(() => {
       if (publisherStartupController.signal.aborted) return;

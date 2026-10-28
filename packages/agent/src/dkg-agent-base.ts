@@ -1,7 +1,6 @@
-import { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import type { StoreContentFence } from './internal/store-content-fence.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
-import { reconcileAfterMaterialization } from './sync/requester/post-materialization.js';
+import { reconcileAfterMaterialization, reconcileAfterHeldAsset } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
 import { createRecoveryAuthority } from './durable-recovery-authority.js';
 import { RecoveryMaterializationOwner } from './durable-recovery-materialization.js';
@@ -213,7 +212,7 @@ import  {
 } from '@origintrail-official/dkg-core';
 import { GraphManager, PrivateContentStore, createTripleStore, isExternalBackend, type TripleStore, type TripleStoreConfig, type Quad, type LargeLiteralStorageConfig, type QueryOptions } from '@origintrail-official/dkg-storage';
 import { bindContextGraphAuthorityReader, emptyRpcUsageWindow, EVMChainAdapter, NoChainAdapter, enrichEvmError, buildKnowledgeAssetUal, type EVMAdapterConfig, type ChainAdapter, type ContextGraphAuthorityReaderCapability, type CreateContextGraphParams, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type KnowledgeAssetVersionSnapshot, type TxResult, type V10PublishingConvictionAccountInfo, type RpcUsageWindow } from '@origintrail-official/dkg-chain';
-import {
+import { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter,
   DKGPublisher, PublishHandler, SharedMemoryHandler, UpdateHandler, ChainEventPoller, AccessHandler, AccessClient,
   PublishJournal, StaleWriteError,
   ACKCollector, StorageACKHandler,
@@ -584,12 +583,10 @@ export class DKGAgentBase {
       retireFinalizedSwmTwinCandidate: (candidate, ctx) => agent.retireFinalizedSwmTwinCandidate(candidate, ctx),
       retireLegacySwmAfterVerifiedVmTwin: params => agent.retireLegacySwmAfterVerifiedVmTwin(params),
     };
-    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) =>
-      reconcileAfterMaterialization(cleanup, asset, ctx);
-    const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
+    const reconcile: DurableRecoveryHost['reconcile'] = (asset, ctx) => reconcileAfterMaterialization(cleanup, asset, ctx);
+    const heldStore = createDurableHeldStore(agent.store, agent.heldStoreContentFence, (commitment, ctx) => reconcileAfterHeldAsset(cleanup, commitment, ctx), () => agent.chain.chainId === 'none' ? 'integrity-only' : 'confirmed');
     const materialization = new RecoveryMaterializationOwner({
-      chain: () => agent.chain,
-      store: () => agent.store,
+      chain: () => agent.chain, store: () => agent.store,
       isClosed: () => agent.graphScopedStoreClosed,
       subscription: id => agent.subscribedContextGraphs.get(id),
       bindingGeneration: id => agent.contextGraphBindingState.capture(id),
@@ -687,7 +684,6 @@ export class DKGAgentBase {
   readonly wallet: AgentWallet;
   readonly node: DKGNode;
   readonly store: TripleStore;
-  readonly storageAckCopyCleanup: StorageAckCopyCleanupWriter;
   protected readonly storageAckLedgerTimestampWriter: StorageAckLedgerTimestampWriter;
   protected readonly publishedNamedKaVmLifecycleWriter: PublishedNamedKaVmLifecycleWriter;
   readonly publisher: DKGPublisher;
@@ -2096,14 +2092,13 @@ export class DKGAgentBase {
     publicSnapshotStore?: WorkspacePublicSnapshotStore,
     publishedLifecycleWriter?: PublishedNamedKaVmLifecycleWriter,
     ledgerTimestampWriter?: StorageAckLedgerTimestampWriter,
-    storageAckCopyCleanup?: StorageAckCopyCleanupWriter,
+    readonly storageAckCopyCleanup: StorageAckCopyCleanupWriter = input => clearDischargedStorageAckCopies(store, input),
     private readonly heldStoreContentFence?: StoreContentFence,
   ) {
     this.config = config;
     this.wallet = wallet;
     this.node = node;
     this.store = store;
-    this.storageAckCopyCleanup = storageAckCopyCleanup ?? (input => clearDischargedStorageAckCopies(store, input));
     this.storageAckLedgerTimestampWriter = ledgerTimestampWriter ?? applyStorageAckLedgerTimestamp(store);
     this.publishedNamedKaVmLifecycleWriter = publishedLifecycleWriter
       ?? (input => applyPublishedNamedKaVmLifecycle(store, input));

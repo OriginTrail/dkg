@@ -855,9 +855,7 @@ export class DKGAgent extends DKGAgentBase {
       store: this.store,
       writeLocks: this.writeLocks,
       listSubGraphs: (contextGraphId) => this.listSubGraphs(contextGraphId),
-      createContextGraphSyncDeadline: (remainingContextGraphs) => (
-        createContextGraphSyncDeadline({ remainingContextGraphs })
-      ),
+      createContextGraphSyncDeadline: remainingContextGraphs => createContextGraphSyncDeadline({ remainingContextGraphs }),
       fetchSyncPages: (
         ctx,
         peerId,
