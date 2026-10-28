@@ -199,3 +199,34 @@ describe('caller-retained confirmed catalog evidence', () => {
   });
 
 });
+
+
+it.each(['unfinalized', 'unavailable', 'missing-capability'] as const)('does not persist or retire inventory while finality is %s', async mode => {
+  const f = await fixture();
+  const insert = vi.spyOn(f.store, 'insert'), update = vi.spyOn(f.store, 'update'), remove = vi.spyOn(f.store, 'deleteByPattern');
+  const finality = vi.spyOn(f.chain, 'isReceiptBlockFinalAndCanonical');
+  if (mode === 'unfinalized') finality.mockResolvedValue(false);
+  else if (mode === 'unavailable') finality.mockRejectedValue(new Error('RPC unavailable'));
+  else Object.defineProperty(f.chain, 'isReceiptBlockFinalAndCanonical', { value: undefined, configurable: true });
+  await expect(recoverConfirmedCatalogObligationV1(f.evidence, f.ports))
+    .rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_OBLIGATION_PENDING', retryable: true });
+  expect(f.observe).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+  expect(insert).not.toHaveBeenCalled(); expect(update).not.toHaveBeenCalled(); expect(remove).not.toHaveBeenCalled();
+});
+
+it('checks the resolved receipt identity and cancellation signal before observer-only recovery', async () => {
+  const f = await fixture();
+  const finality = vi.spyOn(f.chain, 'isReceiptBlockFinalAndCanonical').mockResolvedValue(true);
+  await recoverConfirmedCatalogObligationV1(f.evidence, f.ports);
+  expect(finality).toHaveBeenCalledExactlyOnceWith({ txHash: f.receipt.txHash,
+    blockNumber: f.receipt.blockNumber, blockHash: f.receipt.blockHash }, { signal: f.controller.signal });
+  expect(f.observe).toHaveBeenCalledOnce(); expect(f.submit).not.toHaveBeenCalled();
+  expect(finality.mock.invocationCallOrder[0]).toBeLessThan(f.observe.mock.invocationCallOrder[0]);
+});
+
+it('does not observe if recovery is cancelled during the finality check', async () => {
+  const f = await fixture(); const reason = new Error('finality cancelled');
+  vi.spyOn(f.chain, 'isReceiptBlockFinalAndCanonical').mockImplementation(async () => { f.controller.abort(reason); return true; });
+  await expect(recoverConfirmedCatalogObligationV1(f.evidence, f.ports)).rejects.toBe(reason);
+  expect(f.observe).not.toHaveBeenCalled();
+});

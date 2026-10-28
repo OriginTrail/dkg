@@ -27,6 +27,11 @@ function invalidEvidence(): Error {
     { code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
 }
 
+function pendingFinality(cause?: unknown): Error {
+  return Object.assign(new Error('Confirmed catalog recovery is waiting for a final canonical receipt', { cause }),
+    { code: 'CONFIRMED_CATALOG_OBLIGATION_PENDING', retryable: true });
+}
+
 /** Read-only authentication precedes the same observer used by the confirmed publication tail. */
 export async function recoverConfirmedCatalogObligationV1(
   evidence: Readonly<ConfirmedCatalogObligationRecoveryV1>, ports: RecoveryPortsV1,
@@ -65,6 +70,17 @@ export async function recoverConfirmedCatalogObligationV1(
     || lifecycleAddress.toLowerCase() !== seal.assertedAtKav10Address
     || receipt.knowledgeAssetsContract?.toLowerCase() !== assetsAddress.toLowerCase()) throw invalidEvidence();
   ports.assertCurrent();
+  if (!chain.isReceiptBlockFinalAndCanonical) throw pendingFinality();
+  let final: boolean;
+  try {
+    final = await chain.isReceiptBlockFinalAndCanonical({ txHash: receipt.txHash,
+      blockNumber: receipt.blockNumber, blockHash: receipt.blockHash }, { signal });
+  } catch (cause) {
+    ports.assertCurrent();
+    throw pendingFinality(cause);
+  }
+  ports.assertCurrent();
+  if (!final) throw pendingFinality();
   await ports.observe({ catalogObligationRequired: true, contextGraphId: evidence.contextGraphId,
     assertionCoordinate: evidence.assertionCoordinate, subGraphName: null,
     seal: candidate.seal, assertionUri: evidence.assertionUri,

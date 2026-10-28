@@ -1,6 +1,6 @@
 import type { ObserveRfc64ConfirmedVmParamsV1 } from './internal/confirmed-publication-types.js';
 export type { ObserveRfc64ConfirmedVmParamsV1 } from './internal/confirmed-publication-types.js';
-import { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from './dkg-agent-rfc64-swm-catalog-projection.js';
+import { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from './internal/catalog-workspace-policy.js';
 import type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, TransferRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1 } from './internal/promote/swm-handoff-types.js';
 export type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, TransferRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1, BoundDurableSwmPromotionParamsV1 } from './internal/promote/swm-handoff-types.js';
 import { repairConfirmedPlacement } from './internal/confirmed-placement-repair.js';

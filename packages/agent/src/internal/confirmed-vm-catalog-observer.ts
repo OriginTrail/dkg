@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { handoffConfirmedCatalogPlacementV1, withConfirmedCatalogTailV1 } from './confirmed-catalog-handoff.js';
-import { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from '../dkg-agent-rfc64-swm-catalog-projection.js';
+import { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from './catalog-workspace-policy.js';
+import type { PlacementLaneV1 } from './finalized-placement-decision.js';
 
 import { SwmInventoryWriteFailure } from './swm-inventory-write.js';
 
@@ -155,10 +156,10 @@ export { rfc64SwmInventoryAssetKeyV1 } from '../rfc64/swm-inventory-shadow-runti
 /** Resolve the current lane once before strict ownership transfer. */
 export async function transferSelectedConfirmedVmCatalogV1(
   ports: Omit<ConfirmedVmCatalogObserverDependencies, 'finalizedPrivateScopeBase'> & {
-    resolveLane(): ReturnType<DKGAgent['resolveRfc64CatalogAuthoringLaneV1']>;
+    resolveLane(): PlacementLaneV1 | null;
   }, params: TransferRfc64ConfirmedVmParamsV1,
 ): Promise<ConfirmedVmOwnershipOutcome> {
-    let lane: ReturnType<DKGAgent['resolveRfc64CatalogAuthoringLaneV1']>;
+    let lane: PlacementLaneV1 | null;
     try {
       lane = ports.resolveLane();
     } catch (cause) { throw new ConfirmedVmOwnershipFailure('authority', cause); }

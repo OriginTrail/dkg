@@ -138,14 +138,7 @@ export type Rfc64CatalogAuthoringLaneDecisionV1<Lane = ResolvedRfc64CatalogAutho
     readonly lane: Lane;
   }>;
 
-export function rfc64CatalogLaneAcceptsWorkspaceHeadV1(
-  lane: ResolvedRfc64CatalogAuthoringLaneV1,
-  accessPolicy: 'public' | 'ownerOnly' | 'allowList' | undefined,
-): boolean {
-  return lane.kind === 'public'
-    ? accessPolicy === 'public'
-    : accessPolicy === 'ownerOnly' || accessPolicy === 'allowList';
-}
+export { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from './internal/catalog-workspace-policy.js';
 
 export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
   /** Project the latest authenticated durable author inventory into its signed catalog. */
