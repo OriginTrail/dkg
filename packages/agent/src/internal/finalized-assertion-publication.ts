@@ -274,6 +274,7 @@ export async function completeFinalizedAssertionMint(host: FinalizedAssertionPub
   result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
   const { opts, assertionUri, metaGraph, seal, rfc64WorkspaceHead, contextGraphId } = prepared;
   const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
+  let checkpointReady = true;
   if (result.status === 'confirmed') {
     if (result.onChainResult) try {
       await host.store.insert(buildAssertionPublishReceiptQuads({ assertionUri, metaGraph,
@@ -286,14 +287,16 @@ export async function completeFinalizedAssertionMint(host: FinalizedAssertionPub
     const ready = () => beginNamedPublishFinalization(host.store,
       { assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId },
       () => host.catalogRequired(contextGraphId, opts?.subGraphName));
-    try { await ready(); }
-    catch (err) {
-      host.log.warn(ctx, `Failed to write publish checkpoint for <${assertionUri}>: ${err instanceof Error ? err.message : String(err)}`);
-      await ready();
+    checkpointReady = false;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try { await ready(); checkpointReady = true; break; }
+      catch (err) {
+        host.log.warn(ctx, `Failed to write publish checkpoint for <${assertionUri}>: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
   await stampFinalizedPublicationLifecycle(host, prepared, result);
-  await consumeFinalizedPublicationShare(host, prepared, result, recording);
+  if (checkpointReady) await consumeFinalizedPublicationShare(host, prepared, result, recording);
 }
 
 export async function publishFinalizedAssertionUpdate(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent): Promise<PublishResult> {

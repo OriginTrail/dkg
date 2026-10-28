@@ -477,7 +477,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     });
     const consume = vi.spyOn(agent.publisher, 'clearSwmShareComplete');
     const submit = vi.spyOn(chain, 'createKnowledgeAssets');
-    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toThrow('checkpoint unavailable');
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
     expect(consume).not.toHaveBeenCalled();
     expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'legacy' });
     write.mockRestore();
@@ -485,6 +485,22 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE });
     expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'legacy' });
     expect(submit).not.toHaveBeenCalled();
+  });
+
+  it('keeps ordinary publication confirmed when both readiness checkpoint writes fail', async () => {
+    const { agent, store, sealed, lostMint } = await strandedAsset(new WalletMockChain(), wallet.address);
+    vi.spyOn(agent as unknown as { createV10ACKProvider(cg: string): unknown }, 'createV10ACKProvider')
+      .mockReturnValue(async () => [{ peerId: 'stub-core', signatureR: ZERO, signatureVS: ZERO, nodeIdentityId: 1n }]);
+    const original = store.insert.bind(store);
+    vi.spyOn(store, 'insert').mockImplementation(async quads => {
+      if (quads.some(q => q.predicate === 'http://dkg.io/ontology/namedPublishFinalizationReady')) throw new Error('checkpoint unavailable');
+      return original(quads);
+    });
+    const consume = vi.spyOn(agent.publisher, 'clearSwmShareComplete');
+    const published = await agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR });
+    expect(published).toMatchObject({ status: 'confirmed', ual: sealed.kaUal, onChainResult: { txHash: lostMint.txHash } });
+    expect(consume).not.toHaveBeenCalled();
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'legacy' });
   });
 
   it('completes a publish receipt the publish path failed to write, instead of reporting success without it', async () => {
