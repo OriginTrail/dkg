@@ -1,3 +1,4 @@
+import { admitQueuedCatalogPublicationV1 } from './internal/queued-catalog-publication-admission.js';
 import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogObligationInputV1 } from './confirmed-catalog-obligation-error.js';
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
@@ -4971,11 +4972,7 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<void> {
-    const catalogObligationRequired = this.admitConfirmedCatalogPublicationV1({ contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
-    if (catalogObligationRequired) {
-      if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) throw new LegacyKnowledgeAssetReadOnlyError();
-      assertConfirmedCatalogSealAdmissionV1(true, assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request));
-    }
+    admitQueuedCatalogPublicationV1(this, request);
     return preflightKnowledgeAssetVmPublishSnapshot({
       store: this.store, publicSnapshotStore: this.publicSnapshotStore, log: this.log, request,
     });
@@ -4983,17 +4980,11 @@ export class PublishMethods extends DKGAgentBase {
 
   async preflightQueuedKnowledgeAssetVmPublishExecution(
     this: DKGAgent,
-    request: KnowledgeAssetVmPublishRequest,
+    inputRequest: KnowledgeAssetVmPublishRequest,
     opts?: { publisherOverride?: DKGPublisher },
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult> {
-    const catalogObligationRequired = this.admitConfirmedCatalogPublicationV1({ contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
-    if (catalogObligationRequired) {
-      if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) throw new LegacyKnowledgeAssetReadOnlyError();
-      assertConfirmedCatalogSealAdmissionV1(true, assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request));
-    }
-    if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
+    const { graphScopedRequest: request } = admitQueuedCatalogPublicationV1(this, inputRequest);
+    if (!request) throw new LegacyKnowledgeAssetReadOnlyError();
     createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
     const bareRoot = (value?: string | null): string | undefined => {
       const trimmed = value?.trim().toLowerCase();
@@ -5538,7 +5529,7 @@ export class PublishMethods extends DKGAgentBase {
 
   async publishQueuedKnowledgeAssetVmPublish(
     this: DKGAgent,
-    request: KnowledgeAssetVmPublishRequest,
+    inputRequest: KnowledgeAssetVmPublishRequest,
     publishOptions: PublishOptions,
     opts?: {
       operationCtx?: OperationContext;
@@ -5548,11 +5539,7 @@ export class PublishMethods extends DKGAgentBase {
       onPostConfirmationStep?: LiftJobTailStepObserver;
     },
   ): Promise<AsyncKnowledgeAssetVmPublishExecutionResult & { assertionUri: string; seal: AssertionSeal }> {
-    const catalogObligationRequired = this.admitConfirmedCatalogPublicationV1({ contextGraphId: request.contextGraphId, assertionCoordinate: request.name, subGraphName: request.subGraphName, catalogObligationRequired: request.catalogObligationRequired });
-    if (catalogObligationRequired) {
-      if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) throw new LegacyKnowledgeAssetReadOnlyError();
-      assertConfirmedCatalogSealAdmissionV1(true, assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request));
-    }
+    const { graphScopedRequest: request } = admitQueuedCatalogPublicationV1(this, inputRequest);
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
     // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
@@ -5569,21 +5556,21 @@ export class PublishMethods extends DKGAgentBase {
       ...pickPublishLifecycleHooks(publishOptions),
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
     };
-    const capturedPricingPolicy = request.pricingPolicy ?? 'network-visible';
+    const capturedPricingPolicy = inputRequest.pricingPolicy ?? 'network-visible';
     const executionPricingPolicy = publishOptions.pricingPolicy ?? capturedPricingPolicy;
     if (executionPricingPolicy !== capturedPricingPolicy) {
       throw Object.assign(
         new Error(
-          `Queued VM publish for "${request.name}" has pricingPolicy=${executionPricingPolicy}, `
+          `Queued VM publish for "${inputRequest.name}" has pricingPolicy=${executionPricingPolicy}, `
             + `but its immutable request captured pricingPolicy=${capturedPricingPolicy}.`,
         ),
         { code: 'PUBLISH_INTENT_STALE' },
       );
     }
-    if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    if (inputRequest.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
-    if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
+    if (!request) {
       throw new Error('Queued graph-scoped VM publish has an incomplete KA content envelope');
     }
     const graphScope = createGraphKnowledgeAssetScope(
