@@ -9335,7 +9335,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch (err) {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
-      this.contextGraphSubscriptionActivations.abandonRehydration();
+      if (this.contextGraphSubscriptionActivations.finishPartialRehydration()) {
+        wakeDeferredContextGraphSubscriptionAuthorityRecovery(this.contextGraphSubscriptionAuthorityRecoveryRuntime);
+        this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+      }
       authorityBudget?.dispose();
       startupPlan.finish();
     }

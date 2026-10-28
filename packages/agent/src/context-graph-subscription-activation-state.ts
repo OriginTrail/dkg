@@ -91,7 +91,10 @@ export class ContextGraphSubscriptionActivations {
     this.ports.setStatus(status);
     return status;
   }
-  abandonRehydration(): void { this.startupAccounting = null; }
+  /** Publish partial progress so surviving startup intents have a recovery owner. */
+  finishPartialRehydration(): ContextGraphSubscriptionRehydrationInternalStatus | null {
+    return this.startupAccounting ? this.completeRehydration() : null;
+  }
   reset(rows: readonly ContextGraphSubscriptionRecord[]): void {
     for (const id of this.pending.keys()) this.cancel(id);
     this.ports.contextGraphSubscriptionDormancyById.clear();
