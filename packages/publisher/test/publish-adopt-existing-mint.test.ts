@@ -234,7 +234,7 @@ async function strandedPublishFixture() {
   };
 
   return {
-    chain, store, publisher, publish, strand, mintForeign, reconcileMaterialized, kaId, ual, swmGraph, vmGraph, acks, encrypt,
+    chain, store, publisher, publish, seal, strand, mintForeign, reconcileMaterialized, kaId, ual, swmGraph, vmGraph, acks, encrypt,
     graphSize, recordedTxHashes, metadataValueCounts, sealedRoot: seal.expectedMerkleRoot,
   };
 }
@@ -246,6 +246,23 @@ async function expectNothingRecorded(fixture: Awaited<ReturnType<typeof stranded
 }
 
 describe('a sealed publish whose transaction mined after the node stopped waiting', () => {
+  it.each(['1', ' 1 ', '+1', '0x1'])('keeps graph ID %j consistent through planning, ACKs and submission', async (representation) => {
+    const fixture = await strandedPublishFixture();
+    const planning = vi.spyOn(fixture.chain, 'resolvePublisherPublishPlan');
+    const submission = vi.spyOn(fixture.chain, 'createKnowledgeAssets');
+    const result = await fixture.publisher.publish({ contextGraphId: CONTEXT_GRAPH, quads: [LOT],
+      onChainContextGraphId: representation, precomputedAttestation: fixture.seal,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION, kaUal: fixture.ual,
+      assertionVersion: 1, publicTripleCount: 1, privateTripleCount: 0, v10ACKProvider: fixture.acks });
+    expect(result.status).toBe('confirmed');
+    expect(planning).toHaveBeenCalled();
+    expect(planning.mock.calls[0]![0].contextGraphId).toBe(1n);
+    expect(fixture.acks).toHaveBeenCalledOnce();
+    expect(BigInt(fixture.acks.mock.calls[0]![0].contextGraphId)).toBe(1n);
+    expect(submission).toHaveBeenCalledOnce();
+    expect(submission.mock.calls[0]![0].contextGraphId).toBe(1n);
+  });
+
   it('adopts the matching late mint on the vm/publish retry and keeps the original transaction and cost', async () => {
     const fixture = await strandedPublishFixture();
     const original = await fixture.strand();

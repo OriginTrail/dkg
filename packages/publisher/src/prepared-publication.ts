@@ -4,7 +4,10 @@
 import {GRAPH_KA_CONTENT_SCOPE_VERSION, type CatalogRootResult, type GraphKnowledgeAssetScope, type Logger, type OperationContext} from '@origintrail-official/dkg-core';
 import type {Quad} from '@origintrail-official/dkg-storage';
 import type {PublishOptions, KAManifestEntry, V10CoreNodeACK, V10ACKProviderParams} from './publisher.js';
-import type {KAMetadata} from './metadata.js';
+import type { V10PublishParams } from '@origintrail-official/dkg-chain';
+import { buildAuthorAttestationTypedData } from '@origintrail-official/dkg-core';
+import { ethers } from 'ethers';
+import { publicationAcquisitionFailure } from './prepared-publication-acquisition.js';
 
 
 import {isQuorumUnmetError} from './ack-errors.js';
@@ -13,7 +16,7 @@ import {isFailClosedInlineEncrypt} from './async-lift-publish-options.js';
 
 import {resolvePublicationPricing} from './publication-pricing.js';
 import type {CanonicalPublicationPayloadMeasurement} from './publication-payload-measurement.js';
-import type {FinalizedPublisherPlan, PublisherPlanner} from './publisher-planning.js';
+import type {PublisherPlanner} from './publisher-planning.js';
 import type {PublishLifecycleLogger} from './publish-lifecycle-logger.js';
 import {type SealedMintAdoption} from './adopt-existing-mint.js';
 
@@ -40,8 +43,6 @@ export interface PreparedPublicationInput {
     effectiveAccessPolicy: 'public' | 'ownerOnly' | 'allowList';
     kcMerkleLeafCount: number;
     normalizedAllowedPeers: string[];
-    kaMetadata: KAMetadata[];
-    normalizedQuads: Quad[];
     kaCount: number;
     entityCount: number;
   };
@@ -49,8 +50,6 @@ export interface PreparedPublicationInput {
     publisherContextGraphId: bigint | undefined;
     graphPublish: GraphScopedPublishDescriptor | undefined;
     v10CgDomain: string;
-    normalizedPublisherPeerId: string;
-    dataGraph: string;
     contextGraphId: string;
     attributionIdentityId: bigint;
     hasAttributionOverride: boolean;
@@ -69,6 +68,7 @@ export interface PublicationPreparationPorts {
   publisherPlanner: PublisherPlanner;
   log: Logger;
   allocateOperationId(): string;
+  validateSealIntegrity(): Promise<void>;
   selectPublicStagingQuads(mode: PreparedPublicationInput['publicStagingMode'], quads: Uint8Array): Uint8Array | undefined;
   invokeV10ACKProvider(provider: NonNullable<PublishOptions['v10ACKProvider']>, params: V10ACKProviderParams): Promise<V10CoreNodeACK[]>;
 }
@@ -354,54 +354,75 @@ export async function preparePublication(input: PreparedPublicationInput, ports:
 
   ensurePublishOperationIdentity();
   if (finalizedPublisherPlan.kind === 'local') {
-    const { kaMetadata, normalizedQuads } = input.payload;
-    const { normalizedPublisherPeerId, dataGraph } = input.target;
-    return { kind: 'local', ctx, onPhase, publisherAddress, publishOperationId,
-      reason: publisherContextGraphId === undefined ? 'no on-chain CG id' : 'chain not V10-ready',
-      recording: {
-        content: { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads },
-        graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, ctx,
-        subGraphName: options.subGraphName, targetMetaGraphUri: options.targetMetaGraphUri,
-        authorAddress: options.precomputedAttestation?.authorAddress,
-      } };
+    return { kind: 'local', publisherAddress, publishOperationId,
+      reason: publisherContextGraphId === undefined ? 'no on-chain CG id' : 'chain not V10-ready' };
   }
   const { attributionIdentityId, hasAttributionOverride, v10ChainId, v10KavAddress, sealedAdoption } = input.target;
-  return { kind: 'on-chain',
-    content: { catalogCommitment, privateRoots, kcMerkleRoot, publicRecordCount: allSkolemizedQuads.length,
-      kcMerkleLeafCount, kaCount, entityCount },
-    target: { graphPublish, v10CgDomain, contextGraphId, attributionIdentityId, hasAttributionOverride,
-      v10ChainId, v10KavAddress, sealedAdoption },
-    plan: finalizedPublisherPlan, publicationPricing, useCuratedCatalog, publishOperationId, v10ACKs,
-    lifecycle, ctx, options: { precomputedAttestation: options.precomputedAttestation,
-      reservedKaId: options.reservedKaId, onPhase, onBroadcastAccepted: options.onBroadcastAccepted,
-      onBeforeBroadcast: options.onBeforeBroadcast } };
+  onPhase?.('chain', 'start');
+  await ports.validateSealIntegrity();
+  let signStarted = false, submitStarted = false;
+  try {
+    onPhase?.('chain:sign', 'start'); signStarted = true;
+    ports.log.info(ctx, `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${finalizedPublisherPlan.signer.address}, source=${finalizedPublisherPlan.signer.source})`);
+    onPhase?.('chain:sign', 'end'); signStarted = false;
+    onPhase?.('chain:submit', 'start'); submitStarted = true;
+    ports.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, networkVisibleByteSize=${publicationPricing.networkVisibleByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, billableByteSize=${publicationPricing.billableByteSize}, pricingPolicy=${publicationPricing.policy}, tokenAmount=${precomputedTokenAmount})`);
+  if (publisherContextGraphId === undefined || v10ChainId === undefined || v10KavAddress === undefined) {
+    throw new Error('V10 publish requires a parsed context graph id, getEvmChainId() and getKnowledgeAssetsLifecycleAddress()');
+  }
+  if (!v10ACKs?.length) throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
+  const attestation = options.precomputedAttestation;
+  if (!attestation) throw new Error('Publish rejected: on-chain publish requires precomputedAttestation. Call agent.assertion.finalize(...) first.');
+  buildAuthorAttestationTypedData({ chainId: v10ChainId, kav10Address: v10KavAddress,
+    merkleRoot: kcMerkleRoot, authorAddress: attestation.authorAddress,
+    reservedKaId: attestation.reservedKaId, schemeVersion: attestation.schemeVersion });
+  const authorSig = ethers.Signature.from({ r: ethers.hexlify(attestation.signature.r),
+    yParityAndS: ethers.hexlify(attestation.signature.vs) });
+  if (useCuratedCatalog && (!catalogCommitment || catalogCommitment.root.length !== 32
+    || catalogCommitment.leafCount <= 0 || catalogCommitment.root.every(b => b === 0))) {
+    throw new Error('OT-RFC-49: dkg-publisher refused to submit a curated publish with an empty catalog commitment');
+  }
+  return { kind: 'on-chain', submission: {
+      publishOperationId, contextGraphId: publisherContextGraphId,
+      publisherAddress: finalizedPublisherPlan.signer.address,
+      reservedKaId: options.reservedKaId ?? attestation.reservedKaId,
+      merkleRoot: kcMerkleRoot, knowledgeAssetsAmount: kaCount,
+      byteSize: publicationPricing.networkVisibleByteSize, epochs: publishEpochs,
+      tokenAmount: precomputedTokenAmount, merkleLeafCount: kcMerkleLeafCount,
+      isImmutable: false, publisherNodeIdentityId: attributionIdentityId,
+      author: { address: attestation.authorAddress, schemeVersion: attestation.schemeVersion,
+        signature: { r: ethers.getBytes(authorSig.r), vs: ethers.getBytes(authorSig.yParityAndS) } },
+      ackSignatures: v10ACKs.map(ack => ({ identityId: ack.nodeIdentityId, r: ack.signatureR, vs: ack.signatureVS })),
+      catalogRoot: useCuratedCatalog ? catalogCommitment?.root : undefined,
+      catalogLeafCount: useCuratedCatalog ? catalogCommitment?.leafCount : undefined,
+    }, chainId: v10ChainId, graphPublish, sealedAdoption, v10ACKs, lifecycle, ctx,
+    diagnostics: { contextGraphId, publisherAddress, entityCount, publicRecordCount: allSkolemizedQuads.length,
+      hiddenCommitmentCount: privateRoots.length, billableByteSize: publicationPricing.billableByteSize,
+      pricingPolicy: publicationPricing.policy },
+    hooks: { onPhase, onBroadcastAccepted: options.onBroadcastAccepted, onBeforeBroadcast: options.onBeforeBroadcast } };
+  } catch (error) {
+    if (signStarted) onPhase?.('chain:sign', 'end');
+    if (submitStarted) onPhase?.('chain:submit', 'end');
+    throw publicationAcquisitionFailure(error, ports.log, ctx, lifecycle, publisherContextGraphId ?? 0n, v10ACKs?.length ?? 0);
+  }
 }
-/** Content and local recording metadata have no encryption, ACK or chain execution capabilities. */
-export interface TentativePublicationRecording {
-  content: Pick<PreparedPublicationInput['payload'], 'privateRoots' | 'kcMerkleRoot' | 'effectiveAccessPolicy'
-    | 'normalizedAllowedPeers' | 'kaMetadata' | 'normalizedQuads'>;
-  graphPublish: GraphScopedPublishDescriptor | undefined;
-  normalizedPublisherPeerId: string;
-  dataGraph: string;
-  contextGraphId: string;
-  authorAddress: string | undefined;
-  subGraphName: string | undefined;
-  targetMetaGraphUri: string | undefined;
-  ctx: OperationContext;
-}
-export type PreparedPublication = {
-  kind: 'local'; recording: TentativePublicationRecording; ctx: OperationContext;
-  onPhase: PublishOptions['onPhase']; publisherAddress: string; publishOperationId: string;
+/** Local preparation carries identity only; the recorder owns the content and persistence inputs. */
+export interface PreparedLocalPublication {
+  kind: 'local'; publisherAddress: string; publishOperationId: string;
   reason: 'no on-chain CG id' | 'chain not V10-ready';
-} | {
+}
+/** The chain stage receives validated transaction parameters and execution hooks. */
+export interface PreparedOnChainPublication {
   kind: 'on-chain';
-  content: Pick<PreparedPublicationInput['payload'], 'catalogCommitment' | 'privateRoots' | 'kcMerkleRoot'
-    | 'kcMerkleLeafCount' | 'kaCount' | 'entityCount'> & { publicRecordCount: number };
-  target: Pick<PreparedPublicationInput['target'], 'graphPublish' | 'v10CgDomain' | 'contextGraphId'
-    | 'attributionIdentityId' | 'hasAttributionOverride' | 'v10ChainId' | 'v10KavAddress' | 'sealedAdoption'>;
-  plan: Extract<FinalizedPublisherPlan, { kind: 'on-chain' }>;
-  publicationPricing: ReturnType<typeof resolvePublicationPricing>;
-  useCuratedCatalog: boolean; publishOperationId: string; v10ACKs: V10CoreNodeACK[] | undefined;
-  lifecycle: PublishLifecycleLogger; ctx: OperationContext;
-  options: Pick<PublishOptions, 'precomputedAttestation' | 'reservedKaId' | 'onPhase' | 'onBroadcastAccepted' | 'onBeforeBroadcast'>;
-};
+  submission: Omit<V10PublishParams, 'onBroadcast' | 'onBroadcastAccepted' | 'onBeforeReplacementBroadcast'>;
+  chainId: bigint;
+  graphPublish: GraphScopedPublishDescriptor | undefined;
+  sealedAdoption: SealedMintAdoption | undefined;
+  v10ACKs: V10CoreNodeACK[];
+  lifecycle: PublishLifecycleLogger;
+  ctx: OperationContext;
+  diagnostics: { contextGraphId: string; publisherAddress: string; entityCount: number; publicRecordCount: number;
+    hiddenCommitmentCount: number; billableByteSize: bigint; pricingPolicy: string };
+  hooks: Pick<PublishOptions, 'onPhase' | 'onBroadcastAccepted' | 'onBeforeBroadcast'>;
+}
+export type PreparedPublication = PreparedLocalPublication | PreparedOnChainPublication;

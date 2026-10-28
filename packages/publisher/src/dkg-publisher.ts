@@ -1,4 +1,4 @@
-import { preparePublication, type GraphScopedPublishDescriptor } from './prepared-publication.js';
+import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication } from './prepared-publication.js';
 import { recordTentativePublication } from './record-tentative-publication.js';
 import { acquirePreparedPublication, publicationAcquisitionFailure, type PublicationAcquisition } from './prepared-publication-acquisition.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
@@ -3264,7 +3264,7 @@ export class DKGPublisher implements Publisher {
     };
 
 
-    let acquisition: PublicationAcquisition;
+    let acquisition: PublicationAcquisition | PreparedLocalPublication;
     if (options.adoptExistingMint !== undefined) {
       await this.publisherPlanner.requireMintAdoptionTarget(publisherContextGraphId);
       await validateSealIntegrity();
@@ -3284,23 +3284,23 @@ export class DKGPublisher implements Publisher {
         effectiveAuthorAddress: attestation.authorAddress };
     } else {
       const prepared = await preparePublication({
-        payload: { catalogCommitment, privateRoots, catalogByteSize, publicByteSize, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, publicNquadsBytes, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers, kaMetadata, normalizedQuads, kaCount, entityCount },
-        target: { publisherContextGraphId, graphPublish, v10CgDomain, normalizedPublisherPeerId, dataGraph, contextGraphId, attributionIdentityId, hasAttributionOverride, v10ChainId, v10KavAddress, sealedAdoption },
+        payload: { catalogCommitment, privateRoots, catalogByteSize, publicByteSize, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, publicNquadsBytes, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers, kaCount, entityCount },
+        target: { publisherContextGraphId, graphPublish, v10CgDomain, contextGraphId, attributionIdentityId, hasAttributionOverride, v10ChainId, v10KavAddress, sealedAdoption },
         options, pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode: resolvePublicACKStagingMode(options),
       }, {
         publisherPlanner: this.publisherPlanner, log: this.log,
         allocateOperationId: () => `${this.sessionId}-${++this.tentativeCounter}`,
-        selectPublicStagingQuads, invokeV10ACKProvider,
+        selectPublicStagingQuads, invokeV10ACKProvider, validateSealIntegrity,
       });
-      acquisition = await acquirePreparedPublication(prepared, {
-        chain: this.chain, log: this.log, ensureReservedKaId: this.ensureReservedKaId.bind(this), validateSealIntegrity,
+      acquisition = prepared.kind === 'local' ? prepared : await acquirePreparedPublication(prepared, {
+        chain: this.chain, log: this.log, ensureReservedKaId: this.ensureReservedKaId.bind(this),
       });
     }
 
     const onChainResult = acquisition.kind === 'confirmed' ? acquisition.outcome.result : undefined;
     const usedV10Path = acquisition.kind === 'confirmed';
-    const localChainSkipReason = acquisition.kind === 'tentative' ? acquisition.localChainSkipReason : undefined;
-    const v10ACKs = acquisition.v10ACKs;
+    const localChainSkipReason = acquisition.kind === 'local' ? 'no-chain' : undefined;
+    const v10ACKs = acquisition.kind === 'confirmed' ? acquisition.v10ACKs : undefined;
     if (acquisition.kind === 'confirmed') {
       try {
         ual = await recordConfirmed(acquisition.outcome, acquisition.reservedKaId, acquisition.effectiveAuthorAddress);
@@ -3310,12 +3310,16 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain:metadata', 'start');
       this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult!.batchId} tx=${onChainResult!.txHash}`);
     } else {
-      await recordTentativePublication(acquisition, {
-        store: this.store, log: this.log,
+      ual = await recordTentativePublication(acquisition, {
+        privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads,
+        graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, ctx, onPhase,
+        subGraphName: options.subGraphName, targetMetaGraphUri: options.targetMetaGraphUri,
+        authorAddress: options.precomputedAttestation?.authorAddress,
+      }, {
+        chainId: this.chain.chainId, store: this.store, log: this.log,
         replaceExactKnowledgeAssetGraph: this.replaceExactKnowledgeAssetGraph.bind(this),
         persistFinalizedPrivateSlices, persistCatalogEntry,
       });
-      ual = acquisition.ual;
     }
 
     const status = onChainResult === undefined ? 'tentative' : 'confirmed';

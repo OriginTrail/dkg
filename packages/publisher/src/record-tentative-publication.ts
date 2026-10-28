@@ -17,9 +17,23 @@ import {isAgentRegistryContextGraph} from '@origintrail-official/dkg-core';
 
 
 
-import type {PublicationAcquisition} from './prepared-publication-acquisition.js';
+import type { PreparedLocalPublication, GraphScopedPublishDescriptor } from './prepared-publication.js';
+import type { OperationContext } from '@origintrail-official/dkg-core';
+import type { KAMetadata } from './metadata.js';
+import type { PublishOptions } from './publisher.js';
+
+export interface TentativePublicationRecording {
+  privateRoots: Uint8Array[]; kcMerkleRoot: Uint8Array;
+  effectiveAccessPolicy: 'public' | 'ownerOnly' | 'allowList'; normalizedAllowedPeers: string[];
+  kaMetadata: KAMetadata[]; normalizedQuads: Quad[];
+  graphPublish: GraphScopedPublishDescriptor | undefined;
+  normalizedPublisherPeerId: string; dataGraph: string; contextGraphId: string;
+  authorAddress: string | undefined; subGraphName: string | undefined; targetMetaGraphUri: string | undefined;
+  ctx: OperationContext; onPhase: PublishOptions['onPhase'];
+}
 
 export interface TentativePublicationRecordingPorts {
+  chainId: string;
   store: TripleStore;
   log: Logger;
   replaceExactKnowledgeAssetGraph(graphUri: string, quads: readonly Quad[], operation: string): Promise<void>;
@@ -27,11 +41,13 @@ export interface TentativePublicationRecordingPorts {
   persistCatalogEntry(): Promise<void>;
 }
 /** The recording stage owns every local write, including intentional local-only publications. */
-export async function recordTentativePublication(outcome: Extract<PublicationAcquisition, { kind: 'tentative' }>, ports: TentativePublicationRecordingPorts): Promise<void> {
-  const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads } = outcome.recording.content;
-  const { graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId } = outcome.recording;
-  const { subGraphName, targetMetaGraphUri, authorAddress, ctx } = outcome.recording;
-  const { ual } = outcome;
+export async function recordTentativePublication(outcome: PreparedLocalPublication, recording: TentativePublicationRecording,
+  ports: TentativePublicationRecordingPorts): Promise<string> {
+  const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads,
+    graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, subGraphName, targetMetaGraphUri, authorAddress, ctx, onPhase } = recording;
+  onPhase?.('chain', 'start');
+  ports.log.warn(ctx, `Skipping on-chain publish: ${outcome.reason}`);
+  const ual = graphPublish?.scope.ual ?? `did:dkg:${ports.chainId}/${outcome.publisherAddress}/t${outcome.publishOperationId}`;
     for (const km of kaMetadata) {
       km.kcUal = ual;
     }
@@ -87,4 +103,5 @@ export async function recordTentativePublication(outcome: Extract<PublicationAcq
       await ports.store.insert(tentativeMeta);
     }
     await ports.persistCatalogEntry();
+    return ual;
 }
