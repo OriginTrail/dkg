@@ -1,3 +1,4 @@
+import type { MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import type { AgentSharedMemoryPublishOptions, SharedMemoryPublicationContext, FinalizedAssertionPublishOptions, FinalizedAssertionPublicationOperations } from './internal/agent-publish-options.js';
 import { beginNamedPublishFinalization, finishNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -5797,10 +5798,6 @@ export class PublishMethods extends DKGAgentBase {
 
   async publishFromFinalizedAssertion(this: DKGAgent, contextGraphId: string, name: string,
     opts?: FinalizedAssertionPublishOptions): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-    if (opts?.adoptExistingMint !== undefined) {
-      const { adoptExistingMint, ...content } = opts;
-      return this.recordFinalizedAssertionMint(contextGraphId, name, adoptExistingMint, content);
-    }
     return this.runFinalizedAssertionPublication(contextGraphId, name, opts, {
       assertPlan() {},
       mint: (id, selection, options) => this.publishFromSharedMemory(id, selection, options),
@@ -5811,7 +5808,7 @@ export class PublishMethods extends DKGAgentBase {
 
   /** Reconciliation enters recording directly, under the caller's existing lifecycle lease. */
   async recordFinalizedAssertionMint(this: DKGAgent, contextGraphId: string, name: string,
-    receipt: NonNullable<PublishOptions['adoptExistingMint']>, opts?: Omit<FinalizedAssertionPublishOptions, 'adoptExistingMint'>,
+    receipt: MintAdoptionRequest, opts?: FinalizedAssertionPublishOptions,
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     return this.runFinalizedAssertionPublication(contextGraphId, name, opts, {
       assertPlan(plan) {
@@ -5828,7 +5825,7 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   async runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: string, name: string,
-    opts: Omit<FinalizedAssertionPublishOptions, 'adoptExistingMint'> | undefined,
+    opts: FinalizedAssertionPublishOptions | undefined,
     operations: FinalizedAssertionPublicationOperations,
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
@@ -6634,17 +6631,13 @@ export class PublishMethods extends DKGAgentBase {
    */
   async publishFromSharedMemory(this: DKGAgent, contextGraphId: string,
     selection: 'all' | { rootEntities: string[] }, options?: AgentSharedMemoryPublishOptions): Promise<PublishResult> {
-    if (options?.adoptExistingMint !== undefined) {
-      const { adoptExistingMint, ...content } = options;
-      return this.recordMintFromSharedMemory(contextGraphId, selection, adoptExistingMint, content);
-    }
     return this.runSharedMemoryPublication(contextGraphId, selection, options,
       context => this.publishPreparedSharedMemory(contextGraphId, selection, options, context));
   }
 
   async recordMintFromSharedMemory(this: DKGAgent, contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] }, request: NonNullable<PublishOptions['adoptExistingMint']>,
-    options?: Omit<AgentSharedMemoryPublishOptions, 'adoptExistingMint'>): Promise<PublishResult> {
+    selection: 'all' | { rootEntities: string[] }, request: MintAdoptionRequest,
+    options?: AgentSharedMemoryPublishOptions): Promise<PublishResult> {
     return this.runSharedMemoryPublication(contextGraphId, selection, options, async ({ ctx, ctxGraphIdStr, onChainId }) => {
       const curated = await resolvePublishTargetCuration(this, this.log, ctx,
         { contextGraphId, explicitPolicyTargetContextGraphId: ctxGraphIdStr, logPrefix: 'mint-recording' });
@@ -6659,7 +6652,7 @@ export class PublishMethods extends DKGAgentBase {
 
   /** Both receipt sources converge on the same retirement, gossip and metrics completion. */
   async runSharedMemoryPublication(this: DKGAgent, contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] }, options: Omit<AgentSharedMemoryPublishOptions, 'adoptExistingMint'> | undefined,
+    selection: 'all' | { rootEntities: string[] }, options: AgentSharedMemoryPublishOptions | undefined,
     acquire: (context: SharedMemoryPublicationContext) => Promise<PublishResult>): Promise<PublishResult> {
    return withSpan('agent.publish_from_swm', async (span) => {
     const chainId = typeof this.chain?.chainId === 'string' && this.chain.chainId !== 'none' ? this.chain.chainId : undefined;
@@ -6793,7 +6786,7 @@ export class PublishMethods extends DKGAgentBase {
 
   /** Live publication alone prepares signing, ACK and encryption capabilities. */
   async publishPreparedSharedMemory(this: DKGAgent, contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] }, options: Omit<AgentSharedMemoryPublishOptions, 'adoptExistingMint'> | undefined,
+    selection: 'all' | { rootEntities: string[] }, options: AgentSharedMemoryPublishOptions | undefined,
     { ctx, ctxGraphIdStr, onChainId }: SharedMemoryPublicationContext): Promise<PublishResult> {
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
 

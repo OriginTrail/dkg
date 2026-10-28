@@ -65,11 +65,11 @@ describe('publish outcome metrics — recorded by the real publish entry points'
 
   it('publishFromSharedMemory throwing records publishTotal{outcome:error, source:swm}', async () => {
     installMeter();
-    // Bare stub → the early `this.getContextGraphOnChainId(...)` call throws
+    // Real publication methods; the early `this.getContextGraphOnChainId(...)` call throws
     // inside the try, exercising the swm catch → recordPublishOutcome('error','swm').
     await expect(
       PublishMethods.prototype.publishFromSharedMemory.call(
-        { log: { info: vi.fn(), warn: vi.fn() } } as never, 'cg', 'all',
+        Object.assign(Object.create(PublishMethods.prototype), { log: { info: vi.fn(), warn: vi.fn() } }), 'cg', 'all',
         { contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION },
       ),
     ).rejects.toBeInstanceOf(TypeError);

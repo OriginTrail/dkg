@@ -275,6 +275,20 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(publishedAt.type === 'bindings' && publishedAt.bindings).toHaveLength(1);
   });
 
+  it('retries a consumed-share marker deletion before reporting the mint complete', async () => {
+    const { agent, sealed, lostMint, createKnowledgeAssets, updateKnowledgeCollection } = await strandedAsset(new MockChainAdapter());
+    const clear = vi.spyOn(agent.publisher, 'clearSwmShareComplete').mockRejectedValueOnce(new Error('one-shot marker deletion failure'));
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(true);
+    expect(await readNamedPublishFinalization(agent.store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
+    const record = vi.spyOn(agent, 'recordFinalizedAssertionMint');
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted', txHash: lostMint.txHash });
+    expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(false);
+    expect(clear).toHaveBeenCalledTimes(2); expect(record).not.toHaveBeenCalled();
+    expect(createKnowledgeAssets).not.toHaveBeenCalled(); expect(updateKnowledgeCollection).not.toHaveBeenCalled();
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+  });
+
   it.each([
     ['the VM pointer', VM_CURRENT_ASSERTION_PRED],
     ['the published UAL', PUBLISHED_UAL_PRED],
@@ -523,7 +537,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     // A new complete share of the published asset, as an edit cycle leaves it.
     await store.insert([{ subject: LIFECYCLE, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: META_GRAPH }]);
 
-    await expect(agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, adoptExistingMint: {} }))
+    await expect(agent.recordFinalizedAssertionMint(CONTEXT_GRAPH, NAME, {}, { agentAddress: AUTHOR }))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE });
     expect(updateKnowledgeCollection).not.toHaveBeenCalled();
   });

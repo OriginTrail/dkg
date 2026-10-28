@@ -85,8 +85,6 @@ export type AgentSharedMemoryPublishOptions = {
       /** Author scheme version override (defaults to AUTHOR_SCHEME_VERSION_V1). */
       schemeVersion?: number;
       publisherOverride?: DKGPublisher;
-      /** Record the seal's existing mint instead of minting (see `PublishOptions.adoptExistingMint`). */
-      adoptExistingMint?: PublishOptions['adoptExistingMint'];
     };
 export interface SharedMemoryPublicationContext {
   ctx: OperationContext; ctxGraphIdStr: string | undefined; onChainId: string | undefined;
@@ -109,7 +107,6 @@ export type FinalizedAssertionPublishOptions = {
       pricingPolicy?: PublishOptions['pricingPolicy'];
       clearSharedMemoryAfter?: boolean;
       publisherOverride?: DKGPublisher;
-      adoptExistingMint?: PublishOptions['adoptExistingMint'];
       /** Internal reconciliation transaction; validated by the publisher at cleanup. */
       heldLifecycle?: AssertionLifecycleWriteLease;
     };

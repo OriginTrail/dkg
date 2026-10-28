@@ -149,9 +149,9 @@ async function strandedPublishFixture() {
   const acks = vi.fn(mockChainStubACKProvider());
   const encrypt = vi.fn(async (plaintext: Uint8Array) => plaintext);
 
-  const publish = (adoptExistingMint?: { txHash?: string }) => publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', {
+  const publishOptions = {
     onChainContextGraphId: CONTEXT_GRAPH,
-    sharedMemoryScope: { kind: 'named-lifecycle', identity: { agentAddress: wallet.address, kaNumber } },
+    sharedMemoryScope: { kind: 'named-lifecycle' as const, identity: { agentAddress: wallet.address, kaNumber } },
     contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: ual,
     assertionVersion: 1,
@@ -162,8 +162,10 @@ async function strandedPublishFixture() {
     precomputedAttestation: seal,
     encryptInlinePayload: encrypt,
     v10ACKProvider: acks,
-    ...(adoptExistingMint ? { adoptExistingMint } : {}),
-  });
+  };
+  const publish = (request?: { txHash?: string }) => request === undefined
+    ? publisher.publishFromSharedMemory(CONTEXT_GRAPH, 'all', publishOptions)
+    : publisher.recordExistingMintFromSharedMemory(CONTEXT_GRAPH, 'all', request, publishOptions);
 
   /** The node gave up on the first attempt's receipt, which then mined. */
   const strand = async () => {

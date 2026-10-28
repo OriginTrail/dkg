@@ -1,4 +1,3 @@
-import type { MintAdoptionRequest } from './adopt-existing-mint.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { OnChainPublishResult, PreBroadcastSignal } from '@origintrail-official/dkg-chain';
 
@@ -470,13 +469,6 @@ export interface InitialPublishOptions extends BasePublicationOptions {
    * commitments, or the on-chain byte-size attestation.
    */
   pricingPolicy?: PublicationPricingPolicy;
-  /**
-   * Record a sealed publish whose transaction mined after the node stopped
-   * waiting: verify the reserved id's creation receipt against the seal and
-   * adopt it. Sends no transaction, ACK request or member ciphertext.
-   * `txHash` is an optional hint for the mint transaction.
-   */
-  adoptExistingMint?: MintAdoptionRequest;
 }
 
 /** Options for updating an existing asset. */

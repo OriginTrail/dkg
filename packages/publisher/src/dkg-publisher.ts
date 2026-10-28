@@ -1,3 +1,4 @@
+import type { MintAdoptionRequest } from './adopt-existing-mint.js';
 import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication, type PreparedPublicationInput } from './prepared-publication.js';
 import { recordTentativePublication } from './record-tentative-publication.js';
 import { acquirePreparedPublication, publicationAcquisitionFailure, type PublicationAcquisition } from './prepared-publication-acquisition.js';
@@ -947,7 +948,7 @@ function isNoDataInSwmFailure(err: unknown): boolean {
   return false;
 }
 
-export type SharedMemoryPublishOptions = PublishLifecycleHooks & Pick<PublishOptions, 'adoptExistingMint'> & {
+export type SharedMemoryPublishOptions = PublishLifecycleHooks & {
       operationCtx?: OperationContext;
       clearSharedMemoryAfter?: boolean;
       /** Triggers remap: moves data from the default data graph to `/context/{id}`. */
@@ -2054,10 +2055,6 @@ export class DKGPublisher implements Publisher {
    */
   async publishFromSharedMemory(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
     options?: SharedMemoryPublishOptions): Promise<PublishResult> {
-    if (options?.adoptExistingMint !== undefined) {
-      const { adoptExistingMint, ...content } = options;
-      return this.recordExistingMintFromSharedMemory(contextGraphId, selection, adoptExistingMint, content);
-    }
     const content = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
     let result: PublishResult;
     try { result = await this.publish(content.options); }
@@ -2071,14 +2068,14 @@ export class DKGPublisher implements Publisher {
   }
 
   async recordExistingMintFromSharedMemory(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
-    request: NonNullable<PublishOptions['adoptExistingMint']>,
-    options?: Omit<SharedMemoryPublishOptions, 'adoptExistingMint'>): Promise<PublishResult> {
+    request: MintAdoptionRequest,
+    options?: SharedMemoryPublishOptions): Promise<PublishResult> {
     const content = await this.prepareSharedMemoryPublication(contextGraphId, selection, options);
     return content.finalize(await this.recordExistingMint(content.options, request));
   }
 
   private async prepareSharedMemoryPublication(contextGraphId: string, selection: 'all' | { rootEntities: string[] },
-    options?: Omit<SharedMemoryPublishOptions, 'adoptExistingMint'>) {
+    options?: SharedMemoryPublishOptions) {
     const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
     const sharedMemoryScope: SharedMemoryGraphScope = options?.sharedMemoryScope
       ?? { kind: 'complete-family' };
@@ -2537,10 +2534,6 @@ export class DKGPublisher implements Publisher {
   }
 
   async publish(options: PublishOptions): Promise<PublishResult> {
-    if (options.adoptExistingMint !== undefined) {
-      const { adoptExistingMint, ...content } = options;
-      return this.recordExistingMint(content, adoptExistingMint);
-    }
     const content = await this.preparePublicationContent(options);
     const prepared = await preparePublication(content.preparation, content.ports);
     if (prepared.kind === 'local') return content.record(prepared);
@@ -2554,8 +2547,8 @@ export class DKGPublisher implements Publisher {
   }
 
   /** Record verified mint evidence through the same prepared-content recorder as a live publish. */
-  async recordExistingMint(options: Omit<PublishOptions, 'adoptExistingMint'>,
-    request: NonNullable<PublishOptions['adoptExistingMint']>): Promise<PublishResult> {
+  async recordExistingMint(options: PublishOptions,
+    request: MintAdoptionRequest): Promise<PublishResult> {
     const content = await this.preparePublicationContent(options);
     const { target, payload } = content.preparation;
     const { publisherContextGraphId, sealedAdoption, graphPublish, v10ChainId } = target;
@@ -2580,7 +2573,7 @@ export class DKGPublisher implements Publisher {
   }
 
   /** Content validation and the confirmed recorder are independent of receipt acquisition. */
-  private async preparePublicationContent(options: Omit<PublishOptions, 'adoptExistingMint'>) {
+  private async preparePublicationContent(options: PublishOptions) {
 
     const explicitPublishEpochs = resolvePublishEpochsOverride(options.publishEpochs);
     const pricingPolicyResult = parsePublicationPricingPolicy(options.pricingPolicy);
