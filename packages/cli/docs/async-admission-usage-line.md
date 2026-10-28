@@ -115,7 +115,9 @@ The classes and reasons:
 | Publisher (`lift_retention`) | `finalized` | `unreadable`, `unknown_state`, `index_mismatch`, `not_terminal`, `bound_obligation`, `too_recent`, `future_dated`, `older_sibling_kept`, `older_sibling_pending`, `siblings_unreadable`, `binding_would_change`, `vanished` |
 
 A growing `older_sibling_kept` count means older failed publish jobs of the same
-Knowledge Asset hold newer finalized ones back; clear the failed ones.
+Knowledge Asset hold newer finalized ones back; clear them with
+`dkg publisher clear failed`. It keeps held jobs, which may have sent a
+transaction (see Held jobs in `docs/use-dkg/async-publisher-wallets.md`).
 
 Each sweep also writes its own lines, apart from the usage line:
 
