@@ -155,7 +155,7 @@ export interface Rfc64CatalogReplayRecoveryResultV1 {
 interface ReplayExecutionOutcomeV1 {
   requested: number;
   peerFailures: number;
-  completion: { kind: 'continue'; reason: 'budget-exhausted' | 'pending'; observationFailed: boolean }
+  completion: { kind: 'continue'; reason: 'budget-exhausted'; observationFailed: boolean }
     | { kind: 'settled'; observationFailed: boolean };
 }
 function publicReplayResult(outcome: ReplayExecutionOutcomeV1): Readonly<Rfc64CatalogReplayRecoveryResultV1> {
@@ -382,39 +382,35 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
           if (input.signal?.aborted) reject(input.signal.reason); else resolve(result);
         }, fail: (error: unknown) => { progress.waiters.delete(waiter); reject(error); } };
       progress.waiters.add(waiter);
-      // Handles graph replacement/cancellation as well as an empty final run.
-      void completion.then(waiter.complete, waiter.fail);
+      // Successful settlement belongs to the exact executed generation. A
+      // bounded earlier run may leave this waiter with its continuation owner.
+      void completion.catch(waiter.fail);
     });
   }
 
-  /** One graph owner advances admitted generations through finite peer budgets. */
+  /** One completion owns at most one finite transport budget. */
   async #runOwned(input: Rfc64CatalogReplayRecoveryCommandV1, progress: ReplayProgressV1<Target>, token: number): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
-    let requested = 0, failed = 0;
+    const evidence = new ReplayRunEvidenceV1<Target>((left, right) => this.#mergePromises(left, right), input.kind === 'full-connected-peers');
+    progress.peerWorklist.beginRun(); progress.run = evidence;
+    let outcome: Readonly<ReplayExecutionOutcomeV1> | undefined;
     try {
-      let first = true;
-      let continuation: boolean;
-      do {
-        input.signal?.throwIfAborted();
-        progress.peerWorklist.beginRun();
-        progress.run = new ReplayRunEvidenceV1((left, right) => this.#mergePromises(left, right), first && input.kind === 'full-connected-peers');
-        first = false;
-        const outcome = await this.#execute(input, progress, token);
-        const result = publicReplayResult(outcome);
-        requested += result.requested;
-        failed += result.failed;
-        continuation = outcome.completion.kind === 'continue';
-        for (const waiter of progress.waiters) {
-          const pending = progress.peerWorklist.generation(waiter.demand.peerId);
-          if (pending === null || pending.generation < waiter.demand.generation) waiter.complete(result);
-        }
-        // No command re-admission: retained providers and connection generations
-        // were seeded once. Only already admitted pending work starts a new run.
-      } while (this.#byContextGraph.get(input.contextGraphId) === progress && continuation);
-      return Object.freeze({ requested, failed });
+      input.signal?.throwIfAborted();
+      outcome = await this.#execute(input, progress);
+      const result = publicReplayResult(outcome);
+      for (const waiter of progress.waiters) {
+        const pending = progress.peerWorklist.generation(waiter.demand.peerId);
+        if (this.#byContextGraph.get(input.contextGraphId) !== progress
+          || pending === null || pending.generation !== waiter.demand.generation) waiter.complete(result);
+      }
+      return result;
+    } catch (error) {
+      for (const waiter of progress.waiters) waiter.fail(error);
+      throw error;
     } finally {
       if (this.#byContextGraph.get(input.contextGraphId) === progress && progress.token === token) {
+        this.#settleRun(progress, evidence, outcome?.completion.kind === 'continue');
+        progress.peerWorklist.settleOverflow();
         if (input.signal?.aborted && progress.fullPass) {
-          // Retain advertised heads independently of abandoned execution coverage.
           if (!this.#settlePromisedTargets(progress, progress.fullPass.targets, false)) progress.requiresFullReplay = true;
           progress.fullPass.retireUnowned(demand => {
             const owned = progress.peerWorklist.generation(demand.peerId);
@@ -426,6 +422,15 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         progress.run = new ReplayRunEvidenceV1((left, right) => this.#mergePromises(left, right));
         progress.completion = null;
         this.#bumpRevision(progress);
+        if (outcome?.completion.kind === 'continue') {
+          // Transfer already-admitted generations without reseeding providers or
+          // extending this caller's completion. Exact demand waiters survive.
+          progress.token += 1; progress.active = true; this.#bumpRevision(progress);
+          const next = this.#runOwned({ ...input, kind: 'pending-recovery' }, progress, progress.token);
+          progress.completion = next;
+          // The owner reports errors to retained waiters even if no new caller joins.
+          void next.catch(() => undefined);
+        }
       }
     }
   }
@@ -433,17 +438,22 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   async #execute(
     input: Rfc64CatalogReplayRecoveryCommandV1,
     progress: ReplayProgressV1<Target>,
-    token: number,
   ): Promise<Readonly<ReplayExecutionOutcomeV1>> {
     const evidence = progress.run;
     const outcome = (): ReplayExecutionOutcomeV1 => {
       const observation = evidence.observation;
-      const budgetContinuation = progress.peerWorklist.hasPending
-        && observation.kind === 'unobserved' && observation.reason === 'budget-exhausted';
+      // Only an explicitly awaited connection generation owns continuation.
+      // Legacy full-pass churn must retain the finite 64-request boundary;
+      // pending entries alone can be replenished forever by a reconnect hook.
+      const budgetContinuation = observation.kind === 'unobserved' && observation.reason === 'budget-exhausted'
+        && [...progress.waiters].some(waiter => {
+          const pending = progress.peerWorklist.generation(waiter.demand.peerId);
+          return pending?.staged === false && pending.generation === waiter.demand.generation;
+        });
       const observationFailed = evidence.observationFailed && !budgetContinuation;
       return { requested: evidence.requested, peerFailures: evidence.peerFailures,
-        completion: progress.peerWorklist.hasPending
-          ? { kind: 'continue', reason: budgetContinuation ? 'budget-exhausted' : 'pending', observationFailed }
+        completion: budgetContinuation
+          ? { kind: 'continue', reason: 'budget-exhausted', observationFailed }
           : { kind: 'settled', observationFailed } };
     };
     try {
@@ -551,20 +561,14 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (input.signal?.aborted) { evidence.unobserved('cancelled'); throw input.signal.reason ?? error; }
       evidence.unobserved('parity-error');
       return Object.freeze(outcome());
-    } finally {
-      const current = this.#byContextGraph.get(input.contextGraphId);
-      if (current === progress && current.token === token) {
-        this.#settleRun(current, evidence);
-
-        current.peerWorklist.settleOverflow();
-        this.#bumpRevision(current);
-      }
     }
   }
 
   /** Settle status and promises together from the run's single observation. */
-  #settleRun(current: ReplayProgressV1<Target>, evidence: ReplayRunEvidenceV1<Target>): void {
-    let requiresFullReplay = evidence.requiresFullReplay;
+  #settleRun(current: ReplayProgressV1<Target>, evidence: ReplayRunEvidenceV1<Target>, budgetContinues = false): void {
+    // A transport chunk is not evidence of missing rows when an admitted
+    // continuation owns the remaining generations. Other failure facts survive.
+    let requiresFullReplay = budgetContinues ? evidence.unattributedProviderFailure : evidence.requiresFullReplay;
     const pass = current.fullPass;
     const wasFullPass = pass?.covered ?? false;
     const observation = evidence.observation;

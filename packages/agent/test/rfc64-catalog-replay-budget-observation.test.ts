@@ -39,6 +39,61 @@ describe('replay budgets and unobserved evidence', () => {
     } finally { held.resolve(); lease!.release(); secondLease.release(); }
   });
 
+  it.each(['same', 'distinct'] as const)('bounds %s-peer churn without a connection waiter', async mode => {
+    let calls = 0;
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => {
+        calls += 1;
+        // Keep a regressed unbounded runner from consuming the test worker heap.
+        if (calls > 64) runtime.clear('public-cg');
+        else runtime.markPeerPending('public-cg', 'p', mode === 'same' ? 'peer' : `peer-${calls}`);
+        return { status: 'completed', targets: [] };
+      },
+      whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target.id,
+      parityFailed: async () => false,
+    });
+    await expect(runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p',
+      kind: 'full-connected-peers', connectedPeerIds: ['peer'] })).resolves.toEqual({ requested: 64, failed: 1 });
+    expect(calls).toBe(64);
+    expect(runtime.status('public-cg', 'p')).toMatchObject({ failed: true, active: false, unverified: true });
+  });
+
+  it.each([false, true])('keeps scoped continuation status honest (prior failure=%s)', async priorFailure => {
+    const held = Promise.withResolvers<void>(), started = Promise.withResolvers<void>();
+    let hold = false, parityFailed = priorFailure;
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => { if (hold) { started.resolve(); await held.promise; } return { status: 'completed', targets: [{ id: 'applied' }] }; },
+      whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target.id,
+      parityFailed: async () => parityFailed,
+    });
+    await runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['initial'] });
+    parityFailed = false; hold = true;
+    const leases = Array.from({ length: 64 }, (_, i) => runtime.markPeerPending('public-cg', 'p', `peer-${i}`)!);
+    const first = runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p', kind: 'pending-recovery' });
+    await started.promise;
+    const extra = runtime.markPeerPending('public-cg', 'p', 'extra')!;
+    const next = runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p', kind: 'connection-demand', demand: extra });
+    held.resolve();
+    await expect(first).resolves.toEqual({ requested: 64, failed: 0 });
+    await expect(next).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('public-cg', 'p')).toMatchObject({ active: false, failed: priorFailure, unverified: false });
+    for (const lease of [...leases, extra]) lease.release();
+  });
+
+  it('settles the original full caller despite sustained joined full requests', async () => {
+    let calls = 0;
+    const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+      requestPeer: async () => { calls += 1; return { status: 'completed', targets: [] }; },
+      whenReceiverIdleForContextGraph: async () => {
+        if (calls > 64) runtime.clear('public-cg');
+        else void runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['peer'] });
+      }, targetIdentity: target => target.id, parityFailed: async () => false,
+    });
+    await expect(runtime.request({ contextGraphId: 'public-cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['peer'] }))
+      .resolves.toEqual({ requested: 64, failed: 1 });
+    expect(calls).toBe(64);
+  });
+
   it.each(['timeout', 'cancel'] as const)('retains overflow after an unobserved %s until a full corroborated replay', async mode => {
     const full = Array.from({ length: RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 }, (_, i) => ({ id: `head-${i}` }));
     let targets = full, unobserved = false;

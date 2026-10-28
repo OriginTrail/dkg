@@ -120,6 +120,7 @@ export class ReplayRunEvidenceV1<Target> {
   }
   get peerFailures(): number { return this.#outcomes.filter(kind => kind === 'provider-failed' || kind === 'local-unavailable').length; }
   get failed(): number { return Number(this.observationFailed) + this.peerFailures; }
+  get unattributedProviderFailure(): boolean { return this.#unattributedProviderFailure; }
   get requiresFullReplay(): boolean { return this.observationFailed || this.#unattributedProviderFailure; }
   constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[], readonly fullRequest = false) {}
   record(demand: Rfc64CatalogReplayPeerDemandV1, outcome: ReplayPeerOutcomeV1<Target>): void {
