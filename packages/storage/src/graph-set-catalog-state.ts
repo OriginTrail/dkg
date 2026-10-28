@@ -1,4 +1,4 @@
-import { withGraphInventoryMaterialization } from './graph-inventory-materialization.js';
+import type { MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import { measureGraphCatalogBytes, assertMeasuredGraphCatalogWithinResponseLimit } from './graph-catalog-response-limit.js';
 import {
   createSortedUniqueStringCatalog,
@@ -93,6 +93,11 @@ export class GraphSetCatalogState {
       this.measuredBytes ??= measureGraphCatalogBytes(this.ordered);
       assertMeasuredGraphCatalogWithinResponseLimit(this.measuredBytes, maxBytes);
     }
-    return withGraphInventoryMaterialization(this.ordered, this.sourceMaterializedBytes ?? measureGraphCatalogBytes(this.ordered));
+    return this.ordered;
+  }
+
+  measuredFor(members: ReadonlySet<string>, maxBytes?: number): MeasuredGraphInventory<SortedGraphCatalog> | null {
+    const graphs = this.sortedFor(members, maxBytes);
+    return graphs && { graphs, materializedBytes: this.sourceMaterializedBytes ?? measureGraphCatalogBytes(graphs) };
   }
 }

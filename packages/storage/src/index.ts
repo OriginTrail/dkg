@@ -379,4 +379,4 @@ export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-
 
 export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader, type StoreRecoveryState } from './store-recovery-generation.js';
 
-export { graphInventoryMaterializationBytes, readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
+export { readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';

@@ -66,9 +66,9 @@ it.each([false, true])('shares admission and execution bytes in a real unscoped 
     await markCoreTrustedGraph(agent.store, 'hidden-budget');
   }
   const query = 'SELECT ?value WHERE { GRAPH ?g { ?s <urn:budget-value> ?value } }';
-  const observed: unknown[] = [];
-  const consume = QueryMaterializationBudget.prototype.consume;
-  const spy = vi.spyOn(QueryMaterializationBudget.prototype, 'consume').mockImplementation(function(value) {
+  const observed: number[] = [];
+  const consume = QueryMaterializationBudget.prototype.consumeBytes;
+  const spy = vi.spyOn(QueryMaterializationBudget.prototype, 'consumeBytes').mockImplementation(function(value) {
     observed.push(value); return consume.call(this, value);
   });
   try {
@@ -77,7 +77,7 @@ it.each([false, true])('shares admission and execution bytes in a real unscoped 
     // Real admission charges its ontology and graph inventory; the engine
     // charges the retained content result against that very same budget.
     expect(observed).toHaveLength(3);
-    const sizes = observed.map(value => Buffer.byteLength(JSON.stringify(value)));
+    const sizes = observed;
     const admissionBytes = sizes[0] + sizes[1];
     const executionBytes = sizes[2];
     const total = admissionBytes + executionBytes;

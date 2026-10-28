@@ -1,4 +1,4 @@
-import { filterGraphInventory, graphInventoryMaterializationBytes, withGraphInventoryMaterialization } from './graph-inventory-materialization.js';
+import { filterGraphInventory, readGraphInventory, readGraphInventoryByPrefix, type MeasuredGraphInventory } from './graph-inventory-materialization.js';
 import { graphCatalogFlightKey } from './graph-catalog-flight-key.js';
 import { isStoreResponseTooLargeError } from './http-response-limit.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
@@ -482,52 +482,35 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   }
 
   async listGraphs(options?: QueryOptions): Promise<string[]> {
-    if (!this.enabled) {
-      const graphs = await this.inner.listGraphs(options);
-      assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
-      return filterGraphInventory(graphs, graph => !isAtomicGraphReplaceStagingGraph(graph));
-    }
-    const graphs = await this.loadCurrentSortedGraphs(options);
-    return withGraphInventoryMaterialization([...graphs], graphInventoryMaterializationBytes(graphs));
+    return [...(await this.readGraphInventory(undefined, options)).graphs];
   }
 
   async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
-    if (!this.enabled) {
-      const graphs = await this.inner.listGraphs(options);
-      assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
-      return createSortedUniqueStringCatalog(graphs.filter(
-        (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
-      ));
-    }
-    const graphs = await this.loadCurrentSortedGraphs(options);
-    return graphs;
+    if (this.enabled) return (await this.loadCurrentSortedGraphs(options)).graphs;
+    return createSortedUniqueStringCatalog((await this.readGraphInventory(undefined, options)).graphs.filter(Boolean));
   }
 
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
+    return [...(await this.readGraphInventory(prefix, options)).graphs];
+  }
+
+  async readGraphInventory(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory> {
     if (!this.enabled) {
-      if (this.inner.listGraphsByPrefix) {
-        return filterGraphInventory(await this.inner.listGraphsByPrefix(prefix, options), graph => !isAtomicGraphReplaceStagingGraph(graph));
-      }
-      const graphs = await this.inner.listGraphs(options);
-      assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
-      return filterGraphInventory(graphs, graph => graph.startsWith(prefix) && !isAtomicGraphReplaceStagingGraph(graph));
+      const inventory = prefix === undefined ? await readGraphInventory(this.inner, options) : await readGraphInventoryByPrefix(this.inner, prefix, options);
+      assertGraphCatalogWithinResponseLimit(inventory.graphs, options?.maxResponseBytes);
+      return filterGraphInventory(inventory, graph => !isAtomicGraphReplaceStagingGraph(graph));
     }
-    const graphs = await this.loadCurrentSortedGraphs(options);
-    // startsWith() is defined over UTF-16 code units, while this catalog is
-    // ordered by Unicode code point. A prefix ending in a high surrogate can
-    // split an astral code point, so its matches are not guaranteed to be one
-    // contiguous code-point-sorted range. Preserve exact JS prefix semantics
-    // with the rare O(n) fallback; all scalar-aligned prefixes keep O(log n+k).
-    if (endsWithHighSurrogate(prefix)) {
-      return filterGraphInventory(graphs, graph => graph.startsWith(prefix));
-    }
+    const inventory = await this.loadCurrentSortedGraphs(options);
+    if (prefix === undefined) return inventory;
+    // A split surrogate need not occupy a contiguous code-point-sorted range.
+    if (endsWithHighSurrogate(prefix)) return filterGraphInventory(inventory, graph => graph.startsWith(prefix));
     const matches: string[] = [];
-    for (let index = codePointLowerBound(graphs, prefix); index < graphs.length; index += 1) {
-      const graph = graphs[index]!;
+    for (let index = codePointLowerBound(inventory.graphs, prefix); index < inventory.graphs.length; index += 1) {
+      const graph = inventory.graphs[index]!;
       if (!graph.startsWith(prefix)) break;
       matches.push(graph);
     }
-    return withGraphInventoryMaterialization(matches, graphInventoryMaterializationBytes(graphs));
+    return { graphs: matches, materializedBytes: inventory.materializedBytes };
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -631,10 +614,10 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
         ? { ...options, priority: 'background', source: 'graph-set-index.rebuild' }
         : options;
       const scan = this.refreshCoordinator.beginScan(flight);
-      const discovered = await this.inner.listGraphs(scanOptions);
-      assertGraphCatalogWithinResponseLimit(discovered, scanOptions?.maxResponseBytes);
+      const discovered = await readGraphInventory(this.inner, scanOptions);
+      assertGraphCatalogWithinResponseLimit(discovered.graphs, scanOptions?.maxResponseBytes);
       const next = new Set(
-        discovered.filter(
+        discovered.graphs.filter(
           (graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph),
         ),
       );
@@ -658,7 +641,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
           graphCount: next.size,
         });
       }
-      this.replaceGraphSet(next, sourceForScan, graphInventoryMaterializationBytes(discovered));
+      this.replaceGraphSet(next, sourceForScan, discovered.materializedBytes);
       return this.catalog.current!;
     }
   }
@@ -770,14 +753,14 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     }
   }
 
-  private async loadCurrentSortedGraphs(options?: QueryOptions): Promise<SortedGraphCatalog> {
+  private async loadCurrentSortedGraphs(options?: QueryOptions): Promise<MeasuredGraphInventory<SortedGraphCatalog>> {
     for (;;) {
       const members = await this.ensureGraphSet(options);
       // No async boundary exists between the identity check and projection.
       // If another continuation invalidated/replaced the catalog after
       // ensureGraphSet() resolved, retry instead of manufacturing an empty or
       // stale enumeration from unrelated mutable state.
-      const sorted = this.catalog.sortedFor(members, options?.maxResponseBytes);
+      const sorted = this.catalog.measuredFor(members, options?.maxResponseBytes);
       if (sorted) return sorted;
       throwIfAborted(options?.signal);
     }

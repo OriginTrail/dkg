@@ -1,4 +1,4 @@
-import { graphInventoryMaterializationBytes, readGraphInventoryByPrefix } from '@origintrail-official/dkg-storage';
+import { readGraphInventoryByPrefix } from '@origintrail-official/dkg-storage';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import type { TripleStore, QueryResult as StoreQueryResult, QueryOptions as StoreQueryOptions } from '@origintrail-official/dkg-storage';
 import type { QueryOptions } from './query-engine.js';
@@ -83,8 +83,8 @@ export function createStoreReadLane(
     query: (sparql) => measured(() => store.query(sparql, options)),
     listGraphsByPrefix: async prefix => {
       const graphs = await readGraphInventoryByPrefix(store, prefix, options);
-      meter?.consumeBytes(graphInventoryMaterializationBytes(graphs));
-      return graphs;
+      meter?.consumeBytes(graphs.materializedBytes);
+      return [...graphs.graphs];
     },
   };
 }

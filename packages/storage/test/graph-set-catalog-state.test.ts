@@ -1,3 +1,4 @@
+import { filterGraphInventory, measureGraphInventory } from '../src/graph-inventory-materialization.js';
 import { measureGraphCatalogBytes } from '../src/graph-catalog-response-limit.js';
 import { createSortedUniqueStringCatalog } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
@@ -120,4 +121,21 @@ it('measures each immutable catalog once across caller ceilings and invalidates 
   state.replace(new Set(['urn:c']));
   expect(state.sortedFor(state.current!, bytes)).toEqual(['urn:c']);
   expect(measure).toHaveBeenCalledTimes(3);
+});
+
+
+it('keeps raw inventory cost explicit through filtering, copies, sorting, and cache replay', () => {
+  const raw = measureGraphInventory(['urn:z', 'urn:hidden:' + 'x'.repeat(1000), 'urn:a']);
+  const visible = filterGraphInventory(raw, graph => !graph.startsWith('urn:hidden:'));
+  const copied = { ...visible, graphs: visible.graphs.slice().sort() };
+  expect(copied.graphs).toEqual(['urn:a', 'urn:z']);
+  expect(copied.materializedBytes).toBe(raw.materializedBytes);
+  expect(copied.materializedBytes).toBeGreaterThan(measureGraphCatalogBytes(copied.graphs));
+  const cache = new GraphSetCatalogState();
+  cache.replace(new Set(copied.graphs), copied.materializedBytes);
+  for (let request = 0; request < 2; request++) {
+    const replay = cache.measuredFor(cache.current!)!;
+    expect([...replay.graphs]).toEqual(copied.graphs);
+    expect(replay.materializedBytes).toBe(raw.materializedBytes);
+  }
 });

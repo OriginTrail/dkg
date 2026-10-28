@@ -1,9 +1,9 @@
+import type { MeasuredGraphInventory } from './graph-inventory-materialization.js';
 /**
  * TripleStore — pure SPARQL 1.1 interface for any RDF repository.
  * No vendor-specific methods. Any SPARQL-capable store (Oxigraph, Blazegraph,
  * Neptune, GraphDB, Jena, etc.) can implement this interface.
  */
-
 import { dirname, join } from 'node:path';
 import {
   DEFAULT_LARGE_LITERAL_THRESHOLD_BYTES,
@@ -326,6 +326,8 @@ export interface TripleStore {
    */
   readonly graphEnumerationVisibility?: (graph: string) => boolean;
   listGraphs(options?: QueryOptions): Promise<string[]>;
+  /** Internal measured enumeration; decorators retain source cost across projections. */
+  readGraphInventory?(prefix: string | undefined, options?: QueryOptions): Promise<MeasuredGraphInventory>;
   listGraphsByPrefix?(prefix: string, options?: QueryOptions): Promise<string[]>;
 
   deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number>;

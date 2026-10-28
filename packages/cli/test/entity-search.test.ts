@@ -41,11 +41,7 @@ async function fixture(count = 3, capacity = 100_000, http = false, blobs = fals
     if (!permitted || (allowedCaller !== undefined && options?.callerAgentAddress !== allowedCaller)) throw Object.assign(new Error('denied'), { code: 'QUERY_ACCESS_DENIED' });
     // Match the real agent's public normalization around the engine. This
     // fixture substitutes admission, not the public error contract.
-    return executePublicQuery(options.contextGraphId, { store: graph,
-      readMetadataRevision: () => 0, admit: async () => true,
-      execute: () => queryWithPublicSnapshotTrust(graph, engine, sparql, options, options.chainEvidenceMode),
-      denied: () => { throw new Error('unexpected unscoped query'); },
-    });
+    return executePublicQuery(() => queryWithPublicSnapshotTrust(graph, engine, sparql, options, options.chainEvidenceMode));
   }) };
   for (let i = 0; i < count; i++) await graph.insert([
     { graph: partition, subject: `urn:entity:${i}`, predicate: 'urn:description', object: JSON.stringify(i === 0 ? 'ocean science' : 'mountain climbing') },

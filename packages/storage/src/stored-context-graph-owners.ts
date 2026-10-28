@@ -1,4 +1,4 @@
-import { graphInventoryMaterializationBytes, readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
+import { readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphStorageOwnerCandidates } from '@origintrail-official/dkg-core';
 import type { QueryOptions, TripleStore } from './triple-store.js';
@@ -12,10 +12,10 @@ export async function listStoredContextGraphOwnerCandidates(store: TripleStore, 
     const graphUris = await readGraphInventoryByPrefix(store, CG_PREFIX, readOptions);
     // Charge the decoded inventory before filtering or deduplicating owners.
     // The fallback reads the whole inventory, so it charges that whole response.
-    materializationMeter?.consumeBytes(graphInventoryMaterializationBytes(graphUris));
+    materializationMeter?.consumeBytes(graphUris.materializedBytes);
     const candidates = new Set<string>();
     let visited = 0;
-    for (const graph of graphUris) {
+    for (const graph of graphUris.graphs) {
       // Preserve cancellation responsiveness without imposing a cardinality
       // limit: ordinary per-KA graph growth can legitimately be large.
       if (visited++ % 512 === 511) await new Promise<void>((resolve) => setImmediate(resolve));

@@ -2,21 +2,23 @@
 import { measureGraphCatalogBytes } from './graph-catalog-response-limit.js';
 import type { QueryOptions, TripleStore } from './triple-store.js';
 
-// Enumeration returns arrays for compatibility. This evidence belongs to their
-// exact identity, survives projections, and never retains discarded graph strings.
-const materializedBytes = new WeakMap<readonly string[], number>();
-export function graphInventoryMaterializationBytes(graphs: readonly string[]): number {
-  return materializedBytes.get(graphs) ?? measureGraphCatalogBytes(graphs);
+/** Cost of the decoded source inventory, retained across visibility projections. */
+export interface MeasuredGraphInventory<T extends readonly string[] = readonly string[]> {
+  readonly graphs: T;
+  readonly materializedBytes: number;
 }
-export function withGraphInventoryMaterialization<T extends readonly string[]>(graphs: T, bytes: number): T {
-  materializedBytes.set(graphs, Math.max(bytes, measureGraphCatalogBytes(graphs)));
-  return graphs;
+export function measureGraphInventory<T extends readonly string[]>(graphs: T): MeasuredGraphInventory<T> {
+  return { graphs, materializedBytes: measureGraphCatalogBytes(graphs) };
 }
-export function filterGraphInventory(graphs: readonly string[], visible: (graph: string) => boolean): string[] {
-  return withGraphInventoryMaterialization(graphs.filter(visible), graphInventoryMaterializationBytes(graphs));
+export function filterGraphInventory(inventory: MeasuredGraphInventory, visible: (graph: string) => boolean): MeasuredGraphInventory<string[]> {
+  return { graphs: inventory.graphs.filter(visible), materializedBytes: inventory.materializedBytes };
 }
-/** Outer-store enumeration retains visibility and the cost of a complete fallback. */
-export async function readGraphInventoryByPrefix(store: TripleStore, prefix: string, options?: QueryOptions): Promise<string[]> {
-  return store.listGraphsByPrefix ? store.listGraphsByPrefix(prefix, options)
-    : filterGraphInventory(await store.listGraphs(options), graph => graph.startsWith(prefix));
+/** Use the outer visibility boundary; measure a complete fallback before filtering. */
+export async function readGraphInventory(store: TripleStore, options?: QueryOptions): Promise<MeasuredGraphInventory> {
+  return store.readGraphInventory ? store.readGraphInventory(undefined, options) : measureGraphInventory(await store.listGraphs(options));
+}
+export async function readGraphInventoryByPrefix(store: TripleStore, prefix: string, options?: QueryOptions): Promise<MeasuredGraphInventory> {
+  if (store.readGraphInventory) return store.readGraphInventory(prefix, options);
+  if (store.listGraphsByPrefix) return measureGraphInventory(await store.listGraphsByPrefix(prefix, options));
+  return filterGraphInventory(await readGraphInventory(store, options), graph => graph.startsWith(prefix));
 }
