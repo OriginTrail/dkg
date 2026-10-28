@@ -364,7 +364,7 @@ import {
 
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
-import { contextGraphReader, handleContextGraphMemoryLayerRoute } from './context-graph-memory.js';
+import { contextGraphReader } from './context-graph-reader.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -1044,10 +1044,6 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       }
       throw err;
     }
-  }
-
-  if (req.method === 'POST' && path === '/api/context-graph/memory-layers') {
-    return handleContextGraphMemoryLayerRoute(ctx);
   }
 
   // GET /api/sub-graph/list?contextGraphId=...

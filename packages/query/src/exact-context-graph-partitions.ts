@@ -12,7 +12,7 @@ import {
 import { asGraphWriteRevisionSource, type QueryResult, type TripleStore } from '@origintrail-official/dkg-storage';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 import { createScopedContentGraphRoutePolicy, isScopedRoutePartition } from './scoped-content-graph-policy.js';
-import type { QueryOptions } from './query-engine.js';
+
 
 const METADATA_BATCH_SIZE = 8;
 
@@ -24,12 +24,10 @@ interface ExactPartitionReads {
 export async function authorizeExactContextGraphPartitions(
   store: TripleStore,
   reads: ExactPartitionReads,
-  contextGraphId: string,
+  policy: ReturnType<typeof createScopedContentGraphRoutePolicy>,
   candidates: readonly string[],
-  options: QueryOptions,
 ): Promise<{ allowed: string[]; assertUnchanged(): void }> {
-  if (options.includePrivate) throw new ScopedQueryViolationError('Exact partition reads only admit public graphs');
-  const policy = createScopedContentGraphRoutePolicy(contextGraphId, options);
+  const { contextGraphId } = policy;
   const root = policy.rootGraph;
   const subGraph = policy.subGraphName;
   const metadata = new Set(policy.metadataGraphs);

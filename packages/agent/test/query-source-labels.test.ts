@@ -35,6 +35,12 @@ describe('query caller-provided store labels', () => {
         { subject: 'urn:public', predicate: 'urn:p', object: 'urn:o', graph: root },
         { subject: 'urn:private', predicate: 'urn:p', object: 'urn:o', graph: `${root}/_private` },
       ]);
+      const callerDraft = `${root}/assertion/0xreader/staging`;
+      const foreignDraft = `${root}/assertion/0xforeign/staging`;
+      await store.insert([callerDraft, foreignDraft].flatMap(graph => [
+        { subject: `urn:registered:${graph}`, predicate: 'http://dkg.io/ontology/assertionGraph', object: graph, graph: `${root}/_meta` },
+        { subject: 'urn:draft', predicate: 'urn:p', object: graph === callerDraft ? '"caller"' : '"foreign-secret"', graph },
+      ]));
       const queryEngine = new DKGQueryEngine(store);
       const inventory = vi.spyOn(queryEngine, 'listContextGraphQueryPartitions');
       const authority = vi.fn(async () => ({ outcome }));
@@ -47,12 +53,13 @@ describe('query caller-provided store labels', () => {
         if (outcome === 'allowed') {
           expect(graphs).toContain(root);
           expect(graphs).not.toContain(`${root}/_private`);
+          expect(graphs).toContain(callerDraft); expect(graphs).not.toContain(foreignDraft);
         } else expect(graphs).toEqual([]);
       }
       expect(authority).toHaveBeenCalledExactlyOnceWith(contextGraphId, {
         ...options, authorityReadMode: 'finalized-index', allowSubscriptionFallback: false,
       });
-      if (outcome === 'allowed') expect(inventory).toHaveBeenCalledWith(contextGraphId, options);
+      if (outcome === 'allowed') expect(inventory).toHaveBeenCalledWith(contextGraphId, { ...options, draftAccess: { kind: 'owners', owners: ['0xreader'] } });
       else expect(inventory).not.toHaveBeenCalled();
     } finally { await store.close(); }
   });

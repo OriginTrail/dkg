@@ -44,6 +44,35 @@ routes.push(...routes.map(route => ({
 })));
 
 describe('scoped route policy equivalence', () => {
+  it('preserves caller drafts named staging and rejects registered foreign drafts through every route', async () => {
+    const store = new OxigraphStore();
+    try {
+      const mine = `${ROOT}/assertion/alice/staging`;
+      const foreign = `${ROOT}/assertion/bob/staging`;
+      const child = `${mine}/_named_graph/urn%3Astaging`;
+      const staged = [`${ROOT}/_shared_memory/staging/x`, `${ROOT}/_verifiable_memory/staging/x`];
+      await store.insert([
+        ...[mine, foreign].map(graph => ({ subject: `urn:registration:${graph}`, predicate: 'http://dkg.io/ontology/assertionGraph', object: graph, graph: `${ROOT}/_meta` })),
+        ...[mine, child, foreign, ...staged].map(graph => ({ subject: 'urn:row', predicate: 'urn:p', object: graph === foreign ? '"foreign-secret"' : '"caller"', graph })),
+      ]);
+      const engine = new DKGQueryEngine(store);
+      const options: QueryOptions = { contextGraphId: 'route-equivalence', includeSharedMemory: true,
+        includeContextGraphPartitions: true, draftAccess: { kind: 'owners', owners: ['alice'] } };
+      const inventory = await engine.listContextGraphQueryPartitions('route-equivalence', options);
+      expect(inventory).toEqual(expect.arrayContaining([mine, child]));
+      for (const denied of [foreign, ...staged]) expect(inventory).not.toContain(denied);
+      const ordinary = await engine.query('SELECT DISTINCT ?g WHERE { GRAPH ?g { ?s ?p ?o } }', options);
+      const graphs = ordinary.bindings.map(row => row.g);
+      expect(graphs).toEqual(expect.arrayContaining([mine, child]));
+      for (const denied of [foreign, ...staged]) expect(graphs).not.toContain(denied);
+      for (const graph of [mine, child, foreign, ...staged]) {
+        const read = engine.query(`SELECT ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`, { ...options, exactContextGraphPartitions: true });
+        if (graph === mine || graph === child) expect((await read).bindings).toEqual([{ o: '"caller"' }]);
+        else await expect(read).rejects.toThrow(/Scoped query violation/);
+      }
+    } finally { await store.close(); }
+  });
+
   it.each(routes)('ordinary, inventory and exact reads agree for $name', async ({ options, expected }) => {
     const store = new OxigraphStore();
     try {

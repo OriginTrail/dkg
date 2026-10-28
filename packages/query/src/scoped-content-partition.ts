@@ -94,7 +94,7 @@ export function isKnownChildContextGraphPartition(graph: string, knownChildConte
 }
 
 function isStagingGraphTail(tail: string): boolean {
-  return tail.includes('/staging/');
+  return /^(?:[^/]+\/)?_(?:shared|verifiable)_memory\/staging(?:\/|$)/.test(tail);
 }
 
 

@@ -3,12 +3,17 @@ import { contextGraphDataUri } from '@origintrail-official/dkg-core';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
 import { classifyScopedContentGraph, isExcludedContentGraphTail } from './scoped-content-partition.js';
 import { resolveDraftAccessPolicy, selectContentPartitions } from './content-partition-policy.js';
+import type { DraftAccessPolicy } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
 
 /** Exact admission consumes the same route and partition policy as ordinary reads. */
 export function createScopedContentGraphRoutePolicy(contextGraphId: string, options: QueryOptions = {}) {
   const route = staticScopedRouteGraphs(contextGraphId, options);
-  return { ...route, contextGraphId, options, rootGraph: contextGraphDataUri(contextGraphId),
+  return scopedPartitionPolicyFromRoute(contextGraphId, route, resolveDraftAccessPolicy(options), options.includeSharedMemoryMeta === true);
+}
+export function scopedPartitionPolicyFromRoute(contextGraphId: string, route: ReturnType<typeof staticScopedRouteGraphs>,
+  draftAccess: DraftAccessPolicy, includeSharedMemoryMeta: boolean) {
+  return { ...route, contextGraphId, draftAccess, includeSharedMemoryMeta, rootGraph: contextGraphDataUri(contextGraphId),
     metadataGraphs: route.metaAllowList };
 }
 export function isScopedRoutePartition(policy: ReturnType<typeof createScopedContentGraphRoutePolicy>,
@@ -18,6 +23,6 @@ export function isScopedRoutePartition(policy: ReturnType<typeof createScopedCon
   if (policy.staticContentGraphs.includes(graph)) return true;
   if (policy.isSwmOnlyRoute) return graph.startsWith(`${policy.sharedMemoryGraph}/`);
   const partition = classifyScopedContentGraph(graph, policy.contextGraphId, registeredSubGraphs, registeredAssertionGraphs, children);
-  return !!partition && selectContentPartitions([partition], resolveDraftAccessPolicy(policy.options),
-    policy.subGraphName, policy.options.includeSharedMemoryMeta).includes(graph);
+  return !!partition && selectContentPartitions([partition], policy.draftAccess,
+    policy.subGraphName, policy.includeSharedMemoryMeta).includes(graph);
 }
