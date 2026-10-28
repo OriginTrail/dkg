@@ -183,7 +183,7 @@ test('coverage is aggregated from required test lanes without a duplicate workfl
   const workflow = parseRepositoryYaml('.github/workflows/ci.yml');
   assert.equal(fs.existsSync(path.join(REPO_ROOT, '.github/workflows/node-coverage.yml')), false);
   assert.ok(workflow.on.merge_group !== undefined);
-  assert.ok(workflow.on.schedule.length > 0);
+  assert.ok(workflow.on.workflow_dispatch.inputs.profile.options.includes('nightly-equivalent'));
   const merge = workflow.jobs['coverage-results'];
   assert.equal(merge.if, 'always()');
   assert.equal(merge['continue-on-error'], undefined);
