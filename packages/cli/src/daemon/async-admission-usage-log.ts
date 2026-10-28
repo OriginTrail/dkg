@@ -44,7 +44,7 @@ import type { RetentionQueueName, RetentionUsageView } from './retention-timer.j
  * count), and `store/ack` is the storage-ACK queue-wait P95. P95s of single lines cannot be merged, so the line
  * also prints `store_wait_buckets`, the lane's wait counts as `<upper bound ms>x<count>` for each bucket that
  * holds a wait, ascending, joined by `|` (`infx<count>` past 10000 ms, `-` for none). Adding those counts over
- * the lines of a test cell or a monitoring window gives that window's P95 (docs/use-dkg/backpressure-observability.md).
+ * the lines of a test cell or a monitoring window gives that window's P95 (packages/cli/docs/async-admission-usage-line.md).
  *
  * `preflight_*` are cumulative counts of the write preflight's coalescing (`write-preflight-coalescing.ts`): probes
  * started, calls that joined one, calls served from the result cache, probes kept in it, and calls probed outright.
@@ -57,7 +57,8 @@ import type { RetentionQueueName, RetentionUsageView } from './retention-timer.j
  *     share_retention_pass_scanned=300 share_retention_pass_would_delete=cancelled:1,retired_no_effect:0,succeeded:240 share_retention_pass_deleted=cancelled:0,...
  * `_deleted`, `_kept` (judgments by reason), `_skipped` (ticks not run, by reason) and `_errors` (by phase, `tick` for a batch that threw) are cumulative since the
  * process started; `_kept`, `_skipped` and `_errors` list only what is not zero. The `_pass_` fields are a gauge of the latest COMPLETE pass, not cumulative (`-`
- * until one completed): in report mode `_pass_would_delete` is what the plan's delete gate reads. The `cancelled` class counts only jobs whose every attempt is proven
+ * until one completed): in report mode `_pass_would_delete` counts what the latest pass would remove (see "Before you switch to delete" in
+ * docs/use-dkg/async-queue-operations.md). The `cancelled` class counts only jobs whose every attempt is proven
  * unstarted at an integer format of 2 or more; packages/publisher/docs/async-queue-internals.md states that rule and its two limits.
  *
  * `http=` counts every admission request, 2xx included: `<route>/<phase>/<status>/<code>`, where
