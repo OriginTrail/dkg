@@ -43,7 +43,7 @@ Resend a request only when you know no job came of it: a `503` with `admissionOu
 Otherwise find the job first:
 
 - **Share:** a share is deduplicated only against a running job. Poll the job ID or `statusPath` (an `"indeterminate"` answer has one) and do not resend, whatever state it shows. If every reply was lost, [reconcile the share](#lost-every-reply-reconcile-a-share).
-- **Publish:** read the job (`GET /api/publisher/job?id=<jobId>`) or [find it by intent](#find-a-publish-job-by-intent). It carries your seal when its `request.knowledgeAssetVmPublish.sealMerkleRoot` and `assertionVersion` equal the `merkleRoot` and `assertionVersion` from your `wm/finalize`. If it is `finalized`, it is published: do not resend or re-base.
+- **Publish:** read the job (`GET /api/publisher/job?id=<jobId>`) or [find it by intent](#find-a-publish-job-by-intent). It carries your seal when its `request.knowledgeAssetVmPublish.sealMerkleRoot` and `assertionVersion` equal the `merkleRoot` and `assertionVersion` from your `wm/finalize`. If the job that carries your seal is `finalized`, it is published: do not resend or re-base.
 
 Never rename the Knowledge Asset or change the request to get past an unclear answer or a conflict; that can share or publish the same content twice. An empty status read or job list does not prove that a job never existed.
 
@@ -88,7 +88,7 @@ Every answer carries `mutationRetryAllowed: false`: no answer on its own makes a
 
 | `result` | Next step |
 | --- | --- |
-| `active` | Poll `job` |
+| `active` | Poll `job`. If it does not carry your seal, treat it as a [publish `409`](#when-the-answer-is-not-a-success) |
 | `superseded` | The listed `jobs` have ended. One `finalized` with your seal means you are done; otherwise resend |
 | `none` | No job is stored: resend |
 | `conflict` | Ask an operator |
