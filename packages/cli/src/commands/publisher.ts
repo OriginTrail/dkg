@@ -31,6 +31,7 @@ import {
   type AutoUpdateConfig,
 } from '../config.js';
 import { ApiClient } from '../api-client.js';
+import { assertNoDaemonForOfflineWrite } from '../offline-publisher-guard.js';
 import { parseJobListPagingOptions, readJobList, type JobListPage } from '../job-list-paging.js';
 import { normalizeContextGraphIdOrUri } from '../context-graph-identifiers.js';
 import { parsePositiveIntegerOption, parsePositiveMsOption } from '../cli-option-parsers.js';
@@ -378,6 +379,7 @@ publisherCmd
         await client.publisherCancel(jobId);
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineWrite('cancel');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
@@ -414,6 +416,7 @@ publisherCmd
         outcome = await client.publisherRetry(status);
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineWrite('retry');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });
@@ -451,6 +454,7 @@ publisherCmd
         count = result.cleared;
       } catch (err) {
         if (!isDaemonUnreachable(err)) throw err;
+        await assertNoDaemonForOfflineWrite('clear');
         const config = await loadConfig();
         const { createPublisherInspector } = await import('../publisher-runner.js');
         const inspector = await createPublisherInspector({ dataDir: dkgDir(), config });

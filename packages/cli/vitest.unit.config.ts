@@ -41,6 +41,8 @@ export default defineConfig({
           'test/retention-timer.test.ts',
           'test/retention-sweeps.test.ts',
           'test/retention-share-sweep.test.ts',
+          // OT-RFC-73 P11 — the publisher sweep over the daemon admission instance's own store object and claim transaction, with real publisher rows.
+          'test/retention-publisher-sweep.test.ts',
           'test/retention-runtime-scope.test.ts',
           'test/daemon-queue-retention-live.test.ts',
           'test/async-admission-usage-retention.test.ts',
@@ -315,6 +317,8 @@ export default defineConfig({
           // routes (real publisher control, no hardhat), and the CLI rendering.
           'test/publisher-retry-surfacing-2270.test.ts',
           'test/publisher-retry-command-output-2270.test.ts',
+          // OT-RFC-73 P11 (AC7): the offline inspector refuses destructive commands while a daemon is running.
+          'test/publisher-offline-write-guard.test.ts',
           // #1828 — daemon-boot wiring seam (runDaemonInner invokes the VM-publish
           // intent-index backfill with the admission publisher control).
           'test/publisher-backfill-wiring-1828.test.ts',
