@@ -2,9 +2,9 @@
  * OT-RFC-73 P11: the retention sweep under test, as the retention tests drive it, and the log reads that name what it did.
  */
 import { expect } from 'vitest';
-import type { TripleStoreAsyncLiftPublisher } from '../../src/index.js';
+import type { TripleStore } from '@origintrail-official/dkg-storage';
 import {
-  createPublisherRetention, type PublisherRetention, type PublisherRetentionBatchResult, type PublisherRetentionConfig, type PublisherRetentionLogger,
+  TripleStoreAsyncLiftPublisher, createPublisherRetention, type PublisherRetention, type PublisherRetentionBatchResult, type PublisherRetentionConfig, type PublisherRetentionLogger,
 } from '../../src/index.js';
 import { DAY, NOW, bySource, type Logged } from './lift-retention-fixtures.js';
 
@@ -27,6 +27,9 @@ export function newRetention(publisher: TripleStoreAsyncLiftPublisher, over: Par
   });
 }
 
+/** A publisher over `store` on the sweeps' wall clock (NOW). */
+export const publisherOver = (store: TripleStore): TripleStoreAsyncLiftPublisher => new TripleStoreAsyncLiftPublisher(store, { now: () => NOW, idGenerator: () => 'unused' });
+
 /** Call `runBatch()` until the pass is over (nothing left to judge) or `max` calls were made; returns every result. `afterBatch` runs after each call. */
 export async function drain(
   retention: PublisherRetention, max = 200, afterBatch?: (res: PublisherRetentionBatchResult) => Promise<void>,
@@ -40,6 +43,16 @@ export async function drain(
   }
   return results;
 }
+
+/** The job ids the batches deleted, and the ones report mode says delete would remove, in order. */
+export const deletedIds = (results: readonly PublisherRetentionBatchResult[]): string[] => results.flatMap((r) => r.deletedJobs.map((j) => j.jobId));
+export const wouldDeleteIds = (results: readonly PublisherRetentionBatchResult[]): string[] => results.flatMap((r) => r.wouldDeleteJobs.map((j) => j.jobId));
+/** The keep reasons the batches counted, summed, the ones never counted left out. */
+export const kept = (results: readonly PublisherRetentionBatchResult[]): Record<string, number> => {
+  const total: Record<string, number> = {};
+  for (const r of results) for (const [reason, n] of Object.entries(r.kept)) if (n > 0) total[reason] = (total[reason] ?? 0) + n;
+  return total;
+};
 
 /**
  * The suffix rule of one key, asserted: `order` is the key's records oldest first, `left` the job ids still stored. What is left of the key is a suffix of its order

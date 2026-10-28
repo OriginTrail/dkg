@@ -109,6 +109,7 @@ export default defineConfig({
       'test/async-lift-clear-sibling-guard.test.ts',
       'test/async-lift-lifecycle-siblings.test.ts',
       'test/async-lift-retention.test.ts',
+      'test/async-lift-retention-scan-records.test.ts',
       'test/async-lift-retention-holds.test.ts',
       'test/async-lift-retention-order.test.ts',
       'test/async-lift-retention.property.test.ts',
