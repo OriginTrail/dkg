@@ -5,30 +5,16 @@ import {
   useCallback,
   useEffect,
   useRef,
+  useMemo,
   type ReactNode,
 } from 'react';
 import type { DevnetNode, Activity, GraphAnimation, DevnetConfig, OperationType } from './types';
+import type { DoneEvent, StatusEvent, SimulationSettings } from './simulation-protocol';
+import { snapshotRunAccounting, recordMetric, combineMetrics, emptyMetrics } from './simulation-metrics';
 import { fetchDevnetConfig, fetchNodeStatus } from './api';
 
-export interface PerTypeMetrics {
-  total: number;
-  success: number;
-  errors: number;
-  totalDurationMs: number;
-  successDurationMs: number;
-  /** Accumulated phase durations (e.g. prepare, store, chain, broadcast) */
-  phaseTotals: Record<string, number>;
-  phaseCounts: Record<string, number>;
-}
-
-export interface LiveOpMetrics {
-  total: number;
-  success: number;
-  errors: number;
-  byType: Record<string, PerTypeMetrics>;
-  /** Rolling window of recent op timestamps for ops/sec calculation */
-  recentTimestamps: number[];
-}
+import type { LiveOpMetrics } from './simulation-metrics';
+export type { LiveOpMetrics, PerTypeMetrics } from './simulation-metrics';
 
 export interface SimulationRun {
   id: string;
@@ -36,14 +22,9 @@ export interface SimulationRun {
   startedAt: number;
   finishedAt?: number;
   metrics: LiveOpMetrics;
-  config: {
-    opCount: number;
-    opsPerSec: number;
-    concurrency: number;
-    kasPerPublish: number;
-    contextGraphId: string;
-    enabledOps: string[];
-  };
+  error?: string;
+  diagnosticCount?: number;
+  config: SimulationSettings & { contextGraphId: string };
 }
 
 interface State {
@@ -59,6 +40,8 @@ interface State {
   networkMode: 'devnet' | 'testnet';
 }
 
+type StoredState = Omit<State, 'liveMetrics'> & { manualMetrics: LiveOpMetrics; liveSimulationId: string | null };
+
 type Action =
   | { type: 'SET_CONFIG'; config: DevnetConfig }
   | { type: 'CONFIG_ERROR'; error: string }
@@ -70,14 +53,16 @@ type Action =
   | { type: 'ADD_ANIMATIONS'; animations: GraphAnimation[] }
   | { type: 'TICK_ANIMATIONS'; dt: number }
   | { type: 'REMOVE_ANIMATION'; id: string }
-  | { type: 'RECORD_OP'; opType: string; success: boolean; durationMs: number; phases?: Record<string, number> }
+  | { type: 'RECORD_OP'; simulationId?: string; opType: string; success: boolean; durationMs: number; phases?: Record<string, number> }
   | { type: 'RESET_LIVE_METRICS' }
   | { type: 'START_SIMULATION'; id: string; name: string; config: SimulationRun['config'] }
-  | { type: 'STOP_SIMULATION' };
+  | { type: 'RECONCILE_SIMULATION'; id: string; snapshot: StatusEvent }
+  | { type: 'SIMULATION_ERROR'; id: string; message: string }
+  | { type: 'COMPLETE_SIMULATION'; id: string; snapshot?: DoneEvent };
 
 const MAX_ACTIVITIES = 200;
 
-function reducer(state: State, action: Action): State {
+function reducer(state: StoredState, action: Action): StoredState {
   switch (action.type) {
     case 'SET_CONFIG': {
       const mode = action.config.network ?? 'devnet';
@@ -131,71 +116,48 @@ function reducer(state: State, action: Action): State {
     case 'REMOVE_ANIMATION':
       return { ...state, animations: state.animations.filter((a) => a.id !== action.id) };
     case 'RECORD_OP': {
-      const m = { ...state.liveMetrics };
-      m.total++;
-      if (action.success) m.success++; else m.errors++;
-      const dflt: PerTypeMetrics = { total: 0, success: 0, errors: 0, totalDurationMs: 0, successDurationMs: 0, phaseTotals: {}, phaseCounts: {} };
-      const bt = { ...(m.byType[action.opType] ?? dflt), phaseTotals: { ...(m.byType[action.opType]?.phaseTotals ?? {}) }, phaseCounts: { ...(m.byType[action.opType]?.phaseCounts ?? {}) } };
-      bt.total++;
-      bt.totalDurationMs += action.durationMs;
-      if (action.success) { bt.success++; bt.successDurationMs += action.durationMs; }
-      else bt.errors++;
-      if (action.phases) {
-        for (const [p, ms] of Object.entries(action.phases)) {
-          bt.phaseTotals[p] = (bt.phaseTotals[p] ?? 0) + ms;
-          bt.phaseCounts[p] = (bt.phaseCounts[p] ?? 0) + 1;
-        }
-      }
-      m.byType = { ...m.byType, [action.opType]: bt };
-      const now = Date.now();
-      m.recentTimestamps = [...m.recentTimestamps.filter((t) => now - t < 10_000), now];
-
-      let runs = state.simulationRuns;
-      if (state.activeSimulationId) {
-        runs = runs.map((r) => {
-          if (r.id !== state.activeSimulationId) return r;
-          const rm = { ...r.metrics };
-          rm.total++;
-          if (action.success) rm.success++; else rm.errors++;
-          const rbt = { ...(rm.byType[action.opType] ?? { total: 0, success: 0, errors: 0, totalDurationMs: 0, successDurationMs: 0, phaseTotals: {}, phaseCounts: {} }), phaseTotals: { ...(rm.byType[action.opType]?.phaseTotals ?? {}) }, phaseCounts: { ...(rm.byType[action.opType]?.phaseCounts ?? {}) } };
-          rbt.total++;
-          rbt.totalDurationMs += action.durationMs;
-          if (action.success) { rbt.success++; rbt.successDurationMs += action.durationMs; }
-          else rbt.errors++;
-          if (action.phases) {
-            for (const [p, ms] of Object.entries(action.phases)) {
-              rbt.phaseTotals[p] = (rbt.phaseTotals[p] ?? 0) + ms;
-              rbt.phaseCounts[p] = (rbt.phaseCounts[p] ?? 0) + 1;
-            }
-          }
-          rm.byType = { ...rm.byType, [action.opType]: rbt };
-          rm.recentTimestamps = [...rm.recentTimestamps.filter((t) => now - t < 10_000), now];
-          return { ...r, metrics: rm };
-        });
-      }
-      return { ...state, liveMetrics: m, simulationRuns: runs };
+      if (!action.simulationId) return { ...state, manualMetrics: recordMetric(state.manualMetrics, action) };
+      if (action.simulationId !== state.activeSimulationId) return state;
+      return { ...state, simulationRuns: state.simulationRuns.map(run =>
+        run.id === action.simulationId ? { ...run, metrics: recordMetric(run.metrics, action) } : run) };
     }
     case 'RESET_LIVE_METRICS':
-      return { ...state, liveMetrics: { total: 0, success: 0, errors: 0, byType: {}, recentTimestamps: [] } };
+      return { ...state, manualMetrics: emptyMetrics(), liveSimulationId: state.activeSimulationId };
     case 'START_SIMULATION': {
       const run: SimulationRun = {
         id: action.id,
         name: action.name,
         startedAt: Date.now(),
-        metrics: { total: 0, success: 0, errors: 0, byType: {}, recentTimestamps: [] },
+        metrics: emptyMetrics(),
         config: action.config,
       };
       return {
         ...state,
         activeSimulationId: action.id,
         simulationRuns: [...state.simulationRuns, run],
-        liveMetrics: { total: 0, success: 0, errors: 0, byType: {}, recentTimestamps: [] },
+        manualMetrics: emptyMetrics(), liveSimulationId: action.id,
       };
     }
-    case 'STOP_SIMULATION': {
-      const runs = state.simulationRuns.map((r) =>
-        r.id === state.activeSimulationId ? { ...r, finishedAt: Date.now() } : r,
-      );
+    case 'RECONCILE_SIMULATION': {
+      if (action.id !== state.activeSimulationId) return state;
+      const run = state.simulationRuns.find(r => r.id === action.id)!;
+      const updated = { ...run, ...snapshotRunAccounting(action.snapshot, run.metrics), error: undefined };
+      return { ...state,
+        simulationRuns: state.simulationRuns.map(r => r.id === action.id ? updated : r) };
+    }
+    case 'SIMULATION_ERROR': {
+      if (action.id !== state.activeSimulationId) return state;
+      return { ...state, simulationRuns: state.simulationRuns.map(run => run.id === action.id
+        ? { ...run, error: action.message, diagnosticCount: (run.diagnosticCount ?? 0) + 1 } : run) };
+    }
+    case 'COMPLETE_SIMULATION': {
+      if (action.id !== state.activeSimulationId) return state;
+      const runs = state.simulationRuns.map(run => {
+        if (run.id !== action.id) return run;
+        return { ...run, ...(action.snapshot ? snapshotRunAccounting(action.snapshot, run.metrics) : {}),
+          finishedAt: action.snapshot ? run.startedAt + action.snapshot.elapsedMs : Date.now(),
+        };
+      });
       return { ...state, activeSimulationId: null, simulationRuns: runs };
     }
     default:
@@ -203,14 +165,14 @@ function reducer(state: State, action: Action): State {
   }
 }
 
-const initial: State = {
+const initial: StoredState = {
   nodes: [],
   selectedNode: 1,
   activities: [],
   animations: [],
   config: null,
   configError: null,
-  liveMetrics: { total: 0, success: 0, errors: 0, byType: {}, recentTimestamps: [] },
+  manualMetrics: emptyMetrics(), liveSimulationId: null,
   simulationRuns: [],
   activeSimulationId: null,
   networkMode: 'devnet',
@@ -414,8 +376,12 @@ export function StoreProvider({ children }: { children: ReactNode }) {
     return () => cancelAnimationFrame(raf);
   }, []);
 
+  const { manualMetrics, liveSimulationId, ...visibleState } = state;
+  const liveRun = state.simulationRuns.find(run => run.id === liveSimulationId);
+  const liveMetrics = useMemo(() => combineMetrics(manualMetrics, liveRun?.metrics), [manualMetrics, liveRun?.metrics]);
+  const view: State = { ...visibleState, liveMetrics };
   return (
-    <Ctx.Provider value={{ state, dispatch, addOperation, addBroadcast, completeOperation }}>
+    <Ctx.Provider value={{ state: view, dispatch, addOperation, addBroadcast, completeOperation }}>
       {children}
     </Ctx.Provider>
   );
