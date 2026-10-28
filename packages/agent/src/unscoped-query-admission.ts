@@ -111,8 +111,7 @@ async function readAdmissionCatalog<T>(maxResponseBytes: number | undefined, rea
   try { return await read(); } catch (error) {
       // These two reads use the caller's limit. Fixed internal authority limits
       // and later permission reads retain their own failure classification.
-      if (maxResponseBytes !== undefined && isStoreResponseTooLargeError(error)
-        && error.maxBytes === maxResponseBytes) throw new QueryResultTooLargeError(error);
+      if (maxResponseBytes !== undefined && isStoreResponseTooLargeError(error)) throw new QueryResultTooLargeError(error);
       throw error;
   }
 }

@@ -1,3 +1,4 @@
+import { readGraphInventory, readGraphInventoryByPrefix } from '@origintrail-official/dkg-storage';
 // SPDX-License-Identifier: Apache-2.0
 
 import { isSparqlUpdateOperation } from '@origintrail-official/dkg-core';
@@ -193,6 +194,11 @@ export function createMutationObservedStore(
           'rfc64AuthorCommitCasV1',
         )
       : undefined,
+    // Preserve the source inventory's measured cost through the outer agent boundary.
+    readGraphInventory(prefix, options) {
+      return prefix === undefined ? readGraphInventory(innerStore, options)
+        : readGraphInventoryByPrefix(innerStore, prefix, options);
+    },
     listGraphs(options) {
       return innerStore.listGraphs(options);
     },

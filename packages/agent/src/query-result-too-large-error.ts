@@ -1,5 +1,5 @@
 import { type StoreResponseTooLargeErrorLike, isStoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
-import { isQueryMaterializationTooLargeError } from '@origintrail-official/dkg-query';
+import { isQueryMaterializationTooLargeError, isQueryResultTooLargeError as isQueryLayerResultTooLargeError } from '@origintrail-official/dkg-query';
 
 export const QUERY_RESULT_TOO_LARGE = 'QUERY_RESULT_TOO_LARGE' as const;
 
@@ -53,7 +53,7 @@ export function asQueryResultTooLargeError(
   error: unknown,
 ): QueryResultTooLargeErrorLike | undefined {
   if (isQueryResultTooLargeError(error)) return error;
-  if (isStoreResponseTooLargeError(error) && (error as { queryPhase?: unknown }).queryPhase === 'result') {
+  if (isStoreResponseTooLargeError(error) && isQueryLayerResultTooLargeError(error)) {
     return new QueryResultTooLargeError(error);
   }
   if (!isQueryMaterializationTooLargeError(error)) return undefined;
