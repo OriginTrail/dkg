@@ -62,11 +62,10 @@ export type Rfc64CatalogReplayRecoveryRequestV1 = Readonly<
 export type Rfc64CatalogReplayRecoveryCommandV1 = Readonly<{
   readonly contextGraphId: string;
   readonly policyDigest: string;
-  /** Lifecycle owner for peer transport, receiver drain, and parity handoff. */
-  readonly signal?: AbortSignal;
   /** Callers explicitly share an owner to coalesce execution; otherwise each request owns its run. */
   readonly executionOwner?: Rfc64CatalogReplayExecutionOwnerV1;
-} & (Exclude<Rfc64CatalogReplayRecoveryRequestV1, { kind: 'full-connected-peers' }>
+} & ({ kind: 'pending-recovery' }
+  | { kind: 'connection-demand'; demand: Rfc64CatalogReplayPeerDemandHandleV1; waiterSignal?: AbortSignal }
   | { kind: 'full-connected-peers'; connectedPeerIds: readonly string[] })>;
 
 export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
@@ -309,7 +308,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     input: Rfc64CatalogReplayRecoveryCommandV1,
   ): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
     const progress = this.#progressFor(input.contextGraphId, input.policyDigest);
-    const owner = input.executionOwner ?? Object.freeze({ signal: input.signal });
+    const owner = input.executionOwner ?? Object.freeze({});
+    const waiterSignal = input.kind === 'connection-demand' ? input.waiterSignal : undefined;
     let droppedProviders = false;
     let connectionWork: CatalogReplayPeerWorkV1 | undefined;
     if (input.kind === 'full-connected-peers') {
@@ -341,7 +341,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (coverage.some(demand => demand === null)) progress.fullPass = null;
       else {
         progress.fullPass ??= new FullReplayPassV1((left, right) => this.#mergePromises(left, right));
-        if (!progress.fullPass.include(coverage.filter(demand => demand !== null), progress.promisedTargets, progress.run.kind === 'running' ? progress.run.value.evidence : undefined)) progress.fullPass = null;
+        if (!progress.fullPass.include(coverage.filter(demand => demand !== null), progress.run.kind === 'running' ? progress.run.value.evidence : undefined)) progress.fullPass = null;
       }
     } else {
       if (input.kind === 'connection-demand') connectionWork = progress.peerWorklist.admitDemand(input.demand, owner);
@@ -350,18 +350,18 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     // A drained worklist can still have an in-flight provider/parity pass.
     if (progress.run.kind === 'running') {
       if (droppedProviders) this.#bumpRevision(progress);
-      return connectionWork?.subscribe(input.signal) ?? progress.run.value.completion;
+      return connectionWork?.subscribe(waiterSignal) ?? progress.run.value.completion;
     }
     if (!progress.peerWorklist.hasPending) {
       // Only staged generations can carry coverage into a later connection
       // run. An empty request without that custody cannot donate entitlement.
       if (progress.fullPass?.covered) progress.fullPass = null;
       if (droppedProviders) this.#bumpRevision(progress);
-      return connectionWork?.subscribe(input.signal) ?? Promise.resolve(Object.freeze({ requested: 0, failed: 0 }));
+      return connectionWork?.subscribe(waiterSignal) ?? Promise.resolve(Object.freeze({ requested: 0, failed: 0 }));
     }
     const completion = this.#launch({ contextGraphId: input.contextGraphId,
       initialFullRequest: input.kind === 'full-connected-peers', owner: connectionWork?.continuation ?? owner }, progress);
-    if (connectionWork) { void completion.catch(() => undefined); return connectionWork.subscribe(input.signal); }
+    if (connectionWork) { void completion.catch(() => undefined); return connectionWork.subscribe(waiterSignal); }
     return completion;
   }
 

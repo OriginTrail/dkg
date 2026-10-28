@@ -133,7 +133,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         contextGraphId: 'public-cg',
         policyDigest: 'policy',
         kind: 'pending-recovery',
-        signal,
+        executionOwner: { signal },
       });
     });
 
@@ -175,7 +175,7 @@ describe('RFC-64 catalog replay recovery runtime', () => {
         contextGraphId: 'public-cg',
         policyDigest: 'policy',
         kind: 'pending-recovery',
-        signal,
+        executionOwner: { signal },
       });
     });
 
@@ -823,7 +823,7 @@ it.each([false, true])('retires orphaned cancelled coverage while preserving sta
     parityFailed: async () => failingParity,
   });
   const full = (peers: string[], signal?: AbortSignal) => runtime.request({
-    contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'full-connected-peers', connectedPeerIds: peers, signal,
+    contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'full-connected-peers', connectedPeerIds: peers, executionOwner: { signal },
   });
   await full(['peer-a', 'peer-b']);
   expect(runtime.status('public-cg', 'policy')?.failed).toBe(true);

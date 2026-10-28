@@ -33,6 +33,7 @@ export function recordReplayPeerOutcomeV1<Target>(run: ReplayRunEvidenceV1<Targe
 /** Recovery owns expected generations, evidence and observation as one pass. */
 export class FullReplayPassV1<Target> {
   readonly #expected = new Map<string, { generation: number; replayed: boolean }>();
+  /** Fresh responses only; retained witnesses belong to settlement until full coverage is observed. */
   targets: BoundedReplayTargetsV1<Target> = emptyReplayTargetsV1();
   replacesSnapshot = true;
   #coverageValid = true;
@@ -41,17 +42,13 @@ export class FullReplayPassV1<Target> {
   get corroborated(): boolean { return this.#providers.size > 0; }
   constructor(readonly merge: (left: readonly Target[], right: readonly Target[]) => readonly Target[]) {}
 
-  include(demands: readonly (Rfc64CatalogReplayPeerDemandV1 & { staged: boolean })[], prior: BoundedReplayTargetsV1<Target> | null, run?: ReplayRunEvidenceV1<Target>): boolean {
+  include(demands: readonly (Rfc64CatalogReplayPeerDemandV1 & { staged: boolean })[], run?: ReplayRunEvidenceV1<Target>): boolean {
     if (new Set([...this.#expected.keys(), ...demands.map(demand => demand.peerId)]).size > RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) return false;
     this.#coverageValid = true;
     for (const demand of demands) {
       if (this.#expected.get(demand.peerId)?.generation !== demand.generation) {
         this.#expected.set(demand.peerId, { generation: demand.generation, replayed: false });
       }
-    }
-    if (demands.some(demand => demand.staged)) {
-      this.replacesSnapshot = false;
-      if (prior !== null) this.#retain(prior);
     }
     if (run) {
       this.#retain(run.received);

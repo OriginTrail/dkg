@@ -54,3 +54,16 @@ if (replay) {
   // @ts-expect-error Operator snapshots are immutable.
   replay.pendingScopes = 0;
 }
+
+
+const invalidCancellation: Rfc64CatalogReplayRecoveryCommandV1 = {
+  kind: 'pending-recovery', contextGraphId: 'cg', policyDigest: 'digest',
+  // @ts-expect-error Transport cancellation belongs to the execution owner.
+  signal: new AbortController().signal,
+};
+const invalidWaiter: Rfc64CatalogReplayRecoveryCommandV1 = {
+  kind: 'full-connected-peers', contextGraphId: 'cg', policyDigest: 'digest', connectedPeerIds: [],
+  // @ts-expect-error Only an exact connection demand has an independent waiter.
+  waiterSignal: new AbortController().signal,
+};
+void invalidCancellation; void invalidWaiter;

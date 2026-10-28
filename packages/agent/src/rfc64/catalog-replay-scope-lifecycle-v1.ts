@@ -15,14 +15,15 @@ type PhaseV1 =
   | Readonly<{ state: 'retired' }>;
 interface DemandV1 { readonly connectionGeneration: number; readonly selectionGeneration: number; phase: PhaseV1 }
 export interface Rfc64CatalogReplayScopeAdmissionV1 { admit(): void; reject(): void }
-export interface Rfc64CatalogReplayScopeExecutionV1 { readonly lease: FenceV1 }
+declare const executionBrand: unique symbol;
+export interface Rfc64CatalogReplayScopeExecutionV1 { readonly [executionBrand]: true }
 
 /** Owns demand, admission and cooldown independently of fence availability. */
 export class Rfc64CatalogReplayScopeLifecycleV1 {
   #selection: Readonly<{ state: 'selected' | 'retired'; generation: number }> = { state: 'selected', generation: 0 };
   #current: DemandV1 | null = null;
   #successor: DemandV1 | null = null;
-  readonly #executions = new WeakMap<Rfc64CatalogReplayScopeExecutionV1, DemandV1>();
+  #execution: Rfc64CatalogReplayScopeExecutionV1 | null = null;
   #failures = 0;
   #eligibleAt = 0;
   constructor(readonly contextGraphId: string, readonly peerId: string, readonly debounceMs: number) {}
@@ -85,17 +86,17 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
   begin(now: number): Rfc64CatalogReplayScopeExecutionV1 | null {
     const demand = this.#current;
     if (demand?.phase.state !== 'queued' || !this.ready(now)) return null;
-    const execution = Object.freeze({ lease: demand.phase.lease });
+    const execution = Object.freeze({}) as Rfc64CatalogReplayScopeExecutionV1;
     demand.phase = { state: 'executing', lease: demand.phase.lease };
-    this.#executions.set(execution, demand);
+    this.#execution = execution;
     return execution;
   }
 
   /** Refresh current-policy custody before each asynchronous execution phase. */
   refreshExecution(execution: Rfc64CatalogReplayScopeExecutionV1, reserveFence: () => FenceV1 | null,
     reserveDeferred: () => Readonly<{ release(): void }> | null): FenceV1 | null {
-    const demand = this.#executions.get(execution);
-    if (!demand || demand !== this.#current || demand.phase.state !== 'executing') return null;
+    const demand = this.#current;
+    if (execution !== this.#execution || demand?.phase.state !== 'executing') return null;
     const previous = demand.phase.lease;
     if (previous.isCurrent()) return previous;
     // Acquire replacement custody before releasing the retired reservation.
@@ -104,16 +105,16 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     if (lease === null) {
       const deferred = reserveDeferred();
       demand.phase = { state: 'waiting-for-fence', ...(deferred ? { deferred } : {}) };
-      this.#executions.delete(execution);
+      this.#execution = null;
     } else demand.phase = { state: 'executing', lease };
     if (previous !== lease) previous.release();
     return lease;
   }
 
   finish(execution: Rfc64CatalogReplayScopeExecutionV1, failed: boolean, now: number): void {
-    const demand = this.#executions.get(execution);
-    if (demand === undefined || demand !== this.#current || demand.phase.state !== 'executing') return;
-    this.#executions.delete(execution);
+    const demand = this.#current;
+    if (execution !== this.#execution || demand?.phase.state !== 'executing') return;
+    this.#execution = null;
     this.#failures = failed ? this.#failures + 1 : 0;
     this.#eligibleAt = now + (failed ? this.#retryDelay() : this.debounceMs);
     this.#release(demand);
@@ -141,7 +142,7 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     if ('lease' in demand.phase) demand.phase.lease?.release();
     demand.phase = { state: 'retired' };
     if (demand === this.#successor) this.#successor = null;
-    else { this.#current = this.#successor; this.#successor = null; }
+    else { this.#execution = null; this.#current = this.#successor; this.#successor = null; }
   }
   #retryDelay(): number {
     let hash = 0;

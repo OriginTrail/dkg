@@ -4768,8 +4768,8 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     };
     return settle(this.rfc64CatalogReplayRecoveryRuntimeV1().request(
       request.kind === 'full-connected-peers'
-        ? { ...scope, signal, ...request, connectedPeerIds: this.node.libp2p.getPeers().map(peer => peer.toString()) }
-        : { ...scope, signal, ...request },
+        ? { ...scope, executionOwner: { signal }, ...request, connectedPeerIds: this.node.libp2p.getPeers().map(peer => peer.toString()) }
+        : { ...scope, executionOwner: { signal }, ...request },
     ));
   }
 

@@ -113,7 +113,7 @@ describe('replay budgets and unobserved evidence', () => {
     await fullPass(); expect(runtime.promisedTargets('public-cg', 'policy')).toHaveLength(full.length);
     targets = [{ id: 'extra-head' }]; unobserved = true;
     runtime.markPeerPending('public-cg', 'policy', 'peer');
-    const pending = runtime.request({ contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'pending-recovery', signal: controller.signal });
+    const pending = runtime.request({ contextGraphId: 'public-cg', policyDigest: 'policy', kind: 'pending-recovery', executionOwner: { signal: controller.signal } });
     if (mode === 'cancel') await expect(pending).rejects.toThrow('cancel drain'); else await pending;
     expect(runtime.promisedTargets('public-cg', 'policy')).toBeNull();
     expect(runtime.status('public-cg', 'policy')).toMatchObject({ failed: true, unverified: true });
@@ -337,7 +337,7 @@ describe('joined connection ownership after an unobserved run', () => {
     let expectedSignal: AbortSignal | undefined;
     const joined = owner.runAwaited(signal => {
       expectedSignal = signal;
-      return runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: lease, signal });
+      return runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: lease, executionOwner: { signal } });
     }).then(() => { joinedDone = true; }, () => { joinedDone = true; });
     try {
       timeout.resolve(); await first;
@@ -363,7 +363,7 @@ describe('joined connection ownership after an unobserved run', () => {
     const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({ requestPeer,
       whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target.id, parityFailed: async () => false });
     const lease = runtime.markPeerPending('cg', 'p', 'a')!;
-    await expect(runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: lease, signal: controller.signal }))
+    await expect(runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: lease, executionOwner: { signal: controller.signal } }))
       .rejects.toThrow('already closed');
     expect(requestPeer).not.toHaveBeenCalled();
     await expect(runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'pending-recovery' })).resolves.toEqual({ requested: 1, failed: 0 });
@@ -436,10 +436,10 @@ it.each([false, true])('groups execution by explicit owner despite composed canc
   const a = runtime.reservePeer('cg', 'p', 'a')!, b = runtime.reservePeer('cg', 'p', 'b')!;
   a.admit(); b.admit();
   const first = runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: a,
-    signal: controller.signal, executionOwner: ownerA });
+    waiterSignal: controller.signal, executionOwner: ownerA });
   await started.promise;
   const second = runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: b,
-    signal: AbortSignal.any([controller.signal]), executionOwner: ownerB });
+    waiterSignal: AbortSignal.any([controller.signal]), executionOwner: ownerB });
   try {
     held.resolve(); await Promise.all([first, second]);
     expect(requests).toEqual(['a', 'b']);
@@ -447,4 +447,34 @@ it.each([false, true])('groups execution by explicit owner despite composed canc
     expect(parity).toEqual(shared ? [['a', 'b']] : [['a'], ['a', 'b']]);
     expect(runtime.status('cg', 'p')?.active).toBe(false);
   } finally { held.resolve(); a.release(); b.release(); }
+});
+
+
+it('cancels a connection waiter without cancelling its shared execution owner', async () => {
+  const transport = new AbortController(), waiter = new AbortController();
+  const owner = Object.freeze({ signal: transport.signal });
+  const held = Promise.withResolvers<void>(), started = Promise.withResolvers<void>();
+  let physicalSignal: AbortSignal | undefined;
+  const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+    requestPeer: async (_cg, _peer, signal) => { physicalSignal = signal; started.resolve(); await held.promise; return { status: 'completed', targets: [] }; },
+    whenReceiverIdleForContextGraph: async () => {}, targetIdentity: () => '', parityFailed: async () => false,
+  });
+  const demand = runtime.reservePeer('cg', 'p', 'peer')!; demand.admit();
+  const command = { contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand' as const, demand, executionOwner: owner };
+  const cancelled = runtime.request({ ...command, waiterSignal: waiter.signal });
+  const live = runtime.request(command);
+  try {
+    await started.promise;
+    waiter.abort(new Error('waiter stopped'));
+    let settled = false;
+    void cancelled.then(() => { settled = true; }, () => { settled = true; });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(settled, 'the waiter retains physical drain custody').toBe(false);
+    expect(physicalSignal).toBe(transport.signal); expect(physicalSignal?.aborted).toBe(false);
+    expect(runtime.status('cg', 'p')?.active).toBe(true);
+    held.resolve();
+    await expect(cancelled).rejects.toThrow('waiter stopped');
+    await expect(live).resolves.toEqual({ requested: 1, failed: 0 });
+    expect(runtime.status('cg', 'p')?.active).toBe(false);
+  } finally { held.resolve(); demand.release(); }
 });

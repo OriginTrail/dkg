@@ -61,3 +61,40 @@ describe('staged full replay corroboration across runs', () => {
     }
   }
 });
+
+
+it.each(['complete', 'provider-failed', 'drain-timeout'] as const)('staged full replay replaces retained overflow only after %s observation', async finalOutcome => {
+  let initial = true, final = false;
+  const parity: string[][] = [];
+  const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<string>({
+    requestPeer: async (_cg, peer) => {
+      if (initial) return { status: 'completed', targets: Array.from({ length: 65 }, (_, i) => `old-${i}`) };
+      if (final && finalOutcome === 'provider-failed') throw new Error('provider unavailable');
+      return { status: 'completed', targets: [`fresh-${peer}`] };
+    },
+    whenReceiverIdleForContextGraph: async () => {
+      if (final && finalOutcome === 'drain-timeout') await new Promise<void>(() => {});
+    },
+    sleep: () => final && finalOutcome === 'drain-timeout' ? Promise.resolve() : new Promise(() => {}),
+    targetIdentity: target => target,
+    parityFailed: async (_cg, targets) => { parity.push([...targets]); return false; },
+  });
+  const full = (peers: readonly string[]) => runtime.request({ contextGraphId: 'cg', policyDigest: 'p',
+    kind: 'full-connected-peers', connectedPeerIds: peers });
+  await full(['old']);
+  expect(runtime.status('cg', 'p')?.failed).toBe(true);
+  expect(runtime.promisedTargets('cg', 'p')).toBeNull();
+  initial = false;
+  const a = runtime.reservePeer('cg', 'p', 'a')!, b = runtime.reservePeer('cg', 'p', 'b')!;
+  await full(['a', 'b']);
+  a.admit();
+  await runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: a }); a.release();
+  expect(runtime.status('cg', 'p')?.failed).toBe(true);
+  expect(runtime.promisedTargets('cg', 'p')).toBeNull();
+  final = true; b.admit();
+  await runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: b }); b.release();
+  expect(runtime.status('cg', 'p')?.failed).toBe(finalOutcome !== 'complete');
+  expect(runtime.promisedTargets('cg', 'p')).toEqual(finalOutcome === 'complete' ? ['fresh-a', 'fresh-b'] : null);
+  expect(parity[0]).toEqual(['fresh-a']);
+  if (finalOutcome === 'complete') expect(parity.at(-1)).toEqual(['fresh-a', 'fresh-b']);
+});

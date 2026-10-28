@@ -23,7 +23,7 @@ describe('physical catalog replay capacity', () => {
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => peers, selectContextGraphIds: () => ['cg'],
       reserveDeferredFence: () => null, reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer),
       reannounce: async () => ({ failed: 0 }), warn: vi.fn(),
-      replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }),
+      replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, executionOwner: { signal } }),
     });
     try {
       for (const peer of peers) {
@@ -132,7 +132,7 @@ describe('physical catalog replay capacity', () => {
       whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false });
     let settled = false;
     const run = recovery.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers',
-      connectedPeerIds: ['a', 'b', 'c'], signal: controller.signal });
+      connectedPeerIds: ['a', 'b', 'c'], executionOwner: { signal: controller.signal } });
     const rejected = expect(run).rejects.toThrow('shutdown');
     void run.then(() => { settled = true; }, () => { settled = true; });
     try {
@@ -178,7 +178,7 @@ describe('physical catalog replay capacity', () => {
     const runtime = makeRuntime({ selectContextGraphIds: () => ['g1', 'g2'],
       reserveDeferredFence: () => null, reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer), warn: vi.fn(),
       reannounce: (peer, _cg, signal) => transport.reannounce(peer, {} as never, signal),
-      replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }),
+      replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, executionOwner: { signal } }),
     });
     try {
       runtime.prepareConnectionOpen('c')!.admit(); runtime.prepareConnectionOpen('d')!.admit();
@@ -221,7 +221,7 @@ it.each(['clear', 'reset', 'policy replacement'] as const)('retires queued conne
   const full = recovery.request({ contextGraphId: 'cg', policyDigest: 'old', kind: 'full-connected-peers', connectedPeerIds: peers });
   void full.then(() => { fullSettled = true; });
   const replay = vi.fn((cg: string, demand: { peerId: string; generation: number; handle: object }, signal: AbortSignal) =>
-    recovery.request({ contextGraphId: cg, policyDigest: 'old', kind: 'connection-demand', demand, signal }));
+    recovery.request({ contextGraphId: cg, policyDigest: 'old', kind: 'connection-demand', demand, executionOwner: { signal } }));
   const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null,
     reserveFence: (cg, peer) => recovery.reservePeer(cg, 'old', peer),
     reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn() });
@@ -256,7 +256,7 @@ it.each(['policy replacement', 'clear', 'reset'] as const)('requests the newer h
   const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null,
     reserveFence: (cg, peer) => recovery.reservePeer(cg, policy, peer),
     reannounce: async () => ({ failed: 0 }),
-    replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: policy, kind: 'connection-demand', demand, signal }),
+    replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: policy, kind: 'connection-demand', demand, executionOwner: { signal } }),
     warn: vi.fn() });
   try {
   const pending = connection.prepareConnectionOpen('peer')!;
@@ -291,10 +291,10 @@ it.each([true, false])('keeps an independently owned reconnect after full replay
       return { status: 'completed', targets: [peer === 'old' ? 'H1' : 'H2'] }; },
     whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false,
   });
-  const full = recovery.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['old'], signal: controller.signal });
+  const full = recovery.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['old'], executionOwner: { signal: controller.signal } });
   const completion = cancel ? expect(full).rejects.toThrow('full cancelled') : expect(full).resolves.toMatchObject({ failed: 0 });
   const replay = vi.fn((cg: string, demand: { peerId: string; generation: number; handle: object }, signal: AbortSignal) =>
-    recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }));
+    recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, executionOwner: { signal } }));
   const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null,
     reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer), reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn() });
   try {

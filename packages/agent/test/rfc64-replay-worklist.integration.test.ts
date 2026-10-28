@@ -550,7 +550,7 @@ describe('cancelled receiver observation', () => {
       parityFailed: async () => false,
     });
     const run = runtime.request({ kind: 'full-connected-peers', contextGraphId: 'cg', policyDigest: 'policy',
-      connectedPeerIds: ['peer'], signal: controller.signal });
+      connectedPeerIds: ['peer'], executionOwner: { signal: controller.signal } });
     await entered.promise; controller.abort(cancelled);
     await expect(run).rejects.toBe(cancelled);
     expect(runtime.promisedTargets('cg', 'policy')).toEqual(['unobserved-head']);

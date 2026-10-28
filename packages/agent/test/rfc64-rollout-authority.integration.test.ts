@@ -1306,7 +1306,7 @@ describe('RFC-64 rollout authority integration', () => {
     if (command.kind !== 'connection-demand') throw new Error('expected connection demand');
     expect(command.demand.handle).toBe(markPending.mock.results[0].value!.handle);
     expect(command.demand).toMatchObject({ peerId: markPending.mock.results[0].value!.peerId, generation: markPending.mock.results[0].value!.generation });
-    expect(command.signal).toBe(reannounce.mock.lastCall![2]);
+    expect(command.executionOwner?.signal).toBe(reannounce.mock.lastCall![2]);
   }, 15_000);
 
   it('constructs recovery commands at the accepted agent boundary without eagerly enumerating peers', async () => {
@@ -1320,10 +1320,10 @@ describe('RFC-64 rollout authority integration', () => {
     const signal = new AbortController().signal;
     await edge.continueRfc64CatalogHeadReplayRecoveryV1(CONTEXT_GRAPH_ID, signal);
     expect(owner.mock.lastCall![0]).toMatchObject({ kind: 'pending-recovery', contextGraphId: CONTEXT_GRAPH_ID });
-    expect(owner.mock.lastCall![0].signal).toBe(signal); expect(peers).not.toHaveBeenCalled();
+    expect(owner.mock.lastCall![0].executionOwner?.signal).toBe(signal); expect(peers).not.toHaveBeenCalled();
     await edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID, signal);
     expect(owner.mock.lastCall![0]).toMatchObject({ kind: 'full-connected-peers', connectedPeerIds: ['connected-peer'] });
-    expect(owner.mock.lastCall![0].signal).toBe(signal); expect(peers).toHaveBeenCalledTimes(1);
+    expect(owner.mock.lastCall![0].executionOwner?.signal).toBe(signal); expect(peers).toHaveBeenCalledTimes(1);
   });
 
   it('retains a short reconnect and catches the newer head at the cooldown deadline', async () => {

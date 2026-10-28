@@ -107,7 +107,7 @@ it.each(['before-admission', 'cooldown', 'during-announcement', 'clear', 'reset'
       reservePeer: (id, policy, peer) => { reserved.push(policy); return capacityBlocked ? null : recovery.reservePeer(id, policy, peer); },
       reserveDeferred: id => recovery.reserveDeferred(id, accepted.policyDigest),
       reannounce: async () => { if (timing === 'during-announcement') { announcing.resolve(); await held.promise; } return { failed: 0 }; },
-      replay: (id, demand, owner) => recovery.request({ contextGraphId: id, policyDigest: accepted.policyDigest, kind: 'connection-demand', demand, signal: owner }),
+      replay: (id, demand, owner) => recovery.request({ contextGraphId: id, policyDigest: accepted.policyDigest, kind: 'connection-demand', demand, executionOwner: { signal: owner } }),
       schedule: (slot, work) => { scheduled.set(slot, work); return true; }, wait: async () => {}, warn: vi.fn(),
     });
     try {
@@ -173,7 +173,7 @@ it('keeps a reconnect successor fenced through announcement and cooldown', async
     reservePeer: (id, digest, peer) => recovery.reservePeer(id, digest, peer),
     reserveDeferred: id => recovery.reserveDeferred(id, snapshot.policyDigest),
     reannounce: async () => { if (first) { first = false; announcing.resolve(); await held.promise; } return { failed: 0 }; },
-    replay: (id, demand, owner) => recovery.request({ contextGraphId: id, policyDigest: snapshot.policyDigest, kind: 'connection-demand', demand, signal: owner }),
+    replay: (id, demand, owner) => recovery.request({ contextGraphId: id, policyDigest: snapshot.policyDigest, kind: 'connection-demand', demand, executionOwner: { signal: owner } }),
     schedule: (slot, work) => { scheduled.set(slot, work); return true; }, wait: async () => {}, warn: vi.fn(),
   });
   connection.prepareConnectionOpen('peer')!.admit();
