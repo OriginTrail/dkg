@@ -10,7 +10,8 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { DKGAgentConfig } from './dkg-agent-types.js';
 import { assertCheckpointInventoryUnchanged } from './public-snapshot-checkpoint.js';
 import type { PreparedSnapshotCheckpoint, VerifiedNativeSnapshotCheckpoint } from './snapshot-checkpoint-contract.js';
-import { nativeCheckpointShaFile } from './snapshot-native-build.js';
+import { nativeCheckpointShaFile } from './snapshot-checkpoint-files.js';
+import { CHECKPOINT_PROFILE as PROFILE } from './snapshot-checkpoint-profile.js';
 import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { writeCheckpointFile, syncCheckpointDirectory } from './snapshot-checkpoint-files.js';
 
@@ -42,7 +43,7 @@ export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEd
     || native.inventoryDigest !== snapshot.inventoryDigest || native.journal !== join(prepared.directory, 'native/store.jnl'))
     throw new Error('Invalid native checkpoint handoff');
   const remaining = prepared.manifest.deadline - Date.now();
-  if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 3_600_000) throw new Error('Checkpoint job deadline exceeded');
+  if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > PROFILE.jobTimeoutMs) throw new Error('Checkpoint job deadline exceeded');
   const lifetime = new AbortController();
   const cancel = () => lifetime.abort(options.signal.reason);
   options.signal.throwIfAborted(); options.signal.addEventListener('abort', cancel, { once: true });
@@ -57,7 +58,7 @@ export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEd
     await mkdir(config.dataDir, { mode: 0o700 });
     const folder = join(config.dataDir, 'checkpoint-store'); await mkdir(folder, { mode: 0o700 });
     const disk = await statfs(folder);
-    if (disk.bavail * disk.bsize <= 7 * 2 ** 30 + (await stat(native.journal)).size)
+    if (disk.bavail * disk.bsize <= PROFILE.diskReserveBytes + (await stat(native.journal)).size)
       throw new Error('Insufficient space for the fresh Edge journal');
     const pinnedJar = join(folder, 'runtime.jar');
     await copyFile(runtime.jar, pinnedJar, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);

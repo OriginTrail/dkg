@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { attachCheckpointInventory, type CheckpointInventory } from './snapshot-checkpoint-inventory.js';
-import { totalmem } from 'node:os';
+import { assertCheckpointMemory } from './snapshot-checkpoint-profile.js';
 import { join } from 'node:path';
 import type { BlazegraphStore } from '@origintrail-official/dkg-storage';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -13,8 +13,7 @@ export type CheckpointEdgeConfig = DKGAgentConfig & { dataDir: string; chainAdap
 /** Starts only this Edge's private store; normal snapshot recovery determines current coverage. */
 export async function startCheckpointEdgeSession(config: CheckpointEdgeConfig, java: string,
   sync: PublicSnapshotSyncOptions, signal: AbortSignal, inventory: CheckpointInventory) {
-  if (Math.min(totalmem(), process.constrainedMemory() || Infinity) < 4 * 2 ** 30)
-    throw new Error('Native bootstrap requires a 4 GiB memory allowance; use incremental recovery');
+  assertCheckpointMemory();
   signal.throwIfAborted();
   const folder = join(config.dataDir, 'checkpoint-store');
   let agent: import('./dkg-agent.js').DKGAgent | undefined;

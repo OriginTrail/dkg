@@ -2,34 +2,19 @@
 import { openSnapshotNativeStore } from './snapshot-native-store.js';
 import { nativeCheckpointProperties } from './snapshot-native-properties.js';
 import { constants } from 'node:fs';
-import { createHash } from 'node:crypto';
 import { copyFile, mkdir, open, statfs } from 'node:fs/promises';
-import { availableParallelism, totalmem } from 'node:os';
+import { CHECKPOINT_PROFILE as PROFILE, assertCheckpointMemory, checkpointJavaArguments } from './snapshot-checkpoint-profile.js';
 import { isAbsolute, join } from 'node:path';
 import { BlazegraphStore } from '@origintrail-official/dkg-storage';
 import type { PreparedSnapshotCheckpoint, NativeSnapshotCheckpointReport } from './snapshot-checkpoint-contract.js';
-import { checkpointAssetPath, checkpointSha256, syncCheckpointDirectory, writeCheckpointFile } from './snapshot-checkpoint-files.js';
+import { checkpointAssetPath, checkpointSha256, readPinnedCheckpointFile, nativeCheckpointShaFile, syncCheckpointDirectory, writeCheckpointFile } from './snapshot-checkpoint-files.js';
 import { startSnapshotNativeProcess } from './snapshot-native-process.js';
 import { auditSnapshotCheckpoint } from './snapshot-checkpoint-audit.js';
 
-const RESERVE = 7 * 2 ** 30;
-
-export async function nativeCheckpointShaFile(path: string): Promise<string> {
-  const hash = createHash('sha256');
-  const input = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try { for await (const chunk of input.createReadStream({ autoClose: false })) hash.update(chunk); }
-  finally { await input.close(); }
-  return hash.digest('hex');
-}
+// Retain the existing deep-import export; runtime consumers import the file layer directly.
+export { nativeCheckpointShaFile } from './snapshot-checkpoint-files.js';
 async function copyPinned(source: string, target: string, digest: string, max: number) {
-  const input = await open(source, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = await input.stat();
-    if (!stat.isFile() || stat.size > max) throw new Error('Unsafe checkpoint load input');
-    const bytes = await input.readFile();
-    if (checkpointSha256(bytes) !== digest) throw new Error('Checkpoint load input changed');
-    await writeCheckpointFile(target, bytes);
-  } finally { await input.close(); }
+  await writeCheckpointFile(target, await readPinnedCheckpointFile(source, digest, max, 'load input'));
 }
 /** Build only a new, private, unpublished journal. Existing stores and configs are never replaced. */
 export async function buildNativeSnapshotCheckpoint(prepared: PreparedSnapshotCheckpoint, options: {
@@ -38,15 +23,14 @@ export async function buildNativeSnapshotCheckpoint(prepared: PreparedSnapshotCh
   assertInventoryCurrent(): Promise<void>;
 }): Promise<NativeSnapshotCheckpointReport> {
   const { directory, manifest } = prepared;
-  const constrained = process.constrainedMemory();
-  if (Math.min(totalmem(), constrained || Infinity) < 4 * 2 ** 30) throw new Error('Native bootstrap requires a 4 GiB memory allowance; use incremental recovery');
+  assertCheckpointMemory();
   if (!isAbsolute(options.java) || !isAbsolute(options.jar) || !/^[a-f0-9]{64}$/.test(options.jarSha256))
     throw new Error('Native checkpoint requires an explicit pinned Java/Blazegraph runtime');
   if (await nativeCheckpointShaFile(options.jar) !== options.jarSha256) throw new Error('Native checkpoint runtime hash mismatch');
   if (manifest.state !== 'verified-unpublished' || !manifest.assets.length
-    || manifest.plainBytes > 8 * 2 ** 30 || manifest.encodedBytes > 2 ** 30) throw new Error('Invalid checkpoint build profile');
+    || manifest.plainBytes > PROFILE.maxPlainBytes || manifest.encodedBytes > PROFILE.maxEncodedBytes) throw new Error('Invalid checkpoint build profile');
   const remaining = manifest.deadline - Date.now();
-  if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > 3_600_000) throw new Error('Checkpoint job deadline exceeded');
+  if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > PROFILE.jobTimeoutMs) throw new Error('Checkpoint job deadline exceeded');
   const abort = new AbortController();
   const signal = AbortSignal.any([options.signal, abort.signal]);
   const timer = setTimeout(() => abort.abort(new Error('Checkpoint job deadline exceeded')), remaining);
@@ -56,7 +40,7 @@ export async function buildNativeSnapshotCheckpoint(prepared: PreparedSnapshotCh
   const guard = async () => {
     signal.throwIfAborted();
     const disk = await statfs(directory);
-    if (disk.bavail * disk.bsize <= RESERVE) throw new Error('Checkpoint disk reserve unavailable');
+    if (disk.bavail * disk.bsize <= PROFILE.diskReserveBytes) throw new Error('Checkpoint disk reserve unavailable');
   };
   let monitorBusy = false;
   const monitor = setInterval(() => {
@@ -67,7 +51,7 @@ export async function buildNativeSnapshotCheckpoint(prepared: PreparedSnapshotCh
   try {
     await guard(); await options.assertInventoryCurrent(); signal.throwIfAborted();
     const disk = await statfs(directory);
-    if (disk.bavail * disk.bsize <= RESERVE + 3 * manifest.plainBytes + manifest.encodedBytes)
+    if (disk.bavail * disk.bsize <= PROFILE.diskReserveBytes + 3 * manifest.plainBytes + manifest.encodedBytes)
       throw new Error('Insufficient space for isolated checkpoint journal and retained inputs');
     await mkdir(folder, { mode: 0o700 });
     const pinnedJar = join(folder, 'runtime.jar');
@@ -93,7 +77,7 @@ export async function buildNativeSnapshotCheckpoint(prepared: PreparedSnapshotCh
     const properties = nativeCheckpointProperties(journal);
     await writeCheckpointFile(join(folder, 'load.properties'), properties);
     await writeCheckpointFile(join(folder, 'audit.properties'), properties + 'com.bigdata.journal.AbstractJournal.readOnly=true\n');
-    const java = ['-Xms256m', '-Xmx3g', `-XX:ActiveProcessorCount=${Math.min(4, availableParallelism())}`];
+    const java = checkpointJavaArguments();
     const started = Date.now();
     // Never enumerate the directory: files such as macOS AppleDouble sidecars are not authenticated inputs.
     // Java's argument file also avoids argv limits for the bounded 100,000-asset profile.

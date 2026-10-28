@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createServer } from 'node:net';
-import { availableParallelism } from 'node:os';
+import { checkpointJavaArguments } from './snapshot-checkpoint-profile.js';
 import { setTimeout as delay } from 'node:timers/promises';
 import { BlazegraphStore } from '@origintrail-official/dkg-storage';
 import { startSnapshotNativeProcess } from './snapshot-native-process.js';
@@ -29,8 +29,7 @@ export async function openSnapshotNativeStore(options: {
   const { signal } = options;
   signal.throwIfAborted();
   const port = await choosePort();
-  const owned = await startSnapshotNativeProcess(options.java, ['-Xms256m', '-Xmx3g',
-    `-XX:ActiveProcessorCount=${Math.min(4, availableParallelism())}`, '-Djetty.host=127.0.0.1',
+  const owned = await startSnapshotNativeProcess(options.java, [...checkpointJavaArguments(), '-Djetty.host=127.0.0.1',
     `-Djetty.port=${port}`, `-Dbigdata.propertyFile=${options.properties}`, '-jar', options.jar],
   options.folder, options.log, signal);
   try {

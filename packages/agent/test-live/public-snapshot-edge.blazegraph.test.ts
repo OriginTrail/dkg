@@ -1,4 +1,6 @@
-import { expect, it } from 'vitest';
+import { expect, it, vi } from 'vitest';
+import { ethers } from 'ethers';
+import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { buildNativeSnapshotCheckpoint, nativeCheckpointShaFile } from '../src/snapshot-native-build.js';
 import { createFreshPublicCheckpointEdge } from '../src/snapshot-fresh-edge.js';
 import { resumePublicCheckpointEdge } from '../src/snapshot-resume-edge.js';
@@ -20,6 +22,18 @@ it('activates a real Edge, imports an inventory addition on restart, and rejects
     const fresh = await createFreshPublicCheckpointEdge({ config: f.config, sync: f.sync, runtime, native, prepared, signal });
     agent = fresh.agent;
     expect(fresh.result).toMatchObject({ current: true, assets: 2, committed: 2, alreadyPresent: 2 });
+    const other = 'another-checkpoint-public-graph';
+    await f.config.chainAdapter.createOnChainContextGraph({ accessPolicy: 0, publishPolicy: 1, nameHash: ethers.id(other) });
+    const read = vi.spyOn(f.config.chainAdapter, 'readPublicGraphSnapshot');
+    read.mockResolvedValueOnce(sealPublicGraphSnapshot({ ...f.initial.snapshot,
+      contextGraphId: other, onChainId: '15', nameHash: ethers.id(other), assets: [] }));
+    // Ordinary empty-graph sync still crosses real authority, admission and completion paths.
+    read.mockResolvedValueOnce(sealPublicGraphSnapshot({ ...f.initial.snapshot,
+      contextGraphId: other, onChainId: '15', nameHash: ethers.id(other), assets: [] }));
+    await expect(agent.syncPublicGraphSnapshot({ ...f.sync, contextGraphId: other, onChainId: '15', signal }))
+      .resolves.toMatchObject({ current: true, assets: 0 });
+    expect(agent.getSubscribedContextGraphs().get(other)?.subscribed).toBe(true);
+    read.mockRestore();
     await agent.stop(); agent = undefined;
     f.setInventory(3);
     const resumed = await resumePublicCheckpointEdge({ config: f.config, sync: f.sync, runtime, signal }); agent = resumed.agent;

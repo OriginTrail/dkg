@@ -1,29 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
-import { constants } from 'node:fs';
-import { mkdir, open } from 'node:fs/promises';
+import { mkdir } from 'node:fs/promises';
 import { join } from 'node:path';
 import { gzipBounded, buildKnowledgeAssetUalFromOnChainIdV1 } from '@origintrail-official/dkg-core';
 import { quadToBlazegraphNQuad } from '@origintrail-official/dkg-storage';
 import { PublicSnapshotEvidence, coreTrustedGraphQuads } from './public-snapshot-evidence.js';
 import { withSnapshotVerificationPool } from './snapshot-verification-pool.js';
 import { decodeNegotiatedExactSyncResponse } from './sync/wire-compression.js';
-import { checkpointAssetPath, checkpointSha256, syncCheckpointDirectory, writeCheckpointFile,
+import { checkpointAssetPath, checkpointSha256, readPinnedCheckpointFile, syncCheckpointDirectory, writeCheckpointFile,
   type SnapshotCheckpointEntry } from './snapshot-checkpoint-files.js';
 
 export interface VerifiedSnapshotCheckpointAsset {
   index: number; ual: string; graph: string; metaGraph: string; root: string; version: string;
   publicQuads: number; dataSha256: string; metadataSha256: string;
-}
-
-async function readPinnedFile(path: string, expected: string, maxBytes: number): Promise<Buffer> {
-  const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-  try {
-    const stat = await file.stat();
-    if (!stat.isFile() || stat.size > maxBytes) throw new Error('Unsafe checkpoint input');
-    const bytes = await file.readFile();
-    if (checkpointSha256(bytes) !== expected) throw new Error('Checkpoint input changed');
-    return bytes;
-  } finally { await file.close(); }
 }
 
 /** The result is an isolated import candidate; it confers no live Edge coverage. */
@@ -51,8 +39,8 @@ export async function verifySnapshotCheckpoint(options: {
         const index = next++;
         if (index >= entries.length) return;
         const entry = entries[index]!;
-        const body = await readPinnedFile(checkpointAssetPath(directory, index, 'body'), entry.bodySha256, 4 * 1024 * 1024);
-        const metadata = await readPinnedFile(checkpointAssetPath(directory, index, 'meta'), entry.metadataSha256, 66_000);
+        const body = await readPinnedCheckpointFile(checkpointAssetPath(directory, index, 'body'), entry.bodySha256, 4 * 1024 * 1024);
+        const metadata = await readPinnedCheckpointFile(checkpointAssetPath(directory, index, 'meta'), entry.metadataSha256, 66_000);
         const decoded = await decodeNegotiatedExactSyncResponse(body, { allowCompression: true, signal });
         if (decoded.bytes.length !== entry.plainBytes) throw new Error('Checkpoint expanded size mismatch');
         const asset = await lane.verify({ assetIndex: index, assetUal: entry.ual,

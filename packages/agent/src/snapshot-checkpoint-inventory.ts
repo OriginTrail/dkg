@@ -40,6 +40,9 @@ export class CheckpointInventory {
       return new CheckpointInventory(folder, historicalObservation(JSON.parse(await file.readFile('utf8'))));
     } finally { await file.close(); }
   }
+  isBoundTo(observation: PublicSnapshotObservation): boolean {
+    return observation.snapshot.contextGraphId === this.previous.snapshot.contextGraphId;
+  }
   async advance(fresh: PublicSnapshotObservation): Promise<void> {
     assertPublicSnapshotProgress(this.previous, fresh);
     if (fresh.snapshot.snapshotDigest === this.previous.snapshot.snapshotDigest) return;
@@ -59,5 +62,5 @@ export function attachCheckpointInventory(agent: object, inventory: CheckpointIn
 }
 export function checkpointObservationAcceptor(agent: object): PublicSnapshotObservationAcceptor | undefined {
   const inventory = guards.get(agent);
-  return inventory ? { accept: observation => inventory.advance(observation) } : undefined;
+  return inventory ? { accept: async observation => { if (inventory.isBoundTo(observation)) await inventory.advance(observation); } } : undefined;
 }

@@ -21,6 +21,7 @@ beforeEach(() => {
   vi.mocked(startSnapshotNativeProcess).mockImplementation(async (_java, args, cwd) => {
     if (args[0]?.endsWith('loader.args')) {
       const text = await readFile(join(cwd, 'loader.args'), 'utf8');
+      expect(text.split('\n').slice(0, 2)).toEqual(['"-Xms256m"', '"-Xmx3g"']);
       expect(text).toContain('com.bigdata.rdf.store.DataLoader');
       expect(text).toContain('000000.verified.nq.gz');
       expect(text).toContain('000000.verified.meta.nq');

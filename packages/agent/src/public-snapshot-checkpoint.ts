@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CHECKPOINT_PROFILE as PROFILE } from './snapshot-checkpoint-profile.js';
 import type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest } from './snapshot-checkpoint-contract.js';
 import { assertPublicSnapshotScopeAndAnchor } from './public-snapshot-scope.js';
 import { readFile } from 'node:fs/promises';
@@ -31,10 +32,10 @@ export async function preparePublicSnapshotCheckpoint(host: {
   const snapshot = initial.snapshot;
   const uals = snapshot.assets.map(a => buildKnowledgeAssetUalFromOnChainIdV1(snapshot.chainId, snapshot.assetStorage, BigInt(a.id)));
   // A finite first-bootstrap profile. Larger graphs continue to use incremental recovery.
-  if (!uals.length || uals.length > 100_000) throw new Error('Checkpoint inventory outside bootstrap limits');
+  if (!uals.length || uals.length > PROFILE.maxAssets) throw new Error('Checkpoint inventory outside bootstrap limits');
   const entries: SnapshotCheckpointEntry[] = [];
-  const budget = { encodedBytes: 0, plainBytes: 0, maxEncodedBytes: 2 ** 30,
-    maxPlainBytes: 8 * 2 ** 30, minFreeBytes: 7 * 2 ** 30 };
+  const budget = { encodedBytes: 0, plainBytes: 0, maxEncodedBytes: PROFILE.maxEncodedBytes,
+    maxPlainBytes: PROFILE.maxPlainBytes, minFreeBytes: PROFILE.diskReserveBytes };
   let selected: string | undefined;
   for await (const peers of options.peerBatches()) {
     for (const peer of peers) {

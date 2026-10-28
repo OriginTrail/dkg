@@ -123,3 +123,18 @@ it('pins a later observation before partial recovery and retains the addition af
   await expect(restarted.advance({ ...initial, snapshot: sealPublicGraphSnapshot({ ...snapshot, blockNumber: '12' }) }))
     .rejects.toThrow('removed');
 });
+
+it('allows ordinary sync of another graph without replacing the checkpoint inventory floor', async () => {
+  const { agent, directory, options, read, snapshot } = await fixture();
+  const prior = { mode: 'rpc-only' as const, sourceCore: null, snapshot };
+  attachCheckpointInventory(agent, await CheckpointInventory.create(directory, prior));
+  const other = 'other-public-graph';
+  const next = sealPublicGraphSnapshot({ ...snapshot, contextGraphId: other, onChainId: '2', nameHash: ethers.id(other) });
+  read.mockResolvedValue(next);
+  await expect(agent.syncPublicGraphSnapshot({ ...options, contextGraphId: other, onChainId: '2' }))
+    .resolves.toMatchObject({ current: true, assets: 0 });
+  expect(agent.getSubscribedContextGraphs().get(other)?.subscribed).toBe(true);
+  expect(JSON.parse(await readFile(join(directory, 'AUTHENTICATED-INVENTORY.json'), 'utf8'))).toEqual(prior);
+  read.mockResolvedValue(sealPublicGraphSnapshot({ ...snapshot, blockNumber: '9' }));
+  await expect(agent.syncPublicGraphSnapshot(options)).rejects.toThrow('anchor');
+});

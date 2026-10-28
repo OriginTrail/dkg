@@ -5,7 +5,8 @@ import { constants } from 'node:fs';
 import { lstat, open, readFile, statfs } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
 import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
-import { nativeCheckpointShaFile } from './snapshot-native-build.js';
+import { nativeCheckpointShaFile } from './snapshot-checkpoint-files.js';
+import { CHECKPOINT_PROFILE as PROFILE } from './snapshot-checkpoint-profile.js';
 import { nativeCheckpointProperties } from './snapshot-native-properties.js';
 import { startCheckpointEdgeSession, type CheckpointEdgeConfig } from './snapshot-checkpoint-edge-session.js';
 
@@ -39,13 +40,13 @@ export async function resumePublicCheckpointEdge(options: {
     || await readFile(join(folder, 'store.properties'), 'utf8') !== nativeCheckpointProperties(join(folder, 'store.jnl')))
     throw new Error('Checkpoint Edge runtime changed');
   const disk = await statfs(folder);
-  if (disk.bavail * disk.bsize <= 7 * 2 ** 30) throw new Error('Checkpoint disk reserve unavailable');
+  if (disk.bavail * disk.bsize <= PROFILE.diskReserveBytes) throw new Error('Checkpoint disk reserve unavailable');
   const inventory = await CheckpointInventory.load(folder);
   const lifetime = new AbortController();
   const cancel = () => lifetime.abort(options.signal.reason);
   options.signal.addEventListener('abort', cancel, { once: true });
   if (options.signal.aborted) cancel();
-  const timer = setTimeout(() => lifetime.abort(new Error('Checkpoint catch-up deadline exceeded')), 3_600_000);
+  const timer = setTimeout(() => lifetime.abort(new Error('Checkpoint catch-up deadline exceeded')), PROFILE.jobTimeoutMs);
   try { return await startCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal, inventory); }
   finally { clearTimeout(timer); options.signal.removeEventListener('abort', cancel); }
 }
