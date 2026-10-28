@@ -4,7 +4,7 @@ import { ethers } from 'ethers';
 import { MockChainAdapter, type CanonicalFinalizationReceipt } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { buildAssertionSealQuads, contextGraphAssertionUri, contextGraphMetaUri,
-  contextGraphPrivateUri } from '@origintrail-official/dkg-core';
+  contextGraphPrivateUri, createOperationContext } from '@origintrail-official/dkg-core';
 import { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1 } from '../src/confirmed-catalog-obligation-error.js';
 import { DKGAgent } from '../src/index.js';
 import { recoverConfirmedCatalogObligationV1 } from '../src/internal/confirmed-catalog-obligation-recovery.js';
@@ -12,10 +12,10 @@ import { authorSealV1, assertionSealV1, AUTHOR, CONTEXT_GRAPH_ID } from './suppo
 
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close(); });
-async function fixture(archived = false, assertionVersion = '1') {
+async function fixture(archived = false, assertionVersion = '1', owner = AUTHOR) {
   const store = new OxigraphStore(); stores.push(store);
   const seal = await authorSealV1(103n, assertionVersion); const raw = assertionSealV1(seal);
-  const name = 'confirmed-recovery'; const subject = contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, name);
+  const name = 'confirmed-recovery'; const subject = contextGraphAssertionUri(CONTEXT_GRAPH_ID, owner, name);
   const rows = buildAssertionSealQuads({ assertionUri: subject, metaGraph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
     merkleRoot: raw.merkleRoot, authorAddress: raw.authorAddress, authorAttestationR: raw.authorAttestationR,
     authorAttestationVS: raw.authorAttestationVS, authorSchemeVersion: raw.authorSchemeVersion,
@@ -39,11 +39,31 @@ async function fixture(archived = false, assertionVersion = '1') {
   const ports: Parameters<typeof recoverConfirmedCatalogObligationV1>[1] = { chain, store, signal: controller.signal,
     resolveBinding: async () => ({ onChainId: '1' }), assertCurrent: () => controller.signal.throwIfAborted(), observe };
   const evidence = { version: 1 as const, contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: name,
-    subGraphName: null, seal, transactionHash: txHash, blockNumber: receipt.blockNumber };
+    assertionUri: subject, subGraphName: null, seal, transactionHash: txHash, blockNumber: receipt.blockNumber };
   return { store, chain, submit, observe, controller, ports, evidence, receipt };
 }
 
 describe('caller-retained confirmed catalog evidence', () => {
+  it.each([false, true])('retains a distinct lifecycle owner through JSON recovery (archived=%s)', async archived => {
+    const owner = `0x${'77'.repeat(20)}` as typeof AUTHOR;
+    const f = await fixture(archived, '1', owner);
+    const error = new ConfirmedCatalogObligationErrorV1({
+      catalogObligationRequired: true, contextGraphId: CONTEXT_GRAPH_ID,
+      assertionCoordinate: f.evidence.assertionCoordinate, assertionUri: f.evidence.assertionUri,
+      subGraphName: null, seal: assertionSealV1(f.evidence.seal),
+      ctx: createOperationContext('publishFromSWM'), publicationLabel: 'publish',
+    }, f.receipt, new Error('marker write failed'));
+    const retained = parseConfirmedCatalogObligationRecoveryV1(JSON.parse(JSON.stringify(error.recoveryEvidence)));
+    expect(retained.seal.authorAddress).not.toBe(owner);
+    await recoverConfirmedCatalogObligationV1(retained, f.ports);
+    expect(f.observe).toHaveBeenCalledWith(expect.objectContaining({ assertionUri: f.evidence.assertionUri }));
+    expect(f.submit).not.toHaveBeenCalled();
+    f.observe.mockClear();
+    const wrongOwner = { ...retained, assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, retained.assertionCoordinate) };
+    await expect(recoverConfirmedCatalogObligationV1(wrongOwner, f.ports)).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
+    expect(f.observe).not.toHaveBeenCalled();
+  });
+
   it.each([false, true])('authenticates the exact %s archived local seal without submitting a transaction', async archived => {
     const f = await fixture(archived);
     await recoverConfirmedCatalogObligationV1(f.evidence, f.ports);
@@ -113,6 +133,7 @@ describe('caller-retained confirmed catalog evidence', () => {
       { ...f.evidence, seal: inheritedSeal }, null, [], { ...f.evidence, extra: true }, accessor,
       { ...f.evidence, seal: accessorSeal }, { ...f.evidence, version: 2 },
       { ...f.evidence, transactionHash: '0x1234' }, { ...f.evidence, blockNumber: 1.5 },
+      { ...f.evidence, assertionUri: 'malformed' }, { ...f.evidence, assertionUri: contextGraphAssertionUri('foreign', AUTHOR, f.evidence.assertionCoordinate) },
       { ...f.evidence, subGraphName: 'named' }, { ...f.evidence, contextGraphId: 1 },
       { ...f.evidence, seal: { ...f.evidence.seal, reservedKaId: '-1' } }]) {
       await expect(DKGAgent.prototype.recoverRfc64ConfirmedCatalogObligationV1.call(

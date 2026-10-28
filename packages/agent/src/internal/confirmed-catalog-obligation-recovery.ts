@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
   computeCanonicalGraphScopedAuthorSealDigestV1,
-  createOperationContext, contextGraphAssertionUri, type ContextGraphIdV1,
+  createOperationContext, parseContextGraphAssertionUri, type ContextGraphIdV1,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -33,11 +33,13 @@ export async function recoverConfirmedCatalogObligationV1(
   ports.assertCurrent();
   const { chain, signal } = ports;
   if (!chain.resolveCanonicalFinalizationReceipt || !chain.getKAContextGraphId || !chain.getDKGKnowledgeAssetsAddress) throw invalidEvidence();
+  const coordinate = parseContextGraphAssertionUri(evidence.assertionUri);
+  if (!coordinate || coordinate.scope !== evidence.contextGraphId || coordinate.name !== evidence.assertionCoordinate) throw invalidEvidence();
   const query = { store: ports.store, contextGraphId: evidence.contextGraphId as ContextGraphIdV1,
-    agentAddress: evidence.seal.authorAddress, assertionCoordinate: evidence.assertionCoordinate,
+    agentAddress: coordinate.agentAddress, assertionCoordinate: evidence.assertionCoordinate,
     source: 'agent.confirmedCatalogRecovery.seal', signal };
   const digest = computeCanonicalGraphScopedAuthorSealDigestV1(evidence.seal);
-  const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({ ...query, sealDigest: digest });
+  const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({ ...query, sealDigest: digest, confirmedPublicationAuthor: evidence.seal.authorAddress });
   if (candidate === undefined) throw invalidEvidence();
   const binding = await ports.resolveBinding();
   if (binding === null) throw invalidEvidence();
@@ -64,7 +66,7 @@ export async function recoverConfirmedCatalogObligationV1(
   ports.assertCurrent();
   await ports.observe({ catalogObligationRequired: true, contextGraphId: evidence.contextGraphId,
     assertionCoordinate: evidence.assertionCoordinate, subGraphName: null,
-    seal: candidate.seal, assertionUri: contextGraphAssertionUri(evidence.contextGraphId, candidate.coordinate.agentAddress, evidence.assertionCoordinate),
+    seal: candidate.seal, assertionUri: evidence.assertionUri,
     ctx: createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
 }
 

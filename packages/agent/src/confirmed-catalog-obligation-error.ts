@@ -2,7 +2,7 @@
 
 import {
   assertAssertionCoordinateV1, assertContextGraphIdV1, assertCanonicalGraphScopedAuthorSealV1, snapshotExactDataRecord,
-  canonicalGraphScopedAuthorSealFromAssertionSealV1,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1, parseContextGraphAssertionUri,
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
@@ -23,6 +23,7 @@ export interface ConfirmedCatalogObligationRecoveryV1 {
   readonly version: 1;
   readonly contextGraphId: string;
   readonly assertionCoordinate: string;
+  readonly assertionUri: string;
   readonly subGraphName: string | null;
   readonly seal: Readonly<CanonicalGraphScopedAuthorSealV1>;
   readonly transactionHash: string;
@@ -33,20 +34,24 @@ export interface ConfirmedCatalogObligationRecoveryV1 {
 export function parseConfirmedCatalogObligationRecoveryV1(input: unknown): Readonly<ConfirmedCatalogObligationRecoveryV1> {
   try {
     const value = snapshotExactDataRecord(input, ['version', 'contextGraphId', 'assertionCoordinate',
-      'subGraphName', 'seal', 'transactionHash', 'blockNumber'], 'confirmed catalog recovery');
+      'assertionUri', 'subGraphName', 'seal', 'transactionHash', 'blockNumber'], 'confirmed catalog recovery');
     const seal = snapshotExactDataRecord(value.seal,
       typeof value.seal === 'object' && value.seal !== null ? Object.getOwnPropertyNames(value.seal) : [],
       'Confirmed catalog seal');
     assertContextGraphIdV1(value.contextGraphId, 'confirmed recovery contextGraphId');
     assertAssertionCoordinateV1(value.assertionCoordinate, 'confirmed recovery assertionCoordinate');
     assertCanonicalGraphScopedAuthorSealV1(seal);
+    const coordinate = typeof value.assertionUri === 'string' ? parseContextGraphAssertionUri(value.assertionUri) : undefined;
+    if (!coordinate || coordinate.scope !== value.contextGraphId || coordinate.name !== value.assertionCoordinate) {
+      throw new Error('Invalid recovery lifecycle coordinate');
+    }
     if (value.version !== 1 || value.subGraphName !== null || typeof value.transactionHash !== 'string'
       || !/^0x[0-9a-fA-F]{64}$/.test(value.transactionHash)
       || typeof value.blockNumber !== 'number' || !Number.isSafeInteger(value.blockNumber) || value.blockNumber < 0) {
       throw new Error('Invalid recovery scalars');
     }
     return Object.freeze({ version: 1, contextGraphId: value.contextGraphId,
-      assertionCoordinate: value.assertionCoordinate, subGraphName: null,
+      assertionCoordinate: value.assertionCoordinate, assertionUri: value.assertionUri as string, subGraphName: null,
       seal: Object.freeze(seal), transactionHash: value.transactionHash, blockNumber: value.blockNumber });
   } catch (cause) {
     throw Object.assign(new Error('Invalid confirmed catalog recovery evidence', { cause }),
@@ -80,7 +85,7 @@ export class ConfirmedCatalogObligationErrorV1 extends Error {
   get recoveryEvidence(): Readonly<ConfirmedCatalogObligationRecoveryV1> | undefined {
     if (this.transaction === undefined) return undefined;
     return Object.freeze({ version: 1, contextGraphId: this.retry.contextGraphId,
-      assertionCoordinate: this.retry.assertionCoordinate, subGraphName: this.retry.subGraphName ?? null,
+      assertionCoordinate: this.retry.assertionCoordinate, assertionUri: this.retry.assertionUri, subGraphName: this.retry.subGraphName ?? null,
       seal: this.seal, transactionHash: this.transaction.txHash, blockNumber: this.transaction.blockNumber });
   }
 

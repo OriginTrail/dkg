@@ -246,39 +246,36 @@ export class FinalizedPrivatePlacementOwnerV1 {
     }
   }
 
-  /** One pass-local outcome owns authority, durable reset and graph failure containment. */
+  #releaseLaneWaiters(contextGraphId: ContextGraphIdV1, inFlightKey?: string): void {
+    for (const sibling of this.#lanes.get(contextGraphId)?.entries ?? []) {
+      const key = finalizedPrivateRepairKeyV1(sibling.repair);
+      if (key !== inFlightKey) this.#waiters.release(key);
+    }
+  }
+
+  /** A local authority refusal must not block a sibling with a current lane. */
+  #unavailableLane(repair: Rfc64FinalizedPrivatePlacementRepairV1, error: unknown, inFlightKey?: string): LaneReconciliation {
+    if (this.#lanes.get(repair.contextGraphId)?.resetPending) {
+      // Preserve old evidence until an available sibling can commit the reset.
+      this.#releaseLaneWaiters(repair.contextGraphId, inFlightKey);
+      return { kind: 'blocked', resetCommitted: false };
+    }
+    return { kind: 'authority-unavailable', resetCommitted: false, error };
+  }
+
+  /** Authority classification and graph-wide durable reset failures are separate. */
   #reconcileLane(repair: Rfc64FinalizedPrivatePlacementRepairV1, blockedGraphs: Set<ContextGraphIdV1>, inFlightKey?: string): LaneReconciliation {
     const contextGraphId = repair.contextGraphId;
     if (blockedGraphs.has(contextGraphId)) return { kind: 'blocked', resetCommitted: false };
+    let decision: FinalizedPlacementDecisionV1;
+    try { decision = this.#dependencies.resolveFinalizedPlacementDecision(repair); }
+    catch (error) { return this.#unavailableLane(repair, error, inFlightKey); }
+    if (decision.status === 'unavailable') return this.#unavailableLane(repair, decision.error, inFlightKey);
     try {
-      let decision: FinalizedPlacementDecisionV1;
-      try {
-        decision = this.#dependencies.resolveFinalizedPlacementDecision(repair);
-        if (decision.status === 'unavailable') throw decision.error;
-      }
-      catch (error) {
-        // Do not overwrite failure evidence while its reset is uncommitted.
-        // Settle waiters, but leave available siblings eligible to retry that
-        // reset: one legacy policy conflict does not block the whole graph.
-        if (this.#lanes.get(contextGraphId)?.resetPending) {
-          for (const sibling of this.#lanes.get(contextGraphId)!.entries) {
-            const key = finalizedPrivateRepairKeyV1(sibling.repair);
-            if (key !== inFlightKey) this.#waiters.release(key);
-          }
-          return { kind: 'blocked', resetCommitted: false };
-        }
-        return { kind: 'authority-unavailable', resetCommitted: false, error };
-      }
       return { kind: decision.status === 'ready' ? 'active' : 'inactive', resetCommitted: this.#commitLaneReset(repair, decision) };
-    }
-    catch (error) {
+    } catch (error) {
       blockedGraphs.add(contextGraphId);
-      // Settle earlier cooldown waiters and later siblings too. Keeping a due
-      // waiter would reschedule a failing graph immediately without backoff.
-      for (const sibling of this.#lanes.get(contextGraphId)?.entries ?? []) {
-        const key = finalizedPrivateRepairKeyV1(sibling.repair);
-        if (key !== inFlightKey) this.#waiters.release(key);
-      }
+      this.#releaseLaneWaiters(contextGraphId, inFlightKey);
       this.#warn('catalog_private_repair_lane_reset_failed', error);
       return { kind: 'blocked', resetCommitted: false };
     }

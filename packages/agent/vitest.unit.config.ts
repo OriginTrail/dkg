@@ -18,6 +18,8 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/finalized-placement-decision.test.ts",
+      "test/finalized-placement-mixed-lanes.test.ts",
       "test/held-metadata-controls.test.ts",
       "test/recipient-key-route-scopes.test.ts",
       "test/write-preflight-attribution.test.ts",
