@@ -41,16 +41,6 @@ import { promptStoreBackend, applyStoreFlagsToConfig } from '../store-wizard.js'
 import { runConfiguredSourceWorker } from '../source-worker-runner.js';
 import { batchEntityQuads } from '../batching.js';
 import {
-  runDaemon,
-  checkForNpmVersionUpdate,
-  performNpmUpdate,
-  performNpmUpdateEdge,
-  getCurrentCliVersion,
-  DAEMON_EXIT_CODE_RESTART,
-  resolveStandaloneInstall,
-  decodeForcedExitCode,
-} from '../daemon.js';
-import {
   isLivenessProbeEnabled,
   startLivenessWatcher,
   LIVENESS_CONSECUTIVE_FAILURES_TO_KILL,
@@ -264,6 +254,7 @@ program
   .command('daemon-worker', { hidden: true })
   .description('Internal: run daemon worker process')
   .action(async () => {
+    const { runDaemon } = await import('../daemon.js');
     await runDaemon(false);
   });
 
@@ -271,6 +262,7 @@ program
   .command('daemon-foreground-worker', { hidden: true })
   .description('Internal: run foreground daemon worker process')
   .action(async () => {
+    const { runDaemon } = await import('../daemon.js');
     await runDaemon(true);
   });
 
