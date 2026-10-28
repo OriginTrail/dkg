@@ -1,3 +1,5 @@
+import { prepareDurableHoldingsPhase } from '../src/sync/requester/durable-holdings-phase.js';
+import type { HeldAssetMembership } from '../src/sync/requester/held-assets-contracts.js';
 import { readHeldGraphScopedAssets as readHeldEvidence } from '../src/sync/requester/stored-graph-assets.js';
 import { createDurableHeldStore } from '../src/durable-recovery-held-store.js';
 import { StoreContentFence } from '../src/internal/store-content-fence.js';
@@ -27,7 +29,6 @@ import { createDurableSyncAccumulator, finalizeDurableSyncCompletion } from '../
 import {
   describeDurableHoldingsPlan,
   planDurableDataFromHoldings,
-  planDurableDataFromLocalHoldings,
   currentHeldGraphScopedAssetsConfirmer, HeldAssetsConfirmationRun,
   HELD_CHAIN_CHECK_BUDGET_MS,
   HeldGenerationNotCurrentError,
@@ -41,6 +42,27 @@ import { partitionVerifiedGraphScopedAssets } from '../src/sync/requester/verifi
 
 const CG = 'held-generation-cg';
 const stores: OxigraphStore[] = [];
+
+function holdingsInput(input: {
+  contextGraphId: string;
+  manifest: GraphScopedDurableManifestPlan;
+  options: DurableHoldingsOptions;
+  held: HeldAssetMembership;
+  confirmCurrent: ConfirmHeldAssetsCurrent;
+  signal?: AbortSignal;
+  logWarn: (message: string) => void;
+}): Parameters<typeof prepareDurableHoldingsPhase>[0] {
+  return {
+    context: { ctx: createOperationContext('sync'), signal: input.signal,
+      logWarn: (_ctx, message) => input.logWarn(message) },
+    contextGraphId: input.contextGraphId,
+    manifest: input.manifest,
+    recovery: { meta: { requesterScope: 'durable-recovery-meta:held-tests' },
+      holdings: input.options, held: { confirmCurrent: input.confirmCurrent } },
+    settlement: { proveHoldings: async () => ({ held: input.held }), assertCurrent: () => {} },
+  };
+}
+
 
 afterEach(async () => {
   for (const store of stores.splice(0)) await store.close();
@@ -261,13 +283,13 @@ describe('planning a DATA phase from holdings', () => {
   it('hands a fetch-missing plan to the owner and reconsiders holdings after a chain timeout', async () => {
     const manifest = generation(3);
     const channel: DurableHoldingsOptions = { ownerFetchesMissingAssets: true };
-    const outcome = await planDurableDataFromLocalHoldings({
+    const outcome = await prepareDurableHoldingsPhase(holdingsInput({
       contextGraphId: CG,
       manifest,
       options: channel,
       held: new Set(uals(manifest).slice(1)), confirmCurrent: async () => {},
       logWarn: () => {},
-    });
+    }));
     const plan = outcome;
     expect(plan?.kind).toBe('fetch-missing');
     expect(plan?.kind === 'fetch-missing' ? plan.batches : undefined).toEqual([[{ ual: uals(manifest)[0], assertionVersion: '1' }]]);
@@ -275,48 +297,48 @@ describe('planning a DATA phase from holdings', () => {
       .toContain('2 of 3 assets already held; leaving 1 asset(s) (3 rows) to 1 exact request(s)');
 
     const logWarn = vi.fn();
-    const failed = await planDurableDataFromLocalHoldings({
+    const failed = await prepareDurableHoldingsPhase(holdingsInput({
       contextGraphId: CG,
       manifest,
       options: {},
       held: new Set(uals(manifest)), confirmCurrent: async () => { throw new Error('chain timeout'); },
       logWarn,
-    });
+    }));
     expect(failed).toEqual({ kind: 'full', held: 0, continuation: 'reconsider-holdings' });
     expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('chain timeout'));
 
     const aborted = new AbortController();
     aborted.abort(new Error('node stopping'));
-    await expect(planDurableDataFromLocalHoldings({
+    await expect(prepareDurableHoldingsPhase(holdingsInput({
       contextGraphId: CG,
       manifest,
       options: {},
       held: new Set(uals(manifest)), confirmCurrent: async () => {},
       signal: aborted.signal,
       logWarn,
-    })).rejects.toThrow('node stopping');
+    }))).rejects.toThrow('node stopping');
 
     // A held copy the chain shows superseded fails the round instead of falling back to a full pull.
-    await expect(planDurableDataFromLocalHoldings({
+    await expect(prepareDurableHoldingsPhase(holdingsInput({
       contextGraphId: CG,
       manifest,
       options: {},
       held: new Set(uals(manifest)),
       confirmCurrent: async () => { throw new HeldGenerationNotCurrentError('behind the chain'); },
       logWarn,
-    })).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+    }))).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
   });
 
   it('asks the chain only when the plan skips held copies', async () => {
     const manifest = generation(3);
-    const confirmCurrent = vi.fn(async () => {});
-    const plan = (held: readonly string[], ownerFetchesMissingAssets: boolean) => planDurableDataFromLocalHoldings({
+    const confirmCurrent = vi.fn<ConfirmHeldAssetsCurrent>(async () => {});
+    const plan = (held: readonly string[], ownerFetchesMissingAssets: boolean) => prepareDurableHoldingsPhase(holdingsInput({
       contextGraphId: CG,
       manifest,
       options: { ownerFetchesMissingAssets },
       held: new Set(held), confirmCurrent,
       logWarn: () => {},
-    });
+    }));
 
     // Full-graph rounds authenticate everything they fetch, as a first recovery's rounds do.
     expect(await plan(uals(manifest).slice(1), false)).toMatchObject({ kind: 'full' });
@@ -325,7 +347,37 @@ describe('planning a DATA phase from holdings', () => {
     expect(await plan(uals(manifest).slice(1), true)).toMatchObject({ kind: 'fetch-missing' });
     expect(await plan(uals(manifest), true)).toMatchObject({ kind: 'held' });
     expect(confirmCurrent).toHaveBeenCalledTimes(2);
+    expect(confirmCurrent.mock.calls[0]?.[2]).toEqual({ reuseIntermediateConfirmations: true });
+    expect(confirmCurrent.mock.calls[1]?.[2]).toEqual({ reuseIntermediateConfirmations: false });
   });
+
+  it.each(['proof', 'chain', 'reconcile'].flatMap(phase =>
+    ['unavailable', 'cancelled', 'stale', 'invalidated'].map(fault => [phase, fault] as const)))(
+    'preserves the preflight failure policy for %s: %s', async (phase, fault) => {
+      const manifest = generation(3);
+      const held = new Set(uals(manifest));
+      const logWarn = vi.fn();
+      let invalidated = false;
+      const failure = fault === 'stale' ? new HeldGenerationNotCurrentError('generation changed')
+        : Object.assign(new Error('preflight unavailable'), { name: fault === 'cancelled' ? 'AbortError' : 'Error' });
+      const fail = async () => { invalidated = fault === 'invalidated'; throw failure; };
+      const input = holdingsInput({ contextGraphId: CG, manifest, options: {}, held, logWarn,
+        confirmCurrent: phase === 'chain' ? fail : async () => {} });
+      const run = prepareDurableHoldingsPhase({ ...input, settlement: {
+        proveHoldings: phase === 'proof' ? fail : async () => ({ held,
+          reconcile: phase === 'reconcile' ? fail : async () => {} }),
+        assertCurrent: () => { if (invalidated) throw new Error('content proof invalidated'); },
+      } });
+      if (fault === 'unavailable') {
+        await expect(run).resolves.toEqual({ kind: 'full', held: 0, continuation: 'reconsider-holdings' });
+        expect(logWarn).toHaveBeenCalledWith(expect.stringContaining('preflight unavailable'));
+      } else {
+        if (fault === 'invalidated') await expect(run).rejects.toThrow('content proof invalidated');
+        else await expect(run).rejects.toBe(failure);
+        expect(logWarn).not.toHaveBeenCalled();
+      }
+    },
+  );
 
   it('settles a held generation as a completed DATA phase at its terminal boundary', () => {
     const manifest = generation(3);
@@ -559,13 +611,13 @@ describe('holding a copy only while it is current on chain', () => {
     const channel: DurableHoldingsOptions = { ownerFetchesMissingAssets: true };
     const logWarn = vi.fn();
 
-    const plan = await planDurableDataFromLocalHoldings({
+    const plan = await prepareDurableHoldingsPhase(holdingsInput({
       contextGraphId: CG,
       manifest,
       options: channel,
       held: new Set(manifest.descriptors.map((descriptor) => descriptor.ual)), confirmCurrent: holdings,
       logWarn,
-    });
+    }));
 
     // No shortcut this round, and no failure: the round pulls the graph in bounded rounds.
     expect(plan).toMatchObject({ kind: 'full', continuation: 'reconsider-holdings' });

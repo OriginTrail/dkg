@@ -4,7 +4,7 @@ import type { VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.
 import type { GraphOwnedRecoveryContext } from './graph-owned-recovery.js';
 import type { DurableGraphSettlementGuard } from './durable-prefix-proof.js';
 import type { DurableSyncContext } from './durable-sync.js';
-import { planDurableDataFromLocalHoldings, type DurableDataStrategy } from './durable-data-holdings.js';
+import { HeldGenerationNotCurrentError, planDurableDataFromHoldings, type DurableDataStrategy } from './durable-data-holdings.js';
 
 type HoldingsPhaseContext = Pick<DurableSyncContext, 'ctx' | 'signal' | 'logWarn'>;
 
@@ -28,29 +28,27 @@ export async function prepareDurableHoldingsPhase(input: {
   const { context, contextGraphId, manifest, recovery, settlement } = input;
   const held = recovery.held;
   if (!manifest || !held) return fetch('full-graph');
-  let proof;
-  try { proof = await settlement.proveHoldings(manifest, context.signal); }
-  catch (error) {
+  try {
     context.signal?.throwIfAborted();
-    if (error instanceof Error && error.name === 'AbortError') throw error;
-    context.logWarn(context.ctx, `Could not prove held content for "${contextGraphId}": ${String(error)}`);
+    const proof = await settlement.proveHoldings(manifest, context.signal);
+    if (!proof) return fetch('full-graph');
+    const plan = planDurableDataFromHoldings(manifest, proof.held, recovery.holdings.ownerFetchesMissingAssets === true);
+    // Full DATA rounds authenticate every fetched asset; only shortcuts need held-copy chain evidence.
+    if (plan.kind !== 'full') await held.confirmCurrent({
+      contextGraphId, descriptors: manifest.descriptors, signal: context.signal,
+    }, proof.held, { reuseIntermediateConfirmations: plan.kind === 'fetch-missing' });
+    settlement.assertCurrent();
+    if (plan.kind === 'full') return { ...plan, continuation: 'full-graph' };
+    await proof.reconcile?.(context.ctx);
+    settlement.assertCurrent();
+    const descriptors = manifest.descriptors.filter(copy => proof.held.has(copy.ual));
+    return { ...plan, manifest, descriptors };
+  } catch (error) {
+    context.signal?.throwIfAborted();
+    // Invalidated content or ownership must fail the round, even when another preflight operation also failed.
+    settlement.assertCurrent();
+    if (error instanceof HeldGenerationNotCurrentError || (error instanceof Error && error.name === 'AbortError')) throw error;
+    context.logWarn(context.ctx, `Could not establish held content for "${contextGraphId}"; fetching the graph: ${String(error)}`);
     return fetch('reconsider-holdings');
   }
-  if (!proof) return fetch('full-graph');
-  const plan = await planDurableDataFromLocalHoldings({
-    contextGraphId, manifest, options: recovery.holdings, held: proof.held, confirmCurrent: held.confirmCurrent,
-    signal: context.signal, logWarn: message => context.logWarn(context.ctx, message),
-  });
-  settlement.assertCurrent();
-  if (plan.kind === 'full') return plan;
-  try { await proof.reconcile?.(context.ctx); }
-  catch (error) {
-    context.signal?.throwIfAborted(); settlement.assertCurrent();
-    if (error instanceof Error && error.name === 'AbortError') throw error;
-    context.logWarn(context.ctx, `Could not reconcile held content for "${contextGraphId}": ${String(error)}`);
-    return fetch('reconsider-holdings');
-  }
-  settlement.assertCurrent();
-  const descriptors = manifest.descriptors.filter(copy => proof.held.has(copy.ual));
-  return { ...plan, manifest, descriptors };
 }

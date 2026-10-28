@@ -191,43 +191,6 @@ export function planDurableDataFromHoldings(
 }
 
 /**
- * Plan a graph-owned round's DATA phase once its META generation is verified,
- * and leave a `fetch-missing` plan to the owner. A held copy the chain shows
- * superseded fails the round. A chain read that cannot answer plans
- * a retryable full-graph attempt: the round then runs its bounded full-graph rounds as before.
- */
-export async function planDurableDataFromLocalHoldings(input: {
-  readonly contextGraphId: string;
-  readonly manifest: GraphScopedDurableManifestPlan;
-  readonly options: DurableHoldingsOptions;
-  readonly held: HeldAssetMembership;
-  readonly confirmCurrent: ConfirmHeldAssetsCurrent;
-  readonly signal?: AbortSignal;
-  readonly logWarn: (message: string) => void;
-}): Promise<DurableDataStrategy<unknown, { continuation: 'full-graph' | 'reconsider-holdings' }>> {
-  const { contextGraphId, manifest, options, held, confirmCurrent } = input;
-  const request = { contextGraphId, descriptors: manifest.descriptors, signal: input.signal };
-  let plan: DurableDataStrategy;
-  try {
-    input.signal?.throwIfAborted();
-    plan = planDurableDataFromHoldings(manifest, held, options.ownerFetchesMissingAssets === true);
-    // Full-graph rounds authenticate every asset they fetch: only a plan that skips held copies asks the chain.
-    if (plan.kind !== 'full') await confirmCurrent(request, held, {
-      reuseIntermediateConfirmations: plan.kind === 'fetch-missing',
-    });
-  } catch (error) {
-    input.signal?.throwIfAborted();
-    if (error instanceof HeldGenerationNotCurrentError || (error instanceof Error && error.name === 'AbortError')) throw error;
-    input.logWarn(
-      `Could not establish which assets of "${contextGraphId}" this node holds; fetching the graph: `
-        + `${error instanceof Error ? error.message : String(error)}`,
-    );
-    return { kind: 'full', held: 0, continuation: 'reconsider-holdings' };
-  }
-  return plan.kind === 'full' ? { ...plan, continuation: 'full-graph' } : plan;
-}
-
-/**
  * Settle a DATA phase whose whole generation this node already holds: persist
  * the terminal boundary for this peer, as a completed round would, and count
  * the phase as resumed at that boundary and completed. No row is fetched.
