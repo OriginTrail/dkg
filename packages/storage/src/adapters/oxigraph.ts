@@ -1,3 +1,4 @@
+import { oxigraphGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
 import type { QueryOptions } from '../triple-store.js';
 import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
 import oxigraph from 'oxigraph';
@@ -28,7 +29,6 @@ import {
   buildAtomicGraphAndSubjectReplaceUpdate,
   buildAtomicGraphReplaceUpdate,
   buildAtomicSubjectReplaceUpdate,
-  isAtomicGraphReplaceStagingGraph,
 } from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateFromNormalizedV1,
@@ -65,7 +65,7 @@ type OxQuad = oxigraph.Quad;
 
 export class OxigraphStore implements TripleStore {
   readonly writeRevisionCoverage = 'all-writers' as const;
-  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
+  readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
   readonly queryCancellation = 'pre-dispatch' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;

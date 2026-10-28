@@ -220,3 +220,16 @@ it.each(['root', 'metadata'] as const)('rejects a static subgraph %s registered 
       .resolves.toEqual([{ graph: `${ROOT}/_meta`, entityCount: 1, tripleCount: 1 }]);
   } finally { await store.close(); }
 });
+
+it.each([undefined, false, true])('preserves an explicit SWM-only suffix with includeSharedMemory=%s', async includeSharedMemory => {
+  const store = new OxigraphStore();
+  const swm = `${ROOT}/_shared_memory`;
+  try {
+    await store.insert([ROOT, swm].map(graph => ({ graph, subject: 'urn:s', predicate: 'urn:p', object: '"v"' })));
+    const engine = new DKGQueryEngine(store);
+    const opts = { graphSuffix: '_shared_memory', ...(includeSharedMemory === undefined ? {} : { includeSharedMemory }) };
+    const expected = includeSharedMemory === true ? [ROOT, swm].sort() : [swm];
+    expect((await engine.listContextGraphQueryPartitionReads('large', opts)).map(row => row.graph).sort()).toEqual(expected);
+    expect((await engine.readContextGraphNamedGraphStats('large', opts)).map(row => row.graph).sort()).toEqual(expected);
+  } finally { await store.close(); }
+});

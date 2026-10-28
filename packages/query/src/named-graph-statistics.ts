@@ -7,6 +7,12 @@ import { authorizeExactContextGraphPartitions } from './exact-context-graph-part
 import { createQueryStoreReadContext } from './query-store-read-context.js';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
 
+/** Typed inventory defaults to both memories unless an explicit SWM route narrows it. */
+export function normalizeContextGraphPartitionReadOptions(options: ContextGraphPartitionReadOptions = {}): ContextGraphPartitionReadOptions {
+  return { ...options, includeSharedMemory: options.includeSharedMemory ?? options.includeWorkspace
+    ?? (options.graphSuffix !== '_shared_memory') };
+}
+
 export const NAMED_GRAPH_STATS_BATCH_SIZE = 8;
 export type NamedGraphStatsBatchGate = (admission: ContextGraphPartitionRead['admission'],
   read: () => Promise<ContextGraphNamedGraphStats[]>) => Promise<ContextGraphNamedGraphStats[]>;

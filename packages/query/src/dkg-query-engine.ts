@@ -1,6 +1,6 @@
 import type { ContextGraphPartitionRead, ContextGraphPartitionReadOptions } from './query-types.js';
 import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions, selectScopedRouteGraphs, selectLegacyScopedRouteGraphs } from './scoped-content-graph-policy.js';
-import { readPartitionStatistics, type NamedGraphStatsBatchGate } from './named-graph-statistics.js';
+import { normalizeContextGraphPartitionReadOptions, readPartitionStatistics, type NamedGraphStatsBatchGate } from './named-graph-statistics.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { type ContentPartition } from './content-partition-policy.js';
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
@@ -333,7 +333,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   /** Carry admission requirements with the authorized inventory across caller boundaries. */
   async listContextGraphQueryPartitionReads(contextGraphId: string, options?: ContextGraphPartitionReadOptions): Promise<ContextGraphPartitionRead[]> {
-    const opts = { ...options, includeSharedMemory: options?.includeSharedMemory ?? options?.includeWorkspace ?? true };
+    const opts = normalizeContextGraphPartitionReadOptions(options);
     const policy = createScopedContentGraphRoutePolicy(contextGraphId, opts);
     const reads = createQueryStoreReadContext(this.store, opts);
     const discovery = await this.resolveScopedContentGraphDiscovery(contextGraphId, reads);
@@ -343,7 +343,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   /** Inventory, bounded aggregates and fresh candidate admission have one owner. */
   async readContextGraphNamedGraphStats(contextGraphId: string, options: ContextGraphPartitionReadOptions = {}, aroundBatch?: NamedGraphStatsBatchGate) {
-    const opts = { ...options, includeSharedMemory: options.includeSharedMemory ?? options.includeWorkspace ?? true };
+    const opts = normalizeContextGraphPartitionReadOptions(options);
     const partitions = await this.listContextGraphQueryPartitionReads(contextGraphId, opts);
     return readPartitionStatistics(this.store, contextGraphId, partitions, opts, aroundBatch);
   }
