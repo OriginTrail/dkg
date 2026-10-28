@@ -49,6 +49,13 @@ describe('public query result-size error boundary', () => {
     expect(() => JSON.stringify(normalized)).not.toThrow();
   });
 
+  it('the constructor normalizes structural storage errors and retains their cause', () => {
+    const cause = { code: 'STORE_RESPONSE_TOO_LARGE' as const, message: 'too large',
+      maxBytes: 10, actualBytes: BigInt(Number.MAX_SAFE_INTEGER) + 123n };
+    expect(new QueryResultTooLargeError(cause)).toMatchObject({ cause,
+      code: 'QUERY_RESULT_TOO_LARGE', maxBytes: 10, actualBytes: Number.MAX_SAFE_INTEGER });
+  });
+
   it('preserves internal catalog overflow as a server-side failure', () => {
     expect(asQueryResultTooLargeError(new StoreResponseTooLargeError(8 * 1024 * 1024, 9 * 1024 * 1024))).toBeUndefined();
   });

@@ -1,4 +1,4 @@
-import { StoreResponseTooLargeError, isStoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
+import { type StoreResponseTooLargeErrorLike, isStoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
 import { isQueryMaterializationTooLargeError } from '@origintrail-official/dkg-query';
 
 export const QUERY_RESULT_TOO_LARGE = 'QUERY_RESULT_TOO_LARGE' as const;
@@ -18,9 +18,9 @@ export class QueryResultTooLargeError extends Error
   readonly maxBytes: number;
   readonly actualBytes: number;
 
-  constructor(cause: StoreResponseTooLargeError);
+  constructor(cause: StoreResponseTooLargeErrorLike);
   constructor(maxBytes: number, actualBytes: number, options?: ErrorOptions);
-  constructor(limitOrCause: number | StoreResponseTooLargeError, actual?: number, options: ErrorOptions = {}) {
+  constructor(limitOrCause: number | StoreResponseTooLargeErrorLike, actual?: number, options: ErrorOptions = {}) {
     const maxBytes = typeof limitOrCause === 'number' ? limitOrCause : limitOrCause.maxBytes;
     const actualBytes = typeof limitOrCause === 'number' ? actual! : toPublicByteCount(limitOrCause.actualBytes);
     super(`Query result exceeds byte limit (${actualBytes} > ${maxBytes})`,
@@ -54,11 +54,7 @@ export function asQueryResultTooLargeError(
 ): QueryResultTooLargeErrorLike | undefined {
   if (isQueryResultTooLargeError(error)) return error;
   if (isStoreResponseTooLargeError(error) && (error as { queryPhase?: unknown }).queryPhase === 'result') {
-    return new QueryResultTooLargeError(
-      error.maxBytes,
-      toPublicByteCount(error.actualBytes),
-      { cause: error },
-    );
+    return new QueryResultTooLargeError(error);
   }
   if (!isQueryMaterializationTooLargeError(error)) return undefined;
   return new QueryResultTooLargeError(error.maxBytes, error.actualBytes, { cause: error });

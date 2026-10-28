@@ -16,7 +16,6 @@ import {
 import { isSparqlHttpResponseError } from "@origintrail-official/dkg-storage";
 import {
   isQueryResultTooLargeError,
-  type QueryResultTooLargeErrorLike,
 } from '@origintrail-official/dkg-agent';
 import { jsonResponse } from "../http-utils.js";
 
@@ -28,14 +27,6 @@ import { jsonResponse } from "../http-utils.js";
  * the constant is `packages/query/src/caller-sparql-error.ts`.
  */
 const CALLER_SPARQL_REJECTED_CODE = "CALLER_SPARQL_REJECTED";
-
-export type QueryFailureClassification =
-  | { readonly kind: 'client' }
-  | {
-      readonly kind: 'result-too-large';
-      readonly error: QueryResultTooLargeErrorLike;
-    }
-  | { readonly kind: 'server' };
 
 function isCallerSparqlRejected(err: unknown): boolean {
   if (typeof err !== "object" || err === null) return false;
@@ -100,16 +91,10 @@ function isLegacyClientQueryMessage(msg: string): boolean {
  * This is the sole exported classifier. The legacy message matcher stays
  * private so the provenance-first rule cannot be bypassed.
  */
-export function classifyQueryFailure(err: unknown): QueryFailureClassification {
-  if (isQueryResultTooLargeError(err)) {
-    return {
-      kind: 'result-too-large',
-      error: err,
-    };
-  }
-
+export function isClientQueryFailure(err: unknown): boolean {
+  if (isQueryResultTooLargeError(err)) return false;
   // 1. Provenance wins: the engine marked this as the caller's own SPARQL.
-  if (isCallerSparqlRejected(err)) return { kind: 'client' };
+  if (isCallerSparqlRejected(err)) return true;
 
   // 2. A TYPED store error that was NOT marked is terminal — it came from an
   //    engine-generated query, so it is a server fault no matter what its
@@ -117,18 +102,11 @@ export function classifyQueryFailure(err: unknown): QueryFailureClassification {
   //    whose body contained e.g. "Query must start with SELECT" would fall
   //    through to the legacy families below and be reported as the caller's
   //    fault, defeating the provenance rule (PR #2330 review).
-  if (isSparqlHttpResponseError(err)) return { kind: 'server' };
+  if (isSparqlHttpResponseError(err)) return false;
 
   // 3. Legacy families, for errors with no typed carrier at all.
   const msg = (err as { message?: unknown })?.message;
-  return typeof msg === "string" && isLegacyClientQueryMessage(msg)
-    ? { kind: 'client' }
-    : { kind: 'server' };
-}
-
-/** Backward-compatible predicate for callers that only need the 400 branch. */
-export function isClientQueryFailure(err: unknown): boolean {
-  return classifyQueryFailure(err).kind === 'client';
+  return typeof msg === "string" && isLegacyClientQueryMessage(msg);
 }
 
 /**
@@ -151,18 +129,17 @@ function isUnscopedQueryInvalidated(err: unknown): boolean {
  *   settled, so it gets the shape of the route's other transient answers, not
  *   a 500. The sentence is the one the agent throws.
  */
-export function respondToQueryFailure(res: ServerResponse, err: unknown,
-  failure: QueryFailureClassification = classifyQueryFailure(err)): boolean {
-  if (failure.kind === 'result-too-large') {
-    jsonResponse(res, 413, { error: failure.error.message, code: failure.error.code,
-      limitBytes: failure.error.maxBytes, actualBytes: failure.error.actualBytes });
+export function respondToQueryFailure(res: ServerResponse, err: unknown): boolean {
+  if (isQueryResultTooLargeError(err)) {
+    jsonResponse(res, 413, { error: err.message, code: err.code,
+      limitBytes: err.maxBytes, actualBytes: err.actualBytes });
     return true;
   }
   if ((err as { code?: unknown } | null)?.code === 'CORE_CACHE_QUERY_TRUST_REQUIRED') {
     jsonResponse(res, 409, { code: 'CORE_CACHE_QUERY_TRUST_REQUIRED', error: 'Explicit acceptance of core-cache evidence is required for this context graph' });
     return true;
   }
-  if (failure.kind === 'client') {
+  if (isClientQueryFailure(err)) {
     jsonResponse(res, 400, { error: (err as { message?: unknown } | null)?.message ?? "" });
     return true;
   }

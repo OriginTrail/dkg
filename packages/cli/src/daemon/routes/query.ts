@@ -19,7 +19,6 @@ import {
   type IncomingMessage,
   type ServerResponse,
 } from "node:http";
-import { classifyQueryFailure } from "./query-error.js";
 import { respondToQueryFailure } from "./query-error.js";
 import { createHash, randomUUID } from "node:crypto";
 import {
@@ -741,7 +740,6 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         tracker.fail(ctx, err);
         return;
       }
-      const queryFailure = classifyQueryFailure(err);
       const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
       if (storeUnavailableOutcome !== null) {
         // Pre-dispatch shedding is a cancellation; a store deadline may have
@@ -755,7 +753,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // #1758 — one policy module answers a failed query: a rejection of the
       // caller's own SPARQL is a 400, a withheld unscoped result a retryable
       // 503. See ./query-error.ts.
-      if (respondToQueryFailure(res, err, queryFailure)) return;
+      if (respondToQueryFailure(res, err)) return;
       throw err;
     }
   }
