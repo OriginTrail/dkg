@@ -114,9 +114,14 @@ it('measures each immutable catalog once across caller ceilings and invalidates 
   expect(state.sortedFor(members, bytes)).toEqual(['urn:a']);
   expect(() => state.sortedFor(members, bytes - 1)).toThrow(/byte limit/);
   expect(state.sortedFor(members, bytes + 1)).toEqual(['urn:a']);
+  for (let i = 0; i < 3; i++) expect(state.measuredFor(members, bytes))
+    .toEqual({ graphs: ['urn:a'], materializedBytes: bytes });
   expect(measure).toHaveBeenCalledOnce();
   state.reconcile([{ graph: 'urn:b', present: true }]);
   expect(() => state.sortedFor(members, bytes)).toThrow(/byte limit/);
+  const updatedBytes = Buffer.byteLength(JSON.stringify(['urn:a', 'urn:b']));
+  for (let i = 0; i < 3; i++) expect(state.measuredFor(members, updatedBytes))
+    .toEqual({ graphs: ['urn:a', 'urn:b'], materializedBytes: updatedBytes });
   expect(measure).toHaveBeenCalledTimes(2);
   state.replace(new Set(['urn:c']));
   expect(state.sortedFor(state.current!, bytes)).toEqual(['urn:c']);
@@ -138,4 +143,22 @@ it('keeps raw inventory cost explicit through filtering, copies, sorting, and ca
     expect([...replay.graphs]).toEqual(copied.graphs);
     expect(replay.materializedBytes).toBe(raw.materializedBytes);
   }
+});
+
+
+it('measures a reconciled projection once after the distinct source cost is invalidated', () => {
+  const measure = vi.mocked(measureGraphCatalogBytes); measure.mockClear();
+  const state = new GraphSetCatalogState();
+  state.replace(new Set(['urn:a']), 1000);
+  expect(state.measuredFor(state.current!)?.materializedBytes).toBe(1000);
+  expect(measure).not.toHaveBeenCalled();
+  state.reconcile([{ graph: 'urn:b', present: true }]);
+  const graphs = ['urn:a', 'urn:b'], bytes = Buffer.byteLength(JSON.stringify(graphs));
+  for (const limit of [undefined, bytes, bytes + 1]) {
+    expect(state.measuredFor(state.current!, limit)).toEqual({ graphs, materializedBytes: bytes });
+  }
+  expect(measure).toHaveBeenCalledOnce();
+  state.reconcile([{ graph: 'urn:b', present: true }]);
+  expect(state.measuredFor(state.current!, bytes)?.materializedBytes).toBe(bytes);
+  expect(measure).toHaveBeenCalledOnce();
 });

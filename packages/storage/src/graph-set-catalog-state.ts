@@ -90,14 +90,17 @@ export class GraphSetCatalogState {
     if (this.members !== members) return null;
     this.ordered ??= createSortedUniqueStringCatalog(this.members);
     if (maxBytes !== undefined) {
-      this.measuredBytes ??= measureGraphCatalogBytes(this.ordered);
-      assertMeasuredGraphCatalogWithinResponseLimit(this.measuredBytes, maxBytes);
+      assertMeasuredGraphCatalogWithinResponseLimit(this.projectionBytes(this.ordered), maxBytes);
     }
     return this.ordered;
   }
 
+  private projectionBytes(graphs: SortedGraphCatalog): number {
+    return this.measuredBytes ??= measureGraphCatalogBytes(graphs);
+  }
+
   measuredFor(members: ReadonlySet<string>, maxBytes?: number): MeasuredGraphInventory<SortedGraphCatalog> | null {
     const graphs = this.sortedFor(members, maxBytes);
-    return graphs && { graphs, materializedBytes: this.sourceMaterializedBytes ?? measureGraphCatalogBytes(graphs) };
+    return graphs && { graphs, materializedBytes: this.sourceMaterializedBytes ?? this.projectionBytes(graphs) };
   }
 }

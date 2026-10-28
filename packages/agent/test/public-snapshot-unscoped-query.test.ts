@@ -108,13 +108,14 @@ it.each(['policy', 'inventory'] as const)('normalizes caller-capped %s admission
     }
     return query(sparql, options);
   });
-  const inventory = agent.store.listGraphsByPrefix!.bind(agent.store);
-  const inventorySpy = vi.spyOn(agent.store, 'listGraphsByPrefix').mockImplementation((prefix, options) => {
+  const inventory = agent.store.readGraphInventory!.bind(agent.store);
+  const inventorySpy = vi.spyOn(agent.store, 'readGraphInventory').mockImplementation((prefix, options) => {
     if (kind === 'inventory' && options?.maxResponseBytes === 64) throw error;
     return inventory(prefix, options);
   });
   try {
     await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { maxResponseBytes: 64 }))
       .rejects.toMatchObject({ code: 'QUERY_RESULT_TOO_LARGE', maxBytes: 64, actualBytes: 65, cause: error });
+    if (kind === 'inventory') expect(inventorySpy).toHaveBeenCalledWith('did:dkg:context-graph:', expect.objectContaining({ maxResponseBytes: 64 }));
   } finally { querySpy.mockRestore(); inventorySpy.mockRestore(); }
 });
