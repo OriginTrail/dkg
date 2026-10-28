@@ -49,7 +49,7 @@ describe('physical catalog replay capacity', () => {
     const announce = vi.fn(async (_peer: string, _cg: string) => ({ failed: 0 }));
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['a', 'b'],
       selectContextGraphIds: () => ['old', 'new'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, admit() {}, release() {} }),
       reannounce: announce, replay, warn: vi.fn(),
     }, 60_000, 1);
     try {
@@ -67,7 +67,7 @@ describe('physical catalog replay capacity', () => {
   it('retains full overflow coverage when activation installs the peer first', async () => {
     const replay = vi.fn(async (_cg: string, _demand: { peerId: string }) => ({ failed: 0 }));
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['b'], selectContextGraphIds: () => ['old', 'new'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, admit() {}, release() {} }),
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     }, 60_000, 1);
     const occupying = runtime.prepareConnectionOpen('a')!;
@@ -86,7 +86,7 @@ describe('physical catalog replay capacity', () => {
   it('wakes admitted overflow after every occupying reservation is rejected', async () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => ['a', 'b'], selectContextGraphIds: () => ['cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, admit() {}, release() {} }),
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     }, 60_000, 1);
     const occupying = runtime.prepareConnectionOpen('a')!;
@@ -103,7 +103,7 @@ describe('physical catalog replay capacity', () => {
     const accepted = new Set<string>();
     const topology = ['a', 'b', 'c'];
     const replay = vi.fn(async (_cg: string, _demand: { peerId: string }) => ({ failed: 0 }));
-    const fences = vi.fn((_cg: string, peerId: string) => ({ peerId, generation: 1, admit() {}, release() {} }));
+    const fences = vi.fn((_cg: string, peerId: string) => ({ peerId, generation: 1, handle: {}, admit() {}, release() {} }));
     const runtime = makeRuntime({ admittedConnectedPeerIds: () => topology.filter(peer => accepted.has(peer)),
       selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null, reserveFence: fences,
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
@@ -220,7 +220,7 @@ it.each(['clear', 'reset', 'policy replacement'] as const)('retires queued conne
   let fullSettled = false;
   const full = recovery.request({ contextGraphId: 'cg', policyDigest: 'old', kind: 'full-connected-peers', connectedPeerIds: peers });
   void full.then(() => { fullSettled = true; });
-  const replay = vi.fn((cg: string, demand: { peerId: string; generation: number }, signal: AbortSignal) =>
+  const replay = vi.fn((cg: string, demand: { peerId: string; generation: number; handle: object }, signal: AbortSignal) =>
     recovery.request({ contextGraphId: cg, policyDigest: 'old', kind: 'connection-demand', demand, signal }));
   const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null,
     reserveFence: (cg, peer) => recovery.reservePeer(cg, 'old', peer),
@@ -293,7 +293,7 @@ it.each([true, false])('keeps an independently owned reconnect after full replay
   });
   const full = recovery.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['old'], signal: controller.signal });
   const completion = cancel ? expect(full).rejects.toThrow('full cancelled') : expect(full).resolves.toMatchObject({ failed: 0 });
-  const replay = vi.fn((cg: string, demand: { peerId: string; generation: number }, signal: AbortSignal) =>
+  const replay = vi.fn((cg: string, demand: { peerId: string; generation: number; handle: object }, signal: AbortSignal) =>
     recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }));
   const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null,
     reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer), reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn() });

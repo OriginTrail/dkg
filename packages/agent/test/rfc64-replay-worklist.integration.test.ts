@@ -377,19 +377,20 @@ describe('staged full-pass completeness custody', () => {
     });
     const full = (peers: readonly string[]) => runtime.request({ kind: 'full-connected-peers',
       contextGraphId: 'cg', policyDigest: 'policy', connectedPeerIds: peers });
-    const demand = (value: { peerId: string; generation: number }) => runtime.request({
+    const demand = (value: { peerId: string; generation: number; handle: object }) => runtime.request({
       kind: 'connection-demand', contextGraphId: 'cg', policyDigest: 'policy', demand: value });
     return { runtime, full, demand, requestPeer, repaired: () => { parityFails = false; } };
   }
 
   it('requires the replacement reservation generation to execute before clearing parity', async () => {
-    const { runtime, full, demand, repaired } = failingParityRuntime();
+    const { runtime, full, demand, repaired, requestPeer } = failingParityRuntime();
     await expect(full(['peer'])).resolves.toEqual({ requested: 1, failed: 1 }); repaired();
     const older = runtime.reservePeer('cg', 'policy', 'peer')!;
     await expect(full(['peer'])).resolves.toEqual({ requested: 0, failed: 0 });
     const replacement = runtime.reservePeer('cg', 'policy', 'peer')!;
     older.admit();
-    await expect(demand(older)).resolves.toEqual({ requested: 1, failed: 0 });
+    await expect(demand(older)).rejects.toThrow('Replay reservation superseded');
+    expect(requestPeer).toHaveBeenCalledOnce();
     expect(runtime.status('cg', 'policy')?.failed).toBe(true);
     older.release();
     replacement.admit();

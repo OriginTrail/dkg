@@ -22,7 +22,7 @@ describe('RFC-64 catalog replay connection debounce', () => {
     const replay = vi.fn(async () => { await held; return { failed: 0 }; });
     const runtime = makeRuntime({
       selectContextGraphIds: () => Array.from({ length: 59 }, (_, i) => `cg-${i}`),
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: vi.fn(async () => ({ failed: 0 })), replay, warn: vi.fn(),
     });
     try {
@@ -46,7 +46,7 @@ describe('RFC-64 catalog replay connection debounce', () => {
     const replay = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: vi.fn(async () => ({ failed: 0 })), replay, warn: vi.fn(),
       schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
     }, 100);
@@ -67,7 +67,7 @@ describe('RFC-64 catalog replay connection debounce', () => {
     const reannounce = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['old-cg', 'new-cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce, replay, warn: vi.fn(),
     });
     runtime.prepareGraphActivation('peer', 'new-cg', 0)?.admit();
@@ -80,7 +80,7 @@ describe('RFC-64 catalog replay connection debounce', () => {
     vi.useFakeTimers(); vi.setSystemTime(10_000);
     const replay = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({ selectContextGraphIds: () => ['cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: vi.fn(async () => ({ failed: 0 })), replay, warn: vi.fn() }, 100, 2);
     runtime.prepareConnectionOpen('peer-a')!.admit(); await vi.advanceTimersByTimeAsync(0);
     await vi.advanceTimersByTimeAsync(1);
@@ -109,7 +109,7 @@ describe('catalog reconnect work ownership', () => {
     const replay = vi.fn(async () => ({ failed: 1 }));
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release }),
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     });
     try {
@@ -149,7 +149,7 @@ describe('catalog reconnect work ownership', () => {
     });
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['old', 'new'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     });
     try {
@@ -171,7 +171,7 @@ describe('catalog reconnect work ownership', () => {
     let next: Rfc64CatalogReplayConnectionRuntimeV1;
     next = makeRuntime({
       selectContextGraphIds: () => ['old', 'new'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release }),
       reannounce: async () => ({ failed: 0 }),
       replay: async cg => {
         calls.push(cg);
@@ -190,7 +190,7 @@ describe('catalog reconnect work ownership', () => {
     const release = vi.fn();
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release }),
       reannounce: async () => ({ failed: 0 }),
       replay: async () => { await held.promise; return { failed: 0 }; }, warn: vi.fn(),
     }, 100, 1);
@@ -210,7 +210,7 @@ describe('catalog reconnect work ownership', () => {
   it('releases rejected reservations once and handles an unavailable fence', () => {
     const release = vi.fn();
     const reserveFence = vi.fn((_cg: string, peerId: string) =>
-      peerId === 'none' ? null : { peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release });
+      peerId === 'none' ? null : { peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release });
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'], reserveFence,
       reannounce: vi.fn(), replay: vi.fn(), warn: vi.fn(),
@@ -238,7 +238,7 @@ describe('catalog reconnect work ownership', () => {
     const replay = vi.fn(async () => { await held.promise; return { failed: 0 }; });
     const next = makeRuntime({
       selectContextGraphIds: () => ['a', 'b'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release }),
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
       schedule: (slot, work) => owner.scheduleKeyed(`cancel:${slot}`, work),
     });
@@ -257,7 +257,7 @@ describe('catalog reconnect work ownership', () => {
     const release = vi.fn();
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['a', 'b'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release }),
       reannounce: vi.fn(), replay: vi.fn(), warn: vi.fn(), schedule: () => false,
     });
     runtime.prepareConnectionOpen('peer')?.admit();
@@ -270,7 +270,7 @@ describe('catalog reconnect work ownership', () => {
     const replay = vi.fn(async () => { throw new Error('catalog unavailable'); });
     const runtime = makeRuntime({
       selectContextGraphIds: () => ['cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: async () => { throw new Error('legacy unavailable'); }, replay, warn,
     });
     runtime.prepareConnectionOpen('peer')?.admit();
@@ -287,7 +287,7 @@ describe('catalog reconnect work ownership', () => {
     const seen = new Set<string>();
     const runtime = makeRuntime({
       selectContextGraphIds: () => Array.from({ length: 257 }, (_, i) => `cg-${String(i).padStart(3, '0')}`),
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: async () => ({ failed: 0 }),
       replay: async cg => { seen.add(cg); return { failed: 0 }; }, warn: vi.fn(),
       schedule: (slot, work) => owner.scheduleKeyed(`replay:${slot}`, work),
@@ -305,7 +305,7 @@ describe('catalog reconnect work ownership', () => {
     let ids = Array.from({ length: 256 }, (_, i) => `cg-${String(i).padStart(3, '0')}`);
     const pushed: string[] = [];
     const runtime = makeRuntime({ selectContextGraphIds: () => ids,
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: async (_peer, cg) => { pushed.push(cg); return { failed: 0 }; },
       replay: async () => ({ failed: 0 }), warn: vi.fn() });
     const heldAdmissions = runtime.prepareConnectionOpen('peer')!;
@@ -323,7 +323,7 @@ describe('catalog reconnect work ownership', () => {
     vi.useFakeTimers(); vi.setSystemTime(10_000);
     const calls: string[] = [];
     const next = makeRuntime({ selectContextGraphIds: () => ['cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: async () => ({ failed: 0 }),
       replay: async (_cg, demand) => { calls.push(demand.peerId); return { failed: 0 }; }, warn: vi.fn(),
     }, 100);
@@ -342,7 +342,7 @@ describe('catalog reconnect work ownership', () => {
     const selected = Array.from({ length: 256 }, (_, i) => `cg-${String(i).padStart(3, '0')}`);
     const calls: string[] = [];
     const next = makeRuntime({ selectContextGraphIds: () => selected,
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: async () => ({ failed: 0 }),
       replay: async cg => { calls.push(cg); return { failed: 0 }; }, warn: vi.fn(),
     }, 100);
@@ -359,7 +359,7 @@ describe('catalog reconnect work ownership', () => {
     const held = deferred(); const signals = new Map<string | number, AbortSignal>();
     const release = vi.fn();
     const next = makeRuntime({ selectContextGraphIds: () => ['cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release }),
       reannounce: async () => ({ failed: 0 }),
       replay: async (_cg, demand) => { if (demand.peerId === 'held') await held.promise; return { failed: 0 }; },
       warn: vi.fn(), schedule: (slot, work) => owner.scheduleKeyed(`shutdown:${slot}`, signal => {
@@ -385,7 +385,7 @@ describe('catalog reconnect work ownership', () => {
     const selected = Array.from({ length: 256 }, (_, i) => `cg-${i}`);
     const calls: string[] = [];
     const next = makeRuntime({ selectContextGraphIds: () => selected,
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: async () => ({ failed: 0 }),
       replay: async cg => { calls.push(cg); return { failed: 0 }; }, warn: vi.fn(),
     }, 100);
@@ -538,7 +538,7 @@ describe('connection staging versus canonical recovery execution', () => {
     vi.useFakeTimers(); vi.setSystemTime(10_000);
     const replay = vi.fn(async () => ({ failed: 0 }));
     const connection = makeRuntime({ selectContextGraphIds: () => ['cg'],
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: async () => ({ announced: 0, failed: 1, manifest: [] }), replay, warn: vi.fn() }, 100);
     for (let attempt = 1; attempt <= 3; attempt++) {
       connection.prepareConnectionOpen('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
@@ -553,7 +553,7 @@ describe('connection staging versus canonical recovery execution', () => {
   it('rotates three ready peers before either large scope pass can drain', async () => {
     const calls: string[] = [];
     const connection = makeRuntime({ selectContextGraphIds: () => Array.from({ length: 12 }, (_, i) => `cg-${i}`),
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() }),
       reannounce: async () => ({ failed: 0 }),
       replay: async (_cg, demand) => { calls.push(demand.peerId); return { failed: 0 }; }, warn: vi.fn() });
     for (const peer of ['a', 'b', 'c']) connection.prepareConnectionOpen(peer)!.admit();
@@ -583,15 +583,16 @@ describe('deferred replay completeness custody', () => {
     });
     connection.prepareConnectionOpen('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
     expect(calls).toHaveLength(257);
+    const initialCounts = new Map(ids.map(id => [id, calls.filter(call => call.cg === id).length]));
     for (let reconnect = 1; reconnect <= 3; reconnect++) {
       await vi.advanceTimersByTimeAsync(30_000);
       connection.disconnected('peer'); connection.prepareConnectionOpen('peer')?.admit();
       await vi.advanceTimersByTimeAsync(0);
       if (reconnect === 1) {
         expect(recovery.status('cg-256', 'policy')?.active).toBe(true);
-        expect(calls.some(call => call.cg === 'cg-256')).toBe(true);
+        expect(calls.filter(call => call.cg === 'cg-256').length).toBeGreaterThanOrEqual(1);
       } else {
-        expect(calls.some(call => call.cg === 'cg-256')).toBe(true);
+        expect(calls.filter(call => call.cg === 'cg-256').length).toBeGreaterThanOrEqual(1);
       }
     }
     await vi.advanceTimersByTimeAsync(120_000);
@@ -599,7 +600,7 @@ describe('deferred replay completeness custody', () => {
     for (const cg of ids) {
       expect(recovery.status(cg, 'policy')?.active).toBe(false);
       const completedAt = calls.filter(call => call.cg === cg).map(call => call.at);
-      expect(completedAt.length).toBeGreaterThanOrEqual(cg === 'cg-256' ? 1 : 2);
+      expect(completedAt.length).toBeGreaterThanOrEqual(initialCounts.get(cg)! + 1);
       for (let i = 1; i < completedAt.length; i++) expect(completedAt[i] - completedAt[i - 1]).toBeGreaterThanOrEqual(60_000);
     }
   });
@@ -728,7 +729,7 @@ describe('selected replay demand custody', () => {
     const seen: string[] = [];
     const runtime = makeRuntime({ selectContextGraphIds: () => ids,
       reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => available
-        ? { peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() } : null,
+        ? { peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() } : null,
       reannounce: async () => ({ failed: 0 }),
       replay: async cg => { seen.push(cg); return { failed: 0 }; }, warn: vi.fn(),
     }, 100);
@@ -745,7 +746,7 @@ describe('selected replay demand custody', () => {
     let selected = ['old-cg'];
     const release = vi.fn(); const replay = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({ selectContextGraphIds: () => selected,
-      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release }),
+      reserveDeferredFence: () => null, reserveFence: (_cg, peerId) => ({ peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release }),
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
     }, 100);
     runtime.prepareConnectionOpen('peer')!.admit(); await vi.advanceTimersByTimeAsync(0);
@@ -761,7 +762,7 @@ describe('selected replay demand custody', () => {
     vi.useFakeTimers(); vi.setSystemTime(10_000);
     let selected = ['old-cg'];
     const reserve = vi.fn((cg: string, peerId: string) => cg === 'old-cg' ? null
-      : { peerId, generation: 1, isCurrent: () => true, admit: () => undefined, release: vi.fn() });
+      : { peerId, generation: 1, handle: {}, isCurrent: () => true, admit: () => undefined, release: vi.fn() });
     const replay = vi.fn(async () => ({ failed: 0 }));
     const runtime = makeRuntime({ selectContextGraphIds: () => selected, reserveDeferredFence: () => null, reserveFence: reserve,
       reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),

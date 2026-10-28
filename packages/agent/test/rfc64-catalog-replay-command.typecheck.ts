@@ -28,7 +28,7 @@ const invalidConnection: Rfc64CatalogReplayRecoveryCommandV1 = {
   kind: 'connection-demand',
   contextGraphId: 'cg',
   policyDigest: 'digest',
-  demand: { peerId: 'peer', generation: 1 },
+  demand: { peerId: 'peer', generation: 1, handle: {} },
   // @ts-expect-error A connection demand cannot also claim full-replay semantics.
   connectedPeerIds: ['peer'],
 };

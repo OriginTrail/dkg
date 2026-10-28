@@ -3,7 +3,7 @@ import type { Rfc64CatalogConnectionReplayResultV1 } from './catalog-replay-run-
 // SPDX-License-Identifier: Apache-2.0
 
 import type {
-  Rfc64CatalogReplayPeerDemandV1,
+  Rfc64CatalogReplayPeerDemandHandleV1,
 } from './catalog-replay-recovery-runtime-v1.js';
 import { Rfc64CatalogReplayScopeLifecycleV1, type Rfc64CatalogConnectionCustodyV1, type Rfc64CatalogReplayScopeAdmissionV1 } from './catalog-replay-scope-lifecycle-v1.js';
 
@@ -14,7 +14,7 @@ export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
   reserveDeferredFence(contextGraphId: string): Readonly<{ release(): void }> | null;
   reserveFence(contextGraphId: string, peerId: string): Rfc64CatalogConnectionCustodyV1 | null;
   reannounce(peerId: string, contextGraphId: string, signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
-  replay(contextGraphId: string, demand: Rfc64CatalogReplayPeerDemandV1,
+  replay(contextGraphId: string, demand: Rfc64CatalogReplayPeerDemandHandleV1,
     signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
   /** Two stream keys plus one independent, abortable eligibility notifier. */
   schedule(slot: 0 | 1 | 'deadline', work: (signal: AbortSignal) => Promise<void>): boolean;

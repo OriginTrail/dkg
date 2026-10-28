@@ -23,12 +23,12 @@ const MAX_RETAINED_REPLAY_RETRIES_V1 = 4;
  * Worklist slots one full pass may spend re-dialing retained providers, so a
  * saturated attribution set cannot crowd that pass's own connected-peer set
  * out of the worklist. It bounds THAT path only: `acquire` fences and
- * `seedDemand` re-seeds also occupy `#pending` and respect no floor, so a
+ * connection demand executions also occupy `#pending` and respect no floor, so a
  * burst of reconnect demands can still leave a pass no room. Without it a
  * Context Graph whose attribution set is saturated lets 64 retained providers
  * take every slot, no connected provider is dialed at all, and
  * `requested === 0` on every run -- which the corroboration contract in
- * `#execute` correctly but unhelpfully reports as uncorroborated for as long
+ * `#runOwned` correctly but unhelpfully reports as uncorroborated for as long
  * as they stay attributed. Scoped runs do not apply it: there the retained set
  * IS the work, and `MAX_RETAINED_REPLAY_RETRIES_V1` bounds its cost.
  */
@@ -41,9 +41,14 @@ export interface Rfc64CatalogReplayPeerDemandV1 {
   readonly generation: number;
 }
 
+/** Stable reservation identity survives callback decoration; identifiers cannot recreate it. */
+export interface Rfc64CatalogReplayPeerDemandHandleV1 extends Rfc64CatalogReplayPeerDemandV1 {
+  readonly handle: object;
+}
+
 /** Opaque, idempotent ownership of one exact reconnect demand. */
 export interface Rfc64CatalogReplayPeerFenceLeaseV1
-  extends Rfc64CatalogReplayPeerDemandV1 {
+  extends Rfc64CatalogReplayPeerDemandHandleV1 {
   release(): void;
 }
 
@@ -70,7 +75,7 @@ export type Rfc64CatalogReplayPeerResultV1<Target> = Readonly<{
 export type Rfc64CatalogReplayRecoveryRequestV1 = Readonly<
   | { kind: 'full-connected-peers' }
   | { kind: 'pending-recovery' }
-  | { kind: 'connection-demand'; demand: Rfc64CatalogReplayPeerDemandV1 }
+  | { kind: 'connection-demand'; demand: Rfc64CatalogReplayPeerDemandHandleV1 }
 >;
 
 /** Closed runtime commands; peer seeding and full-replay evidence cannot diverge. */
@@ -301,24 +306,19 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   reservePeer(contextGraphId: string, policyDigest: string, peerId: string):
   Rfc64CatalogReplayPeerReservationV1 | null {
     const progress = this.#progressFor(contextGraphId, policyDigest);
-    const lease = progress.peerWorklist.reserve(peerId);
+    const current = () => this.#byContextGraph.get(contextGraphId) === progress;
+    const lease = progress.peerWorklist.reserve(peerId, {
+      current,
+      changed: () => { if (current()) this.#bumpRevision(progress); },
+      released: demand => {
+        if (progress.fullPass?.cancelled(demand)) progress.fullPass = null;
+        if (current()) this.#bumpRevision(progress);
+      },
+    });
     if (lease === null) return null;
     progress.fullPass?.replace(lease);
     this.#bumpRevision(progress);
-    let released = false;
-    return Object.freeze({
-      peerId: lease.peerId, generation: lease.generation,
-      isCurrent: () => !released && this.#byContextGraph.get(contextGraphId) === progress && lease.isCurrent(),
-      admit: () => { if (!released) { lease.admit(); if (this.#byContextGraph.get(contextGraphId) === progress) this.#bumpRevision(progress); } },
-      release: () => {
-        if (released) return;
-        released = true;
-        if (progress.fullPass?.cancelled(lease)) progress.fullPass = null;
-        lease.release();
-        if (this.#byContextGraph.get(contextGraphId) !== progress) return;
-        this.#bumpRevision(progress);
-      },
-    });
+    return lease;
   }
 
   request(
@@ -359,7 +359,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         if (!progress.fullPass.include(coverage.filter(demand => demand !== null), progress.promisedTargets, progress.run.kind === 'running' ? progress.run.value.evidence : undefined)) progress.fullPass = null;
       }
     } else {
-      if (input.kind === 'connection-demand') connectionWork = progress.peerWorklist.seedDemand(input.demand, progress.run.kind === 'idle' ? undefined : progress.run.value.chunk, input.signal);
+      if (input.kind === 'connection-demand') connectionWork = progress.peerWorklist.admitDemand(input.demand, input.signal);
       this.#seedRetainedProviders(progress);
     }
     // A drained worklist can still have an in-flight provider/parity pass.
@@ -398,7 +398,110 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     let continuation: Readonly<{ signal?: AbortSignal }> | null = null;
     try {
       input.signal?.throwIfAborted();
-      await this.#execute(input, progress, run);
+      try {
+        input.signal?.throwIfAborted();
+        for (;;) {
+          const replayDemands = progress.peerWorklist.drain(run.chunk, input.signal);
+          const settled = await Promise.allSettled(replayDemands.map(async (demand) => {
+            const { peerId } = demand;
+            for (let attempt = 0; attempt < 2; attempt += 1) {
+              try {
+                input.signal?.throwIfAborted();
+                const completion = await this.#ports.requestPeer(input.contextGraphId, peerId, input.signal);
+                input.signal?.throwIfAborted();
+                if (completion.status === 'local-unavailable') {
+                  // A local fault is not provider evidence: it may neither
+                  // attribute a failure to this peer nor clear the attribution an
+                  // earlier provider failure recorded.
+                  recordReplayPeerOutcomeV1(evidence, progress.fullPass, demand, { kind: 'local-unavailable' });
+                  return;
+                }
+                progress.unresolvedPeers.delete(peerId);
+                recordReplayPeerOutcomeV1(evidence, progress.fullPass, demand,
+                  completion.status === 'completed' ? { kind: 'completed', targets: completion.targets }
+                    : { kind: 'not-provider' });
+                return;
+              } catch (error) {
+                if (input.signal?.aborted) throw input.signal.reason ?? error;
+                if (attempt === 1) {
+                  recordReplayPeerOutcomeV1(evidence, progress.fullPass, demand, {
+                    kind: 'provider-failed', attributed: this.#retainPeerFailure(progress, peerId),
+                  });
+                }
+              }
+            }
+          }));
+          // Queued cancellation is immediate, but completion custody lasts until
+          // every already-running transport has physically left its handler.
+          const rejected = settled.find(result => result.status === 'rejected');
+          if (rejected?.status === 'rejected') throw rejected.reason;
+          // Completion-capable provider responses are returned only after every
+          // promised announcement is synchronously admitted at this receiver.
+          // Scoped to THIS context graph: waiting for an unrelated graph to drain
+          // would hold this pass open, latching its replay-active flag and
+          // withholding this graph's catalog parity for as long as that lasts.
+          // The announcements admitted above still take their turn behind other
+          // graphs' tasks for the receiver's shared slots.
+          input.signal?.throwIfAborted();
+          const drained = await this.#drainedWithinBudget(input.contextGraphId, input.signal);
+          input.signal?.throwIfAborted();
+          if (!drained) {
+            // Budget spent without observing the drain. This says only that
+            // parity was NOT OBSERVED; it is not evidence that the retained
+            // heads are wrong.
+            //
+            // Demanding a full replay here is a positive feedback loop, measured
+            // on the devnet: the budget expires, every retained head is
+            // re-announced at once, the receiver cannot go idle within the next
+            // budget, and it expires again. Worse, `requiresFullReplay` is what
+            // the status projection turns into `catalog-replay-incomplete` and
+            // thence `phase: 'blocked'`, which is a HARDER verdict than "not yet
+            // verified" and is exactly what the receiver reported.
+            //
+            // So: no full replay, no `failed`. The worklist is retained and the
+            // next pass re-arms. The corroboration contract still holds — this
+            // pass may not CLEAR a witness, because it observed nothing.
+            this.#ports.warn?.(
+              `RFC-64 catalog replay drain for ${input.contextGraphId} exceeded ` +
+              `${RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1}ms; reporting the pass as ` +
+              'UNVERIFIED and retaining its worklist. Parity was not observed; the retained ' +
+              'heads are not presumed wrong, and no full replay is demanded.',
+            );
+            evidence.unobserved('drain-timeout');
+            break;
+          }
+          if (progress.peerWorklist.exhausted(run.chunk)) {
+            // Transport budget exhaustion has not overflowed the promise set.
+            evidence.unobserved('budget-exhausted');
+            break;
+          }
+          if (progress.peerWorklist.hasRunnable(input.signal)) continue;
+
+          const promised = mergeReplayTargetsV1(progress.fullPass?.targets ?? emptyReplayTargetsV1<Target>(),
+            evidence.received, (left, right) => this.#mergePromises(left, right));
+          input.signal?.throwIfAborted();
+          evidence.unobserved('pending');
+          const parityFailed = promised.kind === 'overflow'
+            || await this.#ports.parityFailed(input.contextGraphId, promised.targets);
+          input.signal?.throwIfAborted();
+          // A reconnect generation arriving during the durable parity read owns
+          // another pass. The worklist budget keeps that fence finite.
+          if (progress.peerWorklist.exhausted(run.chunk)) {
+            // Transport budget exhaustion has not overflowed the promise set.
+            evidence.unobserved('budget-exhausted');
+            break;
+          }
+          if (progress.peerWorklist.hasRunnable(input.signal)) continue;
+          // The queue check and settlement share this synchronous turn, so the
+          // full-pass coverage it reads is the one this set was checked under.
+          evidence.observe(promised, parityFailed);
+          progress.fullPass?.observe();
+          break;
+        }
+      } catch (error) {
+        if (input.signal?.aborted) { evidence.unobserved('cancelled'); throw input.signal.reason ?? error; }
+        evidence.unobserved('parity-error');
+      }
       continuation = progress.peerWorklist.pendingContinuation;
       settlement = this.#settlement(progress, evidence, continuation !== null, false);
       const result = settlement.result;
@@ -430,119 +533,6 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     }
   }
 
-  async #execute(
-    input: Rfc64CatalogReplayRecoveryCommandV1,
-    progress: ReplayProgressV1<Target>,
-    run: ReplayRunV1<Target>,
-  ): Promise<void> {
-    const evidence = run.evidence;
-    try {
-      input.signal?.throwIfAborted();
-      for (;;) {
-        const replayDemands = progress.peerWorklist.drain(run.chunk, input.signal);
-        const settled = await Promise.allSettled(replayDemands.map(async (demand) => {
-          const { peerId } = demand;
-          for (let attempt = 0; attempt < 2; attempt += 1) {
-            try {
-              input.signal?.throwIfAborted();
-              const completion = await this.#ports.requestPeer(input.contextGraphId, peerId, input.signal);
-              input.signal?.throwIfAborted();
-              if (completion.status === 'local-unavailable') {
-                // A local fault is not provider evidence: it may neither
-                // attribute a failure to this peer nor clear the attribution an
-                // earlier provider failure recorded.
-                recordReplayPeerOutcomeV1(evidence, progress.fullPass, demand, { kind: 'local-unavailable' });
-                return;
-              }
-              progress.unresolvedPeers.delete(peerId);
-              recordReplayPeerOutcomeV1(evidence, progress.fullPass, demand,
-                completion.status === 'completed' ? { kind: 'completed', targets: completion.targets }
-                  : { kind: 'not-provider' });
-              return;
-            } catch (error) {
-              if (input.signal?.aborted) throw input.signal.reason ?? error;
-              if (attempt === 1) {
-                recordReplayPeerOutcomeV1(evidence, progress.fullPass, demand, {
-                  kind: 'provider-failed', attributed: this.#retainPeerFailure(progress, peerId),
-                });
-              }
-            }
-          }
-        }));
-        // Queued cancellation is immediate, but completion custody lasts until
-        // every already-running transport has physically left its handler.
-        const rejected = settled.find(result => result.status === 'rejected');
-        if (rejected?.status === 'rejected') throw rejected.reason;
-        // Completion-capable provider responses are returned only after every
-        // promised announcement is synchronously admitted at this receiver.
-        // Scoped to THIS context graph: waiting for an unrelated graph to drain
-        // would hold this pass open, latching its replay-active flag and
-        // withholding this graph's catalog parity for as long as that lasts.
-        // The announcements admitted above still take their turn behind other
-        // graphs' tasks for the receiver's shared slots.
-        input.signal?.throwIfAborted();
-        const drained = await this.#drainedWithinBudget(input.contextGraphId, input.signal);
-        input.signal?.throwIfAborted();
-        if (!drained) {
-          // Budget spent without observing the drain. This says only that
-          // parity was NOT OBSERVED; it is not evidence that the retained
-          // heads are wrong.
-          //
-          // Demanding a full replay here is a positive feedback loop, measured
-          // on the devnet: the budget expires, every retained head is
-          // re-announced at once, the receiver cannot go idle within the next
-          // budget, and it expires again. Worse, `requiresFullReplay` is what
-          // the status projection turns into `catalog-replay-incomplete` and
-          // thence `phase: 'blocked'`, which is a HARDER verdict than "not yet
-          // verified" and is exactly what the receiver reported.
-          //
-          // So: no full replay, no `failed`. The worklist is retained and the
-          // next pass re-arms. The corroboration contract still holds — this
-          // pass may not CLEAR a witness, because it observed nothing.
-          this.#ports.warn?.(
-            `RFC-64 catalog replay drain for ${input.contextGraphId} exceeded ` +
-            `${RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1}ms; reporting the pass as ` +
-            'UNVERIFIED and retaining its worklist. Parity was not observed; the retained ' +
-            'heads are not presumed wrong, and no full replay is demanded.',
-          );
-          evidence.unobserved('drain-timeout');
-          break;
-        }
-        if (progress.peerWorklist.exhausted(run.chunk)) {
-          // Transport budget exhaustion has not overflowed the promise set.
-          evidence.unobserved('budget-exhausted');
-          break;
-        }
-        if (progress.peerWorklist.hasRunnable(input.signal)) continue;
-
-        const promised = mergeReplayTargetsV1(progress.fullPass?.targets ?? emptyReplayTargetsV1<Target>(),
-          evidence.received, (left, right) => this.#mergePromises(left, right));
-        input.signal?.throwIfAborted();
-        evidence.unobserved('pending');
-        const parityFailed = promised.kind === 'overflow'
-          || await this.#ports.parityFailed(input.contextGraphId, promised.targets);
-        input.signal?.throwIfAborted();
-        // A reconnect generation arriving during the durable parity read owns
-        // another pass. The worklist budget keeps that fence finite.
-        if (progress.peerWorklist.exhausted(run.chunk)) {
-          // Transport budget exhaustion has not overflowed the promise set.
-          evidence.unobserved('budget-exhausted');
-          break;
-        }
-        if (progress.peerWorklist.hasRunnable(input.signal)) continue;
-        // Nothing awaits between here and the settle block, so the
-        // full-pass coverage it reads is the one this set was checked under.
-        evidence.observe(promised, parityFailed);
-        progress.fullPass?.observe();
-        break;
-      }
-      return;
-    } catch (error) {
-      if (input.signal?.aborted) { evidence.unobserved('cancelled'); throw input.signal.reason ?? error; }
-      evidence.unobserved('parity-error');
-      return;
-    }
-  }
 
   #settlement(progress: ReplayProgressV1<Target>, evidence: ReplayRunEvidenceV1<Target>,
     continueQueuedConnections: boolean, cancelled: boolean): ReplayRunSettlementV1<Target> {

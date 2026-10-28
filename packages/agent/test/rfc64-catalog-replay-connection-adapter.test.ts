@@ -21,7 +21,7 @@ describe('connection adapter current-policy capabilities', () => {
     const readAcceptedPolicy = vi.fn(() => accepted);
     const announce = vi.fn(async () => ({ failed: 0 }));
     const reservePeer = vi.fn((_cg: string, _digest: string, peerId: string) => ({
-      peerId, generation: 1, isCurrent: () => true, admit: vi.fn(), release: vi.fn(),
+      peerId, generation: 1, handle: {}, isCurrent: () => true, admit: vi.fn(), release: vi.fn(),
     }));
     const scheduled = new Map<0 | 1 | 'deadline', (signal: AbortSignal) => Promise<void>>();
     const controller = new AbortController();
@@ -30,7 +30,7 @@ describe('connection adapter current-policy capabilities', () => {
       admittedConnectedPeerIds: () => [],
       reannounce: announce,
       capabilities: {
-        resolveRfc64CatalogReceiverAuthorityV1: () => ({ active: true, mode: 'rfc64' }),
+        resolveRfc64CatalogReplayRolesV1: () => ({ receiving: true, serving: true }),
         listServingRfc64CatalogReplayContextGraphIdsV1: () => [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
         listActiveRfc64CatalogReplayContextGraphIdsV1: () => [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
         readAcceptedRfc64CatalogAccessSnapshotV1: readAcceptedPolicy,
@@ -59,15 +59,15 @@ describe('connection adapter current-policy capabilities', () => {
 
 it('uses point authority checks for a large initial selection', () => {
   const graphs = Array.from({ length: 257 }, (_, i) => `cg-${i}`);
-  const authority = vi.fn((_id: string) => ({ active: true, mode: 'rfc64' }));
+  const authority = vi.fn((_id: string) => ({ receiving: true, serving: true }));
   const list = vi.fn(() => { for (const id of graphs) authority(id); return graphs; });
   const runtime = createRfc64CatalogReplayConnectionRuntimeV1({
     capabilities: { listActiveRfc64CatalogReplayContextGraphIdsV1: list,
       listServingRfc64CatalogReplayContextGraphIdsV1: () => [],
-      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      resolveRfc64CatalogReplayRolesV1: authority,
       readAcceptedRfc64CatalogAccessSnapshotV1: () => ({ policyDigest: 'p' }) as never },
     admittedConnectedPeerIds: () => [], reserveDeferred: () => ({ release() {} }),
-    reservePeer: (_cg, _digest, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+    reservePeer: (_cg, _digest, peerId) => ({ peerId, generation: 1, handle: {}, admit() {}, release() {} }),
     reannounce: async () => ({ failed: 0 }), replay: async () => ({ failed: 0 }),
     schedule: () => true, wait: async () => {}, warn: vi.fn(),
   });

@@ -1,6 +1,6 @@
 import type { Rfc64CatalogSelectionV1, Rfc64CatalogRuntimeSelectionStatusV1 } from './rfc64/catalog-selection-types-v1.js';
 export type { Rfc64CatalogSelectionV1, Rfc64CatalogConnectionReplayStatusV1, Rfc64CatalogRuntimeSelectionStatusV1 } from './rfc64/catalog-selection-types-v1.js';
-import { selectCatalogReplayGraphsV1 } from './rfc64/catalog-replay-selection-v1.js';
+import { selectCatalogReplayGraphsV1, resolveCatalogReplayRolesV1, type CatalogReplayRolesV1 } from './rfc64/catalog-replay-selection-v1.js';
 import { createCatalogReplayTransportV1, type CatalogReplayTransportV1 } from './rfc64/catalog-replay-transport-v1.js';
 import { Rfc64CatalogReplayRunReporterV1 } from './rfc64/catalog-replay-run-reporter-v1.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -1127,12 +1127,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
         listActiveRfc64CatalogReplayContextGraphIdsV1: () => this.listActiveRfc64CatalogReplayContextGraphIdsV1(),
         listServingRfc64CatalogReplayContextGraphIdsV1: () => this.listServingRfc64CatalogReplayContextGraphIdsV1(),
         readAcceptedRfc64CatalogAccessSnapshotV1: id => this.readAcceptedRfc64CatalogAccessSnapshotV1(id),
-        resolveRfc64CatalogReceiverAuthorityV1: id => {
-          const authority = this.resolveRfc64CatalogReceiverAuthorityV1(id);
-          const selected = Object.hasOwn(this.config.rfc64CatalogExecutionPlan.selectedAuthority, id)
-            || this.readRfc64CatalogResponsibilityV1(id).responsible;
-          return { ...authority, active: selected && authority.active };
-        },
+        resolveRfc64CatalogReplayRolesV1: id => this.resolveRfc64CatalogReplayRolesV1(id),
       },
         reserveDeferred: contextGraphId => {
           const accepted = this.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
@@ -1197,16 +1192,23 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
     ).snapshot();
   }
 
+  /** Replay roles combine lifecycle selection with unchanged canonical authorities. */
+  resolveRfc64CatalogReplayRolesV1(this: DKGAgent, contextGraphId: string): CatalogReplayRolesV1 {
+    return resolveCatalogReplayRolesV1(Object.hasOwn(this.config.rfc64CatalogExecutionPlan.selectedAuthority, contextGraphId)
+      || this.readRfc64CatalogResponsibilityV1(contextGraphId).responsible, rfc64DirectAcceptedCompatibilityV1.get(this)?.has(contextGraphId) === true,
+    this.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId), this.resolveRfc64CatalogServingAuthorityV1(contextGraphId));
+  }
+
   /** Canonical connection-replay targets after responsibility and authority policy. */
   listActiveRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
     return selectCatalogReplayGraphsV1([...this.readRfc64CatalogResponsibilitiesV1().map(selection => selection.contextGraphId),
-      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)], id => this.resolveRfc64CatalogReceiverAuthorityV1(id));
+      ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority)], id => this.resolveRfc64CatalogReplayRolesV1(id), 'receiving');
   }
 
   listServingRfc64CatalogReplayContextGraphIdsV1(this: DKGAgent): readonly string[] {
     return selectCatalogReplayGraphsV1([...this.readRfc64CatalogResponsibilitiesV1().map(selection => selection.contextGraphId),
       ...Object.keys(this.config.rfc64CatalogExecutionPlan.selectedAuthority),
-      ...(rfc64DirectAcceptedCompatibilityV1.get(this) ?? [])], id => this.resolveRfc64CatalogServingAuthorityV1(id));
+      ...(rfc64DirectAcceptedCompatibilityV1.get(this) ?? [])], id => this.resolveRfc64CatalogReplayRolesV1(id), 'serving');
   }
 
   /** Constant-time point lookup for rollout-owned hot-path classification. */

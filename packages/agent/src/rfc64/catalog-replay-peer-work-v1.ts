@@ -51,6 +51,15 @@ export class CatalogReplayPeerWorkV1 implements Rfc64CatalogReplayPeerDemandV1 {
   }
 }
 
+/** A stable demand owns identity and successive execution completions. */
+export class CatalogReplayPeerDemandHandleV1 {
+  execution: CatalogReplayPeerWorkV1;
+  constructor(readonly peerId: string, readonly generation: number, reserved = false) {
+    this.execution = new CatalogReplayPeerWorkV1(peerId, generation, reserved);
+  }
+  retainForRetry(): void { this.execution = new CatalogReplayPeerWorkV1(this.peerId, this.generation); }
+}
+
 /** Explicit ownership of records consumed by one finite execution chunk. */
 export class CatalogReplayChunkV1 {
   readonly records = new Set<CatalogReplayPeerWorkV1>();

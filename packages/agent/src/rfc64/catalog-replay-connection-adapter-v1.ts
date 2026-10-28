@@ -1,3 +1,4 @@
+import type { CatalogReplayRolesV1 } from './catalog-replay-selection-v1.js';
 import type { CatalogReplayTransportV1 } from './catalog-replay-transport-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { AcceptedRfc64CatalogAccessSnapshotV1 } from './catalog-access-policy-v1.js';
@@ -5,7 +6,7 @@ import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectio
 import { RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1 } from './public-catalog-transport-v1.js';
 
 interface Rfc64CatalogReplayConnectionCapabilitiesV1 {
-  resolveRfc64CatalogReceiverAuthorityV1(contextGraphId: string): Readonly<{ active: boolean; mode: string }>;
+  resolveRfc64CatalogReplayRolesV1(contextGraphId: string): CatalogReplayRolesV1;
   listServingRfc64CatalogReplayContextGraphIdsV1(): readonly string[];
   listActiveRfc64CatalogReplayContextGraphIdsV1(): readonly string[];
   readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId: string): AcceptedRfc64CatalogAccessSnapshotV1 | null;
@@ -17,10 +18,7 @@ export function createRfc64CatalogReplayConnectionRuntimeV1(input:
     & Pick<CatalogReplayTransportV1<never>, 'reannounce'>
     & Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'admittedConnectedPeerIds' | 'schedule' | 'wait' | 'warn' | 'replay' | 'reportRun'>,
 ): Rfc64CatalogReplayConnectionRuntimeV1 {
-  const receives = (contextGraphId: string): boolean => {
-    const authority = input.capabilities.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
-    return authority.active && authority.mode !== 'legacy';
-  };
+  const receives = (contextGraphId: string): boolean => input.capabilities.resolveRfc64CatalogReplayRolesV1(contextGraphId).receiving;
   return new Rfc64CatalogReplayConnectionRuntimeV1({
     admittedConnectedPeerIds: input.admittedConnectedPeerIds,
     selectContextGraphIds: () => [...new Set([...input.capabilities.listActiveRfc64CatalogReplayContextGraphIdsV1(),

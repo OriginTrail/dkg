@@ -370,3 +370,53 @@ describe('joined connection ownership after an unobserved run', () => {
     expect(requestPeer).toHaveBeenCalledOnce(); lease.release();
   });
 });
+
+it('executes a full request joining immediately after the final parity continuation', async () => {
+  const requested: string[] = [];
+  const joined = Promise.withResolvers<Readonly<{ requested: number; failed: number }>>();
+  let join = false;
+  const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({
+    requestPeer: async (_cg, peer) => { requested.push(peer); return { status: 'completed', targets: [{ id: peer }] }; },
+    whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target.id,
+    parityFailed: async () => {
+      if (join) {
+        join = false;
+        // The first task precedes the await continuation, the second follows
+        // its final queue check. An extra await before settlement strands B.
+        queueMicrotask(() => queueMicrotask(() => {
+          runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['b'] })
+            .then(joined.resolve, joined.reject);
+        }));
+      }
+      return false;
+    },
+  });
+  await runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['initial'] });
+  requested.length = 0; join = true;
+  await runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['a'] });
+  await expect(joined.promise).resolves.toEqual({ requested: 1, failed: 0 });
+  expect(requested).toEqual(['a', 'b']);
+  expect(runtime.promisedTargets('cg', 'p')).toContainEqual({ id: 'b' });
+  expect(runtime.status('cg', 'p')).toMatchObject({ active: false, failed: false, unverified: false });
+});
+
+it('carries one opaque demand through decorated admission and repeated completion', async () => {
+  const requestPeer = vi.fn(async () => ({ status: 'completed' as const, targets: [] }));
+  const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<Target>({ requestPeer,
+    whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target.id, parityFailed: async () => false });
+  const reserved = runtime.reservePeer('cg', 'p', 'peer')!;
+  expect(() => runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand',
+    demand: { ...reserved, handle: {} } })).toThrow('Unknown catalog replay demand handle');
+  expect(() => runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: reserved }))
+    .toThrow('not admitted');
+  const decorated = { ...reserved, release: vi.fn(() => reserved.release()) };
+  decorated.admit();
+  const command = { contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand' as const, demand: decorated };
+  const first = runtime.request(command);
+  const second = runtime.request(command);
+  await expect(first).resolves.toEqual({ requested: 1, failed: 0 });
+  await expect(second).resolves.toEqual({ requested: 1, failed: 0 });
+  await expect(runtime.request(command)).resolves.toEqual({ requested: 1, failed: 0 });
+  expect(requestPeer).toHaveBeenCalledOnce();
+  decorated.release();
+});

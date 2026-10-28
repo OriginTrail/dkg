@@ -309,7 +309,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       contextGraphId: CG,
       policyDigest: POLICY,
       kind: 'connection-demand',
-      demand: { peerId: HEALTHY_PEER, generation: 1 },
+      demand: runtime.markPeerPending(CG, POLICY, HEALTHY_PEER)!,
     });
     expect(runtime.status(CG, POLICY)?.failed).toBe(true);
   });
@@ -474,7 +474,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       contextGraphId: CG,
       policyDigest: POLICY,
       kind: 'connection-demand',
-      demand: { peerId: FAILING_PEER, generation: 1 },
+      demand: runtime.markPeerPending(CG, POLICY, FAILING_PEER)!,
     });
     expect(requestedPeers(requestPeer)).toEqual([FAILING_PEER, FAILING_PEER]);
   });
