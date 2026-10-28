@@ -196,3 +196,27 @@ it('owns eight-graph aggregate batches and excludes unscoped content', async () 
     await expect(readNamedGraphStatisticsBatch(store, 'large', graphs)).rejects.toThrow('eight graphs');
   } finally { await store.close(); }
 });
+
+
+it.each(['root', 'metadata'] as const)('rejects a static subgraph %s registered as a child between inventory and a statistics batch', async kind => {
+  const store = new OxigraphStore(); const child = `${ROOT}/code`;
+  const graph = kind === 'root' ? child : `${child}/_meta`;
+  try {
+    await store.insert([{ subject: 'urn:child-secret', predicate: 'urn:p', object: '"hidden"', graph }]);
+    const engine = new DKGQueryEngine(store);
+    const reads = vi.spyOn(store, 'query');
+    let batches = 0;
+    await expect(engine.readContextGraphNamedGraphStats('large', { subGraphName: 'code' }, async (_admission, read) => {
+      batches++;
+      await store.insert([{ subject: child, predicate: 'https://dkg.network/ontology#registrationStatus',
+        object: '"registered"', graph: `${child}/_meta` }]);
+      return read();
+    })).rejects.toThrow(/Scoped query violation/);
+    expect(batches).toBe(1);
+    expect(reads.mock.calls.filter(([sparql]) => sparql.includes('COUNT(DISTINCT ?s)'))).toHaveLength(0);
+    // Parent metadata remains a legitimate static exemption.
+    await store.insert([{ subject: 'urn:parent', predicate: 'urn:p', object: '"visible"', graph: `${ROOT}/_meta` }]);
+    await expect(readNamedGraphStatisticsBatch(store, 'large', [`${ROOT}/_meta`], { subGraphName: 'code' }))
+      .resolves.toEqual([{ graph: `${ROOT}/_meta`, entityCount: 1, tripleCount: 1 }]);
+  } finally { await store.close(); }
+});

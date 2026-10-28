@@ -2,7 +2,7 @@ import { validateSubGraphName } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphDataUri, contextGraphSharedMemoryMetaUri } from '@origintrail-official/dkg-core';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
-import { classifyScopedContentGraph, isExcludedContentGraphTail } from './scoped-content-partition.js';
+import { classifyScopedContentGraph, isExcludedContentGraphTail, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { resolveDraftAccessPolicy, isContentPartitionEligible } from './content-partition-policy.js';
 import type { ContentPartition } from './content-partition-policy.js';
 import type { QueryOptions } from './query-engine.js';
@@ -56,6 +56,7 @@ export function selectLegacyScopedRouteGraphs(policy: RoutePolicy, partitions: R
 }
 export function isScopedRoutePartition(policy: RoutePolicy,
   graph: string, registeredSubGraphs: Set<string>, registeredAssertionGraphs: Set<string>, children: Set<string>): boolean {
+  if (isKnownChildContextGraphPartition(graph, children)) return false;
   if (isStaticScopedRoutePartition(policy, graph)) return true;
   const partition = classifyScopedContentGraph(graph, policy.contextGraphId, registeredSubGraphs, registeredAssertionGraphs, children);
   return partition !== undefined && isEligibleScopedPartition(policy, partition);

@@ -43,16 +43,17 @@ export async function authorizeExactContextGraphPartitions(
   const assertionParents = new Set<string>();
   const childCandidates = new Set<string>();
   for (const graph of relevant) {
-    if (metadata.has(graph) || graph === root) continue;
+    if (graph === root) continue;
+    // Static subgraph roots and metadata must observe newly registered child CGs too.
+    const parts = graph.slice(root.length + 1).split('/');
+    for (let i = 0; i < parts.length; i++) childCandidates.add(`${root}/${parts.slice(0, i + 1).join('/')}`);
+    if (metadata.has(graph)) continue;
     const description = describeScopedContentGraph(graph, contextGraphId);
     if (!description) continue;
     if (!subGraph && description.subGraphName) names.add(description.subGraphName);
     if (description.kind === 'draft') {
       for (const parent of assertionRegistrationCandidates(graph)) assertionParents.add(parent);
     }
-    // Only exact admission needs metadata for every possible child-CG ancestor.
-    const parts = graph.slice(root.length + 1).split('/');
-    for (let i = 0; i < parts.length; i++) childCandidates.add(`${root}/${parts.slice(0, i + 1).join('/')}`);
   }
 
   const revisionSource = asGraphWriteRevisionSource(store);

@@ -130,3 +130,29 @@ it.each(['trusted-node', 'caller-downgraded'] as const)('checks caller scope for
   } else { expect(result).toEqual([]); expect(aggregates).toHaveLength(0); }
   expect(authority.mock.calls.length).toBeGreaterThanOrEqual(2);
 });
+
+
+it('rechecks caller authority after the first statistics batch before reading the ninth graph', async () => {
+  const { agent } = node(); const id = 'stats-batch-revocation';
+  const graphs = Array.from({ length: 9 }, (_, n) => `did:dkg:context-graph:${id}/_verifiable_memory/a/${n}`);
+  await agent.store.insert(graphs.map((graph, n) => ({ graph, subject: `urn:entity:${n}`, predicate: 'urn:p', object: '"v"' })));
+  let revoked = false;
+  const authority = vi.fn(async () => ({ outcome: 'allowed', grantScope: revoked ? 'node' : 'caller' }));
+  Object.assign(agent, { queryEngine: new DKGQueryEngine(agent.store), resolveContextGraphReadAuthority: authority });
+  const original = agent.store.query.bind(agent.store);
+  const aggregateGraphs: string[][] = [];
+  const reads = vi.spyOn(agent.store, 'query').mockImplementation(async (sparql, opts) => {
+    const result = await original(sparql, opts);
+    if (sparql.includes('COUNT(DISTINCT ?s)')) {
+      aggregateGraphs.push(graphs.filter(graph => sparql.includes(`<${graph}>`)));
+      revoked = true;
+    }
+    return result;
+  });
+  const stats = await agent.readContextGraphNamedGraphStats(id, { callerAgentAddress: B });
+  expect(aggregateGraphs).toEqual([graphs.slice(0, 8)]);
+  expect(stats.map(row => row.graph).sort()).toEqual(graphs.slice(0, 8));
+  expect(stats.some(row => row.graph === graphs[8])).toBe(false);
+  expect(authority.mock.calls.length).toBeGreaterThanOrEqual(3);
+  expect(reads.mock.calls.filter(([sparql]) => sparql.includes('COUNT(DISTINCT ?s)'))).toHaveLength(1);
+});
