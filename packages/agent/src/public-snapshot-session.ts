@@ -29,7 +29,7 @@ interface PublicSnapshotSession {
 
 /** One foreground owner and lifetime, with explicit caller-owned observation acceptance. */
 export class PublicSnapshotSessionMethods extends DKGAgentBase {
-  async withPublicSnapshotSession<T>(this: DKGAgent, options: PublicSnapshotSyncOptions,
+  protected async withPublicSnapshotSession<T>(this: DKGAgent, options: PublicSnapshotSyncOptions,
     run: (session: PublicSnapshotSession) => Promise<T>, controls: {
       ownershipError?: string; observationAcceptor?: PublicSnapshotObservationAcceptor;
     } = {}): Promise<T> {

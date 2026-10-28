@@ -10,6 +10,7 @@ import { recoverPublicSnapshotExact } from './public-snapshot-exact.js';
 import { createPublicSnapshotHeldAssetCheck } from './public-snapshot-held-assets.js';
 import { admitAuthenticatedContextGraphSubscription } from './context-graph-subscription-admission.js';
 import { DKGAgentBase } from './dkg-agent-base.js';
+import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import { createPublicSnapshotServingRuntime } from './public-snapshot-serving-runtime.js';
 import { decodePublicGraphSnapshotRequest, PUBLIC_GRAPH_SNAPSHOT_REQUEST_MAX_BYTES } from './public-snapshot-wire.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -29,7 +30,7 @@ const encoder = new TextEncoder();
 import { type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { registerSnapshotSourceHandler } from './public-snapshot-source-handler.js';
 export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
-export class PublicSnapshotMethods extends DKGAgentBase {
+export class PublicSnapshotMethods extends PublicSnapshotSessionMethods {
   getPublicSnapshotSourcePolicies(this: DKGAgent): readonly SnapshotSourcePolicyName[] {
     return resolveSnapshotSourcePolicies(this.chain, this.config.coreChainCacheNetworks).map(policy => policy.name);
   }

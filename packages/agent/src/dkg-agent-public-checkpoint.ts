@@ -2,13 +2,13 @@
 import { readPublicSnapshotWithAdmission } from './public-snapshot-admission-read.js';
 import { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
-import { DKGAgentBase } from './dkg-agent-base.js';
+import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import type { PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';
 import { preparePublicSnapshotCheckpoint, assertCheckpointInventoryUnchanged } from './public-snapshot-checkpoint.js';
 
-export class PublicCheckpointMethods extends DKGAgentBase {
+export class PublicCheckpointMethods extends PublicSnapshotSessionMethods {
   /** Drain startup discovery before taking a foreground graph-ownership snapshot. */
   async waitForPublicCheckpointStartup(this: DKGAgent, contextGraphId: string, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
