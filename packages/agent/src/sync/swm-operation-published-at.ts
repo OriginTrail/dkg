@@ -17,7 +17,6 @@
  * only the earliest when they add a copy to a store that already holds one.
  */
 
-import { canonicalQuadKey } from './requester/quad-key.js';
 import { assertSafeIri, formatSparqlTerm, isSafeIri } from '@origintrail-official/dkg-core';
 import { tryUpdateWithTouchedGraphs, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { decodeWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
@@ -39,7 +38,6 @@ export interface OperationPublishedAtPlan {
   readonly retirements: readonly {
     readonly rows: readonly Quad[];
     readonly winner: Quad;
-    readonly requiredReplacement?: Quad;
   }[];
 }
 
@@ -78,7 +76,7 @@ export function planOperationPublishedAt(
       }
     }
     if (retiring.length > 0) {
-      retirements.push({ rows: retiring, winner: { subject, predicate: PUBLISHED_AT, object: winner.object, graph }, ...(winner.row ? { requiredReplacement: winner.row } : {}) });
+      retirements.push({ rows: retiring, winner: { subject, predicate: PUBLISHED_AT, object: winner.object, graph } });
     }
   }
   return {
@@ -107,6 +105,10 @@ export async function insertKeepingOnePublishedAt(
     if (!isOperationPublishedAtRow(row) || !isSafeIri(row.graph) || !isSafeIri(row.subject)) continue;
     targets.set(row.graph, (targets.get(row.graph) ?? new Set<string>()).add(row.subject));
   }
+  if (targets.size === 0) return insertPrefilteredSyncQuads(
+    rows => store.insert(rows, { priority: 'background', source: `${source}.insert` }),
+    filtered.kept, { recordDrops }, seam,
+  );
   const stored = new Map<string, string[]>();
   for (const [graph, subjectSet] of targets) {
     const subjects = [...subjectSet];
@@ -141,12 +143,11 @@ export async function insertKeepingOnePublishedAt(
     plan.rows, { recordDrops }, seam,
   );
   assertUsableOperationTimestamps(targets, stored, inserted);
-  const written = new Set(inserted.map(canonicalQuadKey));
   // The winning stamp must still exist in the SAME backend delete operation.
   // A recovery can replace all operation rows after our insert; an unconditional
   // delete based on the earlier read would then remove its only restored stamp.
   // Backends without UPDATE keep harmless duplicate stamps for a later repair.
-  for (const { graph, sparql } of retirementUpdates(plan.retirements, written)) {
+  for (const { graph, sparql } of retirementUpdates(plan.retirements)) {
     const supported = await tryUpdateWithTouchedGraphs(store, sparql, [graph],
       { priority: 'background', source: `${source}.retirePublishedAt` });
     if (!supported) break;
@@ -155,10 +156,9 @@ export async function insertKeepingOnePublishedAt(
 }
 
 /** Bounded set-based cleanup; every tuple retains its own operation's winner guard. */
-function* retirementUpdates(retirements: OperationPublishedAtPlan['retirements'], written: ReadonlySet<string>) {
+function* retirementUpdates(retirements: OperationPublishedAtPlan['retirements']) {
   const graphs = new Map<string, string[]>();
-  for (const { rows: losers, winner, requiredReplacement } of retirements) {
-    if (requiredReplacement && !written.has(canonicalQuadKey(requiredReplacement))) continue;
+  for (const { rows: losers, winner } of retirements) {
     const graph = assertSafeIri(winner.graph), subject = assertSafeIri(winner.subject);
     const winnerTerm = formatSparqlTerm(winner.object, { position: 'object' });
     let tuples = graphs.get(graph);

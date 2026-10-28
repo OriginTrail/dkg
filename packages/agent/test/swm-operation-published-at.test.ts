@@ -263,7 +263,7 @@ describe('planOperationPublishedAt', () => {
       new Map([[key, [stamp(LOCAL), stamp(LATEST)]]]),
     )).toEqual({
       rows: [typeRow, row(stamp(PEER))],
-      retirements: [{ rows: [row(stamp(LOCAL)), row(stamp(LATEST))], winner: row(stamp(PEER)), requiredReplacement: row(stamp(PEER)) }],
+      retirements: [{ rows: [row(stamp(LOCAL)), row(stamp(LATEST))], winner: row(stamp(PEER)) }],
     });
     expect(planOperationPublishedAt(
       [typeRow, row(stamp(LATER))],
@@ -280,7 +280,7 @@ describe('planOperationPublishedAt', () => {
 
   it('prefers a stamp the head resolver accepts over an earlier unusable one', () => {
     expect(planOperationPublishedAt([row(stamp(LOCAL))], new Map([[key, ['"not-a-date"']]])))
-      .toEqual({ rows: [row(stamp(LOCAL))], retirements: [{ rows: [row('"not-a-date"')], winner: row(stamp(LOCAL)), requiredReplacement: row(stamp(LOCAL)) }] });
+      .toEqual({ rows: [row(stamp(LOCAL))], retirements: [{ rows: [row('"not-a-date"')], winner: row(stamp(LOCAL)) }] });
     expect(planOperationPublishedAt([row(stamp('1960-01-01T00:00:00.000Z'))], new Map([[key, [stamp(LOCAL)]]])))
       .toEqual({ rows: [], retirements: [] });
   });
@@ -405,34 +405,46 @@ describe('a defective head is set aside, not its whole graph', () => {
     }
   });
 
-  it('a conflict between two valid heads still fails the whole graph', () => {
+  it('sets aside both colliding heads without rejecting independent graphs', () => {
     // The SWM graph is keyed by agent address and number, not by chain.
     const twin = fx.share({ version: 1, operationId: 'op-twin', marker: 'twin', ual: `did:dkg:base:8453/${ADDRESS}/1` });
     expect(twin.assertionGraph).toBe(valid.assertionGraph);
-    expect(() => parseGraphScopedSwmRecoveryHeadResults({
-      contextGraphId: CG,
-      metaQuads: [...valid.meta, ...twin.meta, ...defective('bad').meta],
-    })).toThrow(/multiple UAL owners/);
+    const independent = fx.share({ version: 1, operationId: 'op-independent', marker: 'independent',
+      ual: `did:dkg:hardhat:31337/${ADDRESS}/3` });
+    const metaQuads = [...valid.meta, ...twin.meta, ...independent.meta];
+    expect(() => parseGraphScopedSwmRecoveryDescriptors({ contextGraphId: CG, metaQuads })).toThrow(/multiple UAL owners/);
+    const result = parseGraphScopedSwmRecoveryHeadResults({ contextGraphId: CG, metaQuads });
+    expect(result.descriptors.map(item => item.kaUal)).toEqual([independent.headSubject.replace("#dkg-swm-head", "")]);
+    expect(result.setAside).toHaveLength(2);
   });
 
-  it.each([false, true])('rejects a colliding malformed operation before replacing stored content (malformed first: %s)', async malformedFirst => {
+  it.each([false, true].flatMap(first => ['operation', 'envelope'].map(kind => ({ first, kind }))))('withholds colliding $kind before replacing stored content (malformed first: $first)', async ({ first, kind }) => {
     const twin = fx.share({ version: 1, operationId: 'op-colliding-twin', marker: 'stored-twin', ual: `did:dkg:base:8453/${ADDRESS}/1` });
     expect(twin.assertionGraph).toBe(valid.assertionGraph);
     const malformed = [...twin.meta,
-      { subject: twin.operationSubject, predicate: `${DKG}publisherPeerId`, object: '"peer-other"', graph: WS_META }];
-    const servedMeta = malformedFirst ? [...malformed, ...valid.meta] : [...valid.meta, ...malformed];
-    expect(() => parseGraphScopedSwmRecoveryHeadResults({ contextGraphId: CG, metaQuads: servedMeta }))
-      .toThrow(/multiple UAL owners/);
+      kind === 'operation'
+        ? { subject: twin.operationSubject, predicate: `${DKG}publisherPeerId`, object: '"peer-other"', graph: WS_META }
+        : { subject: twin.headSubject, predicate: `${DKG}assertionVersion`, object: '"2"', graph: WS_META }];
+    const independent = fx.share({ version: 1, operationId: 'op-independent', marker: 'independent',
+      ual: `did:dkg:hardhat:31337/${ADDRESS}/3` });
+    const servedMeta = [...(first ? [...malformed, ...valid.meta] : [...valid.meta, ...malformed]), ...independent.meta];
+    const parsed = parseGraphScopedSwmRecoveryHeadResults({ contextGraphId: CG, metaQuads: servedMeta });
+    expect(parsed.descriptors.map(item => item.kaUal)).toEqual([independent.headSubject.replace("#dkg-swm-head", "")]);
+    expect(parsed.setAside).toHaveLength(2);
     const store = newStore();
     await seedMaterialized(store, twin, twin.meta);
     const contentBefore = await rowsOf(store, twin.assertionGraph);
-    const metadataBefore = await rowsOf(store, WS_META);
+    const metadataBefore = await rowsOf(store, WS_META, twin.headSubject);
+    const operationBefore = await rowsOf(store, WS_META, twin.operationSubject);
     const summary = await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, servedMeta,
-      cachedSnapshots: new Map([[valid.digest, valid.payload], [twin.digest, twin.payload]]),
+      cachedSnapshots: new Map([[valid.digest, valid.payload], [twin.digest, twin.payload], [independent.digest, independent.payload]]),
     }).run();
     expect(summary.failedPhases).toBeGreaterThan(0);
     expect(await rowsOf(store, twin.assertionGraph)).toEqual(contentBefore);
-    expect(await rowsOf(store, WS_META)).toEqual(metadataBefore);
+    expect(await rowsOf(store, WS_META, twin.headSubject)).toEqual(metadataBefore);
+    expect(await rowsOf(store, WS_META, twin.operationSubject)).toEqual(operationBefore);
+    expect(await rowsOf(store, WS_META, valid.headSubject)).toEqual([]);
+    expect(await rowsOf(store, independent.assertionGraph)).toHaveLength(independent.payload.length);
   });
 
   it('materializes the other assets and holds the round incomplete', async () => {
@@ -609,6 +621,15 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
     expect(inserted).toEqual([row(stamp(LOCAL))]);
     expect(drops).toHaveBeenCalledWith([expect.objectContaining({ quad: oversized, kind: 'store-reject' })], 'test:store-reject');
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
+  });
+  it('writes data-only batches without timestamp reads or retirement updates', async () => {
+    const store = newStore();
+    const query = vi.spyOn(store, 'query'), update = vi.spyOn(store, 'update');
+    const data = Array.from({ length: 1000 }, (_, index) => ({ subject: `urn:data:${index}`,
+      predicate: 'http://schema.org/text', object: '"payload"', graph: ack.assertionGraph }));
+    expect(await insertKeepingOnePublishedAt(store, data, options)).toEqual(data);
+    expect(query).not.toHaveBeenCalled();
+    expect(update).not.toHaveBeenCalled();
   });
   it('does not retire stored evidence after a failed insert', async () => {
     const store = newStore(); await store.insert([row(stamp(LOCAL))]);

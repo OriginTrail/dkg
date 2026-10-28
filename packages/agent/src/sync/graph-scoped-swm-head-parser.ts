@@ -157,8 +157,8 @@ function parseGraphScopedSwmHeads(
   }
   const descriptors: GraphScopedSwmRecoveryDescriptor[] = [];
   const setAside: SetAsideGraphScopedSwmHead[] = [];
-  const validated: ReturnType<typeof decodeHeadEnvelope>[] = [];
-  const owners = new Map<string, string>();
+  const heads: { head: SwmRecoveryHead; claim?: ReturnType<typeof decodeHeadGraphClaim>; error?: unknown }[] = [];
+  const owners = new Map<string, Set<string>>();
   const rejectHead = (head: SwmRecoveryHead, error: unknown) => {
     if (mode === 'strict') throw error;
     setAside.push({ metaGraph: head.metaGraph, headSubject: head.headSubject,
@@ -174,21 +174,28 @@ function parseGraphScopedSwmHeads(
       .map(row => stripLiteral(row.object).trim()))]
       .map(shareOperationId => ({ shareOperationId, operationSubject: `urn:dkg:share:${params.contextGraphId}:${shareOperationId}` }));
     const head = { metaGraph, headSubject, headRows, operationReferences };
-    let envelope: ReturnType<typeof decodeHeadEnvelope>;
-    try { envelope = decodeHeadEnvelope(params, head, allowedMetaGraphs); }
-    catch (error) { rejectHead(head, error); continue; }
-    // A validated head still owns its graph if its operation is defective.
-    // Check every envelope before any operation can be excluded from the round.
-    const owner = owners.get(envelope.assertionGraph);
-    if (owner && owner !== envelope.scope.ual) {
-      throw new Error(`Graph-scoped SWM assertion graph ${envelope.assertionGraph} has multiple UAL owners`);
-    }
-    owners.set(envelope.assertionGraph, envelope.scope.ual);
-    validated.push(envelope);
+    try {
+      // Graph ownership is independent of assertion version and operation validity.
+      // Reserve every verifiable claim before any malformed envelope is set aside.
+      const claim = decodeHeadGraphClaim(params, head, allowedMetaGraphs);
+      const graphOwners = owners.get(claim.assertionGraph) ?? new Set<string>();
+      graphOwners.add(claim.scope.ual);
+      owners.set(claim.assertionGraph, graphOwners);
+      heads.push({ head, claim });
+    } catch (error) { heads.push({ head, error }); }
   }
-  for (const head of validated) {
-    try { descriptors.push(decodeHeadOperation(params, head, index)); }
-    catch (error) { rejectHead(head, error); }
+  for (const { head, claim, error } of heads) {
+    try {
+      if (!claim) throw error;
+      if (owners.get(claim.assertionGraph)!.size > 1) throw new Error(
+        `Graph-scoped SWM assertion graph ${claim.assertionGraph} has multiple UAL owners`);
+      const scopeVersion = requireSafeInteger(head.headRows, CONTENT_SCOPE_VERSION, 'contentScopeVersion');
+      if (scopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) throw new Error(
+        `Graph-scoped SWM head ${head.headSubject} has unsupported contentScopeVersion ${scopeVersion}`);
+      const assertionVersion = requirePositiveInteger(head.headRows, ASSERTION_VERSION, 'assertionVersion');
+      const scope = createGraphKnowledgeAssetScope(claim.scope.ual, assertionVersion);
+      descriptors.push(decodeHeadOperation(params, { ...head, ...claim, scope }, index));
+    } catch (failure) { rejectHead(head, failure); }
   }
   return { descriptors, setAside };
 }
@@ -204,7 +211,7 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: GraphScopedSwmRec
 export function parseGraphScopedSwmRecoveryHeadResults(params: GraphScopedSwmRecoveryParseInput) {
   return parseGraphScopedSwmHeads(params, 'set-aside');
 }
-function decodeHeadEnvelope(params: GraphScopedSwmRecoveryParseInput,
+function decodeHeadGraphClaim(params: GraphScopedSwmRecoveryParseInput,
   head: SwmRecoveryHead,
   allowedMetaGraphs: ReadonlySet<string>,
 ) {
@@ -214,13 +221,10 @@ function decodeHeadEnvelope(params: GraphScopedSwmRecoveryParseInput,
   }
 
   const kaUalFromHead = headSubject.slice(0, -SWM_HEAD_SUFFIX.length);
-  const scopeVersion = requireSafeInteger(headRows, CONTENT_SCOPE_VERSION, 'contentScopeVersion');
-  if (scopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-    throw new Error(`Graph-scoped SWM head ${headSubject} has unsupported contentScopeVersion ${scopeVersion}`);
-  }
   const kaUal = requireSingle(headRows, KA_UAL, 'kaUal');
-  const assertionVersion = requirePositiveInteger(headRows, ASSERTION_VERSION, 'assertionVersion');
-  const scope = createGraphKnowledgeAssetScope(kaUal, assertionVersion);
+  // The physical graph omits chain and assertion version. Validate its owner
+  // even when another envelope field cannot be decoded.
+  const scope = createGraphKnowledgeAssetScope(kaUal, 1);
   if (scope.ual !== kaUal || scope.ual !== kaUalFromHead) {
     throw new Error(`Graph-scoped SWM head ${headSubject} has a non-canonical or mismatched kaUal`);
   }
@@ -244,7 +248,7 @@ function decodeHeadEnvelope(params: GraphScopedSwmRecoveryParseInput,
 }
 
 function decodeHeadOperation(params: GraphScopedSwmRecoveryParseInput,
-  { metaGraph, headSubject, headRows, operationReferences, scope, subGraphName, assertionGraph }: ReturnType<typeof decodeHeadEnvelope>,
+  { metaGraph, headSubject, headRows, operationReferences, scope, subGraphName, assertionGraph }: ReturnType<typeof decodeHeadGraphClaim>,
   byGraphAndSubject: ReadonlyMap<string, readonly Quad[]>,
 ): GraphScopedSwmRecoveryDescriptor {
   const operation = resolveEquivalentHeadOperation({
