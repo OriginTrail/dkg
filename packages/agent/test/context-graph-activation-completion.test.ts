@@ -36,13 +36,13 @@ async function fixture() {
   return { a, id, row, events, topics, publicationWaits };
 }
 
-it.each([false, true])('returns a completed activation and publishes once with rolling slot policy %s', async claimRollingSlot => {
+it.each([false, true])('returns a completed activation and publishes once with rolling slot policy %s', async capped => {
   const { a, row, events, publicationWaits } = await fixture();
-  a.contextGraphSubscriptionRehydrationStatus.activationCap = claimRollingSlot ? 1 : 0;
-  const result = await a.activatePersistedContextGraphSubscriptionRecord(row, { claimRollingSlot });
+  a.contextGraphSubscriptionRehydrationStatus.activationCap = capped ? 1 : 0;
+  const result = await a.activatePersistedContextGraphSubscriptionRecord(row);
   expect(result.subscribed).toBe(true);
   expect(await Promise.all(publicationWaits)).toEqual(['Subscription activation ownership changed']);
-  expect(events).toEqual([{ dormant: false, pending: false, slot: claimRollingSlot, activated: 1 }]);
+  expect(events).toEqual([{ dormant: false, pending: false, slot: capped, activated: 1 }]);
 });
 
 it.each(['cancelled', 'prepare', 'subscribe'] as const)('never publishes a %s activation', async failure => {
@@ -51,7 +51,6 @@ it.each(['cancelled', 'prepare', 'subscribe'] as const)('never publishes a %s ac
   await expect(a.activatePersistedContextGraphSubscriptionRecord(row, {
     prepare: async () => { if (failure === 'prepare') throw new Error('prepare'); },
     isCurrent: () => failure !== 'cancelled',
-    claimRollingSlot: true,
   })).rejects.toThrow(failure === 'cancelled' ? 'stale' : failure);
   expect(events).toEqual([]);
   expect(a.contextGraphSubscriptionRehydrationSlotIds.has(id)).toBe(false);
@@ -89,6 +88,24 @@ it.each(['prepare', 'subscribe'] as const)('persists repaired intent and retains
   });
   await expect(wait).resolves.toMatchObject({ kind: 'committed', subscription: { onChainId: '8' } });
   expect(events).toHaveLength(1);
+});
+
+it('preserves an installing activation across an ordinary no-op persistence acknowledgement', async () => {
+  const { a, id, row, events } = await fixture();
+  const gate = Promise.withResolvers<void>();
+  const activation = a.activatePersistedContextGraphSubscriptionRecord(row, { prepare: () => gate.promise });
+  const waiting = a.contextGraphSubscriptionActivations.wait(id, new AbortController().signal);
+  const provisional = a.subscribedContextGraphs.get(id);
+  a.recordContextGraphSubscriptionPersistence(id, row);
+  expect(a.contextGraphSubscriptionDormancyById.get(id)).toBe('activationCap');
+  expect(a.getContextGraphSubscriptionRehydrationStatus().activated).toBe(0);
+  expect(events).toEqual([]);
+  gate.resolve();
+  const committed = await activation;
+  expect(committed).toEqual(provisional);
+  expect(a.subscribedContextGraphs.get(id)).toBe(committed);
+  await expect(waiting).resolves.toEqual({ kind: 'committed', subscription: committed });
+  expect(events).toEqual([{ dormant: false, pending: false, slot: true, activated: 1 }]);
 });
 
 it('rejects an overlapping retry without replacing the installing owner', async () => {

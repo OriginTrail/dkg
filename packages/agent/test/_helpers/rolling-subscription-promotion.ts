@@ -89,7 +89,7 @@ export function createRollingPromotionFixture(
           remove: id => { host.subscribedContextGraphs.delete(id); },
           rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
           commit: () => live, persistBinding: host.persistContextGraphSubscriptionStrict,
-        }, { claimRollingSlot: activationOptions.claimRollingSlot });
+        });
       }
     }),
   };

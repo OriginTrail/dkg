@@ -108,7 +108,6 @@ export interface PersistedContextGraphSubscriptionActivationPorts {
 export type PersistSubscriptionActivationRepair = (isCurrent?: () => boolean) => Promise<void>;
 
 export interface PersistedContextGraphSubscriptionActivationOptions {
-  readonly claimRollingSlot?: boolean;
   readonly onChainId?: string;
   readonly restorePendingMeta?: boolean;
   readonly rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
@@ -350,7 +349,7 @@ export async function activateRollingSubscriptionPromotion(
   isCurrent: (subscription: ContextGraphSub) => boolean,
 ): Promise<void> {
   await ports.activate(row, {
-    onChainId, claimRollingSlot: true, updateRehydrationStatus: false, rollbackSlotRelease: 'rolling-rollback',
+    onChainId, updateRehydrationStatus: false, rollbackSlotRelease: 'rolling-rollback',
     prepare: async (subscription, persistRepair) => {
       if (!isCurrent(subscription)) throw new Error('Persisted subscription promotion became stale');
       if (onChainId !== undefined && onChainId !== row.onChainId) {

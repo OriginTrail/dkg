@@ -13,7 +13,7 @@ function fixture() {
     contextGraphSubscriptionRehydrationPendingIds: new Set(),
     contextGraphSubscriptionRehydrationSlotIds: new Set(),
     contextGraphSubscriptionRehydrationStatus: { persistedTotal: 0, activated: 0,
-      hostedActivated: 0, hostedActivatedIds: [], rehydrationEnabled: true },
+      hostedActivated: 0, hostedActivatedIds: [], rehydrationEnabled: true, activationCap: 1 },
     subscribedContextGraphs: new Map(),
     clearContextGraphSubscriptionPersistRevisionStateIfIdle: vi.fn(),
     eventBus: { emit: vi.fn() },
@@ -54,7 +54,7 @@ it('accounts persistence and activation from captured transitions after dormancy
     remove: key => { agent.subscribedContextGraphs.delete(key); },
     rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
     commit: () => live,
-  }, { claimRollingSlot: true });
+  });
   expect(observations).toEqual([{ dormancy: undefined, pending: false, slot: true }]);
   expect(atEvent).toEqual([{ status: expect.objectContaining({ persistedTotal: 1, activated: 1, dormant: 0 }), slot: true }]);
   await expect(wait).resolves.toEqual({ kind: 'committed', subscription: live });
@@ -124,7 +124,7 @@ it('uses one accounting owner for startup commits, durable clears and later retr
       install: () => { agent.subscribedContextGraphs.set(id, live); return live; },
       remove: key => { agent.subscribedContextGraphs.delete(key); },
       rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {}, commit: () => live,
-    }, { claimRollingSlot: true });
+    });
   };
   await activate('hosted', true);
   owner.transition({ id: 'cleared', kind: 'cleared' });

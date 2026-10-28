@@ -8013,15 +8013,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /** Record an acknowledged durable write and its explicit activation transition. */
   recordContextGraphSubscriptionPersistence(this: DKGAgent, contextGraphId: string, persisted?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>): void {
-    const live = this.subscribedContextGraphs.get(contextGraphId);
-    const isPersisted = persisted?.subscribed === true || persisted?.coreHosted === true;
-    const isActive = live?.subscribed === true || live?.coreHosted === true;
-    const reason = isPersisted && !isActive
-      ? this.contextGraphSubscriptionDormancyById.get(contextGraphId)
-        ?? (this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled')
-      : undefined;
-    this.contextGraphSubscriptionActivations.transition({ id: contextGraphId, reason, kind: 'saved',
-      persisted: isPersisted, active: isActive, hosted: live?.coreHosted === true });
+    this.contextGraphSubscriptionActivations.recordPersistence(contextGraphId, persisted);
   }
 
   recordContextGraphSubscriptionClear(this: DKGAgent,
@@ -9245,7 +9237,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           : undefined;
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
           restorePendingMeta,
-          claimRollingSlot: cap > 0,
           onChainId: healedOnChainId,
           ...(healedOnChainId !== undefined && healedOnChainId !== row.onChainId
             ? {

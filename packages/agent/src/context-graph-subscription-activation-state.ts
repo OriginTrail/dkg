@@ -2,7 +2,7 @@
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { accountSubscriptionChanges, type SubscriptionAccountingChange } from './context-graph-subscription-accounting.js';
-import { releaseRollingSubscriptionSlot, rehydratedSubscriptionReachedSafeState, type PersistedContextGraphSubscriptionActivationOptions, type PersistedContextGraphSubscriptionActivationPorts } from './context-graph-subscription-authority-recovery.js';
+import { rehydratedSubscriptionReachedSafeState, type PersistedContextGraphSubscriptionActivationOptions, type PersistedContextGraphSubscriptionActivationPorts } from './context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord, ContextGraphSubscriptionRehydrationInternalStatus } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
@@ -49,7 +49,7 @@ export type SubscriptionLifecycleEvent = Readonly<{ id: string } & (
   | { kind: 'cleared' | 'deactivated' }
 )>;
 
-type SubscriptionActivationCommit = Readonly<{ id: string; kind: 'activated'; subscription: ContextGraphSub; claimRollingSlot: boolean }>;
+type SubscriptionActivationCommit = Readonly<{ id: string; kind: 'activated'; subscription: ContextGraphSub }>;
 
 export interface SubscriptionActivationPorts {
   readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
@@ -104,18 +104,32 @@ export class ContextGraphSubscriptionActivations {
     this.ports.contextGraphSubscriptionRehydrationPendingIds.clear();
     this.ports.contextGraphSubscriptionRehydrationSlotIds.clear();
   }
-  /** Canonical readiness changes own rolling slot occupancy and its notification. */
-  updateReadiness(id: string, subscription: ContextGraphSub, release: 'deactivation' | 'activation-rollback' | 'rolling-rollback' = 'deactivation'): boolean {
-    const ports = this.ports, status = ports.getStatus();
+  /** Persistence acknowledges durability; only intent replacement or commit retires an activation. */
+  recordPersistence(id: string, persisted?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>): void {
+    const live = this.ports.subscribedContextGraphs.get(id);
+    const isPersisted = persisted?.subscribed === true || persisted?.coreHosted === true;
+    const active = !this.pending.has(id) && (live?.subscribed === true || live?.coreHosted === true);
+    const reason = isPersisted && !active
+      ? this.ports.contextGraphSubscriptionDormancyById.get(id)
+        ?? ((this.startupAccounting ?? this.ports.getStatus())?.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled')
+      : undefined;
+    this.apply([{ id, kind: 'saved', reason, persisted: isPersisted, active, hosted: live?.coreHosted === true }]);
+  }
+  /** One policy owns slot occupancy during startup, activation commit and readiness changes. */
+  private reconcileRollingSlot(id: string, subscription: ContextGraphSub, persisted: boolean): boolean {
+    const ports = this.ports, status = this.startupAccounting ?? ports.getStatus();
     const eligible = status?.rehydrationEnabled === true && status.activationCap > 0
-      && ports.contextGraphSubscriptionRehydrationAccountedIds.has(id)
-      && subscription.coreHosted !== true && subscription.subscribed;
+      && persisted && subscription.coreHosted !== true && subscription.subscribed;
     if (eligible && !rehydratedSubscriptionReachedSafeState(subscription)) {
       ports.contextGraphSubscriptionRehydrationSlotIds.add(id);
       return false;
     }
-    return releaseRollingSubscriptionSlot(ports.contextGraphSubscriptionRehydrationSlotIds,
-      { request: () => { ports.slotReleased(); return true; } }, id, eligible ? 'readiness' : release);
+    return ports.contextGraphSubscriptionRehydrationSlotIds.delete(id);
+  }
+  updateReadiness(id: string, subscription: ContextGraphSub, release: 'deactivation' | 'activation-rollback' | 'rolling-rollback' = 'deactivation'): boolean {
+    const released = this.reconcileRollingSlot(id, subscription, this.ports.contextGraphSubscriptionRehydrationAccountedIds.has(id));
+    if (released && release !== 'rolling-rollback') this.ports.slotReleased();
+    return released;
   }
   private attemptFor(row: ContextGraphSubscriptionRecord): ActivationAttempt {
     const current = this.pending.get(row.id);
@@ -176,8 +190,7 @@ export class ContextGraphSubscriptionActivations {
       } else
       if (kind === 'activated') {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-        if (event.claimRollingSlot && !event.subscription.coreHosted && !rehydratedSubscriptionReachedSafeState(event.subscription))
-          ports.contextGraphSubscriptionRehydrationSlotIds.add(id);
+        released = this.reconcileRollingSlot(id, event.subscription, true) || released;
         changes.push({ dormancy, kind: 'saved', persisted: true, active: true, hosted: event.subscription.coreHosted === true });
       } else if (kind === 'saved') {
         changes.push({ dormancy, kind, persisted: event.persisted, active: event.active, hosted: event.hosted });
@@ -225,7 +238,7 @@ export class ContextGraphSubscriptionActivations {
         if (row.syncScoped) ports.trackSync(row.id);
         if (row.subscribed) { ports.subscribe(row.id); ports.persistMembership(row.id); }
       }
-      return this.commit(attempt, ports.commit, options.claimRollingSlot === true);
+      return this.commit(attempt, ports.commit);
     } catch (error) {
       try {
         // A live subscribe may take custody of the very same provisional row.
@@ -275,7 +288,7 @@ export class ContextGraphSubscriptionActivations {
     if (sameIntent(attempt.intent, record)) attempt.repaired = { ...record };
   }
   /** One owner commits bookkeeping, settles waiters, then publishes activation. */
-  private commit(attempt: ActivationAttempt, write: (id: string) => ContextGraphSub, claimRollingSlot: boolean): ContextGraphSub {
+  private commit(attempt: ActivationAttempt, write: (id: string) => ContextGraphSub): ContextGraphSub {
     const ports = this.ports, id = attempt.intent.id;
     // Fence the old owner before the verified transition retires any wire custody.
     this.assertInstalled(attempt);
@@ -284,7 +297,7 @@ export class ContextGraphSubscriptionActivations {
     // verified Core hosting. The canonical write returns its committed row.
     if (this.pending.get(id) !== attempt || ports.subscribedContextGraphs.get(id) !== live
       || (!live.subscribed && !live.coreHosted)) throw changed();
-    this.apply([{ id, kind: 'activated', subscription: live, claimRollingSlot }]);
+    this.apply([{ id, kind: 'activated', subscription: live }]);
     this.settle(attempt, { kind: 'committed', subscription: live });
     ports.publish(id);
     return live;
