@@ -8,15 +8,8 @@ import type { ContextGraphDormancyReason } from './context-graph-subscription-do
 import { contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
 
 type Dormancy = ReadonlyMap<string, ContextGraphDormancyReason>;
-export type SubscriptionDormancyTransition = Readonly<{
-  id: string;
-  before: ContextGraphDormancyReason | undefined;
-  after: ContextGraphDormancyReason | undefined;
-}>;
-function applyDormancy(dormancy: Map<string, ContextGraphDormancyReason>, id: string, after: ContextGraphDormancyReason | undefined): SubscriptionDormancyTransition {
-  const transition = Object.freeze({ id, before: dormancy.get(id), after });
+function applyDormancy(dormancy: Map<string, ContextGraphDormancyReason>, id: string, after: ContextGraphDormancyReason | undefined): void {
   if (after === undefined) dormancy.delete(id); else dormancy.set(id, after);
-  return transition;
 }
 const changed = () => new Error('Subscription activation ownership changed');
 export function isCommittedSubscription(
@@ -45,12 +38,16 @@ interface ActivationAttempt {
 
 export type SubscriptionLifecycleEvent = Readonly<{ id: string } & (
   | { kind: 'dormancy'; reason: ContextGraphDormancyReason | undefined }
-  | { kind: 'persistence-acknowledged' | 'intent-replaced'; reason: ContextGraphDormancyReason | undefined; persisted: boolean; active: boolean; hosted: boolean }
   | { kind: 'cleared' | 'deactivated' }
 )>;
 
 type SubscriptionActivationCommit = Readonly<{ id: string; kind: 'activated'; subscription: ContextGraphSub }>;
-type TransitionEvent = SubscriptionLifecycleEvent | SubscriptionActivationCommit;
+// These facts are decided by owner methods, never supplied through the public lifecycle API.
+type SubscriptionOwnerDecision = Readonly<{ id: string;
+  kind: 'persistence-acknowledged' | 'intent-replaced';
+  reason: ContextGraphDormancyReason | undefined; persisted: boolean; active: boolean; hosted: boolean;
+}>;
+type TransitionEvent = SubscriptionLifecycleEvent | SubscriptionActivationCommit | SubscriptionOwnerDecision;
 type SubscriptionFacts = { persisted: boolean; active: boolean; hosted: boolean };
 type TransitionDecision = {
   facts: SubscriptionFacts;
@@ -204,11 +201,11 @@ export class ContextGraphSubscriptionActivations {
   replaceLiveIntent(id: string, subscription: ContextGraphSub): void {
     if (!this.pending.has(id) && (!this.ports.contextGraphSubscriptionDormancyById.has(id)
       || (!subscription.subscribed && !subscription.coreHosted))) return;
-    this.transition({ id, kind: 'intent-replaced',
+    this.apply([{ id, kind: 'intent-replaced',
       persisted: this.ports.contextGraphSubscriptionRehydrationAccountedIds.has(id),
       active: subscription.subscribed || subscription.coreHosted === true,
       hosted: subscription.coreHosted === true,
-      reason: subscription.subscribed || subscription.coreHosted ? undefined : 'deactivated' });
+      reason: subscription.subscribed || subscription.coreHosted ? undefined : 'deactivated' }]);
   }
   /** Explicit unsubscribe retires member intent even before a live row was installed. */
   unsubscribe(id: string): void {
