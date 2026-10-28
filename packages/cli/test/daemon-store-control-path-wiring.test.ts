@@ -3,7 +3,7 @@
  * `store.controlReservedSlots` before any store call can build the path, and logs the resulting geometry with the
  * setting that decided it. The resolution itself is covered in the storage package; this locks the one line between
  * them, which neither sees: a daemon that configured the path late (or not at all) would keep every other test green
- * and leave Blazegraph nodes on today's lanes.
+ * and leave Blazegraph and managed Oxigraph nodes on today's lanes.
  *
  * Pattern: the shared mocked lifecycle fixture. The external store's reachability probe (the first store contact of
  * the boot) and `DKGAgent.create` (which builds the agent's store) are mocked and record the path as they see it.
@@ -23,6 +23,7 @@ import { daemonWiringMocks as mocks, installDaemonLifecycleWiringFixture } from 
 
 const BLAZEGRAPH = { backend: 'blazegraph', options: { url: 'http://127.0.0.1:9999/blazegraph/namespace/kb/sparql' } };
 const MANAGED = { backend: 'oxigraph-server', options: {} };
+const SPARQL_HTTP = { backend: 'sparql-http', options: { queryEndpoint: 'http://127.0.0.1:7200/sparql', updateEndpoint: 'http://127.0.0.1:7200/update' } };
 const OXIGRAPH_QUERY = 'http://127.0.0.1:7878/query';
 const geometryLines = (lines: string[]) => lines.join('').split('\n').filter((line) => /Store control path: (on|off) \(/.test(line));
 
@@ -88,12 +89,24 @@ describe('runDaemonInner configures the store control path before the store is u
     expect(Object.keys(getStoreControlPath())).toEqual(cpus > 2 ? ['share', 'publisher'] : []);
   });
 
-  it('keeps it off by default for managed oxigraph-server (its configured name, not the runtime sparql-http view)', async () => {
+  it('turns it on by default for managed oxigraph-server on more than 2 CPUs (its configured name, not the runtime sparql-http view)', async () => {
+    const cpus = availableParallelism();
     const managed = await boot(MANAGED);
-    expect(managed.line).toBe(
-      'Store control path: off (added slots share=0 publisher=0; default for oxigraph-server; effective until daemon restart)',
-    );
+    expect(managed.line).toBe(cpus > 2
+      ? `Store control path: on (added slots share=1 publisher=2; default for oxigraph-server, ${cpus} CPUs; effective until daemon restart)`
+      : `Store control path: off (added slots share=0 publisher=0; default: 2 CPUs or fewer (oxigraph-server, ${cpus} CPUs); `
+        + 'effective until daemon restart)');
     expect(managed.seen.probe).toBe(managed.line);
+    expect(managed.seen.agent).toBe(managed.line);
+    expect(Object.keys(getStoreControlPath())).toEqual(cpus > 2 ? ['share', 'publisher'] : []);
+  });
+
+  it('keeps it off by default for a generic sparql-http store', async () => {
+    const generic = await boot(SPARQL_HTTP);
+    expect(generic.line).toBe(
+      'Store control path: off (added slots share=0 publisher=0; default for sparql-http; effective until daemon restart)',
+    );
+    expect(generic.seen.probe).toBe(generic.line);
     expect(getStoreControlPath()).toEqual({});
   });
 
@@ -104,17 +117,20 @@ describe('runDaemonInner configures the store control path before the store is u
     );
   });
 
-  it('lets store.controlReservedSlots turn the path off where the default is on', async () => {
-    const off = await boot({ ...BLAZEGRAPH, controlReservedSlots: 0 });
-    expect(off.line).toBe(
-      'Store control path: off (added slots share=0 publisher=0; config store.controlReservedSlots=0; effective until daemon restart)',
-    );
-    expect(off.seen.probe).toBe(off.line);
-    expect(getStoreControlPath()).toEqual({});
-  });
+  it.each([['Blazegraph', BLAZEGRAPH], ['managed oxigraph-server', MANAGED]] as const)(
+    'lets store.controlReservedSlots turn the path off where the default is on (%s)',
+    async (_name, store) => {
+      const off = await boot({ ...store, controlReservedSlots: 0 });
+      expect(off.line).toBe(
+        'Store control path: off (added slots share=0 publisher=0; config store.controlReservedSlots=0; effective until daemon restart)',
+      );
+      expect(off.seen.probe).toBe(off.line);
+      expect(getStoreControlPath()).toEqual({});
+    },
+  );
 
   it('lets store.controlReservedSlots turn the path on where the default is off', async () => {
-    const on = await boot({ ...MANAGED, controlReservedSlots: 'share:1,publisher:2' });
+    const on = await boot({ ...SPARQL_HTTP, controlReservedSlots: 'share:1,publisher:2' });
     expect(on.line).toBe(
       'Store control path: on (added slots share=1 publisher=2; config store.controlReservedSlots=share:1,publisher:2; '
       + 'effective until daemon restart)',

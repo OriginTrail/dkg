@@ -774,7 +774,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
   entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
-  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph on more than 2 CPUs). */
+  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph and oxigraph-server on more than 2 CPUs). */
   store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean; controlReservedSlots?: string | number };
   /**
    * Intentional cap on how many persisted context-graph subscriptions a node
