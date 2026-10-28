@@ -207,3 +207,39 @@ describe('physical catalog replay capacity', () => {
     held.resolve(); await first; await following; expect(next).toHaveBeenCalledOnce();
   });
 });
+
+
+it.each(['clear', 'reset', 'policy replacement'] as const)('retires queued connection demand on %s while the old physical chunk drains', async mode => {
+  const held = deferred();
+  const requested: string[] = [];
+  const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+    requestPeer: async (_cg, peer) => { requested.push(peer); await held.promise; return { status: 'completed', targets: [] }; },
+    whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false,
+  });
+  const peers = Array.from({ length: 64 }, (_, i) => `budget-${i}`);
+  let fullSettled = false;
+  const full = recovery.request({ contextGraphId: 'cg', policyDigest: 'old', kind: 'full-connected-peers', connectedPeerIds: peers });
+  void full.then(() => { fullSettled = true; });
+  const replay = vi.fn((cg: string, demand: { peerId: string; generation: number }, signal: AbortSignal) =>
+    recovery.request({ contextGraphId: cg, policyDigest: 'old', kind: 'connection-demand', demand, signal }));
+  const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null,
+    reserveFence: (cg, peer) => recovery.reservePeer(cg, 'old', peer),
+    reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn() });
+  try {
+    await vi.waitFor(() => expect(requested).toHaveLength(64));
+    connection.prepareConnectionOpen('queued-65')!.admit();
+    await vi.waitFor(() => expect(replay).toHaveBeenCalledOnce());
+    expect(connection.status().activePeers).toBe(1);
+    if (mode === 'clear') recovery.clear('cg');
+    else if (mode === 'reset') recovery.reset();
+    else recovery.reserveDeferred('cg', 'next').release();
+    await vi.waitFor(() => expect(connection.status().activePeers).toBe(0));
+    expect(connection.status().pendingScopes).toBe(0);
+    expect(fullSettled).toBe(false); // A running chunk keeps its physical completion custody.
+    expect(requested).not.toContain('queued-65');
+    const currentRevision = recovery.revisionForContextGraph('cg');
+    held.resolve(); await full;
+    expect(recovery.revisionForContextGraph('cg')).toBe(currentRevision);
+    expect(recovery.status('cg', 'old')).toBeNull();
+  } finally { held.resolve(); await full; }
+});

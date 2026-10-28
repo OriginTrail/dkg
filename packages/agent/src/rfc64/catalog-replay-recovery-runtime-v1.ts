@@ -256,11 +256,13 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   clear(contextGraphId: string): void {
+    this.#byContextGraph.get(contextGraphId)?.peerWorklist.retire();
     if (this.#byContextGraph.delete(contextGraphId)) this.#bumpRevision();
   }
 
   reset(): void {
     if (this.#byContextGraph.size > 0) {
+      for (const progress of this.#byContextGraph.values()) progress.peerWorklist.retire();
       this.#byContextGraph.clear();
       this.#bumpRevision();
     }
@@ -560,6 +562,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   #progressFor(contextGraphId: string, policyDigest: string): ReplayProgressV1<Target> {
     let progress = this.#byContextGraph.get(contextGraphId);
     if (progress === undefined || progress.policyDigest !== policyDigest) {
+      progress?.peerWorklist.retire();
       progress = {
         policyDigest,
         revisionToken: Object.freeze({}),

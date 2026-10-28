@@ -44,6 +44,40 @@ interface PeerV1 {
 
 interface SchedulingSweepV1 { turns: Array<{ peer: PeerV1; scopes: readonly ScopeV1[] }>; nextWake: number }
 
+/** One coalesced intent owns admission, its scan and all deferred graph leases. */
+class OverflowIntentV1 {
+  pending = 0;
+  cursor: { after?: string } | null = null;
+  retired = false;
+  readonly #leases = new Map<string, Readonly<{ release(): void }>>();
+  reserve(selected: readonly string[], reserve: Rfc64CatalogReplayConnectionRuntimePortsV1['reserveDeferredFence']):
+  Rfc64CatalogReplayConnectionReservationV1 {
+    for (const id of selected) {
+      if (this.#leases.has(id)) continue;
+      const lease = reserve(id); if (lease) this.#leases.set(id, lease);
+    }
+    this.pending++;
+    let settled = false;
+    const finish = (admitted: boolean) => {
+      if (settled || this.retired) return;
+      settled = true; this.pending--;
+      if (admitted) this.cursor = {}; // New topology admission restarts this intent's scan.
+    };
+    return { admit: () => finish(true), reject: () => finish(false) };
+  }
+  prune(selected: ReadonlySet<string>): void {
+    for (const [id, lease] of this.#leases) if (!selected.has(id)) {
+      this.#leases.delete(id); lease.release();
+    }
+  }
+  get idle(): boolean { return this.pending === 0 && this.cursor === null; }
+  retire(): void {
+    this.retired = true; this.cursor = null;
+    for (const lease of this.#leases.values()) lease.release();
+    this.#leases.clear();
+  }
+}
+
 const DEFAULT_DEBOUNCE_MS = 60_000;
 const DEFAULT_MAX_PEERS = 256;
 const MAX_SCOPES_PER_TURN = 8;
@@ -60,10 +94,9 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   readonly #ports: Rfc64CatalogReplayConnectionRuntimePortsV1;
   readonly #debounceMs: number;
   readonly #maxPeers: number;
-  readonly #deferred = new Map<string, { pending: number; scans: Set<string | null>; lease: Readonly<{ release(): void }> }>();
   #closed = false;
   #suppressed = 0;
-  readonly #overflowScans = new Map<string | null, { after?: string }>();
+  readonly #overflowIntents = new Map<string | null, OverflowIntentV1>();
 
   constructor(ports: Rfc64CatalogReplayConnectionRuntimePortsV1,
     debounceMs = DEFAULT_DEBOUNCE_MS, maxPeers = DEFAULT_MAX_PEERS) {
@@ -80,9 +113,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
       }
     }
     this.#byPeer.clear();
-    this.#overflowScans.clear();
-    for (const entry of this.#deferred.values()) entry.lease.release();
-    this.#deferred.clear();
+    for (const intent of this.#overflowIntents.values()) intent.retire();
+    this.#overflowIntents.clear();
   }
 
   status(): Readonly<{
@@ -125,37 +157,17 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     const reservations = this.#reserveSelected(peerId, selected, event.kind === 'connection-open', nowMs);
     if (reservations === null) {
       this.#suppressed++;
-      const deferred = selected.flatMap(id => {
-        let entry = this.#deferred.get(id);
-        if (!entry) {
-          const lease = this.#ports.reserveDeferredFence(id);
-          if (!lease) return [];
-          entry = { pending: 0, scans: new Set<string | null>(), lease };
-          this.#deferred.set(id, entry);
-        }
-        entry.pending++;
-        return [{ id, entry }];
-      });
-      const settleDeferred = (scan: { key: string | null } | null) => {
-        for (const { id, entry } of deferred) {
-          entry.pending--;
-          if (scan && this.#deferred.get(id) === entry) entry.scans.add(scan.key);
-          this.#releaseDeferred(id, entry);
-        }
-      };
-      let settled = false;
+      const key = event.kind === 'connection-open' ? null : event.contextGraphId;
+      let intent = this.#overflowIntents.get(key);
+      if (!intent) { intent = new OverflowIntentV1(); this.#overflowIntents.set(key, intent); }
+      const owned = intent;
+      const admission = owned.reserve(selected, id => this.#ports.reserveDeferredFence(id));
       return Object.freeze({
-        reject: () => { if (!settled) { settled = true; settleDeferred(null); } },
+        reject: () => { admission.reject(); this.#retireIdleOverflow(key, owned); },
         admit: () => {
-          if (settled) return;
-          settled = true;
-          if (this.#closed) { settleDeferred(null); return; }
-          const key = event.kind === 'connection-open' ? null : event.contextGraphId;
-          settleDeferred({ key });
-          // Topology retains peer identities and admission. Cursors retain only
-          // the replay intent: full connection scope or one exact activation.
-          this.#overflowScans.set(key, {});
-          this.#schedule();
+          if (owned.retired) return;
+          if (this.#closed) { admission.reject(); this.#retireIdleOverflow(key, owned); return; }
+          admission.admit(); this.#schedule();
         },
       });
     }
@@ -163,7 +175,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     let settled = false;
     const release = (): void => { for (const reservation of reservations) reservation.reject(); };
     return Object.freeze({
-      reject: () => { if (!settled) { settled = true; release(); if (this.#overflowScans.size) this.#schedule(); } },
+      reject: () => { if (!settled) { settled = true; release(); if (this.#overflowIntents.size) this.#schedule(); } },
       admit: () => {
         if (settled) return;
         settled = true;
@@ -233,27 +245,22 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     }
   }
 
-  #releaseDeferred(id: string, entry: { pending: number; scans: Set<string | null>; lease: Readonly<{ release(): void }> }): void {
-    if (entry.pending === 0 && entry.scans.size === 0 && this.#deferred.get(id) === entry) {
-      this.#deferred.delete(id); entry.lease.release();
-    }
-  }
-  #retireOverflowScan(key: string | null): void {
-    this.#overflowScans.delete(key);
-    for (const [id, entry] of this.#deferred) {
-      entry.scans.delete(key); this.#releaseDeferred(id, entry);
-    }
+  #retireIdleOverflow(key: string | null, intent: OverflowIntentV1): void {
+    if (intent.retired || !intent.idle) return;
+    intent.retire(); this.#overflowIntents.delete(key);
   }
 
   #resumeOverflow(): void {
-    if (this.#closed || this.#overflowScans.size === 0) return;
+    if (this.#closed || this.#overflowIntents.size === 0) return;
     const selected = new Set(this.#ports.selectContextGraphIds());
     const peers = [...new Set(this.#ports.admittedConnectedPeerIds())].sort();
-    for (const [id, entry] of this.#deferred) {
-      if (!selected.has(id)) { this.#deferred.delete(id); entry.lease.release(); }
-    }
-    for (const [graph, cursor] of this.#overflowScans) {
-      if (graph !== null && !selected.has(graph)) { this.#retireOverflowScan(graph); continue; }
+    for (const [graph, intent] of this.#overflowIntents) {
+      intent.prune(selected);
+      if (graph !== null && !selected.has(graph)) {
+        intent.retire(); this.#overflowIntents.delete(graph); continue;
+      }
+      const cursor = intent.cursor;
+      if (cursor === null) continue; // Network admission still owns this intent.
       for (const peerId of peers) {
         if (cursor.after !== undefined && peerId <= cursor.after) continue;
         const missing = (graph === null ? [...selected] : [graph]).filter(id => !this.#byPeer.get(peerId)?.scopes.has(id));
@@ -264,7 +271,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         }
         cursor.after = peerId;
       }
-      if (this.#overflowScans.get(graph) === cursor) this.#retireOverflowScan(graph);
+      intent.cursor = null; this.#retireIdleOverflow(graph, intent);
     }
   }
 
@@ -286,40 +293,44 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     return { turns, nextWake };
   }
 
-  #schedule(plan?: SchedulingSweepV1): void {
+  #schedule(): void {
     if (this.#closed) return;
-    const scheduledPlan = plan ?? this.#sweep(Date.now());
-    const worker = async (signal: AbortSignal): Promise<void> => {
-      try {
-        if (signal.aborted || this.#closed) return;
-        this.#resumeOverflow();
-        const turn = this.#sweep(Date.now()).turns[0];
-        if (turn === undefined) return;
-        const { peer, scopes } = turn;
-        await this.#runTurn(peer, scopes, signal);
-        // Move a completed turn behind the other ready peers.
-        if (this.#byPeer.get(peer.peerId) === peer) {
-          this.#byPeer.delete(peer.peerId); this.#byPeer.set(peer.peerId, peer);
-        }
-        if (!signal.aborted) { this.#resumeOverflow(); this.#schedule(); }
-      } finally { if (signal.aborted) this.#retire(); }
-    };
-    for (const slot of [0, 1] as const) {
-      if (!this.#ports.schedule(slot, worker)) { this.#retire(); return; }
+    for (const slot of [0, 1, 'deadline'] as const) {
+      if (!this.#ports.schedule(slot, slot === 'deadline' ? this.#deadline : this.#worker)) {
+        this.#retire(); return;
+      }
     }
-    if (scheduledPlan.nextWake !== Infinity && !this.#ports.schedule('deadline', async signal => {
-      try {
-        let sweep = scheduledPlan;
-        while (!signal.aborted && !this.#closed && sweep.nextWake !== Infinity) {
-          // One owned notifier; stream slots never wait for future eligibility.
-          await this.#ports.wait(signal, Math.min(1_000, Math.max(1, sweep.nextWake - Date.now())));
-          if (signal.aborted || this.#closed) return;
-          sweep = this.#sweep(Date.now());
-          if (sweep.turns.length > 0) this.#schedule(sweep);
-        }
-      } finally { if (signal.aborted) this.#retire(); }
-    })) this.#retire();
   }
+
+  readonly #worker = async (signal: AbortSignal): Promise<void> => {
+    try {
+      if (signal.aborted || this.#closed) return;
+      this.#resumeOverflow();
+      const turn = this.#sweep(Date.now()).turns[0];
+      if (turn === undefined) return;
+      const { peer, scopes } = turn;
+      await this.#runTurn(peer, scopes, signal);
+      // Move a completed turn behind the other ready peers.
+      if (this.#byPeer.get(peer.peerId) === peer) {
+        this.#byPeer.delete(peer.peerId); this.#byPeer.set(peer.peerId, peer);
+      }
+      if (!signal.aborted) { this.#resumeOverflow(); this.#schedule(); }
+    } finally { if (signal.aborted) this.#retire(); }
+  };
+
+  readonly #deadline = async (signal: AbortSignal): Promise<void> => {
+    try {
+      while (!signal.aborted && !this.#closed) {
+        const sweep = this.#sweep(Date.now());
+        if (sweep.turns.length > 0) for (const slot of [0, 1] as const) {
+          if (!this.#ports.schedule(slot, this.#worker)) { this.#retire(); return; }
+        }
+        if (sweep.nextWake === Infinity) return;
+        // One owned notifier; stream slots never wait for future eligibility.
+        await this.#ports.wait(signal, Math.min(1_000, Math.max(1, sweep.nextWake - Date.now())));
+      }
+    } finally { if (signal.aborted) this.#retire(); }
+  };
 
   #retire(): void {
     this.#closed = true;

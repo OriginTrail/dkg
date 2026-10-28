@@ -2,10 +2,22 @@ import { createOperationContext, CONTEXT_GRAPH_SHARED_PROJECTION_ID_V1, type Evm
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/index.js';
 import { NetworkAdmissionProbeError } from '../src/p2p/network-admission-coordinator.js';
-import { resolveRfc64CatalogExecutionPlanV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
+import { resolveRfc64CatalogExecutionPlanV1, resolveRfc64CatalogResponsibilityAuthorityV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
 import { isRedundantLimitedConnection, syncOpenedPeerConnection } from '../src/sync/peer-connection.js';
 import { PeerSyncSession } from '../src/sync/peer-sync-session.js';
 import { createPeerEventFixture, deferred, flushMicrotasks } from './_helpers/peer-event-lifecycle.js';
+
+
+/** Connection orchestration consumes resolved receiver and serving authority independently. */
+function stubCatalogAuthorities(agent: DKGAgent, modes: Readonly<Record<string, 'catalog' | 'legacy' | 'inactive'>>) {
+  const resolve = (contextGraphId: string) => resolveRfc64CatalogResponsibilityAuthorityV1({
+    contextGraphId, responsible: modes[contextGraphId] !== undefined,
+    active: modes[contextGraphId] !== undefined && modes[contextGraphId] !== 'inactive',
+    mode: modes[contextGraphId] === 'legacy' ? 'legacy' : 'catalog', killSwitchActive: false,
+  });
+  vi.spyOn(agent, 'resolveRfc64CatalogReceiverAuthorityV1').mockImplementation(resolve);
+  vi.spyOn(agent, 'resolveRfc64CatalogServingAuthorityV1').mockImplementation(resolve);
+}
 
 function activeSessionWithoutJobs(): PeerSyncSession {
   return new PeerSyncSession({
@@ -94,6 +106,8 @@ describe('peer connection lifecycle', () => {
             responsibilityReason: 'private-membership', selectionSource: 'operator-override',
           },
         ]);
+        stubCatalogAuthorities(f.agent, { 'configured-active': 'catalog', 'configured-legacy': 'legacy',
+          'responsibility-active': 'catalog', 'responsibility-inactive': 'inactive', 'responsibility-legacy': 'legacy' });
         expect(f.agent.listActiveRfc64CatalogReplayContextGraphIdsV1()).toEqual([
           'configured-active',
           'responsibility-active',
@@ -247,6 +261,7 @@ describe('peer connection lifecycle', () => {
           contextGraphId: 'connection-catalog', responsible: true, active: true, mode: 'catalog',
           responsibilityReason: 'private-membership', selectionSource: 'default',
         }]);
+        stubCatalogAuthorities(f.agent, { 'connection-catalog': 'catalog' });
         vi.spyOn(f.agent, 'markRfc64CatalogReplayPeerPendingV1')
           .mockImplementation((_contextGraphId, peerId) => ({
             peerId, generation: 1, release: vi.fn(),

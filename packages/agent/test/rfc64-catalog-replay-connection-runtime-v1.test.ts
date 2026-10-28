@@ -620,7 +620,7 @@ describe('deferred replay completeness custody', () => {
     expect(select).toHaveBeenCalledOnce();
     select.mockClear();
     await expect(scheduled.get('deadline')!(controller.signal)).rejects.toBe(cancelled);
-    expect(select).toHaveBeenCalledOnce();
+    expect(select).toHaveBeenCalledTimes(2); // Invocation and the next wake each read current state.
     expect(waits).toBe(2);
   });
 

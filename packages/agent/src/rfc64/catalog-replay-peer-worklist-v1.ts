@@ -30,6 +30,11 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
       this.#pending.set(peer, new CatalogReplayPeerWorkV1(peer, record.generation));
     }
   }
+  /** Retire queued subscribers without releasing transports consumed by the running chunk. */
+  retire(): void {
+    for (const record of this.#pending.values()) record.settle({ error: new Error('Catalog replay policy owner retired') });
+    this.#pending.clear(); this.#staged.clear();
+  }
   #replacePending(record: CatalogReplayPeerWorkV1): void {
     const prior = this.#pending.get(record.peerId);
     if (prior && prior !== record) prior.settle({ error: new Error('Replay generation superseded') });
