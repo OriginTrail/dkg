@@ -501,6 +501,7 @@ export const PATH_TRIGGERS = Object.freeze([
     // listed here, and listing it makes the coverage test run.
     patterns: [
       /^packages\/cli\/src\/daemon\/chain-reset-wipe\.ts$/,
+      /^packages\/agent\/src\/named-publish-finalization\.ts$/,
     ],
     lanes: ['tornado_publisher'],
     evmScopes: [],
