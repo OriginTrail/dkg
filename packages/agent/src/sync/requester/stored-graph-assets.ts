@@ -1,11 +1,16 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri, contextGraphMetaUri, DEFAULT_MAX_READ_BYTES } from '@origintrail-official/dkg-core';
-import { GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
+import { workspacePublicQuadsDigest, GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetMetadataRead } from '@origintrail-official/dkg-publisher';
 import { parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { heldMetadataControlsMatchReplay } from './held-metadata-controls.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import type { GraphScopedDescriptor } from '../durable-integrity.js';
 import { verifyExactGraphContent } from '../../exact-graph-content-verifier.js';
+import { commitmentFromDescriptor, type FinalizedVmAssetCommitment } from './finalized-vm-asset-commitment.js';
+
+export type HeldGraphScopedAssetEvidence =
+  | { readonly kind: 'confirmed'; readonly commitment: FinalizedVmAssetCommitment }
+  | { readonly kind: 'integrity-only' };
 
 /** Assets per store read: one VALUES list of exact metadata subjects. */
 const HOLDINGS_READ_CHUNK = 200;
@@ -32,11 +37,12 @@ export async function readHeldGraphScopedAssets(
   request: HeldGraphScopedAssetsRequest,
   chunkSize = HOLDINGS_READ_CHUNK,
   confirmation: 'confirmed' | 'integrity-only' = 'confirmed',
-): Promise<Set<string>> {
+
+): Promise<Map<string, HeldGraphScopedAssetEvidence>> {
   const metaGraph = assertSafeIri(contextGraphMetaUri(request.contextGraphId));
   const predicates = [AUTHENTICATED_SUB_GRAPH, ...GRAPH_KNOWLEDGE_ASSET_ENVELOPE_PREDICATES, ...GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, ...['contextGraph', 'rootEntity', 'partOf'].map(name => `http://dkg.io/ontology/${name}`)].map((predicate) => `<${predicate}>`).join(' ');
   const options = { priority: 'background' as const, signal: request.signal };
-  const held = new Set<string>();
+  const held = new Map<string, HeldGraphScopedAssetEvidence>();
   for (let start = 0; start < request.descriptors.length; start += chunkSize) {
     const chunk = request.descriptors.slice(start, start + chunkSize);
     const subjects = chunk.map((descriptor) => `<${assertSafeIri(descriptor.ual)}>`).join(' ');
@@ -55,11 +61,13 @@ export async function readHeldGraphScopedAssets(
       rows.push({ predicate, object });
       rowsBySubject.set(ual, rows);
     }
+    const confirmed = new Set<string>();
     const eligible = chunk.filter(descriptor => {
       const rows = rowsBySubject.get(descriptor.ual) ?? [];
       const stored = parseStoredGraphKnowledgeAssetMetadataEnvelope(
         rows.map(row => ({ ...row, graph: metaGraph })),
         { contextGraphId: request.contextGraphId, ual: descriptor.ual });
+      if (stored.state === 'confirmed') confirmed.add(descriptor.ual);
       // Authenticated replay restores this receiver-owned route. A named copy
       // without it can be complete in storage yet invisible to scoped queries.
       const routes = rows.filter(row => row.predicate === AUTHENTICATED_SUB_GRAPH);
@@ -85,7 +93,10 @@ export async function readHeldGraphScopedAssets(
         source: 'agent.durableSync.heldAssetContent', queryOptions: options,
       });
       if (content.status !== 'verified') continue;
-      held.add(descriptor.ual);
+      // Membership and cleanup authority are one result, including tentative no-chain copies.
+      held.set(descriptor.ual, confirmed.has(descriptor.ual)
+        ? { kind: 'confirmed', commitment: commitmentFromDescriptor(descriptor, workspacePublicQuadsDigest(content.quads)) }
+        : { kind: 'integrity-only' });
     }
   }
   return held;
@@ -96,7 +107,7 @@ export function heldGraphScopedAssetsReader(
   store: TripleStore,
   confirmation: () => 'confirmed' | 'integrity-only' = () => 'confirmed',
 ): (request: HeldGraphScopedAssetsRequest) => Promise<Set<string>> {
-  return (request) => readHeldGraphScopedAssets(store, request, undefined, confirmation());
+  return async (request) => new Set((await readHeldGraphScopedAssets(store, request, undefined, confirmation())).keys());
 }
 
 function holdsDescriptor(

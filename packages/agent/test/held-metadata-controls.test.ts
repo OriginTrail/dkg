@@ -1,3 +1,4 @@
+import { readHeldGraphScopedAssets } from './_helpers/held-asset-membership.js';
 import { afterEach, expect, it } from 'vitest';
 import { MemoryLayer, createGraphKnowledgeAssetScope, knowledgeAssetLayerGraphUri } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
@@ -5,7 +6,6 @@ import { computeFlatKCRootV10, generateGraphKnowledgeAssetMetadata,
   overlayLocallyAuthenticatedGraphKnowledgeAssetMetadataV1, replaceLocallyTrustedKnowledgeAssetControlEnvelope,
 } from '@origintrail-official/dkg-publisher';
 import { createGraphScopedDurableManifestPlan } from '../src/sync/durable-integrity.js';
-import { readHeldGraphScopedAssets } from '../src/sync/requester/stored-graph-assets.js';
 import { partitionVerifiedGraphScopedAssets } from '../src/sync/requester/verified-asset-preparation.js';
 import { materializeVerifiedGraphScopedAsset } from '../src/sync/requester/graph-scoped-materialization.js';
 

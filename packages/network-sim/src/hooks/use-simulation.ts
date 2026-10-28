@@ -1,8 +1,8 @@
 import { requestSimulationCancellation } from '../simulation-cancellation';
 import { isCountedDiagnostic, SIMULATION_START_WINDOW_MS } from '../simulation-protocol';
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { useStore } from '../store';
-import type { DoneEvent, ScopedSimEvent, SimulationSettings } from '../simulation-protocol';
+import { useStore, type SimulationTerminalOutcome } from '../store';
+import type { ScopedSimEvent, SimulationSettings } from '../simulation-protocol';
 
 interface SimulationOptions extends SimulationSettings {
   name: string; contextGraphId: string;
@@ -24,23 +24,25 @@ export function useSimulation(onComplete: () => void) {
   const [failure, setFailure] = useState<string | null>(null);
   const storedRun = state.simulationRuns.find(run => run.id === selectedRunId);
   const running = selectedRunId !== null && state.activeSimulationId === selectedRunId;
-  const stats = storedRun ? {
+  const outcome = storedRun?.outcome;
+  const terminalFailure = outcome?.kind === 'cancelled'
+    ? 'Cancellation confirmed. Final results are unavailable.'
+    : outcome?.kind === 'start-rejected' ? 'Simulation could not be started.' : null;
+  const stats = storedRun && (!outcome || outcome.kind === 'completed') ? {
     total: storedRun.config.opCount, completed: storedRun.metrics.total,
     success: storedRun.metrics.success, errors: storedRun.metrics.errors + (storedRun.diagnosticCount ?? 0),
     startedAt: storedRun.startedAt, finishedAt: storedRun.finishedAt,
   } : null;
 
-  const finish = useCallback((run: ClientRun, result: DoneEvent | string) => {
+  const finish = useCallback((run: ClientRun, outcome: SimulationTerminalOutcome) => {
     if (active.current !== run) return;
     active.current = null;
     clearTimeout(run.cancellationRetry);
     run.stream?.close();
     run.startAbort.abort();
-    setDisconnected(false); setFailure(typeof result === 'string' ? result : null);
-    if (typeof result === 'string') setSelectedRunId(null);
-    dispatch({ type: 'COMPLETE_SIMULATION', id: run.id,
-      ...(typeof result === 'string' ? {} : { snapshot: result }) });
-    if (typeof result !== 'string') onComplete();
+    setDisconnected(false); setFailure(null);
+    dispatch({ type: 'COMPLETE_SIMULATION', id: run.id, outcome });
+    if (outcome.kind === 'completed') onComplete();
   }, [dispatch, onComplete]);
 
   const cancel = useCallback(async (run: ClientRun) => {
@@ -63,8 +65,8 @@ export function useSimulation(onComplete: () => void) {
           setFailure('Waiting for the start window to close. Cancellation will retry automatically.');
           run.cancellationRetry = setTimeout(() => { void cancel(run); }, Math.min(result.retryAfterMs, 60_000));
           break;
-        case 'completed': finish(run, result.snapshot); break;
-        case 'cancelled': finish(run, 'Cancellation confirmed. Final results are unavailable.'); break;
+        case 'completed': finish(run, { kind: 'completed', snapshot: result.snapshot }); break;
+        case 'cancelled': finish(run, { kind: 'cancelled' }); break;
         case 'unconfirmed': throw new Error(result.reason);
       }
     } catch {
@@ -102,7 +104,7 @@ export function useSimulation(onComplete: () => void) {
         try {
           const event = JSON.parse(message.data) as ScopedSimEvent;
           if (event.runId !== id) return;
-          if (event.type === 'done') { finish(run, event); return; }
+          if (event.type === 'done') { finish(run, { kind: 'completed', snapshot: event }); return; }
           if (event.type === 'unavailable') {
             // Recovery can overtake a delayed start. Unknown state is not proof
             // that the server cannot admit this ID; confirm cancellation first.
@@ -128,7 +130,7 @@ export function useSimulation(onComplete: () => void) {
     try {
       const response = await run.start;
       if (active.current !== run) return;
-      if (!response.ok && response.status < 500) { finish(run, 'Simulation could not be started.'); return; }
+      if (!response.ok && response.status < 500) { finish(run, { kind: 'start-rejected' }); return; }
       // A proxy 5xx may also hide an accepted or still queued upstream request.
       if (!response.ok) setDisconnected(true);
       connect();
@@ -149,5 +151,5 @@ export function useSimulation(onComplete: () => void) {
     run?.startAbort.abort();
   }, []);
 
-  return { running, disconnected, failure: failure ?? storedRun?.error ?? null, stats, start, stop };
+  return { running, disconnected, failure: terminalFailure ?? failure ?? storedRun?.error ?? null, stats, start, stop };
 }
