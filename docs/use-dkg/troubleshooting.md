@@ -34,6 +34,20 @@ curl -H "Authorization: Bearer $TOKEN" http://127.0.0.1:9200/api/agent/identity
 - Finalize (seal) the Knowledge Asset, then share it to SWM before publishing to VM (VM publish requires a finalized Knowledge Asset present in SWM).
 - Check wallet funding before on-chain finality.
 
+## Slow async share or publish, retryable `503`s
+
+- A `503` with `retryable: true` from `share-async` or `publish-async` usually
+  means the node is busy. Wait for the `Retry-After` header and send the same
+  request again. If the body names a job (`jobId` or `existingJobId`), follow
+  that job instead. Never resend under a new name. What each answer means:
+  [Async Share and Publish Jobs](../build/async-jobs.md).
+- To see whether admission, the store or the workers are slow, read the
+  `async_admission_usage` line in `dkg logs`. The daemon writes it every five
+  minutes. How to read it: [Monitor Store and Queue Pressure](backpressure-observability.md).
+- If jobs got slower after an update, check the start-up line
+  `Store control path: ...`. To turn the path off, see
+  [Store control path](async-queue-operations.md#store-control-path).
+
 ## Agent integrations
 
 - MCP: restart the client after setup and inspect the tool list.

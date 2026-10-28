@@ -106,6 +106,22 @@ dkg publisher clear failed
 
 It keeps failed jobs that may still have a transaction on chain.
 
+## Updating from 10.0.26
+
+The first release after 10.0.26 changes two things to check before you update.
+
+- **Finished-job cleanup ships, off by default.** 10.0.26 ignores the
+  `queueRetention` block of `config.json`; the new release reads it. A mode
+  already set there starts that cleanup at the first start. A wrong value or an
+  unknown key stops the daemon from starting. See
+  [Clean up finished jobs](async-queue-operations.md#clean-up-finished-jobs).
+- **The async queues get store slots of their own.** This is on by default
+  for Blazegraph and managed Oxigraph stores on hosts with more than 2 CPUs.
+  Nodes set up with `dkg init` use managed Oxigraph. If share or publish jobs
+  get slower after the update, turn it off and restart: see
+  [Store control path](async-queue-operations.md#store-control-path). The
+  daemon logs `Store control path: on (...)` or `off (...)` once at start.
+
 ## Node.js security releases
 
 Node.js 22.23.4, 24.22.1 and 26.12.1, released on 21 October 2026, fix
