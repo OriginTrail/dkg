@@ -485,6 +485,20 @@ describe('one validated devnet shutdown plan', () => {
     expect(pidAlive(other.pid!)).toBe(true);
   });
 
+  it('planning retains the exact identity that passed PID-file validation', async () => {
+    const worker = sleeper(); writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
+    const original = readProcessCommandLine(worker.pid!)!;
+    let reads = 0;
+    const reader = (pid: number) => pid === worker.pid
+      ? (++reads === 1 ? original : 'unrelated replacement process') : readProcessCommandLine(pid);
+    const plan = planDevnetShutdown(paths, [4], reader);
+    expect(reads).toBe(1);
+    expect(plan.identities.get(worker.pid!)).toBe(original);
+    await expect(executeDevnetShutdown(plan, { graceMs: 0, killWaitMs: 0 })).rejects.toThrow('did not stop');
+    expect(pidAlive(worker.pid!)).toBe(true);
+    expect(readFileSync(pidFile(4, 'daemon.pid'), 'utf8')).toBe(String(worker.pid));
+  });
+
   it('leaves an identity changed after planning alive and preserves its PID file', async () => {
     const worker = sleeper(); writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
     const original = readProcessCommandLine(worker.pid!)!;

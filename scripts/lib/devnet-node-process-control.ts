@@ -213,11 +213,16 @@ function repoRootSpellings(repoRoot: string): string[] {
  * Reads the command lines through `ps`, which takes tens of milliseconds: call
  * it before a time-critical kill and pass the result to `sigkillNodeProcesses`.
  */
-export function verifiedNodePids(
+interface OwnedProcess { readonly pid: number; readonly commandLine: string }
+export function verifiedNodePids(paths: DevnetPaths, num: number,
+  readCommandLine: CommandLineReader = readProcessCommandLine): number[] {
+  return verifiedNodeProcesses(paths, num, readCommandLine).map(record => record.pid);
+}
+function verifiedNodeProcesses(
   paths: DevnetPaths,
   num: number,
   readCommandLine: CommandLineReader = readProcessCommandLine,
-): number[] {
+): OwnedProcess[] {
   let recorded: string | undefined;
   try { recorded = readFileSync(join(nodeHome(paths, num), '.devnet-cli-entry'), 'utf8').trim(); }
   catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
@@ -225,9 +230,9 @@ export function verifiedNodePids(
   if (alternate !== undefined && (!isAbsolute(alternate) || /[\r\n\0]/.test(alternate) || !alternate.endsWith(`/${CLI_ENTRY_POINT}`))) throw new Error(`node${num}: invalid configured CLI entry`);
   const roots = [...repoRootSpellings(paths.repoRoot),
     ...(alternate === undefined ? [] : repoRootSpellings(dirname(dirname(dirname(dirname(alternate))))))];
-  const pids: number[] = [];
+  const owned = new Map<number, OwnedProcess>();
   for (const { file, pid } of readNodePidEntries(paths, num)) {
-    if (pids.includes(pid) || !pidAlive(pid)) continue;
+    if (owned.has(pid) || !pidAlive(pid)) continue;
     const commandLine = readCommandLine(pid);
     if (commandLine === null) {
       if (!pidAlive(pid)) continue; // exited while it was being looked at
@@ -243,9 +248,9 @@ export function verifiedNodePids(
         + `${paths.repoRoot} (a stale PID file whose number was recycled?); not signalling it`,
       );
     }
-    pids.push(pid);
+    owned.set(pid, { pid, commandLine });
   }
-  return pids;
+  return [...owned.values()];
 }
 
 /**
@@ -301,13 +306,8 @@ export interface DevnetShutdownPlan {
 export function planDevnetShutdown(paths: DevnetPaths, numbers: readonly number[],
   readCommandLine: CommandLineReader = readProcessCommandLine): DevnetShutdownPlan {
   const snapshot = readProcessInventory();
-  const pids = new Set(numbers.flatMap(num => collectOwnedNodePids(paths, num, readCommandLine, snapshot)));
-  const identities = new Map<number, string>();
-  for (const pid of pids) {
-    const identity = readCommandLine(pid);
-    if (identity !== null) identities.set(pid, identity);
-    else if (pidAlive(pid)) throw new Error(`Owned PID ${pid} has no readable command identity; not signalling it`);
-  }
+  const identities = new Map(numbers.flatMap(num => collectOwnedNodeProcesses(paths, num, readCommandLine, snapshot))
+    .map(record => [record.pid, record.commandLine] as const));
   return { paths, numbers: [...numbers], identities, readCommandLine };
 }
 /** One TERM/grace/KILL flow for the whole validated set; recheck identity at each signal. */
@@ -335,7 +335,7 @@ export async function stopNodeProcesses(paths: DevnetPaths, num: number,
 /** Collect every owned process before signalling any, including detached stores. */
 export function collectDevnetNodePids(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader = readProcessCommandLine,
   inventory: ProcessInventory = readProcessInventory()): number[] {
-  return collectOwnedNodePids(paths, num, readCommandLine, inventory);
+  return collectOwnedNodeProcesses(paths, num, readCommandLine, inventory).map(record => record.pid);
 }
 export interface ProcessRecord {
   readonly pid: number;
@@ -375,21 +375,29 @@ function readProcessInventory(): ProcessInventory {
   const metadata = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,comm='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
   return parseProcessInventory(listings, metadata);
 }
-function collectOwnedNodePids(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader,
-  inventory: ProcessInventory): number[] {
-  const owned = new Set(verifiedNodePids(paths, num, readCommandLine));
+function collectOwnedNodeProcesses(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader,
+  inventory: ProcessInventory): OwnedProcess[] {
+  const owned = new Map(verifiedNodeProcesses(paths, num, readCommandLine).map(record => [record.pid, record]));
+  // Resolve identity at discovery, retaining it through planning. A verified
+  // PID-file record must never be replaced by a later command observation.
+  const retain = (pid: number): void => {
+    if (owned.has(pid) || !pidAlive(pid)) return;
+    const commandLine = readCommandLine(pid);
+    if (commandLine !== null) owned.set(pid, { pid, commandLine });
+    else if (pidAlive(pid)) throw new Error(`Owned PID ${pid} has no readable command identity; not signalling it`);
+  };
   const home = nodeHome(paths, num);
   for (const { pid, commandLine, executable } of inventory.records.values()) {
     if (pid === process.pid || !(commandLine.includes(`${home}/`) || commandLine.includes(`DKG_HOME=${home} `)
       || commandLine.endsWith(`DKG_HOME=${home}`))) continue;
-    if (executable === 'node' || executable.startsWith('oxigraph')) owned.add(pid);
+    if (executable === 'node' || executable.startsWith('oxigraph')) retain(pid);
   }
-  const pending = [...owned];
+  const pending = [...owned.keys()];
   for (let index = 0; index < pending.length; index++) {
     for (const pid of inventory.childrenByParent.get(pending[index]!) ?? []) {
       if (pid === process.pid || owned.has(pid)) continue;
-      owned.add(pid); pending.push(pid);
+      retain(pid); if (owned.has(pid)) pending.push(pid);
     }
   }
-  return [...owned].filter(pidAlive);
+  return [...owned.values()].filter(record => pidAlive(record.pid));
 }
