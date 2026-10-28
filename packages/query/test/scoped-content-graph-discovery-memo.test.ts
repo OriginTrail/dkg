@@ -32,8 +32,8 @@ function testMemo(...args: ConstructorParameters<typeof ScopedContentGraphDiscov
     get(request: typeof REQUEST & { signal?: AbortSignal; load: () => Promise<readonly string[]> }) {
       return memo.get({ ...request, load: async () => {
         const graphs = await request.load();
-        return { inventory: graphs, partitions: [], materializedBytes: 42 };
-      } }).then(snapshot => snapshot.inventory);
+        return { snapshot: { inventory: graphs, partitions: [] }, byteCount: 42 };
+      } }).then(value => value.snapshot.inventory);
     },
   };
 }
@@ -45,14 +45,16 @@ describe('ScopedContentGraphDiscoveryMemo', () => {
     );
     const inventory = ['urn:route-only', 'urn:content'];
     const partitions: Array<{ graph: string; kind: 'content' }> = [{ graph: 'urn:content', kind: 'content' }];
-    const first = await memo.get({ ...REQUEST, load: async () => ({ inventory, partitions }) });
+    const first = await memo.get({ ...REQUEST, load: async () => ({ snapshot: { inventory, partitions }, byteCount: 42 }) });
     inventory.push('urn:later'); partitions[0]!.graph = 'urn:later';
-    expect(first.inventory).toEqual(['urn:route-only', 'urn:content']);
-    expect(first.partitions).toEqual([{ graph: 'urn:content', kind: 'content' }]);
+    expect(first.snapshot.inventory).toEqual(['urn:route-only', 'urn:content']);
+    expect(first.snapshot.partitions).toEqual([{ graph: 'urn:content', kind: 'content' }]);
+    expect(first.byteCount).toBe(42);
     expect(Object.isFrozen(first)).toBe(true);
-    expect(Object.isFrozen(first.inventory)).toBe(true);
-    expect(Object.isFrozen(first.partitions)).toBe(true);
-    expect(Object.isFrozen(first.partitions[0])).toBe(true);
+    expect(Object.isFrozen(first.snapshot)).toBe(true);
+    expect(Object.isFrozen(first.snapshot.inventory)).toBe(true);
+    expect(Object.isFrozen(first.snapshot.partitions)).toBe(true);
+    expect(Object.isFrozen(first.snapshot.partitions[0])).toBe(true);
     const second = await memo.get({ ...REQUEST, load: async () => { throw new Error('unexpected reload'); } });
     expect(second).toBe(first);
   });

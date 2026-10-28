@@ -1,5 +1,6 @@
+import { createQueryStoreReadContext } from '../src/query-store-read-context.js';
 import type { ScopedContentGraphDiscoverySnapshot } from '../src/scoped-content-graph-discovery-memo.js';
-import { describe, it, expect, beforeEach, expectTypeOf } from 'vitest';
+import { describe, it, expect, beforeEach, expectTypeOf, vi } from 'vitest';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -240,6 +241,17 @@ describe('DKGQueryEngine', () => {
       actualBytes: expect.any(Number),
     });
     expect(seenOptions?.maxResponseBytes).toBe(1_000);
+  });
+
+  it('keeps the cumulative budget when an unscoped query withholds graphs', async () => {
+    const result = { type: 'bindings' as const, bindings: [{ value: 'x'.repeat(200) }] };
+    const query = vi.fn(async (_sparql: string, _options?: StoreQueryOptions) => result);
+    const engine = new DKGQueryEngine({ query } as unknown as TripleStore);
+    await expect(engine.query('SELECT ?value WHERE { ?s ?p ?value }', {
+      withheldGraphRoots: ['urn:hidden'], maxMaterializedBytes: 100,
+    })).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: 100,
+      actualBytes: Buffer.byteLength(JSON.stringify(result)) });
+    expect(query.mock.calls[0]?.[1]).toMatchObject({ withheldGraphRoots: ['urn:hidden'] });
   });
 
   it('keeps caller cancellation out of shared graph-discovery flights', async () => {
@@ -1002,25 +1014,6 @@ describe('DKGQueryEngine', () => {
       expect(subjects).toEqual([E1, E2]);
     });
 
-    it('enforces the cumulative budget for merged quad results', async () => {
-      const query = `CONSTRUCT { ?s <urn:out> ?v } WHERE {
-        { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
-      }`;
-      await expect(engine.query(query, {
-        contextGraphId: CONTEXT_GRAPH,
-        view: 'verifiable-memory',
-        maxMaterializedBytes: 180,
-      })).rejects.toMatchObject({
-        code: 'QUERY_MATERIALIZATION_TOO_LARGE',
-        maxBytes: 180,
-      });
-      await expect(engine.query(query, {
-        contextGraphId: CONTEXT_GRAPH,
-        view: 'verifiable-memory',
-        maxMaterializedBytes: 1_000,
-      })).resolves.toMatchObject({ quads: expect.any(Array) });
-    });
-
     it('ASK returns true when the pattern matches in ANY graph', async () => {
       const result = await engine.query(
         `ASK {
@@ -1052,44 +1045,45 @@ describe('DKGQueryEngine', () => {
       expect(subjects).toEqual([E1, E2]);
     });
 
-    it('enforces one cumulative materialization budget across per-graph reads', async () => {
-      const query = `SELECT ?s ?v WHERE {
+    it.each(['SELECT ?s ?v', 'CONSTRUCT { ?s <urn:out> ?v }'])(
+      'charges the second content read after discovery and the first fit: %s', async form => {
+      const query = `${form} WHERE {
         { ?s <http://ex.org/p1> ?v } UNION { ?s <http://ex.org/p2> ?v }
       }`;
-
       const originalQuery = store.query.bind(store);
-      let responseSizes: number[] = [];
+      const originalList = async (prefix: string, options?: StoreQueryOptions) => (await store.listGraphs(options)).filter(graph => graph.startsWith(prefix));
+      const content: number[] = [];
+      let discoveryBytes = 0;
+      const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
       store.query = async (...args) => {
         const result = await originalQuery(...args);
-        responseSizes.push(Buffer.byteLength(JSON.stringify(result), 'utf8'));
+        if (args[0].includes('http://ex.org/p1')) content.push(size(result));
+        else discoveryBytes += size(result);
         return result;
       };
-
-      // Measure this deterministic fixture first, then select a limit that is
-      // at least every individual response but below their cumulative total.
+      store.listGraphsByPrefix = async (...args) => {
+        const result = await originalList(...args);
+        discoveryBytes += size(result);
+        return result;
+      };
       await new DKGQueryEngine(store).query(query, {
-        contextGraphId: CONTEXT_GRAPH,
-        view: 'verifiable-memory',
+        contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory',
       });
-      expect(responseSizes.length).toBeGreaterThan(1);
-      const discoveredGraphs = (await store.listGraphs())
-        .filter(graph => graph.startsWith(`${GRAPH}/_verifiable_memory/`));
-      const discoveryBytes = Buffer.byteLength(JSON.stringify(discoveredGraphs), 'utf8');
-      const ceiling = discoveryBytes + Math.max(...responseSizes);
-      expect(discoveryBytes + responseSizes.reduce((sum, size) => sum + size, 0))
-        .toBeGreaterThan(ceiling);
-
-      responseSizes = [];
+      expect(content).toHaveLength(2);
+      const ceiling = discoveryBytes + Math.max(...content);
+      const total = discoveryBytes + content.reduce((sum, bytes) => sum + bytes, 0);
+      expect(ceiling).toBeLessThan(total);
+      content.length = 0; discoveryBytes = 0;
       await expect(new DKGQueryEngine(store).query(query, {
-        contextGraphId: CONTEXT_GRAPH,
-        view: 'verifiable-memory',
-        maxMaterializedBytes: ceiling,
-      })).rejects.toMatchObject({
-        code: 'QUERY_MATERIALIZATION_TOO_LARGE',
-        maxBytes: ceiling,
-        actualBytes: expect.any(Number),
-      });
-      expect(responseSizes.length).toBeGreaterThan(1);
+        contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory', maxMaterializedBytes: ceiling,
+      })).rejects.toMatchObject({ code: 'QUERY_MATERIALIZATION_TOO_LARGE', maxBytes: ceiling, actualBytes: total });
+      // Neither discovery nor the first content read can be the rejection.
+      expect(content).toHaveLength(2);
+      expect(discoveryBytes + content[0]).toBeLessThanOrEqual(ceiling);
+      expect(discoveryBytes + content[1]).toBeLessThanOrEqual(ceiling);
+      await expect(new DKGQueryEngine(store).query(query, {
+        contextGraphId: CONTEXT_GRAPH, view: 'verifiable-memory', maxMaterializedBytes: total,
+      })).resolves.toBeDefined();
     });
 
     it('SELECT with a solution-set modifier (ORDER BY) is rejected, not silently corrupted', async () => {
@@ -2533,10 +2527,7 @@ describe('DKGQueryEngine', () => {
       discoveryCalls += 1;
       return discoveryCalls === 1 ? firstDiscovery.promise : secondDiscovery.promise;
     };
-    const reads = {
-      signal: undefined,
-      shared: { cacheKey: '["normal",null]' },
-    };
+    const reads = createQueryStoreReadContext(store, undefined);
 
     const beforeWrite = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads);
     expect(discoveryCalls).toBe(1);
@@ -2545,12 +2536,12 @@ describe('DKGQueryEngine', () => {
     expect(discoveryCalls).toBe(2);
 
     secondDiscovery.resolve({ inventory: ['urn:graph:fresh'], partitions: [] });
-    await expect(afterWrite).resolves.toEqual({ inventory: ['urn:graph:fresh'], partitions: [], materializedBytes: 0 });
+    await expect(afterWrite).resolves.toEqual({ inventory: ['urn:graph:fresh'], partitions: [] });
     firstDiscovery.resolve({ inventory: ['urn:graph:stale'], partitions: [] });
-    await expect(beforeWrite).resolves.toEqual({ inventory: ['urn:graph:stale'], partitions: [], materializedBytes: 0 });
+    await expect(beforeWrite).resolves.toEqual({ inventory: ['urn:graph:stale'], partitions: [] });
 
     await expect(target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, reads))
-      .resolves.toEqual({ inventory: ['urn:graph:fresh'], partitions: [], materializedBytes: 0 });
+      .resolves.toEqual({ inventory: ['urn:graph:fresh'], partitions: [] });
     expect(discoveryCalls).toBe(2);
   });
 
@@ -2571,14 +2562,8 @@ describe('DKGQueryEngine', () => {
       return discoveryCalls === 1 ? laneA.promise : laneB.promise;
     };
 
-    const first = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, {
-      signal: undefined,
-      shared: { cacheKey: '["normal","dashboard.wm"]' },
-    });
-    const second = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, {
-      signal: undefined,
-      shared: { cacheKey: '["normal","dashboard.vm"]' },
-    });
+    const first = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, createQueryStoreReadContext(store, { source: 'dashboard.wm' }));
+    const second = target.resolveScopedContentGraphDiscovery(CONTEXT_GRAPH, createQueryStoreReadContext(store, { source: 'dashboard.vm' }));
     expect(discoveryCalls).toBe(2);
     laneA.resolve({ inventory: ['urn:graph:a'], partitions: [] });
     laneB.resolve({ inventory: ['urn:graph:b'], partitions: [] });

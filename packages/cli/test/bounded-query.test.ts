@@ -4,7 +4,7 @@ import { EventEmitter } from 'node:events';
 import { boundSelect, boundedResult } from '../src/daemon/bounded-query.js';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
-import { DKGAgent } from '../../agent/src/dkg-agent.js';
+import { DKGAgent } from '@origintrail-official/dkg-agent';
 import { handleBoundedQueryRoutes } from '../src/daemon/routes/bounded-query.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';

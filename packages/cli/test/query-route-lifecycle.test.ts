@@ -815,3 +815,11 @@ describe('/api/query request lifecycle', () => {
     expect(res.headers['Retry-After']).toBeUndefined();
   });
 });
+
+it('the shared query responder renders the public result-size contract as 413', () => {
+  const res = new ResponseStub();
+  const error = { code: 'QUERY_RESULT_TOO_LARGE', message: 'Query result exceeds byte limit', maxBytes: 100, actualBytes: 101 };
+  expect(respondToQueryFailure(res as unknown as ServerResponse, error)).toBe(true);
+  expect(res.statusCode).toBe(413);
+  expect(JSON.parse(res.body)).toEqual({ code: error.code, error: error.message, limitBytes: 100, actualBytes: 101 });
+});

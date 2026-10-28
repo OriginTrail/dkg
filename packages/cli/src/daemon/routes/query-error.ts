@@ -151,12 +151,18 @@ function isUnscopedQueryInvalidated(err: unknown): boolean {
  *   settled, so it gets the shape of the route's other transient answers, not
  *   a 500. The sentence is the one the agent throws.
  */
-export function respondToQueryFailure(res: ServerResponse, err: unknown): boolean {
+export function respondToQueryFailure(res: ServerResponse, err: unknown,
+  failure: QueryFailureClassification = classifyQueryFailure(err)): boolean {
+  if (failure.kind === 'result-too-large') {
+    jsonResponse(res, 413, { error: failure.error.message, code: failure.error.code,
+      limitBytes: failure.error.maxBytes, actualBytes: failure.error.actualBytes });
+    return true;
+  }
   if ((err as { code?: unknown } | null)?.code === 'CORE_CACHE_QUERY_TRUST_REQUIRED') {
     jsonResponse(res, 409, { code: 'CORE_CACHE_QUERY_TRUST_REQUIRED', error: 'Explicit acceptance of core-cache evidence is required for this context graph' });
     return true;
   }
-  if (isClientQueryFailure(err)) {
+  if (failure.kind === 'client') {
     jsonResponse(res, 400, { error: (err as { message?: unknown } | null)?.message ?? "" });
     return true;
   }

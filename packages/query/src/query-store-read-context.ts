@@ -52,11 +52,22 @@ export interface StoreReadLane {
   listGraphsByPrefix(prefix: string): Promise<string[]>;
 }
 
+/** Cache envelope: cost is required even for an empty discovery result. */
+export interface MeasuredDiscovery<T> {
+  readonly snapshot: T;
+  readonly byteCount: number;
+}
+
 export interface QueryStoreReadContext extends StoreReadLane {
   readonly signal: AbortSignal | undefined;
   readonly materializationBudget: QueryMaterializationBudget | undefined;
   readonly catalog: StoreReadLane;
-  readonly shared: StoreReadLane & { readonly options: StoreQueryOptions; readonly cacheKey: string };
+  withWithheldGraphRoots(roots: readonly string[]): StoreReadLane;
+  readonly shared: StoreReadLane & {
+    readonly cacheKey: string;
+    measure<T>(load: (reads: StoreReadLane) => Promise<T>): Promise<MeasuredDiscovery<T>>;
+    replay<T>(discovery: MeasuredDiscovery<T>): T;
+  };
 }
 
 export function createStoreReadLane(
@@ -93,10 +104,21 @@ export function createQueryStoreReadContext(
     },
     signal: options?.signal,
     materializationBudget: budget,
+    withWithheldGraphRoots: roots => createStoreReadLane(store, { ...options, withheldGraphRoots: [...roots] }, budget),
     catalog: createStoreReadLane(store, catalogOptions, budget),
     shared: {
       ...sharedLane,
-      options: sharedOptions,
+      async measure<T>(load: (reads: StoreReadLane) => Promise<T>): Promise<MeasuredDiscovery<T>> {
+        let byteCount = 0;
+        const measured = createStoreReadLane(store, sharedOptions, {
+          consume(value) { byteCount += estimateMaterializedBytes(value); },
+        });
+        return { snapshot: await load(measured), byteCount };
+      },
+      replay<T>(discovery: MeasuredDiscovery<T>): T {
+        budget?.consumeBytes(discovery.byteCount);
+        return discovery.snapshot;
+      },
       cacheKey: JSON.stringify([
         sharedOptions?.priority ?? 'normal',
         sharedOptions?.source ?? null,

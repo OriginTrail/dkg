@@ -71,8 +71,6 @@ import { CallerSparqlRejectedError } from './caller-sparql-error.js';
 import { ScopedContentGraphDiscoveryMemo, type ScopedContentGraphDiscoverySnapshot } from './scoped-content-graph-discovery-memo.js';
 import {
   createQueryStoreReadContext,
-  createStoreReadLane,
-  estimateMaterializedBytes,
   type QueryStoreReadContext,
   type StoreReadLane,
 } from './query-store-read-context.js';
@@ -371,7 +369,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
         const withheld = options?.withheldGraphRoots ?? [];
         if (withheld.length) assertWithheldGraphQuery(initialGraphScope);
         return this.execWithExclusions(initialGraphScope, withheld.length
-          ? createStoreReadLane(this.store, { ...storeOptions(options), withheldGraphRoots: withheld }) : reads,
+          ? reads.withWithheldGraphRoots(withheld) : reads,
         options?.excludeGraphPrefixes);
       }
     }
@@ -879,19 +877,10 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       laneKey: reads.shared.cacheKey,
       graphPrefix,
       signal: reads.signal,
-      load: async () => {
-        let materializedBytes = 0;
-        const discoveryReads = createStoreReadLane(this.store, reads.shared.options, {
-          consume(result) { materializedBytes += estimateMaterializedBytes(result); },
-        });
-        const snapshot = await this.discoverScopedContentGraphDiscovery(contextGraphId, discoveryReads);
-        return { ...snapshot, materializedBytes };
-      },
+      load: () => reads.shared.measure(discoveryReads =>
+        this.discoverScopedContentGraphDiscovery(contextGraphId, discoveryReads)),
     });
-    // Shared discovery work is coalesced, but every logical query debits the
-    // reported materialization cost against its own request-local budget.
-    reads.materializationBudget?.consumeBytes(discovery.materializedBytes ?? 0);
-    return discovery;
+    return reads.shared.replay(discovery);
   }
 
   private async discoverScopedContentGraphDiscovery(

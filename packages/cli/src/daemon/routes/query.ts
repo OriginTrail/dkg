@@ -742,15 +742,6 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
         return;
       }
       const queryFailure = classifyQueryFailure(err);
-      if (queryFailure.kind === 'result-too-large') {
-        tracker.fail(ctx, err);
-        return jsonResponse(res, 413, {
-          error: queryFailure.error.message,
-          code: queryFailure.error.code,
-          limitBytes: queryFailure.error.maxBytes,
-          actualBytes: queryFailure.error.actualBytes,
-        });
-      }
       const storeUnavailableOutcome = respondIfStoreUnavailable(res, err);
       if (storeUnavailableOutcome !== null) {
         // Pre-dispatch shedding is a cancellation; a store deadline may have
@@ -764,7 +755,7 @@ export async function handleQueryRoutes(ctx: RequestContext): Promise<void> {
       // #1758 — one policy module answers a failed query: a rejection of the
       // caller's own SPARQL is a 400, a withheld unscoped result a retryable
       // 503. See ./query-error.ts.
-      if (respondToQueryFailure(res, err)) return;
+      if (respondToQueryFailure(res, err, queryFailure)) return;
       throw err;
     }
   }
