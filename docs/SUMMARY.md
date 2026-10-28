@@ -11,6 +11,7 @@
 * [Import Documents](build/import-documents.md)
 * [Google OKF Tutorial](build/okf-tutorial.md)
 * [Integrate an HTTP Application](build/http-application.md)
+* [Async Share and Publish Jobs](build/async-jobs.md)
 * [Two-Agent Collaboration](build/collaborate.md)
 
 ## Connect Agents and Systems
@@ -29,18 +30,19 @@
 * [Large Content](use-dkg/large-content.md)
 * [Knowledge Asset Lifecycle CLI](use-dkg/knowledge-asset-lifecycle.md)
 * [Async Publisher Wallets](use-dkg/async-publisher-wallets.md)
+* [Async Queue Operations](use-dkg/async-queue-operations.md)
+* [RPC Request Budget](use-dkg/rpc-request-budget.md)
 * [External Signer](use-dkg/external-signer.md)
 * [OKF Import, Export, and Verify](use-dkg/okf.md)
 * [Funding](use-dkg/funding.md)
 * [Publishing Conviction](use-dkg/publishing-conviction.md)
 * [Relays & Peers](use-dkg/relays-and-peers.md)
-* [Storage SPARQL HTTP](use-dkg/storage-sparql-http.md)
+* [Storage Backends](use-dkg/storage-sparql-http.md)
 * [SWM Public Snapshot Garbage Collection](use-dkg/swm-public-snapshot-gc.md)
 * [Host-Mode Manual Subscribe](use-dkg/host-mode-manual-subscribe.md)
 * [Updates & Rollback](use-dkg/updates-and-rollback.md)
 * [Migrate to npm](use-dkg/migrate-to-npm.md)
-* [Backpressure Observability](use-dkg/backpressure-observability.md)
-* [Write Preflight Coalescing](use-dkg/write-preflight-coalescing.md)
+* [Monitor Store and Queue Pressure](use-dkg/backpressure-observability.md)
 * [Troubleshooting](use-dkg/troubleshooting.md)
 
 ## Concepts
