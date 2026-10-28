@@ -545,11 +545,16 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
     expect(await publishedAtOf(store, filtered)).toEqual([LOCAL]);
     expect(await publishedAtOf(store, held)).toEqual([LOCAL]);
   });
-  it('refuses an all-oversized new operation before committing any metadata', async () => {
+  it('refuses a new operation with only an oversized timestamp before committing any metadata', async () => {
     const store = newStore(), insert = vi.spyOn(store, 'insert');
     const drops = vi.fn();
     await expect(insertKeepingOnePublishedAt(store,
-      [row(`"${' '.repeat(60_001)}${EARLY}"`)], { ...options, recordDrops: drops })).rejects.toThrow('without a usable publishedAt');
+      [row(`"${' '.repeat(60_001)}${EARLY}"`),
+        ...operationRows(ack).filter(quad => quad.predicate !== PUBLISHED_AT)],
+      { ...options, recordDrops: drops })).rejects.toThrow('without a usable publishedAt');
+    expect(await store.query(`CONSTRUCT { <${ack.operationSubject}> ?p ?o } WHERE {
+      GRAPH <${WS_META}> { <${ack.operationSubject}> ?p ?o }
+    }`)).toMatchObject({ type: 'quads', quads: [] });
     expect(insert).not.toHaveBeenCalled();
     expect(drops).toHaveBeenCalledOnce();
   });
