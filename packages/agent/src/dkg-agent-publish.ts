@@ -6246,11 +6246,21 @@ export class PublishMethods extends DKGAgentBase {
       );
     }
 
-    // OT-RFC-43 A2 (decision 2) — stamp the VM pointer on the lifecycle URN
-    // whenever the publish/update is confirmed. (For the mint path this is the
-    // first VM pointer; for the update path the DELETE/INSERT above already set
-    // it, and this idempotent re-stamp is a no-op.)
-    if (result.status === 'confirmed' || result.status === 'tentative') {
+    // Confirmed mints share the canonical mutation with consumed-share recovery.
+    // Tentative and update results retain their existing lifecycle behavior.
+    if (result.status === 'confirmed' && operationPlan.kind !== 'update') {
+      try {
+        const vmKaId = result.onChainResult ? packedKaId ?? result.onChainResult.kaId ?? result.kaId : undefined;
+        await this.publishedNamedKaVmLifecycleWriter({
+          contextGraphId, agentAddress, name, subGraphName: opts?.subGraphName,
+          publishedUal: result.ual, merkleRoot: newMerkleHexBare,
+          ...(vmKaId === undefined || vmKaId === null ? {} : { packedKaId: BigInt(vmKaId) }),
+        });
+      } catch (err) {
+        this.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          `Failed to stamp VM lifecycle marker for <${lifecycleUri}>: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    } else if (result.status === 'confirmed' || result.status === 'tentative') {
       try {
         await this._stampPointer(lifecycleUri, VM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
         // OT-RFC-44 Design B — the assertion now lives at Verifiable Memory, so

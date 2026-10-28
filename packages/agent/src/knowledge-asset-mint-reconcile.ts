@@ -99,9 +99,9 @@ function isRecorded(lifecycle: AssertionHistoryDescriptor | null | undefined, se
  * consumes the share. A publish-owned checkpoint proves that content recording,
  * content cleanup and finalization gossip completed; its retained catalog obligation
  * must then transfer to a durable owner before the lifecycle can be terminal.
- * Without a checkpoint, a share marker still set after the share was consumed
- * is ambiguous and refuses, VM pointer or not: a queued publish stamps that
- * pointer before its gossip. Retrying resumes the explicit checkpoint without
+ * Without a checkpoint, a consumed share is ambiguous and refuses, VM pointer
+ * or marker absence notwithstanding: a queued publish stamps that pointer
+ * before gossip, and a promote retry may then clear the marker. Retrying resumes the explicit checkpoint without
  * sending another mint.
  */
 export async function reconcileLateMint(
@@ -141,21 +141,15 @@ export async function reconcileLateMint(
     throw refused(`The lifecycle of "${name}" already records VM version ${vmPointer}, not the sealed ${sealRoot}.`);
   }
   const readableShare = async (current: AssertionHistoryDescriptor | null | undefined) => {
-    // Only the publish-owned checkpoint proves a publish passed its finalization
-    // gossip. Without one the share marker decides, which both publish paths
-    // clear only after that gossip; a queued publish stamps the VM pointer before
-    // it, so the pointer alone proves nothing. With a pointer, publishing again
-    // would plan an update.
+    // A promote retry can clear the marker after checking VM content without
+    // sending finalization. Only a publish-owned checkpoint certifies that step.
     const progress = await readNamedPublishFinalization(agent.store, reservation);
     const share = progress.kind !== 'legacy'
       ? 'consumed' : await shareState(agent, reservation, target, current?.vmCurrentAssertion !== undefined);
     if (share === 'interrupted') {
-      throw refused(current?.vmCurrentAssertion === undefined
-        ? `An interrupted publish consumed the share of "${name}" before its finalization gossip and catalog transition. ` +
-          'Reconcile cannot finish those from the VM record alone, so it leaves the asset unrecorded.'
-        : `The lifecycle of "${name}" records the sealed VM version, but its share marker is still set and no publish ` +
-          'checkpoint shows that its finalization gossip and catalog transition ran (a queued publish stamps the lifecycle ' +
-          'before both). Reconcile cannot finish those from the VM record alone, so it changes nothing.');
+      throw refused(`An interrupted publish consumed the share of "${name}", or its VM lifecycle was already stamped, ` +
+        'but no publish-owned checkpoint proves its finalization gossip completed. A cleared share marker ' +
+        'does not prove completion; reconcile changes nothing.');
     }
     return share;
   };
@@ -225,22 +219,15 @@ async function hasPublishReceipt(agent: DKGAgent, { assertionUri, metaGraph }: S
   return result.type === 'boolean' && result.value;
 }
 
-/**
- * Where the complete share a publish consumes stands: still `resident`;
- * `consumed` by a publish that went on to clear the share marker, which it
- * does only after its finalization gossip; or `interrupted`, consumed while
- * the marker stayed set because that publish stopped before those steps. A
- * stamped VM pointer with the marker set is `interrupted` whatever shared
- * memory holds.
- */
+/** A resident share is safe to record; all other legacy states require positive finalization evidence. */
 async function shareState(
   agent: DKGAgent,
   { seal, scope }: SealedReservation,
   target: Target,
   vmStamped: boolean,
-): Promise<'resident' | 'consumed' | 'interrupted'> {
+): Promise<'resident' | 'interrupted'> {
   if (!(await agent.publisher.hasSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName))) {
-    return 'consumed';
+    return 'interrupted';
   }
   if (vmStamped) return 'interrupted';
   if (seal.publicTripleCount === 0) return 'resident';

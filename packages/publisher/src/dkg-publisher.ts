@@ -1,5 +1,5 @@
 import type { MintAdoptionRequest } from './adopt-existing-mint.js';
-import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication, type PreparedPublicationInput } from './prepared-publication.js';
+import { preparePublication, type GraphScopedPublishDescriptor, type PreparedLocalPublication, type PreparedPublicationContent } from './prepared-publication.js';
 import { recordTentativePublication } from './record-tentative-publication.js';
 import { acquirePreparedPublication, publicationAcquisitionFailure, type PublicationAcquisition } from './prepared-publication-acquisition.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
@@ -2535,14 +2535,19 @@ export class DKGPublisher implements Publisher {
 
   async publish(options: PublishOptions): Promise<PublishResult> {
     const content = await this.preparePublicationContent(options);
-    const prepared = await preparePublication(content.preparation, content.ports);
-    if (prepared.kind === 'local') return content.record(prepared);
+    const prepared = await preparePublication(content, {
+      publisherPlanner: this.publisherPlanner, log: this.log,
+      allocateOperationId: () => `${this.sessionId}-${++this.tentativeCounter}`,
+      selectPublicStagingQuads, invokeV10ACKProvider,
+      validateSealIntegrity: this.validatePublicationSeal.bind(this),
+    });
+    if (prepared.kind === 'local') return this.recordPublication(content, prepared);
     options.onPhase?.('chain', 'start');
     try {
       const receipt = await acquirePreparedPublication(prepared, {
         chain: this.chain, log: this.log, ensureReservedKaId: this.ensureReservedKaId.bind(this),
       });
-      return await content.record(receipt);
+      return await this.recordPublication(content, receipt);
     } finally { options.onPhase?.('chain', 'end'); }
   }
 
@@ -2550,10 +2555,10 @@ export class DKGPublisher implements Publisher {
   async recordExistingMint(options: PublishOptions,
     request: MintAdoptionRequest): Promise<PublishResult> {
     const content = await this.preparePublicationContent(options);
-    const { target, payload } = content.preparation;
+    const { target, payload } = content;
     const { publisherContextGraphId, sealedAdoption, graphPublish, v10ChainId } = target;
     await this.publisherPlanner.requireMintAdoptionTarget(publisherContextGraphId);
-    await content.ports.validateSealIntegrity();
+    await this.validatePublicationSeal(content);
     const attestation = options.precomputedAttestation;
     if (!sealedAdoption || !graphPublish || !attestation || publisherContextGraphId === undefined)
       throw new Error('Recording an existing mint requires a sealed graph-scoped publish');
@@ -2567,13 +2572,13 @@ export class DKGPublisher implements Publisher {
         kaId: attestation.reservedKaId, merkleRoot: payload.kcMerkleRoot,
         contextGraphId: publisherContextGraphId, authorAddress: attestation.authorAddress,
       }, sealedAdoption, request);
-      return await content.record({ kind: 'confirmed', outcome, reservedKaId: attestation.reservedKaId,
+      return await this.recordPublication(content, { kind: 'confirmed', outcome, reservedKaId: attestation.reservedKaId,
         effectiveAuthorAddress: attestation.authorAddress });
     } finally { options.onPhase?.('chain', 'end'); }
   }
 
   /** Content validation and the confirmed recorder are independent of receipt acquisition. */
-  private async preparePublicationContent(options: PublishOptions) {
+  private async preparePublicationContent(options: PublishOptions): Promise<PreparedPublicationContent> {
 
     const explicitPublishEpochs = resolvePublishEpochsOverride(options.publishEpochs);
     const pricingPolicyResult = parsePublicationPricingPolicy(options.pricingPolicy);
@@ -2835,7 +2840,6 @@ export class DKGPublisher implements Publisher {
     // guard conflated entity count with KA count and blocked multi-entity
     // files; that conflation is the bug OT-RFC-44 removes.
     const entityCount = manifestEntries.length;
-    const kaCount = 1;
     if (!graphPublish && entityCount < 1) {
       throw new Error('V10 publish requires at least one entity');
     }
@@ -2858,7 +2862,6 @@ export class DKGPublisher implements Publisher {
           options.subGraphName,
         )
       : options.targetGraphUri ?? this.graphManager.dataGraphUri(contextGraphId);
-    const normalizedQuads = allSkolemizedQuads.map((q) => ({ ...q, graph: dataGraph }));
 
     // RC11 / PR2: defer the public-data insert into the root data graph
     // until AFTER on-chain confirmation (or until the publisher's chain
@@ -2890,30 +2893,7 @@ export class DKGPublisher implements Publisher {
     // private store consistent with the committed `privateMerkleRoot`, and
     // invoking it BEFORE the publish returns 'confirmed' preserves the
     // no-"confirmed-before-data" guarantee the pre-chain insert used to give.
-    const persistFinalizedPrivateSlices = async (): Promise<void> => {
-      if (graphPublish) {
-        await this.privateStore.replaceKnowledgeAssetPrivateTriples(
-          contextGraphId,
-          graphPublish.scope,
-          canonicalPrivateQuads,
-          options.subGraphName,
-        );
-        return;
-      }
-      for (const entry of canonical!.manifestEntries) {
-        const entityPrivateQuads = privateQuads.filter(
-          (q) => q.subject === entry.rootEntity || q.subject.startsWith(entry.rootEntity + '/.well-known/genid/'),
-        );
-        if (entityPrivateQuads.length > 0) {
-          // Tag the stored slice with the commitment this root committed (its
-          // privateMerkleRoot) so a later re-publish supersedes the stale slice.
-          const commitmentId = entry.privateMerkleRoot
-            ? Buffer.from(entry.privateMerkleRoot).toString('hex')
-            : undefined;
-          await this.privateStore.storePrivateTriples(contextGraphId, entry.rootEntity, entityPrivateQuads, options.subGraphName, commitmentId);
-        }
-      }
-    };
+
 
     onPhase?.('store', 'end');
 
@@ -2927,8 +2907,6 @@ export class DKGPublisher implements Publisher {
       fallbackGraph: dataGraph,
     });
     const nquadsStr = payloadMeasurement.publicNQuads;
-    const publicNquadsBytes = payloadMeasurement.publicBytes;
-    const publicByteSize = payloadMeasurement.publicByteSize;
 
     // Legacy payloads retain the combined catalog model. V2 graph-scoped KAs
     // use a detached protocol-owned floor: their KC Merkle root and exact
@@ -2991,23 +2969,8 @@ export class DKGPublisher implements Publisher {
     // result: each intentional-local branch (via `finalizeIntentionalLocalPublish`)
     // and the confirmed chain-success branch. The chain-failure catch path never
     // calls it, so a failed publish leaves the `_catalog` graph untouched.
-    const persistCatalogEntry = async (): Promise<void> => {
-      if (catalogQuads.length === 0) return;
-      // Canonical location (shared with projection + open-serve): graph =
-      // contextGraphCatalogUri(contextGraphId) (`<source-cg>/_catalog`), subject =
-      // the context-graph DID. B4: CLEAR/REPLACE — purge any prior catalog
-      // entry for these subjects in this graph before inserting the refreshed
-      // one, so repeated publishes don't accumulate stale catalog triples.
-      const catalogGraph = contextGraphCatalogUri(contextGraphId);
-      const catalogSubjects = new Set(catalogQuads.map((q) => q.subject));
-      for (const subject of catalogSubjects) {
-        await this.deleteStoreByPatternWithoutCount({ graph: catalogGraph, subject });
-      }
-      await this.store.insert(catalogQuads.map((q) => ({ ...q, graph: catalogGraph })));
-    };
 
-    const merkleRootHex = ethers.hexlify(kcMerkleRoot);
-    let ual = '';
+
     const v10CgDomain = String(onChainContextGraphId ?? contextGraphId);
     const attributionIdentityId: bigint = hasAttributionOverride
       ? options.publisherNodeIdentityIdOverride!
@@ -3019,13 +2982,6 @@ export class DKGPublisher implements Publisher {
       localNodeIdentityId: attributionIdentityId.toString(),
       resolveAssetUal: (kaId) => this.resolveKaUal(kaId),
     });
-    let v10CgId: bigint;
-    try {
-      v10CgId = BigInt(v10CgDomain);
-    } catch {
-      v10CgId = 0n;
-    }
-
     // Numeric EVM chainId + kav10Address are needed by the publisher digest
     // (H5 prefix) in the chain-submit path below. Fetch once; the adapter
     // field `this.chain.chainId` is a namespaced string like `evm:31337` and
@@ -3044,7 +3000,37 @@ export class DKGPublisher implements Publisher {
       v10KavAddress = undefined;
     }
 
-    const validateSealIntegrity = async (): Promise<void> => {
+
+
+
+
+    return {
+      payload: {
+        catalogCommitment, catalogQuads, catalogByteSize, payloadMeasurement, encryptableNquadsStr,
+        kcMerkleRoot, catalogNquadsStr, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy,
+        kcMerkleLeafCount, normalizedAllowedPeers, privateRoots, kaMetadata,
+        privateQuads: graphPublish ? canonicalPrivateQuads : privateQuads,
+        publisherPeerId: normalizedPublisherPeerId,
+      },
+      target: {
+        publisherContextGraphId, graphPublish, v10CgDomain, contextGraphId, dataGraph,
+        attributionIdentityId, v10ChainId, v10KavAddress, sealedAdoption,
+        subGraphName: options.subGraphName, targetMetaGraphUri: options.targetMetaGraphUri,
+      },
+      execution: {
+        onPhase, onPublishConfirmed, onBroadcastAccepted: options.onBroadcastAccepted,
+        onBeforeBroadcast: options.onBeforeBroadcast, encryptInlinePayload: options.encryptInlinePayload,
+        encryptInlineChunked: options.encryptInlineChunked, precomputedAttestation: options.precomputedAttestation,
+        reservedKaId: options.reservedKaId, v10ACKProvider: options.v10ACKProvider, fromSharedMemory: options.fromSharedMemory,
+      },
+      pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode: resolvePublicACKStagingMode(options),
+    };
+  }
+
+  private async validatePublicationSeal(content: PreparedPublicationContent): Promise<void> {
+      const { v10ChainId, v10KavAddress } = content.target;
+      const { kcMerkleRoot } = content.payload;
+      const options = content.execution;
       if (
         options.precomputedAttestation &&
         v10ChainId !== undefined &&
@@ -3110,8 +3096,133 @@ export class DKGPublisher implements Publisher {
           }
         }
       }
+  }
+
+  private async recordPublication(content: PreparedPublicationContent,
+    acquisition: PublicationAcquisition | PreparedLocalPublication): Promise<PublishResult> {
+    const { payload, target, execution: options, lifecycle, ctx } = content;
+    const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata,
+      allSkolemizedQuads, manifestEntries, publisherPeerId: normalizedPublisherPeerId } = payload;
+    const { graphPublish, dataGraph, contextGraphId, publisherContextGraphId } = target;
+    const { onPhase } = options;
+    const normalizedQuads = allSkolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
+    let ual = '';
+    const onChainResult = acquisition.kind === 'confirmed' ? acquisition.outcome.result : undefined;
+    const usedV10Path = acquisition.kind === 'confirmed';
+    const localChainSkipReason = acquisition.kind === 'local' ? 'no-chain' : undefined;
+    const v10ACKs = acquisition.kind === 'confirmed' ? acquisition.v10ACKs : undefined;
+    if (acquisition.kind === 'confirmed') {
+      try {
+        ual = await this.recordConfirmedPublication(content, acquisition.outcome, acquisition.reservedKaId, acquisition.effectiveAuthorAddress);
+      } catch (error) {
+        throw publicationAcquisitionFailure(error, this.log, ctx, lifecycle, publisherContextGraphId ?? 0n, acquisition.v10ACKs?.length ?? 0);
+      }
+      onPhase?.('chain:metadata', 'start');
+      this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult!.batchId} tx=${onChainResult!.txHash}`);
+    } else {
+      ual = await recordTentativePublication(acquisition, {
+        privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads,
+        graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, ctx, onPhase,
+        subGraphName: target.subGraphName, targetMetaGraphUri: target.targetMetaGraphUri,
+        authorAddress: options.precomputedAttestation?.authorAddress,
+      }, {
+        chainId: this.chain.chainId, store: this.store, log: this.log,
+        replaceExactKnowledgeAssetGraph: this.replaceExactKnowledgeAssetGraph.bind(this),
+        persistFinalizedPrivateSlices: () => this.persistPublicationPrivateSlices(content),
+        persistCatalogEntry: () => this.persistPublicationCatalog(content),
+      });
+    }
+
+    const status = onChainResult === undefined ? 'tentative' : 'confirmed';
+
+    // Track owned entities and batch→context graph binding on confirmed publishes
+    if (status === 'confirmed' && onChainResult) {
+      const confirmOwnershipKey = target.subGraphName ? `${contextGraphId}\0${target.subGraphName}` : contextGraphId;
+      if (!this.ownedEntities.has(confirmOwnershipKey)) {
+        this.ownedEntities.set(confirmOwnershipKey, new Set());
+      }
+      for (const e of manifestEntries) {
+        this.ownedEntities.get(confirmOwnershipKey)!.add(e.rootEntity);
+      }
+      this.knownBatchContextGraphs.set(String(onChainResult.batchId), contextGraphId);
+      // RS prevention (GH #1264): self-promote the confirmed KC into the SCOPED
+      // context-graph graphs the Random Sampling prover reads. The one-shot
+      // `dkg publish --file` path otherwise leaves the KC only in the legacy
+      // label graphs, so every prover tick reports `kc-not-synced` and no proof
+      // ever lands. Best-effort — the KC is already on-chain, so a promote error
+      // must NOT fail the publish (the layer-3 heal backstop is the fallback).
+      // Skipped for sub-graph publishes (RS samples root CGs; sub-graph KCs use a
+      // different layout); remap is not applicable on this one-shot path.
+      if (!target.subGraphName) {
+        try {
+          await this.promoteConfirmedKCToScopedGraph(
+            contextGraphId,
+            onChainResult,
+            ual,
+            kcMerkleRoot,
+            manifestEntries,
+            allSkolemizedQuads,
+            publisherContextGraphId,
+            ctx,
+          );
+        } catch (err) {
+          this.log.warn(ctx, `RS scoped-promote failed for ${ual} (heal backstop will retry): ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+      onPhase?.('chain:metadata', 'end');
+    }
+
+    const result: PublishResult = {
+      kaId: graphPublish
+        ? onChainResult?.kaId
+          ?? ((BigInt(graphPublish.scope.agentAddress) << 96n) | BigInt(graphPublish.scope.kaNumber))
+        : onChainResult?.batchId ?? 0n,
+      ual,
+      merkleRoot: kcMerkleRoot,
+      kaManifest: manifestEntries,
+      status,
+      onChainResult,
+      localChainSkipReason, // GH #1013
+      publicQuads: allSkolemizedQuads,
+      v10ACKs,
+      v10Origin: usedV10Path,
+      subGraphName: target.subGraphName,
+      ...(graphPublish
+        ? {
+            contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+            assertionVersion: graphPublish.scope.assertionVersion,
+            publicTripleCount: graphPublish.publicTripleCount,
+            ...(privateRoots[0] ? { privateMerkleRoot: privateRoots[0] } : {}),
+            privateTripleCount: graphPublish.privateTripleCount,
+            accessPolicy: effectiveAccessPolicy,
+            allowedPeers: [...normalizedAllowedPeers],
+          }
+        : {}),
     };
-    const recordConfirmed = async (outcome: MintOrAdoptOutcome, reservedKaId: bigint | undefined, effectiveAuthorAddress: string): Promise<string> => {
+    lifecycle.emit('finalization', 'complete', {
+      metadata: {
+        kaId: result.kaId.toString(),
+        status: result.status,
+        ackCount: result.v10ACKs?.length ?? 0,
+        localChainSkipReason: result.localChainSkipReason,
+      },
+    });
+
+    this.eventBus.emit(DKGEvent.KC_PUBLISHED, {
+      ...result,
+      contextGraphId,
+      tripleCount: allSkolemizedQuads.length,
+    });
+    return result;
+  }
+
+  private async recordConfirmedPublication(content: PreparedPublicationContent, outcome: MintOrAdoptOutcome, reservedKaId: bigint | undefined, effectiveAuthorAddress: string): Promise<string> {
+      const { payload, target, execution: options, lifecycle, ctx } = content;
+      const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata,
+        allSkolemizedQuads, manifestEntries, publisherPeerId: normalizedPublisherPeerId } = payload;
+      const { graphPublish, dataGraph, contextGraphId, publisherContextGraphId } = target;
+      const { onPublishConfirmed } = options;
+      const normalizedQuads = allSkolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
       const onChainResult = outcome.result;
       let ual = '';
       const recording = outcome.recording;
@@ -3154,7 +3265,7 @@ export class DKGPublisher implements Publisher {
       lifecycle.setAssetUal(ual);
       lifecycle.emit('chain', 'confirm', {
         metadata: {
-          contextGraphId: v10CgId.toString(),
+          contextGraphId: (publisherContextGraphId ?? 0n).toString(),
           kaId: kaId.toString(),
           txHash: onChainResult.txHash,
           blockNumber: onChainResult.blockNumber,
@@ -3182,7 +3293,7 @@ export class DKGPublisher implements Publisher {
         accessPolicy: effectiveAccessPolicy,
         allowedPeers: normalizedAllowedPeers,
         timestamp: new Date(),
-        subGraphName: options.subGraphName,
+        subGraphName: target.subGraphName,
         authorAddress: effectiveAuthorAddress,
       };
       let confirmedQuads = graphPublish
@@ -3197,7 +3308,7 @@ export class DKGPublisher implements Publisher {
                 contextGraphId,
                 MemoryLayer.VerifiableMemory,
                 graphPublish.scope,
-                options.subGraphName,
+                target.subGraphName,
               ),
             },
             {
@@ -3221,10 +3332,10 @@ export class DKGPublisher implements Publisher {
           ...buildDeterministicTokenRows(ual, kaMetadata, `did:dkg:context-graph:${contextGraphId}/_meta`),
         ];
       }
-      if (options.targetMetaGraphUri) {
+      if (target.targetMetaGraphUri) {
         const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
         confirmedQuads = confirmedQuads.map((q) =>
-          q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
+          q.graph === defaultMeta ? { ...q, graph: target.targetMetaGraphUri! } : q,
         );
       }
       if (graphPublish && !recording.keepsExistingRecord) {
@@ -3253,9 +3364,9 @@ export class DKGPublisher implements Publisher {
             contextGraphId,
             MemoryLayer.VerifiableMemory,
             graphPublish.scope,
-            options.subGraphName,
+            target.subGraphName,
           )
-        : contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, options.subGraphName);
+        : contextGraphLayerUri(contextGraphId, MemoryLayer.VerifiableMemory, vmAuthor, vmNumber, target.subGraphName);
       const vmQuads = normalizedQuads.map((q) => ({ ...q, graph: vmGraph }));
       this.log.info(ctx, `Storing ${vmQuads.length} triples in ${vmGraph} (post-confirmation)`);
       if (graphPublish) {
@@ -3271,7 +3382,7 @@ export class DKGPublisher implements Publisher {
       // GH #1078 — supersede/persist private slices only now that the chain
       // has confirmed (before returning 'confirmed', so no read sees the KA
       // confirmed without its private data).
-      await persistFinalizedPrivateSlices();
+      await this.persistPublicationPrivateSlices(content);
       if (!graphPublish) {
         await stampTrustLevel(
           this.store,
@@ -3293,7 +3404,7 @@ export class DKGPublisher implements Publisher {
       // quads are committed — refresh the public catalog entry here, inside
       // the success branch, so a failed ACK/chain publish never exposes one
       // (CLEAR/REPLACE — see persistCatalogEntry).
-      await persistCatalogEntry();
+      await this.persistPublicationCatalog(content);
       lifecycle.emit('vm', 'promote', {
         metadata: {
           kaId: kaId.toString(),
@@ -3305,128 +3416,50 @@ export class DKGPublisher implements Publisher {
       });
 
       return ual;
-    };
+  }
 
-
-    const preparation: PreparedPublicationInput = {
-        payload: { catalogCommitment, privateRoots, catalogByteSize, publicByteSize, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, publicNquadsBytes, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers, kaCount, entityCount },
-        target: { publisherContextGraphId, graphPublish, v10CgDomain, contextGraphId, attributionIdentityId, hasAttributionOverride, v10ChainId, v10KavAddress, sealedAdoption },
-        options, pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode: resolvePublicACKStagingMode(options),
-      };
-    const ports = {
-        publisherPlanner: this.publisherPlanner, log: this.log,
-        allocateOperationId: () => `${this.sessionId}-${++this.tentativeCounter}`,
-        selectPublicStagingQuads, invokeV10ACKProvider, validateSealIntegrity,
-      };
-    const record = async (acquisition: PublicationAcquisition | PreparedLocalPublication): Promise<PublishResult> => {
-    const onChainResult = acquisition.kind === 'confirmed' ? acquisition.outcome.result : undefined;
-    const usedV10Path = acquisition.kind === 'confirmed';
-    const localChainSkipReason = acquisition.kind === 'local' ? 'no-chain' : undefined;
-    const v10ACKs = acquisition.kind === 'confirmed' ? acquisition.v10ACKs : undefined;
-    if (acquisition.kind === 'confirmed') {
-      try {
-        ual = await recordConfirmed(acquisition.outcome, acquisition.reservedKaId, acquisition.effectiveAuthorAddress);
-      } catch (error) {
-        throw publicationAcquisitionFailure(error, this.log, ctx, lifecycle, v10CgId, acquisition.v10ACKs?.length ?? 0);
+  private async persistPublicationPrivateSlices(content: PreparedPublicationContent): Promise<void> {
+      const { graphPublish, contextGraphId, subGraphName } = content.target;
+      const { privateQuads, manifestEntries } = content.payload;
+      if (graphPublish) {
+        await this.privateStore.replaceKnowledgeAssetPrivateTriples(
+          contextGraphId,
+          graphPublish.scope,
+          privateQuads,
+          subGraphName,
+        );
+        return;
       }
-      onPhase?.('chain:metadata', 'start');
-      this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult!.batchId} tx=${onChainResult!.txHash}`);
-    } else {
-      ual = await recordTentativePublication(acquisition, {
-        privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads,
-        graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, ctx, onPhase,
-        subGraphName: options.subGraphName, targetMetaGraphUri: options.targetMetaGraphUri,
-        authorAddress: options.precomputedAttestation?.authorAddress,
-      }, {
-        chainId: this.chain.chainId, store: this.store, log: this.log,
-        replaceExactKnowledgeAssetGraph: this.replaceExactKnowledgeAssetGraph.bind(this),
-        persistFinalizedPrivateSlices, persistCatalogEntry,
-      });
-    }
-
-    const status = onChainResult === undefined ? 'tentative' : 'confirmed';
-
-    // Track owned entities and batch→context graph binding on confirmed publishes
-    if (status === 'confirmed' && onChainResult) {
-      const confirmOwnershipKey = options.subGraphName ? `${contextGraphId}\0${options.subGraphName}` : contextGraphId;
-      if (!this.ownedEntities.has(confirmOwnershipKey)) {
-        this.ownedEntities.set(confirmOwnershipKey, new Set());
-      }
-      for (const e of manifestEntries) {
-        this.ownedEntities.get(confirmOwnershipKey)!.add(e.rootEntity);
-      }
-      this.knownBatchContextGraphs.set(String(onChainResult.batchId), contextGraphId);
-      // RS prevention (GH #1264): self-promote the confirmed KC into the SCOPED
-      // context-graph graphs the Random Sampling prover reads. The one-shot
-      // `dkg publish --file` path otherwise leaves the KC only in the legacy
-      // label graphs, so every prover tick reports `kc-not-synced` and no proof
-      // ever lands. Best-effort — the KC is already on-chain, so a promote error
-      // must NOT fail the publish (the layer-3 heal backstop is the fallback).
-      // Skipped for sub-graph publishes (RS samples root CGs; sub-graph KCs use a
-      // different layout); remap is not applicable on this one-shot path.
-      if (!options.subGraphName) {
-        try {
-          await this.promoteConfirmedKCToScopedGraph(
-            contextGraphId,
-            onChainResult,
-            ual,
-            kcMerkleRoot,
-            manifestEntries,
-            allSkolemizedQuads,
-            publisherContextGraphId,
-            ctx,
-          );
-        } catch (err) {
-          this.log.warn(ctx, `RS scoped-promote failed for ${ual} (heal backstop will retry): ${err instanceof Error ? err.message : String(err)}`);
+      for (const entry of manifestEntries) {
+        const entityPrivateQuads = privateQuads.filter(
+          (q) => q.subject === entry.rootEntity || q.subject.startsWith(entry.rootEntity + '/.well-known/genid/'),
+        );
+        if (entityPrivateQuads.length > 0) {
+          // Tag the stored slice with the commitment this root committed (its
+          // privateMerkleRoot) so a later re-publish supersedes the stale slice.
+          const commitmentId = entry.privateMerkleRoot
+            ? Buffer.from(entry.privateMerkleRoot).toString('hex')
+            : undefined;
+          await this.privateStore.storePrivateTriples(contextGraphId, entry.rootEntity, entityPrivateQuads, subGraphName, commitmentId);
         }
       }
-      onPhase?.('chain:metadata', 'end');
-    }
+  }
 
-    const result: PublishResult = {
-      kaId: graphPublish
-        ? onChainResult?.kaId
-          ?? ((BigInt(graphPublish.scope.agentAddress) << 96n) | BigInt(graphPublish.scope.kaNumber))
-        : onChainResult?.batchId ?? 0n,
-      ual,
-      merkleRoot: kcMerkleRoot,
-      kaManifest: manifestEntries,
-      status,
-      onChainResult,
-      localChainSkipReason, // GH #1013
-      publicQuads: allSkolemizedQuads,
-      v10ACKs,
-      v10Origin: usedV10Path,
-      subGraphName: options.subGraphName,
-      ...(graphPublish
-        ? {
-            contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-            assertionVersion: graphPublish.scope.assertionVersion,
-            publicTripleCount: graphPublish.publicTripleCount,
-            ...(privateRoots[0] ? { privateMerkleRoot: privateRoots[0] } : {}),
-            privateTripleCount: graphPublish.privateTripleCount,
-            accessPolicy: effectiveAccessPolicy,
-            allowedPeers: [...normalizedAllowedPeers],
-          }
-        : {}),
-    };
-    lifecycle.emit('finalization', 'complete', {
-      metadata: {
-        kaId: result.kaId.toString(),
-        status: result.status,
-        ackCount: result.v10ACKs?.length ?? 0,
-        localChainSkipReason: result.localChainSkipReason,
-      },
-    });
-
-    this.eventBus.emit(DKGEvent.KC_PUBLISHED, {
-      ...result,
-      contextGraphId,
-      tripleCount: allSkolemizedQuads.length,
-    });
-    return result;
-    };
-    return { preparation, ports, record };
+  private async persistPublicationCatalog(content: PreparedPublicationContent): Promise<void> {
+      const { catalogQuads } = content.payload;
+      const { contextGraphId } = content.target;
+      if (catalogQuads.length === 0) return;
+      // Canonical location (shared with projection + open-serve): graph =
+      // contextGraphCatalogUri(contextGraphId) (`<source-cg>/_catalog`), subject =
+      // the context-graph DID. B4: CLEAR/REPLACE — purge any prior catalog
+      // entry for these subjects in this graph before inserting the refreshed
+      // one, so repeated publishes don't accumulate stale catalog triples.
+      const catalogGraph = contextGraphCatalogUri(contextGraphId);
+      const catalogSubjects = new Set(catalogQuads.map((q) => q.subject));
+      for (const subject of catalogSubjects) {
+        await this.deleteStoreByPatternWithoutCount({ graph: catalogGraph, subject });
+      }
+      await this.store.insert(catalogQuads.map((q) => ({ ...q, graph: catalogGraph })));
   }
 
   /**

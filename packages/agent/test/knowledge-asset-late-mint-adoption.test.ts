@@ -168,10 +168,12 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
   /** Fail chosen lifecycle writes once each, as transient store failures would. */
   function lifecycleWriteFailures(target: DKGAgent, store: OxigraphStore) {
     const pending = new Set<string>();
-    const stampPointer = target._stampPointer.bind(target);
-    vi.spyOn(target, '_stampPointer').mockImplementation(async (subject, pred, ...rest) => {
-      if (pending.delete(pred)) throw new Error(`store write of ${pred} failed`);
-      return stampPointer(subject, pred, ...rest);
+    const stampLifecycle = target.publishedNamedKaVmLifecycleWriter;
+    vi.spyOn(target, 'publishedNamedKaVmLifecycleWriter').mockImplementation(async input => {
+      for (const predicate of [VM_CURRENT_ASSERTION_PRED, PUBLISHED_UAL_PRED]) {
+        if (pending.delete(predicate)) throw new Error(`store write of ${predicate} failed`);
+      }
+      return stampLifecycle(input);
     });
     const insert = store.insert.bind(store);
     vi.spyOn(store, 'insert').mockImplementation(async (quads: Quad[]) => {
@@ -371,7 +373,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     const gossip = vi.spyOn(agent.gossip, 'publish');
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
-      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/share marker is still set/) });
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/no publish-owned checkpoint/) });
 
     expect(await history()).toEqual(before);
     expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'legacy' });
@@ -380,21 +382,28 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(gossip.mock.calls.filter(([topic]) => topic === contextGraphFinalizationTopic(CONTEXT_GRAPH))).toHaveLength(0);
   });
 
-  it('completes a VM lifecycle stamped without a publish checkpoint once its share marker is cleared', async () => {
-    const { agent, store, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
+  it('refuses after an interrupted queued mint is followed by a promote retry that clears the marker', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, store, sealed, history, createKnowledgeAssets } = await strandedAsset(chain);
     await agent.reconcileKnowledgeAssetMint(RECONCILE);
-    // Either publish path clears the marker only after its finalization gossip, but a queued publish, or one from
-    // before the checkpoint existed, leaves no checkpoint for its catalog transition.
+    // Reconstruct the queued interruption boundary: VM content/lifecycle persisted,
+    // no finalization checkpoint, and the original share marker remains.
     await store.deleteByPattern({ graph: NAMED_FINALIZATION_GRAPH });
+    await store.insert([{ subject: LIFECYCLE, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: META_GRAPH }]);
+    const gossip = vi.spyOn(agent.gossip, 'publish');
+    await agent.assertion.promote(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR, entities: 'all' });
     expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(false);
+    const before = await history();
+    const lookup = vi.spyOn(chain, 'resolveKnowledgeAssetMint');
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
-      .resolves.toMatchObject({ status: 'adopted', ual: sealed.kaUal, txHash: lostMint.txHash });
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/no publish-owned checkpoint/) });
 
-    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
-    expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
+    expect(await history()).toEqual(before);
+    expect(await readNamedPublishFinalization(store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'legacy' });
+    expect(lookup).not.toHaveBeenCalled();
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
-    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+    expect(gossip.mock.calls.filter(([topic]) => topic === contextGraphFinalizationTopic(CONTEXT_GRAPH))).toHaveLength(0);
   });
 
   it('writes the receipt before the lifecycle stamp, so a failed receipt write is retried', async () => {
@@ -442,7 +451,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     await agent.publisher.clearSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR);
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
-      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/no verified record/) });
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/no publish-owned checkpoint/) });
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
     expect(await history()).toMatchObject({ status: 'swm-shared' });
   });
@@ -616,8 +625,9 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
   it('leaves a draft that pull-from reopened while reconcile waited for the lifecycle lock', async () => {
     const { agent, store, history } = await strandedAsset(new MockChainAdapter());
-    failNextLifecycleWrite(agent, store, PUBLISHED_UAL_PRED);
-    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    await agent.reconcileKnowledgeAssetMint(RECONCILE);
+    // A recorded VM copy whose completion metadata needs repair; pull-from can use that proof.
+    await store.deleteByPattern({ subject: LIFECYCLE, predicate: PUBLISHED_UAL_PRED, graph: META_GRAPH });
     // The retry reads the reservation, then pauses before the lock while pull-from reopens the asset as a draft.
     vi.mocked(agent.getContextGraphOnChainId).mockImplementationOnce(async () => {
       await agent.assertion.pullFrom(CONTEXT_GRAPH, NAME, 'vm', { agentAddress: AUTHOR });
@@ -692,8 +702,9 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
   it('reads mint evidence outside the lifecycle lock, so pull-from finishes during a slow lookup', async () => {
     const chain = new MockChainAdapter();
     const { agent, store, history } = await strandedAsset(chain);
-    failNextLifecycleWrite(agent, store, PUBLISHED_UAL_PRED);
-    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    await agent.reconcileKnowledgeAssetMint(RECONCILE);
+    // A recorded VM copy whose completion metadata needs repair; pull-from can use that proof.
+    await store.deleteByPattern({ subject: LIFECYCLE, predicate: PUBLISHED_UAL_PRED, graph: META_GRAPH });
     // pull-from takes the same lifecycle lock; were the lookup inside it, this would never finish.
     const lookup = chain.resolveKnowledgeAssetMint.bind(chain);
     vi.spyOn(chain, 'resolveKnowledgeAssetMint').mockImplementationOnce(async (...args) => {
@@ -745,7 +756,6 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
   it('refuses to complete a lifecycle without an on-chain context graph', async () => {
     const { agent } = await strandedAsset(new MockChainAdapter());
-    await agent.publisher.clearSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR);
     vi.mocked(agent.getContextGraphOnChainId).mockResolvedValue(null);
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))

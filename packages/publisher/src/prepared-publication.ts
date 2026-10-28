@@ -2,6 +2,7 @@
 
 
 import {GRAPH_KA_CONTENT_SCOPE_VERSION, type CatalogRootResult, type GraphKnowledgeAssetScope, type Logger, type OperationContext} from '@origintrail-official/dkg-core';
+import type { KAMetadata } from './metadata.js';
 import type {Quad} from '@origintrail-official/dkg-storage';
 import type {PublishOptions, KAManifestEntry, V10CoreNodeACK, V10ACKProviderParams} from './publisher.js';
 import type { V10PublishParams } from '@origintrail-official/dkg-chain';
@@ -27,37 +28,42 @@ export interface GraphScopedPublishDescriptor {
   privateTripleCount: number;
   expectedPrivateMerkleRoot?: Uint8Array;
 }
-export interface PreparedPublicationInput {
+export interface PreparedPublicationContent {
   payload: {
+    /** One measured public document is shared by pricing, ACK transport and recording. */
     catalogCommitment: CatalogRootResult | undefined;
+    catalogQuads: Quad[];
+    privateQuads: Quad[];
+    kaMetadata: KAMetadata[];
+    publisherPeerId: string;
     privateRoots: Uint8Array[];
     catalogByteSize: bigint;
-    publicByteSize: bigint;
     payloadMeasurement: CanonicalPublicationPayloadMeasurement;
     encryptableNquadsStr: string;
     kcMerkleRoot: Uint8Array;
     catalogNquadsStr: string | undefined;
-    publicNquadsBytes: Uint8Array;
     allSkolemizedQuads: Quad[];
     manifestEntries: KAManifestEntry[];
     effectiveAccessPolicy: 'public' | 'ownerOnly' | 'allowList';
     kcMerkleLeafCount: number;
     normalizedAllowedPeers: string[];
-    kaCount: number;
-    entityCount: number;
   };
   target: {
     publisherContextGraphId: bigint | undefined;
     graphPublish: GraphScopedPublishDescriptor | undefined;
     v10CgDomain: string;
     contextGraphId: string;
+    dataGraph: string;
+    subGraphName: string | undefined;
+    targetMetaGraphUri: string | undefined;
     attributionIdentityId: bigint;
-    hasAttributionOverride: boolean;
     v10ChainId: bigint | undefined;
     v10KavAddress: string | undefined;
     sealedAdoption: SealedMintAdoption | undefined;
   };
-  options: PublishOptions;
+  execution: Pick<PublishOptions, 'onPhase' | 'onPublishConfirmed' | 'onBroadcastAccepted' | 'onBeforeBroadcast'
+    | 'encryptInlinePayload' | 'encryptInlineChunked' | 'precomputedAttestation' | 'reservedKaId'
+    | 'v10ACKProvider' | 'fromSharedMemory'>;
   pricingPolicy: PublishOptions['pricingPolicy'];
   lifecycle: PublishLifecycleLogger;
   ctx: OperationContext;
@@ -68,14 +74,17 @@ export interface PublicationPreparationPorts {
   publisherPlanner: PublisherPlanner;
   log: Logger;
   allocateOperationId(): string;
-  validateSealIntegrity(): Promise<void>;
-  selectPublicStagingQuads(mode: PreparedPublicationInput['publicStagingMode'], quads: Uint8Array): Uint8Array | undefined;
+  validateSealIntegrity(content: PreparedPublicationContent): Promise<void>;
+  selectPublicStagingQuads(mode: PreparedPublicationContent['publicStagingMode'], quads: Uint8Array): Uint8Array | undefined;
   invokeV10ACKProvider(provider: NonNullable<PublishOptions['v10ACKProvider']>, params: V10ACKProviderParams): Promise<V10CoreNodeACK[]>;
 }
-export async function preparePublication(input: PreparedPublicationInput, ports: PublicationPreparationPorts): Promise<PreparedPublication> {
-  const { catalogCommitment, privateRoots, catalogByteSize, publicByteSize, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, publicNquadsBytes, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers, kaCount, entityCount } = input.payload;
+export async function preparePublication(input: PreparedPublicationContent, ports: PublicationPreparationPorts): Promise<PreparedPublication> {
+  const { catalogCommitment, privateRoots, catalogByteSize, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers } = input.payload;
   const { publisherContextGraphId, graphPublish, v10CgDomain, contextGraphId } = input.target;
-  const { options, pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode } = input;
+  const { execution: options, pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode } = input;
+  const { publicByteSize, publicBytes: publicNquadsBytes } = payloadMeasurement;
+  const kaCount = 1;
+  const entityCount = manifestEntries.length;
   const { onPhase } = options;
   const swmGraphId = contextGraphId;
   let publishOperationId = '';
@@ -158,7 +167,7 @@ export async function preparePublication(input: PreparedPublicationInput, ports:
       rootEntityCount: manifestEntries.length,
       accessPolicy: effectiveAccessPolicy,
       hiddenCommitmentCount: privateRoots.length,
-      subGraphName: options.subGraphName,
+      subGraphName: input.target.subGraphName,
     },
   });
   lifecycle.emit('swm_share', 'prepared', {
@@ -199,7 +208,7 @@ export async function preparePublication(input: PreparedPublicationInput, ports:
     try {
       const rootEntities = manifestEntries.map(m => m.rootEntity);
       const reservedAckKaId =
-        (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId;
+        options.reservedKaId ?? options.precomputedAttestation?.reservedKaId;
       const assetUal = await lifecycle.rememberAssetUal(reservedAckKaId);
       const commonACKParams = {
         merkleRoot: kcMerkleRoot,
@@ -210,7 +219,7 @@ export async function preparePublication(input: PreparedPublicationInput, ports:
         epochs: publishEpochs,
         tokenAmount: precomputedTokenAmount,
         swmGraphId,
-        subGraphName: options.subGraphName,
+        subGraphName: input.target.subGraphName,
         merkleLeafCount: kcMerkleLeafCount,
         assetUal,
         ...(graphPublish
@@ -235,7 +244,7 @@ export async function preparePublication(input: PreparedPublicationInput, ports:
         metadata: {
           contextGraphId: v10CgDomain,
           swmGraphId,
-          subGraphName: options.subGraphName,
+          subGraphName: input.target.subGraphName,
           ackMode: lifecycleAckMode,
           kaCount,
           rootEntityCount: rootEntities.length,
@@ -358,7 +367,7 @@ export async function preparePublication(input: PreparedPublicationInput, ports:
       reason: publisherContextGraphId === undefined ? 'no on-chain CG id' : 'chain not V10-ready' };
   }
   const { attributionIdentityId, v10ChainId, v10KavAddress, sealedAdoption } = input.target;
-  await ports.validateSealIntegrity();
+  await ports.validateSealIntegrity(input);
   try {
   if (publisherContextGraphId === undefined || v10ChainId === undefined || v10KavAddress === undefined) {
     throw new Error('V10 publish requires a parsed context graph id, getEvmChainId() and getKnowledgeAssetsLifecycleAddress()');
