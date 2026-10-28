@@ -24,6 +24,7 @@ export default defineConfig({
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',
           'test/public-checkpoint-job.test.ts',
+          'test/sync-checkpoint-command.test.ts',
           'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-launch-command.test.ts',
