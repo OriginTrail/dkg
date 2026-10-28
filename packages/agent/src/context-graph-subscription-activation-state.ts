@@ -50,7 +50,7 @@ export type SubscriptionLifecycleEvent = Readonly<{ id: string } & (
 )>;
 
 type SubscriptionActivationCommit = Readonly<{ id: string; kind: 'activated'; subscription: ContextGraphSub }>;
-type TransitionEvent = SubscriptionLifecycleEvent | SubscriptionActivationCommit | { id: string; kind: 'cancelled' };
+type TransitionEvent = SubscriptionLifecycleEvent | SubscriptionActivationCommit;
 type SubscriptionFacts = { persisted: boolean; active: boolean; hosted: boolean };
 type TransitionDecision = {
   facts: SubscriptionFacts;
@@ -68,7 +68,7 @@ function shouldHoldRollingSlot(subscription: ContextGraphSub, persisted: boolean
 }
 /** Event semantics are decided once, before any shared collection or waiter is changed. */
 function reduceSubscriptionTransition(event: TransitionEvent, current: {
-  facts: SubscriptionFacts; reason: ContextGraphDormancyReason | undefined; pending: boolean;
+  facts: SubscriptionFacts;
   live: ContextGraphSub | undefined; status: ContextGraphSubscriptionRehydrationInternalStatus | null;
 }): TransitionDecision {
   const normalized = (persisted: boolean, liveActive: boolean, hosted: boolean,
@@ -95,9 +95,6 @@ function reduceSubscriptionTransition(event: TransitionEvent, current: {
       return normalized(true, true, event.subscription.coreHosted === true, undefined,
         { kind: 'committed', subscription: event.subscription },
         shouldHoldRollingSlot(event.subscription, true, current.status) ? 'acquire' : 'release');
-    case 'cancelled':
-      return { facts: current.facts, reason: current.reason, pending: current.pending,
-        slot: 'retain', clearRevision: false, settlement: { kind: 'cancelled' } };
     default: {
       const exhaustive: never = event;
       throw new Error(`Unknown subscription transition: ${String(exhaustive)}`);
@@ -200,7 +197,8 @@ export class ContextGraphSubscriptionActivations {
     attempt.listeners.clear();
   }
   cancel(id: string): void {
-    this.apply([{ id, kind: 'cancelled' }]);
+    const attempt = this.pending.get(id);
+    if (attempt) this.settle(attempt, { kind: 'cancelled' });
   }
   /** A new live intent supersedes the dormant activation independently of disk I/O. */
   replaceLiveIntent(id: string, subscription: ContextGraphSub): void {
@@ -235,7 +233,7 @@ export class ContextGraphSubscriptionActivations {
       const reason = ports.contextGraphSubscriptionDormancyById.get(id);
       const before = { persisted, active: persisted && reason === undefined, hosted: hostedBefore.has(id) };
       return { id, before, decision: reduceSubscriptionTransition(event, {
-        facts: before, reason, pending: ports.contextGraphSubscriptionRehydrationPendingIds.has(id),
+        facts: before,
         live: ports.subscribedContextGraphs.get(id), status,
       }) };
     });

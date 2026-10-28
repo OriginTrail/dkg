@@ -134,3 +134,30 @@ it('uses one accounting owner for startup commits, durable clears and later retr
   expect([...agent.contextGraphSubscriptionRehydrationSlotIds]).toEqual(['retry']);
   expect(agent.eventBus.emit).toHaveBeenCalledTimes(2);
 });
+
+it('cancels an attempt once without publishing bookkeeping or changing lifecycle facts', async () => {
+  const agent = fixture(), id = 'cancelled-attempt';
+  const owner: ContextGraphSubscriptionActivations = agent.contextGraphSubscriptionActivations;
+  owner.reset([intent(id)]);
+  agent.contextGraphSubscriptionRehydrationAccountedIds.add(id);
+  agent.contextGraphSubscriptionRehydrationPendingIds.add(id);
+  agent.contextGraphSubscriptionRehydrationSlotIds.add(id);
+  agent.contextGraphSubscriptionDormancyById.set(id, 'activationCap');
+  const status = agent.contextGraphSubscriptionRehydrationStatus;
+  const publishStatus = vi.fn();
+  Object.defineProperty(agent, 'contextGraphSubscriptionRehydrationStatus', { get: () => status, set: publishStatus });
+  const settled = vi.fn();
+  const wait = owner.wait(id, new AbortController().signal).then(outcome => { settled(outcome); return outcome; });
+  owner.cancel('unknown');
+  owner.cancel(id);
+  owner.cancel(id);
+  await expect(wait).resolves.toEqual({ kind: 'cancelled' });
+  expect(settled).toHaveBeenCalledOnce();
+  expect(publishStatus).not.toHaveBeenCalled();
+  expect(agent.contextGraphSubscriptionRehydrationStatus).toBe(status);
+  expect([...agent.contextGraphSubscriptionRehydrationAccountedIds]).toEqual([id]);
+  expect([...agent.contextGraphSubscriptionRehydrationPendingIds]).toEqual([id]);
+  expect([...agent.contextGraphSubscriptionRehydrationSlotIds]).toEqual([id]);
+  expect([...agent.contextGraphSubscriptionDormancyById]).toEqual([[id, 'activationCap']]);
+  expect(agent.clearContextGraphSubscriptionPersistRevisionStateIfIdle).not.toHaveBeenCalled();
+});
