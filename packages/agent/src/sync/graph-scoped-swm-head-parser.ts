@@ -143,10 +143,18 @@ export interface SetAsideGraphScopedSwmHead {
   readonly error: Error;
 }
 
+type RejectedHeadOutcome = Readonly<{ kind: 'rejected'; rejection: SetAsideGraphScopedSwmHead }>;
+type HeadClaimOutcome = Readonly<{ kind: 'claim'; head: SwmRecoveryHead; claim: ReturnType<typeof decodeHeadGraphClaim> }> | RejectedHeadOutcome;
+type HeadParseOutcome = Readonly<{ kind: 'descriptor'; descriptor: GraphScopedSwmRecoveryDescriptor }> | RejectedHeadOutcome;
+function rejectedHead(head: SwmRecoveryHead, error: unknown): SetAsideGraphScopedSwmHead {
+  return { metaGraph: head.metaGraph, headSubject: head.headSubject,
+    operationSubjects: head.operationReferences.filter(ref => ref.shareOperationId.length > 0).map(ref => ref.operationSubject),
+    error: error instanceof Error ? error : new Error(String(error)) };
+}
+
 function parseGraphScopedSwmHeads(
   params: GraphScopedSwmRecoveryParseInput,
-  mode: 'strict' | 'set-aside',
-): { descriptors: GraphScopedSwmRecoveryDescriptor[]; setAside: SetAsideGraphScopedSwmHead[] } {
+): readonly HeadParseOutcome[] {
   const allowedMetaGraphs = allowedWorkspaceMetaGraphs(params.contextGraphId,
     params.registeredSubGraphNames, params.excludedSubGraphNames);
   const index = new Map<string, Quad[]>();
@@ -155,16 +163,8 @@ function parseGraphScopedSwmHeads(
     const rows = index.get(key);
     if (rows) rows.push(quad); else index.set(key, [quad]);
   }
-  const descriptors: GraphScopedSwmRecoveryDescriptor[] = [];
-  const setAside: SetAsideGraphScopedSwmHead[] = [];
-  const heads: { head: SwmRecoveryHead; claim?: ReturnType<typeof decodeHeadGraphClaim>; error?: unknown }[] = [];
+  const heads: HeadClaimOutcome[] = [];
   const owners = new Map<string, Set<string>>();
-  const rejectHead = (head: SwmRecoveryHead, error: unknown) => {
-    if (mode === 'strict') throw error;
-    setAside.push({ metaGraph: head.metaGraph, headSubject: head.headSubject,
-      operationSubjects: head.operationReferences.filter(ref => ref.shareOperationId.length > 0).map(ref => ref.operationSubject),
-      error: error instanceof Error ? error : new Error(String(error)) });
-  };
   for (const [key, headRows] of index) {
     const separator = key.indexOf('\u0000');
     const metaGraph = key.slice(0, separator);
@@ -181,12 +181,13 @@ function parseGraphScopedSwmHeads(
       const graphOwners = owners.get(claim.assertionGraph) ?? new Set<string>();
       graphOwners.add(claim.scope.ual);
       owners.set(claim.assertionGraph, graphOwners);
-      heads.push({ head, claim });
-    } catch (error) { heads.push({ head, error }); }
+      heads.push({ kind: 'claim', head, claim });
+    } catch (error) { heads.push({ kind: 'rejected', rejection: rejectedHead(head, error) }); }
   }
-  for (const { head, claim, error } of heads) {
+  return heads.map(outcome => {
+    if (outcome.kind === 'rejected') return outcome;
+    const { head, claim } = outcome;
     try {
-      if (!claim) throw error;
       if (owners.get(claim.assertionGraph)!.size > 1) throw new Error(
         `Graph-scoped SWM assertion graph ${claim.assertionGraph} has multiple UAL owners`);
       const declaredGraph = requireSingle(head.headRows, ASSERTION_GRAPH, 'assertionGraph');
@@ -197,10 +198,9 @@ function parseGraphScopedSwmHeads(
         `Graph-scoped SWM head ${head.headSubject} has unsupported contentScopeVersion ${scopeVersion}`);
       const assertionVersion = requirePositiveInteger(head.headRows, ASSERTION_VERSION, 'assertionVersion');
       const scope = createGraphKnowledgeAssetScope(claim.scope.ual, assertionVersion);
-      descriptors.push(decodeHeadOperation(params, { ...head, ...claim, scope }, index));
-    } catch (failure) { rejectHead(head, failure); }
-  }
-  return { descriptors, setAside };
+      return { kind: 'descriptor' as const, descriptor: decodeHeadOperation(params, { ...head, ...claim, scope }, index) };
+    } catch (error) { return { kind: 'rejected' as const, rejection: rejectedHead(head, error) }; }
+  });
 }
 export interface GraphScopedSwmRecoveryParseInput {
   readonly contextGraphId: string;
@@ -209,10 +209,20 @@ export interface GraphScopedSwmRecoveryParseInput {
   readonly excludedSubGraphNames?: readonly string[];
 }
 export function parseGraphScopedSwmRecoveryDescriptors(params: GraphScopedSwmRecoveryParseInput): GraphScopedSwmRecoveryDescriptor[] {
-  return parseGraphScopedSwmHeads(params, 'strict').descriptors;
+  const descriptors: GraphScopedSwmRecoveryDescriptor[] = [];
+  for (const outcome of parseGraphScopedSwmHeads(params)) {
+    if (outcome.kind === 'rejected') throw outcome.rejection.error;
+    descriptors.push(outcome.descriptor);
+  }
+  return descriptors;
 }
 export function parseGraphScopedSwmRecoveryHeadResults(params: GraphScopedSwmRecoveryParseInput) {
-  return parseGraphScopedSwmHeads(params, 'set-aside');
+  const descriptors: GraphScopedSwmRecoveryDescriptor[] = [], setAside: SetAsideGraphScopedSwmHead[] = [];
+  for (const outcome of parseGraphScopedSwmHeads(params)) {
+    if (outcome.kind === 'descriptor') descriptors.push(outcome.descriptor);
+    else setAside.push(outcome.rejection);
+  }
+  return { descriptors, setAside };
 }
 function decodeHeadGraphClaim(params: GraphScopedSwmRecoveryParseInput,
   head: SwmRecoveryHead,

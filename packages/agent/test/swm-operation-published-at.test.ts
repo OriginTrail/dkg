@@ -268,21 +268,21 @@ describe('planOperationPublishedAt', () => {
     expect(planOperationPublishedAt(
       [typeRow, row(stamp(LATER))],
       new Map([[key, [stamp(LOCAL), stamp(LATEST)]]]),
-    )).toEqual({ rows: [typeRow], retirements: [{ rows: [row(stamp(LATEST))], winner: row(stamp(LOCAL)) }] });
+    )).toEqual({ rows: [typeRow, row(stamp(LOCAL))], retirements: [{ rows: [row(stamp(LATEST))], winner: row(stamp(LOCAL)) }] });
   });
 
   it('keeps the stored stamp for the same instant in another lexical form', () => {
     expect(planOperationPublishedAt(
       [row(stamp(LOCAL))],
       new Map([[key, [stamp(LOCAL.replace('.000Z', 'Z'))]]]),
-    )).toEqual({ rows: [], retirements: [] });
+    )).toEqual({ rows: [row(stamp(LOCAL.replace('.000Z', 'Z')))], retirements: [] });
   });
 
   it('prefers a stamp the head resolver accepts over an earlier unusable one', () => {
     expect(planOperationPublishedAt([row(stamp(LOCAL))], new Map([[key, ['"not-a-date"']]])))
       .toEqual({ rows: [row(stamp(LOCAL))], retirements: [{ rows: [row('"not-a-date"')], winner: row(stamp(LOCAL)) }] });
     expect(planOperationPublishedAt([row(stamp('1960-01-01T00:00:00.000Z'))], new Map([[key, [stamp(LOCAL)]]])))
-      .toEqual({ rows: [], retirements: [] });
+      .toEqual({ rows: [row(stamp(LOCAL))], retirements: [] });
   });
 
   it('leaves stamps outside share operations in metadata graphs alone', () => {
@@ -561,6 +561,21 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
     for (const copy of copies.slice(1)) expect(await publishedAtOf(store, copy.subject)).toEqual([PEER]);
     expect(await rowsOf(store, graph2, copies[0].subject)).toHaveLength(1);
   });
+  it.each([false, true])('reinserts the stored winner atomically with metadata after concurrent deletion (filtered incoming: %s)', async filteredIncoming => {
+    const store = newStore();
+    await store.insert([row(stamp(LOCAL))]);
+    const insert = store.insert.bind(store);
+    vi.spyOn(store, 'insert').mockImplementationOnce(async quads => {
+      await store.deleteByPattern({ graph: WS_META, subject: ack.operationSubject });
+      await insert(quads);
+    });
+    const type = { ...row(`${DKG}WorkspaceOperation`), predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' };
+    const inserted = await insertKeepingOnePublishedAt(store, [type,
+      row(filteredIncoming ? `"${' '.repeat(60_001)}${EARLY}"` : stamp(LATER))], options);
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
+    expect(inserted).toContainEqual(row(stamp(LOCAL.replace('.000Z', 'Z'))));
+    expect(await rowsOf(store, WS_META, ack.operationSubject)).toHaveLength(2);
+  });
   it('renders escaped stored literals through the canonical term policy', async () => {
     const store = newStore();
     await store.insert([row('"bad\\"stamp\\\\value\\n"')]);
@@ -591,7 +606,7 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
     const inserted = await insertKeepingOnePublishedAt(store, [row(stamp(PEER)),
       { ...row(`"${' '.repeat(60_001)}${EARLY}"`), subject: filtered },
       { ...row(stamp(LATEST)), subject: held }], options);
-    expect(inserted.map(quad => quad.subject)).toEqual([ack.operationSubject]);
+    expect(inserted.map(quad => quad.subject).sort()).toEqual([ack.operationSubject, filtered, held].sort());
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([PEER]);
     expect(await publishedAtOf(store, filtered)).toEqual([LOCAL]);
     expect(await publishedAtOf(store, held)).toEqual([LOCAL]);

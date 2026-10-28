@@ -32,7 +32,7 @@ const RETIREMENT_BYTES = 256 * 1024;
 export { operationPublishedAtMs } from './swm-operation-timestamp-reader.js';
 
 export interface OperationPublishedAtPlan {
-  /** The rows to write: the input without the incoming stamps that lose. */
+  /** The rows to write, including every selected winner even when it was already stored. */
   readonly rows: Quad[];
   /** Each group's stored losers and the incoming winner required before retiring them. */
   readonly retirements: readonly {
@@ -60,6 +60,7 @@ export function planOperationPublishedAt(
     incoming.set(key, [...(incoming.get(key) ?? []), row]);
   }
   const kept = new Set<Quad>();
+  const reused: Quad[] = [];
   const retirements: OperationPublishedAtPlan['retirements'][number][] = [];
   for (const [key, stamps] of incoming) {
     const { graph, subject } = stamps[0]!;
@@ -69,6 +70,7 @@ export function planOperationPublishedAt(
       ...stamps.map((row): StampCandidate => ({ object: row.object, row })),
     ].reduce((best, candidate) => (compareStamps(candidate, best) < 0 ? candidate : best));
     if (winner.row) kept.add(winner.row);
+    else reused.push({ subject, predicate: PUBLISHED_AT, object: winner.object, graph });
     const retiring: Quad[] = [];
     for (const object of storedObjects) {
       if (winner.row || object !== winner.object) {
@@ -80,7 +82,7 @@ export function planOperationPublishedAt(
     }
   }
   return {
-    rows: rows.filter((row) => !isOperationPublishedAtRow(row) || kept.has(row)),
+    rows: [...rows.filter((row) => !isOperationPublishedAtRow(row) || kept.has(row)), ...reused],
     retirements,
   };
 }
@@ -136,13 +138,23 @@ export async function insertKeepingOnePublishedAt(
   }
   // Select only stamps that can survive the canonical ingest filter. Otherwise
   // an oversized early winner could discard the only writable later stamp.
-  const plan = planOperationPublishedAt(filtered.kept, stored);
-  assertUsableOperationTimestamps(targets, stored, plan.rows);
+  // Reinsert a selected stored winner in the same mutation as its metadata.
+  // A cleanup may delete the operation after our read, including on bulk paths
+  // outside a KA lease; a stale read is therefore never persistence evidence.
+  const stamped = new Set(filtered.kept.filter(isOperationPublishedAtRow).map(row => `${row.graph}\u0000${row.subject}`));
+  const fallback: Quad[] = [];
+  for (const [graph, subjects] of targets) for (const subject of subjects) {
+    const key = `${graph}\u0000${subject}`;
+    if (!stamped.has(key)) for (const object of stored.get(key) ?? []) fallback.push({ graph, subject, predicate: PUBLISHED_AT, object });
+  }
+  const candidates = [...filtered.kept, ...filterOversizedSyncQuads(fallback).kept];
+  const plan = planOperationPublishedAt(candidates, stored);
+  assertUsableOperationTimestamps(targets, plan.rows);
   const inserted = await insertPrefilteredSyncQuads(
     rows => store.insert(rows, { priority: 'background', source: `${source}.insert` }),
     plan.rows, { recordDrops }, seam,
   );
-  assertUsableOperationTimestamps(targets, stored, inserted);
+  assertUsableOperationTimestamps(targets, inserted);
   // The winning stamp must still exist in the SAME backend delete operation.
   // A recovery can replace all operation rows after our insert; an unconditional
   // delete based on the earlier read would then remove its only restored stamp.
@@ -186,14 +198,13 @@ function* retirementUpdates(retirements: OperationPublishedAtPlan['retirements']
 /** Never report a new operation as materialized without a persisted usable stamp. */
 function assertUsableOperationTimestamps(
   targets: ReadonlyMap<string, ReadonlySet<string>>,
-  stored: ReadonlyMap<string, readonly string[]>,
   rows: readonly Quad[],
 ): void {
   const incoming = new Set(rows.filter(row => isOperationPublishedAtRow(row) && usableStampMs(row.object) !== null)
     .map(row => `${row.graph}\u0000${row.subject}`));
   for (const [graph, subjects] of targets) for (const subject of subjects) {
     const key = `${graph}\u0000${subject}`;
-    if (!incoming.has(key) && !(stored.get(key) ?? []).some(object => usableStampMs(object) !== null)) {
+    if (!incoming.has(key)) {
       throw new Error(`Cannot materialize SWM operation ${subject} without a usable publishedAt`);
     }
   }
