@@ -1,5 +1,14 @@
+export interface PublicSnapshotMetadata {
+  ref: string;
+  digest: string;
+  count: number;
+  /** Optional, non-authoritative scheduling hint parsed with the manifest. */
+  publishedAtMs?: number;
+  /** Optional UAL suffix used only as a deterministic recency fallback. */
+  ualOrdinal?: bigint;
+}
+
 import type { Quad } from '@origintrail-official/dkg-storage';
-import type { PublicSnapshotMetadata } from './shared-memory-sync.js';
 import { stripMetadataLiteral as stripLiteral } from '../metadata-literal.js';
 const DKG = 'http://dkg.io/ontology/';
 

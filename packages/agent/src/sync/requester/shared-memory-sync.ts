@@ -8,7 +8,8 @@ import {
   planEntityRecovery,
   type EntityRecoveryPhaseOutcome,
 } from './entity-slice-recovery.js';
-import { collectPublicSnapshotManifest } from './public-snapshot-manifest.js';
+import { collectPublicSnapshotManifest, type PublicSnapshotMetadata } from './public-snapshot-manifest.js';
+export type { PublicSnapshotMetadata } from './public-snapshot-manifest.js';
 import { createGraphScopedRecoveryPlan } from './graph-scoped-recovery-plan.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
@@ -1566,15 +1567,6 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
   return summary;
 });
 
-export interface PublicSnapshotMetadata {
-  ref: string;
-  digest: string;
-  count: number;
-  /** Optional, non-authoritative scheduling hint parsed with the manifest. */
-  publishedAtMs?: number;
-  /** Optional UAL suffix used only as a deterministic recency fallback. */
-  ualOrdinal?: bigint;
-}
 
 /** Compatibility boundary for callers that only fetch/verify snapshots. Metadata
  * writers must use the enclosing operation scope and syncPublicSnapshotsInScope. */
