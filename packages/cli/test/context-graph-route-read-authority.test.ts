@@ -69,7 +69,7 @@ function fixture(route: Route, decision: ContextGraphReadAuthorityDecision, oper
   const agent = { resolveContextGraphReadAuthority: authority,
     listCclEvaluations: read, evaluateCclPolicy: read, listCclPolicies: read, resolveCclPolicy: read,
     assertion: { history: read, query: read, listPromoteAsyncJobs: vi.fn(async () => []), getPromoteAsyncStatus: vi.fn(async () => job) },
-    listContextGraphQueryPartitions: vi.fn(async () => [] as string[]),
+    listContextGraphQueryPartitionReads: vi.fn(async () => [] as { graph: string; admission: 'public' | 'shared-memory' }[]),
     listSubGraphs: vi.fn(async () => []), getContextGraphAllowedAgents: read, query,
     canReadContextGraph: vi.fn(async () => decision.outcome === 'allowed'),
   };
@@ -265,9 +265,9 @@ describe('caller-bound graph reads', () => {
       { g: `did:dkg:context-graph:${CG}/_meta`, entities: '99', triples: '99' },
       { g: 'did:dkg:context-graph:other/docs', entities: '99', triples: '99' },
     ] } as never);
-    h.agent.listContextGraphQueryPartitions.mockResolvedValue([`did:dkg:context-graph:${CG}/docs`, `did:dkg:context-graph:${CG}/docs/assertion/${CALLER}/one`]);
+    h.agent.listContextGraphQueryPartitionReads.mockResolvedValue([`did:dkg:context-graph:${CG}/docs`, `did:dkg:context-graph:${CG}/docs/assertion/${CALLER}/one`].map(graph => ({ graph, admission: 'public' as const })));
     await routes[5].run(h.ctx);
-    expect(h.agent.listContextGraphQueryPartitions).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: CALLER }));
+    expect(h.agent.listContextGraphQueryPartitionReads).toHaveBeenCalledWith(CG, expect.objectContaining({ callerAgentAddress: CALLER }));
     expect(h.query).toHaveBeenCalledExactlyOnceWith(expect.any(String), expect.objectContaining({
       contextGraphId: CG, includeContextGraphPartitions: true, callerAgentAddress: CALLER,
     }));

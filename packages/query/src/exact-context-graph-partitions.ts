@@ -1,13 +1,12 @@
+import { describeScopedContentGraph } from './scoped-content-partition.js';
 import { registeredSubGraphBranches } from './registered-sub-graphs.js';
 import { registeredAssertionGraphPattern, CHILD_CONTEXT_GRAPH_PREDICATES, decodePartitionMetadataFact } from './partition-metadata-facts.js';
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  ASSERTION_NAMED_GRAPH_PREFIX,
   assertSafeIri,
   contextGraphMetaUri,
   escapeSparqlLiteral,
-  validateSubGraphName,
 } from '@origintrail-official/dkg-core';
 import { asGraphWriteRevisionSource, type QueryResult, type TripleStore } from '@origintrail-official/dkg-storage';
 import { ScopedQueryViolationError } from './scoped-query-error.js';
@@ -41,20 +40,11 @@ export async function authorizeExactContextGraphPartitions(
   const childCandidates = new Set<string>();
   for (const graph of relevant) {
     if (metadata.has(graph) || graph === root) continue;
-    const tail = graph.slice(root.length + 1);
-    const first = tail.split('/')[0];
-    if (!subGraph && validateSubGraphName(first).valid) names.add(first);
-    if (tail.startsWith('_working_memory/') || tail.includes('/_working_memory/') || tail.startsWith('assertion/') || tail.includes('/assertion/')) {
-      assertionParents.add(graph);
-      let offset = graph.indexOf(ASSERTION_NAMED_GRAPH_PREFIX);
-      while (offset >= 0) {
-        assertionParents.add(graph.slice(0, offset));
-        offset = graph.indexOf(ASSERTION_NAMED_GRAPH_PREFIX, offset + ASSERTION_NAMED_GRAPH_PREFIX.length);
-      }
-    }
-    // Only a candidate's canonical ancestors can own that graph as a child CG.
-    const parts = tail.split('/');
-    for (let length = 1; length <= parts.length; length++) childCandidates.add(`${root}/${parts.slice(0, length).join('/')}`);
+    const description = describeScopedContentGraph(graph, contextGraphId);
+    if (!description) continue;
+    if (!subGraph && description.subGraphName) names.add(description.subGraphName);
+    for (const parent of description.assertionAncestors) assertionParents.add(parent);
+    for (const ancestor of description.contextGraphAncestors) childCandidates.add(ancestor);
   }
 
   const revisionSource = asGraphWriteRevisionSource(store);

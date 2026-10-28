@@ -24,7 +24,7 @@ function mockReader(
   queryImpl: (sparql: string, options?: QueryOptions) => Promise<QueryResult>,
 ): ContextGraphReader {
   return {
-    listGraphs: vi.fn(async () => graphs),
+    listPartitions: vi.fn(async () => graphs.map(graph => ({ graph, admission: 'public' as const }))),
     query: vi.fn(queryImpl),
   };
 }
@@ -46,11 +46,11 @@ describe('context-graph exact stats read model', () => {
         resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed' }),
         resolveSharedMemoryReadAdmission: sharedGate };
       const stats = await readContextGraphNamedGraphStats({
-        listGraphs: options => queryEngine.listContextGraphQueryPartitions(CG, options),
-        query: async (sparql, options, policy) => {
+        listPartitions: options => queryEngine.listContextGraphQueryPartitionReads(CG, options),
+        query: async (sparql, options, admission) => {
           const result = await QueryMethods.prototype.query.call(agent as never, sparql, {
             ...options, contextGraphId: CG, includeContextGraphPartitions: true,
-            exactContextGraphPartitions: true, includeSharedMemory: policy.includeSharedMemory,
+            exactContextGraphPartitions: true, includeSharedMemory: admission === 'shared-memory',
             callerAgentAddress: '0xpublic-reader',
           });
           return { type: 'bindings', bindings: result.bindings };

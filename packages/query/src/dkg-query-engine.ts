@@ -2,7 +2,7 @@ import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions } from
 import { authorizeExactContextGraphPartitions } from './exact-context-graph-partitions.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
-import { classifyScopedContentGraph, isExcludedContentGraphTail, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
+import { describeScopedContentGraph, classifyScopedContentGraph, isExcludedContentGraphTail, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { createQueryStoreReadContext, createStoreReadLane, type QueryStoreReadContext, type StoreReadLane } from './query-store-read-context.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
@@ -332,11 +332,22 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
 
   /** Enumerate the same caller-selected public dataset as scoped GRAPH variables. */
   async listContextGraphQueryPartitions(contextGraphId: string, options?: QueryOptions): Promise<string[]> {
+    return (await this.listContextGraphQueryPartitionReads(contextGraphId, options)).map(partition => partition.graph);
+  }
+
+  /** Carry admission requirements with the authorized inventory across caller boundaries. */
+  async listContextGraphQueryPartitionReads(contextGraphId: string, options?: QueryOptions): Promise<Readonly<{
+    graph: string; admission: 'public' | 'shared-memory';
+  }>[]> {
     const opts = { ...options, includeSharedMemory: options?.includeSharedMemory ?? options?.includeWorkspace ?? true };
     const policy = createScopedContentGraphRoutePolicy(contextGraphId, opts);
     const reads = createQueryStoreReadContext(this.store, opts);
     const discovery = await this.resolveScopedContentGraphDiscovery(contextGraphId, reads);
-    return selectScopedRoutePartitions(policy, discovery.partitions);
+    const byGraph = new Map(discovery.partitions.map(partition => [partition.graph, partition]));
+    return selectScopedRoutePartitions(policy, discovery.partitions).map(graph => {
+      const kind = byGraph.get(graph)?.kind ?? describeScopedContentGraph(graph, contextGraphId)?.kind;
+      return { graph, admission: kind === 'shared' || kind === 'shared-root' ? 'shared-memory' : 'public' };
+    });
   }
 
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {

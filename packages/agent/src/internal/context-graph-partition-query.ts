@@ -10,6 +10,12 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
   async listContextGraphQueryPartitions(this: DKGAgent, contextGraphId: string,
     options: { callerAgentAddress?: string; signal?: AbortSignal; priority?: import('@origintrail-official/dkg-storage').StoreWorkPriority; source?: string } = {},
   ): Promise<string[]> {
+    return (await this.listContextGraphQueryPartitionReads(contextGraphId, options)).map(partition => partition.graph);
+  }
+
+  async listContextGraphQueryPartitionReads(this: DKGAgent, contextGraphId: string,
+    options: Parameters<ContextGraphPartitionQueryMethods['listContextGraphQueryPartitions']>[1] = {},
+  ): ReturnType<DKGAgent['queryEngine']['listContextGraphQueryPartitionReads']> {
     // Inventory is part of a scoped read, so consume the same finalized
     // evidence as query execution. Cached subscription intent cannot admit it.
     const authority = await this.resolveContextGraphReadAuthority(contextGraphId, {
@@ -19,7 +25,7 @@ export class ContextGraphPartitionQueryMethods extends DKGAgentBase {
     if (authority.outcome !== 'allowed') return [];
     const owner = options.callerAgentAddress ?? this.defaultAgentAddress ?? this.peerId;
     const aliases = resolveWorkingMemoryIdentityAliases({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, owner, address => address.toLowerCase()).aliases ?? [];
-    return this.queryEngine.listContextGraphQueryPartitions(contextGraphId, { ...options,
+    return this.queryEngine.listContextGraphQueryPartitionReads(contextGraphId, { ...options,
       draftAccess: owner ? { kind: 'owners', owners: [owner, ...aliases] } : { kind: 'none' } });
   }
 

@@ -4,11 +4,11 @@ import type { ContextGraphReader } from '../context-graph-read-model.js';
 
 export function contextGraphReader(agent: DKGAgent, contextGraphId: string, callerAgentAddress?: string): ContextGraphReader {
   return {
-    listGraphs: options => agent.listContextGraphQueryPartitions(contextGraphId, { ...options, callerAgentAddress }),
-    query: async (sparql, options, policy) => {
+    listPartitions: options => agent.listContextGraphQueryPartitionReads(contextGraphId, { ...options, callerAgentAddress }),
+    query: async (sparql, options, admission) => {
       const result = await agent.query(sparql, { ...options, contextGraphId,
         includeContextGraphPartitions: true, exactContextGraphPartitions: true,
-        includeSharedMemory: policy.includeSharedMemory, callerAgentAddress });
+        includeSharedMemory: admission === 'shared-memory', callerAgentAddress });
       return { type: 'bindings', bindings: result.bindings };
     },
   };

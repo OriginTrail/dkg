@@ -1,17 +1,14 @@
+import type { DKGAgent } from '@origintrail-official/dkg-agent';
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { QueryOptions, QueryResult } from '@origintrail-official/dkg-storage';
 
-export interface ContextGraphBatchPolicy {
-  includeSharedMemory: boolean;
-}
-
+type PartitionRead = Awaited<ReturnType<DKGAgent['listContextGraphQueryPartitionReads']>>[number];
 /** Both operations belong to one admitted, caller-bound partition reader. */
 export interface ContextGraphReader {
-  listGraphs(options: QueryOptions): Promise<string[]>;
-  query(sparql: string, options: QueryOptions, policy: ContextGraphBatchPolicy): Promise<QueryResult>;
+  listPartitions(options: QueryOptions): Promise<PartitionRead[]>;
+  query(sparql: string, options: QueryOptions, admission: PartitionRead['admission']): Promise<QueryResult>;
 }
-
 
 export interface ContextGraphNamedGraphStats {
   graph: string;
@@ -35,11 +32,11 @@ function isScopedGraph(graph: string, root: string): boolean {
 }
 
 
-export function planDiagnosticGraphReads(graphs: readonly string[], contextGraphId: string) {
+export function planDiagnosticGraphReads(partitions: readonly PartitionRead[], contextGraphId: string) {
   const root = `did:dkg:context-graph:${contextGraphId}`;
-  return [...new Set(graphs)].sort().filter(graph => isScopedGraph(graph, root)).map(graph => ({
-    graph: assertSafeIri(graph), requiresSharedMemory: graph.endsWith('/_shared_memory') || graph.includes('/_shared_memory/'),
-  }));
+  return [...partitions].sort((a, b) => a.graph.localeCompare(b.graph))
+    .filter(partition => isScopedGraph(partition.graph, root))
+    .map(partition => ({ ...partition, graph: assertSafeIri(partition.graph) }));
 }
 
 function buildStatsQuery(targets: readonly { graph: string }[]): string {
@@ -70,15 +67,15 @@ export async function readContextGraphNamedGraphStats(
     priority: options.priority ?? 'background',
     source: options.source ?? 'node-ui.sub-graph-stats',
   };
-  const discovered = await reader.listGraphs(queryOptions);
+  const discovered = await reader.listPartitions(queryOptions);
   const targets = planDiagnosticGraphReads(discovered, contextGraphId);
   const stats: ContextGraphNamedGraphStats[] = [];
-  const groups = [targets.filter(target => !target.requiresSharedMemory), targets.filter(target => target.requiresSharedMemory)];
+  const groups = [targets.filter(target => target.admission === 'public'), targets.filter(target => target.admission === 'shared-memory')];
   for (const [index, group] of groups.entries()) {
     for (let offset = 0; offset < group.length; offset += EXACT_GRAPH_QUERY_BATCH_SIZE) {
       throwIfAborted(queryOptions.signal);
       const batch = group.slice(offset, offset + EXACT_GRAPH_QUERY_BATCH_SIZE);
-      const result = await reader.query(buildStatsQuery(batch), { ...queryOptions, source: `${queryOptions.source}.${index === 1 ? 'swm' : 'public'}` }, { includeSharedMemory: index === 1 });
+      const result = await reader.query(buildStatsQuery(batch), { ...queryOptions, source: `${queryOptions.source}.${index === 1 ? 'swm' : 'public'}` }, batch[0].admission);
       if (result.type !== 'bindings') {
         throw new Error('Context-graph stats read expected SELECT bindings');
       }

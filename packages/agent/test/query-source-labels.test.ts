@@ -42,9 +42,10 @@ describe('query caller-provided store labels', () => {
         { subject: 'urn:draft', predicate: 'urn:p', object: graph === callerDraft ? '"caller"' : '"foreign-secret"', graph },
       ]));
       const queryEngine = new DKGQueryEngine(store);
-      const inventory = vi.spyOn(queryEngine, 'listContextGraphQueryPartitions');
+      const inventory = vi.spyOn(queryEngine, 'listContextGraphQueryPartitionReads');
       const authority = vi.fn(async () => ({ outcome }));
-      const agent = { queryEngine, resolveContextGraphReadAuthority: authority } as unknown as DKGAgent;
+      const agent = Object.assign(Object.create(ContextGraphPartitionQueryMethods.prototype),
+        { queryEngine, resolveContextGraphReadAuthority: authority }) as DKGAgent;
       const options = { callerAgentAddress: '0xreader', signal: new AbortController().signal, priority: 'background' as const, source: 'inventory-caller' };
       const result = ContextGraphPartitionQueryMethods.prototype.listContextGraphQueryPartitions.call(agent, contextGraphId, options);
       if (outcome === 'unavailable') await expect(result).rejects.toMatchObject({ code: 'CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE' });

@@ -1,4 +1,4 @@
-import { contextGraphDataUri, isAssertionScopedChildGraph, validateSubGraphName } from '@origintrail-official/dkg-core';
+import { ASSERTION_NAMED_GRAPH_PREFIX, contextGraphDataUri, validateSubGraphName } from '@origintrail-official/dkg-core';
 import type { ContentPartition } from './content-partition-policy.js';
 
 function isDraft(tail: string): boolean {
@@ -6,63 +6,56 @@ function isDraft(tail: string): boolean {
   return first === '_working_memory' || first === 'assertion';
 }
 
-export function classifyScopedContentGraph(
-  graph: string,
-  contextGraphId: string,
-  registeredSubGraphs: Set<string>,
-  registeredAssertionGraphs: Set<string>,
-  knownChildContextGraphs: Set<string>,
-): ContentPartition | undefined {
+/** Pure storage-layout description, shared by metadata planning and classification. */
+export function describeScopedContentGraph(graph: string, contextGraphId: string): {
+  kind: ContentPartition['kind'] | 'shared-root'; subGraphName?: string; draftOwner?: string | null;
+  assertionAncestors: readonly string[]; contextGraphAncestors: readonly string[];
+} | undefined {
   const root = contextGraphDataUri(contextGraphId);
-  const scope = (subGraphName?: string) => ({ graph,
-    broadScopeEligible: subGraphName === undefined || registeredSubGraphs.has(subGraphName),
-    ...(subGraphName ? { subGraphName } : {}) });
-  const admit = (kind: Exclude<ContentPartition['kind'], 'draft'>, subGraphName?: string): ContentPartition =>
-    Object.freeze({ ...scope(subGraphName), kind });
-  if (graph === root) return admit('content');
+  if (graph === root) return { kind: 'content', assertionAncestors: [], contextGraphAncestors: [] };
   if (!graph.startsWith(`${root}/`)) return undefined;
-  if (isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return undefined;
-
   const tail = graph.slice(root.length + 1);
   if (!tail) return undefined;
-
-  // Normalize the optional registered subgraph coordinate once. Partition
-  // semantics and draft ownership are identical below root and subgraphs.
-  let partition = tail;
-  let subGraphName: string | undefined;
+  let partition = tail, subGraphName: string | undefined;
   const first = tail.split('/', 1)[0];
   if (!first.startsWith('_') && first !== 'assertion') {
     if (!validateSubGraphName(first).valid) return undefined;
     subGraphName = first;
     partition = tail.length === first.length ? '' : tail.slice(first.length + 1);
   }
-  // Metadata uses the same coordinate parser but requires a registered
-  // subgraph even for explicit scope. Keep its distinct cached classification.
-  if (partition === '_shared_memory_meta') {
-    return subGraphName === undefined || registeredSubGraphs.has(subGraphName)
-      ? admit('shared-metadata', subGraphName) : undefined;
-  }
+  const parts = tail.split('/');
+  const contextGraphAncestors = parts.map((_part, i) => `${root}/${parts.slice(0, i + 1).join('/')}`);
+  const base = { subGraphName, contextGraphAncestors, assertionAncestors: [] as string[] };
+  if (partition === '_shared_memory_meta') return { ...base, kind: 'shared-metadata' };
   if (isExcludedContentGraphTail(tail)) return undefined;
-  if (!partition) return admit('content', subGraphName);
-  if (partition.startsWith('_shared_memory/')) return admit('shared', subGraphName);
-  if (partition.startsWith('_verifiable_memory/')) return admit('verified', subGraphName);
-  if (isDraft(partition) && isRegisteredAssertionGraphOrScopedChild(graph, registeredAssertionGraphs)) {
-    return Object.freeze({ ...scope(subGraphName), kind: 'draft', draftOwner: partition.split('/')[1] ?? null });
+  if (!partition) return { ...base, kind: 'content' };
+  if (partition === '_shared_memory') return { ...base, kind: 'shared-root' };
+  if (partition.startsWith('_shared_memory/')) return { ...base, kind: 'shared' };
+  if (partition.startsWith('_verifiable_memory/')) return { ...base, kind: 'verified' };
+  if (!isDraft(partition)) return undefined;
+  const assertionAncestors = [graph];
+  let offset = graph.indexOf(ASSERTION_NAMED_GRAPH_PREFIX);
+  while (offset >= 0) {
+    assertionAncestors.push(graph.slice(0, offset));
+    offset = graph.indexOf(ASSERTION_NAMED_GRAPH_PREFIX, offset + ASSERTION_NAMED_GRAPH_PREFIX.length);
   }
-  return undefined;
+  return { ...base, kind: 'draft', draftOwner: partition.split('/')[1] ?? null, assertionAncestors };
 }
 
-function isRegisteredAssertionGraphOrScopedChild(
-  graph: string,
-  registeredAssertionGraphs: Set<string>,
-): boolean {
-  if (registeredAssertionGraphs.has(graph)) return true;
-  for (const registeredGraph of registeredAssertionGraphs) {
-    if (isAssertionScopedChildGraph(graph, registeredGraph)) {
-      return true;
-    }
+export function classifyScopedContentGraph(graph: string, contextGraphId: string,
+  registeredSubGraphs: Set<string>, registeredAssertionGraphs: Set<string>,
+  knownChildContextGraphs: Set<string>): ContentPartition | undefined {
+  const description = describeScopedContentGraph(graph, contextGraphId);
+  if (!description || description.kind === 'shared-root' || isKnownChildContextGraphPartition(graph, knownChildContextGraphs)) return undefined;
+  const { subGraphName, kind } = description;
+  if (kind === 'shared-metadata' && subGraphName !== undefined && !registeredSubGraphs.has(subGraphName)) return undefined;
+  const scope = { graph, broadScopeEligible: subGraphName === undefined || registeredSubGraphs.has(subGraphName),
+    ...(subGraphName ? { subGraphName } : {}) };
+  if (kind === 'draft') {
+    if (!description.assertionAncestors.some(parent => registeredAssertionGraphs.has(parent))) return undefined;
+    return Object.freeze({ ...scope, kind, draftOwner: description.draftOwner ?? null });
   }
-  return false;
+  return Object.freeze({ ...scope, kind });
 }
 
 function isMetadataGraphTail(tail: string): boolean {
