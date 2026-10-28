@@ -187,6 +187,7 @@ describe('what is deleted: one record at a time', () => {
     it.each([
       ['a stored finish time that disagrees with the payload', replacePredicate(CONTROL_FINALIZED_AT, `"${Math.round(9 * DAY)}"^^<http://www.w3.org/2001/XMLSchema#integer>`), 'index_mismatch'],
       ['a stored lifecycle key that is not the payload\'s', replacePredicate(CONTROL_LIFECYCLE_KEY, '"music-social\\u001fsomething-else\\u001f"'), 'index_mismatch'],
+      ['a second stored lifecycle key next to the payload\'s (online review 4395740472)', (quads: Quad[]) => [...quads, { subject: jobSubject('f'), predicate: CONTROL_LIFECYCLE_KEY, object: '"music-social\\u001fsomething-else\\u001f"', graph: DEFAULT_CONTROL_GRAPH_URI }], 'index_mismatch'],
       ['a stored status other than finalized (a lying index row, found by a scan for finalized)', (quads: Quad[]) => [...quads, { subject: jobSubject('f'), predicate: CONTROL_STATUS, object: '"accepted"', graph: DEFAULT_CONTROL_GRAPH_URI }], 'index_mismatch'],
       ['a payload that is not JSON', replacePredicate(CONTROL_PAYLOAD, '"not json at all"'), 'unreadable'],
       ['a payload of another job', (quads: Quad[]) => quads.map((quad) => (quad.predicate === CONTROL_PAYLOAD ? { ...quad, object: quad.object.replace('\\"jobId\\":\\"f\\"', '\\"jobId\\":\\"someone-else\\"') } : quad)), 'unreadable'],

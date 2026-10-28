@@ -230,6 +230,8 @@ const termString = (term: string | undefined): string | undefined => { try { ret
  */
 const indexAgrees = (states: ReadonlySet<string>, finishes: ReadonlySet<string>, finalizedAt: number | undefined): boolean =>
   states.size === 1 && termString([...states][0]) === 'finalized' && finishes.size === 1 && exactFinishTime([...finishes][0]) === finalizedAt;
+/** The stored lifecycle-key triples of a record whose payload has `key`: at most one with a key (which the key's own read then matches), none without one. */
+const keyedIndexAgrees = (keys: ReadonlySet<string>, key: string | null): boolean => keys.size <= (key === null ? 0 : 1);
 /** Most subjects one verify read names: a key with a long history is read in several queries. */
 const VERIFY_CHUNK = 100;
 
@@ -423,9 +425,11 @@ class PublisherRetentionImpl implements PublisherRetention {
       if (job.status !== 'finalized') { keep('not_terminal'); continue; }
       const key = lifecycleKeyOfJob(job);
       const keys = stored(row.iri, 'key');
-      // The stored lifecycle key is not compared with the payload's here: the key's records are read by that very triple (planDeletions), so a record whose triple names another key is
-      // not among them and is kept there. A job that has no key must have no key triple at all.
-      const indexed = indexAgrees(stored(row.iri, 'state'), stored(row.iri, 'finalizedAt'), job.timestamps.finalizedAt) && (key !== null || keys.size === 0);
+      // The stored lifecycle key is not parsed and compared with the payload's here (its U+001F separators are spelled the engine's way): the key's records are read by that very
+      // triple (planDeletions), so a record whose triple names another key is not among them and is kept there. A second key triple, even next to the right one, names a key whose
+      // admission reads this record and refuses it, and deleting the record would change that answer (online review 4395740472). So a job with a key carries at most one key triple
+      // (a legacy one none: the same read judges it), and a job without a key none at all.
+      const indexed = indexAgrees(stored(row.iri, 'state'), stored(row.iri, 'finalizedAt'), job.timestamps.finalizedAt) && keyedIndexAgrees(keys, key);
       if (!indexed) { keep('index_mismatch'); this.block(key, job); continue; }
       if (bound.has(row.iri)) { keep('bound_obligation'); this.block(key, job); continue; }
       const own = judgeFinalizedRecord(job, now, this.cfg.policy);
@@ -490,8 +494,9 @@ class PublisherRetentionImpl implements PublisherRetention {
    * The finalized records of `key` older than its youngest candidate (and not candidates themselves) that this sweep could not delete itself: the plan must not reach past them,
    * or a newer record would go while they stay. A record the scan met earlier and kept is in `blockedSince`, and one it would delete (in report mode, one an earlier hold counted) is
    * no obstacle. What `blockedSince` cannot know is a record the scan never meets: a pre-upgrade payload the sweep does not delete, a stored status or finish time that is missing
-   * or disagrees with the payload, or a finish time stored as a term the scan does not read (not an `xsd:integer`). So the stored index of each is read and the candidate checks of `judgeCandidates` are applied to it: one that would not pass is refused, and a
-   * refused record ends the plan's prefix. The answer is a function of the stored records alone, so report and delete mode give the same one.
+   * or disagrees with the payload, or a finish time stored as a term the scan does not read (not an `xsd:integer`). So the stored index of each is read and the candidate checks of
+   * `judgeCandidates` are applied to it, the key triples included (a second one, which the scan meets, makes a record the sweep never deletes): one that would not pass is refused,
+   * and a refused record ends the plan's prefix. The answer is a function of the stored records alone, so report and delete mode give the same one.
    */
   private async refusedSiblings(siblings: readonly PersistedLiftJob[], key: string, members: readonly Judged[]): Promise<Set<string>> {
     const refused = new Set<string>();
@@ -514,7 +519,7 @@ class PublisherRetentionImpl implements PublisherRetention {
         const payloads = stored(iri, 'payload');
         const decoded = payloads.size === 1 ? decodeLiftJobPayload([...payloads][0]) : undefined;
         const reachable = decoded?.kind === 'canonical' && decoded.job.jobId === record.jobId && decoded.job.status === 'finalized'
-          && indexAgrees(stored(iri, 'state'), stored(iri, 'finalizedAt'), decoded.job.timestamps.finalizedAt);
+          && indexAgrees(stored(iri, 'state'), stored(iri, 'finalizedAt'), decoded.job.timestamps.finalizedAt) && keyedIndexAgrees(stored(iri, 'key'), key);
         if (!reachable) refused.add(record.jobId);
       }
     }

@@ -19,8 +19,12 @@ import { TripleStoreAsyncLiftPublisher, type PublisherRetentionBatchResult } fro
 import {
   CONTROL_FINALIZED_AT, CONTROL_LIFECYCLE_KEY, CONTROL_PAYLOAD, CONTROL_STATUS, DEFAULT_CONTROL_GRAPH_URI, DEFAULT_WALLET_LOCK_GRAPH_URI, jobSubject,
 } from '../src/async-lift-control-plane.js';
+import { bindingJobIds } from '../src/async-lift-lifecycle-siblings.js';
+import { LiftJobPayloadUnreadableError } from '../src/lift-job-payload-unreadable.js';
+import { lifecycleKeyOfJob } from '../src/lift-job-store-selectors.js';
+import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import {
-  DAY, NOW, at, createRetentionTemplates, fin, keyedQuads, present, seedWalletLock, type KeyedSpec, type RetentionTemplates,
+  DAY, NOW, at, createRetentionTemplates, fin, keyedQuads, present, seedWalletLock, stampKeyed, type KeyedSpec, type RetentionTemplates,
 } from './_helpers/lift-retention-fixtures.js';
 import { drain, expectKeySuffix, newRetention } from './_helpers/lift-retention-sweep.js';
 
@@ -52,6 +56,14 @@ const kept = (results: readonly PublisherRetentionBatchResult[]): Record<string,
 async function bindingView(publisher: TripleStoreAsyncLiftPublisher, key: string): Promise<string> {
   const lookup = await publisher.lookupKnowledgeAssetVmPublishJobByIntent({ contextGraphId: 'music-social', name: key });
   return lookup.kind === 'active' ? `active:${lookup.job.jobId}` : lookup.kind === 'conflict' ? 'conflict' : 'unbound';
+}
+/** Admission's answer for the key named `name`: its records read inside the claim transaction as admission reads them, and the binding selector over them, or the read's refusal. */
+async function admissionAnswer(publisher: TripleStoreAsyncLiftPublisher, name: string): Promise<string> {
+  const key = lifecycleKeyOfJob(stampKeyed(templates, fin('probe', name, 1)))!;
+  return publisher.retentionAccess().runClaimTransaction((tx) => tx.siblings(key)).then(
+    (records) => `binds:${bindingJobIds(records, key).join(',')}`,
+    (cause: unknown) => `refused:${cause instanceof LiftJobPayloadUnreadableError}:${(cause as Error).message}`,
+  );
 }
 
 /** What is left of a key (`order`: its records oldest first) is a suffix of it, and its newest record is there until the last one goes. */
@@ -250,6 +262,35 @@ describe('an older record the sweep can never delete keeps every record behind i
       expect(kept(results), mode).toEqual({ index_mismatch: 1, older_sibling_pending: 2 });
       expect(await idsOf(w), mode).toEqual(['a', 'b', 'c']);
       expect(await present(w.store, 'a'), mode).toBe(before);
+    }
+  });
+
+  it.each([
+    ['in one batch', {}],
+    ['one batch each', { batchSize: 1 }],
+  ])('a finalized record that carries a second stored key next to its own, in front of newer ones (%s; online review 4395740472): it stays, the records behind it stay, and the other key\'s admission answer is the same', async (_name, over) => {
+    // a's payload and its own key triple say k; a second key triple names `other`. Admission for `other` reads a by that triple and refuses the key (a's payload names k), which
+    // also keeps x, other's older failed job, from binding it again. The sweep reads k's records by k's triple and finds a among them: only the number of a's key triples says
+    // that a is indexed under a second key, whose answer deleting a would change. So a is kept (index_mismatch), and, being a record the sweep never deletes, it holds b and c.
+    const order = ['a', 'b', 'c'];
+    const specs = [fin('a', 'k', 10), fin('b', 'k', 20), fin('c', 'k', 30), at('x', 'other', 'retryable', 5)];
+    const otherKey = keyedQuads(templates, specs[3]!).find((quad) => quad.predicate === CONTROL_LIFECYCLE_KEY)!;
+    const secondKey = (quads: Quad[], spec: KeyedSpec) => (spec.id === 'a' ? [...quads, { ...otherKey, subject: jobSubject('a') }] : quads);
+    for (const mode of ['delete', 'report'] as const) {
+      const w = await world(specs, secondKey);
+      const before = await present(w.store, 'a');
+      const answer = await admissionAnswer(w.publisher, 'other');
+      expect(answer, mode).toMatch(/^refused:true:Malformed persisted LiftJob payload: lifecycle index does not match /);
+      const results = await walk(newRetention(w.publisher, { mode, ...over }), w, order, mode);
+      expect(deletedIds(results), mode).toEqual([]);
+      expect(wouldDeleteIds(results), mode).toEqual([]);
+      expect(kept(results), mode).toEqual({ index_mismatch: 1, older_sibling_kept: 2 });
+      expect(await idsOf(w), mode).toEqual(['a', 'b', 'c', 'x']);
+      expect(await present(w.store, 'a'), mode).toBe(before);
+      expect(await admissionAnswer(w.publisher, 'other'), mode).toBe(answer);
+      // and admission itself still refuses `other` rather than re-accepting x
+      const resubmit = new TripleStoreAsyncLiftPublisher(w.store, { now: () => NOW, idGenerator: () => 'fresh' }).enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'other' }));
+      expect(await resubmit.then((id) => `admitted:${id}`, (cause: unknown) => `refused:${cause instanceof LiftJobPayloadUnreadableError}`), mode).toBe('refused:true');
     }
   });
 });
