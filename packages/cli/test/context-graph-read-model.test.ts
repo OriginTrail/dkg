@@ -3,7 +3,6 @@ import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGQueryEngine } from '../../query/src/dkg-query-engine.js';
 import { ContextGraphPartitionQueryMethods } from '../../agent/src/internal/context-graph-partition-query.js';
-import { readContextGraphNamedGraphStats } from '../src/daemon/context-graph-read-model.js';
 const CG = 'large-cg';
 const ROOT = `did:dkg:context-graph:${CG}`;
 describe('context-graph exact stats read model', () => {
@@ -22,23 +21,15 @@ describe('context-graph exact stats read model', () => {
       const agent = { store, log: { info() {} }, queryEngine,
         resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed' }),
         resolveSharedMemoryReadAdmission: sharedGate };
-      const stats = await readContextGraphNamedGraphStats({
-        statistics: options => ContextGraphPartitionQueryMethods.prototype.readContextGraphNamedGraphStats.call(agent as never, CG,
-          { ...options, callerAgentAddress: '0xpublic-reader' }),
-      }, CG, { source: 'changed-diagnostic-label' });
+      const stats = await ContextGraphPartitionQueryMethods.prototype.readContextGraphNamedGraphStats.call(agent as never, CG,
+        { source: 'changed-diagnostic-label', callerAgentAddress: '0xpublic-reader' });
       expect(stats.find(row => row.graph === ROOT)).toMatchObject({ tripleCount: 1 });
       expect(sharedGate).toHaveBeenCalled();
       expect(stats.find(row => row.graph === catalogGraph)?.tripleCount ?? 0).toBe(allowed ? 1 : 0);
     } finally { await store.close(); }
   });
 
-  it('passes cancellation and lane metadata to the typed operation', async () => {
-    const controller = new AbortController();
-    const expected = [{ graph: ROOT, tripleCount: 3, entityCount: 2 }];
-    const statistics = vi.fn(async () => expected);
-    expect(await readContextGraphNamedGraphStats({ statistics }, CG, { signal: controller.signal })).toEqual(expected);
-    expect(statistics).toHaveBeenCalledWith({ signal: controller.signal, priority: 'background', source: 'node-ui.sub-graph-stats' });
-  });
+
 });
 
 

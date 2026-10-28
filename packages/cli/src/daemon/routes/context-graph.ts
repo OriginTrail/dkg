@@ -358,13 +358,9 @@ import {
   reverseLocalAgentSetupForUi,
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
-import {
-  readContextGraphNamedGraphStats,
-} from '../context-graph-read-model.js';
 
 import type { RequestContext } from './context.js';
 import { actorFromRequestContext } from './context.js';
-import { contextGraphReader } from './context-graph-reader.js';
 
 /**
  * Map a `registerContextGraph` failure to an HTTP status +
@@ -1067,8 +1063,9 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       const counts = new Map<string, { entityCount: number; tripleCount: number }>();
       try {
         const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-        const graphStats = await readContextGraphNamedGraphStats(contextGraphReader(agent, contextGraphId!, actor.authenticatedAgentAddress), contextGraphId!, {
-          signal: lifecycle.signal, priority: lifecycle.priority,
+        const graphStats = await agent.readContextGraphNamedGraphStats(contextGraphId!, {
+          callerAgentAddress: actor.authenticatedAgentAddress,
+          signal: lifecycle.signal, priority: lifecycle.priority, source: lifecycle.source,
         });
         for (const row of graphStats) {
           if (!row.graph.startsWith(prefix)) continue;

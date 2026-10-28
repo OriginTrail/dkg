@@ -54,3 +54,24 @@ describe('agent-owned working-memory identity aliases', () => {
     expect(fixture.query.mock.calls[0][1]?.agentAddressAliases).toBeUndefined();
   });
 });
+
+it.each([
+  [undefined, [A, PEER]], [A, [A, PEER]], [PEER, [PEER, A]], [B, [B]],
+] as const)('shares draft policy across query, inventory and statistics for %s', async (caller, owners) => {
+  const { agent, query } = node();
+  const inventory = vi.fn(async () => []);
+  const statistics = vi.fn(async () => []);
+  Object.assign(agent.queryEngine, { listContextGraphQueryPartitionReads: inventory, readContextGraphNamedGraphStats: statistics });
+  await agent.query(sparql, { contextGraphId: 'cg-1', callerAgentAddress: caller });
+  await agent.listContextGraphQueryPartitionReads('cg-1', { callerAgentAddress: caller });
+  await agent.readContextGraphNamedGraphStats('cg-1', { callerAgentAddress: caller });
+  const expected = { kind: 'owners', owners };
+  expect(query.mock.calls[0][1]?.draftAccess).toEqual(expected);
+  expect(inventory).toHaveBeenCalledWith('cg-1', expect.objectContaining({ draftAccess: expected }));
+  expect(statistics).toHaveBeenCalledWith('cg-1', expect.objectContaining({ draftAccess: expected }), expect.any(Function));
+});
+it('keeps explicit draft exclusion on ordinary queries', async () => {
+  const { agent, query } = node();
+  await agent.query(sparql, { contextGraphId: 'cg-1', callerAgentAddress: A, excludeWorkingMemoryPartitions: true });
+  expect(query.mock.calls[0][1]?.draftAccess).toEqual({ kind: 'none' });
+});
