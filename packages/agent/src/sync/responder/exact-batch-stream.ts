@@ -147,6 +147,8 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
           if (awaitingCredit) {
             if (options.servingWithheld?.(request.contextGraphId)) refuse('serving', 'BUSY');
             await requirePublicAuthority(request.contextGraphId, session.signal);
+            await prepared.assertCurrent();
+            session.signal.throwIfAborted();
           }
           // Bounded observation cannot affect exporter ownership or response.
           if (prepared.wholePayloadExports !== undefined) {

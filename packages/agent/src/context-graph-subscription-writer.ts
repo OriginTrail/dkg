@@ -7,6 +7,8 @@ import { projectContextGraphWireAdoption, normalizeContextGraphSubscriptionTrans
 
 export type ContextGraphSubscriptionWriteOptions = Readonly<{
   persist?: boolean;
+  /** Internal activation writes preserve their attempt across installation and rollback. */
+  activationWrite?: boolean;
   updateRehydrationStatus?: boolean;
   preserveAdmittedWireBinding?: boolean;
   deferWireAdoption?: boolean;
@@ -75,4 +77,20 @@ export function projectContextGraphSubscriptionWrite(input: {
       syncScoped: input.syncScoped, preserveInactiveIntent: options?.persist !== true && retainsInactiveBinding
         && previous?.subscribed !== true && previous?.coreHosted !== true }),
   } as const;
+}
+
+/** Options for subscribing this node to one context graph. */
+export interface ContextGraphSubscribeOptions {
+  trackSyncScope?: boolean;
+  persist?: boolean;
+  /** Internal activation transaction; explicit callers leave this unset. */
+  activationWrite?: boolean;
+  deferSharedMemoryGossipSubscribe?: boolean;
+  /** Internal activation transaction: wire retirement belongs to its commit. */
+  deferWireAdoption?: boolean;
+  syncMode?: 'on-demand' | 'always-on';
+  /** Authoritative numeric slot established by the admission owner. */
+  onChainId?: string;
+  /** Authenticated name commitment belonging to the numeric slot. */
+  onChainHash?: string;
 }

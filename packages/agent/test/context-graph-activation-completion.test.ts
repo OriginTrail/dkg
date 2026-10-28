@@ -150,3 +150,20 @@ it('rejects a queued replacement after activation before the snapshot reads inve
   expect(topics).toEqual(replacementTopics!);
   expect(a.workLifetime.physicalRuns.size).toBe(0);
 });
+
+it.each([false, true])('explicit subscription retires dormant activation before persistence (persist=%s)', async persist => {
+  const { a, id } = await fixture();
+  a.contextGraphSubscriptionDormancyById.set(id, 'authorityUnavailable');
+  const old = a.contextGraphSubscriptionActivations.wait(id, new AbortController().signal);
+  const pendingSave = Promise.withResolvers<void>();
+  const save = vi.fn(() => pendingSave.promise);
+  a.config.contextGraphSubscriptionStore = { save, load: async () => null, loadAll: async () => [], delete: async () => undefined };
+  try {
+  a.subscribeToContextGraph(id, { persist });
+  await expect(old).resolves.toEqual({ kind: 'cancelled' });
+  expect(a.contextGraphSubscriptionDormancyById.has(id)).toBe(false);
+  expect(a.contextGraphSubscriptionRehydrationPendingIds.has(id)).toBe(false);
+  expect(a.waitForContextGraphSubscriptionActivation(id, new AbortController().signal)).toBeUndefined();
+  expect(a.getSubscribedContextGraphs().get(id)?.subscribed).toBe(true);
+  } finally { pendingSave.resolve(); }
+});

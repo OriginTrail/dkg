@@ -406,19 +406,8 @@ import { rfc64ExecutionPlanAllowsLegacySyncV1 } from
 import { projectRfc64CatalogTransportStateV1 } from
   './rfc64/catalog-rollout-authority-v1.js';
 
-/** Options for subscribing this node to one context graph. */
-export interface ContextGraphSubscribeOptions {
-  trackSyncScope?: boolean;
-  persist?: boolean;
-  deferSharedMemoryGossipSubscribe?: boolean;
-  /** Internal activation transaction: wire retirement belongs to its commit. */
-  deferWireAdoption?: boolean;
-  syncMode?: 'on-demand' | 'always-on';
-  /** Authoritative numeric slot established by the admission owner. */
-  onChainId?: string;
-  /** Authenticated name commitment belonging to the numeric slot. */
-  onChainHash?: string;
-}
+import type { ContextGraphSubscribeOptions } from './context-graph-subscription-writer.js';
+export type { ContextGraphSubscribeOptions } from './context-graph-subscription-writer.js';
 
 export class SwmSubstrateMethods extends DKGAgentBase {
   subscribeToContextGraph(this: DKGAgent, contextGraphId: string, options?: ContextGraphSubscribeOptions): ContextGraphSub {
@@ -430,6 +419,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     // the subscription: nothing may keep running under the hash id.
     if (options?.deferWireAdoption !== true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     const subscription = this.installContextGraphSubscription(contextGraphId, options);
+    if (!options?.activationWrite) this.contextGraphSubscriptionActivations.replaceLiveIntent(contextGraphId, subscription);
     // An explicit subscribe, not a start-up restore: the graph is in use here (#3251).
     if (options?.persist !== false) this.recentSharedMemoryPulls?.noteActivity(contextGraphId);
     // The row is installed, so the phonebook check sees the subscription it
@@ -511,7 +501,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       const subscription = this.setContextGraphSubscription(
         contextGraphId,
         nextSubscription(),
-        { persist, deferWireAdoption: options?.deferWireAdoption },
+        { persist, deferWireAdoption: options?.deferWireAdoption, activationWrite: options?.activationWrite },
       );
       if (options?.deferSharedMemoryGossipSubscribe !== true) {
         this.queueSharedMemoryGossipSubscription(contextGraphId);
@@ -549,7 +539,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
         return this.setContextGraphSubscription(
           contextGraphId,
           nextSubscription(),
-          { persist, deferWireAdoption: options?.deferWireAdoption },
+          { persist, deferWireAdoption: options?.deferWireAdoption, activationWrite: options?.activationWrite },
         );
       }
       return existing;
@@ -565,7 +555,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     const subscription = this.setContextGraphSubscription(
       contextGraphId,
       nextSubscription(),
-      { persist, deferWireAdoption: options?.deferWireAdoption },
+      { persist, deferWireAdoption: options?.deferWireAdoption, activationWrite: options?.activationWrite },
     );
 
     this.gossip.onMessage(publishTopic, async (_topic, data, from) => {
@@ -617,6 +607,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
       persist?: boolean;
       updateRehydrationStatus?: boolean;
       rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
+      activationWrite?: boolean;
       /** The cleartext id that supersedes this name-hash id (adoption). */
       supersededBy?: string;
     },
@@ -673,7 +664,7 @@ export class SwmSubstrateMethods extends DKGAgentBase {
     this.setContextGraphSubscription(
       contextGraphId,
       { ...existing, subscribed: false },
-      { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus, rollbackSlotRelease: options?.rollbackSlotRelease },
+      { persist: options?.persist ?? true, updateRehydrationStatus: options?.updateRehydrationStatus, rollbackSlotRelease: options?.rollbackSlotRelease, activationWrite: options?.activationWrite },
     );
 
     void this.reconcileSwmHostModeSubscription(contextGraphId).catch((err) => {

@@ -55,7 +55,7 @@ it('prepares one bounded export during commit wait without spending wire credit'
   } finally { f.ack(); await f.run; }
   expect(await f.run).toEqual({ passed: true });
   for (const release of f.releases) expect(release).toHaveBeenCalledTimes(1);
-  for (const fence of f.fences) expect(fence).toHaveBeenCalledTimes(1);
+  f.fences.forEach((fence, index) => expect(fence).toHaveBeenCalledTimes(index === 2 ? 2 : 1));
 });
 
 it.each(['missing', 'resource'] as const)('waits for existing commit credit before reporting %s preparation failure', async failure => {
@@ -84,4 +84,16 @@ it.each(['private', 'cancelled'] as const)('does not send prepared bytes after %
   expect(await f.run).toHaveProperty('error');
   expect(f.sent.some(frame => frame.kind === K.META && frame.assetIndex === 2)).toBe(false);
   for (const release of f.releases) expect(release).toHaveBeenCalledTimes(1);
+});
+
+it('rechecks prepared asset access after credit while its graph remains public', async () => {
+  const f = await fixture();
+  try {
+    await vi.waitFor(() => expect(f.acquired).toHaveLength(3));
+    f.fences[2]!.mockRejectedValue(new Error('asset became private'));
+  } finally { f.ack(); await f.run; }
+  expect(await f.run).toMatchObject({ error: { message: 'asset became private' } });
+  await expect(f.authority()).resolves.toBe('public');
+  expect(f.sent.filter(frame => frame.assetIndex === 2 && (frame.kind === K.META || frame.kind === K.DATA))).toEqual([]);
+  for (const release of f.releases) expect(release).toHaveBeenCalledOnce();
 });

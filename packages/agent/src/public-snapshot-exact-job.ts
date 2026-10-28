@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { mapWithConcurrencyDrained } from './map-with-concurrency.js';
 import { withKeyedLocks } from '@origintrail-official/dkg-publisher';
 import type { PublicSnapshotExactRecoveryOptions } from './public-snapshot-exact.js';
 import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
@@ -42,16 +43,14 @@ export class PublicSnapshotExactJob {
     });
   }
   async run(workers: Array<() => Promise<void>>): Promise<PublicSnapshotRecoveryResult> {
-    let firstFailure: unknown;
-    await Promise.allSettled(workers.map(async worker => {
+    await mapWithConcurrencyDrained(workers, workers.length, async worker => {
       try { await worker(); }
       catch (error) {
-        if (!this.failure.signal.aborted) { firstFailure = error; this.failure.abort(error); }
+        if (!this.failure.signal.aborted) this.failure.abort(error);
         throw error;
       }
-    }));
+    });
     // Every physical callback and peer lock has drained before ownership returns.
-    if (this.failure.signal.aborted) throw firstFailure;
     this.assertActive();
     return { committed: this.committed, alreadyPresent: this.alreadyPresent };
   }

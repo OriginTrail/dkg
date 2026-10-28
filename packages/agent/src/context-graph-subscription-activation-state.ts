@@ -117,6 +117,16 @@ export class ContextGraphSubscriptionActivations {
     const attempt = this.pending.get(id);
     if (attempt) this.settle(attempt, { kind: 'cancelled' });
   }
+  /** A new live intent supersedes the dormant activation independently of disk I/O. */
+  replaceLiveIntent(id: string, subscription: ContextGraphSub): void {
+    if (!this.pending.has(id)) return;
+    this.ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+    this.transition({ id, kind: 'saved',
+      persisted: this.ports.contextGraphSubscriptionRehydrationAccountedIds.has(id),
+      active: subscription.subscribed || subscription.coreHosted === true,
+      hosted: subscription.coreHosted === true,
+      reason: subscription.subscribed || subscription.coreHosted ? undefined : 'deactivated' });
+  }
   /** Explicit lifecycle facts use the same bookkeeping operation as activation. */
   transition(event: SubscriptionLifecycleEvent): void { this.transitionBatch([event]); }
   /** Apply the entire batch and its accounting before cancelling any waiters. */

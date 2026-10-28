@@ -317,3 +317,27 @@ describe('nonempty snapshot cancellation through exact materialization', () => {
     } finally { release(); await outcome; }
   });
 });
+
+it('an explicit persist:false subscription frees the pending snapshot slot immediately', async () => {
+  const chain = new MockChainAdapter();
+  Object.defineProperties(chain, { chainId: { value: 'evm:31337' }, deploymentId: { value: 'test' } });
+  Object.assign(chain, { readPublicGraphSnapshot: async () => snapshot() });
+  const agent = await DKGAgent.create({ name: 'explicit-live-snapshot', listenHost: '127.0.0.1', listenPort: 0,
+    chainAdapter: chain, syncOnConnectEnabled: false, syncReconcilerEnabled: false, vmReconcilerEnabled: false });
+  try {
+    await agent.start();
+    const a = agent as any;
+    a.contextGraphSubscriptionActivations.reset([{ id: graph, subscribed: true, synced: false,
+      metaSynced: false, syncScoped: false, onChainId: '1' }]);
+    a.contextGraphSubscriptionDormancyById.set(graph, 'authorityUnavailable');
+    a.contextGraphSubscriptionRehydrationPendingIds.add(graph);
+    let settled = false;
+    const old = run(agent, 'rpc-only').then(() => ({ ok: true }), error => ({ error })).finally(() => { settled = true; });
+    await Promise.resolve();
+    agent.subscribeToContextGraph(graph, { persist: false });
+    await vi.waitFor(() => expect(settled).toBe(true), { timeout: 500 });
+    expect(await old).toHaveProperty('error');
+    await expect(run(agent, 'rpc-only')).resolves.toMatchObject({ assets: 0, current: true });
+    expect(a.contextGraphSubscriptionDormancyById.has(graph)).toBe(false);
+  } finally { await agent.stop(); }
+});
