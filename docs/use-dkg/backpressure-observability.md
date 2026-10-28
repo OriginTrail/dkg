@@ -163,6 +163,12 @@ To switch the path off on one node, set either of them and restart the daemon:
 
 or `DKG_STORE_CONTROL_RESERVED_SLOTS=0` in the daemon's environment.
 
+`dkg init` and `dkg openclaw|hermes|mcp setup --store ...` keep
+`controlReservedSlots` when they rewrite the `store` block, whichever backend
+you pick. Only a switch to the embedded store (`--store oxigraph`, or picking it
+in `dkg init`) removes the block, and the key with it; that store never uses the
+path.
+
 The daemon logs the effective geometry once at start, with the setting that
 decided it:
 
