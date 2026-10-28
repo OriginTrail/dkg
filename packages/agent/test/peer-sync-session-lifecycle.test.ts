@@ -260,4 +260,34 @@ describe('peer sync session lifecycle', () => {
     } finally { await f.close(); }
   });
 
+  it('runs a graph-scoped authority catch-up without holding off the next whole-scope pass', async () => {
+    const f = await createPeerEventFixture();
+    try {
+      vi.spyOn(f.agent.networkAdmissionCoordinator, 'isAcceptedPeer').mockReturnValue(true);
+      vi.spyOn(f.agent, 'getSyncReconcilerProbe').mockResolvedValue(PROBE);
+      const trySync = vi.spyOn(f.agent, 'trySyncFromPeer')
+        .mockImplementation(async (_peerId, onSyncAccounting) => {
+          onSyncAccounting?.({ reconcilerDisposition: 'clear', fresh: false, progress: false });
+          return 'synced';
+        });
+      const changed = new Set(['cg-changed']);
+
+      expect(f.agent.queueSyncFromPeerOnConnect(
+        f.peerId,
+        () => {},
+        0,
+        { authorityScopeChanged: true, authorityScopeContextGraphIds: changed },
+      )).toBe(true);
+      expect(f.state.session.snapshot(f.peerId).lastQueued).toBe(0);
+      await vi.waitFor(() => expect(trySync).toHaveBeenCalledOnce());
+      expect(trySync).toHaveBeenCalledWith(f.peerId, expect.any(Function), 'on-connect', changed);
+      await vi.waitFor(() => expect(f.agent.getSyncOnConnectPeerScheduler().has(f.peerId)).toBe(false));
+
+      // The graph pass did not use up the peer's on-connect cooldown.
+      expect(f.agent.queueSyncFromPeerOnConnect(f.peerId, () => {}, 0)).toBe(true);
+      await vi.waitFor(() => expect(trySync).toHaveBeenCalledTimes(2));
+      expect(trySync).toHaveBeenLastCalledWith(f.peerId, expect.any(Function), 'on-connect', null);
+    } finally { await f.close(); }
+  });
+
 });

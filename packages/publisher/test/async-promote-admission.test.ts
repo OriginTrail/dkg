@@ -3,8 +3,10 @@ import { OxigraphStore, StoreSchedulerBusyError, StorePriorityScheduler, type Tr
 import { jobSubject, literal, PROMOTE_PAYLOAD } from '../src/async-promote-queue-utils.js';
 import { isAutomaticallyRecoverablePostCommitFailure } from '../src/async-promote-recovery-policy.js';
 import { TripleStoreAsyncPromoteQueue } from '../src/async-promote-queue-impl.js';
-import { PromoteAdmissionAttempt, PromoteAdmissionCoordinator, type PromoteAdmissionEvent } from '../src/promote-admission.js';
+import { PromoteAdmissionAttempt, PromoteAdmissionCoordinator, PromoteAdmissionError, type PromoteAdmissionEvent } from '../src/promote-admission.js';
+import { PROMOTE_POST_COMMIT_FAILURE_CODE, PROMOTE_POST_COMMIT_FAILURE_MESSAGE } from '../src/promote-replay-safety.js';
 import type { AsyncPromoteQueueConfig, PromoteRequest, PromoteJob } from '../src/async-promote-queue-types.js';
+import { seedShareRows } from './_helpers/share-job-rows.js';
 
 const request: PromoteRequest = { contextGraphId: 'admission-test', assertionName: 'asset', entities: 'all' };
 function gate() {
@@ -15,14 +17,15 @@ function gate() {
 }
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close(); });
-function fixture(intercept: (method: string, args: unknown[], run: () => Promise<unknown>) => Promise<unknown>) {
+function fixture(intercept: (method: string, args: unknown[], run: () => Promise<unknown>) => Promise<unknown>,
+  overrides: Partial<AsyncPromoteQueueConfig> = {}) {
   const inner = new OxigraphStore(); stores.push(inner);
   const store = new Proxy(inner, { get(target, prop) {
     const value = Reflect.get(target, prop, target);
     return typeof value === 'function'
       ? (...args: unknown[]) => intercept(String(prop), args, () => value.apply(target, args)) : value;
   } }) as TripleStore;
-  const config = { graphUri: `urn:test:admission:${crypto.randomUUID()}`, admissionTimeoutMs: 25 } as AsyncPromoteQueueConfig;
+  const config = { graphUri: `urn:test:admission:${crypto.randomUUID()}`, admissionTimeoutMs: 25, ...overrides } as AsyncPromoteQueueConfig;
   const queue = new TripleStoreAsyncPromoteQueue(store, config);
   return { inner, store, config, queue };
 }
@@ -428,4 +431,179 @@ it.each(['malformed', 'mismatched-id', 'unknown-state'] as const)('does not eras
   await inner.insert([{ ...pattern, object: literal(payload) }]);
   expect(await queue.clearTerminalJob(id)).toEqual({ outcome: 'rejected', reason: kind === 'unknown-state' ? 'unknown' : 'malformed' });
   await expect(queue.enqueue(request)).rejects.toMatchObject({ admissionOutcome: 'indeterminate', jobId: id });
+});
+
+// OT-RFC-73 P8a: what settles a retained admission handle. `getStats` and the post-commit sweep no longer show the coordinator the
+// jobs they list, so they no longer settle a retained handle; the reads that return a job still do. A retained handle fences retries
+// (the same indeterminate handle comes back) and holds one of the coordinator's 64 slots until a read reaches its job.
+const WRITE_METHODS = new Set(['replaceSubject', 'replaceSubjectAndInsert', 'insert', 'delete', 'deleteByPattern', 'deleteByPatternWithoutCount',
+  'deleteBySubjectPrefix', 'update']);
+const SWEEP_FIND_SOURCE = 'publisher.asyncPromote.recoverPostCommit';
+const STATS_SOURCE = 'publisher.asyncPromote.stats';
+
+/**
+ * A real queue over a real in-memory store whose admissions persisted their job and lost the acknowledgement: each job is durable, its
+ * caller holds an indeterminate handle, and the coordinator retains that handle until a read shows it the job. `trace.writes` counts the
+ * store mutations dispatched through the queue under test and `trace.sources` its labelled reads. `external` is another process over the
+ * same store: its coordinator never saw the handles, and what it writes is not counted.
+ */
+async function lostAcknowledgements(selectors: readonly PromoteRequest[], overrides: Partial<AsyncPromoteQueueConfig> = {}) {
+  const trace = { writes: 0, lose: selectors.length, refuseWrites: false, sources: [] as string[] };
+  const built = fixture(async (method, args, run) => {
+    if (method === 'query') trace.sources.push(String((args[1] as { source?: string })?.source));
+    if (WRITE_METHODS.has(method)) { trace.writes++; if (trace.refuseWrites) throw new Error('write refused'); }
+    const result = await run();
+    if (trace.lose > 0 && method === 'flush') { trace.lose--; throw new Error('lost admission acknowledgement'); }
+    return result;
+  }, { admissionTimeoutMs: 5_000, ...overrides });
+  const handles: PromoteAdmissionError[] = [];
+  for (const selector of selectors) {
+    const outcome = await bounded(built.queue.enqueue(selector));
+    expect(outcome).toMatchObject({ error: { admissionOutcome: 'indeterminate', phase: 'persist', jobId: expect.any(String) } });
+    handles.push((outcome as { error: PromoteAdmissionError }).error);
+  }
+  expect(trace.writes).toBe(selectors.length);
+  const external = new TripleStoreAsyncPromoteQueue(built.inner, built.config);
+  return { ...built, trace, handles, ids: handles.map(handle => handle.jobId!), external };
+}
+
+/** Another process claims the only claimable job and records a failure on it; the job ends `failed`. */
+async function failExternally(external: TripleStoreAsyncPromoteQueue, id: string, postCommit: boolean) {
+  const claimed = (await external.claimNext('external-worker'))!;
+  expect(claimed.jobId).toBe(id);
+  await external.fail(id, claimed.lease!.claimToken, {
+    message: postCommit ? PROMOTE_POST_COMMIT_FAILURE_MESSAGE : 'promote refused before any write',
+    ...(postCommit ? { diagnosticCode: PROMOTE_POST_COMMIT_FAILURE_CODE } : {}),
+    retryable: false, classification: 'fatal', recordedAt: Date.now(),
+  });
+  const failed = (await external.getStatus(id))!;
+  expect(failed.state).toBe('failed');
+  expect(isAutomaticallyRecoverablePostCommitFailure(failed)).toBe(postCommit);
+}
+
+/** The retry gets the retained handle itself (same phase, outcome and job ID) and dispatches nothing. */
+async function expectRetained(queue: TripleStoreAsyncPromoteQueue, selector: PromoteRequest, handle: PromoteAdmissionError) {
+  const error = await queue.enqueue(selector).then(() => undefined, (cause: unknown) => cause);
+  expect(error).toBeInstanceOf(PromoteAdmissionError);
+  expect((error as PromoteAdmissionError).evidence).toEqual({ phase: 'persist', admissionOutcome: 'indeterminate', jobId: handle.jobId });
+}
+/** The retry gets the durable outcome: the job is a remembered owner of the selector. */
+const expectOwner = (queue: TripleStoreAsyncPromoteQueue, selector: PromoteRequest, id: string) =>
+  expect(queue.enqueue(selector)).rejects.toMatchObject({ existingJobId: id, observedAdmission: true });
+
+describe('retained admission settlement by statistics, the sweep and the job readers (OT-RFC-73 P8a)', () => {
+  it('getStats counts the persisted job but leaves its retained handle: retries get the same handle and no write', async () => {
+    const { queue, trace, handles, ids } = await lostAcknowledgements([request]);
+    trace.sources.length = 0;
+    expect(await queue.getStats()).toMatchObject({ queued: 1 });
+    const statsReads = [...trace.sources];
+    await expectRetained(queue, request, handles[0]!);
+    expect(await queue.getStats()).toMatchObject({ queued: 1 });
+    await expectRetained(queue, request, handles[0]!);
+    expect(trace.writes).toBe(1);
+    expect(statsReads).toEqual([STATS_SOURCE]); // one COUNT, no payload read
+    // Control: the handle was settle-able all along; a read that returns the job releases it.
+    expect((await queue.getStatus(ids[0]!))?.state).toBe('queued');
+    await expectOwner(queue, request, ids[0]!);
+    expect(trace.writes).toBe(1);
+  });
+
+  it('the sweep does not settle a retained handle whose job is a failed non-candidate; a read of that job does', async () => {
+    const { queue, external, trace, handles, ids } = await lostAcknowledgements([request]);
+    await failExternally(external, ids[0]!, false);
+    trace.sources.length = 0;
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    const sweepReads = [...trace.sources];
+    await expectRetained(queue, request, handles[0]!);
+    expect(trace.writes).toBe(1);
+    expect(sweepReads).toEqual([SWEEP_FIND_SOURCE]); // the engine dropped the row; it never reached the coordinator
+    // Control: a page of failed jobs returns it and settles the handle. A failed unbound job owns nothing, so the retry is admitted anew.
+    expect((await queue.listPage({ state: ['failed'] })).jobs.map(job => job.jobId)).toEqual([ids[0]]);
+    const next = await queue.enqueue(request);
+    expect(next).not.toBe(ids[0]);
+    expect(trace.writes).toBe(2);
+    expect((await external.getStatus(ids[0]!))?.state).toBe('failed');
+  });
+
+  it.each([
+    ['getStatus', (queue: TripleStoreAsyncPromoteQueue, id: string) => queue.getStatus(id).then(job => (job ? [job] : []))],
+    ['listPage', (queue: TripleStoreAsyncPromoteQueue) => queue.listPage().then(page => page.jobs)],
+    ['list', (queue: TripleStoreAsyncPromoteQueue) => queue.list()],
+    ['listForSelector', (queue: TripleStoreAsyncPromoteQueue) => queue.listForSelector(request)],
+  ] as const)('%s returns the job and settles its retained handle: the retry gets the durable outcome and no write', async (_reader, read) => {
+    const { queue, trace, handles, ids } = await lostAcknowledgements([request]);
+    await expectRetained(queue, request, handles[0]!);
+    expect((await read(queue, ids[0]!)).map(job => job.jobId)).toEqual([ids[0]]);
+    await expectOwner(queue, request, ids[0]!);
+    expect(trace.writes).toBe(1);
+  });
+
+  it('a page or filter that does not return the job leaves its handle retained; the page that does settles it', async () => {
+    const { queue, inner, config, trace, handles, ids } = await lostAcknowledgements([request], { now: () => 2_000 });
+    await seedShareRows(inner, [{ id: 'older', state: 'succeeded', enqueuedAt: 1_000, name: 'older-asset', contextGraphId: request.contextGraphId }], config.graphUri);
+    const first = await queue.listPage({}, { pageSize: 1 });
+    expect(first.jobs.map(job => job.jobId)).toEqual(['older']);
+    expect(first.complete).toBe(false);
+    await expectRetained(queue, request, handles[0]!);
+    expect((await queue.listPage({ state: ['failed'] })).jobs).toEqual([]);
+    expect(await queue.list({ contextGraphId: 'another-context-graph' })).toEqual([]);
+    await expectRetained(queue, request, handles[0]!);
+    const second = await queue.listPage({}, { pageSize: 1, cursor: first.nextCursor });
+    expect(second.jobs.map(job => job.jobId)).toEqual([ids[0]]);
+    await expectOwner(queue, request, ids[0]!);
+    expect(trace.writes).toBe(1);
+  });
+
+  it('the retained handles keep their coordinator slots through statistics and the sweep; one page frees exactly the slots of the jobs it returns', async () => {
+    let issued = 0;
+    const selectors = Array.from({ length: 64 }, (_, i) => ({ ...request, assertionName: `asset-${i}` }));
+    const fresh = { ...request, assertionName: 'fresh' };
+    const { queue, external, trace, handles, ids } = await lostAcknowledgements(selectors, {
+      now: () => 1_000 + issued, idGenerator: () => `job-${String(++issued).padStart(3, '0')}`,
+    });
+    expect(ids[0]).toBe('job-001');
+    await failExternally(external, ids[0]!, false);
+    // The coordinator is full: a new selector is refused without dispatch, and neither statistics nor a sweep that skips the failed job frees a slot.
+    const full = { admissionOutcome: 'not_admitted', phase: 'lock' } as const;
+    await expect(queue.enqueue(fresh)).rejects.toMatchObject(full);
+    expect(await queue.getStats()).toMatchObject({ queued: 63, failed: 1 });
+    expect(await queue.recoverPostCommitFailures()).toEqual([]);
+    await expect(queue.enqueue(fresh)).rejects.toMatchObject(full);
+    await expectRetained(queue, selectors[0]!, handles[0]!);
+    expect(trace.writes).toBe(64);
+    // One page of one row (the oldest job) settles that handle alone, and the freed slot admits one new selector, whose own lost
+    // acknowledgement takes it again.
+    expect((await queue.listPage({}, { pageSize: 1 })).jobs.map(job => job.jobId)).toEqual([ids[0]]);
+    trace.lose = 1;
+    const lost = await bounded(queue.enqueue(fresh)) as { error: PromoteAdmissionError };
+    expect(lost.error).toMatchObject({ admissionOutcome: 'indeterminate', jobId: expect.any(String) });
+    expect(ids).not.toContain(lost.error.jobId);
+    await expect(queue.enqueue({ ...request, assertionName: 'another' })).rejects.toMatchObject(full);
+    await expectRetained(queue, selectors[1]!, handles[1]!);
+    expect(trace.writes).toBe(65);
+  });
+
+  it('the sweep settles the handle of a candidate it reads, even when its requeue write is refused', async () => {
+    const { queue, external, trace, handles, ids } = await lostAcknowledgements([request]);
+    await failExternally(external, ids[0]!, true);
+    await expectRetained(queue, request, handles[0]!); // the other process's failure settles nothing here
+    trace.refuseWrites = true;
+    await expect(queue.recoverPostCommitFailures()).rejects.toThrow('write refused');
+    trace.refuseWrites = false;
+    expect(trace.writes).toBe(2); // the admission and the refused requeue
+    expect((await external.getStatus(ids[0]!))?.state).toBe('failed');
+    // The find pass read the candidate, so the handle is gone; the failed unbound job owns nothing and the retry is admitted anew.
+    const next = await queue.enqueue(request);
+    expect(next).not.toBe(ids[0]);
+    expect(trace.writes).toBe(3);
+  });
+
+  it('a requeued sweep candidate becomes the remembered owner and its handle is settled', async () => {
+    const { queue, external, trace, handles, ids } = await lostAcknowledgements([request]);
+    await failExternally(external, ids[0]!, true);
+    await expectRetained(queue, request, handles[0]!);
+    expect(await queue.recoverPostCommitFailures()).toMatchObject([{ jobId: ids[0], action: 'requeued' }]);
+    await expectOwner(queue, request, ids[0]!);
+    expect(trace.writes).toBe(2); // the admission and the sweep's one requeue; the retry dispatched nothing
+  });
 });

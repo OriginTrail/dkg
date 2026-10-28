@@ -11,7 +11,7 @@ export type { PublisherAssertionPromoteOptions } from './assertion-promote-types
 import { tryCreateShareCompletionEvidence } from './share-completion-evidence.js';
 import { preparePromoteRecoveryBinding, assertPromoteRecoveryBinding, type PromoteRecoveryAdmission } from './promote-recovery-binding.js';
 import { throwIfCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
-import { readAssertionLifecycleRecord, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
+import { readAssertionLifecycleRecord, resolveAssertionReadAuthor, type AssertionLifecycleRecord } from './assertion-lifecycle-record.js';
 import { assertExpectedKaSlotMatchesLifecycle, assertExpectedKaSlotMatchesAllocation } from './assertion-reserved-slot.js';
 import { assertKaSlotOwnershipAvailable, assertionAllocationLockKey } from './assertion-ka-slot-ownership.js';
 import { assertWorkingMemoryLifecycleMutable } from './working-memory-lifecycle.js';
@@ -120,6 +120,7 @@ import {
 } from './knowledge-asset-swm-staging.js';
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { verifyPullRecoverySeal, validateGraphScopedPayloadAgainstSeal, type ResolvedAssertionSource } from './assertion-seal-recovery.js';
+import { snapshotAssertionPullOptions, verifyExactAssertionDraft, draftRecoveryError, rethrowDraftSourceFailure, rethrowDraftVerificationFailure, type AssertionPullFromOptions, type AssertionPullFromResult } from './assertion-draft-recovery.js';
 import { resolveAssertionPullSource, type AssertionPromoteState } from './assertion-pull-source.js';
 import type { DurableRootAtomicCompanionResolver, DurableRootCompanionAdmissionWait } from
   './durable-root-atomic-companion.js';
@@ -417,6 +418,7 @@ export interface DurableRootPromotionAtomicCompanionResolver {
 }
 
 export interface DKGPublisherConfig {
+  storageAckCopyCleanupWriter?: import('./storage-ack-copy-cleanup.js').StorageAckCopyCleanupWriter;
   store: TripleStore;
   /** Trusted queue ownership scope, explicitly supplied by the composing agent. */
   promoteOwnershipReader?: PromoteOwnershipReader;
@@ -449,7 +451,6 @@ export interface DKGPublisherConfig {
   workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
   /** Encrypts private/agent-gated SWM gossip with the node's Sender Key epoch state. */
   workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
-  /** Optional out-of-Oxigraph store for immutable public SWM operation snapshots. */
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
   /**
    * OT-RFC-43 Option 1 — when present, the publisher allocates a deterministic
@@ -1055,7 +1056,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
-    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle, config.storageAckCopyCleanupWriter);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
@@ -6393,7 +6394,7 @@ export class DKGPublisher implements Publisher {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const res = await this.store.query(
-      `ASK { GRAPH <${metaGraph}> { <${lifecycleUri}> <${SWM_SHARE_COMPLETE_PRED}> ?o } }`,
+      `ASK { GRAPH <${metaGraph}> { <${lifecycleUri}> <${SWM_SHARE_COMPLETE_PRED}> ?o } }`, { source: 'publisher.hasSwmShareComplete' },
     );
     return res.type === 'boolean' && res.value;
   }
@@ -7986,8 +7987,8 @@ export class DKGPublisher implements Publisher {
     subGraphName?: string,
   ): Promise<Quad[]> {
     DKGPublisher.validateOptionalSubGraph(subGraphName);
-    const graphUri = await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName);
-    return this.assertionScopedQuads(graphUri);
+    const storedAuthor = await resolveAssertionReadAuthor(this.store, contextGraphId, agentAddress, name, subGraphName);
+    return this.assertionScopedQuads(await this.wmGraphUri(contextGraphId, storedAuthor, name, subGraphName));
   }
 
   async assertionQueryPrivate(
@@ -8019,30 +8020,12 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     sourceLayer: 'swm' | 'vm',
-    opts?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
-  ): Promise<{
-    seeded: number;
-    seededPublic: number;
-    seededPrivate: number;
-    fromLayer: 'swm' | 'vm';
-    contentScopeVersion: number;
-    kaUal: string;
-    assertionVersion: string;
-  }> {
-    const stableOpts = opts ? { ...opts } : undefined;
-    return this.withAssertionLifecycleWriteLock(
-      contextGraphId,
-      name,
-      agentAddress,
-      stableOpts?.subGraphName,
-      () => this.assertionPullFromUnlocked(
-        contextGraphId,
-        name,
-        agentAddress,
-        sourceLayer,
-        stableOpts,
-      ),
-    );
+    opts?: AssertionPullFromOptions,
+  ): Promise<AssertionPullFromResult> {
+    const stableOpts = snapshotAssertionPullOptions(opts);
+    const run = () => this.assertionPullFromUnlocked(contextGraphId, name, agentAddress, sourceLayer, stableOpts);
+    return this.withAssertionLifecycleWriteLock(contextGraphId, name, agentAddress, stableOpts?.subGraphName,
+      () => stableOpts?.recoverExact ? run().catch(rethrowDraftVerificationFailure) : run());
   }
 
   private async assertionPullFromUnlocked(
@@ -8050,28 +8033,23 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     sourceLayer: 'swm' | 'vm',
-    opts?: { subGraphName?: string; onConflict?: 'reject' | 'replace' },
-  ): Promise<{
-    seeded: number;
-    seededPublic: number;
-    seededPrivate: number;
-    fromLayer: 'swm' | 'vm';
-    contentScopeVersion: number;
-    kaUal: string;
-    assertionVersion: string;
-  }> {
+    opts?: AssertionPullFromOptions,
+  ): Promise<AssertionPullFromResult> {
     const subGraphName = opts?.subGraphName;
     await this.ensureSubGraphRegistered(contextGraphId, subGraphName);
-    const { loadedSeal: selectedSeal, scope, payload: validated } = await resolveAssertionPullSource({
-      contextGraphId, name, agentAddress, subGraphName, sourceLayer,
+    const source = await resolveAssertionPullSource({
+      contextGraphId, name, agentAddress, subGraphName, sourceLayer, recoverExact: opts?.recoverExact,
       state: await this.inspectAssertionPromoteState(contextGraphId, name, agentAddress, subGraphName),
       loadSeals: () => this.loadAssertionSeals(contextGraphId, name, agentAddress, subGraphName),
       verifyRecovery: (operationId) => this.verifyPullRecoverySeal(contextGraphId, name, agentAddress, operationId, subGraphName),
       readPublicQuads: (graph) => this.assertionScopedQuads(graph),
       readPrivateQuads: (scope) => this.privateStore.getKnowledgeAssetPrivateTriples(contextGraphId, scope, subGraphName),
+    }).catch(error => {
+      if (opts?.recoverExact) rethrowDraftSourceFailure(error);
+      throw error;
     });
+    const { loadedSeal: selectedSeal, scope, payload: validated } = source;
     const wmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.WorkingMemory, scope, subGraphName);
-
     const publicDraftExists = await this.assertionScopedHasQuads(wmGraph);
     const privateDraft = await this.privateStore.getKnowledgeAssetPrivateDraftTriples(
       contextGraphId,
@@ -8079,6 +8057,17 @@ export class DKGPublisher implements Publisher {
       name,
       subGraphName,
     );
+    if (opts?.recoverExact) {
+      await this.assertDraftUnsealedForWrite(contextGraphId, name, agentAddress, subGraphName);
+      if (await this.wmGraphUri(contextGraphId, agentAddress, name, subGraphName) !== wmGraph)
+        throw draftRecoveryError('WM_DRAFT_NOT_EXACT');
+      const draftEvidence = await verifyExactAssertionDraft({ source, contextGraphId, name, agentAddress,
+        subGraphName, fromLayer: sourceLayer, publicQuads: await this.assertionScopedQuads(wmGraph), privateQuads: privateDraft });
+      return { seeded: draftEvidence.publicTripleCount + draftEvidence.privateTripleCount,
+        seededPublic: draftEvidence.publicTripleCount, seededPrivate: draftEvidence.privateTripleCount,
+        fromLayer: sourceLayer, contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: scope.ual, assertionVersion: scope.assertionVersion, merkleRoot: draftEvidence.merkleRoot, recovered: true, draftEvidence };
+    }
     const hasDraft = publicDraftExists || privateDraft.length > 0;
     if (hasDraft && (opts?.onConflict ?? 'reject') === 'reject') {
       throw Object.assign(
@@ -8136,7 +8125,7 @@ export class DKGPublisher implements Publisher {
       fromLayer: sourceLayer,
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       kaUal: scope.ual,
-      assertionVersion: scope.assertionVersion,
+      assertionVersion: scope.assertionVersion, merkleRoot: ethers.hexlify(selectedSeal.seal.merkleRoot),
     };
   }
 

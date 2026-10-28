@@ -144,4 +144,28 @@ describe('Rfc64BackgroundWorkDispatcherV1', () => {
     expect(observedSignal?.aborted).toBe(true);
     expect(onError).not.toHaveBeenCalled();
   });
+  it('keeps shutdown pending after abort until physical scheduled work finishes', async () => {
+    const dispatcher = new Rfc64BackgroundWorkDispatcherV1();
+    let release!: () => void;
+    const physical = new Promise<void>(resolve => { release = resolve; });
+    let signal: AbortSignal | undefined;
+    const work = vi.fn(async (ownerSignal: AbortSignal) => {
+      signal = ownerSignal;
+      await physical; // Deliberately does not settle on cancellation.
+    });
+    dispatcher.scheduleKeyed('responsibility\0cg', work);
+    await vi.waitFor(() => expect(signal).toBeDefined());
+    dispatcher.scheduleKeyed('responsibility\0cg', work);
+    let closed = false;
+    const closing = dispatcher.closeAndDrain().then(() => { closed = true; });
+    try {
+      expect(signal?.aborted).toBe(true);
+      await new Promise(resolve => setImmediate(resolve));
+      expect(closed).toBe(false);
+      expect(dispatcher.scheduleKeyed('responsibility\0other', work)).toBe(false);
+    } finally { release(); await closing; }
+    expect(closed).toBe(true);
+    expect(work).toHaveBeenCalledOnce();
+  });
+
 });

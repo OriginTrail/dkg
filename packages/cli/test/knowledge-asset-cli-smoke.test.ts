@@ -728,6 +728,21 @@ describe.sequential('knowledge-asset CLI smoke', () => {
     });
   }, 60000);
 
+  it('passes a pinned exact recovery and refuses incomplete or destructive combinations', async () => {
+    calls = [];
+    const env = testEnv(dkgHome, smokeApiPort);
+    const flags = ['ka', 'pull-from', 'paper', '-c', 'research', '--layer', 'swm'];
+    await runCli([...flags, '--recover-exact-ual', 'did:dkg:base:84532/0x1111111111111111111111111111111111111111/1',
+      '--recover-exact-version', '1', '--recover-exact-root', `0x${'ab'.repeat(32)}`, '--json'], env);
+    expect(calls.at(-1)?.body.recoverExact).toMatchObject({ assertionVersion: '1', kaUal: expect.any(String) });
+    const before = calls.length;
+    for (const args of [ ['--recover-exact-version', '1'], ['--recover-exact-ual', 'some-ual'],
+      ['--recover-exact-ual', 'some-ual', '--recover-exact-version', '1', '--on-conflict', 'replace'] ]) {
+      await expect(runCli([...flags, ...args], env)).rejects.toMatchObject({ stderr: expect.stringContaining('Exact recovery requires') });
+    }
+    expect(calls.length).toBe(before);
+  }, 60000);
+
   it('wraps document import, extraction status, and async SWM share job routes', async () => {
     calls = [];
     const env = testEnv(dkgHome, smokeApiPort);

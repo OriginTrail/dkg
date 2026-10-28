@@ -34,7 +34,7 @@ import {
   type SwmChangeNoticeDisposition,
   type SwmChangeRecipientPorts,
 } from './swm/shared-memory-change-notice.js';
-import { sharedMemoryFollowersOf } from './swm/shared-memory-followers.js';
+import { sharedMemoryFollowersOf, type SharedMemoryFollowers } from './swm/shared-memory-followers.js';
 import {
   checkRelayedShare,
   graphHasAllowlist,
@@ -274,6 +274,21 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
     return this.swmChangeNoticeOwnersV1().notifier;
   }
 
+  /**
+   * Where a catalog-head replay request records its peer: the graph's
+   * followers. A peer the request made a follower goes to the notifier, which
+   * tells it of a recent change it may lack (after this node restarted, say).
+   */
+  swmCatalogHeadReplayFollowerPortsV1(this: DKGAgent): {
+    readonly followers: SharedMemoryFollowers;
+    readonly onNewFollower: (contextGraphId: string, peerId: string) => void;
+  } {
+    return {
+      followers: sharedMemoryFollowersOf(this),
+      onNewFollower: (contextGraphId, peerId) => this.swmChangeNotifierV1().afterNewFollower(contextGraphId, peerId),
+    };
+  }
+
   swmChangeNoticeReceiverV1(this: DKGAgent): SwmChangeNoticeReceiver {
     return this.swmChangeNoticeOwnersV1().receiver;
   }
@@ -304,6 +319,11 @@ export class SwmChangeNoticeMethods extends DKGAgentBase {
       deliver: (notice, recipients) => sendSwmChangeNotice(notice, recipients, (peerId, bytes) => this.messenger.sendToPeer(
         peerId, PROTOCOL_SWM_CHANGE_NOTICE, bytes, { timeoutMs: DKGAgentBase.SWM_SUBSTRATE_FANOUT_TIMEOUT_MS },
       )),
+      // What identify told of the peer; unknown (no protocols yet) is tried.
+      supportsNotice: async (peerId) => {
+        const protocols = await this.getPeerProtocols(peerId);
+        return protocols.length === 0 ? undefined : protocols.includes(PROTOCOL_SWM_CHANGE_NOTICE);
+      },
       log: (message) => this.log.info(shareCtx, message),
     });
     const ownerPeers = new Map<string, { readonly at: number; readonly peerIds: readonly string[] }>();

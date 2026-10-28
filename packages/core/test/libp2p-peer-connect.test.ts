@@ -398,6 +398,61 @@ describe('connectLibp2pPeer', () => {
       .toEqual([RELAY_A, TARGET]);
   });
 
+  it('keeps only the circuit that reached the target, and logs what each candidate hit', async () => {
+    const calls: string[] = [];
+    const log = vi.fn();
+    const host = {
+      getConnections: () => calls.includes(CIRCUIT_B) ? [{ remotePeer: { toString: () => TARGET } }] : [],
+      dial: vi.fn(async (target: unknown) => {
+        const address = targetString(target);
+        calls.push(address);
+        if (address === CIRCUIT_A) throw new Error('failed to connect via relay with status NO_RESERVATION');
+      }),
+      peerStore: { merge: vi.fn(async (..._args: unknown[]) => undefined) },
+    };
+
+    await connectLibp2pPeer(host, TARGET, [], {
+      configuredRelayTargets: CONFIGURED_RELAYS.slice(0, 2),
+      skipIdentityFallback: true,
+      log,
+    });
+
+    expect(calls).toEqual([RELAY_A, CIRCUIT_A, RELAY_B, CIRCUIT_B]);
+    expect(host.peerStore.merge).toHaveBeenCalledOnce();
+    const merged = host.peerStore.merge.mock.calls[0]![1] as { multiaddrs: Array<{ toString(): string }> };
+    expect(merged.multiaddrs.map(String)).toEqual([CIRCUIT_B]);
+    expect(log).toHaveBeenCalledWith(
+      `Connection candidate ${CIRCUIT_A} failed: failed to connect via relay with status NO_RESERVATION`,
+    );
+  });
+
+  it('logs every failed candidate and still throws the last one\'s error as it was', async () => {
+    const log = vi.fn();
+    const failures = new Map([
+      [CIRCUIT_A, new Error('failed to connect via relay with status NO_RESERVATION')],
+      [CIRCUIT_B, new Error('stream reset')],
+    ]);
+    const host = {
+      getConnections: () => [],
+      dial: vi.fn(async (target: unknown) => {
+        const failure = failures.get(targetString(target));
+        if (failure) throw failure;
+      }),
+      peerStore: { merge: vi.fn(async () => undefined) },
+    };
+
+    await expect(connectLibp2pPeer(host, TARGET, [], {
+      configuredRelayTargets: CONFIGURED_RELAYS.slice(0, 2),
+      skipIdentityFallback: true,
+      log,
+    })).rejects.toBe(failures.get(CIRCUIT_B));
+    expect(host.peerStore.merge).not.toHaveBeenCalled();
+    expect(log.mock.calls.map(([line]) => line).filter((line: string) => line.startsWith('Connection candidate'))).toEqual([
+      `Connection candidate ${CIRCUIT_A} failed: failed to connect via relay with status NO_RESERVATION`,
+      `Connection candidate ${CIRCUIT_B} failed: stream reset`,
+    ]);
+  });
+
   it('reaches a target whose only reservation is on the last of seven connected relays', async () => {
     const last = SEVEN_CONFIGURED_RELAYS.at(-1)!;
     const calls: string[] = [];
