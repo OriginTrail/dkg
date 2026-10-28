@@ -245,6 +245,47 @@ describe('catch-up keeps one publishedAt on a share operation', () => {
     })).toHaveLength(1);
   });
 
+  it.each(['not-a-date', ' '.repeat(60_001) + EARLY])('private recovery quarantines unusable unreferenced history (%#)', async badStamp => {
+    const store = newStore();
+    const current = fx.share({ version: 2, operationId: 'private-current', marker: 'current', ual: UAL });
+    const historical = fx.share({ version: 1, operationId: 'private-old', marker: 'old', ual: UAL });
+    await seedMaterialized(store, current, current.meta);
+    const meta = [...current.meta, ...operationRows(historical, stampedAt(historical.meta, historical.operationSubject, badStamp))];
+    const executor = await executorServing(store, meta, [current, historical]);
+    await expect(executor.recoverPrivateTarget({ remotePeerId: 'peer-source', contextGraphId: CG,
+      recoveryGuard: { signal: new AbortController().signal, assertCurrent: () => undefined },
+    })).resolves.toMatchObject({ completed: true });
+    expect(await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store),
+      contextGraphId: CG, kaUal: UAL })).toMatchObject({ shareOperationId: 'private-current' });
+    expect(await rowsOf(store, WS_META, historical.operationSubject)).toEqual([]);
+  });
+
+  it('private recovery rejects an unusable active operation before replacing its stored head', async () => {
+    const store = newStore();
+    await seedMaterialized(store, ack, stampedAt(ack.meta, ack.operationSubject, LOCAL));
+    const executor = await executorServing(store, stampedAt(ack.meta, ack.operationSubject, 'not-a-date'), [ack]);
+    await expect(executor.recoverPrivateTarget({ remotePeerId: 'peer-source', contextGraphId: CG,
+      recoveryGuard: { signal: new AbortController().signal, assertCurrent: () => undefined },
+    })).rejects.toThrow();
+    expect(await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store),
+      contextGraphId: CG, kaUal: UAL })).toMatchObject({ shareOperationId: 'storage-ack-7', publishedAt: String(Date.parse(LOCAL)) });
+  });
+
+  it.each([{ peer: PEER, kept: PEER, withoutUpdate: false }, { peer: LATER, kept: LOCAL, withoutUpdate: false },
+    { peer: LATER, kept: LOCAL, withoutUpdate: true }])(
+    'private same-ID recovery stamped $peer retains exactly $kept (without UPDATE=$withoutUpdate)', async ({ peer, kept, withoutUpdate }) => {
+      const store = newStore();
+      await seedMaterialized(store, ack, stampedAt(ack.meta, ack.operationSubject, LOCAL));
+      if (withoutUpdate) Object.defineProperty(store, 'update', { value: undefined });
+      const executor = await executorServing(store, stampedAt(ack.meta, ack.operationSubject, peer), [ack]);
+      await expect(executor.recoverPrivateTarget({ remotePeerId: 'peer-source', contextGraphId: CG,
+        recoveryGuard: { signal: new AbortController().signal, assertCurrent: () => undefined },
+      })).resolves.toMatchObject({ completed: true });
+      expect(await publishedAtOf(store, ack.operationSubject)).toEqual([kept]);
+      expect(await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store),
+        contextGraphId: CG, kaUal: UAL })).toMatchObject({ shareOperationId: 'storage-ack-7', publishedAt: String(Date.parse(kept)) });
+    });
+
   it('private recovery: the source copy of a preserved operation', async () => {
     const store = newStore();
     await seedMaterialized(store, local, stampedAt(local.meta, local.operationSubject, LOCAL));

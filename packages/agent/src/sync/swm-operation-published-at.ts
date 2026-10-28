@@ -18,7 +18,7 @@
  */
 
 import { assertSafeIri, formatSparqlTerm, isSafeIri } from '@origintrail-official/dkg-core';
-import { tryUpdateWithTouchedGraphs, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import { deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type Quad, type QueryOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import { decodeWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
 
 import { filterOversizedSyncQuads, insertPrefilteredSyncQuads, type OversizeGuardHooks } from './oversize-filter.js';
@@ -146,6 +146,25 @@ export async function insertKeepingOnePublishedAt(
     if (!supported) break;
   }
   return inserted;
+}
+
+/** Replace control metadata without discarding the retained operation's clock.
+ * The following timestamp insertion still chooses one usable winner. A failed
+ * replacement cannot lose its earlier evidence before that writer reads it.
+ */
+export async function deleteSwmOperationMetadata(store: TripleStore, graph: string, subject: string,
+  retainPublishedAt: boolean, options: QueryOptions): Promise<void> {
+  if (!retainPublishedAt) {
+    await deleteByPatternWithoutCount(store, { graph, subject }, options);
+    return;
+  }
+  graph = assertSafeIri(graph); subject = assertSafeIri(subject);
+  const where = `GRAPH <${graph}> { <${subject}> ?p ?o } FILTER (?p != <${PUBLISHED_AT}>)`;
+  if (await tryUpdateWithTouchedGraphs(store,
+    `DELETE { GRAPH <${graph}> { <${subject}> ?p ?o } } WHERE { ${where} }`, [graph], options)) return;
+  const result = await store.query(`CONSTRUCT { <${subject}> ?p ?o } WHERE { ${where} }`, options);
+  if (result.type !== 'quads') throw new Error('Cannot read operation metadata for replacement');
+  if (result.quads.length) await store.delete(result.quads.map(row => ({ ...row, graph })), options);
 }
 
 /** Bounded set-based cleanup; every tuple retains its own operation's winner guard. */
