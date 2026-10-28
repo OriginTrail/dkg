@@ -18,6 +18,8 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/context-graph-lifecycle-cache.test.ts",
+      "test/storage-ack-copy-cleanup-writer.test.ts",
       "test/held-metadata-controls.test.ts",
       "test/recipient-key-route-scopes.test.ts",
       "test/public-snapshot-catch-up.test.ts",
