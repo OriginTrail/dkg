@@ -19,7 +19,18 @@ beforeEach(() => {
   vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })));
   vi.mocked(auditSnapshotCheckpoint).mockResolvedValue({ assets: 1, publicQuads: 1, fullReadback: true });
   vi.mocked(startSnapshotNativeProcess).mockImplementation(async (_java, args, cwd) => {
-    if (args.includes('com.bigdata.rdf.store.DataLoader')) await writeFile(join(cwd, 'store.jnl'), 'journal');
+    if (args[0]?.endsWith('loader.args')) {
+      const text = await readFile(join(cwd, 'loader.args'), 'utf8');
+      expect(text).toContain('com.bigdata.rdf.store.DataLoader');
+      expect(text).toContain('000000.verified.nq.gz');
+      expect(text).toContain('000000.verified.meta.nq');
+      expect(text).toContain('trust.nq');
+      expect(text.split('\n')).not.toContain(JSON.stringify(join(cwd, 'input')));
+      // Unlisted files in the private input directory cannot become loader inputs.
+      await writeFile(join(cwd, 'input/._000000.verified.meta.nq'), Buffer.from([0, 5, 16]));
+      expect(text).not.toContain('._000000');
+      await writeFile(join(cwd, 'store.jnl'), 'journal');
+    }
     const process = { stop: vi.fn(async () => {}), assertRunning: vi.fn(), closed: Promise.resolve(0) };
     processes.push(process); return process;
   });

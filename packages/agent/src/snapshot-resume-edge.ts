@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { decodeSnapshotBootstrapRecord, type SnapshotBootstrapRecord } from './snapshot-bootstrap-record.js';
 import { CheckpointInventory } from './snapshot-checkpoint-inventory.js';
 import { constants } from 'node:fs';
 import { lstat, open, readFile, statfs } from 'node:fs/promises';
@@ -23,13 +24,13 @@ export async function resumePublicCheckpointEdge(options: {
   const folder = join(config.dataDir, 'checkpoint-store');
   if (!(await lstat(config.dataDir)).isDirectory() || !(await lstat(folder)).isDirectory()) throw new Error('Unsafe checkpoint Edge directory');
   const file = await open(join(folder, 'BOOTSTRAP-COMPLETE.json'), constants.O_RDONLY | constants.O_NOFOLLOW);
-  let complete;
+  let complete: SnapshotBootstrapRecord;
   try {
     const info = await file.stat();
     if (!info.isFile() || info.size > 64 * 1024) throw new Error('Invalid bootstrap completion record');
-    complete = JSON.parse(await file.readFile('utf8'));
+    complete = decodeSnapshotBootstrapRecord(JSON.parse(await file.readFile('utf8')));
   } finally { await file.close(); }
-  if (complete.version !== 1 || !complete.result?.current || complete.chainId !== config.chainAdapter.chainId
+  if (complete.chainId !== config.chainAdapter.chainId
     || complete.deploymentId !== config.chainAdapter.deploymentId || complete.contextGraphId !== sync.contextGraphId
     || complete.onChainId !== sync.onChainId || complete.mode !== sync.mode || complete.runtimeSha256 !== runtime.jarSha256
     || !/^[a-f0-9]{64}$/.test(runtime.jarSha256)) throw new Error('Checkpoint Edge restart binding mismatch');

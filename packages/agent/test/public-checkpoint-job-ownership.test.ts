@@ -72,7 +72,11 @@ it('drains startup discovery before observing activation, and preserves caller c
   const rejection = expect(pending).rejects.toThrow('operator cancelled');
   await Promise.resolve();
   expect(activation).not.toHaveBeenCalled();
-  caller.abort(new Error('operator cancelled')); release(); await rejection;
+  let settled = false;
+  void pending.catch(() => { settled = true; });
+  caller.abort(new Error('operator cancelled'));
+  try { await expect.poll(() => settled, { timeout: 250 }).toBe(true); }
+  finally { release(); await rejection; }
   expect(activation).not.toHaveBeenCalled();
   const assertCurrent = vi.fn(); activation.mockResolvedValue({ assertCurrent });
   await PublicCheckpointMethods.prototype.waitForPublicCheckpointStartup.call(host as never, 'graph', new AbortController().signal);

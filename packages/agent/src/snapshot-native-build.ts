@@ -75,15 +75,20 @@ export async function buildNativeSnapshotCheckpoint(prepared: Prepared, options:
     await copyFile(options.jar, pinnedJar, constants.COPYFILE_EXCL | constants.COPYFILE_FICLONE);
     if (await nativeCheckpointShaFile(pinnedJar) !== options.jarSha256) throw new Error('Native runtime copy mismatch');
     const input = join(folder, 'input'); await mkdir(input, { mode: 0o700 });
+    const inputs: string[] = [];
     for (const asset of manifest.assets) {
       signal.throwIfAborted();
       for (const [suffix, hash, max] of [
         ['verified.nq.gz', asset.dataSha256, 16 * 1024 * 1024],
         ['verified.meta.nq', asset.metadataSha256, 128 * 1024],
-      ] as const) await copyPinned(checkpointAssetPath(join(directory, 'load'), asset.index, suffix),
-        checkpointAssetPath(input, asset.index, suffix), hash, max);
+      ] as const) {
+        const target = checkpointAssetPath(input, asset.index, suffix);
+        await copyPinned(checkpointAssetPath(join(directory, 'load'), asset.index, suffix), target, hash, max);
+        inputs.push(target);
+      }
     }
     await copyPinned(join(directory, 'load/trust.nq'), join(input, 'trust.nq'), manifest.trustSha256, 4096);
+    inputs.push(join(input, 'trust.nq'));
     await syncCheckpointDirectory(input);
     const journal = join(folder, 'store.jnl');
     const properties = nativeCheckpointProperties(journal);
@@ -91,8 +96,13 @@ export async function buildNativeSnapshotCheckpoint(prepared: Prepared, options:
     await writeCheckpointFile(join(folder, 'audit.properties'), properties + 'com.bigdata.journal.AbstractJournal.readOnly=true\n');
     const java = ['-Xms256m', '-Xmx3g', `-XX:ActiveProcessorCount=${Math.min(4, availableParallelism())}`];
     const started = Date.now();
-    owned = await startSnapshotNativeProcess(options.java, [...java, '-cp', pinnedJar, 'com.bigdata.rdf.store.DataLoader',
-      '-namespace', 'kb', join(folder, 'load.properties'), input], folder, join(folder, 'loader.log'), signal);
+    // Never enumerate the directory: files such as macOS AppleDouble sidecars are not authenticated inputs.
+    // Java's argument file also avoids argv limits for the bounded 100,000-asset profile.
+    const argumentsFile = join(folder, 'loader.args');
+    const argumentsText = [...java, '-cp', pinnedJar, 'com.bigdata.rdf.store.DataLoader',
+      '-namespace', 'kb', join(folder, 'load.properties'), ...inputs].map(javaArgument).join('\n');
+    await writeCheckpointFile(argumentsFile, argumentsText);
+    owned = await startSnapshotNativeProcess(options.java, [`@${argumentsFile}`], folder, join(folder, 'loader.log'), signal);
     await owned.closed; await owned.stop(); owned = undefined;
     await guard();
     const loaderMs = Date.now() - started;
@@ -115,4 +125,10 @@ export async function buildNativeSnapshotCheckpoint(prepared: Prepared, options:
     clearTimeout(timer); clearInterval(monitor);
     await Promise.allSettled([store?.close(), owned?.stop()]);
   }
+}
+
+/** Quoted Java launcher argument-file token, including whitespace and literal backslashes. */
+function javaArgument(value: string): string {
+  return '"' + value.replaceAll('\\', '\\\\').replaceAll('"', '\\"')
+    .replaceAll('\n', '\\n').replaceAll('\r', '\\r').replaceAll('\t', '\\t') + '"';
 }

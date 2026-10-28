@@ -19,6 +19,9 @@ export default defineConfig({
     coverage: coverageForPackage("agent"),
     include: [
       "test/public-snapshot-checkpoint.test.ts",
+      "test/public-checkpoint-active-store.test.ts",
+      "test/public-snapshot-bootstrap-record.test.ts",
+      "test/public-snapshot-verification-pool.test.ts",
       "test/public-snapshot-native-boundaries.test.ts",
       "test/public-snapshot-native-build.test.ts",
       "test/public-snapshot-native-lifecycle.test.ts",

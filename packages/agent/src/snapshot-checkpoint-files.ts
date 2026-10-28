@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash } from 'node:crypto';
 import { lstat, mkdir, mkdtemp, open } from 'node:fs/promises';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 
 export interface SnapshotCheckpointEntry {
   readonly index: number; readonly ual: string;
@@ -17,7 +17,7 @@ export function checkpointAssetPath(directory: string, index: number, suffix: 'b
 
 /** Every attempt gets a new private directory. Failed/partial attempts are never reused. */
 export async function reserveSnapshotCheckpoint(dataDir: string): Promise<string> {
-  const parent = join(dataDir, 'public-snapshot-checkpoints');
+  const parent = resolve(dataDir, 'public-snapshot-checkpoints');
   await mkdir(parent, { recursive: true, mode: 0o700 });
   const state = await lstat(parent);
   if (!state.isDirectory() || state.isSymbolicLink()) throw new Error('Unsafe checkpoint directory');

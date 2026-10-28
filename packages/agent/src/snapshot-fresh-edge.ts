@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { encodeSnapshotBootstrapRecord } from './snapshot-bootstrap-record.js';
 import { CheckpointInventory } from './snapshot-checkpoint-inventory.js';
 import { nativeCheckpointProperties } from './snapshot-native-properties.js';
 import { startCheckpointEdgeSession } from './snapshot-checkpoint-edge-session.js';
@@ -77,10 +78,11 @@ export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEd
     agent = session.agent;
     const { result } = session;
     lifetime.signal.throwIfAborted();
-    await writeCheckpointFile(join(folder, 'BOOTSTRAP-COMPLETE.json'), JSON.stringify({ version: 1,
+    await writeCheckpointFile(join(folder, 'BOOTSTRAP-COMPLETE.json'), encodeSnapshotBootstrapRecord({ version: 1,
       chainId: snapshot.chainId, deploymentId: snapshot.deploymentId, contextGraphId: snapshot.contextGraphId,
       onChainId: snapshot.onChainId, mode: sync.mode,
-      initialJournalSha256: native.journalSha256, runtimeSha256: runtime.jarSha256, result }));
+      initialJournalSha256: native.journalSha256, runtimeSha256: runtime.jarSha256,
+      result: { ...result, current: true, completeAsOfSnapshot: true } }));
     await syncCheckpointDirectory(folder);
     lifetime.signal.throwIfAborted();
     return { agent, result, dataDir: config.dataDir };

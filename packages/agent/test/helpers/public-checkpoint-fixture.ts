@@ -19,8 +19,8 @@ export async function checkpointFixture(options: Parameters<typeof fixture>[3] =
     ? { mode, snapshot, sourceCore: f.supplierPeer } : { mode, snapshot, sourceCore: null };
   const abort = new AbortController();
   const readFresh = vi.fn(async () => initial);
-  const run = () => preparePublicSnapshotCheckpoint({ router: f.router, ensurePeerConnected: async () => {} }, {
-    initial, readFresh, peerBatches: async function* () { yield [f.supplierPeer]; }, dataDir: f.directory,
+  const run = (dataDir = f.directory) => preparePublicSnapshotCheckpoint({ router: f.router, ensurePeerConnected: async () => {} }, {
+    initial, readFresh, peerBatches: async function* () { yield [f.supplierPeer]; }, dataDir,
     signal: abort.signal, assertCurrent: () => abort.signal.throwIfAborted(), deadline: Date.now() + 30_000,
   });
   return { ...f, run, readFresh, initial, abort };

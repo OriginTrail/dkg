@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { mapWithConcurrencyDrained } from './map-with-concurrency.js';
 import { availableParallelism, freemem } from 'node:os';
 import { SyncVerifyWorker } from './sync-verify-worker.js';
 import { createAssetPayloadVerifier, type DecodedAssetPayload } from './sync/requester/asset-payload-verifier.js';
@@ -29,17 +30,14 @@ export async function withSnapshotVerificationPool<T>(options: {
   const workers: SyncVerifyWorker[] = [];
   const failed = new AbortController();
   const signal = AbortSignal.any([options.signal, failed.signal]);
-  let firstFailure: unknown;
-  let outcome: T[] = [];
-  let rejected = false;
-  let error: unknown;
-  let closed: PromiseSettledResult<void>[] = [];
+  let results: T[];
+  let closed: PromiseSettledResult<void>[];
   const stop = () => { for (const worker of workers) void worker.close().catch(() => undefined); };
   try {
     for (let i = 0; i < Math.min(max, snapshotVerificationWidth()); i++) workers.push(new SyncVerifyWorker());
     signal.addEventListener('abort', stop, { once: true });
     signal.throwIfAborted();
-    const results = await Promise.allSettled(workers.map(async (worker, index) => {
+    results = await mapWithConcurrencyDrained(workers, workers.length, async (worker, index) => {
       const verify = createAssetPayloadVerifier({
         contextGraphId: options.contextGraphId, ctx: createOperationContext('sync'),
         parseAndFilter: worker.parseAndFilter.bind(worker),
@@ -53,21 +51,20 @@ export async function withSnapshotVerificationPool<T>(options: {
           return result;
         } });
       } catch (error) {
-        if (!failed.signal.aborted) { firstFailure = error; failed.abort(error); }
+        failed.abort(error);
         throw error;
       }
-    }));
-    if (firstFailure !== undefined) throw firstFailure;
-    signal.throwIfAborted();
-    outcome = results.map(result => {
-      if (result.status === 'rejected') throw result.reason;
-      return result.value;
     });
-  } catch (cause) { rejected = true; error = cause; } finally {
+    signal.throwIfAborted();
+  } catch (error) {
+    failed.abort(error);
+    throw error;
+  } finally {
     signal.removeEventListener('abort', stop);
     closed = await Promise.allSettled(workers.map(worker => worker.close()));
   }
-  if (rejected) throw error;
+  // Only reached after successful work; cleanup cannot hide its primary failure.
+  signal.throwIfAborted();
   for (const result of closed) if (result.status === 'rejected') throw result.reason;
-  return outcome;
+  return results;
 }

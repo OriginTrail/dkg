@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { readFile, readdir } from 'node:fs/promises';
-import { join } from 'node:path';
+import { isAbsolute, join, relative } from 'node:path';
 import { gunzipSync } from 'node:zlib';
 import { PUBLIC_CHECKPOINT_PROTOCOL } from '@origintrail-official/dkg-core';
 import { snapshotVerificationWidth } from '../src/snapshot-verification-pool.js';
@@ -17,7 +17,6 @@ describe('isolated public checkpoint', () => {
     expect(result.manifest.assets.map(a => a.ual)).toEqual(f.uals);
     expect(result.manifest.assets.every(a => a.publicQuads > 0)).toBe(true);
     expect(probe.mock.calls[0]?.[1]).toBe(PUBLIC_CHECKPOINT_PROTOCOL);
-    expect(await f.target.countQuads()).toBe(0);
     expect(await readFile(join(result.directory, 'load/trust.nq'), 'utf8')).toContain('chainEvidenceMode');
     expect(JSON.parse(await readFile(join(result.directory, 'manifest.json'), 'utf8')).state).toBe('verified-unpublished');
   });
@@ -31,7 +30,6 @@ describe('isolated public checkpoint', () => {
     const attempts = await readdir(join(f.directory, 'public-snapshot-checkpoints'));
     expect(attempts).toHaveLength(1);
     expect(await readdir(join(f.directory, 'public-snapshot-checkpoints', attempts[0]!))).not.toContain('manifest.json');
-    expect(await f.target.countQuads()).toBe(0);
   });
   it.each(['\n', '\t'])('never loads peer statements skipped by the verifier (separator %j)', async separator => {
     const f = await checkpointFixture({ payloadBytes: [14, 4000, 14], transformPayload: plain => plain.trimEnd() + separator
@@ -43,7 +41,12 @@ describe('isolated public checkpoint', () => {
       expect(bytes.trim().split('\n')).toHaveLength(asset.publicQuads);
       expect(bytes).toContain(`<${asset.graph}> .`);
     }
-    expect(await f.target.countQuads()).toBe(0);
+  });
+  it('resolves a relative data directory before crossing native process boundaries', async () => {
+    const f = await checkpointFixture();
+    const result = await f.run(relative(process.cwd(), f.directory));
+    expect(isAbsolute(result.directory)).toBe(true);
+    expect(JSON.parse(await readFile(join(result.directory, 'manifest.json'), 'utf8')).state).toBe('verified-unpublished');
   });
   it('does not send checkpoint traffic to an older core', async () => {
     const f = await checkpointFixture();

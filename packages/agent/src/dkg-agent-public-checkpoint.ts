@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
+import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
@@ -9,7 +10,7 @@ export class PublicCheckpointMethods extends DKGAgentBase {
   /** Drain startup discovery before taking a foreground graph-ownership snapshot. */
   async waitForPublicCheckpointStartup(this: DKGAgent, contextGraphId: string, signal: AbortSignal): Promise<void> {
     signal.throwIfAborted();
-    await this.chainPoller?.waitForCurrentPoll();
+    await resolveWithinAbort(async () => { await this.chainPoller?.waitForCurrentPoll(); }, signal);
     signal.throwIfAborted();
     const activation = this.waitForContextGraphSubscriptionActivation(contextGraphId, signal);
     if (activation) (await activation).assertCurrent();
