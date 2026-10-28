@@ -2,7 +2,7 @@ import type { SharedMemoryMintRecordingOptions } from '@origintrail-official/dkg
 import type { MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import type { AgentSharedMemoryPublishOptions, SharedMemoryPublicationContext, FinalizedAssertionPublishOptions, FinalizedAssertionRecordingContext } from './internal/agent-publish-options.js';
 import { completeNamedPublishFinalization, selectFinalizedAssertionPublication, prepareFinalizedAssertionContent,
-  finalizedMintContentOptions, finalizedMintOptions, completeFinalizedAssertionMint,
+  finalizedMintContentOptions, finalizedMintOptions, completeFinalizedAssertionMint, completeRecordedAssertionMint,
   publishFinalizedAssertionUpdate, type FinalizedAssertionPublicationHost,
 } from './internal/finalized-assertion-publication.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -6304,7 +6304,7 @@ export async function recordFinalizedAssertionMint(this: DKGAgent, contextGraphI
     { code: KA_MINT_RECONCILE_REFUSED_CODE });
   const prepared = await prepareFinalizedAssertionContent(host, selected);
   const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintContentOptions(prepared, selected.operationPlan.pricingPolicy));
-  await completeFinalizedAssertionMint(host, prepared, result, recording);
+  await completeRecordedAssertionMint(host, prepared, result, recording, receipt, await this.getContextGraphOnChainId(contextGraphId));
   return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
 }
 

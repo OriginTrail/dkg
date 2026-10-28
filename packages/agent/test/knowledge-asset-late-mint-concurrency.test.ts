@@ -1,3 +1,4 @@
+import { contextGraphFinalizationTopic } from '@origintrail-official/dkg-core';
 import { generateGraphKnowledgeAssetMetadata } from '@origintrail-official/dkg-publisher';
 import * as mintReconciliation from '../src/knowledge-asset-mint-reconcile.js';
 /**
@@ -32,6 +33,9 @@ describe('late-mint concurrency', () => {
     failNextLifecycleWrite(f.agent, f.store, VM_CURRENT_ASSERTION_PRED);
     await expect(f.agent.reconcileKnowledgeAssetMint(RECONCILE))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    return newerMaterializer(f, chain);
+  }
+  async function newerMaterializer(f: Awaited<ReturnType<typeof strandedAsset>>, chain: MockChainAdapter) {
     const record = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store,
       { contextGraphId: CONTEXT_GRAPH, ual: f.sealed.kaUal });
     if (record.state !== 'confirmed') throw new Error('fixture must hold the consumed mint');
@@ -54,6 +58,54 @@ describe('late-mint concurrency', () => {
     };
     return { ...f, chain, write, root };
   }
+
+  it('refuses resident completion when a newer VM commits during finalization gossip', async () => {
+    const chain = new MockChainAdapter(), f = await strandedAsset(chain);
+    const entered = Promise.withResolvers<void>(), continued = Promise.withResolvers<void>();
+    const publish = f.agent.gossip.publish.bind(f.agent.gossip);
+    vi.spyOn(f.agent.gossip, 'publish').mockImplementation(async (...args) => {
+      if (args[0] === contextGraphFinalizationTopic(CONTEXT_GRAPH)) { entered.resolve(); await continued.promise; }
+      return publish(...args);
+    });
+    const stamp = vi.spyOn(f.agent, 'publishedNamedKaVmLifecycleWriter');
+    const recovery = f.agent.reconcileKnowledgeAssetMint(RECONCILE);
+    const outcome = recovery.then(value => ({ value }), error => ({ error }));
+    try {
+      await Promise.race([entered.promise, recovery.then(() => { throw new Error('missing finalization gossip'); })]);
+      const newer = await newerMaterializer(f, chain);
+      await withMaterializationLock(META_GRAPH, f.sealed.kaUal, newer.write);
+      continued.resolve();
+      expect(await outcome).toMatchObject({ error: { reason: 'superseded' } });
+      expect(stamp).not.toHaveBeenCalled();
+      expect((await f.history())?.vmCurrentAssertion).toBeUndefined();
+      expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store,
+        { contextGraphId: CONTEXT_GRAPH, ual: f.sealed.kaUal }))
+        .toMatchObject({ state: 'confirmed', envelope: { assertionVersion: '2', merkleRoot: newer.root } });
+    } finally { continued.resolve(); await outcome; }
+  });
+
+  it('holds resident completion custody until the lifecycle stamp finishes', async () => {
+    const chain = new MockChainAdapter(), f = await strandedAsset(chain);
+    const entered = Promise.withResolvers<void>(), continued = Promise.withResolvers<void>();
+    const writeLifecycle = f.agent.publishedNamedKaVmLifecycleWriter;
+    const order: string[] = [];
+    vi.spyOn(f.agent, 'publishedNamedKaVmLifecycleWriter').mockImplementation(async value => {
+      entered.resolve(); await continued.promise; await writeLifecycle(value); order.push('stamp');
+    });
+    const recovery = f.agent.reconcileKnowledgeAssetMint(RECONCILE);
+    let update: Promise<void> | undefined;
+    try {
+      await Promise.race([entered.promise, recovery.then(() => { throw new Error('missing lifecycle completion'); })]);
+      const newer = await newerMaterializer(f, chain);
+      update = withMaterializationLock(META_GRAPH, f.sealed.kaUal, async () => { order.push('update'); await newer.write(); });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(order, 'the newer writer must wait until resident completion finishes').toEqual([]);
+      continued.resolve();
+      await expect(recovery).resolves.toMatchObject({ status: 'adopted' });
+      await update;
+      expect(order).toEqual(['stamp', 'update']);
+    } finally { continued.resolve(); await Promise.allSettled([recovery, ...(update ? [update] : [])]); }
+  });
 
   it('leaves a draft that pull-from reopened while reconcile waited for the lifecycle lock', async () => {
     const { agent, store, history } = await strandedAsset(new MockChainAdapter());

@@ -24,7 +24,7 @@ import {
   type AssertionLifecycleWriteLease,
 } from '@origintrail-official/dkg-publisher';
 import type { AssertionHistoryDescriptor, DKGAgent } from './dkg-agent.js';
-import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
+import { verifyNamedMintRecord } from './internal/verified-named-mint-record.js';
 import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 import { sealChainTargetMismatch } from './seal-chain-target.js';
 
@@ -288,30 +288,11 @@ async function completeRecordedLifecycle(
   mint: OnChainPublishResult,
   heldLifecycle: AssertionLifecycleWriteLease,
 ): Promise<OnChainPublishResult> {
-  const { seal, scope, kaId } = reservation;
-  const record = await resolveConfirmedGraphScopedVm(host.store, {
-    contextGraphId: target.contextGraphId,
-    ual: scope.ual,
-    assertionVersion: BigInt(scope.assertionVersion),
-    merkleRoot: seal.merkleRoot,
-    kaId,
-    batchId: kaId,
-    subGraphName: target.subGraphName,
-  });
-  const envelope = record.status === 'verified' ? record.envelope : undefined;
-  if (!envelope || envelope.publicTripleCount !== seal.publicTripleCount
-    || envelope.privateTripleCount !== (seal.privateTripleCount ?? 0)) {
-    throw refused(
-      `The share of "${target.name}" is no longer resident and this node holds no verified record of the sealed content ` +
-        `(${record.status === 'invalid' ? record.reason : record.status}), so there is nothing to complete.`,
-    );
-  }
-  if (envelope.transactionHash !== undefined && envelope.transactionHash.toLowerCase() !== mint.txHash.toLowerCase()) {
-    throw refused(`The local record of "${target.name}" names transaction ${envelope.transactionHash}, not the mint ${mint.txHash}.`);
-  }
-  await completeNamedMint({ store: host.store, stampPublishedLifecycle: host.stampPublishedLifecycle,
+  await verifyNamedMintRecord(host.store, reservation, target, mint);
+  const completion = await completeNamedMint({ store: host.store, stampPublishedLifecycle: host.stampPublishedLifecycle,
     completeFinalization: host.completeFinalization,
     clearShareMarker: () => host.clearSwmShareComplete(target.contextGraphId, target.name, target.agentAddress, target.subGraphName, heldLifecycle),
-  }, { reservation, ...target, receipt: mint }, { consumeShare: true, onFailure: (_stage, error) => { throw error; } });
+  }, { reservation, ...target, receipt: mint }, { consumeShare: true, failureMode: 'stop' });
+  if (completion.status === 'incomplete') throw completion.failures[0].error;
   return mint;
 }

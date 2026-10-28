@@ -393,7 +393,7 @@ describe('late-mint adoption', () => {
     const stamp = vi.mocked(agent.publishedNamedKaVmLifecycleWriter); stamp.mockClear();
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({
-      code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/no verified record of the sealed content/),
+      code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/no verified record .* of the sealed content/),
     });
     expect(await history()).toEqual(before);
     expect(stamp).not.toHaveBeenCalled(); expect(transfer).not.toHaveBeenCalled();

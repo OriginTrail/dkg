@@ -1,3 +1,5 @@
+import { verifyNamedMintRecord } from './verified-named-mint-record.js';
+import { withMaterializationLock, prepareMintAdoption, readPreparedMintAdoption, type MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import { completeNamedMint } from './named-mint-completion.js';
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
@@ -288,20 +290,39 @@ export async function completeFinalizedAssertionMint(host: FinalizedAssertionPub
     catch (err) { host.log.warn(ctx, `Failed to write publish checkpoint for <${assertionUri}>: ${err instanceof Error ? err.message : String(err)}`); }
   }
   if (opts?.clearSharedMemoryAfter === true) await publisher.clearRemainingSharedMemory(contextGraphId, opts?.subGraphName, ctx);
-  let catalogFailure: unknown;
-  await completeNamedMint({ store: host.store, stampPublishedLifecycle: host.publishedNamedKaVmLifecycleWriter,
+  const completion = await completeNamedMint({ store: host.store, stampPublishedLifecycle: host.publishedNamedKaVmLifecycleWriter,
     completeFinalization: input => completeNamedPublishFinalization(host, input),
     clearShareMarker: () => publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, recording?.heldLifecycle),
   }, { reservation: { seal, scope: graphScope, kaId: packedKaId, assertionUri, metaGraph },
     contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName, receipt: result.onChainResult }, {
-    consumeShare: checkpointReady,
-    onFailure: (stage, error) => {
-      if (stage === 'catalog') catalogFailure = error;
-      host.log.warn(ctx, `Failed named-mint ${stage} completion for <${assertionUri}>: ${error instanceof Error ? error.message : String(error)}`);
-    },
+    consumeShare: checkpointReady, failureMode: 'continue',
   });
-  // Ordinary publication retains the confirmed result; record-only reconciliation requires catalog ownership.
-  if (recording && catalogFailure !== undefined) throw catalogFailure;
+  if (completion.status === 'incomplete') {
+    for (const { stage, error } of completion.failures)
+      host.log.warn(ctx, `Failed named-mint ${stage} completion for <${assertionUri}>: ${error instanceof Error ? error.message : String(error)}`);
+    // Ordinary publication retains the confirmed result; record-only reconciliation requires catalog ownership.
+    const catalogFailure = completion.failures.find(failure => failure.stage === 'catalog');
+    if (recording && catalogFailure) throw catalogFailure.error;
+  }
+}
+
+/** Reacquire after the recorder's nested lock has drained; gossip never carries stale completion authority. */
+export async function completeRecordedAssertionMint(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent,
+  result: PublishResult, recording: FinalizedAssertionRecordingContext, receipt: MintAdoptionRequest,
+  onChainContextGraphId: string | null | undefined): Promise<void> {
+  if (result.status !== 'confirmed' || !result.onChainResult) return;
+  if (!onChainContextGraphId || !/^\d+$/.test(onChainContextGraphId))
+    throw Object.assign(new Error('Recorded mint completion requires its on-chain context graph'), { code: 'KA_MINT_RECONCILE_REFUSED' });
+  const reservation = recording.reservation;
+  const expected = { kaId: reservation.kaId, merkleRoot: reservation.seal.merkleRoot,
+    contextGraphId: BigInt(onChainContextGraphId), authorAddress: reservation.seal.authorAddress };
+  const evidence = receipt.kind === 'prepared' ? receipt.evidence : await prepareMintAdoption(host.chain, expected, receipt.txHash);
+  await withMaterializationLock(reservation.metaGraph, reservation.scope.ual, async () => {
+    const mint = await readPreparedMintAdoption(evidence, host.chain, expected);
+    await verifyNamedMintRecord(host.store, reservation,
+      { contextGraphId: prepared.contextGraphId, name: prepared.name, subGraphName: prepared.opts?.subGraphName }, mint);
+    await completeFinalizedAssertionMint(host, prepared, result, recording);
+  });
 }
 
 export async function publishFinalizedAssertionUpdate(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent): Promise<PublishResult> {
