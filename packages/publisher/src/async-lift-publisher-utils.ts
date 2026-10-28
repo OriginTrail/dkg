@@ -573,6 +573,7 @@ function parseKnowledgeAssetVmPublishRequest(value: unknown, path: string): Know
     ...optionalStringField(record, 'reservedUal', path),
     ...optionalNumberField(record, 'publishEpochs', path),
     ...optionalEnumField(record, 'pricingPolicy', PUBLICATION_PRICING_POLICIES, path),
+    ...optionalBooleanField(record, 'catalogObligationRequired', path),
     ...optionalBooleanField(record, 'clearSharedMemoryAfter', path),
     ...optionalBigIntStringField(record, 'publisherNodeIdentityIdOverride', path),
   };

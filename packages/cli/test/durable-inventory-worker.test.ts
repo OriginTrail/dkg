@@ -253,7 +253,7 @@ describe('bound worker owns the real inventory CAS', () => {
     const runtime = rfc64SwmInventoryShadowRuntimeV1(agent);
     const handoffTracked = runtime.hasInventoryWrites({ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR });
     let removed = false;
-    const confirmation = agent.observeRfc64ConfirmedVmV1({ contextGraphId: CONTEXT_GRAPH_ID,
+    const confirmation = agent.transferRfc64ConfirmedVmV1({ contextGraphId: CONTEXT_GRAPH_ID,
       assertionCoordinate: seeded.assertionCoordinate, shareOperationId: seeded.shareOperationId,
       seal: seeded.seal, assertionUri: 'urn:confirmed:race',
       ctx: createOperationContext('publish'), publicationLabel: 'queued publish' }).then(result => { removed = true; return result; });
@@ -265,7 +265,7 @@ describe('bound worker owns the real inventory CAS', () => {
       resume();
     }
     await handoff;
-    expect(await confirmation).toBe(true);
+    expect(await confirmation).toBe('owned');
     expect(agent.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest: seeded.scopeDigest, authorAddress: AUTHOR })?.rows ?? []).toHaveLength(0);
     expect(runtime.hasInventoryWrites({ contextGraphId: CONTEXT_GRAPH_ID, authorAddress: AUTHOR })).toBe(false);
   });

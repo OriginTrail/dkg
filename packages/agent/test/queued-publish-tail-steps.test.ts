@@ -20,6 +20,7 @@ import {
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { DKGAgent } from '../src/dkg-agent.js';
 import { PublishMethods } from '../src/dkg-agent-publish.js';
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 import type { PublishedNamedKaVmLifecycleInput } from '../src/named-ka-vm-lifecycle.js';
 
 const AUTHOR = `0x${'11'.repeat(20)}` as const;
@@ -86,7 +87,7 @@ function harness(options: {
   retireLegacySwm?: () => Promise<void>;
   observer?: (step: LiftJobTailStep) => void;
   failStep?: string;
-  catalogCompletion?: boolean;
+  catalogFailure?: Error;
   cleanupCompletion?: boolean;
 } = {}) {
   const calls: string[] = [];
@@ -111,6 +112,7 @@ function harness(options: {
     clearSwmShareComplete: call('clearShareMarker()'),
   };
   const host = Object.setPrototypeOf({
+    config: confirmedPublicationCatalogConfigV1(false),
     publisher,
     peerId: 'peer-1',
     defaultAgentAddress: AUTHOR,
@@ -145,7 +147,7 @@ function harness(options: {
     },
     observeRfc64ConfirmedVmV1: async () => {
       await call('catalogObserver()')();
-      return Object.hasOwn(options, 'catalogCompletion') ? options.catalogCompletion : true;
+      if (options.catalogFailure) throw options.catalogFailure;
     },
   }, PublishMethods.prototype) as unknown as DKGAgent;
   const publishOptions = {
@@ -337,14 +339,15 @@ describe('the steps a queued executor reports after the confirmation', () => {
     },
   );
 
-  it.each(OPERATIONS.flatMap(operation => [false, undefined].map(catalogCompletion => ({ ...operation, catalogCompletion }))))(
-    'clears an upstream $kind certificate when catalog completion is $catalogCompletion', async ({ overrides, catalogCompletion }) => {
-      const { execute } = harness({ catalogCompletion, publish: async () => ({
-        ...publishResult(), localFinalizationComplete: true,
-      }) });
-      expect((await execute(request(overrides))).localFinalizationComplete).toBeUndefined();
-    },
-  );
+  it.each(OPERATIONS)('rejects an upstream $kind certificate when catalog durability fails', async ({ overrides }) => {
+    const catalogFailure = new Error('durable catalog write refused');
+    const { execute } = harness({ catalogFailure, publish: async () => ({
+      ...publishResult(), localFinalizationComplete: true,
+    }) });
+    await expect(execute(request(overrides))).rejects.toMatchObject({
+      code: 'CONFIRMED_CATALOG_OBLIGATION_PENDING', cause: catalogFailure,
+    });
+  });
 
   it.each(OPERATIONS.flatMap(operation => [false, undefined].map(cleanupCompletion => ({ ...operation, cleanupCompletion }))))(
     'clears an upstream $kind certificate when cleanup completion is $cleanupCompletion', async ({ overrides, cleanupCompletion }) => {
