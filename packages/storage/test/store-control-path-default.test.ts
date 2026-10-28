@@ -263,6 +263,27 @@ describe('configureStoreControlPath', () => {
     expect(controlIds()).toEqual([]);
   });
 
+  // Each half of the repeat check on its own: a late configuration that differs from the built one in one setting
+  // only is refused like any other, never accepted as a repeat while the path stays as it was.
+  it.each([
+    ['only the backend', { backend: 'oxigraph-server' }, { backend: 'blazegraph' },
+      '(default for oxigraph-server). Backend blazegraph and store.controlReservedSlots absent'],
+    ['only the config value', { backend: 'blazegraph', configured: 0 }, { backend: 'blazegraph', configured: 'share:1,publisher:2' },
+      '(config store.controlReservedSlots=0). Backend blazegraph and store.controlReservedSlots "share:1,publisher:2"'],
+  ] as const)('refuses a late configuration that changes %s', (_name, built, late, stated) => {
+    vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, undefined);
+    configureStoreControlPath(built);
+    const path = getStoreControlPath();
+    const { warn, logger } = capture();
+    expect(configureStoreControlPath(late, logger)).toBe(false);
+    expect(warn).toEqual([
+      `Store control path: configuration refused, the path was already built ${stated} take effect only after a restart.`,
+    ]);
+    expect(getStoreControlPath()).toBe(path);
+    expect(path).toEqual({});
+    expect(controlIds()).toEqual([]);
+  });
+
   it('refuses a configuration after an unconfigured use built the path', () => {
     vi.stubEnv(STORE_CONTROL_RESERVED_SLOTS_ENV, undefined);
     const shared = new StorePriorityScheduler({ maxConcurrent: 2 });
