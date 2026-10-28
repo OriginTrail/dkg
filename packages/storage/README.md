@@ -239,11 +239,11 @@ setting.
 | node config `store.controlReservedSlots` | absent | The same values (also the number `0`), used when the variable is unset. A malformed value (`null`, `true`, any number but `0` included) is refused with a warning that names the key and leaves the path off. Read by the daemon only. |
 
 With neither setting, the default (OT-RFC-73 P14) is share 1 + publisher 2 for
-a node whose configured backend is `blazegraph` (`STORE_CONTROL_DEFAULT_BACKENDS`)
-on a host with more than 2 CPUs (`availableParallelism()`), and off for every
-other node: 2 or fewer CPUs, managed `oxigraph-server`, `sparql-http` and any
-other backend. A malformed value never falls through to the other setting or
-to the default.
+a node whose configured backend is `blazegraph` or managed `oxigraph-server`
+(`STORE_CONTROL_DEFAULT_BACKENDS`) on a host with more than 2 CPUs
+(`availableParallelism()`), and off for every other node: 2 or fewer CPUs,
+`sparql-http` (any other SPARQL store) and any other backend. A malformed value
+never falls through to the other setting or to the default.
 
 The daemon calls `configureStoreControlPath({ backend, configured })` with the
 node's `store.backend` (the configured name, so managed Oxigraph is
