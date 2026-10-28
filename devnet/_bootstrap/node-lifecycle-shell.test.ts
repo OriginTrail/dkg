@@ -1,6 +1,7 @@
+import { readProcessInventorySync } from '../../packages/cli/src/daemon/process-probe.js';
 import { afterEach, describe, expect, it } from 'vitest';
 import { spawn, spawnSync, type ChildProcess } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { constants, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DEFAULT_DEVNET_RPC, pidAlive, restartNodeAndWait } from './node-lifecycle.js';
 import { root, paths, children, pidFile, sleeper, exited, listen } from './node-lifecycle-fixture.js';
@@ -40,13 +41,20 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
   /** A node process that mentions the home in its arguments (a daemon helper). */
   const homeNode = () => sleeper({ argv: [join(home(), 'work')] });
 
-  /** A process named like the managed store binary (`oxigraph-v<version>`) working in the home. */
-  function homeStore(): ChildProcess {
-    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', join(home(), 'store')], {
-      argv0: 'oxigraph-v0.0.0',
-      stdio: 'ignore',
-    });
+  /** Use an actual executable name, not argv0 (Linux comm ignores argv0). */
+  function storeExecutable(): string {
+    const executable = join(root, 'oxigraph-v0.0.0');
+    if (!existsSync(executable)) copyFileSync(process.execPath, executable, constants.COPYFILE_FICLONE);
+    return executable;
+  }
+  async function assertNativeStore(pid: number): Promise<void> {
+    await expect.poll(() => readProcessInventorySync().records.get(pid)?.executable,
+      { timeout: 5_000, interval: 50 }).toMatch(/^oxigraph/);
+  }
+  async function homeStore(): Promise<ChildProcess> {
+    const child = spawn(storeExecutable(), ['-e', 'setInterval(() => {}, 1000)', join(home(), 'store')], { stdio: 'ignore' });
     children.push(child);
+    await assertNativeStore(child.pid!);
     return child;
   }
 
@@ -101,7 +109,7 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
 
   it('lists a node process and a managed store binary that mention the home, and not a log tail', async () => {
     const node = homeNode();
-    const store = homeStore();
+    const store = await homeStore();
     const tail = logTail();
     const pids = await collected();
     expect(pids).toEqual(expect.arrayContaining([node.pid, store.pid]));
@@ -124,7 +132,7 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
 
   it('stops the node\'s own processes and leaves the log tail running', async () => {
     const node = homeNode();
-    const store = homeStore();
+    const store = await homeStore();
     const tail = logTail();
     const result = await run('stop_devnet_node_processes 4');
     expect(result.status, result.stderr).toBe(0);
@@ -152,11 +160,12 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
     // processes are not children of the caller: start the store from a launcher that exits.
     const launcher = spawnSync(
       process.execPath,
-      ['-e', "const c = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)', process.argv[1]], { argv0: 'oxigraph-v0.0.0', detached: true, stdio: 'ignore' }); c.unref(); console.log(c.pid)", join(home(), 'store')],
+      ['-e', "const c = require('node:child_process').spawn(process.argv[1], ['-e', 'setInterval(() => {}, 1000)', process.argv[2]], { detached: true, stdio: 'ignore' }); c.unref(); console.log(c.pid)", storeExecutable(), join(home(), 'store')],
       { encoding: 'utf8' },
     );
     const storePid = Number(launcher.stdout.trim());
     strayPids.push(storePid);
+    await assertNativeStore(storePid);
     expect(pidAlive(storePid), 'the stand-in store must be running before the restart').toBe(true);
     const tail = logTail();
     const api = await listen(() => ({ status: 200 }));

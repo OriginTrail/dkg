@@ -1,3 +1,4 @@
+import { decodeHostStoreFrames } from '../_helpers/host-mode-store-frame-decoder.js';
 /**
  * Seeded model-based test of the SWM host store's directory-fsync tracking.
  *
@@ -60,7 +61,6 @@ const DEFAULT_SEEDS = 16;
 const SEEDS = Number(process.env.HOST_STORE_MODEL_SEEDS ?? DEFAULT_SEEDS);
 const FIRST_SEED = Number(process.env.HOST_STORE_MODEL_FROM ?? 1);
 const BATCH = 24; // seeds running side by side
-const HEADER_BYTES = 20;
 const TTL_MS = 1_000;
 const BYTE_CAP = 360; // a handful of small frames: appends overflow it and exercise the rewrite prune
 const MAX_TRIES = 10;
@@ -93,17 +93,9 @@ function mulberry32(seed: number): () => number {
   };
 }
 
-/** Timestamps of the complete frames in a log buffer (an independent parse of the wire format). */
+/** Timestamp evidence for the durable-view model, independent of the production codec. */
 function frameTimestamps(buf: Buffer): number[] {
-  const out: number[] = [];
-  let offset = 0;
-  while (offset + HEADER_BYTES <= buf.length) {
-    const end = offset + HEADER_BYTES + buf.readUInt32BE(offset + 16);
-    if (end > buf.length) break;
-    out.push(Number(buf.readBigUInt64BE(offset)));
-    offset = end;
-  }
-  return out;
+  return decodeHostStoreFrames(buf).frames.map(frame => frame.timestampMs);
 }
 
 interface InFlightFsync {

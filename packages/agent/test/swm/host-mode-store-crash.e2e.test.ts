@@ -1,3 +1,4 @@
+import { decodeHostStoreFrames, HEADER_BYTES } from '../_helpers/host-mode-store-frame-decoder.js';
 /**
  * End-to-end crash safety of the SWM host-mode store on real files.
  *
@@ -31,7 +32,6 @@ vi.setConfig({ testTimeout: 60_000 });
 
 const AGENT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
 const CHILD = path.join(AGENT_ROOT, 'test/_helpers/host-mode-store-crash-child.ts');
-const HEADER_BYTES = 20;
 const LIMITS = { perCgByteCap: 1024 * 1024, ttlMs: 50_000 };
 
 type Op = 'prune' | 'meta' | 'append';
@@ -39,20 +39,10 @@ type CrashAt = 'mid-write' | 'before-rename' | 'after-rename';
 
 const cgKey = (contextGraphId: string) => createHash('sha256').update(contextGraphId).digest('base64url');
 
-/** Independent walk of the on-disk frames (the store cannot vouch for itself), keeping each payload. */
+/** Select the exact ciphertexts and sequence numbers from the independent test decoder. */
 function parseFrames(buf: Buffer): { seqnos: number[]; payloads: Buffer[]; validLength: number } {
-  const seqnos: number[] = [];
-  const payloads: Buffer[] = [];
-  let offset = 0;
-  while (offset + HEADER_BYTES <= buf.length) {
-    const len = buf.readUInt32BE(offset + 16);
-    const end = offset + HEADER_BYTES + len;
-    if (end > buf.length) break;
-    seqnos.push(Number(buf.readBigUInt64BE(offset + 8)));
-    payloads.push(Buffer.from(buf.subarray(offset + HEADER_BYTES, end)));
-    offset = end;
-  }
-  return { seqnos, payloads, validLength: offset };
+  const { frames, validLength } = decodeHostStoreFrames(buf);
+  return { seqnos: frames.map(frame => frame.seqno), payloads: frames.map(frame => frame.payload), validLength };
 }
 
 /**

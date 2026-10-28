@@ -1,3 +1,5 @@
+import { decodeHostStoreFrames, HEADER_BYTES } from './host-mode-store-frame-decoder.js';
+export { HEADER_BYTES } from './host-mode-store-frame-decoder.js';
 /**
  * Shared support for the SWM host-mode store's durability suites
  * (`test/swm/host-mode-store-{durable-writes,tail-recovery,cold-init,dirsync-retries}.test.ts`):
@@ -21,7 +23,6 @@ import path from 'node:path';
 import * as fsPolicy from '../../src/rfc64/secure-filesystem-policy-v1.js';
 import { SwmHostModeStore } from '../../src/swm/host-mode-store.js';
 
-export const HEADER_BYTES = 20;
 export const LIMITS = { perCgByteCap: 1024 * 1024, ttlMs: 60_000 };
 
 export function cgKey(contextGraphId: string): string {
@@ -40,20 +41,10 @@ export function newStore(
   });
 }
 
-/** Independent re-implementation of the frame walk, so the store cannot vouch for itself. */
+/** Select sequence and timestamp evidence from the independent test decoder. */
 export function parseFrames(buf: Buffer): { seqnos: number[]; timestamps: number[]; validLength: number } {
-  const seqnos: number[] = [];
-  const timestamps: number[] = [];
-  let offset = 0;
-  while (offset + HEADER_BYTES <= buf.length) {
-    const len = buf.readUInt32BE(offset + 16);
-    const end = offset + HEADER_BYTES + len;
-    if (end > buf.length) break;
-    timestamps.push(Number(buf.readBigUInt64BE(offset)));
-    seqnos.push(Number(buf.readBigUInt64BE(offset + 8)));
-    offset = end;
-  }
-  return { seqnos, timestamps, validLength: offset };
+  const { frames, validLength } = decodeHostStoreFrames(buf);
+  return { seqnos: frames.map(frame => frame.seqno), timestamps: frames.map(frame => frame.timestampMs), validLength };
 }
 
 export function frame(seqno: number, payload: Uint8Array, timestampMs = Date.now()): Buffer {
