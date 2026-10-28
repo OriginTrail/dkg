@@ -1,5 +1,5 @@
 import type { ContextGraphPartitionRead, ContextGraphPartitionReadOptions } from './query-types.js';
-import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions, selectLegacyScopedRoutePartitions } from './scoped-content-graph-policy.js';
+import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions, selectScopedRouteGraphs, selectLegacyScopedRouteGraphs } from './scoped-content-graph-policy.js';
 import { readPartitionStatistics, type NamedGraphStatsBatchGate } from './named-graph-statistics.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
 import { type ContentPartition } from './content-partition-policy.js';
@@ -397,7 +397,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       const lane = discovery ? { query: reads.query,
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
       const { policy } = plan;
-      const variableContentGraphs = discovery ? selectScopedRoutePartitions(policy, discovery.partitions).map(read => read.graph) : [];
+      const variableContentGraphs = discovery ? selectScopedRouteGraphs(policy, discovery.partitions) : [];
       return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
     };
     switch (plan.discovery.catalog.kind) {
@@ -416,7 +416,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
       partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
     }
     const { policy } = plan;
-    const allowedGraphs = selectLegacyScopedRoutePartitions(policy, partitions).map(read => read.graph);
+    const allowedGraphs = selectLegacyScopedRouteGraphs(policy, partitions);
     const privateAllowList = plan.discovery.privatePartitions
       ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.policy.contextGraphId, catalogReads, subGraphName))]
       : staticPrivateAllowList;
