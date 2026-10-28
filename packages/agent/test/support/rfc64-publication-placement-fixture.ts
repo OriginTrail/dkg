@@ -291,7 +291,7 @@ interface PlacementAgentInternalsV1 {
     }>,
     observer: CatalogPlacementWaiterObserverV1,
   ): Rfc64FinalizedPrivatePlacementRepairRequestV1;
-  afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<boolean>;
+  afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<void>;
 }
 
 function internalsOf(agent: DKGAgent): PlacementAgentInternalsV1 {

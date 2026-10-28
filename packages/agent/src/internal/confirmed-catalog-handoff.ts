@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { CanonicalGraphScopedAuthorSealV1, Logger } from '@origintrail-official/dkg-core';
-import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
+import type { ConfirmedVmIdentityAndTimingV1 } from './confirmed-catalog-handoff-types.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../rfc64/finalized-private-placement-repair-store-v1.js';
 import { rfc64SwmInventoryAssetKeyV1, rfc64SwmInventoryShadowRuntimeV1 } from '../rfc64/swm-inventory-shadow-runtime-v1.js';
 import { catalogPlacementTimingV1, type CatalogPlacementWaiterObserverV1 } from './catalog-placement-timing.js';
@@ -8,7 +8,7 @@ import { catalogPlacementTimingV1, type CatalogPlacementWaiterObserverV1 } from 
 type PlacementWait = ReturnType<ReturnType<typeof catalogPlacementTimingV1>['beginWait']>;
 /** Timing and confirmation fencing have one lifetime for either marker format. */
 export async function withConfirmedCatalogTailV1<T>(owner: object, log: Logger,
-  params: ObserveRfc64ConfirmedVmParamsV1, seal: CanonicalGraphScopedAuthorSealV1,
+  params: ConfirmedVmIdentityAndTimingV1, seal: CanonicalGraphScopedAuthorSealV1,
   run: (wait: PlacementWait) => Promise<T>): Promise<T> {
   const wait = catalogPlacementTimingV1(owner).beginWait(seal, params.ctx);
   try {
@@ -22,7 +22,7 @@ export async function withConfirmedCatalogTailV1<T>(owner: object, log: Logger,
 }
 
 /** Durable ownership precedes best-effort nonblocking placement notification. */
-export async function handoffConfirmedCatalogPlacementV1(params: ObserveRfc64ConfirmedVmParamsV1,
+export async function handoffConfirmedCatalogPlacementV1(params: ConfirmedVmIdentityAndTimingV1,
   repair: Rfc64FinalizedPrivatePlacementRepairV1, wait: PlacementWait, ports: {
     log: Logger;
     persist(repair: Rfc64FinalizedPrivatePlacementRepairV1): Promise<void>;

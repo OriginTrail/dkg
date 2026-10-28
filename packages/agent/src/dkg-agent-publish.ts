@@ -6458,9 +6458,9 @@ export class PublishMethods extends DKGAgentBase {
   private async afterConfirmedGraphScopedVmPublishV1(
     this: DKGAgent,
     input: ConfirmedCatalogObligationInputV1,
-  ): Promise<boolean> {
-    if (input.status !== 'confirmed') return false;
-    try { return await this.observeRfc64ConfirmedVmV1(input); }
+  ): Promise<void> {
+    if (input.status !== 'confirmed') return;
+    try { await this.observeRfc64ConfirmedVmV1(input); }
     catch (cause) { throw new ConfirmedCatalogObligationErrorV1(input, input.confirmedTransaction, cause); }
   }
 

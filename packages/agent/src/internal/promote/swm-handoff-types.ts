@@ -1,4 +1,5 @@
-import type { AssertionSeal, OperationContext } from '@origintrail-official/dkg-core';
+import type { ConfirmedVmIdentityAndTimingV1 } from '../confirmed-catalog-handoff-types.js';
+import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { PromoteRecoveryBinding } from '@origintrail-official/dkg-publisher';
 import type { RecordRfc64SwmAuthorInventoryShadowParamsV1 } from '../../dkg-agent-rfc64-catalog-auto-publish.js';
 import type { RemoveRfc64SwmAuthorInventoryResultV1 } from '../../rfc64/swm-author-inventory-producer-v1.js';
@@ -22,17 +23,7 @@ export type AfterDurableSwmPromotionParamsV1 = BoundDurableSwmPromotionParamsV1
 export type ConfirmedInventoryRemovalOutcomeV1 = RemoveRfc64SwmAuthorInventoryResultV1
   | Readonly<{ status: 'inactive' }>;
 
-export interface ObserveRfc64ConfirmedVmParamsV1 {
-  readonly contextGraphId: string;
-  readonly subGraphName?: string | null;
-  readonly assertionCoordinate: string;
-  readonly shareOperationId?: string;
-  readonly seal: AssertionSeal;
-  readonly assertionUri: string;
-  readonly ctx: OperationContext;
-  /** Captured publication obligation; recovery must not reselect current rollout policy. */
-  readonly catalogObligationRequired?: boolean;
-  readonly publicationLabel: 'publish' | 'queued publish';
-  /** The original workspace policy required by a bound share's admission. */
+/** Promotion transfer retains the original workspace policy admission fence. */
+export interface TransferRfc64ConfirmedVmParamsV1 extends ConfirmedVmIdentityAndTimingV1 {
   readonly expectedWorkspaceAccessPolicy?: PromoteRecoveryBinding['intent']['accessPolicy'];
 }

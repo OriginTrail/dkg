@@ -11,7 +11,7 @@ import {
   type OperationContext, type SwmAuthorInventoryScopeV1,
 } from '@origintrail-official/dkg-core';
 import type { DKGAgent } from '../dkg-agent.js';
-import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
+import type { TransferRfc64ConfirmedVmParamsV1 } from './promote/swm-handoff-types.js';
 import { rfc64SwmInventoryShadowRuntimeV1 } from '../rfc64/swm-inventory-shadow-runtime-v1.js';
 import {
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
@@ -45,7 +45,7 @@ export class ConfirmedVmOwnershipFailure extends SwmInventoryWriteFailure {
 
 /** Legacy observation preserves committed-removal success; only strict transfer certifies ownership. */
 export async function observeConfirmedVmTransfer(
-  log: Logger, params: ObserveRfc64ConfirmedVmParamsV1,
+  log: Logger, params: TransferRfc64ConfirmedVmParamsV1,
   transfer: () => Promise<ConfirmedVmOwnershipOutcome>,
 ): Promise<boolean> {
   try { return await transfer() !== 'pending'; } catch (error) {
@@ -64,7 +64,7 @@ export async function observeConfirmedVmTransfer(
   }
 }
 
-export async function observeConfirmedVmCatalogV1(deps: ConfirmedVmCatalogObserverDependencies, params: ObserveRfc64ConfirmedVmParamsV1): Promise<boolean> {
+export async function observeConfirmedVmCatalogV1(deps: ConfirmedVmCatalogObserverDependencies, params: TransferRfc64ConfirmedVmParamsV1): Promise<boolean> {
   return observeConfirmedVmTransfer(deps.log, params, () => transferConfirmedVmCatalogV1(deps, params));
 }
 
@@ -74,7 +74,7 @@ export async function observeConfirmedVmCatalogV1(deps: ConfirmedVmCatalogObserv
  */
 export async function transferConfirmedVmCatalogV1(
   deps: ConfirmedVmCatalogObserverDependencies,
-  params: ObserveRfc64ConfirmedVmParamsV1,
+  params: TransferRfc64ConfirmedVmParamsV1,
 ): Promise<ConfirmedVmOwnershipOutcome> {
   const subGraphName = params.subGraphName ?? null;
   const contextGraphId = params.contextGraphId;
@@ -156,7 +156,7 @@ export { rfc64SwmInventoryAssetKeyV1 } from '../rfc64/swm-inventory-shadow-runti
 export async function transferSelectedConfirmedVmCatalogV1(
   ports: Omit<ConfirmedVmCatalogObserverDependencies, 'finalizedPrivateScopeBase'> & {
     resolveLane(): ReturnType<DKGAgent['resolveRfc64CatalogAuthoringLaneV1']>;
-  }, params: ObserveRfc64ConfirmedVmParamsV1,
+  }, params: TransferRfc64ConfirmedVmParamsV1,
 ): Promise<ConfirmedVmOwnershipOutcome> {
     let lane: ReturnType<DKGAgent['resolveRfc64CatalogAuthoringLaneV1']>;
     try {

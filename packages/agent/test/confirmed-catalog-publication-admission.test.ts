@@ -1,3 +1,4 @@
+import { assertConfirmedCatalogPublicationAdmissionV1, normalizeConfirmedPublicationV1 } from '../src/internal/confirmed-catalog-obligation.js';
 import { describe, expect, it, vi } from 'vitest';
 import { DKGAgent } from '../src/dkg-agent.js';
 import type { KnowledgeAssetVmPublishRequest } from '@origintrail-official/dkg-publisher';
@@ -85,4 +86,34 @@ it.each(['snapshot', 'preflight', 'execute'] as const)('honors persisted exclusi
   await expect(boundary === 'snapshot' ? f.agent.preflightKnowledgeAssetVmPublishSnapshot(required)
     : boundary === 'preflight' ? f.agent.preflightQueuedKnowledgeAssetVmPublishExecution(required)
     : f.agent.publishQueuedKnowledgeAssetVmPublish(required, {})).rejects.toMatchObject({ name: 'CatalogPublicationAdmissionError', code: 'CATALOG_PUBLICATION_ADMISSION_INVALID' });
+});
+
+
+it.each(lanes)('$name maps invalid graph identities under default responsibility selection', async lane => {
+  const f = fixture();
+  Object.assign((f.agent as any).config, { rfc64CatalogAuthoringPolicy: undefined });
+  await expect(lane.run(f.agent, invalidIdentities[3].contextGraphId, 'asset')).rejects.toMatchObject({
+    name: 'CatalogPublicationAdmissionError', code: 'CATALOG_PUBLICATION_ADMISSION_INVALID',
+  });
+  expect(f.entered).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+  expect(f.sign).not.toHaveBeenCalled(); expect(f.consume).not.toHaveBeenCalled(); expect(f.reserve).not.toHaveBeenCalled();
+});
+
+it('preserves unrelated authority errors during default responsibility selection', async () => {
+  const f = fixture(), failure = new Error('authority storage unavailable');
+  Object.assign((f.agent as any).config, { rfc64CatalogAuthoringPolicy: undefined });
+  vi.spyOn(f.agent, 'readRfc64CatalogResponsibilityV1').mockImplementation(() => { throw failure; });
+  await expect(f.agent.publishFromFinalizedAssertion(CG, 'asset')).rejects.toBe(failure);
+  expect(f.entered).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+});
+
+it('refuses persisted root obligations attached to a named subgraph at both boundaries', () => {
+  const f = fixture(), identity = { contextGraphId: CG, assertionCoordinate: 'asset', subGraphName: 'documents', catalogObligationRequired: true };
+  const config = (f.agent as any).config;
+  expect(() => assertConfirmedCatalogPublicationAdmissionV1(f.agent,
+    { plan: config.rfc64CatalogExecutionPlan, authoring: config.rfc64CatalogAuthoringPolicy }, identity))
+    .toThrow('root graph identity');
+  // The normalization guard runs before any seal, persistence or placement work.
+  expect(() => normalizeConfirmedPublicationV1(identity as Parameters<typeof normalizeConfirmedPublicationV1>[0],
+    () => { throw new Error('persisted selection must not be recomputed'); })).toThrow('root graph identity');
 });

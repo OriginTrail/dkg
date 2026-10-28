@@ -1598,7 +1598,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
       request: { ...recoveryInput.request, clearSharedMemoryAfter: false },
     } as any);
     const recoveredRfc64Confirmation = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1')
-      .mockResolvedValue(true);
+      .mockResolvedValue(undefined);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(recoveredRfc64Confirmation).toHaveBeenCalledTimes(1);
     expect(recoveredRfc64Confirmation).toHaveBeenCalledWith(expect.objectContaining({
@@ -1770,7 +1770,7 @@ describe('rootless graph-scoped KA lifecycle', () => {
     const currentFinalizer = agent.getOrCreateFinalizationHandler();
     const supersededReconcile = vi.spyOn(currentFinalizer, 'handleChainReconciledKC');
     const supersededRfc64Confirmation = vi.spyOn(agent, 'observeRfc64ConfirmedVmV1')
-      .mockResolvedValue(true);
+      .mockResolvedValue(undefined);
     await agent.finalizeRecoveredQueuedKnowledgeAssetVmPublish(recoveryInput as any);
     expect(supersededReconcile).not.toHaveBeenCalled();
     expect(supersededRfc64Confirmation).toHaveBeenCalledOnce();

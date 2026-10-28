@@ -7,7 +7,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import type { PublishResult } from '@origintrail-official/dkg-publisher';
-import type { ObserveRfc64ConfirmedVmParamsV1 } from './dkg-agent-rfc64-catalog-auto-publish.js';
+import type { ObserveRfc64ConfirmedVmParamsV1 } from './internal/confirmed-publication-types.js';
 
 export type ConfirmedCatalogTransactionEvidenceV1 = Readonly<Pick<OnChainPublishResult,
   'txHash' | 'blockNumber' | 'txIndex' | 'kaId' | 'batchId' | 'startKAId' | 'endKAId'>>;

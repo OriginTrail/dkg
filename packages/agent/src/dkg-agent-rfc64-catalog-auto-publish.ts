@@ -1,6 +1,8 @@
+import type { ObserveRfc64ConfirmedVmParamsV1 } from './internal/confirmed-publication-types.js';
+export type { ObserveRfc64ConfirmedVmParamsV1 } from './internal/confirmed-publication-types.js';
 import { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from './dkg-agent-rfc64-swm-catalog-projection.js';
-import type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1 } from './internal/promote/swm-handoff-types.js';
-export type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, ObserveRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1, BoundDurableSwmPromotionParamsV1 } from './internal/promote/swm-handoff-types.js';
+import type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, TransferRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1 } from './internal/promote/swm-handoff-types.js';
+export type { AfterDurableSwmPromotionParamsV1, ObserveRfc64DurableSwmPromotionParamsV1, TransferRfc64ConfirmedVmParamsV1, ConfirmedInventoryRemovalOutcomeV1, BoundDurableSwmPromotionParamsV1 } from './internal/promote/swm-handoff-types.js';
 import { repairConfirmedPlacement } from './internal/confirmed-placement-repair.js';
 import { requireInventoryRemovalLane, type SwmInventoryAttemptOutcome, SwmInventoryWriteFailure, type SwmInventoryWriteOutcome } from './internal/swm-inventory-write.js';
 import { finishDurableShare } from './internal/promote/durable-share-inventory.js';
@@ -642,14 +644,13 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
   }
 
   /** Persist owed named-publication work before allowing its confirmation tail to complete. */
-  async observeRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<boolean> {
+  async observeRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<void> {
     await observeConfirmedCatalogObligationV1(params, {
       select: () => selectConfirmedCatalogObligationForAgentV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, params),
       persistence: this.rfc64PersistenceV1, log: this.log,
       owner: this,
       request: (repair, ctx, observer) => this.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, ctx }, observer).accepted,
     });
-    return true;
   }
 
   /** Validate retained confirmation evidence and retry only its catalog observer. */
@@ -662,7 +663,7 @@ export class Rfc64CatalogAutoPublishMethods extends DKGAgentBase {
     });
   }
 
-  async transferRfc64ConfirmedVmV1(this: DKGAgent, params: ObserveRfc64ConfirmedVmParamsV1): Promise<ConfirmedVmOwnershipOutcome> {
+  async transferRfc64ConfirmedVmV1(this: DKGAgent, params: TransferRfc64ConfirmedVmParamsV1): Promise<ConfirmedVmOwnershipOutcome> {
     return transferSelectedConfirmedVmCatalogV1({
       owner: this,
       log: this.log,

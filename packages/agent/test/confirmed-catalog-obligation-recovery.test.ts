@@ -174,7 +174,7 @@ describe('caller-retained confirmed catalog evidence', () => {
     const gate = () => { let resolve!: () => void; const promise = new Promise<void>(done => { resolve = done; }); return { promise, resolve }; };
     const entered = gate(), receipt = gate();
     const state = new ContextGraphBindingState();
-    const observe = vi.fn(async () => true);
+    const observe = vi.fn(async () => {});
     const agent = { chain: f.chain, store: f.store, workLifetime: f.controller,
       contextGraphBindingState: state,
       resolveContextGraphOnChainIdBinding: vi.fn(async () => ({ onChainId: '1' })),

@@ -1538,7 +1538,7 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     const markerStore = (author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs;
     const beforeMarkers = markerStore.list();
     await expect(author.observeRfc64ConfirmedVmV1({ ...identity, seal, assertionUri: 'urn:private-legacy-name',
-      ctx: createOperationContext('publish'), publicationLabel: 'publish' })).resolves.toBe(true);
+      ctx: createOperationContext('publish'), publicationLabel: 'publish' })).resolves.toBeUndefined();
     expect(markerStore.list()).toEqual(beforeMarkers);
 
     await expect(author.recordRfc64PublicCatalogAssetV1({

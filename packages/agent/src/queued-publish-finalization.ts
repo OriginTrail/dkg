@@ -225,7 +225,7 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
     ), `Failed to clear swmShareComplete after queued publish of <${lifecycleUri}>`, 'shareMarkerClear');
   }
   // Records the durable obligation without awaiting private catalog placement. Called for tentative results too.
-  const catalogCompletionRecorded = await services.observeConfirmedCatalog({
+  await services.observeConfirmedCatalog({
     status: result.status,
     catalogObligationRequired: request.catalogObligationRequired,
     confirmedTransaction: result.onChainResult,
@@ -237,7 +237,7 @@ export async function finalizeQueuedKnowledgeAssetVmPublish(
   });
   ended('catalogObserver');
   // Override any upstream marker: only this complete queued lifecycle can certify its tail.
-  if (result.status === 'confirmed' && result.onChainResult && catalogCompletionRecorded === true && complete) {
+  if (result.status === 'confirmed' && result.onChainResult && complete) {
     return { ...result, status: 'confirmed', onChainResult: result.onChainResult, localFinalizationComplete: true };
   }
   return { ...result, localFinalizationComplete: undefined };

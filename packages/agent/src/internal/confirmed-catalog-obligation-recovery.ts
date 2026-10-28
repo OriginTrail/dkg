@@ -8,7 +8,7 @@ import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogObligationRecoveryV1 } from '../confirmed-catalog-obligation-error.js';
-import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
+import type { ObserveRfc64ConfirmedVmParamsV1 } from './confirmed-publication-types.js';
 import {
   resolveConfirmedLifecycleSealEvidenceV1,
 } from '../durable-author-seal-resolver-v1.js';
@@ -84,7 +84,7 @@ export async function recoverRetainedCatalogObligationV1(input: unknown, ports: 
   chain: ChainAdapter; store: TripleStore; signal(): AbortSignal;
   captureFence(graph: string): () => void;
   resolveBinding(graph: string, signal: AbortSignal): Promise<{ onChainId: string } | null>;
-  observe(params: ObserveRfc64ConfirmedVmParamsV1): Promise<boolean>;
+  observe(params: ObserveRfc64ConfirmedVmParamsV1): Promise<void>;
 }): Promise<void> {
   const evidence = parseConfirmedCatalogObligationRecoveryV1(input);
   const signal = ports.signal();
@@ -96,6 +96,6 @@ export async function recoverRetainedCatalogObligationV1(input: unknown, ports: 
       signal.throwIfAborted();
       assertGeneration();
     },
-    observe: async params => { await ports.observe(params); },
+    observe: ports.observe,
   });
 }
