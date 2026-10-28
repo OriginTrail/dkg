@@ -110,8 +110,9 @@ It keeps failed jobs that may still have a transaction on chain.
 
 The first release after 10.0.26 changes two things to check before you update.
 
-- **Finished-job cleanup ships, off by default.** 10.0.26 ignores the
-  `queueRetention` block of `config.json`; the new release reads it. A mode
+- **Finished-job cleanup ships for evaluation, off by default.** Leave it off
+  on production nodes until a later release says it is ready. 10.0.26 ignores
+  the `queueRetention` block of `config.json`; the new release reads it. A mode
   already set there starts that cleanup at the first start. A wrong value or an
   unknown key stops the daemon from starting. See
   [Clean up finished jobs](async-queue-operations.md#clean-up-finished-jobs).
