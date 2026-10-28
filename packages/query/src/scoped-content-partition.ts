@@ -6,10 +6,12 @@ function isDraft(tail: string): boolean {
   return first === '_working_memory' || first === 'assertion';
 }
 
+export type ScopedContentGraphDescriptor = Readonly<{ subGraphName?: string }> & (
+  | Readonly<{ kind: 'draft'; draftOwner: string | null }>
+  | Readonly<{ kind: Exclude<ContentPartition['kind'], 'draft'> | 'shared-root'; draftOwner?: never }>
+);
 /** Pure storage-layout identity; authority dependencies are planned by the caller. */
-export function describeScopedContentGraph(graph: string, contextGraphId: string): {
-  kind: ContentPartition['kind'] | 'shared-root'; subGraphName?: string; draftOwner?: string | null;
-} | undefined {
+export function describeScopedContentGraph(graph: string, contextGraphId: string): ScopedContentGraphDescriptor | undefined {
   const root = contextGraphDataUri(contextGraphId);
   if (graph === root) return { kind: 'content' };
   if (!graph.startsWith(`${root}/`)) return undefined;
@@ -58,7 +60,7 @@ export function classifyScopedContentGraph(graph: string, contextGraphId: string
     ...(subGraphName ? { subGraphName } : {}) };
   if (kind === 'draft') {
     if (!hasRegisteredAssertionAncestor(graph, registeredAssertionGraphs)) return undefined;
-    return Object.freeze({ ...scope, kind, draftOwner: description.draftOwner ?? null });
+    return Object.freeze({ ...scope, kind, draftOwner: description.draftOwner });
   }
   return Object.freeze({ ...scope, kind });
 }

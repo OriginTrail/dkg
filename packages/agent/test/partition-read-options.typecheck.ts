@@ -16,3 +16,13 @@ export function partitionReadOptionsContract(engine: DKGQueryEngine): void {
   // @ts-expect-error The context graph is owned by the explicit argument.
   void engine.readContextGraphNamedGraphStats('cg', { contextGraphId: 'other' });
 }
+
+// The internal descriptor must retain explicit historical ownerlessness.
+import type { ScopedContentGraphDescriptor } from '../../query/dist/scoped-content-partition.js';
+export function partitionDescriptorContract(): ScopedContentGraphDescriptor[] {
+  // @ts-expect-error A draft must name its owner, including explicit null for historical drafts.
+  const missing: ScopedContentGraphDescriptor = { kind: 'draft' };
+  // @ts-expect-error Verified partitions cannot carry a draft owner.
+  const contradictory: ScopedContentGraphDescriptor = { kind: 'verified', draftOwner: 'alice' };
+  return [missing, contradictory, { kind: 'draft', draftOwner: null }];
+}

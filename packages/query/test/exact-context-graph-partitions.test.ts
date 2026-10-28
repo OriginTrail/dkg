@@ -8,6 +8,19 @@ const WM = `${ROOT}/_working_memory/0xagent/1`;
 const options = { contextGraphId: 'large', includeContextGraphPartitions: true };
 
 describe('typed named-graph statistics', () => {
+  it.each(['_private', '_meta', '_working_memory', 'assertion/bob/staging', 'docs/_private'])('rejects invalid subgraph %s before inventory or exact admission', async subGraphName => {
+    const store = new OxigraphStore();
+    try {
+      const graph = `${ROOT}/${subGraphName}`;
+      await store.insert([{ subject: 'urn:secret', predicate: 'urn:p', object: '"hidden"', graph }]);
+      const engine = new DKGQueryEngine(store);
+      const opts = { subGraphName, draftAccess: { kind: 'none' as const } };
+      await expect(engine.listContextGraphQueryPartitionReads('large', opts)).rejects.toThrow(/Invalid sub-graph name/);
+      await expect(engine.readContextGraphNamedGraphStats('large', opts)).rejects.toThrow(/Invalid sub-graph name/);
+      await expect(readNamedGraphStatisticsBatch(store, 'large', [graph], opts)).rejects.toThrow(/Invalid sub-graph name/);
+    } finally { await store.close(); }
+  });
+
   it('authorizes each statistics batch from bounded live metadata without enumerating the CG again', async () => {
     const inner = new OxigraphStore();
     const submitted: string[] = [];

@@ -1,3 +1,4 @@
+import { validateSubGraphName } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
 import { contextGraphDataUri, contextGraphSharedMemoryMetaUri } from '@origintrail-official/dkg-core';
 import { staticScopedRouteGraphs } from './static-scoped-route-graphs.js';
@@ -9,6 +10,10 @@ import type { ContextGraphPartitionRead } from './query-types.js';
 
 /** Route selection owns admission labels, including static roots and metadata. */
 export function createScopedContentGraphRoutePolicy(contextGraphId: string, options: QueryOptions = {}) {
+  if (options.subGraphName !== undefined) {
+    const validation = validateSubGraphName(options.subGraphName);
+    if (!validation.valid) throw new Error(`Invalid sub-graph name for query: ${validation.reason}`);
+  }
   const route = staticScopedRouteGraphs(contextGraphId, options);
   const draftAccess = resolveDraftAccessPolicy(options);
   const includeSharedMemoryMeta = options.includeSharedMemoryMeta === true;
