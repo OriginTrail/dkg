@@ -1,3 +1,5 @@
+import { formatResult, runPublishAsyncGetBenchmark, type BenchmarkClient } from '../src/benchmark/publish-get/index.js';
+import { baseConfig, MockBenchmarkClient, monotonicClock } from './helpers/publish-async-get-benchmark.js';
 import { describe, expect, it, vi } from 'vitest';
 import { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type DKGAgent } from '@origintrail-official/dkg-agent';
 import { contextGraphAssertionUri, createOperationContext, type AssertionSeal } from '@origintrail-official/dkg-core';
@@ -105,4 +107,31 @@ describe('the shared confirmed catalog HTTP response contract', () => {
     expect(f.status()).toBe(invalid ? 409 : 503);
     expect(f.body()).toMatchObject({ recovery: evidence, retryAction: 'observe_confirmed_catalog_obligation' });
   });
+});
+
+
+it.each(['json', 'ndjson'] as const)('retains the complete confirmed recovery response in benchmark %s failures', async outputFormat => {
+  const seal = sealFor(75n);
+  const pending = confirmedCatalogObligationResponse(new ConfirmedCatalogObligationErrorV1({
+    contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: 'asset', seal,
+    assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, 'asset'),
+    ctx: createOperationContext('publish'), publicationLabel: 'publish',
+  }, { txHash: `0x${'ab'.repeat(32)}`, blockNumber: 71, txIndex: 2, batchId: seal.reservedKaId!, kaId: seal.reservedKaId! },
+  new Error('journal refused')))!;
+  const client: BenchmarkClient = new MockBenchmarkClient();
+  const publish = vi.spyOn(client, 'publishAssertion').mockResolvedValue(pending);
+  const query = vi.spyOn(client, 'query');
+  const result = await runPublishAsyncGetBenchmark(baseConfig({ contextGraphId: CONTEXT_GRAPH_ID, outputFormat }), client, monotonicClock());
+  const serialized = formatResult(result, outputFormat);
+  const rows = outputFormat === 'ndjson' ? serialized.split('\n').map(line => JSON.parse(line)) : [];
+  const decoded = outputFormat === 'json' ? JSON.parse(serialized) : rows.at(-1);
+  const operations = outputFormat === 'json' ? decoded.operations : rows.filter(row => row.type === 'operation');
+  const operation = operations.find((row: { operation: string }) => row.operation === 'syncPublish');
+  const failure = decoded.failures.find((row: { operation: string }) => row.operation === 'syncPublish');
+  expect(operation.success).toBe(false);
+  expect(operation.context.confirmedPublicationRecovery).toEqual(pending);
+  expect(failure.context.confirmedPublicationRecovery).toEqual(pending);
+  expect(parseConfirmedCatalogObligationRecoveryV1(failure.context.confirmedPublicationRecovery.recovery)).toEqual(pending.recovery);
+  expect(publish).toHaveBeenCalledOnce();
+  expect(query).not.toHaveBeenCalled();
 });
