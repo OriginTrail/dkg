@@ -181,38 +181,36 @@ export class ContextGraphSubscriptionActivations {
     const ports = this.ports;
     const changes: SubscriptionAccountingChange[] = [];
     const cleanup: string[] = [];
+    const hostedBefore = new Set((this.startupAccounting ?? ports.getStatus())?.hostedActivatedIds ?? []);
     let released = false;
     const transitions = [...new Map([...events].map(event => [event.id, event])).values()].map(event => {
       const { id, kind } = event;
+      const wasPersisted = ports.contextGraphSubscriptionRehydrationAccountedIds.has(id);
+      const before = { persisted: wasPersisted,
+        active: wasPersisted && !ports.contextGraphSubscriptionDormancyById.has(id), hosted: hostedBefore.has(id) };
+      const live = kind === 'activated' ? event.subscription : ports.subscribedContextGraphs.get(id);
       const reason = kind === 'saved' || kind === 'dormancy' ? event.reason
         : kind === 'deactivated' ? 'deactivated' : undefined;
+      const persisted = kind === 'activated' || (kind === 'saved' ? event.persisted : kind !== 'cleared' && wasPersisted);
+      const liveActive = kind === 'activated' || (kind === 'saved' ? event.active
+        : kind === 'dormancy' && Boolean(live?.subscribed || live?.coreHosted));
+      const active = persisted && liveActive && reason === undefined;
+      const after = { persisted, active, hosted: active && (kind === 'saved' ? event.hosted : live?.coreHosted === true) };
       const dormancy = applyDormancy(ports.contextGraphSubscriptionDormancyById, id, reason);
-      if ((kind !== 'activated' && (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id))) return dormancy;
+      if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)) return dormancy;
+      if (persisted) ports.contextGraphSubscriptionRehydrationAccountedIds.add(id);
+      else ports.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
+      changes.push({ id, before, after });
       if (reason === 'activationCap') ports.contextGraphSubscriptionRehydrationPendingIds.add(id);
       else ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-      if (reason !== undefined) released = ports.contextGraphSubscriptionRehydrationSlotIds.delete(id) || released;
-      if (kind === 'dormancy') {
-        const live = ports.subscribedContextGraphs.get(id);
-        changes.push({ dormancy, kind: 'saved', persisted: ports.contextGraphSubscriptionRehydrationAccountedIds.has(id),
-          active: Boolean(live?.subscribed || live?.coreHosted), hosted: live?.coreHosted === true });
-      } else
-      if (kind === 'activated') {
-        ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-        released = this.reconcileRollingSlot(id, event.subscription, true) || released;
-        changes.push({ dormancy, kind: 'saved', persisted: true, active: true, hosted: event.subscription.coreHosted === true });
-      } else if (kind === 'saved') {
-        changes.push({ dormancy, kind, persisted: event.persisted, active: event.active, hosted: event.hosted });
-      } else {
-        ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-        released = ports.contextGraphSubscriptionRehydrationSlotIds.delete(id) || released;
-        changes.push({ dormancy, kind });
-        if (kind === 'cleared') cleanup.push(id);
-      }
+      if (kind === 'activated') released = this.reconcileRollingSlot(id, event.subscription, true) || released;
+      else if (reason !== undefined || kind === 'cleared') released = ports.contextGraphSubscriptionRehydrationSlotIds.delete(id) || released;
+      if (kind === 'cleared') cleanup.push(id);
       return dormancy;
     });
     const status = this.startupAccounting ?? ports.getStatus();
     if (status && changes.length) {
-      const next = accountSubscriptionChanges(status, ports.contextGraphSubscriptionRehydrationAccountedIds, changes);
+      const next = accountSubscriptionChanges(status, changes);
       if (this.startupAccounting) this.startupAccounting = next;
       else ports.setStatus(next);
     }
@@ -234,7 +232,6 @@ export class ContextGraphSubscriptionActivations {
       updateRehydrationStatus: options.updateRehydrationStatus !== false });
     this.assertOwned(attempt);
     attempt.phase = { kind: 'installing', subscription };
-    let networkEffectsStarted = false;
     try {
       await options.prepare?.(subscription, isCurrent => this.persistRepair(attempt, subscription, ports, isCurrent));
       this.assertInstalled(attempt);
@@ -242,7 +239,6 @@ export class ContextGraphSubscriptionActivations {
         throw new Error(`Persisted subscription activation for "${row.id}" became stale`);
       }
       if (!restorePendingMeta) {
-        networkEffectsStarted = true;
         if (row.syncScoped) ports.trackSync(row.id);
         if (row.subscribed) { ports.subscribe(row.id); ports.persistMembership(row.id); }
       }
@@ -251,8 +247,7 @@ export class ContextGraphSubscriptionActivations {
       try {
         // A live subscribe may take custody of the very same provisional row.
         // Attempt identity, rather than row identity alone, authorizes rollback.
-        if (this.pending.get(row.id) === attempt
-          && (networkEffectsStarted || this.ports.subscribedContextGraphs.get(row.id) === subscription)) {
+        if (this.isInstalled(attempt)) {
           try { ports.rollbackNetworkEffects(row.id, options.rollbackSlotRelease ?? 'activation-rollback'); }
           finally {
             ports.remove(row.id);

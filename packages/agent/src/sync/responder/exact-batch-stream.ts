@@ -125,6 +125,7 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
         let started = performance.now();
         let lease: ExactAssetEncodedExportLease | null = null;
         try {
+          let preparation: { kind: 'ready' } | { kind: 'failed'; error: unknown };
           try {
             // Prepare one bounded lease while prior assets await commit credit.
             lease = await options.exportCache.acquireEncoded({ contextGraphId: request.contextGraphId, assetUal, readPriority: 'normal',
@@ -136,11 +137,12 @@ export function createExactBatchResponderBinding(options: ExactBatchResponderBin
             const encodingMs = lease?.encodingDurationMs ?? 0;
             observeExactBatch(() => options.onStage?.('export', assetIndex,
               Math.max(0, performance.now() - started - encodingMs), context));
-          } finally {
-            // Prepared bytes and preparation failures both wait for wire credit.
-            session.signal.throwIfAborted();
-            while (!window.canStartAsset) await readAck();
-          }
+            preparation = { kind: 'ready' };
+          } catch (error) { preparation = { kind: 'failed', error }; }
+          // Prepared bytes and explicit preparation failures both wait for wire credit.
+          session.signal.throwIfAborted();
+          while (!window.canStartAsset) await readAck();
+          if (preparation.kind === 'failed') throw preparation.error;
           const prepared = lease;
           if (!prepared) throw new ExactBatchResponderRefusal('RESOURCE_LIMIT');
           session.signal.throwIfAborted();

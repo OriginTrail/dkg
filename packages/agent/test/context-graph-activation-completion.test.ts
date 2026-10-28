@@ -90,6 +90,25 @@ it.each(['prepare', 'subscribe'] as const)('persists repaired intent and retains
   expect(events).toHaveLength(1);
 });
 
+it.each(['synced', 'metaSynced'] as const)('rolls back an owned provisional row after a %s rewrite and lets the original waiter retry', async field => {
+  const { a, id, row, events } = await fixture();
+  const waiting = a.contextGraphSubscriptionActivations.wait(id, new AbortController().signal);
+  let settled = false; void waiting.then(() => { settled = true; });
+  await expect(a.activatePersistedContextGraphSubscriptionRecord(row, {
+    prepare: async (installed: unknown) => {
+      a.markContextGraphSubscriptionState(id, { [field]: true });
+      expect(a.subscribedContextGraphs.get(id)).not.toBe(installed);
+      throw new Error('preparation failed after readiness update');
+    },
+  })).rejects.toThrow('preparation failed after readiness update');
+  expect(a.subscribedContextGraphs.has(id)).toBe(false);
+  expect(a.contextGraphSubscriptionRehydrationSlotIds.has(id)).toBe(false);
+  expect(events).toEqual([]); expect(settled).toBe(false);
+  await a.activatePersistedContextGraphSubscriptionRecord(row);
+  await expect(waiting).resolves.toMatchObject({ kind: 'committed' });
+  expect(events).toHaveLength(1);
+});
+
 it('preserves an installing activation across an ordinary no-op persistence acknowledgement', async () => {
   const { a, id, row, events } = await fixture();
   const gate = Promise.withResolvers<void>();
