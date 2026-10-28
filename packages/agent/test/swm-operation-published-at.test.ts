@@ -249,47 +249,38 @@ describe('catch-up keeps one publishedAt on a share operation', () => {
 
 describe('planOperationPublishedAt', () => {
   const subject = ack.operationSubject;
-  const key = `${WS_META}\u0000${subject}`;
-  const row = (object: string, graph = WS_META, rowSubject = subject): Quad => ({
-    subject: rowSubject, predicate: PUBLISHED_AT, object, graph,
-  });
-  const typeRow: Quad = {
-    subject, predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type', object: `${DKG}WorkspaceOperation`, graph: WS_META,
-  };
-
+  const row = (object: string, graph = WS_META, rowSubject = subject): Quad => ({ subject: rowSubject, predicate: PUBLISHED_AT, object, graph });
+  const group = (incoming: string[], stored: string[]) => ({ graph: WS_META, subject, incoming, stored });
   it('keeps the earliest stamp, stored or incoming', () => {
-    expect(planOperationPublishedAt(
-      [typeRow, row(stamp(LATER)), row(stamp(PEER))],
-      new Map([[key, [stamp(LOCAL), stamp(LATEST)]]]),
-    )).toEqual({
-      rows: [typeRow, row(stamp(PEER))],
-      retirements: [{ rows: [row(stamp(LOCAL)), row(stamp(LATEST))], winner: row(stamp(PEER)) }],
+    expect(planOperationPublishedAt([group([stamp(LATER), stamp(PEER)], [stamp(LOCAL), stamp(LATEST)])])).toEqual({
+      rows: [row(stamp(PEER))], retirements: [{ rows: [row(stamp(LOCAL)), row(stamp(LATEST))], winner: row(stamp(PEER)) }],
     });
-    expect(planOperationPublishedAt(
-      [typeRow, row(stamp(LATER))],
-      new Map([[key, [stamp(LOCAL), stamp(LATEST)]]]),
-    )).toEqual({ rows: [typeRow, row(stamp(LOCAL))], retirements: [{ rows: [row(stamp(LATEST))], winner: row(stamp(LOCAL)) }] });
+    expect(planOperationPublishedAt([group([stamp(LATER)], [stamp(LOCAL), stamp(LATEST)])])).toEqual({
+      rows: [row(stamp(LOCAL))], retirements: [{ rows: [row(stamp(LATEST))], winner: row(stamp(LOCAL)) }],
+    });
   });
-
   it('keeps the stored stamp for the same instant in another lexical form', () => {
-    expect(planOperationPublishedAt(
-      [row(stamp(LOCAL))],
-      new Map([[key, [stamp(LOCAL.replace('.000Z', 'Z'))]]]),
-    )).toEqual({ rows: [row(stamp(LOCAL.replace('.000Z', 'Z')))], retirements: [] });
+    expect(planOperationPublishedAt([group([stamp(LOCAL)], [stamp(LOCAL.replace('.000Z', 'Z'))])])).toEqual({
+      rows: [row(stamp(LOCAL.replace('.000Z', 'Z')))], retirements: [],
+    });
   });
-
   it('prefers a stamp the head resolver accepts over an earlier unusable one', () => {
-    expect(planOperationPublishedAt([row(stamp(LOCAL))], new Map([[key, ['"not-a-date"']]])))
-      .toEqual({ rows: [row(stamp(LOCAL))], retirements: [{ rows: [row('"not-a-date"')], winner: row(stamp(LOCAL)) }] });
-    expect(planOperationPublishedAt([row(stamp('1960-01-01T00:00:00.000Z'))], new Map([[key, [stamp(LOCAL)]]])))
-      .toEqual({ rows: [row(stamp(LOCAL))], retirements: [] });
+    expect(planOperationPublishedAt([group([stamp(LOCAL)], ['"not-a-date"'])])).toEqual({
+      rows: [row(stamp(LOCAL))], retirements: [{ rows: [row('"not-a-date"')], winner: row(stamp(LOCAL)) }],
+    });
+    expect(planOperationPublishedAt([group([stamp('1960-01-01T00:00:00.000Z')], [stamp(LOCAL)])])).toEqual({ rows: [row(stamp(LOCAL))], retirements: [] });
   });
-
-  it('leaves stamps outside share operations in metadata graphs alone', () => {
+  it('plans an explicit group with no accepted incoming stamp and reinserts its stored winner', () => {
+    expect(planOperationPublishedAt([group([], [stamp(LOCAL), stamp(LATEST)])])).toEqual({
+      rows: [row(stamp(LOCAL))], retirements: [{ rows: [row(stamp(LATEST))], winner: row(stamp(LOCAL)) }],
+    });
+    expect(planOperationPublishedAt([group([], [])])).toEqual({ rows: [], retirements: [] });
+  });
+  it('leaves stamps outside share operations in metadata graphs alone', async () => {
     const slice = row(stamp(LATER), WS_META, `urn:dkg:public-stage:${CG}:_:op:urn%3Aroot`);
     const data = row(stamp(LATER), `did:dkg:context-graph:${CG}/_shared_memory`);
-    expect(planOperationPublishedAt([slice, data], new Map([[key, [stamp(LOCAL)]]])))
-      .toEqual({ rows: [slice, data], retirements: [] });
+    const inserted = await insertKeepingOnePublishedAt(newStore(), [slice, data], { source: 'test', seam: 'test', recordDrops: vi.fn() });
+    expect(inserted).toEqual([slice, data]);
   });
 });
 

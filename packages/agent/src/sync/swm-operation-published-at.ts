@@ -34,57 +34,40 @@ export { operationPublishedAtMs } from './swm-operation-timestamp-reader.js';
 export interface OperationPublishedAtPlan {
   /** The rows to write, including every selected winner even when it was already stored. */
   readonly rows: Quad[];
-  /** Each group's stored losers and the incoming winner required before retiring them. */
+  /** Each group's stored losers and the selected winner required before retiring them. */
   readonly retirements: readonly {
     readonly rows: readonly Quad[];
     readonly winner: Quad;
   }[];
 }
 
-/**
- * The rows that add verified metadata to a store holding `stored` without
- * giving a share operation a second stamp. The earliest stamp the head
- * resolver accepts is kept: it is the value the resolver already reported for
- * a union, and copies stamped later leave it unchanged.
- *
- * `stored` maps `${graph}\u0000${subject}` to the stamps the store holds.
- */
-export function planOperationPublishedAt(
-  rows: readonly Quad[],
-  stored: ReadonlyMap<string, readonly string[]>,
-): OperationPublishedAtPlan {
-  const incoming = new Map<string, Quad[]>();
-  for (const row of rows) {
-    if (!isOperationPublishedAtRow(row)) continue;
-    const key = `${row.graph}\u0000${row.subject}`;
-    incoming.set(key, [...(incoming.get(key) ?? []), row]);
-  }
-  const kept = new Set<Quad>();
-  const reused: Quad[] = [];
+export interface OperationPublishedAtGroup {
+  readonly graph: string;
+  readonly subject: string;
+  readonly incoming: readonly string[];
+  readonly stored: readonly string[];
+}
+
+/** Complete groups retain stored evidence even when every incoming stamp was filtered. */
+export function planOperationPublishedAt(groups: readonly OperationPublishedAtGroup[]): OperationPublishedAtPlan {
+  const rows: Quad[] = [];
   const retirements: OperationPublishedAtPlan['retirements'][number][] = [];
-  for (const [key, stamps] of incoming) {
-    const { graph, subject } = stamps[0]!;
-    const storedObjects = stored.get(key) ?? [];
-    const winner = [
-      ...storedObjects.map((object): StampCandidate => ({ object })),
-      ...stamps.map((row): StampCandidate => ({ object: row.object, row })),
-    ].reduce((best, candidate) => (compareStamps(candidate, best) < 0 ? candidate : best));
-    if (winner.row) kept.add(winner.row);
-    else reused.push({ subject, predicate: PUBLISHED_AT, object: winner.object, graph });
-    const retiring: Quad[] = [];
-    for (const object of storedObjects) {
-      if (winner.row || object !== winner.object) {
-        retiring.push({ subject, predicate: PUBLISHED_AT, object, graph });
-      }
-    }
-    if (retiring.length > 0) {
-      retirements.push({ rows: retiring, winner: { subject, predicate: PUBLISHED_AT, object: winner.object, graph } });
-    }
+  for (const { graph, subject, incoming, stored } of groups) {
+    const stampRow = (object: string): Quad => ({ graph, subject, predicate: PUBLISHED_AT, object });
+    // A historical stored value may also exceed today's canonical ingest bound.
+    const acceptedStored = filterOversizedSyncQuads(stored.map(stampRow)).kept;
+    const candidates: StampCandidate[] = [
+      ...acceptedStored.map(({ object }) => ({ object, source: 'stored' as const })),
+      ...incoming.map(object => ({ object, source: 'incoming' as const })),
+    ];
+    if (candidates.length === 0) continue;
+    const winner = candidates.reduce((best, candidate) => compareStamps(candidate, best) < 0 ? candidate : best);
+    const winnerRow = stampRow(winner.object);
+    rows.push(winnerRow);
+    const losers = stored.filter(object => object !== winner.object).map(stampRow);
+    if (losers.length > 0) retirements.push({ rows: losers, winner: winnerRow });
   }
-  return {
-    rows: [...rows.filter((row) => !isOperationPublishedAtRow(row) || kept.has(row)), ...reused],
-    retirements,
-  };
+  return { rows, retirements };
 }
 
 /**
@@ -103,15 +86,22 @@ export async function insertKeepingOnePublishedAt(
   const filtered = filterOversizedSyncQuads(rows);
   if (filtered.dropped.length > 0) recordDrops(filtered.dropped, seam);
   const targets = new Map<string, Set<string>>();
+  const groups = new Map<string, { graph: string; subject: string; incoming: string[]; stored: string[] }>();
   for (const row of rows) {
     if (!isOperationPublishedAtRow(row) || !isSafeIri(row.graph) || !isSafeIri(row.subject)) continue;
     targets.set(row.graph, (targets.get(row.graph) ?? new Set<string>()).add(row.subject));
+    const key = `${row.graph}\u0000${row.subject}`;
+    if (!groups.has(key)) groups.set(key, { graph: row.graph, subject: row.subject, incoming: [], stored: [] });
   }
   if (targets.size === 0) return insertPrefilteredSyncQuads(
     rows => store.insert(rows, { priority: 'background', source: `${source}.insert` }),
     filtered.kept, { recordDrops }, seam,
   );
-  const stored = new Map<string, string[]>();
+  const otherRows: Quad[] = [];
+  for (const row of filtered.kept) {
+    const group = isOperationPublishedAtRow(row) ? groups.get(`${row.graph}\u0000${row.subject}`) : undefined;
+    if (group) group.incoming.push(row.object); else otherRows.push(row);
+  }
   for (const [graph, subjectSet] of targets) {
     const subjects = [...subjectSet];
     for (let start = 0; start < subjects.length; start += READ_CHUNK) {
@@ -132,27 +122,18 @@ export async function insertKeepingOnePublishedAt(
         const object = binding['o'];
         if (!subject || !object) continue;
         const key = `${graph}\u0000${subject}`;
-        stored.set(key, [...(stored.get(key) ?? []), object]);
+        groups.get(key)?.stored.push(object);
       }
     }
   }
-  // Select only stamps that can survive the canonical ingest filter. Otherwise
-  // an oversized early winner could discard the only writable later stamp.
-  // Reinsert a selected stored winner in the same mutation as its metadata.
-  // A cleanup may delete the operation after our read, including on bulk paths
-  // outside a KA lease; a stale read is therefore never persistence evidence.
-  const stamped = new Set(filtered.kept.filter(isOperationPublishedAtRow).map(row => `${row.graph}\u0000${row.subject}`));
-  const fallback: Quad[] = [];
-  for (const [graph, subjects] of targets) for (const subject of subjects) {
-    const key = `${graph}\u0000${subject}`;
-    if (!stamped.has(key)) for (const object of stored.get(key) ?? []) fallback.push({ graph, subject, predicate: PUBLISHED_AT, object });
-  }
-  const candidates = [...filtered.kept, ...filterOversizedSyncQuads(fallback).kept];
-  const plan = planOperationPublishedAt(candidates, stored);
+  // The planner sees complete operation groups, including empty incoming sets.
+  // Its selected stored winners are reinserted with metadata: a read alone is
+  // not persistence evidence after concurrent operation cleanup.
+  const plan = planOperationPublishedAt([...groups.values()]);
   assertUsableOperationTimestamps(targets, plan.rows);
   const inserted = await insertPrefilteredSyncQuads(
     rows => store.insert(rows, { priority: 'background', source: `${source}.insert` }),
-    plan.rows, { recordDrops }, seam,
+    [...otherRows, ...plan.rows], { recordDrops }, seam,
   );
   assertUsableOperationTimestamps(targets, inserted);
   // The winning stamp must still exist in the SAME backend delete operation.
@@ -217,10 +198,10 @@ function isOperationPublishedAtRow(row: Quad): boolean {
     && row.graph.endsWith('/_shared_memory_meta');
 }
 
-/** A stored stamp, or an incoming one with its row. */
+/** Original evidence provenance preserves stored-value preference on a tie. */
 interface StampCandidate {
   readonly object: string;
-  readonly row?: Quad;
+  readonly source: 'stored' | 'incoming';
 }
 
 /** A stamp the head resolver accepts, or null. */
@@ -235,6 +216,6 @@ function compareStamps(left: StampCandidate, right: StampCandidate): number {
   const rightMs = usableStampMs(right.object);
   if ((leftMs === null) !== (rightMs === null)) return leftMs === null ? 1 : -1;
   if (leftMs !== null && rightMs !== null && leftMs !== rightMs) return leftMs - rightMs;
-  if (Boolean(left.row) !== Boolean(right.row)) return left.row ? 1 : -1;
+  if (left.source !== right.source) return left.source === 'incoming' ? 1 : -1;
   return left.object < right.object ? -1 : left.object > right.object ? 1 : 0;
 }
