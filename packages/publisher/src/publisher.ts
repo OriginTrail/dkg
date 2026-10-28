@@ -475,10 +475,7 @@ export interface InitialPublishOptions extends BasePublicationOptions {
    * adopt it. Sends no transaction, ACK request or member ciphertext.
    * `txHash` is an optional hint for the mint transaction.
    */
-  adoptExistingMint?: { txHash?: string;
-    /** Resolved catalog policy, independent of the ability to encrypt member payloads. */
-    curated?: boolean;
-  };
+  adoptExistingMint?: { txHash?: string };
 }
 
 /** Options for updating an existing asset. */

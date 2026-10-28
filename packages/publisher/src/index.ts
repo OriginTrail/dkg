@@ -617,3 +617,7 @@ export {
 } from './lift-job-page.js';
 
 export { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, projectGraphKnowledgeAssetReplayControls } from './graph-knowledge-asset-controls.js';
+
+export { prepareMintAdoption, withPreparedMintAdoption, copyPreparedMintAdoption } from './adopt-existing-mint.js';
+
+export { withAssertionLifecycleWriteLease, type AssertionLifecycleWriteLease } from './store-write-locks.js';

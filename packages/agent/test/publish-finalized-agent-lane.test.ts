@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import {
   buildAssertionSealQuads,
   contextGraphAssertionUri,
@@ -39,6 +39,7 @@ const MERKLE = computeFlatKCRootV10([PUBLIC_QUAD], []);
 function buildGraphSeal(
   assertionUri: string,
   reservedKaId: bigint = RESERVED_KA_ID,
+  assertionVersion = 1,
 ): Quad[] {
   return buildAssertionSealQuads({
     assertionUri,
@@ -54,7 +55,7 @@ function buildGraphSeal(
     finalizedAtIso: '2026-01-01T00:00:00.000Z',
     contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: KA_UAL,
-    assertionVersion: 1,
+    assertionVersion,
     publicTripleCount: 1,
     privateTripleCount: 0,
   }) as Quad[];
@@ -90,7 +91,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       .toThrow(/not in author .* namespace/);
   });
 
-  it('reads finalized assertions from the explicitly selected non-default agent lane', async () => {
+  it('retains a failed confirmed-mint handoff for the explicitly selected non-default agent lane', async () => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
     const exactGraph = `${contextGraphSharedMemoryUri(CG)}/${AGENT_B}/1`;
@@ -162,12 +163,11 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     // sole author AGENT_B — covered by publish-foreign-author-resolution.test.ts.)
     await expect(agent.publishFromFinalizedAssertion(CG, 'no-such-name')).rejects.toThrow(/is not finalized/);
 
-    const result = await agent.publishFromFinalizedAssertion(CG, NAME, {
+    await expect(agent.publishFromFinalizedAssertion(CG, NAME, {
       agentAddress: AGENT_B,
       clearSharedMemoryAfter: true,
-    });
+    })).rejects.toMatchObject({ cause: expect.objectContaining({ message: 'simulated escaped RFC-64 SWM inventory removal failure' }) });
 
-    expect(result.assertionUri).toBe(assertionUri);
     expect(markerCalls).toEqual([{
       contextGraphId: CG,
       name: NAME,
@@ -200,7 +200,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(publishCalls[0]?.opts).not.toHaveProperty('clearSharedMemoryAfter');
     expect(remainingClearCalls).toHaveLength(1);
     expect(remainingClearCalls[0].slice(0, 2)).toEqual([CG, undefined]);
-    expect(result.status).toBe('confirmed');
     expect(rfc64SwmInventoryRemovalCalls).toHaveLength(1);
     expect(rfc64SwmInventoryRemovalCalls[0]).toMatchObject({
       contextGraphId: CG,
@@ -210,9 +209,9 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         kaUal: KA_UAL,
       },
     });
-    expect(warnings).toEqual(expect.arrayContaining([
-      expect.stringContaining('simulated escaped RFC-64 SWM inventory removal failure'),
-    ]));
+    const checkpoint = await store.query('SELECT ?p WHERE { GRAPH <urn:dkg:publisher:named-finalization> { ?s ?p ?o } }');
+    expect(checkpoint.type === 'bindings' && checkpoint.bindings.map(row => row.p))
+      .toEqual(['http://dkg.io/ontology/namedPublishFinalizationReady']);
   });
 
   it('maps an empty exact KA graph to the mint no-data precondition', async () => {
@@ -307,7 +306,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       graph: swmGraph,
     };
     await store.insert([
-      ...buildGraphSeal(assertionUri),
+      ...buildGraphSeal(assertionUri, RESERVED_KA_ID, 2),
       { subject: lifecycleUri, predicate: VM_CURRENT_ASSERTION_PRED, object: '"prior"', graph: metaGraph },
       { subject: lifecycleUri, predicate: KA_ID_PRED, object: '"1"', graph: metaGraph },
       { ...PUBLIC_QUAD, graph: namedGraph },
@@ -348,7 +347,14 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       };
     };
 
+    // A confirmed v2 must retain existing best-effort update semantics: the
+    // mint-only recovery command cannot resume a checkpoint for this update.
+    const transfer = vi.fn().mockRejectedValueOnce(new Error('temporary update catalog failure'));
+    agent.transferRfc64ConfirmedVmV1 = transfer;
     const result = await agent.publishFromFinalizedAssertion(CG, NAME, { agentAddress: AGENT_B });
+    expect(transfer).toHaveBeenCalledOnce();
+    const checkpoint = await store.query('SELECT ?s WHERE { GRAPH <urn:dkg:publisher:named-finalization> { ?s ?p ?o } }');
+    expect(checkpoint.type === 'bindings' && checkpoint.bindings).toEqual([]);
 
     expect(result.status).toBe('confirmed');
     expect(updateCalls).toHaveLength(1);
@@ -357,7 +363,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(updateCalls[0][4]).toMatchObject({
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       kaUal: KA_UAL,
-      assertionVersion: '1',
+      assertionVersion: '2',
       publicTripleCount: 1,
       privateTripleCount: 0,
     });
@@ -370,7 +376,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(cleanupCalls[0][2]).toBeUndefined();
     expect(cleanupCalls[0][4]).toBe(KA_UAL);
     // The cleanup is bounded by the assertion version this update confirmed.
-    expect(cleanupCalls[0][5]).toBe('1');
+    expect(cleanupCalls[0][5]).toBe('2');
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
     const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
     expect(legacy).toMatchObject({ type: 'boolean', value: true });

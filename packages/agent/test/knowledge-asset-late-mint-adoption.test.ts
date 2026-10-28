@@ -462,7 +462,8 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     const catalog = await store.query(`SELECT ?s WHERE { GRAPH <${contextGraphCatalogUri(CONTEXT_GRAPH)}> { ?s ?p ?o } }`);
     expect(catalog.type === 'bindings' && catalog.bindings.length).toBeGreaterThan(0);
     const options = publishFromSharedMemory.mock.calls[0]?.[2];
-    expect(options?.adoptExistingMint).toMatchObject({ curated: true });
+    expect(options?.adoptExistingMint).toEqual({});
+    expect(options?.trustedNonManifestCatalogTriples?.size ?? options?.trustedNonManifestCatalogTriples?.length).toBeGreaterThan(0);
     expect(options?.encryptInlinePayload).toBeUndefined();
     expect(options?.encryptInlineChunked).toBeUndefined();
   });
@@ -565,6 +566,24 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
     expect(await history()).toMatchObject({ state: 'created', memoryLayer: 'WM' });
     expect((await history())?.publishedUal).toBeUndefined();
+  });
+
+  it('preserves a resident share reopened by pull-from while mint lookup is pending', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, store, history, createKnowledgeAssets } = await strandedAsset(chain);
+    const lookup = chain.resolveKnowledgeAssetMint.bind(chain);
+    vi.spyOn(chain, 'resolveKnowledgeAssetMint').mockImplementationOnce(async (...args) => {
+      // This takes the same lifecycle lock. Lookup must be outside it.
+      await agent.assertion.pullFrom(CONTEXT_GRAPH, NAME, 'swm', { agentAddress: AUTHOR, onConflict: 'replace' });
+      return lookup(...args);
+    });
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE, message: expect.stringMatching(/removed while reconcile waited/) });
+    expect(await history()).toMatchObject({ state: 'created', memoryLayer: 'WM' });
+    expect((await history())?.publishedUal).toBeUndefined();
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
+    const rows = await store.query(`SELECT ?s WHERE { GRAPH <${NAMED_FINALIZATION_GRAPH}> { ?s ?p ?o } }`);
+    expect(rows.type === 'bindings' && rows.bindings).toEqual([]);
   });
 
   it('reads mint evidence outside the lifecycle lock, so pull-from finishes during a slow lookup', async () => {

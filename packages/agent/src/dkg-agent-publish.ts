@@ -1,3 +1,4 @@
+import { copyPreparedMintAdoption, type AssertionLifecycleWriteLease } from '@origintrail-official/dkg-publisher';
 import { beginNamedPublishFinalization, finishNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
@@ -5813,6 +5814,8 @@ export class PublishMethods extends DKGAgentBase {
       clearSharedMemoryAfter?: boolean;
       publisherOverride?: DKGPublisher;
       adoptExistingMint?: PublishOptions['adoptExistingMint'];
+      /** Internal reconciliation transaction; validated by the publisher at cleanup. */
+      heldLifecycle?: AssertionLifecycleWriteLease;
     },
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
@@ -6155,7 +6158,7 @@ export class PublishMethods extends DKGAgentBase {
       result = await this.publishFromSharedMemory(
         contextGraphId,
         'all',
-        {
+        copyPreparedMintAdoption(opts, {
           operationCtx: opts?.operationCtx,
           onPhase: opts?.onPhase,
           subGraphName: opts?.subGraphName,
@@ -6186,7 +6189,7 @@ export class PublishMethods extends DKGAgentBase {
           },
           publisherOverride: publisher,
           adoptExistingMint: opts?.adoptExistingMint,
-        },
+        }),
       );
 
       // On confirmed mint, stamp VM pointer + publish receipt on _meta.
@@ -6210,7 +6213,7 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    if (result.status === 'confirmed') {
+    if (result.status === 'confirmed' && operationPlan.kind !== 'update') {
       await beginNamedPublishFinalization(this.store, {
         assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId,
       }, () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
@@ -6360,7 +6363,7 @@ export class PublishMethods extends DKGAgentBase {
     // re-sets the marker via assertionPromote). Covers BOTH MINT and UPDATE.
     if (result.status === 'confirmed') {
       try {
-        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName);
+        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, opts?.heldLifecycle);
       } catch (err) {
         this.log.warn(
           opts?.operationCtx ?? createOperationContext('publishFromSWM'),
@@ -6370,10 +6373,16 @@ export class PublishMethods extends DKGAgentBase {
       }
     }
 
-    if (result.status === 'confirmed') await this.completeNamedPublishFinalization({
-      contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
-      shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri,
-    });
+    if (result.status === 'confirmed') {
+      const finalization = { contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
+        shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri };
+      if (operationPlan.kind === 'update') {
+        // Only initial mints have a verified recovery command. Preserve the
+        // existing update observer instead of leaving an unresumable checkpoint.
+        await this.afterConfirmedGraphScopedVmPublishV1({ ...finalization, status: result.status,
+          ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
+      } else await this.completeNamedPublishFinalization(finalization);
+    }
 
     return { ...result, assertionUri, seal };
   }
@@ -6775,11 +6784,9 @@ export class PublishMethods extends DKGAgentBase {
     // decrypt — without this, remap publishes (source SWM cg != target
     // chain cg) produced undecryptable payloads.
     // Adopt-only resolves the access policy alone: the recorded catalog depends on it, sender keys do not.
-    const adoption = options?.adoptExistingMint === undefined ? undefined : {
-      ...options.adoptExistingMint,
-      curated: await resolvePublishTargetCuration(this, this.log, ctx,
-        { contextGraphId, explicitPolicyTargetContextGraphId: ctxGraphIdStr, logPrefix: 'LU-5' }),
-    };
+    const adoption = options?.adoptExistingMint;
+    const adoptionCurated = adoption === undefined ? undefined : await resolvePublishTargetCuration(this, this.log, ctx,
+      { contextGraphId, explicitPolicyTargetContextGraphId: ctxGraphIdStr, logPrefix: 'LU-5' });
     const { encryptInlinePayload, encryptInlineChunked } = adoption ? {} : await this._resolveInlineEncryption(
         contextGraphId, options?.subGraphName, options?.authorAgentAddress, ctxGraphIdStr,
         onChainId ? { aeadBindingContextGraphId: onChainId } : undefined,
@@ -6801,11 +6808,11 @@ export class PublishMethods extends DKGAgentBase {
       graphScoped: true,
       onChainContextGraphId: onChainId,
       encryptInlinePayload,
-      curated: adoption?.curated,
+      curated: adoptionCurated,
     });
 
     const publisher = options?.publisherOverride ?? this.publisher;
-    const result = await publisher.publishFromSharedMemory(contextGraphId, selection, {
+    const result = await publisher.publishFromSharedMemory(contextGraphId, selection, copyPreparedMintAdoption(options, {
       operationCtx: ctx,
       clearSharedMemoryAfter: options?.clearSharedMemoryAfter,
       onPhase: options?.onPhase,
@@ -6832,7 +6839,7 @@ export class PublishMethods extends DKGAgentBase {
       encryptInlinePayload,
       encryptInlineChunked,
       adoptExistingMint: adoption,
-    });
+    }));
 
     if (
       result.status === 'confirmed'

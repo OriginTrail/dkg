@@ -157,8 +157,6 @@ export async function adoptExistingMint(
 
 /** Adoption context for one sealed (graph-scoped) publish. */
 export interface SealedMintAdoption {
-  /** Reconcile: record the existing mint and send nothing. */
-  readonly existingOnly?: { txHash?: string };
   readonly store: TripleStore;
   /** The confirmed record this publish writes, to recognize one that already exists. */
   readonly record: { contextGraphId: string; ual: string }
@@ -178,15 +176,13 @@ export function sealedMintAdoption(
     privateTripleCount: number;
     expectedPrivateMerkleRoot?: Uint8Array;
   } | undefined,
-  input: { contextGraphId: string; subGraphName?: string; existingOnly?: { txHash?: string }; log: (message: string) => void },
+  input: { contextGraphId: string; subGraphName?: string; log: (message: string) => void },
 ): SealedMintAdoption | undefined {
   if (!graphPublish) {
-    if (input.existingOnly) throw new Error('adoptExistingMint requires a sealed graph-scoped publish');
     return undefined;
   }
   const { scope } = graphPublish;
   return {
-    ...(input.existingOnly ? { existingOnly: input.existingOnly } : {}),
     store,
     log: input.log,
     record: {
@@ -219,9 +215,8 @@ export interface MintOrAdoptOutcome {
  * The chain step of a publish. A sealed publish adopts its own existing mint
  * when the contract reports the reserved id already minted: only a
  * `KaIdAlreadyMinted` revert decoded from structured revert data, for exactly
- * the sealed reservation, leads there. With `existingOnly` (reconcile) it
- * skips `createKnowledgeAssets` and goes straight to adoption, so nothing is
- * sent. The seal's expectation is the publish's own reserved id, root,
+ * the sealed reservation, leads there. Explicit record-only acquisition uses
+ * adoptMintForRecording at the publisher boundary. The seal's expectation is the publish's own reserved id, root,
  * context graph and author.
  */
 export async function mintOrAdoptKnowledgeAssets(
@@ -237,10 +232,6 @@ export async function mintOrAdoptKnowledgeAssets(
       authorAddress: params.author.address,
     }
     : undefined;
-  if (sealed?.existingOnly) {
-    if (!expected) throw new Error('Recording an existing mint requires a reserved KA id');
-    return adopted(sealed, expected, await adoptExistingMint(chain, expected, { txHash: sealed.existingOnly.txHash }));
-  }
   try {
     return { result: await chain.createKnowledgeAssets(params), recording: { adopted: false, keepsExistingRecord: false } };
   } catch (error) {
@@ -254,10 +245,47 @@ export async function mintOrAdoptKnowledgeAssets(
   }
 }
 
+/** Opaque verified receipt, scoped to one adapter and sealed reservation. */
+export interface PreparedMintAdoption { readonly preparedMintAdoption: unique symbol }
+const preparedEvidence = new WeakMap<object, { chain: ChainAdapter; expected: MintAdoptionExpectation; result: OnChainPublishResult }>();
+const PREPARED_MINT = Symbol('prepared mint adoption');
+type EvidenceOptions = { [PREPARED_MINT]?: PreparedMintAdoption };
+/** Read slow chain evidence before taking an assertion lifecycle write lock. */
+export async function prepareMintAdoption(chain: ChainAdapter, expected: MintAdoptionExpectation,
+  txHash?: string): Promise<PreparedMintAdoption> {
+  const result = await adoptExistingMint(chain, expected, { txHash });
+  const token = Object.freeze({}) as PreparedMintAdoption;
+  preparedEvidence.set(token, { chain, expected: { ...expected, merkleRoot: Uint8Array.from(expected.merkleRoot) }, result: { ...result } });
+  return token;
+}
+/** Internal capability propagation; no public publish option can manufacture evidence. */
+export function withPreparedMintAdoption<T extends object>(options: T, token: PreparedMintAdoption): T {
+  if (!preparedEvidence.has(token)) throw new Error('Invalid prepared mint evidence');
+  return Object.assign(options, { [PREPARED_MINT]: token });
+}
+export function copyPreparedMintAdoption<T extends object>(source: object | undefined, target: T): T {
+  const token = (source as EvidenceOptions | undefined)?.[PREPARED_MINT];
+  return token === undefined ? target : withPreparedMintAdoption(target, token);
+}
+function preparedReceipt(source: object | undefined, chain: ChainAdapter,
+  expected: MintAdoptionExpectation, txHash?: string): OnChainPublishResult | undefined {
+  const token = (source as EvidenceOptions | undefined)?.[PREPARED_MINT];
+  if (token === undefined) return undefined;
+  const evidence = preparedEvidence.get(token);
+  if (!evidence || evidence.chain !== chain || evidence.expected.kaId !== expected.kaId
+    || evidence.expected.contextGraphId !== expected.contextGraphId
+    || evidence.expected.authorAddress.toLowerCase() !== expected.authorAddress.toLowerCase()
+    || ethers.hexlify(evidence.expected.merkleRoot) !== ethers.hexlify(expected.merkleRoot)
+    || (txHash !== undefined && evidence.result.txHash.toLowerCase() !== txHash.toLowerCase()))
+    throw new Error('Prepared mint evidence does not match the current sealed reservation');
+  return { ...evidence.result };
+}
+
 /** Verify receipt evidence directly; adoption never constructs transaction parameters. */
 export async function adoptMintForRecording(chain: ChainAdapter, expected: MintAdoptionExpectation,
-  sealed: SealedMintAdoption, txHash?: string): Promise<MintOrAdoptOutcome> {
-  return adopted(sealed, expected, await adoptExistingMint(chain, expected, { txHash }));
+  sealed: SealedMintAdoption, txHash?: string, sourceOptions?: object): Promise<MintOrAdoptOutcome> {
+  return adopted(sealed, expected, preparedReceipt(sourceOptions, chain, expected, txHash)
+    ?? await adoptExistingMint(chain, expected, { txHash }));
 }
 
 async function adopted(

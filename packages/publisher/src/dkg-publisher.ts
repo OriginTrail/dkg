@@ -1,7 +1,8 @@
+import { acquirePreparedPublication, publicationAcquisitionFailure, type PublicationAcquisition, type GraphScopedPublishDescriptor } from './prepared-publication-acquisition.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
 import { certifyPromoteNoEffectRejection } from './promote-no-effect-rejection.js';
 import { createPromoteOwnershipReader, type PromoteOwnershipReader } from './async-promote-ownership.js';
-import { assertionLifecycleWriteLockKey, writeLocksForStore } from './store-write-locks.js';
+import { assertionLifecycleWriteLockKey, writeLocksForStore, assertAssertionLifecycleWriteLease, type AssertionLifecycleWriteLease } from './store-write-locks.js';
 import { assertNoUnfinishedBoundShare, unfinishedBoundShareError } from './bound-share-mutation-guard.js';
 import type { BoundPromoteRequest } from './async-promote-queue-types.js';
 import { readAssertionPromoteEvidence, parsePromoteLifecycleLiteral } from './assertion-promote-evidence.js';
@@ -32,7 +33,6 @@ import {
   assertPublicationPricingPolicyApplicable,
   formatPublicationPricingPolicyRequirement,
   parsePublicationPricingPolicy,
-  resolvePublicationPricing,
 } from './publication-pricing.js';
 import { measureCanonicalPublicationPayload } from './publication-payload-measurement.js';
 import { assertNoUserAuthoredKnowledgeAssetSkolemTerms, skolemizeByEntity, skolemizeKnowledgeAsset, skolemizeKnowledgeAssetParts } from './auto-partition.js';
@@ -58,7 +58,7 @@ import {
   splitTrustedGeneratedCatalogRootMap,
   trustedCatalogTripleKeySet,
 } from './catalog-trust.js';
-import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, contextGraphOnChainIdBindingQuery, isAgentRegistryContextGraph } from '@origintrail-official/dkg-core';
+import { partitionCatalogQuads, catalogCommittedLeaves, computeCatalogRoot, contextGraphCatalogUri, contextGraphOnChainIdBindingQuery } from '@origintrail-official/dkg-core';
 import { RESERVED_SUBJECT_PREFIXES, findReservedSubjectPrefix, isReservedSubject } from './reserved-subjects.js';
 import { skolemize } from './skolemize.js';
 import {
@@ -71,7 +71,6 @@ import {
   validateCanonicalGraphScopedKnowledgeAssetPayload,
   validatePublishRequest,
 } from './validation.js';
-import { isFailClosedInlineEncrypt } from './async-lift-publish-options.js';
 import {
   assertionOriginalGraph,
   assertionScopedGraphUri,
@@ -88,7 +87,6 @@ import {
   generateAssertionCreatedMetadata,
   generateAssertionWrittenMetadata,
   generateAssertionDiscardedMetadata,
-  generateTentativeMetadata,
   WM_CURRENT_ASSERTION_PRED,
   SWM_CURRENT_ASSERTION_PRED,
   VM_CURRENT_ASSERTION_PRED,
@@ -146,7 +144,7 @@ import {
   CuratorRejectedError,
   type CASCondition,
 } from './errors.js';
-import { RpcPreconditionError, isQuorumUnmetError } from './ack-errors.js';
+import { RpcPreconditionError } from './ack-errors.js';
 import { stripOptionalLiteral } from './sparql-binding-literal.js';
 import {
   runLegacyWorkingMemoryMigration,
@@ -160,7 +158,7 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
-import { adoptMintForRecording, mintOrAdoptKnowledgeAssets, sealedMintAdoption, type MintOrAdoptOutcome, type MintRecording } from './adopt-existing-mint.js';
+import { copyPreparedMintAdoption, adoptMintForRecording, sealedMintAdoption, type MintOrAdoptOutcome } from './adopt-existing-mint.js';
 import { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -695,14 +693,6 @@ type InternalUpdateOptions = UpdateOptions & {
   [TRUSTED_CATALOG_ORIGIN_TOKEN]?: true;
 };
 
-interface GraphScopedPublishDescriptor {
-  scope: GraphKnowledgeAssetScope;
-  /** Packed V10 kaId derived once from the immutable UAL author/number pair. */
-  expectedPackedKaId: bigint;
-  publicTripleCount: number;
-  privateTripleCount: number;
-  expectedPrivateMerkleRoot?: Uint8Array;
-}
 
 type GraphScopedPublicationOperation =
   | { kind: 'initial'; options: InitialPublishOptions }
@@ -2252,7 +2242,7 @@ export class DKGPublisher implements Publisher {
     };
     let publishResult: PublishResult;
     try {
-      publishResult = await this.publish(internalPublishOptions);
+      publishResult = await this.publish(copyPreparedMintAdoption(options, internalPublishOptions));
     } catch (err) {
       if (!isNoDataInSwmFailure(err)) throw err;
       this.log.warn(
@@ -2575,8 +2565,6 @@ export class DKGPublisher implements Publisher {
       operationCtx,
       entityProofs = false,
       onPhase,
-      onBeforeBroadcast,
-      onBroadcastAccepted,
       onPublishConfirmed,
     } = options;
     // Round 9 Bug 25 + Round 12 Bug 34: reject user-authored reserved-
@@ -2601,7 +2589,7 @@ export class DKGPublisher implements Publisher {
     const graphPublish = resolveGraphScopedPublishDescriptor({ kind: 'initial', options });
     // A sealed publish adopts its own late mint; explicit adoption records it and sends nothing.
     const sealedAdoption = sealedMintAdoption(this.store, graphPublish, { contextGraphId, subGraphName: options.subGraphName,
-      existingOnly: options.adoptExistingMint, log: (message) => this.log.info(ctx, message) });
+      log: (message) => this.log.info(ctx, message) });
     assertPublicationPricingPolicyApplicable(pricingPolicy, {
       kind: 'initial',
       graphScoped: graphPublish !== undefined,
@@ -2973,23 +2961,8 @@ export class DKGPublisher implements Publisher {
     };
 
     const merkleRootHex = ethers.hexlify(kcMerkleRoot);
-    let publishOperationId = '';
     let ual = '';
-    const ensurePublishOperationIdentity = () => {
-      if (publishOperationId.length > 0) return;
-      const tentativeSeq = ++this.tentativeCounter;
-      // RFC-001 §3.5 publication identifier. Stable across tentative and
-      // confirmed states for this publish so the `dkg:Publication` subject
-      // emitted in metadata stays the same after on-chain confirmation.
-      publishOperationId = `${this.sessionId}-${tentativeSeq}`;
-    };
-
-    let onChainResult: OnChainPublishResult | undefined;
-    let usedV10Path = false;
-    let localChainSkipReason: 'no-chain' | undefined;
-    let v10ACKs: V10CoreNodeACK[] | undefined;
     const v10CgDomain = String(onChainContextGraphId ?? contextGraphId);
-    const swmGraphId = contextGraphId;
     const attributionIdentityId: bigint = hasAttributionOverride
       ? options.publisherNodeIdentityIdOverride!
       : this.publisherNodeIdentityId;
@@ -3092,8 +3065,9 @@ export class DKGPublisher implements Publisher {
         }
       }
     };
-    const recordConfirmed = async (outcome: MintOrAdoptOutcome, reservedKaId: bigint | undefined, effectiveAuthorAddress: string): Promise<void> => {
-      onChainResult = outcome.result;
+    const recordConfirmed = async (outcome: MintOrAdoptOutcome, reservedKaId: bigint | undefined, effectiveAuthorAddress: string): Promise<string> => {
+      const onChainResult = outcome.result;
+      let ual = '';
       const recording = outcome.recording;
       // GH#2359 item 2 — the receipt is confirmed and parsed; everything below is local
       // post-receipt work. Fire the scheduling hint NOW so a demand-driven reconciler can
@@ -3284,903 +3258,11 @@ export class DKGPublisher implements Publisher {
         },
       });
 
+      return ual;
     };
 
-    const submitPreparedPayload = async (): Promise<void> => {
-      const publisherPlanning = await this.publisherPlanner.prepare(publisherContextGraphId);
-      const { chainV10Ready, canAttemptOnChainPublish } = publisherPlanning;
-      // V10: Collect core node StorageACKs (spec §9.0, Phase 3).
-      // For direct publish: send staging quads inline via P2P so core nodes
-      // can verify the merkle root without needing SWM pre-positioning.
-      // For public callers using fromSharedMemory: data is already in peers'
-      // SWM via shared memory gossip — do NOT send inline quads; core nodes
-      // verify against their local SWM copy (preserving storage-attestation).
-      // Internal publishFromSharedMemory() calls set a private ACK staging policy
-      // to inline small public payloads on the first ACK attempt, avoiding the
-      // public-CG subscription gap; oversized payloads keep the SWM fallback.
-      // Folded public+private publishes send only the private Merkle roots on
-      // the ACK wire. Core nodes verify the public quads they store and fold
-      // those commitments into the claimed KC root without seeing private
-      // plaintext.
-      // OT-RFC-38 / LU-5: when an encryptInlinePayload hook is wired (curated
-      // CGs only — DKGAgent resolves this from accessPolicy), ALWAYS send the
-      // payload inline as AEAD ciphertext, regardless of `fromSharedMemory`.
-      // Cores can't decrypt and they're not subscribed to curated SWM yet
-      // (substrate split lands in LU-6), so SWM-lookup would always decline
-      // with NO_DATA_IN_SWM — the exact bug §1.1 surfaces. Public CGs keep
-      // strict external `fromSharedMemory` semantics; only an internal explicit
-      // ACK staging policy can opt into size-gated inline staging.
-      // GH #1121 — take the encrypted-inline path whenever a REAL encryption
-      // callback is wired. The ONE exception: skip the async-lift mapper's
-      // fail-closed DEFAULT on a chainless / local-only publish (ownerOnly KA on
-      // an unregistered CG, chain-not-ready node, …). Such a publish ships nothing
-      // to other nodes, so there is no plaintext-to-cores leak to guard — and the
-      // default (which exists only to prevent that leak) cannot resolve a real
-      // chain-key off-chain, so invoking it would needlessly fail a legitimate
-      // local publish. For an actual on-chain publish the default still fires
-      // (fail-closed): a private payload is never shipped to cores in the clear.
-      const inlineEncryptCb = options.encryptInlinePayload;
-      const useEncryptedInline =
-        typeof inlineEncryptCb === 'function'
-        && (canAttemptOnChainPublish || !isFailClosedInlineEncrypt(inlineEncryptCb));
-      // OT-RFC-49 / WS-D — a curated publish is now identified by a non-zero
-      // catalog commitment. The on-chain commitment + the core ACK verify the
-      // PUBLIC `_catalog`; the PRIVATE data stays encrypted for MEMBERS only.
-      // `useCuratedCatalog` gates the inline-catalog ACK path (cores rebuild the
-      // catalog root from the inline plaintext and DECLINE on mismatch).
-      const useCuratedCatalog = useEncryptedInline && catalogCommitment !== undefined;
-      if (useEncryptedInline && privateRoots.length > 0 && !graphPublish) {
-        throw new Error(
-          'Encrypted inline publishes with privateQuads are not supported by the current V10 ACK model. ' +
-          'The publisher can collect either curated-catalog ACKs or folded-private public-CG ACKs, ' +
-          'but not both in one publish without a mixed ACK mode that preserves curated confidentiality.',
-        );
-      }
-      // Funding/signer selection must finish before either encryption hook runs:
-      // the chunked hook persists and gossips member ciphertext, so invoking it
-      // for an unfundable publish would leave remote staging artifacts behind.
-      // Curated ACK pricing is known from the public catalog commitment without
-      // running member-side encryption, which lets us finalize the whole plan at
-      // this fail-fast boundary.
-      const stagingByteSize = useCuratedCatalog
-        ? catalogByteSize
-        : publicByteSize;
-      const networkVisibleByteSize = stagingByteSize;
-      // Pricing and storage attestation are deliberately separate. The opt-in
-      // policy computes a higher token quote from the publisher's canonical
-      // public+private payload while ACKs and the chain continue to attest the
-      // exact network-visible catalog/public bytes in `networkVisibleByteSize`.
-      const publicationPricing = resolvePublicationPricing({
-        policy: pricingPolicy,
-        networkVisibleByteSize,
-        fullContentByteSize: payloadMeasurement.fullContentByteSize,
-      });
-      const finalizedPublisherPlan = await publisherPlanning.finalize({
-        explicitPublishEpochs,
-        billableByteSize: publicationPricing.billableByteSize,
-        ctx,
-      });
-      const publisherSigner = finalizedPublisherPlan.kind === 'on-chain'
-        ? finalizedPublisherPlan.signer
-        : undefined;
-      const publisherAddress = finalizedPublisherPlan.publisherAddress;
-      const publishEpochs = finalizedPublisherPlan.publishEpochs;
-      const precomputedTokenAmount = finalizedPublisherPlan.tokenAmount;
 
-      let stagingQuads: Uint8Array | undefined;
-      if (useEncryptedInline) {
-        // MEMBER-SIDE ENCRYPTION STAYS. The private (non-catalog) data is still
-        // AEAD-encrypted and distributed to CG members — via the chunked SWM
-        // fan-out when wired (preferred), else the single-blob hook. This is
-        // member distribution ONLY; OT-RFC-49 stripped the ciphertext from the
-        // on-chain commitment, the core ACK, and pricing, so the returned
-        // ciphertext root/bytes are intentionally DISCARDED here.
-        const plaintextBytes = new TextEncoder().encode(encryptableNquadsStr);
-        if (typeof options.encryptInlineChunked === 'function') {
-          ensurePublishOperationIdentity();
-          // batchId = V10 KC merkleRoot (member-side per-chunk persistence key);
-          // publishOperationId is the per-operation AEAD nonce domain.
-          await options.encryptInlineChunked({
-            plaintextNquads: plaintextBytes,
-            batchId: kcMerkleRoot,
-            publishOperationId,
-          });
-        } else {
-          // Single-blob member encryption (no chunked emitter wired): run the
-          // hook so members still receive ciphertext; discard the bytes.
-          await options.encryptInlinePayload!(plaintextBytes);
-        }
-        // The ACK wire payload for a curated CG is the PUBLIC catalog N-quads
-        // (plaintext — the catalog is public by design). Cores rebuild the
-        // catalog root from these bytes, verify == the claimed `catalogRoot`,
-        // persist them to `<cg>/_catalog`, and sign. byteSize == the catalog
-        // footprint, derived from the SAME committed leaf-set as the root.
-        if (useCuratedCatalog) {
-          stagingQuads = new TextEncoder().encode(catalogNquadsStr);
-        } else {
-          // Curated CG with no catalog entry — nothing public to commit/serve.
-          // Leave staging empty; this publish carries a zero catalog commitment.
-          stagingQuads = undefined;
-        }
-      } else {
-        // A2 (§1.1 fix): internal public-CG VM publishes ship small plaintext
-        // quads inline on the first ACK attempt — the
-        // SAME bytes the NO_DATA_IN_SWM self-heal retry (fromSharedMemory:false)
-        // and the curated catalog path above already send. Relying on a core's
-        // local SWM copy declines NO_DATA_IN_SWM / times out the round whenever
-        // the core never subscribed to the public CG's workspace topic (the
-        // common case on public networks: cores only auto-subscribe curated
-        // workspace topics). byteSize (`publicByteSize`/`networkVisibleByteSize`),
-        // `kcMerkleRoot` and the ACK digest all derive from `nquadsStr`, so this
-        // is byte-identical to the self-heal path — just on attempt 1, which
-        // avoids the failed first round + 120s storage_ack_timeout.
-        // Exception: above the core's inline cap keep
-        // the SWM-lookup fallback so a large publish can still ACK from cores that
-        // synced the data (the bound-graph SWM lookup in A3 keeps that path fast).
-        // Public callers that set `fromSharedMemory: true` keep the strict SWM
-        // contract and therefore omit `stagingQuads`.
-        stagingQuads = selectPublicStagingQuads(
-          resolvePublicACKStagingMode(options),
-          publicNquadsBytes,
-        );
-      }
-
-      // The adapter-owned plan above has already finalized signer, lifetime, and
-      // exact token amount before encryption or ACK collection. Those same values
-      // feed the H5-prefixed ACK digest and the chain call. For curated CGs the
-      // priced byte size is the committed public catalog footprint; for public
-      // CGs it is the plaintext footprint. This keeps fundability, pricing, ACK,
-      // and transaction inputs on one coherent plan.
-      // Identifier split for V10 publishes.
-      //
-      //   `contextGraphId` (outer) = the SWM graph id the publisher reads
-      //     data from (e.g. "devnet-test" or "42").
-      //   `options.publishContextGraphId` (optional) = the TARGET on-chain
-      //     numeric CG id that the ACK digest + publishDirect tx use.
-      //
-      // Remap flow: `publishFromSharedMemory("devnet-test", { publishContextGraphId: "42" })`
-      //   → swmGraphId = "devnet-test", target CG id = 42. Peers read SWM at
-      //   "devnet-test" and sign the ACK against on-chain id 42.
-      //
-      // Direct flow: `dkg publish "42"` → both are "42"; no remap.
-      //
-      // The previous code force-picked `contextGraphId` whenever
-      // `isPublishFromSharedMemory` was true, which made the ACK digest and
-      // the on-chain tx see the SOURCE name (not a number) in the remap
-      // flow → `BigInt()` threw → silent 0n → evm-adapter fail-loud →
-      // ZeroContextGraphId. Always prefer the explicit target override.
-      if (canAttemptOnChainPublish && options.precomputedAttestation?.reservedKaId !== undefined) {
-        await lifecycle.rememberAssetUal(options.precomputedAttestation.reservedKaId);
-        lifecycle.emit('identity', 'asset_ual_allocated', {
-          metadata: {
-            contextGraphId,
-            kaId: options.precomputedAttestation.reservedKaId.toString(),
-            publisherAddress,
-            entityCount,
-            publicRecordCount: allSkolemizedQuads.length,
-            hiddenCommitmentCount: privateRoots.length,
-          },
-        });
-      }
-      lifecycle.emit('wm', 'write', {
-        metadata: {
-          contextGraphId,
-          recordCount: allSkolemizedQuads.length,
-          rootEntityCount: manifestEntries.length,
-          accessPolicy: effectiveAccessPolicy,
-          hiddenCommitmentCount: privateRoots.length,
-          subGraphName: options.subGraphName,
-        },
-      });
-      lifecycle.emit('swm_share', 'prepared', {
-        metadata: {
-          contextGraphId,
-          swmGraphId,
-          source: options.fromSharedMemory ? 'shared_memory' : 'inline',
-          recordCount: allSkolemizedQuads.length,
-          byteSize: publicationPricing.networkVisibleByteSize.toString(),
-          billableByteSize: publicationPricing.billableByteSize.toString(),
-          pricingPolicy: publicationPricing.policy,
-          encryptedInline: useEncryptedInline,
-          catalogCommitment: useCuratedCatalog ? 'present' : 'absent',
-        },
-      });
-
-      // Numeric-negative and numeric-zero CG ids are programming errors —
-      // reject them here BEFORE burning CPU on ACK collection or on-chain
-      // tx construction, so the caller sees the real
-      // error instead of watching it decay through a swallowed ACK warning
-      // into a misleading `tentative` status. Descriptive SWM graph names
-      // (e.g. `"devnet-test"`, `"test-contextGraph"`) MUST still fall through to
-      // the soft `v10CgId = 0n` coercion below — mock adapter tests and
-      // integration fixtures publish with those names and rely on the
-      // data-flow path continuing to exercise. So we only fail loud when
-      // `BigInt(v10CgDomain)` actually parses and the parsed value is
-      // non-positive, which is specifically the "numeric but invalid" case.
-      {
-        let parsedDomain: bigint | null = null;
-        try {
-          parsedDomain = BigInt(v10CgDomain);
-        } catch {
-          // Non-numeric descriptive name — stays on the soft path below.
-        }
-        if (parsedDomain !== null && parsedDomain <= 0n) {
-          throw new Error(
-            `V10 publish requires a positive on-chain context graph id; ` +
-            `got '${v10CgDomain}' (parsed to ${parsedDomain}). ` +
-            'Register the CG via ContextGraphs.createContextGraph first ' +
-            'and pass the returned numeric id as `publishContextGraphId` ' +
-            '(or as the first argument to `publish()`).',
-          );
-        }
-      }
-
-      // Collect ACKs only when this publish can actually submit to V10.
-      // Descriptive/local CG ids may still pass a daemon-provided provider
-      // (the agent wires it eagerly), but those are intentional local
-      // publishes and must not fail before the local branch below can run.
-      const v10ACKProvider = options.v10ACKProvider;
-      const shouldCollectV10ACKs = v10ACKProvider !== undefined && canAttemptOnChainPublish;
-      if (shouldCollectV10ACKs) {
-        onPhase?.('collect_v10_acks', 'start');
-        try {
-          const rootEntities = manifestEntries.map(m => m.rootEntity);
-          const reservedAckKaId =
-            (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId;
-          const assetUal = await lifecycle.rememberAssetUal(reservedAckKaId);
-          // Replicas always attest the exact network-visible catalog/public byte
-          // size. An opt-in pricing policy may independently raise tokenAmount;
-          // no additional private bytes or claimed storage are sent to cores.
-          const commonACKParams = {
-            merkleRoot: kcMerkleRoot,
-            contextGraphId: v10CgDomain,
-            kaCount,
-            rootEntities,
-            publicByteSize: publicationPricing.networkVisibleByteSize,
-            epochs: publishEpochs,
-            tokenAmount: precomputedTokenAmount,
-            swmGraphId,
-            subGraphName: options.subGraphName,
-            merkleLeafCount: kcMerkleLeafCount,
-            assetUal,
-            ...(graphPublish
-              ? {
-                  contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-                  kaUal: graphPublish.scope.ual,
-                  assertionVersion: graphPublish.scope.assertionVersion,
-                  publicTripleCount: graphPublish.publicTripleCount,
-                  ...(privateRoots[0] ? { privateMerkleRoot: privateRoots[0] } : {}),
-                  privateTripleCount: graphPublish.privateTripleCount,
-                  accessPolicy: effectiveAccessPolicy,
-                  allowedPeers: [...normalizedAllowedPeers],
-                }
-              : {}),
-          };
-          const lifecycleAckMode = useCuratedCatalog
-            ? 'curated_catalog'
-            : privateRoots.length > 0
-              ? 'folded_private'
-              : 'public';
-          lifecycle.emit('storage_ack', 'request', {
-            metadata: {
-              contextGraphId: v10CgDomain,
-              swmGraphId,
-              subGraphName: options.subGraphName,
-              ackMode: lifecycleAckMode,
-              kaCount,
-              rootEntityCount: rootEntities.length,
-              publicByteSize: publicationPricing.networkVisibleByteSize.toString(),
-              tokenAmount: precomputedTokenAmount.toString(),
-              merkleLeafCount: kcMerkleLeafCount,
-              outcome: 'request',
-            },
-          });
-          if (useCuratedCatalog) {
-            if (!catalogCommitment || !stagingQuads || stagingQuads.length === 0) {
-              throw new Error('Curated catalog ACK mode requires a non-empty catalog commitment and stagingQuads');
-            }
-            v10ACKs = await invokeV10ACKProvider(v10ACKProvider, {
-              ...commonACKParams,
-              stagingQuads,
-              ackMode: {
-                kind: 'curated-catalog',
-                catalogCommitment: {
-                  catalogRoot: catalogCommitment.root,
-                  catalogLeafCount: catalogCommitment.leafCount,
-                },
-              },
-            });
-          } else if (privateRoots.length > 0) {
-            v10ACKs = await invokeV10ACKProvider(v10ACKProvider, {
-              ...commonACKParams,
-              stagingQuads,
-              ackMode: {
-                kind: 'folded-private',
-                privateMerkleRoots: privateRoots,
-              },
-            });
-          } else {
-            v10ACKs = await invokeV10ACKProvider(v10ACKProvider, {
-              ...commonACKParams,
-              stagingQuads,
-              ackMode: { kind: 'public' },
-            });
-          }
-          // PR5 ACK-provenance summary — one line per publish that names
-          // every ACKing core and the LU-6 Phase B discovery path that
-          // brought it to the curated CG. Lets an operator answer
-          // "*why* did this CG get hosted by these cores?" from the
-          // daemon log alone instead of cross-referencing the chain
-          // event poller, beacon receiver, and reconciler timer.
-          // Pre-PR5 cores show `?` for the source; that's the honest
-          // shape until they upgrade.
-          const provenance = v10ACKs
-            .map((a) => `${a.peerId.slice(-8)}:${a.subscriptionSource ?? '?'}`)
-            .join(', ');
-          for (const ack of v10ACKs) {
-            lifecycle.emit('storage_ack', 'success', {
-              peer: ack.peerId,
-              peerNodeIdentityId: ack.nodeIdentityId.toString(),
-              metadata: {
-                outcome: 'success',
-                quorumCollected: v10ACKs.length,
-                subscriptionSource: ack.subscriptionSource,
-              },
-            });
-          }
-          lifecycle.emit('storage_ack', 'quorum', {
-            metadata: {
-              outcome: 'success',
-              quorumCollected: v10ACKs.length,
-            },
-          });
-          this.log.info(
-            ctx,
-            `V10: Collected ${v10ACKs.length} core node ACKs [${provenance}]`,
-          );
-        } catch (err) {
-          // RC11 / PR1+PR3: no self-signed ACK fallback. ACK collection
-          // (A publishing Core's own StorageACK through its local endpoint is
-          // different: it is one verified signature of the Core quorum, not a
-          // fallback.)
-          // failure is a publish failure — propagate the underlying
-          // ACKProvider error verbatim so callers (and the daemon log)
-          // see the real cause (RPC pre-flight, quorum unmet, transport,
-          // etc.) instead of a single self-signed ACK that the contract
-          // would reject anyway on any network with
-          // `minimumRequiredSignatures >= 2`.
-          //
-          // PR3: the agent's V10 ACK provider now throws typed
-          // `RpcPreconditionError` / `QuorumUnmetError` subclasses (see
-          // `ack-errors.ts`). The typed `.name` lands in `err.toString()`
-          // automatically, so this log line distinguishes
-          // "RpcPreconditionError(getEvmChainId: ... upstream=-32016)"
-          // from "QuorumUnmetError(collected=0/3, peers=[...])"
-          // without any further plumbing.
-          const tag = err instanceof Error ? err.name : 'unknown';
-          if (isQuorumUnmetError(err)) {
-            for (const peerOutcome of err.peerOutcomes) {
-              const reason = peerOutcome.reason;
-              const outcome = reason?.startsWith('STORAGE_ACK_DECLINE')
-                ? 'decline'
-                : reason === 'no_response'
-                  ? 'timeout'
-                  : reason === 'ACK' || reason?.startsWith('ACK:')
-                    ? 'success'
-                    : 'failure';
-              lifecycle.emit('storage_ack', outcome, {
-                level: 'warn',
-                peer: peerOutcome.peerId,
-                metadata: {
-                  outcome,
-                  reason,
-                  dialOk: peerOutcome.dialOk,
-                  protocolSupported: peerOutcome.protocolSupported,
-                  swmHostModeAdvertised: peerOutcome.swmHostModeAdvertised,
-                },
-              });
-            }
-            lifecycle.emit('storage_ack', 'quorum', {
-              level: 'warn',
-              metadata: {
-                outcome: 'failure',
-                quorumCollected: err.collected,
-                quorumRequired: err.required,
-                peerDialled: err.dialled,
-              },
-            });
-          }
-          lifecycle.emit('storage_ack', 'failure', {
-            level: 'warn',
-            metadata: {
-              outcome: 'failure',
-              errorClass: tag,
-              reason: err instanceof Error ? err.message : String(err),
-            },
-          });
-          this.log.warn(
-            ctx,
-            `V10 ACK collection failed (${tag}): ${err instanceof Error ? err.message : String(err)}`,
-          );
-          throw err;
-        } finally {
-          onPhase?.('collect_v10_acks', 'end');
-        }
-      }
-
-      // Resolve the target CG id bigint once for the whole V10 block so the
-      // publisher digest (in the chain-submit block) sees a stable value.
-      // Non-numeric domains resolve to 0n
-      // here — the V10 contract rejects `contextGraphId == 0` with
-      // `ZeroContextGraphId`, so the authoritative fail-loud lives at the EVM
-      // adapter boundary (`evm-adapter.ts:createKnowledgeAssets` pre-tx
-      // check) and at the core-node `storage-ack-handler.ts`. Keeping the
-      // publisher-side resolution soft lets mock adapters and integration
-      // tests that publish with descriptive SWM CG names continue to exercise
-      // the data-flow path without needing per-test fixture gymnastics.
-      // RC11 / PR1: the legacy "self-sign ACK as last resort" block lived
-      // here. It synthesised a single ACK with `peerId: 'self'` against
-      // the publisher's own identity when no real ACKs had been collected,
-      // which was rejected on-chain by `minimumRequiredSignatures` on
-      // every real network (default 3). Removed in favour of fail-loud:
-      // ACK collection produces real ACKs from real cores, or the publish
-      // fails. See `packages/publisher/test/_helpers/acks.ts` for the
-      // in-memory multi-signer fixture tests use instead.
-
-      onPhase?.('chain', 'start');
-
-      let recording: MintRecording | undefined;
-      ensurePublishOperationIdentity();
-      // The operation id may be needed earlier as an encryption nonce domain,
-      // but its UAL is derived exactly once, after signer reservation is final.
-      ual = graphPublish?.scope.ual
-        ?? `did:dkg:${this.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
-
-      // Resolve the on-chain attribution target from the per-call override
-      // (computed above) or fall back to the daemon's persistent identity.
-      // `0n` is a VALID explicit override value (mode (d) "no attribution"
-      // — contract validates this case) and must NOT be confused with
-      // "override absent". The daemon's own identity is still used
-      // elsewhere (signer resolution); this only affects the on-chain
-      // `PublishParams.publisherNodeIdentityId`.
-
-      // Gate: skip on-chain only when we can't resolve a target CG id or
-      // the chain adapter doesn't advertise V10 readiness. The earlier
-      // identity-zero gate is gone (OT-RFC-38 §1.1) — edge agents without
-      // a Profile publish in no-attribution mode (`attributionIdentityId
-      // === 0n`), which the contract accepts.
-      // RC11 / PR2: helper for the two legitimate non-chain branches
-      // below. Sets the tentative-form UAL on every manifest entry so
-      // the returned `kaManifest[*].kcUal` is consistent with the
-      // tentative `ual` and writes the public quads into the root data
-      // graph (intentional local-only publish). NOT used on the
-      // chain-failure path — that re-throws and never reaches a store
-      // write.
-      const finalizeIntentionalLocalPublish = async (reasonLog: string) => {
-        for (const km of kaMetadata) {
-          km.kcUal = ual;
-        }
-        // RC11 / PR3: write the KC + KA metadata + tentative status quad
-        // alongside the public quads so downstream consumers
-        // (`access-handler`, `assertion-history`, the `verifiable-memory`
-        // view) can still locate this publish by its tentative UAL.
-        // Pre-PR2 this was the responsibility of the chain-failure
-        // catch block via `generateTentativeMetadata`. PR2 deleted that
-        // unconditional catch (failed *chain* publishes now write
-        // nothing locally), but the two intentional-local branches
-        // (`no on-chain CG id`, `chain not V10-ready`) both need the metadata
-        // to keep the local data-graph queryable. Replicating the
-        // tentative-metadata generation here scopes the metadata write
-        // exclusively to those intentional-skip branches and keeps the
-        // chain-failure path inert.
-        // RC11 / PR2 (review fix): preserve the exact provenance + meta-graph
-        // routing the pre-PR2 catch block did. Two strictly-additive
-        // requirements relative to the minimal call above:
-        //
-        //   1. `authorAddress` — feeds the KC row's `prov:wasAttributedTo`
-        //      so downstream consumers (`access-handler`,
-        //      `assertion-history`, the verifiable-memory view) can still
-        //      attribute the publish locally before any chain confirmation.
-        //      The on-chain `KnowledgeBatch.authorAddress` is canonical only
-        //      once the publish confirms; until then this is a self-claim.
-        //      `publisherSigner` may be undefined (no-chain / no-key path) —
-        //      skip the field in that case. (The former `dkg:Publication`
-        //      mirror keyed on `publishOperationId` was dropped — RFC
-        //      ka-metadata-trim Phase 1, zero readers.)
-        //
-        //   2. `targetMetaGraphUri` remap — every generated meta quad sits
-        //      in the default `did:dkg:context-graph:<id>/_meta` graph. If
-        //      the caller supplied a `targetMetaGraphUri` (e.g. for SWM /
-        //      private-channel meta isolation) the pre-PR2 path remapped
-        //      them; without this, intentional-local publishes targeting a
-        //      non-default meta graph would silently drop their `_meta`
-        //      triples into the wrong graph and become invisible to the
-        //      caller's own meta-graph queries.
-        const commonMeta = {
-          ual,
-          contextGraphId,
-          merkleRoot: kcMerkleRoot,
-          publisherPeerId: normalizedPublisherPeerId || 'unknown',
-          accessPolicy: effectiveAccessPolicy,
-          allowedPeers: normalizedAllowedPeers,
-          timestamp: new Date(),
-          subGraphName: options.subGraphName,
-          ...((options.precomputedAttestation?.authorAddress
-            ?? publisherSigner?.address) != null
-            ? {
-                authorAddress: (options.precomputedAttestation?.authorAddress
-                  ?? publisherSigner!.address),
-              }
-            : {}),
-        };
-        let tentativeMeta = graphPublish
-          ? generateGraphKnowledgeAssetMetadata(
-              {
-                ...commonMeta,
-                assertionVersion: graphPublish.scope.assertionVersion,
-                publicTripleCount: graphPublish.publicTripleCount,
-                privateTripleCount: graphPublish.privateTripleCount,
-                ...(privateRoots[0] ? { privateMerkleRoot: privateRoots[0] } : {}),
-                assertionGraph: dataGraph,
-              },
-              { status: 'tentative' },
-            )
-          : generateTentativeMetadata(commonMeta, kaMetadata);
-        if (options.targetMetaGraphUri) {
-          const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
-          tentativeMeta = tentativeMeta.map((q) =>
-            q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
-          );
-        }
-        if (graphPublish && !isAgentRegistryContextGraph(contextGraphId)) {
-          // Keep locally authored ACLs outside peer-sync-visible metadata. A
-          // later exact durable replacement can then preserve only trusted
-          // controls anchored to this assertion version and root.
-          await replaceLocallyTrustedKnowledgeAssetControls(
-            this.store,
-            graphPublish.scope.ual,
-            tentativeMeta,
-          );
-        }
-        this.log.info(ctx, `Storing ${normalizedQuads.length} triples in local store (${reasonLog})`);
-        if (graphPublish) {
-          await this.replaceExactKnowledgeAssetGraph(
-            dataGraph,
-            normalizedQuads,
-            'Graph-scoped local publish',
-          );
-        } else {
-          await this.store.insert(normalizedQuads);
-        }
-        // GH #1078 — persist private slices on this intentional-local terminal
-        // branch too (a chainless / ownerOnly publish still finalizes here).
-        await persistFinalizedPrivateSlices();
-        // #1233 — the agents registry CG never confirms on-chain and its
-        // per-publish tentative `_meta` record has no consumer (agent facts are
-        // served from the DATA graph); persisting one per heartbeat would grow
-        // `agents/_meta` without bound and stall offset-0 sync. Skip it there.
-        if (!isAgentRegistryContextGraph(contextGraphId)) {
-          await this.store.insert(tentativeMeta);
-        }
-        // B3: only now that the local publish has persisted do we refresh the
-        // public catalog entry (CLEAR/REPLACE — see persistCatalogEntry).
-        await persistCatalogEntry();
-      };
-
-      // GH #1013 — record WHY a local-only publish skipped chain so the async
-      // lift can tell an honest local finalization (no chain) from a publish
-      // that failed to reach the chain it should have.
-      if (publisherContextGraphId === undefined) {
-        this.log.warn(ctx, `No positive on-chain context graph id resolved from "${v10CgDomain}" — skipping on-chain publish`);
-        localChainSkipReason = 'no-chain';
-        await finalizeIntentionalLocalPublish('no on-chain CG id');
-      } else if (!chainV10Ready) {
-        this.log.warn(ctx, 'Chain adapter is not V10-ready — skipping on-chain publish');
-        localChainSkipReason = 'no-chain';
-        await finalizeIntentionalLocalPublish('chain not V10-ready');
-      } else {
-        const tokenAmount = precomputedTokenAmount;
-        usedV10Path = true;
-
-        // ─────────────────────────────────────────────────────────────
-        // SEAL INTEGRITY PREFLIGHT (Round 4 review §12)
-        //
-        // When a precomputedAttestation IS provided, validate it BEFORE
-        // the on-chain try/catch so seal-integrity failures (mismatched
-        // expectedMerkleRoot, wrong-signer recovery) propagate up as
-        // hard errors instead of being downgraded to a "tentative"
-        // result with a `On-chain tx failed` log line. These are
-        // protocol-correctness violations, not transient chain issues.
-        // Named lifecycle publish callers must see a 4xx for a
-        // broken seal, not a 200 OK with `status: tentative` and
-        // `kaId: 0` (which the daemon previously had to special-case).
-        //
-        // Missing-seal — `precomputedAttestation === undefined` — is
-        // checked inside the chain-submit branch below, after ACK
-        // collection has proven this is a real V10 publish attempt. RC11
-        // / PR-A deliberately rethrows that failure instead of
-        // downgrading to local tentative VM, so ACK-ready no-seal callers
-        // get a clear contract error and no root data-graph write.
-        // Intentional local publishes (no on-chain CG id / non-V10)
-        // still bypass this branch and can remain tentative.
-        // ─────────────────────────────────────────────────────────────
-        await validateSealIntegrity();
-        // ── End preflight ───────────────────────────────────────────
-
-        let signStarted = false;
-        let submitStarted = false;
-        try {
-          onPhase?.('chain:sign', 'start');
-          signStarted = true;
-          if (!publisherSigner) throw new PublisherWalletRequiredError('publish');
-          if (publisherSigner) this.log.info(ctx, `Signing on-chain publish (attributionId=${attributionIdentityId}${hasAttributionOverride ? ' [override]' : ''}, signer=${publisherSigner.address}, source=${publisherSigner.source})`);
-
-          onPhase?.('chain:sign', 'end');
-          signStarted = false;
-          onPhase?.('chain:submit', 'start');
-          submitStarted = true;
-          this.log.info(ctx, `Submitting V10 on-chain publish tx (${kaCount} KAs, networkVisibleByteSize=${publicationPricing.networkVisibleByteSize}${useCuratedCatalog ? ' [catalog]' : ''}, billableByteSize=${publicationPricing.billableByteSize}, pricingPolicy=${publicationPricing.policy}, tokenAmount=${tokenAmount})`);
-
-          if (!v10ACKs || v10ACKs.length === 0) {
-            throw new Error('V10 ACKs required for on-chain publish — no ACKs collected');
-          }
-          if (typeof this.chain.isV10Ready !== 'function' || !this.chain.isV10Ready()) {
-            throw new Error(
-              'Chain adapter is not V10-ready (isV10Ready() returned false or is missing). ' +
-              'Publish is routed through KnowledgeAssetsV10.publish, which requires ' +
-              'the adapter to expose createKnowledgeAssets, getEvmChainId, and ' +
-              'getKnowledgeAssetsLifecycleAddress — use an EVM adapter pointed at a chain where ' +
-              'KnowledgeAssetsV10 is deployed.',
-            );
-          }
-          if (v10ChainId === undefined || v10KavAddress === undefined) {
-            throw new Error(
-              'V10 publish requires the chain adapter to expose getEvmChainId() and ' +
-              'getKnowledgeAssetsLifecycleAddress(); neither was resolved. The adapter is not V10-capable.',
-            );
-          }
-          if (!options.precomputedAttestation) {
-            throw new Error(
-              'Publish rejected: on-chain publish requires precomputedAttestation. ' +
-              'RFC-001 §9.x — every published assertion must be sealed at finalize-time. ' +
-              'Call agent.assertion.finalize(...) first; the daemon\'s assertion-name-aware ' +
-              '/api/knowledge-assets/:name/vm/publish route resolves the seal automatically.',
-            );
-          }
-          const effectiveAuthorAddress = options.precomputedAttestation.authorAddress;
-          const effectiveSchemeVersion = options.precomputedAttestation.schemeVersion;
-          // #1116: the seal is CG-independent — the AuthorAttestation no longer
-          // binds the on-chain CG id. v10CgId is still submitted to the contract
-          // (createKnowledgeAssets below) as the mint target / publisher-auth gate.
-          const authorTypedData = buildAuthorAttestationTypedData({
-            chainId: v10ChainId,
-            kav10Address: v10KavAddress,
-            merkleRoot: kcMerkleRoot,
-            authorAddress: effectiveAuthorAddress,
-            reservedKaId: options.precomputedAttestation.reservedKaId,
-            schemeVersion: effectiveSchemeVersion,
-          });
-          const authorSig: ethers.Signature = ethers.Signature.from({
-            r: ethers.hexlify(options.precomputedAttestation.signature.r),
-            yParityAndS: ethers.hexlify(options.precomputedAttestation.signature.vs),
-          });
-          // Note: the seal-integrity validations (expectedMerkleRoot
-          // match, signer recovery) are now done as preflight above
-          // before this try block, so they propagate as hard errors
-          // instead of being silently downgraded to tentative
-          // (Round 4 review §12).
-          // P-1 review (iter-2): `chain:writeahead:start` now fires
-          // *from inside* the adapter via the `onBroadcast` callback,
-          // which the adapter invokes immediately before the real
-          // `publishDirect` broadcast — after any TRAC `approve()` tx
-          // and allowance top-up. Listeners that checkpoint on
-          // `:start` therefore only record recovery state for a
-          // publish tx that is actually about to hit the wire.
-          //
-          // The surrounding `try/finally` still guarantees
-          // `:end` always pairs with `:start`: if the adapter throws
-          // BEFORE invoking `onBroadcast` (e.g. revert during
-          // `approve()`, `estimateGas`, ACK preflight) neither
-          // `:start` nor `:end` fires, so listeners see no WAL
-          // boundary for a broadcast that never happened. If the
-          // adapter throws AFTER invoking `onBroadcast` (revert on
-          // the publish tx itself), `:start` has fired and the
-          // `finally` emits `:end` — this is the recoverable-crash
-          // window spec axiom 4 / §06 asks nodes to persist.
-          //
-          // Spec axiom 4 / §06: nodes persist a "publish attempt
-          // about to hit the wire" record BEFORE any
-          // `eth_sendRawTransaction` RPC so that a crash between
-          // "tx on wire" and "receipt observed" can be recovered
-          // without a double-submit. Older adapters that don't
-          // invoke `onBroadcast` fall back to the previous behaviour
-          // (no `:start` / `:end` on that path) — the publisher
-          // emits neither and listeners simply see the parent `chain`
-          // phase; adapters upgrading to the new hook regain the
-          // precise boundary. See P-1 / P-1.2 in BUGS_FOUND.md.
-          // GH#2270 PR-3 r4 — the latch, ordering and durable-boundary contract live in the one
-          // `createWriteAheadHook` builder shared with `update` (see its doc for the full history).
-          const writeAhead = createWriteAheadHook({ onPhase, onBeforeBroadcast, operationKind: 'create' });
-          const emitWriteAheadStart = writeAhead.emitWriteAheadStart;
-          // OT-RFC-43 Option 1 — reserve the deterministic packed kaId for this
-          // author BEFORE the on-chain mint, so the UAL is known pre-tx and the
-          // contract _safeMints exactly this id. `undefined` when no allocator is
-          // configured (mock/no-chain); the real EVM adapter then throws.
-          //
-          // OT-RFC-43 A2 (decision 1) — when the caller stamped a packed kaId at
-          // finalize (`options.reservedKaId`), REUSE it and skip allocation so a
-          // finalize→publish mints exactly the stamped id (no double-allocation).
-          const reservedKaId = await this.ensureReservedKaId(
-            effectiveAuthorAddress,
-            // §F2 — mint EXACTLY the id the agent signed: the finalize path threads it
-            // as options.reservedKaId; the ephemeral selection path carries it on the
-            // precomputedAttestation (the agent is the single allocation point).
-            (options as PublishOptions).reservedKaId ?? options.precomputedAttestation?.reservedKaId,
-          );
-          if (graphPublish && reservedKaId !== undefined) {
-            if (reservedKaId !== graphPublish.expectedPackedKaId) {
-              throw new Error(
-                `Graph-scoped publish reserved kaId ${reservedKaId} does not derive from ` +
-                  `UAL ${graphPublish.scope.ual} (expected ${graphPublish.expectedPackedKaId}); refusing to mint`,
-              );
-            }
-            if (!graphScopeTargetsChain(
-              graphPublish.scope.chainId,
-              this.chain.chainId,
-              v10ChainId,
-            )) {
-              throw new Error(
-                `Graph-scoped publish UAL ${graphPublish.scope.ual} targets chain ` +
-                  `${graphPublish.scope.chainId}, but this publisher mints on ` +
-                  `${this.chain.chainId} (EIP-155 ${v10ChainId})`,
-              );
-            }
-          }
-          await lifecycle.rememberAssetUal(reservedKaId);
-          if (!lifecycle.identityAllocatedEmitted && reservedKaId !== undefined) {
-            lifecycle.emit('identity', 'asset_ual_allocated', {
-              metadata: {
-                contextGraphId,
-                kaId: reservedKaId.toString(),
-                publisherAddress,
-                entityCount,
-                publicRecordCount: allSkolemizedQuads.length,
-                hiddenCommitmentCount: privateRoots.length,
-              },
-            });
-          }
-          try {
-            // OT-RFC-49 / WS-D — handshake hardening. When the publisher ran the
-            // curated catalog path, the chain submit MUST carry the same
-            // `(catalogRoot, catalogLeafCount)` pair that was signed into the ACK
-            // digest. Anything else (e.g. silently submitting `bytes32(0)` / `0`
-            // on a curated KC) would leave the on-chain catalog commitment empty
-            // — RFC-39 random sampling would then skip the KC because the picker
-            // filters zero-commitment curated CGs out of the curated draw, and
-            // curated proving would be inert. Fail loud here so the bug surfaces
-            // at the publisher instead of as missing reward proofs days later.
-            if (useCuratedCatalog) {
-              if (
-                !catalogCommitment
-                || catalogCommitment.root.length !== 32
-                || catalogCommitment.leafCount <= 0
-                || catalogCommitment.root.every((b) => b === 0)
-              ) {
-                throw new Error(
-                  `OT-RFC-49: dkg-publisher refused to submit a curated publish with an empty ` +
-                  `catalog commitment (root=${catalogCommitment?.root.length ?? 0} bytes, ` +
-                  `count=${catalogCommitment?.leafCount ?? 0}). The catalog root MUST be the V10 ` +
-                  `Merkle root over the committed catalog leaf-set, never bytes32(0) — without it ` +
-                  `the prover cannot prove the curated CG and random sampling skips the KC.`,
-                );
-              }
-            }
-            lifecycle.emit('chain', 'submit', {
-              metadata: {
-                contextGraphId: v10CgId.toString(),
-                kaId: reservedKaId?.toString(),
-                byteSize: publicationPricing.networkVisibleByteSize.toString(),
-                billableByteSize: publicationPricing.billableByteSize.toString(),
-                pricingPolicy: publicationPricing.policy,
-                tokenAmount: tokenAmount.toString(),
-                ackCount: v10ACKs?.length ?? 0,
-                merkleLeafCount: kcMerkleLeafCount,
-              },
-            });
-            ({ result: onChainResult, recording } = await mintOrAdoptKnowledgeAssets(this.chain, {
-              publishOperationId,
-              contextGraphId: v10CgId,
-              publisherAddress: publisherSigner.address,
-              reservedKaId,
-              merkleRoot: kcMerkleRoot,
-              knowledgeAssetsAmount: kaCount,
-              byteSize: publicationPricing.networkVisibleByteSize,
-              catalogRoot: useCuratedCatalog ? catalogCommitment?.root : undefined,
-              catalogLeafCount: useCuratedCatalog ? catalogCommitment?.leafCount : undefined,
-              // PCA strict-equality: must match the value committed to the
-              // ACK digest produced by the ACK collector
-              // (`packages/publisher/src/ack-collector.ts:159` invokes
-              // `computePublishACKDigest`) so the on-chain ECDSA recovery
-              // yields the same operator address each core signed with.
-              // Hard-coding `1` here re-introduces a digest mismatch on
-              // PCA-funded publishes and trips `SignerIsNotNodeOperator`
-              // even though the
-              // signatures were produced correctly.
-              epochs: publishEpochs,
-              tokenAmount,
-              merkleLeafCount: kcMerkleLeafCount,
-              isImmutable: false,
-              publisherNodeIdentityId: attributionIdentityId,
-              author: {
-                address: effectiveAuthorAddress,
-                signature: {
-                  r: ethers.getBytes(authorSig.r),
-                  vs: ethers.getBytes(authorSig.yParityAndS),
-                },
-                schemeVersion: effectiveSchemeVersion,
-              },
-              ackSignatures: v10ACKs.map(ack => ({
-                identityId: ack.nodeIdentityId,
-                r: ack.signatureR,
-                vs: ack.signatureVS,
-              })),
-              onBroadcast: emitWriteAheadStart,
-              onBroadcastAccepted: (signal) =>
-                onBroadcastAccepted?.({ ...signal, operationKind: 'create' }),
-              ...(writeAhead.onBeforeReplacementBroadcast
-                ? { onBeforeReplacementBroadcast: writeAhead.onBeforeReplacementBroadcast }
-                : {}),
-            }, sealedAdoption));
-          } finally {
-            if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
-          }
-
-          if (!recording.adopted) onChainResult.tokenAmount = tokenAmount;
-          await recordConfirmed({ result: onChainResult, recording }, reservedKaId, effectiveAuthorAddress);
-          onPhase?.('chain:submit', 'end');
-          submitStarted = false;
-          onPhase?.('chain:metadata', 'start');
-          this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult.batchId} tx=${onChainResult.txHash}`);
-        } catch (err) {
-          if (signStarted) onPhase?.('chain:sign', 'end');
-          if (submitStarted) onPhase?.('chain:submit', 'end');
-          // RC11 / PR2: re-throw chain failures instead of silently
-          // downgrading to a "tentative" result with a local data-graph
-          // write. Pre-PR2 this branch swallowed the error and fell
-          // through to `generateTentativeMetadata` + a `store.insert` of
-          // the (potentially never-confirmed) quads, which surfaced
-          // through /api/query as if they were real verifiable memory.
-          // The data-graph insert now lives exclusively inside the
-          // success branch above and the two non-chain skip branches —
-          // a failed on-chain publish therefore writes NOTHING to the
-          // root data graph. Caller (DKGAgent / daemon publish route)
-          // sees the typed error and is responsible for surfacing it.
-          //
-          // RC11 / PR3: surface the error class name in the log so a
-          // typed `ACKProviderError` (RpcPrecondition / QuorumUnmet)
-          // that slipped past the earlier ACK-collection catch is
-          // visually distinct from a real chain revert (`callException`,
-          // `insufficientFunds`, etc.). The original error rethrows
-          // unchanged so callers preserve `instanceof` checks.
-          const tag = err instanceof Error ? err.name : 'unknown';
-          const msg = err instanceof Error ? err.message : String(err);
-          lifecycle.emit('chain', 'failure', {
-            level: 'error',
-            metadata: {
-              outcome: 'failure',
-              contextGraphId: v10CgId.toString(),
-              ackCount: v10ACKs?.length ?? 0,
-              errorClass: tag,
-              reason: msg,
-            },
-          });
-          this.log.warn(ctx, `On-chain publish failed (${tag}): ${msg}`);
-          throw err instanceof Error ? err : new Error(msg);
-        }
-      }
-
-    };
-
+    let acquisition: PublicationAcquisition;
     if (options.adoptExistingMint !== undefined) {
       await this.publisherPlanner.requireMintAdoptionTarget(publisherContextGraphId);
       await validateSealIntegrity();
@@ -4192,16 +3274,40 @@ export class DKGPublisher implements Publisher {
       if (!graphScopeTargetsChain(graphPublish.scope.chainId, this.chain.chainId, v10ChainId))
         throw new Error('Graph-scoped publish UAL targets a different chain');
       onPhase?.('chain', 'start');
-      usedV10Path = true;
       const outcome = await adoptMintForRecording(this.chain, {
         kaId: attestation.reservedKaId, merkleRoot: kcMerkleRoot,
         contextGraphId: publisherContextGraphId, authorAddress: attestation.authorAddress,
-      }, sealedAdoption, options.adoptExistingMint.txHash);
-      await recordConfirmed(outcome, attestation.reservedKaId, attestation.authorAddress);
-      onPhase?.('chain:metadata', 'start');
+      }, sealedAdoption, options.adoptExistingMint.txHash, options);
+      acquisition = { kind: 'confirmed', outcome, reservedKaId: attestation.reservedKaId,
+        effectiveAuthorAddress: attestation.authorAddress, submitted: false };
     } else {
-      await submitPreparedPayload();
+      acquisition = await acquirePreparedPublication({
+        publisherContextGraphId, options, catalogCommitment, privateRoots, graphPublish, catalogByteSize, publicByteSize, pricingPolicy, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, publicNquadsBytes, lifecycle, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, v10CgDomain, kcMerkleLeafCount, normalizedAllowedPeers, ctx, kaMetadata, normalizedPublisherPeerId, dataGraph, contextGraphId, normalizedQuads, attributionIdentityId, hasAttributionOverride, kaCount, entityCount, v10ChainId, v10KavAddress, sealedAdoption, explicitPublishEpochs, publicStagingMode: resolvePublicACKStagingMode(options),
+      }, {
+        publisherPlanner: this.publisherPlanner, log: this.log, chain: this.chain, store: this.store,
+        replaceExactKnowledgeAssetGraph: this.replaceExactKnowledgeAssetGraph.bind(this),
+        ensureReservedKaId: this.ensureReservedKaId.bind(this),
+        allocateOperationId: () => `${this.sessionId}-${++this.tentativeCounter}`,
+        validateSealIntegrity, persistFinalizedPrivateSlices, persistCatalogEntry,
+        selectPublicStagingQuads, invokeV10ACKProvider,
+      });
     }
+
+    const onChainResult = acquisition.kind === 'confirmed' ? acquisition.outcome.result : undefined;
+    const usedV10Path = acquisition.kind === 'confirmed';
+    const localChainSkipReason = acquisition.kind === 'tentative' ? acquisition.localChainSkipReason : undefined;
+    const v10ACKs = acquisition.v10ACKs;
+    if (acquisition.kind === 'confirmed') {
+      try {
+        ual = await recordConfirmed(acquisition.outcome, acquisition.reservedKaId, acquisition.effectiveAuthorAddress);
+      } catch (error) {
+        throw publicationAcquisitionFailure(error, this.log, ctx, lifecycle, v10CgId, acquisition.v10ACKs?.length ?? 0);
+      } finally {
+        if (acquisition.submitted) onPhase?.('chain:submit', 'end');
+      }
+      onPhase?.('chain:metadata', 'start');
+      this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult!.batchId} tx=${onChainResult!.txHash}`);
+    } else ual = acquisition.ual;
 
     const status = onChainResult === undefined ? 'tentative' : 'confirmed';
 
@@ -6392,7 +5498,13 @@ export class DKGPublisher implements Publisher {
     name: string,
     agentAddress: string,
     subGraphName?: string,
+    heldLifecycle?: AssertionLifecycleWriteLease,
   ): Promise<void> {
+    if (heldLifecycle) {
+      assertAssertionLifecycleWriteLease(heldLifecycle, this.writeLocks,
+        assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, subGraphName));
+      return this.clearSwmShareCompleteUnlocked(contextGraphId, name, agentAddress, subGraphName);
+    }
     return this.withAssertionLifecycleWriteLock(
       contextGraphId,
       name,

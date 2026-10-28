@@ -1,3 +1,4 @@
+import { withKeyedLocks } from './keyed-lock.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 
 /**
@@ -42,4 +43,22 @@ export function assertionLifecycleWriteLockKey(
     normalizedAgentAddress,
     name,
   ])}`;
+}
+
+/** Short-lived proof that a caller owns one lifecycle lock in this exact store domain. */
+export interface AssertionLifecycleWriteLease { readonly assertionLifecycleWriteLease: unique symbol }
+const lifecycleLeases = new WeakMap<object, { locks: Map<string, Promise<void>>; key: string }>();
+export async function withAssertionLifecycleWriteLease<T>(locks: Map<string, Promise<void>>, key: string,
+  run: (lease: AssertionLifecycleWriteLease) => Promise<T>): Promise<T> {
+  return withKeyedLocks(locks, [key], async () => {
+    const lease = Object.freeze({}) as AssertionLifecycleWriteLease;
+    lifecycleLeases.set(lease, { locks, key });
+    try { return await run(lease); } finally { lifecycleLeases.delete(lease); }
+  });
+}
+/** Allows nested cleanup only while the exact transaction still owns its lock. */
+export function assertAssertionLifecycleWriteLease(lease: AssertionLifecycleWriteLease,
+  locks: Map<string, Promise<void>>, key: string): void {
+  const held = lifecycleLeases.get(lease);
+  if (!held || held.locks !== locks || held.key !== key) throw new Error('Assertion lifecycle write lease is not current');
 }

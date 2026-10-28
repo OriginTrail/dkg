@@ -14,6 +14,9 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   adoptExistingMint,
+  prepareMintAdoption,
+  withPreparedMintAdoption,
+  withAssertionLifecycleWriteLease,
   assertionLifecycleWriteLockKey,
   graphScopeTargetsChain,
   withKeyedLocks,
@@ -153,7 +156,7 @@ export async function reconcileLateMint(
         'before both). Reconcile cannot finish those from the VM record alone, so it changes nothing.');
   }
   const mint = share === 'resident'
-    ? await recordThroughPublish(agent, target)
+    ? await recordThroughPublish(agent, host, reservation, target)
     : await completeRecordedLifecycle(agent, host, reservation, target);
 
   const after = await lifecycle();
@@ -258,18 +261,26 @@ async function assertReservationUnchanged(
   }
 }
 
-async function recordThroughPublish(agent: DKGAgent, target: Target): Promise<OnChainPublishResult> {
-  const published = await agent.publishFromFinalizedAssertion(target.contextGraphId, target.name, {
-    subGraphName: target.subGraphName,
-    agentAddress: target.agentAddress,
-    adoptExistingMint: target.txHash === undefined ? {} : { txHash: target.txHash },
+async function recordThroughPublish(agent: DKGAgent, host: KnowledgeAssetMintReconcileHost,
+  reservation: SealedReservation, target: Target): Promise<OnChainPublishResult> {
+  const onChainId = await agent.getContextGraphOnChainId(target.contextGraphId);
+  if (!onChainId || !/^\d+$/.test(onChainId)) throw refused(`Context graph "${target.contextGraphId}" has no on-chain id.`);
+  const evidence = await prepareMintAdoption(host.chain, { kaId: reservation.kaId,
+    merkleRoot: reservation.seal.merkleRoot, contextGraphId: BigInt(onChainId),
+    authorAddress: reservation.seal.authorAddress }, target.txHash);
+  const lock = assertionLifecycleWriteLockKey(target.contextGraphId, target.name, target.agentAddress, target.subGraphName);
+  return withAssertionLifecycleWriteLease(host.writeLocks, lock, async heldLifecycle => {
+    await assertReservationUnchanged(agent, reservation, target);
+    const published = await agent.publishFromFinalizedAssertion(target.contextGraphId, target.name,
+      withPreparedMintAdoption({ heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress,
+        adoptExistingMint: target.txHash === undefined ? {} : { txHash: target.txHash } }, evidence));
+    if (published.status !== 'confirmed' || !published.onChainResult) {
+      throw Object.assign(new Error(`Recording the mint of "${target.name}" ended ${published.status}. Retry the reconcile.`), {
+        code: KA_MINT_RECONCILE_INCOMPLETE_CODE,
+      });
+    }
+    return published.onChainResult;
   });
-  if (published.status !== 'confirmed' || !published.onChainResult) {
-    throw Object.assign(new Error(`Recording the mint of "${target.name}" ended ${published.status}. Retry the reconcile.`), {
-      code: KA_MINT_RECONCILE_INCOMPLETE_CODE,
-    });
-  }
-  return published.onChainResult;
 }
 
 /**

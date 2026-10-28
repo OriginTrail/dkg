@@ -1,3 +1,4 @@
+import { withAssertionLifecycleWriteLease, assertionLifecycleWriteLockKey } from '../src/store-write-locks.js';
 // SPDX-License-Identifier: Apache-2.0
 
 /**
@@ -40,7 +41,7 @@ import {
   mintOrAdoptKnowledgeAssets,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
 } from '../src/index.js';
-import { sealedMintAdoption, type SealedMintAdoption } from '../src/adopt-existing-mint.js';
+import { sealedMintAdoption, type SealedMintAdoption, prepareMintAdoption, withPreparedMintAdoption, adoptMintForRecording } from '../src/adopt-existing-mint.js';
 import { PublisherPlanner } from '../src/publisher-planning.js';
 import { buildSeal, mockSealCtx } from './_helpers/seal.js';
 import { mockChainStubACKProvider } from './_helpers/acks.js';
@@ -464,14 +465,10 @@ describe('adoption refuses what the chain cannot prove', () => {
     expect(kaIdAlreadyMintedFromError((refusal as Error).cause)).toBe(kaId + 1n);
   });
 
-  it('records an existing mint only for a sealed publish with a reserved id', async () => {
+  it('does not create an adoption context for an unsealed publish', async () => {
     const store = new OxigraphStore();
     expect(sealedMintAdoption(store, undefined, { contextGraphId: CONTEXT_GRAPH, log: () => {} })).toBeUndefined();
-    expect(() => sealedMintAdoption(store, undefined, { contextGraphId: CONTEXT_GRAPH, existingOnly: {}, log: () => {} }))
-      .toThrow(/requires a sealed graph-scoped publish/);
-    const params = { merkleRoot, contextGraphId: 1n, author: { address: author } } as unknown as V10PublishParams;
-    await expect(mintOrAdoptKnowledgeAssets({} as ChainAdapter, params, { existingOnly: {} } as SealedMintAdoption))
-      .rejects.toThrow(/requires a reserved KA id/);
+    await store.close();
   });
 
   it('admits receipt adoption only for an on-chain context graph on a V10-ready chain', async () => {
@@ -486,4 +483,44 @@ describe('adoption refuses what the chain cannot prove', () => {
     await expect(planner.requireMintAdoptionTarget(1n)).rejects.toThrow(/on-chain context graph id and a V10-ready chain/);
     await expect(planner.requireMintAdoptionTarget(undefined)).rejects.toThrow(/on-chain context graph id and a V10-ready chain/);
   });
+});
+
+it('prepared receipt evidence is adapter/reservation-bound and avoids a second slow lookup', async () => {
+  const f = await strandedPublishFixture();
+  try {
+    const original = await f.strand();
+    const scope = createGraphKnowledgeAssetScope(f.ual, 1);
+    const expected = { kaId: f.kaId, merkleRoot: f.sealedRoot, contextGraphId: 1n, authorAddress: scope.agentAddress };
+    const lookup = vi.spyOn(f.chain, 'resolveKnowledgeAssetMint');
+    const evidence = await prepareMintAdoption(f.chain, expected, original.txHash);
+    const options = withPreparedMintAdoption({}, evidence);
+    const sealed = sealedMintAdoption(f.store, { scope, publicTripleCount: 1, privateTripleCount: 0 },
+      { contextGraphId: CONTEXT_GRAPH, log() {} })!;
+    await expect(adoptMintForRecording(f.chain, expected, sealed, original.txHash, options))
+      .resolves.toMatchObject({ result: { txHash: original.txHash }, recording: { adopted: true } });
+    expect(lookup).toHaveBeenCalledOnce();
+    await expect(adoptMintForRecording(f.chain, { ...expected, kaId: f.kaId + 1n }, sealed, original.txHash, options))
+      .rejects.toThrow(/does not match/);
+    await expect(adoptMintForRecording(new MockChainAdapter(), expected, sealed, original.txHash, options))
+      .rejects.toThrow(/does not match/);
+    expect(() => withPreparedMintAdoption({}, {} as never)).toThrow(/Invalid prepared mint evidence/);
+    expect(lookup).toHaveBeenCalledOnce();
+  } finally { await f.store.close(); }
+});
+
+it('nested share cleanup requires the current lease for its exact lifecycle and store', async () => {
+  const f = await strandedPublishFixture();
+  const author = createGraphKnowledgeAssetScope(f.ual, 1).agentAddress;
+  const key = assertionLifecycleWriteLockKey(CONTEXT_GRAPH, 'lease-asset', author);
+  let expired: Parameters<typeof f.publisher.clearSwmShareComplete>[4];
+  try {
+    await withAssertionLifecycleWriteLease(f.publisher.writeLocks, key, async lease => {
+      expired = lease;
+      await expect(f.publisher.clearSwmShareComplete(CONTEXT_GRAPH, 'lease-asset', author, undefined, lease)).resolves.toBeUndefined();
+      await expect(f.publisher.clearSwmShareComplete(CONTEXT_GRAPH, 'other-asset', author, undefined, lease))
+        .rejects.toThrow(/lease is not current/);
+    });
+    await expect(f.publisher.clearSwmShareComplete(CONTEXT_GRAPH, 'lease-asset', author, undefined, expired))
+      .rejects.toThrow(/lease is not current/);
+  } finally { await f.store.close(); }
 });
