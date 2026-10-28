@@ -1,6 +1,6 @@
 import type { GraphOwnedDurableRecoveryRequest } from '../src/durable-recovery-owned-round.js';
 import type { ManifestResumePlan } from '../src/sync/requester/manifest-resume-policy.js';
-import { durableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
+import type { DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
 
 declare const owned: GraphOwnedDurableRecoveryRequest;
@@ -11,7 +11,8 @@ void multiple;
 const invalidPlan: ManifestResumePlan = { checkpointAction: 'replace', seeded: true, resume: { kind: 'fresh', verifiedOffset: 0, rawOffset: 0 } };
 void invalidPlan;
 // @ts-expect-error A round must state its decision, including when execution never started.
-void durableRecoveryRoundOutcome(createIncompleteDurableSyncResult());
+const missingDecision: DurableRecoveryRoundOutcome = { result: createIncompleteDurableSyncResult() };
+void missingDecision;
 
 import type { DetailedDurableSyncResult } from '../src/sync/requester/durable-sync-result.js';
 declare const physical: DetailedDurableSyncResult;

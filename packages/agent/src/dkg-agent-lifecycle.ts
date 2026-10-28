@@ -1,7 +1,7 @@
 import { exactRecoveryActionOutcome } from './sync/durable-recovery-action.js';
 import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
 // SPDX-License-Identifier: Apache-2.0
-import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
+import type { DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -6610,7 +6610,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }),
         executeSlice: async (peerId, recovery) => {
           if (!durableSyncEnabled(this.config) || !await this.canUseLegacyDurableSyncForContextGraphV1(contextGraphId)) {
-            return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult(), { strategy: 'not-started' });
+            return { result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' } };
           }
           return this.runGraphOwnedDurableRecoveryRound({ ctx, remotePeerId: peerId, contextGraphId,
             recovery,

@@ -1,7 +1,7 @@
 import type { GraphOwnedRecoveryInput } from './requester/graph-owned-recovery.js';
 import { recoveryActionDiagnostics, exactRecoveryActionOutcome, type DurableRecoveryDiagnostics, type ExactRecoveryActionOutcome } from './durable-recovery-action.js';
 import { accountDurableRecoveryAction, type DurableRecoveryAccounting, type MutableDurableRecoveryPeerHealth } from './durable-recovery-peer-health.js';
-import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from './durable-recovery-round.js';
+import type { DurableRecoveryRoundOutcome } from './durable-recovery-round.js';
 import { HeldAssetsConfirmationRun } from './requester/durable-data-holdings.js';
 import type { DurableSyncResult } from '../dkg-agent-types.js';
 import {
@@ -356,7 +356,7 @@ export class DurableRecoveryRunner {
           confirmation,
         };
         round = await deps.executeSlice(action.peerId, recovery);
-      } catch (error) { round = durableRecoveryRoundOutcome(failedSlice(action.peerId, error), { strategy: 'not-started' }); }
+      } catch (error) { round = { result: failedSlice(action.peerId, error), decision: { strategy: 'not-started' } }; }
       const result = round.result;
       const after = deps.checkpointStore.get(checkpointKey);
       resume.recordSlice({ peerId: action.peerId, checkpointKey, before, after,

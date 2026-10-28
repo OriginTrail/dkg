@@ -1,5 +1,5 @@
 import { exactRecoveryActionOutcome } from '../src/sync/durable-recovery-action.js';
-import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
+import type { DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { describe, expect, it, vi } from 'vitest';
 import * as accounting from '../src/sync/durable-recovery-peer-health.js';
 import { getSyncCheckpointKey, MemorySyncCheckpointStore } from '../src/sync/checkpoint/state.js';
@@ -24,14 +24,14 @@ const missing = (...assets: Array<[string, string]>): MissingDurableAsset[] => (
 
 /** A round that found the rest of the generation held and left these batches to the owner. */
 const leaves = (...batches: MissingDurableAsset[][]): Round => async (continuation) => {
-  return durableRecoveryRoundOutcome(createIncompleteDurableSyncResult(), continuation.ownerFetchesMissingAssets
-    ? { strategy: 'exact-missing', batches } : { strategy: 'full', continuation: 'full-graph' });
+  return { result: createIncompleteDurableSyncResult(), decision: continuation.ownerFetchesMissingAssets
+    ? { strategy: 'exact-missing', batches } : { strategy: 'full', continuation: 'full-graph' } };
 };
 /** A round that found the whole generation held: it settles the terminal boundary. */
 const held: Round = async (_continuation, store) => {
   store.setManifestBoundOffset(dataKey, 30, GENERATION, Date.now(), PREFIX, true);
-  return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), completedPhases: 2, resumedPhases: 1, complete: true },
-    { strategy: 'held' });
+  return { result: { ...createIncompleteDurableSyncResult(), completedPhases: 2, resumedPhases: 1, complete: true },
+    decision: { strategy: 'held' } };
 };
 /** A bounded full-graph round that verified the rest of the graph. */
 const pulledAll: Round = held;
@@ -117,9 +117,9 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
   });
 
   it('preserves verified legacy completion without a rootless manifest checkpoint', async () => {
-    const f = runner([async () => durableRecoveryRoundOutcome(
-      { ...createIncompleteDurableSyncResult(), insertedDataTriples: 3, complete: true }, { strategy: 'legacy' },
-    )]);
+    const f = runner([async () => ({
+      result: { ...createIncompleteDurableSyncResult(), insertedDataTriples: 3, complete: true }, decision: { strategy: 'legacy' },
+    })]);
     const execution = await f.run();
     expect(execution.outcome).toBe('terminal');
     expect(execution.result.complete).toBe(true);
@@ -127,7 +127,7 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
   });
 
   it('refuses graph readiness without a persisted terminal boundary', async () => {
-    const f = runner([async () => durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), complete: true }, { strategy: 'not-started' })]);
+    const f = runner([async () => ({ result: { ...createIncompleteDurableSyncResult(), complete: true }, decision: { strategy: 'not-started' } })]);
     const execution = await f.run();
     expect(execution.outcome).toBe('no-progress');
     expect(execution.result.complete).toBe(false);
@@ -189,8 +189,8 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
       if (stored === 0) {
         stored = 10;
         store.setManifestBoundOffset(dataKey, stored, GENERATION, Date.now(), PREFIX);
-        return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 },
-          { strategy: 'full', continuation: 'full-graph' });
+        return { result: { ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 },
+          decision: { strategy: 'full', continuation: 'full-graph' } };
       }
       return leavesOrPulls(missing(['ual-1', '1']))(continuation, store);
     };
@@ -204,8 +204,8 @@ describe('durable recovery fetches the assets a held generation lacks', () => {
   it('uses the explicit reconsider policy after partial progress', async () => {
     const advance: Round = async (_continuation, store) => {
       store.setManifestBoundOffset(dataKey, 10, GENERATION, Date.now(), PREFIX);
-      return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 },
-        { strategy: 'full', continuation: 'reconsider-holdings' });
+      return { result: { ...createIncompleteDurableSyncResult(), checkpointAdvances: 1 },
+        decision: { strategy: 'full', continuation: 'reconsider-holdings' } };
     };
     const f = runner([advance, leaves(missing(['ual-1', '2'])), held]);
     expect((await f.run()).outcome).toBe('terminal');

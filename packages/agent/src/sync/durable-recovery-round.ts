@@ -15,10 +15,3 @@ export interface DurableRecoveryRoundOutcome {
   readonly result: DurableSyncResult;
   readonly decision: DurableRecoveryRoundDecision;
 }
-
-export function durableRecoveryRoundOutcome(
-  result: DurableSyncResult,
-  decision: DurableRecoveryRoundDecision,
-): DurableRecoveryRoundOutcome {
-  return { result, decision };
-}

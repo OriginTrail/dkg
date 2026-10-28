@@ -1,5 +1,5 @@
 import type { GraphOwnedRecoveryInput } from '../src/sync/requester/graph-owned-recovery.js';
-import { durableRecoveryRoundOutcome, type DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
+import type { DurableRecoveryRoundOutcome } from '../src/sync/durable-recovery-round.js';
 import { resolveManifestResumePlan } from '../src/sync/requester/manifest-resume-policy.js';
 import { describe, expect, it } from 'vitest';
 import {
@@ -87,17 +87,17 @@ function runner(peers: string[], slices: Record<string, Slice[]>, store = new Me
 /** A slice that verified and stored the graphs up to `offset` of `GENERATION`. */
 const advanceTo = (offset: number, prefix: `sha256:${string}`, terminal = false): Slice => async (peerId, store) => {
   store.setManifestBoundOffset(dataKey(peerId), offset, GENERATION, undefined, prefix, terminal);
-  return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), complete: terminal }, { strategy: 'full', continuation: 'full-graph' });
+  return { result: { ...createIncompleteDurableSyncResult(), complete: terminal }, decision: { strategy: 'full', continuation: 'full-graph' } };
 };
 const failWith = (message: string): Slice => async () => { throw new Error(message); };
 /** A DATA round whose rows did not start the next manifest graph after the boundary it resumed at. */
 const refuseResume: Slice = async (peerId, store) => {
   const resumedAt = store.get(dataKey(peerId))?.offset ?? 0;
   store.delete(dataKey(peerId));
-  return durableRecoveryRoundOutcome({ ...createIncompleteDurableSyncResult(), failedPhases: 1 },
-    { strategy: 'full', continuation: 'full-graph', rejectedResumeOffset: resumedAt });
+  return { result: { ...createIncompleteDurableSyncResult(), failedPhases: 1 },
+    decision: { strategy: 'full', continuation: 'full-graph', rejectedResumeOffset: resumedAt } };
 };
-const noProgress: Slice = async () => durableRecoveryRoundOutcome(createIncompleteDurableSyncResult(), { strategy: 'not-started' });
+const noProgress: Slice = async () => ({ result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' } });
 
 describe('durable recovery continues a verified prefix with another peer', () => {
   it('seeds the next peer with the verified boundary instead of row 0', async () => {
