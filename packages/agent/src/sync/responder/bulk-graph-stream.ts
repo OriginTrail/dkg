@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash } from 'node:crypto';
 import { BULK_GRAPH_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
-  createOperationContext, registerBulkGraphResponder, type ProtocolRouter, type BulkGraphSession, type DuplexStreamOptions } from '@origintrail-official/dkg-core';
+  createOperationContext, registerBulkGraphResponder, registerPublicCheckpointResponder, type ProtocolRouter, type BulkGraphSession, type DuplexStreamOptions } from '@origintrail-official/dkg-core';
 import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson, encodeBulkRefusal, encodeBulkChunkEnd,
   validateBulkGraphRequest, type BulkGraphRequest, type BulkAssetHeader } from '../bulk-graph-contract.js';
 import type { PublicAssetResponderOptions, PublicAssetServingOptions } from './public-asset-responder.js';
@@ -11,7 +11,10 @@ const EMPTY = new Uint8Array();
 /** Public-only, shares the existing responder admission and verified prepared-content cache. */
 export function registerPublicBulkGraph(router: ProtocolRouter,
   options: PublicAssetResponderOptions & Pick<DuplexStreamOptions, 'onInboundFailure'>): void {
-  registerBulkGraphResponder(router, async (bytes, peer, signal) => {
+  // The new protocol only acknowledges immutable checkpoint persistence. The old
+  // protocol retains COMMIT = applied graph data; negotiation cannot confuse them.
+  for (const register of [registerBulkGraphResponder, registerPublicCheckpointResponder]) {
+  register(router, async (bytes, peer, signal) => {
     const request = validateBulkGraphRequest(readBulkJson(bytes));
     return options.admission.withPreAuthorizationAdmission(peer, signal, async () => {
       // The ordinary public graph authorizer is still mandatory. It authorizes graph
@@ -25,6 +28,7 @@ export function registerPublicBulkGraph(router: ProtocolRouter,
     });
   }, (request, session, peer) => options.admission.withAuthorizedResponseAdmission(peer, request.contextGraphId,
     session.signal, () => servePublicBulkChunk(request, session, options)), options);
+  }
 }
 
 export async function servePublicBulkChunk(request: BulkGraphRequest, session: Pick<BulkGraphSession, 'signal' | 'next' | 'send'>, options: PublicAssetServingOptions): Promise<void> {

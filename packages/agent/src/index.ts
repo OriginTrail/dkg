@@ -664,3 +664,9 @@ export {
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
 
 export type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
+
+export { createFreshPublicCheckpointEdge } from './snapshot-fresh-edge.js';
+export { preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
+export { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
+
+export { resumePublicCheckpointEdge } from './snapshot-resume-edge.js';

@@ -96,6 +96,8 @@ export interface DurableBatchProcessWireResult
 
 export class SyncVerifyWorker {
   private readonly worker: Worker;
+  private closing: Promise<void> | undefined;
+  private failure: Error | undefined;
   private nextId = 0;
   private readonly pending = new Map<number, {
     resolve: (value: any) => void;
@@ -203,12 +205,20 @@ export class SyncVerifyWorker {
       else pending.resolve(message.result);
     });
     this.worker.on('error', (error) => {
+      this.failure = error;
+      for (const [, pending] of this.pending) pending.reject(error);
+      this.pending.clear();
+    });
+    this.worker.on('exit', code => {
+      const error = this.failure ?? new Error(`Sync verification worker exited (${code})`);
+      this.failure = error;
       for (const [, pending] of this.pending) pending.reject(error);
       this.pending.clear();
     });
   }
 
   verify(dataQuads: Quad[], metaQuads: Quad[], acceptUnverified: boolean): Promise<SyncVerifyResult> {
+    if (this.failure) return Promise.reject(this.failure);
     const id = this.nextId++;
     return new Promise<SyncVerifyResult>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -217,6 +227,7 @@ export class SyncVerifyWorker {
   }
 
   parseAndFilter(nquadsText: string, graphUri: string, contextGraphId: string): Promise<SyncParseResult> {
+    if (this.failure) return Promise.reject(this.failure);
     const id = this.nextId++;
     return new Promise<SyncParseResult>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -225,6 +236,7 @@ export class SyncVerifyWorker {
   }
 
   processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): Promise<SharedMemoryProcessResult> {
+    if (this.failure) return Promise.reject(this.failure);
     const id = this.nextId++;
     return new Promise<SharedMemoryProcessResult>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -248,6 +260,7 @@ export class SyncVerifyWorker {
     // reorder their arrays once this method returns.
     const stableDataQuads = dataQuads.slice();
     const stableMetaQuads = metaQuads.slice();
+    if (this.failure) return Promise.reject(this.failure);
     const id = this.nextId++;
     return new Promise<DurableBatchProcessWireResult>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -282,6 +295,7 @@ export class SyncVerifyWorker {
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
   ): Promise<SharedMemoryBatchProcessResult> {
+    if (this.failure) return Promise.reject(this.failure);
     const id = this.nextId++;
     return new Promise<SharedMemoryBatchProcessResult>((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -294,7 +308,14 @@ export class SyncVerifyWorker {
   }
 
   async close(): Promise<void> {
-    await this.worker.terminate();
+    if (!this.closing) {
+      const error = this.failure ?? new Error('Sync verification worker closed');
+      this.failure = error;
+      for (const [, pending] of this.pending) pending.reject(error);
+      this.pending.clear();
+      this.closing = this.worker.terminate().then(() => undefined);
+    }
+    await this.closing;
   }
 }
 

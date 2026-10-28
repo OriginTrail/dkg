@@ -18,6 +18,9 @@ export default defineConfig({
     allowOnly: false,
     coverage: coverageForPackage("agent"),
     include: [
+      "test/public-snapshot-checkpoint.test.ts",
+      "test/public-snapshot-native-boundaries.test.ts",
+      "test/public-checkpoint-job-ownership.test.ts",
       "test/held-metadata-controls.test.ts",
       "test/recipient-key-route-scopes.test.ts",
       "test/public-snapshot-catch-up.test.ts",

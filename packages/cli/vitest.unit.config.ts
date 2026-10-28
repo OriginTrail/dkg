@@ -23,6 +23,7 @@ export default defineConfig({
           'test/durable-unregistered-author-process.test.ts',
           'test/promote-route-not-persisted.test.ts',
           'test/public-snapshot-job.test.ts',
+          'test/public-checkpoint-job.test.ts',
           'test/core-chain-cache-config.test.ts',
           'test/mcp-config-document.test.ts',
           'test/mcp-launch-command.test.ts',

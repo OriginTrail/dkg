@@ -1,3 +1,4 @@
+import { createPublicCheckpointClient } from './public-checkpoint-client.js';
 import type { QueryOptions } from './query-options.js';
 import { shareJobsPath, shareReconciliationPath, type ShareJobsListOptions, type ShareJobsListResult } from './share-job-client-paths.js';
 import { publisherJobsPath, type PublisherJobsPageOptions, type PublisherJobsResult } from './publisher-job-client-paths.js';
@@ -53,10 +54,8 @@ import {
   type DaemonRequestDeadlines,
 } from '@origintrail-official/dkg-core/daemon-request-deadlines';
 import type { PublicQueryResult } from '@origintrail-official/dkg-core';
-
 export type { KnowledgeAssetFinalizedPublishOptions } from './finalized-publish-options.js';
 export type { KnowledgeAssetWritableQuad } from './knowledge-asset-write-contract.js';
-
 /**
  * `/api/verify` collects signatures for up to 30 minutes when the request names
  * no `timeoutMs` (the agent default in packages/agent/src/dkg-agent-endorse.ts).
@@ -669,6 +668,7 @@ interface ConfigFallbackContext {
 }
 
 export class ApiClient {
+  readonly checkpoints = createPublicCheckpointClient({ get: (path, opts) => this.get(path, opts), post: (path, body) => this.post(path, body) });
   private baseUrl: string;
   private token?: string;
   private readonly configFallback?: Readonly<ConfigFallbackContext>;

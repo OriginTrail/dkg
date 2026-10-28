@@ -1,3 +1,4 @@
+export { PublicCheckpointMethods } from './dkg-agent-public-checkpoint.js';
 import { PublicSnapshotProofRuntime } from './public-snapshot-proof-runtime.js';
 import { resolveSnapshotSourcePolicies, type SnapshotSourcePolicyName } from './public-snapshot-policy.js';
 import { registerCoreChainCacheHandlers } from './core-chain-cache-handler.js';
@@ -27,7 +28,7 @@ import {
 import { createPublicSnapshotReader, PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from "./public-snapshot-reader.js";
 export { PUBLIC_GRAPH_SNAPSHOT_PROTOCOL } from "./public-snapshot-reader.js";
 const encoder = new TextEncoder();
-const jobs = new WeakSet<DKGAgent>();
+import { publicSnapshotJobs as jobs } from './dkg-agent-public-checkpoint.js';
 import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { registerSnapshotSourceHandler } from './public-snapshot-source-handler.js';
 export type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
