@@ -1,3 +1,4 @@
+import { oxigraphGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
 import { serializableQueryOptions } from './serializable-query-options.js';
 import { registerStoreRecoveryGeneration, storeWorkerExecutionFailure } from '../store-recovery-generation.js';
 import { runTrackedStoreWrite } from '../tracked-store-write.js';
@@ -8,10 +9,7 @@ import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import {
-  GraphWriteGenTracker,
-  type GraphWriteLifecycle,
-} from '../graph-write-gen.js';
+import { GraphWriteGenTracker, type GraphWriteLifecycle } from '../graph-write-gen.js';
 import {
   RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1,
   Rfc64ExactBindingsReadResultErrorV1,
@@ -187,6 +185,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
+  readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
