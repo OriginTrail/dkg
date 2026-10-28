@@ -421,6 +421,10 @@ export default defineConfig({
           'test/daemon-sync-agents-meta-wiring.test.ts',
           'test/daemon-storage-ack-timing-wiring.test.ts',
           'test/daemon-managed-boot-wiring.test.ts',
+          // OT-RFC-73 P14 — the store control path's default and its store.controlReservedSlots setting: the
+          // config type and loader, and the daemon configuring the path before any store call. No hardhat.
+          'test/store-control-path-config.test.ts',
+          'test/daemon-store-control-path-wiring.test.ts',
         ],
     testTimeout: runsDaemonHttpBehavior ? 120_000 : 60_000,
     globalSetup: runsDaemonHttpBehavior ? ['../chain/test/hardhat-global-setup.ts'] : [],
