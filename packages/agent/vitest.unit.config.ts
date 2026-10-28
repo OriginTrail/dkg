@@ -20,6 +20,9 @@ export default defineConfig({
     include: [
       "test/public-snapshot-checkpoint.test.ts",
       "test/public-snapshot-native-boundaries.test.ts",
+      "test/public-snapshot-native-build.test.ts",
+      "test/public-snapshot-native-lifecycle.test.ts",
+      "test/public-snapshot-checkpoint-audit.test.ts",
       "test/public-checkpoint-job-ownership.test.ts",
       "test/context-graph-lifecycle-cache.test.ts",
       "test/storage-ack-copy-cleanup-writer.test.ts",
