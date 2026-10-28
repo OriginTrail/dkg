@@ -29,7 +29,10 @@ Publishing works the same way, once the node has [Async Publisher Wallets](../us
 
 ## When the answer is not a success
 
-A `409` with `existingJobId` means a job for this Knowledge Asset already exists. Poll that job instead of submitting again.
+A `409` with `existingJobId` means another job for this Knowledge Asset is in the way:
+
+- **Share:** it is the same share, still running. Poll that job instead of submitting again.
+- **Publish:** it is a different publish of the same asset. An identical resubmit answers `202` with the same `jobId` instead. That job's result is not yours: wait for it to finish, then send your own request again.
 
 A `503` with a `Retry-After` header means the node is busy. Wait that long, then send the same request. If a share answer says `admissionOutcome: "indeterminate"`, a job may exist, so poll its `statusPath` first. Without `Retry-After`, waiting helps only if the answer says `retryable: true`.
 
@@ -67,7 +70,7 @@ Every answer carries `mutationRetryAllowed: false`: no answer on its own makes a
 | --- | --- |
 | `200` (share) or `202` (publish), with `jobId` | The job is stored. Poll it |
 | `400 KA_ATOMIC_SHARE_REQUIRED` | Drop the `entities` array: a share always takes the whole Knowledge Asset |
-| `409` with `existingJobId` | A job for this asset exists. Poll it |
+| `409` with `existingJobId` | Share: the same share is still running; poll it. Publish: a different publish of this asset is in the way; its result is not yours, so send your request again after it finishes |
 | `409 PUBLISH_INTENT_STALE` or `PUBLISH_NOT_FULL_SHARE` | The shared content is out of date or not fully shared. See [Stale update intents](../use-dkg/async-publisher-wallets.md#stale-update-intents) |
 | `503 PROMOTE_ADMISSION_UNAVAILABLE`, `admissionOutcome: "not_admitted"` | No share job was written. Send the same request after `Retry-After` |
 | `503 PROMOTE_ADMISSION_UNAVAILABLE`, `admissionOutcome: "indeterminate"` | A share job may exist. Poll `statusPath`, or send the same request |
