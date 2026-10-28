@@ -4,12 +4,8 @@ import { normalizePublicSnapshotSyncOptions, type DKGAgent } from '@origintrail-
 import { readBody, jsonResponse, isPayloadTooLargeError } from '../http-utils.js';
 import type { RequestContext } from './context.js';
 
-type Job = { id: string; startedAt: number } & (
-  | { state: 'running' }
-  | { state: 'complete'; result: Awaited<ReturnType<DKGAgent['preparePublicGraphCheckpoint']>> }
-  | { state: 'failed'; error: string }
-);
-const jobs = new WeakMap<DKGAgent, Job>();
+import type { PublicCheckpointJob, RunningPublicCheckpointJob } from '../../public-checkpoint-contract.js';
+const jobs = new WeakMap<DKGAgent, Exclude<PublicCheckpointJob, { state: 'idle' }>>();
 
 /** Parent route enforces node-admin access. A completed preparation is never active coverage. */
 export async function handlePublicCheckpointJob({ req, res, agent }: RequestContext): Promise<void> {
@@ -27,7 +23,7 @@ export async function handlePublicCheckpointJob({ req, res, agent }: RequestCont
     jsonResponse(res, isPayloadTooLargeError(error) ? 413 : 400, { error: 'Invalid checkpoint request' }); return;
   }
   if (jobs.get(agent)?.state === 'running') { jsonResponse(res, 409, { error: 'Checkpoint preparation already running' }); return; }
-  const job: Job = { id: randomUUID(), startedAt: Date.now(), state: 'running' };
+  const job: RunningPublicCheckpointJob = { id: randomUUID(), startedAt: Date.now(), state: 'running' };
   jobs.set(agent, job);
   void agent.preparePublicGraphCheckpoint(input, native).then(
     result => { jobs.set(agent, { ...job, state: 'complete', result }); },

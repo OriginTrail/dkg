@@ -1,6 +1,7 @@
+import * as snapshotRecovery from '../src/public-snapshot-exact.js';
 import { CheckpointInventory, attachCheckpointInventory } from '../src/snapshot-checkpoint-inventory.js';
 import { afterEach, expect, it, vi } from 'vitest';
-import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { MockChainAdapter, sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
@@ -10,6 +11,7 @@ import { PublicCheckpointMethods } from '../src/dkg-agent-public-checkpoint.js';
 
 const active: Array<{ agent: DKGAgent; directory: string }> = [];
 afterEach(async () => {
+  vi.restoreAllMocks();
   for (const { agent, directory } of active.splice(0)) {
     await agent.stop(); await rm(directory, { recursive: true, force: true });
   }
@@ -96,4 +98,28 @@ it.each(['removal', 'anchor'])('rejects checkpoint %s on the FIRST fresh authori
   await expect(agent.syncPublicGraphSnapshot(options)).rejects.toThrow(change === 'removal' ? 'removed' : 'anchor');
   expect(read).toHaveBeenCalledOnce();
   expect(write).not.toHaveBeenCalled();
+});
+
+it('pins a later observation before partial recovery and retains the addition after failure and reload', async () => {
+  const { agent, directory, options, read, snapshot } = await fixture();
+  const initial = { mode: 'rpc-only' as const, sourceCore: null, snapshot };
+  attachCheckpointInventory(agent, await CheckpointInventory.create(directory, initial));
+  const added = sealPublicGraphSnapshot({ ...snapshot, blockNumber: '11',
+    assets: [{ id: '1', root: `0x${'1'.repeat(64)}`, version: '1' }] });
+  read.mockResolvedValueOnce(snapshot).mockResolvedValue(added);
+  const recover = vi.spyOn(snapshotRecovery, 'recoverPublicSnapshotExact');
+  recover.mockResolvedValueOnce({ committed: new Set<string>() });
+  recover.mockImplementationOnce(async () => {
+    // Assert the production observation boundary performed write-ahead pinning.
+    const pinned = JSON.parse(await readFile(join(directory, 'AUTHENTICATED-INVENTORY.json'), 'utf8'));
+    expect(pinned.snapshot.assets).toEqual(added.assets);
+    await agent.store.insert([{ subject: 'urn:added', predicate: 'urn:value', object: '"partial"', graph: 'urn:partial' }]);
+    throw new Error('interrupted after partial import');
+  });
+  await expect(agent.syncPublicGraphSnapshot(options)).rejects.toThrow('interrupted after partial import');
+  expect(recover).toHaveBeenCalledTimes(2);
+  expect(await agent.store.query('ASK { GRAPH <urn:partial> { <urn:added> ?p ?o } }')).toMatchObject({ value: true });
+  const restarted = await CheckpointInventory.load(directory);
+  await expect(restarted.advance({ ...initial, snapshot: sealPublicGraphSnapshot({ ...snapshot, blockNumber: '12' }) }))
+    .rejects.toThrow('removed');
 });

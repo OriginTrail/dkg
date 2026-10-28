@@ -3,8 +3,7 @@ import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { normalizePublicGraphSnapshot, sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
-import { CheckpointInventory, attachCheckpointInventory, advanceCheckpointInventory } from '../src/snapshot-checkpoint-inventory.js';
-import { recoverPublicSnapshotToCurrent } from '../src/public-snapshot-catch-up.js';
+import { CheckpointInventory } from '../src/snapshot-checkpoint-inventory.js';
 import { makeSnapshotAssets, sealSnapshotOf } from './helpers/public-snapshot-assets.js';
 
 const folders: string[] = [];
@@ -29,24 +28,6 @@ it.each(['removal', 'chain', 'deployment', 'graph', 'storage', 'mode', 'anchor',
     await expect(inventory.advance(fresh)).rejects.toThrow(/removed|scope|anchor/);
     expect(JSON.parse(await readFile(join(path, 'AUTHENTICATED-INVENTORY.json'), 'utf8'))).toEqual(initial);
   });
-
-it('retains additions before recovery, even if that round fails, and enforces them after restart', async () => {
-  const path = await folder(), first = observation(1), next = observation(2, '11');
-  const inventory = await CheckpointInventory.create(path, first), agent = {};
-  attachCheckpointInventory(agent, inventory);
-  let rounds = 0;
-  await expect(recoverPublicSnapshotToCurrent({ initial: first, signal: new AbortController().signal,
-    deadline: Date.now() + 30_000, assertCurrent() {}, readFresh: async () => next,
-    recover: async pinned => {
-      await advanceCheckpointInventory(agent, pinned);
-      if (++rounds === 2) throw new Error('interrupted after partial import');
-      return { committed: new Set<string>() };
-    },
-  })).rejects.toThrow('interrupted');
-  const restarted = await CheckpointInventory.load(path);
-  await expect(restarted.advance(observation(1, '12'))).rejects.toThrow('removed');
-  await restarted.advance(observation(3, '12'));
-});
 
 it('loads expired historical pins only as a comparison floor, never as new authority', async () => {
   const path = await folder(), old = observation(2, '10', { observedAt: 1000, expiresAt: 121000 });

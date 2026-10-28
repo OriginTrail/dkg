@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { assertPublicSnapshotScopeAndAnchor } from './public-snapshot-scope.js';
 import { PublicSnapshotUnavailableError } from './public-snapshot-reader.js';
 import { PUBLIC_SNAPSHOT_ADMISSION_WINDOW_MS } from './public-snapshot-admission.js';
 import { waitForPublicSnapshotRetry } from './public-snapshot-exact-pacing.js';
@@ -59,16 +60,7 @@ export async function recoverPublicSnapshotToCurrent(options: {
 /** Shared by catch-up and a checkpoint's first authority read after activation/restart. */
 export function assertPublicSnapshotProgress(observation: PublicSnapshotObservation, fresh: PublicSnapshotObservation): void {
   const previous = observation.snapshot, next = fresh.snapshot;
-  // A changed contract/name binding is not an incremental inventory. Never
-  // transfer under the old subscription's authority into another namespace.
-  if (observation.mode !== fresh.mode || previous.chainId !== next.chainId
-    || previous.deploymentId !== next.deploymentId || previous.contextGraphId !== next.contextGraphId
-    || previous.onChainId !== next.onChainId || previous.nameHash !== next.nameHash
-    || previous.assetStorage !== next.assetStorage || previous.contextGraphStorage !== next.contextGraphStorage)
-    throw new Error('Snapshot catch-up scope changed');
-  if (BigInt(next.blockNumber) < BigInt(previous.blockNumber)
-    || (next.blockNumber === previous.blockNumber && next.blockHash !== previous.blockHash))
-    throw new Error('Snapshot catch-up finalized anchor regressed or changed');
+  assertPublicSnapshotScopeAndAnchor(observation, fresh);
   const nextIds = new Set(next.assets.map(asset => asset.id));
   // Catch-up can add or replace authenticated content, but cannot silently
   // authorize old stored data after a member disappears from the inventory.

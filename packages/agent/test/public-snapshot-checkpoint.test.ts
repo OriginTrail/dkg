@@ -1,3 +1,4 @@
+import { sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
 import { describe, expect, it, vi } from 'vitest';
 import { readFile, readdir } from 'node:fs/promises';
 import { isAbsolute, join, relative } from 'node:path';
@@ -27,6 +28,19 @@ describe('isolated public checkpoint', () => {
       snapshot: { ...f.initial.snapshot, inventoryDigest: '0'.repeat(64) } }));
     if (failure === 'abort') f.readFresh.mockImplementation(async () => { f.abort.abort(new Error('retired')); return f.initial; });
     await expect(f.run()).rejects.toThrow();
+    const attempts = await readdir(join(f.directory, 'public-snapshot-checkpoints'));
+    expect(attempts).toHaveLength(1);
+    expect(await readdir(join(f.directory, 'public-snapshot-checkpoints', attempts[0]!))).not.toContain('manifest.json');
+  });
+  it.each(['root', 'version'] as const)('rejects valid supplier bytes disagreeing with the authenticated %s before sealing', async field => {
+    const f = await checkpointFixture();
+    // Supplier content and all transport hashes stay intact. Both authority reads
+    // name the same mismatching pin, so inventory-change detection cannot mask it.
+    const assets = f.initial.snapshot.assets.map((asset, i) => i ? asset : {
+      ...asset, ...(field === 'root' ? { root: `0x${'f'.repeat(64)}` } : { version: '2' }),
+    });
+    Object.assign(f.initial, { snapshot: sealPublicGraphSnapshot({ ...f.initial.snapshot, assets }) });
+    await expect(f.run()).rejects.toMatchObject({ code: 'PUBLIC_SNAPSHOT_ASSET_MISMATCH' });
     const attempts = await readdir(join(f.directory, 'public-snapshot-checkpoints'));
     expect(attempts).toHaveLength(1);
     expect(await readdir(join(f.directory, 'public-snapshot-checkpoints', attempts[0]!))).not.toContain('manifest.json');

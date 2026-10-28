@@ -11,6 +11,9 @@ import { runGraphScopedPhysicalOperation } from './sync/requester/graph-scoped-o
 import { isContextGraphSubscriptionStoredAgain, contextGraphSubscriptionAdmissionPremisesEqual } from './context-graph-subscription-policy.js';
 
 const jobs = new WeakSet<DKGAgent>();
+export interface PublicSnapshotObservationAcceptor {
+  accept(observation: PublicSnapshotObservation): Promise<void>;
+}
 interface PublicSnapshotSession {
   normalized: ReturnType<typeof normalizePublicSnapshotSyncOptions>;
   sourcePlan: Awaited<ReturnType<typeof createPublicSnapshotSourcePlan>>;
@@ -24,10 +27,13 @@ interface PublicSnapshotSession {
   readFresh(refresh?: boolean): Promise<PublicSnapshotObservation>;
 }
 
-/** One foreground owner and lifetime. The caller alone decides whether to admit or write. */
+/** One foreground owner and lifetime, with explicit caller-owned observation acceptance. */
 export class PublicSnapshotSessionMethods extends DKGAgentBase {
   async withPublicSnapshotSession<T>(this: DKGAgent, options: PublicSnapshotSyncOptions,
-    run: (session: PublicSnapshotSession) => Promise<T>, ownershipError = 'Snapshot job ownership changed'): Promise<T> {
+    run: (session: PublicSnapshotSession) => Promise<T>, controls: {
+      ownershipError?: string; observationAcceptor?: PublicSnapshotObservationAcceptor;
+    } = {}): Promise<T> {
+    const ownershipError = controls.ownershipError ?? 'Snapshot job ownership changed';
     const normalized = normalizePublicSnapshotSyncOptions(options);
     const { contextGraphId, onChainId, mode } = normalized;
     if (jobs.has(this)) throw new Error('A snapshot job is already running');
@@ -70,14 +76,25 @@ export class PublicSnapshotSessionMethods extends DKGAgentBase {
           assertInitialInventoryCurrent();
           const readerOptions = { mode, chain: this.chain, request: sourcePlan.request, peers: sourcePlan.inventoryPeers,
             signal, expected: { chainId: this.chain.chainId, deploymentId: this.chain.deploymentId!, contextGraphId, onChainId } };
-          const readBeforeAdmission = createPublicSnapshotReader({ ...readerOptions, assertCurrent: assertInitialInventoryCurrent });
+          // Every accepted authority observation crosses this one boundary before
+          // admission, recovery, or freshness completion can consume it. Preparation
+          // supplies no persistence capability and remains non-mutating.
+          const observe = (assertObservationCurrent: () => void) => {
+            const read = createPublicSnapshotReader({ ...readerOptions, assertCurrent: assertObservationCurrent });
+            return async (refresh?: boolean) => {
+              const observation = await read(refresh); assertObservationCurrent();
+              if (subscription?.onChainHash && subscription.onChainHash.toLowerCase() !== observation.snapshot.nameHash.toLowerCase())
+                throw new Error('Graph name binding differs from requested snapshot');
+              await controls.observationAcceptor?.accept(observation);
+              assertObservationCurrent();
+              return observation;
+            };
+          };
+          const readBeforeAdmission = observe(assertInitialInventoryCurrent);
           const initial = await readBeforeAdmission();
-          assertInitialInventoryCurrent();
-          if (subscription?.onChainHash && subscription.onChainHash.toLowerCase() !== initial.snapshot.nameHash.toLowerCase())
-            throw new Error('Graph name binding differs from requested snapshot');
           return run({ normalized, sourcePlan, initial, startedAt, deadline, signal, assertInitialInventoryCurrent,
             assertCurrent, isCurrent, admitSubscription: admit => control.admitSubscription(admit), readBeforeAdmission,
-            readFresh: createPublicSnapshotReader({ ...readerOptions, assertCurrent }) });
+            readFresh: observe(assertCurrent) });
         },
       }));
     } finally { lifecycle.release(); jobs.delete(this); }

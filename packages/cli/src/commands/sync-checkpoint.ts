@@ -26,8 +26,8 @@ export function registerSyncCheckpointCommand(sync: Command): void {
         const deadline = Date.now() + 3_600_000;
         for (;;) {
           const status = await client.checkpoints.status();
-          if (status.id !== job.id) throw new Error('Checkpoint job ownership changed; inspect the daemon before retrying');
-          if (status.state === 'failed') throw new Error(status.error ?? 'Checkpoint preparation failed');
+          if (status.state === 'idle' || status.id !== job.id) throw new Error('Checkpoint job ownership changed; inspect the daemon before retrying');
+          if (status.state === 'failed') throw new Error(status.error);
           if (status.state === 'complete') { console.log(JSON.stringify(status.result, null, 2)); return; }
           if (Date.now() >= deadline) throw new Error('Stopped waiting at the snapshot deadline; inspect job status before retrying');
           await new Promise(resolve => setTimeout(resolve, 2000));

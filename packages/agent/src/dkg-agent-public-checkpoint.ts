@@ -37,6 +37,6 @@ export class PublicCheckpointMethods extends DKGAgentBase {
       return { directory: prepared.directory, assets: prepared.manifest.assets.length,
         inventoryDigest: initial.snapshot.inventoryDigest, mode, committed: 0, current: false,
         activeStoreChanged: false, state: 'verified-unpublished', ...(native ? { native } : {}) };
-    }, 'Checkpoint ownership changed');
+    }, { ownershipError: 'Checkpoint ownership changed' });
   }
 }

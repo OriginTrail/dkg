@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { assertPublicSnapshotScopeAndAnchor } from './public-snapshot-scope.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
 import { BULK_GRAPH_MAX_ASSETS, PUBLIC_CHECKPOINT_PROTOCOL, bulkGraphTransportOptions,
@@ -77,10 +78,7 @@ export async function preparePublicSnapshotCheckpoint(host: {
 export function assertCheckpointInventoryUnchanged(initial: PublicSnapshotObservation, fresh: PublicSnapshotObservation): void {
   // Fresh authority may advance its block without changing this exact inventory.
   // Reorg, scope change, removal or update requires a new attempt/incremental sync.
-  const a = initial.snapshot, b = fresh.snapshot;
-  if (initial.mode !== fresh.mode || a.chainId !== b.chainId || a.deploymentId !== b.deploymentId
-    || a.contextGraphId !== b.contextGraphId || a.onChainId !== b.onChainId || a.nameHash !== b.nameHash
-    || a.assetStorage !== b.assetStorage || a.contextGraphStorage !== b.contextGraphStorage
-    || a.inventoryDigest !== b.inventoryDigest || BigInt(b.blockNumber) < BigInt(a.blockNumber)
-    || (a.blockNumber === b.blockNumber && a.blockHash !== b.blockHash)) throw new Error('Checkpoint inventory changed; use incremental recovery');
+  const error = 'Checkpoint inventory changed; use incremental recovery';
+  assertPublicSnapshotScopeAndAnchor(initial, fresh, { scope: error, anchor: error });
+  if (initial.snapshot.inventoryDigest !== fresh.snapshot.inventoryDigest) throw new Error(error);
 }

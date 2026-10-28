@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { PublicSnapshotObservationAcceptor } from './public-snapshot-session.js';
 import { constants } from 'node:fs';
 import { open, rename } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -56,6 +57,7 @@ export function attachCheckpointInventory(agent: object, inventory: CheckpointIn
   if (guards.has(agent)) throw new Error('Checkpoint inventory already attached');
   guards.set(agent, inventory);
 }
-export async function advanceCheckpointInventory(agent: object, fresh: PublicSnapshotObservation): Promise<void> {
-  await guards.get(agent)?.advance(fresh);
+export function checkpointObservationAcceptor(agent: object): PublicSnapshotObservationAcceptor | undefined {
+  const inventory = guards.get(agent);
+  return inventory ? { accept: observation => inventory.advance(observation) } : undefined;
 }

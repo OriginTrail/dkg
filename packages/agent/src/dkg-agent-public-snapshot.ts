@@ -1,4 +1,4 @@
-import { advanceCheckpointInventory } from './snapshot-checkpoint-inventory.js';
+import { checkpointObservationAcceptor } from './snapshot-checkpoint-inventory.js';
 export { PublicCheckpointMethods } from './dkg-agent-public-checkpoint.js';
 import { PublicSnapshotProofRuntime } from './public-snapshot-proof-runtime.js';
 import { resolveSnapshotSourcePolicies, type SnapshotSourcePolicyName } from './public-snapshot-policy.js';
@@ -97,8 +97,6 @@ export class PublicSnapshotMethods extends DKGAgentBase {
       const { normalized: { contextGraphId, onChainId, mode, transport }, initial, sourcePlan,
         signal, deadline, startedAt, admitSubscription, assertCurrent, isCurrent, readFresh } = session;
       const snapshot = initial.snapshot;
-      // Compare against the retained journal before admission or any durable recovery.
-      await advanceCheckpointInventory(this, initial);
       session.assertInitialInventoryCurrent();
       // From admission onward every captured write premise stays strict.
       // A validated public snapshot admits this job without scheduling the
@@ -113,8 +111,6 @@ export class PublicSnapshotMethods extends DKGAgentBase {
         initial, deadline, signal, assertCurrent,
         readFresh: () => readFresh(true),
         recover: async observation => {
-          // Persist new pins BEFORE recovery can add content, including on a failed round.
-          await advanceCheckpointInventory(this, observation);
           assertCurrent();
           const evidence = new PublicSnapshotEvidence(observation, isCurrent);
           const uals = observation.snapshot.assets.map(a => buildKnowledgeAssetUalFromOnChainIdV1(
@@ -141,7 +137,6 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           });
         },
       });
-      await advanceCheckpointInventory(this, caughtUp.fresh);
       assertCurrent();
       const { committed, alreadyPresent } = caughtUp.recovered;
       const { snapshot: finalSnapshot, sourceCore } = caughtUp.observation;
@@ -165,6 +160,6 @@ export class PublicSnapshotMethods extends DKGAgentBase {
         finishedAt: Date.now(),
         elapsedMs: Date.now() - startedAt,
       };
-    });
+    }, { observationAcceptor: checkpointObservationAcceptor(this) });
   }
 }
