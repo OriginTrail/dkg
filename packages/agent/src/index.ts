@@ -680,4 +680,4 @@ export { resumePublicCheckpointEdge } from './snapshot-resume-edge.js';
 export { CatalogPublicationAdmissionError, CATALOG_PUBLICATION_ADMISSION_CODE } from './catalog-publication-admission-error.js';
 export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
 
-export type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest, VerifiedNativeSnapshotCheckpoint, NativeSnapshotCheckpointReport } from './snapshot-checkpoint-contract.js';
+export type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest, VerifiedNativeSnapshotCheckpoint, NativeSnapshotCheckpointReport, PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';

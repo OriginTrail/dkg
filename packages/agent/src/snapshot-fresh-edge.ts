@@ -12,6 +12,7 @@ import { assertCheckpointInventoryUnchanged } from './public-snapshot-checkpoint
 import type { PreparedSnapshotCheckpoint, VerifiedNativeSnapshotCheckpoint } from './snapshot-checkpoint-contract.js';
 import { nativeCheckpointShaFile } from './snapshot-checkpoint-files.js';
 import { CHECKPOINT_PROFILE as PROFILE } from './snapshot-checkpoint-profile.js';
+import { checkpointLifetime } from './snapshot-checkpoint-lifetime.js';
 import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { writeCheckpointFile, syncCheckpointDirectory } from './snapshot-checkpoint-files.js';
 
@@ -42,12 +43,7 @@ export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEd
     || native.state !== 'verified-unpublished' || !native.fullReadback
     || native.inventoryDigest !== snapshot.inventoryDigest || native.journal !== join(prepared.directory, 'native/store.jnl'))
     throw new Error('Invalid native checkpoint handoff');
-  const remaining = prepared.manifest.deadline - Date.now();
-  if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > PROFILE.jobTimeoutMs) throw new Error('Checkpoint job deadline exceeded');
-  const lifetime = new AbortController();
-  const cancel = () => lifetime.abort(options.signal.reason);
-  options.signal.throwIfAborted(); options.signal.addEventListener('abort', cancel, { once: true });
-  const timer = setTimeout(() => lifetime.abort(new Error('Checkpoint job deadline exceeded')), remaining);
+  const lifetime = checkpointLifetime(options.signal, prepared.manifest.deadline);
   let agent: import('./dkg-agent.js').DKGAgent | undefined;
   try {
     if (await nativeCheckpointShaFile(runtime.jar) !== runtime.jarSha256
@@ -91,6 +87,6 @@ export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEd
     await agent?.stop();
     throw error;
   } finally {
-    clearTimeout(timer); options.signal.removeEventListener('abort', cancel);
+    lifetime.dispose();
   }
 }

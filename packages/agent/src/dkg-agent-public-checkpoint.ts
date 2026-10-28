@@ -5,6 +5,7 @@ import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { DKGAgentBase } from './dkg-agent-base.js';
 import type { DKGAgent } from './dkg-agent.js';
 import type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
+import type { PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';
 import { preparePublicSnapshotCheckpoint, assertCheckpointInventoryUnchanged } from './public-snapshot-checkpoint.js';
 
 export class PublicCheckpointMethods extends DKGAgentBase {
@@ -17,7 +18,7 @@ export class PublicCheckpointMethods extends DKGAgentBase {
     if (activation) (await activation).assertCurrent();
     signal.throwIfAborted();
   }
-  async preparePublicGraphCheckpoint(this: DKGAgent, options: PublicSnapshotSyncOptions, nativeBuild = false) {
+  async preparePublicGraphCheckpoint(this: DKGAgent, options: PublicSnapshotSyncOptions, nativeBuild = false): Promise<PublicCheckpointPreparationResult> {
     const runtime = nativeBuild ? { java: process.env.DKG_PUBLIC_CHECKPOINT_JAVA ?? '',
       jar: process.env.DKG_PUBLIC_CHECKPOINT_JAR ?? '', jarSha256: process.env.DKG_PUBLIC_CHECKPOINT_JAR_SHA256 ?? '' } : undefined;
     if (runtime && (!runtime.java || !runtime.jar || !/^[a-f0-9]{64}$/.test(runtime.jarSha256)))
@@ -38,7 +39,7 @@ export class PublicCheckpointMethods extends DKGAgentBase {
       }) : undefined;
       return { directory: prepared.directory, assets: prepared.manifest.assets.length,
         inventoryDigest: initial.snapshot.inventoryDigest, mode, committed: 0, current: false,
-        activeStoreChanged: false, state: 'verified-unpublished', ...(native ? { native } : {}) };
+        activeStoreChanged: false, state: 'verified-unpublished', ...(native ? { native } : {}) } satisfies PublicCheckpointPreparationResult;
     }, { ownershipError: 'Checkpoint ownership changed' });
   }
 }

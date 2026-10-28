@@ -28,6 +28,8 @@ export default defineConfig({
       "test/snapshot-checkpoint-inventory.test.ts",
       "test/snapshot-checkpoint-durability.test.ts",
       "test/snapshot-checkpoint-profile.test.ts",
+      "test/snapshot-checkpoint-lifetime.test.ts",
+      "test/snapshot-checkpoint-budget.test.ts",
       "test/snapshot-checkpoint-files.test.ts",
       "test/snapshot-native-store.test.ts",
       "test/public-snapshot-checkpoint-audit.test.ts",

@@ -33,9 +33,23 @@ beforeEach(() => {
       }, syncPublicGraphSnapshot: lifecycle.sync, stop: lifecycle.stop };
   });
 });
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('fresh checkpoint Edge and restart ownership', () => {
+  it('keeps fresh and resumed Edges alive after their former job deadlines and caller cancellation', async () => {
+    const f = await handoffFixture(), caller = new AbortController(); f.options.signal = caller.signal;
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
+    const fresh = await createFreshPublicCheckpointEdge(f.options);
+    const firstSignal = lifecycle.sync.mock.calls.at(-1)![0].signal as AbortSignal;
+    vi.advanceTimersByTime(3_600_001);
+    expect(firstSignal.aborted).toBe(false); expect(lifecycle.processStop).not.toHaveBeenCalled();
+    await fresh.agent.stop();
+    const resumed = await resumePublicCheckpointEdge(f.options);
+    const resumedSignal = lifecycle.sync.mock.calls.at(-1)![0].signal as AbortSignal;
+    caller.abort(new Error('caller ended')); vi.advanceTimersByTime(3_600_001);
+    expect(resumedSignal.aborted).toBe(false); expect(lifecycle.processStop).toHaveBeenCalledTimes(1);
+    await resumed.agent.stop(); expect(lifecycle.processStop).toHaveBeenCalledTimes(2);
+  });
   it('waits for startup and ordinary exact catchup before sealing; restart reuses the private journal', async () => {
     const f = await handoffFixture();
     lifecycle.sync.mockImplementationOnce(async () => {

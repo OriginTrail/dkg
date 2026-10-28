@@ -2,6 +2,15 @@ import type { PreparedSnapshotCheckpoint, VerifiedNativeSnapshotCheckpoint } fro
 import type { preparePublicSnapshotCheckpoint } from '../src/public-snapshot-checkpoint.js';
 import type { buildNativeSnapshotCheckpoint } from '../src/snapshot-native-build.js';
 import type { createFreshPublicCheckpointEdge } from '../src/snapshot-fresh-edge.js';
+import type { DKGAgent, PublicCheckpointPreparationResult } from '../src/index.js';
+
+declare const publicResult: Awaited<ReturnType<DKGAgent['preparePublicGraphCheckpoint']>>;
+const publicContract: PublicCheckpointPreparationResult = publicResult;
+const committed: 0 = publicResult.committed;
+const current: false = publicResult.current;
+const changed: false = publicResult.activeStoreChanged;
+const state: 'verified-unpublished' = publicResult.state;
+void [publicContract, committed, current, changed, state];
 
 declare const prepared: Awaited<ReturnType<typeof preparePublicSnapshotCheckpoint>>;
 declare const built: Awaited<ReturnType<typeof buildNativeSnapshotCheckpoint>>;

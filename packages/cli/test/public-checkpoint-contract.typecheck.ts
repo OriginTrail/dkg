@@ -3,6 +3,13 @@ import { createPublicCheckpointClient } from '../src/public-checkpoint-client.js
 
 declare const status: PublicCheckpointJob;
 if (status.state === 'complete') {
+  const committed: 0 = status.result.committed;
+  const current: false = status.result.current;
+  const changed: false = status.result.activeStoreChanged;
+  const state: 'verified-unpublished' = status.result.state;
+  void [committed, current, changed, state];
+}
+if (status.state === 'complete') {
   const result: object = status.result;
   const identity: string = status.id;
   void [result, identity];

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { PublicSnapshotObservation } from './public-snapshot-evidence.js';
+import type { PublicSnapshotMode, PublicSnapshotObservation } from './public-snapshot-evidence.js';
 import type { SnapshotCheckpointEntry } from './snapshot-checkpoint-files.js';
 import type { VerifiedSnapshotCheckpointAsset } from './snapshot-checkpoint-verify.js';
 
@@ -24,4 +24,10 @@ export interface VerifiedNativeSnapshotCheckpoint {
 }
 export interface NativeSnapshotCheckpointReport extends VerifiedNativeSnapshotCheckpoint {
   assets: number; publicQuads: number; loaderMs: number; elapsedMs: number;
+}
+/** Public preparation/job result. It never confers live coverage or store ownership. */
+export interface PublicCheckpointPreparationResult {
+  directory: string; assets: number; inventoryDigest: string; mode: PublicSnapshotMode;
+  committed: 0; current: false; activeStoreChanged: false; state: 'verified-unpublished';
+  native?: NativeSnapshotCheckpointReport;
 }

@@ -4,6 +4,7 @@ import { nativeCheckpointProperties } from './snapshot-native-properties.js';
 import { constants } from 'node:fs';
 import { copyFile, mkdir, open, statfs } from 'node:fs/promises';
 import { CHECKPOINT_PROFILE as PROFILE, assertCheckpointMemory, checkpointJavaArguments } from './snapshot-checkpoint-profile.js';
+import { checkpointLifetime } from './snapshot-checkpoint-lifetime.js';
 import { isAbsolute, join } from 'node:path';
 import { BlazegraphStore } from '@origintrail-official/dkg-storage';
 import type { PreparedSnapshotCheckpoint, NativeSnapshotCheckpointReport } from './snapshot-checkpoint-contract.js';
@@ -29,11 +30,8 @@ export async function buildNativeSnapshotCheckpoint(prepared: PreparedSnapshotCh
   if (await nativeCheckpointShaFile(options.jar) !== options.jarSha256) throw new Error('Native checkpoint runtime hash mismatch');
   if (manifest.state !== 'verified-unpublished' || !manifest.assets.length
     || manifest.plainBytes > PROFILE.maxPlainBytes || manifest.encodedBytes > PROFILE.maxEncodedBytes) throw new Error('Invalid checkpoint build profile');
-  const remaining = manifest.deadline - Date.now();
-  if (!Number.isSafeInteger(remaining) || remaining < 1 || remaining > PROFILE.jobTimeoutMs) throw new Error('Checkpoint job deadline exceeded');
-  const abort = new AbortController();
-  const signal = AbortSignal.any([options.signal, abort.signal]);
-  const timer = setTimeout(() => abort.abort(new Error('Checkpoint job deadline exceeded')), remaining);
+  const lifetime = checkpointLifetime(options.signal, manifest.deadline);
+  const { signal } = lifetime;
   const folder = join(directory, 'native');
   let owned: Awaited<ReturnType<typeof startSnapshotNativeProcess>> | undefined;
   let store: BlazegraphStore | undefined;
@@ -46,7 +44,7 @@ export async function buildNativeSnapshotCheckpoint(prepared: PreparedSnapshotCh
   const monitor = setInterval(() => {
     if (monitorBusy) return;
     monitorBusy = true;
-    void guard().catch(error => abort.abort(error)).finally(() => { monitorBusy = false; });
+    void guard().catch(error => lifetime.abort(error)).finally(() => { monitorBusy = false; });
   }, 1000);
   try {
     await guard(); await options.assertInventoryCurrent(); signal.throwIfAborted();
@@ -105,7 +103,7 @@ export async function buildNativeSnapshotCheckpoint(prepared: PreparedSnapshotCh
     await syncCheckpointDirectory(folder);
     return result;
   } finally {
-    clearTimeout(timer); clearInterval(monitor);
+    lifetime.dispose(); clearInterval(monitor);
     await Promise.allSettled([store?.close(), owned?.stop()]);
   }
 }
