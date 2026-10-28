@@ -161,6 +161,14 @@ export class ContextGraphSubscriptionActivations {
       hosted: subscription.coreHosted === true,
       reason: subscription.subscribed || subscription.coreHosted ? undefined : 'deactivated' });
   }
+  /** Explicit unsubscribe retires member intent even before a live row was installed. */
+  unsubscribe(id: string): void {
+    const ports = this.ports, live = ports.subscribedContextGraphs.get(id);
+    if (live) this.replaceLiveIntent(id, live);
+    else if (this.pending.has(id) || ports.contextGraphSubscriptionDormancyById.has(id)
+      || ports.contextGraphSubscriptionRehydrationPendingIds.has(id)
+      || ports.contextGraphSubscriptionRehydrationAccountedIds.has(id)) this.transition({ id, kind: 'deactivated' });
+  }
   /** Explicit lifecycle facts use the same bookkeeping operation as activation. */
   transition(event: SubscriptionLifecycleEvent): void { this.transitionBatch([event]); }
   /** Apply the entire batch and its accounting before cancelling any waiters. */
