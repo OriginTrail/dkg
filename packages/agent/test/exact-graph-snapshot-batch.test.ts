@@ -146,13 +146,33 @@ describe('bounded exact graph snapshot batches', () => {
     } finally { await store.close(); }
   });
 
-  it.each([
-    { type: 'boolean', value: false },
-    { type: 'bindings', bindings: [{ g: 'urn:unadmitted', s: 'urn:s', p: 'urn:p', o: '"v"' }] },
-    { type: 'bindings', bindings: [{ g: 'urn:graph:0000', s: 'urn:s', o: '"v"' }] },
-  ])('rejects malformed or unadmitted store responses', async (result) => {
-    const store = { query: vi.fn().mockResolvedValue(result) } as unknown as TripleStore;
-    await expect(readExactGraphSnapshotBatch(store, plan([1, 1]).entries, 1024)).rejects.toThrow();
+  describe('response validation', () => {
+    const completeBindings = [
+      { g: 'urn:graph:0000', s: 'urn:s', p: 'urn:p', o: '"v"' },
+      { g: 'urn:graph:0001', s: 'urn:s', p: 'urn:p', o: '"v"' },
+    ];
+
+    it('rejects a non-binding response with the intended validation error', async () => {
+      const store = { query: vi.fn().mockResolvedValue({ type: 'boolean', value: false }) } as unknown as TripleStore;
+      await expect(readExactGraphSnapshotBatch(store, plan([1, 1]).entries, 1024))
+        .rejects.toThrow('Sync exact-graph snapshot returned non-binding rows');
+    });
+
+    it('rejects an extra unadmitted row even when every planned graph is complete', async () => {
+      const bindings = [...completeBindings, { g: 'urn:unadmitted', s: 'urn:s', p: 'urn:p', o: '"v"' }];
+      const store = { query: vi.fn().mockResolvedValue({ type: 'bindings', bindings }) } as unknown as TripleStore;
+      await expect(readExactGraphSnapshotBatch(store, plan([1, 1]).entries, 1024))
+        .rejects.toThrow('Sync exact-graph snapshot returned an unadmitted graph or malformed row');
+    });
+
+    it.each(['s', 'p', 'o'] as const)('rejects a missing %s without relying on a graph-count mismatch', async (term) => {
+      const malformed: Record<string, string> = { ...completeBindings[0]! };
+      delete malformed[term];
+      const bindings = [malformed, completeBindings[1]!];
+      const store = { query: vi.fn().mockResolvedValue({ type: 'bindings', bindings }) } as unknown as TripleStore;
+      await expect(readExactGraphSnapshotBatch(store, plan([1, 1]).entries, 1024))
+        .rejects.toThrow('Sync exact-graph snapshot returned an unadmitted graph or malformed row');
+    });
   });
 
   it('rejects oversized, duplicate or invalid batches before dispatch', async () => {
