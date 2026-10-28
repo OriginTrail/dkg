@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
-import type { DurableRecoveryOptions } from './durable-recovery-types.js';
+import type { DurableRecoverySchedulingOptions } from './durable-recovery-types.js';
 import { DurableSyncAdmissionBoundary } from './sync/requester/admission-boundary.js';
 import { createDurableSyncFetchTimeoutMs } from './sync/requester/durable-sync-budget.js';
 import { createAbortError as asSyncFetchAbortError } from './bounded-operation.js';
@@ -174,7 +174,7 @@ export const DURABLE_RECOVERY_HARD_TIMEOUT_MS =
 /** Shared physical scheduling for ordinary fanout and a single graph owner. */
 export function createDurableGraphScheduler(input: {
   host: DurableRecoveryHost; ctx: OperationContext; remotePeerId: string;
-  options: DurableRecoveryOptions | undefined;
+  options: DurableRecoverySchedulingOptions | undefined;
   exactRecovery: boolean; extendedRecovery: boolean; maximumTimeoutMs?: number;
 }) {
   const { host, ctx, remotePeerId, options } = input;

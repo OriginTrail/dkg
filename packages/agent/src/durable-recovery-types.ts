@@ -26,7 +26,7 @@ export type ExactKnowledgeAssetRefreshSyncOptions = ExactKnowledgeAssetSyncOptio
   exactFetchPurpose?: 'vm-update-refresh';
 };
 
-export type DurableRecoveryOptions = {
+export type DurableRecoverySchedulingOptions = {
   stopOnBackoffWorthyFailure?: boolean;
   /**
    * Outer wall-clock budget for the complete legacy durable operation.
@@ -57,11 +57,6 @@ export type DurableRecoveryOptions = {
    * settlement boundary, not a generic progress callback.
    */
   onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
-  /** Selection-bound requester policy; a refresh always identifies its exact assets. */
-  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
-  /** Internal transport decision; required streams never replay an enlarged selection. */
-  exactRecoveryTransportMode?: ExactRecoveryTransportMode;
-  /** Owner-private retained META prefix for bounded durable recovery. */
   /** Admission override for foreground VM recovery. */
   priority?: number;
   /**
@@ -77,6 +72,13 @@ export type DurableRecoveryOptions = {
    * The scheduler re-clamps anyway, as defence in depth.
    */
   source?: SyncAdmissionSource;
+};
+
+export type DurableRecoveryOptions = DurableRecoverySchedulingOptions & {
+  /** Selection-bound requester policy; a refresh always identifies its exact assets. */
+  exactAssetFetchPolicy?: ExactAssetFetchSessionPolicy;
+  /** Internal transport decision; required streams never replay an enlarged selection. */
+  exactRecoveryTransportMode?: ExactRecoveryTransportMode;
 };
 
 type LegacyExactAssetFetchOptions = {

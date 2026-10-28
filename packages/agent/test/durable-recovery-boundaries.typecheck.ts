@@ -53,3 +53,10 @@ void runAdmittedGraphOwnedDurableGraph({ ...admittedOwned, options: { ...admitte
 void runAdmittedGraphOwnedDurableGraph({ ...admittedOwned, options: { ...admittedOwned.options, onVerifiedFullSnapshot: async () => {} } });
 // @ts-expect-error Owned assembly has no delta watermark resolver.
 void runAdmittedGraphOwnedDurableGraph({ ...admittedOwned, options: { ...admittedOwned.options, sinceBatchIdFor: () => '1' } });
+
+// @ts-expect-error Graph owners accept scheduling options, never exact transport policy.
+const exactTransport: GraphOwnedDurableRecoveryRequest = { ...owned, options: { exactRecoveryTransportMode: 'stream-required' } };
+void exactTransport;
+// @ts-expect-error Graph owners cannot carry an ordinary exact-selection policy.
+const exactSelection: GraphOwnedDurableRecoveryRequest = { ...owned, options: { exactAssetFetchPolicy: undefined } };
+void exactSelection;

@@ -2,7 +2,7 @@
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { DurableRecoveryHost } from './durable-recovery-host.js';
 import type { DurableRecoveryAuthority } from './durable-recovery-authority.js';
-import type { DurableRecoveryOptions } from './durable-recovery-types.js';
+import type { DurableRecoverySchedulingOptions } from './durable-recovery-types.js';
 import type { GraphOwnedRecoveryInput } from './sync/requester/graph-owned-recovery.js';
 import type { DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 import { createIncompleteDurableSyncResult } from './sync/durable-progress.js';
@@ -18,7 +18,7 @@ export interface GraphOwnedDurableRecoveryRequest {
   readonly remotePeerId: string;
   readonly contextGraphId: string;
   readonly recovery: GraphOwnedRecoveryInput;
-  readonly options?: Omit<DurableRecoveryOptions, 'exactAssetFetchPolicy'>;
+  readonly options?: DurableRecoverySchedulingOptions;
 }
 export type AgentGraphOwnedRecoveryRequest = Omit<GraphOwnedDurableRecoveryRequest, 'host' | 'authority'>;
 
