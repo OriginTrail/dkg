@@ -137,6 +137,8 @@ export default defineConfig({
           // A persisted subscription restored unsynced gets a catch-up job
           // (#3251). Agent double and stub runner; no hardhat.
           'test/context-graph-activation-catchup.test.ts',
+          'test/context-graph-activation-committed.test.ts',
+      'test/context-graph-activation-provisional.test.ts',
           // A write into a graph this node is still catching up waits for the
           // catch-up, bounded; a restarted owner's first write into its own
           // registered graph goes through. Same worker and fake thread.

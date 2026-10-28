@@ -20,6 +20,10 @@ export default defineConfig({
     include: [
       "test/held-metadata-controls.test.ts",
       "test/recipient-key-route-scopes.test.ts",
+      "test/public-snapshot-catch-up.test.ts",
+      "test/public-snapshot-parallel-exact.test.ts",
+      "test/exact-batch-stream-pipeline.test.ts",
+      "test/host-mode-reconcile-priority.test.ts",
       "test/write-preflight-attribution.test.ts",
       // S4a: which writes move the policy generation, what makes two probe calls interchangeable.
       "test/write-preflight-generation.test.ts",
@@ -236,6 +240,7 @@ export default defineConfig({
       "test/context-graph-dormant-admission-boundary.test.ts",
       "test/context-graph-automatic-discovery-binding.test.ts",
       "test/context-graph-activation-custody.test.ts",
+      "test/context-graph-activation-completion.test.ts",
       "test/context-graph-dormant-predecessor-retirement.test.ts",
       "test/swm-host-dormancy.test.ts",
       "test/context-graph-subscription-rolling-checks.test.ts",

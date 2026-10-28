@@ -92,6 +92,7 @@ export async function readHeldGraphScopedAssets(
         expectedMerkleRoot: Buffer.from(descriptor.claimedRootHex, 'hex'),
         source: 'agent.durableSync.heldAssetContent', queryOptions: options,
       });
+      request.signal?.throwIfAborted();
       if (content.status !== 'verified') continue;
       // Membership and cleanup authority are one result, including tentative no-chain copies.
       held.set(descriptor.ual, confirmed.has(descriptor.ual)

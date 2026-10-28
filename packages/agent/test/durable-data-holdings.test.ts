@@ -1,3 +1,4 @@
+import { DurableGraphSettlementGuard, DURABLE_HOLDINGS_SCAN_BUDGET_MS } from '../src/sync/requester/durable-prefix-proof.js';
 import { prepareDurableHoldingsPhase } from '../src/sync/requester/durable-holdings-phase.js';
 import type { HeldAssetMembership } from '../src/sync/requester/held-assets-contracts.js';
 import { readHeldGraphScopedAssets as readHeldEvidence } from '../src/sync/requester/stored-graph-assets.js';
@@ -688,4 +689,48 @@ it('retains one keyed evidence collection with confirmed-only reconciliation', a
     expect(() => proof.retain(new Set([confirmed.ual]))).toThrow('unproven held asset');
     expect(query).not.toHaveBeenCalled();
   } finally { proof.close(); }
+});
+
+
+describe('optional holdings preflight has its own budget', () => {
+  const generation = (count: number) => manifestOf(Array.from({ length: count }, (_, i) => asset(i + 1)));
+  const uals = (manifest: GraphScopedDurableManifestPlan) => manifest.descriptors.map(descriptor => descriptor.ual);
+  it('falls back before the caller deadline and retires a late proof without touching the DATA proof', async () => {
+    vi.useFakeTimers();
+    const manifest = generation(3), caller = new AbortController();
+    const lateClose = vi.fn(), dataClose = vi.fn();
+    let finishScan!: (proof: import('../src/sync/requester/held-assets-contracts.js').HeldAssetsProof) => void;
+    const slow = new Promise<import('../src/sync/requester/held-assets-contracts.js').HeldAssetsProof>(resolve => { finishScan = resolve; });
+    const proof = (close: () => void) => ({ held: new Set(uals(manifest)), close, retain: () => {}, assertCurrent: () => {} });
+    const source = { prove: vi.fn().mockReturnValueOnce(slow).mockResolvedValue(proof(dataClose)), assertOwnership: () => {} };
+    const settlement = new DurableGraphSettlementGuard(() => caller.signal.throwIfAborted(), source);
+    const input = holdingsInput({ contextGraphId: CG, manifest, options: {}, held: new Set(),
+      confirmCurrent: async () => {}, signal: caller.signal, logWarn: () => {} });
+    try {
+      let settled = false;
+      const plan = prepareDurableHoldingsPhase({ ...input, settlement }).then(value => { settled = true; return value; });
+      await vi.advanceTimersByTimeAsync(DURABLE_HOLDINGS_SCAN_BUDGET_MS);
+      expect(settled).toBe(true);
+      expect(await plan).toEqual({ kind: 'full', held: 0, continuation: 'reconsider-holdings' });
+      expect(caller.signal.aborted).toBe(false);
+      expect(source.prove.mock.calls[0]?.[0].signal.aborted).toBe(true);
+      await settlement.acquire(manifest, 0, () => {}, caller.signal);
+      finishScan(proof(lateClose));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(lateClose).toHaveBeenCalledOnce();
+      expect(dataClose).not.toHaveBeenCalled();
+      expect(() => settlement.assertCurrent()).not.toThrow();
+      settlement.close();
+      expect(dataClose).toHaveBeenCalledOnce();
+    } finally { settlement.close(); vi.useRealTimers(); }
+  });
+
+  it('does not rescan the whole manifest after the owner commits to full DATA rounds', async () => {
+    const input = holdingsInput({ contextGraphId: CG, manifest: generation(3),
+      options: { skipHoldingsPreflight: true }, held: new Set(), confirmCurrent: async () => {}, logWarn: () => {} });
+    const prove = vi.fn(input.settlement.proveHoldings);
+    expect(await prepareDurableHoldingsPhase({ ...input, settlement: { ...input.settlement, proveHoldings: prove } }))
+      .toEqual({ kind: 'full', held: 0, continuation: 'full-graph' });
+    expect(prove).not.toHaveBeenCalled();
+  });
 });

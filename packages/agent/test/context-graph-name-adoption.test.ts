@@ -518,6 +518,24 @@ describe('restart with a saved name-hash subscription', () => {
     syncScoped: true,
   };
 
+  it.each([true, false])('never revives an adopted hash predecessor of inactive intent with rehydration=%s', async enabled => {
+    const inactive = { ...cleartextRow, subscribed: false, coreHosted: false };
+    const store = recordingStore([hashRow, inactive]);
+    const internals = await boot({ store, syncContextGraphs: [NAME_HASH], rehydrationEnabled: enabled });
+    const authority = vi.spyOn(internals, 'resolveContextGraphSubscriptionBootstrapAuthority');
+    await internals.rehydrateContextGraphSubscriptions(null);
+    expect(internals.subscribedContextGraphs.has(NAME_HASH)).toBe(false);
+    expect(internals.subscribedContextGraphs.has(CLEARTEXT)).toBe(false);
+    expect(authority).not.toHaveBeenCalled();
+    expect([...internals.gossip.topics]).toEqual([]);
+    expect(store.deleted).toEqual(enabled ? [NAME_HASH] : []);
+    expect(store.saved).toEqual([]);
+    expect(await store.loadAll()).toEqual(enabled ? [inactive] : [hashRow, inactive]);
+    expect(internals.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      persistedTotal: 0, activated: 0, dormant: 0,
+    });
+  });
+
   it('drops a superseded hash row and keeps syncing the cleartext id', async () => {
     const store = recordingStore([hashRow, cleartextRow]);
     const internals = await boot({ store, syncContextGraphs: [NAME_HASH] });

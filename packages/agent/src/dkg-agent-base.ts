@@ -1,4 +1,5 @@
 import type { StoreContentFence } from './internal/store-content-fence.js';
+import { ContextGraphSubscriptionActivations } from './context-graph-subscription-activation-state.js';
 import { mergeRpcUsageWindows } from '@origintrail-official/dkg-chain';
 import { reconcileAfterMaterialization, reconcileAfterHeldAsset } from './sync/requester/post-materialization.js';
 import type { DurableRecoveryHost, RecoveryAdmissionRequest } from './durable-recovery-host.js';
@@ -478,7 +479,7 @@ import {
   type ReplicationEvent,
 } from './dkg-agent-types.js';
 import type { SyncCheckpointStore, ChangelogCursorStore } from './sync/checkpoint/state.js';
-import {
+import { readNonNegativeNumberEnv, readPositiveSafeIntegerEnv, readNonNegativeIntegerEnv,
   normalizePublishContextGraphId,
   isPublishAsyncQuadEnvelope,
   assertQuadArray,
@@ -523,18 +524,6 @@ import {
   type ChainAuthorityReadBudgets,
 } from './chain-authority-read-budgets.js';
 import type { DKGAgent } from './dkg-agent.js';
-
-function readNonNegativeNumberEnv(name: string, fallback: number): number {
-  const raw = process.env[name];
-  if (raw === undefined || raw.trim() === '') return fallback;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) ? Math.max(0, parsed) : fallback;
-}
-
-function readPositiveSafeIntegerEnv(name: string, fallback: number): number {
-  const parsed = Number(process.env[name]);
-  return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : fallback;
-}
 
 /**
  * Same-instance restart contract.
@@ -595,6 +584,7 @@ export class DKGAgentBase {
       verifyBinding: (id, onChainId, ctx, signal) => agent.requireLocalCgMatchesOnChainSlot(id, onChainId, ctx, { signal }),
       persistSubscription: (id, subscription, reason, isCurrent) => agent.persistContextGraphSyncStateStrict(id, subscription, reason, isCurrent),
       bindSubscription: (id, subscription, onChainId) => agent.bindSubscriptionOnChainId(id, subscription, onChainId),
+      logTiming: (ctx, message) => agent.log.debug(ctx, message),
       recordDrops: (drops, seam) => agent.oversizeTombstoneLog.record(drops, seam),
       reconcile,
     });
@@ -953,13 +943,7 @@ export class DKGAgentBase {
    * (`source: 'allowlist'`) are NOT truncated by this cap — see
    * `chooseFanOutTier` jsdoc for the rationale.
    */
-  protected readonly swmSubstrateMaxMembers: number = (() => {
-    const raw = process.env.DKG_SWM_SUBSTRATE_MAX_MEMBERS;
-    if (!raw) return 100;
-    const n = Number.parseInt(raw, 10);
-    if (!Number.isFinite(n) || n < 0) return 100;
-    return n;
-  })();
+  protected readonly swmSubstrateMaxMembers = readNonNegativeIntegerEnv('DKG_SWM_SUBSTRATE_MAX_MEMBERS', 100);
   /**
    * Per-send substrate timeout for SWM update fan-out. Matches the
    * 15s reliability SLO the messenger targets for chat. Kept as a
@@ -1529,6 +1513,18 @@ export class DKGAgentBase {
   /** Which waiting row rolling activation checks next, and how soon; made anew when a start retires the runtime before. */
   protected contextGraphSubscriptionRollingChecks = new RollingSubscriptionChecks();
   protected readonly contextGraphSubscriptionRehydrationAccountedIds = new Set<string>();
+  protected readonly contextGraphSubscriptionActivations = new ContextGraphSubscriptionActivations({
+    subscribedContextGraphs: this.subscribedContextGraphs,
+    contextGraphSubscriptionDormancyById: this.contextGraphSubscriptionDormancyById,
+    contextGraphSubscriptionRehydrationPendingIds: this.contextGraphSubscriptionRehydrationPendingIds,
+    contextGraphSubscriptionRehydrationSlotIds: this.contextGraphSubscriptionRehydrationSlotIds,
+    contextGraphSubscriptionRehydrationAccountedIds: this.contextGraphSubscriptionRehydrationAccountedIds,
+    getStatus: () => this.contextGraphSubscriptionRehydrationStatus,
+    setStatus: status => { this.contextGraphSubscriptionRehydrationStatus = status; },
+    slotReleased: () => this.contextGraphSubscriptionRehydrationPromotionRuntime?.request(),
+    clearPersistRevision: id => (this as unknown as DKGAgent).clearContextGraphSubscriptionPersistRevisionStateIfIdle(id),
+    publish: id => this.eventBus.emit(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, { contextGraphId: id }),
+  });
   protected readonly contextGraphSubscriptionPersistRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistAppliedRevisions = new Map<string, number>();
   protected readonly contextGraphSubscriptionPersistCanceledRevisions = new Map<string, number>();
