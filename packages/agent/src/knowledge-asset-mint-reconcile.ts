@@ -150,8 +150,7 @@ export async function reconcileLateMint(
         'Reconcile cannot finish those from the VM record alone, so it leaves the asset unrecorded.'
       : `The lifecycle of "${name}" records the sealed VM version, but its share marker is still set and no publish ` +
         'checkpoint shows that its finalization gossip and catalog transition ran (a queued publish stamps the lifecycle ' +
-        'before both, and its job recovery finishes them). Reconcile cannot finish those from the VM record alone, ' +
-        'so it changes nothing.');
+        'before both). Reconcile cannot finish those from the VM record alone, so it changes nothing.');
   }
   const mint = share === 'resident'
     ? await recordThroughPublish(agent, target)
