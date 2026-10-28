@@ -146,3 +146,50 @@ it.each(['before-admission', 'cooldown', 'during-announcement', 'clear', 'reset'
       expect(connection.status().pendingScopes).toBe(0);
     } finally { held.resolve(); connection.reset(); vi.useRealTimers(); }
   });
+
+
+it('keeps a reconnect successor fenced through announcement and cooldown', async () => {
+  const { Rfc64CatalogReplayRecoveryRuntimeV1 } = await import('../src/rfc64/catalog-replay-recovery-runtime-v1.js');
+  vi.useFakeTimers(); vi.setSystemTime(10_000);
+  const policy = buildOpenOwnerContextGraphPolicyV1({ networkId: RFC64_ROLLOUT_NETWORK_ID,
+    contextGraphId: RFC64_ROLLOUT_CONTEXT_GRAPH_ID, ownerAddress: RFC64_ROLLOUT_AUTHOR });
+  const snapshot = { policy, policyDigest: computeOpenContextGraphPolicyDigestV1(policy), roster: null };
+  const cg = RFC64_ROLLOUT_CONTEXT_GRAPH_ID;
+  const requested: string[] = [];
+  const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<string>({
+    requestPeer: async (_cg, peer) => { requested.push(peer); return { status: 'completed', targets: [String(requested.length)] }; },
+    whenReceiverIdleForContextGraph: async () => {}, targetIdentity: value => value, parityFailed: async () => false,
+  });
+  const scheduled = new Map<0 | 1 | 'deadline', (signal: AbortSignal) => Promise<void>>();
+  const held = Promise.withResolvers<void>(), announcing = Promise.withResolvers<void>();
+  const signal = new AbortController().signal;
+  let first = true;
+  const connection = createRfc64CatalogReplayConnectionRuntimeV1({
+    capabilities: {
+      resolveRfc64CatalogReplayRolesV1: () => ({ receiving: true, serving: true }),
+      listActiveRfc64CatalogReplayContextGraphIdsV1: () => [cg], listServingRfc64CatalogReplayContextGraphIdsV1: () => [cg],
+      readAcceptedRfc64CatalogAccessSnapshotV1: () => snapshot,
+    }, admittedConnectedPeerIds: () => ['peer'],
+    reservePeer: (id, digest, peer) => recovery.reservePeer(id, digest, peer),
+    reserveDeferred: id => recovery.reserveDeferred(id, snapshot.policyDigest),
+    reannounce: async () => { if (first) { first = false; announcing.resolve(); await held.promise; } return { failed: 0 }; },
+    replay: (id, demand, owner) => recovery.request({ contextGraphId: id, policyDigest: snapshot.policyDigest, kind: 'connection-demand', demand, signal: owner }),
+    schedule: (slot, work) => { scheduled.set(slot, work); return true; }, wait: async () => {}, warn: vi.fn(),
+  });
+  connection.prepareConnectionOpen('peer')!.admit();
+  const running = scheduled.get(0)!(signal);
+  try {
+    await announcing.promise;
+    connection.disconnected('peer'); connection.prepareConnectionOpen('peer')!.admit();
+    held.resolve(); await running;
+    expect(requested).toEqual(['peer']);
+    expect(connection.status().pendingScopes).toBe(1);
+    expect(recovery.status(cg, snapshot.policyDigest)?.active).toBe(true);
+    vi.setSystemTime(69_999); await scheduled.get(0)!(signal);
+    expect(requested).toHaveLength(1); expect(recovery.status(cg, snapshot.policyDigest)?.active).toBe(true);
+    vi.setSystemTime(70_000); await scheduled.get(0)!(signal);
+    expect(requested).toEqual(['peer', 'peer']);
+    expect(recovery.status(cg, snapshot.policyDigest)?.active).toBe(false);
+    expect(connection.status().pendingScopes).toBe(0);
+  } finally { held.resolve(); await running; connection.reset(); vi.useRealTimers(); }
+});

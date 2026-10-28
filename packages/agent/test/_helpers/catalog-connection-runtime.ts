@@ -1,3 +1,5 @@
+import type { Rfc64CatalogReplayPeerReservationV1, Rfc64CatalogReplayPeerDemandHandleV1 } from '../../src/rfc64/catalog-replay-types-v1.js';
+import type { Rfc64CatalogConnectionReplayResultV1 } from '../../src/rfc64/catalog-replay-run-reporter-v1.js';
 import { afterEach, vi } from 'vitest';
 import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionRuntimePortsV1 } from '../../src/rfc64/catalog-replay-connection-runtime-v1.js';
 import { Rfc64BackgroundWorkDispatcherV1 } from '../../src/rfc64/background-work-dispatcher-v1.js';
@@ -7,8 +9,12 @@ afterEach(async () => {
   vi.useRealTimers();
 });
 
-export function makeRuntime(ports: Omit<Rfc64CatalogReplayConnectionRuntimePortsV1, 'admittedConnectedPeerIds' | 'schedule' | 'wait'>
-  & Partial<Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'admittedConnectedPeerIds' | 'schedule' | 'wait'>>,
+export type TestConnectionPorts = Omit<Rfc64CatalogReplayConnectionRuntimePortsV1, 'reserveFence'> & {
+  reserveFence(contextGraphId: string, peerId: string): Rfc64CatalogReplayPeerReservationV1 | null;
+  replay(contextGraphId: string, demand: Rfc64CatalogReplayPeerDemandHandleV1, signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
+};
+export function makeRuntime(ports: Omit<TestConnectionPorts, 'admittedConnectedPeerIds' | 'schedule' | 'wait'>
+  & Partial<Pick<TestConnectionPorts, 'admittedConnectedPeerIds' | 'schedule' | 'wait'>>,
   debounceMs?: number, maxPeers?: number): Rfc64CatalogReplayConnectionRuntimeV1 {
   const owner = new Rfc64BackgroundWorkDispatcherV1(); owners.push(owner);
   return new Rfc64CatalogReplayConnectionRuntimeV1({
@@ -20,6 +26,11 @@ export function makeRuntime(ports: Omit<Rfc64CatalogReplayConnectionRuntimePorts
       signal.addEventListener('abort', abort, { once: true });
     }),
     ...ports,
+    reserveFence: (cg, peer) => {
+      const lease = ports.reserveFence(cg, peer);
+      return lease === null ? null : { isCurrent: () => lease.isCurrent(), release: () => lease.release(),
+        replay: signal => { lease.admit(); return ports.replay(cg, lease, signal); } };
+    },
   }, debounceMs, maxPeers);
 }
 

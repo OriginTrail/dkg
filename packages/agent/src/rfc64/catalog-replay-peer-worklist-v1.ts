@@ -1,7 +1,7 @@
 import { CatalogReplayPeerWorkV1, CatalogReplayPeerDemandHandleV1, CatalogReplayChunkV1 } from './catalog-replay-peer-work-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './catalog-peers-v1.js';
-import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerDemandHandleV1, Rfc64CatalogReplayPeerReservationV1 } from './catalog-replay-types-v1.js';
+import type { Rfc64CatalogReplayExecutionOwnerV1, Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerDemandHandleV1, Rfc64CatalogReplayPeerReservationV1 } from './catalog-replay-types-v1.js';
 
 /**
  * One owner for reconnect generations, pending-peer deduplication, and the
@@ -17,11 +17,11 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
   constructor(readonly allocateGeneration: () => number) {}
   #overflowed = false;
 
-  failPending(error: unknown, cancelledSignal?: AbortSignal): void {
+  failPending(error: unknown, owner: Rfc64CatalogReplayExecutionOwnerV1): void {
     for (const demand of this.#pending.values()) {
       const record = demand.execution;
       // A cancelled run cannot revoke another live connection owner.
-      if (cancelledSignal?.aborted && (record.reserved || (record.continuation !== null && record.continuation.signal !== cancelledSignal))) continue;
+      if (owner.signal?.aborted && (record.reserved || (record.continuation !== null && record.continuation !== owner))) continue;
       record.settle({ error });
       // Cancellation releases this execution's subscribers, but unconsumed
       // generations remain available to an explicit later recovery command.
@@ -108,18 +108,18 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
   }
 
   /** Commands carry the exact reservation handle; peer/generation are diagnostic identity only. */
-  admitDemand(reservation: Rfc64CatalogReplayPeerDemandHandleV1, signal?: AbortSignal): CatalogReplayPeerWorkV1 {
+  admitDemand(reservation: Rfc64CatalogReplayPeerDemandHandleV1, owner: Rfc64CatalogReplayExecutionOwnerV1): CatalogReplayPeerWorkV1 {
     const demand = this.#handles.get(reservation.handle);
     if (!demand) throw new Error('Unknown catalog replay demand handle');
     if (this.#staged.get(demand.peerId) === demand) throw new Error('Catalog replay demand is not admitted');
     // Never reconstruct an old demand from identifiers or search a running chunk.
     // Superseded and completed executions keep their own settled result.
-    demand.execution.admitExecution(signal);
+    demand.execution.admitExecution(owner);
     return demand.execution;
   }
 
-  drain(chunk: CatalogReplayChunkV1, signal?: AbortSignal): readonly Rfc64CatalogReplayPeerDemandV1[] {
-    const records = [...this.#pending.values()].filter(record => record.execution.runnable(signal)).slice(0, chunk.remaining);
+  drain(chunk: CatalogReplayChunkV1, owner: Rfc64CatalogReplayExecutionOwnerV1): readonly Rfc64CatalogReplayPeerDemandV1[] {
+    const records = [...this.#pending.values()].filter(record => record.execution.runnable(owner)).slice(0, chunk.remaining);
     for (const record of records) {
       this.#pending.delete(record.peerId);
       chunk.take(record.execution);
@@ -128,14 +128,14 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
   }
 
   /** Explicit connection execution owns another chunk independently of subscribers. */
-  get pendingContinuation(): Readonly<{ signal?: AbortSignal }> | null {
+  get pendingContinuation(): Rfc64CatalogReplayExecutionOwnerV1 | null {
     return [...this.#pending.values()].find(entry => entry.execution.continuation !== null)?.execution.continuation ?? null;
   }
 
   get hasStaged(): boolean { return this.#staged.size > 0 || [...this.#pending.values()].some(record => record.execution.reserved); }
 
   get hasOwnedPending(): boolean { return [...this.#pending.values()].some(record => record.execution.owned); }
-  hasRunnable(signal?: AbortSignal): boolean { return [...this.#pending.values()].some(record => record.execution.runnable(signal)); }
+  hasRunnable(owner: Rfc64CatalogReplayExecutionOwnerV1): boolean { return [...this.#pending.values()].some(record => record.execution.runnable(owner)); }
 
   get hasPending(): boolean {
     return this.#pending.size > 0;

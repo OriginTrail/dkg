@@ -1,10 +1,11 @@
+import type { TestConnectionPorts as Rfc64CatalogReplayConnectionRuntimePortsV1 } from './_helpers/catalog-connection-runtime.js';
 
 
 
 
 import {Rfc64CatalogReplayRecoveryRuntimeV1} from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import {describe, expect, it, vi} from 'vitest';
-import {Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionRuntimePortsV1} from
+import {Rfc64CatalogReplayConnectionRuntimeV1} from
   '../src/rfc64/catalog-replay-connection-runtime-v1.js';
 
 
@@ -148,12 +149,13 @@ describe('RFC-64 catalog replay after a connection, with the replay recovery run
       parityFailed: options.parityFailed ?? (async () => false),
     });
     const log = vi.fn();
+    const executionOwner = Object.freeze({});
     const connection = reportingRuntime({
       selectContextGraphIds: () => [CG],
       reserveDeferredFence: () => null, reserveFence: (contextGraphId, peerId) => recovery.reservePeer(contextGraphId, POLICY, peerId),
       reannounce: async () => ({ failed: 0 }),
       replay: (contextGraphId, demand) => recovery.request({
-        contextGraphId, policyDigest: POLICY, kind: 'connection-demand', demand,
+        contextGraphId, policyDigest: POLICY, kind: 'connection-demand', demand, executionOwner,
       }),
       replayStatus: (contextGraphId) => recovery.status(contextGraphId, POLICY),
       log,

@@ -26,3 +26,8 @@ export interface Rfc64CatalogReplayRecoveryResultV1 {
   readonly requested: number;
   readonly failed: number;
 }
+
+/** Scheduling identity is explicit; signals only govern cancellation. */
+export interface Rfc64CatalogReplayExecutionOwnerV1 { readonly signal?: AbortSignal }
+
+export type Rfc64CatalogConnectionReplayResultV1 = Readonly<{ requested?: number; failed: number }>;

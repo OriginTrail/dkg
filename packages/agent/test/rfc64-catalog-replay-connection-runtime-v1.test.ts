@@ -1,3 +1,4 @@
+import type { TestConnectionPorts as Rfc64CatalogReplayConnectionRuntimePortsV1 } from './_helpers/catalog-connection-runtime.js';
   const deferred = () => {
     let resolve!: () => void;
     const promise = new Promise<void>((done) => { resolve = done; });
@@ -9,7 +10,7 @@
 
 import {Rfc64CatalogReplayRecoveryRuntimeV1} from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import {describe, expect, it, vi} from 'vitest';
-import {Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectionRuntimePortsV1} from
+import {Rfc64CatalogReplayConnectionRuntimeV1} from
   '../src/rfc64/catalog-replay-connection-runtime-v1.js';
 import {Rfc64BackgroundWorkDispatcherV1} from '../src/rfc64/background-work-dispatcher-v1.js';
 
@@ -794,7 +795,10 @@ describe('selection retirement preserves physical custody', () => {
     });
     const releases = new Map<string, ReturnType<typeof vi.fn>[]>();
     const connection = makeRuntime({ selectContextGraphIds: () => selected,
-      reserveDeferredFence: () => null, reserveFence: (cg, peer) => {
+      reserveDeferredFence: cg => {
+        const lease = recovery.reserveDeferred(cg, 'policy'); const done = vi.fn(() => lease.release());
+        releases.set(cg, [...(releases.get(cg) ?? []), done]); return { release: done };
+      }, reserveFence: (cg, peer) => {
         const fence = recovery.reservePeer(cg, 'policy', peer);
         if (fence === null) return null;
         const done = vi.fn(() => fence.release());
@@ -843,7 +847,10 @@ describe('selection reactivation during receiver drain', () => {
     const fences: ReturnType<typeof vi.fn>[] = [];
     const announce = vi.fn(async (_peer: string, _cg: string) => ({ failed: 0 }));
     const connection = makeRuntime({ selectContextGraphIds: () => selected,
-      reserveDeferredFence: () => null, reserveFence: (cg, peer) => {
+      reserveDeferredFence: cg => {
+        const lease = recovery.reserveDeferred(cg, 'policy'); const done = vi.fn(() => lease.release());
+        if (cg === 'cg') fences.push(done); return { release: done };
+      }, reserveFence: (cg, peer) => {
         const fence = recovery.reservePeer(cg, 'policy', peer); if (fence === null) return null;
         const done = vi.fn(() => fence.release()); if (cg === 'cg') fences.push(done);
         return { ...fence, release: done };
@@ -910,4 +917,30 @@ it('keeps corroborated Y fenced while peer overflow is held by X work', async ()
   } finally { held.resolve(); }
   await vi.waitFor(() => expect(connection.status().pendingScopes).toBe(0));
   expect(recovery.status('Y', 'policy')?.active).toBe(false);
+});
+
+
+it('resumes admitted peer overflow when deadline pruning frees capacity', async () => {
+  vi.useFakeTimers(); vi.setSystemTime(10_000);
+  let selected = ['X'];
+  const calls: string[] = [];
+  const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+    requestPeer: async (cg, peer) => { calls.push(`${peer}:${cg}`); return { status: 'completed', targets: [] }; },
+    whenReceiverIdleForContextGraph: async () => {}, targetIdentity: () => '', parityFailed: async () => false,
+  });
+  const connection = makeRuntime({ selectContextGraphIds: () => selected, admittedConnectedPeerIds: () => ['B'],
+    reserveDeferredFence: cg => recovery.reserveDeferred(cg, 'p'), reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer),
+    reannounce: async () => ({ failed: 0 }), warn: vi.fn(),
+    replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }),
+  }, 60_000, 1);
+  connection.prepareConnectionOpen('A')!.admit(); await vi.advanceTimersByTimeAsync(0);
+  connection.prepareConnectionOpen('A')!.admit(); // Occupies the only peer slot through cooldown.
+  selected = ['X', 'Y']; connection.prepareConnectionOpen('B')!.admit();
+  await vi.advanceTimersByTimeAsync(0); // Both stream workers found capacity occupied and exited.
+  expect(calls).toEqual(['A:X']); expect(recovery.status('Y', 'p')?.active).toBe(true);
+  selected = ['Y']; // No further connection or activation event.
+  await vi.advanceTimersByTimeAsync(1_000);
+  expect(calls).toEqual(['A:X', 'B:Y']);
+  expect(recovery.status('Y', 'p')?.active).toBe(false);
+  expect(connection.status().pendingScopes).toBe(0);
 });

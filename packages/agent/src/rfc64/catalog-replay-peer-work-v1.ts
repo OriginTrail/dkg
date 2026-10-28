@@ -1,6 +1,6 @@
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './catalog-peers-v1.js';
 // SPDX-License-Identifier: Apache-2.0
-import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayRecoveryResultV1 as Result } from './catalog-replay-types-v1.js';
+import type { Rfc64CatalogReplayExecutionOwnerV1, Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayRecoveryResultV1 as Result } from './catalog-replay-types-v1.js';
 
 type Outcome = Readonly<{ result: Readonly<Result> }> | Readonly<{ error: unknown }>;
 /** One generation owns its execution phase and all of its completion subscribers. */
@@ -9,22 +9,22 @@ export class CatalogReplayPeerWorkV1 implements Rfc64CatalogReplayPeerDemandV1 {
   readonly #subscribers = new Set<(outcome: Outcome) => void>();
   // Reserved custody waits for connection execution. Generic admitted recovery
   // borrows the next run; execution custody carries its own connection signal.
-  #custody: Readonly<{ kind: 'retained' | 'reserved' | 'admitted' }> | Readonly<{ kind: 'execution'; signal?: AbortSignal }>;
+  #custody: Readonly<{ kind: 'retained' | 'reserved' | 'admitted' }> | Readonly<{ kind: 'execution'; owner: Rfc64CatalogReplayExecutionOwnerV1 }>;
   constructor(readonly peerId: string, readonly generation: number, reserved = false) {
     this.#custody = { kind: reserved ? 'reserved' : 'retained' };
   }
   get reserved(): boolean { return this.#custody.kind === 'reserved'; }
-  get owned(): boolean { return this.reserved || this.#custody.kind === 'admitted' || (this.#custody.kind === 'execution' && !this.#custody.signal?.aborted); }
-  get continuation(): Readonly<{ signal?: AbortSignal }> | null {
-    return this.#custody.kind === 'execution' && !this.#custody.signal?.aborted ? this.#custody : null;
+  get owned(): boolean { return this.reserved || this.#custody.kind === 'admitted' || (this.#custody.kind === 'execution' && !this.#custody.owner.signal?.aborted); }
+  get continuation(): Rfc64CatalogReplayExecutionOwnerV1 | null {
+    return this.#custody.kind === 'execution' && !this.#custody.owner.signal?.aborted ? this.#custody.owner : null;
   }
   retainRecovery(): void { if (this.#custody.kind === 'admitted') this.#custody = { kind: 'retained' }; }
   admitRecovery(): void { this.#custody = { kind: 'admitted' }; }
-  admitExecution(signal?: AbortSignal): void {
-    if (this.#custody.kind !== 'execution') this.#custody = { kind: 'execution', signal };
+  admitExecution(owner: Rfc64CatalogReplayExecutionOwnerV1): void {
+    if (this.#custody.kind !== 'execution') this.#custody = { kind: 'execution', owner };
   }
-  runnable(signal?: AbortSignal): boolean {
-    return this.#custody.kind === 'retained' || this.#custody.kind === 'admitted' || (this.#custody.kind === 'execution' && this.#custody.signal === signal);
+  runnable(owner: Rfc64CatalogReplayExecutionOwnerV1): boolean {
+    return this.#custody.kind === 'retained' || this.#custody.kind === 'admitted' || (this.#custody.kind === 'execution' && this.#custody.owner === owner);
   }
   start(): void { this.#phase = 'running'; }
   settle(outcome: Outcome): void {

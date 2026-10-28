@@ -420,3 +420,31 @@ it('carries one opaque demand through decorated admission and repeated completio
   expect(requestPeer).toHaveBeenCalledOnce();
   decorated.release();
 });
+
+
+it.each([false, true])('groups execution by explicit owner despite composed cancellation signals (shared owner=%s)', async shared => {
+  const controller = new AbortController();
+  const ownerA = Object.freeze({ signal: controller.signal });
+  const ownerB = shared ? ownerA : Object.freeze({ signal: controller.signal });
+  const held = Promise.withResolvers<void>(), started = Promise.withResolvers<void>();
+  const requests: string[] = [], parity: string[][] = [];
+  const runtime = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+    requestPeer: async (_cg, peer) => { requests.push(peer); if (peer === 'a') { started.resolve(); await held.promise; } return { status: 'completed', targets: [] }; },
+    whenReceiverIdleForContextGraph: async () => {},
+    targetIdentity: () => '', parityFailed: async () => { parity.push([...requests]); return false; },
+  });
+  const a = runtime.reservePeer('cg', 'p', 'a')!, b = runtime.reservePeer('cg', 'p', 'b')!;
+  a.admit(); b.admit();
+  const first = runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: a,
+    signal: controller.signal, executionOwner: ownerA });
+  await started.promise;
+  const second = runtime.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'connection-demand', demand: b,
+    signal: AbortSignal.any([controller.signal]), executionOwner: ownerB });
+  try {
+    held.resolve(); await Promise.all([first, second]);
+    expect(requests).toEqual(['a', 'b']);
+    // Same owner joins before the first parity settlement; separate owners each settle independently.
+    expect(parity).toEqual(shared ? [['a', 'b']] : [['a'], ['a', 'b']]);
+    expect(runtime.status('cg', 'p')?.active).toBe(false);
+  } finally { held.resolve(); a.release(); b.release(); }
+});

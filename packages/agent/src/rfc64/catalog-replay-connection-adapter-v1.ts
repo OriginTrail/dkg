@@ -1,3 +1,5 @@
+import type { Rfc64CatalogReplayPeerReservationV1, Rfc64CatalogReplayPeerDemandHandleV1 } from './catalog-replay-types-v1.js';
+import type { Rfc64CatalogConnectionReplayResultV1 } from './catalog-replay-types-v1.js';
 import type { CatalogReplayRolesV1 } from './catalog-replay-selection-v1.js';
 import type { CatalogReplayTransportV1 } from './catalog-replay-transport-v1.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -14,9 +16,15 @@ interface Rfc64CatalogReplayConnectionCapabilitiesV1 {
 
 /** Bind current accepted policy at fence reservation and compatibility announcement. */
 export function createRfc64CatalogReplayConnectionRuntimeV1(input:
-  Readonly<{ reserveDeferred: Rfc64CatalogReplayConnectionRuntimePortsV1['reserveDeferredFence']; capabilities: Rfc64CatalogReplayConnectionCapabilitiesV1; reservePeer(contextGraphId: string, policyDigest: string, peerId: string): Exclude<ReturnType<Rfc64CatalogReplayConnectionRuntimePortsV1['reserveFence']>, 'announcement-only'> }>
+  Readonly<{
+    reserveDeferred: Rfc64CatalogReplayConnectionRuntimePortsV1['reserveDeferredFence'];
+    capabilities: Rfc64CatalogReplayConnectionCapabilitiesV1;
+    reservePeer(contextGraphId: string, policyDigest: string, peerId: string): Rfc64CatalogReplayPeerReservationV1 | null;
+    replay(contextGraphId: string, demand: Rfc64CatalogReplayPeerDemandHandleV1,
+      signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
+  }>
     & Pick<CatalogReplayTransportV1<never>, 'reannounce'>
-    & Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'admittedConnectedPeerIds' | 'schedule' | 'wait' | 'warn' | 'replay' | 'reportRun'>,
+    & Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'admittedConnectedPeerIds' | 'schedule' | 'wait' | 'warn' | 'reportRun'>,
 ): Rfc64CatalogReplayConnectionRuntimeV1 {
   const receives = (contextGraphId: string): boolean => input.capabilities.resolveRfc64CatalogReplayRolesV1(contextGraphId).receiving;
   return new Rfc64CatalogReplayConnectionRuntimeV1({
@@ -26,11 +34,16 @@ export function createRfc64CatalogReplayConnectionRuntimeV1(input:
     reserveDeferredFence: contextGraphId => receives(contextGraphId)
       ? input.reserveDeferred(contextGraphId) : null,
     reserveFence: (contextGraphId, peerId) => {
-      if (!receives(contextGraphId)) return 'announcement-only';
+      if (!receives(contextGraphId)) return Object.freeze({
+        isCurrent: () => !receives(contextGraphId), release: () => {},
+        replay: async () => Object.freeze({ failed: 0 }),
+      });
       const accepted = input.capabilities.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
       if (accepted === null) return null;
       const lease = input.reservePeer(contextGraphId, accepted.policyDigest, peerId);
-      return lease === null ? null : Object.freeze({ ...lease, isCurrent: () => lease.isCurrent()
+      return lease === null ? null : Object.freeze({ release: () => lease.release(),
+        replay: (signal: AbortSignal) => { lease.admit(); return input.replay(contextGraphId, lease, signal); },
+        isCurrent: () => lease.isCurrent()
         && receives(contextGraphId)
         && input.capabilities.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)?.policyDigest === accepted.policyDigest });
     },
@@ -44,6 +57,6 @@ export function createRfc64CatalogReplayConnectionRuntimeV1(input:
         }, signal);
     },
     schedule: input.schedule, wait: input.wait, warn: input.warn,
-    replay: input.replay, reportRun: input.reportRun,
+    reportRun: input.reportRun,
   });
 }

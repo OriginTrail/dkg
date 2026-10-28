@@ -1,5 +1,6 @@
 import type { Rfc64CatalogReplayRecoveryStatusV1 } from './catalog-replay-recovery-runtime-v1.js';
-export type Rfc64CatalogConnectionReplayResultV1 = Readonly<{ requested?: number; failed: number }>;
+import type { Rfc64CatalogConnectionReplayResultV1 } from './catalog-replay-types-v1.js';
+export type { Rfc64CatalogConnectionReplayResultV1 } from './catalog-replay-types-v1.js';
 export class Rfc64CatalogReplayRunReporterV1 {
   readonly #reportedRuns = new WeakSet<Rfc64CatalogConnectionReplayResultV1>();
   constructor(private readonly ports: {

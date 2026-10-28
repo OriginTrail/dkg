@@ -8398,6 +8398,7 @@ it('retains a genuine last-close reconnect raised during the receiver drain', as
   vi.spyOn(edge, 'reannounceRfc64CatalogHeadsToPeerV1').mockResolvedValue({ announced: 0, failed: 0, manifest: [] });
   const service = (edge as any).rfc64PublicCatalogServiceV1;
   const reserve = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reservePeer');
+  const deferred = vi.spyOn(Rfc64CatalogReplayRecoveryRuntimeV1.prototype, 'reserveDeferred');
   const request = vi.spyOn(service, 'requestCatalogHeadReplay').mockResolvedValue({
     kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [],
   });
@@ -8430,15 +8431,17 @@ it('retains a genuine last-close reconnect raised during the receiver drain', as
     await new Promise(resolve => setTimeout(resolve, 0));
     expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(2);
     const peerFences = reserve.mock.results.filter((_, i) => reserve.mock.calls[i][2] === peer).map(result => result.value);
-    expect(peerFences).toHaveLength(2);
-    expect(peerFences[0]).toBe(currentFence);
-    expect(peerFences[1]).not.toBe(currentFence);
+    expect(peerFences).toEqual([currentFence]);
+    expect(deferred.mock.calls.some(call => call[0] === CONTEXT_GRAPH_ID)).toBe(true);
     release();
     await vi.waitFor(() => expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.activePeers).toBe(0));
     expect(request).toHaveBeenCalledOnce();
     expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(1);
     now += 60_001;
     await vi.waitFor(() => expect(request).toHaveBeenCalledTimes(2), { timeout: 3_000 });
+    const completedFences = reserve.mock.results.filter((_, i) => reserve.mock.calls[i][2] === peer).map(result => result.value);
+    expect(completedFences).toHaveLength(2);
+    expect(completedFences[1]).not.toBe(currentFence);
     await vi.waitFor(() => expect(edge.readRfc64CatalogRuntimeSelectionV1().connectionReplay?.pendingScopes).toBe(0));
   } finally { release(); clock.mockRestore(); }
 }, 15_000);

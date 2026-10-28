@@ -1,10 +1,7 @@
 import type { Rfc64CatalogConnectionReplayStatusV1 } from './catalog-selection-types-v1.js';
-import type { Rfc64CatalogConnectionReplayResultV1 } from './catalog-replay-run-reporter-v1.js';
+import type { Rfc64CatalogConnectionReplayResultV1 } from './catalog-replay-types-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 
-import type {
-  Rfc64CatalogReplayPeerDemandHandleV1,
-} from './catalog-replay-types-v1.js';
 import { Rfc64CatalogReplayScopeLifecycleV1, type Rfc64CatalogConnectionCustodyV1, type Rfc64CatalogReplayScopeAdmissionV1 } from './catalog-replay-scope-lifecycle-v1.js';
 
 export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
@@ -14,8 +11,6 @@ export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
   reserveDeferredFence(contextGraphId: string): Readonly<{ release(): void }> | null;
   reserveFence(contextGraphId: string, peerId: string): Rfc64CatalogConnectionCustodyV1 | null;
   reannounce(peerId: string, contextGraphId: string, signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
-  replay(contextGraphId: string, demand: Rfc64CatalogReplayPeerDemandHandleV1,
-    signal: AbortSignal): Promise<Rfc64CatalogConnectionReplayResultV1>;
   /** Two stream keys plus one independent, abortable eligibility notifier. */
   schedule(slot: 0 | 1 | 'deadline', work: (signal: AbortSignal) => Promise<void>): boolean;
   wait(signal: AbortSignal, delayMs: number): Promise<void>;
@@ -206,7 +201,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     const reservations: Rfc64CatalogReplayScopeAdmissionV1[] = [];
     for (const id of selected) {
       const scope = this.#scope(peer, id);
-      const reservation = scope.reserve(peer.connectionGeneration, () => this.#ports.reserveFence(id, peer.peerId));
+      const reservation = scope.reserve(peer.connectionGeneration, () => this.#ports.reserveFence(id, peer.peerId),
+        () => this.#ports.reserveDeferredFence(id));
       if (reservation === null) this.#suppressed++;
       else reservations.push(reservation);
     }
@@ -275,10 +271,12 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   /** Advance each peer's scheduling window once for this synchronous sweep. */
   #sweep(now: number): SchedulingSweepV1 {
     const selected = new Set(this.#ports.selectContextGraphIds());
+    // Pruning can free the capacity an admitted overflow scan was waiting for.
+    for (const peer of this.#byPeer.values()) this.#continue(peer, selected);
+    this.#resumeOverflow();
     const turns: Array<{ peer: PeerV1; scopes: readonly ScopeV1[] }> = [];
     let nextWake = Infinity;
     for (const peer of this.#byPeer.values()) {
-      this.#continue(peer, selected);
       const runnable: ScopeV1[] = [];
       for (const scope of peer.scopes.values()) {
         if (scope.awaitingFence()) nextWake = Math.min(nextWake, now + 1_000);
@@ -362,9 +360,8 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
           }
           signal.throwIfAborted();
           const demand = renew();
-          if (demand === null || demand === 'announcement-only') continue;
-          demand.admit();
-          const result = await this.#ports.replay(scope.contextGraphId, demand, signal);
+          if (demand === null) continue;
+          const result = await demand.replay(signal);
           failed = result.failed > 0 || failed;
           if (result.failed > 0) {
             if (this.#ports.reportRun) this.#ports.reportRun(scope.contextGraphId, peer.peerId, result);
