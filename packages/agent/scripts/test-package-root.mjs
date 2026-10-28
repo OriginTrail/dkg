@@ -397,6 +397,7 @@ const blockedRfc64Modules = [
   'catalog-replay-recovery-runtime-v1.js',
   'catalog-replay-peer-worklist-v1.js',
   'catalog-replay-peer-lane-v1.js',
+  'catalog-replay-transport-v1.js',
   'catalog-replay-snapshot-runtime-v1.js',
   'catalog-operational-applied-heads-v1.js',
   'catalog-operational-reads-v1.js',

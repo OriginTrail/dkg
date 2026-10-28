@@ -1,3 +1,4 @@
+import { createCatalogReplayTransportV1, type CatalogReplayTransportV1 } from './rfc64/catalog-replay-transport-v1.js';
 import { Rfc64CatalogReplayRunReporterV1 } from './rfc64/catalog-replay-run-reporter-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { waitForRfc64ScheduledResponsibilityDelayV1 } from './rfc64/abort-v1.js';
@@ -696,6 +697,7 @@ type Rfc64CatalogReplayAdmissionV1 = Readonly<{
 const rfc64CatalogReplayRuntimesV1 = new WeakMap<DKGAgent, Rfc64CatalogReplayRuntimeV1>();
 const rfc64CatalogReplaySnapshotRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64CatalogReplaySnapshotRuntimeOwnerV1>();
+const rfc64CatalogReplayTransportsV1 = new WeakMap<DKGAgent, CatalogReplayTransportV1<Rfc64PublicCatalogHeadAnnouncementV1>>();
 const rfc64CatalogReplayConnectionRuntimesV1 =
   new WeakMap<DKGAgent, Rfc64CatalogReplayConnectionRuntimeV1>();
 const rfc64CatalogReplayRecoveryRuntimesV1 = new WeakMap<
@@ -1024,13 +1026,11 @@ export function isRfc64UnregisteredOwnerUnresolvedErrorV1(error: unknown): boole
 }
 
 export class Rfc64CatalogMethods extends DKGAgentBase {
-  /** Stable recovery capabilities are captured once per agent-owned runtime. */
-  private rfc64CatalogReplayRecoveryRuntimeV1(
-    this: DKGAgent,
-  ): Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1> {
-    let runtime = rfc64CatalogReplayRecoveryRuntimesV1.get(this);
-    if (runtime !== undefined) return runtime;
-    runtime = new Rfc64CatalogReplayRecoveryRuntimeV1({
+  /** Composition owns both bounded transport operations; recovery only owns evidence. */
+  private rfc64CatalogReplayTransportV1(this: DKGAgent): CatalogReplayTransportV1<Rfc64PublicCatalogHeadAnnouncementV1> {
+    let transport = rfc64CatalogReplayTransportsV1.get(this);
+    if (transport) return transport;
+    transport = createCatalogReplayTransportV1<Rfc64PublicCatalogHeadAnnouncementV1>({
       requestPeer: async (contextGraphId, remotePeerId, signal) => {
         const service = this.rfc64PublicCatalogServiceV1;
         const networkId = (
@@ -1063,6 +1063,20 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
           throw rfc64CatalogReplayPeerFailureV1(this.log, contextGraphId, remotePeerId, error);
         }
       },
+      reannounce: (peer, scope, signal) => this.reannounceRfc64CatalogHeadsToPeerV1(peer, scope, signal),
+    });
+    rfc64CatalogReplayTransportsV1.set(this, transport);
+    return transport;
+  }
+
+  /** Stable recovery capabilities are captured once per agent-owned runtime. */
+  private rfc64CatalogReplayRecoveryRuntimeV1(
+    this: DKGAgent,
+  ): Rfc64CatalogReplayRecoveryRuntimeV1<Rfc64PublicCatalogHeadAnnouncementV1> {
+    let runtime = rfc64CatalogReplayRecoveryRuntimesV1.get(this);
+    if (runtime !== undefined) return runtime;
+    runtime = new Rfc64CatalogReplayRecoveryRuntimeV1({
+      requestPeer: this.rfc64CatalogReplayTransportV1().requestPeer,
       whenReceiverIdleForContextGraph: async (contextGraphId, signal) => {
         await this.rfc64PublicCatalogServiceV1
           ?.whenReceiverIdleForContextGraph(contextGraphId, signal);
@@ -1114,7 +1128,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       });
       runtime = createRfc64CatalogReplayConnectionRuntimeV1({ capabilities: this,
         connectedPeerIds: () => this.node.libp2p.getPeers().map(peer => peer.toString()),
-        runPeerTransport: (peer, signal, work) => this.rfc64CatalogReplayRecoveryRuntimeV1().runPeerTransport(peer, signal, work),
+        reannounce: this.rfc64CatalogReplayTransportV1().reannounce,
         reportRun: (id, peer, result) => reporter.report(id, peer, result),
         reservePeer: (id, digest, peer) => this.rfc64CatalogReplayRecoveryRuntimeV1().reservePeer(id, digest, peer),
         replay: (contextGraphId, demand, signal) => this.requestRfc64CatalogHeadReplayV1(contextGraphId, { kind: 'connection-demand', demand }, signal),
@@ -4276,6 +4290,7 @@ export class Rfc64CatalogMethods extends DKGAgentBase {
       rfc64CatalogReplaySnapshotRuntimesV1.delete(this);
       rfc64CatalogReplayRecoveryRuntimesV1.get(this)?.reset();
       rfc64CatalogReplayRecoveryRuntimesV1.delete(this);
+      rfc64CatalogReplayTransportsV1.delete(this);
       rfc64CatalogReplayConnectionRuntimesV1.get(this)?.reset();
       rfc64CatalogReplayConnectionRuntimesV1.delete(this);
       rfc64CatalogTargetAnnouncementsV1.get(this)?.resetAll();

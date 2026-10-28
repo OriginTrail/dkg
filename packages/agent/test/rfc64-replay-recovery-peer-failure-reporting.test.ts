@@ -143,7 +143,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     });
   });
 
-  it('still fails the Context Graph when the bounded worklist overflows', async () => {
+  it('reports spent transport budget as failed and unobserved', async () => {
     const churnPeer = 'peer-reconnect-churn';
     let runtime!: Rfc64CatalogReplayRecoveryRuntimeV1<Target>;
     const created = createRuntime({
@@ -162,7 +162,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)).toMatchObject({
       failed: true,
       unresolvedPeerCount: 0,
-      unverified: false,
+      unverified: true,
     });
   });
 

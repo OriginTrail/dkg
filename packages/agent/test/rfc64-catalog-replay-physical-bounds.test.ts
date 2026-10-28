@@ -1,3 +1,4 @@
+import { createCatalogReplayTransportV1 } from '../src/rfc64/catalog-replay-transport-v1.js';
 import { describe, expect, it, vi } from 'vitest';
 import { Rfc64CatalogReplayRecoveryRuntimeV1 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { CatalogReplayPeerLaneV1 } from '../src/rfc64/catalog-replay-peer-lane-v1.js';
@@ -63,6 +64,48 @@ describe('physical catalog replay capacity', () => {
     } finally { held.resolve(); }
   });
 
+  it('wakes admitted overflow after every occupying reservation is rejected', async () => {
+    const replay = vi.fn(async () => ({ failed: 0 }));
+    const runtime = makeRuntime({ connectedPeerIds: () => ['a', 'b'], selectContextGraphIds: () => ['cg'],
+      reserveFence: (_cg, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+      reannounce: async () => ({ failed: 0 }), replay, warn: vi.fn(),
+    }, 60_000, 1);
+    const occupying = runtime.prepareConnectionOpen('a')!;
+    runtime.prepareConnectionOpen('b')!.admit();
+    // Let both scheduled workers discover that no occupying peer is runnable.
+    await new Promise(resolve => setTimeout(resolve, 10));
+    expect(replay).not.toHaveBeenCalled();
+    occupying.reject();
+    await vi.waitFor(() => expect(replay.mock.calls.some(([, demand]) => demand.peerId === 'b')).toBe(true));
+    await vi.waitFor(() => expect(runtime.status().pendingScopes).toBe(0));
+  });
+
+  it('retains replay completion and active state until aborted running transports drain', async () => {
+    const held = deferred(), controller = new AbortController();
+    const called: string[] = [];
+    const transport = createCatalogReplayTransportV1<never>({
+      requestPeer: async (_cg, peer) => { called.push(peer); await held.promise; return { status: 'completed', targets: [] }; },
+      reannounce: async () => ({ failed: 0 }),
+    });
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({ requestPeer: transport.requestPeer,
+      whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false });
+    let settled = false;
+    const run = recovery.request({ contextGraphId: 'cg', policyDigest: 'p', kind: 'full-connected-peers',
+      connectedPeerIds: ['a', 'b', 'c'], signal: controller.signal });
+    const rejected = expect(run).rejects.toThrow('shutdown');
+    void run.then(() => { settled = true; }, () => { settled = true; });
+    try {
+      await vi.waitFor(() => expect(called).toHaveLength(2));
+      controller.abort(new Error('shutdown'));
+      await new Promise(resolve => setTimeout(resolve, 10));
+      expect(settled).toBe(false);
+      expect(recovery.status('cg', 'p')?.active).toBe(true);
+      expect(called).toEqual(['a', 'b']);
+    } finally { held.resolve(); await rejected; }
+    expect(recovery.status('cg', 'p')?.active).toBe(false);
+    expect(called).toEqual(['a', 'b']);
+  });
+
   it('limits actual announcement and recovery requests with retained provider fan-out across graphs', async () => {
     let seeding = true;
     let active = 0, peak = 0;
@@ -77,14 +120,15 @@ describe('physical catalog replay capacity', () => {
       try { await held.promise; }
       finally { active--; perPeer.set(peer, perPeer.get(peer)! - 1); }
     }
-    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({
+    const transport = createCatalogReplayTransportV1<never>({
       requestPeer: async (_cg, peer) => {
         if (seeding) throw new Error('retained provider unavailable');
         await operation(peer, 'request'); return { status: 'completed', targets: [] };
       },
-      whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target,
-      parityFailed: async () => false,
+      reannounce: async peer => { await operation(peer, 'announcement'); return { failed: 0 }; },
     });
+    const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<never>({ requestPeer: transport.requestPeer,
+      whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false });
     for (const cg of ['g1', 'g2']) {
       await recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'full-connected-peers', connectedPeerIds: ['a', 'b'] });
       expect(recovery.status(cg, 'p')?.unresolvedPeerCount).toBe(2);
@@ -92,9 +136,7 @@ describe('physical catalog replay capacity', () => {
     seeding = false;
     const runtime = makeRuntime({ selectContextGraphIds: () => ['g1', 'g2'],
       reserveFence: (cg, peer) => recovery.reservePeer(cg, 'p', peer), warn: vi.fn(),
-      reannounce: (peer, _cg, signal) => recovery.runPeerTransport(peer, signal, async () => {
-        await operation(peer, 'announcement'); return { failed: 0 };
-      }),
+      reannounce: (peer, _cg, signal) => transport.reannounce(peer, {} as never, signal),
       replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: 'p', kind: 'connection-demand', demand, signal }),
     });
     try {

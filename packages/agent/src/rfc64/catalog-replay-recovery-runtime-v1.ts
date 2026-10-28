@@ -1,4 +1,3 @@
-import { CatalogReplayPeerLaneV1 } from './catalog-replay-peer-lane-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { FullReplayPassV1, ReplayRunEvidenceV1, recordReplayPeerOutcomeV1, emptyReplayTargetsV1, mergeReplayTargetsV1, type BoundedReplayTargetsV1 } from './catalog-replay-evidence-v1.js';
 import { Rfc64CatalogReplayPeerWorklistV1 } from './catalog-replay-peer-worklist-v1.js';
@@ -212,13 +211,6 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   readonly #byContextGraph = new Map<string, ReplayProgressV1<Target>>();
   readonly #ports: Rfc64CatalogReplayRecoveryPortsV1<Target>;
   #revision = 0;
-  readonly #peerLane = new CatalogReplayPeerLaneV1();
-
-  /** Announcements and recovery fan-out share the same physical peer limits. */
-  runPeerTransport<T>(peer: string, signal: AbortSignal | undefined, work: () => Promise<T>): Promise<T> {
-    return this.#peerLane.run(peer, signal, work);
-  }
-
   constructor(ports: Rfc64CatalogReplayRecoveryPortsV1<Target>) {
     this.#ports = ports;
   }
@@ -394,14 +386,12 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       input.signal?.throwIfAborted();
       for (;;) {
         const replayDemands = progress.peerWorklist.drain();
-        await Promise.all(replayDemands.map(async (demand) => {
+        const settled = await Promise.allSettled(replayDemands.map(async (demand) => {
           const { peerId } = demand;
           for (let attempt = 0; attempt < 2; attempt += 1) {
             try {
               input.signal?.throwIfAborted();
-              const completion = await this.runPeerTransport(peerId, input.signal, () => input.signal === undefined
-                ? this.#ports.requestPeer(input.contextGraphId, peerId)
-                : this.#ports.requestPeer(input.contextGraphId, peerId, input.signal));
+              const completion = await this.#ports.requestPeer(input.contextGraphId, peerId, input.signal);
               input.signal?.throwIfAborted();
               if (completion.status === 'local-unavailable') {
                 // A local fault is not provider evidence: it may neither
@@ -425,6 +415,10 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
             }
           }
         }));
+        // Queued cancellation is immediate, but completion custody lasts until
+        // every already-running transport has physically left its handler.
+        const rejected = settled.find(result => result.status === 'rejected');
+        if (rejected?.status === 'rejected') throw rejected.reason;
         // Completion-capable provider responses are returned only after every
         // promised announcement is synchronously admitted at this receiver.
         // Scoped to THIS context graph: waiting for an unrelated graph to drain

@@ -164,7 +164,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     let settled = false;
     const release = (): void => { for (const reservation of reservations) reservation.reject(); };
     return Object.freeze({
-      reject: () => { if (!settled) { settled = true; release(); } },
+      reject: () => { if (!settled) { settled = true; release(); if (this.#overflowScans.size) this.#schedule(); } },
       admit: () => {
         if (settled) return;
         settled = true;
@@ -206,7 +206,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
   }
 
   #resumeOverflow(): void {
-    if (this.#closed) return;
+    if (this.#closed || this.#overflowScans.size === 0) return;
     const selected = new Set(this.#ports.selectContextGraphIds());
     const peers = [...new Set(this.#ports.connectedPeerIds())].sort();
     for (const [graph, cursor] of this.#overflowScans) {
@@ -237,6 +237,7 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
     const worker = async (signal: AbortSignal): Promise<void> => {
       try {
         if (signal.aborted || this.#closed) return;
+        this.#resumeOverflow();
         const now = Date.now();
         const selected = new Set(this.#ports.selectContextGraphIds());
         for (const peer of this.#byPeer.values()) this.#continue(peer, selected);

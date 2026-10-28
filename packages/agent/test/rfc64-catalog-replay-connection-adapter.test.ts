@@ -27,11 +27,10 @@ describe('connection adapter current-policy capabilities', () => {
     const controller = new AbortController();
     const runtime = createRfc64CatalogReplayConnectionRuntimeV1({
       connectedPeerIds: () => [],
-      runPeerTransport: (_peer, _signal, work) => work(),
+      reannounce: announce,
       capabilities: {
         listActiveRfc64CatalogReplayContextGraphIdsV1: () => [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
         readAcceptedRfc64CatalogAccessSnapshotV1: readAcceptedPolicy,
-        reannounceRfc64CatalogHeadsToPeerV1: announce,
       },
       reservePeer, replay: async () => ({ failed: 0 }), warn: vi.fn(),
       schedule: (slot, work) => { scheduled.set(slot, work); return true; }, wait: async () => undefined,
