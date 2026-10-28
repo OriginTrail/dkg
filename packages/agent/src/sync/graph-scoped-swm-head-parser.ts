@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { stripMetadataLiteral as stripLiteral } from './metadata-literal.js';
-import { operationPublishedAtMs } from './swm-operation-published-at.js';
+import { operationPublishedAtMs } from './swm-operation-timestamp-reader.js';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   MemoryLayer,
@@ -157,6 +157,14 @@ function parseGraphScopedSwmHeads(
   }
   const descriptors: GraphScopedSwmRecoveryDescriptor[] = [];
   const setAside: SetAsideGraphScopedSwmHead[] = [];
+  const validated: ReturnType<typeof decodeHeadEnvelope>[] = [];
+  const owners = new Map<string, string>();
+  const rejectHead = (head: SwmRecoveryHead, error: unknown) => {
+    if (mode === 'strict') throw error;
+    setAside.push({ metaGraph: head.metaGraph, headSubject: head.headSubject,
+      operationSubjects: head.operationReferences.filter(ref => ref.shareOperationId.length > 0).map(ref => ref.operationSubject),
+      error: error instanceof Error ? error : new Error(String(error)) });
+  };
   for (const [key, headRows] of index) {
     const separator = key.indexOf('\u0000');
     const metaGraph = key.slice(0, separator);
@@ -165,25 +173,22 @@ function parseGraphScopedSwmHeads(
     const operationReferences = [...new Set(headRows.filter(row => row.predicate === SWM_SHARE_OPERATION_ID)
       .map(row => stripLiteral(row.object).trim()))]
       .map(shareOperationId => ({ shareOperationId, operationSubject: `urn:dkg:share:${params.contextGraphId}:${shareOperationId}` }));
-    try {
-      descriptors.push(decodeHead(params, { metaGraph, headSubject, headRows, operationReferences }, index, allowedMetaGraphs));
-    } catch (error) {
-      if (mode === 'strict') throw error;
-      setAside.push({
-        metaGraph, headSubject,
-        operationSubjects: operationReferences.filter(ref => ref.shareOperationId.length > 0).map(ref => ref.operationSubject),
-        error: error instanceof Error ? error : new Error(String(error)),
-      });
+    const head = { metaGraph, headSubject, headRows, operationReferences };
+    let envelope: ReturnType<typeof decodeHeadEnvelope>;
+    try { envelope = decodeHeadEnvelope(params, head, allowedMetaGraphs); }
+    catch (error) { rejectHead(head, error); continue; }
+    // A validated head still owns its graph if its operation is defective.
+    // Check every envelope before any operation can be excluded from the round.
+    const owner = owners.get(envelope.assertionGraph);
+    if (owner && owner !== envelope.scope.ual) {
+      throw new Error(`Graph-scoped SWM assertion graph ${envelope.assertionGraph} has multiple UAL owners`);
     }
+    owners.set(envelope.assertionGraph, envelope.scope.ual);
+    validated.push(envelope);
   }
-  // Cross-head ownership conflicts always reject the generation, even after isolated failures.
-  const owners = new Map<string, string>();
-  for (const descriptor of descriptors) {
-    const owner = owners.get(descriptor.assertionGraph);
-    if (owner && owner !== descriptor.kaUal) {
-      throw new Error(`Graph-scoped SWM assertion graph ${descriptor.assertionGraph} has multiple UAL owners`);
-    }
-    owners.set(descriptor.assertionGraph, descriptor.kaUal);
+  for (const head of validated) {
+    try { descriptors.push(decodeHeadOperation(params, head, index)); }
+    catch (error) { rejectHead(head, error); }
   }
   return { descriptors, setAside };
 }
@@ -199,11 +204,11 @@ export function parseGraphScopedSwmRecoveryDescriptors(params: GraphScopedSwmRec
 export function parseGraphScopedSwmRecoveryHeadResults(params: GraphScopedSwmRecoveryParseInput) {
   return parseGraphScopedSwmHeads(params, 'set-aside');
 }
-function decodeHead(params: GraphScopedSwmRecoveryParseInput,
-  { metaGraph, headSubject, headRows, operationReferences }: SwmRecoveryHead,
-  byGraphAndSubject: ReadonlyMap<string, readonly Quad[]>,
+function decodeHeadEnvelope(params: GraphScopedSwmRecoveryParseInput,
+  head: SwmRecoveryHead,
   allowedMetaGraphs: ReadonlySet<string>,
-): GraphScopedSwmRecoveryDescriptor {
+) {
+  const { metaGraph, headSubject, headRows } = head;
   if (!allowedMetaGraphs.has(metaGraph)) {
     throw new Error(`Graph-scoped SWM head ${headSubject} is in an unregistered metadata graph ${metaGraph}`);
   }
@@ -235,6 +240,13 @@ function decodeHead(params: GraphScopedSwmRecoveryParseInput,
     );
   }
 
+  return { ...head, scope, subGraphName, assertionGraph };
+}
+
+function decodeHeadOperation(params: GraphScopedSwmRecoveryParseInput,
+  { metaGraph, headSubject, headRows, operationReferences, scope, subGraphName, assertionGraph }: ReturnType<typeof decodeHeadEnvelope>,
+  byGraphAndSubject: ReadonlyMap<string, readonly Quad[]>,
+): GraphScopedSwmRecoveryDescriptor {
   const operation = resolveEquivalentHeadOperation({
     headRows, operationReferences,
     byGraphAndSubject,

@@ -378,6 +378,26 @@ describe('a defective head is set aside, not its whole graph', () => {
     })).toThrow(/multiple UAL owners/);
   });
 
+  it.each([false, true])('rejects a colliding malformed operation before replacing stored content (malformed first: %s)', async malformedFirst => {
+    const twin = fx.share({ version: 1, operationId: 'op-colliding-twin', marker: 'stored-twin', ual: `did:dkg:base:8453/${ADDRESS}/1` });
+    expect(twin.assertionGraph).toBe(valid.assertionGraph);
+    const malformed = [...twin.meta,
+      { subject: twin.operationSubject, predicate: `${DKG}publisherPeerId`, object: '"peer-other"', graph: WS_META }];
+    const servedMeta = malformedFirst ? [...malformed, ...valid.meta] : [...valid.meta, ...malformed];
+    expect(() => parseGraphScopedSwmRecoveryHeadResults({ contextGraphId: CG, metaQuads: servedMeta }))
+      .toThrow(/multiple UAL owners/);
+    const store = newStore();
+    await seedMaterialized(store, twin, twin.meta);
+    const contentBefore = await rowsOf(store, twin.assertionGraph);
+    const metadataBefore = await rowsOf(store, WS_META);
+    const summary = await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, servedMeta,
+      cachedSnapshots: new Map([[valid.digest, valid.payload], [twin.digest, twin.payload]]),
+    }).run();
+    expect(summary.failedPhases).toBeGreaterThan(0);
+    expect(await rowsOf(store, twin.assertionGraph)).toEqual(contentBefore);
+    expect(await rowsOf(store, WS_META)).toEqual(metadataBefore);
+  });
+
   it('materializes the other assets and holds the round incomplete', async () => {
     const bad = defective('bad');
     const store = newStore();

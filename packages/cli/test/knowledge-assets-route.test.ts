@@ -1070,6 +1070,7 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
       const path = `/api/knowledge-assets/${name}/wm/pull-from`;
       // A real HTTP proxy forwards a complete pull but drops its response.
       let forwardedStatus: number | undefined;
+      let forwardedSeeded: unknown;
       const proxy = createServer(async (req, res) => {
         try {
           const chunks = [];
@@ -1079,7 +1080,7 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
             body: Buffer.concat(chunks) });
           const completed = await upstream.json();
           forwardedStatus = upstream.status;
-          expect(completed.seeded).toBeGreaterThan(0);
+          forwardedSeeded = completed.seeded;
           res.destroy();
         } catch (error) { res.destroy(error as Error); }
       });
@@ -1090,6 +1091,7 @@ describe('/api/knowledge-assets routes (real daemon, real chain)', () => {
           body: JSON.stringify({ contextGraphId: cg, layer: 'swm', onConflict: 'replace' }) })).rejects.toThrow();
       } finally { await new Promise<void>(resolve => proxy.close(() => resolve())); }
       expect(forwardedStatus).toBe(200);
+      expect(forwardedSeeded).toBeGreaterThan(0);
       expect((await agent.post(path, { contextGraphId: cg, layer: 'swm' })).body.code).toBe('WM_DRAFT_CONFLICT');
       const recovered = await agent.post(path, { contextGraphId: cg, layer: 'swm', recoverExact });
       expect(recovered.status, JSON.stringify(recovered.body)).toBe(200);

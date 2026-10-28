@@ -20,7 +20,7 @@
 import { canonicalQuadKey } from './requester/quad-key.js';
 import { assertSafeIri, formatSparqlTerm, isSafeIri } from '@origintrail-official/dkg-core';
 import { tryUpdateWithTouchedGraphs, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
+import { decodeWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
 
 import { filterOversizedSyncQuads, insertPrefilteredSyncQuads, type OversizeGuardHooks } from './oversize-filter.js';
 
@@ -30,19 +30,7 @@ const READ_CHUNK = 100;
 const RETIREMENT_TUPLES = 100;
 const RETIREMENT_BYTES = 256 * 1024;
 
-/**
- * An operation's publishedAt as the head resolver reads it: the earliest
- * stamp. A missing or unparseable stamp still fails closed.
- */
-export function operationPublishedAtMs(rows: readonly Quad[], operationSubject: string): number {
-  const earliest = earliestWorkspaceOperationTimestamp(
-    rows.filter((row) => row.predicate === PUBLISHED_AT).map((row) => row.object));
-  if (earliest === undefined) throw new Error('missing publishedAt');
-  if (!Number.isFinite(earliest)) {
-    throw new Error(`Graph-scoped SWM operation ${operationSubject} has an invalid publishedAt`);
-  }
-  return earliest;
-}
+export { operationPublishedAtMs } from './swm-operation-timestamp-reader.js';
 
 export interface OperationPublishedAtPlan {
   /** The rows to write: the input without the incoming stamps that lose. */
