@@ -449,11 +449,11 @@ describe('holding a copy only while it is current on chain', () => {
       budget: { createGraphScopedAuthenticationDeadline: () => Date.now() + 1000 },
     })!;
     const request = { contextGraphId: CG, descriptors: manifest.descriptors };
-    await holdings(request, new Set([descriptor.ual]));
-    await holdings(request, new Set([descriptor.ual]));
+    await holdings(request, new Set([descriptor.ual]), { reuseIntermediateConfirmations: true });
+    await holdings(request, new Set([descriptor.ual]), { reuseIntermediateConfirmations: true });
     expect(authenticateHeld).toHaveBeenCalledTimes(1);
     onChainId = '582';
-    await expect(holdings(request, new Set([descriptor.ual]))).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+    await expect(holdings(request, new Set([descriptor.ual]), { reuseIntermediateConfirmations: true })).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
     expect(authenticateHeld).toHaveBeenCalledTimes(2);
   });
 
@@ -468,8 +468,8 @@ describe('holding a copy only while it is current on chain', () => {
     })!;
     const held = new Set([descriptor.ual]);
     const request = { contextGraphId: CG, descriptors: [descriptor] };
-    await nextRound()(request, held);
-    await nextRound()(request, held);
+    await nextRound()(request, held, { reuseIntermediateConfirmations: true });
+    await nextRound()(request, held, { reuseIntermediateConfirmations: true });
     expect(authenticateHeld).toHaveBeenCalledTimes(1);
     if (change === 'generation') bindingGeneration++;
     const changed = { contextGraphId: change === 'context' ? `${CG}-other` : CG,
@@ -478,10 +478,29 @@ describe('holding a copy only while it is current on chain', () => {
         ...(change === 'root' ? { claimedRootHex: 'cd'.repeat(32) } : {}),
       }],
     };
-    await nextRound()(changed, held);
+    await nextRound()(changed, held, { reuseIntermediateConfirmations: true });
     expect(authenticateHeld).toHaveBeenCalledTimes(2);
-    await nextRound()(changed, held);
+    await nextRound()(changed, held, { reuseIntermediateConfirmations: true });
     expect(authenticateHeld).toHaveBeenCalledTimes(2);
+  });
+
+  it('requires fresh chain evidence for terminal held completion, including after an interrupted check', async () => {
+    const manifest = generation(2);
+    const chain = currentOf(manifest);
+    const all = manifest.descriptors.map(copy => copy.ual);
+    const reads: string[] = [];
+    const holdings = reader(chain, reads);
+    const request = { contextGraphId: CG, descriptors: manifest.descriptors };
+    await holdings(request, new Set(all), { reuseIntermediateConfirmations: true });
+    expect(reads).toHaveLength(2);
+
+    const absent = chain.get(all[1]!)!;
+    chain.delete(all[1]!);
+    await expect(holdings(request, new Set(all))).rejects.toThrow("within the round's budget");
+    chain.set(all[1]!, absent);
+    chain.set(all[0]!, { ...chain.get(all[0]!)!, assertionVersion: 2n });
+    await expect(holdings(request, new Set(all))).rejects.toBeInstanceOf(HeldGenerationNotCurrentError);
+    expect(reads.filter(ual => ual === all[0])).toHaveLength(3);
   });
 
   it('confirms held copies the chain shows current, and reads only those', async () => {
@@ -557,7 +576,7 @@ describe('holding a copy only while it is current on chain', () => {
     const manifest = generation(300);
     const all = manifest.descriptors.map((descriptor) => descriptor.ual);
     const confirmation = new HeldAssetsConfirmationRun();
-    const confirmOnce = (chain: Map<string, ChainState>, reads: string[]) => reader(chain, reads, [], () => 42, confirmation)({ contextGraphId: CG, descriptors: manifest.descriptors }, new Set(all));
+    const confirmOnce = (chain: Map<string, ChainState>, reads: string[]) => reader(chain, reads, [], () => 42, confirmation)({ contextGraphId: CG, descriptors: manifest.descriptors }, new Set(all), { reuseIntermediateConfirmations: true });
 
     // The first round's budget ends after a third of the checks; the ones it finished stay confirmed.
     await expect(confirmOnce(new Map([...currentOf(manifest)].slice(0, 100)), []))

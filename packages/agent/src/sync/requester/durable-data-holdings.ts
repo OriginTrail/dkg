@@ -57,7 +57,8 @@ const HELD_CHAIN_CHECK_CONCURRENCY = 8;
 /**
  * Longest a round confirms held copies on chain, one recovery settlement slice.
  * On a slow or throttled endpoint, a round that runs out runs its DATA phase
- * instead of failing, and the run's next round checks only the copies left.
+ * instead of failing. Intermediate missing-asset plans may reuse successful
+ * checks, but terminal held completion must check every copy afresh.
  */
 export const HELD_CHAIN_CHECK_BUDGET_MS = 120_000;
 
@@ -71,12 +72,14 @@ export const HELD_CHAIN_CHECK_BUDGET_MS = 120_000;
  * that cannot answer for every held copy within one budget
  * ({@link HELD_CHAIN_CHECK_BUDGET_MS}, or the round's authentication deadline
  * if earlier) rejects with an ordinary error, and the round runs its DATA
- * rounds, which authenticate what they fetch. The run-scoped confirmer owns
- * successful identities and only checks the remaining copies next round.
+ * rounds, which authenticate what they fetch. Prior confirmations may only
+ * guide intermediate missing-asset work: they do not prove currentness at a
+ * later terminal boundary without fresh chain revision evidence.
  */
 export type ConfirmHeldAssetsCurrent = (
   request: HeldGraphScopedAssetsRequest,
   held: HeldAssetMembership,
+  options?: { readonly reuseIntermediateConfirmations?: boolean },
 ) => Promise<void>;
 
 const heldCopyKey = (descriptor: GraphScopedDescriptor) =>
@@ -89,7 +92,7 @@ interface HeldAssetsConfirmationInput {
   /** The round's budget: the chain checks share one authentication deadline. */
   readonly budget: { createGraphScopedAuthenticationDeadline(): number };
 }
-/** Authentication owns successful identities across the graph owner's rounds. */
+/** Prior chain verdicts guide intermediate work, never terminal held readiness. */
 export class HeldAssetsConfirmationRun {
   private readonly confirmed = new Set<string>();
   forRound(input: HeldAssetsConfirmationInput): ConfirmHeldAssetsCurrent | undefined {
@@ -102,7 +105,7 @@ export function currentHeldGraphScopedAssetsConfirmer(input: HeldAssetsConfirmat
 function bindHeldAssetsConfirmer(input: HeldAssetsConfirmationInput, confirmed: Set<string>): ConfirmHeldAssetsCurrent | undefined {
   const { authenticateHeld } = input;
   if (!authenticateHeld) return undefined;
-  return async (request, held) => {
+  return async (request, held, options) => {
     const deadline = Math.min(
       input.budget.createGraphScopedAuthenticationDeadline(),
       Date.now() + HELD_CHAIN_CHECK_BUDGET_MS,
@@ -114,7 +117,7 @@ function bindHeldAssetsConfirmer(input: HeldAssetsConfirmationInput, confirmed: 
     const cacheKey = (descriptor: GraphScopedDescriptor) => `${capturedBinding}\0${heldCopyKey(descriptor)}`;
     await mapWithConcurrencyDrained(
       request.descriptors.filter((descriptor) => held.has(descriptor.ual)
-        && !confirmed.has(cacheKey(descriptor))),
+        && !(options?.reuseIntermediateConfirmations && confirmed.has(cacheKey(descriptor)))),
       HELD_CHAIN_CHECK_CONCURRENCY,
       async (descriptor) => {
         const { ual } = descriptor;
@@ -209,7 +212,9 @@ export async function planDurableDataFromLocalHoldings(input: {
     input.signal?.throwIfAborted();
     plan = planDurableDataFromHoldings(manifest, held, options.ownerFetchesMissingAssets === true);
     // Full-graph rounds authenticate every asset they fetch: only a plan that skips held copies asks the chain.
-    if (plan.kind !== 'full') await confirmCurrent(request, held);
+    if (plan.kind !== 'full') await confirmCurrent(request, held, {
+      reuseIntermediateConfirmations: plan.kind === 'fetch-missing',
+    });
   } catch (error) {
     input.signal?.throwIfAborted();
     if (error instanceof HeldGenerationNotCurrentError || (error instanceof Error && error.name === 'AbortError')) throw error;

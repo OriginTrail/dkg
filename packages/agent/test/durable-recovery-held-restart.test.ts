@@ -252,6 +252,32 @@ describe('a restarted Core and a graph it has already recovered', () => {
     expect(core.info).toContainEqual(expect.stringContaining('reached its terminal verified boundary'));
   });
 
+  it('rejects a stale held asset updated on chain while another asset is fetched exactly', async () => {
+    const graph = [asset(1), asset(2)];
+    const peer = servingPeer(graph);
+    let onChain = graph;
+    let updateDuringFetch = false;
+    const core = createRequesterHarness(peer, {
+      chain: { assets: () => onChain },
+      mutations: { afterAssetStore: async () => {
+        if (updateDuringFetch) onChain = [asset(1, '2'), graph[1]!];
+      } },
+    });
+    expect((await core.start().recover()).outcome).toBe('terminal');
+    await core.store.dropGraph(graph[1]!.graph);
+    peer.served.exactDataRows = 0;
+    updateDuringFetch = true;
+
+    const restarted = core.start();
+    const result = await restarted.recover();
+
+    expect(peer.served.exactDataRows).toBe(graph[1]!.payload.length);
+    expect(result.outcome).not.toBe('terminal');
+    expect(result.result.complete).toBe(false);
+    expect(core.info).toContainEqual(expect.stringContaining('is not current on chain'));
+    expect(restarted.checkpointStore.get(getSyncCheckpointKey(PEER, CG, false, 'data'))?.terminal).not.toBe(true);
+  });
+
   it('still recovers a changed generation with full-graph rounds when exact requests are unavailable', async () => {
     const peer = servingPeer(generation());
     const core = createRequesterHarness(peer);
@@ -281,32 +307,34 @@ describe('a restarted Core and a graph it has already recovered', () => {
     expect(core.info).toContainEqual(expect.stringContaining('store queue wait timeout'));
   });
 
-  it('settles a large held graph over several rounds when the chain answers only part of its checks in each', async () => {
-    const large = Array.from({ length: 120 }, (_, index) => asset(index + 1));
+  it('uses authenticated DATA rounds when fresh terminal held checks exceed every round budget', async () => {
+    const large = Array.from({ length: 12 }, (_, index) => asset(index + 1));
     const peer = servingPeer(large);
     const core = createRequesterHarness(peer);
     expect((await core.start().recover()).outcome).toBe('terminal');
 
-    // A throttled endpoint: each round's checks run out of budget after 50 assets, and with them its slice.
-    core.limitChainAnswersPerRound(50);
+    // No round can prove the whole generation current; old verdicts cannot complete it.
+    core.limitChainAnswersPerRound(5);
     peer.served.dataRows = 0;
     const restarted = await core.start({ sliceSpent: true }).recover();
 
     expect(restarted.outcome).toBe('terminal');
     expect(core.info).toContainEqual(expect.stringContaining("against the chain within the round's budget"));
-    expect(core.info).toContainEqual(expect.stringContaining('already held at this META generation'));
-    // Each round's checks resume where the last stopped; in between, short DATA rounds rather than a re-pull.
-    expect(peer.served.dataRows).toBeLessThan(rowsOf(large) / 4);
+    expect(restarted.result.verifiedHeldAssets).toBe(0);
+    expect(restarted.result.complete).toBe(true);
+    expect(restarted.slices).toBeGreaterThan(1);
+    // Safety fallback: bounded DATA rounds authenticate their writes instead of using stale verdicts.
+    expect(peer.served.dataRows).toBeGreaterThanOrEqual(rowsOf(large));
   });
 
-  it('fetches only an updated asset of a large graph when the chain answers part of the checks in each round', async () => {
-    const large = (updated = '1') => Array.from({ length: 120 }, (_, index) => asset(index + 1, index === 2 ? updated : '1'));
+  it('keeps exact repair but requires fresh evidence before terminal held readiness', async () => {
+    const large = (updated = '1') => Array.from({ length: 12 }, (_, index) => asset(index + 1, index === 2 ? updated : '1'));
     const peer = servingPeer(large());
     const core = createRequesterHarness(peer);
     expect((await core.start().recover()).outcome).toBe('terminal');
 
     peer.publish(large('2'));
-    core.limitChainAnswersPerRound(50);
+    core.limitChainAnswersPerRound(5);
     peer.served.dataRows = 0;
     peer.served.exactDataRows = 0;
     const restarted = await core.start({ sliceSpent: true }).recover();
@@ -314,9 +342,10 @@ describe('a restarted Core and a graph it has already recovered', () => {
     expect(restarted.outcome).toBe('terminal');
     expect(core.info).toContainEqual(expect.stringContaining("against the chain within the round's budget"));
     expect(core.info).toContainEqual(expect.stringContaining('fetches 1 missing asset(s)'));
-    // The updated asset by exact request, and short DATA rounds while the checks catch up: no full-graph re-pull.
     expect(peer.served.exactDataRows).toBe(asset(3, '2').payload.length);
-    expect(peer.served.dataRows).toBeLessThan(rowsOf(large()) / 4);
+    expect(restarted.result.verifiedHeldAssets).toBe(0);
+    expect(restarted.result.complete).toBe(true);
+    expect(peer.served.dataRows).toBeGreaterThanOrEqual(rowsOf(large('2')));
   });
 
   it('pulls the graph again when the store no longer holds it', async () => {
