@@ -1,3 +1,4 @@
+import { completeNamedPublishFinalization } from './complete-named-publish-finalization.js';
 import { verifyNamedMintRecord } from './verified-named-mint-record.js';
 import { withMaterializationLock, prepareMintAdoption, readPreparedMintAdoption, type MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import { completeNamedMint } from './named-mint-completion.js';
@@ -16,7 +17,7 @@ import type { DKGAgent } from '../dkg-agent.js';
 import { readFinalizedAssertionReservation } from './finalized-assertion-reservation.js';
 import { planKnowledgeAssetVmPublication } from './knowledge-asset-vm-publish-request.js';
 import { sealChainTargetMismatch } from '../seal-chain-target.js';
-import { beginNamedPublishFinalization, finishNamedPublishFinalization, type NamedPublishFinalizationInput } from '../named-publish-finalization.js';
+import { beginNamedPublishFinalization } from '../named-publish-finalization.js';
 import type { AgentSharedMemoryPublishOptions, FinalizedAssertionPublishOptions, FinalizedAssertionRecordingContext } from './agent-publish-options.js';
 
 /** Capabilities used by finalized mint/update stages; public entry points bind them once. */
@@ -37,15 +38,6 @@ export interface FinalizedAssertionPublicationHost {
   catalogRequired(contextGraphId: string, subGraphName?: string): boolean;
   retireLegacySwm(contextGraphId: string, kaUal: string, assertionVersion: string,
     subGraphName: string | undefined, ctx: OperationContext): Promise<boolean>;
-}
-
-// Implementation-only publication stages; absent from the exported DKGAgent surface.
-export async function completeNamedPublishFinalization(host: FinalizedAssertionPublicationHost, input: NamedPublishFinalizationInput): Promise<'complete' | 'pending'> {
-    return finishNamedPublishFinalization(host.store, input, {
-      transfer: shareOperationId => host.transferRfc64ConfirmedVmV1({
-        ...input, shareOperationId, ctx: createOperationContext('publishFromSWM'), publicationLabel: 'publish',
-      }),
-    });
 }
 
 export async function selectFinalizedAssertionPublication(host: FinalizedAssertionPublicationHost, contextGraphId: string, name: string,
@@ -122,7 +114,7 @@ export async function selectFinalizedAssertionPublication(host: FinalizedAsserti
 }
 type FinalizedAssertionSelection = Awaited<ReturnType<typeof selectFinalizedAssertionPublication>>;
 
-export async function prepareFinalizedAssertionContent(host: FinalizedAssertionPublicationHost, selected: FinalizedAssertionSelection) {
+export async function prepareFinalizedAssertionUpdateContent(host: FinalizedAssertionPublicationHost, selected: FinalizedAssertionSelection) {
   const { contextGraphId, opts, graphScope, seal, packedKaId } = selected;
   const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
   const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
@@ -199,9 +191,20 @@ export async function prepareFinalizedAssertionContent(host: FinalizedAssertionP
 
   return { ...selected, newMerkleHexBare, recoveredReservedKaId, sharedMemoryScope, canonicalSwmQuads, canonicalPrivateQuads, privateMerkleRoot };
 }
-type PreparedFinalizedAssertionContent = Awaited<ReturnType<typeof prepareFinalizedAssertionContent>>;
+type PreparedFinalizedAssertionContent = Awaited<ReturnType<typeof prepareFinalizedAssertionUpdateContent>>;
 
-export function finalizedMintContentOptions(prepared: PreparedFinalizedAssertionContent, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): SharedMemoryMintRecordingOptions & { publisherOverride: DKGPublisher } {
+/** Named lifecycle planning carries the sealed target; publisher owns mint content loading and validation. */
+export function finalizedAssertionMintPlan(selected: FinalizedAssertionSelection) {
+  const { seal, graphScope, packedKaId } = selected;
+  const sharedMemoryScope: SharedMemoryGraphScope = { kind: 'named-lifecycle',
+    identity: { agentAddress: graphScope.agentAddress, kaNumber: BigInt(graphScope.kaNumber) } };
+  return { ...selected, newMerkleHexBare: ethers.hexlify(seal.merkleRoot).slice(2),
+    recoveredReservedKaId: seal.reservedKaId ?? packedKaId, sharedMemoryScope,
+    privateMerkleRoot: seal.privateMerkleRoot };
+}
+type FinalizedAssertionMintPlan = ReturnType<typeof finalizedAssertionMintPlan>;
+
+export function finalizedMintContentOptions(prepared: FinalizedAssertionMintPlan, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): SharedMemoryMintRecordingOptions & { publisherOverride: DKGPublisher } {
   const { opts, publisher, recoveredReservedKaId, sharedMemoryScope, graphScope, seal, privateMerkleRoot } = prepared;
   return {
         operationCtx: opts?.operationCtx,
@@ -218,7 +221,7 @@ export function finalizedMintContentOptions(prepared: PreparedFinalizedAssertion
         assertionVersion: graphScope.assertionVersion,
         publicTripleCount: seal.publicTripleCount,
         ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
-        privateTripleCount: prepared.canonicalPrivateQuads.length,
+        privateTripleCount: seal.privateTripleCount ?? 0,
         precomputedAttestation: {
           expectedMerkleRoot: seal.merkleRoot,
           authorAddress: seal.authorAddress,
@@ -230,12 +233,12 @@ export function finalizedMintContentOptions(prepared: PreparedFinalizedAssertion
   };
 }
 
-export function finalizedMintOptions(prepared: PreparedFinalizedAssertionContent, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): AgentSharedMemoryPublishOptions {
+export function finalizedMintOptions(prepared: FinalizedAssertionMintPlan, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): AgentSharedMemoryPublishOptions {
   return { ...finalizedMintContentOptions(prepared, pricingPolicy),
     publisherNodeIdentityIdOverride: prepared.opts?.publisherNodeIdentityIdOverride, publishEpochs: prepared.opts?.publishEpochs };
 }
 
-async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent, result: PublishResult): Promise<boolean> {
+async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionPublicationHost, prepared: FinalizedAssertionMintPlan, result: PublishResult): Promise<boolean> {
   const { contextGraphId, name, opts, publisher, agentAddress, packedKaId, lifecycleUri, newMerkleHexBare } = prepared;
   const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
   if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true)
@@ -254,7 +257,7 @@ async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionPublic
   }
 }
 
-async function consumeFinalizedPublicationShare(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent,
+async function consumeFinalizedPublicationShare(host: FinalizedAssertionPublicationHost, prepared: FinalizedAssertionMintPlan,
   result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
   if (result.status !== 'confirmed') return;
   const { contextGraphId, name, opts, publisher, agentAddress, lifecycleUri } = prepared;
@@ -266,14 +269,14 @@ async function consumeFinalizedPublicationShare(host: FinalizedAssertionPublicat
   }
 }
 
-export function finalizedPublicationIdentity(prepared: PreparedFinalizedAssertionContent) {
+export function finalizedPublicationIdentity(prepared: FinalizedAssertionMintPlan) {
   const { contextGraphId, name, opts, rfc64WorkspaceHead, seal, assertionUri } = prepared;
   return { contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
     shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri };
 }
 
 /** Original publication alone creates the checkpoint; the completion protocol needs no resident content. */
-export async function completeFinalizedAssertionMint(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent,
+export async function completeFinalizedAssertionMint(host: FinalizedAssertionPublicationHost, prepared: FinalizedAssertionMintPlan,
   result: PublishResult, recording?: FinalizedAssertionRecordingContext): Promise<void> {
   if (result.status !== 'confirmed') {
     await stampFinalizedPublicationLifecycle(host, prepared, result); return;
@@ -307,7 +310,7 @@ export async function completeFinalizedAssertionMint(host: FinalizedAssertionPub
 }
 
 /** Reacquire after the recorder's nested lock has drained; gossip never carries stale completion authority. */
-export async function completeRecordedAssertionMint(host: FinalizedAssertionPublicationHost, prepared: PreparedFinalizedAssertionContent,
+export async function completeRecordedAssertionMint(host: FinalizedAssertionPublicationHost, prepared: FinalizedAssertionMintPlan,
   result: PublishResult, recording: FinalizedAssertionRecordingContext, receipt: MintAdoptionRequest,
   onChainContextGraphId: string | null | undefined): Promise<void> {
   if (result.status !== 'confirmed' || !result.onChainResult) return;

@@ -1,7 +1,8 @@
+import { completeNamedPublishFinalization } from './internal/complete-named-publish-finalization.js';
 import type { SharedMemoryMintRecordingOptions } from '@origintrail-official/dkg-publisher';
 import type { MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import type { AgentSharedMemoryPublishOptions, SharedMemoryPublicationContext, FinalizedAssertionPublishOptions, FinalizedAssertionRecordingContext } from './internal/agent-publish-options.js';
-import { completeNamedPublishFinalization, selectFinalizedAssertionPublication, prepareFinalizedAssertionContent,
+import { selectFinalizedAssertionPublication, prepareFinalizedAssertionUpdateContent, finalizedAssertionMintPlan,
   finalizedMintContentOptions, finalizedMintOptions, completeFinalizedAssertionMint, completeRecordedAssertionMint,
   publishFinalizedAssertionUpdate, type FinalizedAssertionPublicationHost,
 } from './internal/finalized-assertion-publication.js';
@@ -5058,7 +5059,7 @@ export class PublishMethods extends DKGAgentBase {
       chain: this.chain,
       writeLocks: this.writeLocks,
       stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter,
-      completeFinalization: input => completeNamedPublishFinalization(finalizedAssertionPublicationHost.call(this), input),
+      completeFinalization: input => completeNamedPublishFinalization({ store: this.store, transferRfc64ConfirmedVmV1: this.transferRfc64ConfirmedVmV1.bind(this) }, input),
       recordMint: (target, evidence, recording) => recordFinalizedAssertionMint.call(this,
         target.contextGraphId, target.name, { kind: 'prepared', evidence }, recording,
         { subGraphName: target.subGraphName, agentAddress: target.agentAddress }),
@@ -5807,11 +5808,12 @@ export class PublishMethods extends DKGAgentBase {
     opts?: FinalizedAssertionPublishOptions): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const host = finalizedAssertionPublicationHost.call(this);
     const selected = await selectFinalizedAssertionPublication(host, contextGraphId, name, opts);
-    const prepared = await prepareFinalizedAssertionContent(host, selected);
-    if (prepared.operationPlan.kind === 'update') return {
-      ...await publishFinalizedAssertionUpdate(host, prepared), assertionUri: prepared.assertionUri, seal: prepared.seal,
-    };
-    const result = await this.publishFromSharedMemory(contextGraphId, 'all', finalizedMintOptions(prepared, prepared.operationPlan.pricingPolicy));
+    if (selected.operationPlan.kind === 'update') {
+      const prepared = await prepareFinalizedAssertionUpdateContent(host, selected);
+      return { ...await publishFinalizedAssertionUpdate(host, prepared), assertionUri: prepared.assertionUri, seal: prepared.seal };
+    }
+    const prepared = finalizedAssertionMintPlan(selected);
+    const result = await this.publishFromSharedMemory(contextGraphId, 'all', finalizedMintOptions(prepared, selected.operationPlan.pricingPolicy));
     await completeFinalizedAssertionMint(host, prepared, result);
     return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
   }
@@ -6302,7 +6304,7 @@ export async function recordFinalizedAssertionMint(this: DKGAgent, contextGraphI
   const selected = await selectFinalizedAssertionPublication(host, contextGraphId, name, opts, recording);
   if (selected.operationPlan.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
     { code: KA_MINT_RECONCILE_REFUSED_CODE });
-  const prepared = await prepareFinalizedAssertionContent(host, selected);
+  const prepared = finalizedAssertionMintPlan(selected);
   const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintContentOptions(prepared, selected.operationPlan.pricingPolicy));
   await completeRecordedAssertionMint(host, prepared, result, recording, receipt, await this.getContextGraphOnChainId(contextGraphId));
   return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };

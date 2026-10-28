@@ -21,6 +21,7 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   MemoryLayer,
   contextGraphFinalizationTopic,
+  contextGraphSharedMemoryUri,
   contextGraphLayerUri,
   decodeFinalizationMessage
 } from '@origintrail-official/dkg-core';
@@ -139,6 +140,38 @@ describe('late-mint adoption', () => {
     expect(publishedAt.type === 'bindings' && publishedAt.bindings).toHaveLength(1);
   });
 
+
+  it('resumes consumed-share completion without constructing update capabilities', async () => {
+    const { agent, store } = await strandedAsset(new MockChainAdapter());
+    failNextLifecycleWrite(agent, store, VM_CURRENT_ASSERTION_PRED);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    Object.defineProperty(agent, 'update', { configurable: true, get() { throw new Error('completion must not construct update capabilities'); } });
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted' });
+  });
+
+  it.each(['live', 'record'] as const)('publisher owns sealed-content rejection for %s mint acquisition', async kind => {
+    const { agent, store, sealed, createKnowledgeAssets, updateKnowledgeCollection } = await strandedAsset(new WalletMockChain(), wallet.address);
+    vi.spyOn(agent as unknown as { createV10ACKProvider(cg: string): unknown }, 'createV10ACKProvider')
+      .mockReturnValue(async () => [{ peerId: 'stub-core', signatureR: ZERO, signatureVS: ZERO, nodeIdentityId: 1n }]);
+    const graphs = (await store.listGraphs()).filter(graph => graph.startsWith(contextGraphSharedMemoryUri(CONTEXT_GRAPH)));
+    let changed = 0;
+    for (const graph of graphs) {
+      const rows = await store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+      if (rows.type !== 'quads') continue;
+      const payload = rows.quads.filter(quad => quad.subject === QUADS[0]!.subject && quad.predicate === QUADS[0]!.predicate);
+      if (payload.length === 0) continue;
+      await store.delete(payload.map(quad => ({ ...quad, graph })));
+      await store.insert(payload.map(quad => ({ ...quad, object: '"Changed after finalization"', graph })));
+      changed += payload.length;
+    }
+    expect(changed).toBeGreaterThan(0);
+    const operation = kind === 'live' ? agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR })
+      : agent.reconcileKnowledgeAssetMint(RECONCILE);
+    await expect(operation).rejects.toThrow(/mismatch|does not match/);
+    expect(createKnowledgeAssets).not.toHaveBeenCalled(); expect(updateKnowledgeCollection).not.toHaveBeenCalled();
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(store, { contextGraphId: CONTEXT_GRAPH, ual: sealed.kaUal }))
+      .not.toMatchObject({ state: 'confirmed' });
+  });
 
   it('retries a consumed-share marker deletion before reporting the mint complete', async () => {
     const { agent, sealed, lostMint, createKnowledgeAssets, updateKnowledgeCollection } = await strandedAsset(new MockChainAdapter());

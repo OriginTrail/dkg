@@ -645,14 +645,14 @@ describe.sequential('knowledge-asset CLI smoke', () => {
 
   it('records a late-mined publish through ka reconcile without the publish options', async () => {
     calls = [];
-    const env = testEnv(dkgHome, smokeApiPort);
+    const invocation = testInvocation(dkgHome, smokeApiPort);
     const txHash = `0x${'ab'.repeat(32)}`;
 
-    const help = await runCli(['ka', 'reconcile', '--help'], env);
+    const help = await runCli(['ka', 'reconcile', '--help'], invocation);
     expect(help.stdout).toContain('--tx-hash <hash>');
     expect(help.stdout).not.toContain('--publish-epochs');
 
-    const reconciled = await runCli(['ka', 'reconcile', 'paper', '-c', 'research', '--sub-graph-name', 'lots', '--tx-hash', txHash], env);
+    const reconciled = await runCli(['ka', 'reconcile', 'paper', '-c', 'research', '--sub-graph-name', 'lots', '--tx-hash', txHash], invocation);
     expect(reconciled.stdout).toContain('Knowledge asset late mint recorded:');
     expect(reconciled.stdout).toContain(`Tx hash: ${txHash}`);
     expect(calls.find((call) => call.url === '/api/knowledge-assets/paper/vm/reconcile')?.body)

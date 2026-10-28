@@ -1,3 +1,5 @@
+import { MockChainAdapter } from '@origintrail-official/dkg-chain';
+import { TypedEventBus, generateEd25519Keypair } from '@origintrail-official/dkg-core';
 import { describe, expect, it, vi } from 'vitest';
 import {
   buildAssertionSealQuads,
@@ -11,6 +13,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import {
+  DKGPublisher,
   KA_ID_PRED,
   VM_CURRENT_ASSERTION_PRED,
   computeFlatKCRootV10,
@@ -230,12 +233,11 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-source-empty', configurable: true });
     agent.log = makeLog();
-    agent.publisher = {
-      hasSwmShareComplete: async () => true,
-    };
-    agent.publishFromSharedMemory = async () => {
-      throw new Error('publish should not be called for an empty source');
-    };
+    const publisher = new DKGPublisher({ store, chain: new MockChainAdapter(), eventBus: new TypedEventBus(),
+      keypair: await generateEd25519Keypair() });
+    vi.spyOn(publisher, 'hasSwmShareComplete').mockResolvedValue(true);
+    agent.publisher = publisher;
+    agent.publishFromSharedMemory = publisher.publishFromSharedMemory.bind(publisher);
 
     let thrown: any;
     try {

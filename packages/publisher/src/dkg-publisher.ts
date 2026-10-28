@@ -2183,7 +2183,9 @@ export class DKGPublisher implements Publisher {
 
     if (quads.length === 0 && privateQuads.length === 0) {
       throw new Error(
-        `No public or private quads for context graph ${contextGraphId} matching the selected Knowledge Asset`,
+        graphPublish ? `No quads in shared memory for context graph ${contextGraphId} matching graph-scoped ` +
+          `KA ${graphPublish.scope.ual} (neither public nor private content is present)`
+          : `No public or private quads for context graph ${contextGraphId} matching the selected Knowledge Asset`,
       );
     }
     // OT-RFC-44 / Design B: once the caller has selected one lifecycle/file,
