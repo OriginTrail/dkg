@@ -608,9 +608,9 @@ export { assertionLifecycleAuthorCandidates, readAssertionLifecycleCandidates } 
 export { readShareCompletionEvidence, tryCreateShareCompletionEvidence, shareEvidenceMatchesRequest, type ShareCompletionEvidence } from './share-completion-evidence.js';
 export { validateShareReconciliationInput, type ShareReconciliationInput, type ShareReconciliationResult } from './share-reconciliation.js';
 
+export { clearDischargedStorageAckCopies, planStorageAckCopyCleanup, type StorageAckCopyCleanupInput, type StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';
 export { readShareQueueDepth, readLiftQueueDepth, readLiftJournalEntryCount, type AsyncQueueDepthOptions } from './async-queue-depth.js';
 
-export { clearDischargedStorageAckCopies, type StorageAckCopyCleanupWriter } from './storage-ack-copy-cleanup.js';
 export { parseWireGraphKnowledgeAssetStructure, parseStoredGraphKnowledgeAssetMetadataEnvelope, type GraphKnowledgeAssetStructure } from './graph-metadata-envelope.js';
 export {
   LIFT_JOB_PAGE_DEFAULT_LIMIT,
@@ -626,6 +626,7 @@ export {
   type VmPublishJobPager,
 } from './lift-job-page.js';
 
+export { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from './workspace-operation-timestamp.js';
 export { GRAPH_KNOWLEDGE_ASSET_LOCAL_CONTROL_PREDICATES, GRAPH_KNOWLEDGE_ASSET_REPLAY_CONTROL_PREDICATES, projectGraphKnowledgeAssetReplayControls } from './graph-knowledge-asset-controls.js';
 
 export { prepareMintAdoption, readPreparedMintAdoption } from './adopt-existing-mint.js';

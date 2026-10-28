@@ -1,12 +1,14 @@
 export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
 export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
 export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
+export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
 export {
+  QUERY_RESULT_TOO_LARGE,
   QueryResultTooLargeError,
+  asQueryResultTooLargeError,
   isQueryResultTooLargeError,
   type QueryResultTooLargeErrorLike,
-} from '@origintrail-official/dkg-query';
-export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+} from './query-result-too-large-error.js';
 export {
   authorityIndexTrustDomain,
   planAuthorityIndexBootstrap,
@@ -670,3 +672,5 @@ export {
   type KnowledgeAssetMintReconcileInput,
   type KnowledgeAssetMintReconcileResult,
 } from './knowledge-asset-mint-reconcile.js';
+
+export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';

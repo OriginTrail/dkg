@@ -27,9 +27,9 @@ export async function prepareDurableHoldingsPhase(input: {
   const fetch = (continuation: 'full-graph' | 'reconsider-holdings'): PreparedDurableDataStrategy => ({ kind: 'full', held: 0, continuation });
   const { context, contextGraphId, manifest, recovery, settlement } = input;
   const held = recovery.held;
-  if (!manifest || !held) return fetch('full-graph');
+  context.signal?.throwIfAborted();
+  if (!manifest || !held || recovery.holdings.skipHoldingsPreflight) return fetch('full-graph');
   try {
-    context.signal?.throwIfAborted();
     const proof = await settlement.proveHoldings(manifest, context.signal);
     if (!proof) return fetch('full-graph');
     const plan = planDurableDataFromHoldings(manifest, proof.held, recovery.holdings.ownerFetchesMissingAssets === true);
