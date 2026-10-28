@@ -96,8 +96,9 @@ export class FinalizedPrivatePlacementOwnerV1 {
     const lane = this.#lanes.get(contextGraphId);
     if (!lane) return;
     try {
-      const first = lane.entries.values().next().value;
-      if (first) this.#commitLaneReset(first.repair);
+      // A pinned legacy marker may be unavailable while newer obligations
+      // have a valid current lane. Let any available sibling observe its edge.
+      for (const entry of lane.entries) if (this.#commitLaneReset(entry.repair)) break;
     } catch (error) { this.#warn('catalog_private_repair_lane_reset_failed', error); }
   }
 
@@ -188,21 +189,33 @@ export class FinalizedPrivatePlacementOwnerV1 {
   #commitLaneReset(repair: Rfc64FinalizedPrivatePlacementRepairV1, supplied?: FinalizedPlacementDecisionV1): boolean {
     const lane = this.#lanes.get(repair.contextGraphId);
     if (!lane) return false;
-    const revisions: { entry: RetryEntry; revision: string }[] = [];
-    for (const entry of lane.entries) {
-      const decision = entry.repair === repair && supplied !== undefined ? supplied
-        : this.#dependencies.resolveFinalizedPlacementDecision(entry.repair);
-      if (decision.status === 'unavailable') throw decision.error;
-      const hint = finalizedPlacementRevisionV1(decision);
-      if (hint !== undefined) revisions.push({ entry, revision: JSON.stringify(hint) });
+    const selected = this.#retries.get(finalizedPrivateRepairKeyV1(repair));
+    const decision = supplied ?? this.#dependencies.resolveFinalizedPlacementDecision(repair);
+    const hint = finalizedPlacementRevisionV1(decision);
+    // Unavailable evidence belongs to this repair. A V1 policy conflict must
+    // neither block a ready V2 sibling nor erase its own retained observation.
+    if (hint === undefined || !selected) return false;
+    const revision = JSON.stringify(hint);
+    lane.resetPending ||= selected.laneRevision !== undefined && selected.laneRevision !== revision;
+    if (!lane.resetPending) {
+      selected.laneRevision = revision;
+      return false;
     }
-    lane.resetPending ||= revisions.some(({ entry, revision }) => entry.laneRevision !== undefined && entry.laneRevision !== revision);
-    const reset = lane.resetPending;
-    if (reset) this.#commitResets([...lane.entries].map(sibling => this.#prepareReset(sibling.repair)));
-    // Advance the sibling observations together only after the graph-wide write.
+    // Unchanged cooling entries take the constant-time path above. Traverse
+    // siblings only for a real lane edge or a failed durable reset retry.
+    const revisions: { entry: RetryEntry; revision: string }[] = [{ entry: selected, revision }];
+    for (const entry of lane.entries) {
+      if (entry === selected) continue;
+      const sibling = this.#dependencies.resolveFinalizedPlacementDecision(entry.repair);
+      const siblingHint = finalizedPlacementRevisionV1(sibling);
+      if (siblingHint !== undefined) revisions.push({ entry, revision: JSON.stringify(siblingHint) });
+    }
+    this.#commitResets([...lane.entries].map(sibling => this.#prepareReset(sibling.repair)));
+    // Persistence owns the transition: advance observations only after the
+    // graph-wide write, leaving unavailable siblings' prior evidence intact.
     for (const { entry, revision } of revisions) entry.laneRevision = revision;
     lane.resetPending = false;
-    return reset;
+    return true;
   }
 
   /** Unread evidence is not absence; a reset must resolve it before consuming its edge. */
@@ -244,9 +257,16 @@ export class FinalizedPrivatePlacementOwnerV1 {
         if (decision.status === 'unavailable') throw decision.error;
       }
       catch (error) {
-        // Without a pending reset this remains an ordinary measured attempt failure.
-        // With one, uncertain authority cannot authorize overwriting the old evidence.
-        if (this.#lanes.get(contextGraphId)?.resetPending) throw error;
+        // Do not overwrite failure evidence while its reset is uncommitted.
+        // Settle waiters, but leave available siblings eligible to retry that
+        // reset: one legacy policy conflict does not block the whole graph.
+        if (this.#lanes.get(contextGraphId)?.resetPending) {
+          for (const sibling of this.#lanes.get(contextGraphId)!.entries) {
+            const key = finalizedPrivateRepairKeyV1(sibling.repair);
+            if (key !== inFlightKey) this.#waiters.release(key);
+          }
+          return { kind: 'blocked', resetCommitted: false };
+        }
         return { kind: 'authority-unavailable', resetCommitted: false, error };
       }
       return { kind: decision.status === 'ready' ? 'active' : 'inactive', resetCommitted: this.#commitLaneReset(repair, decision) };

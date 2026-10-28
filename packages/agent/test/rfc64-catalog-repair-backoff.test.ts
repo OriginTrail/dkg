@@ -710,6 +710,51 @@ describe('RFC-64 unchanged repair backoff', () => {
     expect(f.repairPrivate).toHaveBeenCalledTimes(3);
   });
 
+  it.each([false, true])('keeps a stale V1 pending while a current V2 completes (V2 first=%s)', async v2First => {
+    const f = fixture(0);
+    const legacy = privateRepair();
+    if (legacy.version !== 1) throw new Error('expected V1');
+    const seal = await authorSealV1(102n);
+    const current: Rfc64FinalizedPrivatePlacementRepairV1 = { ...legacy,
+      version: 2, assertionCoordinate: 'current', inventoryScope: null, subGraphName: null,
+      authorAddress: seal.authorAddress, kaUal: seal.kaUal, assertionVersion: seal.assertionVersion,
+      sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(seal), seal };
+    let era = '1';
+    f.resolvePlacement.mockImplementation(row => resolveFinalizedPlacementDecisionV1(row, () => ({
+      status: 'active', lane: { kind: 'private', acceptsFinalizedVmRepair: true,
+        scopeBase: { ...legacy.inventoryScope, era } },
+    })));
+    f.setPrivateRepairs(v2First ? [current, legacy] : [legacy, current]);
+    f.owner.start(ctx); await f.owner.whenIdle();
+    expect(f.repairPrivate).toHaveBeenCalledTimes(2);
+    era = '2';
+    f.repairPrivate.mockClear();
+    f.repairPrivate.mockImplementation(async row => {
+      expect(row.version).toBe(2);
+      f.setPrivateRepairs([legacy]);
+    });
+    f.owner.observeLaneAvailability(CG);
+    f.owner.start(ctx); await f.owner.whenIdle();
+    expect(f.repairPrivate).toHaveBeenCalledOnce();
+    expect(f.repairPrivate).toHaveBeenCalledWith(current, expect.anything());
+    expect(f.listPrivateRepairs()).toEqual([legacy]);
+    expect(f.resolvePlacement(legacy)).toMatchObject({ status: 'unavailable' });
+    expect(f.resolvePlacement(current)).toMatchObject({ status: 'ready', inventoryScope: { era: '2' } });
+  });
+
+  it('evaluates a thousand unchanged cooling repairs in linear work', async () => {
+    const rows = Array.from({ length: 1000 }, (_, index) => ({ ...privateRepair(), assertionCoordinate: `cooling-${index}` }));
+    const f = fixture(0, { readPrivateFailure: () => ({ kind: 'unknown', consecutiveFailures: 2,
+      sameKindFailures: 2, firstFailedAtMs: 0, lastFailedAtMs: 0, nextAttemptAtMs: 10_000, parked: false }) });
+    f.setPrivateRepairs(rows);
+    f.owner.start(ctx); await f.owner.whenIdle();
+    f.resolvePlacement.mockClear();
+    f.owner.start(ctx); await f.owner.whenIdle();
+    expect(f.repairPrivate).not.toHaveBeenCalled();
+    expect(f.resolvePlacement.mock.calls.length).toBeGreaterThanOrEqual(rows.length);
+    expect(f.resolvePlacement.mock.calls.length).toBeLessThanOrEqual(3 * rows.length);
+  });
+
   it('does not transfer private cooldown across a changed durable confirmation scope', async () => {
     const f = fixture();
     const repair = privateRepair();

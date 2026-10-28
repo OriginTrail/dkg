@@ -1025,6 +1025,7 @@ function makeQueuedAgentHarness(options: {
   const agentLike: any = {
     peerId: options.peerId,
     config: confirmedPublicationCatalogConfigV1(),
+    readAcceptedRfc64CatalogAccessSnapshotV1: () => ({ policy: { accessPolicy: 0 } }),
     defaultAgentAddress: QUEUED_TEST_AUTHOR,
     chain: options.chain ?? {},
     store: {

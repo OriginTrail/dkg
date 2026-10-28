@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import {
-  canonicalGraphScopedAuthorSealFromAssertionSealV1, computeCanonicalGraphScopedAuthorSealDigestV1,
+  computeCanonicalGraphScopedAuthorSealDigestV1,
   createOperationContext, contextGraphAssertionUri, type ContextGraphIdV1,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
@@ -9,7 +9,7 @@ import { ethers } from 'ethers';
 import { parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogObligationRecoveryV1 } from '../confirmed-catalog-obligation-error.js';
 import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
 import {
-  resolveDurableGraphScopedAuthorSealCandidateV1, resolveArchivedGraphScopedAuthorSealCandidateV1,
+  resolveDurableGraphScopedAuthorSealCandidateV1,
 } from '../durable-author-seal-resolver-v1.js';
 
 interface RecoveryPortsV1 {
@@ -37,11 +37,8 @@ export async function recoverConfirmedCatalogObligationV1(
     agentAddress: evidence.seal.authorAddress, assertionCoordinate: evidence.assertionCoordinate,
     source: 'agent.confirmedCatalogRecovery.seal', signal };
   const digest = computeCanonicalGraphScopedAuthorSealDigestV1(evidence.seal);
-  let candidate = await resolveDurableGraphScopedAuthorSealCandidateV1(query);
-  const matches = (): boolean => candidate !== undefined
-    && computeCanonicalGraphScopedAuthorSealDigestV1(canonicalGraphScopedAuthorSealFromAssertionSealV1(candidate.seal)) === digest;
-  if (!matches()) candidate = await resolveArchivedGraphScopedAuthorSealCandidateV1(query);
-  if (!matches() || candidate === undefined) throw invalidEvidence();
+  const candidate = await resolveDurableGraphScopedAuthorSealCandidateV1({ ...query, sealDigest: digest });
+  if (candidate === undefined) throw invalidEvidence();
   const binding = await ports.resolveBinding();
   if (binding === null) throw invalidEvidence();
   const assertionVersion = BigInt(evidence.seal.assertionVersion);
