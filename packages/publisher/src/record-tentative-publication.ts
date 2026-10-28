@@ -1,35 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 
-import {type Logger} from '@origintrail-official/dkg-core';
-import type {Quad, TripleStore} from '@origintrail-official/dkg-storage';
+import { isAgentRegistryContextGraph, type Logger } from '@origintrail-official/dkg-core';
+import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
+import { generateGraphKnowledgeAssetMetadata, generateTentativeMetadata, replaceLocallyTrustedKnowledgeAssetControls } from './metadata.js';
+import type { PreparedLocalPublication, PreparedPublicationContent } from './prepared-publication.js';
 
-
-import {generateGraphKnowledgeAssetMetadata, generateTentativeMetadata, replaceLocallyTrustedKnowledgeAssetControls} from './metadata.js';
-
-
-
-import {isAgentRegistryContextGraph} from '@origintrail-official/dkg-core';
-
-
-
-
-
-
-
-import type { PreparedLocalPublication, GraphScopedPublishDescriptor } from './prepared-publication.js';
-import type { OperationContext } from '@origintrail-official/dkg-core';
-import type { KAMetadata } from './metadata.js';
-
-export interface TentativePublicationRecording {
-  privateRoots: Uint8Array[]; kcMerkleRoot: Uint8Array;
-  effectiveAccessPolicy: 'public' | 'ownerOnly' | 'allowList'; normalizedAllowedPeers: string[];
-  kaMetadata: KAMetadata[]; normalizedQuads: Quad[];
-  graphPublish: GraphScopedPublishDescriptor | undefined;
-  normalizedPublisherPeerId: string; dataGraph: string; contextGraphId: string;
-  authorAddress: string | undefined; subGraphName: string | undefined; targetMetaGraphUri: string | undefined;
-  ctx: OperationContext;
-}
+type TentativePublicationRecording = Pick<PreparedPublicationContent, 'payload' | 'target' | 'execution' | 'ctx'>;
 
 export interface TentativePublicationRecordingPorts {
   chainId: string;
@@ -42,8 +19,12 @@ export interface TentativePublicationRecordingPorts {
 /** The recording stage owns every local write, including intentional local-only publications. */
 export async function recordTentativePublication(outcome: PreparedLocalPublication, recording: TentativePublicationRecording,
   ports: TentativePublicationRecordingPorts): Promise<string> {
-  const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads,
-    graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, subGraphName, targetMetaGraphUri, authorAddress, ctx } = recording;
+  const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata,
+    allSkolemizedQuads, publisherPeerId: normalizedPublisherPeerId } = recording.payload;
+  const { graphPublish, dataGraph, contextGraphId, subGraphName, targetMetaGraphUri } = recording.target;
+  const { ctx } = recording;
+  const authorAddress = recording.execution.precomputedAttestation?.authorAddress;
+  const normalizedQuads = allSkolemizedQuads.map(quad => ({ ...quad, graph: dataGraph }));
   ports.log.warn(ctx, `Skipping on-chain publish: ${outcome.reason}`);
   const ual = graphPublish?.scope.ual ?? `did:dkg:${ports.chainId}/${outcome.publisherAddress}/t${outcome.publishOperationId}`;
     for (const km of kaMetadata) {

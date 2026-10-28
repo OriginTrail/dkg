@@ -3100,11 +3100,9 @@ export class DKGPublisher implements Publisher {
   private async recordPublication(content: PreparedPublicationContent,
     acquisition: PublicationAcquisition | PreparedLocalPublication): Promise<PublishResult> {
     const { payload, target, execution: options, lifecycle, ctx } = content;
-    const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata,
-      allSkolemizedQuads, manifestEntries, publisherPeerId: normalizedPublisherPeerId } = payload;
-    const { graphPublish, dataGraph, contextGraphId, publisherContextGraphId } = target;
+    const { privateRoots, effectiveAccessPolicy, normalizedAllowedPeers, kcMerkleRoot, allSkolemizedQuads, manifestEntries } = payload;
+    const { graphPublish, contextGraphId, publisherContextGraphId } = target;
     const { onPhase } = options;
-    const normalizedQuads = allSkolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
     let ual = '';
     const onChainResult = acquisition.kind === 'confirmed' ? acquisition.outcome.result : undefined;
     const usedV10Path = acquisition.kind === 'confirmed';
@@ -3119,12 +3117,7 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain:metadata', 'start');
       this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult!.batchId} tx=${onChainResult!.txHash}`);
     } else {
-      ual = await recordTentativePublication(acquisition, {
-        privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads,
-        graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId, ctx,
-        subGraphName: target.subGraphName, targetMetaGraphUri: target.targetMetaGraphUri,
-        authorAddress: options.precomputedAttestation?.authorAddress,
-      }, {
+      ual = await recordTentativePublication(acquisition, content, {
         chainId: this.chain.chainId, store: this.store, log: this.log,
         replaceExactKnowledgeAssetGraph: this.replaceExactKnowledgeAssetGraph.bind(this),
         persistFinalizedPrivateSlices: () => this.persistPublicationPrivateSlices(content),

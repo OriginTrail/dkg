@@ -1,3 +1,5 @@
+import * as mintReconciliation from '../src/knowledge-asset-mint-reconcile.js';
+import type { KnowledgeAssetMintReconcileHost } from '../src/knowledge-asset-mint-reconcile.js';
 import * as publicationStages from '../src/dkg-agent-publish.js';
 import { transferConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
 import { beginNamedPublishFinalization, finishNamedPublishFinalization, readNamedPublishFinalization } from '../src/named-publish-finalization.js';
@@ -305,7 +307,12 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(true);
     expect(await readNamedPublishFinalization(agent.store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
     expect(finalizations()).toHaveLength(1);
-    const record = vi.spyOn(publicationStages, 'recordFinalizedAssertionMint');
+    const record = vi.fn<KnowledgeAssetMintReconcileHost['recordMint']>();
+    const reconcile = mintReconciliation.reconcileLateMint;
+    vi.spyOn(mintReconciliation, 'reconcileLateMint').mockImplementation((agent, host, input) => {
+      record.mockImplementation(host.recordMint);
+      return reconcile(agent, { ...host, recordMint: record }, input);
+    });
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted', txHash: lostMint.txHash });
     expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(false);
     expect(finalizations()).toHaveLength(1);
@@ -795,7 +802,9 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
   it('fails retryably when the record-only publish does not confirm', async () => {
     const { agent } = await strandedAsset(new MockChainAdapter());
-    vi.spyOn(publicationStages, 'recordFinalizedAssertionMint').mockResolvedValueOnce({ status: 'tentative' } as never);
+    const reconcile = mintReconciliation.reconcileLateMint;
+    vi.spyOn(mintReconciliation, 'reconcileLateMint').mockImplementation((agent, host, input) => reconcile(agent,
+      { ...host, recordMint: vi.fn<KnowledgeAssetMintReconcileHost['recordMint']>().mockResolvedValueOnce({ status: 'tentative' } as never) }, input));
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE, message: expect.stringMatching(/ended tentative/) });

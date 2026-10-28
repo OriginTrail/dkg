@@ -1,4 +1,3 @@
-import { recordFinalizedAssertionMint } from './dkg-agent-publish.js';
 import { readFinalizedAssertionReservation, FinalizedAssertionReservationError, type FinalizedAssertionReservation as SealedReservation } from './internal/finalized-assertion-reservation.js';
 import { readNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -16,6 +15,7 @@ import {
   assertionLifecycleWriteLockKey,
   graphScopeTargetsChain,
   type PreparedMintAdoption,
+  type PublishResult,
   type AssertionLifecycleWriteLease,
 } from '@origintrail-official/dkg-publisher';
 import type { AssertionHistoryDescriptor, DKGAgent } from './dkg-agent.js';
@@ -55,6 +55,8 @@ export interface KnowledgeAssetMintReconcileHost {
   readonly writeLocks: Map<string, Promise<void>>;
   readonly stampPublishedLifecycle: PublishedNamedKaVmLifecycleWriter;
   readonly completeFinalization: OmitThisParameter<DKGAgent['completeNamedPublishFinalization']>;
+  recordMint(target: Target, evidence: PreparedMintAdoption, heldLifecycle: AssertionLifecycleWriteLease,
+    reservation: SealedReservation): Promise<PublishResult>;
 }
 
 interface Target {
@@ -157,7 +159,7 @@ export async function reconcileLateMint(
     const current = await lifecycle();
     const share = await readableShare(current);
     return share === 'resident'
-      ? recordThroughPublish(agent, target, evidence, heldLifecycle, lockedReservation)
+      ? recordThroughPublish(host, target, evidence, heldLifecycle, lockedReservation)
       : completeRecordedLifecycle(agent, host, lockedReservation, target, await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle);
   });
 
@@ -246,11 +248,9 @@ async function assertReservationUnchanged(
   return current;
 }
 
-async function recordThroughPublish(agent: DKGAgent, target: Target,
+async function recordThroughPublish(host: KnowledgeAssetMintReconcileHost, target: Target,
   evidence: PreparedMintAdoption, heldLifecycle: AssertionLifecycleWriteLease, reservation: SealedReservation): Promise<OnChainPublishResult> {
-  const published = await recordFinalizedAssertionMint.call(agent, target.contextGraphId, target.name,
-    { kind: 'prepared', evidence },
-    { heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress }, reservation);
+  const published = await host.recordMint(target, evidence, heldLifecycle, reservation);
   if (published.status !== 'confirmed' || !published.onChainResult) {
     throw Object.assign(new Error(`Recording the mint of "${target.name}" ended ${published.status}. Retry the reconcile.`), {
       code: KA_MINT_RECONCILE_INCOMPLETE_CODE,

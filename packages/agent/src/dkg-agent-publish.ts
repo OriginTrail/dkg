@@ -5055,6 +5055,9 @@ export class PublishMethods extends DKGAgentBase {
       writeLocks: this.writeLocks,
       stampPublishedLifecycle: this.publishedNamedKaVmLifecycleWriter,
       completeFinalization: this.completeNamedPublishFinalization.bind(this),
+      recordMint: (target, evidence, heldLifecycle, reservation) => recordFinalizedAssertionMint.call(this,
+        target.contextGraphId, target.name, { kind: 'prepared', evidence },
+        { heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress }, reservation),
     }, input);
   }
 
