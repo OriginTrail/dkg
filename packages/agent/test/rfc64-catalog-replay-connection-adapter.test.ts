@@ -30,6 +30,7 @@ describe('connection adapter current-policy capabilities', () => {
       admittedConnectedPeerIds: () => [],
       reannounce: announce,
       capabilities: {
+        resolveRfc64CatalogReceiverAuthorityV1: () => ({ active: true, mode: 'rfc64' }),
         listServingRfc64CatalogReplayContextGraphIdsV1: () => [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
         listActiveRfc64CatalogReplayContextGraphIdsV1: () => [RFC64_ROLLOUT_CONTEXT_GRAPH_ID],
         readAcceptedRfc64CatalogAccessSnapshotV1: readAcceptedPolicy,
@@ -55,3 +56,24 @@ describe('connection adapter current-policy capabilities', () => {
 });
 
 
+
+it('uses point authority checks for a large initial selection', () => {
+  const graphs = Array.from({ length: 257 }, (_, i) => `cg-${i}`);
+  const authority = vi.fn((_id: string) => ({ active: true, mode: 'rfc64' }));
+  const list = vi.fn(() => { for (const id of graphs) authority(id); return graphs; });
+  const runtime = createRfc64CatalogReplayConnectionRuntimeV1({
+    capabilities: { listActiveRfc64CatalogReplayContextGraphIdsV1: list,
+      listServingRfc64CatalogReplayContextGraphIdsV1: () => [],
+      resolveRfc64CatalogReceiverAuthorityV1: authority,
+      readAcceptedRfc64CatalogAccessSnapshotV1: () => ({ policyDigest: 'p' }) as never },
+    admittedConnectedPeerIds: () => [], reserveDeferred: () => ({ release() {} }),
+    reservePeer: (_cg, _digest, peerId) => ({ peerId, generation: 1, admit() {}, release() {} }),
+    reannounce: async () => ({ failed: 0 }), replay: async () => ({ failed: 0 }),
+    schedule: () => true, wait: async () => {}, warn: vi.fn(),
+  });
+  runtime.prepareConnectionOpen('peer')!.admit();
+  expect(list).toHaveBeenCalledOnce();
+  expect(authority.mock.calls.length).toBeLessThanOrEqual(graphs.length * 3);
+  expect(authority.mock.calls.length).toBeGreaterThanOrEqual(graphs.length * 2);
+  runtime.reset();
+});

@@ -14,7 +14,7 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
   readonly #pending = new Map<string, CatalogReplayPeerWorkV1>();
   readonly #staged = new Map<string, number>();
   #chunk: CatalogReplayChunkV1 | null = null;
-  #nextGeneration = 0;
+  constructor(readonly allocateGeneration: () => number) {}
   #remaining = RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1;
   #overflowed = false;
 
@@ -47,7 +47,7 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
       this.#overflowed = true;
       return null;
     }
-    const generation = ++this.#nextGeneration;
+    const generation = this.allocateGeneration();
     this.#staged.set(peerId, generation);
     let released = false;
     return Object.freeze({
@@ -78,7 +78,7 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
     if (this.#staged.has(peerId)) return false;
     if (this.#pending.has(peerId)) return true;
     if (new Set([...this.#pending.keys(), ...this.#staged.keys()]).size >= RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1) return false;
-    this.#replacePending(new CatalogReplayPeerWorkV1(peerId, ++this.#nextGeneration));
+    this.#replacePending(new CatalogReplayPeerWorkV1(peerId, this.allocateGeneration()));
     return true;
   }
 
@@ -110,7 +110,6 @@ export class Rfc64CatalogReplayPeerWorklistV1 {
       this.#replacePending(record);
     }
     record.continuation ??= { signal };
-    this.#nextGeneration = Math.max(this.#nextGeneration, demand.generation);
     return record;
   }
 

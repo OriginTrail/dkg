@@ -5,6 +5,7 @@ import { Rfc64CatalogReplayConnectionRuntimeV1, type Rfc64CatalogReplayConnectio
 import { RFC64_PUBLIC_CATALOG_HEAD_REPLAY_KIND_V1 } from './public-catalog-transport-v1.js';
 
 interface Rfc64CatalogReplayConnectionCapabilitiesV1 {
+  resolveRfc64CatalogReceiverAuthorityV1(contextGraphId: string): Readonly<{ active: boolean; mode: string }>;
   listServingRfc64CatalogReplayContextGraphIdsV1(): readonly string[];
   listActiveRfc64CatalogReplayContextGraphIdsV1(): readonly string[];
   readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId: string): AcceptedRfc64CatalogAccessSnapshotV1 | null;
@@ -16,14 +17,18 @@ export function createRfc64CatalogReplayConnectionRuntimeV1(input:
     & Pick<CatalogReplayTransportV1<never>, 'reannounce'>
     & Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'admittedConnectedPeerIds' | 'schedule' | 'wait' | 'warn' | 'replay' | 'reportRun'>,
 ): Rfc64CatalogReplayConnectionRuntimeV1 {
+  const receives = (contextGraphId: string): boolean => {
+    const authority = input.capabilities.resolveRfc64CatalogReceiverAuthorityV1(contextGraphId);
+    return authority.active && authority.mode !== 'legacy';
+  };
   return new Rfc64CatalogReplayConnectionRuntimeV1({
     admittedConnectedPeerIds: input.admittedConnectedPeerIds,
     selectContextGraphIds: () => [...new Set([...input.capabilities.listActiveRfc64CatalogReplayContextGraphIdsV1(),
       ...input.capabilities.listServingRfc64CatalogReplayContextGraphIdsV1()])],
-    reserveDeferredFence: contextGraphId => input.capabilities.listActiveRfc64CatalogReplayContextGraphIdsV1().includes(contextGraphId)
+    reserveDeferredFence: contextGraphId => receives(contextGraphId)
       ? input.reserveDeferred(contextGraphId) : null,
     reserveFence: (contextGraphId, peerId) => {
-      if (!input.capabilities.listActiveRfc64CatalogReplayContextGraphIdsV1().includes(contextGraphId)) return 'announcement-only';
+      if (!receives(contextGraphId)) return 'announcement-only';
       const accepted = input.capabilities.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
       return accepted === null ? null : input.reservePeer(contextGraphId, accepted.policyDigest, peerId);
     },

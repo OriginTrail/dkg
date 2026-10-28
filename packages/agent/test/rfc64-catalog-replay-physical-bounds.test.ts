@@ -243,3 +243,32 @@ it.each(['clear', 'reset', 'policy replacement'] as const)('retires queued conne
     expect(recovery.status('cg', 'old')).toBeNull();
   } finally { held.resolve(); await full; }
 });
+
+it.each(['policy replacement', 'clear', 'reset'] as const)('requests the newer head after stale admission crosses %s', async mode => {
+  let policy = 'A', head = 'H1';
+  const requested: string[] = [];
+  const recovery = new Rfc64CatalogReplayRecoveryRuntimeV1<string>({
+    requestPeer: async (_cg, peer) => { requested.push(`${peer}:${head}`); return { status: 'completed', targets: [head] }; },
+    whenReceiverIdleForContextGraph: async () => {}, targetIdentity: target => target, parityFailed: async () => false,
+  });
+  const connection = makeRuntime({ selectContextGraphIds: () => ['cg'], reserveDeferredFence: () => null,
+    reserveFence: (cg, peer) => recovery.reservePeer(cg, policy, peer),
+    reannounce: async () => ({ failed: 0 }),
+    replay: (cg, demand, signal) => recovery.request({ contextGraphId: cg, policyDigest: policy, kind: 'connection-demand', demand, signal }),
+    warn: vi.fn() });
+  const pending = connection.prepareConnectionOpen('peer')!;
+  if (mode === 'clear') recovery.clear('cg');
+  else if (mode === 'reset') recovery.reset();
+  else policy = 'B';
+  await recovery.request({ contextGraphId: 'cg', policyDigest: policy, kind: 'full-connected-peers', connectedPeerIds: ['peer'] });
+  expect(requested).toEqual(['peer:H1']);
+  head = 'H2';
+  connection.disconnected('peer');
+  const replacement = connection.prepareConnectionOpen('peer')!;
+  pending.reject(); // The fresh connection inherited custody; the old callback is inert.
+  replacement.admit();
+  await vi.waitFor(() => expect(connection.status().pendingScopes).toBe(0));
+  expect(requested).toEqual(['peer:H1', 'peer:H2']);
+  expect(recovery.promisedTargets('cg', policy)).toContain('H2');
+  connection.reset();
+});

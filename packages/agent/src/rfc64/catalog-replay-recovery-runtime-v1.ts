@@ -211,6 +211,9 @@ interface ReplayProgressV1<Target> {
  * status revision observed by the agent's operational projection.
  */
 export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
+  // Demand identities belong to this stable runtime, not a replaceable policy
+  // progress owner. Clear/reset/policy rotation must never reuse one.
+  #nextPeerGeneration = 0;
   readonly #byContextGraph = new Map<string, ReplayProgressV1<Target>>();
   readonly #ports: Rfc64CatalogReplayRecoveryPortsV1<Target>;
   #revision = 0;
@@ -368,20 +371,22 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       if (droppedProviders) this.#bumpRevision(progress);
       return connectionWork?.subscribe(input.signal) ?? Promise.resolve(Object.freeze({ requested: 0, failed: 0 }));
     }
-    progress.token += 1;
-    const token = progress.token;
-    progress.active = true;
-    this.#bumpRevision(progress);
-    const completion = this.#runOwned(input, progress, token);
-    progress.completion = completion;
+    const completion = this.#launch(input, progress);
     if (connectionWork) { void completion.catch(() => undefined); return connectionWork.subscribe(input.signal); }
+    return completion;
+  }
+
+  /** Install ownership and completion before executing either launch path. */
+  #launch(input: Rfc64CatalogReplayRecoveryCommandV1, progress: ReplayProgressV1<Target>): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
+    const token = ++progress.token;
+    progress.active = true; this.#bumpRevision(progress);
+    const completion = Promise.resolve().then(() => this.#runOwned(input, progress, token));
+    progress.completion = completion;
     return completion;
   }
 
   /** One completion owns at most one finite transport budget. */
   async #runOwned(input: Rfc64CatalogReplayRecoveryCommandV1, progress: ReplayProgressV1<Target>, token: number): Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>> {
-    // Publish completion ownership before an already-aborted command can settle.
-    await Promise.resolve();
     const evidence = new ReplayRunEvidenceV1<Target>((left, right) => this.#mergePromises(left, right), input.kind === 'full-connected-peers');
     const chunk = progress.peerWorklist.beginRun(); progress.run = evidence;
     let settlement: ReplayRunSettlementV1<Target> | undefined;
@@ -413,9 +418,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         if (settlement?.continueQueuedConnections) {
           // Transfer already-admitted generations without reseeding providers or
           // extending this caller's completion. Exact demand waiters survive.
-          progress.token += 1; progress.active = true; this.#bumpRevision(progress);
-          const next = this.#runOwned({ ...input, kind: 'pending-recovery', signal: continuation?.signal }, progress, progress.token);
-          progress.completion = next;
+          const next = this.#launch({ ...input, kind: 'pending-recovery', signal: continuation?.signal }, progress);
           // The owner reports errors to retained waiters even if no new caller joins.
           void next.catch(() => undefined);
         }
@@ -566,7 +569,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       progress = {
         policyDigest,
         revisionToken: Object.freeze({}),
-        peerWorklist: new Rfc64CatalogReplayPeerWorklistV1(),
+        peerWorklist: new Rfc64CatalogReplayPeerWorklistV1(() => ++this.#nextPeerGeneration),
         fullPass: null,
         run: new ReplayRunEvidenceV1((left, right) => this.#mergePromises(left, right)),
         unresolvedPeers: new Map(),
