@@ -192,6 +192,8 @@ describe('real RDF registry discovery across legacy and V2 layouts', () => {
     { who: attacker, '@context': { who: 'next', next: 'dkg-streams:registeredByAgentAddress' } },
     { '@context': { alias: 'dkg-streams:', who: 'alias:registeredByAgentAddress' }, who: attacker },
     { '@context': { '@vocab': 'dkg-streams:' }, registeredByAgentAddress: attacker },
+    { '@context': { '@vocab': streams, who: 'registeredByAgentAddress' }, who: attacker },
+    { '@context': { '@vocab': 'alias:', alias: 'dkg-streams:', who: 'next', next: 'registeredByAgentAddress' }, who: attacker },
     { '@context': { 'dkg-streams:registeredByAgentAddress': 'urn:forged' } },
   ])('publishes exactly the authenticated registrar after real JSON-LD conversion: %j', async fragment => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -220,5 +222,18 @@ describe('real RDF registry discovery across legacy and V2 layouts', () => {
       expect(single.status).toBe(200);
       expect(single.body.registry.descriptor.registeredByAgentAddress).toBe(registrar);
     } finally { warn.mockRestore(); }
+  });
+
+  it.each([
+    { '@base': streams, '@vocab': '', who: 'registeredByAgentAddress' },
+    { '@import': 'https://example.invalid/context' },
+    { '@language': 'en' },
+    { '@vocab': 'relative' },
+    { '@vocab': 'cycle', cycle: 'cycle' },
+  ])('rejects document-wide or relative context directives before enqueueing: %j', async context => {
+    const result = await request('/streams/register', { '@context': context, who: attacker });
+    expect(result.status).toBe(400);
+    expect(result.body.error).toBe('InvalidContent');
+    expect(result.content).toBeUndefined();
   });
 });

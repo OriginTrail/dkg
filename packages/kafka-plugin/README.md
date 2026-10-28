@@ -80,6 +80,11 @@ publisher attribution. Legacy entries do not acquire an invented registrar.
 Malformed or ambiguous descriptors cannot be exported as registry snapshots;
 ordinary legacy JSON-LD discovery remains available without the envelope.
 
+Extension contexts support inline string term/prefix aliases and `@vocab` values
+that resolve to absolute IRIs. Aliases cannot add core registrar assertions.
+Document-wide directives such as `@base`, `@import` and `@language`, and relative
+vocabularies, return `400 InvalidContent` before publication is enqueued.
+
 `@origintrail-official/kafka-plugin/registry` exports the shared wire schema,
 descriptor normalization, digest and envelope validation without importing the
 daemon route handler. The Kafka Source Worker package uses this contract for

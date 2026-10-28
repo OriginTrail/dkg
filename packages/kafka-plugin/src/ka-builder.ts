@@ -60,28 +60,32 @@ export function mergeAugmentFragment(
 }
 
 function isCoreProperty(key: string, context: Record<string, string>): boolean {
+  const resolved = resolveContextIri(key, context);
+  return resolved === undefined || resolved.startsWith(STREAMS);
+}
+
+function resolveContextIri(
+  term: string, context: Record<string, string>, vocab = true, seen = new Set<string>(),
+): string | undefined {
   // Context merging accepts only local string definitions. Follow term and
   // compact-prefix chains without loading remote contexts; cycles fail closed.
-  const resolve = (term: string, vocab: boolean, seen = new Set<string>()): string | undefined => {
-    if (seen.has(term)) return undefined;
-    const next = new Set(seen).add(term);
-    if (Object.hasOwn(context, term)) return resolve(context[term], false, next);
-    const colon = term.indexOf(':');
-    if (colon !== -1) {
-      const prefix = term.slice(0, colon);
-      if (prefix === '_' || term.slice(colon + 1).startsWith('//')) return term;
-      if (!Object.hasOwn(context, prefix)) return term;
-      const namespace = resolve(prefix, false, next);
-      return namespace === undefined ? undefined : namespace + term.slice(colon + 1);
-    }
-    if (vocab && Object.hasOwn(context, '@vocab')) {
-      const namespace = resolve(context['@vocab'], false, next);
-      return namespace === undefined ? undefined : namespace + term;
-    }
-    return term;
-  };
-  const resolved = resolve(key, true);
-  return resolved === undefined || resolved.startsWith(STREAMS);
+  if (seen.has(term)) return undefined;
+  const next = new Set(seen).add(term);
+  // Bare term-definition values also expand against the effective @vocab.
+  if (Object.hasOwn(context, term)) return resolveContextIri(context[term], context, true, next);
+  const colon = term.indexOf(':');
+  if (colon !== -1) {
+    const prefix = term.slice(0, colon);
+    if (prefix === '_' || term.slice(colon + 1).startsWith('//')) return term;
+    if (!Object.hasOwn(context, prefix)) return term;
+    const namespace = resolveContextIri(prefix, context, false, next);
+    return namespace === undefined ? undefined : namespace + term.slice(colon + 1);
+  }
+  if (vocab && Object.hasOwn(context, '@vocab')) {
+    const namespace = resolveContextIri(context['@vocab'], context, false, next);
+    return namespace === undefined ? undefined : namespace + term;
+  }
+  return term;
 }
 
 function mergeTypes(baseType: KafkaStreamKa['@type'], extType: unknown): string | string[] {
@@ -109,11 +113,23 @@ function mergeContexts(
   const merged: Record<string, string> = { ...baseCtx };
   for (const [prefix, iri] of Object.entries(extCtx as Record<string, unknown>)) {
     if (typeof iri !== 'string') continue;
+    // Base/import/language directives can alter core identifiers or literals;
+    // the extension contract permits local aliases, not document-wide policy.
+    if (prefix.startsWith('@') && prefix !== '@vocab') {
+      throw new Error('Extension @context supports only local aliases and @vocab');
+    }
     if (prefix in baseCtx || (!prefix.startsWith('@') && isCoreProperty(prefix, baseCtx))) {
       logCollisionOnce(`@context:${prefix}`, loggedCollisionKeys);
       continue;
     }
     merged[prefix] = iri;
+  }
+  if (Object.hasOwn(merged, '@vocab')) {
+    const vocab = resolveContextIri(merged['@vocab'], merged, false);
+    if (!vocab || !/^[A-Za-z][A-Za-z\d+.-]*:/.test(vocab)) {
+      throw new Error('Extension @vocab must resolve to an absolute IRI');
+    }
+    merged['@vocab'] = vocab;
   }
   return merged;
 }

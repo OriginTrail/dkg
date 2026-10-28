@@ -67,6 +67,7 @@ describe('generic registry contract', () => {
       { who: 'attacker', '@context': { who: 'next', next: 'dkg-streams:registeredByAgentAddress' } },
       { who: 'attacker', '@context': { who: 'alias:registeredByAgentAddress', alias: 'dkg-streams:' } },
       { registeredByAgentAddress: 'attacker', '@context': { '@vocab': 'dkg-streams:' } },
+      { who: 'attacker', '@context': { '@vocab': STREAMS, who: 'registeredByAgentAddress' } },
       { who: 'attacker', '@context': { who: 'cycle', cycle: 'who' } },
     ]) {
       const merged = mergeAugmentFragment(original, fragment, new Set());

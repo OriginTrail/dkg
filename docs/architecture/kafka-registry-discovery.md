@@ -25,6 +25,9 @@ discovery. New optional descriptor fields are `clusterId`, `providerIri`,
 `schemaIri` and `about[]`. References are flat RDF IRIs; arbitrary nested schemas
 remain outside this contract. Extensions retain their own namespaces and cannot
 override the core namespace through aliases or `@vocab`.
+Inline string term/prefix definitions and an `@vocab` resolving to an absolute
+IRI are supported. Document-wide directives such as `@base`, `@import` and
+`@language`, and relative vocabularies, are rejected before publication is enqueued.
 
 The authenticated requester is stamped as `registeredByAgentAddress`. The actual
 signing publisher can differ under curation and is read from native

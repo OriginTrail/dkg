@@ -152,16 +152,13 @@ async function handlePostRegister(
     let fragment;
     try {
       fragment = opts.extension.augment(extensionFields);
+      ka = mergeAugmentFragment(baseKa, fragment, loggedCollisionKeys) as unknown as Record<string, unknown>;
     } catch (err) {
       return jsonResponse(ctx.res, 400, {
         error: 'InvalidContent',
         message: err instanceof Error ? err.message : String(err),
       });
     }
-    ka = mergeAugmentFragment(baseKa, fragment, loggedCollisionKeys) as unknown as Record<
-      string,
-      unknown
-    >;
   }
   // The enqueue principal and the signing publisher can differ under curation.
   // This stamp records the authenticated requester, never a supplied provider.
