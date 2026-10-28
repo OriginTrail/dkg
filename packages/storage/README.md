@@ -136,8 +136,10 @@ and keeps the daemon responsive under load.
 
 ## External-store admission and deadlines
 
-All external adapters share a process-wide priority scheduler. Waiting work is
-bounded independently for `ack`, `normal`, and `background` traffic, and an
+All external adapters share a process-wide priority scheduler, except the async
+share and publisher queues' own calls while the queue control path is on (see
+[Queue control path](#queue-control-path)). Waiting work is
+bounded independently for `ack`, `health`, `normal`, and `background` traffic, and an
 operation rejected before dispatch receives `StoreSchedulerBusyError` with
 `code: STORE_SCHEDULER_BUSY`, `retryable: true`, and a reason of either
 `queue_full` or `queue_wait_timeout`. Because this error is only created before
@@ -177,15 +179,17 @@ periodic admission log line should call it.
 
 | Environment variable | Default | Purpose |
 |---|---:|---|
-| `DKG_STORE_MAX_CONCURRENT` | `4` | Maximum external-store operations in flight, capped to available CPUs while preserving the default ACK reserve on single-CPU hosts. |
+| `DKG_STORE_MAX_CONCURRENT` | `4` | Maximum operations in flight on the shared external-store scheduler, capped to available CPUs while preserving the default ACK reserve on single-CPU hosts. The queue control path, when on (the default for `blazegraph` and `oxigraph-server` on more than 2 CPUs), runs up to 3 more on its own schedulers (share 1, publisher 2) on top of this ceiling; `DKG_STORE_CONTROL_RESERVED_SLOTS=0` keeps the backend at this ceiling. |
 | `DKG_STORE_ACK_RESERVED_SLOTS` | `1` | In-flight capacity reserved for ACK work. |
+| `DKG_STORE_HEALTH_RESERVED_SLOTS` | `1` | Non-ACK capacity reserved for health work, capped so at least one ordinary slot remains. |
 | `DKG_STORE_NORMAL_RESERVED_SLOTS` | `1` | Non-ACK capacity kept available for normal work while background operations are in flight. |
 | `DKG_STORE_BACKGROUND_RESERVED_SLOTS` | `1` | Non-ACK capacity reserved for background progress. |
 | `DKG_STORE_QUEUE_LIMIT` | `64` | Maximum waiting operations in each priority queue. |
 | `DKG_STORE_ACK_QUEUE_LIMIT` | common limit | Optional ACK queue override. |
-| `DKG_STORE_NORMAL_QUEUE_LIMIT` | common limit | Optional normal queue override. |
+| `DKG_STORE_HEALTH_QUEUE_LIMIT` | common limit | Optional health queue override. |
+| `DKG_STORE_NORMAL_QUEUE_LIMIT` | common limit | Optional normal queue override. Also the queue limit of each control scheduler. |
 | `DKG_STORE_BACKGROUND_QUEUE_LIMIT` | common limit | Optional background queue override. |
-| `DKG_STORE_QUEUE_WAIT_TIMEOUT_MS` | `10000` | Maximum pre-dispatch wait before a retryable busy rejection. |
+| `DKG_STORE_QUEUE_WAIT_TIMEOUT_MS` | `10000` | Maximum pre-dispatch wait before a retryable busy rejection. Also applies to the control schedulers. |
 | `DKG_BLAZEGRAPH_OPERATION_TIMEOUT_MS` | `30000` | Blazegraph end-to-end operation deadline, including scheduler wait, HTTP, response decoding, and mapping. |
 
 Normal and background reserves are normalized against the available non-ACK
@@ -205,14 +209,15 @@ ordering. Schedulers with multiple ordinary slots retain their capacity reserves
 ### Queue control path
 
 The async share and publisher queues can run their own store calls on two small
-schedulers of their own, beside the shared one (OT-RFC-73 S1), so queue
+schedulers of their own, beside the shared one, so queue
 bookkeeping never waits behind client reads or data-plane work. The shared
 scheduler's lanes, limits and `StorePressureSnapshot` are unchanged; the
 control schedulers add slots on top of them: one for the share queue and two for
 the publisher queue, which are also the caps. Each is built only for a queue
 whose configured slots are above 0, once per process, with every capacity
 option explicit (no ACK, health, normal or background reserve; the shared
-scheduler's queue limit and wait as values; the same timeout diagnostics).
+scheduler's normal-lane queue limit and its queue wait as values; the same
+timeout diagnostics).
 
 A call reaches its queue's scheduler by naming the queue and nothing else:
 
@@ -238,7 +243,7 @@ setting.
 | `DKG_STORE_CONTROL_RESERVED_SLOTS` | unset | `0` turns the path off. `share:1,publisher:2` sets the slots per queue (caps: share 1, publisher 2; a queue left out gets 0; a higher number is clamped with a warning). A malformed value, or a variable that is set but blank, is refused with a warning and leaves the path off. An explicit value is honoured on any host and with any backend. Wins over the config value when set. Read once at start. |
 | node config `store.controlReservedSlots` | absent | The same values (also the number `0`), used when the variable is unset. A malformed value (`null`, `true`, any number but `0` included) is refused with a warning that names the key and leaves the path off. Read by the daemon only. |
 
-With neither setting, the default (OT-RFC-73 P14) is share 1 + publisher 2 for
+With neither setting, the default is share 1 + publisher 2 for
 a node whose configured backend is `blazegraph` or managed `oxigraph-server`
 (`STORE_CONTROL_DEFAULT_BACKENDS`) on a host with more than 2 CPUs
 (`availableParallelism()`), and off for every other node: 2 or fewer CPUs,
@@ -256,8 +261,9 @@ daemon restart)`. The path is built once; a configuration after that is
 refused with a warning (a repeat of the same settings is accepted). A process
 that never configures the path (a standalone tool, a benchmark, a test) has no
 backend and no config value, so only the variable can turn its path on.
-`resolveStoreControlConfig(env, { cpus, backend, configured })` is the pure
-resolver behind it. Tests replace the process-wide path with
+`resolveStoreControlConfig(process.env.DKG_STORE_CONTROL_RESERVED_SLOTS, { cpus, backend, configured })`
+(the first argument is the variable's raw value, `undefined` when unset) is the
+pure resolver behind it. Tests replace the process-wide path with
 `setStoreControlPathForTesting(buildStoreControlPath(...))`, and
 `setStoreControlPathForTesting(undefined)` returns the process to the
 unconfigured state.
