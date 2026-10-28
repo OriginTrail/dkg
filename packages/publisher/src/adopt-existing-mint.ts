@@ -98,6 +98,10 @@ export async function adoptExistingMint(
   expected: MintAdoptionExpectation,
   options: { txHash?: string; revert?: unknown; signal?: AbortSignal } = {},
 ): Promise<OnChainPublishResult> {
+  return publishResultFromMint(await resolveVerifiedMintEvidence(chain, expected, options));
+}
+async function resolveVerifiedMintEvidence(chain: ChainAdapter, expected: MintAdoptionExpectation,
+  options: { txHash?: string; revert?: unknown; signal?: AbortSignal }): Promise<KnowledgeAssetMintEvidence> {
   const refuse = (reason: MintAdoptionRefusalReason, detail: string) =>
     new MintAdoptionRefusedError(reason, expected.kaId, detail, { cause: options.revert });
   if (typeof chain.resolveKnowledgeAssetMint !== 'function' || typeof chain.readKnowledgeAssetVersionSnapshot !== 'function') {
@@ -138,21 +142,28 @@ export async function adoptExistingMint(
   if (mint.authorAddress.toLowerCase() !== expected.authorAddress.toLowerCase()) {
     throw refuse('author-mismatch', `minted for author ${mint.authorAddress}, not ${expected.authorAddress}`);
   }
+  await assertMintCurrent(chain, expected, mint, options);
+  return mint;
+}
+async function assertMintCurrent(chain: ChainAdapter, expected: MintAdoptionExpectation,
+  mint: Pick<KnowledgeAssetMintEvidence, 'merkleRoot' | 'blockNumber'>,
+  options: { revert?: unknown; signal?: AbortSignal } = {}): Promise<void> {
+  const refuse = (reason: MintAdoptionRefusalReason, detail: string) =>
+    new MintAdoptionRefusedError(reason, expected.kaId, detail, { cause: options.revert });
   // A receipt proves the content was minted, not that it is still current.
   // The pinned version view only gates adoption: every recorded fact still
   // comes from the receipt. A mint is version 1, so more roots mean an update
   // superseded it; fewer, or one other root, mean the view cannot be trusted
   // yet (the rule named-ka-publish-recovery.ts applies to a recovered create).
-  const current = await chain.readKnowledgeAssetVersionSnapshot(expected.kaId, { signal: options.signal });
+  const current = await chain.readKnowledgeAssetVersionSnapshot?.(expected.kaId, { signal: options.signal });
   if (current && current.rootCount > 1n) {
     throw refuse('superseded', `the KA is at version ${current.rootCount}; an update replaced the minted content`);
   }
-  if (!current || current.rootCount < 1n
+  if (!current || current.blockNumber < mint.blockNumber || current.rootCount < 1n
     || current.latestRoot.toLowerCase() !== ethers.hexlify(mint.merkleRoot).toLowerCase()) {
     throw refuse('version-view-unavailable',
       'the current version at the finality-depth block is unavailable or does not show this mint yet');
   }
-  return publishResultFromMint(mint);
 }
 
 /** Adoption context for one sealed (graph-scoped) publish. */
@@ -247,33 +258,38 @@ export async function mintOrAdoptKnowledgeAssets(
 
 /** Opaque verified receipt, scoped to one adapter and sealed reservation. */
 export interface PreparedMintAdoption { readonly preparedMintAdoption: unique symbol }
-const preparedEvidence = new WeakMap<object, { chain: ChainAdapter; expected: MintAdoptionExpectation; result: OnChainPublishResult }>();
+const preparedEvidence = new WeakMap<object, { chain: ChainAdapter; expected: MintAdoptionExpectation; mint: KnowledgeAssetMintEvidence }>();
 export type MintAdoptionRequest = Readonly<{ kind?: 'lookup'; txHash?: string }>
   | Readonly<{ kind: 'prepared'; evidence: PreparedMintAdoption }>;
 /** Read slow chain evidence before taking an assertion lifecycle write lock. */
 export async function prepareMintAdoption(chain: ChainAdapter, expected: MintAdoptionExpectation,
   txHash?: string): Promise<PreparedMintAdoption> {
-  const result = await adoptExistingMint(chain, expected, { txHash });
+  if (!chain.isReceiptBlockFinalAndCanonical) throw new MintAdoptionRefusedError('lookup-unsupported', expected.kaId, 'prepared mint evidence requires canonical block revalidation');
+  const mint = await resolveVerifiedMintEvidence(chain, expected, { txHash });
   const token = Object.freeze({}) as PreparedMintAdoption;
-  preparedEvidence.set(token, { chain, expected: { ...expected, merkleRoot: Uint8Array.from(expected.merkleRoot) }, result: { ...result } });
+  preparedEvidence.set(token, { chain, expected: { ...expected, merkleRoot: Uint8Array.from(expected.merkleRoot) }, mint: { ...mint, merkleRoot: Uint8Array.from(mint.merkleRoot) } });
   return token;
 }
-function preparedReceipt(token: PreparedMintAdoption, chain: ChainAdapter,
-  expected: MintAdoptionExpectation): OnChainPublishResult {
+/** Revalidate prepared evidence inside the lifecycle lease, without rescanning creation logs. */
+export async function readPreparedMintAdoption(token: PreparedMintAdoption, chain: ChainAdapter,
+  expected: MintAdoptionExpectation): Promise<OnChainPublishResult> {
   const evidence = preparedEvidence.get(token);
   if (!evidence || evidence.chain !== chain || evidence.expected.kaId !== expected.kaId
     || evidence.expected.contextGraphId !== expected.contextGraphId
     || evidence.expected.authorAddress.toLowerCase() !== expected.authorAddress.toLowerCase()
     || ethers.hexlify(evidence.expected.merkleRoot) !== ethers.hexlify(expected.merkleRoot))
     throw new Error('Prepared mint evidence does not match the current sealed reservation');
-  return { ...evidence.result };
+  if (!chain.isReceiptBlockFinalAndCanonical || !await chain.isReceiptBlockFinalAndCanonical(evidence.mint))
+    throw new MintAdoptionRefusedError('mint-not-final', expected.kaId, 'the prepared mint block is no longer final and canonical');
+  await assertMintCurrent(chain, expected, evidence.mint);
+  return publishResultFromMint(evidence.mint);
 }
 
 /** Verify receipt evidence directly; adoption never constructs transaction parameters. */
 export async function adoptMintForRecording(chain: ChainAdapter, expected: MintAdoptionExpectation,
   sealed: SealedMintAdoption, request: MintAdoptionRequest): Promise<MintOrAdoptOutcome> {
   return adopted(sealed, expected, request.kind === 'prepared'
-    ? preparedReceipt(request.evidence, chain, expected)
+    ? await readPreparedMintAdoption(request.evidence, chain, expected)
     : await adoptExistingMint(chain, expected, { txHash: request.txHash }));
 }
 

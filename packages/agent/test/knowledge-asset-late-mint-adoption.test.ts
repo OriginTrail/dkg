@@ -476,7 +476,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     await beginNamedPublishFinalization(store, input, () => true);
     const transfer = vi.fn(async () => 'inactive' as const);
     await expect(finishNamedPublishFinalization(store, input, { catalogRequired: () => false, transfer }))
-      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+      .resolves.toBe('pending');
     expect(transfer).toHaveBeenCalledWith('original-share');
     expect(await readNamedPublishFinalization(store, input)).toMatchObject({ kind: 'pending',
       checkpoint: { catalogRequired: true, shareOperationId: 'original-share' } });
@@ -610,6 +610,46 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
     expect(await history()).toMatchObject({ state: 'created', memoryLayer: 'WM' });
     expect((await history())?.publishedUal).toBeUndefined();
+  });
+
+  it('refuses a mint superseded after evidence preparation without recording VM or consuming the share', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, store, history, createKnowledgeAssets } = await strandedAsset(chain);
+    const version = chain.readKnowledgeAssetVersionSnapshot.bind(chain);
+    vi.spyOn(chain, 'readKnowledgeAssetVersionSnapshot').mockImplementationOnce(async id => {
+      const original = await version(id);
+      await chain.updateKnowledgeCollectionV10({ kaId: id, newMerkleRoot: new Uint8Array(32).fill(9),
+        newByteSize: 1n, newMerkleLeafCount: 1, authorAddress: AUTHOR, authorR: ZERO, authorVS: ZERO });
+      return original;
+    });
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ reason: 'superseded' });
+    expect(await history()).toMatchObject({ status: 'swm-shared' });
+    expect((await history())?.vmCurrentAssertion).toBeUndefined();
+    expect(await receiptTxHashes(store)).toEqual([]);
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
+    const checkpoints = await store.query(`SELECT ?s WHERE { GRAPH <${NAMED_FINALIZATION_GRAPH}> { ?s ?p ?o } }`);
+    expect(checkpoints.type === 'bindings' && checkpoints.bindings).toEqual([]);
+  });
+
+  it('refuses a consumed-share lifecycle completion superseded after evidence preparation', async () => {
+    const chain = new MockChainAdapter();
+    const { agent, store, history, createKnowledgeAssets } = await strandedAsset(chain);
+    failNextLifecycleWrite(agent, store, VM_CURRENT_ASSERTION_PRED);
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    const receipts = await receiptTxHashes(store);
+    expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(false);
+    const version = chain.readKnowledgeAssetVersionSnapshot.bind(chain);
+    vi.spyOn(chain, 'readKnowledgeAssetVersionSnapshot').mockImplementationOnce(async id => {
+      const original = await version(id);
+      await chain.updateKnowledgeCollectionV10({ kaId: id, newMerkleRoot: new Uint8Array(32).fill(9),
+        newByteSize: 1n, newMerkleLeafCount: 1, authorAddress: AUTHOR, authorR: ZERO, authorVS: ZERO });
+      return original;
+    });
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ reason: 'superseded' });
+
+    expect((await history())?.vmCurrentAssertion).toBeUndefined();
+    expect(await receiptTxHashes(store)).toEqual(receipts);
+    expect(createKnowledgeAssets).not.toHaveBeenCalled();
   });
 
   it('preserves a resident share reopened by pull-from while mint lookup is pending', async () => {

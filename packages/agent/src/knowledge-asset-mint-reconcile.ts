@@ -13,7 +13,7 @@ import {
   type AssertionSeal,
 } from '@origintrail-official/dkg-core';
 import {
-  adoptExistingMint,
+  readPreparedMintAdoption,
   prepareMintAdoption,
   withAssertionLifecycleWriteLease,
   assertionLifecycleWriteLockKey,
@@ -303,17 +303,15 @@ async function completeRecordedLifecycle(
   // Chain evidence is read before the lifecycle lock: the lock does not
   // stabilize chain state, and holding it through a log scan would stall
   // every other operation on this asset's lifecycle.
-  const mint = await adoptExistingMint(host.chain, {
-    kaId,
-    merkleRoot: seal.merkleRoot,
-    contextGraphId: BigInt(onChainContextGraphId),
-    authorAddress: seal.authorAddress,
-  }, { txHash: target.txHash });
+  const expected = { kaId, merkleRoot: seal.merkleRoot,
+    contextGraphId: BigInt(onChainContextGraphId), authorAddress: seal.authorAddress };
+  const evidence = await prepareMintAdoption(host.chain, expected, target.txHash);
   const lock = assertionLifecycleWriteLockKey(target.contextGraphId, target.name, target.agentAddress, target.subGraphName);
   return withKeyedLocks(host.writeLocks, [lock], async () => {
     // A lifecycle operation that finished while this one waited for the lock
     // (pull-from reopening a draft, a new seal) must not be stamped over.
     await assertReservationUnchanged(agent, { seal, scope }, target);
+    const mint = await readPreparedMintAdoption(evidence, host.chain, expected);
     const record = await resolveConfirmedGraphScopedVm(agent.store, {
       contextGraphId: target.contextGraphId,
       ual: scope.ual,
@@ -337,10 +335,12 @@ async function completeRecordedLifecycle(
     await agent.store.insert(buildAssertionPublishReceiptQuads({
       assertionUri, metaGraph, txHash: mint.txHash, blockNumber: BigInt(mint.blockNumber),
     }));
-    await host.completeFinalization({
+    const finalization = await host.completeFinalization({
       contextGraphId: target.contextGraphId, subGraphName: target.subGraphName,
       assertionCoordinate: target.name, seal, assertionUri,
     });
+    if (finalization === 'pending') throw Object.assign(new Error('Named publish catalog finalization remains pending; retry to finish it'),
+      { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
     await host.stampPublishedLifecycle({
       contextGraphId: target.contextGraphId,
       agentAddress: target.agentAddress,

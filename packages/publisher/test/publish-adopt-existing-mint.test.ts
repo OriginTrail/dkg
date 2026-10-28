@@ -524,3 +524,26 @@ it('nested share cleanup requires the current lease for its exact lifecycle and 
       .rejects.toThrow(/lease is not current/);
   } finally { await f.store.close(); }
 });
+
+
+it.each(['superseded', 'reorged'] as const)('revalidates prepared mint evidence after it becomes %s', async stale => {
+  const f = await strandedPublishFixture();
+  try {
+    const original = await f.strand();
+    const scope = createGraphKnowledgeAssetScope(f.ual, 1);
+    const expected = { kaId: f.kaId, merkleRoot: f.sealedRoot, contextGraphId: 1n, authorAddress: scope.agentAddress };
+    const lookup = vi.spyOn(f.chain, 'resolveKnowledgeAssetMint');
+    const evidence = await prepareMintAdoption(f.chain, expected, original.txHash);
+    if (stale === 'superseded') {
+      await f.chain.updateKnowledgeCollectionV10({ kaId: f.kaId, newMerkleRoot: new Uint8Array(32).fill(9),
+        newByteSize: 1n, newMerkleLeafCount: 1, authorAddress: ethers.ZeroAddress,
+        authorR: new Uint8Array(32), authorVS: new Uint8Array(32) });
+    } else vi.spyOn(f.chain, 'isReceiptBlockFinalAndCanonical').mockResolvedValue(false);
+    const sealed = sealedMintAdoption(f.store, { scope, publicTripleCount: 1, privateTripleCount: 0 },
+      { contextGraphId: CONTEXT_GRAPH, log() {} })!;
+    await expect(adoptMintForRecording(f.chain, expected, sealed, { kind: 'prepared', evidence }))
+      .rejects.toMatchObject({ reason: stale === 'superseded' ? 'superseded' : 'mint-not-final' });
+    expect(lookup).toHaveBeenCalledOnce();
+    await expectNothingRecorded(f);
+  } finally { await f.store.close(); }
+});

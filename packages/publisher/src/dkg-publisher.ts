@@ -1,4 +1,4 @@
-import { preparePublication, type PreparedPublication, type GraphScopedPublishDescriptor } from './prepared-publication.js';
+import { preparePublication, type GraphScopedPublishDescriptor } from './prepared-publication.js';
 import { recordTentativePublication } from './record-tentative-publication.js';
 import { acquirePreparedPublication, publicationAcquisitionFailure, type PublicationAcquisition } from './prepared-publication-acquisition.js';
 import { assertPromoteSeal } from './assertion-promote-seal.js';
@@ -3265,7 +3265,6 @@ export class DKGPublisher implements Publisher {
 
 
     let acquisition: PublicationAcquisition;
-    let prepared: PreparedPublication | undefined;
     if (options.adoptExistingMint !== undefined) {
       await this.publisherPlanner.requireMintAdoptionTarget(publisherContextGraphId);
       await validateSealIntegrity();
@@ -3284,7 +3283,7 @@ export class DKGPublisher implements Publisher {
       acquisition = { kind: 'confirmed', outcome, reservedKaId: attestation.reservedKaId,
         effectiveAuthorAddress: attestation.authorAddress };
     } else {
-      prepared = await preparePublication({
+      const prepared = await preparePublication({
         payload: { catalogCommitment, privateRoots, catalogByteSize, publicByteSize, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, publicNquadsBytes, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers, kaMetadata, normalizedQuads, kaCount, entityCount },
         target: { publisherContextGraphId, graphPublish, v10CgDomain, normalizedPublisherPeerId, dataGraph, contextGraphId, attributionIdentityId, hasAttributionOverride, v10ChainId, v10KavAddress, sealedAdoption },
         options, pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode: resolvePublicACKStagingMode(options),
@@ -3311,7 +3310,7 @@ export class DKGPublisher implements Publisher {
       onPhase?.('chain:metadata', 'start');
       this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult!.batchId} tx=${onChainResult!.txHash}`);
     } else {
-      await recordTentativePublication(prepared!, acquisition, {
+      await recordTentativePublication(acquisition, {
         store: this.store, log: this.log,
         replaceExactKnowledgeAssetGraph: this.replaceExactKnowledgeAssetGraph.bind(this),
         persistFinalizedPrivateSlices, persistCatalogEntry,

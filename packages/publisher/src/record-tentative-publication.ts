@@ -17,7 +17,6 @@ import {isAgentRegistryContextGraph} from '@origintrail-official/dkg-core';
 
 
 
-import type {PreparedPublication} from './prepared-publication.js';
 import type {PublicationAcquisition} from './prepared-publication-acquisition.js';
 
 export interface TentativePublicationRecordingPorts {
@@ -28,12 +27,10 @@ export interface TentativePublicationRecordingPorts {
   persistCatalogEntry(): Promise<void>;
 }
 /** The recording stage owns every local write, including intentional local-only publications. */
-export async function recordTentativePublication(input: PreparedPublication,
-  outcome: Extract<PublicationAcquisition, { kind: 'tentative' }>, ports: TentativePublicationRecordingPorts): Promise<void> {
-  const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads } = input.payload;
-  const { graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId } = input.target;
-  const { options, ctx } = input;
-  const { publisherSigner } = input;
+export async function recordTentativePublication(outcome: Extract<PublicationAcquisition, { kind: 'tentative' }>, ports: TentativePublicationRecordingPorts): Promise<void> {
+  const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata, normalizedQuads } = outcome.recording.content;
+  const { graphPublish, normalizedPublisherPeerId, dataGraph, contextGraphId } = outcome.recording;
+  const { subGraphName, targetMetaGraphUri, authorAddress, ctx } = outcome.recording;
   const { ual } = outcome;
     for (const km of kaMetadata) {
       km.kcUal = ual;
@@ -46,14 +43,8 @@ export async function recordTentativePublication(input: PreparedPublication,
       accessPolicy: effectiveAccessPolicy,
       allowedPeers: normalizedAllowedPeers,
       timestamp: new Date(),
-      subGraphName: options.subGraphName,
-      ...((options.precomputedAttestation?.authorAddress
-        ?? publisherSigner?.address) != null
-        ? {
-            authorAddress: (options.precomputedAttestation?.authorAddress
-              ?? publisherSigner!.address),
-          }
-        : {}),
+      subGraphName,
+      ...(authorAddress === undefined ? {} : { authorAddress }),
     };
     let tentativeMeta = graphPublish
       ? generateGraphKnowledgeAssetMetadata(
@@ -68,10 +59,10 @@ export async function recordTentativePublication(input: PreparedPublication,
           { status: 'tentative' },
         )
       : generateTentativeMetadata(commonMeta, kaMetadata);
-    if (options.targetMetaGraphUri) {
+    if (targetMetaGraphUri) {
       const defaultMeta = `did:dkg:context-graph:${contextGraphId}/_meta`;
       tentativeMeta = tentativeMeta.map((q) =>
-        q.graph === defaultMeta ? { ...q, graph: options.targetMetaGraphUri! } : q,
+        q.graph === defaultMeta ? { ...q, graph: targetMetaGraphUri! } : q,
       );
     }
     if (graphPublish && !isAgentRegistryContextGraph(contextGraphId)) {

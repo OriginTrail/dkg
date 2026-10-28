@@ -18,12 +18,12 @@ import {createWriteAheadHook} from './publisher-write-ahead.js';
 import type {PublishLifecycleLogger} from './publish-lifecycle-logger.js';
 import {mintOrAdoptKnowledgeAssets, type MintOrAdoptOutcome, type MintRecording} from './adopt-existing-mint.js';
 
-import type {PreparedPublication} from './prepared-publication.js';
+import type {PreparedPublication, TentativePublicationRecording} from './prepared-publication.js';
 export type PublicationAcquisition =
   | { kind: 'confirmed'; outcome: MintOrAdoptOutcome; reservedKaId: bigint | undefined;
       effectiveAuthorAddress: string; v10ACKs?: V10CoreNodeACK[] }
   | { kind: 'tentative'; ual: string; localChainSkipReason: 'no-chain' | undefined;
-      v10ACKs?: V10CoreNodeACK[]; reason: string };
+      v10ACKs?: V10CoreNodeACK[]; reason: string; recording: TentativePublicationRecording };
 interface PublicationAcquisitionPorts {
   chain: ChainAdapter;
   log: Logger;
@@ -32,28 +32,23 @@ interface PublicationAcquisitionPorts {
 }
 /** Acquire a local outcome or receipt from a prepared payload. All persistence belongs to recording. */
 export async function acquirePreparedPublication(input: PreparedPublication, ports: PublicationAcquisitionPorts): Promise<PublicationAcquisition> {
-  const { catalogCommitment, privateRoots, kcMerkleRoot, allSkolemizedQuads, kcMerkleLeafCount, kaCount, entityCount } = input.payload;
-  const { publisherContextGraphId, graphPublish, v10CgDomain, contextGraphId, attributionIdentityId, hasAttributionOverride, v10ChainId, v10KavAddress, sealedAdoption } = input.target;
-  const { options, lifecycle, ctx } = input;
-  const { publisherSigner, publisherAddress, publishEpochs, precomputedTokenAmount,
-    chainV10Ready, publicationPricing, useCuratedCatalog, publishOperationId, v10ACKs } = input;
+  if (input.kind === 'local') {
+    input.onPhase?.('chain', 'start');
+    ports.log.warn(input.ctx, `Skipping on-chain publish: ${input.reason}`);
+    return { kind: 'tentative', ual: input.recording.graphPublish?.scope.ual
+      ?? `did:dkg:${ports.chain.chainId}/${input.publisherAddress}/t${input.publishOperationId}`,
+      localChainSkipReason: 'no-chain', reason: input.reason, recording: input.recording };
+  }
+  const { catalogCommitment, privateRoots, kcMerkleRoot, publicRecordCount, kcMerkleLeafCount, kaCount, entityCount } = input.content;
+  const { graphPublish, v10CgDomain, contextGraphId, attributionIdentityId, hasAttributionOverride, v10ChainId, v10KavAddress, sealedAdoption } = input.target;
+  const { options, lifecycle, ctx, publicationPricing, useCuratedCatalog, publishOperationId, v10ACKs } = input;
+  const { signer: publisherSigner, publisherAddress, publishEpochs, tokenAmount: precomputedTokenAmount } = input.plan;
   const { onPhase, onBroadcastAccepted, onBeforeBroadcast } = options;
   const v10CgId = /^\d+$/.test(v10CgDomain) ? BigInt(v10CgDomain) : 0n;
   let onChainResult: OnChainPublishResult;
   let recording: MintRecording | undefined;
-  let localChainSkipReason: 'no-chain' | undefined;
-  const ual = graphPublish?.scope.ual ?? `did:dkg:${ports.chain.chainId}/${publisherAddress}/t${publishOperationId}`;
   onPhase?.('chain', 'start');
-
-  if (publisherContextGraphId === undefined) {
-    ports.log.warn(ctx, `No positive on-chain context graph id resolved from "${v10CgDomain}" — skipping on-chain publish`);
-    localChainSkipReason = 'no-chain';
-    return { kind: 'tentative', ual, localChainSkipReason, v10ACKs, reason: 'no on-chain CG id' };
-  } else if (!chainV10Ready) {
-    ports.log.warn(ctx, 'Chain adapter is not V10-ready — skipping on-chain publish');
-    localChainSkipReason = 'no-chain';
-    return { kind: 'tentative', ual, localChainSkipReason, v10ACKs, reason: 'chain not V10-ready' };
-  } else {
+  {
     const tokenAmount = precomputedTokenAmount;
     
 
@@ -146,7 +141,7 @@ export async function acquirePreparedPublication(input: PreparedPublication, por
             kaId: reservedKaId.toString(),
             publisherAddress,
             entityCount,
-            publicRecordCount: allSkolemizedQuads.length,
+            publicRecordCount: publicRecordCount,
             hiddenCommitmentCount: privateRoots.length,
           },
         });

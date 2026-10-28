@@ -49,15 +49,16 @@ export async function beginNamedPublishFinalization(store: TripleStore, input: N
   return { kind: 'pending', checkpoint };
 }
 /** A retry cannot turn a retained obligation into success by disabling its execution policy. */
+export type NamedPublishFinalizationOutcome = 'complete' | 'pending';
 export async function finishNamedPublishFinalization(store: TripleStore, input: NamedPublishFinalizationIdentity & {
   shareOperationId?: string;
-}, ports: { catalogRequired(): boolean; transfer(shareOperationId?: string): Promise<ConfirmedVmOwnershipOutcome> }): Promise<void> {
+}, ports: { catalogRequired(): boolean; transfer(shareOperationId?: string): Promise<ConfirmedVmOwnershipOutcome> }): Promise<NamedPublishFinalizationOutcome> {
   const progress = await beginNamedPublishFinalization(store, input, ports.catalogRequired);
-  if (progress.kind === 'complete') return;
+  if (progress.kind === 'complete') return 'complete';
   const outcome = await ports.transfer(progress.checkpoint.shareOperationId);
   if (outcome !== 'owned' && (progress.checkpoint.catalogRequired || outcome !== 'inactive')) {
-    throw Object.assign(new Error(`Named publish catalog finalization remains ${outcome}; retry to finish it`),
-      { code: 'KA_MINT_RECONCILE_INCOMPLETE' });
+    return 'pending';
   }
   await store.insert([{ subject: subject(input), predicate: COMPLETE, object: '"complete"', graph: GRAPH }]);
+  return 'complete';
 }

@@ -6395,18 +6395,15 @@ export class PublishMethods extends DKGAgentBase {
       if (operationPlan.kind === 'update') {
         await this.afterConfirmedGraphScopedVmPublishV1({ ...finalization, status: result.status,
           ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
-      } else if (opts?.adoptExistingMint !== undefined) await this.completeNamedPublishFinalization(finalization);
+      } else if (opts?.adoptExistingMint !== undefined) {
+        if (await this.completeNamedPublishFinalization(finalization) === 'pending')
+          throw Object.assign(new Error('Named publish catalog finalization remains pending; retry to finish it'),
+            { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+      }
       else await observeConfirmedVmTransfer(this.log, {
         ...finalization, ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish',
       }, async () => {
-        try {
-          await this.completeNamedPublishFinalization(finalization);
-          return 'owned';
-        } catch (error) {
-          // An unfinished transition stays pending in its checkpoint, which the observer does not report.
-          if ((error as { code?: string }).code === KA_MINT_RECONCILE_INCOMPLETE_CODE) return 'pending';
-          throw error;
-        }
+        return await this.completeNamedPublishFinalization(finalization) === 'complete' ? 'owned' : 'pending';
       });
     }
 
@@ -6416,8 +6413,8 @@ export class PublishMethods extends DKGAgentBase {
   async completeNamedPublishFinalization(this: DKGAgent, input: {
     contextGraphId: string; subGraphName?: string; assertionCoordinate: string;
     shareOperationId?: string; seal: AssertionSeal; assertionUri: string;
-  }): Promise<void> {
-    await finishNamedPublishFinalization(this.store, input, {
+  }): Promise<'complete' | 'pending'> {
+    return finishNamedPublishFinalization(this.store, input, {
       catalogRequired: () => this.resolveRfc64CatalogAuthoringLaneV1(input.contextGraphId, input.subGraphName) !== null,
       transfer: shareOperationId => this.transferRfc64ConfirmedVmV1({
         ...input, shareOperationId, ctx: createOperationContext('publishFromSWM'), publicationLabel: 'publish',
