@@ -847,6 +847,8 @@ describe('two records of one job id: the key is kept whole, whatever order the e
       () => [keyedQuads(templates, fin('f', 'key', 10)), storedUnder(at('f', 'key', 'retryable', 5), 'z', legacyV0Failed(at('f', 'key', 'retryable', 5)))], { siblings_unreadable: 1 }],
     ['the review\'s case with a second old finalized candidate in the key, g, finished before f: both candidates are kept',
       () => [keyedQuads(templates, fin('g', 'key', 8)), keyedQuads(templates, fin('f', 'key', 10)), storedUnder(at('f', 'key', 'retryable', 5), 'z')], { siblings_unreadable: 2 }],
+    ['one id, two payloads in one status: subject f holds two retryable failed payloads of job f (accepted day 30 and day 10), next to the old finalized g (day 20)',
+      () => [keyedQuads(templates, fin('g', 'key', 20)), keyedQuads(templates, at('f', 'key', 'retryable', 30)), keyedQuads(templates, at('f', 'key', 'retryable', 10))], { siblings_unreadable: 1 }],
   ];
 
   it.each(CASES.flatMap(([label, records, reasons]) => (['delete', 'report'] as const).map((mode) => [label, mode, records, reasons] as const)))('%s, %s mode: every record stays and admission answers as before, in every row order', async (_label, mode, records, reasons) => {
