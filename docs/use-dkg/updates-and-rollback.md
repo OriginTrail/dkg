@@ -117,8 +117,10 @@ The first release after 10.0.26 changes two things to check before you update.
   unknown key stops the daemon from starting. See
   [Clean up finished jobs](async-queue-operations.md#clean-up-finished-jobs).
 - **The async queues get store slots of their own.** This is on by default
-  for Blazegraph and managed Oxigraph stores on hosts with more than 2 CPUs.
-  Nodes set up with `dkg init` use managed Oxigraph. If share or publish jobs
+  for Blazegraph and managed Oxigraph stores on hosts with more than 2 CPUs,
+  and off for other backends, including `sparql-http`, and on hosts with 2 CPUs
+  or fewer. The embedded store never uses it. Nodes set up with `dkg init` use
+  managed Oxigraph. If share or publish jobs
   get slower after the update, turn it off and restart: see
   [Store control path](async-queue-operations.md#store-control-path). The
   daemon logs `Store control path: on (...)` or `off (...)` once at start.
