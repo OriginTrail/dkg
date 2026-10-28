@@ -1108,6 +1108,9 @@ start_node() {
   local cli_entry
   cli_entry="$(node_cli_entry "$node_num")"
   log "Node $node_num launching from $cli_entry"
+  # Shutdown uses the running node's launch identity, independent of the next
+  # invocation's DEVNET_VERSION_LAYOUT. Publish the record before spawning.
+  record_node_cli_entry "$node_num" "$cli_entry"
   # Use the CLI's detached supervisor. `restart-node` is commonly called from
   # short-lived devnet test scripts; foreground mode leaves the worker in that
   # shell's process group and can make the daemon disappear after the helper
@@ -1200,20 +1203,14 @@ start_node() {
   fi
 }
 
+record_node_cli_entry() {
+  local node_dir="$DEVNET_DIR/node$1"
+  printf '%s\n' "$2" > "$node_dir/.devnet-cli-entry.tmp.$$"
+  mv "$node_dir/.devnet-cli-entry.tmp.$$" "$node_dir/.devnet-cli-entry"
+}
+
 run_devnet_process_control() {
-  local action="$1" selected="${2:-}" directory num
-  local entries=("$action" "$REPO_ROOT" "$DEVNET_DIR" "$selected")
-  if [ -n "$selected" ]; then
-    entries+=("$selected" "$(node_cli_entry "$selected")")
-  else
-    for directory in "$DEVNET_DIR"/node*; do
-      [ -d "$directory" ] || continue
-      num="${directory##*/node}"
-      [[ "$num" =~ ^[1-9][0-9]*$ ]] || continue
-      entries+=("$num" "$(node_cli_entry "$num")")
-    done
-  fi
-  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs" "${entries[@]}"
+  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs"     "$1" "$REPO_ROOT" "$DEVNET_DIR" "${2:-}"
 }
 
 collect_devnet_node_pids() {

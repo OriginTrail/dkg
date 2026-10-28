@@ -1,4 +1,4 @@
-import { planDevnetShutdown, executeDevnetShutdown } from '../../scripts/lib/devnet-node-process-control.js';
+import { planDevnetShutdown, executeDevnetShutdown, parseProcessInventory, collectDevnetNodePids } from '../../scripts/lib/devnet-node-process-control.js';
 // No-devnet tests for the shared node-lifecycle helpers (node-lifecycle.ts): PID files,
 // the ownership rule (only this devnet's own, live PIDs, and only a daemon of this
 // checkout, are ever signalled), port resolution, the readiness probe, and the restart
@@ -485,6 +485,53 @@ describe('one validated devnet shutdown plan', () => {
     expect(pidAlive(other.pid!)).toBe(true);
   });
 
+  it('leaves an identity changed after planning alive and preserves its PID file', async () => {
+    const worker = sleeper(); writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
+    const original = readProcessCommandLine(worker.pid!)!;
+    let identity = original;
+    const reader = (pid: number) => pid === worker.pid ? identity : readProcessCommandLine(pid);
+    const plan = planDevnetShutdown(paths, [4], reader);
+    identity = `${original} recycled`;
+    await expect(executeDevnetShutdown(plan, { graceMs: 0, killWaitMs: 0 })).rejects.toThrow('did not stop');
+    expect(pidAlive(worker.pid!)).toBe(true);
+    expect(readFileSync(pidFile(4, 'daemon.pid'), 'utf8')).toBe(String(worker.pid));
+  });
+
+  it('leaves an identity changed during grace alive instead of escalating to KILL', async () => {
+    const marker = join(root, 'term-observed');
+    const worker = spawn(process.execPath, ['-e',
+      "process.on('SIGTERM', () => require('node:fs').writeFileSync(process.argv[1], 'term')); console.log('ready'); setInterval(() => {}, 1000)",
+      marker, join(root, 'packages/cli/dist/cli.js'), 'daemon-worker'], { stdio: ['ignore', 'pipe', 'ignore'] });
+    children.push(worker); await new Promise(resolve => worker.stdout!.once('data', resolve));
+    writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
+    const original = readProcessCommandLine(worker.pid!)!;
+    const reader = (pid: number) => pid === worker.pid && existsSync(marker) ? `${original} recycled` : readProcessCommandLine(pid);
+    const plan = planDevnetShutdown(paths, [4], reader);
+    await expect(executeDevnetShutdown(plan, { graceMs: 200, killWaitMs: 0 })).rejects.toThrow('did not stop');
+    expect(readFileSync(marker, 'utf8')).toBe('term');
+    expect(pidAlive(worker.pid!)).toBe(true);
+    expect(readFileSync(pidFile(4, 'daemon.pid'), 'utf8')).toBe(String(worker.pid));
+  });
+
+  it('selects owned processes and descendants from normalized supplied inventory', () => {
+    const daemon = sleeper(), detached = sleeper(), descendant = sleeper(), bystander = sleeper(), otherHome = sleeper();
+    writeFileSync(pidFile(4, 'daemon.pid'), String(daemon.pid));
+    const home = join(paths.devnetDir, 'node4');
+    const rows = [
+      [daemon.pid!, 1, '/Program Files/node', readProcessCommandLine(daemon.pid!)!],
+      [detached.pid!, 1, '/tools/oxigraph-v1', `oxigraph --path ${home}/store`],
+      [descendant.pid!, daemon.pid!, '/tools/helper', 'helper'],
+      [bystander.pid!, 1, '/usr/bin/tail', `tail -f ${home}/daemon.log`],
+      [otherHome.pid!, 1, '/usr/bin/node', `node --path ${home}0/store`],
+    ] as const;
+    const inventory = parseProcessInventory(rows.map(([pid, , , command]) => `${pid} ${command}`).join('\n'),
+      rows.map(([pid, parent, executable]) => `${pid} ${parent} ${executable}`).join('\n'));
+    expect(inventory.records.get(daemon.pid!)?.executable).toBe('node');
+    expect(inventory.childrenByParent.get(daemon.pid!)).toEqual([descendant.pid]);
+    expect(collectDevnetNodePids(paths, 4, readProcessCommandLine, inventory).sort()).toEqual([daemon.pid, detached.pid, descendant.pid].sort());
+    expect(pidAlive(bystander.pid!)).toBe(true);
+  });
+
   it('signals all stubborn nodes before their shared grace period', async () => {
     const ready: Promise<void>[] = [];
     const workers = [1, 2, 3].map(num => {
@@ -811,9 +858,9 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
   });
 
   /** Sources the real script and runs `body`, without blocking this process (children of the test must still be reaped). */
-  const run = (body: string) =>
+  const run = (body: string, extraEnv: Record<string, string> = {}) =>
     new Promise<{ status: number | null; stdout: string; stderr: string }>((resolve, reject) => {
-      const bash = spawn('bash', ['-c', `DEVNET_SOURCE_ONLY=1 source "${devnetSh}"; ${body}`], { env: env() });
+      const bash = spawn('bash', ['-c', `DEVNET_SOURCE_ONLY=1 source "${devnetSh}"; ${body}`], { env: { ...env(), ...extraEnv } });
       let stdout = '';
       let stderr = '';
       bash.stdout.on('data', (chunk) => { stdout += chunk; });
@@ -854,6 +901,18 @@ describe('devnet.sh stop phase: which processes that mention the node home it si
   });
 
   const collected = async () => (await run('collect_devnet_node_pids 4')).stdout.split(/\s+/).filter(Boolean).map(Number);
+
+  it('stops a recorded alternate-version daemon in a separate invocation with a changed layout', async () => {
+    const entry = join(root, 'alternate build', 'packages/cli/dist/cli.js');
+    const worker = sleeper({ entry }); writeFileSync(pidFile(4, 'daemon.pid'), String(worker.pid));
+    expect(await run('record_node_cli_entry 4 "$TEST_CLI_ENTRY"', {
+      TEST_CLI_ENTRY: entry, DEVNET_VERSION_LAYOUT: 'all:current,edges:prev',
+    })).toMatchObject({ status: 0 });
+    const result = await run('unset DEVNET_VERSION_LAYOUT; stop_devnet_node_processes 4');
+    expect(result.status, result.stderr).toBe(0);
+    expect(await exited(worker)).toBe(true);
+    expect(existsSync(pidFile(4, 'daemon.pid'))).toBe(false);
+  });
 
   it('lists a node process and a managed store binary that mention the home, and not a log tail', async () => {
     const node = homeNode();

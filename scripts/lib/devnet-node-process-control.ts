@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { execFileSync } from 'node:child_process';
 import { existsSync, readFileSync, realpathSync, rmSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, isAbsolute } from 'node:path';
 
 export interface DevnetPaths {
   /** The repository root (where `scripts/devnet.sh` lives and restarts run from). */
@@ -218,8 +218,11 @@ export function verifiedNodePids(
   num: number,
   readCommandLine: CommandLineReader = readProcessCommandLine,
 ): number[] {
-  const alternate = paths.nodeCliEntries?.[num];
-  if (alternate !== undefined && !alternate.endsWith(`/${CLI_ENTRY_POINT}`)) throw new Error(`node${num}: invalid configured CLI entry`);
+  let recorded: string | undefined;
+  try { recorded = readFileSync(join(nodeHome(paths, num), '.devnet-cli-entry'), 'utf8').trim(); }
+  catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+  const alternate = recorded ?? paths.nodeCliEntries?.[num];
+  if (alternate !== undefined && (!isAbsolute(alternate) || /[\r\n\0]/.test(alternate) || !alternate.endsWith(`/${CLI_ENTRY_POINT}`))) throw new Error(`node${num}: invalid configured CLI entry`);
   const roots = [...repoRootSpellings(paths.repoRoot),
     ...(alternate === undefined ? [] : repoRootSpellings(dirname(dirname(dirname(dirname(alternate))))))];
   const pids: number[] = [];
@@ -330,35 +333,63 @@ export async function stopNodeProcesses(paths: DevnetPaths, num: number,
 
 
 /** Collect every owned process before signalling any, including detached stores. */
-export function collectDevnetNodePids(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader = readProcessCommandLine): number[] {
-  return collectOwnedNodePids(paths, num, readCommandLine, readProcessInventory());
+export function collectDevnetNodePids(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader = readProcessCommandLine,
+  inventory: ProcessInventory = readProcessInventory()): number[] {
+  return collectOwnedNodePids(paths, num, readCommandLine, inventory);
 }
-function readProcessInventory() {
-  const listings = execFileSync('ps', ['axeww', '-o', 'pid=,command='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
-  const children = execFileSync('ps', ['-A', '-o', 'pid=,ppid='], { encoding: 'utf8' }).trim().split('\n')
-    .map(line => line.trim().split(/\s+/).map(Number));
-  return { listings, children };
+export interface ProcessRecord {
+  readonly pid: number;
+  readonly parentPid: number;
+  readonly commandLine: string;
+  readonly executable: string;
 }
-function collectOwnedNodePids(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader,
-  { listings, children }: ReturnType<typeof readProcessInventory>): number[] {
-  const owned = new Set(verifiedNodePids(paths, num, readCommandLine));
-  const home = nodeHome(paths, num);
+export interface ProcessInventory {
+  readonly records: ReadonlyMap<number, ProcessRecord>;
+  readonly childrenByParent: ReadonlyMap<number, readonly number[]>;
+}
+/** Normalize both OS snapshots once, including executable paths containing spaces. */
+export function parseProcessInventory(listings: string, metadata: string): ProcessInventory {
+  const commands = new Map<number, string>();
   for (const line of listings.split('\n')) {
     const match = /^\s*(\d+)\s+(.+)$/.exec(line);
+    if (match) commands.set(Number(match[1]), match[2]!);
+  }
+  const records = new Map<number, ProcessRecord>();
+  const childrenByParent = new Map<number, number[]>();
+  for (const line of metadata.split('\n')) {
+    const match = /^\s*(\d+)\s+(\d+)\s+(.+)$/.exec(line);
     if (!match) continue;
-    const pid = Number(match[1]), command = match[2]!;
-    if (pid === process.pid || !(command.includes(`${home}/`) || command.includes(`DKG_HOME=${home} `) || command.endsWith(`DKG_HOME=${home}`))) continue;
-    let executable = command.split(/\s+/, 1)[0]!.split('/').at(-1)!;
-    if (executable !== 'node' && !executable.startsWith('oxigraph')) {
-      try { executable = execFileSync('ps', ['-p', String(pid), '-o', 'comm='], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim().split('/').at(-1)!; }
-      catch { continue; }
-    }
+    const pid = Number(match[1]), parentPid = Number(match[2]);
+    if (!Number.isSafeInteger(pid) || pid <= 0 || !Number.isSafeInteger(parentPid) || parentPid < 0) continue;
+    const commandLine = commands.get(pid);
+    if (commandLine === undefined) continue; // Process exited between snapshots.
+    const executable = match[3]!.trim().split('/').at(-1)!;
+    records.set(pid, Object.freeze({ pid, parentPid, commandLine, executable }));
+    const children = childrenByParent.get(parentPid) ?? [];
+    children.push(pid); childrenByParent.set(parentPid, children);
+  }
+  return { records, childrenByParent };
+}
+function readProcessInventory(): ProcessInventory {
+  const listings = execFileSync('ps', ['axeww', '-o', 'pid=,command='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  const metadata = execFileSync('ps', ['-A', '-o', 'pid=,ppid=,comm='], { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 });
+  return parseProcessInventory(listings, metadata);
+}
+function collectOwnedNodePids(paths: DevnetPaths, num: number, readCommandLine: CommandLineReader,
+  inventory: ProcessInventory): number[] {
+  const owned = new Set(verifiedNodePids(paths, num, readCommandLine));
+  const home = nodeHome(paths, num);
+  for (const { pid, commandLine, executable } of inventory.records.values()) {
+    if (pid === process.pid || !(commandLine.includes(`${home}/`) || commandLine.includes(`DKG_HOME=${home} `)
+      || commandLine.endsWith(`DKG_HOME=${home}`))) continue;
     if (executable === 'node' || executable.startsWith('oxigraph')) owned.add(pid);
   }
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const [pid, parent] of children) if (owned.has(parent!) && pid !== process.pid && !owned.has(pid!)) { owned.add(pid!); changed = true; }
+  const pending = [...owned];
+  for (let index = 0; index < pending.length; index++) {
+    for (const pid of inventory.childrenByParent.get(pending[index]!) ?? []) {
+      if (pid === process.pid || owned.has(pid)) continue;
+      owned.add(pid); pending.push(pid);
+    }
   }
   return [...owned].filter(pidAlive);
 }
