@@ -26,6 +26,7 @@ export async function auditSnapshotCheckpoint(store: TripleStore,
       source: 'publicCheckpoint.readback', queryOptions: deadline(30_000) });
     if (checked.status !== 'verified') throw new Error(`Checkpoint readback failed: ${checked.status}`);
   }
+  // sparql-scan-allow: R2 -- Full audit of the isolated read-only bootstrap journal, capped at 8 GiB expanded inputs; never a live Core/Edge store. Must detect unexpected graph content too.
   const total = await store.query(`SELECT (COUNT(*) AS ?n) WHERE { GRAPH ?g { ?s ?p ?o }
     FILTER(?g != <${contextGraphMetaUri(snapshot.contextGraphId)}> && ?g != <urn:dkg:local:public-snapshot-trust>) }`, deadline(30_000));
   if (total.type !== 'bindings' || Number(lexical(total.bindings[0]?.n ?? 'NaN')) !== manifest.assets.reduce((n, a) => n + a.publicQuads, 0))
