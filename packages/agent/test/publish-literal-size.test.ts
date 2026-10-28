@@ -14,6 +14,7 @@ describe('agent publish literal size validation', () => {
   it('rejects publishAsync private quads before workspace staging', async () => {
     const agentStub = {
       config: confirmedPublicationCatalogConfigV1(false),
+      admitConfirmedCatalogPublicationV1: PublishMethods.prototype.admitConfirmedCatalogPublicationV1,
       contextGraphExists: vi.fn(async () => true),
     };
 

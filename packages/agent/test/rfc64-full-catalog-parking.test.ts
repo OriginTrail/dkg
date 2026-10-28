@@ -141,12 +141,13 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
   let laneUnavailable: Error | undefined;
   const warn = vi.fn();
   const reconcile = vi.fn(async (): Promise<null> => null);
+  const resolvePlacement = vi.fn((repair: Marker) => pinnedPrivatePlacementDecisionV1(repair, laneActive, laneUnavailable));
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 5_000, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }) as never,
     listDurableInventoryScopes: () => [],
     listLocalAuthorAddresses: () => [AUTHOR],
     acceptsPublicRootLane: () => true,
-    resolveFinalizedPlacementDecision: (repair) => pinnedPrivatePlacementDecisionV1(repair, laneActive, laneUnavailable),
+    resolveFinalizedPlacementDecision: resolvePlacement,
     readRepairRevision: () => revision,
     readPrivateFailure: () => null,
     writePrivateFailures: () => {},
@@ -161,7 +162,7 @@ function supervisor(model: ReturnType<typeof node>, options: { readHead?: boolea
     .map(([, message]) => JSON.parse(String(message)) as Record<string, unknown>)
     .filter((line) => line.event === event);
   return {
-    owner, warn, reconcile, lines,
+    owner, warn, reconcile, resolvePlacement, lines,
     capacity: () => owner.status()?.authorCatalogCapacity,
     /** One supervisor pass now, as a start or a new marker asks for. */
     pass: async () => { owner.start(ctx); await owner.whenIdle(); },
@@ -178,6 +179,20 @@ const NEW_B = marker(FULL_GRAPH, CAP + 2);
 const NEW_C = marker(FULL_GRAPH, CAP + 3);
 
 describe('finalized-private placements of a full author catalog', () => {
+  it('shares the reconciled placement decision with capacity parking', async () => {
+    const model = node(); model.fill(NEW_A); model.state.markers = [NEW_A, NEW_B];
+    const s = supervisor(model);
+    await s.pass();
+    expect(model.state.attempts).toEqual([NEW_A.kaUal]);
+    // One decision per repair, plus one after the first placement refuses capacity.
+    expect(s.resolvePlacement).toHaveBeenCalledTimes(3);
+    s.resolvePlacement.mockClear();
+    await s.pass();
+    expect(s.resolvePlacement).toHaveBeenCalledTimes(2);
+    expect(model.state.attempts).toEqual([NEW_A.kaUal]);
+    expect(s.capacity()).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
+  });
+
   it('parks a refused placement: no further attempt for hours, but one a scope at the safety-net interval', async () => {
     const model = node();
     model.fill(NEW_A);
@@ -737,7 +752,7 @@ describe('full catalog parking', () => {
     const clock = { now: 0 };
     const warn = vi.fn();
     const parkingV1 = new FullCatalogParkingV1(
-      { warn, resolveFinalizedPlacementDecision: pinnedPrivatePlacementDecisionV1, ...(readAppliedCatalogHead === undefined ? {} : { readAppliedCatalogHead }) },
+      { warn, ...(readAppliedCatalogHead === undefined ? {} : { readAppliedCatalogHead }) },
       () => clock.now,
     );
     return { parking: parkingV1, clock, warn };
@@ -747,9 +762,9 @@ describe('full catalog parking', () => {
 
   it('leaves any other failure to the ordinary handling', () => {
     const { parking: p } = parking(atCap);
-    expect(p.placementRefused('a', NEW_A, new Error('store timeout'))).toBe(false);
+    expect(p.placementRefused('a', NEW_A, new Error('store timeout'), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(false);
     expect(p.projectionRefused(NEW_A, new Error('store timeout'))).toBe(false);
-    expect(p.park('a', NEW_A)).toBe(false);
+    expect(p.park('a', NEW_A, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(false);
     expect(p.status([])).toEqual({ parkedPlacements: 0, scopesAtCap: 0 });
   });
 
@@ -757,18 +772,18 @@ describe('full catalog parking', () => {
     const { parking: p } = parking(atCap);
     let looked = 0;
     const watched = new Proxy(NEW_A, { get(target, property) { looked += 1; return Reflect.get(target, property); } });
-    expect(p.park('a', watched)).toBe(false);
+    expect(p.park('a', watched, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(false);
     expect(looked).toBe(0);
-    p.placementRefused('b', NEW_B, refusal());
-    expect(p.park('a', watched)).toBe(true);
+    p.placementRefused('b', NEW_B, refusal(), pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope);
+    expect(p.park('a', watched, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(true);
     expect(looked).toBeGreaterThan(0);
   });
 
   it('finds the refusal behind a wrapping error', () => {
     const { parking: p } = parking(atCap);
     const wrapped = new Error('repair failed', { cause: new Error('mutation failed', { cause: refusal() }) });
-    expect(p.placementRefused('a', NEW_A, wrapped)).toBe(true);
-    expect(p.park('b', NEW_B)).toBe(true);
+    expect(p.placementRefused('a', NEW_A, wrapped, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(true);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(true);
   });
 
   it.each([
@@ -777,32 +792,32 @@ describe('full catalog parking', () => {
   ])('keeps what is parked when the applied-head reader %s', (_label, unreadable) => {
     const read = vi.fn<() => ReturnType<typeof atCap> | undefined>(atCap);
     const { parking: p } = parking(read as never);
-    expect(p.placementRefused('a', NEW_A, refusal())).toBe(true);
+    expect(p.placementRefused('a', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(true);
     read.mockImplementation(unreadable);
-    expect(p.park('a', NEW_A)).toBe(true);
+    expect(p.park('a', NEW_A, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(true);
     // A marker it never parked is not taken on a head it cannot read.
-    expect(p.park('b', NEW_B)).toBe(false);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(false);
     expect(p.status([])).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
   });
 
   it('attempts every marker of a scope whose catalog is gone, from the next pass on', () => {
     const read = vi.fn<() => ReturnType<typeof atCap> | null>(atCap);
     const { parking: p } = parking(read);
-    p.placementRefused('a', NEW_A, refusal());
-    expect(p.park('b', NEW_B)).toBe(true);
+    p.placementRefused('a', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(true);
     read.mockReturnValue(null);
     // Status reads the head now; a pass keeps the one it read for the scope until it ends.
     expect(p.status([])).toEqual({ parkedPlacements: 0, scopesAtCap: 0 });
-    expect(p.park('a', NEW_A)).toBe(true);
+    expect(p.park('a', NEW_A, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(true);
     p.passStarted(new Set(['a', 'b']));
-    expect(p.park('a', NEW_A)).toBe(false);
-    expect(p.park('b', NEW_B)).toBe(false);
+    expect(p.park('a', NEW_A, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(false);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(false);
   });
 
   it('reads one applied-head row a scope a pass for what is parked, however many markers', () => {
     const read = vi.fn(atCap);
     const { parking: p } = parking(read);
-    p.placementRefused('a', NEW_A, refusal());
+    p.placementRefused('a', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
     const markers = Array.from({ length: 50 }, (_value, index) => marker(FULL_GRAPH, CAP + 10 + index));
     const keys = new Set(['a', ...markers.map((_marker, index) => `m${index}`)]);
 
@@ -810,8 +825,8 @@ describe('full catalog parking', () => {
     for (let pass = 0; pass < 4; pass++) {
       read.mockClear();
       p.passStarted(keys);
-      expect(p.park('a', NEW_A)).toBe(true);
-      for (const [index, parked] of markers.entries()) expect(p.park(`m${index}`, parked)).toBe(true);
+      expect(p.park('a', NEW_A, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(true);
+      for (const [index, parked] of markers.entries()) expect(p.park(`m${index}`, parked, pinnedPrivatePlacementDecisionV1(parked).capacityScope)).toBe(true);
       expect(read).toHaveBeenCalledTimes(1);
     }
     expect(p.status([])).toEqual({ parkedPlacements: 51, scopesAtCap: 1 });
@@ -820,62 +835,62 @@ describe('full catalog parking', () => {
   it('does not park a marker whose scope it cannot name', () => {
     const { parking: p } = parking(atCap);
     const unnamed = { ...NEW_A, inventoryScope: { ...NEW_A.inventoryScope, era: 'not-an-era' } } as never;
-    expect(p.placementRefused('a', unnamed, refusal())).toBe(false);
+    expect(p.placementRefused('a', unnamed, refusal(), pinnedPrivatePlacementDecisionV1(unnamed).capacityScope)).toBe(false);
     expect(p.status([])).toEqual({ parkedPlacements: 0, scopesAtCap: 0 });
     // Nor on another scope's refusal.
-    expect(p.placementRefused('b', NEW_B, refusal())).toBe(true);
-    expect(p.park('a', unnamed)).toBe(false);
+    expect(p.placementRefused('b', NEW_B, refusal(), pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(true);
+    expect(p.park('a', unnamed, pinnedPrivatePlacementDecisionV1(unnamed).capacityScope)).toBe(false);
     expect(p.status([])).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
   });
 
   it('keeps scopes apart by their canonical catalog scope: graph, author and era', () => {
     const { parking: p } = parking(atCap);
-    p.placementRefused('a', NEW_A, refusal());
+    p.placementRefused('a', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
     const otherGraph = marker(OTHER_GRAPH, CAP + 1);
     const otherEra = { ...NEW_B, inventoryScope: { ...NEW_B.inventoryScope, era: '2' } } as Marker;
     const otherAuthor = `0x${'22'.repeat(20)}` as EvmAddressV1;
     const otherAuthorMarker = {
       ...NEW_B, authorAddress: otherAuthor, inventoryScope: { ...NEW_B.inventoryScope, authorAddress: otherAuthor },
     } as Marker;
-    expect(p.park('b', NEW_B)).toBe(true);
-    expect(p.park('g', otherGraph)).toBe(false);
-    expect(p.park('e', otherEra)).toBe(false);
-    expect(p.park('u', otherAuthorMarker)).toBe(false);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(true);
+    expect(p.park('g', otherGraph, pinnedPrivatePlacementDecisionV1(otherGraph).capacityScope)).toBe(false);
+    expect(p.park('e', otherEra, pinnedPrivatePlacementDecisionV1(otherEra).capacityScope)).toBe(false);
+    expect(p.park('u', otherAuthorMarker, pinnedPrivatePlacementDecisionV1(otherAuthorMarker).capacityScope)).toBe(false);
     expect(p.status([])).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
   });
 
   it('gives the safety net to another marker when the one it chose left the queue', () => {
     const { parking: p, clock } = parking(atCap);
-    p.placementRefused('a', NEW_A, refusal());
-    expect(p.park('b', NEW_B)).toBe(true);
+    p.placementRefused('a', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(true);
     clock.now = HOUR;
     // This pass chooses the marker parked longest, and ends before reaching it.
     p.passStarted(new Set(['a', 'b']));
     // The next pass no longer lists it.
     p.passStarted(new Set(['b']));
-    expect(p.park('b', NEW_B)).toBe(false);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(false);
     // One attempt a scope an interval: asked again in the same pass, it is parked.
-    expect(p.park('b', NEW_B)).toBe(true);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(true);
   });
 
   it('forgets a marker that left the queue, and a scope with nothing parked after its interval', () => {
     const { parking: p, clock } = parking(atCap);
-    p.placementRefused('a', NEW_A, refusal());
+    p.placementRefused('a', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
     p.passStarted(new Set(['a']));
     expect(p.status([])).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
 
     p.passStarted(new Set());
     expect(p.status([])).toEqual({ parkedPlacements: 0, scopesAtCap: 1 });
     // Within the interval a new marker of the scope is still parked on what the refusal found.
-    expect(p.park('b', NEW_B)).toBe(true);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(true);
     p.passStarted(new Set());
     clock.now = HOUR;
     p.passStarted(new Set());
     expect(p.status([])).toEqual({ parkedPlacements: 0, scopesAtCap: 0 });
-    expect(p.park('b', NEW_B)).toBe(false);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(false);
 
     // The same when the marker a pass chose for the safety net is the last one to leave.
-    p.placementRefused('c', NEW_C, refusal());
+    p.placementRefused('c', NEW_C, refusal(), pinnedPrivatePlacementDecisionV1(NEW_C).capacityScope);
     clock.now = 2 * HOUR;
     p.passStarted(new Set(['c']));
     p.passStarted(new Set());
@@ -885,26 +900,26 @@ describe('full catalog parking', () => {
   it('keeps the safety-net marker parked whatever its attempt failed on, with nothing else to park it', () => {
     // No applied-head reader: a marker that is not parked gets an attempt of its own.
     const { parking: p, clock } = parking();
-    p.placementRefused('a', NEW_A, refusal());
+    p.placementRefused('a', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
     clock.now = HOUR;
     p.passStarted(new Set(['a']));
-    expect(p.park('a', NEW_A)).toBe(false);
+    expect(p.park('a', NEW_A, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(false);
     // That attempt failed before the catalog was asked, so no refusal came back. The marker is
     // not left to the failure timer.
     p.passStarted(new Set(['a']));
-    expect(p.park('a', NEW_A)).toBe(true);
+    expect(p.park('a', NEW_A, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(true);
     expect(p.status([])).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
   });
 
   it('takes a marker out of what is parked once a refusal finds its asset in the catalog', () => {
     const { parking: p } = parking(atCap);
-    p.placementRefused('a', NEW_A, refusal());
-    expect(p.park('b', NEW_B)).toBe(true);
+    p.placementRefused('a', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(true);
     expect(p.status([])).toEqual({ parkedPlacements: 2, scopesAtCap: 1 });
     // A later refusal of the scope finds the second marker's asset among the rows.
     const rows = [...fullRows().slice(1), { seal: { kaUal: NEW_B.kaUal } }];
-    p.placementRefused('a', NEW_A, new AuthorCatalogFullErrorV1(rows, 1));
-    expect(p.park('b', NEW_B)).toBe(false);
+    p.placementRefused('a', NEW_A, new AuthorCatalogFullErrorV1(rows, 1), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
+    expect(p.park('b', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(false);
     expect(p.status([])).toEqual({ parkedPlacements: 1, scopesAtCap: 1 });
   });
 
@@ -912,26 +927,26 @@ describe('full catalog parking', () => {
     const freed = new Set<string>();
     const read = (digest: string) => ({ inventoryRowCount: String(freed.has(digest) ? CAP - 1 : CAP) });
     const { parking: p } = parking(read as never);
-    p.placementRefused('old', NEW_A, refusal());
+    p.placementRefused('old', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
     // More scopes than lists are kept come and go, one at a time.
     for (let index = 0; index <= MAX_FULL_CATALOG_DETAILED_SCOPES_V1; index++) {
       const other = marker(`passing-${index}` as ContextGraphIdV1, CAP + 1);
-      p.placementRefused(`o${index}`, other, refusal());
+      p.placementRefused(`o${index}`, other, refusal(), pinnedPrivatePlacementDecisionV1(other).capacityScope);
       freed.add(scopeDigest(other));
       p.passStarted(new Set(['old', `o${index}`]));
-      expect(p.park(`o${index}`, other)).toBe(false);
+      expect(p.park(`o${index}`, other, pinnedPrivatePlacementDecisionV1(other).capacityScope)).toBe(false);
     }
     // The list of the scope that stayed full was never the one to go: its new marker is parked on it.
     p.passStarted(new Set(['old']));
-    expect(p.park('new', NEW_B)).toBe(true);
+    expect(p.park('new', NEW_B, pinnedPrivatePlacementDecisionV1(NEW_B).capacityScope)).toBe(true);
   });
 
   it('survives a log sink that throws', () => {
     const { parking: p, warn } = parking(atCap);
     warn.mockImplementation(() => { throw new Error('log sink closed'); });
-    p.placementRefused('a', NEW_A, refusal());
+    p.placementRefused('a', NEW_A, refusal(), pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope);
     expect(() => p.passEnded()).not.toThrow();
     expect(warn).toHaveBeenCalledTimes(1);
-    expect(p.park('a', NEW_A)).toBe(true);
+    expect(p.park('a', NEW_A, pinnedPrivatePlacementDecisionV1(NEW_A).capacityScope)).toBe(true);
   });
 });

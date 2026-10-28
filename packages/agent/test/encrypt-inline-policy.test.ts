@@ -40,6 +40,7 @@ import {
   type PublishOptions,
 } from '@origintrail-official/dkg-publisher';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { PublishMethods } from '../src/dkg-agent-publish.js';
 import { localGossipSigner } from '../src/external-author-signing.js';
 import { computeSwmSenderKeyRecipientRouteHash } from '../src/dkg-agent-swm-state.js';
 
@@ -1024,6 +1025,7 @@ function makeQueuedAgentHarness(options: {
   }));
   const agentLike: any = {
     peerId: options.peerId,
+    admitConfirmedCatalogPublicationV1: PublishMethods.prototype.admitConfirmedCatalogPublicationV1,
     config: confirmedPublicationCatalogConfigV1(),
     readAcceptedRfc64CatalogAccessSnapshotV1: () => ({ policy: { accessPolicy: 0 } }),
     defaultAgentAddress: QUEUED_TEST_AUTHOR,

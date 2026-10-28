@@ -29,7 +29,7 @@ export type FinalizedPlacementDecisionV1<Lane = unknown> =
   } & ({ action: 'place-private-row'; capacityScope: Readonly<AuthorCatalogScopeV1> }
     | { action: 'retire-public-row'; capacityScope: undefined })>;
 
-/** The same decision is re-read at admission, execution, retry and capacity parking. */
+/** Admission and retries retain this decision for capacity parking; execution re-reads authority. */
 export function resolveFinalizedPlacementDecisionV1<Lane extends PlacementLaneV1>(
   repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
   readLane: () => Rfc64CatalogAuthoringLaneDecisionV1<Lane>,
