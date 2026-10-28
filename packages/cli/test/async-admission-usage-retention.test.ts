@@ -1,13 +1,14 @@
 /**
- * OT-RFC-73 P10b: queue retention in the periodic `async_admission_usage` line. The line is unchanged unless a retention sweep is registered and not off; with one
+ * OT-RFC-73 P10b, P11: queue retention in the periodic `async_admission_usage` line. The line is unchanged unless a retention sweep is registered and not off; with one
  * it gains a fixed, pinned set of fields: deleted by class, kept by reason, skipped by reason, errors, and the `lastCompletePass` gauge (report mode: would-delete by
- * class).
+ * class). The share queue's fields have the prefix `share_retention`, the publisher queue's `lift_retention`.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { asyncAdmissionUsage, type AsyncAdmissionUsageSnapshot, type LatencySummary } from '@origintrail-official/dkg-core';
 import {
   ASYNC_ADMISSION_USAGE_LOG_INTERVAL_MS, formatAsyncAdmissionUsageLine, startAsyncAdmissionUsageLog, type AsyncAdmissionUsageSample,
 } from '../src/daemon/async-admission-usage-log.js';
+import { PUBLISHER_RETENTION_JOB_CLASSES, PUBLISHER_RETENTION_KEEP_REASONS } from '@origintrail-official/dkg-publisher';
 import type { RetentionUsageView } from '../src/daemon/retention-timer.js';
 
 const EMPTY: LatencySummary = { n: 0, p50Ms: null, p95Ms: null, p99Ms: null, maxMs: null };
@@ -33,6 +34,19 @@ const reportView = (over: Partial<RetentionUsageView> = {}): RetentionUsageView 
   skipped: { off: 0, overlap: 0, clock_invalid: 0, clock_backwards: 0, clock_jump: 1 },
   errors: { scan: 1, verify: 0, delete: 0, tick: 2 },
   lastCompletePass: { scanned: 300, wouldDelete: classes({ succeeded: 240, cancelled: 1 }), deleted: classes() },
+  ...over,
+});
+
+const keptReasons = (counts: Partial<Record<(typeof PUBLISHER_RETENTION_KEEP_REASONS)[number], number>> = {}) =>
+  Object.fromEntries(PUBLISHER_RETENTION_KEEP_REASONS.map(name => [name, counts[name] ?? 0]));
+/** What the publisher core reports after a first complete report pass: its one class and every reason key present, most of them zero. */
+const publisherView = (over: Partial<RetentionUsageView> = {}): RetentionUsageView => ({
+  queue: 'publisher', mode: 'report', ticks: 2,
+  deleted: { finalized: 0 },
+  kept: keptReasons({ older_sibling_kept: 5, too_recent: 9 }),
+  skipped: { off: 0, overlap: 0, clock_invalid: 0, clock_backwards: 0, clock_jump: 1 },
+  errors: { scan: 1, verify: 0, delete: 0 },
+  lastCompletePass: { scanned: 7, wouldDelete: { finalized: 4 }, deleted: { finalized: 0 } },
   ...over,
 });
 
@@ -93,16 +107,60 @@ describe('the retention fields (pinned)', () => {
     expect(suffix).toContain(' share_retention_pass_would_delete=cancelled:0,retired_no_effect:0,succeeded:0 share_retention_pass_deleted=cancelled:0,retired_no_effect:1,succeeded:80');
   });
 
-  it('the publisher\'s sweep (P11) prints under the lift_ prefix, after the share\'s', () => {
-    const publisher: RetentionUsageView = {
-      queue: 'publisher', mode: 'report', ticks: 2, deleted: { finalized: 0 }, kept: { failed_retained: 5 }, skipped: {}, errors: {},
-      lastCompletePass: { scanned: 7, wouldDelete: { finalized: 4 }, deleted: { finalized: 0 } },
-    };
-    const line = formatAsyncAdmissionUsageLine({ ...base(), retention: [reportView(), publisher] });
+  it('the publisher\'s sweep prints under the lift_ prefix, after the share\'s', () => {
+    const line = formatAsyncAdmissionUsageLine({ ...base(), retention: [reportView(), publisherView()] });
     expect(line.indexOf('share_retention=report')).toBeGreaterThan(0);
     expect(line.indexOf('lift_retention=report')).toBeGreaterThan(line.indexOf('share_retention_pass_deleted='));
-    expect(line).toContain(' lift_retention=report lift_retention_ticks=2 lift_retention_deleted=finalized:0 lift_retention_kept=failed_retained:5 lift_retention_skipped=- lift_retention_errors=- '
-      + 'lift_retention_pass_scanned=7 lift_retention_pass_would_delete=finalized:4 lift_retention_pass_deleted=finalized:0');
+    expect(line.endsWith(' lift_retention_pass_deleted=finalized:0')).toBe(true);
+  });
+
+  describe('the publisher\'s fields (pinned)', () => {
+    const suffixOf = (view: RetentionUsageView): string => formatAsyncAdmissionUsageLine({ ...base(), retention: [view] }).slice(formatAsyncAdmissionUsageLine(base()).length + 1);
+
+    it('report mode after a complete pass: one class (finalized) and the publisher\'s own reasons, in sorted order', () => {
+      expect(suffixOf(publisherView())).toBe([
+        'lift_retention=report',
+        'lift_retention_ticks=2',
+        'lift_retention_deleted=finalized:0',
+        'lift_retention_kept=older_sibling_kept:5,too_recent:9',
+        'lift_retention_skipped=clock_jump:1',
+        'lift_retention_errors=scan:1',
+        'lift_retention_pass_scanned=7',
+        'lift_retention_pass_would_delete=finalized:4',
+        'lift_retention_pass_deleted=finalized:0',
+      ].join(' '));
+    });
+
+    it('before a pass has completed, and with nothing kept, skipped or failed: the gauge and the empty lists print `-`', () => {
+      const view = publisherView({ ticks: 0, kept: keptReasons(), skipped: { off: 0, overlap: 0 }, errors: { scan: 0, verify: 0, delete: 0 }, lastCompletePass: null });
+      expect(suffixOf(view)).toBe([
+        'lift_retention=report', 'lift_retention_ticks=0', 'lift_retention_deleted=finalized:0', 'lift_retention_kept=-', 'lift_retention_skipped=-', 'lift_retention_errors=-',
+        'lift_retention_pass_scanned=-', 'lift_retention_pass_would_delete=-', 'lift_retention_pass_deleted=-',
+      ].join(' '));
+    });
+
+    it('delete mode: the cumulative deleted counter and the pass that deleted', () => {
+      const view = publisherView({
+        mode: 'delete', ticks: 40, deleted: { finalized: 1200 }, kept: keptReasons({ older_sibling_pending: 3 }),
+        lastCompletePass: { scanned: 90, wouldDelete: { finalized: 0 }, deleted: { finalized: 80 } },
+      });
+      const suffix = suffixOf(view);
+      expect(suffix).toContain('lift_retention=delete lift_retention_ticks=40 lift_retention_deleted=finalized:1200 lift_retention_kept=older_sibling_pending:3 ');
+      expect(suffix).toContain(' lift_retention_pass_would_delete=finalized:0 lift_retention_pass_deleted=finalized:80');
+    });
+
+    it('the figures a real publisher core reports print without any field being dropped or renamed (every class and reason the core can report is a legal key)', () => {
+      const everything = publisherView({ kept: Object.fromEntries(PUBLISHER_RETENTION_KEEP_REASONS.map((reason, index) => [reason, index + 1])) });
+      const kept = /lift_retention_kept=(\S+)/.exec(suffixOf(everything))![1]!.split(',');
+      expect(kept).toHaveLength(PUBLISHER_RETENTION_KEEP_REASONS.length);
+      expect(kept.map(entry => entry.split(':')[0])).toEqual([...PUBLISHER_RETENTION_KEEP_REASONS].sort());
+      expect(PUBLISHER_RETENTION_JOB_CLASSES).toEqual(['finalized']);
+    });
+
+    it('only a registered sweep prints: a publisher-only line has no share field, and a share-only line has no lift_retention field', () => {
+      expect(suffixOf(publisherView())).not.toContain('share_retention');
+      expect(formatAsyncAdmissionUsageLine({ ...base(), retention: [reportView()] })).not.toContain('lift_retention');
+    });
   });
 
   it('keys are sanitised like every other list key', () => {
