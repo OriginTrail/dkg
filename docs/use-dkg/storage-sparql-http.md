@@ -166,7 +166,9 @@ Size the daemon service and Oxigraph scope independently, while keeping their co
 
 ### Store concurrency budget
 
-The node runs at most `DKG_STORE_MAX_CONCURRENT` store operations at once (4 by default), capped at the host's CPU count (but at least 2). One slot stays reserved for storage acknowledgements and one for health checks. A remote store that is slow because of request latency, not CPU, can sometimes do more at once. `DKG_STORE_CONCURRENCY_POLICY=configured` removes the CPU cap, so `DKG_STORE_MAX_CONCURRENT` becomes the exact total; the two reserved slots stay reserved. Raise it only after comparing queue waits, completed work and the store's own load before and after, on your store and workload. To roll back, remove the variables and restart.
+The node's shared store queue runs at most `DKG_STORE_MAX_CONCURRENT` operations at once (4 by default), capped at the host's CPU count (but at least 2). One slot stays reserved for storage acknowledgements and one for health checks. Where the [store control path](async-queue-operations.md#store-control-path) is on, the job queues get up to three more slots on top of that (one for sharing, two for publishing), so a 4-slot node can send the store up to 7 operations at once. To make the shared limit cover every store call, switch the control path off as well.
+
+A remote store that is slow because of request latency, not CPU, can sometimes do more at once. `DKG_STORE_CONCURRENCY_POLICY=configured` removes the CPU cap, so `DKG_STORE_MAX_CONCURRENT` becomes the exact size of the shared queue; the two reserved slots stay reserved. Raise it only after comparing queue waits, completed work and the store's own load before and after, on your store and workload. To roll back, remove the variables and restart.
 
 ### Blazegraph provisioned by `dkg init` (Docker)
 
