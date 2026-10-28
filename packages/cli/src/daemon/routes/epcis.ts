@@ -1,3 +1,4 @@
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/epcis.ts
 //
 // Route handlers for EPCIS events + capture.
@@ -318,7 +319,7 @@ import {
   refreshLocalAgentIntegrationFromUi,
 } from '../local-agents.js';
 
-import type { RequestContext } from './context.js';
+import { actorFromRequestContext, type RequestContext } from './context.js';
 
 type ResolveOk<T> = { ok: true; value: T };
 type ResolveErr = { ok: false; status: number; body: object };
@@ -432,6 +433,8 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
     const sg = resolveSubGraphName(searchParams.get('subGraphName'));
     if (!sg.ok) return jsonResponse(res, sg.status, sg.body);
 
+    if (!(await requireContextGraphReadAuthority(ctx, cg.value))) return;
+    const callerAgentAddress = actorFromRequestContext(ctx).authenticatedAgentAddress;
     const epcisQueryEngine = {
       query: (
         sparql: string,
@@ -441,7 +444,7 @@ export async function handleEpcisRoutes(ctx: RequestContext): Promise<void> {
           graphSuffix?: '_shared_memory';
           includePrivate?: boolean;
         },
-      ) => agent.query(sparql, opts),
+      ) => agent.query(sparql, { ...opts, callerAgentAddress }),
     };
     try {
       const result = await handleEventsQuery(searchParams, {

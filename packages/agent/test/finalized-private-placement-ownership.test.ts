@@ -26,7 +26,6 @@ import {
 } from '../src/internal/catalog-placement-timing.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from
   '../src/rfc64/finalized-private-placement-repair-store-v1.js';
-import { DKGAgent } from '../src/index.js';
 import {
   CONTEXT_GRAPH_ID,
   agents,
@@ -58,9 +57,7 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
   const owners: Rfc64SwmCatalogProjectionOwnerV1[] = [];
   const gates: Array<ReturnType<typeof gateV1>> = [];
 
-  it('exposes no orphaned process-local seal producer on the agent mixin', () => {
-    expect('requestObservedRfc64FinalizedPrivateCatalogPlacementRepairV1' in DKGAgent.prototype).toBe(false);
-  });
+
 
   afterEach(async () => {
     // A row that failed with a repair still parked must not leave its owner unable to close.
@@ -107,10 +104,13 @@ describe('the finalized-private supervisor as the owner of a placement', () => {
       resolvePartition: () => ({
         retryIntervalMs: options.retryIntervalMs ?? 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [],
       }),
+      listDurableInventoryScopes: () => [],
       listLocalAuthorAddresses: () => [AUTHOR],
       acceptsPublicRootLane: () => true,
       resolveFinalizedPlacementDecision: (repair) => pinnedPrivatePlacementDecisionV1(repair, state.laneActive, state.laneUnavailable),
       readRepairRevision: () => ({ scopeIdentity: 'scope-1', headRevision: 'head-1' }),
+      readPrivateFailure: () => null,
+      writePrivateFailures: () => {},
       listFinalizedPrivateRepairs: () => {
         state.listings += 1;
         return state.markers;

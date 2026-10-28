@@ -1,14 +1,17 @@
 import { beforeEach, describe, expect, it } from 'vitest';
-import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { OxigraphStore, controlStoreOptions } from '@origintrail-official/dkg-storage';
 import {
   QuorumUnmetError,
   TripleStoreAsyncLiftPublisher,
   type AsyncLiftPublisherConfig,
 } from '../src/index.js';
 import type { LiftJob } from '../src/lift-job.js';
+import { LiftJobStoreSelectors } from '../src/lift-job-store-selectors.js';
+import { LiftLegacyScanMemo } from '../src/lift-legacy-scan-memo.js';
 import {
   CONTROL_LIFECYCLE_KEY,
   CONTROL_PAYLOAD,
+  CONTROL_STATUS,
   DEFAULT_CONTROL_GRAPH_URI,
   jobSubject,
   knowledgeAssetVmPublishLifecycleKey,
@@ -45,6 +48,11 @@ describe('#1828 async lift intent lookup', () => {
       ...config,
     });
   }
+
+  // OT-RFC-73 P7: admission clears its legacy un-indexed scan per process and store. A test that seeds a
+  // legacy row after some publisher admitted a job on this store models a queue that already held that row
+  // when the process started, so it forgets what those admissions learned.
+  const restartProcess = (): void => new LiftLegacyScanMemo(store, DEFAULT_CONTROL_GRAPH_URI).forgetForTesting();
 
   // The facts a recovering client retains (never the jobId or intentKey).
   const facts = { contextGraphId: 'music-social', name: 'albums' };
@@ -515,6 +523,162 @@ describe('#1828 async lift intent lookup', () => {
     // not duplicate the index (still 'active', never 'conflict').
     expect(await publisher.ensureVmPublishIntentIndex()).toBe(0);
     expect((await publisher.lookupKnowledgeAssetVmPublishJobByIntent(facts)).kind).toBe('active');
+  });
+
+  it('admission uses one bounded candidate read without transferring unrelated indexed history', async () => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const targetId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    const target = await publisher.getStatus(targetId);
+    if (!target || target.request.jobType !== 'knowledge-asset-vm-publish') throw new Error('seed missing');
+    const publish = target.request.knowledgeAssetVmPublish;
+    const history = Array.from({ length: 1_000 }, (_, index): LiftJob => ({
+      jobId: `history-${index}`, jobSlug: `history-${index}`,
+      request: { jobType: 'knowledge-asset-vm-publish', knowledgeAssetVmPublish: {
+        ...publish, name: `historical-asset-${index}`,
+      } },
+      status: 'finalized',
+      timestamps: { acceptedAt: index, updatedAt: index },
+      retries: { retryCount: 0, maxRetries: 10 },
+      claim: { walletId: 'historical-wallet' }, validation: KA_VM_VALIDATION,
+      finalization: { mode: 'local' },
+      controlPlane: { jobRef: jobSubject(`history-${index}`) },
+    }));
+    await store.insert(history.flatMap((job) => serializeJob(job, DEFAULT_CONTROL_GRAPH_URI)));
+    const query = store.query.bind(store);
+    let transferredPayloads = 0;
+    const queries: Parameters<typeof store.query>[] = [];
+    store.query = async (...args) => {
+      queries.push(args);
+      const result = await query(...args);
+      if (result.type === 'bindings') {
+        transferredPayloads += result.bindings.filter((row) => row.payload !== undefined).length;
+      }
+      return result;
+    };
+    // The first admission of a process still scans for legacy un-indexed rows: the original assertions hold for it.
+    restartProcess();
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(targetId);
+    expect(transferredPayloads).toBe(1);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.[1]).toEqual(controlStoreOptions('publisher', 'publisher.asyncLift.findActiveVmPublish'));
+    expect(queries[0]?.[0]).toContain('UNION');
+    // That scan found no un-indexed VM-publish row, so the next admission is bound by the lifecycle key alone.
+    queries.length = 0;
+    transferredPayloads = 0;
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(targetId);
+    expect(transferredPayloads).toBe(1);
+    expect(queries).toHaveLength(1);
+    expect(queries[0]?.[1]).toEqual(controlStoreOptions('publisher', 'publisher.asyncLift.findActiveVmPublish'));
+    expect(queries[0]?.[0]).not.toContain('UNION');
+    expect(queries[0]?.[0]).not.toContain('NOT EXISTS');
+  });
+
+  it('keeps legacy duplicate payload precedence regardless of candidate row order', async () => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    const indexed = await publisher.getStatus(jobId);
+    if (!indexed) throw new Error('seed missing');
+    const legacy = { ...indexed, timestamps: { ...indexed.timestamps, updatedAt: now + 100 } };
+    await store.insert(serializeJob(legacy, DEFAULT_CONTROL_GRAPH_URI)
+      .filter((entry) => entry.predicate !== CONTROL_LIFECYCLE_KEY)
+      .map((entry) => ({ ...entry, subject: jobSubject('legacy-duplicate') })));
+    const query = store.query.bind(store);
+    store.query = async (...args) => {
+      const result = await query(...args);
+      return result.type === 'bindings' ? { ...result, bindings: result.bindings.reverse() } : result;
+    };
+    restartProcess();
+    const selectors = new LiftJobStoreSelectors(store, DEFAULT_CONTROL_GRAPH_URI, (job) => job);
+    const candidates = await selectors.vmPublishAdmissionCandidates(knowledgeAssetVmPublishLifecycleKey(request));
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.timestamps.updatedAt).toBe(legacy.timestamps.updatedAt);
+  });
+
+  it.each(['rejected', 'non-bindings'] as const)('does not admit after a %s candidate query', async (failure) => {
+    const publisher = createPublisher();
+    const seedId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'existing' }));
+    const query = store.query.bind(store);
+    store.query = async () => {
+      if (failure === 'rejected') throw new Error('candidate backend unavailable');
+      return { type: 'boolean', value: false };
+    };
+    try {
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest())).rejects.toThrow(
+        failure === 'rejected' ? 'candidate backend unavailable' : /bindings/i,
+      );
+    } finally {
+      store.query = query;
+    }
+    expect((await publisher.list()).map((job) => job.jobId)).toEqual([seedId]);
+  });
+
+  it('deduplicates a legacy unindexed accepted job while ignoring malformed unindexed neighbors', async () => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    await store.deleteByPattern({ subject: jobSubject(jobId), predicate: CONTROL_LIFECYCLE_KEY, graph: DEFAULT_CONTROL_GRAPH_URI });
+    await store.insert([
+      { subject: jobSubject('broken-legacy'), predicate: CONTROL_PAYLOAD, object: literal('{not-json'), graph: DEFAULT_CONTROL_GRAPH_URI },
+      { subject: jobSubject('broken-legacy'), predicate: CONTROL_STATUS, object: literal('accepted'), graph: DEFAULT_CONTROL_GRAPH_URI },
+    ]);
+    restartProcess();
+    expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).toBe(jobId);
+  });
+
+  it.each([false, true])('preserves indexed missing-status behavior with corrupt payload=%s', async (corrupt) => {
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request);
+    const subject = jobSubject(jobId);
+    await store.deleteByPattern({ subject, predicate: CONTROL_STATUS, graph: DEFAULT_CONTROL_GRAPH_URI });
+    if (corrupt) {
+      await store.deleteByPattern({ subject, predicate: CONTROL_PAYLOAD, graph: DEFAULT_CONTROL_GRAPH_URI });
+      await store.insert([{ subject, predicate: CONTROL_PAYLOAD, object: literal('{not-json'), graph: DEFAULT_CONTROL_GRAPH_URI }]);
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toThrow('Malformed persisted LiftJob payload');
+    } else {
+      // A valid payload alone was never a member of the status-bound admission inventory.
+      expect(await publisher.enqueueKnowledgeAssetVmPublish(request)).not.toBe(jobId);
+    }
+  });
+
+  it.each([
+    ['older', false], ['newer', false], ['older', true], ['newer', true],
+  ] as const)('keeps all-status sibling semantics with %s unindexed and held=%s', async (unindexed, held) => {
+    const request = kaVmPublishRequest();
+    const failedId = await (held ? driveToFailed(request) : driveToRetryableFailed(request));
+    const publisher = createPublisher();
+    const failed = await publisher.getStatus(failedId);
+    if (!failed) throw new Error('failed seed missing');
+    const finished: LiftJob = {
+      jobId: 'newer-finalized', jobSlug: 'newer-finalized', request: failed.request,
+      status: 'finalized',
+      timestamps: { acceptedAt: now + 1_000, updatedAt: now + 1_000 },
+      retries: { retryCount: 0, maxRetries: 10 },
+      claim: { walletId: 'finalized-wallet' }, validation: KA_VM_VALIDATION,
+      finalization: { mode: 'local' },
+      controlPlane: { jobRef: jobSubject('newer-finalized') },
+    };
+    await store.insert(serializeJob(finished, DEFAULT_CONTROL_GRAPH_URI));
+    await store.deleteByPattern({
+      subject: jobSubject(unindexed === 'older' ? failedId : finished.jobId),
+      predicate: CONTROL_LIFECYCLE_KEY, graph: DEFAULT_CONTROL_GRAPH_URI,
+    });
+    restartProcess();
+    now += 2_000;
+    if (held) {
+      await expect(publisher.enqueueKnowledgeAssetVmPublish(request)).rejects.toMatchObject({
+        code: 'LIFT_JOB_PENDING_CHAIN_PROOF', existingJobId: failedId,
+      });
+    } else {
+      const admitted = await publisher.enqueueKnowledgeAssetVmPublish(request);
+      expect(admitted).not.toBe(failedId);
+      expect(admitted).not.toBe(finished.jobId);
+      expect((await publisher.getStatus(admitted))?.status).toBe('accepted');
+    }
+    expect((await publisher.getStatus(failedId))?.status).toBe('failed');
+    expect((await publisher.getStatus(finished.jobId))?.status).toBe('finalized');
   });
 
   it('is indexed: a lookup issues a single object-bound query, not a full scan (AC5)', async () => {

@@ -1,4 +1,13 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  CONTROL_NEXT_RETRY_AT,
+  CONTROL_PAYLOAD,
+  CONTROL_STATUS,
+  DEFAULT_CONTROL_GRAPH_URI,
+  integer,
+  jobSubject,
+  literal,
+} from '../src/async-lift-control-plane.js';
 import { resolveAsyncLiftRetryTuning, type LiftJob } from '../src/index.js';
 import {
   createAsyncLift2270Harness,
@@ -72,8 +81,13 @@ describe('GH#2270 async lift automatic retry lane', () => {
     expect(scheduledDelay(failed as LiftJob)).toBe(100);
     expect(executed).toHaveLength(0);
 
-    // Not due yet: the sweep leaves it failed.
+    // Not due yet: no failed payload crosses the store boundary.
+    const querySpy = vi.spyOn(h.store, 'query');
     expect(await publisher.claimNext('wallet-2')).toBeNull();
+    const retryRead = querySpy.mock.calls.findIndex(([, options]) => options?.source === 'publisher.asyncLift.claimCandidates');
+    expect(retryRead).toBeGreaterThanOrEqual(0);
+    expect(await querySpy.mock.results[retryRead]!.value).toMatchObject({ type: 'bindings', bindings: [] });
+    querySpy.mockRestore();
     expect((await publisher.getStatus(jobId))?.status).toBe('failed');
 
     h.advance(100);
@@ -259,7 +273,12 @@ describe('GH#2270 async lift automatic retry lane', () => {
     h.advance(1_000);
 
     const disabled = createCorruptHeadPublisher({ autoRetryEnabled: false });
+    const querySpy = vi.spyOn(h.store, 'query');
     expect(await disabled.claimNext('wallet-2')).toBeNull();
+    expect(querySpy.mock.calls.some(([, options]) =>
+      options?.source === 'publisher.asyncLift.claimCandidates' || options?.source === 'publisher.asyncLift.list',
+    )).toBe(false);
+    querySpy.mockRestore();
     const stranded = await disabled.getStatus(jobId);
     expect(stranded?.status).toBe('failed');
     expect(stranded?.retries.retryCount).toBe(0);
@@ -370,5 +389,23 @@ describe('GH#2270 async lift automatic retry lane', () => {
 
     expect(afterFirstSweep.failed).toBe(1);
     expect(afterSecondSweep.failed).toBe(0);
+  });
+
+  it('validates the durable payload after indexed retry selection and skips malformed candidates', async () => {
+    const publisher = createCorruptHeadPublisher({ retryBackoffBaseMs: 10_000, rand: () => 0.5 });
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const failed = await failWithCorruptHead(publisher, 'wallet-1');
+    // A stale derived index cannot override the future retry time in the canonical payload.
+    await h.store.deleteByPattern({ graph: DEFAULT_CONTROL_GRAPH_URI, subject: jobSubject(jobId), predicate: CONTROL_NEXT_RETRY_AT });
+    await h.store.insert([
+      { graph: DEFAULT_CONTROL_GRAPH_URI, subject: jobSubject(jobId), predicate: CONTROL_NEXT_RETRY_AT, object: integer(1) },
+      { graph: DEFAULT_CONTROL_GRAPH_URI, subject: jobSubject('malformed'), predicate: CONTROL_NEXT_RETRY_AT, object: integer(1) },
+      { graph: DEFAULT_CONTROL_GRAPH_URI, subject: jobSubject('malformed'), predicate: CONTROL_STATUS, object: literal('failed') },
+      { graph: DEFAULT_CONTROL_GRAPH_URI, subject: jobSubject('malformed'), predicate: CONTROL_PAYLOAD, object: literal('{bad-json') },
+    ]);
+    expect(await publisher.claimNext('wallet-2')).toBeNull();
+    expect((await publisher.getStatus(jobId))?.timestamps.nextRetryAt).toBe(failed.timestamps.nextRetryAt);
+    h.advance(20_000);
+    expect((await publisher.claimNext('wallet-2'))?.jobId).toBe(jobId);
   });
 });

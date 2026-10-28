@@ -74,7 +74,7 @@ export class ConfirmedCatalogObligationErrorV1 extends Error {
       txIndex: transaction.txIndex, kaId: transaction.kaId, batchId: transaction.batchId,
       startKAId: transaction.startKAId, endKAId: transaction.endKAId,
     });
-    this.retry = structuredClone(input);
+    this.retry = structuredClone({ ...input, catalogObligationRequired: true });
   }
 
   get recoveryEvidence(): Readonly<ConfirmedCatalogObligationRecoveryV1> | undefined {

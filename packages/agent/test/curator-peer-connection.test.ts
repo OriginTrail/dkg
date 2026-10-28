@@ -19,7 +19,7 @@ function makeAgent(
       ? [{ remotePeer: { toString: () => CURATOR_PEER_ID } }]
       : [] } },
     peerResolver: { connect },
-    log: { warn: vi.fn() },
+    log: { warn: vi.fn(), debug: vi.fn() },
     markConnected: () => { connected = true; },
   };
 }
@@ -67,5 +67,18 @@ describe('curator connection recovery request', () => {
       agent, CURATOR_PEER_ID, undefined, CONTEXT, () => undefined,
     )).toBe(true);
     expect(agent.peerResolver.connect).not.toHaveBeenCalled();
+  });
+
+  it('logs each route the resolver tries at debug level; the warning names the last failure only', async () => {
+    const agent = makeAgent();
+    agent.peerResolver.connect.mockImplementationOnce(async (_peer: string, options: { log?: (message: string) => void }) => {
+      options.log?.('Connection candidate /ip4/10.0.0.4/tcp/4001 failed: timed out');
+      throw new Error('failed to connect via relay with status NO_RESERVATION');
+    });
+    await expect(ensureCuratorConnected(
+      agent, CURATOR_PEER_ID, undefined, CONTEXT, () => undefined,
+    )).resolves.toBe(false);
+    expect(agent.log.debug).toHaveBeenCalledWith(CONTEXT, 'Connection candidate /ip4/10.0.0.4/tcp/4001 failed: timed out');
+    expect(agent.log.warn).toHaveBeenCalledWith(CONTEXT, expect.stringContaining('NO_RESERVATION'));
   });
 });

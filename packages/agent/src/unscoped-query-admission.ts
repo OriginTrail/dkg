@@ -6,7 +6,7 @@ import {
   parseContextGraphUri,
   SYSTEM_CONTEXT_GRAPHS,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, type TripleStore } from '@origintrail-official/dkg-storage';
+import { GraphManager, storeLaneInflightLimit, type TripleStore } from '@origintrail-official/dkg-storage';
 import { runBoundedOperation } from './bounded-operation.js';
 import { strip } from './dkg-agent-utils.js';
 import { everyWithConcurrency } from './map-with-concurrency.js';
@@ -79,7 +79,8 @@ export async function canReadUnscopedQuery(
       ? await deps.prepareReadChecks(ids, signal)
       : deps.canReadContextGraph;
     signal.throwIfAborted();
-    return await everyWithConcurrency(ids, 4, async (id, _index, readSignal) => {
+    const readWidth = Math.min(4, storeLaneInflightLimit(deps.store) ?? 4);
+    return await everyWithConcurrency(ids, readWidth, async (id, _index, readSignal) => {
       readSignal.throwIfAborted();
       const allowed = await canRead(id, readSignal);
       readSignal.throwIfAborted();

@@ -5,7 +5,7 @@ import {
   type ContextGraphReadAuthorityDecision,
   type DKGAgent,
 } from '@origintrail-official/dkg-agent';
-import { DKGEvent, resolveWithinAbort } from '@origintrail-official/dkg-core';
+import { DKGEvent, resolveWithinAbort, startRequestAbortLifecycle } from '@origintrail-official/dkg-core';
 import type { DashboardDB } from '@origintrail-official/dkg-node-ui';
 import { readContextGraphReadiness } from './context-graph-readiness.js';
 import { classifyEmptyPrivateVmReadiness, withProvenEmptyPrivateVmReadiness } from './context-graph-empty-vm-readiness-owner.js';
@@ -40,6 +40,7 @@ export async function settlePrivateEmptyVmAtSubscribe(
   trace('subscribe', 'candidate');
   return settlePrivateEmptyVm(
     'subscribe', agent, dashboard, contextGraphId, callerAgentAddress, SUBSCRIBE_SETTLEMENT_TIMEOUT_MS,
+    agent.node?.stopSignal,
   );
 }
 
@@ -93,30 +94,6 @@ export async function settlePrivateEmptyVmAfterJoinMetadata(
   return true;
 }
 
-/**
- * One signal for the deadline and the node's stop. The stop signal lives as
- * long as the node, so nothing derived from it stays registered on it once
- * the settlement is over.
- */
-function endingWithEither(
-  deadline: AbortSignal,
-  stop: AbortSignal | undefined,
-): { signal: AbortSignal; release: () => void } {
-  if (stop === undefined) return { signal: deadline, release: () => {} };
-  const controller = new AbortController();
-  const end = () => controller.abort();
-  if (deadline.aborted || stop.aborted) end();
-  deadline.addEventListener('abort', end, { once: true });
-  stop.addEventListener('abort', end, { once: true });
-  return {
-    signal: controller.signal,
-    release: () => {
-      deadline.removeEventListener('abort', end);
-      stop.removeEventListener('abort', end);
-    },
-  };
-}
-
 async function settlePrivateEmptyVm(
   origin: SettlementOrigin,
   agent: DKGAgent,
@@ -126,7 +103,7 @@ async function settlePrivateEmptyVm(
   timeoutMs: number,
   stopSignal?: AbortSignal,
 ): Promise<boolean> {
-  const { signal, release } = endingWithEither(AbortSignal.timeout(timeoutMs), stopSignal);
+  const { signal, release } = startRequestAbortLifecycle(timeoutMs, [stopSignal]);
   // One second within the subscribe deadline; a longer deadline retries less often.
   const maxRetryDelayMs = Math.max(1_000, Math.floor(timeoutMs / 8));
   const settle = async (): Promise<boolean> => {

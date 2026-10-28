@@ -1,3 +1,4 @@
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 /**
  * GH#3081 — a confirmed publication is terminal once its catalog placement is durably owed, not
  * once the placement was attempted.
@@ -146,6 +147,8 @@ describe('a confirmed publication and its catalog placement', () => {
 
       const job = await path.job(jobId);
       expect(job?.status).toBe('finalized');
+      expect(await agent.assertion.history(CONTEXT_GRAPH_ID, asset.assertionCoordinate, { agentAddress: AUTHOR }))
+        .toMatchObject({ state: 'published', publishedUal: asset.seal.kaUal });
       expect(job?.timestamps).toMatchObject({ finalityObservedAt: 1_000, finalizedAt: 1_000 });
       expect(await path.postFinalityWaitMs(jobId)).toBe(0);
 
@@ -290,7 +293,7 @@ describe('a confirmed publication and its catalog placement', () => {
       expect(parked.entries()).toBe(1);
       expect(fixture.queue()).toMatchObject({ pending: 6, oldestPendingAgeMs: 1_000, passRunning: true });
       expect(Object.keys(fixture.queue()!).sort()).toEqual([
-        'cooldownSkips', 'depth', 'lastPassDurationMs', 'oldestPendingAgeMs', 'oldestWaiterAgeMs',
+        'cooldownSkips', 'depth', 'failures', 'lastPassDurationMs', 'oldestPendingAgeMs', 'oldestWaiterAgeMs',
         'passRunning', 'pending', 'waiters',
       ]);
 
@@ -420,7 +423,7 @@ describe('a confirmed publication and its catalog placement', () => {
     expect(fixture.catalogRows()).toBe('1');
   }, 120_000);
 
-  it('retains owned confirmed evidence for a synchronous observer-only retry after marker refusal', async () => {
+  it.each([false, true])('retains owned confirmed evidence across catalog disable=%s for a synchronous observer-only retry', async disable => {
     const fixture = await startPlacementAgentV1({ name: 'sync-marker-refusal-evidence' });
     const asset = await seedPlacementAssetV1(fixture.agent, 'sync-refused', 97n);
     const transaction = { txHash: `0x${'97'.repeat(32)}`, blockNumber: 17, batchId: 97n, kaId: 97n };
@@ -437,8 +440,18 @@ describe('a confirmed publication and its catalog placement', () => {
     retry.seal.merkleRoot.fill(0);
     expect(pending.retryInput.seal.merkleRoot).toEqual(asset.seal.merkleRoot);
     expect(fixture.markers()).toEqual([]);
+    const config = (fixture.agent as unknown as { config: ReturnType<typeof confirmedPublicationCatalogConfigV1> }).config;
+    const enabled = { ...config };
+    if (disable) { Object.assign(config, confirmedPublicationCatalogConfigV1(false)); fixture.lane.inactive = true; }
     fixture.failMarkerWrite = undefined;
     await fixture.agent.observeRfc64ConfirmedVmV1(pending.retryInput);
+    if (disable) {
+      expect(fixture.markers()).toEqual([expect.objectContaining({ version: 2, assertionVersion: '1',
+        seal: canonicalGraphScopedAuthorSealFromAssertionSealV1(asset.seal) })]);
+      expect(fixture.catalogRows()).toBeNull();
+      Object.assign(config, enabled); fixture.lane.inactive = false;
+      for (const repair of fixture.markers()) fixture.agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair });
+    }
     await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect(fixture.markers()).toEqual([]);
     expect(fixture.catalogRows()).toBe('1');
@@ -542,7 +555,7 @@ describe('a confirmed publication and its catalog placement', () => {
     }
   }, 120_000);
 
-  it('retains confirmed tx evidence until its marker commits, then completes without another broadcast', async () => {
+  it.each([false, true])('retains confirmed tx evidence across catalog disable=%s until its marker commits without another broadcast', async disable => {
     const fixture = await startPlacementAgentV1({ name: 'terminal-marker-write-fails' });
     const asset = await seedPlacementAssetV1(fixture.agent, 'unrecorded', 97n);
     const path = createPublicationPathV1(fixture);
@@ -556,8 +569,21 @@ describe('a confirmed publication and its catalog placement', () => {
     expect(held?.broadcast?.txHash ?? held?.recovery?.txHashChecked).toBe(asset.txHash);
     expect(fixture.markers()).toEqual([]);
     expect(fixture.counts().repairs).toBe(0);
+    const config = (fixture.agent as unknown as { config: ReturnType<typeof confirmedPublicationCatalogConfigV1> }).config;
+    const enabled = { ...config };
+    if (disable) { Object.assign(config, confirmedPublicationCatalogConfigV1(false)); fixture.lane.inactive = true; }
+    // Even the disabled retry must retain the confirmed job while the marker store refuses it.
+    expect(await path.publisher.recover()).toBe(0);
+    expect((await path.job(jobId))?.status).not.toBe('finalized');
     fixture.failMarkerWrite = undefined;
     expect(await path.publisher.recover()).toBe(1);
+    if (disable) {
+      expect(fixture.markers()).toEqual([expect.objectContaining({ version: 2, assertionVersion: '1' })]);
+      expect((await path.job(jobId))?.status).toBe('finalized');
+      expect(fixture.catalogRows()).toBeNull();
+      Object.assign(config, enabled); fixture.lane.inactive = false;
+      for (const repair of fixture.markers()) fixture.agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair });
+    }
     await fixture.agent.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     expect((await path.job(jobId))?.status).toBe('finalized');
     expect(fixture.catalogRows()).toBe('1');

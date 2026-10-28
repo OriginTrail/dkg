@@ -49,6 +49,7 @@ describe('caller-retained confirmed catalog evidence', () => {
     await recoverConfirmedCatalogObligationV1(f.evidence, f.ports);
     expect(f.observe).toHaveBeenCalledOnce();
     const params = f.observe.mock.calls[0][0];
+    expect(params.catalogObligationRequired).toBe(true);
     expect(params.seal.reservedKaId?.toString()).toBe(f.evidence.seal.reservedKaId);
     expect(params.seal.authorAttestationR).toEqual(ethers.getBytes(f.evidence.seal.authorAttestationR));
     expect(f.submit).not.toHaveBeenCalled();
@@ -125,6 +126,7 @@ describe('caller-retained confirmed catalog evidence', () => {
     const f = await fixture();
     await recoverConfirmedCatalogObligationV1(f.evidence, f.ports);
     const params = f.observe.mock.calls[0][0];
+    expect(params.catalogObligationRequired).toBe(true);
     const error = new ConfirmedCatalogObligationErrorV1(params, f.receipt, new Error('disk refusal'));
     expect(JSON.parse(JSON.stringify(error.recoveryEvidence))).toEqual(f.evidence);
     expect(Object.isFrozen(error.recoveryEvidence)).toBe(true);

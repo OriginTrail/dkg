@@ -87,8 +87,8 @@ describe('async promote repairs a failed SWM pointer stamp (GH#2901)', () => {
         return runPromoteJob({
           job, queue: q, workerId: 'pointer-worker', now: clock.now, heartbeatIntervalMs: 0,
           log: (message) => { logs.push(message); },
-          runPromote: async (_request, markPromoteStarted) => {
-            await markPromoteStarted();
+          runPromote: async (_request) => {
+
             return target.assertion.promote(CG, NAME, { accessPolicy: 'public' });
           },
         });

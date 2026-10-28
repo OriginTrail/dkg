@@ -16,6 +16,8 @@ import { installHardhatACKProvider } from '../../agent/test/_helpers/v10-acks.js
 import type { Rfc64FinalizedPrivatePlacementRepairStoreV1 } from '../../agent/src/rfc64/finalized-private-placement-repair-store-v1.js';
 import { handleKnowledgeAssetsRoutes } from '../src/daemon/routes/knowledge-assets.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
+import { daemonState } from '../src/daemon/state.js';
+import { createPromoteWorkerSupervisor } from '../src/daemon/worker/async-promote-worker.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
 let snapshot: string;
@@ -39,8 +41,13 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       rfc64PublicCatalogAutoPublish: { peers: [], catalogIssuerDelegationExpiresAt: '1893456000000' },
       syncReconcilerEnabled: false, vmReconcilerEnabled: false });
     let server: Server | undefined;
+    let shareWorker: ReturnType<typeof createPromoteWorkerSupervisor> | undefined;
+    const priorWorkerAvailable = daemonState.promoteWorkerAvailable;
     try {
       await agent.start(); await installHardhatACKProvider(agent, chain);
+      shareWorker = createPromoteWorkerSupervisor({ agent, log: () => undefined });
+      await shareWorker.start();
+      daemonState.promoteWorkerAvailable = true;
       const cg = `confirmed-http-${lane}`; const name = `sealed-${lane}`;
       await agent.createContextGraph({ id: cg, name: cg }); await agent.registerContextGraph(cg);
       const curatorAddress = new ethers.Wallet(HARDHAT_KEYS.CORE_OP).address;
@@ -62,6 +69,9 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       let refusing = true;
       host.rfc64PersistenceV1.finalizedPrivatePlacementRepairs = Object.freeze({
         list: () => repairs.list(), delete: repair => repairs.delete(repair),
+        readFailure: repair => repairs.readFailure(repair),
+        writeFailure: (repair, failure) => repairs.writeFailure(repair, failure),
+        writeFailures: failures => repairs.writeFailures(failures),
         put: async repair => { if (refusing) throw new Error('injected inventory SQLite write refusal'); await repairs.put(repair); },
       });
       vi.spyOn(host, 'resolveRfc64CatalogAuthoringLaneV1').mockReturnValue(null);
@@ -216,6 +226,8 @@ describe('confirmed catalog obligation across synchronous HTTP', () => {
       vi.restoreAllMocks();
       server?.closeAllConnections();
       if (server) await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));
+      daemonState.promoteWorkerAvailable = priorWorkerAvailable;
+      await shareWorker?.stop();
       await agent.stop(); await agent.store.close(); await rm(dataDir, { recursive: true, force: true });
     }
   }, 120_000);

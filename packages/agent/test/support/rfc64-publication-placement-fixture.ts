@@ -15,8 +15,9 @@ import type { ConfirmedCatalogTransactionEvidenceV1 } from '../../src/confirmed-
  * chain normalization answers as it does for a publish that is the asset's current version (the
  * test file mocks the normalizer module for that; see {@link recoveredNamedKaPublishV1}), and the
  * agent's own finalization handler gives a staged answer about the VM content and writes none.
- * The fixture's assets have no named lifecycle record, so recovery writes its receipt without
- * stamping one, as it does for any assertion that moved on.
+ * Queued publications retain normal created/promoted lifecycle metadata. Recovery must prove
+ * and stamp their descriptors before finalizing, independently of deferred catalog placement.
+ * Observer-only fixtures exercise catalog obligations without enqueueing a named publication.
  *
  * Time: one clock the row moves by hand drives the publisher's job timestamps and the placement
  * timing, so a wait is exactly what the row parked.
@@ -29,6 +30,7 @@ import {
   buildAssertionSealQuads,
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   contextGraphAssertionUri,
+  assertionLifecycleUri,
   contextGraphMetaUri,
   contextGraphPrivateUri,
   createGraphKnowledgeAssetScope,
@@ -41,6 +43,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   TripleStoreAsyncLiftPublisher,
+  generateAssertionCreatedMetadata,
+  generateAssertionPromotedMetadata,
   type AsyncKnowledgeAssetVmPublishRecoveryEvidence,
   type AsyncLiftPublisherConfig,
   type KnowledgeAssetVmPublishRequest,
@@ -287,7 +291,7 @@ interface PlacementAgentInternalsV1 {
     }>,
     observer: CatalogPlacementWaiterObserverV1,
   ): Rfc64FinalizedPrivatePlacementRepairRequestV1;
-  afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<void>;
+  afterConfirmedGraphScopedVmPublishV1(input: ConfirmedVmPublishTailInputV1): Promise<boolean>;
 }
 
 function internalsOf(agent: DKGAgent): PlacementAgentInternalsV1 {
@@ -412,6 +416,9 @@ export async function startPlacementAgentV1(
   const markerStore = persistence.finalizedPrivatePlacementRepairs;
   const watchedMarkerStore: Rfc64FinalizedPrivatePlacementRepairStoreV1 = Object.freeze({
     list: () => markerStore.list(),
+    readFailure: (repair: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['readFailure']>[0]) => markerStore.readFailure(repair),
+    writeFailure: (...[repair, state]: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['writeFailure']>) => markerStore.writeFailure(repair, state),
+    writeFailures: (entries: Parameters<Rfc64FinalizedPrivatePlacementRepairStoreV1['writeFailures']>[0]) => markerStore.writeFailures(entries),
     put: async (repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>) => {
       if (hooks.failMarkerWrite !== undefined) throw hooks.failMarkerWrite;
       await markerStore.put(repair);
@@ -480,13 +487,36 @@ export async function seedPlacementAssetV1(
   });
 }
 
+/** Queue recovery owns a named descriptor; catalog-observer-only fixtures do not. */
+async function seedNamedPublicationLifecycleV1(agent: DKGAgent, asset: PlacementAssetV1): Promise<void> {
+  const { seal } = asset;
+  const lifecycle = {
+    contextGraphId: CONTEXT_GRAPH_ID, agentAddress: AUTHOR,
+    assertionName: asset.assertionCoordinate, kaNumber: asset.kaNumber,
+    timestamp: new Date(seal.finalizedAtIso),
+  };
+  await agent.store.insert(generateAssertionCreatedMetadata({ ...lifecycle, reservedUal: seal.kaUal }));
+  const promoted = generateAssertionPromotedMetadata({ ...lifecycle,
+    shareOperationId: asset.shareOperationId, rootEntities: [],
+    merkleHex: Buffer.from(seal.merkleRoot).toString('hex'),
+  });
+  await agent.store.delete(promoted.delete);
+  await agent.store.insert(promoted.insert);
+  await agent.store.insert(['contentScopeVersion', 'assertionVersion'].map(predicate => ({
+    graph: contextGraphMetaUri(CONTEXT_GRAPH_ID),
+    subject: assertionLifecycleUri(CONTEXT_GRAPH_ID, AUTHOR, lifecycle.assertionName),
+    predicate: `http://dkg.io/ontology/${predicate}`,
+    object: JSON.stringify(String(predicate === 'contentScopeVersion' ? seal.contentScopeVersion : seal.assertionVersion)),
+  })));
+}
+
 /** One call of the real post-confirmation observer for `asset`, as a completion path makes it. */
-export function observeConfirmedV1(
+export async function observeConfirmedV1(
   agent: DKGAgent,
   asset: PlacementAssetV1,
   publicationLabel: 'publish' | 'queued publish' = 'queued publish',
 ): Promise<void> {
-  return agent.observeRfc64ConfirmedVmV1({
+  await agent.observeRfc64ConfirmedVmV1({
     contextGraphId: CONTEXT_GRAPH_ID,
     assertionCoordinate: asset.assertionCoordinate,
     shareOperationId: asset.shareOperationId,
@@ -501,10 +531,10 @@ export function observeConfirmedV1(
  * The tail a synchronous publish of `asset` awaits before it answers: `publishFromFinalizedAssertion`
  * ends in this call and returns its result right after it.
  */
-export function confirmedSynchronousPublishTailV1(
+export async function confirmedSynchronousPublishTailV1(
   agent: DKGAgent, asset: PlacementAssetV1, confirmedTransaction?: ConfirmedCatalogTransactionEvidenceV1,
 ): Promise<void> {
-  return internalsOf(agent).afterConfirmedGraphScopedVmPublishV1({
+  await internalsOf(agent).afterConfirmedGraphScopedVmPublishV1({
     status: 'confirmed',
     confirmedTransaction,
     contextGraphId: CONTEXT_GRAPH_ID,
@@ -574,6 +604,7 @@ export function queuedPublishRequestV1(asset: PlacementAssetV1): KnowledgeAssetV
     name: asset.assertionCoordinate,
     agentAddress: AUTHOR,
     shareOperationId: asset.shareOperationId,
+    catalogObligationRequired: true,
     roots: [],
     contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: seal.kaUal,
@@ -758,6 +789,7 @@ export function createPublicationPathV1(
   });
 
   const enqueue = async (asset: PlacementAssetV1): Promise<string> => {
+    await seedNamedPublicationLifecycleV1(agent, asset);
     const request = queuedPublishRequestV1(asset);
     queued.set(asset.txHash.toLowerCase(), { request, asset });
     return publisher.enqueueKnowledgeAssetVmPublish(request);

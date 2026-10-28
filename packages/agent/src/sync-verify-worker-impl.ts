@@ -93,7 +93,7 @@ function verifySyncedDataImpl(
   };
 }
 
-function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
+export function parseAndFilterNQuads(text: string, graphUri: string, contextGraphId: string): SyncParseResult {
   const rawQuads = parseNQuads(text);
   const cgUriPrefix = `did:dkg:context-graph:${contextGraphId}/`;
   const quads: Quad[] = [];
@@ -471,7 +471,8 @@ export function processDurableBatchForWire(
   };
 }
 
-function processSharedMemoryBatch(
+/** Exported for tests that run the pull verifier on the main thread, as `verifySyncedData` is. */
+export function processSharedMemoryBatch(
   wsDataQuads: Quad[],
   wsMetaQuads: Quad[],
   contextGraphId?: string,

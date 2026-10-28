@@ -6,7 +6,7 @@ import {
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
-import type { ConfirmedCatalogObligationRecoveryV1 } from '../confirmed-catalog-obligation-error.js';
+import { parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogObligationRecoveryV1 } from '../confirmed-catalog-obligation-error.js';
 import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
 import {
   resolveDurableGraphScopedAuthorSealCandidateV1, resolveArchivedGraphScopedAuthorSealCandidateV1,
@@ -65,8 +65,30 @@ export async function recoverConfirmedCatalogObligationV1(
     || lifecycleAddress.toLowerCase() !== seal.assertedAtKav10Address
     || receipt.knowledgeAssetsContract?.toLowerCase() !== assetsAddress.toLowerCase()) throw invalidEvidence();
   ports.assertCurrent();
-  await ports.observe({ contextGraphId: evidence.contextGraphId,
+  await ports.observe({ catalogObligationRequired: true, contextGraphId: evidence.contextGraphId,
     assertionCoordinate: evidence.assertionCoordinate, subGraphName: null,
     seal: candidate.seal, assertionUri: contextGraphAssertionUri(evidence.contextGraphId, candidate.coordinate.agentAddress, evidence.assertionCoordinate),
     ctx: createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
+}
+
+/** Capture the caller lifetime and graph generation before any evidence read awaits. */
+export async function recoverRetainedCatalogObligationV1(input: unknown, ports: {
+  chain: ChainAdapter; store: TripleStore; signal(): AbortSignal;
+  capture(graph: string): unknown;
+  isCurrent(graph: string, generation: unknown): boolean;
+  resolveBinding(graph: string, signal: AbortSignal): Promise<{ onChainId: string } | null>;
+  observe(params: ObserveRfc64ConfirmedVmParamsV1): Promise<boolean>;
+}): Promise<void> {
+  const evidence = parseConfirmedCatalogObligationRecoveryV1(input);
+  const signal = ports.signal();
+  const generation = ports.capture(evidence.contextGraphId);
+  await recoverConfirmedCatalogObligationV1(evidence, {
+    chain: ports.chain, store: ports.store, signal,
+    resolveBinding: () => ports.resolveBinding(evidence.contextGraphId, signal),
+    assertCurrent: () => {
+      signal.throwIfAborted();
+      if (!ports.isCurrent(evidence.contextGraphId, generation)) throw new Error('Confirmed catalog recovery graph binding changed');
+    },
+    observe: async params => { await ports.observe(params); },
+  });
 }

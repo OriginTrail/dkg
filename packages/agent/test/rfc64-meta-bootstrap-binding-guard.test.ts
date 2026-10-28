@@ -264,6 +264,41 @@ describe('curator-meta-refresh: relayed (unauthenticated-source) snapshot guard'
     }
   });
 
+  it('reports a peer that holds no definition as a miss, and keeps the warning for a refused snapshot', async () => {
+    const store = new OxigraphStore();
+    try {
+      // The bootstrap asks connected peers in turn. One that never held the
+      // graph answers with a complete, empty page.
+      const miss = createRefreshAgent(store, []);
+      await expect(runCuratorMetaRefreshFromPeer(miss.agent, contextGraphId, SERVING_PEER_ID, relayedOptions))
+        .resolves.toBe(false);
+      expect(miss.log.warn).not.toHaveBeenCalled();
+      expect(miss.log.info).toHaveBeenCalledOnce();
+      expect(miss.log.info.mock.calls[0]?.[1])
+        .toBe(`Peer ${SERVING_PEER_ID.slice(-8)} holds no definition of "${contextGraphId}"`);
+
+      // Rows that do not make a public definition are a snapshot, and refused.
+      const withoutPolicy = servedPublicMetaQuads(contextGraphId, SERVING_PEER_ID)
+        .filter((quad) => quad.predicate !== DKG_ONTOLOGY.DKG_ACCESS_POLICY);
+      const refused = createRefreshAgent(store, withoutPolicy);
+      await expect(runCuratorMetaRefreshFromPeer(refused.agent, contextGraphId, SERVING_PEER_ID, relayedOptions))
+        .resolves.toBe(false);
+      expect(refused.log.warn).toHaveBeenCalledOnce();
+      expect(String(refused.log.warn.mock.calls[0]?.[1])).toContain('Rejected curator metadata snapshot');
+
+      // Outside the public bootstrap the peer asked is the curator itself, and
+      // its empty answer keeps the warning.
+      const curator = createRefreshAgent(store, []);
+      await expect(runCuratorMetaRefreshFromPeer(curator.agent, contextGraphId, SERVING_PEER_ID, { force: true }))
+        .resolves.toBe(false);
+      expect(curator.log.warn).toHaveBeenCalledOnce();
+      expect(String(curator.log.warn.mock.calls[0]?.[1])).toContain('Rejected curator metadata snapshot');
+      expect(await rootMetaRows(store, contextGraphId)).toEqual([]);
+    } finally {
+      await store.close();
+    }
+  });
+
   it('leaves the authenticated curator refresh binding exactly as before', async () => {
     const store = new OxigraphStore();
     try {

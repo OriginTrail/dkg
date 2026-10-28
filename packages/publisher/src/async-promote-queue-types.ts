@@ -1,3 +1,7 @@
+import type { ShareReconciliationInput, ShareReconciliationResult } from './share-reconciliation.js';
+import type { ShareCompletionEvidence } from './share-completion-evidence.js';
+import type { PromoteNoEffectProof } from './promote-no-effect-rejection.js';
+import type { PromoteRecoveryBinding } from './promote-recovery-binding.js';
 /**
  * Async Promote Queue — public types.
  *
@@ -44,7 +48,7 @@ export type PromoteJobState = (typeof PROMOTE_JOB_STATES)[number];
  * legacy job). Bump this constant any time the on-disk job shape or
  * the recovery invariants change.
  */
-export const ASYNC_PROMOTE_QUEUE_FORMAT_VERSION = 3;
+export const ASYNC_PROMOTE_QUEUE_FORMAT_VERSION = 4;
 
 /**
  * Oldest persisted job format safe for automatic startup reclaim when the
@@ -70,16 +74,30 @@ export type PromoteFailureClassification = 'transient' | 'cap_exceeded' | 'fatal
  * A promote request — the payload the queue persists for the worker to
  * replay. Validated at the HTTP layer; the queue stores it verbatim.
  */
-export interface PromoteRequest {
+interface PromoteRequestScope {
   contextGraphId: string;
   subGraphName?: string;
   assertionName: string;
-  entities: readonly string[] | 'all';
   /** Worker-facing storage namespace used to locate the WM draft; conflict keys canonicalize separately. */
   agentAddress?: string;
   /** Signing author used by finalize/seal during promote replay. */
   authorAgentAddress?: string;
 }
+
+export interface OrdinaryPromoteRequest extends PromoteRequestScope {
+  recoveryBinding?: undefined;
+  entities: readonly string[] | 'all';
+}
+
+/** Internal immutable share-recovery authority; never client supplied. */
+export interface BoundPromoteRequest extends PromoteRequestScope {
+  recoveryBinding: PromoteRecoveryBinding;
+  entities: 'all';
+  agentAddress: string;
+}
+
+export type PromoteRequest = OrdinaryPromoteRequest | BoundPromoteRequest;
+export type BoundPromoteJob = PromoteJob & { request: BoundPromoteRequest; formatVersion: 4 };
 
 /**
  * Per-attempt lease metadata. Present only when state is `running`.
@@ -108,6 +126,14 @@ export interface PromoteAttemptError {
    * never reach the queue row. The recovery sweep keys on it.
    */
   diagnosticCode?: string;
+  /**
+   * The context-graph authority reason behind a retryable prerequisite failure,
+   * when the worker recognized one from its closed set (for example
+   * `approved-member-metadata-pending`). Never free text.
+   */
+  authorityReason?: string;
+  /** Producer certificate; only the fenced first failed attempt may retire its owner. */
+  noEffectProof?: PromoteNoEffectProof;
 }
 
 export interface PromoteAttemptState {
@@ -118,6 +144,8 @@ export interface PromoteAttemptState {
 }
 
 export interface PromoteResult {
+  /** Additive versioned observation; not queue replay authority. */
+  shareEvidence?: ShareCompletionEvidence;
   promotedCount: number;
   succeededAt: number;
   /** Informational only — populated when the worker observed the gossip payload size. */
@@ -158,6 +186,8 @@ export interface PromoteJob {
   lease?: PromoteLease;
   attempt: PromoteAttemptState;
   result?: PromoteResult;
+  /** Contiguous initial attempts proven to have failed before promotion started. */
+  preparationAttempts?: number;
   commitMarker?: PromoteCommitMarker;
   /**
    * Stable string describing why a job is currently in its state when
@@ -181,6 +211,28 @@ export interface PromoteListFilter {
   contextGraphId?: string;
   limit?: number;
 }
+
+/** A paged listing request (OT-RFC-73 P8a). Every call that goes through `listPage` is paged; `list` is the complete read. */
+export interface PromoteListPageRequest {
+  /** The `nextCursor` of the previous page, unchanged; absent for the first page. A malformed one is a `PromoteListRequestError`. */
+  cursor?: string;
+  /** Rows per page: 100 when absent, at most 1,000. */
+  pageSize?: number;
+}
+
+/**
+ * One page of the keyset listing, oldest `enqueuedAt` first and then `jobId` by code point (not the ready-time order of `list`).
+ * `complete` means no row followed this page at the time it was read, never proof that nothing was added since.
+ */
+export interface PromoteJobPage {
+  jobs: PromoteJob[];
+  /** Present exactly when `complete` is false. */
+  nextCursor?: string;
+  complete: boolean;
+}
+
+/** The fields that name a share's selector: the uniqueness key a job is stored under. */
+export type PromoteSelector = Pick<PromoteRequest, 'contextGraphId' | 'subGraphName' | 'assertionName' | 'agentAddress'>;
 
 /**
  * Result of a startup recovery sweep. See RFC §4.4.
@@ -224,7 +276,7 @@ export interface PromotePostCommitRecoveryEvent {
 /** The exact failure transition acknowledged after the queue's write and flush. */
 export type PromoteFailureTransition =
   | Readonly<{ state: 'failed_retrying'; jobId: string; attemptCount: number; nextRetryAt: number }>
-  | Readonly<{ state: 'failed'; jobId: string; attemptCount: number }>;
+  | Readonly<{ state: 'failed'; jobId: string; attemptCount: number; retiredNoEffect?: true }>;
 
 export type PromoteStats = Record<PromoteJobState, number>;
 
@@ -237,10 +289,19 @@ export interface AsyncPromoteQueue {
   readonly effectiveLeaseMs: number;
   // RFC §3.1
   enqueue(request: PromoteRequest): Promise<string>;
+  /** Persist ownership and the inline lease together, before content mutation. */
+  enqueueAndClaim?(request: BoundPromoteRequest, workerId: string): Promise<BoundPromoteJob>;
+  /** Bind a claimed, unstarted job under the publisher lifecycle fence. Never HTTP supplied. */
+  bindRecovery?(jobId: string, claimToken: string, binding: PromoteRecoveryBinding): Promise<BoundPromoteJob>;
   // RFC §3.2
   getStatus(jobId: string): Promise<PromoteJob | null>;
   // RFC §3.3
   list(filter?: PromoteListFilter): Promise<PromoteJob[]>;
+  /** One bounded page of the listing (cursor + page size), in the keyset order of `PromoteJobPage`. */
+  listPage?(filter?: Omit<PromoteListFilter, 'limit'>, request?: PromoteListPageRequest): Promise<PromoteJobPage>;
+  /** Every job stored under the selector's uniqueness key, in any state, in `list` order. */
+  listForSelector?(selector: PromoteSelector): Promise<PromoteJob[]>;
+  reconcileShare?(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
   // RFC §3.4
   cancel(jobId: string): Promise<void>;
   recover(jobId: string): Promise<void>;
@@ -277,6 +338,11 @@ export interface AsyncPromoteQueue {
   };
 }
 
+/** Required on agent-owned queues that expose the reconciliation read API. */
+export interface PromoteShareReconciler {
+  reconcileShare(input: ShareReconciliationInput): Promise<ShareReconciliationResult>;
+}
+
 /**
  * #1837 — atomic by-exact-jobId terminal cleanup for the SWM share (promote) queue.
  * Segregated off the base contract (mirrors the publisher-side VmPublishTerminalJobClearer);
@@ -290,6 +356,8 @@ export interface PromoteTerminalJobClearer {
 }
 
 export interface AsyncPromoteQueueConfig {
+  /** Queue admission budget, including mutex wait. Defaults to 10 seconds. */
+  admissionTimeoutMs?: number;
   /** Defaults to `urn:dkg:promote-queue:control-plane` per RFC §4.1. */
   graphUri?: string;
   /** Defaults to 5 — promote retries are cheap. RFC §4.2. */
@@ -312,6 +380,12 @@ export interface AsyncPromoteQueueConfig {
   backoff?: (attemptCount: number) => number;
   /** Random source of the default backoff's jitter, in [0, 1). Defaults to `Math.random`. */
   rand?: () => number;
+  /** Payloads read per hold of the queue's mutex by a complete listing (`list`); defaults to 1,000 (the paged maximum). */
+  listPageSize?: number;
+  /** Keys read per hold, and per ordered scan, by a complete listing; defaults to 10,000, at most 100,000. */
+  listKeyPageSize?: number;
+  /** A complete listing of more rows than this logs a warning that points at cursor paging; defaults to 5,000. */
+  listWarnRows?: number;
 }
 
 /**
@@ -325,11 +399,21 @@ export class PromoteJobConflictError extends Error {
   constructor(
     readonly existingJobId: string,
     readonly key: { contextGraphId: string; subGraphName?: string; assertionName: string; agentAddress?: string },
+    readonly observedAdmission = false,
   ) {
     const lane = key.agentAddress ? `, agentAddress=${key.agentAddress}` : '';
     super(
-      `Promote job already active for (${key.contextGraphId}, ${key.subGraphName ?? '<no-sub>'}, ${key.assertionName}${lane}): ${existingJobId}`,
+      observedAdmission ? `Previously observed share admission: ${existingJobId}; inspect job status for its current state`
+      : `Promote job already active for (${key.contextGraphId}, ${key.subGraphName ?? '<no-sub>'}, ${key.assertionName}${lane}): ${existingJobId}`,
     );
+  }
+}
+
+/** Cancellation conflicts with a queue-owned lifecycle obligation or active lease. */
+export class PromoteJobCancellationConflictError extends Error {
+  override readonly name = 'PromoteJobCancellationConflictError';
+  constructor(readonly jobId: string, reason: string) {
+    super(`Cannot cancel job ${jobId}: ${reason}`);
   }
 }
 
@@ -346,5 +430,13 @@ export class PromoteJobLeaseError extends Error {
     reason: string,
   ) {
     super(`Stale promote lease for ${jobId}: ${reason}`);
+  }
+}
+
+/** Atomic admission may have committed; callers must observe this owner before retrying. */
+export class PromoteAdmissionUncertainError extends Error {
+  override readonly name = 'PromoteAdmissionUncertainError';
+  constructor(readonly jobId: string, cause: unknown) {
+    super('Durable share admission could not be confirmed', { cause });
   }
 }

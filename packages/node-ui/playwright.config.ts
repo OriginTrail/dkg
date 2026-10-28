@@ -45,6 +45,17 @@ const WEB_SERVER_TIMEOUT_MS = CI
   : DEVNET_BOOTSTRAP_TIMEOUT_MS + 120_000;
 
 export default defineConfig({
+  metadata: {
+    subject: process.env.DKG_CI_SUBJECT ?? process.env.GITHUB_SHA,
+    profile: process.env.DKG_CI_PROFILE,
+    seed: process.env.DKG_PROPERTY_SEED,
+    requestedTrials: process.env.DKG_PROPERTY_RUNS,
+    managedLocal: process.env.PW_DEVNET_LOCAL === '1',
+    runId: process.env.GITHUB_RUN_ID,
+    attempt: process.env.GITHUB_RUN_ATTEMPT,
+    node: process.version,
+    platform: process.platform,
+  },
   testDir: './e2e/specs',
   // `devnet-local/` holds the heavy devnet specs trimmed OUT of the CI lane in
   // #1403 (on-chain KA mint + update attestation, destructive `clearAfter`

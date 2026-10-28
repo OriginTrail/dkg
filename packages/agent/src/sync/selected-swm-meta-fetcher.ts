@@ -15,7 +15,10 @@ import type {
   SharedMemoryMetadataFetchRequest,
   SharedMemoryMetadataFetcher,
 } from './requester/shared-memory-sync.js';
-import type { SelectedSwmMetaRetentionLease } from './selected-swm-meta-budget.js';
+import type {
+  SelectedSwmMetaRetentionLease,
+  SelectedSwmMetaRetentionReservation,
+} from './selected-swm-meta-budget.js';
 import type { SyncWorkAdmission } from './work-admission.js';
 import { DURABLE_DATA_SYNC_SESSION_TTL_MS } from './durable-session.js';
 import {
@@ -31,6 +34,16 @@ import {
  */
 const MAX_CONSECUTIVE_SHARED_POOL_YIELDS = 3;
 
+/**
+ * Longest wait of a transfer for the metadata pool.
+ *
+ * A fetch in flight for a small manifest answers many times within it. A
+ * transfer that waits behind slower fetches keeps its place in the sync
+ * admission, in its peer's queue and in the walk of its job meanwhile, so it
+ * gives up and ends as it did before it could wait.
+ */
+const MAX_POOL_WAIT_MS = 10_000;
+
 /** Exact metadata prefix retained only by one selected-provider transfer owner. */
 interface SelectedSwmMetaContinuationState {
   quads: Quad[];
@@ -45,6 +58,14 @@ interface SelectedSwmMetaContinuationState {
   metadataExpiresAtMs: number;
   /** Independent continuation created only after metadata is complete. */
   snapshotWalk?: SelectedManifestBoundSnapshotWalk;
+  /**
+   * The walk, and how many of its refs were resolved, when a round of the
+   * current outer invocation first replayed this completed manifest.
+   */
+  replayedAt?: {
+    readonly walk: SelectedManifestBoundSnapshotWalk | undefined;
+    readonly resolved: number;
+  };
   retentionLease: SelectedSwmMetaRetentionLease;
   /** Consecutive shared-pool yields since this prefix last grew. */
   sharedPoolYields: number;
@@ -327,6 +348,14 @@ export function createSelectedSwmMetaFetcher(options: {
     hasRetainedMetadataPrefix(state) || hasIncompleteSnapshotWalk(state)
   );
 
+  /** A round of this outer invocation replayed the manifest and its walk resolved nothing more. */
+  const replayedWithoutProgress = (state: SelectedSwmMetaContinuationState): boolean => {
+    const replayed = state.replayedAt;
+    if (replayed === undefined) return false;
+    const resolvedBefore = state.snapshotWalk === replayed.walk ? replayed.resolved : 0;
+    return (state.snapshotWalk?.resolvedCount() ?? 0) <= resolvedBefore;
+  };
+
   const retainedContinuationExpiry = (
     state: SelectedSwmMetaContinuationState,
   ): number | undefined => {
@@ -374,10 +403,46 @@ export function createSelectedSwmMetaFetcher(options: {
     request: SharedMemoryMetadataFetchRequest,
     state: SelectedSwmMetaContinuationState,
     allowFreshRestartRetry: boolean,
+    restarted?: SelectedSwmMetaRetentionReservation,
   ): Promise<SyncPageResult> => {
     // Reserve before yielding to transport. Overlapping selected invocations
     // therefore cannot both spend the same process-wide free allowance.
-    const reservation = state.retentionLease.reserve();
+    let reservation = restarted ?? state.retentionLease.reserve();
+    // Every fetch reserves a whole prefix allowance before it starts, so the
+    // pool admits only a few transfers at once however little they then
+    // retain. A transfer that holds nothing yet has no prefix to protect, and
+    // the continuation ledger grants no later pass to a round without
+    // progress: yielding here would report a timed-out page for a peer that
+    // was never asked. So while fetches are in flight it waits in line, and
+    // the budget hands it a whole allowance, never a share, once that leaves
+    // the transfers that are between two passes over their manifest the room
+    // for the next one. It waits for at most half of its work allowance, so
+    // that a transfer that does get the pool still has time to ask its peer,
+    // and never longer than `MAX_POOL_WAIT_MS`.
+    if (
+      reservation.exhaustion === 'shared'
+      && state.nextOffset === 0
+      && state.quads.length === 0
+    ) {
+      reservation.release();
+      const whole = await state.retentionLease.reserveWholeAllowance(
+        Math.min(
+          MAX_POOL_WAIT_MS,
+          Math.floor(request.workAdmission.capTimeout(Number.MAX_SAFE_INTEGER) / 2),
+        ),
+        request.signal,
+      );
+      if (request.signal?.aborted) {
+        // A recovery revoked while it waited neither holds the pool nor asks
+        // its peer.
+        whole?.release();
+        request.signal.throwIfAborted();
+      }
+      // Without a grant the transfer yields below, as it did before it could
+      // wait. It must not reserve again: what is free now is the room the
+      // budget kept for transfers that go on with their manifest.
+      if (whole) reservation = whole;
+    }
     const exhaustion = reservation.exhaustion;
     if (exhaustion === 'shared') {
       // Sibling transfers hold the whole process-wide allowance. Spending a
@@ -457,7 +522,7 @@ export function createSelectedSwmMetaFetcher(options: {
       const nextBytesEstimate = resumesPrefix
         ? state.bytesEstimate + fetchedBytesEstimate
         : fetchedBytesEstimate;
-      reservation.commitReplace(nextRows, nextBytesEstimate);
+      reservation.commitReplace(nextRows, nextBytesEstimate, fetched.completed);
       // This lease just grew, so any contention it waited through was the
       // transient kind. Start the stall counter over.
       state.sharedPoolYields = 0;
@@ -488,45 +553,54 @@ export function createSelectedSwmMetaFetcher(options: {
       if (state.completed) completedContextGraphs.add(request.contextGraphId);
       return { ...fetched, quads: state.quads };
     } catch (error) {
-      reservation.release();
-      if (
-        allowFreshRestartRetry
-        && error instanceof SyncPageAccumulationLimitError
-        && error.responderSessionStartedFresh === true
-        && state.nextOffset > 0
-      ) {
-        // The responder replaced its immutable row-list. Drop the obsolete full
-        // prefix and retry once with the full bounded allowance.
-        options.deleteCheckpoint(state.checkpointKey);
-        state.retentionLease.replace(0, 0);
-        state.quads = [];
-        state.bytesEstimate = 0;
-        state.nextOffset = 0;
-        state.completed = false;
-        state.metadataExpiresAtMs = 0;
-        state.snapshotWalk = undefined;
-        state.generation += 1;
-        completedContextGraphs.delete(request.contextGraphId);
-        return fetchRetained(request, state, false);
+      try {
+        if (
+          allowFreshRestartRetry
+          && error instanceof SyncPageAccumulationLimitError
+          && error.responderSessionStartedFresh === true
+          && state.nextOffset > 0
+        ) {
+          // The responder replaced its immutable row-list. Drop the obsolete
+          // full prefix and retry once with the full bounded allowance. The
+          // lease takes the failed reservation back, drops the prefix and
+          // reserves again in one step, so that no waiting transfer is handed
+          // the allowance in between.
+          options.deleteCheckpoint(state.checkpointKey);
+          const fresh = state.retentionLease.restart();
+          state.quads = [];
+          state.bytesEstimate = 0;
+          state.nextOffset = 0;
+          state.completed = false;
+          state.metadataExpiresAtMs = 0;
+          state.snapshotWalk = undefined;
+          state.generation += 1;
+          completedContextGraphs.delete(request.contextGraphId);
+          return fetchRetained(request, state, false, fresh);
+        }
+        if (exhaustion === 'prefix' && error instanceof SyncPageAccumulationLimitError) {
+          // The responder's rejection of a zero allowance is the symptom; the
+          // cause is local and already known here — this lease's retained prefix
+          // is at its own per-CG ceiling, which no later pass widens. The fetch
+          // still goes out because only the responder can report that it started
+          // a fresh session (handled above), but an operator reading the log
+          // deserves the limit to raise rather than an accumulation failure that
+          // looks like a peer problem.
+          error.message = `${error.message} — the retained selected-SWM metadata `
+            + `prefix for "${request.contextGraphId}" is at its own per-Context-Graph `
+            + `ceiling (${state.quads.length} rows / ${state.bytesEstimate} bytes retained); `
+            + 'raise syncResponderSnapshotLimits.local.rows / local.bytesEstimate to '
+            + 'carry a larger manifest';
+        }
+        // Only an incomplete result returned by the page fetcher is resumable.
+        // Every thrown boundary is fail-closed: discard the prefix and its exact
+        // responder cursor before propagating the original error unchanged.
+        // The lease gives its reservation back together with the prefix, so
+        // waiting transfers decide once, on all that the failure frees.
+        release(request.contextGraphId, state);
+      } finally {
+        // Taken back already when the lease restarted or was released.
+        reservation.release();
       }
-      if (exhaustion === 'prefix' && error instanceof SyncPageAccumulationLimitError) {
-        // The responder's rejection of a zero allowance is the symptom; the
-        // cause is local and already known here — this lease's retained prefix
-        // is at its own per-CG ceiling, which no later pass widens. The fetch
-        // still goes out because only the responder can report that it started
-        // a fresh session (handled above), but an operator reading the log
-        // deserves the limit to raise rather than an accumulation failure that
-        // looks like a peer problem.
-        error.message = `${error.message} — the retained selected-SWM metadata `
-          + `prefix for "${request.contextGraphId}" is at its own per-Context-Graph `
-          + `ceiling (${state.quads.length} rows / ${state.bytesEstimate} bytes retained); `
-          + 'raise syncResponderSnapshotLimits.local.rows / local.bytesEstimate to '
-          + 'carry a larger manifest';
-      }
-      // Only an incomplete result returned by the page fetcher is resumable.
-      // Every thrown boundary is fail-closed: discard the prefix and its exact
-      // responder cursor before propagating the original error unchanged.
-      release(request.contextGraphId, state);
       throw error;
     }
   };
@@ -538,6 +612,10 @@ export function createSelectedSwmMetaFetcher(options: {
       activeContextGraphs.add(request.contextGraphId);
       try {
         if (state.completed) {
+          state.replayedAt ??= {
+            walk: state.snapshotWalk,
+            resolved: state.snapshotWalk?.resolvedCount() ?? 0,
+          };
           return {
             result: {
               quads: state.quads,
@@ -607,9 +685,22 @@ export function createSelectedSwmMetaFetcher(options: {
         // skip refs already materialized instead of spending every slice
         // re-reading the same prefix. Full walks, zero-ref manifests and empty
         // metadata state have no resumable work and are released immediately.
-        if (!hasRetainedContinuation(state)) {
+        //
+        // Nor is it kept once a round replayed it and its walk resolved
+        // nothing more. The ref the walk waits for may be one the peer no
+        // longer serves: a Core drops the copy it keeps for a StorageACK once
+        // the asset is in Verified Memory, and its current manifest no longer
+        // names it. The next round reads the manifest again instead of asking
+        // for that ref until the walk expires.
+        const stalled = replayedWithoutProgress(state);
+        state.replayedAt = undefined;
+        if (!hasRetainedContinuation(state) || stalled) {
           release(contextGraphId, state);
           completedContextGraphs.delete(contextGraphId);
+        } else {
+          // Kept for a later invocation, which may never come: until one
+          // fetches for it again, the pool keeps no room for its next pass.
+          state.retentionLease.endRound();
         }
       }
       return retentionState();

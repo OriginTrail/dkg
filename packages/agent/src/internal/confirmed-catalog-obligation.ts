@@ -4,7 +4,6 @@ import {
   canonicalGraphScopedAuthorSealFromAssertionSealV1,
   computeCanonicalGraphScopedAuthorSealDigestV1,
   type ContextGraphIdV1, type AssertionCoordinateV1, type OperationContext, type Logger,
-  type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 import {
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
@@ -14,7 +13,9 @@ import {
 import type { DKGAgent } from '../dkg-agent.js';
 import { selectRfc64ConfirmedCatalogObligationV1 } from '../rfc64/catalog-rollout-authority-v1.js';
 import type { ObserveRfc64ConfirmedVmParamsV1 } from '../dkg-agent-rfc64-catalog-auto-publish.js';
-import type { CatalogPlacementWaitV1, CatalogPlacementWaiterObserverV1 } from './catalog-placement-timing.js';
+import { catalogPlacementTimingV1, type CatalogPlacementWaiterObserverV1 } from './catalog-placement-timing.js';
+
+import { rfc64SwmInventoryAssetKeyV1, rfc64SwmInventoryShadowRuntimeV1 } from '../rfc64/swm-inventory-shadow-runtime-v1.js';
 
 type CatalogPublicationIdentityV1 = Readonly<{ contextGraphId: string; assertionCoordinate: string; subGraphName?: string | null }>;
 type CatalogAdmissionConfigurationV1 = Pick<Parameters<typeof selectRfc64ConfirmedCatalogObligationV1>[0], 'plan' | 'authoring'>;
@@ -45,8 +46,7 @@ export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmiss
 interface ConfirmationObserverPortsV1 {
   select(): 'required' | 'excluded';
   readonly persistence: { finalizedPrivatePlacementRepairs: Rfc64FinalizedPrivatePlacementRepairStoreV1 } | undefined;
-  beginWait(seal: Readonly<CanonicalGraphScopedAuthorSealV1>, ctx: OperationContext): CatalogPlacementWaitV1;
-  confirmed(seal: Readonly<CanonicalGraphScopedAuthorSealV1>): void;
+  readonly owner: object;
   request(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>, ctx: OperationContext,
     observer: CatalogPlacementWaiterObserverV1): boolean;
   readonly log: Logger;
@@ -57,7 +57,8 @@ export async function observeConfirmedCatalogObligationV1(
   params: ObserveRfc64ConfirmedVmParamsV1, ports: ConfirmationObserverPortsV1,
 ): Promise<void> {
   const contextGraphId = params.contextGraphId;
-  if (ports.select() === 'excluded') return;
+  if (params.catalogObligationRequired === false
+    || (params.catalogObligationRequired === undefined && ports.select() === 'excluded')) return;
   assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
   assertAssertionCoordinateV1(params.assertionCoordinate, 'confirmed publish assertionCoordinate');
   const confirmedSeal = canonicalGraphScopedAuthorSealFromAssertionSealV1(params.seal);
@@ -68,8 +69,11 @@ export async function observeConfirmedCatalogObligationV1(
     assertionVersion: confirmedSeal.assertionVersion, kaUal: confirmedSeal.kaUal,
     sealDigest: computeCanonicalGraphScopedAuthorSealDigestV1(confirmedSeal), seal: confirmedSeal,
   });
-  const placementWait = ports.beginWait(confirmedSeal, params.ctx);
-  ports.confirmed(confirmedSeal);
+  const placementWait = catalogPlacementTimingV1(ports.owner).beginWait(confirmedSeal, params.ctx);
+  if (params.shareOperationId !== undefined) rfc64SwmInventoryShadowRuntimeV1(ports.owner).markVmConfirmed(
+    rfc64SwmInventoryAssetKeyV1({ contextGraphId, subGraphName: params.subGraphName ?? null,
+      authorAddress: confirmedSeal.authorAddress, assertionCoordinate: params.assertionCoordinate }),
+    confirmedSeal.assertionVersion, params.shareOperationId);
   // No lane lookup precedes this atomic write. A write refusal must cross the completion
   // boundary: the queue retains its confirmed transaction and immutable request for recovery.
   try {

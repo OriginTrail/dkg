@@ -13,8 +13,7 @@
 import { describe, it, expect, afterEach } from 'vitest';
 import { _resetRpcFailoverStatsForTest } from '../src/rpc-failover-log.js';
 import { EVMChainAdapter } from '../src/evm-adapter.js';
-import type { SignPopulatedFn } from '../src/rpc-failover-client.js';
-import { makeClient, recorder } from './rpc-failover-test-helpers.js';
+import { makeClient, NEVER_PREPARE, recorder } from './rpc-failover-test-helpers.js';
 
 afterEach(() => { _resetRpcFailoverStatsForTest(); });
 
@@ -32,10 +31,6 @@ const makeSigner = () => ({
   address: ADDRESS,
   connect: (p: unknown) => ({ address: ADDRESS, boundTo: p }),
 }) as any;
-
-const NEVER_SIGNED: SignPopulatedFn = async () => {
-  throw new Error('sign must not be reached');
-};
 
 async function caught(run: () => Promise<unknown>): Promise<any> {
   try {
@@ -97,10 +92,10 @@ describe('write-transport exhaustion messages are host-only', () => {
     connect: () => ({ doWrite: { populateTransaction: () => Promise.reject(keyed429()) } }),
   }) as any;
 
-  it('populateAndSign, single endpoint: the provider text is no longer forwarded verbatim', async () => {
-    const client = makeClient([{}], [KEYED], NEVER_SIGNED);
+  it('prepareTransaction, single endpoint: the provider text is no longer forwarded verbatim', async () => {
+    const client = makeClient([{}], [KEYED], NEVER_PREPARE);
 
-    const err = await caught(() => client.populateAndSign(failingContract(), 'doWrite', [], makeSigner(), 'publish'));
+    const err = await caught(() => client.prepareTransaction(failingContract(), 'doWrite', [], makeSigner(), 'publish'));
 
     expect(err.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
     expect(err.txHash).toBeUndefined();
@@ -109,10 +104,10 @@ describe('write-transport exhaustion messages are host-only', () => {
     expect(err.cause.message).toContain('SECRET-API-KEY');
   });
 
-  it('populateAndSign, several endpoints: the aggregate host list plus a reduced cause text', async () => {
-    const client = makeClient([{}, {}], [KEYED, 'https://backup.example/v2/OTHER-KEY'], NEVER_SIGNED);
+  it('prepareTransaction, several endpoints: the aggregate host list plus a reduced cause text', async () => {
+    const client = makeClient([{}, {}], [KEYED, 'https://backup.example/v2/OTHER-KEY'], NEVER_PREPARE);
 
-    const err = await caught(() => client.populateAndSign(failingContract(), 'doWrite', [], makeSigner(), 'publish'));
+    const err = await caught(() => client.prepareTransaction(failingContract(), 'doWrite', [], makeSigner(), 'publish'));
 
     expect(err.code).toBe('RPC_ENDPOINTS_EXHAUSTED');
     expectHostOnly(err);
@@ -162,14 +157,13 @@ describe('write-transport exhaustion messages are host-only', () => {
     const populateTransaction = recorder(async () => ({ to: '0xTO', data: '0x' }));
     const estimateGas = recorder(async () => { throw keyed429(); });
     const contract = { connect: () => ({ doWrite: { populateTransaction, estimateGas } }) } as any;
-    const signPopulated = recorder(async () => ({ signedTx: '0xS', txHash: '0xH' }));
-    const client = makeClient([{}], [KEYED], signPopulated as SignPopulatedFn);
+    const client = makeClient([{}], [KEYED], async (_signer, populated) => populated);
 
     const warns: string[] = [];
     const original = console.warn;
     console.warn = ((...args: unknown[]) => { warns.push(String(args[0])); }) as typeof console.warn;
     try {
-      await client.populateAndSign(contract, 'doWrite', [], makeSigner(), 'publish', { gasLimitBufferBps: 1_000 });
+      await client.prepareTransaction(contract, 'doWrite', [], makeSigner(), 'publish', { gasLimitBufferBps: 1_000 });
     } finally {
       console.warn = original;
     }
