@@ -12,7 +12,7 @@
  *   - **store-backed** — composes any `ProtocolOutboxStore` (in-memory
  *     `InMemoryProtocolOutboxStore` for tests; SQLite-backed
  *     `SqliteProtocolOutboxStore` for the daemon, defined in
- *     `packages/node-ui/src/protocol-outbox-store.ts`). Adds inflight-lock + backoff +
+ *     `packages/node-store/src/protocol-outbox-store.ts`). Adds inflight-lock + backoff +
  *     prune logic on top of the raw storage primitive.
  *
  *   - **stale-snapshot-safe** — preserves the `hasEntry` guard from
@@ -415,7 +415,7 @@ export class BoundedProtocolOutbox extends ProtocolOutboxAttempts<BoundedProtoco
  * Reference in-memory implementation of `ProtocolOutboxStore`. Used
  * by tests + by the substrate before the SQLite-backed store is
  * wired in `lifecycle.ts` (PR-2). The SQLite-backed implementation
- * lives in `packages/node-ui/src/protocol-outbox-store.ts` and has the same semantics
+ * lives in `packages/node-store/src/protocol-outbox-store.ts` and has the same semantics
  * — this class exists as the executable spec for the contract.
  *
  * Implements the same backoff ladder the wrapper `ProtocolOutbox`

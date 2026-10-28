@@ -1,4 +1,5 @@
 import { normalizeContextGraphNameHashBatch } from './context-graph-name-hash-resolver.js';
+import { verifyMockACKIdentity } from './mock-ack-identity.js';
 import type {
   ChainAdapter,
   IdentityProof,
@@ -8,6 +9,7 @@ import type {
   CanonicalFinalizationReceiptReadOptions,
   CanonicalFinalizationReceiptResolution,
   ChainReadOptions,
+  IdentityReadOptions,
   ContextGraphAuthorityReadOptions,
   ContextGraphLiveAuthorityReadOptions,
   CreateKCParams,
@@ -54,6 +56,7 @@ import {
   ChallengeNoLongerActiveError,
 } from './chain-adapter.js';
 import { ethers } from 'ethers';
+import { ChainWriteAheadHookError } from './write-ahead-hook-error.js';
 import {
   isNonexistentContextGraphStorageRevert,
   readContextGraphStorageRangeV1,
@@ -273,7 +276,8 @@ export class MockChainAdapter implements ChainAdapter {
     this.nextContextGraphId = initialContextGraphId;
   }
 
-  async getIdentityId(): Promise<bigint> {
+  async getIdentityId(options: IdentityReadOptions = {}): Promise<bigint> {
+    options.signal?.throwIfAborted();
     const existing = this.identities.get(this.signerAddress);
     return existing ?? 0n;
   }
@@ -670,9 +674,10 @@ export class MockChainAdapter implements ChainAdapter {
       // Codex PR #241 iter-7: `await` an async WAL hook.
       await params.onBroadcast?.({ txHash: mockUpdateTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before updateKnowledgeCollectionV10 broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 
@@ -1427,9 +1432,11 @@ export class MockChainAdapter implements ChainAdapter {
    * the historical zero-byte stub so we don't accidentally bind a
    * signer identity that test setup didn't ask for.
    */
-  async signMessage(messageHash: Uint8Array): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+  async signMessage(messageHash: Uint8Array, options: ChainReadOptions = {}): Promise<{ r: Uint8Array; vs: Uint8Array }> {
+    options.signal?.throwIfAborted();
     if (this.mockACKSigner) {
       const sig = ethers.Signature.from(await this.mockACKSigner.signMessage(messageHash));
+      options.signal?.throwIfAborted();
       return {
         r: ethers.getBytes(sig.r),
         vs: ethers.getBytes(sig.yParityAndS),
@@ -1481,8 +1488,8 @@ export class MockChainAdapter implements ChainAdapter {
     return identityId > 0n;
   }
 
-  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint): Promise<boolean> {
-    return (await this.verifyACKIdentityDetailed(recoveredAddress, claimedIdentityId)).valid;
+  async verifyACKIdentity(recoveredAddress: string, claimedIdentityId: bigint, options: ChainReadOptions = {}): Promise<boolean> {
+    return (await this.verifyACKIdentityDetailed(recoveredAddress, claimedIdentityId, options)).valid;
   }
 
   /**
@@ -1495,14 +1502,9 @@ export class MockChainAdapter implements ChainAdapter {
   async verifyACKIdentityDetailed(
     recoveredAddress: string,
     claimedIdentityId: bigint,
+    options: ChainReadOptions = {},
   ): Promise<VerifyACKIdentityResult> {
-    const normalizedAddress = recoveredAddress.toLowerCase();
-    for (const [addr, id] of this.identities) {
-      if (id === claimedIdentityId && addr.toLowerCase() === normalizedAddress) {
-        return { valid: true };
-      }
-    }
-    return { valid: false, reason: 'key-not-registered' };
+    return verifyMockACKIdentity(this.identities, recoveredAddress, claimedIdentityId, options);
   }
 
   async isOperationalWalletRegistered(identityId: bigint, address: string): Promise<boolean> {
@@ -2190,9 +2192,10 @@ export class MockChainAdapter implements ChainAdapter {
       // completion before the mock "broadcasts".
       await params.onBroadcast?.({ txHash: mockPublishTxHash });
     } catch (hookErr) {
-      throw new Error(
+      throw new ChainWriteAheadHookError(
         `chain:writeahead hook failed before createKnowledgeAssets broadcast (mock): ` +
         `${hookErr instanceof Error ? hookErr.message : String(hookErr)}`,
+        hookErr,
       );
     }
 

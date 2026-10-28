@@ -59,6 +59,24 @@ describe('respondIfStoreUnavailable', () => {
     });
   });
 
+  it('maps a control-path refusal to the same retryable not-started 503, naming the control lane', () => {
+    for (const reason of ['queue_full', 'queue_wait_timeout'] as const) {
+      const res = mockResponse();
+      const error = new StoreSchedulerBusyError(reason, 'control', 'publisher.asyncPromote.writeJob');
+
+      expect(respondIfStoreUnavailable(res, error)).toBe('not_started');
+      expect(res.statusCode).toBe(503);
+      expect(res.headers['Retry-After']).toBe('1');
+      expect(JSON.parse(res.body ?? '{}')).toMatchObject({
+        code: 'STORE_SCHEDULER_BUSY',
+        reason,
+        priority: 'control',
+        retryable: true,
+        outcome: 'not_started',
+      });
+    }
+  });
+
   it('maps pre-dispatch scheduler shedding to retryable 503 with a known outcome', () => {
     const res = mockResponse();
     const error = new StoreSchedulerBusyError(
@@ -77,6 +95,19 @@ describe('respondIfStoreUnavailable', () => {
       retryable: true,
       outcome: 'not_started',
     });
+  });
+
+  it('keeps other active work out of a scheduler-busy HTTP response', () => {
+    const res = mockResponse();
+    const error = new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'request.read');
+    Object.assign(error, { activeAtTimeout: [{
+      priority: 'normal', operation: 'tenant/acme/private-sync', count: 7, oldestAgeMs: 1234,
+    }] });
+    expect(respondIfStoreUnavailable(res, error)).toBe('not_started');
+    expect(res.statusCode).toBe(503);
+    expect(res.body).not.toContain('tenant/acme/private-sync');
+    expect(res.body).not.toContain('1234');
+    expect(res.body).not.toContain('activeAtTimeout');
   });
 
   it('maps an adapter deadline to retryable 503 with an indeterminate outcome', () => {

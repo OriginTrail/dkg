@@ -215,8 +215,24 @@ describe('GH#1778 resolveFinalizedAssertionVmPublishIntent (async) auto-resolves
       },
       configurable: true,
     });
+    // GH#3294 — the curator holds the member's seal (kept from the member's share)
+    // but not the member's lifecycle record, which the queued lane checks.
+    await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
+      .rejects.toMatchObject({
+        code: 'ASYNC_PUBLISH_FOREIGN_AUTHOR',
+        message: expect.stringContaining(`/api/knowledge-assets/${NAME}/vm/publish`),
+      });
+    expect(historyAgent).toBe(MEMBER);
+  });
+
+  it('keeps the not-finalized answer when no seal is resident at the coordinate', async () => {
+    const store = new OxigraphStore();
+    const agent = stubAgent(store, CURATOR);
+    Object.defineProperty(agent, 'assertion', {
+      value: { history: async () => null },
+      configurable: true,
+    });
     await expect(agent.resolveFinalizedAssertionVmPublishIntent(CG, NAME))
       .rejects.toThrow(/is not finalized or does not exist/);
-    expect(historyAgent).toBe(MEMBER);
   });
 });

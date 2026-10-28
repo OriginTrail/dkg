@@ -89,55 +89,280 @@ git push origin v10.0.0-canary.1
 
 npm publishing is **fully manual**. There is **no automated npm-publish or tag-triggered release workflow**: npm's mandatory 2FA/OTP makes token-based CI publishing unworkable, and the old GitHub Release workflow was removed so the repository does not carry two competing release paths. Everything below is done by a maintainer from a clean checkout of the signed tag.
 
-### 6a) Publish the package set
+### 6a) Prepare and certify immutable package bytes
 
-From a clean checkout at the tagged commit:
+Use Node 22 and the repository-pinned pnpm. Docker must be available. Day-to-day
+implementation PRs target `testnet-canary` per `.github/CONTRIBUTING.md`; real
+release authorization still requires the signed tag on `main` described above.
+A local rehearsal uses the candidate's **existing version**, without a tag,
+version bump, npm credentials, public publication or channel mutation.
 
-```bash
-pnpm release:verify-tag --tag vX.Y.Z --version X.Y.Z
-git checkout vX.Y.Z            # detached HEAD at the tag
-pnpm install --frozen-lockfile
-pnpm build                     # must fully succeed (UI bundle included)
-pnpm release:verify-versions --version X.Y.Z
-pnpm release:build-info --dist-tag latest
-pnpm release:verify-pack       # asserts the dkg tarball ships network/*.json + project.json + build-info.json
-pnpm -r publish --no-git-checks --tag latest
-```
-
-`release:verify-tag` restores the tag gates the old tag-triggered workflow enforced, now as a publish preflight: the tag must be an annotated object carrying a PGP/SSH signature block, it must exist on `origin` at the same object (an unpushed or moved tag fails), and its commit must be reachable from `origin/main` (override with `--base` for a release branch). Signer identity is enforced server-side by the signed-tag ruleset; this gate checks structure and ancestry so a publish can never start from a mislabeled or foreign commit.
-
-`release:verify-pack` runs `npm pack --dry-run` on `@origintrail-official/dkg` and fails the release if the tarball would omit `project.json`, `build-info.json`, or any `network/*.json` overlay. The `network/*.json` + `project.json` files are copied into `packages/cli` from the repo root at pack time (a `prepack` step), not committed — 10.0.3 shipped them but 10.0.4 dropped them when a turbo cache hit skipped the copy, leaving npm-installed nodes with no network overlay. The `prepack` copy now makes materialization unconditional; this preflight is the belt-and-suspenders guard that turns a silent drop into a hard failure. Run it **after** `release:build-info` so `build-info.json` (which drives `/api/status` and startup telemetry) is present for the check. It cannot protect against an explicit `pnpm publish --ignore-scripts` (that skips `prepack` by design) — a single blessed publish command that refuses `--ignore-scripts` is tracked as follow-up hardening.
-
-npm prompts for your **OTP** (2FA). All publishable public `@origintrail-official/*` packages publish in one command; private workspaces are skipped automatically. `pnpm` skips versions already on the registry, so a re-run after a partial publish is safe. `pnpm release:build-info` writes `packages/cli/build-info.json` before packaging, so npm-installed daemons report the tag commit, build time, and publish dist-tag through `/api/status`.
-
-For a canary/prerelease, use the prerelease npm tag and move only the `testnet` update channel:
+From a clean commit (keep output directories outside the checkout):
 
 ```bash
-pnpm release:verify-tag --tag vX.Y.Z-canary.1 --version X.Y.Z-canary.1
-git checkout vX.Y.Z-canary.1
-pnpm install --frozen-lockfile
-pnpm build
-pnpm release:verify-versions --version X.Y.Z-canary.1
-pnpm release:build-info --dist-tag canary
-pnpm release:verify-pack
-pnpm -r publish --no-git-checks --tag canary
-pnpm release:promote --version X.Y.Z-canary.1 --tags testnet --otp <fresh 2FA code>
+COMMIT=$(git rev-parse HEAD)
+VERSION=$(node -p "require('./package.json').version")
+BUNDLE=/tmp/dkg-package-set-unique
+ATTEMPT=/tmp/dkg-package-attempt-unique
+node scripts/release-packages.mjs prepare-packages --version "$VERSION" --out "$BUNDLE"
+pnpm release:certify-install --bundle "$BUNDLE" --commit "$COMMIT" --version "$VERSION" \
+  --profile installed-local-rdf-v1 --out "$ATTEMPT"
+pnpm release:verify-package-certificate --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
+  --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1
 ```
 
-The prerelease npm tag (`canary` / `beta` / `rc` / `alpha`) is for humans and direct installs; `testnet` is what `network/testnet.json` auto-update follows. Reserve `rc` for a build that has already passed canary validation and is intended to become the stable release if no final issues appear.
+Preparation owns a **new** directory. It performs frozen dependency installation,
+the full UI-inclusive build, version/runtime-guard checks, unconditional CLI asset
+materialization, and `pnpm pack` on every package from the existing public-package
+discovery. `pnpm pack` rewrites workspace dependencies; `npm pack` is not an
+interchangeable substitute. Actual tarball manifests are checked for escaped
+workspace/link/local-file references and exact internal versions. Private
+build-only workspaces may appear as rewritten development dependencies; runtime,
+optional and peer dependencies must resolve within the public prepared set. The compiler
+stamps build identity once during the build; preparation retains that stamp.
+Later commands never regenerate it. Its historical `distTag: monorepo` field is
+build provenance, **not the deployed channel**. npm dist-tags remain deployment
+metadata and can change without changing the tarball.
 
-After promoting `testnet`, update a real testnet node to the canary and run the testnet smoke test. Do not continue to the stable/mainnet release until the smoke test passes.
+`manifest.json` schema 1 records the full source commit, tracked-input digest,
+lockfile/config hashes and copies, actual tools, full expected package set and
+relationships, per-tarball byte size/SHA-256/SHA-512 integrity, packaged file
+hashes, asset contract, compiler identity, lockfile baseline, family pin policy
+and build/install/pack elapsed milliseconds. `packageSetDigest` is SHA-256 of UTF-8
+JSON with object keys recursively sorted, no whitespace, array order preserved,
+and the top-level `packageSetDigest` field omitted. This certifies the actual
+bytes; it does not claim reproducibility across machines. Tracked source must
+remain clean and unchanged across preparation; ignored generated build outputs
+are allowed. Uncommitted source cannot produce a certifying bundle.
 
-### 6b) Move the mainnet dist-tag (stable production promotion)
+Certification installs the CLI into both an empty Core-style hoisted release slot
+and an actual `npm install --global --prefix` Edge prefix, with fresh homes,
+caches and npm configuration. Lifecycle scripts and native setup remain enabled.
+A disposable registry overlay serves candidate tarballs and refuses all fallback
+for `@origintrail-official/*`, including public packages at the same version.
+Unrelated dependencies use the npm registry upstream. Both physical dependency
+trees, npm's full `ls` output, versions, available integrities and explicit
+permitted non-family drift from pnpm are retained. Global npm does not emit a lockfile: the observer hashes candidate archives
+actually fetched into the fresh npm cache and retains the archive index; local
+installs also use npm's hidden lockfile. Every installed internal file
+must match its prepared tarball. The current libp2p family must have exactly one
+copy of each pinned version. These pins do **not** freeze unrelated transitives.
 
-`--tag latest` only sets `latest`. Mainnet node auto-update channels + SDK pins follow the `mainnet` dist-tag, which is carried on **every** published package — so move it on all of them, not just the flagship:
+The installed product container never mounts the checkout, workspace modules or
+build outputs. Before runtime execution it is disconnected from the install
+network and attached only to an internal Docker network. Its sole fixture gateway
+then exposes only an owned local Hardhat chain started through the existing chain
+harness. The shipped testnet genesis overlay is read unchanged, with relay and
+bootstrap access disabled, all RPC/wallet endpoints explicitly set to the local
+fixture, and auto-update/telemetry disabled. No public network is joined. Each layout declares these required cases before execution: `install`,
+`dependency-policy`, `cli-identity`, `runtime-assets`, `daemon-status`,
+`rdf-readback`, `graceful-restart`. The CLI binary, UI/config/helper assets,
+`/api/status`, an editable RDF draft (`finalize: false`) written/queried through
+public APIs, and graceful restart
+with the same data directory are checked. No store override is applied: this
+profile exercises the default persistent `oxigraph-worker` store. Both layouts
+run a single edge-role daemon; layout coverage is not a multi-role topology test.
+
+Every attempt gets a fresh ID and directory; failed attempts are never rewritten
+to PASS. `receipt.json` binds the package digest, subject, tool revision,
+OS/architecture/Node/npm, layouts, required cases, tree digests, times and hashed
+reports/logs, including both raw query responses. In CI it also records workflow/run/attempt. `FAIL` means an observed
+case failed; `INCOMPLETE` means execution or evidence is incomplete. Missing,
+skipped, cancelled, timed-out and zero-case reports cannot pass. The read-only
+verifier accepts the intended commit/version/profile from the caller and derives
+the expected package/asset/pin policy from that candidate checkout, rather than
+trusting the receipt's own subject. Paths inside portable evidence are relative.
+This local consistency check is **not cryptographic proof of who executed it**;
+retain authenticated Actions artifacts for CI runs. There is no new signing PKI.
+
+Global npm installs do not produce a lockfile. The versioned `npm10-cacache19-v1`
+adapter reads the fresh installer's bundled cacache 19 through npm 10 and hashes
+the fetched candidate archives; its exact npm/cacache versions are recorded and
+verified in each report. This is an explicit tooling dependency on the pinned
+container image. A different npm/cache major requires an adapter compatibility
+update and a new rehearsal. Cache acquisition and record interpretation are
+separate from installed-tree policy validation.
+
+Exercise the actual installation boundary with a separate negative attempt:
 
 ```bash
-pnpm release:packages
-pnpm release:promote --version X.Y.Z --tags mainnet --otp <fresh 2FA code>
+pnpm release:certify-install --bundle "$BUNDLE" --commit "$COMMIT" --version "$VERSION" \
+  --profile installed-local-rdf-v1 --out /tmp/dkg-negative-unique --negative-control missing-ui
+# Expected: nonzero exit and FAIL receipt, after deleting the installed UI index.
 ```
 
-One OTP covers the batch; a TOTP code can expire mid-loop, so if some fail, re-run with a fresh code (`npm dist-tag add` is idempotent). Moving `mainnet` is the **production go-live** — do it only after the testnet canary smoke test and stable package verification have passed.
+Logs and diagnostic data survive failures; owned containers, networks and chain
+processes are stopped. SIGINT/SIGTERM cancel active commands, attempt every owned
+resource cleanup and retain an `INCOMPLETE` receipt; cleanup errors are recorded.
+Final verification checks a prospective PASS receipt in memory; only successful
+verification permits atomically replacing the durable INCOMPLETE receipt with PASS.
+The initial receipt is written before execution, so SIGKILL or host loss also
+leaves non-passing evidence, but cannot guarantee cleanup. Inspect resources
+named `dkg-cert-<receipt.runId>-*` after a forced termination. `*-data/` contains disposable local wallet keys and is
+local diagnosis only: exclude it from uploads. Portable evidence is the complete
+bundle plus attempt top-level JSON/JSONL/log files. The separately named
+`package-certification.yml` workflow runs automatically on every push to `main`,
+including release PR merges, and certifies the exact pushed commit. It prepares
+the full package set, certifies both installation layouts, verifies the receipt,
+and runs the missing-UI negative control. Package bytes and attempt evidence are
+uploaded for 14 days, including evidence from failed attempts, with no npm
+credentials or publication. A failed run marks that commit's certification check
+as failed; it does not undo the merge or automatically promote a release.
+
+Maintainers can also dispatch a manual rehearsal for a full candidate SHA once
+the workflow reaches the default branch. The workflow does not run on unrelated
+PRs. Both automatic and manual runs use the selected SHA consistently for checkout,
+certification, verification and artifact naming. This post-merge check does not
+change the immutable planner, required checks or branch protections.
+Required script tests continue through `pnpm test:scripts`; any activation as a
+required candidate gate needs a separately reviewed trusted-controller pin/route
+update and maintainer branch-protection decision.
+
+### 6a.1) Verify the complete release decision
+
+Package installation alone does not qualify promotion. Before changing a dist-tag,
+assemble a portable `decision.json` next to the downloaded nightly receipt and
+all harness `suite-state.json` attempts, then run:
+
+```bash
+pnpm release:verify-evidence --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
+  --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 \
+  --evidence "$EVIDENCE/decision.json"
+```
+
+Promotion completes fresh authenticated CI history and artifact acquisition before asking for an OTP. Immediately after the prompt, it rechecks the installed-package certificate, decision bytes and every local evidence receipt against that qualified snapshot before the first registry write. This local check performs no GitHub requests; changed evidence requires a new qualification. CI history is qualified as of the pre-prompt acquisition, not continuously monitored while the maintainer enters a code.
+
+The version-1 decision has these fields (full object IDs and SHA-256 file hashes
+are required; placeholders below are explanatory and cannot certify):
+
+```json
+{
+  "schemaVersion": 1,
+  "candidate": {
+    "commit": "<final product commit>", "tree": "<git tree>", "version": "<version>",
+    "sourceInputsDigest": "<manifest source input digest>", "packageSetDigest": "<manifest package set digest>"
+  },
+  "ci": { "runId": "<successful CI run>", "attempt": 1 },
+  "nightly": {
+    "runId": "<successful full nightly run>", "attempt": 1,
+    "receipt": { "file": "nightly-profile-summary.json", "sha256": "<file hash>" }
+  },
+  "harness": {
+    "commit": "<full harness commit>", "profile": "local-release-v1",
+    "attempts": [{ "id": "qualification-1", "receipt": { "file": "qualification-1/suite-state.json", "sha256": "<file hash>" } }]
+  },
+  "priorCiFailures": []
+}
+```
+
+Use the integrated harness profile from OriginTrail/dkg-blackbox-harness #47.
+It requires eight registration/policy cells, eight functional scenarios and the
+overlap leg, all with verified builds and successful process/run identities.
+Keep raw child runs with suite-state. The release helper verifies their recorded
+contract and identities; local harness evidence still relies on the trusted
+operator/executor, like locally produced package certificates. It is not a
+cryptographic attestation that an arbitrary operator ran the tests.
+
+The helper queries GitHub using `gh` credentials: CI must be complete/successful
+on the final commit, and the nightly receipt must byte-match the authenticated
+`nightly-profile-summary` artifact of the latest run attempt. It recomputes the
+nightly completeness check (all seven browser shards, mandatory lifecycle cases
+and 1,000 property trials). Deleted/expired artifacts are a qualification gap;
+archive them before the workflow retention expires, and re-run if the online
+source required for verification is no longer available.
+
+Every failed CI attempt found for that commit must appear in `priorCiFailures`
+with `runId`, `attempt`, `classification` (`product`, `test`, `environment` or
+`unknown`), an owning GitHub `issue`, and a later successful
+`supersededBy: {runId, attempt}` matching the selected CI/nightly run. Keep every
+local harness attempt in order. A failed attempt requires
+`resolution: {classification, issue, supersededBy}`; classification is `product`,
+`test`, `environment` or `unknown`, and supersededBy identifies a later complete
+passing harness attempt. A failure cannot be dismissed solely by relabeling it.
+Local attempt history is operator supplied; the verifier does not claim to
+discover unarchived private runs.
+
+Selected CI must be a successful push, scheduled or dispatched run of the
+candidate itself. Pull-request and merge-queue runs are ineligible here: GitHub's
+API head SHA alone does not prove the synthetic merge tree they checked out.
+The same complete dispatched nightly may satisfy both CI and nightly entries.
+
+Promotion and direct `latest`/`mainnet` publication require `--evidence`, including
+dry-runs. Canary publication can precede qualification. The package, registry and
+signed-tag checks still apply. A new candidate requires fresh receipts at its
+exact commit; this first implementation does not reuse receipts across equal
+trees. Run `pnpm qa:check-regressions` and `pnpm qa:incident-status` to inspect
+proven detectors and explicitly unresolved incident gaps before the human release
+decision. Archive the decision, package bundle/certificate and raw campaign
+records with the release; credentials and OTPs must not enter those artifacts.
+
+### 6b) Publish the same bytes, verify the registry, then promote manually
+
+After the existing devnet gate and signed-tag policy are satisfied, use the same
+bundle/receipt. A real publication requires `v$VERSION` to resolve to exactly
+`$COMMIT`, be signature-bearing and unchanged on origin, and be reachable from
+`origin/main`. Local preparation/certification does not require registry existence.
+Post-publication integrity checks are separate, so the gate is not circular.
+
+```bash
+# Dry run still verifies bytes, certificate, authorization and registry metadata.
+pnpm release:publish-prepared --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
+  --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 \
+  --tag "v$VERSION" --dist-tag canary --dry-run
+# Repeat without --dry-run when authorized. npm can prompt for OTP; alternatively
+# provide NPM_CONFIG_OTP in the maintainer's environment. Logs never echo it.
+pnpm release:publish-prepared --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
+  --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 \
+  --tag "v$VERSION" --dist-tag canary
+pnpm release:verify-published --bundle "$BUNDLE" --commit "$COMMIT" --version "$VERSION" \
+  --profile installed-local-rdf-v1 --tags canary
+# Promotion reads every package's dist-tags first, then asks for one npm
+# one-time code (typing is hidden) and moves every remaining tag with it.
+# --otp or NPM_CONFIG_OTP skips the question; --dry-run shows the plan only.
+pnpm release:promote --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
+  --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 \
+  --tag "v$VERSION" --tags testnet --evidence "$EVIDENCE/decision.json"
+```
+
+Choose `latest` only for the stable release at the existing human-controlled
+release stage; this procedure does not move it earlier. Move `mainnet` with the
+same promotion command **only after** the existing testnet/functional release
+gates. Package-smoke PASS is additional evidence, never a replacement for
+comprehensive devnet, testnet or mainnet acceptance. This profile does not certify
+crash durability, previous-version upgrades, multi-peer sharing, every platform,
+or distributed/network readiness.
+
+Source cleanliness includes comparing every tracked file with its Git blob in the
+claimed commit, independently of index flags and content filters. Preparation also
+checks that tracked contents remain unchanged through building and packing. Ignored
+generated outputs remain permitted.
+
+Publication passes the exact manifest-bound tarball paths to npm, never workspace
+directories. Before its first mutation it verifies every existing registry
+version's `dist.integrity`; a matching version can be reused after partial
+publication, but a same-version integrity mismatch aborts the entire operation.
+Publication orders internal runtime dependencies before their consumers, so an
+exposed CLI tag never depends on candidate packages still awaiting publication.
+Cycles fail before mutation. Dry-run and execution use the same ordered plan.
+Promotion requires all versions to exist with matching integrity before its first
+tag update. It then reads every package's dist-tags and plans only the tags not on
+the version yet, reporting how many already are. Only after those reads does it
+ask for the one-time code, so the code is fresh when the writes start; it asks in
+a terminal, unless `--otp` or `NPM_CONFIG_OTP` supplies one. npm runs with stdin
+closed, so it cannot fall back to its web authentication prompt, and receives the
+code in its environment, never its arguments. The first write goes alone, so a
+stale or mistyped code is refused once; then eight packages are written at a time,
+each package's tags in sequence (two writes to one package's dist-tags at once can
+fail with E409 Conflict). On a stale code (EOTP) or a rate limit (E429) no new write
+starts, and the command reports what moved and what to do: take a fresh code, or
+wait about ten minutes. It then reads the registry again and lists every tag still
+not on the version, because npm has accepted tag writes before that never showed.
+Both paths recheck package/evidence bytes immediately before mutation.
+Cross-package changes are **not atomic**: failures report exact completed/reused
+packages and tags, and re-running promotion after the complete integrity preflight
+moves only the tags still missing. Dry-run performs reads only, asks for no code
+and never prints OTPs or registry credentials. The supported wrapper cannot prevent
+a credential holder bypassing it with direct npm commands.
 
 ### 6c) Create the GitHub Release (manual)
 
@@ -160,9 +385,9 @@ Use `--latest=false` when back-filling an older version so it doesn't steal the 
 ### 6d) Verify and smoke test
 
 ```bash
-pnpm release:verify-published --version X.Y.Z --tags latest,mainnet
+pnpm release:verify-published --bundle "$BUNDLE" --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 --tags latest,mainnet
 # prerelease example:
-pnpm release:verify-published --version X.Y.Z-canary.1 --tags canary,testnet
+pnpm release:verify-published --bundle "$BUNDLE" --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 --tags canary,testnet
 gh release view vX.Y.Z --repo OriginTrail/dkg
 ```
 
@@ -257,3 +482,7 @@ Required progression:
 3. Publish a canary/prerelease to `testnet` and pass the testnet smoke test.
 4. Publish/promote the stable version to `mainnet` only after the testnet smoke test passes.
 5. Run the mainnet smoke test and final package/channel validation (`pnpm release:verify-published ...`).
+
+### Builder documentation release checks
+
+Run the [documentation checks and released-package smoke](scripts/docs/README.md) for the release candidate. Refresh `scripts/docs/capabilities.json`, including source-only features becoming available. Verify the representative builder and agent workflows and record any unexecuted checks explicitly. After the normal reviewed promotion, verify GitBook navigation and `llms.txt`; a repo merge alone is not proof that the site updated. Keep validation reports out of `docs/SUMMARY.md`.

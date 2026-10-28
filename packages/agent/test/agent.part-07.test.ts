@@ -1,4 +1,5 @@
 import type { RandomSamplingRuntime } from '../src/random-sampling-runtime.js';
+import { resolveChainFinalityConfirmationsV1 } from '../src/chain-finality-confirmations-v1.js';
 import { describe, it, expect, beforeAll, afterAll, vi, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
 
 
@@ -265,7 +266,7 @@ describe('DKGAgent ACK signer gating', () => {
       // The RFC-64 precommits must anchor at the SAME depth the adapter's own
       // authority reads use, and they must read it FROM the adapter.
       expect((agent as any).chain.getFinalityConfirmations()).toBe(3);
-      expect((agent as any).resolveChainFinalityConfirmationsV1()).toBe(3);
+      expect(resolveChainFinalityConfirmationsV1((agent as any).chain, (agent as any).config.chainConfig)).toBe(3);
     });
 
     it('takes the precommit finality depth from a pre-built adapter, not chainConfig', async () => {
@@ -298,7 +299,7 @@ describe('DKGAgent ACK signer gating', () => {
       });
 
       expect((agent as any).config.chainConfig?.finalityConfirmations).toBeUndefined();
-      expect((agent as any).resolveChainFinalityConfirmationsV1()).toBe(7);
+      expect(resolveChainFinalityConfirmationsV1((agent as any).chain, (agent as any).config.chainConfig)).toBe(7);
     });
 
 

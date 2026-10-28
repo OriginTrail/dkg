@@ -4,15 +4,13 @@
 // api.ts share one same-origin, bearer-authed, HttpError-shaped fetch layer
 // instead of re-declaring it. Pure relocation — no behavior change.
 
+import { resolveWithinAbort } from '@origintrail-official/dkg-core/dist/abort-boundary.js';
+import { currentApiToken } from './lib/apiToken.js';
+
 export const BASE = '';
 
-declare global {
-  interface Window { __DKG_TOKEN__?: string; }
-}
-
 export function authHeaders(): Record<string, string> {
-  if (typeof window === 'undefined') return {};
-  const token = window.__DKG_TOKEN__;
+  const token = currentApiToken();
   if (!token) return {};
   return { Authorization: `Bearer ${token}` };
 }
@@ -125,6 +123,17 @@ export async function getJson<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+/** Authenticated GET whose deadline also bounds body decoding and non-cooperative IO. */
+export async function getBoundedJson<T>(path: string, timeoutMs = 10_000): Promise<T> {
+  const { response, body } = await fetchBoundedJson(`${BASE}${path}`, { headers: authHeaders() }, {
+    timeoutMs, maxResponseBytes: null,
+  });
+  if (!response.ok) {
+    throw new HttpError(response.status, (body as { error?: string })?.error ?? `HTTP ${response.status}`, body);
+  }
+  return body as T;
+}
+
 export async function getWithTimeout<T>(path: string, timeoutMs: number): Promise<T> {
   const res = await fetchWithTimeout(`${BASE}${path}`, { headers: authHeaders() }, timeoutMs);
   if (!res.ok) {
@@ -187,4 +196,68 @@ export async function delJson<T>(path: string): Promise<T> {
     throw new HttpError(res.status, msg, errBody);
   }
   return res.json() as Promise<T>;
+}
+
+/** Read JSON within one deadline covering headers and the complete body. */
+export async function fetchBoundedJson(
+  url: string,
+  init: RequestInit,
+  limits: {
+    timeoutMs: number | null;
+    maxResponseBytes: number | null;
+    onResponse?: (response: Response) => void;
+    limitError?: (maxBytes: number) => Error;
+  },
+): Promise<{ response: Response; body: unknown }> {
+  for (const limit of [limits.timeoutMs, limits.maxResponseBytes]) {
+    if (limit !== null && (!Number.isFinite(limit) || limit <= 0)) throw new RangeError('Read budgets must be positive and finite, or explicitly null.');
+  }
+  const controller = new AbortController();
+  const cancel = () => controller.abort(init.signal?.reason);
+  if (init.signal?.aborted) cancel();
+  else init.signal?.addEventListener('abort', cancel, { once: true });
+  let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  const timer = limits.timeoutMs === null ? undefined : setTimeout(() => {
+    controller.abort(new Error(`Request timed out after ${Math.round(limits.timeoutMs! / 1000)}s`));
+  }, limits.timeoutMs);
+  const guard = async <T,>(work: () => Promise<T>): Promise<T> => {
+    const result = await resolveWithinAbort(async () => ({ value: await work() }), controller.signal);
+    if (result === null) throw controller.signal.reason;
+    return result.value;
+  };
+  const checkBytes = (bytes: number) => {
+    if (limits.maxResponseBytes !== null && bytes > limits.maxResponseBytes) {
+      const error = (limits.limitError?.(limits.maxResponseBytes) ?? new Error(`Response exceeded ${limits.maxResponseBytes} bytes`));
+      controller.abort(error); throw error;
+    }
+  };
+  try {
+    const response = await guard(() => fetch(url, { ...init, signal: controller.signal }));
+    limits.onResponse?.(response);
+    const declared = response.headers?.get('Content-Length');
+    if (declared && Number.isFinite(Number(declared))) checkBytes(Number(declared));
+    if (!response.body?.getReader) {
+      const body: unknown = await guard(() => response.json());
+      checkBytes(new TextEncoder().encode(JSON.stringify(body)).byteLength);
+      return { response, body };
+    }
+    reader = response.body.getReader();
+    const chunks: Uint8Array[] = []; let size = 0;
+    while (true) {
+      const activeReader = reader;
+      const { value, done } = await guard(() => activeReader.read());
+      if (done) break;
+      size += value.byteLength; checkBytes(size); chunks.push(value);
+    }
+    const bytes = new Uint8Array(size); let offset = 0;
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength; }
+    const text = new TextDecoder().decode(bytes);
+    try { return { response, body: JSON.parse(text) }; }
+    catch (error) { if (!response.ok && error instanceof SyntaxError) return { response, body: {} }; throw error; }
+  } finally {
+    init.signal?.removeEventListener('abort', cancel);
+    if (timer !== undefined) clearTimeout(timer);
+    if (controller.signal.aborted) void reader?.cancel(controller.signal.reason).catch(() => {});
+    try { reader?.releaseLock(); } catch { /* A canceled read may still be settling. */ }
+  }
 }

@@ -1,4 +1,4 @@
-import type { AgentQueryOptions } from '../src/dkg-agent-query.js';
+import type { AgentQueryOptions } from '../src/agent-query-options.js';
 
 const supported: AgentQueryOptions = {
   contextGraphId: 'cg-1',

@@ -49,6 +49,7 @@ import {
 } from '../src/index.js';
 import {
   CONTEXT_GRAPH_AGENT_GATE_UNAVAILABLE_REASONS,
+  createContextGraphAuthorityError,
   isRetryableContextGraphAuthorityUnavailableReason,
   type ContextGraphAgentGateAuthority,
   type ContextGraphAgentGateUnavailableReason,
@@ -73,6 +74,7 @@ interface DKGAgentInternals {
     publishPolicy: number | null;
   }>;
   getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null>;
+  resolveSwmAllowedPeersForCurrentAuthority(contextGraphId: string): Promise<string[] | null>;
   // The sender-side classification of a rejection ACK's reason code.
   isRetryableSwmSenderKeySetupAckReason(reasonCode: string | undefined): boolean;
   readonly peerId: string;
@@ -312,6 +314,7 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
     'chain-participant-authority-unavailable': true,
     'chain-participant-authority-invalid': false,
     'rfc64-private-read-roster-unavailable': true,
+    'approved-member-metadata-pending': true,
   };
 
   it('classifies exactly the registered unavailable reasons', () => {
@@ -330,6 +333,36 @@ describe('acceptSwmSenderKeyPackage: stale-target throw type', () => {
       expect(senderRetries).toBe(retryable);
       // The promote path consumes the same classifier.
       expect(isRetryableContextGraphAuthorityUnavailableReason(reason)).toBe(retryable);
+    },
+  );
+
+  it.each([
+    ['chain-access-policy-timeout', 'agent-gate-pending'],
+    ['chain-participant-authority-invalid', 'agent-gate-unavailable'],
+  ] as const)(
+    'maps an unavailable SWM peer gate (%s) to the existing %s ACK',
+    async (reason, expectedReasonCode) => {
+      const { internals, recipient, senderWallet } = await bootAgentForStaleTargetTest();
+      const pkg = await buildSignedPackage({
+        senderWallet,
+        recipientAgentAddress: recipient.agentAddress,
+        recipientKeyId: recipient.workspaceEncryptionKeys[0].encryptionKeyId,
+      });
+      internals.resolveSwmAllowedPeersForCurrentAuthority = async () => {
+        throw createContextGraphAuthorityError('test SWM peer authority failure', { reason });
+      };
+
+      const ack = decodeSwmSenderKeyPackageAck(
+        await internals.handleSwmSenderKeyPackage(
+          encodeSwmSenderKeyPackage(pkg),
+          FROM_PEER_ID,
+        ),
+      );
+      expect(ack).toMatchObject({
+        accepted: false,
+        reasonCode: expectedReasonCode,
+      });
+      expect(ack.reason).toContain(`SWM peer gate authority is unavailable (${reason})`);
     },
   );
 

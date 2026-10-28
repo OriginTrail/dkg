@@ -4,8 +4,9 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import {
   ExactGraphReadError,
-  readExactGraphPaged,
+  readExactGraph,
   type Quad,
+  type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
@@ -45,14 +46,19 @@ export async function verifyExactGraphContent(
     expectedMerkleRoot: Uint8Array;
     expectedPublicQuadsDigest?: string;
     source: string;
+    /** Caller-owned whole-asset limits; physical query pages remain storage-bounded. */
+    readLimits?: { maxQuadCount: number; maxNQuadsBytes: number };
+    queryOptions?: Omit<QueryOptions, 'source'>;
   },
 ): Promise<ExactGraphContentVerification> {
   let quads: Quad[];
   try {
-    quads = await readExactGraphPaged(store, input.graphUri, {
+    quads = await readExactGraph(store, input.graphUri, {
+      profile: 'bounded-single-result',
+      ...input.readLimits,
       expectedQuadCount: input.publicTripleCount,
       outputGraph: '',
-      queryOptions: { source: input.source },
+      queryOptions: { ...input.queryOptions, source: input.source },
     });
   } catch (error) {
     if (

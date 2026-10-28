@@ -56,3 +56,70 @@ describe('GH#1778 async VM publish CG auto-registration', () => {
     expect(registrationCalls).toEqual([{}]);
   });
 });
+
+/**
+ * GH#3081 — the queue hands its executor an observer for the steps after the confirmation. It
+ * arrives on the execution input and belongs in the executor's own options, not in the publish
+ * options the executor passes on to the publish or update call.
+ */
+describe('GH#3081 the queue\'s step observer through the publish handler', () => {
+  function makeRecordingAgent(options: { registered: boolean }) {
+    const executions: Array<{ publishOptions: unknown; executorOptions: unknown }> = [];
+    const agent = {
+      async publishQueuedKnowledgeAssetVmPublish(_request: unknown, publishOptions: unknown, executorOptions: unknown) {
+        executions.push({ publishOptions, executorOptions });
+        if (!options.registered && executions.length === 1) {
+          throw Object.assign(new Error('context graph not registered on-chain'), { code: 'CG_NOT_REGISTERED' });
+        }
+        return { status: 'confirmed', ual: 'did:dkg:test/1/7', kaId: '7' };
+      },
+      async ensureRegisteredForPublish() {},
+    } as any;
+    return { agent, executions };
+  }
+
+  const request: any = { contextGraphId: CG, name: 'report', agentAddress: MEMBER };
+
+  it('forwards it in the executor\'s options and leaves the publish options as they came', async () => {
+    const { agent, executions } = makeRecordingAgent({ registered: true });
+    const onPostConfirmationStep = () => {};
+    const publishOptions = { contextGraphId: CG };
+
+    await createKnowledgeAssetVmPublishHandler(agent).execute(
+      { request, publishOptions, publisher: undefined, onPostConfirmationStep } as any,
+    );
+
+    expect(executions).toHaveLength(1);
+    expect(executions[0]!.executorOptions).toEqual({ onPostConfirmationStep });
+    expect(executions[0]!.publishOptions).toBe(publishOptions);
+    expect(publishOptions).toEqual({ contextGraphId: CG });
+  });
+
+  it('forwards it again when the publish is repeated after a registration', async () => {
+    const { agent, executions } = makeRecordingAgent({ registered: false });
+    const onPostConfirmationStep = () => {};
+
+    await createKnowledgeAssetVmPublishHandler(agent).execute(
+      { request, publishOptions: {}, publisher: undefined, onPostConfirmationStep } as any,
+    );
+
+    expect(executions.map((execution) => execution.executorOptions)).toEqual([
+      { onPostConfirmationStep },
+      { onPostConfirmationStep },
+    ]);
+  });
+
+  it('passes none when the queue gave none, next to the wallet\'s publisher', async () => {
+    const { agent, executions } = makeRecordingAgent({ registered: true });
+    const publisher: any = { name: 'wallet-publisher' };
+
+    const handler = createKnowledgeAssetVmPublishHandler(agent);
+    await handler.execute({ request, publishOptions: {}, publisher: undefined } as any);
+    await handler.execute({ request, publishOptions: {}, publisher } as any);
+
+    expect(executions.map((execution) => execution.executorOptions)).toEqual([
+      {},
+      { publisherOverride: publisher },
+    ]);
+  });
+});

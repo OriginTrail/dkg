@@ -14,6 +14,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { EVMChainAdapter, type EVMAdapterConfig } from '../src/evm-adapter.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
+import { HubAssetStorageNotFoundError, HubContractNotFoundError } from '../src/hub-contract-not-found-error.js';
 import type {
   ChainEventLogAuthoritySource,
   ChainEventLogBinding,
@@ -168,17 +169,17 @@ function stubInitBoundary(adapter: EVMChainAdapter) {
   internals.contracts.hub = contract('Hub', HUB_ADDRESS);
   internals.resolveContract = async (name) => {
     if (['Identity', 'Profile', 'ParametersStorage', 'ContextGraphs'].includes(name)) return {};
-    throw new Error(`${name} is optional in this fixture`);
+    throw new HubContractNotFoundError(name, HUB_ADDRESS);
   };
   internals.resolveAssetStorage = async (name) => {
     if (name === 'DKGKnowledgeAssets') return contract('DKGKnowledgeAssets', KA_STORAGE);
     if (name === 'ContextGraphStorage') {
       return contract('ContextGraphStorage', RETIRED_CG_STORAGE);
     }
-    throw new Error(`${name} is optional in this fixture`);
+    throw new HubAssetStorageNotFoundError(name, HUB_ADDRESS);
   };
   internals.resolveAndAssignRandomSamplingPair = async () => {
-    throw new Error('RandomSampling is optional in this fixture');
+    throw new HubContractNotFoundError('RandomSampling', HUB_ADDRESS);
   };
   internals.resolveContractDeployBlockNumber = async () => 1;
   internals.readProvider = async (label, read) => {

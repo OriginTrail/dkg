@@ -412,6 +412,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     });
     expect(readAuthority).toHaveBeenCalledWith(contextGraphId, {
       allowSubscriptionFallback: false,
+      onReadAuthorityDecision: expect.any(Function),
     });
     expect(index.whenIdle).toHaveBeenCalledOnce();
     expect(legacyLookup).not.toHaveBeenCalled();
@@ -827,7 +828,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     stubNode(agent);
     let deps = (agent as any).createVmReconcileDeps(
       'edge-selected-cg',
-      (agent as any).vmReconcileLifecycleGeneration,
+      (agent as any).workLifetime.generation,
       target,
     );
     expect(deps.recentOrdinalsPerPass).toBeGreaterThan(0);
@@ -843,7 +844,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     stubNode(agent);
     deps = (agent as any).createVmReconcileDeps(
       'core-hosted-cg',
-      (agent as any).vmReconcileLifecycleGeneration,
+      (agent as any).workLifetime.generation,
       {
         ...target,
         sub: { ...target.sub, coreHosted: true },
@@ -1145,7 +1146,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
       onChainId: '298',
       cursor: { watermark: 7 },
     });
-    const oldGeneration = (internals as any).vmReconcileLifecycleGeneration;
+    const oldGeneration = (internals as any).workLifetime.generation;
     expect((internals as any).isVmReconcileTargetCurrent(
       selected,
       restartedTarget,
@@ -1276,7 +1277,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     await expect((internals as any).revalidateVmReconcileTarget(
       selected,
       target,
-      (internals as any).vmReconcileLifecycleGeneration,
+      (internals as any).workLifetime.generation,
     )).resolves.toBe(false);
     expect(resolveOnChainId).toHaveBeenCalledTimes(2);
     expect(internals.subscribedContextGraphs.size).toBe(0);
@@ -1307,7 +1308,7 @@ describe('GH #1098 — VM reconcile sweep self-primes onChainId for a pre-subscr
     await expect((internals as any).revalidateVmReconcileTarget(
       selected,
       target,
-      (internals as any).vmReconcileLifecycleGeneration,
+      (internals as any).workLifetime.generation,
     )).resolves.toBe(false);
 
     expect(target).toMatchObject({ kind: 'rfc64-selected', onChainId: '298' });

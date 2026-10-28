@@ -1,5 +1,6 @@
 import {
   BoundedResponseBodyLimitError,
+  consumeResponseBodyChunks,
   readResponseBodyBytesBounded,
 } from '@origintrail-official/dkg-http-utils';
 
@@ -67,6 +68,25 @@ export async function readResponseTextBounded(
   } catch (error) {
     if (error instanceof BoundedResponseBodyLimitError) {
       throw new StoreResponseTooLargeError(maxBytes, error.actualBytes);
+    }
+    throw error;
+  }
+}
+
+/** Stream response chunks while preserving the canonical store-limit error. */
+export async function consumeStoreResponseBodyChunks(
+  response: Response,
+  maxBytes: number | undefined,
+  consume: (chunk: Uint8Array) => void | Promise<void>,
+): Promise<number> {
+  if (maxBytes !== undefined && (!Number.isSafeInteger(maxBytes) || maxBytes < 0)) {
+    throw new RangeError('maxResponseBytes must be a non-negative safe integer');
+  }
+  try {
+    return await consumeResponseBodyChunks(response, maxBytes, consume);
+  } catch (error) {
+    if (error instanceof BoundedResponseBodyLimitError) {
+      throw new StoreResponseTooLargeError(error.maxBytes, error.actualBytes);
     }
     throw error;
   }

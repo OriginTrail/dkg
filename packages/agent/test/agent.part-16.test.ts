@@ -190,10 +190,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         }));
         (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
 
-        const recovery = await agent.syncVmRecoveryFromConnectedPeers('runtime-contextGraph', {
+        const recovery = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
         });
-        const result = recovery.catchup;
+        const result = recovery;
 
         expect(peerStoreReads).toBe(3);
         // Background catch-up carries no admission priority override, but it
@@ -223,7 +223,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.peersTried).toBe(1);
         expect(result.dataSynced).toBe(5);
         expect(result.sharedMemorySynced).toBe(2);
-        expect(recovery.cleanMissPeerIds).toEqual([remotePeer.toString()]);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([remotePeer.toString()]);
         expect(result.diagnostics.noProtocolPeers).toBe(0);
         expect(result.diagnostics.durable.failedPeers).toBe(0);
         expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
@@ -265,13 +265,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           emptyResponses: 1,
         });
 
-        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+        const recovery = await agent.syncContextGraphFromConnectedPeers(
           'runtime-contextGraph',
           { includeSharedMemory: true },
         );
 
-        expect(recovery.catchup.sharedMemorySynced).toBe(0);
-        expect(recovery.cleanMissPeerIds).toEqual([remotePeer.toString()]);
+        expect(recovery.sharedMemorySynced).toBe(0);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([remotePeer.toString()]);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -314,12 +314,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           ...failure,
         });
 
-        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+        const recovery = await agent.syncContextGraphFromConnectedPeers(
           'runtime-contextGraph',
           { includeSharedMemory: true },
         );
 
-        expect(recovery.cleanMissPeerIds).toEqual([]);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([]);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -359,7 +359,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         }));
         (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
 
-        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+        const recovery = await agent.syncContextGraphFromConnectedPeers(
           'runtime-contextGraph',
           { includeSharedMemory: true },
         );
@@ -368,8 +368,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           cleanPeer.toString(),
           timedOutPeer.toString(),
         ]);
-        expect(recovery.cleanMissPeerIds).toEqual([cleanPeer.toString()]);
-        expect(recovery.catchup.diagnostics.sharedMemory.timedOutPhases).toBe(1);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([cleanPeer.toString()]);
+        expect(recovery.diagnostics.sharedMemory.timedOutPhases).toBe(1);
       } finally {
         await agent.stop().catch(() => {});
       }

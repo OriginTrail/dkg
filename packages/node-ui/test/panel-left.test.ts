@@ -102,22 +102,24 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     });
   });
 
-  async function renderPanel() {
+  async function renderPanel(options: { graphs?: any[]; stage?: number } = {}) {
     const { PanelLeft } = await import('../src/ui/components/Shell/PanelLeft.js');
     const { useJourneyStore } = await import('../src/ui/stores/journey.js');
     const { useProjectsStore } = await import('../src/ui/stores/projects.js');
     const { useLayoutStore } = await import('../src/ui/stores/layout.js');
     // Reset stores between tests so prior toggles don't leak.
     act(() => {
-      useJourneyStore.setState({ stage: 2 });
+      useJourneyStore.setState({ stage: options.stage ?? 2 });
       useProjectsStore.setState({
         // `callerInvolved: true` short-circuits the My-CG membership
         // predicate (`belongsInMyProjectsSidebar`) without needing an
         // agent-identity resolve — keeps the test pure-DOM, no async.
-        contextGraphs: [
+        contextGraphs: options.graphs ?? [
           { id: 'cg-1', name: 'My First CG', assetCount: 42, callerInvolved: true } as any,
         ],
         loading: false,
+        inventoryError: null,
+        inventoryLoaded: false,
         activeProjectId: null,
       });
       useLayoutStore.setState({
@@ -137,6 +139,91 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
     await flush();
     return { container, root };
   }
+
+  it('settles shared loading when the sidebar collapses during an inventory request', async () => {
+    let reply!: (value: any) => void;
+    apiFetchContextGraphsMock.mockImplementationOnce(() => new Promise(resolve => { reply = resolve; }));
+    const { root } = await renderPanel();
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    expect(useProjectsStore.getState().loading).toBe(true);
+    await act(async () => { root.render(null); });
+    expect(useProjectsStore.getState().loading).toBe(false);
+    await act(async () => { reply({ contextGraphs: [] }); });
+    expect(useProjectsStore.getState().loading).toBe(false);
+  });
+
+  it('a dashboard retry recovers the shared inventory error in the mounted sidebar too', async () => {
+    apiFetchContextGraphsMock.mockRejectedValue(new Error('list unavailable'));
+    const { container } = await renderPanel();
+    const { useMyContextGraphs } = await import('../src/ui/hooks/useMyContextGraphs.js');
+    let mine!: ReturnType<typeof useMyContextGraphs>;
+    function DashboardProbe() { mine = useMyContextGraphs(); return null; }
+    const probeContainer = document.createElement('div'); document.body.appendChild(probeContainer);
+    const probeRoot = createRoot(probeContainer); mountedRoots.push(probeRoot); mountedContainers.push(probeContainer);
+    await act(async () => { probeRoot.render(React.createElement(DashboardProbe)); });
+    await flush();
+    expect(container.querySelector('[role="alert"]')).not.toBeNull();
+    expect(mine.cgsError).toContain('list unavailable');
+    apiFetchContextGraphsMock.mockResolvedValue({ contextGraphs: [{ id: 'recovered', name: 'Recovered graph', callerInvolved: true }] });
+    await act(async () => { await mine.retry(); });
+    expect(mine.cgsError).toBeNull();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).toContain('Recovered graph');
+    expect(apiFetchContextGraphsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('clears an anonymous inventory before a failed authenticated refresh', async () => {
+    const { container } = await renderPanel();
+    const { refreshContextGraphInventory } = await import('../src/ui/hooks/useContextGraphInventory.js');
+    const { useProjectsStore } = await import('../src/ui/stores/projects.js');
+    expect(container.textContent).toContain('My First CG');
+    window.__DKG_TOKEN__ = 'new-auth-context';
+    apiFetchContextGraphsMock.mockRejectedValueOnce(new Error('authenticated list unavailable'));
+    try {
+      await act(async () => { await refreshContextGraphInventory(true); });
+      expect(useProjectsStore.getState().contextGraphs).toEqual([]);
+      expect(useProjectsStore.getState().inventoryError).toContain('authenticated list unavailable');
+      expect(useProjectsStore.getState().loading).toBe(false);
+      expect(container.textContent).not.toContain('My First CG');
+    } finally {
+      delete window.__DKG_TOKEN__;
+    }
+  });
+
+  it.each(['graphs', 'identity'])('shows an actionable cold-load %s failure instead of a false empty state', async (endpoint) => {
+    apiFetchContextGraphsMock.mockResolvedValue({ contextGraphs: [] });
+    const failed = endpoint === 'graphs' ? apiFetchContextGraphsMock : fetchCurrentAgentMock;
+    failed.mockRejectedValueOnce(new Error(`${endpoint} unavailable`));
+    const { container } = await renderPanel({ graphs: [], stage: 1 });
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('unavailable');
+    expect(container.textContent).not.toContain('No context graphs yet');
+    expect(container.textContent).not.toContain('No context graphs in this view yet.');
+    const modes = container.querySelectorAll<HTMLButtonElement>('.v10-tree-mode-btn');
+    await act(async () => { modes[1].click(); });
+    expect(container.textContent).not.toContain('No discovered public Context Graphs yet');
+    await act(async () => { modes[0].click(); });
+    const retry = Array.from(container.querySelectorAll('button')).find(button => button.textContent === 'Retry');
+    expect(retry).toBeTruthy();
+    await act(async () => { retry!.click(); });
+    await flush();
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).toContain('No context graphs yet');
+  });
+
+  it('keeps the last graph list visible and marks it stale after refresh failure', async () => {
+    apiFetchContextGraphsMock.mockRejectedValueOnce(new Error('list unavailable'));
+    const { container } = await renderPanel();
+    expect(container.textContent).toContain('My First CG');
+    expect(container.querySelector('[role="alert"]')?.textContent).toContain('last available');
+  });
+
+  it('does not show empty onboarding while the list is still loading', async () => {
+    apiFetchContextGraphsMock.mockImplementationOnce(() => new Promise(() => {}));
+    const { container } = await renderPanel({ graphs: [], stage: 1 });
+    expect(container.textContent).toContain('Loading context graphs');
+    expect(container.querySelector('[role="alert"]')).toBeNull();
+    expect(container.textContent).not.toContain('No context graphs yet');
+  });
 
   it('does not render the in-panel ◂ collapse button (global header toggle is the sole control)', async () => {
     const { container } = await renderPanel();
@@ -215,6 +302,8 @@ describe('PanelLeft — sidebar cleanup + collapsible sections', () => {
       useProjectsStore.setState({
         contextGraphs: [{ id: 'cg-x', name: 'Catalog Only CG', callerInvolved: false } as any],
         loading: false,
+        inventoryError: null,
+        inventoryLoaded: false,
         activeProjectId: null,
       });
       useLayoutStore.setState({

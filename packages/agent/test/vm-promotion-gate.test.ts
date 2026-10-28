@@ -36,6 +36,7 @@ import {
   STORAGE_ACK_DECLINE_CODES,
   SYSTEM_CONTEXT_GRAPHS,
   contextGraphDataGraphUri,
+  contextGraphMetaGraphUri,
   contextGraphMetaUri,
   contextGraphSharedMemoryMetaUri,
   createGraphKnowledgeAssetScope,
@@ -55,6 +56,8 @@ import {
   storageAckLedgerEntryQuads,
   storeKnowledgeAssetWorkspaceHead,
   xsdDateTimeLiteral,
+  generateSubGraphRegistration,
+  hasSubGraphRegistration,
 } from '@origintrail-official/dkg-publisher';
 import {
   GraphManager,
@@ -68,6 +71,14 @@ import {
 import { DKGAgent } from '../src/index.js';
 import { DKGAgentBase } from '../src/dkg-agent-base.js';
 import type { ContextGraphSubscriptionRecord } from '../src/dkg-agent-types.js';
+import type { RollingSubscriptionChecks } from '../src/context-graph-subscription-rolling-checks.js';
+import {
+  holdsCoreHostedOwnerDefinition,
+  noteCoreHostedOwnerShare,
+  pendingCoreHostedDefinitionHint,
+  pendingCoreHostedDefinitionRefresh,
+} from '../src/core-hosted-definition.js';
+import { relayedShareRequest, signedEnvelope } from './_helpers/relayed-share-fixtures.js';
 
 const AUTHOR = '0x1111111111111111111111111111111111111111';
 const DKG = 'http://dkg.io/ontology/';
@@ -135,6 +146,7 @@ interface Internals {
     contextGraphId: string;
     swmGraphId?: string;
     operation: 'publish' | 'update';
+    publisherPeerId?: string;
   }): Promise<{ ok: boolean; code?: string; message?: string }>;
   ensureStorageAckLedgerReady(): Promise<boolean>;
   runVmPromotionAudit(): Promise<AuditStatus>;
@@ -155,6 +167,8 @@ interface Internals {
   storageAckDormantSince: Map<string, number>;
   vmPromotionBackfillBackoff: Map<string, unknown>;
   contextGraphSubscriptionDormancyById: Map<string, string>;
+  contextGraphSubscriptionRollingChecks: RollingSubscriptionChecks;
+  contextGraphSubscriptionRehydrationPromotionRuntime?: { request(): boolean; close(): Promise<void> };
   writeLocks: Map<string, Promise<void>>;
   readStorageAckKnowledgeAssetRootCount(kaUal: string, signal?: AbortSignal): Promise<bigint>;
   reconcileChainOrdinal(
@@ -843,8 +857,13 @@ describe('core VM-promotion guarantees', () => {
         copies.push(await seedCopy(internals.store, { namespace: 'busy-cg', n: 300 + index, ageMs: 2 * HOUR + index * 60_000 }));
       }
 
+      const queries = vi.spyOn(internals.store, 'query');
       await internals.runVmPromotionAudit();
       expect(reads.calls).toHaveLength(2);
+      expect(queries.mock.calls.filter(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promotedBatch')).toHaveLength(1);
+      expect(queries.mock.calls.some(([, options]) =>
+        options?.source === 'agent.vmPromotionAudit.promoted')).toBe(false);
 
       for (let pass = 0; pass < 12; pass += 1) await internals.runVmPromotionAudit();
       const examined = new Set(reads.calls.map(([id]) => id));
@@ -853,6 +872,7 @@ describe('core VM-promotion guarantees', () => {
         expect(examined.has(kaId(300 + index))).toBe(true);
       }
     });
+
   });
 
   describe('durable update path', () => {
@@ -1512,6 +1532,123 @@ describe('core VM-promotion guarantees', () => {
     });
   });
 
+  describe('the definition of a graph the gate records as hosted', () => {
+    const OWNER_SIGNER = new ethers.Wallet(`0x${'95'.repeat(32)}`);
+    const OWNER_WALLET = OWNER_SIGNER.address.toLowerCase();
+    const OWNER_NODE = '12D3KooWOwnerNodeOfTheAckedGraph';
+    const OWNED_GRAPH = `${OWNER_WALLET}/acked-graph`;
+    const OWNED_GRAPH_ID = 57n;
+
+    /** The owner's `_meta`: its public declaration and the sub-graph `reports`. */
+    function ownerMeta(): Quad[] {
+      const meta = contextGraphMetaGraphUri(OWNED_GRAPH);
+      const root = contextGraphDataGraphUri(OWNED_GRAPH);
+      return [
+        { subject: root, predicate: DKG_ONTOLOGY.RDF_TYPE, object: DKG_ONTOLOGY.DKG_CONTEXT_GRAPH, graph: meta },
+        { subject: root, predicate: DKG_ONTOLOGY.DKG_ACCESS_POLICY, object: '"public"', graph: meta },
+        { subject: root, predicate: DKG_ONTOLOGY.DKG_CURATOR, object: `did:dkg:agent:${OWNER_WALLET}`, graph: meta },
+        ...generateSubGraphRegistration({
+          contextGraphId: OWNED_GRAPH,
+          subGraphName: 'reports',
+          createdBy: OWNER_NODE,
+          timestamp: new Date('2026-10-19T00:00:00.000Z'),
+        }),
+      ];
+    }
+
+    /** A share into the graph naming the owner's node, in the envelope the owner's wallet signs. */
+    async function ownerShare(): Promise<Uint8Array> {
+      const payload = await relayedShareRequest({ contextGraphId: OWNED_GRAPH, publisherPeerId: OWNER_NODE });
+      return signedEnvelope(payload, OWNER_SIGNER, { contextGraphId: OWNED_GRAPH });
+    }
+
+    /**
+     * The Core's view right after the owner created the graph: the owner's
+     * node serves its `_meta` while connected, but the agent registry lists
+     * no node for the owner wallet and the peer selection's window does not
+     * reach it. Returns the peers asked for the `_meta`.
+     */
+    function connectOwnerNode(internals: Internals): { asked: string[]; connect(connected: boolean): void } {
+      const stop = new AbortController();
+      const asked: string[] = [];
+      let connected = true;
+      const surface = internals as unknown as Record<string, unknown>;
+      surface.node = {
+        peerId: '12D3KooWVmPromotionGate',
+        stopSignal: stop.signal,
+        libp2p: {
+          getPeers: () => [],
+          getConnections: () => (connected ? [{ remotePeer: { toString: () => OWNER_NODE } }] : []),
+        },
+      };
+      surface.resolveRfc64UnregisteredAuthoritySeedPeersV1 = () => [];
+      surface.runContextGraphSyncWithBackpressure = async (...args: unknown[]) => (args[4] as () => Promise<unknown>)();
+      surface.fetchSyncPages = async (_ctx: unknown, remotePeerId: string) => {
+        asked.push(remotePeerId);
+        if (remotePeerId !== OWNER_NODE) throw new Error(`no route to ${remotePeerId.slice(-8)}`);
+        return { quads: ownerMeta(), checkpointKey: `meta-${remotePeerId}`, resumedFromOffset: 0, completed: true };
+      };
+      COMMITTED_NAMES.set(OWNED_GRAPH_ID, OWNED_GRAPH);
+      restoreStatics.push(() => {
+        COMMITTED_NAMES.delete(OWNED_GRAPH_ID);
+        stop.abort();
+      });
+      return { asked, connect: (value) => { connected = value; } };
+    }
+
+    it('asks the owner\'s node at once when the owner\'s signed share tied it before the first StorageACK', async () => {
+      const internals = await boot();
+      const owner = connectOwnerNode(internals);
+      // The owner's share reaches the Core before its first StorageACK; the graph is not hosted yet.
+      noteCoreHostedOwnerShare(internals, await ownerShare(), OWNER_NODE);
+      expect(pendingCoreHostedDefinitionHint(internals, OWNED_GRAPH)).toBeUndefined();
+      expect(owner.asked).toEqual([]);
+
+      await expect(internals.ensureStorageAckVmPromotion({
+        contextGraphId: OWNED_GRAPH_ID.toString(),
+        swmGraphId: OWNED_GRAPH,
+        operation: 'publish',
+        publisherPeerId: OWNER_NODE,
+      })).resolves.toEqual({ ok: true });
+      await pendingCoreHostedDefinitionRefresh(internals, OWNED_GRAPH);
+
+      expect(owner.asked).toEqual([OWNER_NODE]);
+      await expect(holdsCoreHostedOwnerDefinition(internals.store, OWNED_GRAPH, OWNER_WALLET)).resolves.toBe(true);
+      await expect(hasSubGraphRegistration(internals.store, OWNED_GRAPH, 'reports')).resolves.toBe(true);
+    });
+
+    it('asks no requester the owner did not tie, and the tied node of a later StorageACK while the definition is missing', async () => {
+      const internals = await boot();
+      const owner = connectOwnerNode(internals);
+      const request = { contextGraphId: OWNED_GRAPH_ID.toString(), swmGraphId: OWNED_GRAPH, operation: 'publish' as const };
+
+      // A local self-ACK names no requester; the owner's node asks for the next ACK, but nothing ties it yet.
+      await expect(internals.ensureStorageAckVmPromotion(request)).resolves.toEqual({ ok: true });
+      await pendingCoreHostedDefinitionRefresh(internals, OWNED_GRAPH);
+      await expect(internals.ensureStorageAckVmPromotion({ ...request, operation: 'update', publisherPeerId: OWNER_NODE }))
+        .resolves.toEqual({ ok: true });
+      expect(pendingCoreHostedDefinitionHint(internals, OWNED_GRAPH)).toBeUndefined();
+      expect(owner.asked).toEqual([]);
+      await expect(holdsCoreHostedOwnerDefinition(internals.store, OWNED_GRAPH, OWNER_WALLET)).resolves.toBe(false);
+
+      // Its signed share ties it while it is away; its StorageACK once it is back asks it for the definition.
+      owner.connect(false);
+      noteCoreHostedOwnerShare(internals, await ownerShare(), OWNER_NODE);
+      expect(pendingCoreHostedDefinitionHint(internals, OWNED_GRAPH)).toBeUndefined();
+      owner.connect(true);
+      await expect(internals.ensureStorageAckVmPromotion({ ...request, operation: 'update', publisherPeerId: OWNER_NODE }))
+        .resolves.toEqual({ ok: true });
+      await pendingCoreHostedDefinitionHint(internals, OWNED_GRAPH);
+      expect(owner.asked).toEqual([OWNER_NODE]);
+      await expect(hasSubGraphRegistration(internals.store, OWNED_GRAPH, 'reports')).resolves.toBe(true);
+
+      // Held: the ACKs after it cost no fetch.
+      await expect(internals.ensureStorageAckVmPromotion({ ...request, publisherPeerId: OWNER_NODE })).resolves.toEqual({ ok: true });
+      expect(pendingCoreHostedDefinitionHint(internals, OWNED_GRAPH)).toBeUndefined();
+      expect(owner.asked).toEqual([OWNER_NODE]);
+    });
+  });
+
   describe('gate, audit and lane edge paths', () => {
     function ledgerRow(op: string, fields: Record<string, string>): Quad[] {
       return Object.entries(fields).map(([predicate, object]) => ({
@@ -1872,6 +2009,31 @@ describe('core VM-promotion guarantees', () => {
 
       expect(verdict).toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_DISABLED });
       expect(verdict.message).toContain('rehydrationDisabled');
+    });
+
+    it('asks rolling activation for a row the activation cap left dormant, ahead of its backlog', async () => {
+      const internals = await boot();
+      internals.contextGraphSubscriptionDormancyById.set('a-earlier-row', 'activationCap');
+      internals.contextGraphSubscriptionDormancyById.set('dormant-cg', 'activationCap');
+      const request = vi.fn(() => true);
+      internals.contextGraphSubscriptionRehydrationPromotionRuntime = { request, close: async () => undefined };
+
+      const verdict = await internals.ensureStorageAckVmPromotion({
+        contextGraphId: '46', swmGraphId: 'dormant-cg', operation: 'publish',
+      });
+
+      expect(verdict).toMatchObject({ ok: false, code: STORAGE_ACK_DECLINE_CODES.CORE_VM_PROMOTION_UNAVAILABLE });
+      expect(verdict.message).toContain('activationCap');
+      expect(request).toHaveBeenCalledOnce();
+      // Rolling activation checks it next, not the row that sorts first.
+      const pass = internals.contextGraphSubscriptionRollingChecks.beginPass({
+        pendingIds: new Set(['a-earlier-row', 'dormant-cg']),
+        dormancyById: internals.contextGraphSubscriptionDormancyById as never,
+        subscriptions: internals.subscribedContextGraphs,
+        warn: () => undefined,
+        debug: () => undefined,
+      });
+      await expect(pass.next(new AbortController().signal)).resolves.toBe('dormant-cg');
     });
 
     it('declines transiently for a while, then finally, when dormancy does not clear', async () => {

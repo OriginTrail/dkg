@@ -22,7 +22,6 @@ import {
   assertSafeIri,
   assertSafeRdfTerm,
   validateSubGraphName,
-  contextGraphSubGraphUri,
   GOSSIP_ENVELOPE_FRESHNESS_MS,
   GOSSIP_ENVELOPE_VERSION,
   ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
@@ -37,9 +36,9 @@ import { validateCanonicalGraphScopedKnowledgeAssetPayload } from './validation.
 import { acceptIncomingPublicQuads } from './incoming-public-copy.js';
 import { withKeyedLocks, swmKaWriteLockKey } from './keyed-lock.js';
 import {
-  generateSubGraphRegistration,
   replaceLocallyTrustedKnowledgeAssetControlEnvelope,
 } from './metadata.js';
+import { ensureSubGraphRegistration } from './sub-graph-registration.js';
 import { parseSimpleNQuads } from './publish-handler.js';
 import {
   storeKnowledgeAssetOperationPublicQuads,
@@ -49,7 +48,10 @@ import {
 import type { WorkspacePublicSnapshotStore } from './workspace-snapshot-store.js';
 import { workspacePublicQuadsDigest } from './workspace-snapshot-store.js';
 import { resolveWorkspaceEncryptionRequirement } from './workspace-encryption-policy.js';
+import { AGENT_ENVELOPE_INVALID, admitAgentSigner, retryAgentEnvelopeWithRefreshedGate } from './swm-write-gate-refresh.js';
+import type { AdmissionMetadata, AgentEnvelopeVerdict, SwmAgentGateRefreshOracle } from './swm-write-gate-refresh.js';
 import { computeFlatKCRootV10 } from './merkle.js';
+import { SharedMemoryAuthorSealKeeper } from './shared-memory-author-seal.js';
 import { workspaceHeadIncludesShareOperationId } from './workspace-operation-equivalence.js';
 import { storageAckOwedCopiesByScopeQuery } from './storage-ack-ledger.js';
 import {
@@ -140,6 +142,7 @@ function appliedSharedMemoryOutcome(
     cgId: fields.contextGraphId,
     shareOperationId: fields.shareOperationId,
     publisherPeerId: fields.publisherPeerId,
+    subGraphName: fields.subGraphName || undefined,
     insertedTriples,
   };
 }
@@ -151,6 +154,8 @@ export interface ContextGraphMetaOracleRecord {
   revokedAgents?: readonly string[];
   accessPolicy?: string;
 }
+
+type ContextGraphMetaOracleRead = () => Promise<ContextGraphMetaOracleRecord | null>;
 
 /**
  * Outcome of one `SharedMemoryHandler.handle()` invocation. Added
@@ -219,6 +224,8 @@ export type SharedMemoryApplyOutcome =
        * Caller addresses the PROTOCOL_SWM_SHARE_ACK to this peer.
        */
       publisherPeerId?: string;
+      /** Named sub-graph the share applied into; undefined for the context graph's root. */
+      subGraphName?: string;
       /**
        * Number of N-Quads that were inserted into the SWM graph
        * by this apply (i.e., `quads.length` after decode + decrypt).
@@ -303,9 +310,12 @@ export class SharedMemoryHandler {
   private readonly sharedMemoryOwnedEntities: Map<string, Map<string, string>> = new Map();
   private readonly writeLocks: Map<string, Promise<void>>;
   private readonly localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+  private readonly authorSeals: SharedMemoryAuthorSealKeeper;
   private readonly contextGraphMetaOracle?: (
     contextGraphId: string,
   ) => Promise<ContextGraphMetaOracleRecord | null>;
+  /** Fresh gate for a signer the projected gate lacked; see `swm-write-gate-refresh.ts`. */
+  private readonly agentGateRefreshOracle?: SwmAgentGateRefreshOracle;
   /**
    * Authenticated proof that a CG's SWM is public-readable.
    *
@@ -457,9 +467,12 @@ export class SharedMemoryHandler {
       sharedMemoryOwnedEntities?: Map<string, Map<string, string>>;
       writeLocks?: Map<string, Promise<void>>;
       localAgentAddresses?: () => readonly string[] | Promise<readonly string[]>;
+      keepsAuthorSeals?: (contextGraphId: string) => boolean | Promise<boolean>;
       contextGraphMetaOracle?: (
         contextGraphId: string,
       ) => Promise<ContextGraphMetaOracleRecord | null>;
+      /** Fresh gate for a signer the projected gate lacked; see `swm-write-gate-refresh.ts`. Optional. */
+      agentGateRefreshOracle?: SwmAgentGateRefreshOracle;
       /**
        * Authenticated public-access proof (live on-chain policy, or an
        * unregistered graph's accepted owner-signed policy), mirroring the
@@ -544,7 +557,9 @@ export class SharedMemoryHandler {
     }
     this.writeLocks = options?.writeLocks ?? new Map();
     this.localAgentAddresses = options?.localAgentAddresses;
+    this.authorSeals = new SharedMemoryAuthorSealKeeper(store, this.log, options);
     this.contextGraphMetaOracle = options?.contextGraphMetaOracle;
+    this.agentGateRefreshOracle = options?.agentGateRefreshOracle;
     this.publicAccessPolicyOracle = options?.publicAccessPolicyOracle
       ?? options?.publicAccessPolicyOnChainOracle;
     this.legacyApplyAllowedOracle = options?.legacyApplyAllowedOracle;
@@ -1097,12 +1112,21 @@ export class SharedMemoryHandler {
         return declineNonAuthoritativeLegacyApply(encodedSubGraphName);
       }
 
+      // One inbound envelope must be judged from one projected metadata read.
+      // Besides keeping the agent/peer/policy gates on a coherent snapshot,
+      // this matters when the injected oracle proves an approved private
+      // replica against finalized/live authority: the three consumers below
+      // must not repeat that authority read independently on the hot path.
+      const readProjectedMeta = this.createContextGraphMetaOracleRead(contextGraphId);
       const agentGateAddresses = await withRpcUsageSite(
         CG_AUTH_RPC_SITES.workspaceApply,
-        () => this.getContextGraphAgentGateAddresses(contextGraphId),
+        () => this.getContextGraphAgentGateAddresses(contextGraphId, readProjectedMeta),
       );
-      const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
-      const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(contextGraphId);
+      const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
+      const hasPrivateAccessPolicy = await this.contextGraphHasPrivateAccessPolicy(
+        contextGraphId,
+        readProjectedMeta,
+      );
 
       if (hasPrivateAccessPolicy && agentGateAddresses === null && allowedPeers === null) {
         const reason = `private context graph "${contextGraphId}" has no gossip allowlist`;
@@ -1117,27 +1141,23 @@ export class SharedMemoryHandler {
       }
 
       if (agentGateAddresses !== null) {
-        const verified = await this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, agentGateAddresses, ctx, {
-          // LU-6 host-catchup replay (PR #610 Codex round-2 #1): the
-          // 5-minute `GOSSIP_ENVELOPE_FRESHNESS_MS` window protects
-          // live gossip against replay attacks, but it BREAKS the
-          // host-catchup recovery path — a member that comes online
-          // hours/days after a curator wrote to SWM legitimately
-          // needs to replay envelopes whose timestamps are far older
-          // than the freshness window. Skipping the freshness check
-          // on trusted replays is safe because the (cryptographic)
-          // signature + decryption chain still verifies, and `seqno`
-          // monotonicity in the host catalog prevents re-applying
-          // already-seen entries. Without this skip, every aged
-          // host-catchup envelope returned `stale or invalid gossip
-          // timestamp` and the off-line member could never catch up.
+        const verdict = await this.verifyAgentEnvelope(envelope, signedPayload, contextGraphId, agentGateAddresses, ctx, {
+          // LU-6 host-catchup replay (PR #610 Codex round-2 #1): the 5-minute `GOSSIP_ENVELOPE_FRESHNESS_MS`
+          // window protects live gossip against replay, but a member that comes online hours/days after a curator
+          // wrote to SWM legitimately replays far older envelopes. Skipping the check on trusted replays is safe: the
+          // signature + decryption chain still verifies, and host catalog `seqno` monotonicity prevents re-applying.
           skipTimestampFreshness: trustedReplay,
         });
-        if (!verified) {
-          // verifyAgentEnvelope already logged the specific reason
-          // at WARN. Treated as permanent: a bad signature won't
-          // become good on retry.
-          return { applied: false, reason: 'agent envelope verification failed', retryable: false };
+        if (verdict.kind !== 'verified') {
+          // Logged at WARN. Invalid is permanent; a signer the projected gate lacked gets one fresh look.
+          const retry = await retryAgentEnvelopeWithRefreshedGate({
+            verdict, oracle: this.agentGateRefreshOracle, contextGraphId, fromPeerId, trustedReplay, allowedPeers,
+            localAgentAddresses: this.localAgentAddresses?.bind(this),
+            revokedAgents: await this.getContextGraphRevokedAgents(contextGraphId, await readProjectedMeta?.()),
+            readRefreshedMetadata: () => this.readAdmissionMetadata(contextGraphId),
+            logWarn: (message) => this.log.warn(ctx, message), logInfo: (message) => this.log.info(ctx, message),
+          });
+          if (!retry.accepted) return { applied: false, reason: 'agent envelope verification failed', retryable: retry.retryable };
         }
       } else if (trustedReplay && !hasPrivateAccessPolicy && !decoded.senderKeyMessage && !decoded.encryptedPayload) {
         // GH #1124 (otReviewAgent #1239) — PUBLIC-CG host-catchup forgery gate.
@@ -1172,7 +1192,7 @@ export class SharedMemoryHandler {
           envelope, signedPayload, contextGraphId, [ethers.getAddress(envelope.agentAddress)], ctx,
           { requireLocalMembership: false, skipTimestampFreshness: true },
         );
-        if (!selfConsistent) {
+        if (selfConsistent.kind !== 'verified') {
           return { applied: false, reason: 'public-CG host-catchup envelope failed signature verification', retryable: false };
         }
       }
@@ -1299,6 +1319,7 @@ export class SharedMemoryHandler {
         accessPolicy: wireAccessPolicy,
         allowedPeers: wireAllowedPeers,
       } = request;
+      const sealedShare = request;
       const shareOperationId = request.shareOperationId?.trim();
       const requestLifecycleFields: SharedMemoryLifecycleFields = {
         contextGraphId,
@@ -1451,25 +1472,14 @@ export class SharedMemoryHandler {
 
       if (subGraphName) {
         await this.graphManager.ensureSubGraph(contextGraphId, subGraphName);
-
-        const sgUri = contextGraphSubGraphUri(contextGraphId, subGraphName);
-        const metaGraph = `did:dkg:context-graph:${assertSafeIri(contextGraphId)}/_meta`;
-        const alreadyRegistered = await this.store.query(
-          `ASK { GRAPH <${metaGraph}> {
-            <${assertSafeIri(sgUri)}> a <http://dkg.io/ontology/SubGraph> ;
-              <http://schema.org/name> ${JSON.stringify(subGraphName)} ;
-              <http://dkg.io/ontology/createdBy> ?createdBy .
-          } }`,
-        );
-        if (alreadyRegistered.type !== 'boolean' || !alreadyRegistered.value) {
-          const regQuads = generateSubGraphRegistration({
-            contextGraphId,
-            subGraphName,
-            createdBy: publisherPeerId || 'swm-discovery',
-            timestamp: new Date(),
-          });
-          await this.store.insert(regQuads);
-          this.markContextGraphMetaDirtyFromQuads?.(regQuads);
+        const registration = await ensureSubGraphRegistration(this.store, {
+          contextGraphId,
+          subGraphName,
+          createdBy: publisherPeerId || 'swm-discovery',
+          timestamp: new Date(),
+        });
+        if (registration.registered) {
+          this.markContextGraphMetaDirtyFromQuads?.(registration.quads);
           this.log.info(ctx, `Auto-registered sub-graph "${subGraphName}" in context graph "${contextGraphId}" from SWM`);
         }
       }
@@ -1646,6 +1656,7 @@ export class SharedMemoryHandler {
               // Refresh local-only controls so a retry completes a prior
               // head/sidecar tear.
               await persistLocallyTrustedControls();
+              await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized, { envelope, signedPayload });
               return swmWriteApplied;
             }
             const reason =
@@ -1784,6 +1795,7 @@ export class SharedMemoryHandler {
         // this assertion's locally recomputed root, only after the durable SWM
         // head has committed. Receipt recovery must fail closed without them.
         await persistLocallyTrustedControls();
+        await this.authorSeals.keep(ctx, sealedShare, contentScope, normalized, { envelope, signedPayload });
 
         return swmWriteApplied;
       });
@@ -2024,11 +2036,15 @@ export class SharedMemoryHandler {
     if (!envelope) {
       return { accepted: false, reasonCode: 'UNSIGNED', reason: 'unsigned envelope (host mode requires agent-signed gossip)' };
     }
+    // Agent and peer gates are two views of the same authority snapshot. Read
+    // the injected projection once so an authority-backed oracle is not
+    // resolved twice for one host-mode envelope.
+    const readProjectedMeta = this.createContextGraphMetaOracleRead(contextGraphId);
     const agentGateAddresses = await withRpcUsageSite(
       CG_AUTH_RPC_SITES.hostEnvelope,
-      () => this.getContextGraphAgentGateAddresses(contextGraphId),
+      () => this.getContextGraphAgentGateAddresses(contextGraphId, readProjectedMeta),
     );
-    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId);
+    const allowedPeers = await this.getContextGraphAllowedPeers(contextGraphId, readProjectedMeta);
 
     // GH #1124 — resolve "fully-open (self-publishable) CG" HERE rather than
     // trusting a caller flag: the caller injects the (forced-fresh, fail-closed)
@@ -2061,7 +2077,7 @@ export class SharedMemoryHandler {
       const selfConsistent = await this.verifyAgentEnvelope(
         envelope, signedPayload, contextGraphId, [ethers.getAddress(envelope.agentAddress)], ctx, { requireLocalMembership: false },
       );
-      if (!selfConsistent) {
+      if (selfConsistent.kind !== 'verified') {
         return { accepted: false, reasonCode: 'SIG_VERIFY_FAILED', reason: 'public-CG envelope failed signature/freshness verification' };
       }
       // A public self-signed host-mode entry is later applied via host catchup
@@ -2108,7 +2124,7 @@ export class SharedMemoryHandler {
       ctx,
       { requireLocalMembership: false },
     );
-    if (!verified) {
+    if (verified.kind !== 'verified') {
       return { accepted: false, reasonCode: 'SIG_VERIFY_FAILED', reason: 'agent envelope verification failed (see preceding WARN log)' };
     }
     return { accepted: true };
@@ -2142,10 +2158,10 @@ export class SharedMemoryHandler {
        */
       skipTimestampFreshness?: boolean;
     },
-  ): Promise<boolean> {
+  ): Promise<AgentEnvelopeVerdict> {
     if (!envelope) {
       this.log.warn(ctx, `SWM write rejected: unsigned workspace gossip for agent-gated context graph "${contextGraphId}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
     // OT-RFC-38 LU-11: accept both the legacy single-blob type
@@ -2159,25 +2175,25 @@ export class SharedMemoryHandler {
         && envelope.type !== GOSSIP_TYPE_WORKSPACE_PUBLISH_CHUNKED)
     ) {
       this.log.warn(ctx, `SWM write rejected: invalid gossip envelope type/version for context graph "${contextGraphId}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
     if (envelope.contextGraphId !== contextGraphId) {
       this.log.warn(ctx, `SWM write rejected: envelope contextGraphId "${envelope.contextGraphId}" does not match payload "${contextGraphId}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
     if (!envelope.signature || envelope.signature.length === 0) {
       this.log.warn(ctx, `SWM write rejected: missing agent signature for context graph "${contextGraphId}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
     const timestampMs = Date.parse(envelope.timestamp);
     if (!Number.isFinite(timestampMs)) {
       this.log.warn(ctx, `SWM write rejected: invalid gossip timestamp "${envelope.timestamp}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
     if (!options?.skipTimestampFreshness && Math.abs(this.now() - timestampMs) > GOSSIP_ENVELOPE_FRESHNESS_MS) {
       this.log.warn(ctx, `SWM write rejected: stale or invalid gossip timestamp "${envelope.timestamp}"`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
     let claimedAgent: string;
@@ -2206,31 +2222,23 @@ export class SharedMemoryHandler {
       recovered = ethers.verifyMessage(signingPayload, ethers.hexlify(envelope.signature));
     } catch (err) {
       this.log.warn(ctx, `SWM write rejected: invalid agent signature (${err instanceof Error ? err.message : String(err)})`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
     if (recovered.toLowerCase() !== claimedAgent.toLowerCase()) {
       this.log.warn(ctx, `SWM write rejected: recovered signer ${recovered} does not match envelope agent ${claimedAgent}`);
-      return false;
+      return AGENT_ENVELOPE_INVALID;
     }
 
-    const agentGateSet = new Set(agentGateAddresses.map((agent) => agent.toLowerCase()));
-    if (!agentGateSet.has(recovered.toLowerCase())) {
-      this.log.warn(ctx, `SWM write rejected: agent ${recovered} is not allowed for context graph "${contextGraphId}"`);
-      return false;
-    }
-
-    const requireLocalMembership = options?.requireLocalMembership !== false;
-    if (requireLocalMembership && this.localAgentAddresses) {
-      const localAgents = await this.localAgentAddresses();
-      const localAllowed = localAgents.some((agent) => agentGateSet.has(agent.toLowerCase()));
-      if (!localAllowed) {
-        this.log.warn(ctx, `SWM write rejected: local node has no allowed agent for context graph "${contextGraphId}"`);
-        return false;
-      }
-    }
-
-    return true;
+    // Authenticated; admission is separate so a fresh gate can re-admit the signer without verifying it again.
+    return admitAgentSigner({
+      signer: recovered,
+      contextGraphId,
+      agentGateAddresses,
+      requireLocalMembership: options?.requireLocalMembership !== false,
+      localAgentAddresses: this.localAgentAddresses?.bind(this),
+      logWarn: (message) => this.log.warn(ctx, message),
+    });
   }
 
   /**
@@ -2252,10 +2260,30 @@ export class SharedMemoryHandler {
   }
 
   /**
+   * Build a lazy request-local read of the projected context-graph metadata.
+   * Laziness preserves the RPC-usage context of the first gate that consumes
+   * it; promise memoization keeps every later gate on the same snapshot.
+   */
+  private createContextGraphMetaOracleRead(
+    contextGraphId: string,
+  ): ContextGraphMetaOracleRead | undefined {
+    const oracle = this.contextGraphMetaOracle;
+    if (oracle === undefined) return undefined;
+    let projected: Promise<ContextGraphMetaOracleRecord | null> | undefined;
+    return () => {
+      projected ??= oracle(contextGraphId);
+      return projected;
+    };
+  }
+
+  /**
    * Returns the peer allowlist for a context graph, or null if no allowlist
    * is set (open CG — all peers allowed).
    */
-  private async getContextGraphAllowedPeers(contextGraphId: string): Promise<string[] | null> {
+  private async getContextGraphAllowedPeers(
+    contextGraphId: string,
+    readProjectedMeta?: ContextGraphMetaOracleRead,
+  ): Promise<string[] | null> {
     // The oracle record is intentionally PARTIAL (OT-RFC-49 public
     // projection): a populated record does NOT imply every gate field
     // was projected. Short-circuit on the projection ONLY for the
@@ -2264,7 +2292,7 @@ export class SharedMemoryHandler {
     // complete snapshot here would let a projection that carried only
     // `accessPolicy`/agent fields skip the peer allowlist entirely
     // (returns null ⇒ "open CG — all peers allowed").
-    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
     if (projected?.allowedPeers !== undefined) {
       const peers = [...new Set(projected.allowedPeers.filter((v): v is string => typeof v === 'string'))];
       return peers.length > 0 ? peers : null;
@@ -2284,12 +2312,34 @@ export class SharedMemoryHandler {
       .map(stripRdfLiteral);
   }
 
+  /** Revoked tombstones, lowercased: the projection when it carried the field, otherwise `_meta`.
+   * Applied to whichever source an allowlist comes from (a projected revocation kicks a store member). */
+  private async getContextGraphRevokedAgents(
+    contextGraphId: string,
+    projected: ContextGraphMetaOracleRecord | null | undefined,
+  ): Promise<ReadonlySet<string>> {
+    const revokedAgents = projected?.revokedAgents ?? await this.queryMetaAgents(contextGraphId, DKG_ONTOLOGY.DKG_REVOKED_AGENT);
+    return new Set(revokedAgents
+      .filter((v): v is string => typeof v === 'string' && ethers.isAddress(v))
+      .map((v) => v.toLowerCase()));
+  }
+
+  /** The revocations and peer allowlist of the metadata as it is now, from one projected read. */
+  private async readAdmissionMetadata(contextGraphId: string): Promise<AdmissionMetadata> {
+    const read = this.createContextGraphMetaOracleRead(contextGraphId);
+    const revokedAgents = await this.getContextGraphRevokedAgents(contextGraphId, await read?.());
+    return { revokedAgents, allowedPeers: await this.getContextGraphAllowedPeers(contextGraphId, read) };
+  }
+
   /**
    * Returns the accepted SWM writer agent addresses for a context graph, or
    * null if the graph is not agent-gated. Includes DKG_ALLOWED_AGENT and
    * DKG_PARTICIPANT_AGENT metadata.
    */
-  private async getContextGraphAgentGateAddresses(contextGraphId: string): Promise<string[] | null> {
+  private async getContextGraphAgentGateAddresses(
+    contextGraphId: string,
+    readProjectedMeta?: ContextGraphMetaOracleRead,
+  ): Promise<string[] | null> {
     // The oracle record is intentionally PARTIAL (OT-RFC-49 public
     // projection): each gate field is resolved INDEPENDENTLY from the
     // projection-if-present-else-store, so a projection that carried
@@ -2299,20 +2349,8 @@ export class SharedMemoryHandler {
     // resolved separately and then subtracted — short-circuiting on a
     // whole truthy record here would let a partial projection fall
     // back to a *stale store allowlist with no revocation applied*.
-    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
-
-    // Revoked tombstones: prefer the projection when it carried the
-    // field, otherwise read `_meta`. Applied to whichever source the
-    // allowlist comes from, so a projected revocation kicks a store-
-    // resolved member and vice versa.
-    const revoked = new Set<string>(
-      (projected?.revokedAgents !== undefined
-        ? projected.revokedAgents
-        : await this.queryMetaAgents(contextGraphId, DKG_ONTOLOGY.DKG_REVOKED_AGENT)
-      )
-        .filter((v): v is string => typeof v === 'string' && ethers.isAddress(v))
-        .map((v) => v.toLowerCase()),
-    );
+    const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
+    const revoked = await this.getContextGraphRevokedAgents(contextGraphId, projected);
 
     // Resolve EACH allowlist field (allowed, participant) INDEPENDENTLY:
     // projection-if-that-specific-field-was-projected, else `_meta` store
@@ -2444,7 +2482,10 @@ export class SharedMemoryHandler {
     }
   }
 
-  private async contextGraphHasPrivateAccessPolicy(contextGraphId: string): Promise<boolean> {
+  private async contextGraphHasPrivateAccessPolicy(
+    contextGraphId: string,
+    readProjectedMeta?: ContextGraphMetaOracleRead,
+  ): Promise<boolean> {
     if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(contextGraphId)) {
       return false;
     }
@@ -2453,7 +2494,7 @@ export class SharedMemoryHandler {
     // projected (`!== undefined`). The oracle record is PARTIAL, so a
     // record carrying only agent/peer fields must NOT be read as
     // "accessPolicy absent ⇒ not private"; fall back to the store.
-    const projected = await this.contextGraphMetaOracle?.(contextGraphId);
+    const projected = await (readProjectedMeta?.() ?? this.contextGraphMetaOracle?.(contextGraphId));
     if (projected?.accessPolicy !== undefined) {
       return projected.accessPolicy.trim().toLowerCase() === 'private';
     }

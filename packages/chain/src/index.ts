@@ -1,4 +1,8 @@
+export * from './public-graph-snapshot.js';
+export type { CoreChainCacheRegistry } from './core-chain-cache-registry.js';
+export { createEvmCoreChainCacheRegistry, CORE_CHAIN_CACHE_MAX_RPC_ENDPOINTS } from './evm-core-chain-cache.js';
 export * from './chain-adapter.js';
+export { RpcUsageScope } from './rpc-usage-scope.js';
 export {
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MAX_BYTES,
   CONTEXT_GRAPH_AUTHORITY_INDEX_SNAPSHOT_MIN_TAIL_BLOCKS,
@@ -86,6 +90,8 @@ export {
   FINALIZED_CONTEXT_GRAPH_NAME_HASH_MAX_RETURN_BYTES_V1,
   FINALIZED_CONTEXT_GRAPH_TUPLE_MAX_RETURN_BYTES_V1,
   createFinalizedContextGraphRpcResolverV1,
+  readFinalizedContextGraphEmptyVmFactsInSnapshotV1,
+  type FinalizedContextGraphEmptyVmFactsV1,
 } from './finalized-context-graph-rpc-resolver.js';
 export {
   FinalizedVmChainInventoryValidationErrorV1,
@@ -96,6 +102,7 @@ export {
 } from './finalized-vm-chain-inventory.js';
 export {
   FINALIZED_VM_CHAIN_SCAN_MAX_ROWS_V1,
+  FinalizedVmChainInventoryLimitErrorV1,
   createFinalizedVmChainScannerV1,
   scanFinalizedVmChainInventoryInSnapshotV1,
   type FinalizedVmChainScanRequestV1,
@@ -188,6 +195,18 @@ export {
   type RpcUsageRecorder,
   type RpcUsageWindow,
 } from './rpc-usage.js';
+// Observation-only split of physical RPC attempts into local admission wait and
+// endpoint latency. Process-cumulative, bounded and secret-free; consumers diff
+// two non-draining snapshots.
+export {
+  RPC_TIMING_BUCKET_UPPER_MS,
+  diffRpcRequestTiming,
+  snapshotRpcRequestTiming,
+  type RpcRequestTimingClassSnapshot,
+  type RpcRequestTimingSnapshot,
+  type RpcTimingDistribution,
+  type RpcTimingRequestClass,
+} from './rpc-request-timing.js';
 // The bounded census of call sites that reach `cgStorage.getContextGraph`.
 export {
   CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER,
@@ -226,11 +245,16 @@ export {
   type RpcRequestGovernorClock,
   type RpcRequestGovernorWindow,
 } from './rpc-request-governor.js';
+export {
+  drainRpcReadBatchingWindow,
+  type RpcReadBatchingWindow,
+} from './evm-background-read-batching.js';
 export { MockChainAdapter, MOCK_DEFAULT_SIGNER } from './mock-adapter.js';
 export type { MockChainAdapterOptions } from './mock-adapter.js';
 export {
   EVMChainAdapter,
   type EVMAdapterConfig,
+  type EVMAdapterOptions,
   decodeEvmError,
   enrichEvmError,
   classifyRpcRetryDisposition,
@@ -249,6 +273,52 @@ export {
 } from './evm-adapter.js';
 export { NoChainAdapter } from './no-chain-adapter.js';
 export {
+  OperationalKeyUnavailableError,
+  isExternalEvmSigner,
+  type AuthorSigner,
+  type EvmSigner,
+  type ExternalAuthorSigners,
+  type ExternalEvmSigner,
+  type ExternalOperationalSignerSource,
+  type LocalOperationalSignerSource,
+  type OperationalSignerSource,
+} from './evm-signer.js';
+export {
+  RemoteSigner,
+  RemoteSignerClient,
+  type RemoteSignerApi,
+  type RemoteSignerClientOptions,
+} from './remote-signer.js';
+export {
+  DEFAULT_REMOTE_SIGNER_TIMEOUT_MS,
+  type RemoteSignerTransportOptions,
+} from './remote-signer-transport.js';
+export {
+  RemoteSignerError,
+  isRemoteSignerError,
+  type RemoteSignerErrorCode,
+  type RemoteSignerFailureCode,
+  type RemoteSignerFailureLike,
+} from './remote-signer-errors.js';
+export {
+  RemoteAuthorSigners,
+  connectRemoteSigners,
+  type ConnectRemoteSignersOptions,
+  type RemoteSignerAuthorOptions,
+  type RemoteSigners,
+} from './remote-signer-connect.js';
+export {
+  connectConfiguredRemoteSigners,
+  resolveChainSignerConfig,
+  type ChainSignerConfig,
+  type ChainSignerSettings,
+  type ConnectConfiguredRemoteSignersOptions,
+  type LocalChainSignerConfig,
+  type RemoteChainSignerAuthorConfig,
+  type RemoteChainSignerConfig,
+  type ResolvedRemoteSignerConfig,
+} from './remote-signer-config.js';
+export {
   createRpcReadDescriptor,
   type RpcReadDescriptor,
   type RpcReadDescriptorInput,
@@ -258,12 +328,20 @@ export {
   RpcEndpointsExhaustedError,
   isChainRpcTransportError,
   isRpcEndpointsExhaustedError,
+  isTransientRpcTransportFailureWithoutTransaction,
   createRpcTimeoutError,
   type ChainRpcTransportCode,
   type ChainRpcTransportErrorLike,
   type RpcEndpointExhaustionKind,
   type RpcEndpointsExhaustedErrorLike,
 } from './chain-rpc-transport-error.js';
+export {
+  CHAIN_WRITE_AHEAD_HOOK_FAILED_CODE,
+  ChainWriteAheadHookError,
+  getChainWriteAheadHookCause,
+  isChainWriteAheadHookError,
+  type ChainWriteAheadHookErrorLike,
+} from './write-ahead-hook-error.js';
 export {
   classifyContextGraphRegistrationFailure,
   markContextGraphRegistrationNotSubmitted,
@@ -281,12 +359,31 @@ export {
   noteRpcExhaustion,
   notePreferredEndpoint,
   noteRpcServed,
+  // GH#2942 — the publisher persists a transport failure's message and must reduce any URL in
+  // it (a configured RPC URL can carry an API key) to its host first.
+  hostOnlyRpcText,
 } from './rpc-failover-log.js';
+export {
+  // Why a KA version snapshot could not be established: which endpoint gave no view (host
+  // only) and a closed class. The agent names it; `/api/status` reads the process-wide record.
+  describeKnowledgeAssetVersionSnapshotUnavailable,
+  getKnowledgeAssetVersionSnapshotHealth,
+  _resetKnowledgeAssetVersionSnapshotHealthForTest,
+  type KnowledgeAssetVersionSnapshotEndpointFailure,
+  type KnowledgeAssetVersionSnapshotEndpointFailureClass,
+  type KnowledgeAssetVersionSnapshotFailingEndpoint,
+  type KnowledgeAssetVersionSnapshotHealth,
+  type KnowledgeAssetVersionSnapshotReadOptions,
+  type KnowledgeAssetVersionSnapshotReadStage,
+  type KnowledgeAssetVersionSnapshotUnavailable,
+  type KnowledgeAssetVersionSnapshotUnavailableReason,
+} from './ka-version-snapshot-report.js';
 export {
   HubResolutionCache,
   type HubResolutionCacheOptions,
 } from './hub-resolution-cache.js';
 export { PcaUnavailableError, isPcaUnavailableError } from './pca-errors.js';
+export { numericChainIdOf } from './evm-adapter-storage-reads.js';
 export {
   DEFAULT_FINALITY_CONFIRMATIONS,
   MIN_RPC_RECEIPT_TIMEOUT_MS,
@@ -332,3 +429,7 @@ export {
   type EvmChainIndexRuntime,
   type EvmChainIndexRuntimeOptions,
 } from './evm-chain-index-runtime.js';
+
+export { normalizeKnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateIdentity, type KnowledgeAssetUpdateMetadata } from './knowledge-asset-update-identity.js';
+
+export { isPublicGraphSnapshotScope } from './public-graph-snapshot-scope.js';

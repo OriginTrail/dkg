@@ -36,6 +36,12 @@ interface NormalizedMemberProof {
   nowMs: number;
 }
 
+/**
+ * Expiry carried out of the same source-qualified store proof that established
+ * membership. `null` means that the proved delegation has no expiry.
+ */
+export type ApprovedMemberDelegationExpiry = number | null;
+
 function normalizeMemberProof(
   proof: ApprovedMemberProof,
 ): NormalizedMemberProof | undefined {
@@ -62,6 +68,45 @@ function normalizeMemberProof(
 
 function literalEqualsIgnoreCase(value: string, expected: string): boolean {
   return value.startsWith('"') && stripLiteral(value).trim().toLowerCase() === expected;
+}
+
+/**
+ * Parse the expiry selected by the authoritative member proof. Multiple
+ * active expiry rows retain the latest deadline, matching the proof's
+ * any-active-row semantics. Ambiguous or malformed results fail closed.
+ */
+export function parseApprovedMemberDelegationExpiry(
+  bindings: readonly Readonly<Record<string, string>>[],
+): ApprovedMemberDelegationExpiry | undefined {
+  if (bindings.length === 0) return undefined;
+  let hasUnboundedRow = false;
+  let latestExpiry: number | undefined;
+  for (const binding of bindings) {
+    const rawExpiry = binding['delegationExpiresAt'];
+    if (rawExpiry === undefined) {
+      hasUnboundedRow = true;
+      continue;
+    }
+    const lexicalExpiry = stripLiteral(rawExpiry);
+    if (!/^[0-9]+$/u.test(lexicalExpiry)) return undefined;
+    const expiry = Number(lexicalExpiry);
+    if (!Number.isSafeInteger(expiry) || expiry < 0) return undefined;
+    latestExpiry = latestExpiry === undefined
+      ? expiry
+      : Math.max(latestExpiry, expiry);
+  }
+  if (hasUnboundedRow) return latestExpiry === undefined ? null : undefined;
+  return latestExpiry;
+}
+
+/** Revalidate a proved delegation deadline against the current wall clock. */
+export function isApprovedMemberDelegationExpiryActive(
+  expiry: ApprovedMemberDelegationExpiry,
+  nowMs = Date.now(),
+): boolean {
+  return Number.isSafeInteger(nowMs)
+    && nowMs >= 0
+    && (expiry === null || expiry > nowMs);
 }
 
 /**

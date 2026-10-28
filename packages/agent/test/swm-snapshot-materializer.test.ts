@@ -41,7 +41,13 @@ import {
   workspacePublicQuadsDigest,
   type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
-import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  OxigraphStore,
+  OxigraphWorkerStore,
+  type Quad,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import {
   canonicalGraphScopedSnapshotManifestQuads,
   materializeGraphScopedSwmRecoveryAsset,
@@ -55,6 +61,7 @@ import {
   type SharedMemorySyncContext,
 } from '../src/sync/requester/shared-memory-sync.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
+import { sharedMemoryRoundFoundNothingMissing } from '../src/sync/shared-memory-diagnostics.js';
 import type { RecoveryExecutionGuard } from
   '../src/sync/requester/recovery-execution-guard.js';
 import { swmFixtures } from './swm-descriptor-fixtures.js';
@@ -128,6 +135,45 @@ function inGraph(quads: readonly Quad[], graph: string): Quad[] {
   return quads.map((quad) => ({ ...quad, graph }));
 }
 
+/**
+ * Counts the two validation queries so "did the memo answer this, or did the
+ * store?" is observable — the same technique as
+ * `swm-materialization-witness.test.ts`.
+ */
+function countingStore(inner: TripleStore) {
+  let constructs = 0;
+  let countQueries = 0;
+  const proxy = new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === 'query') {
+        return async (sparql: string, options?: unknown) => {
+          const normalized = sparql.trimStart();
+          if (normalized.startsWith('CONSTRUCT')) constructs += 1;
+          if (normalized.startsWith('SELECT (COUNT')) countQueries += 1;
+          return (target as TripleStore).query(sparql, options as never);
+        };
+      }
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as TripleStore;
+  return { store: proxy, constructs: () => constructs, countQueries: () => countQueries };
+}
+
+/**
+ * Presents `inner` as a store whose revision source sees every writer but
+ * whose generation never moves. A memo miss on it cannot be explained by the
+ * generation check; `stable` lets a test hold the revision unstable.
+ */
+function fixedRevisionStore(inner: TripleStore, stable: () => boolean = () => true): TripleStore {
+  return new Proxy(inner, {
+    get(target, prop, receiver) {
+      if (prop === 'writeRevisionCoverage') return 'all-writers';
+      if (prop === 'getWriteRevision') return () => ({ generation: 0, stable: stable() });
+      return Reflect.get(target, prop, receiver);
+    },
+  }) as TripleStore;
+}
+
 async function distinctObjects(store: TripleStore, graph: string, subject: string, predicate: string): Promise<string[]> {
   const result = await store.query(
     `SELECT DISTINCT ?o WHERE { GRAPH <${graph}> { <${subject}> <${predicate}> ?o } }`,
@@ -173,6 +219,192 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
       await store.insert(inGraph(v1.payload, v1.assertionGraph));
       const { materializer } = materializerFor(store);
       expect(await materializer.isGraphAssetMaterialized(descriptorFor(v2))).toBe(false);
+    });
+
+    it('fails open when the write-revision capability throws', async () => {
+      const store = new OxigraphStore();
+      await store.insert(inGraph(v1.payload, v1.assertionGraph));
+      vi.spyOn(store, 'getWriteRevision').mockImplementation(() => {
+        throw new Error('revision probe unavailable');
+      });
+      const { materializer } = materializerFor(store);
+
+      // A revision-probe failure must fall back to the bounded count + digest
+      // validation instead of turning a transient capability error into a
+      // materialization failure.
+      expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+    });
+
+    it('evicts the oldest entries when the bounded memo reaches its limit', async () => {
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      // Frozen clock: the memo TTL must not be able to explain a miss below, so
+      // the LRU bound is the only thing that can force a revalidation.
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        const { store, constructs, countQueries } = countingStore(inner);
+        const { materializer } = materializerFor(store);
+        // One past MATERIALIZATION_MEMO_MAX_ENTRIES (1024), so filling the memo
+        // evicts exactly the first descriptor. `-0` is not a prefix of any other
+        // generated graph (no index carries a leading zero) and 1025 tracked
+        // graphs cannot move the tracker's global floor, so descriptors[0]'s
+        // write generation is fixed: eviction is the ONLY thing that can make
+        // the re-check below touch the store again.
+        const descriptors = Array.from({ length: 1025 }, (_, index) => ({
+          ...descriptorFor(v1),
+          assertionGraph: `${v1.assertionGraph}-${index}`,
+        }));
+        for (const descriptor of descriptors) {
+          await inner.insert(inGraph(v1.payload, descriptor.assertionGraph));
+          expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        }
+        // Every check above was cold: one count gate plus one read-back each.
+        const coldCounts = countQueries();
+        const coldConstructs = constructs();
+        expect(coldCounts).toBe(descriptors.length);
+        expect(coldConstructs).toBe(descriptors.length);
+
+        // The newest entry is still memoized — a warm re-check touches the
+        // store not at all. Without this row, "the answer is still true" would
+        // also hold with the memo disabled outright.
+        expect(await materializer.isGraphAssetMaterialized(descriptors.at(-1)!)).toBe(true);
+        expect(countQueries()).toBe(coldCounts);
+        expect(constructs()).toBe(coldConstructs);
+
+        // The 1025th entry evicted the first, so rechecking it pays the full
+        // COUNT + CONSTRUCT validation again — and still returns the
+        // digest-bound answer. Raising the bound, or dropping the eviction
+        // loop, leaves this warm and fails here.
+        expect(await materializer.isGraphAssetMaterialized(descriptors[0]!)).toBe(true);
+        expect(countQueries()).toBe(coldCounts + 1);
+        expect(constructs()).toBe(coldConstructs + 1);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('does not memoize a validation that a write raced', async () => {
+      // The read-back sees v1, then a writer installs equal-count v2 before the
+      // check finishes. The check may report what it read, but it must not keep
+      // that answer under the post-write generation.
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        await inner.insert(inGraph(v1.payload, v1.assertionGraph));
+        let raceNextConstruct = true;
+        const store = new Proxy(inner, {
+          get(target, prop, receiver) {
+            if (prop === 'query') {
+              return async (sparql: string, options?: unknown) => {
+                const result = await (target as TripleStore).query(sparql, options as never);
+                if (raceNextConstruct && sparql.trimStart().startsWith('CONSTRUCT')) {
+                  raceNextConstruct = false;
+                  await target.replaceGraph(v2.assertionGraph, inGraph(v2.payload, v2.assertionGraph));
+                }
+                return result;
+              };
+            }
+            return Reflect.get(target, prop, receiver);
+          },
+        }) as TripleStore;
+        const { materializer } = materializerFor(store);
+
+        expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(true);
+        // The store now holds v2. A memoized answer would still say v1.
+        expect(await materializer.isGraphAssetMaterialized(descriptorFor(v1))).toBe(false);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('meets the data-loss error of a crashed in-memory worker store instead of a memoized answer', async () => {
+      // Without a path, OxigraphWorkerStore keeps its data in the worker
+      // thread. When that thread dies the contents are gone and the store
+      // fails closed. A memo hit here would report the lost graph as present.
+      const store = new OxigraphWorkerStore();
+      try {
+        await store.insert(inGraph(v1.payload, v1.assertionGraph));
+        const { materializer } = materializerFor(store);
+        const descriptor = descriptorFor(v1);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+
+        // An unexpected exit of the idle worker, as an out-of-memory kill would cause.
+        await (store as unknown as { worker: { terminate(): Promise<number> } }).worker.terminate();
+
+        await expect(materializer.isGraphAssetMaterialized(descriptor))
+          .rejects.toThrow(/IN-MEMORY store's worker crashed/);
+      } finally {
+        await store.close();
+      }
+    });
+
+    it('neither keeps nor uses a memo entry while the revision is unstable', async () => {
+      // An unstable revision means a write is pending or its outcome is unknown,
+      // so an unchanged generation proves nothing.
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        await inner.insert(inGraph(v1.payload, v1.assertionGraph));
+        const { store, constructs, countQueries } = countingStore(inner);
+        let stable = false;
+        const { materializer } = materializerFor(fixedRevisionStore(store, () => stable));
+        const descriptor = descriptorFor(v1);
+
+        // Unstable: a validation is not kept, so the second check validates again.
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(2);
+        expect(constructs()).toBe(2);
+
+        // Stable: one validation seeds the memo and the next check uses it.
+        stable = true;
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(3);
+        expect(constructs()).toBe(3);
+
+        // Unstable again: the stored entry is bypassed.
+        stable = false;
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(4);
+        expect(constructs()).toBe(4);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
+    });
+
+    it('drops its memo entry when it replaces the graph itself', async () => {
+      // On this store the generation never moves, so only the materializer
+      // forgetting its own entry can make the last check touch the store.
+      vi.stubEnv('DKG_SWM_MATERIALIZATION_WITNESS', '0');
+      const now = vi.spyOn(Date, 'now').mockReturnValue(1_000_000);
+      try {
+        const inner = new OxigraphStore();
+        await inner.insert(inGraph(v1.payload, v1.assertionGraph));
+        const { store, constructs, countQueries } = countingStore(inner);
+        const { materializer } = materializerFor(fixedRevisionStore(store));
+        const descriptor = descriptorFor(v1);
+
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(1);
+        expect(constructs()).toBe(1);
+
+        await materializer.replaceGraph(v1.assertionGraph, inGraph(v1.payload, v1.assertionGraph));
+
+        expect(await materializer.isGraphAssetMaterialized(descriptor)).toBe(true);
+        expect(countQueries()).toBe(2);
+        expect(constructs()).toBe(2);
+      } finally {
+        now.mockRestore();
+        vi.unstubAllEnvs();
+      }
     });
   });
 
@@ -1090,6 +1322,222 @@ describe('createSharedMemorySnapshotMaterializer against a real OxigraphStore', 
         contextGraphId: CG,
         metaQuads: poisonedMeta,
       })).toThrow(/ambiguous shareOperationId/);
+    });
+
+    describe('what a catch-up finds the node already holds (#3296)', () => {
+      // A member that received a graph's writes before its catch-up ran is
+      // served content it already has, and nothing is inserted. Readiness can
+      // still rest on that round: every asset found already held is counted,
+      // and an asset left to the catalog lane is counted apart, never as held.
+      const graphLocator = (fixture: typeof v1): Quad[] => fixture.meta.map((quad) => (
+        quad.predicate === `${DKG}publicSnapshotRef`
+          ? {
+              ...quad,
+              predicate: `${DKG}publicSnapshotGraph`,
+              object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, fixture.operationId),
+            }
+          : quad
+      ));
+      const boundary = () => ({
+        graphUri: 'urn:test:rfc64-late-boundary',
+        subject: 'urn:test:rfc64-late-boundary:held',
+        quads: [{
+          subject: 'urn:test:rfc64-late-boundary:held',
+          predicate: 'urn:test:entry',
+          object: '"held"',
+          graph: 'urn:test:rfc64-late-boundary',
+        }],
+      });
+
+      it('counts a snapshot the node already holds; nothing is inserted and nothing is missing', async () => {
+        const store = new OxigraphStore();
+        await store.insert([...v1.meta]);
+        await store.insert(inGraph(v1.payload, v1.assertionGraph));
+        const h = realHarness(store, v1);
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0,
+          insertedDataTriples: 0,
+          alreadyHeldAssets: 1,
+          catalogDeferredAssets: 0,
+          swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 1, missingCount: 0, manifestComplete: true },
+        });
+        expect(summary.completedPhases).toBeGreaterThan(0);
+        expect(h.replaceCalls()).toBe(0);
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(true);
+      });
+
+      it('counts a snapshot that a newer stored version supersedes', async () => {
+        const store = new OxigraphStore();
+        await store.insert([...v2.meta]);
+        await store.insert(inGraph(v2.payload, v2.assertionGraph));
+        const h = realHarness(store, v1);
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0, insertedDataTriples: 0, alreadyHeldAssets: 1, supersededUnprovenAssets: 0,
+        });
+        expect(h.replaceCalls()).toBe(0);
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(true);
+      });
+
+      // A newer stored head is kept either way, but it proves the asset held
+      // only with its own content in the store. The first row is the review's
+      // case: v2's metadata alone in an empty store, then the peer's v1 snapshot.
+      it.each([
+        ['only its metadata', () => [...v2.meta]],
+        ['the older version\'s bytes under it', () => [...v2.meta, ...inGraph(v1.payload, v2.assertionGraph)]],
+      ])('reports a snapshot missing when the newer stored head it keeps has %s', async (_state, seed) => {
+        const store = new OxigraphStore();
+        await store.insert(seed());
+        const h = realHarness(store, v1);
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0,
+          insertedDataTriples: 0,
+          alreadyHeldAssets: 0,
+          supersededUnprovenAssets: 1,
+          swmCoverage: { snapshotsTotal: 1, snapshotsResolved: 0, missingCount: 1, manifestComplete: true },
+        });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+        // Never overwritten with the older snapshot: the head stays v2.
+        expect(h.replaceCalls()).toBe(0);
+        const { materializer } = materializerFor(store);
+        expect(await materializer.readStoredHead(descriptorFor(v1)))
+          .toEqual({ version: '2', needsRepair: false, shareOperationId: 'op-v2' });
+      });
+
+      it('counts an asset the round writes as data, not as held', async () => {
+        const h = realHarness(new OxigraphStore(), v1);
+
+        const summary = await h.run();
+
+        expect(summary.insertedDataTriples).toBeGreaterThan(0);
+        expect(summary).toMatchObject({ failedPhases: 0, alreadyHeldAssets: 0 });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+      });
+
+      it('counts a root snapshot left to the catalog lane as deferred, never as held', async () => {
+        const store = new OxigraphStore();
+        await store.insert([...v1.meta]);
+        await store.insert(inGraph(v1.payload, v1.assertionGraph));
+        const h = realHarness(store, v1, v1.meta, { ordinaryRootSnapshotApplyAllowed: () => false });
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({ failedPhases: 0, alreadyHeldAssets: 0, catalogDeferredAssets: 1 });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+      });
+
+      it.each([false, true])(
+        'counts a graph-locator root the node already holds (durable boundary: %s)',
+        async (withBoundary) => {
+          const store = new OxigraphStore();
+          const meta = graphLocator(v1);
+          await store.insert(inGraph(v1.payload, v1.assertionGraph));
+          await store.insert(meta);
+          const h = realHarness(store, v1, meta, {
+            selectedRecovery: true,
+            preloadSnapshot: false,
+            ...(withBoundary ? { resolveRootSnapshotAtomicCompanion: boundary } : {}),
+          });
+
+          const summary = await h.run();
+
+          expect(summary).toMatchObject({
+            failedPhases: 0, insertedDataTriples: 0, alreadyHeldAssets: 1, catalogDeferredAssets: 0,
+          });
+          expect(h.atomicReplaceCalls()).toBe(withBoundary ? 1 : 0);
+          expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(true);
+        },
+      );
+
+      it('counts a graph-locator root that a newer stored head supersedes', async () => {
+        const store = new OxigraphStore();
+        await store.insert(inGraph(v2.payload, v2.assertionGraph));
+        await store.insert([...v2.meta]);
+        const h = realHarness(store, v1, graphLocator(v1), {
+          preloadSnapshot: false,
+          ordinaryRootSnapshotApplyAllowed: () => true,
+        });
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0, insertedDataTriples: 0, alreadyHeldAssets: 1, supersededUnprovenAssets: 0,
+        });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(true);
+      });
+
+      // No snapshot ref covers a graph-locator root, so only the count keeps a
+      // round from reading as complete when the newer head's content is absent.
+      it.each([
+        ['only its metadata', () => [...v2.meta]],
+        ['the older version\'s bytes under it', () => [...v2.meta, ...inGraph(v1.payload, v1.assertionGraph)]],
+      ])('leaves a graph-locator root missing when the newer stored head it keeps has %s', async (_state, seed) => {
+        const store = new OxigraphStore();
+        await store.insert(seed());
+        const h = realHarness(store, v1, graphLocator(v1), {
+          preloadSnapshot: false,
+          ordinaryRootSnapshotApplyAllowed: () => true,
+        });
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({
+          failedPhases: 0, insertedDataTriples: 0, alreadyHeldAssets: 0, supersededUnprovenAssets: 1,
+        });
+        expect(summary.swmCoverage).toBeUndefined();
+        expect(h.replaceCalls()).toBe(0);
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+      });
+
+      it('a held asset beside one missing under a newer stored head does not prove the round', async () => {
+        const otherUal = 'did:dkg:hardhat:31337/0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/10';
+        const otherV1 = share(1, 'op-other-v1', 'other-one', otherUal);
+        const otherV2 = share(2, 'op-other-v2', 'other-two', otherUal);
+        const store = new OxigraphStore();
+        await store.insert([...graphLocator(v1), ...inGraph(v1.payload, v1.assertionGraph)]);
+        await store.insert([...otherV2.meta]);
+        const h = realHarness(store, v1, [...graphLocator(v1), ...graphLocator(otherV1)], {
+          preloadSnapshot: false,
+          ordinaryRootSnapshotApplyAllowed: () => true,
+        });
+
+        const summary = await h.run();
+
+        expect(summary).toMatchObject({ failedPhases: 0, alreadyHeldAssets: 1, supersededUnprovenAssets: 1 });
+        expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+      });
+
+      it.each([1, 2])(
+        'counts a graph-locator root left to the catalog lane at authority check %i as deferred',
+        async (deniedAtCheck) => {
+          const store = new OxigraphStore();
+          const meta = graphLocator(v1);
+          await store.insert(inGraph(v1.payload, v1.assertionGraph));
+          await store.insert(meta);
+          let checks = 0;
+          const h = realHarness(store, v1, meta, {
+            preloadSnapshot: false,
+            ordinaryRootSnapshotApplyAllowed: () => {
+              checks += 1;
+              return checks < deniedAtCheck;
+            },
+          });
+
+          const summary = await h.run();
+
+          expect(checks).toBe(deniedAtCheck);
+          expect(summary).toMatchObject({ failedPhases: 0, alreadyHeldAssets: 0, catalogDeferredAssets: 1 });
+          expect(sharedMemoryRoundFoundNothingMissing(summary)).toBe(false);
+        },
+      );
     });
   });
 });

@@ -1,3 +1,8 @@
+export {
+  QueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from './query-result-size-error.js';
 export * from './query-engine.js';
 export * from './query-types.js';
 export { QueryMaterializationBudget } from './query-store-read-context.js';
@@ -15,6 +20,11 @@ export {
   type CallerSparqlRejectedErrorLike,
 } from './caller-sparql-error.js';
 export { QueryHandler, type QueryHandlerDeps } from './query-handler.js';
+export {
+  WITHHELD_GRAPH_QUERY_CODE,
+  WithheldGraphQueryError,
+  isWithheldGraphQueryError,
+} from './withheld-graph-scope.js';
 export {
   validateReadOnlySparql,
   detectSparqlQueryForm,

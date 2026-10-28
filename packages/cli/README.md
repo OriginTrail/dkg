@@ -275,7 +275,7 @@ modes auto-renewal can't recover from:
 | `dkg ka finalize <name> -c <cg>` | Seal a WM draft; existing root-scoped SWM assets remain read-only |
 | `dkg ka share <name> -c <cg> [--entity <uri...>]` | Share finalized WM to Shared Working Memory |
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
-| `dkg ka share-jobs [--context-graph-id <cg>]` | List async SWM share jobs |
+| `dkg ka share-jobs [--context-graph-id <cg>] [--all \| --page-size <n> [--cursor <cursor>]]` | List async SWM share jobs; `--all` or `--page-size` pages the list instead of reading it whole |
 | `dkg ka publish <name> -c <cg>` | Synchronously publish an already finalized and fully shared KA from SWM to VM |
 | `dkg ka publish-async <name> -c <cg> [--publisher-node-identity-id 0]` | Enqueue VM publish for an already finalized and fully shared KA |
 | `dkg ka pull-from <name> -c <cg> --layer swm\|vm` | Seed WM from SWM or VM |
@@ -446,7 +446,7 @@ not truncate the previous state file.
 When the daemon is running, it exposes a local HTTP API (default: `http://localhost:9200`). Key endpoint groups:
 
 - `GET /api/status`, `GET /api/info` — node status and health
-- `POST /api/agent/register`, `GET /api/agent/identity` — agent identity
+- `POST /api/agent/register` (node-admin token), `GET /api/agent/identity` — agent identity
 - `POST /api/context-graph/create`, `/register`, `/invite`, `GET /api/context-graph/list` — context graph management
 - `POST /api/knowledge-assets`, `/{name}/wm/write`, `/{name}/swm/share`, `/{name}/vm/publish`, `/{name}/vm/publish-async`, `/{name}/wm/discard`, `/{name}/wm/import-file`, `GET /api/knowledge-assets/{name}` — named knowledge asset lifecycle
 - `POST /api/query`, `POST /api/query-remote` — SPARQL querying
@@ -525,8 +525,10 @@ records include operation, iteration, error message, root entity, marker, contex
 graph, and a reproduction command. Warmups are excluded from summaries.
 
 The repository-level ESBench workflow for this same benchmark feature is
-documented in `BENCHMARKING.md`. It uses a deterministic layered DKG client, not
-a live daemon, so the generated reports avoid auth tokens and local node paths.
+documented in the repository's
+[`bench/README.md`](../../bench/README.md).
+It uses a deterministic layered DKG client, not a live daemon, so the generated
+reports avoid auth tokens and local node paths.
 `pnpm bench:html` writes the combined ESBench report plus one focused HTML page
 for each benchmark flow and payload size. The full default matrix includes the
 `200mb` scene; set `DKG_ESBENCH_PAYLOAD_SIZES=10kb` or another comma-separated
@@ -732,4 +734,5 @@ for the design rationale, threat model, and stability guarantees.
 - `@origintrail-official/dkg-publisher` — publish pipeline (SWM → VM)
 - `@origintrail-official/dkg-storage` — triple-store adapters
 - `@origintrail-official/dkg-chain` — blockchain abstraction
+- `@origintrail-official/dkg-node-store` — durable protocol state (outbox, sync checkpoints, cursors, KA numbers, chain log) the daemon composes
 - `@origintrail-official/dkg-node-ui` — web dashboard serving

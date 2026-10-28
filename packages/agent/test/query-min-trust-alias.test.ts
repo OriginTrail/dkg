@@ -38,6 +38,7 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
     log: { info() {}, warn() {}, debug() {}, error() {} },
     config: {},
     queryEngine: stubEngine,
+    store: { query: async () => ({ type: 'bindings', bindings: [] }) },
     // Production type is `Map<string, ContextGraphSub>`; a Set made
     // `resolveContextGraphReadAuthority` throw once the scoped gate started
     // consulting it directly instead of going through `canReadContextGraph`.
@@ -64,7 +65,7 @@ function makeStubAgent(observer: (opts: QueryOptions | undefined) => void): Inst
 
 describe('DKGAgent.query forwards `_minTrust` alias (PR #239 iter-6)', () => {
   it.each([
-    new StoreResponseTooLargeError(10, 11),
+    Object.assign(new StoreResponseTooLargeError(10, 11), { queryPhase: 'result' }),
     Object.assign(new Error('materialization limit'), {
       code: 'QUERY_MATERIALIZATION_TOO_LARGE',
       maxBytes: 10,
@@ -82,6 +83,13 @@ describe('DKGAgent.query forwards `_minTrust` alias (PR #239 iter-6)', () => {
       actualBytes: expect.any(Number),
       cause,
     });
+  });
+
+  it('keeps internal authority overflow distinct from caller results', async () => {
+    const cause = new StoreResponseTooLargeError(8 * 1024 * 1024, 9 * 1024 * 1024);
+    const agent = makeStubAgent(() => { throw cause; });
+    await expect(agent.query('SELECT ?s WHERE { ?s ?p ?o }', { contextGraphId: 'cg-1', maxResponseBytes: 10 }))
+      .rejects.toBe(cause);
   });
 
   it('forwards store cancellation, priority, source, and response bounds', async () => {

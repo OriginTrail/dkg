@@ -7,6 +7,7 @@ import {
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import { ContextGraphResolveMethods } from '../src/dkg-agent-cg-resolve.js';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
+import { stubRecipientRevisions } from './_helpers/recipient-fence-stub.js';
 
 const CG = '0x1111111111111111111111111111111111111111/private-cg';
 const MEMBER_A = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
@@ -30,7 +31,9 @@ describe('RFC-64 private Sender Key roster authority', () => {
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
-      resolveRfc64PrivateReadRosterV1: () => [MEMBER_A_LOWERCASE, MEMBER_B, MEMBER_A],
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => (
+        [MEMBER_A_LOWERCASE, MEMBER_B, MEMBER_A]
+      ),
       getCgMeta,
       subscribedContextGraphs: new Map(),
     };
@@ -55,7 +58,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
-      resolveRfc64PrivateReadRosterV1: () => null,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => null,
       getCgMeta,
       subscribedContextGraphs: new Map(),
     };
@@ -247,7 +250,7 @@ describe('RFC-64 private Sender Key roster authority', () => {
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
-      resolveRfc64PrivateReadRosterV1: () => null,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => null,
       getCgMeta,
       subscribedContextGraphs: new Map(),
       localAgents: new Map(),
@@ -329,10 +332,15 @@ describe('RFC-64 private Sender Key roster authority', () => {
   it('keeps a fully revoked legacy gate authoritative and empty', async () => {
     const receiver = {
       ...noAcceptedPublicUnregisteredPolicy,
+      contextGraphMetaProjection: {
+        readAuthorityFactsRevision: 0,
+        readContextGraphAuthorityFactsRevision: () => '0:0',
+        ...stubRecipientRevisions(),
+      },
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
-      resolveRfc64PrivateReadRosterV1: () => undefined,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => undefined,
       getCgMeta: async () => ({
         allowedAgents: [MEMBER_A],
         participantAgents: [],
@@ -350,10 +358,15 @@ describe('RFC-64 private Sender Key roster authority', () => {
   it('preserves legacy meta and subscription resolution for non-RFC-64 graphs', async () => {
     const receiver = {
       ...noAcceptedPublicUnregisteredPolicy,
+      contextGraphMetaProjection: {
+        readAuthorityFactsRevision: 0,
+        readContextGraphAuthorityFactsRevision: () => '0:0',
+        ...stubRecipientRevisions(),
+      },
       resolveContextGraphAgentGateAuthority:
         WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
       resolveRegisteredContextGraphAuthority: async () => ({ kind: 'unregistered' as const }),
-      resolveRfc64PrivateReadRosterV1: () => undefined,
+      resolveActiveAcceptedRfc64PrivateUnregisteredRosterV1: () => undefined,
       getCgMeta: async () => ({
         allowedAgents: [MEMBER_A],
         participantAgents: [],

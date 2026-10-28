@@ -237,6 +237,10 @@ import {
 } from '../auto-update.js';
 import { isValidRef, parseTagName } from '../../auto-update-ref.js';
 import {
+  normalizeOpenClawPersistTurnPayload,
+  persistOpenClawTurn,
+} from './openclaw-persist-turn.js';
+import {
   OPENCLAW_UI_CONNECT_TIMEOUT_MS,
   OPENCLAW_UI_CONNECT_POLL_MS,
   OPENCLAW_CHANNEL_RESPONSE_TIMEOUT_MS,
@@ -270,7 +274,6 @@ import {
   type OpenClawStreamReader,
   writeOpenClawStreamChunk,
   pipeOpenClawStream,
-  isValidOpenClawPersistTurnPayload,
   type OpenClawAttachmentRef,
   normalizeOpenClawAttachmentRef,
   normalizeOpenClawAttachmentRefs,
@@ -992,63 +995,30 @@ export async function handleOpenclawRoutes(ctx: RequestContext): Promise<void> {
   // ChatMemoryManager default since the openclaw-dkg-primary-memory retarget).
   // Uses the same ChatMemoryManager pathway as the node-owned local-agent
   // chat flow — chat-turn content never reaches Shared Working Memory in v1.
+  // The write goes through `persistDurableChatTurn`, the daemon-wide owner of
+  // durable-turn idempotency shared with Hermes and Prime Agent: a resent
+  // `(sessionId, turnId)` is a duplicate, and a higher `persistenceState`
+  // becomes a transition instead of a second exchange. Normalization and the
+  // persistence step live in `./openclaw-persist-turn.ts`.
   if (req.method === 'POST' && path === '/api/openclaw-channel/persist-turn') {
     const body = await readBody(req, SMALL_BODY_BYTES);
-    let payload: any;
+    let parsed: unknown;
     try {
-      payload = JSON.parse(body);
+      parsed = JSON.parse(body);
     } catch {
       return jsonResponse(res, 400, { error: "Invalid JSON" });
     }
 
-    if (!isValidOpenClawPersistTurnPayload(payload)) {
-      return jsonResponse(res, 400, {
-        error:
-          "Missing required fields: sessionId, userMessage, assistantReply",
-      });
-    }
-    const { sessionId, userMessage, assistantReply, turnId, toolCalls, attachmentRefs, persistenceState, failureReason } =
-      payload;
-    const normalizedToolCalls = Array.isArray(toolCalls)
-      ? (toolCalls as Array<{
-          name: string;
-          args: Record<string, unknown>;
-          result: unknown;
-        }>)
-      : undefined;
-    const normalizedAttachmentRefs = normalizeOpenClawAttachmentRefs(attachmentRefs);
-    if (attachmentRefs != null && normalizedAttachmentRefs === undefined) {
+    const payload = normalizeOpenClawPersistTurnPayload(parsed);
+    if ('error' in payload) return jsonResponse(res, 400, { error: payload.error });
+
+    const verifiedAttachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, payload.attachmentRefs);
+    if (payload.attachmentRefs != null && verifiedAttachmentRefs === undefined) {
       return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
     }
-    const verifiedAttachmentRefs = await verifyOpenClawAttachmentRefsProvenance(agent, extractionStatus, normalizedAttachmentRefs);
-    if (attachmentRefs != null && verifiedAttachmentRefs === undefined) {
-      return jsonResponse(res, 400, { error: 'Invalid "attachmentRefs"' });
-    }
-    const normalizedTurnId =
-      typeof turnId === "string" ? turnId : crypto.randomUUID();
-    const normalizedPersistenceState = persistenceState === 'failed' || persistenceState === 'pending'
-      ? persistenceState
-      : 'stored';
-    const normalizedFailureReason = typeof failureReason === 'string'
-      ? failureReason.trim() || undefined
-      : undefined;
-    try {
-      await memoryManager.storeChatExchange(
-        sessionId,
-        userMessage,
-        assistantReply,
-        normalizedToolCalls,
-        {
-          turnId: normalizedTurnId,
-          attachmentRefs: verifiedAttachmentRefs,
-          persistenceState: normalizedPersistenceState,
-          failureReason: normalizedFailureReason,
-        },
-      );
-      return jsonResponse(res, 200, { ok: true });
-    } catch (err: any) {
-      return jsonResponse(res, 500, { error: err.message });
-    }
+
+    const result = await persistOpenClawTurn(memoryManager, payload, verifiedAttachmentRefs);
+    return jsonResponse(res, result.statusCode, result.body);
   }
 
   // GET /api/openclaw-channel/health — check if the channel bridge is reachable

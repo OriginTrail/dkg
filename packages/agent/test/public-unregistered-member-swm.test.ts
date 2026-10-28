@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 import { projectRfc64CatalogTransportStateV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
+import { stubRecipientRevisions } from './_helpers/recipient-fence-stub.js';
 
 const CG = '0x1111111111111111111111111111111111111111/public-p2p';
 const CURATOR = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
@@ -92,10 +93,17 @@ function joinedMember(options: {
   const isContextGraphPublicOnChain = vi.fn(async () => options.publicOnChain === true);
   const warn = vi.fn();
   const agent = {
+    contextGraphMetaProjection: {
+      ...stubRecipientRevisions(store),
+      readAuthorityFactsRevision: 0,
+      readContextGraphAuthorityFactsRevision: () => '0:0',
+    },
     resolveContextGraphAgentGateAuthority:
       WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
     resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,
     resolveSwmTransportAuthority: WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority,
+    getLocalMetadataMemberRecoveryGate:
+      WorkspaceCryptoMethods.prototype.getLocalMetadataMemberRecoveryGate,
     isContextGraphSwmPublic: WorkspaceCryptoMethods.prototype.isContextGraphSwmPublic,
     resolveRegisteredContextGraphAuthority: registry.resolve,
     // A public graph has no RFC-64 private roster.
@@ -123,6 +131,39 @@ function joinedMember(options: {
   return { agent, registry, store, getCgMeta, isContextGraphPublicOnChain, warn };
 }
 
+describe('approved private replica SWM transport compatibility', () => {
+  it.each([
+    ['an omitted peer gate', {}],
+    ['a non-array peer gate', { allowedPeers: 'peer-a' }],
+    ['a non-string peer entry', { allowedPeers: ['peer-a', 7] }],
+    ['an empty peer entry', { allowedPeers: [''] }],
+  ] as const)('fails closed for %s', async (_label, peerGate) => {
+    const host = {
+      hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1: () => false,
+      resolveRegisteredContextGraphAuthority: async () => ({
+        kind: 'unregistered' as const,
+        approvedPrivateReplicaAuthority: {
+          approvedAgentAddress: MEMBER,
+          ownerAddress: CURATOR,
+          requestGeneration: 'generation-1',
+          curatorPeerId: 'curator-peer',
+          memberAddresses: [MEMBER],
+          ...peerGate,
+        },
+      }),
+    };
+
+    await expect(WorkspaceCryptoMethods.prototype.resolveSwmTransportAuthority.call(
+      host as never,
+      CG,
+    )).resolves.toEqual({
+      kind: 'unavailable',
+      reason: 'finalized-name-absence-unaccepted',
+      detail: 'approved private replica authority is missing a valid source-qualified peer gate',
+    });
+  });
+});
+
 const resolveRecipients = (agent: unknown) => WorkspaceCryptoMethods.prototype
   .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(agent as never, { contextGraphId: CG });
 
@@ -141,6 +182,7 @@ describe('SWM authority for a joined member of an unregistered graph (#2827)', (
 
     expect(gate).toEqual([CURATOR, MEMBER]);
     expect(registry.calls).toEqual([
+      expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: true }),
       expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: true }),
     ]);
   });
@@ -217,6 +259,7 @@ describe('SWM authority for a joined member of an unregistered graph (#2827)', (
 
     expect(gate).toEqual([CURATOR, MEMBER]);
     expect(registry.calls).toEqual([
+      expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: true }),
       expect.objectContaining({ allowAcceptedRfc64FinalizedAbsence: true }),
     ]);
   });

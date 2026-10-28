@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import type { OperationContext } from '@origintrail-official/dkg-core';
@@ -20,7 +21,7 @@ import {
   shouldApplyMaterialization,
 } from '@origintrail-official/dkg-publisher';
 import { processDurableBatchForWire } from '../src/sync-verify-worker-impl.js';
-import { runDurableSync } from '../src/sync/requester/durable-sync.js';
+import { runDurableSync, runDurableSyncDetailed } from '../src/sync/requester/durable-sync.js';
 import { uniformDurableSyncBudget } from './durable-sync-test-helpers.js';
 import type { SyncPageResult } from '../src/sync/requester/page-fetch.js';
 import { DKGAgent } from '../src/dkg-agent.js';
@@ -213,7 +214,9 @@ function runGraphScopedDurableSync(options: {
   logWarn?: (ctx: OperationContext, message: string) => void;
 }) {
   const v2Data = dataQuad(2);
-  const v2Meta = metadata(2);
+  const v2Meta = [...metadata(2), ...['publicTripleCount', 'privateTripleCount'].map((predicate, i) => ({
+    subject: ual, predicate: `${DKG}${predicate}`, object: JSON.stringify(String(1 - i)), graph: metaGraph,
+  }))];
   return runDurableSync({
     ctx,
     remotePeerId: 'peer-graph-scoped-authentication',
@@ -298,6 +301,7 @@ describe('durable graph-scoped KA materialization', () => {
     const historicalData = dataQuad(1);
     const historicalRoot = computeFlatKCRootV10([historicalData], []);
     const historicalAsset: VerifiedGraphScopedAsset = {
+      merkleRootHex: Buffer.from(historicalRoot).toString('hex'),
       contextGraphId,
       ual,
       assertionVersion: 1n,
@@ -345,6 +349,7 @@ describe('durable graph-scoped KA materialization', () => {
     const historicalData = dataQuad(1);
     const historicalRoot = computeFlatKCRootV10([historicalData], []);
     const historicalAsset: VerifiedGraphScopedAsset = {
+      merkleRootHex: Buffer.from(historicalRoot).toString('hex'),
       contextGraphId,
       ual,
       assertionVersion: 1n,
@@ -402,6 +407,7 @@ describe('durable graph-scoped KA materialization', () => {
   it('adds reader-visible local metadata in no-chain mode and keeps receive time stable on replay', async () => {
     const store = new OxigraphStore();
     const asset = {
+      merkleRootHex: fixtureRoot(metadata(1)),
       contextGraphId,
       ual,
       assertionVersion: 1n,
@@ -469,6 +475,7 @@ describe('durable graph-scoped KA materialization', () => {
     const authenticated = await authenticateVerifiedGraphScopedAsset(
       chain,
       {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -519,6 +526,7 @@ describe('durable graph-scoped KA materialization', () => {
       await expect(authenticateVerifiedGraphScopedAsset(
         chain,
         {
+      merkleRootHex: fixtureRoot(metadata(2)),
           contextGraphId,
           ual,
           assertionVersion: 2n,
@@ -554,6 +562,7 @@ describe('durable graph-scoped KA materialization', () => {
     const authenticated = await authenticateVerifiedGraphScopedAsset(
       chain,
       {
+      merkleRootHex: fixtureRoot(finalizedMaterializationMetadata(2, root)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -575,6 +584,128 @@ describe('durable graph-scoped KA materialization', () => {
     )).toEqual([expect.objectContaining({ object: '"0:0"' })]);
   });
 
+  it('verifies a receipt-backed first publish from the single receipt read without the unused header lookup', async () => {
+    const v1Data = dataQuad(1);
+    const root = computeFlatKCRootV10([v1Data], []);
+    const resolvePublishByTxHash = vi.fn(async (_hash: string, _options?: unknown) => ({
+      batchId: BigInt(packedKaId),
+      kaId: BigInt(packedKaId),
+      merkleRoot: root,
+      txHash: transactionHash(1),
+      blockNumber: 77,
+      txIndex: 3,
+      blockTimestamp: 0,
+      publisherAddress: '0x1111111111111111111111111111111111111111',
+    }));
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 1n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      resolvePublishByTxHash,
+    } as ChainAdapter;
+    const { signal } = new AbortController();
+
+    const authenticated = await authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+      merkleRootHex: fixtureRoot(metadata(1, toHex(root))),
+        contextGraphId,
+        ual,
+        assertionVersion: 1n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [v1Data],
+        metadataQuads: metadata(1, toHex(root)),
+      },
+      strictContextGraphBindingVerifier(chain),
+      new Date('2026-07-16T08:30:00.000Z'),
+      { signal },
+    );
+
+    expect(resolvePublishByTxHash).toHaveBeenCalledTimes(1);
+    expect(resolvePublishByTxHash).toHaveBeenCalledWith(
+      transactionHash(1),
+      { signal, skipBlockTimestamp: true },
+    );
+    expect(authenticated.asset.metadataQuads).toContainEqual(expect.objectContaining({
+      predicate: `${DKG}materializedVersion`,
+      object: '"77:3"',
+    }));
+  });
+
+  it.each(['valid', 'wrong-root', 'missing-transaction'] as const)(
+    'requires transaction provenance when mixed confirmation metadata is %s', async (provenance) => {
+      const data = dataQuad(1);
+      const root = computeFlatKCRootV10([data], []);
+      const receiptRoot = provenance === 'wrong-root' ? Uint8Array.from(root, (byte) => byte ^ 0xff) : root;
+      const receipt = vi.fn(async () => ({
+        batchId: BigInt(packedKaId), kaId: BigInt(packedKaId), merkleRoot: receiptRoot,
+        txHash: transactionHash(1), blockNumber: 77, txIndex: 3, blockTimestamp: 0,
+        publisherAddress: '0x1111111111111111111111111111111111111111',
+      }));
+      const chain = { chainId: 'otp:2043', getLatestMerkleRoot: async () => root,
+        getMerkleRootCount: async () => 1n, getKAContextGraphId: async () => 14n,
+        getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+        resolvePublishByTxHash: receipt } as unknown as ChainAdapter;
+      const meta = metadata(1, toHex(root)).filter((quad) => provenance !== 'missing-transaction'
+        || quad.predicate !== `${DKG}transactionHash`);
+      meta.push(...['transaction', 'finalized-materialization'].map((kind) => ({
+        subject: ual, predicate: `${DKG}confirmationKind`, object: `"${kind}"`, graph: metaGraph,
+      })));
+      const authenticate = authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(meta),
+        contextGraphId, ual, assertionVersion: 1n, assertionGraph, metaGraph,
+        dataQuads: [data], metadataQuads: meta,
+      }, strictContextGraphBindingVerifier(chain));
+      if (provenance === 'valid') {
+        await expect(authenticate).resolves.toMatchObject({ asset: { ual } });
+        expect(receipt).toHaveBeenCalledTimes(1);
+      } else {
+        await expect(authenticate).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+      }
+    },
+  );
+
+  it('still rejects a receipt for a different root when the header lookup is skipped', async () => {
+    const v1Data = dataQuad(1);
+    const root = computeFlatKCRootV10([v1Data], []);
+    const wrongRoot = Uint8Array.from(root, (byte) => byte ^ 0xff);
+    const chain = {
+      chainId: 'otp:2043',
+      getLatestMerkleRoot: async () => root,
+      getMerkleRootCount: async () => 1n,
+      getKAContextGraphId: async () => 14n,
+      getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+      resolvePublishByTxHash: async () => ({
+        batchId: BigInt(packedKaId),
+        kaId: BigInt(packedKaId),
+        merkleRoot: wrongRoot,
+        txHash: transactionHash(1),
+        blockNumber: 77,
+        txIndex: 3,
+        blockTimestamp: 0,
+        publisherAddress: '0x1111111111111111111111111111111111111111',
+      }),
+    } as ChainAdapter;
+
+    await expect(authenticateVerifiedGraphScopedAsset(
+      chain,
+      {
+      merkleRootHex: fixtureRoot(metadata(1, toHex(root))),
+        contextGraphId,
+        ual,
+        assertionVersion: 1n,
+        assertionGraph,
+        metaGraph,
+        dataQuads: [v1Data],
+        metadataQuads: metadata(1, toHex(root)),
+      },
+      strictContextGraphBindingVerifier(chain),
+    )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+  });
+
   it('rejects receipt-backed graph metadata when its transaction claim is missing', async () => {
     const v2Data = dataQuad(2);
     const root = computeFlatKCRootV10([v2Data], []);
@@ -589,6 +720,9 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(authenticateVerifiedGraphScopedAsset(
       chain,
       {
+      merkleRootHex: fixtureRoot(metadata(2, toHex(root)).filter(
+          (quad) => quad.predicate !== `${DKG}transactionHash`,
+        )),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -601,6 +735,388 @@ describe('durable graph-scoped KA materialization', () => {
       },
       strictContextGraphBindingVerifier(chain),
     )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+  });
+
+  describe('the receipt of a first publish, requested with the views', () => {
+    const v1Data = dataQuad(1);
+    const root = computeFlatKCRootV10([v1Data], []);
+    const staleRoot = Uint8Array.from(root, (byte) => byte ^ 0xff);
+    const publish = {
+      batchId: BigInt(packedKaId),
+      kaId: BigInt(packedKaId),
+      merkleRoot: root,
+      txHash: transactionHash(1),
+      blockNumber: 77,
+      txIndex: 3,
+      blockTimestamp: 0,
+      publisherAddress: '0x1111111111111111111111111111111111111111',
+    };
+    const firstPublish = (metadataQuads: Quad[] = metadata(1, toHex(root))): VerifiedGraphScopedAsset => ({
+      merkleRootHex: fixtureRoot(metadataQuads),
+      contextGraphId,
+      ual,
+      assertionVersion: 1n,
+      assertionGraph,
+      metaGraph,
+      dataQuads: [v1Data],
+      metadataQuads,
+    });
+    const receiptClaim = (hash: string): Quad => ({
+      subject: ual,
+      predicate: `${DKG}transactionHash`,
+      object: `"${hash}"`,
+      graph: metaGraph,
+    });
+    const withoutReceiptClaim = (quads: Quad[]) => quads.filter(
+      (quad) => quad.predicate !== `${DKG}transactionHash`,
+    );
+    const turn = () => new Promise<void>((resolve) => { setImmediate(resolve); });
+
+    /** A chain whose views answer when released, so a test decides what is out at once. */
+    const viewGates = new WeakMap<ChainAdapter, Promise<void>>();
+    /** The gate of `chain`'s views, for a view a test replaces. */
+    const viewsReleasedFor = (chain: ChainAdapter) => viewGates.get(chain)!;
+
+    function gatedChain(overrides: Partial<ChainAdapter> = {}) {
+      let releaseViews!: () => void;
+      const viewsReleased = new Promise<void>((resolve) => { releaseViews = resolve; });
+      const viewsStarted: string[] = [];
+      const view = <T>(name: string, value: T) => async () => {
+        viewsStarted.push(name);
+        await viewsReleased;
+        return value;
+      };
+      const resolvePublishByTxHash = vi.fn(async (_hash: string, _options?: unknown) => publish);
+      const chain = {
+        chainId: 'otp:2043',
+        getLatestMerkleRoot: view('root', root),
+        getMerkleRootCount: view('count', 1n),
+        getKAContextGraphId: view('contextGraph', 14n),
+        getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+        resolvePublishByTxHash,
+        ...overrides,
+      } as ChainAdapter;
+      viewGates.set(chain, viewsReleased);
+      return { chain, releaseViews, viewsStarted, resolvePublishByTxHash };
+    }
+
+    it('is out while the views are still out, and is read once', async () => {
+      const { chain, releaseViews, viewsStarted, resolvePublishByTxHash } = gatedChain();
+      const { signal } = new AbortController();
+
+      const authenticating = authenticateVerifiedGraphScopedAsset(
+        chain,
+        firstPublish(),
+        strictContextGraphBindingVerifier(chain),
+        new Date('2026-07-16T08:30:00.000Z'),
+        { signal },
+      );
+      await turn();
+
+      // No view has answered, and the receipt is already requested.
+      expect(viewsStarted).toEqual(['root', 'count', 'contextGraph']);
+      expect(resolvePublishByTxHash).toHaveBeenCalledTimes(1);
+      expect(resolvePublishByTxHash).toHaveBeenCalledWith(
+        transactionHash(1),
+        { signal, skipBlockTimestamp: true },
+      );
+
+      releaseViews();
+      const authenticated = await authenticating;
+
+      expect(resolvePublishByTxHash).toHaveBeenCalledTimes(1);
+      expect(authenticated.asset.metadataQuads).toContainEqual(expect.objectContaining({
+        predicate: `${DKG}materializedVersion`,
+        object: '"77:3"',
+      }));
+    });
+
+    it('calls the resolver as a method of the chain adapter', async () => {
+      const receivers: unknown[] = [];
+      const { chain, releaseViews } = gatedChain({
+        async resolvePublishByTxHash(this: unknown) {
+          receivers.push(this);
+          return publish;
+        },
+      });
+      releaseViews();
+
+      await authenticateVerifiedGraphScopedAsset(
+        chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+      );
+
+      expect(receivers).toEqual([chain]);
+    });
+
+    it('reports a stale copy as a root mismatch when the receipt read fails as well', async () => {
+      const unhandled: unknown[] = [];
+      const onUnhandled = (reason: unknown) => { unhandled.push(reason); };
+      process.on('unhandledRejection', onUnhandled);
+      try {
+        const { chain, releaseViews } = gatedChain({
+          getLatestMerkleRoot: async () => staleRoot,
+          resolvePublishByTxHash: async () => {
+            throw Object.assign(new Error('receipt endpoint unavailable'), { code: 'NETWORK_ERROR' });
+          },
+        });
+        releaseViews();
+
+        await expect(authenticateVerifiedGraphScopedAsset(
+          chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+        )).rejects.toMatchObject({ code: 'VM_CHAIN_ROOT_MISMATCH' });
+
+        // The receipt read nobody awaited is not left as an unhandled rejection.
+        await new Promise<void>((resolve) => { setTimeout(resolve, 0); });
+        expect(unhandled).toEqual([]);
+      } finally {
+        process.off('unhandledRejection', onUnhandled);
+      }
+    });
+
+    it('does not wait for the receipt before reporting a stale copy', async () => {
+      const { chain, releaseViews } = gatedChain({
+        getLatestMerkleRoot: async () => staleRoot,
+        // A receipt request that never answers.
+        resolvePublishByTxHash: () => new Promise(() => {}),
+      });
+      releaseViews();
+
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+      )).rejects.toMatchObject({ code: 'VM_CHAIN_ROOT_MISMATCH' });
+    });
+
+    it('reports the receipt read\'s own failure once the views have passed', async () => {
+      const failure = Object.assign(new Error('receipt endpoint unavailable'), { code: 'NETWORK_ERROR' });
+      const { chain, releaseViews } = gatedChain({
+        resolvePublishByTxHash: async () => { throw failure; },
+      });
+      releaseViews();
+
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+      )).rejects.toBe(failure);
+    });
+
+    it('reports a resolver that throws before returning a promise the same way', async () => {
+      const failure = new Error('resolver threw synchronously');
+      const { chain, releaseViews } = gatedChain({
+        resolvePublishByTxHash: (() => { throw failure; }) as ChainAdapter['resolvePublishByTxHash'],
+      });
+      releaseViews();
+
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+      )).rejects.toBe(failure);
+    });
+
+    describe('when the early request finds no publish', () => {
+      it('asks once more after the views have passed and accepts the receipt it finds then', async () => {
+        // The endpoint had not seen the publish block when the receipt was
+        // requested; the views, answered after it, already reflect that block.
+        let asked = 0;
+        const viewsAnsweredAtAsk: boolean[] = [];
+        let viewsAnswered = false;
+        const { chain, releaseViews, resolvePublishByTxHash } = gatedChain({
+          getKAContextGraphId: async () => {
+            await viewsReleasedFor(chain);
+            viewsAnswered = true;
+            return 14n;
+          },
+        });
+        resolvePublishByTxHash.mockImplementation(async () => {
+          viewsAnsweredAtAsk.push(viewsAnswered);
+          asked += 1;
+          return asked === 1 ? null : publish;
+        });
+        const authenticating = authenticateVerifiedGraphScopedAsset(
+          chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+        );
+        await turn();
+        releaseViews();
+
+        const authenticated = await authenticating;
+
+        // Once with the views, once after them.
+        expect(viewsAnsweredAtAsk).toEqual([false, true]);
+        expect(authenticated.asset.metadataQuads).toContainEqual(expect.objectContaining({
+          predicate: `${DKG}materializedVersion`,
+          object: '"77:3"',
+        }));
+      });
+
+      it('reports a publish that is still not found, and does not ask a third time', async () => {
+        const { chain, releaseViews, resolvePublishByTxHash } = gatedChain();
+        resolvePublishByTxHash.mockImplementation(async () => null);
+        releaseViews();
+
+        await expect(authenticateVerifiedGraphScopedAsset(
+          chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+        )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+        expect(resolvePublishByTxHash).toHaveBeenCalledTimes(2);
+      });
+
+      it('reports the second read\'s own failure', async () => {
+        const failure = Object.assign(new Error('receipt endpoint unavailable'), { code: 'NETWORK_ERROR' });
+        const { chain, releaseViews, resolvePublishByTxHash } = gatedChain();
+        resolvePublishByTxHash
+          .mockImplementationOnce(async () => null)
+          .mockImplementationOnce(async () => { throw failure; });
+        releaseViews();
+
+        await expect(authenticateVerifiedGraphScopedAsset(
+          chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+        )).rejects.toBe(failure);
+      });
+
+      it('does not ask again when the views fail first', async () => {
+        const { chain, releaseViews, resolvePublishByTxHash } = gatedChain({
+          getLatestMerkleRoot: async () => staleRoot,
+        });
+        resolvePublishByTxHash.mockImplementation(async () => null);
+        releaseViews();
+
+        await expect(authenticateVerifiedGraphScopedAsset(
+          chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+        )).rejects.toMatchObject({ code: 'VM_CHAIN_ROOT_MISMATCH' });
+        expect(resolvePublishByTxHash).toHaveBeenCalledTimes(1);
+      });
+    });
+
+    it('does not ask again for a receipt that names another root', async () => {
+      const { chain, releaseViews, resolvePublishByTxHash } = gatedChain();
+      resolvePublishByTxHash.mockImplementation(async () => ({ ...publish, merkleRoot: staleRoot }));
+      releaseViews();
+
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+      )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_MISMATCH' });
+      expect(resolvePublishByTxHash).toHaveBeenCalledTimes(1);
+    });
+
+    it('still reports a chain that cannot resolve a publish after the views', async () => {
+      const { chain, releaseViews } = gatedChain({ resolvePublishByTxHash: undefined });
+      releaseViews();
+
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain, firstPublish(), strictContextGraphBindingVerifier(chain),
+      )).rejects.toMatchObject({ code: 'VM_CHAIN_PROVENANCE_UNSUPPORTED' });
+    });
+
+    it.each([
+      {
+        name: 'two receipt claims',
+        metadataQuads: () => [...metadata(1, toHex(root)), receiptClaim(transactionHash(9))],
+        failure: { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      },
+      {
+        name: 'no receipt claim',
+        metadataQuads: () => withoutReceiptClaim(metadata(1, toHex(root))),
+        failure: { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      },
+      {
+        name: 'a receipt claim that is not a transaction hash',
+        metadataQuads: () => [...withoutReceiptClaim(metadata(1, toHex(root))), receiptClaim('0x1234')],
+        failure: { message: 'Graph-scoped durable sync transactionHash must be a 32-byte hex literal' },
+      },
+      {
+        name: 'a finalized materialization that claims a receipt',
+        metadataQuads: () => [...finalizedMaterializationMetadata(1, root), receiptClaim(transactionHash(1))],
+        failure: { code: 'VM_CHAIN_PROVENANCE_MISMATCH' },
+      },
+    ])('requests no receipt for $name, and reports it after the views', async ({ metadataQuads, failure }) => {
+      const { chain, releaseViews, viewsStarted, resolvePublishByTxHash } = gatedChain();
+      let settled = false;
+
+      const authenticating = authenticateVerifiedGraphScopedAsset(
+        chain, firstPublish(metadataQuads()), strictContextGraphBindingVerifier(chain),
+      ).finally(() => { settled = true; });
+      authenticating.catch(() => undefined);
+      await turn();
+
+      // The malformed claim is known, and is not reported ahead of the views.
+      expect(viewsStarted).toEqual(['root', 'count', 'contextGraph']);
+      expect(settled).toBe(false);
+
+      releaseViews();
+      await expect(authenticating).rejects.toMatchObject(failure);
+      expect(resolvePublishByTxHash).not.toHaveBeenCalled();
+    });
+
+    it('reports a stale copy with a malformed receipt claim as a root mismatch', async () => {
+      const { chain, releaseViews, resolvePublishByTxHash } = gatedChain({
+        getLatestMerkleRoot: async () => staleRoot,
+      });
+      releaseViews();
+
+      await expect(authenticateVerifiedGraphScopedAsset(
+        chain,
+        firstPublish([...withoutReceiptClaim(metadata(1, toHex(root))), receiptClaim('0x1234')]),
+        strictContextGraphBindingVerifier(chain),
+      )).rejects.toMatchObject({ code: 'VM_CHAIN_ROOT_MISMATCH' });
+      expect(resolvePublishByTxHash).not.toHaveBeenCalled();
+    });
+
+    it('requests no receipt for a finalized materialization of a first version', async () => {
+      const { chain, releaseViews, resolvePublishByTxHash } = gatedChain();
+      releaseViews();
+
+      const authenticated = await authenticateVerifiedGraphScopedAsset(
+        chain,
+        firstPublish(finalizedMaterializationMetadata(1, root)),
+        strictContextGraphBindingVerifier(chain),
+      );
+
+      expect(resolvePublishByTxHash).not.toHaveBeenCalled();
+      expect(authenticated.asset.metadataQuads.filter(
+        (quad) => quad.predicate === `${DKG}materializedVersion`,
+      )).toEqual([expect.objectContaining({ object: '"0:0"' })]);
+    });
+
+    it('requests no publish receipt for an update, which is verified as an update', async () => {
+      const v2Data = dataQuad(2);
+      const v2Root = computeFlatKCRootV10([v2Data], []);
+      const resolvePublishByTxHash = vi.fn(async () => publish);
+      const verifyKAUpdate = vi.fn(async () => ({
+        verified: true,
+        onChainMerkleRoot: v2Root,
+        blockNumber: 123,
+        txIndex: 4,
+        merkleRootCount: 2n,
+      }));
+      const chain = {
+        chainId: 'otp:2043',
+        getLatestMerkleRoot: async () => v2Root,
+        getMerkleRootCount: async () => 2n,
+        getKAContextGraphId: async () => 14n,
+        getContextGraphNameHash: async () => ethers.keccak256(ethers.toUtf8Bytes(contextGraphId)),
+        getLatestMerkleRootPublisher: async () => '0x2222222222222222222222222222222222222222',
+        resolvePublishByTxHash,
+        verifyKAUpdate,
+      } as ChainAdapter;
+
+      const authenticated = await authenticateVerifiedGraphScopedAsset(
+        chain,
+        {
+      merkleRootHex: fixtureRoot(metadata(2, toHex(v2Root))),
+          contextGraphId,
+          ual,
+          assertionVersion: 2n,
+          assertionGraph,
+          metaGraph,
+          dataQuads: [v2Data],
+          metadataQuads: metadata(2, toHex(v2Root)),
+        },
+        strictContextGraphBindingVerifier(chain),
+      );
+
+      expect(resolvePublishByTxHash).not.toHaveBeenCalled();
+      expect(verifyKAUpdate).toHaveBeenCalledTimes(1);
+      expect(authenticated.asset.metadataQuads).toContainEqual(expect.objectContaining({
+        predicate: `${DKG}materializedVersion`,
+        object: '"123:4"',
+      }));
+    });
   });
 
   it('fails closed when the bound CG commits a different name hash', async () => {
@@ -617,6 +1133,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId,
       ual,
       assertionVersion: 2n,
@@ -641,6 +1158,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId,
       ual,
       assertionVersion: 2n,
@@ -667,6 +1185,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     await expect(authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId: '0014',
       ual,
       assertionVersion: 2n,
@@ -700,6 +1219,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     const authenticated = await authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId: wireId,
       ual,
       assertionVersion: 2n,
@@ -731,6 +1251,7 @@ describe('durable graph-scoped KA materialization', () => {
     } as ChainAdapter;
 
     const authenticated = await authenticateVerifiedGraphScopedAsset(chain, {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId: '14',
       ual,
       assertionVersion: 2n,
@@ -823,9 +1344,9 @@ describe('durable graph-scoped KA materialization', () => {
   });
 
   it.each([
-    ['conflicting', ['"transaction"', '"finalized-materialization"']],
-    ['unsupported', ['"unsupported"']],
-  ])('rejects %s peer confirmation metadata before durable materialization', async (_label, kinds) => {
+    ['mixed-compatible', ['"transaction"', '"finalized-materialization"'], true],
+    ['unsupported', ['"unsupported"'], false],
+  ])('validates %s peer confirmation metadata before durable materialization', async (_label, kinds, accepted) => {
     const v2Data = dataQuad(2);
     const v2Meta = metadata(2);
     v2Meta.push(
@@ -882,9 +1403,14 @@ describe('durable graph-scoped KA materialization', () => {
       logDebug: () => {},
     });
 
-    expect(summary.failedPhases).toBe(1);
-    expect(summary.insertedTriples).toBe(0);
-    expect(materialized).toEqual([]);
+    expect(summary.failedPhases).toBe(accepted ? 0 : 1);
+    if (accepted) {
+      expect(materialized).toHaveLength(1);
+      expect(readGraphKnowledgeAssetConfirmationKindV1((materialized[0] as VerifiedGraphScopedAsset).metadataQuads)).toBe('transaction');
+    } else {
+      expect(summary.insertedTriples).toBe(0);
+      expect(materialized).toEqual([]);
+    }
   });
 
   it('replaces a poisoned v1 union with the verified v2 assertion and metadata', async () => {
@@ -1393,6 +1919,7 @@ describe('durable graph-scoped KA materialization', () => {
     const outcome = await materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(v1Meta),
         contextGraphId,
         ual,
         assertionVersion: 1n,
@@ -1425,7 +1952,9 @@ describe('durable graph-scoped KA materialization', () => {
       graph: metaGraph,
     }));
     const v2Data = dataQuad(2);
-    const v2Meta = metadata(2);
+    const v2Meta = [...metadata(2), ...['publicTripleCount', 'privateTripleCount'].map((predicate, i) => ({
+    subject: ual, predicate: `${DKG}${predicate}`, object: JSON.stringify(String(1 - i)), graph: metaGraph,
+  }))];
     const inserted: Quad[] = [];
     const exactAssets: unknown[] = [];
 
@@ -1469,6 +1998,11 @@ describe('durable graph-scoped KA materialization', () => {
 
   it('rejects a peer assertion version that does not match chain root history', async () => {
     const asset = {
+      merkleRootHex: fixtureRoot(metadata(2).map((quad) => (
+        quad.predicate === `${DKG}assertionVersion`
+          ? { ...quad, object: '"999999999"' }
+          : quad
+      ))),
       contextGraphId,
       ual,
       assertionVersion: 999_999_999n,
@@ -1503,6 +2037,7 @@ describe('durable graph-scoped KA materialization', () => {
 
   it('rejects a valid-root KA replayed into a different context graph', async () => {
     const asset = {
+      merkleRootHex: fixtureRoot(metadata(2)),
       contextGraphId,
       ual,
       assertionVersion: 2n,
@@ -1541,6 +2076,7 @@ describe('durable graph-scoped KA materialization', () => {
     const outcome = await materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(v2Meta),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -1589,6 +2125,7 @@ describe('durable graph-scoped KA materialization', () => {
     const outcome = await materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -1633,6 +2170,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(finalized),
         contextGraphId,
         ual,
         assertionVersion: 1n,
@@ -1682,6 +2220,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(finalized),
         contextGraphId,
         ual,
         assertionVersion: 1n,
@@ -1728,6 +2267,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -1761,6 +2301,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -1784,6 +2325,7 @@ describe('durable graph-scoped KA materialization', () => {
     const outcome = await materializeVerifiedGraphScopedAsset({
       store,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -1831,6 +2373,7 @@ describe('durable graph-scoped KA materialization', () => {
     const materialization = materializeVerifiedGraphScopedAsset({
       store: gatedStore,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -1886,6 +2429,7 @@ describe('durable graph-scoped KA materialization', () => {
     const materialization = materializeVerifiedGraphScopedAsset({
       store: gatedStore,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -1925,6 +2469,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store: failingStore,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -1956,6 +2501,7 @@ describe('durable graph-scoped KA materialization', () => {
     await expect(materializeVerifiedGraphScopedAsset({
       store: updateOnlyStore,
       asset: {
+      merkleRootHex: fixtureRoot(metadata(2)),
         contextGraphId,
         ual,
         assertionVersion: 2n,
@@ -1970,4 +2516,42 @@ describe('durable graph-scoped KA materialization', () => {
     expect(data.type === 'bindings' ? data.bindings.map((row) => row.s) : []).toEqual([v1Data.subject]);
     expect(await values(store, 'assertionVersion')).toEqual(['"1"']);
   });
+});
+
+it.each(['failed','stale','quarantined'] as const)('keeps only the applied identity when a later exact asset is %s', async outcome => {
+  const secondUal = ual.slice(0,-1)+'2', secondGraph = assertionGraph.slice(0,-1)+'2';
+  const data = [dataQuad(2),{...dataQuad(2),subject:'urn:second',graph:secondGraph}];
+  const meta = data.flatMap((q,i) => {
+    const root = computeFlatKCRootV10([{...q,graph:''}],[]);
+    return finalizedMaterializationMetadata(2,root).map(row=>({...row,
+      subject:i===0 ? ual : secondUal,
+      object:row.object===ual ? (i===0 ? ual : secondUal) : row.object===assertionGraph ? q.graph : row.object}));
+  });
+  const store = new OxigraphStore(), seen: string[] = [];
+  try {
+    const detailed = await runDurableSyncDetailed({ctx,remotePeerId:'exact-partial-test',contextGraphIds:[contextGraphId],
+      durableSyncBudget:uniformDurableSyncBudget(()=>Date.now()+60000),
+      exactAssetSelectionFor:()=>({kind:'ual-only',assetUals:[ual,secondUal]}),
+      fetchSyncPages:async ({phase})=>page(phase,phase==='data'?data:meta),
+      processDurableBatchInWorker:async (data,meta,_ctx,acceptUnverified,mode)=>{
+        const verified=processDurableBatchForWire(data,meta,acceptUnverified,mode);
+        return {...verified,verifiedData:verified.verifiedDataIndexes.map(i=>data[i]!),verifiedMeta:verified.verifiedMetaIndexes.map(i=>meta[i]!)};
+      },
+      storeInsert:({quads})=>store.insert(quads),
+      storeGraphScopedAsset:async ({asset})=>{
+        seen.push(asset.ual);
+        if(asset.ual===secondUal) {
+          if(outcome==='failed') throw new Error('Second asset authentication refused');
+          return outcome;
+        }
+        return materializeVerifiedGraphScopedAsset({store,asset});
+      },
+      deleteCheckpoint:()=>{},setCheckpoint:()=>{},logInfo:()=>{},logWarn:()=>{},logDebug:()=>{},
+    });
+    expect(seen).toEqual([ual,secondUal]);
+    expect(detailed.committedExactAssetUals).toEqual([ual]);
+    expect(await graphQuads(store,assertionGraph)).toHaveLength(1);
+    expect(await graphQuads(store,secondGraph)).toEqual([]);
+    if(outcome==='failed') expect(detailed.result.failedPhases).toBe(1);
+  } finally {await store.close();}
 });

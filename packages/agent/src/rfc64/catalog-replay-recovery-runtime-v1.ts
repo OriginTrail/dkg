@@ -274,6 +274,7 @@ class Rfc64CatalogReplayPeerWorklistV1 {
 
 interface ReplayProgressV1<Target> {
   readonly policyDigest: string;
+  revisionToken: object;
   readonly peerWorklist: Rfc64CatalogReplayPeerWorklistV1;
   /**
    * Provider-specific failures survive later scoped connection runs, each with
@@ -319,6 +320,11 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
 
   get revision(): number {
     return this.#revision;
+  }
+
+  /** Stable across other graphs; changes on this graph's replay transitions. */
+  revisionForContextGraph(contextGraphId: string): object | undefined {
+    return this.#byContextGraph.get(contextGraphId)?.revisionToken;
   }
 
   status(
@@ -370,7 +376,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     if (worklistLease === null) return null;
     if (!progress.active) {
       progress.active = true;
-      this.#bumpRevision();
+      this.#bumpRevision(progress);
     }
     let released = false;
     return Object.freeze({
@@ -383,7 +389,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         if (this.#byContextGraph.get(contextGraphId) !== progress) return;
         if (!progress.peerWorklist.hasPending && progress.completion === null && progress.active) {
           progress.active = false;
-          this.#bumpRevision();
+          this.#bumpRevision(progress);
         }
       },
     });
@@ -427,7 +433,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     }
     // A drained worklist can still have an in-flight provider/parity pass.
     if (progress.completion !== null) {
-      if (droppedProviders) this.#bumpRevision();
+      if (droppedProviders) this.#bumpRevision(progress);
       return progress.completion;
     }
     if (!progress.peerWorklist.hasPending) {
@@ -436,7 +442,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
       // `!replayFailed && requestedFullReplay` and clear a parity witness that
       // no full pass ever re-covered.
       progress.requestedFullReplay = false;
-      if (droppedProviders) this.#bumpRevision();
+      if (droppedProviders) this.#bumpRevision(progress);
       return Promise.resolve(Object.freeze({ requested: 0, failed: 0 }));
     }
     progress.peerWorklist.beginRun();
@@ -446,7 +452,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     // One bump publishes both the drop and the run: a second one only costs
     // every racing status read a durable re-read and a transient all-null
     // parity projection.
-    this.#bumpRevision();
+    this.#bumpRevision(progress);
     const run = this.#execute(input, progress, token);
     progress.completion = run;
     return run;
@@ -675,7 +681,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         else if (wasConnectedPeerPass && providerFailures > 0) current.unverified = true;
         current.completion = null;
         current.peerWorklist.settleOverflow();
-        this.#bumpRevision();
+        this.#bumpRevision(current);
       }
     }
   }
@@ -730,30 +736,17 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
   }
 
   /**
-   * Replay evidence is process-local. A policy-digest rotation replaces the
-   * entry, `clear()`/`reset()` drop it, and a restart starts empty, so both
-   * `requiresFullReplay` and `unverified` evaporate at those boundaries -- as
-   * they always have. Recovery is by re-derivation, not by persistence: the
-   * connected-peers pass that runs on every authority accept/refresh re-raises
-   * whichever state still holds. The two boundaries are NOT equally covered:
-   * after a restart no entry exists, so the projection reports
-   * `unresolvedReplayPeers` as unknown until that pass runs, but a digest
-   * rotation constructs a live entry here, so it reports a real `0` -- it
-   * evaporates the witness and shows no unknown signal at all.
-   *
-   * The limitation this leaves is deliberate and NOT closed by deriving
-   * `failed` in `status()`: deriving a value inside an entry that no longer
-   * exists derives nothing. A fleet roll restarts every node, so a Context
-   * Graph carrying a witness at roll time comes back reporting clean until its
-   * first pass; a policy rotation is the same shape, since rotating a policy
-   * does not make unverified rows verified. Closing it needs the witness to be
-   * durable, which is a persisted-record change, not a hotfix.
+   * Replay evidence is process-local and disappears on restart or policy
+   * rotation. A missing failure is therefore not proof of completion. Strict
+   * readiness also requires corroborated, bounded `promisedTargets`, which
+   * remain null until a provider replay has reached its parity settlement.
    */
   #progressFor(contextGraphId: string, policyDigest: string): ReplayProgressV1<Target> {
     let progress = this.#byContextGraph.get(contextGraphId);
     if (progress === undefined || progress.policyDigest !== policyDigest) {
       progress = {
         policyDigest,
+        revisionToken: Object.freeze({}),
         peerWorklist: new Rfc64CatalogReplayPeerWorklistV1(),
         unresolvedPeers: new Map(),
         requiresFullReplay: false,
@@ -865,7 +858,8 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
     return false;
   }
 
-  #bumpRevision(): void {
+  #bumpRevision(progress?: ReplayProgressV1<Target>): void {
     this.#revision += 1;
+    if (progress !== undefined) progress.revisionToken = Object.freeze({});
   }
 }

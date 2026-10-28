@@ -1,3 +1,4 @@
+import type { ContentPartition } from './content-partition-policy.js';
 import { BoundedLruCache } from '@origintrail-official/dkg-core';
 import type { GraphWriteRevisionSource } from '@origintrail-official/dkg-storage';
 import { callerAbortReason, raceAgainstCallerAbort } from './caller-abort.js';
@@ -8,17 +9,18 @@ export interface ScopedContentGraphDiscoveryMemoOptions {
   maxEntries?: number;
 }
 
-export interface ScopedContentGraphDiscoveryResult {
-  readonly graphs: readonly string[];
-  readonly materializedBytes: number;
+export interface ScopedContentGraphDiscoverySnapshot {
+  readonly materializedBytes?: number;
+  readonly inventory: readonly string[];
+  readonly partitions: readonly ContentPartition[];
 }
 
 export interface ScopedContentGraphDiscoveryRequest {
-  contentKey: string;
+  contextKey: string;
   laneKey: string;
   graphPrefix: string;
   signal?: AbortSignal;
-  load: () => Promise<ScopedContentGraphDiscoveryResult>;
+  load: () => Promise<ScopedContentGraphDiscoverySnapshot>;
 }
 
 /**
@@ -28,8 +30,8 @@ export interface ScopedContentGraphDiscoveryRequest {
  * generation cannot authorize reuse for an externally mutable SPARQL backend.
  */
 export class ScopedContentGraphDiscoveryMemo {
-  private readonly completed: BoundedLruCache<string, ScopedContentGraphDiscoveryResult>;
-  private readonly inFlight = new Map<string, Promise<ScopedContentGraphDiscoveryResult>>();
+  private readonly completed: BoundedLruCache<string, ScopedContentGraphDiscoverySnapshot>;
+  private readonly inFlight = new Map<string, Promise<ScopedContentGraphDiscoverySnapshot>>();
 
   constructor(
     private readonly revisionSource: GraphWriteRevisionSource | null,
@@ -38,7 +40,7 @@ export class ScopedContentGraphDiscoveryMemo {
     this.completed = new BoundedLruCache(options.maxEntries ?? DEFAULT_MAX_ENTRIES);
   }
 
-  get(request: ScopedContentGraphDiscoveryRequest): Promise<ScopedContentGraphDiscoveryResult> {
+  get(request: ScopedContentGraphDiscoveryRequest): Promise<ScopedContentGraphDiscoverySnapshot> {
     if (request.signal?.aborted) return Promise.reject(callerAbortReason(request.signal));
     if (this.revisionSource?.writeRevisionCoverage !== 'all-writers') {
       return raceAgainstCallerAbort(request.load(), request.signal);
@@ -47,12 +49,12 @@ export class ScopedContentGraphDiscoveryMemo {
     const before = this.revisionSource.getWriteRevision(request.graphPrefix);
     if (!before.stable) return raceAgainstCallerAbort(request.load(), request.signal);
 
-    const completedKey = JSON.stringify([request.contentKey, before.generation]);
+    const completedKey = JSON.stringify([request.contextKey, before.generation]);
     const cached = this.completed.get(completedKey);
     if (cached) return raceAgainstCallerAbort(Promise.resolve(cached), request.signal);
 
     const flightKey = JSON.stringify([
-      request.contentKey,
+      request.contextKey,
       request.laneKey,
       before.generation,
     ]);
@@ -63,8 +65,9 @@ export class ScopedContentGraphDiscoveryMemo {
       const after = this.revisionSource!.getWriteRevision(request.graphPrefix);
       if (after.stable && after.generation === before.generation) {
         const immutable = Object.freeze({
-          graphs: Object.freeze([...value.graphs]),
           materializedBytes: value.materializedBytes,
+          inventory: Object.freeze([...value.inventory]),
+          partitions: Object.freeze(value.partitions.map(partition => Object.freeze({ ...partition }))),
         });
         this.completed.set(completedKey, immutable);
         return immutable;

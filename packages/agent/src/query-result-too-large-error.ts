@@ -1,4 +1,4 @@
-import { isStoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
+import { StoreResponseTooLargeError, isStoreResponseTooLargeError } from '@origintrail-official/dkg-storage';
 import { isQueryMaterializationTooLargeError } from '@origintrail-official/dkg-query';
 
 export const QUERY_RESULT_TOO_LARGE = 'QUERY_RESULT_TOO_LARGE' as const;
@@ -14,14 +14,20 @@ export interface QueryResultTooLargeErrorLike {
 export class QueryResultTooLargeError extends Error
   implements QueryResultTooLargeErrorLike {
   readonly code = QUERY_RESULT_TOO_LARGE;
+  readonly queryPhase = 'result';
+  readonly maxBytes: number;
+  readonly actualBytes: number;
 
-  constructor(
-    readonly maxBytes: number,
-    readonly actualBytes: number,
-    options: ErrorOptions = {},
-  ) {
-    super(`Query result exceeds byte limit (${actualBytes} > ${maxBytes})`, options);
+  constructor(cause: StoreResponseTooLargeError);
+  constructor(maxBytes: number, actualBytes: number, options?: ErrorOptions);
+  constructor(limitOrCause: number | StoreResponseTooLargeError, actual?: number, options: ErrorOptions = {}) {
+    const maxBytes = typeof limitOrCause === 'number' ? limitOrCause : limitOrCause.maxBytes;
+    const actualBytes = typeof limitOrCause === 'number' ? actual! : toPublicByteCount(limitOrCause.actualBytes);
+    super(`Query result exceeds byte limit (${actualBytes} > ${maxBytes})`,
+      typeof limitOrCause === 'number' ? options : { cause: limitOrCause });
     this.name = 'QueryResultTooLargeError';
+    this.maxBytes = maxBytes;
+    this.actualBytes = actualBytes;
   }
 }
 
@@ -47,7 +53,7 @@ export function asQueryResultTooLargeError(
   error: unknown,
 ): QueryResultTooLargeErrorLike | undefined {
   if (isQueryResultTooLargeError(error)) return error;
-  if (isStoreResponseTooLargeError(error)) {
+  if (isStoreResponseTooLargeError(error) && (error as { queryPhase?: unknown }).queryPhase === 'result') {
     return new QueryResultTooLargeError(
       error.maxBytes,
       toPublicByteCount(error.actualBytes),

@@ -21,6 +21,8 @@
 import {
   compareAcceptedJobs,
   getLiftJobTransactionEvidence,
+  liftJobCheckedNonce,
+  liftJobCheckedSigner,
   liftJobOperationKindMarker,
   isFailedJob,
   pinnedPublishIdentityKaId,
@@ -38,7 +40,7 @@ import type {
 // Type-only, and erased at emit — the reverse edge (types importing `LiftJobRetryProjection`
 // from here) is type-only too, so nothing circular survives into the JavaScript. The verdict
 // vocabulary stays defined once, beside the resolver contract that produces it.
-import type { AsyncLiftChainProofResolution } from './async-lift-publisher-types.js';
+import type { AsyncLiftChainProofResolution, AsyncLiftLastChainCheck } from './async-lift-publisher-types.js';
 
 /**
  * Might a transaction have been submitted for this job? Keyed on persisted EVIDENCE, never on the
@@ -122,8 +124,9 @@ export function isHeldForChainProof(job: PersistedFailedJob): boolean {
  *  - CREATE with a recorded nonce and a pinned identity → TRUE, and the promise is
  *    unconditional: if the transaction mined, canonical recognition finalizes it; if it can never
  *    mine, the three-proof absence release re-runs it. Every chain-truth world has an exit.
- *  - CREATE without a recorded nonce (legacy pre-write-ahead records, inherited hashes) or
- *    without a pinned identity → FALSE: recognition would move it only in the world where the
+ *  - CREATE without a nonce on EITHER carrier (the live `broadcast.nonce`, or the
+ *    `recovery.nonceChecked` an inherited hash carries; legacy pre-write-ahead records have
+ *    neither) or without a pinned identity → FALSE: recognition would move it only in the world where the
  *    transaction mined, and no absence proof exists to release it in the other — a dropped
  *    transaction leaves it holding until an operator clears it, so `retryable: true` would be a
  *    promise the lane cannot keep.
@@ -132,34 +135,85 @@ export function isHeldForChainProof(job: PersistedFailedJob): boolean {
  *    the transaction actually mined. An update has no absence lane at all (the ABA hazard), so a
  *    dropped update keeps answering 503 until the operator acts — the record cannot distinguish
  *    that world from the about-to-converge one, and this cell is where the honest per-job answer
- *    bottoms out.
+ *    bottoms out. The same holds for an update that carries an earlier attempt's INHERITED hash and
+ *    a later `reverted` verdict: a revert proves that transaction had no effect, not that the
+ *    queued request is still current, so recovery holds it (see `decideChainProofDisposition`)
+ *    until an operator acts.
  *  - UPDATE without a derivable recognition identity, and any job whose lookup cannot even be
  *    formed (no hash, no wallet) → FALSE: nothing automatic can ever ask a question about it.
  */
 export function hasAutomaticRecoveryExit(job: PersistedFailedJob): boolean {
-  if (!getLiftJobTransactionEvidence(job)) return false;
+  return describeAutomaticRecoveryExit(job).exit;
+}
+
+/**
+ * GH#2942 — one ingredient a held job's record lacks before an automatic lane could settle it.
+ * Order is the order they are reported in, and the first one names the headline blocker.
+ *  - `transaction_hash` / `signer_wallet` — nothing can be ASKED about the job at all.
+ *  - `claim_or_validation` / `publish_identity` — the chain can be asked, but a mined transaction
+ *    cannot be turned into a finalized job (or recognized as this job's effect).
+ *  - `operation_marker` — which operation signed is unknown, so no operation-specific proof applies.
+ *  - `nonce` (CREATE) — absence cannot be proven, so the job can finalize but never be released.
+ *  - `intended_root` (UPDATE) — the effect cannot be recognized.
+ */
+export type HeldRecoveryGap =
+  | 'transaction_hash'
+  | 'signer_wallet'
+  | 'claim_or_validation'
+  | 'publish_identity'
+  | 'operation_marker'
+  | 'nonce'
+  | 'intended_root';
+
+export type AutomaticRecoveryExit =
+  | { readonly exit: true }
+  | { readonly exit: false; readonly gaps: readonly [HeldRecoveryGap, ...HeldRecoveryGap[]] };
+
+/**
+ * {@link hasAutomaticRecoveryExit} with its reasons: EVERY ingredient the record lacks, so an
+ * operator is not told to fix one and then meets the next. The boolean is a view of this, so the
+ * two cannot drift.
+ *
+ * GH#2942 — and both now read the SAME carriers the dispatcher's lookup does. The wallet and nonce
+ * used to be read from the live `broadcast` metadata with the claim as a wallet fallback, while the
+ * lookup (`chainProofLookupFor`) reads `liftJobCheckedSigner` / `liftJobCheckedNonce` — the signer
+ * and nonce preserved WITH an inherited hash, and no claim fallback. So a pre-r21 record with an
+ * inherited hash and a claim wallet was promised an exit the dispatcher would never take, and a
+ * CREATE whose nonce survived only in the recovery record was denied one the dispatcher does.
+ *
+ * An operation-specific gap (nonce, intended root) is only reported once the operation is KNOWN:
+ * for an unmarked record there is no fact to apply a rule to.
+ */
+export function describeAutomaticRecoveryExit(job: PersistedFailedJob): AutomaticRecoveryExit {
+  const gaps: HeldRecoveryGap[] = [];
+  if (!getLiftJobTransactionEvidence(job)) gaps.push('transaction_hash');
+  // The wallet must come from the SAME carrier as the hash; the claim names the NEXT attempt's wallet.
+  if (!liftJobCheckedSigner(job)) gaps.push('signer_wallet');
   // r15 (3814317413) — the promise must match what the DISPATCHER will actually do. It refuses to
   // finalize a record that cannot form a published-finalized job (claim and validation are part of
   // that shape), so a record missing them has no automatic exit however complete its proof looks:
   // every tick would resolve `recovered` and then decline, leaving the operator-only clear the
   // response said was unnecessary.
-  if (!job.claim || !job.validation) return false;
-  if (!(job.broadcast?.walletId ?? job.claim?.walletId)) return false;
-  const pinnedId = pinnedPublishIdentityKaId(job);
-  if (pinnedId === undefined) return false;
+  if (!job.claim || !job.validation) gaps.push('claim_or_validation');
+  if (pinnedPublishIdentityKaId(job) === undefined) gaps.push('publish_identity');
   // PR #2300 r5 (3812123691) — the exit is OPERATION-SPECIFIC, so it may only be promised on
   // authoritative evidence of which operation ran. `queuedLiftOperationKind` answers 'update' for
   // an unmarked record as a SAFE fallback, not as a fact: if such a record was really a create,
   // update recognition can never recognize it and update absence is deliberately inconclusive, so
   // every chain outcome leaves it held. Promising a retry there sends the client into a loop.
   // Unmarked means the operator's by-id clear, and the response now says so.
-  if (liftJobOperationKindMarker(job) === undefined) return false;
-  if (queuedLiftOperationKind(job) === 'create') {
-    return job.broadcast?.nonce !== undefined;
+  const operation = liftJobOperationKindMarker(job);
+  if (operation === undefined) {
+    gaps.push('operation_marker');
+  } else if (operation === 'create') {
+    if (liftJobCheckedNonce(job) === undefined) gaps.push('nonce');
+  } else {
+    const intendedRoot = (job.request as { knowledgeAssetVmPublish?: { sealMerkleRoot?: unknown } })
+      .knowledgeAssetVmPublish?.sealMerkleRoot;
+    if (!(typeof intendedRoot === 'string' && intendedRoot.length > 0)) gaps.push('intended_root');
   }
-  const intendedRoot = (job.request as { knowledgeAssetVmPublish?: { sealMerkleRoot?: unknown } })
-    .knowledgeAssetVmPublish?.sealMerkleRoot;
-  return typeof intendedRoot === 'string' && intendedRoot.length > 0;
+  const [first, ...rest] = gaps;
+  return first === undefined ? { exit: true } : { exit: false, gaps: [first, ...rest] };
 }
 
 /**
@@ -176,11 +230,20 @@ export function isAutomaticallyRetryableLiftJob(
   options: { readonly autoRetryEnabled: boolean },
 ): boolean {
   return options.autoRetryEnabled
-    && getLiftJobFailurePolicy(job.failure.code).autoRetry === true
-    && job.failure.retryable
-    && job.failure.resolution === 'reset_to_accepted'
+    && isAutoRetryLiftFailure(job)
     && job.retries.retryCount < job.retries.maxRetries
     && !isHeldForChainProof(job);
+}
+
+/**
+ * The CODE half of the gate above: is this the kind of failure the registry lets the publisher
+ * retry by itself? Independent of the operator's kill-switch, the budget and the hold, which is
+ * what lets the read view tell "this code is not in the lane" from "the lane is off".
+ */
+function isAutoRetryLiftFailure(job: PersistedFailedJob): boolean {
+  return getLiftJobFailurePolicy(job.failure.code).autoRetry === true
+    && job.failure.retryable
+    && job.failure.resolution === 'reset_to_accepted';
 }
 
 /**
@@ -475,6 +538,177 @@ export type LiftJobRetryWaitingReason =
 export interface LiftJobRetryProjection {
   readonly autoRetryEligible: boolean;
   readonly waitingReason?: LiftJobRetryWaitingReason;
+  /**
+   * GH#2942 — WHY the job is not moving, where the waiting reason alone is too coarse: a held job
+   * (what is missing, or whether this node can act on a complete record), a retryable job nothing
+   * automatic will move (which of three different reasons), or a spent budget. Absent where
+   * nothing blocks: a job on its own backoff, a terminal one, one owned by `recover()`. Derived on
+   * read from the record and the node's wiring, never persisted, and carrying only fixed text —
+   * no RPC URL, hash, payload or any other instance data.
+   */
+  readonly blocker?: LiftJobRetryBlocker;
+}
+
+/**
+ * The closed vocabulary of {@link LiftJobRetryBlocker}. A consumer must treat the SET as open: a
+ * later release may name a new reason, and an unknown code is still a reason to read `summary`.
+ *
+ * Held for chain proof, record incomplete (`LiftJobRetryBlocker.missing` lists every gap):
+ * `no_transaction_hash` · `no_signer_wallet` · `claim_or_validation_missing` ·
+ * `publish_identity_unpinned` · `operation_unmarked` · `nonce_missing` · `intended_root_missing`.
+ * Held, record complete: `recovery_not_configured` (this node cannot settle it) ·
+ * `chain_recheck_pending` (it re-checks on a bounded backoff).
+ * Retryable, evidence-free, nothing automatic: `not_auto_retryable` · `auto_retry_disabled` ·
+ * `retry_not_scheduled`. Out of budget: `retry_budget_spent`.
+ */
+export type LiftJobRetryBlockerCode =
+  | 'no_transaction_hash'
+  | 'no_signer_wallet'
+  | 'claim_or_validation_missing'
+  | 'publish_identity_unpinned'
+  | 'operation_unmarked'
+  | 'nonce_missing'
+  | 'intended_root_missing'
+  | 'recovery_not_configured'
+  | 'chain_recheck_pending'
+  | 'not_auto_retryable'
+  | 'auto_retry_disabled'
+  | 'retry_not_scheduled'
+  | 'retry_budget_spent';
+
+export interface LiftJobRetryBlocker {
+  readonly code: LiftJobRetryBlockerCode;
+  /** Fixed text for the code: what is wrong, and what an operator can and cannot do about it. */
+  readonly summary: string;
+  /** Held job with an incomplete record: EVERY gap, in the order the headline code was chosen. */
+  readonly missing?: readonly HeldRecoveryGap[];
+  /**
+   * `chain_recheck_pending` only, and only when the publisher runtime that runs the re-checks holds an
+   * observation for this exact incarnation (GH#2945): the latest re-check that did not settle the job.
+   * Never derived from the record, so it is attached by the daemon, not by {@link describeHeldBlocker}.
+   */
+  readonly lastCheck?: AsyncLiftLastChainCheck;
+}
+
+/**
+ * The text behind each code. A `Record` over the union, so a new code cannot be added without
+ * saying what an operator may do about it. Fixed strings only: the same text is served to every
+ * caller of every job, so nothing here may quote an instance.
+ *
+ * Two sentences recur on purpose, because they are the whole operator contract for a held job:
+ * no supported control writes evidence into a job (so an operator cannot supply a missing hash,
+ * signer, nonce or root), and clearing a job abandons this node's TRACKING of it — it neither
+ * cancels a transaction that was sent nor proves that none was.
+ */
+export const LIFT_JOB_RETRY_BLOCKER_SUMMARY: Record<LiftJobRetryBlockerCode, string> = {
+  no_transaction_hash:
+    'This held job has no transaction hash on its record, so chain recovery has nothing to look up. '
+    + 'No supported control can add one; the best-effort journal (`GET /api/publisher/journal`, '
+    + 'named-KA jobs) may still hold it for inspection. '
+    + 'An operator cannot manufacture a safe retry: clearing the job abandons tracking, it does not '
+    + 'prove that no transaction was sent.',
+  no_signer_wallet:
+    'The record names a transaction hash but not the wallet that signed it (a record written before '
+    + 'the signer was preserved), so chain recovery cannot ask the chain about it. No supported '
+    + 'control can add the signer; inspect the transaction on a block explorer. Clearing the job '
+    + 'abandons tracking, it does not prove that the transaction had no effect.',
+  claim_or_validation_missing:
+    'The record lacks the claim or validation facts a finalized publish is built from, so chain '
+    + 'recovery cannot finalize this job even if its transaction mined. No supported control can '
+    + 'add them; inspect the transaction yourself before deciding whether to clear the job.',
+  publish_identity_unpinned:
+    'The record has no pinned identity for the asset the transaction would have minted or updated, '
+    + 'so chain recovery cannot recognize its effect on chain. No supported control can add it; '
+    + 'inspect the transaction yourself before deciding whether to clear the job.',
+  operation_unmarked:
+    'The record does not say whether the signed transaction was a create or an update (it predates '
+    + 'the marker), so no operation-specific proof can be applied and none is guessed. Inspect the '
+    + 'transaction yourself before deciding whether to clear the job.',
+  nonce_missing:
+    'A CREATE needs the nonce its transaction reserved to prove it was never sent; the record has '
+    + 'none. Chain recovery will still finalize this job if the transaction mined, but can never '
+    + 'release it as unsent. No supported control can add the nonce; inspect the transaction yourself.',
+  intended_root_missing:
+    'An UPDATE needs the Merkle root it intended to install to recognize its effect on chain; the '
+    + 'record has none, so recovery cannot recognize it. Absence is never proof for an UPDATE, so '
+    + 'recovery will not release it either. Inspect the transaction yourself before deciding '
+    + 'whether to clear the job.',
+  recovery_not_configured:
+    'The record is complete, but this node has no chain-recovery capability for this job\'s wallet '
+    + 'and operation (no resolver, its chain adapter cannot answer, or the publisher runtime is not '
+    + 'running), so nothing will ask the chain. Restore chain access, the adapter capability or the '
+    + 'runtime rather than retrying: a retry is refused while a transaction may exist, and clearing '
+    + 'the job abandons tracking only.',
+  chain_recheck_pending:
+    'While the publisher runtime is running and not paused, chain recovery re-checks this job on a '
+    + 'bounded backoff. It finalizes the same job if the transaction mined, and releases a CREATE for '
+    + 'a re-run only once the transaction is proven never sent; an UPDATE whose transaction never '
+    + 'landed stays held, because absence is never proof for an UPDATE. On the job-detail routes, '
+    + 'when the running publisher holds an observation of the latest re-check it is reported as '
+    + '`retryState.blocker.lastCheck`; without one (no re-check yet, a restart, no running runtime, or '
+    + 'a surface that has no runtime reader) this cannot say whether the provider is unavailable, the '
+    + 'transaction is still pending, or the proof is inconclusive. Waiting is the safe move; no '
+    + 'operator action manufactures a safe retry.',
+  not_auto_retryable:
+    'This failure is not one the publisher retries by itself, and it persisted no transaction '
+    + 'evidence. `POST /api/publisher/retry` or re-submitting the identical request re-runs it as '
+    + 'the same job.',
+  auto_retry_disabled:
+    'Automatic retry is switched off on this node. A retry that was already scheduled fires again '
+    + 'once it is switched back on (the claim sweep releases a few per pass), but a job that failed '
+    + 'while it was off was never scheduled and is not released by switching it on: re-run it by '
+    + 'hand with `POST /api/publisher/retry` or by re-submitting the request.',
+  retry_not_scheduled:
+    'This failure is one the publisher retries by itself, but no retry was scheduled for it (it '
+    + 'failed while automatic retry was off, or was recorded by an older build). Re-run it by hand '
+    + 'with `POST /api/publisher/retry` or by re-submitting the request.',
+  retry_budget_spent:
+    'The shared retry budget (automatic and manual) is spent. Re-submitting the identical '
+    + '`vm/publish-async` request re-arms a full budget on this same job; nothing else does.',
+};
+
+const HELD_GAP_BLOCKER: Record<HeldRecoveryGap, LiftJobRetryBlockerCode> = {
+  transaction_hash: 'no_transaction_hash',
+  signer_wallet: 'no_signer_wallet',
+  claim_or_validation: 'claim_or_validation_missing',
+  publish_identity: 'publish_identity_unpinned',
+  operation_marker: 'operation_unmarked',
+  nonce: 'nonce_missing',
+  intended_root: 'intended_root_missing',
+};
+
+function blockerOf(code: LiftJobRetryBlockerCode, missing?: readonly HeldRecoveryGap[]): LiftJobRetryBlocker {
+  return { code, summary: LIFT_JOB_RETRY_BLOCKER_SUMMARY[code], ...(missing ? { missing } : {}) };
+}
+
+/**
+ * Why a held job is held, from its record and — when the caller can say — this node's recovery
+ * capability. An incomplete record is named by its gaps whatever the node could do; a complete one
+ * is `recovery_not_configured` or `chain_recheck_pending` by the capability. With no capability
+ * supplied, a complete record gets no blocker rather than a guess.
+ */
+export function describeHeldBlocker(
+  job: PersistedFailedJob,
+  canSettleHeldJob: ((job: PersistedFailedJob) => boolean) | undefined,
+): LiftJobRetryBlocker | undefined {
+  const exit = describeAutomaticRecoveryExit(job);
+  if (!exit.exit) return blockerOf(HELD_GAP_BLOCKER[exit.gaps[0]], exit.gaps);
+  if (!canSettleHeldJob) return undefined;
+  return blockerOf(canSettleHeldJob(job) ? 'chain_recheck_pending' : 'recovery_not_configured');
+}
+
+/**
+ * Why a retryable, evidence-free job has nothing automatic moving it. The ORDER is the point:
+ * a code that is not in the lane is blamed first, because switching the lane on cannot help it;
+ * a switched-off lane next; an unscheduled job last.
+ */
+function describeOperatorBlocker(
+  job: PersistedFailedJob,
+  options: { readonly autoRetryEnabled: boolean },
+): LiftJobRetryBlocker {
+  if (!isAutoRetryLiftFailure(job)) return blockerOf('not_auto_retryable');
+  if (!options.autoRetryEnabled) return blockerOf('auto_retry_disabled');
+  return blockerOf('retry_not_scheduled');
 }
 
 /**
@@ -547,32 +781,54 @@ export function classifyRetryAction(job: PersistedFailedJob): FailedJobRetryActi
  */
 export function describeRetryProjection(
   job: PersistedFailedJob,
-  options: { readonly autoRetryEnabled: boolean },
+  options: {
+    readonly autoRetryEnabled: boolean;
+    /**
+     * GH#2942 - can THIS node settle the held job (the capability half of "does an automatic exit
+     * exist")? Only a held job with a COMPLETE record consults it. Omitted, such a job gets no
+     * blocker rather than a guess, and the projection keeps the two keys it always had.
+     */
+    readonly canSettleHeldJob?: (job: PersistedFailedJob) => boolean;
+  },
 ): LiftJobRetryProjection {
   const autoRetryEligible = isAutomaticallyRetryableLiftJob(job, options)
     && job.timestamps.nextRetryAt !== undefined;
-  return { autoRetryEligible, ...waitingReasonOf(classifyRetryAction(job), autoRetryEligible) };
+  return { autoRetryEligible, ...describeRetryAction(classifyRetryAction(job), job, autoRetryEligible, options) };
 }
 
-function waitingReasonOf(
+/**
+ * Why a classified action is waiting, and - where that reason is too coarse - what exactly it waits for.
+ * ONE exhaustive switch, so each `waitingReason` sits beside its `blocker`; a key is ABSENT (never
+ * `undefined`) where nothing applies, which is what keeps the serialized projection stable.
+ */
+function describeRetryAction(
   action: FailedJobRetryAction,
+  job: PersistedFailedJob,
   autoRetryEligible: boolean,
-): { waitingReason?: LiftJobRetryWaitingReason } {
+  options: {
+    readonly autoRetryEnabled: boolean;
+    readonly canSettleHeldJob?: (job: PersistedFailedJob) => boolean;
+  },
+): { waitingReason?: LiftJobRetryWaitingReason; blocker?: LiftJobRetryBlocker } {
   switch (action) {
     case 'blocked_recovery':
       return { waitingReason: 'recovery' };
-    case 'blocked_pending_chain_proof':
-      return { waitingReason: 'pending_chain_proof' };
+    case 'blocked_pending_chain_proof': {
+      const blocker = describeHeldBlocker(job, options.canSettleHeldJob);
+      return { waitingReason: 'pending_chain_proof', ...(blocker ? { blocker } : {}) };
+    }
     case 'skip_exhausted':
-      return { waitingReason: 'exhausted' };
+      return { waitingReason: 'exhausted', blocker: blockerOf('retry_budget_spent') };
     case 'skip_terminal':
       return {};
     case 'reaccept':
       // The ONE place the operator's kill-switch is allowed to matter: it separates a retry the
       // node performs itself from one that waits for an operator or a client re-submit.
-      return { waitingReason: autoRetryEligible ? 'backoff' : 'operator' };
+      return autoRetryEligible
+        ? { waitingReason: 'backoff' }
+        : { waitingReason: 'operator', blocker: describeOperatorBlocker(job, options) };
     default: {
-      // A new action must decide its own reason here rather than inherit a silent default.
+      // A new action must decide its own reason AND blocker here rather than inherit a silent default.
       const unhandled: never = action;
       return unhandled;
     }
@@ -585,7 +841,7 @@ function waitingReasonOf(
  */
 export function deriveLiftJobRetryProjection(
   job: PersistedLiftJob,
-  options: { readonly autoRetryEnabled: boolean },
+  options: Parameters<typeof describeRetryProjection>[1],
 ): LiftJobRetryProjection {
   if (!isFailedJob(job)) return { autoRetryEligible: false };
   return describeRetryProjection(job, options);

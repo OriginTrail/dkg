@@ -8,7 +8,7 @@ import {
 
 describe('public query result-size error boundary', () => {
   it.each([
-    new StoreResponseTooLargeError(10, 11),
+    Object.assign(new StoreResponseTooLargeError(10, 11), { queryPhase: 'result' }),
     Object.assign(new Error('materialization limit'), {
       code: 'QUERY_MATERIALIZATION_TOO_LARGE',
       maxBytes: 10,
@@ -39,7 +39,7 @@ describe('public query result-size error boundary', () => {
     [BigInt(Number.MAX_SAFE_INTEGER) + 1n, Number.MAX_SAFE_INTEGER],
   ])('normalizes bigint store byte counts (%s) to JSON-safe numbers', (actualBytes, expected) => {
     const normalized = asQueryResultTooLargeError(
-      new StoreResponseTooLargeError(10, actualBytes),
+      Object.assign(new StoreResponseTooLargeError(10, actualBytes), { queryPhase: 'result' }),
     );
     expect(normalized).toMatchObject({
       code: 'QUERY_RESULT_TOO_LARGE',
@@ -47,6 +47,10 @@ describe('public query result-size error boundary', () => {
       actualBytes: expected,
     });
     expect(() => JSON.stringify(normalized)).not.toThrow();
+  });
+
+  it('preserves internal catalog overflow as a server-side failure', () => {
+    expect(asQueryResultTooLargeError(new StoreResponseTooLargeError(8 * 1024 * 1024, 9 * 1024 * 1024))).toBeUndefined();
   });
 
   it('does not promote code-only lookalikes', () => {

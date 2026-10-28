@@ -42,22 +42,40 @@ function activeSessionWithoutJobs(): PeerSyncSession {
 }
 
 describe('selected RFC-64 SWM lifecycle wiring', () => {
-  it('uses the canonical legacy SWM decision for shared-memory admission', () => {
+  it('uses the canonical legacy SWM decision for shared-memory admission', async () => {
     const rfc64LegacySwmGossipAllowedForContextGraph = vi.fn(
       (contextGraphId: string) => contextGraphId === 'cg-legacy',
     );
-    const agent = { rfc64LegacySwmGossipAllowedForContextGraph };
+    const privateMember = vi.fn().mockResolvedValue(false);
+    const agent = {
+      rfc64LegacySwmGossipAllowedForContextGraph,
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
+    };
     const allowed = LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1;
 
-    expect(allowed.call(agent as never, 'cg-legacy')).toBe(true);
-    expect(allowed.call(agent as never, 'cg-catalog-only')).toBe(false);
+    await expect(allowed.call(agent as never, 'cg-legacy')).resolves.toBe(true);
+    await expect(allowed.call(agent as never, 'cg-catalog-only')).resolves.toBe(false);
     expect(rfc64LegacySwmGossipAllowedForContextGraph.mock.calls).toEqual([
       ['cg-legacy'],
       ['cg-catalog-only'],
     ]);
+    expect(privateMember).toHaveBeenCalledExactlyOnceWith('cg-catalog-only');
   });
 
-  it('restores legacy SWM for a configured catalog graph under the global kill switch', () => {
+  it('admits only a locally proven private member after legacy policy declines', async () => {
+    const privateMember = vi.fn(async (contextGraphId: string) => contextGraphId === 'cg-member');
+    const agent = {
+      rfc64LegacySwmGossipAllowedForContextGraph: () => false,
+      rfc64PrivateRootSwmOnLegacyLaneV1: privateMember,
+    };
+    const allowed = LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1;
+
+    await expect(allowed.call(agent as never, 'cg-member')).resolves.toBe(true);
+    await expect(allowed.call(agent as never, 'cg-outsider')).resolves.toBe(false);
+    expect(privateMember.mock.calls).toEqual([['cg-member'], ['cg-outsider']]);
+  });
+
+  it('restores legacy SWM for a configured catalog graph under the global kill switch', async () => {
     const contextGraphId = 'cg-configured-catalog';
     const executionPlan = resolveRfc64CatalogExecutionPlanV1({
       configuredContextGraphs: [contextGraphId],
@@ -76,8 +94,8 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
 
     expect(executionPlan.selectedAuthority[contextGraphId]?.legacySyncAllowed).toBe(false);
     expect(executionPlan.legacyContextGraphs).toContain(contextGraphId);
-    expect(LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1
-      .call(agent as never, contextGraphId)).toBe(true);
+    await expect(LifecycleSyncMethods.prototype.canUseLegacySharedMemorySyncForContextGraphV1
+      .call(agent as never, contextGraphId)).resolves.toBe(true);
   });
 
   it('restores durable VM admission under the global kill switch', async () => {
@@ -695,6 +713,52 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
     }
   });
 
+  it('keeps a reserved-slot-only request on every pass, continuations included', async () => {
+    const publicCg = 'selected-reserved-only';
+    const privateCg = 'selected-reserved-only-private';
+    let initialSnapshotReads = 0;
+    let wallNow = 1_000;
+    const harness = createSelectedSwmLifecycleHarness({
+      contextGraphs: { public: publicCg, private: privateCg },
+      manifest: snapshotManifest(publicCg, 905),
+      clock: { now: () => wallNow, deadline: () => wallNow + 1 },
+      priorities: { [publicCg]: 100, [privateCg]: 0 },
+      onSnapshotRead: ({ publicAdmission }) => {
+        if (publicAdmission === 1) {
+          initialSnapshotReads += 1;
+          if (initialSnapshotReads === 672) wallNow += 120_000;
+        }
+      },
+    });
+
+    try {
+      const selected = await callSelectedSharedMemoryFromPeerDetailed(
+        harness.agent,
+        [publicCg, privateCg],
+        {
+          selectedSwmPriority: true,
+          requestedScope: { kind: 'rfc64-recovery-plan' },
+          priority: 2_000,
+          reservedSlotOnly: true,
+          recoveryTargets: [
+            { contextGraphId: publicCg, lane: 'selected-public' },
+            { contextGraphId: privateCg, lane: 'ordinary-private' },
+          ],
+        },
+      );
+      expect(selected.shared.continuationPasses).toBe(1);
+      // The continuation, too, asks for a reserved slot only: with one general
+      // slot and no queue it must leave that slot to other transfers.
+      expect(harness.probes.admissions.filter(({ event }) => event === 'start')).toEqual([
+        { contextGraphId: publicCg, selected: true, priority: 2_000, reservedSlotOnly: true, event: 'start' },
+        { contextGraphId: privateCg, selected: false, priority: undefined, reservedSlotOnly: true, event: 'start' },
+        { contextGraphId: publicCg, selected: true, priority: 2_000, reservedSlotOnly: true, event: 'start' },
+      ]);
+    } finally {
+      await harness.close();
+    }
+  });
+
   it('keeps retry state when one selected CG completes and another remains incomplete', async () => {
     const completeCg = 'selected-multi-complete';
     const incompleteCg = 'selected-multi-incomplete';
@@ -1145,5 +1209,18 @@ describe('selected RFC-64 SWM lifecycle wiring', () => {
       }
       await harness.close();
     }
+  });
+});
+
+describe('selected scope admission keeps ordered target identity', () => {
+  it.each([{ ids: ['graph-a'] }, { ids: ['graph-b', 'graph-a'] }])('refuses execution IDs $ids before provider authority work', async ({ ids }) => {
+    const authority = vi.fn(() => { throw new Error('provider authority work started'); });
+    const agent = { config: { durableSyncEnabled: true }, createSwmTargetExecutorSessionV1: () => ({}),
+      resolveRfc64CompleteSwmProviderPeerIdsV1: authority };
+    await expect(LifecycleSyncMethods.prototype.syncSharedMemoryFromPeerDetailedExecution.call(agent as never, 'peer', ids,
+      { selectedSwmPriority: true, requestedScope: { kind: 'selected-public', targets: [
+        { contextGraphId: 'graph-a', lane: 'selected-public' }, { contextGraphId: 'graph-b', lane: 'selected-public' },
+      ] } } as never)).rejects.toThrow('Selected shared-memory request targets do not match its execution scope');
+    expect(authority).not.toHaveBeenCalled();
   });
 });

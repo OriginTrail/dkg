@@ -1,18 +1,51 @@
 # Table of contents
 
-## Getting Started
+## Start Here
 
 * [Overview — What is OriginTrail DKG?](README.md "Overview")
 * [Quickstart](getting-started/quickstart.md)
 * [Terms & Conditions](getting-started/dkg-v10-t-c.md)
 
-## Active Now
+## Build with DKG
 
-* [DKG V10 Bounty Program](active-now/dkg-v10-bounty.md)
-* [Staking & Migration (V8 → V10)](active-now/staking-migration.md)
+* [Import Documents](build/import-documents.md)
+* [Google OKF Tutorial](build/okf-tutorial.md)
+* [Integrate an HTTP Application](build/http-application.md)
+* [Two-Agent Collaboration](build/collaborate.md)
 
-## How DKG Works
+## Connect Agents and Systems
 
+* [Choose a Connection](integrations/README.md)
+* [Hermes](integrations/hermes.md)
+* [OpenClaw](integrations/openclaw.md)
+* [Prime Agent](integrations/prime-agent.md)
+* [MCP Clients](integrations/mcp.md)
+* [Run a Local LLM](use-dkg/local-llm.md)
+
+## Operate
+
+* [Daemon Lifecycle](use-dkg/run-node.md)
+* [Publish & Query](use-dkg/publish-and-query.md)
+* [Large Content](use-dkg/large-content.md)
+* [Knowledge Asset Lifecycle CLI](use-dkg/knowledge-asset-lifecycle.md)
+* [Async Publisher Wallets](use-dkg/async-publisher-wallets.md)
+* [External Signer](use-dkg/external-signer.md)
+* [OKF Import, Export, and Verify](use-dkg/okf.md)
+* [Funding](use-dkg/funding.md)
+* [Publishing Conviction](use-dkg/publishing-conviction.md)
+* [Relays & Peers](use-dkg/relays-and-peers.md)
+* [Storage SPARQL HTTP](use-dkg/storage-sparql-http.md)
+* [SWM Public Snapshot Garbage Collection](use-dkg/swm-public-snapshot-gc.md)
+* [Host-Mode Manual Subscribe](use-dkg/host-mode-manual-subscribe.md)
+* [Updates & Rollback](use-dkg/updates-and-rollback.md)
+* [Migrate to npm](use-dkg/migrate-to-npm.md)
+* [Backpressure Observability](use-dkg/backpressure-observability.md)
+* [Write Preflight Coalescing](use-dkg/write-preflight-coalescing.md)
+* [Troubleshooting](use-dkg/troubleshooting.md)
+
+## Concepts
+
+* [Node + Agent and Neuro-Symbolic AI](how-dkg-works/node-and-agent.md)
 * [Key Concepts](how-dkg-works/key-concepts.md)
 * [DKG Network](how-dkg-works/dkg-network.md)
 * [DKG Node](how-dkg-works/dkg-node.md)
@@ -27,39 +60,33 @@
 * [Universal Messenger](how-dkg-works/universal-messenger.md)
 * [P2P Resilience](how-dkg-works/p2p-resilience.md)
 
-## Use DKG
-
-* [Daemon Lifecycle](use-dkg/run-node.md)
-* [Publish & Query](use-dkg/publish-and-query.md)
-* [Knowledge Asset Lifecycle CLI](use-dkg/knowledge-asset-lifecycle.md)
-* [Async Publisher Wallets](use-dkg/async-publisher-wallets.md)
-* [OKF Import, Export, and Verify](use-dkg/okf.md)
-* [Funding](use-dkg/funding.md)
-* [Publishing Conviction](use-dkg/publishing-conviction.md)
-* [Relays & Peers](use-dkg/relays-and-peers.md)
-* [Storage SPARQL HTTP](use-dkg/storage-sparql-http.md)
-* [SWM Public Snapshot Garbage Collection](use-dkg/swm-public-snapshot-gc.md)
-* [Host-Mode Manual Subscribe](use-dkg/host-mode-manual-subscribe.md)
-* [Updates & Rollback](use-dkg/updates-and-rollback.md)
-* [Migrate to npm](use-dkg/migrate-to-npm.md)
-* [Backpressure Observability](use-dkg/backpressure-observability.md)
-* [Troubleshooting](use-dkg/troubleshooting.md)
-
-## Agent Context
-
-* [Context Pack](agent-context/context-pack.md)
-* [Invariants](agent-context/invariants.md)
-* [Publish Lifecycle Language](agent-context/publish-lifecycle-language.md)
-* [Publish & Query](agent-context/task-packs/publish-query.md)
-* [Operate & Troubleshoot](agent-context/task-packs/operate-troubleshoot.md)
-
 ## References
 
+* [Feature Availability](references/availability.md)
+* [Tool and Route Map](references/tool-route-map.md)
 * [CLI](references/cli.md)
 * [API](references/api.md)
 * [Packages](references/packages.md)
 * [Glossary](references/glossary.md)
 * [Node Skill](references/node-skill.md)
+
+## For Agents
+
+* [Local LLM Agent Runbook](use-dkg/local-llm-agent-runbook.md)
+* [Context Pack](agent-context/context-pack.md)
+* [Set Up and Verify](agent-context/task-packs/setup.md)
+* [Ingest Knowledge](agent-context/task-packs/ingest.md)
+* [OKF Workflow](agent-context/task-packs/okf.md)
+* [Collaborate](agent-context/task-packs/collaborate.md)
+* [Invariants](agent-context/invariants.md)
+* [Publish Lifecycle Language](agent-context/publish-lifecycle-language.md)
+* [Publish & Query](agent-context/task-packs/publish-query.md)
+* [Operate & Troubleshoot](agent-context/task-packs/operate-troubleshoot.md)
+
+## Active Now
+
+* [DKG V10 Bounty Program](active-now/dkg-v10-bounty.md)
+* [Staking & Migration (V8 → V10)](active-now/staking-migration.md)
 
 ## General
 

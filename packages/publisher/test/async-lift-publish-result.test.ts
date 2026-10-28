@@ -158,6 +158,61 @@ describe('async lift publish result mapping', () => {
     expect(failure.resolution).toBe('reset_to_accepted');
   });
 
+  it('keeps broadcast failure precedence explicit when markers overlap', () => {
+    const authorFailure = mapPublishExceptionToLiftJobFailure({
+      error: Object.assign(
+        new Error('cannot re-sign UpdateAuthorAttestation: no operational wallet has enough funds'),
+        { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' },
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:precedence-author',
+    });
+    expect(authorFailure.code).toBe('authority_forbidden');
+
+    const walletFailure = mapPublishExceptionToLiftJobFailure({
+      error: Object.assign(
+        new Error('No operational wallet has enough funds; QuorumUnmetError(collected=0/3, dialled=0)'),
+        { code: 'NO_FUNDED_PUBLISHER_WALLET' },
+      ),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:precedence-wallet',
+    });
+    expect(walletFailure.code).toBe('insufficient_funds');
+
+    const quorumFailure = mapPublishExceptionToLiftJobFailure({
+      error: new QuorumUnmetError({
+        collected: 0,
+        required: 3,
+        dialled: 0,
+        legacyMessage: 'insufficient funds while collecting ACKs',
+      }),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:precedence-quorum',
+    });
+    expect(quorumFailure.code).toBe('quorum_unmet');
+  });
+
+  it.each([
+    ['PUBLISH_AUTHOR_NOT_CUSTODIAL', 'authority_forbidden'],
+    ['NO_FUNDED_PUBLISHER_WALLET', 'insufficient_funds'],
+  ] as const)('records the terminal %s failure without evaluating a later rule that would throw', (code, expected) => {
+    // The quorum rule uses `instanceof`, which runs this trap. The rules stop
+    // at the first match, so an error the author or wallet rule already owns
+    // must still be recorded.
+    const hostile = new Proxy({ code }, {
+      getPrototypeOf() { throw new Error('boom'); },
+    });
+
+    const failure = mapPublishExceptionToLiftJobFailure({
+      error: hostile,
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:error:hostile-prototype',
+    });
+
+    expect(failure.code).toBe(expected);
+    expect(failure.retryable).toBe(false);
+  });
+
   it('drops submit-timeout metadata from a quorum failure with legacy timeout text', () => {
     const failure = mapPublishExceptionToLiftJobFailure({
       error: new QuorumUnmetError({
@@ -305,6 +360,32 @@ describe('async lift publish result mapping', () => {
       expect(isPermanentAuthorCapabilityFailure(
         { message: 'cannot re-sign UpdateAuthorAttestation for author 0xabc' },
       )).toBe(true);
+    });
+
+    it('decides the broadcast failure code for every error shape', () => {
+      // The broadcast mapper asks this predicate instead of repeating its checks. Whatever
+      // it accepts must fail the job terminally from 'broadcast'; whatever it rejects must
+      // not be reported as an authority failure.
+      const hostile = { get code(): never { throw new Error('boom'); }, message: 'x' };
+      const shapes: unknown[] = [
+        Object.assign(new Error('wrapped and reworded'), { code: 'PUBLISH_AUTHOR_NOT_CUSTODIAL' }),
+        new Error('publishFromFinalizedAssertion (update path): cannot re-sign UpdateAuthorAttestation for author 0xabc'),
+        { message: 'cannot re-sign UpdateAuthorAttestation for author 0xabc' },
+        new Error('connection reset by peer'),
+        new Error('No operational wallet has enough funds to publish to Verifiable Memory'),
+        hostile,
+        Object.create(null),
+        undefined,
+        null,
+      ];
+      const authorityFailures = shapes.map((error) => mapPublishExceptionToLiftJobFailure({
+        error,
+        failedFromState: 'broadcast',
+        errorPayloadRef: 'urn:error:author-predicate-agreement',
+      }).code === 'authority_forbidden');
+
+      expect(authorityFailures).toEqual(shapes.map((error) => isPermanentAuthorCapabilityFailure(error)));
+      expect(authorityFailures).toEqual([true, true, true, false, false, false, false, false, false]);
     });
   });
 

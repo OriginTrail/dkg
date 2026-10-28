@@ -29,7 +29,9 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: rfc64-inventory-windows-${{ github.event.pull_request.number || github.ref }}
+  # The caller owns branch/PR cancellation. Sharing a branch key here lets
+  # ordinary CI cancel the Windows jobs of an independent nightly run.
+  group: rfc64-inventory-windows-${{ github.run_id }}-${{ github.run_attempt }}
   cancel-in-progress: true
 
 permissions:
@@ -80,6 +82,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Check regression proof launcher and process cleanup
+        run: pnpm qa:check-regression-launcher
+
       - name: Build agent dependency closure
         # The canonical Gate 0 closure excludes unnecessary Solidity compilation.
         run: pnpm test:gate0:rfc64-persistence-lifecycle:build
@@ -122,3 +127,12 @@ jobs:
           pnpm --filter @origintrail-official/dkg-agent exec vitest run
           --config vitest.unit.config.ts
           ${{ matrix.tests }}
+
+      - name: Test snapshot retirement aliases and metadata leases
+        if: matrix.group == 'object-stores'
+        run: >-
+          pnpm --filter @origintrail-official/dkg-publisher exec vitest run
+          --config vitest.unit.config.ts
+          test/workspace-snapshot-retirement.test.ts
+          test/workspace-snapshot-write-scope.test.ts
+          test/finalized-snapshot-collector.test.ts

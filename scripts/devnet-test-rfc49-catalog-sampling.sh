@@ -98,13 +98,6 @@ api_call_agent() {
 
 jq_field() { node -e 'let d="";process.stdin.on("data",c=>d+=c);process.stdin.on("end",()=>{try{const j=JSON.parse(d);const p=process.argv[1].split(".").filter(Boolean);let v=j;for(const k of p)v=v?.[k];console.log(typeof v==="object"?JSON.stringify(v):(v??""))}catch(e){console.log("")}})' "$1"; }
 
-hardhat_mine() {
-  local hex; hex=$(printf '0x%x' "$1")
-  curl -sS -X POST -H 'Content-Type: application/json' \
-    --data "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"hardhat_mine\",\"params\":[\"${hex}\"]}" \
-    "http://127.0.0.1:${HARDHAT_PORT}" > /dev/null
-}
-
 # Parse the COUNT(*) row of a SPARQL JSON answer (a store's `.results`, or the
 # daemon's `.result`). The binding value is a typed literal like
 # `"0"^^<http://www.w3.org/2001/XMLSchema#integer>` — take ONLY the value
@@ -545,7 +538,7 @@ for n in "${STRIPPED_CORES[@]}" "$BASELINE_CORE"; do RS0[$n]=$(rs_submitted "$n"
 
 RS_OK=0
 for round in $(seq 1 12); do
-  hardhat_mine 250
+  devnet_mine_blocks 250 "$HARDHAT_PORT"
   sleep 8
   for n in "${STRIPPED_CORES[@]}" "$BASELINE_CORE"; do
     now=$(rs_submitted "$n")
@@ -651,7 +644,7 @@ RSU0=()
 for n in "${STRIPPED_CORES[@]}" "$BASELINE_CORE"; do RSU0[$n]=$(rs_submitted "$n"); log "  core$n=${RSU0[$n]:-?}"; done
 RSU_OK=0
 for round in $(seq 1 12); do
-  hardhat_mine 250
+  devnet_mine_blocks 250 "$HARDHAT_PORT"
   sleep 8
   for n in "${STRIPPED_CORES[@]}" "$BASELINE_CORE"; do
     now=$(rs_submitted "$n")
