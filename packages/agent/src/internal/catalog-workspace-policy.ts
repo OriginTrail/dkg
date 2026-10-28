@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { PlacementLaneV1 } from './finalized-placement-decision.js';
+import type { PlacementLaneV1 } from './catalog-lane-types.js';
 
 /** Workspace content must retain its public/private catalog policy at transfer. */
 export function rfc64CatalogLaneAcceptsWorkspaceHeadV1(

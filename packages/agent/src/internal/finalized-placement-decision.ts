@@ -8,13 +8,8 @@ import {
 } from '@origintrail-official/dkg-core';
 import type { CatalogRepairRevisionHintV1 } from '../rfc64/catalog-repair-retry-v1.js';
 import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../rfc64/finalized-private-placement-repair-store-v1.js';
-import type { Rfc64CatalogAuthoringLaneDecisionV1 } from '../dkg-agent-rfc64-swm-catalog-projection.js';
-
-export interface PlacementLaneV1 {
-  readonly kind: 'private' | 'public';
-  readonly acceptsFinalizedVmRepair: boolean;
-  readonly scopeBase: Readonly<Omit<SwmAuthorInventoryScopeV1, 'authorAddress'>>;
-}
+import type { PlacementLaneV1, CatalogAuthoringLaneDecisionV1 } from './catalog-lane-types.js';
+export type { PlacementLaneV1 } from './catalog-lane-types.js';
 
 /** Current authority owns V2 scope; a V1 marker remains pinned to its original scope. */
 export type FinalizedPlacementDecisionV1<Lane = unknown> =
@@ -32,7 +27,7 @@ export type FinalizedPlacementDecisionV1<Lane = unknown> =
 /** Admission and retries retain this decision for capacity parking; execution re-reads authority. */
 export function resolveFinalizedPlacementDecisionV1<Lane extends PlacementLaneV1>(
   repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>,
-  readLane: () => Rfc64CatalogAuthoringLaneDecisionV1<Lane>,
+  readLane: () => CatalogAuthoringLaneDecisionV1<Lane>,
 ): FinalizedPlacementDecisionV1<Lane> {
   // V1 capacity remains pinned even while its lane is temporarily unavailable.
   const pinnedCapacityScope = repair.version === 1
@@ -69,7 +64,7 @@ export function resolveFinalizedPlacementDecisionV1<Lane extends PlacementLaneV1
 }
 
 /** A graph transition is independent of any marker's pinned compatibility. */
-export type FinalizedPlacementAuthorityV1<Lane extends PlacementLaneV1 = PlacementLaneV1> = Rfc64CatalogAuthoringLaneDecisionV1<Lane>;
+export type FinalizedPlacementAuthorityV1<Lane extends PlacementLaneV1 = PlacementLaneV1> = CatalogAuthoringLaneDecisionV1<Lane>;
 export function readFinalizedPlacementAuthorityV1(read: () => FinalizedPlacementAuthorityV1): FinalizedPlacementAuthorityV1 {
   try { return read(); }
   catch (error) { return { status: 'unavailable', error: error instanceof Error ? error : new Error(String(error)) }; }

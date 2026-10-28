@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { handoffConfirmedCatalogPlacementV1, withConfirmedCatalogTailV1 } from './confirmed-catalog-handoff.js';
 import { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from './catalog-workspace-policy.js';
-import type { PlacementLaneV1 } from './finalized-placement-decision.js';
+import type { PlacementLaneV1 } from './catalog-lane-types.js';
 
 import { SwmInventoryWriteFailure } from './swm-inventory-write.js';
 
@@ -42,31 +42,6 @@ export class ConfirmedVmOwnershipFailure extends SwmInventoryWriteFailure {
       : boundary === 'authority' ? 'authority' : boundary === 'input' ? 'preparation-read' : 'inventory-maintenance',
     cause instanceof SwmInventoryWriteFailure ? cause.kaUal : null, cause instanceof SwmInventoryWriteFailure ? cause.cause : cause);
   }
-}
-
-/** Legacy observation preserves committed-removal success; only strict transfer certifies ownership. */
-export async function observeConfirmedVmTransfer(
-  log: Logger, params: TransferRfc64ConfirmedVmParamsV1,
-  transfer: () => Promise<ConfirmedVmOwnershipOutcome>,
-): Promise<boolean> {
-  try { return await transfer() !== 'pending'; } catch (error) {
-    const cause = error instanceof SwmInventoryWriteFailure ? error.cause : error;
-    const boundary = error instanceof ConfirmedVmOwnershipFailure ? error.boundary : 'authority';
-    const detail = cause instanceof Error ? cause.message : String(cause);
-    const message = boundary === 'input'
-      ? `Confirmed ${params.publicationLabel} for <${params.assertionUri}> but RFC-64 post-confirmation observer input was invalid: ${detail}`
-      : boundary === 'authority'
-        ? `Confirmed ${params.publicationLabel} but RFC-64 catalog authority was unavailable: ${detail}`
-        : boundary === 'marker'
-          ? `Confirmed ${params.publicationLabel} but RFC-64 finalized-private placement was not recorded, so nothing owes it: ${detail}`
-          : `Confirmed ${params.publicationLabel} but RFC-64 SWM inventory shadow removal escaped its failure boundary: ${detail}`;
-    log.warn(params.ctx, message);
-    return boundary === 'projection';
-  }
-}
-
-export async function observeConfirmedVmCatalogV1(deps: ConfirmedVmCatalogObserverDependencies, params: TransferRfc64ConfirmedVmParamsV1): Promise<boolean> {
-  return observeConfirmedVmTransfer(deps.log, params, () => transferConfirmedVmCatalogV1(deps, params));
 }
 
 /**
@@ -129,8 +104,7 @@ export async function transferConfirmedVmCatalogV1(
         switch (result.status) {
           case 'applied':
           case 'absent':
-            // Public removal has no separate repair marker: strict recovery retains its owner
-            // until projection accepts. Legacy observation still reports committed removal.
+            // Public removal retains its owner until projection accepts.
             try {
               return deps.requestProjection({
                 contextGraphId: contextGraphId as ContextGraphIdV1,

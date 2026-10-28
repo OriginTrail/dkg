@@ -1,3 +1,4 @@
+import type { CatalogLaneV1, CatalogAuthoringLaneDecisionV1 } from './internal/catalog-lane-types.js';
 import { catalogAuthoringApplicability } from './internal/catalog-authoring-applicability.js';
 import { SwmCatalogAuthorityNotReady } from './internal/swm-inventory-write.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -118,25 +119,11 @@ interface ResolvedRfc64CatalogAuthoringLaneBaseV1 {
   readonly scopeBase: Readonly<Omit<AuthorLaneScopeV1, 'authorAddress'>>;
 }
 
-type ResolvedRfc64CatalogAuthoringLaneV1 =
-  | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
-    readonly kind: 'public';
-    readonly projectionTargetPolicy: 'exact-replacement';
-    readonly acceptsFinalizedVmRepair: false;
-  }>
-  | Readonly<ResolvedRfc64CatalogAuthoringLaneBaseV1 & {
-    readonly kind: 'private';
-    readonly projectionTargetPolicy: Rfc64CatalogProjectionTargetPolicyV1;
-    readonly acceptsFinalizedVmRepair: boolean;
-  }>;
-
-export type Rfc64CatalogAuthoringLaneDecisionV1<Lane = ResolvedRfc64CatalogAuthoringLaneV1> =
-  | Readonly<{ readonly status: 'inactive' }>
-  | Readonly<{ readonly status: 'unavailable'; readonly error: Error }>
-  | Readonly<{
-    readonly status: 'active';
-    readonly lane: Lane;
-  }>;
+type ResolvedRfc64CatalogAuthoringLaneV1 = ResolvedRfc64CatalogAuthoringLaneBaseV1 & CatalogLaneV1<
+  { readonly projectionTargetPolicy: 'exact-replacement' },
+  { readonly projectionTargetPolicy: Rfc64CatalogProjectionTargetPolicyV1 }
+>;
+export type Rfc64CatalogAuthoringLaneDecisionV1<Lane = ResolvedRfc64CatalogAuthoringLaneV1> = CatalogAuthoringLaneDecisionV1<Lane>;
 
 export { rfc64CatalogLaneAcceptsWorkspaceHeadV1 } from './internal/catalog-workspace-policy.js';
 

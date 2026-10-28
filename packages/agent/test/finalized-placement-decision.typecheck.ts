@@ -14,3 +14,9 @@ agent.requestRfc64FinalizedPrivateCatalogPlacementRepairV1({ repair, seal });
 // @ts-expect-error Public retirement cannot reserve a private catalog capacity scope.
 const invalid: FinalizedPlacementDecisionV1 = { ...ready, action: 'retire-public-row', capacityScope: scope };
 void invalid;
+
+import type { PlacementLaneV1 } from '../src/internal/catalog-lane-types.js';
+declare const scopeBase: PlacementLaneV1['scopeBase'];
+// @ts-expect-error Public catalog lanes cannot enable finalized-private repair.
+const impossiblePublicLane: PlacementLaneV1 = { kind: 'public', acceptsFinalizedVmRepair: true, scopeBase };
+void impossiblePublicLane;
