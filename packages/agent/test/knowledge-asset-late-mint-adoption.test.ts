@@ -36,6 +36,8 @@ import {
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
 import {
+  withMaterializationLock,
+  writeMaterializedVersion,
   VM_CURRENT_ASSERTION_PRED,
   computeFlatKCRootV10,
   computePrivateRootV10,
@@ -787,6 +789,93 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect((await history())?.vmCurrentAssertion).toBeUndefined();
     expect(await receiptTxHashes(store)).toEqual(receipts);
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
+  });
+
+  /** The newer materializer writes under the same per-KA lock as UpdateHandler. */
+  async function consumedMintWithNewerMaterializer() {
+    const chain = new MockChainAdapter();
+    const f = await strandedAsset(chain);
+    failNextLifecycleWrite(f.agent, f.store, VM_CURRENT_ASSERTION_PRED);
+    await expect(f.agent.reconcileKnowledgeAssetMint(RECONCILE))
+      .rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    const record = await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store,
+      { contextGraphId: CONTEXT_GRAPH, ual: f.sealed.kaUal });
+    if (record.state !== 'confirmed') throw new Error('fixture must hold the consumed mint');
+    const vmGraph = record.envelope.assertionGraph;
+    const quad = { ...QUADS[0]!, object: '"Version two"', graph: vmGraph };
+    const root = computeFlatKCRootV10([{ ...quad, graph: '' }], []);
+    const write = async () => {
+      await chain.updateKnowledgeCollectionV10({ kaId: RESERVED_KA_ID, newMerkleRoot: root,
+        newByteSize: 1n, newMerkleLeafCount: 1, authorAddress: AUTHOR, authorR: ZERO, authorVS: ZERO });
+      await f.store.deleteByPattern({ graph: vmGraph });
+      await f.store.deleteByPattern({ subject: f.sealed.kaUal, graph: META_GRAPH });
+      await f.store.insert([quad, ...generateGraphKnowledgeAssetMetadata({
+        ual: f.sealed.kaUal, contextGraphId: CONTEXT_GRAPH, merkleRoot: root,
+        publisherPeerId: 'newer-materializer', accessPolicy: 'public', allowedPeers: [], timestamp: new Date(0),
+        assertionVersion: 2, authorAddress: AUTHOR, publicTripleCount: 1, privateTripleCount: 0,
+        assertionGraph: vmGraph,
+      }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization',
+        provenance: { batchId: RESERVED_KA_ID, materializedVersion: { blockNumber: 200, txIndex: 0 } } } })]);
+      await writeMaterializedVersion(f.store, META_GRAPH, f.sealed.kaUal, { blockNumber: 200, txIndex: 0 });
+    };
+    return { ...f, chain, write, root };
+  }
+
+  it('keeps consumed-share completion exclusive until its lifecycle stamp finishes', async () => {
+    const f = await consumedMintWithNewerMaterializer();
+    let entered!: () => void, resume!: () => void;
+    const finalizing = new Promise<void>(resolve => { entered = resolve; });
+    const continued = new Promise<void>(resolve => { resume = resolve; });
+    const order: string[] = [];
+    const reconcile = mintReconciliation.reconcileLateMint;
+    vi.spyOn(mintReconciliation, 'reconcileLateMint').mockImplementation((host, input) => reconcile({ ...host,
+      completeFinalization: async value => { entered(); await continued; return host.completeFinalization(value); },
+      stampPublishedLifecycle: async value => { await host.stampPublishedLifecycle(value); order.push('stamp'); },
+    }, input));
+    const recovery = f.agent.reconcileKnowledgeAssetMint(RECONCILE);
+    let update: Promise<void> | undefined;
+    try {
+      await Promise.race([finalizing, recovery.then(() => { throw new Error('completion bypassed finalization'); })]);
+      update = withMaterializationLock(META_GRAPH, f.sealed.kaUal, async () => {
+        order.push('update'); await f.write();
+      });
+      await new Promise<void>(resolve => setImmediate(resolve));
+      expect(order, 'newer materialization must wait for the verified lifecycle completion').toEqual([]);
+      resume();
+      await expect(recovery).resolves.toMatchObject({ status: 'adopted' });
+      await update;
+      expect(order).toEqual(['stamp', 'update']);
+      expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store,
+        { contextGraphId: CONTEXT_GRAPH, ual: f.sealed.kaUal }))
+        .toMatchObject({ state: 'confirmed', envelope: { assertionVersion: '2', merkleRoot: f.root } });
+    } finally { resume(); await Promise.allSettled([recovery, ...(update ? [update] : [])]); }
+  });
+
+  it('revalidates consumed-share evidence after waiting for a newer materializer', async () => {
+    const f = await consumedMintWithNewerMaterializer();
+    let entered!: () => void, release!: () => void, prepared!: () => void;
+    const locked = new Promise<void>(resolve => { entered = resolve; });
+    const continueUpdate = new Promise<void>(resolve => { release = resolve; });
+    const evidenceRead = new Promise<void>(resolve => { prepared = resolve; });
+    const update = withMaterializationLock(META_GRAPH, f.sealed.kaUal, async () => {
+      entered(); await continueUpdate; await f.write();
+    });
+    await locked;
+    const version = f.chain.readKnowledgeAssetVersionSnapshot.bind(f.chain);
+    vi.spyOn(f.chain, 'readKnowledgeAssetVersionSnapshot').mockImplementationOnce(async id => {
+      const result = await version(id); prepared(); return result;
+    });
+    const stamp = vi.spyOn(f.agent, 'publishedNamedKaVmLifecycleWriter').mockClear();
+    const recovery = f.agent.reconcileKnowledgeAssetMint(RECONCILE);
+    const outcome = recovery.then(value => ({ value }), error => ({ error }));
+    try {
+      await Promise.race([evidenceRead, recovery.then(() => { throw new Error('missing mint evidence'); })]);
+      await new Promise<void>(resolve => setImmediate(resolve));
+      release(); await update;
+      expect(await outcome).toMatchObject({ error: { reason: 'superseded' } });
+      expect(stamp).not.toHaveBeenCalled();
+      expect((await f.history())?.vmCurrentAssertion).toBeUndefined();
+    } finally { release(); await Promise.allSettled([recovery, update]); }
   });
 
   it('preserves a resident share reopened by pull-from while mint lookup is pending', async () => {

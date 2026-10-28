@@ -13,6 +13,7 @@ import {
   buildAssertionPublishReceiptQuads,
 } from '@origintrail-official/dkg-core';
 import {
+  withMaterializationLock,
   readPreparedMintAdoption,
   prepareMintAdoption,
   withAssertionLifecycleWriteLease,
@@ -169,7 +170,9 @@ export async function reconcileLateMint(
     const share = await readableShare(current);
     return share === 'resident'
       ? recordThroughPublish(host, target, evidence, heldLifecycle, lockedReservation)
-      : completeRecordedLifecycle(host, lockedReservation, target, await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle);
+      : withMaterializationLock(lockedReservation.metaGraph, lockedReservation.scope.ual, async () =>
+        completeRecordedLifecycle(host, lockedReservation, target,
+          await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle));
   });
 
   const after = await lifecycle();
@@ -272,7 +275,9 @@ async function recordThroughPublish(host: KnowledgeAssetMintReconcileHost, targe
  * Complete the lifecycle of a mint whose VM content an earlier attempt
  * already recorded, without the consumed share. The local record must verify
  * against the sealed root, and the mint must pass the same checks as
- * adoption, read before the lifecycle lock is taken. The receipt is written
+ * adoption, revalidated after acquiring the shared materialization lock. The caller
+ * holds that lock through receipt, finalization and lifecycle completion so an
+ * UpdateHandler or publisher cannot replace the verified VM record mid-flight. The receipt is written
  * before the lifecycle is stamped, because the stamp is what makes later
  * attempts report the asset published.
  */
