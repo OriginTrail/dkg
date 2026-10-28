@@ -94,7 +94,7 @@ Removed jobs cannot be restored.
 
 ### After a job is removed
 
-Its status read returns `404`. A resend after a job finished is never joined to it, whether or not cleanup removed it. The window only sets how long status reads, `job-by-intent` and share reconciliation can still find the job, so keep it longer than your clients poll or reconcile.
+Its status read returns `404`. A resend after a job succeeded or finalized is never joined to it, whether or not cleanup removed it. The window only sets how long status reads, `job-by-intent` and share reconciliation can still find the job, so keep it longer than your clients poll or reconcile.
 
 ### Cautions
 
