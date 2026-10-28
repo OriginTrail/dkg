@@ -2,7 +2,8 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { DKGAgent } from '../src/dkg-agent.js';
-import type { QueryOptions } from '@origintrail-official/dkg-query';
+import { DKGQueryEngine, type QueryOptions } from '@origintrail-official/dkg-query';
+import { markCoreTrustedGraph } from '../src/public-snapshot-evidence.js';
 
 const stores: OxigraphStore[] = [];
 afterEach(async () => { await Promise.all(stores.splice(0).map(store => store.close())); });
@@ -74,4 +75,28 @@ it('keeps explicit draft exclusion on ordinary queries', async () => {
   const { agent, query } = node();
   await agent.query(sparql, { contextGraphId: 'cg-1', callerAgentAddress: A, excludeWorkingMemoryPartitions: true });
   expect(query.mock.calls[0][1]?.draftAccess).toEqual({ kind: 'none' });
+});
+
+
+it.each(['readable', 'trust-changes', 'cancelled'] as const)('runs real named-graph statistics with agent guards: %s', async mode => {
+  const { agent } = node();
+  const graph = 'did:dkg:context-graph:stats-agent/_verifiable_memory/a/1';
+  await agent.store.insert([1, 2].map(i => ({ subject: 'urn:entity', predicate: `urn:p:${i}`, object: '"value"', graph })));
+  Object.assign(agent, { queryEngine: new DKGQueryEngine(agent.store) });
+  const controller = new AbortController(), reason = new Error('caller cancelled after aggregate');
+  const originalQuery = agent.store.query.bind(agent.store);
+  const reads = vi.spyOn(agent.store, 'query').mockImplementation(async (sparql, options) => {
+    const result = await originalQuery(sparql, options);
+    if (sparql.includes('COUNT(DISTINCT ?s)')) {
+      if (mode === 'trust-changes') await markCoreTrustedGraph(agent.store, 'stats-agent');
+      if (mode === 'cancelled') controller.abort(reason);
+    }
+    return result;
+  });
+  const stats = agent.readContextGraphNamedGraphStats('stats-agent', { callerAgentAddress: A,
+    signal: controller.signal, priority: 'normal', source: 'test.stats-agent' });
+  if (mode === 'trust-changes') await expect(stats).rejects.toMatchObject({ code: 'CORE_CACHE_QUERY_TRUST_REQUIRED' });
+  else if (mode === 'cancelled') await expect(stats).rejects.toBe(reason);
+  else await expect(stats).resolves.toContainEqual({ graph, entityCount: 1, tripleCount: 2 });
+  expect(reads.mock.calls.filter(([sparql]) => sparql.includes('COUNT(DISTINCT ?s)'))).toHaveLength(1);
 });
