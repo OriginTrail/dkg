@@ -71,7 +71,7 @@ An update of an already-published KA can only be published as **one above the KA
 
 Recovery, per KA:
 
-1. If you sent this publish before, read that job first ([Retry safely](../build/async-jobs.md#retry-safely)). If it is `finalized` and carries your seal, the update is published: stop.
+1. If you sent this publish before, read that job first ([Retry safely](../build/async-jobs.md#retry-safely)). If it is `finalized` and carries your seal, the update is published: stop. If it is still running or [held](#held-jobs), wait until it finalizes or fails and is no longer held, then check again.
 2. If a failed job still holds the KA (a corrected publish gets `409` with its `existingJobId`), read it with `GET /api/publisher/job?id=<id>`. A `retryState.waitingReason` of `pending_chain_proof` or `recovery` means it may have sent a transaction, perhaps the one that moved the version on: follow [Held jobs](#held-jobs) and do not clear it. Otherwise clear it by id: `POST /api/publisher/clear-job { "jobId": "…" }`.
 3. `POST /api/knowledge-assets/{name}/wm/pull-from { "layer": "swm" }` re-opens the shared content as a draft (add `"onConflict": "replace"` if a WM draft already exists). If the message says the **published version moved on** (the sealed number is *below* the required one), use `"layer": "vm"` instead and re-apply your edits.
 4. `wm/finalize` — check that the returned `assertionVersion` equals the number the message asked for.
