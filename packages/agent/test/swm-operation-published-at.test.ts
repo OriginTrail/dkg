@@ -471,6 +471,31 @@ describe('timestamp replacement keeps stored evidence through failed writes', ()
       { ...row(`${DKG}WorkspaceOperation`), predicate: 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type' }], options);
     expect(await publishedAtOf(store, ack.operationSubject)).toEqual([restored]);
   });
+  it('retires many operations in bounded graph batches while protecting a replaced winner', async () => {
+    const store = newStore();
+    const graph2 = `did:dkg:context-graph:${CG}/child/_shared_memory_meta`;
+    const copies = Array.from({ length: 501 }, (_, i) => ({ ...row(stamp(LOCAL)), subject: `${ack.operationSubject}-${i}` }));
+    await store.insert([...copies, { ...copies[0], graph: graph2 }]);
+    const insert = store.insert.bind(store);
+    vi.spyOn(store, 'insert').mockImplementationOnce(async quads => {
+      await insert(quads);
+      await store.deleteByPattern({ graph: WS_META, subject: copies[0].subject });
+      await insert([copies[0]]);
+    });
+    const update = vi.spyOn(store, 'update');
+    await insertKeepingOnePublishedAt(store,
+      [...copies, { ...copies[0], graph: graph2 }].map(quad => ({ ...quad, object: stamp(PEER) })), options);
+    expect(update).toHaveBeenCalledTimes(7); // Six bounded batches in the root graph, one in its child.
+    expect(await publishedAtOf(store, copies[0].subject)).toEqual([LOCAL]);
+    for (const copy of copies.slice(1)) expect(await publishedAtOf(store, copy.subject)).toEqual([PEER]);
+    expect(await rowsOf(store, graph2, copies[0].subject)).toHaveLength(1);
+  });
+  it('renders escaped stored literals through the canonical term policy', async () => {
+    const store = newStore();
+    await store.insert([row('"bad\\"stamp\\\\value\\n"')]);
+    await insertKeepingOnePublishedAt(store, [row(stamp(LOCAL))], options);
+    expect(await publishedAtOf(store, ack.operationSubject)).toEqual([LOCAL]);
+  });
   it('keeps duplicate stamps when conditional update is unavailable', async () => {
     const store = newStore();
     await store.insert([row(stamp(LOCAL))]);

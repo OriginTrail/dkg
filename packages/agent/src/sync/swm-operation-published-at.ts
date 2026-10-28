@@ -18,9 +18,8 @@
  */
 
 import { canonicalQuadKey } from './requester/quad-key.js';
-import { assertSafeIri, isSafeIri } from '@origintrail-official/dkg-core';
+import { assertSafeIri, formatSparqlTerm, isSafeIri } from '@origintrail-official/dkg-core';
 import { tryUpdateWithTouchedGraphs, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
-import { formatCanonicalRdfLiteralTerm, parseRdfLiteralTerm } from '@origintrail-official/dkg-rdf-utils';
 import { decodeWorkspaceOperationTimestamp, earliestWorkspaceOperationTimestamp, isResolverWorkspaceOperationTimestamp } from '@origintrail-official/dkg-publisher';
 
 import { filterOversizedSyncQuads, insertPrefilteredSyncQuads, type OversizeGuardHooks } from './oversize-filter.js';
@@ -28,6 +27,8 @@ import { filterOversizedSyncQuads, insertPrefilteredSyncQuads, type OversizeGuar
 const PUBLISHED_AT = 'http://dkg.io/ontology/publishedAt';
 /** Operation subjects per stored-stamp read. */
 const READ_CHUNK = 100;
+const RETIREMENT_TUPLES = 100;
+const RETIREMENT_BYTES = 256 * 1024;
 
 /**
  * An operation's publishedAt as the head resolver reads it: the earliest
@@ -157,23 +158,41 @@ export async function insertKeepingOnePublishedAt(
   // A recovery can replace all operation rows after our insert; an unconditional
   // delete based on the earlier read would then remove its only restored stamp.
   // Backends without UPDATE keep harmless duplicate stamps for a later repair.
-  for (const { rows: losers, winner, requiredReplacement } of plan.retirements) {
-    if (requiredReplacement && !written.has(canonicalQuadKey(requiredReplacement))) continue;
-    const graph = assertSafeIri(winner.graph), subject = assertSafeIri(winner.subject);
-    const term = (object: string): string => {
-      const literal = parseRdfLiteralTerm(object);
-      return literal === null ? `<${assertSafeIri(object)}>` : formatCanonicalRdfLiteralTerm(literal);
-    };
-    const winnerTerm = term(winner.object);
-    await tryUpdateWithTouchedGraphs(store,
-      `DELETE { GRAPH <${graph}> { <${subject}> <${PUBLISHED_AT}> ?loser } } WHERE { `
-      + `GRAPH <${graph}> { <${subject}> <${PUBLISHED_AT}> ${winnerTerm} . `
-      + `<${subject}> <${PUBLISHED_AT}> ?loser } `
-      + `VALUES ?loser { ${losers.map(row => term(row.object)).join(' ')} } `
-      + `FILTER(!sameTerm(?loser, ${winnerTerm})) }`,
-      [graph], { priority: 'background', source: `${source}.retirePublishedAt` });
+  for (const { graph, sparql } of retirementUpdates(plan.retirements, written)) {
+    const supported = await tryUpdateWithTouchedGraphs(store, sparql, [graph],
+      { priority: 'background', source: `${source}.retirePublishedAt` });
+    if (!supported) break;
   }
   return inserted;
+}
+
+/** Bounded set-based cleanup; every tuple retains its own operation's winner guard. */
+function* retirementUpdates(retirements: OperationPublishedAtPlan['retirements'], written: ReadonlySet<string>) {
+  const graphs = new Map<string, string[]>();
+  for (const { rows: losers, winner, requiredReplacement } of retirements) {
+    if (requiredReplacement && !written.has(canonicalQuadKey(requiredReplacement))) continue;
+    const graph = assertSafeIri(winner.graph), subject = assertSafeIri(winner.subject);
+    const winnerTerm = formatSparqlTerm(winner.object, { position: 'object' });
+    let tuples = graphs.get(graph);
+    if (!tuples) { tuples = []; graphs.set(graph, tuples); }
+    for (const loser of losers) tuples.push(
+      `(<${subject}> ${winnerTerm} ${formatSparqlTerm(loser.object, { position: 'object' })})`);
+  }
+  for (const [graph, tuples] of graphs) {
+    const prefix = `DELETE { GRAPH <${graph}> { ?subject <${PUBLISHED_AT}> ?loser } } WHERE { `
+      + `GRAPH <${graph}> { ?subject <${PUBLISHED_AT}> ?winner . ?subject <${PUBLISHED_AT}> ?loser } `
+      + 'FILTER(!sameTerm(?loser, ?winner)) VALUES (?subject ?winner ?loser) { ';
+    let batch: string[] = [], bytes = Buffer.byteLength(prefix) + 3;
+    for (const tuple of tuples) {
+      const tupleBytes = Buffer.byteLength(tuple) + 1;
+      if (batch.length && (batch.length >= RETIREMENT_TUPLES || bytes + tupleBytes > RETIREMENT_BYTES)) {
+        yield { graph, sparql: prefix + batch.join(' ') + ' } }' };
+        batch = []; bytes = Buffer.byteLength(prefix) + 3;
+      }
+      batch.push(tuple); bytes += tupleBytes;
+    }
+    if (batch.length) yield { graph, sparql: prefix + batch.join(' ') + ' } }' };
+  }
 }
 
 /** Never report a new operation as materialized without a persisted usable stamp. */
