@@ -1,3 +1,4 @@
+import { executeUnscopedQuery } from './unscoped-query-consistency.js';
 import type { AgentQueryOptions } from './agent-query-options.js';
 import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -667,7 +668,7 @@ export class QueryMethods extends DKGAgentBase {
       }, opts.chainEvidenceMode, { signal: opts.signal, priority: opts.priority, source: opts.source });
     };
     // The executor owns admission and consistency through result release.
-    const result = await executePublicQuery(opts.contextGraphId, {
+    const result = await executePublicQuery(() => opts.contextGraphId ? execute() : executeUnscopedQuery({
         store: this.store,
         readMetadataRevision: () => this.contextGraphMetaProjection.readAuthorityFactsRevision,
         admit: () => canReadUnscopedQuery({
@@ -692,7 +693,7 @@ export class QueryMethods extends DKGAgentBase {
           this.log.info(ctx, 'Unscoped query denied because the caller cannot read every possible context graph');
           return deniedResult(sparql, opts.accessDenied);
         },
-    });
+    }));
     this.log.info(ctx, `Query returned ${result.bindings?.length ?? 0} bindings`);
     return result;
   }

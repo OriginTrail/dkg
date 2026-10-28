@@ -1,10 +1,11 @@
+import { graphInventoryMaterializationBytes, readGraphInventoryByPrefix } from '@origintrail-official/dkg-storage';
 import { raceAgainstCallerAbort } from './caller-abort.js';
 import type { TripleStore, QueryResult as StoreQueryResult, QueryOptions as StoreQueryOptions } from '@origintrail-official/dkg-storage';
 import type { QueryOptions } from './query-engine.js';
 import { storeOptions } from './query-store-options.js';
 import { QueryMaterializationTooLargeError } from './query-materialization-error.js';
 interface MaterializationMeter {
-  consume(value: unknown): void;
+  consumeBytes(bytes: number): void;
 }
 
 export class QueryMaterializationBudget implements MaterializationMeter {
@@ -76,15 +77,14 @@ export function createStoreReadLane(
   meter?: MaterializationMeter,
 ): StoreReadLane {
   const measured = async <T>(read: () => Promise<T>): Promise<T> => {
-    const value = await read(); meter?.consume(value); return value;
+    const value = await read(); meter?.consumeBytes(estimateMaterializedBytes(value)); return value;
   };
   return {
     query: (sparql) => measured(() => store.query(sparql, options)),
     listGraphsByPrefix: async prefix => {
-      if (store.listGraphsByPrefix) return measured(() => store.listGraphsByPrefix!(prefix, options));
-      // Charge the decoded inventory, including unrelated graphs, before projection.
-      const graphs = await measured(() => store.listGraphs(options));
-      return graphs.filter(graph => graph.startsWith(prefix));
+      const graphs = await readGraphInventoryByPrefix(store, prefix, options);
+      meter?.consumeBytes(graphInventoryMaterializationBytes(graphs));
+      return graphs;
     },
   };
 }
@@ -103,7 +103,7 @@ export function createQueryStoreReadContext(
   const measure = async <T>(load: (reads: StoreReadLane) => Promise<T>): Promise<MeasuredDiscovery<T>> => {
     let byteCount = 0;
     const measured = createStoreReadLane(store, sharedOptions, {
-      consume(value) { byteCount += estimateMaterializedBytes(value); },
+      consumeBytes(bytes) { byteCount += bytes; },
     });
     return { snapshot: await load(measured), byteCount };
   };

@@ -971,7 +971,7 @@ export class ContextGraphManager {
    * still resolve read authority for every returned candidate.
    */
   async listStoredContextGraphOwnerCandidates(options: QueryOptions = {},
-    materializationMeter?: { consume(value: unknown): void }): Promise<string[]> {
+    materializationMeter?: { consumeBytes(bytes: number): void }): Promise<string[]> {
     return listStoredContextGraphOwnerCandidates(this.store, options, materializationMeter);
   }
 

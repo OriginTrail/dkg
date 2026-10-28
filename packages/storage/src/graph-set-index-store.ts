@@ -1,3 +1,4 @@
+import { filterGraphInventory, graphInventoryMaterializationBytes, withGraphInventoryMaterialization } from './graph-inventory-materialization.js';
 import { graphCatalogFlightKey } from './graph-catalog-flight-key.js';
 import { isStoreResponseTooLargeError } from './http-response-limit.js';
 import { composeGraphEnumerationVisibility } from './graph-enumeration-visibility.js';
@@ -484,12 +485,10 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     if (!this.enabled) {
       const graphs = await this.inner.listGraphs(options);
       assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
-      return graphs.filter(
-        (graph) => !isAtomicGraphReplaceStagingGraph(graph),
-      );
+      return filterGraphInventory(graphs, graph => !isAtomicGraphReplaceStagingGraph(graph));
     }
     const graphs = await this.loadCurrentSortedGraphs(options);
-    return [...graphs];
+    return withGraphInventoryMaterialization([...graphs], graphInventoryMaterializationBytes(graphs));
   }
 
   async listGraphsSorted(options?: QueryOptions): Promise<SortedGraphCatalog> {
@@ -507,15 +506,11 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
   async listGraphsByPrefix(prefix: string, options?: QueryOptions): Promise<string[]> {
     if (!this.enabled) {
       if (this.inner.listGraphsByPrefix) {
-        return (await this.inner.listGraphsByPrefix(prefix, options)).filter(
-          (graph) => !isAtomicGraphReplaceStagingGraph(graph),
-        );
+        return filterGraphInventory(await this.inner.listGraphsByPrefix(prefix, options), graph => !isAtomicGraphReplaceStagingGraph(graph));
       }
       const graphs = await this.inner.listGraphs(options);
       assertGraphCatalogWithinResponseLimit(graphs, options?.maxResponseBytes);
-      return graphs.filter(
-        (graph) => graph.startsWith(prefix) && !isAtomicGraphReplaceStagingGraph(graph),
-      );
+      return filterGraphInventory(graphs, graph => graph.startsWith(prefix) && !isAtomicGraphReplaceStagingGraph(graph));
     }
     const graphs = await this.loadCurrentSortedGraphs(options);
     // startsWith() is defined over UTF-16 code units, while this catalog is
@@ -524,7 +519,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     // contiguous code-point-sorted range. Preserve exact JS prefix semantics
     // with the rare O(n) fallback; all scalar-aligned prefixes keep O(log n+k).
     if (endsWithHighSurrogate(prefix)) {
-      return graphs.filter((graph) => graph.startsWith(prefix));
+      return filterGraphInventory(graphs, graph => graph.startsWith(prefix));
     }
     const matches: string[] = [];
     for (let index = codePointLowerBound(graphs, prefix); index < graphs.length; index += 1) {
@@ -532,7 +527,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
       if (!graph.startsWith(prefix)) break;
       matches.push(graph);
     }
-    return matches;
+    return withGraphInventoryMaterialization(matches, graphInventoryMaterializationBytes(graphs));
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -663,7 +658,7 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
           graphCount: next.size,
         });
       }
-      this.replaceGraphSet(next, sourceForScan);
+      this.replaceGraphSet(next, sourceForScan, graphInventoryMaterializationBytes(discovered));
       return this.catalog.current!;
     }
   }
@@ -718,8 +713,8 @@ export class GraphSetIndexStore implements TripleStoreDecorator {
     this.resetRevalidationSchedule();
   }
 
-  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource): void {
-    const { added, removed } = this.catalog.replace(next);
+  private replaceGraphSet(next: Set<string>, source: GraphSetRefreshSource, materializedBytes?: number): void {
+    const { added, removed } = this.catalog.replace(next, materializedBytes);
     this.revalidateFailureCount = 0;
     this.nextRevalidateAt = this.now() + this.revalidateMs;
     if (added.length > 0 || removed.length > 0 || source !== 'seed') {

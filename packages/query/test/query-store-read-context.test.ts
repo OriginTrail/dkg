@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import type { TripleStore } from '@origintrail-official/dkg-storage';
-import { createQueryStoreReadContext } from '../src/query-store-read-context.js';
+import { ChangelogStore, GraphManager, GraphSetIndexStore, SharedMemoryLiteralBlobStore, type TripleStore } from '@origintrail-official/dkg-storage';
+import { createQueryStoreReadContext, QueryMaterializationBudget } from '../src/query-store-read-context.js';
 
 describe('query store-read materialization budget', () => {
   it('charges graph enumeration even when no SPARQL result is materialized', async () => {
@@ -77,4 +77,37 @@ describe('fallback inventory materialization', () => {
     await expect(reads.query('SELECT * WHERE {}')).resolves.toEqual(result);
     await expect(reads.query('SELECT * WHERE {}')).rejects.toMatchObject({ actualBytes: rawBytes + 2 * resultBytes });
   });
+});
+
+
+describe('decorated inventory materialization', () => {
+  const hidden = 'did:dkg:context-graph:hidden';
+  const inventory = [hidden, ...Array.from({ length: 1000 }, (_, i) => `urn:unrelated:${i}:${'x'.repeat(500)}`)];
+  const inventoryBytes = Buffer.byteLength(JSON.stringify(inventory));
+  const result = { type: 'bindings' as const, bindings: [{ value: '"ok"' }] };
+  const resultBytes = Buffer.byteLength(JSON.stringify(result));
+  const base = { listGraphs: async () => inventory, query: async () => result } as unknown as TripleStore;
+  const decorate = (kind: string): TripleStore => {
+    const visible = new ChangelogStore(base, { reservedGraphs: [hidden] });
+    if (kind === 'visibility') return visible;
+    if (kind === 'blob') return new SharedMemoryLiteralBlobStore(visible, { blobDir: '/unused-read-only-fixture', thresholdBytes: 1024 });
+    return new GraphSetIndexStore(visible, { enabled: kind === 'index-enabled' });
+  };
+  it.each(['visibility', 'blob', 'index-disabled', 'index-enabled'])
+    ('retains full fallback cost through %s and cache replay without exposing reserved graphs', async kind => {
+      const store = decorate(kind);
+      const reads = createQueryStoreReadContext(store, { maxMaterializedBytes: inventoryBytes });
+      const discovery = await reads.shared.measure(lane => lane.listGraphsByPrefix('did:dkg:context-graph:'));
+      expect(discovery).toEqual({ snapshot: [], byteCount: inventoryBytes });
+      expect(reads.shared.replay(discovery)).toEqual([]);
+      await expect(reads.query('SELECT * WHERE {}')).rejects.toMatchObject({
+        code: 'QUERY_MATERIALIZATION_TOO_LARGE', actualBytes: inventoryBytes + resultBytes,
+      });
+      const exact = createQueryStoreReadContext(store, { maxMaterializedBytes: inventoryBytes + resultBytes });
+      await expect(exact.listGraphsByPrefix('did:dkg:context-graph:')).resolves.toEqual([]);
+      await expect(exact.query('SELECT * WHERE {}')).resolves.toEqual(result);
+      const budget = new QueryMaterializationBudget(inventoryBytes);
+      await expect(new GraphManager(store).listStoredContextGraphOwnerCandidates({}, budget)).resolves.toEqual([]);
+      expect(() => budget.consume(result)).toThrow(expect.objectContaining({ actualBytes: inventoryBytes + resultBytes }));
+    });
 });

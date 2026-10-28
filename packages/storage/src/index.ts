@@ -378,3 +378,5 @@ export { buildAtomicAssetGroupUpdate, ATOMIC_ASSET_GROUP_MAX_ASSETS, ATOMIC_ASSE
 export { StoreReadTransportFailure, isStoreReadTransportFailure } from './store-read-transport-failure.js';
 
 export { readStoreOperationExecutionGeneration, asStoreRecoveryGenerationReader, type StoreRecoveryGenerationReader, type StoreRecoveryState } from './store-recovery-generation.js';
+
+export { graphInventoryMaterializationBytes, readGraphInventoryByPrefix } from './graph-inventory-materialization.js';
