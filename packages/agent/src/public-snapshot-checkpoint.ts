@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest } from './snapshot-checkpoint-contract.js';
 import { assertPublicSnapshotScopeAndAnchor } from './public-snapshot-scope.js';
 import { readFile } from 'node:fs/promises';
 import { join } from 'node:path';
@@ -19,7 +20,7 @@ export async function preparePublicSnapshotCheckpoint(host: {
   initial: PublicSnapshotObservation; readFresh(): Promise<PublicSnapshotObservation>;
   peerBatches(): AsyncIterable<readonly string[]>; dataDir: string;
   signal: AbortSignal; deadline: number; assertCurrent(): void;
-}) {
+}): Promise<PreparedSnapshotCheckpoint> {
   const { initial, signal, assertCurrent, deadline } = options;
   const assertLive = () => {
     signal.throwIfAborted(); assertCurrent();
@@ -66,7 +67,7 @@ export async function preparePublicSnapshotCheckpoint(host: {
   assertLive();
   assertCheckpointInventoryUnchanged(initial, fresh);
   const trustSha256 = checkpointSha256(await readFile(join(directory, 'load', 'trust.nq')));
-  const manifest = { version: 1, state: 'verified-unpublished', observation: initial, freshObservation: fresh,
+  const manifest: SnapshotCheckpointManifest = { version: 1, state: 'verified-unpublished', observation: initial, freshObservation: fresh,
     sourcePeer: selected, entries, assets, trustSha256, encodedBytes: budget.encodedBytes,
     plainBytes: budget.plainBytes, preparedAt: Date.now(), deadline };
   await writeCheckpointFile(join(directory, 'manifest.json'), JSON.stringify(manifest));

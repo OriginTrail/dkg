@@ -3,11 +3,11 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { verifyExactGraphContent } from './exact-graph-content-verifier.js';
 import { assertPublicSnapshotQueryTrust } from './public-snapshot-evidence.js';
-import type { preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
+import type { SnapshotCheckpointManifest, SnapshotCheckpointAudit } from './snapshot-checkpoint-contract.js';
 
 /** Full journal readback, including the durable trust guard. Sampling is not coverage. */
 export async function auditSnapshotCheckpoint(store: TripleStore,
-  manifest: Awaited<ReturnType<typeof preparePublicSnapshotCheckpoint>>['manifest'], signal: AbortSignal) {
+  manifest: SnapshotCheckpointManifest, signal: AbortSignal): Promise<SnapshotCheckpointAudit> {
   const { snapshot } = manifest.observation;
   const deadline = (ms: number) => ({ signal: AbortSignal.any([signal, AbortSignal.timeout(ms)]) });
   const rows = await store.query(`SELECT ?ual ?root ?version WHERE { GRAPH <${contextGraphMetaUri(snapshot.contextGraphId)}> {

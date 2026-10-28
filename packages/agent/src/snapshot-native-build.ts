@@ -7,12 +7,11 @@ import { copyFile, mkdir, open, statfs } from 'node:fs/promises';
 import { availableParallelism, totalmem } from 'node:os';
 import { isAbsolute, join } from 'node:path';
 import { BlazegraphStore } from '@origintrail-official/dkg-storage';
-import type { preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
+import type { PreparedSnapshotCheckpoint, NativeSnapshotCheckpointReport } from './snapshot-checkpoint-contract.js';
 import { checkpointAssetPath, checkpointSha256, syncCheckpointDirectory, writeCheckpointFile } from './snapshot-checkpoint-files.js';
 import { startSnapshotNativeProcess } from './snapshot-native-process.js';
 import { auditSnapshotCheckpoint } from './snapshot-checkpoint-audit.js';
 
-type Prepared = Awaited<ReturnType<typeof preparePublicSnapshotCheckpoint>>;
 const RESERVE = 7 * 2 ** 30;
 
 export async function nativeCheckpointShaFile(path: string): Promise<string> {
@@ -33,11 +32,11 @@ async function copyPinned(source: string, target: string, digest: string, max: n
   } finally { await input.close(); }
 }
 /** Build only a new, private, unpublished journal. Existing stores and configs are never replaced. */
-export async function buildNativeSnapshotCheckpoint(prepared: Prepared, options: {
+export async function buildNativeSnapshotCheckpoint(prepared: PreparedSnapshotCheckpoint, options: {
   java: string; jar: string; jarSha256: string; signal: AbortSignal;
   /** Re-authenticate the current source inventory using the selected chain policy. */
   assertInventoryCurrent(): Promise<void>;
-}) {
+}): Promise<NativeSnapshotCheckpointReport> {
   const { directory, manifest } = prepared;
   const constrained = process.constrainedMemory();
   if (Math.min(totalmem(), constrained || Infinity) < 4 * 2 ** 30) throw new Error('Native bootstrap requires a 4 GiB memory allowance; use incremental recovery');
@@ -114,7 +113,7 @@ export async function buildNativeSnapshotCheckpoint(prepared: Prepared, options:
     await store.close(); store = undefined;
     if (await nativeCheckpointShaFile(journal) !== journalSha256) throw new Error('Read-only checkpoint audit changed the journal');
     await options.assertInventoryCurrent(); await guard();
-    const result = { version: 1, state: 'verified-unpublished', ...audited, journal, journalSha256,
+    const result: NativeSnapshotCheckpointReport = { version: 1, state: 'verified-unpublished', ...audited, journal, journalSha256,
       inventoryDigest: manifest.observation.snapshot.inventoryDigest, runtimeSha256: options.jarSha256,
       propertiesSha256: checkpointSha256(Buffer.from(properties)),
       loaderMs, elapsedMs: Date.now() - started, current: false, activeStoreChanged: false };

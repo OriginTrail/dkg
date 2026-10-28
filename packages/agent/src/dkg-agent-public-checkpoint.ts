@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { readPublicSnapshotWithAdmission } from './public-snapshot-admission-read.js';
 import { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
 import { resolveWithinAbort } from '@origintrail-official/dkg-core';
 import { DKGAgentBase } from './dkg-agent-base.js';
@@ -25,14 +26,15 @@ export class PublicCheckpointMethods extends DKGAgentBase {
     return this.withPublicSnapshotSession(options, async session => {
       const { initial, sourcePlan: plan, signal, deadline, assertInitialInventoryCurrent: assertCurrent,
         readBeforeAdmission: read, normalized: { mode } } = session;
+      const readFresh = () => readPublicSnapshotWithAdmission({ read: () => read(true), signal, deadline, assertCurrent });
       // No subscription admission, metadata writes, reconciliation, or active-store mutation.
       const prepared = await preparePublicSnapshotCheckpoint({ router: this.router,
         ensurePeerConnected: (peer, opts) => this.ensurePeerConnected(peer, opts) }, {
-        initial, readFresh: () => read(true), peerBatches: plan.contentPeerBatches,
+        initial, readFresh, peerBatches: plan.contentPeerBatches,
         dataDir: this.config.dataDir!, signal, deadline, assertCurrent,
       });
       const native = runtime ? await buildNativeSnapshotCheckpoint(prepared, { ...runtime, signal,
-        assertInventoryCurrent: async () => { const fresh = await read(true); assertCurrent(); assertCheckpointInventoryUnchanged(initial, fresh); },
+        assertInventoryCurrent: async () => { const fresh = await readFresh(); assertCurrent(); assertCheckpointInventoryUnchanged(initial, fresh); },
       }) : undefined;
       return { directory: prepared.directory, assets: prepared.manifest.assets.length,
         inventoryDigest: initial.snapshot.inventoryDigest, mode, committed: 0, current: false,

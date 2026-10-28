@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertPublicSnapshotScopeAndAnchor } from './public-snapshot-scope.js';
-import { PublicSnapshotUnavailableError } from './public-snapshot-reader.js';
-import { PUBLIC_SNAPSHOT_ADMISSION_WINDOW_MS } from './public-snapshot-admission.js';
-import { waitForPublicSnapshotRetry } from './public-snapshot-exact-pacing.js';
+import { readPublicSnapshotWithAdmission } from './public-snapshot-admission-read.js';
 import type { PublicSnapshotObservation } from './public-snapshot-evidence.js';
 import type { PublicSnapshotRecoveryResult } from './public-snapshot-recovery.js';
 
@@ -20,21 +18,8 @@ export async function recoverPublicSnapshotToCurrent(options: {
     options.assertCurrent();
     if (Date.now() >= options.deadline) throw new Error('Snapshot catch-up exceeded the original job deadline');
   };
-  const readFresh = async (): Promise<PublicSnapshotObservation> => {
-    for (;;) {
-      active();
-      try { return await options.readFresh(); }
-      catch (error) {
-        active();
-        if (!(error instanceof PublicSnapshotUnavailableError)) throw error;
-        // The wire deliberately hides whether refusal means private, missing or
-        // busy. Wait a full serving admission window; never relax validation or
-        // extend this job. Short slices retain the ownership fence while waiting.
-        await waitForPublicSnapshotRetry(Math.min(Date.now() + PUBLIC_SNAPSHOT_ADMISSION_WINDOW_MS, options.deadline),
-          options.signal, active);
-      }
-    }
-  };
+  const readFresh = () => readPublicSnapshotWithAdmission({ read: options.readFresh,
+    signal: options.signal, deadline: options.deadline, assertCurrent: active });
   let observation = options.initial, rounds = 0;
   const bulkChunks: NonNullable<PublicSnapshotRecoveryResult['bulkChunks']> = [];
   while (true) {

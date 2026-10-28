@@ -8,16 +8,16 @@ import { copyFile, mkdir, open, readFile, stat, statfs } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { DKGAgentConfig } from './dkg-agent-types.js';
-import { assertCheckpointInventoryUnchanged, type preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
-import type { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
+import { assertCheckpointInventoryUnchanged } from './public-snapshot-checkpoint.js';
+import type { PreparedSnapshotCheckpoint, VerifiedNativeSnapshotCheckpoint } from './snapshot-checkpoint-contract.js';
 import { nativeCheckpointShaFile } from './snapshot-native-build.js';
 import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { writeCheckpointFile, syncCheckpointDirectory } from './snapshot-checkpoint-files.js';
 
 interface FreshCheckpointEdgeOptions {
   config: DKGAgentConfig & { dataDir: string; chainAdapter: ChainAdapter };
-  prepared: Awaited<ReturnType<typeof preparePublicSnapshotCheckpoint>>;
-  native: Awaited<ReturnType<typeof buildNativeSnapshotCheckpoint>>;
+  prepared: PreparedSnapshotCheckpoint;
+  native: VerifiedNativeSnapshotCheckpoint;
   runtime: { java: string; jar: string; jarSha256: string };
   sync: PublicSnapshotSyncOptions;
   signal: AbortSignal;

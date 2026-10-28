@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 import type { Stream } from '@libp2p/interface';
 import { type ProtocolRouter, type DuplexStreamOptions } from './protocol-router.js';
-import { BULK_GRAPH_KIND as K, BULK_GRAPH_PROTOCOL, BULK_GRAPH_REQUEST_BYTES,
+import { GRAPH_TRANSFER_KIND as K, BULK_GRAPH_PROTOCOL, BULK_GRAPH_REQUEST_BYTES,
   decodeBulkGraphFrames, encodeBulkGraphFrame, type BulkGraphFrame } from './bulk-graph-wire.js';
 
 /** Distinct negotiation: PERSISTED means durable checkpoint bytes, never applied graph data. */
 export const PUBLIC_CHECKPOINT_PROTOCOL = '/dkg/experimental/public-checkpoint/1.0.0';
-export const PUBLIC_CHECKPOINT_KIND = Object.freeze({ REQUEST: 1, META: 2, DATA: 3, ASSET_END: 4,
-  CREDIT: 5, PERSISTED: 6, CHUNK_END: 7, REFUSE: 8 });
+export { PUBLIC_CHECKPOINT_KIND } from './bulk-graph-wire.js';
 
 export class BulkGraphSession {
   private readonly frames: AsyncGenerator<BulkGraphFrame>;
