@@ -12,7 +12,7 @@ vi.mock('node:fs/promises', async original => ({ ...await original<typeof import
 vi.mock('../src/snapshot-native-process.js', () => ({ startSnapshotNativeProcess: vi.fn() }));
 vi.mock('@origintrail-official/dkg-storage', async original => ({
   ...await original<typeof import('@origintrail-official/dkg-storage')>(),
-  BlazegraphStore: class { close = lifecycle.close; },
+  BlazegraphStore: class { async close() { await lifecycle.close(); } },
 }));
 vi.mock('../src/dkg-agent.js', () => ({ DKGAgent: { create: lifecycle.create } }));
 beforeEach(() => {

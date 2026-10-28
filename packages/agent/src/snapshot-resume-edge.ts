@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CheckpointInventory } from './snapshot-checkpoint-inventory.js';
 import { constants } from 'node:fs';
 import { lstat, open, readFile, statfs } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
@@ -38,11 +39,12 @@ export async function resumePublicCheckpointEdge(options: {
     throw new Error('Checkpoint Edge runtime changed');
   const disk = await statfs(folder);
   if (disk.bavail * disk.bsize <= 7 * 2 ** 30) throw new Error('Checkpoint disk reserve unavailable');
+  const inventory = await CheckpointInventory.load(folder);
   const lifetime = new AbortController();
   const cancel = () => lifetime.abort(options.signal.reason);
   options.signal.addEventListener('abort', cancel, { once: true });
   if (options.signal.aborted) cancel();
   const timer = setTimeout(() => lifetime.abort(new Error('Checkpoint catch-up deadline exceeded')), 3_600_000);
-  try { return await startCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal); }
+  try { return await startCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal, inventory); }
   finally { clearTimeout(timer); options.signal.removeEventListener('abort', cancel); }
 }

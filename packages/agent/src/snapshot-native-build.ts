@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
+import { openSnapshotNativeStore } from './snapshot-native-store.js';
 import { nativeCheckpointProperties } from './snapshot-native-properties.js';
 import { constants } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { createServer } from 'node:net';
 import { copyFile, mkdir, open, statfs } from 'node:fs/promises';
 import { availableParallelism, totalmem } from 'node:os';
 import { isAbsolute, join } from 'node:path';
@@ -32,15 +32,6 @@ async function copyPinned(source: string, target: string, digest: string, max: n
     await writeCheckpointFile(target, bytes);
   } finally { await input.close(); }
 }
-export async function chooseCheckpointAuditPort(): Promise<number> {
-  const server = createServer();
-  await new Promise<void>((resolve, reject) => { server.once('error', reject); server.listen(0, '127.0.0.1', resolve); });
-  const address = server.address();
-  if (!address || typeof address === 'string') throw new Error('No local audit port');
-  await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-  return address.port;
-}
-
 /** Build only a new, private, unpublished journal. Existing stores and configs are never replaced. */
 export async function buildNativeSnapshotCheckpoint(prepared: Prepared, options: {
   java: string; jar: string; jarSha256: string; signal: AbortSignal;
@@ -107,24 +98,10 @@ export async function buildNativeSnapshotCheckpoint(prepared: Prepared, options:
     const loaderMs = Date.now() - started;
     const file = await open(journal, 'r'); try { await file.sync(); } finally { await file.close(); }
     const journalSha256 = await nativeCheckpointShaFile(journal);
-    const port = await chooseCheckpointAuditPort();
-    owned = await startSnapshotNativeProcess(options.java, [...java, '-Djetty.host=127.0.0.1', `-Djetty.port=${port}`,
-      `-Dbigdata.propertyFile=${join(folder, 'audit.properties')}`, '-jar', pinnedJar], folder, join(folder, 'audit.log'), signal);
-    const endpoint = `http://127.0.0.1:${port}/blazegraph/sparql`;
-    let ready = false;
-    for (let i = 0; i < 60; i++) {
-      owned.assertRunning();
-      try {
-        const response = await fetch(`http://127.0.0.1:${port}/blazegraph/status`, { signal: AbortSignal.any([signal, AbortSignal.timeout(1000)]) });
-        await response.body?.cancel(); if (response.ok) { ready = true; break; }
-      } catch { signal.throwIfAborted(); }
-      await new Promise(resolve => setTimeout(resolve, 1000));
-    }
-    if (!ready) throw new Error('Checkpoint audit store readiness deadline exceeded');
-    store = new BlazegraphStore(endpoint);
+    store = await openSnapshotNativeStore({ java: options.java, jar: pinnedJar,
+      properties: join(folder, 'audit.properties'), folder, log: join(folder, 'audit.log'), signal });
     const audited = await auditSnapshotCheckpoint(store, manifest, signal);
     await store.close(); store = undefined;
-    await owned.stop(); owned = undefined;
     if (await nativeCheckpointShaFile(journal) !== journalSha256) throw new Error('Read-only checkpoint audit changed the journal');
     await options.assertInventoryCurrent(); await guard();
     const result = { version: 1, state: 'verified-unpublished', ...audited, journal, journalSha256,

@@ -22,6 +22,8 @@ export default defineConfig({
       "test/public-snapshot-native-boundaries.test.ts",
       "test/public-snapshot-native-build.test.ts",
       "test/public-snapshot-native-lifecycle.test.ts",
+      "test/snapshot-checkpoint-inventory.test.ts",
+      "test/snapshot-native-store.test.ts",
       "test/public-snapshot-checkpoint-audit.test.ts",
       "test/public-checkpoint-job-ownership.test.ts",
       "test/finalized-placement-decision.test.ts",

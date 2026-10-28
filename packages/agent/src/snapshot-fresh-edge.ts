@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CheckpointInventory } from './snapshot-checkpoint-inventory.js';
 import { nativeCheckpointProperties } from './snapshot-native-properties.js';
 import { startCheckpointEdgeSession } from './snapshot-checkpoint-edge-session.js';
 import { constants } from 'node:fs';
@@ -6,7 +7,7 @@ import { copyFile, mkdir, open, readFile, stat, statfs } from 'node:fs/promises'
 import { isAbsolute, join } from 'node:path';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { DKGAgentConfig } from './dkg-agent-types.js';
-import type { preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
+import { assertCheckpointInventoryUnchanged, type preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
 import type { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
 import { nativeCheckpointShaFile } from './snapshot-native-build.js';
 import { normalizePublicSnapshotSyncOptions, type PublicSnapshotSyncOptions } from './public-snapshot-options.js';
@@ -70,7 +71,9 @@ export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEd
     const props = nativeCheckpointProperties(journal);
     await writeCheckpointFile(join(folder, 'store.properties'), props);
     await syncCheckpointDirectory(folder);
-    const session = await startCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal);
+    assertCheckpointInventoryUnchanged(prepared.manifest.observation, prepared.manifest.freshObservation);
+    const inventory = await CheckpointInventory.create(folder, prepared.manifest.freshObservation);
+    const session = await startCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal, inventory);
     agent = session.agent;
     const { result } = session;
     lifetime.signal.throwIfAborted();

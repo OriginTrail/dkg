@@ -1,7 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { readFile, readdir, statfs, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { BlazegraphStore } from '@origintrail-official/dkg-storage';
 import { buildNativeSnapshotCheckpoint } from '../src/snapshot-native-build.js';
 import { startSnapshotNativeProcess } from '../src/snapshot-native-process.js';
 import { auditSnapshotCheckpoint } from '../src/snapshot-checkpoint-audit.js';
@@ -10,7 +9,8 @@ import { nativeFixture } from './helpers/native-checkpoint-fixture.js';
 vi.mock('node:fs/promises', async original => ({ ...await original<typeof import('node:fs/promises')>(), statfs: vi.fn() }));
 vi.mock('../src/snapshot-native-process.js', () => ({ startSnapshotNativeProcess: vi.fn() }));
 vi.mock('../src/snapshot-checkpoint-audit.js', () => ({ auditSnapshotCheckpoint: vi.fn() }));
-vi.mock('@origintrail-official/dkg-storage', () => ({ BlazegraphStore: vi.fn(class { close = vi.fn(async () => {}); }) }));
+const closeStore = vi.hoisted(() => vi.fn(async () => {}));
+vi.mock('@origintrail-official/dkg-storage', () => ({ BlazegraphStore: class { async close() { await closeStore(); } } }));
 const processes: { stop: ReturnType<typeof vi.fn>; assertRunning: ReturnType<typeof vi.fn>; closed: Promise<number> }[] = [];
 beforeEach(() => {
   vi.clearAllMocks(); processes.length = 0;
@@ -44,7 +44,7 @@ describe('native checkpoint build lifecycle', () => {
     expect(authority).toHaveBeenCalledTimes(2);
     expect(auditSnapshotCheckpoint).toHaveBeenCalledWith(expect.anything(), f.prepared.manifest, expect.any(AbortSignal));
     expect(processes.every(p => p.stop.mock.calls.length === 1)).toBe(true);
-    expect(vi.mocked(BlazegraphStore).mock.results[0]!.value.close).toHaveBeenCalledOnce();
+    expect(closeStore).toHaveBeenCalledOnce();
   });
   it.each(['input', 'audit', 'journal', 'authority'] as const)('keeps a failed %s unpublished and closes owned resources', async failure => {
     const f = await nativeFixture();

@@ -606,6 +606,22 @@ jobs:
       - name: Restore build outputs
         run: tar -xzf /tmp/build-outputs.tgz
 
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: '11'
+      - name: Prepare pinned native checkpoint test runtime
+        run: |
+          set -euo pipefail
+          jar="$RUNNER_TEMP/checkpoint-blazegraph.jar"
+          curl --fail --location --max-time 120 --output "$jar" \
+            https://github.com/blazegraph/database/releases/download/BLAZEGRAPH_2_1_6_RC/blazegraph.jar
+          sha=930c38b5bce7c0ae99701c1f6ef3057c52f3f385d938e1397a3e05561c7df5de
+          echo "$sha  $jar" | sha256sum --check --strict
+          echo "DKG_PUBLIC_CHECKPOINT_JAVA=$JAVA_HOME/bin/java" >> "$GITHUB_ENV"
+          echo "DKG_PUBLIC_CHECKPOINT_JAR=$jar" >> "$GITHUB_ENV"
+          echo "DKG_PUBLIC_CHECKPOINT_JAR_SHA256=$sha" >> "$GITHUB_ENV"
+
       - name: Wait for Blazegraph to be ready
         run: |
           set -euo pipefail

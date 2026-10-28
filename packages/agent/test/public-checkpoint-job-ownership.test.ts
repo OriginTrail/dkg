@@ -1,3 +1,4 @@
+import { CheckpointInventory, attachCheckpointInventory } from '../src/snapshot-checkpoint-inventory.js';
 import { afterEach, expect, it, vi } from 'vitest';
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -76,4 +77,19 @@ it('drains startup discovery before observing activation, and preserves caller c
   const assertCurrent = vi.fn(); activation.mockResolvedValue({ assertCurrent });
   await PublicCheckpointMethods.prototype.waitForPublicCheckpointStartup.call(host as never, 'graph', new AbortController().signal);
   expect(assertCurrent).toHaveBeenCalledOnce();
+});
+
+it.each(['removal', 'anchor'])('rejects checkpoint %s on the FIRST fresh authority read before admission or recovery', async change => {
+  const { agent, directory, options, read, snapshot } = await fixture();
+  const assets = [1, 2].map(id => ({ id: String(id), root: `0x${'1'.repeat(64)}`, version: '1' }));
+  const prior = sealPublicGraphSnapshot({ ...snapshot, assets });
+  attachCheckpointInventory(agent, await CheckpointInventory.create(directory,
+    { mode: 'rpc-only', sourceCore: null, snapshot: prior }));
+  read.mockResolvedValue(sealPublicGraphSnapshot({ ...snapshot,
+    assets: change === 'removal' ? assets.slice(0, 1) : assets,
+    blockNumber: change === 'anchor' ? '9' : '11' }));
+  const write = vi.spyOn(agent.store, 'insert');
+  await expect(agent.syncPublicGraphSnapshot(options)).rejects.toThrow(change === 'removal' ? 'removed' : 'anchor');
+  expect(read).toHaveBeenCalledOnce();
+  expect(write).not.toHaveBeenCalled();
 });

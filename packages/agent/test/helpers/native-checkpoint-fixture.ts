@@ -1,3 +1,5 @@
+import { normalizePublicGraphSnapshot, sealPublicGraphSnapshot } from '@origintrail-official/dkg-chain';
+import { sealSnapshotOf, makeSnapshotAssets } from './public-snapshot-assets.js';
 import { afterEach } from 'vitest';
 import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -17,9 +19,12 @@ export async function nativeFixture() {
   const jar = join(root, 'fixture.jar'); await writeFile(jar, 'runtime');
   const load = { '000000.verified.nq.gz': 'data', '000000.verified.meta.nq': 'meta', 'trust.nq': 'trust' };
   for (const [name, bytes] of Object.entries(load)) await writeFile(join(directory, 'load', name), bytes);
-  const snapshot = { chainId: 'base:84532', deploymentId: 'fixture', contextGraphId: 'graph', onChainId: '14', inventoryDigest: 'inventory' };
+  const sealed = sealPublicGraphSnapshot({ ...sealSnapshotOf('graph', makeSnapshotAssets('graph', 1)),
+    chainId: 'base:84532', deploymentId: 'fixture', onChainId: '14' });
+  const snapshot = normalizePublicGraphSnapshot(sealed, sealed);
+  const observation = { mode: 'rpc-only', sourceCore: null, snapshot };
   const prepared = { directory, manifest: { state: 'verified-unpublished', deadline: Date.now() + 30_000,
-    observation: { mode: 'rpc-only', snapshot }, plainBytes: 100, encodedBytes: 10, trustSha256: digest('trust'),
+    observation, freshObservation: observation, plainBytes: 100, encodedBytes: 10, trustSha256: digest('trust'),
     assets: [{ index: 0, ual: 'urn:asset', publicQuads: 1, dataSha256: digest('data'), metadataSha256: digest('meta') }],
   } } as unknown as Awaited<ReturnType<typeof preparePublicSnapshotCheckpoint>>;
   const runtime = { java: process.execPath, jar, jarSha256: digest('runtime') };
@@ -33,7 +38,7 @@ export async function handoffFixture() {
   await writeFile(join(folder, 'load.properties'), nativeCheckpointProperties(journal));
   const options = { ...f,
     config: { dataDir: join(f.root, 'edge'), chainAdapter: { chainId: 'base:84532', deploymentId: 'fixture' } },
-    native: { state: 'verified-unpublished', fullReadback: true, inventoryDigest: 'inventory',
+    native: { state: 'verified-unpublished', fullReadback: true, inventoryDigest: f.prepared.manifest.observation.snapshot.inventoryDigest,
       runtimeSha256: f.runtime.jarSha256, journal, journalSha256: digest('journal') },
     sync: { mode: 'rpc-only', contextGraphId: 'graph', onChainId: '14', trustedCorePeerIds: ['fixture'] },
   } as unknown as Parameters<typeof import('../../src/snapshot-fresh-edge.js').createFreshPublicCheckpointEdge>[0];
