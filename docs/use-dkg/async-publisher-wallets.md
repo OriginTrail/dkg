@@ -51,17 +51,17 @@ All publisher wallets share the daemon's RPC request budget. For rate sizing,
 the restart requirement and diagnosing local wait versus provider latency, see
 [RPC Request Budget](rpc-request-budget.md).
 
-Before `vm/publish-async` creates a job, it checks the shared snapshot. Store pressure gets a retryable `503`: retry the same request, without sharing again. `jobCreated: false` means this request created no job, but an earlier one may exist. [Async Share and Publish Jobs](../build/async-jobs.md) explains each answer. For `409 PUBLISH_INTENT_STALE`, see [Stale update intents](#stale-update-intents).
+Before `vm/publish-async` creates a job, it checks the shared snapshot. Store pressure gets a retryable `503`: retry the same request, without sharing again. `jobCreated: false` means this request created no job, but an earlier one may exist. For `409 PUBLISH_INTENT_STALE`, see [Stale update intents](#stale-update-intents).
 
 ## Clearing finished jobs
 
 Finished jobs stay until they are cleared. `dkg publisher clear finalized|failed`, or `POST /api/publisher/clear` with the node-admin token, clears them in bulk and returns the count removed.
 
-A Knowledge Asset's jobs share one key: context graph, name, sub-graph and agent lane. A bulk clear never makes a different job bind the Knowledge Asset. So it keeps a finalized job while an older failed job of the same Knowledge Asset is kept, and it never removes a held job. It checks every job of that status, oldest first, so it can remove fewer jobs than are listed and takes a while on a large queue.
+A re-submit of a Knowledge Asset is matched to its newest job, by context graph, name, sub-graph and agent lane. A bulk clear never lets an older failed job become the newest again. So it keeps a finalized job while an older failed job of the same asset remains. It also never removes a held job. It can remove fewer jobs than are listed, and it is slow on a large queue.
 
-`POST /api/publisher/clear-job { "jobId": "…" }` removes one job; there is no CLI command for it yet. It is the deliberate override: clearing the newest job can make an older failed job bind the Knowledge Asset again.
+`POST /api/publisher/clear-job { "jobId": "…" }` removes one job, even the newest. Clearing a single job is API-only for now. After you clear the newest job, a re-submit can restart an older failed job of the same asset.
 
-If the daemon does not answer, `dkg publisher cancel`, `retry` and `clear` refuse to write the store directly while the node home's `daemon.pid` names a running process. They print `Refusing to run "dkg publisher <command>" offline: a daemon appears to be running (PID <pid>) ...` and exit 1. Try again once the daemon answers, or run `dkg stop` first.
+If the daemon does not answer, `dkg publisher cancel`, `retry` and `clear` refuse to write the store directly while the node home's `daemon.pid` names a running process. They print `Refusing to run "dkg publisher <command>" offline` and exit 1. Try again once the daemon answers, or run `dkg stop` first.
 
 Old finalized jobs can also be removed on a timer. This cleanup is off by default; see [Async Queue Operations](async-queue-operations.md#clean-up-finished-jobs).
 
@@ -76,7 +76,7 @@ Recovery, per KA:
 3. `wm/finalize` — check that the returned `assertionVersion` equals the number the message asked for.
 4. `swm/share`, then `vm/publish-async` (or `vm/publish`).
 
-A core that already ACK-signed the abandoned draft declines its replacement transiently until the pending window ends (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, 5 minutes by default), so retry the publish after that. Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Memory until the update is published: a re-share carrying the same or a lower number than a draft a peer already holds is not applied there, and with `swmAwaitCuratorAck` on a curator that holds the earlier draft rejects the re-share before it commits. Finalizing a replacement draft also replaces the private payload sealed under that number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Memory once its replacement is finalized (tracked in [#2964](https://github.com/OriginTrail/dkg/issues/2964)).
+A core that already ACK-signed the abandoned draft declines its replacement transiently until the pending window ends (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, 5 minutes by default), so retry the publish after that. Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Memory until the update is published: a re-share carrying the same or a lower number than a draft a peer already holds is not applied there, and with `swmAwaitCuratorAck` on a curator that holds the earlier draft rejects the re-share before it commits. Finalizing a replacement draft also replaces the private payload sealed under that number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Memory once its replacement is finalized.
 
 ## Held jobs
 
@@ -146,10 +146,6 @@ The polling interval remains a fallback, rather than a required delay for new wo
 Automatic retry selection uses the persisted retry deadline
 index, and recovery inventories exclude accepted and finalized history.
 Recovery still retains every failed job needed to preserve its proof backoff.
-
-With the store control path on, the queue's own job-state reads and writes get
-store slots of their own, so they do not wait behind client queries; see
-[Async Queue Operations](async-queue-operations.md#store-control-path).
 
 A detached named-KA executor can finish its own queue record after confirmed
 chain execution and successful local finalization. Failed local bookkeeping,
