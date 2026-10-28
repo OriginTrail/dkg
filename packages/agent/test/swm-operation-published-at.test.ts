@@ -14,7 +14,7 @@
  * policy of both catch-up lanes; the set-aside cases exercise the round itself.
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { createOperationContext, OversizedRdfLiteralError, type OperationContext } from '@origintrail-official/dkg-core';
+import { createOperationContext, workspaceKnowledgeAssetOperationSnapshotGraph, OversizedRdfLiteralError, type OperationContext } from '@origintrail-official/dkg-core';
 import { resolveKnowledgeAssetWorkspaceHead } from '@origintrail-official/dkg-publisher';
 import { GraphManager, OxigraphStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import { canonicalGraphScopedSnapshotManifestQuads, parseGraphScopedSwmRecoveryDescriptors } from '../src/sync/graph-scoped-swm-recovery.js';
@@ -366,6 +366,43 @@ describe('a defective head is set aside, not its whole graph', () => {
     expect(await rowsOf(store, WS_META, bad.share.operationSubject)).toEqual([]);
     expect(summary.swmCoverage).toMatchObject({ snapshotsResolved: 0, descriptorsAuthoritative: false });
     expect(summary.failedPhases).toBeGreaterThan(0);
+  });
+
+  it.each([false, true])('holds defective graph-backed metadata when the canonical manifest is empty (healthy alias: %s)', async mixed => {
+    const bad = defective('bad');
+    const graphMeta = (share: SwmShare, meta: readonly Quad[]) => [
+      ...meta.filter(row => row.predicate !== `${DKG}publicSnapshotRef`),
+      { subject: share.operationSubject, predicate: `${DKG}publicSnapshotGraph`,
+        object: workspaceKnowledgeAssetOperationSnapshotGraph(CG, share.operationId), graph: WS_META },
+    ];
+    const healthy = fx.share({ version: 1, operationId: 'op-a-graph', marker: 'valid',
+      ual: `did:dkg:hardhat:31337/${ADDRESS}/1` });
+    const healthyAlias = fx.share({ version: 1, operationId: 'op-z-store', marker: 'valid',
+      ual: `did:dkg:hardhat:31337/${ADDRESS}/1` });
+    const servedMeta = [...graphMeta(bad.share, bad.meta), ...(mixed
+      ? [...graphMeta(healthy, stampedAt(healthy.meta, healthy.operationSubject, LATEST)),
+        ...stampedAt(healthyAlias.meta, healthyAlias.operationSubject, EARLY)] : [])];
+    const parsed = parseGraphScopedSwmRecoveryHeadResults({ contextGraphId: CG, metaQuads: servedMeta });
+    expect(parsed.setAside).toHaveLength(1);
+    expect(parsed.descriptors).toHaveLength(mixed ? 1 : 0);
+    if (mixed) expect(parsed.descriptors[0].snapshotSource.locator.kind).toBe('graph');
+    const store = newStore();
+    const summary = await makeSwmSyncHarness({ ctx, contextGraphId: CG, store, servedMeta,
+      cachedSnapshots: new Map([[healthyAlias.digest, healthyAlias.payload]]),
+      verifiedDataOverride: [],
+      fetchPage: async ({ phase }, fallback) => phase === 'data'
+        ? { ...fallback, quads: [...bad.share.payload.map(row => ({ ...row, graph: bad.share.assertionGraph })),
+          ...(mixed ? healthy.payload.map(row => ({ ...row, graph: healthy.assertionGraph })) : [])] } : fallback,
+    }).run();
+    expect(summary.swmCoverage).toMatchObject({ snapshotsTotal: 0, descriptorsAuthoritative: false });
+    expect(summary.failedPhases).toBeGreaterThan(0);
+    expect(await rowsOf(store, WS_META, bad.share.headSubject)).toEqual([]);
+    expect(await rowsOf(store, WS_META, bad.share.operationSubject)).toEqual([]);
+    expect(await rowsOf(store, bad.share.assertionGraph)).toEqual([]);
+    if (mixed) {
+      expect(await rowsOf(store, healthy.assertionGraph)).toHaveLength(healthy.payload.length);
+      expect(await rowsOf(store, WS_META, healthy.headSubject)).not.toEqual([]);
+    }
   });
 
   it('a conflict between two valid heads still fails the whole graph', () => {

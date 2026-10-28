@@ -8,7 +8,8 @@ import {
   planEntityRecovery,
   type EntityRecoveryPhaseOutcome,
 } from './entity-slice-recovery.js';
-import { stripMetadataLiteral as stripLiteral } from '../metadata-literal.js';
+import { collectPublicSnapshotManifest } from './public-snapshot-manifest.js';
+import { createGraphScopedRecoveryPlan } from './graph-scoped-recovery-plan.js';
 import { contextGraphWorkspaceGraphUri, contextGraphWorkspaceMetaGraphUri } from '@origintrail-official/dkg-core';
 import type { OperationContext } from '@origintrail-official/dkg-core';
 import type { Quad } from '@origintrail-official/dkg-storage';
@@ -47,14 +48,9 @@ import {
   type SyncPageResult,
 } from './page-fetch.js';
 import {
-  canonicalGraphScopedSnapshotManifestQuads,
-  canonicalizeGraphScopedSwmHeadRows,
   materializeGraphScopedSwmRecoveryAsset,
   type GraphScopedSwmRecoveryDescriptor,
-  parseGraphScopedSwmRecoveryHeadResults,
 } from '../graph-scoped-swm-recovery.js';
-import { setAsideHeadsMayOwnRef } from '../graph-scoped-swm-set-aside.js';
-import type { SetAsideGraphScopedSwmHead } from '../graph-scoped-swm-head-parser.js';
 import { admitServedSubGraphNames } from './served-sub-graph-admission.js';
 import { fetchPublicSwmDataPhase } from './public-swm-data-phase.js';
 import type { SharedMemorySnapshotMaterializer } from './swm-snapshot-materializer.js';
@@ -470,7 +466,8 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
     // is not part of this snapshot walk. Do not turn that into terminal 0/0
     // evidence. The genuinely empty two-phase response has its own explicit
     // builder below.
-    if (walk.totalSnapshots <= 0) return;
+    // Rejected descriptors are explicit negative evidence, even for an empty manifest.
+    if (walk.totalSnapshots <= 0 && descriptorsAuthoritative) return;
     // RESOLVED MEANS LOCALLY MATERIALIZED, not fetched.
     //
     // `walk.readySnapshots` counts refs retrieved and digest-valid in the blob
@@ -685,68 +682,17 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       // this lane pages meta, so a timed-out page would otherwise abort the
       // whole CG fanout. A parse failure here must degrade to
       // "no materialization this round" — never take down the sync.
-      const snapshotDescriptorsByRef = new Map<string, GraphScopedSwmRecoveryDescriptor[]>();
-      const graphBackedDescriptors: GraphScopedSwmRecoveryDescriptor[] = [];
-      let verifiedMetaForInsert = processed.verifiedMeta;
-      let snapshotManifestMeta = processed.verifiedMeta;
-      // Complete metadata is not sufficient for authoritative descriptors:
-      // parsing can still fail or set aside a defective head. In either case,
-      // an empty descriptor list must not certify a snapshot by vacuity.
-      let setAsideHeads: readonly SetAsideGraphScopedSwmHead[] = [];
-      if (snapshotMaterializer && wsMetaResult.completed) {
-        try {
-          const { descriptors, setAside } = parseGraphScopedSwmRecoveryHeadResults({
-            contextGraphId: pid,
-            metaQuads: processed.verifiedMeta,
-            // Without the subgraph admission context every KA under a
-            // REGISTERED subgraph is judged to live in an unregistered metadata
-            // graph. The parser then throws, the catch clears ALL descriptors,
-            // and materialization is silently disabled for the whole context
-            // graph — not just for the subgraph KA that triggered it.
-            ...(verificationSubGraphNames
-              ? { registeredSubGraphNames: verificationSubGraphNames }
-              : {}),
-            ...(excludedSubGraphNames ? { excludedSubGraphNames } : {}),
-          });
-          // A defective head is set aside alone, and nothing may certify it.
-          setAsideHeads = setAside;
-          const [firstSetAside] = setAside;
-          if (firstSetAside) {
-            descriptorsAuthoritativeForCg = false;
-            logWarn(ctx, `SWM sync set aside ${setAside.length} graph-scoped head(s) for "${pid}" `
-              + `and kept ${descriptors.length}: ${firstSetAside.headSubject}: ${firstSetAside.error.message}`);
-          }
-          verifiedMetaForInsert = canonicalizeGraphScopedSwmHeadRows({
-            metaQuads: processed.verifiedMeta,
-            descriptors,
-          });
-          snapshotManifestMeta = canonicalGraphScopedSnapshotManifestQuads(
-            processed.verifiedMeta,
-            descriptors,
-          );
-          for (const descriptor of descriptors) {
-            if (descriptor.snapshotSource.locator.kind === 'graph') {
-              graphBackedDescriptors.push(descriptor);
-              continue;
-            }
-            const { ref } = descriptor.snapshotSource.locator;
-            const list = snapshotDescriptorsByRef.get(ref) ?? [];
-            list.push(descriptor);
-            snapshotDescriptorsByRef.set(ref, list);
-          }
-        } catch (err) {
-          logWarn(ctx, `SWM sync could not parse graph-scoped snapshot descriptors for "${pid}": `
-            + `${err instanceof Error ? err.message : String(err)}`);
-          snapshotDescriptorsByRef.clear();
-          graphBackedDescriptors.length = 0;
-          // The map is now empty because parsing FAILED, not because there was
-          // nothing to describe. Without this the vacuity rule would read every
-          // manifest ref as "nothing to write" and report the graph fully
-          // materialized while zero assertion graphs were written. A defective
-          // head is set aside above; only a conflict between heads lands here,
-          // and it discards the descriptors of every valid KA alongside them.
-          descriptorsAuthoritativeForCg = false;
-        }
+      const recoveryPlan = createGraphScopedRecoveryPlan({
+        contextGraphId: pid,
+        metaQuads: processed.verifiedMeta,
+        ...(verificationSubGraphNames ? { registeredSubGraphNames: verificationSubGraphNames } : {}),
+        ...(excludedSubGraphNames ? { excludedSubGraphNames } : {}),
+      }, Boolean(snapshotMaterializer && wsMetaResult.completed));
+      const { graphBackedDescriptors, snapshotDescriptorsByRef,
+        verifiedMetaForInsert, manifest } = recoveryPlan;
+      descriptorsAuthoritativeForCg = recoveryPlan.descriptorsAuthoritative;
+      if (recoveryPlan.diagnostic) {
+        logWarn(ctx, `SWM sync for "${pid}": ${recoveryPlan.diagnostic}`);
       }
       // Root graph-locator bytes belong to complete, digest-bound KA graphs,
       // not the aggregate entity-union lane. Current responders transport them
@@ -770,12 +716,6 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       let finalizedTwinsHeld = 0;
       let materializationFailures = 0;
       let materializedQuads = 0;
-      const manifest = collectPublicSnapshotManifest(snapshotManifestMeta);
-      // Canonicalization removes unselected alias rows, but their owners still
-      // constrain resolution of a shared ref when one head was set aside.
-      const ownershipSources = setAsideHeads.length > 0
-        ? collectPublicSnapshotManifest(processed.verifiedMeta).sourceSubjectsByRef
-        : manifest.sourceSubjectsByRef;
       const manifestSnapshots = manifest.snapshots;
       const entitySnapshotAuthority = createEntitySliceRecoveryPlan(
         pid, processed.verifiedMeta, manifest.sourceSubjectsByRef,
@@ -1360,7 +1300,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         // that fetched and then failed to write is not resolved, which is what
         // stops an all-cached round whose writes all failed from reporting
         // maximal coverage and silently ending the continuation.
-        if (refMaterialized && !setAsideHeadsMayOwnRef(setAsideHeads, snapshotRef, ownershipSources)) {
+        if (refMaterialized && !recoveryPlan.blocksRef(snapshotRef)) {
           materializedRefs.add(snapshotRef);
           materializedRefsForCg = materializedRefs.size;
         }
@@ -1377,7 +1317,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         ...(snapshotWalk
           ? { snapshotWalk: snapshotWalk.prepare({ order: 'manifest', canReuseResolved: () => true }) }
           : {
-            metaQuads: snapshotManifestMeta,
+            metaQuads: recoveryPlan.manifestMetadata,
             recoveryOrder: snapshotRecoveryOrder,
           }),
         publicSnapshotStore,
@@ -1463,7 +1403,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
       }) ?? true;
       const snapshotPhaseUsable = snapshotSync.completed
         && materializationFailures === 0
-        && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0)
+        && descriptorsAuthoritativeForCg
         && snapshotEvidenceAccepted;
       if (materializationFailures > 0) {
         logWarn(ctx, `SWM sync for "${pid}": ${materializationFailures} snapshot(s) verified but `
@@ -1482,7 +1422,7 @@ export const runSharedMemorySync = snapshotOperation<SharedMemorySyncContext, Sh
         // while graph-scoped assets or selected evidence remain unproven.
         const localBudgetOnly = snapshotSync.phaseFailureCause === 'local-budget'
           && materializationFailures === 0
-          && (descriptorsAuthoritativeForCg || snapshotSync.totalSnapshots === 0)
+          && descriptorsAuthoritativeForCg
           && snapshotEvidenceAccepted;
         recordSharedMemoryPhaseFailure(
           summary,
@@ -1950,109 +1890,6 @@ export function collectPublicSnapshotMetadata(metaQuads: readonly Quad[]): Publi
   return collectPublicSnapshotManifest(metaQuads).snapshots;
 }
 
-/** Keep source provenance internal without changing the exported metadata shape. */
-function collectPublicSnapshotManifest(metaQuads: readonly Quad[]): {
-  snapshots: PublicSnapshotMetadata[];
-  sourceSubjectsByRef: Map<string, Set<string>>;
-} {
-  const bySubject = new Map<string, {
-    ref?: string;
-    digest?: string;
-    count?: number;
-    hasSnapshotGraph?: boolean;
-    publishedAtMs?: number;
-    ualOrdinal?: bigint;
-  }>();
-  for (const quad of metaQuads) {
-    if (
-      quad.predicate !== `${DKG}publicSnapshotRef` &&
-      quad.predicate !== `${DKG}publicSnapshotGraph` &&
-      quad.predicate !== `${DKG}publicQuadsDigest` &&
-      quad.predicate !== `${DKG}publicQuadsCount` &&
-      quad.predicate !== `${DKG}publishedAt` &&
-      quad.predicate !== `${DKG}kaUal`
-    ) {
-      continue;
-    }
-    const entry = bySubject.get(quad.subject) ?? {};
-    const value = stripLiteral(quad.object)?.trim();
-    if (quad.predicate === `${DKG}publicSnapshotRef`) entry.ref = value;
-    if (quad.predicate === `${DKG}publicSnapshotGraph`) entry.hasSnapshotGraph = true;
-    if (quad.predicate === `${DKG}publicQuadsDigest`) entry.digest = value;
-    if (quad.predicate === `${DKG}publicQuadsCount`) entry.count = parseIntegerLiteral(quad.object);
-    if (quad.predicate === `${DKG}publishedAt` && value) {
-      const parsed = Date.parse(value);
-      if (Number.isFinite(parsed)) entry.publishedAtMs = parsed;
-    }
-    if (quad.predicate === `${DKG}kaUal` && value) {
-      const match = value.match(/\/(\d+)$/);
-      if (match) {
-        try { entry.ualOrdinal = BigInt(match[1]!); } catch { /* scheduling hint only */ }
-      }
-    }
-    bySubject.set(quad.subject, entry);
-  }
-
-  const byRef = new Map<string, PublicSnapshotMetadata>();
-  const sourceSubjectsByRef = new Map<string, Set<string>>();
-  for (const [subject, entry] of bySubject) {
-    // Read-both (RFC ka-metadata-trim Phase 2): old-store rows carry an
-    // explicit `dkg:publicSnapshotRef` (byte-identical to the digest); new
-    // store-backed rows carry only the digest — their ref IS the digest
-    // (`putSnapshot` returns `ref === digest`). Rows with a
-    // `dkg:publicSnapshotGraph` are graph-backed, not snapshot-store-backed:
-    // their quads travel through ordinary graph sync, so they are NOT
-    // snapshot-fetch targets.
-    let ref = entry.ref;
-    if (!ref) {
-      // Derived (new-shape) rows must be complete to qualify — an incomplete
-      // digest-only row is ignored exactly as ref-less rows always were,
-      // rather than promoted into the hard integrity throw below (which
-      // stays reserved for explicit-ref rows written by older nodes).
-      if (entry.hasSnapshotGraph || !entry.digest || !Number.isInteger(entry.count)) continue;
-      ref = entry.digest;
-    }
-    if (!entry.digest || !Number.isInteger(entry.count)) {
-      throw new Error(`Shared-memory public snapshot metadata for ${subject} is missing digest/count`);
-    }
-    const sources = sourceSubjectsByRef.get(ref) ?? new Set<string>();
-    sources.add(subject);
-    sourceSubjectsByRef.set(ref, sources);
-    const existing = byRef.get(ref);
-    const metadata: PublicSnapshotMetadata = {
-      ref,
-      digest: entry.digest,
-      count: entry.count!,
-      ...(entry.publishedAtMs !== undefined ? { publishedAtMs: entry.publishedAtMs } : {}),
-      ...(entry.ualOrdinal !== undefined ? { ualOrdinal: entry.ualOrdinal } : {}),
-    };
-    if (existing && (existing.digest !== metadata.digest || existing.count !== metadata.count)) {
-      throw new Error(`Conflicting shared-memory public snapshot metadata for ${ref}`);
-    }
-    if (!existing) {
-      byRef.set(ref, metadata);
-      continue;
-    }
-    const newerHints = newerPublicSnapshotRecency(existing, metadata);
-    byRef.set(ref, {
-      ...existing,
-      ...(newerHints.publishedAtMs !== undefined ? { publishedAtMs: newerHints.publishedAtMs } : {}),
-      ...(newerHints.ualOrdinal !== undefined ? { ualOrdinal: newerHints.ualOrdinal } : {}),
-    });
-  }
-  return { snapshots: [...byRef.values()], sourceSubjectsByRef };
-}
-
-function newerPublicSnapshotRecency(
-  left: Pick<PublicSnapshotMetadata, 'publishedAtMs' | 'ualOrdinal'>,
-  right: Pick<PublicSnapshotMetadata, 'publishedAtMs' | 'ualOrdinal'>,
-): Pick<PublicSnapshotMetadata, 'publishedAtMs' | 'ualOrdinal'> {
-  if ((right.publishedAtMs ?? -1) !== (left.publishedAtMs ?? -1)) {
-    return (right.publishedAtMs ?? -1) > (left.publishedAtMs ?? -1) ? right : left;
-  }
-  return (right.ualOrdinal ?? -1n) > (left.ualOrdinal ?? -1n) ? right : left;
-}
-
 /**
  * Build a deterministic 3:1 recent/history walk from verified metadata.
  *
@@ -2150,9 +1987,4 @@ async function hasValidSnapshot(
   }
   if (!quads) return false;
   return quads.length === snapshot.count && workspacePublicQuadsDigest(quads) === snapshot.digest;
-}
-
-function parseIntegerLiteral(value: string | undefined): number | undefined {
-  const parsed = Number.parseInt(stripLiteral(value) ?? '', 10);
-  return Number.isSafeInteger(parsed) ? parsed : undefined;
 }
