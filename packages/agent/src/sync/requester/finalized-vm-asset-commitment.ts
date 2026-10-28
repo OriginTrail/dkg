@@ -3,7 +3,7 @@ import { contextGraphMetaUri } from '@origintrail-official/dkg-core';
 import { workspacePublicQuadsDigest } from '@origintrail-official/dkg-publisher';
 import { parseGraphScopedDescriptor, type GraphScopedDescriptor } from '../durable-integrity.js';
 import type { VerifiedGraphScopedAsset } from './graph-scoped-materialization.js';
-import { literalValue } from './finalized-swm-twin-terms.js';
+import { literalValue } from './finalized-swm-twin-literals.js';
 
 /** Compact verified content plus confirmed VM metadata; no payload survives the proof read. */
 export interface FinalizedVmAssetCommitment {

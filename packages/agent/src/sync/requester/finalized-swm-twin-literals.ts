@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
+
+/** The literal readers of the finalized-twin proof (`finalized-swm-twin-reconciliation.ts`). */
+
 export function parseInteger(value: string | undefined): bigint | null {
   if (!value) return null;
   const match = /^"?([0-9]+)"?(?:\^\^<[^>]+>)?$/.exec(value);

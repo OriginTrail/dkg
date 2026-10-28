@@ -80,23 +80,28 @@ class SparqlTsvLineFramer {
     }
     // Scan only the new fragment. Rescanning the accumulated unfinished row
     // makes large literals quadratic when HTTP delivers many small chunks.
-    // Preserve native split's fast LF path, joining fragments once per row.
+    // Native delimiter searches avoid an array of every line in each chunk.
+    // Join an unfinished row only once, when its terminator arrives.
     this.skipLeadingLf = text.endsWith('\r');
-    const lines = text.includes('\r') ? text.split(/\r\n|\n|\r/) : text.split('\n');
-    if (lines.length > 1) {
+    let start = 0;
+    let lf = text.indexOf('\n');
+    let cr = text.indexOf('\r');
+    while (lf !== -1 || cr !== -1) {
+      const end = lf === -1 ? cr : cr === -1 ? lf : Math.min(lf, cr);
+      const line = text.slice(start, end);
       if (this.pending.length > 0) {
-        this.pending.push(lines[0]!);
+        this.pending.push(line);
         this.consumeLine(this.pending.join(''));
         this.pending = [];
       } else {
-        this.consumeLine(lines[0]!);
+        this.consumeLine(line);
       }
-      for (let index = 1; index < lines.length - 1; index += 1) {
-        this.consumeLine(lines[index]!);
-      }
+      start = end + 1;
+      if (end === cr && text.charCodeAt(start) === 0x0a) start += 1;
+      if (lf !== -1 && lf < start) lf = text.indexOf('\n', start);
+      if (cr !== -1 && cr < start) cr = text.indexOf('\r', start);
     }
-    const remainder = lines[lines.length - 1]!;
-    if (remainder.length > 0) this.pending.push(remainder);
+    if (start < text.length) this.pending.push(text.slice(start));
   }
 
   finish(): void {
@@ -130,25 +135,31 @@ class SparqlTsvSelectParser {
       this.consumeHeader(line);
       return;
     }
-    const cells = this.variables.length === 0 && line === '' ? [] : line.split('\t');
     const rowIndex = this.bindings.length;
-    if (cells.length !== this.variables.length) {
-      malformed(
-        `SPARQL TSV row ${rowIndex} has ${cells.length} columns; expected ${this.variables.length}`,
-      );
+    const variableCount = this.variables.length;
+    // Check arity before term validation, preserving shape-error precedence.
+    // No array of cells or diagnostic strings is retained on the valid path.
+    let columnCount = variableCount === 0 && line === '' ? 0 : 1;
+    for (let tab = line.indexOf('\t'); tab !== -1; tab = line.indexOf('\t', tab + 1)) columnCount += 1;
+    if (columnCount !== variableCount) {
+      malformed(`SPARQL TSV row ${rowIndex} has ${columnCount} columns; expected ${variableCount}`);
     }
     const binding: Record<string, string> = {};
-    for (let column = 0; column < this.variables.length; column += 1) {
-      const cell = cells[column]!;
+    let start = 0;
+    for (let column = 0; column < variableCount; column += 1) {
+      const end = column + 1 === variableCount ? line.length : line.indexOf('\t', start);
+      const cell = line.slice(start, end);
+      start = end + 1;
       if (cell === '') continue;
       const variable = this.variables[column]!;
-      const value = formatTsvTerm(
-        cell,
-        column,
-        `SPARQL TSV binding ${rowIndex}.${variable}`,
-        this.normalizer!,
-      );
-      setBinding(binding, variable, value);
+      try {
+        setBinding(binding, variable, formatTsvTerm(cell, column, this.normalizer!));
+      } catch (error) {
+        if (error instanceof SparqlTsvResultsShapeError) {
+          error.message = `SPARQL TSV binding ${rowIndex}.${variable} ${error.message}`;
+        }
+        throw error;
+      }
     }
     this.bindings.push(binding);
   }
@@ -192,9 +203,9 @@ class TsvResultNormalizer {
     this.datatypeValidators = Array.from({ length: cachedColumns }, createSparqlResultIriValidator);
   }
 
-  formatIri(value: string, column: number, label: string): string {
+  formatIri(value: string, column: number): string {
     if (!(this.iriValidators[column] ?? isSafeSparqlResultIri)(value)) {
-      malformed(`${label} URI value must be an absolute safe IRI`);
+      malformed('URI value must be an absolute safe IRI');
     }
     return value;
   }
@@ -202,17 +213,16 @@ class TsvResultNormalizer {
   formatLiteral(
     term: RdfLiteralTerm,
     column: number,
-    label: string,
   ): string {
     if (term.kind === 'typed') {
       let datatype = term.datatype;
       if (datatype.includes('\\')) {
         const decoded = decodeNTriplesIriEscapesStrict(datatype);
-        if (decoded === null) malformed(`${label} datatype must be an absolute safe IRI`);
+        if (decoded === null) malformed('datatype must be an absolute safe IRI');
         datatype = decoded;
       }
       if (!(this.datatypeValidators[column] ?? isSafeSparqlResultIri)(datatype)) {
-        malformed(`${label} datatype must be an absolute safe IRI`);
+        malformed('datatype must be an absolute safe IRI');
       }
       return formatCanonicalRdfLiteralTerm({ ...term, datatype });
     }
@@ -223,7 +233,6 @@ class TsvResultNormalizer {
 function formatTsvTerm(
   cell: string,
   column: number,
-  label: string,
   normalizer: TsvResultNormalizer,
 ): string {
   // Canonical plain literals need no normalization or additional allocation.
@@ -232,7 +241,6 @@ function formatTsvTerm(
     return normalizer.formatLiteral(
       { kind: 'typed', value: cell, datatype: `${XSD_NAMESPACE}boolean` },
       column,
-      label,
     );
   }
   const numericDatatype = TSV_INTEGER.test(cell)
@@ -246,7 +254,6 @@ function formatTsvTerm(
     return normalizer.formatLiteral(
       { kind: 'typed', value: cell, datatype: `${XSD_NAMESPACE}${numericDatatype}` },
       column,
-      label,
     );
   }
   if (cell.startsWith('<') && cell.endsWith('>')) {
@@ -254,19 +261,19 @@ function formatTsvTerm(
     const value = encoded.includes('\\')
       ? decodeNTriplesIriEscapesStrict(encoded)
       : encoded;
-    if (value === null) malformed(`${label} is not a valid RDF term`);
-    return normalizer.formatIri(value, column, label);
+    if (value === null) malformed('is not a valid RDF term');
+    return normalizer.formatIri(value, column);
   }
   if (cell.startsWith('_:')) {
     const labelValue = cell.slice(2);
-    if (!isRdfBlankNodeLabel(labelValue)) malformed(`${label} is not a valid RDF term`);
+    if (!isRdfBlankNodeLabel(labelValue)) malformed('is not a valid RDF term');
     return `_:${labelValue}`;
   }
   const literal = parseSparqlTsvLiteralTerm(cell, {
     combineSurrogatePairs: true,
   });
-  if (literal === null) malformed(`${label} is not a valid RDF term`);
-  return normalizer.formatLiteral(literal, column, label);
+  if (literal === null) malformed('is not a valid RDF term');
+  return normalizer.formatLiteral(literal, column);
 }
 
 function setBinding(binding: Record<string, string>, variable: string, value: string): void {
