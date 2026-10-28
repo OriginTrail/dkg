@@ -434,10 +434,10 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the query security tests assert the query README',
   },
   {
-    patterns: [/^docs\/use-dkg\/backpressure-observability\.md$/],
+    patterns: [/^packages\/cli\/docs\/async-admission-usage-line\.md$/],
     lanes: ['bura_cli'],
     evmScopes: [],
-    reason: 'the CLI admission usage-log tests assert the backpressure observability document',
+    reason: 'the CLI admission usage-log tests assert the usage-line field reference',
   },
   // Files other packages load by relative path, outside their declared
   // dependencies.

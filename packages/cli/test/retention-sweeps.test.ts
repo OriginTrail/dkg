@@ -111,7 +111,7 @@ describe('only the daemon admission instance starts it', () => {
     await handle.stop();
     await vi.advanceTimersByTimeAsync(60_000);
     expect(sweep.calls).toBe(3);
-    expect(log.mock.calls.map(call => String(call[0])).join('\n')).toMatch(/share retention started in report mode.*it judges and counts, and deletes nothing/);
+    expect(log.mock.calls.map(call => String(call[0])).join('\n')).toMatch(/share retention started in report mode.*it judges and counts, and deletes nothing\. See docs\/use-dkg\/async-queue-operations\.md/);
   });
 
   it('hands the daemon\'s publisher admission instance to every factory it builds, and the factory of a queue that is off is never called', async () => {
@@ -127,14 +127,14 @@ describe('only the daemon admission instance starts it', () => {
     await handle.stop();
   });
 
-  it('delete mode starts with a loud warning that it is irreversible and belongs behind the delete gate', async () => {
+  it('delete mode starts with a loud warning that it is irreversible and belongs behind the operator checklist', async () => {
     const share = stubFactory('share');
     const log = vi.fn();
     const handle = startRetention({ runtime: 'daemon-admission', settings: settings({ share: { mode: 'delete' } }), agent: untouchable, log, factories: [share] });
     const started = log.mock.calls.map(call => String(call[0])).find(line => line.includes('started'))!;
     expect(started).toMatch(/^\[warn\] \[retention\] share retention started in DELETE mode/);
     expect(started).toContain('cannot be restored');
-    expect(started).toContain('delete gate');
+    expect(started).toContain('"Before you switch to delete" in docs/use-dkg/async-queue-operations.md');
     await handle.stop();
   });
 });

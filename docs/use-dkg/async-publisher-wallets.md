@@ -7,7 +7,9 @@ doc_type: how-to
 
 # Async Publisher Wallets
 
-Async publisher wallets are transaction signers for queued Verifiable Memory publish jobs. They live in `publisher-wallets.json` under the DKG data directory and are managed with:
+Async publishing moves Knowledge Assets from Shared Working Memory to Verifiable Memory in the background. Each publish is a job in the node's publish queue. Publisher wallets sign the jobs' on-chain transactions, and each wallet runs one publisher worker.
+
+The wallets live in `publisher-wallets.json` under the DKG data directory. Manage them with:
 
 ```bash
 dkg publisher wallet add <privateKey>
@@ -16,6 +18,16 @@ dkg publisher wallet remove <address>
 dkg publisher enable
 dkg publisher publish-async <context-graph-id> <name>
 ```
+
+Queue settings are on [Async Queue Operations](async-queue-operations.md). What each answer means for a client is on [Async Share and Publish Jobs](../build/async-jobs.md).
+
+## Receipt, finality, and local completion
+
+A job enters `broadcast` when its signed transaction is durably recorded before send. Receipt confirmation can trigger reconciliation while the executor finishes local work. The reconciler independently checks the transaction at the configured confirmation depth and binds canonical publish evidence to that job before writing `included` and releasing its wallet. `finalized` also requires the executor to settle, local lifecycle repair/private staging to complete, and the final job record to be persisted. An `included` job can therefore have already reached chain finality while local work remains.
+
+`GET /api/publisher/job?id=<id>` and `GET /api/publisher/jobs` expose `timestamps.receiptObservedAt` and `timestamps.finalityObservedAt` (Unix milliseconds). The first records the receipt-confirmation callback, or the inclusion itself when nothing was observed earlier (it then equals `includedAt`). The second is recorded only when a reconciliation or recovery pass proves the transaction at the configured confirmation depth. A job whose executor completes before any such pass has no `finalityObservedAt`: reaching `finalized` is local completion, and it is not recorded as a chain observation. Both are distinct from `includedAt` and `finalizedAt`, which describe job transitions. Receipt observations are diagnostics and never release a wallet or authorize a publish. Observations are matched to the job's transaction hash. A daemon that runs the publisher shows them on these endpoints as soon as they are made, and the next state transition persists them. A restart before that transition loses the observation, and a job view read by another process shows it only once it is persisted. Older jobs and local-only finalizations omit both fields.
+
+The default scheduler has four total slots (capped by available logical CPUs), with one slot each reserved for ACK and health work. This leaves two shared normal/background slots on a four-CPU host. Background work protects one normal slot and uses at most one slot by default. These are intentional backend admission limits, rather than a count of publisher wallets; six wallets do not imply six concurrent store operations. `DKG_STORE_MAX_CONCURRENT` and the lane reservation settings control these limits. Post-confirmation store work uses this scheduler, and the daemon's main event loop also gates the completion of job-state reads and writes.
 
 ## Pause and resume the running publisher
 
@@ -33,53 +45,25 @@ The live runtime persists desired state in `publisher-control.json` in its data 
 
 A missing runtime returns HTTP 503. A persistence/control failure also returns 503, fences the runtime, and requires restart to reload durable intent; a failed request has no acknowledgement. A status read during a transition may show the previous acknowledged desired state alongside gates already closing. File contents are synced before atomic rename, and the parent directory is synced on supported POSIX hosts. Windows preserves process-restart state without claiming the same directory-fsync power-loss guarantee.
 
-The isolated native restart campaign runs actual two-wallet runtime composition, authenticated loopback HTTP routes, persistent Oxigraph queue evidence and SIGKILL/restart. After building publisher and CLI, run `node --experimental-sqlite --import tsx scripts/repro/publisher-live-control-restart.test.mts`. It uses a disposable data directory and `NoChainAdapter`; it verifies queue/control behavior rather than on-chain execution.
-
-## Receipt, finality, and local completion
-
-A job enters `broadcast` when its signed transaction is durably recorded before send. Receipt confirmation can trigger reconciliation while the executor finishes local work. The reconciler independently checks the transaction at the configured confirmation depth and binds canonical publish evidence to that job before writing `included` and releasing its wallet. `finalized` also requires the executor to settle, local lifecycle repair/private staging to complete, and the final job record to be persisted. An `included` job can therefore have already reached chain finality while local work remains.
-
-`GET /api/publisher/job?id=<id>` and `GET /api/publisher/jobs` expose `timestamps.receiptObservedAt` and `timestamps.finalityObservedAt` (Unix milliseconds). The first records the receipt-confirmation callback, or the inclusion itself when nothing was observed earlier (it then equals `includedAt`). The second is recorded only when a reconciliation or recovery pass proves the transaction at the configured confirmation depth. A job whose executor completes before any such pass has no `finalityObservedAt`: reaching `finalized` is local completion, and it is not recorded as a chain observation. Both are distinct from `includedAt` and `finalizedAt`, which describe job transitions. Receipt observations are diagnostics and never release a wallet or authorize a publish. Observations are matched to the job's transaction hash. A daemon that runs the publisher shows them on these endpoints as soon as they are made, and the next state transition persists them. A restart before that transition loses the observation, and a job view read by another process shows it only once it is persisted. Older jobs and local-only finalizations omit both fields.
-
-RFC-64 exact-set verification yields between rows after roughly 25 ms of work, allowing receipt polling and store timers to progress. Every row still passes verification before signing and bundle/control-object staging. One large row or whole-object codec operation can take longer than a slice.
-
-The default scheduler has four total slots (capped by available logical CPUs), with one slot each reserved for ACK and health work. This leaves two shared normal/background slots on a four-CPU host. Background work protects one normal slot and uses at most one slot by default. These are intentional backend admission limits, rather than a count of publisher wallets; six wallets do not imply six concurrent store operations. `DKG_STORE_MAX_CONCURRENT` and the lane reservation settings control these limits. Post-confirmation store work uses this scheduler, and the daemon's main event loop also gates the completion of job-state reads and writes.
-
-### Queue control path
-
-With the queue control path off, the publisher queue's own job-state reads and writes use that same scheduler. With it on (by default on a node with `store.backend: "blazegraph"` or `"oxigraph-server"` and more than 2 CPUs, or with `publisher:2` in `DKG_STORE_CONTROL_RESERVED_SLOTS` or `store.controlReservedSlots`; see [Queue control schedulers](backpressure-observability.md#queue-control-schedulers)), every store call on the queue's three graphs (`urn:dkg:publisher:control-plane`, `urn:dkg:publisher:wallet-locks` and `urn:dkg:publisher:journal`) runs on the publisher's own scheduler of up to two slots instead, so it does not wait behind client reads or data-plane work. That covers admission (duplicate check, job write), job and wallet-lock reads and writes, claim candidate selection, the stale-lock sweep, the admission journal (sequence allocation and append), the point reads (`GET /api/publisher/job`, `/job-payload`, `/job-by-intent` and `/journal`), cancel and the removal of one job, and the job listing that a bulk `POST /api/publisher/retry` takes while it holds the claim lock. Everything else keeps today's lane. The unlocked reads stay on the normal lane, because they hold no lock and the control scheduler's slots are for the calls that do. Some of them read the whole history: `GET /api/publisher/jobs` without `pageSize` or `cursor`, the job listing of a bulk `POST /api/publisher/clear`, the reconciliation inventory and the boot backfill that indexes older jobs. The others are bounded: `GET /api/publisher/stats`, which is a single `COUNT` query grouped by state, and the paged job read (`listPage`), which returns one page of jobs per call under the same context graph scope as the complete listing and which `GET /api/publisher/jobs` serves when the request sends `pageSize` or `cursor` (see [Listing async jobs](../references/api.md#listing-async-jobs); the request without them is still the complete listing). The queue-depth counts behind the `async_admission_usage` line stay on the background lane. The claimed job's own work (workspace reads, validation, the publish, post-confirmation store work) never carries the control tag, whatever lane the claim ran in. A call the control scheduler refuses is the usual retryable `503` with `"priority": "control"`. With the path off (the default on every other node, or `0` in either setting), no control scheduler exists and every call takes exactly the lane it took before.
-
-For an external store limited by HTTP/backend latency, a qualified workload may benefit from more concurrent operations than the daemon's logical CPU count. `DKG_STORE_CONCURRENCY_POLICY=configured` makes `DKG_STORE_MAX_CONCURRENT` the explicit total budget, without the automatic CPU ceiling. For example, `DKG_STORE_MAX_CONCURRENT=6` with the default one ACK and one health reservation admits four normal/background operations, including on a four-CPU daemon. Both reservations remain protected; this does not lend them to normal work. The ordinary pool is shared: existing lane floors still apply, and with the default one-slot normal floor, background work can use up to three of those four slots. The default policy remains `cpu`, and setting only the policy retains the default four-slot budget. Unknown policies retain the CPU ceiling; invalid budgets retain existing fallback behavior.
-
-Use the explicit policy only after a bounded comparison on the chosen backend and workload. Increasing HTTP concurrency can help while the backend has spare capacity, but long queries, write serialization, heap pressure, event-loop stalls and CPU steal can still limit throughput. Compare queue wait/rejections, completed work, backend service time, ACK/health tails and memory/GC; retain transaction uncertainty and duplicate-work protection. Roll back by restoring the prior environment and restarting through the normal graceful shutdown path. A local Blazegraph metadata experiment supports testing four ordinary slots; it does not establish a universal default or a live publication latency gain. See the [#3409 investigation](../../run-reports/2026-10-21-3409-store-admission.md).
-
-
 ## Admission retries
 
 All publisher wallets share the daemon's RPC request budget. For rate sizing,
 the restart requirement and diagnosing local wait versus provider latency, see
 [RPC Request Budget](rpc-request-budget.md).
 
-Before `POST /api/knowledge-assets/{name}/vm/publish-async` enqueues a job, it verifies the immutable SWM snapshot. Temporary store pressure or recovery returns `503` with `code: "STORE_SCHEDULER_BUSY"` or `"STORE_OPERATION_TIMEOUT"`, `retryable: true`, and `Retry-After: 1`. Retry the same request after the store recovers without re-sharing valid content. A genuine snapshot mismatch still returns `409 PUBLISH_INTENT_STALE`; so does a finalized update that is not numbered one above the KA's latest confirmed version, which could never be published (see [Stale update intents](#stale-update-intents) below and [Editing a published Knowledge Asset](knowledge-asset-lifecycle.md#editing-a-published-knowledge-asset)).
+Before `vm/publish-async` creates a job, it checks the shared snapshot. Store pressure gets a retryable `503`: retry the same request, without sharing again. `jobCreated: false` means this request created no job, but an earlier one may exist. For `409 PUBLISH_INTENT_STALE`, see [Stale update intents](#stale-update-intents).
 
-These pre-enqueue failures include `jobCreated: false`: this request did not reach enqueue, although an earlier job may exist for the KA. The separate `outcome` describes the failed store operation (`not_started` or `indeterminate`); even an indeterminate read can reject before job creation. Once enqueue begins, a store failure omits `jobCreated` because a job may already have been persisted. Use the publisher job lookup before assuming that no job exists.
+## Clearing finished jobs
 
-### Duplicate check on admission
+Finished jobs stay until they are cleared. `dkg publisher clear finalized|failed`, or `POST /api/publisher/clear` with the node-admin token, clears them in bulk and returns the count removed.
 
-Admission looks for an existing job for the same Knowledge Asset (the lifecycle key: context graph, sub-graph and name) so that a re-submit reuses it, or is refused with `409` and `existingJobId`, instead of creating a second job. The lookup runs under the global claim lock and is bound by that lifecycle key: its cost follows the jobs under this key, not the retained history of every other asset.
+A re-submit of a Knowledge Asset is matched to its newest job, by context graph, name, sub-graph and agent lane. A bulk clear never lets an older failed job become the newest again. So it keeps a finalized job while an older failed job of the same asset remains. It also never removes a held job. It can remove fewer jobs than are listed, and it is slow on a large queue.
 
-Jobs admitted before the lifecycle index existed (#1828) have no index row. The first admission after a node starts therefore also scans for such rows. When it finds none that could match an admission, the node remembers that for the rest of the process, and later admissions use the key-bound lookup alone. The boot backfill (`ensureVmPublishIntentIndex`) indexes any such row it finds, so a restart scans once more and then stops again. Raw-lift rows and rows that cannot form a lifecycle key never match an admission and do not keep the scan on.
+`POST /api/publisher/clear-job { "jobId": "…" }` removes one job, even the newest. Clearing a single job is API-only for now. After you clear the newest job, a re-submit can restart an older failed job of the same asset.
 
-One narrowing follows: a pre-index VM-publish row that appears **after** the node has cleared the scan is not seen by admission until the next backfill or restart. Nothing in the current code writes such a row, and each node has its own queue store, so in practice it does not occur. If you restore an old queue into a running node, restart it so the backfill and the first scan see the restored rows.
+If the daemon does not answer, `dkg publisher cancel`, `retry` and `clear` refuse to write the store directly while the node home's `daemon.pid` names a running process. They print `Refusing to run "dkg publisher <command>" offline` and exit 1. Try again once the daemon answers, or run `dkg stop` first.
 
-### Clearing finished jobs, and retention
-
-A Knowledge Asset's jobs are siblings: they share the lifecycle key above. Whether a job still binds the Knowledge Asset depends on its siblings, not on the job alone. A failed job older than the newest job for the same Knowledge Asset is history and binds nothing; if that newest job is deleted, the older failed job becomes the newest and binds again, so a re-submit would reaccept it instead of starting a new job. Everything that deletes finished jobs in bulk therefore applies one rule, which keeps every such binding decision as it was:
-
-- **Bulk clear** (`dkg publisher clear finalized|failed`, `POST /api/publisher/clear`) keeps a finalized job while an older failed job for the same Knowledge Asset is kept, and removes no job whose removal would make a kept job bind the Knowledge Asset. It takes the claim lock for each job it removes, as clearing one job by id does, and it goes oldest first. A Knowledge Asset whose job records cannot be read is skipped. The rule is always on, so a bulk clear can remove fewer jobs than it did before this release (the count in the response is what it removed), and a large one takes longer. `POST /api/publisher/clear-job` for one job is unchanged and stays the deliberate override: clearing the newest job by id can make an older failed job bind the Knowledge Asset.
-- **Retention** is an opt-in sweep that deletes a `finalized` job 7 days after it finished. It ships switched off (`queueRetention.publisher.mode` defaults to `off`) and runs only in the daemon's admission instance; see [Promote queue operations](../promote-queue-operations.md#retention-of-finished-publisher-jobs) for the modes, the delete gate and the limits. Every failed job is kept until an operator clears it, and so is any job that is not finished. A Knowledge Asset's finalized jobs are deleted oldest first, inside the same claim transaction that serializes admission and claims, and a finalized job is never deleted while an older job for the same Knowledge Asset is kept: a failed or unfinished one, or a finalized one the sweep keeps or cannot delete itself (for example a record stored by a much older version). The sweep has the modes `off` (default), `report` (counts what it would delete and deletes nothing) and `delete`. It never touches the journal. After a job is deleted, `GET /api/publisher/job` for it answers `404`, `job-by-intent` answers `none` or lists one job fewer as `superseded`, and a re-submit after the window is admitted as a new job.
-
-`dkg publisher cancel`, `retry` and `clear` fall back to the node's store directly when the daemon cannot be reached. They refuse to do that while the node home names a running daemon process, because a second writer next to the daemon's admission instance is not excluded by its locks. Stop the daemon (`dkg stop`) first, or try again once it answers. `jobs`, `job` and `stats` change no queue state, and still fall back. They are not free of writes, though. With the file-backed Oxigraph backends, closing the inspector's store rewrites the store file from what the inspector loaded ([#3551](https://github.com/OriginTrail/dkg/issues/3551)). Run them next to a stalled daemon only when you need to.
+Old finalized jobs can also be removed on a timer. This cleanup is off by default; see [Async Queue Operations](async-queue-operations.md#clean-up-finished-jobs).
 
 ## Stale update intents
 
@@ -92,7 +76,7 @@ Recovery, per KA:
 3. `wm/finalize` — check that the returned `assertionVersion` equals the number the message asked for.
 4. `swm/share`, then `vm/publish-async` (or `vm/publish`).
 
-A core that already ACK-signed the abandoned draft declines its replacement transiently until the pending window ends (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, 5 minutes by default), so retry the publish after that. Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Memory until the update is published: a re-share carrying the same or a lower number than a draft a peer already holds is not applied there, and with `swmAwaitCuratorAck` on a curator that holds the earlier draft rejects the re-share before it commits. Finalizing a replacement draft also replaces the private payload sealed under that number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Memory once its replacement is finalized (tracked in [#2964](https://github.com/OriginTrail/dkg/issues/2964)).
+A core that already ACK-signed the abandoned draft declines its replacement transiently until the pending window ends (`DKG_STORAGE_ACK_PENDING_TX_WINDOW_MS`, 5 minutes by default), so retry the publish after that. Peers that already hold an earlier shared draft of the KA may keep showing it in Shared Memory until the update is published: a re-share carrying the same or a lower number than a draft a peer already holds is not applied there, and with `swmAwaitCuratorAck` on a curator that holds the earlier draft rejects the re-share before it commits. Finalizing a replacement draft also replaces the private payload sealed under that number, so an earlier shared draft that carried private content can no longer be re-opened from Shared Memory once its replacement is finalized.
 
 ## Held jobs
 
@@ -169,6 +153,11 @@ incomplete results, or lost claim ownership retain the existing recovery path.
 Private catalog placement remains asynchronous after its durable repair marker
 is stored; publication does not wait for placement.
 
+The five-minute `async_admission_usage` log line shows publisher pick-up,
+claim-to-finish time and the accepted backlog;
+[Monitor Store and Queue Pressure](backpressure-observability.md#async-admission-usage-line)
+says which fields to read.
+
 Use `GET /api/diagnostics/backpressure` to inspect store lane occupancy. The
 `dkg.store.scheduler_queue_wait_ms` and
 `dkg.store.scheduler_operation_duration_ms` histograms separate admission wait
@@ -185,6 +174,7 @@ are hashed; job IDs are retained for correlation, so treat these logs as
 operational diagnostics. A free wallet can still wait for the claim lock or
 store capacity, and a worker may still be finishing an earlier execution after
 its wallet is released. Do not infer wallet availability from job finalization.
+
 ## Funding
 
 Every async publisher wallet needs the chain's native gas token because it submits on-chain transactions.

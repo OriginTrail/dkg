@@ -82,7 +82,7 @@ A pre-signed attestation remains valid for sealing. In a graph that requires cat
 
 ## Async share recovery
 
-Use `dkg ka share-job <job-id>` to observe an accepted async share. A `failed_retrying` job follows the queue's existing backoff and attempt limit; do not submit another share to restart it. The queue makes five attempts in all, waiting about 1, 2, 4 and 8 minutes between them (each wait varies by up to 20 %, so jobs that failed together do not come back together). A job that spends them ends `failed` with `retryable: true`; `dkg ka recover-share-job <job-id>` starts it again.
+Use `dkg ka share-job <job-id>` to observe an accepted async share. A `failed_retrying` job follows the queue's existing backoff and attempt limit; do not submit another share to restart it. The queue makes five attempts in all, waiting about 1, 2, 4 and 8 minutes between them (each wait varies by up to 20 %, so jobs that failed together do not come back together). A job that spends them ends `failed` with `retryable: true`; `dkg ka recover-share-job <job-id>` starts it again. What each async share response means, and how to reconcile a share whose replies were all lost, is in [Async Share and Publish Jobs](../build/async-jobs.md).
 
 The queue returns the terminal or retrying failure transition only after its write and flush complete; the worker consumes it without another outcome read. If the worker cannot acknowledge a promotion failure write, the `async_promote_failure_bookkeeping_uncertain` log event identifies the affected job and bookkeeping stage. This event does not establish whether promotion changed SWM. A result already saved in the queue remains authoritative. Otherwise, the job can remain `running` until its lease expires (15 minutes by default), after which ordinary queue polling or startup recovery reconciles it. An unbound async promotion with uncertain effects becomes an explicit **partial promote ambiguity** inspection hold. Version-4 synchronous recovery jobs carry an immutable seal and operation binding; an expired started lease can reclaim only that validated operation. For an unbound inspection hold, inspect SWM/VM state before explicit recovery; do not blindly reshare or reset its retry budget.
 
@@ -121,7 +121,7 @@ Durable synchronous sharing requires an available share worker and a store suppo
 | `dkg ka finalize <name> -c <cg>` | Seal the WM draft |
 | `dkg ka share <name> -c <cg>` | Share finalized WM to SWM |
 | `dkg ka share-async <name> -c <cg>` | Enqueue async WM-to-SWM share |
-| `dkg ka share-jobs [--context-graph-id <cg>] [--state <states>] [--limit <n> \| --all \| --page-size <n> [--cursor <cursor>]]` | List async share jobs: all of them, up to `--limit`, every one by paging (`--all`), or one page at a time ([details](../references/api.md#listing-async-jobs)) |
+| `dkg ka share-jobs [--context-graph-id <cg>] [--state <states>] [--limit <n> \| --all [--page-size <n>] \| [--page-size <n>] [--cursor <cursor>]]` | List async share jobs: all of them, up to `--limit`, every one by paging (`--all`), or one page at a time ([details](../references/api.md#listing-async-jobs)) |
 | `dkg ka share-job <job-id>` | Show one async share job |
 | `dkg ka cancel-share-job <job-id>` | Cancel a queued share job (a retrying one cannot be cancelled) |
 | `dkg ka recover-share-job <job-id>` | Recover a failed share job |
