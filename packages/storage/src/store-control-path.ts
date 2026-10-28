@@ -19,10 +19,10 @@ import type { QueryOptions, StoreControlQueue } from './triple-store.js';
  *   nothing else: no priority and no ambient lane moves a call there or away from it.
  * - With the path off nothing is built or registered, and a tagged call resolves exactly like an untagged one.
  * - Configuration is read once, so a change needs a restart. The setting is `DKG_STORE_CONTROL_RESERVED_SLOTS` when it
- *   is set, else the node config's `store.controlReservedSlots`, else the default (on only for Blazegraph on more than
- *   2 CPUs, OT-RFC-73 P14). Only the daemon passes the config value and the backend (`configureStoreControlPath`,
- *   before anything builds the path); any other process that imports this package honours the environment variable
- *   alone and otherwise keeps the path off, which is today's lane choice exactly.
+ *   is set, else the node config's `store.controlReservedSlots`, else the default (on only for Blazegraph and managed
+ *   `oxigraph-server` on more than 2 CPUs, OT-RFC-73 P14). Only the daemon passes the config value and the backend
+ *   (`configureStoreControlPath`, before anything builds the path); any other process that imports this package
+ *   honours the environment variable alone and otherwise keeps the path off, which is today's lane choice exactly.
  */
 export const STORE_CONTROL_QUEUES: readonly StoreControlQueue[] = Object.freeze(['share', 'publisher']);
 
@@ -47,11 +47,12 @@ const SMALL_HOST_CPUS = 2;
 
 /**
  * The store backends (the node config's `store.backend`) whose nodes have the path on when nothing sets it
- * (OT-RFC-73 P14): Blazegraph only. Managed `oxigraph-server` (D-14), `sparql-http` (a Blazegraph reached through
- * it included) and every other backend keep it off by default until their own G2 cell passes; adding a backend here
- * is that change. `defaultStoreControlSlots` applies the small-host rule on top.
+ * (OT-RFC-73 P14): Blazegraph and managed `oxigraph-server` (D-14; the configured name, which runs as `sparql-http`).
+ * Generic `sparql-http` (any other SPARQL store, a Blazegraph reached through it included) and every other backend
+ * keep it off by default; adding a backend here is that change. `defaultStoreControlSlots` applies the small-host
+ * rule on top.
  */
-export const STORE_CONTROL_DEFAULT_BACKENDS: readonly string[] = Object.freeze(['blazegraph']);
+export const STORE_CONTROL_DEFAULT_BACKENDS: readonly string[] = Object.freeze(['blazegraph', 'oxigraph-server']);
 
 /** The embedded backends run no store scheduler, so the path never applies to them, whatever its setting. */
 const EMBEDDED_BACKENDS: ReadonlySet<string> = new Set(['oxigraph', 'oxigraph-persistent', 'oxigraph-worker']);
