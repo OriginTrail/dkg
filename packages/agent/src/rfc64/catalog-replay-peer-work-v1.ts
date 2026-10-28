@@ -1,6 +1,6 @@
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './catalog-peers-v1.js';
 // SPDX-License-Identifier: Apache-2.0
-import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayRecoveryResultV1 as Result } from './catalog-replay-recovery-runtime-v1.js';
+import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayRecoveryResultV1 as Result } from './catalog-replay-types-v1.js';
 
 type Outcome = Readonly<{ result: Readonly<Result> }> | Readonly<{ error: unknown }>;
 /** One generation owns its execution phase and all of its completion subscribers. */

@@ -28,18 +28,24 @@ describe('approved private catalog readiness handoff', () => {
     });
   });
 
-  it('withholds old corroborated readiness while the 257th scope is deferred before admission', async () => {
+  it('withholds corroborated readiness while a second peer owns deferred overflow custody', async () => {
     const f = await fixture();
     await expect(f.run()).resolves.toBe(true);
     f.commit.mockClear();
+    let selected = ['unrelated-graph'];
+    const reserveDeferred = vi.fn((cg: string) => f.state.replay.reserveDeferred(cg, POLICY));
+    const reservePeer = vi.fn((cg: string, peer: string) => f.state.replay.reservePeer(cg, POLICY, peer));
     const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
-      admittedConnectedPeerIds: () => [],
-      selectContextGraphIds: () => [...Array.from({ length: 256 }, (_, i) => `a-${String(i).padStart(3, '0')}`), CG],
-      reserveFence: (cg, peer) => f.state.replay.reservePeer(cg, POLICY, peer),
+      admittedConnectedPeerIds: () => [], selectContextGraphIds: () => selected,
+      reserveFence: reservePeer, reserveDeferredFence: reserveDeferred,
       schedule: () => false, wait: async () => undefined, warn: vi.fn(),
       reannounce: async () => ({ failed: 0 }), replay: async () => ({ failed: 0 }),
-    });
-    const reservation = runtime.prepareConnectionOpen('curator-peer')!;
+    }, 60_000, 1);
+    const occupied = runtime.prepareConnectionOpen('occupied-peer')!;
+    selected = ['unrelated-graph', CG];
+    const reservation = runtime.prepareConnectionOpen('overflow-peer')!;
+    expect(reserveDeferred).toHaveBeenCalledWith(CG);
+    expect(reservePeer.mock.calls.some(([cg]) => cg === CG)).toBe(false);
     expect(f.state.replay.status(CG, POLICY)?.active).toBe(true);
     await expect(f.run()).resolves.toBe(false);
     expect(f.commit).not.toHaveBeenCalled();
@@ -47,6 +53,7 @@ describe('approved private catalog readiness handoff', () => {
     expect(f.state.replay.status(CG, POLICY)?.active).toBe(false);
     await expect(f.run()).resolves.toBe(true);
     expect(f.commit).toHaveBeenCalledOnce();
+    occupied.reject(); runtime.reset();
   });
 
   it('cannot certify a partial restored catalog after losing a second advertised head', async () => {

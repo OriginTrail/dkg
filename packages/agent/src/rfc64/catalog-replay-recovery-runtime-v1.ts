@@ -1,3 +1,5 @@
+import type { Rfc64CatalogReplayPeerDemandHandleV1, Rfc64CatalogReplayPeerFenceLeaseV1, Rfc64CatalogReplayPeerReservationV1, Rfc64CatalogReplayRecoveryResultV1 } from './catalog-replay-types-v1.js';
+export type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerDemandHandleV1, Rfc64CatalogReplayPeerFenceLeaseV1, Rfc64CatalogReplayPeerReservationV1, Rfc64CatalogReplayRecoveryResultV1 } from './catalog-replay-types-v1.js';
 import { CatalogReplayChunkV1, type CatalogReplayPeerWorkV1 } from './catalog-replay-peer-work-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { FullReplayPassV1, ReplayRunEvidenceV1, resolveReplayRunSettlementV1, type ReplayRunSettlementV1, recordReplayPeerOutcomeV1, emptyReplayTargetsV1, mergeReplayTargetsV1, type BoundedReplayTargetsV1 } from './catalog-replay-evidence-v1.js';
@@ -35,28 +37,6 @@ const MAX_RETAINED_REPLAY_RETRIES_V1 = 4;
 const MAX_FULL_PASS_RETAINED_SEEDS_V1 = Math.floor(
   RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 / 2,
 );
-
-export interface Rfc64CatalogReplayPeerDemandV1 {
-  readonly peerId: string;
-  readonly generation: number;
-}
-
-/** Stable reservation identity survives callback decoration; identifiers cannot recreate it. */
-export interface Rfc64CatalogReplayPeerDemandHandleV1 extends Rfc64CatalogReplayPeerDemandV1 {
-  readonly handle: object;
-}
-
-/** Opaque, idempotent ownership of one exact reconnect demand. */
-export interface Rfc64CatalogReplayPeerFenceLeaseV1
-  extends Rfc64CatalogReplayPeerDemandHandleV1 {
-  release(): void;
-}
-
-/** Completeness custody held until the connection owner permits execution. */
-export interface Rfc64CatalogReplayPeerReservationV1 extends Rfc64CatalogReplayPeerFenceLeaseV1 {
-  admit(): void;
-  isCurrent(): boolean;
-}
 
 export type Rfc64CatalogReplayPeerResultV1<Target> = Readonly<{
   status: 'completed';
@@ -153,11 +133,6 @@ export interface Rfc64CatalogReplayRecoveryPortsV1<Target> {
 export const RFC64_CATALOG_REPLAY_IDLE_DRAIN_BUDGET_MS_V1 =
   RFC64_RECEIVER_MAX_ADMISSION_DEFERRAL_WINDOW_MS_V1 * 2;
 
-export interface Rfc64CatalogReplayRecoveryResultV1 {
-  readonly requested: number;
-  readonly failed: number;
-}
-
 export interface Rfc64CatalogReplayRecoveryStatusV1 {
   readonly active: boolean;
   /**
@@ -184,7 +159,7 @@ interface ReplayRunV1<Target> {
   readonly completion: Promise<Readonly<Rfc64CatalogReplayRecoveryResultV1>>;
 }
 type ReplayExecutionV1<Target> = Readonly<{ kind: 'idle' }>
-  | Readonly<{ kind: 'running' | 'settled'; value: ReplayRunV1<Target> }>;
+  | Readonly<{ kind: 'running'; value: ReplayRunV1<Target> }>;
 
 interface ReplayProgressV1<Target> {
   readonly policyDigest: string;
@@ -520,7 +495,7 @@ export class Rfc64CatalogReplayRecoveryRuntimeV1<Target> {
         progress.requiresFullReplay = retained.requiresFullReplay;
         progress.unverified = retained.unverified;
         progress.peerWorklist.settleOverflow();
-        progress.run = { kind: 'settled', value: run };
+        progress.run = { kind: 'idle' };
         this.#bumpRevision(progress);
         if (retained.continueQueuedConnections) {
           // Transfer already-admitted generations without reseeding providers or

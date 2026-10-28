@@ -29,7 +29,7 @@ function ports(overrides: Partial<ReportPorts> = {}) {
     selectContextGraphIds: () => [CG],
     reserveDeferredFence: () => null, reserveFence: (_contextGraphId: string, peerId: string) => ({
       peerId,
-      generation: 1, handle: {},
+      generation: 1, handle: {}, isCurrent: () => true,
       admit: () => undefined,
       release: vi.fn(),
     }),

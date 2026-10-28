@@ -4,7 +4,7 @@ import type { Rfc64CatalogConnectionReplayResultV1 } from './catalog-replay-run-
 
 import type {
   Rfc64CatalogReplayPeerDemandHandleV1,
-} from './catalog-replay-recovery-runtime-v1.js';
+} from './catalog-replay-types-v1.js';
 import { Rfc64CatalogReplayScopeLifecycleV1, type Rfc64CatalogConnectionCustodyV1, type Rfc64CatalogReplayScopeAdmissionV1 } from './catalog-replay-scope-lifecycle-v1.js';
 
 export interface Rfc64CatalogReplayConnectionRuntimePortsV1 {
@@ -342,7 +342,6 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         this.#pruneSelection(peer, new Set(this.#ports.selectContextGraphIds()));
         const execution = scope.begin(Date.now());
         if (execution === null) continue;
-        const demand = execution.lease;
         let failed = false;
         peer.started++;
         const now = Date.now();
@@ -352,13 +351,18 @@ export class Rfc64CatalogReplayConnectionRuntimeV1 {
         }
         peer.windowStarted++;
         try {
+          const renew = () => scope.refreshExecution(execution,
+            () => this.#ports.reserveFence(scope.contextGraphId, peer.peerId),
+            () => this.#ports.reserveDeferredFence(scope.contextGraphId));
+          if (renew() === null) continue;
           try { failed = (await this.#ports.reannounce(peer.peerId, scope.contextGraphId, signal)).failed > 0; }
           catch (error) {
             failed = true;
             if (!signal.aborted) this.#ports.warn(`RFC-64 compatibility re-announcement failed for ${peer.peerId.slice(-8)}: ${error instanceof Error ? error.message : String(error)}`);
           }
           signal.throwIfAborted();
-          if (demand === 'announcement-only') continue;
+          const demand = renew();
+          if (demand === null || demand === 'announcement-only') continue;
           demand.admit();
           const result = await this.#ports.replay(scope.contextGraphId, demand, signal);
           failed = result.failed > 0 || failed;

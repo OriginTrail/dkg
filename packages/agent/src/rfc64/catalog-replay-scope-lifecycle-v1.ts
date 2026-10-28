@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { Rfc64CatalogReplayPeerReservationV1 } from './catalog-replay-recovery-runtime-v1.js';
+import type { Rfc64CatalogReplayPeerReservationV1 } from './catalog-replay-types-v1.js';
 
 export type Rfc64CatalogConnectionCustodyV1 = Rfc64CatalogReplayPeerReservationV1 | 'announcement-only';
 type FenceV1 = Rfc64CatalogConnectionCustodyV1;
 type PhaseV1 =
   | Readonly<{ state: 'awaiting-admission'; lease: FenceV1 | null }>
-  | Readonly<{ state: 'waiting-for-fence' }>
+  | Readonly<{ state: 'waiting-for-fence'; deferred?: Readonly<{ release(): void }> }>
   | Readonly<{ state: 'queued' | 'executing'; lease: FenceV1 }>
   | Readonly<{ state: 'retired' }>;
 interface DemandV1 { readonly connectionGeneration: number; readonly selectionGeneration: number; phase: PhaseV1 }
@@ -62,7 +62,11 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     for (const demand of [this.#current, this.#successor]) {
       if (demand?.phase.state !== 'waiting-for-fence') continue;
       const lease = reserveFence();
-      if (lease !== null) demand.phase = { state: 'queued', lease };
+      if (lease !== null) {
+        const deferred = demand.phase.deferred;
+        demand.phase = { state: 'queued', lease };
+        deferred?.release();
+      }
     }
   }
 
@@ -73,6 +77,25 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
     demand.phase = { state: 'executing', lease: demand.phase.lease };
     this.#executions.set(execution, demand);
     return execution;
+  }
+
+  /** Refresh current-policy custody before each asynchronous execution phase. */
+  refreshExecution(execution: Rfc64CatalogReplayScopeExecutionV1, reserveFence: () => FenceV1 | null,
+    reserveDeferred: () => Readonly<{ release(): void }> | null): FenceV1 | null {
+    const demand = this.#executions.get(execution);
+    if (!demand || demand !== this.#current || demand.phase.state !== 'executing') return null;
+    const previous = demand.phase.lease;
+    if (previous !== 'announcement-only' && previous.isCurrent()) return previous;
+    // Acquire replacement custody before releasing the retired reservation.
+    // Capacity pressure leaves the same demand pending, without resetting cooldown.
+    const lease = reserveFence();
+    if (lease === null) {
+      const deferred = reserveDeferred();
+      demand.phase = { state: 'waiting-for-fence', ...(deferred ? { deferred } : {}) };
+      this.#executions.delete(execution);
+    } else demand.phase = { state: 'executing', lease };
+    if (previous !== 'announcement-only' && previous !== lease) previous.release();
+    return lease;
   }
 
   finish(execution: Rfc64CatalogReplayScopeExecutionV1, failed: boolean, now: number): void {
@@ -102,6 +125,7 @@ export class Rfc64CatalogReplayScopeLifecycleV1 {
   #owns(demand: DemandV1): boolean { return demand === this.#current || demand === this.#successor; }
   #release(demand: DemandV1): void {
     if (!this.#owns(demand)) return;
+    if (demand.phase.state === 'waiting-for-fence') demand.phase.deferred?.release();
     if ('lease' in demand.phase && demand.phase.lease !== 'announcement-only') demand.phase.lease?.release();
     demand.phase = { state: 'retired' };
     if (demand === this.#successor) this.#successor = null;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import type { Rfc64CatalogReplayPeerDemandV1 } from './catalog-replay-recovery-runtime-v1.js';
+import type { Rfc64CatalogReplayPeerDemandV1 } from './catalog-replay-types-v1.js';
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './catalog-peers-v1.js';
 import { RFC64_CATALOG_TARGET_MAX_ENTRIES_PER_CONTEXT_GRAPH_V1 } from './catalog-limits-v1.js';
 

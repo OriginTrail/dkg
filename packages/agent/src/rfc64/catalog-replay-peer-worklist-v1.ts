@@ -1,7 +1,7 @@
 import { CatalogReplayPeerWorkV1, CatalogReplayPeerDemandHandleV1, CatalogReplayChunkV1 } from './catalog-replay-peer-work-v1.js';
 // SPDX-License-Identifier: Apache-2.0
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from './catalog-peers-v1.js';
-import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerDemandHandleV1, Rfc64CatalogReplayPeerReservationV1 } from './catalog-replay-recovery-runtime-v1.js';
+import type { Rfc64CatalogReplayPeerDemandV1, Rfc64CatalogReplayPeerDemandHandleV1, Rfc64CatalogReplayPeerReservationV1 } from './catalog-replay-types-v1.js';
 
 /**
  * One owner for reconnect generations, pending-peer deduplication, and the

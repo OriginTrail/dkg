@@ -392,6 +392,7 @@ const blockedRfc64Modules = [
   'catalog-replay-evidence-v1.js',
   'catalog-replay-peer-work-v1.js',
   'catalog-replay-selection-v1.js',
+  'catalog-replay-types-v1.js',
   'catalog-selection-types-v1.js',
   'catalog-replay-run-reporter-v1.js',
   'catalog-replay-scope-lifecycle-v1.js',

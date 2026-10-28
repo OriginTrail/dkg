@@ -14,7 +14,7 @@ interface Rfc64CatalogReplayConnectionCapabilitiesV1 {
 
 /** Bind current accepted policy at fence reservation and compatibility announcement. */
 export function createRfc64CatalogReplayConnectionRuntimeV1(input:
-  Readonly<{ reserveDeferred: Rfc64CatalogReplayConnectionRuntimePortsV1['reserveDeferredFence']; capabilities: Rfc64CatalogReplayConnectionCapabilitiesV1; reservePeer(contextGraphId: string, policyDigest: string, peerId: string): ReturnType<Rfc64CatalogReplayConnectionRuntimePortsV1['reserveFence']> }>
+  Readonly<{ reserveDeferred: Rfc64CatalogReplayConnectionRuntimePortsV1['reserveDeferredFence']; capabilities: Rfc64CatalogReplayConnectionCapabilitiesV1; reservePeer(contextGraphId: string, policyDigest: string, peerId: string): Exclude<ReturnType<Rfc64CatalogReplayConnectionRuntimePortsV1['reserveFence']>, 'announcement-only'> }>
     & Pick<CatalogReplayTransportV1<never>, 'reannounce'>
     & Pick<Rfc64CatalogReplayConnectionRuntimePortsV1, 'admittedConnectedPeerIds' | 'schedule' | 'wait' | 'warn' | 'replay' | 'reportRun'>,
 ): Rfc64CatalogReplayConnectionRuntimeV1 {
@@ -28,7 +28,11 @@ export function createRfc64CatalogReplayConnectionRuntimeV1(input:
     reserveFence: (contextGraphId, peerId) => {
       if (!receives(contextGraphId)) return 'announcement-only';
       const accepted = input.capabilities.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId);
-      return accepted === null ? null : input.reservePeer(contextGraphId, accepted.policyDigest, peerId);
+      if (accepted === null) return null;
+      const lease = input.reservePeer(contextGraphId, accepted.policyDigest, peerId);
+      return lease === null ? null : Object.freeze({ ...lease, isCurrent: () => lease.isCurrent()
+        && receives(contextGraphId)
+        && input.capabilities.readAcceptedRfc64CatalogAccessSnapshotV1(contextGraphId)?.policyDigest === accepted.policyDigest });
     },
     reannounce: (peerId, id, signal) => {
       const accepted = input.capabilities.readAcceptedRfc64CatalogAccessSnapshotV1(id);

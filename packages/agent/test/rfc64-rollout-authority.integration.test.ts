@@ -1304,7 +1304,8 @@ describe('RFC-64 rollout authority integration', () => {
     expect(reannounce).toHaveBeenCalledTimes(1);
     const command = replay.mock.lastCall![0];
     if (command.kind !== 'connection-demand') throw new Error('expected connection demand');
-    expect(command.demand).toBe(markPending.mock.results[0].value);
+    expect(command.demand.handle).toBe(markPending.mock.results[0].value!.handle);
+    expect(command.demand).toMatchObject({ peerId: markPending.mock.results[0].value!.peerId, generation: markPending.mock.results[0].value!.generation });
     expect(command.signal).toBe(reannounce.mock.lastCall![2]);
   }, 15_000);
 
