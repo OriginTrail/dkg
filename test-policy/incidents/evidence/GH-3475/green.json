@@ -10,12 +10,12 @@
     "vitest.unit.config.ts",
     "test/peer-profile-follow-up-agent.test.ts",
     "-t",
-    "a\\ Core\\ pulls\\ the\\ agents\\ graph\\ again\\ when\\ its\\ connect\\-time\\ pull\\ lacked\\ the\\ peer's\\ own\\ profile",
+    "follow\\-up\\ pull\\ of\\ a\\ peer's\\ own\\ agent\\ profile\\ a\\ Core\\ pulls\\ the\\ agents\\ graph\\ again\\ when\\ its\\ connect\\-time\\ pull\\ lacked\\ the\\ peer's\\ own\\ profile",
     "--reporter=json",
     "--outputFile=<report>"
   ],
   "exitCode": 0,
-  "rawReportSha256": "01ba4547eca4173e98ba6cc8d9cf6b8474427ed461553bbbe7e16977ac75e44d",
+  "rawReportSha256": "9832e86cac0118dec45f794ce3d638e547808784f532be0363c9f2bf05593b13",
   "assertions": [
     {
       "ancestorTitles": [
@@ -24,7 +24,7 @@
       "fullName": "follow-up pull of a peer's own agent profile a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
       "status": "passed",
       "title": "a Core pulls the agents graph again when its connect-time pull lacked the peer's own profile",
-      "duration": 2676.469,
+      "duration": 2681.675542,
       "failureMessages": [],
       "meta": {}
     }
