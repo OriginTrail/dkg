@@ -5798,7 +5798,7 @@ export class PublishMethods extends DKGAgentBase {
 
   async publishFromFinalizedAssertion(this: DKGAgent, contextGraphId: string, name: string,
     opts?: FinalizedAssertionPublishOptions): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-    return this.runFinalizedAssertionPublication(contextGraphId, name, opts, {
+    return runFinalizedAssertionPublication.call(this, contextGraphId, name, opts, {
       assertPlan() {},
       mint: (id, selection, options) => this.publishFromSharedMemory(id, selection, options),
       finishMint: async (input, ctx) => { await observeConfirmedVmTransfer(this.log, { ...input, ctx, publicationLabel: 'publish' },
@@ -5807,465 +5807,9 @@ export class PublishMethods extends DKGAgentBase {
   }
 
   /** Reconciliation enters recording directly, under the caller's existing lifecycle lease. */
-  async recordFinalizedAssertionMint(this: DKGAgent, contextGraphId: string, name: string,
-    receipt: MintAdoptionRequest, opts?: FinalizedAssertionPublishOptions, reservation?: FinalizedAssertionReservation,
-  ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-    return this.runFinalizedAssertionPublication(contextGraphId, name, opts, {
-      reservation,
-      assertPlan(plan) {
-        if (plan.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
-          { code: KA_MINT_RECONCILE_REFUSED_CODE });
-      },
-      mint: (id, selection, options) => this.recordMintFromSharedMemory(id, selection, receipt, options),
-      finishMint: async input => {
-        if (await this.completeNamedPublishFinalization(input) === 'pending')
-          throw Object.assign(new Error('Named publish catalog finalization remains pending; retry to finish it'),
-            { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
-      },
-    });
-  }
 
-  async runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: string, name: string,
-    opts: FinalizedAssertionPublishOptions | undefined,
-    operations: FinalizedAssertionPublicationOperations,
-  ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
-    const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
-    const publisher = opts?.publisherOverride ?? this.publisher;
-    const assertionUri = contextGraphAssertionUri(
-      contextGraphId,
-      agentAddress,
-      name,
-      opts?.subGraphName,
-    );
-    const metaGraph = contextGraphMetaUri(contextGraphId);
 
-    if (operations.reservation) {
-      if (!opts?.heldLifecycle) throw new Error('Prepared reservation requires its current lifecycle lease');
-      assertAssertionLifecycleWriteLease(opts.heldLifecycle, this.writeLocks,
-        assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, opts.subGraphName));
-      if (operations.reservation.assertionUri !== assertionUri || operations.reservation.metaGraph !== metaGraph)
-        throw new Error('Prepared reservation belongs to a different assertion');
-    }
-    const { seal, scope: graphScope, kaId: packedKaId } = operations.reservation
-      ?? await readFinalizedAssertionReservation(this.store,
-        { contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName }, 'agent.vmPublish.seal');
 
-    // 2. Cross-check chain target — refuse to publish a sig signed
-    //    against a different deployment than this daemon currently
-    //    points at. This is the cross-deployment safety the EIP-712
-    //    domain is buying us; surface as an early 4xx-equivalent
-    //    rather than a tx revert.
-    const chainTargetMismatch = await sealChainTargetMismatch(this.chain, seal);
-    if (chainTargetMismatch) throw new Error(`publishFromFinalizedAssertion: ${chainTargetMismatch}`);
-
-    // #1116 (round 9, reviewer 🔴 #1/#2) — MARKER GATE. A valid seal is no longer
-    // SUFFICIENT to publish: it must be backed by a LIVE complete full share
-    // resident in SWM (the swmShareComplete marker). This closes the whole
-    // seal-staleness class at the consumer: a stale full seal that survived a
-    // subset re-share (subset never re-seals) or an already-consumed share
-    // (confirmed publish drains SWM + clears the marker, round 9 step 3) would
-    // otherwise be publishable via the merkle-still-matches path under the KA
-    // name. Placed AFTER the seal-read (so a genuinely-unfinalized asset still
-    // throws "is not finalized" — preserving that precondition) and BEFORE the
-    // create-vs-update routing + SWM gather, so it covers BOTH the MINT and UPDATE
-    // paths. A legitimate full-share publish has the marker (assertionPromote set
-    // it on the full share); an UPDATE re-publish re-sets it via the required
-    // re-promote (a confirmed publish drained SWM, so a re-publish MUST re-share).
-    if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
-      throw Object.assign(
-        new Error(
-          `Cannot publish "${name}" in context graph "${contextGraphId}": it is not a complete full share ` +
-            `resident in Shared Memory (a subset/partial share, an explicitly-unsealed share, or an ` +
-            `already-consumed/published share). Seal and share the full asset (entities:"all") before publishing.`,
-        ),
-        { code: 'PUBLISH_NOT_FULL_SHARE' },
-      );
-    }
-    // Current graph-scoped shares retain the operation identity needed to
-    // fence an exact late SWM replay. Older finalized fixtures and migrated
-    // stores may not have a workspace head, so confirmation remains valid
-    // without installing an over-broad tombstone for those records.
-    const rfc64WorkspaceHead = await resolveKnowledgeAssetWorkspaceHead({
-      store: this.store,
-      graphManager: new GraphManager(this.store),
-      contextGraphId,
-      kaUal: graphScope.ual,
-      subGraphName: opts?.subGraphName,
-    });
-    // Merge note (PR #1107 ← main): #1097's "auto-promote a sealed-but-unstaged
-    // assertion before publish" was dropped here. main reworked the memory
-    // model so that publishing a finalized-but-unshared assertion is an
-    // explicit caller precondition — `publishFromFinalizedAssertion` surfaces
-    // the actionable "No quads in shared memory" error and the vm/publish route
-    // maps it to a clean 409 VM_PUBLISH_PRECONDITION (see
-    // packages/cli/test/knowledge-assets-route.test.ts). Auto-promoting here
-    // defeats that precondition (it stages the data, so the publish proceeds
-    // instead of returning 409), so main's explicit share→publish contract
-    // supersedes the PR's auto-promote approach to the same issue.
-
-    // ── OT-RFC-43 A2 (decision 3) — CREATE-VS-UPDATE ROUTING ──
-    //
-    // BEFORE minting, read the per-layer VM pointer + the stamped kaId off the
-    // LIFECYCLE URN. If dkg:vmCurrentAssertion is SET this name has already
-    // been confirmed on-chain → this is an UPDATE (publish the SAME name
-    // twice), so call the update path with the existing kaId instead of a
-    // fresh mint. Otherwise → MINT, reusing the finalize-stamped kaId.
-    //
-    // This is the LOCAL named-lifecycle path only; the gossip-receiver
-    // "Complexity C" path (resolveUalByBatchId / update-handler.ts) is
-    // untouched.
-    const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
-    const xsdInt = 'http://www.w3.org/2001/XMLSchema#integer';
-    const pointerRes = await this.store.query(
-      `SELECT ?vm ?kaNum WHERE { GRAPH <${metaGraph}> {
-        OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
-        OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
-      } } LIMIT 1`,
-      { source: 'agent.vmPublish.lifecyclePointer' },
-    );
-    const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
-    const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
-    const vmCurrent = stripLit(pointerRow?.['vm']);
-    const operationPlan = planKnowledgeAssetVmPublication({
-      vmCurrentAssertion: vmCurrent,
-      pricingPolicy: opts?.pricingPolicy,
-    });
-    operations.assertPlan(operationPlan);
-    const stampedNumberStr = stripLit(pointerRow?.['kaNum']);
-
-    if (
-      stampedNumberStr !== undefined
-      && stampedNumberStr !== ''
-      && BigInt(stampedNumberStr) !== BigInt(graphScope.kaNumber)
-    ) {
-      throw new Error(
-        `Lifecycle kaId number ${stampedNumberStr} does not match graph-scoped UAL number ${graphScope.kaNumber}`,
-      );
-    }
-    const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
-    const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
-    const sharedMemoryScope: SharedMemoryGraphScope = {
-      kind: 'named-lifecycle',
-      identity: {
-        agentAddress: graphScope.agentAddress,
-        kaNumber: BigInt(graphScope.kaNumber),
-      },
-    };
-    const scopedSwmQuads = await this._loadSelectedSWMQuads(
-      contextGraphId,
-      'all',
-      opts?.subGraphName,
-      sharedMemoryScope,
-    );
-    const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
-    const scopedPrivateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
-      contextGraphId,
-      graphScope,
-      opts?.subGraphName,
-    );
-    if (scopedSwmQuads.length === 0 && scopedPrivateQuads.length === 0) {
-      throw new Error(
-        `No quads in shared memory for context graph ${contextGraphId} matching graph-scoped ` +
-          `KA ${graphScope.ual} (neither public nor private content is present)`,
-      );
-    }
-    const canonicalParts = await skolemizeKnowledgeAssetParts(
-      scopedSwmQuads,
-      scopedPrivateQuads,
-      { allowCanonicalSkolemTerms: true },
-    );
-    const canonicalSwmQuads = canonicalParts.publicQuads;
-    const canonicalPrivateQuads = canonicalParts.privateQuads;
-    if (canonicalSwmQuads.length !== seal.publicTripleCount) {
-      throw new Error(
-        `Graph-scoped SWM triple count mismatch for ${graphScope.ual}: ` +
-          `seal=${seal.publicTripleCount}, store=${canonicalSwmQuads.length}`,
-      );
-    }
-    if (canonicalPrivateQuads.length !== seal.privateTripleCount) {
-      throw new Error(
-        `Graph-scoped private triple count mismatch for ${graphScope.ual}: ` +
-          `seal=${seal.privateTripleCount}, store=${canonicalPrivateQuads.length}`,
-      );
-    }
-    const privateMerkleRoot = computePrivateRoot(canonicalPrivateQuads);
-    const privateRootMatches = seal.privateMerkleRoot === undefined
-      ? privateMerkleRoot === undefined
-      : privateMerkleRoot !== undefined
-        && seal.privateMerkleRoot.length === privateMerkleRoot.length
-        && seal.privateMerkleRoot.every((byte, index) => byte === privateMerkleRoot[index]);
-    if (!privateRootMatches) {
-      throw new Error(
-        `Graph-scoped private Merkle root mismatch for ${graphScope.ual}: ` +
-          `seal=${seal.privateMerkleRoot ? ethers.hexlify(seal.privateMerkleRoot) : '(none)'}, ` +
-          `store=${privateMerkleRoot ? ethers.hexlify(privateMerkleRoot) : '(none)'}`,
-      );
-    }
-    const swmMerkleRoot = computeFlatKCRoot(
-      canonicalSwmQuads,
-      privateMerkleRoot ? [privateMerkleRoot] : [],
-    );
-    if (
-      swmMerkleRoot.length !== seal.merkleRoot.length
-      || !swmMerkleRoot.every((byte, index) => byte === seal.merkleRoot[index])
-    ) {
-      throw new Error(
-        `Graph-scoped SWM Merkle root mismatch for ${graphScope.ual}: ` +
-          `seal=${ethers.hexlify(seal.merkleRoot)}, store=${ethers.hexlify(swmMerkleRoot)}`,
-      );
-    }
-
-    let result: PublishResult;
-    if (operationPlan.kind === 'update') {
-      // ── UPDATE PATH ──
-      // The name already has a confirmed VM version. Reuse its kaId and call
-      // the on-chain update primitive. The publisher's update path recomputes
-      // the merkle from the SWM-selected quads and requires a
-      // precomputedUpdateAttestation over (kaId, newMerkleRoot, author); we
-      // mint it here from the seal's merkle using the seal's author signer.
-      const updateQuads = canonicalSwmQuads;
-      const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
-        packedKaId,
-        seal,
-        publisher,
-      );
-      result = await this.update(
-        packedKaId,
-        contextGraphId,
-        updateQuads.map((q) => ({ ...q, graph: '' })),
-        canonicalPrivateQuads.map((q) => ({ ...q, graph: '' })),
-        {
-          operationCtx: opts?.operationCtx,
-          onPhase: opts?.onPhase,
-          precomputedUpdateAttestation: updateAttestation,
-          publisherOverride: publisher,
-          subGraphName: opts?.subGraphName,
-          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-          kaUal: graphScope.ual,
-          assertionVersion: graphScope.assertionVersion,
-          publicTripleCount: seal.publicTripleCount,
-          ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
-          privateTripleCount: seal.privateTripleCount,
-          [INTERNAL_ROOTLESS_UPDATE_ORIGIN]: true,
-        },
-      );
-
-      // #1099: the update primitive (`publisher.update`) has no SWM-drain of
-      // its own — only the mint path's `publishFromSharedMemory` cleans SWM
-      // after chain confirmation. Without this, every edit-loop update left
-      // the re-shared SWM copy in place forever (locally AND on every replica
-      // that mirrored the share), so SWM and VM permanently disagreed.
-      if (result.status === 'confirmed') {
-        try {
-          await publisher.clearPublishedKnowledgeAssetSwm(
-            contextGraphId,
-            sharedMemoryScope,
-            opts?.subGraphName,
-            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            graphScope.ual,
-            graphScope.assertionVersion,
-          );
-          await retireLegacySwmAfterConfirmedLocalPublish(this, this.log,
-            contextGraphId,
-            graphScope.ual,
-            graphScope.assertionVersion,
-            opts?.subGraphName,
-            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          );
-        } catch (err) {
-          this.log.warn(
-            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            `Failed to clear SWM after confirmed update of <${lifecycleUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-      }
-
-    } else {
-      // ── MINT PATH ──
-      // Round 4 review §9 — scope the SWM CONSTRUCT to the seal's
-      // `rootEntities` instead of `'all'`. The seal's rootEntities were
-      // captured at finalize time so this selection deterministically yields
-      // the post-promote SWM slice the seal commits to.
-      //
-      // OT-RFC-43 A2 (decision 1) — REUSE the finalize-stamped kaId. We thread
-      // `reservedKaId: packedKaId` down so ensureReservedKaId short-circuits
-      // (no second allocation). When no allocator stamped one (mock/no-chain),
-      // packedKaId is undefined and the publisher keeps its existing behavior.
-      // §F2 / OT-RFC-43 A2 — recover the packed id the seal's signature
-      // committed to: prefer the persisted seal.reservedKaId, else the
-      // lifecycle-URN kaId re-packed above. Both are undefined only for a
-      // legacy seal that predates the §F2 binding AND was never stamped with a
-      // lifecycle kaId.
-      // #1116 (round 5) — no-data preflight BEFORE the inner publisher's
-      // CG-not-registered guard. `publishFromSharedMemory` checks registration
-      // (throws CG_NOT_REGISTERED) BEFORE its own no-quads check, so an
-      // UNregistered CG + valid seal + EMPTY sealed SWM would surface
-      // CG_NOT_REGISTERED first — the /vm/publish route then auto-registers
-      // (burning mint gas) and only the retry hits the no-quads 409. The legacy
-      // memory.ts publish path had a SWM preflight to avoid exactly this; mirror
-      // it here so the no-data precondition fires for ALL callers regardless of
-      // registration. Match the publisher's wording so the route's existing 409
-      // mapping (/No quads in shared memory/) still applies.
-      result = await operations.mint(
-        contextGraphId,
-        'all',
-        {
-          operationCtx: opts?.operationCtx,
-          onPhase: opts?.onPhase,
-          subGraphName: opts?.subGraphName,
-          publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
-          publishEpochs: opts?.publishEpochs,
-          pricingPolicy: operationPlan.pricingPolicy,
-          reservedKaId: recoveredReservedKaId,
-          sharedMemoryScope,
-          contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-          kaUal: graphScope.ual,
-          assertionVersion: graphScope.assertionVersion,
-          publicTripleCount: seal.publicTripleCount,
-          ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
-          privateTripleCount: seal.privateTripleCount,
-          // Wired through to the inner publisher.publish() via
-          // publishFromSharedMemory's `precomputedAttestation` option.
-          // Skips the publisher's signing entirely.
-          precomputedAttestation: {
-            expectedMerkleRoot: seal.merkleRoot,
-            authorAddress: seal.authorAddress,
-            signature: { r: seal.authorAttestationR, vs: seal.authorAttestationVS },
-            schemeVersion: seal.authorSchemeVersion,
-            // §F2 — the exact packed id the seal's signature committed to. The
-            // throw above guarantees this is defined whenever the publish is
-            // going on-chain; the `?? 0n` only survives for mock/no-chain runs
-            // where it is never submitted.
-            reservedKaId: recoveredReservedKaId ?? 0n,
-          },
-          publisherOverride: publisher,
-        },
-      );
-
-      // On confirmed mint, stamp VM pointer + publish receipt on _meta.
-      if (result.status === 'confirmed' && result.onChainResult) {
-        try {
-          const receiptQuads = buildAssertionPublishReceiptQuads({
-            assertionUri,
-            metaGraph,
-            txHash: result.onChainResult.txHash ?? '',
-            blockNumber: BigInt(result.onChainResult.blockNumber ?? 0),
-            kaId: result.onChainResult.batchId ?? 0n,
-          });
-          await this.store.insert(receiptQuads);
-        } catch (err) {
-          this.log.warn(
-            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-            `Failed to write publish receipt for <${assertionUri}>: ` +
-              (err instanceof Error ? err.message : String(err)),
-          );
-        }
-      }
-    }
-
-    if (result.status === 'confirmed' && operationPlan.kind !== 'update') {
-      // Best-effort like the receipt: the finalization below writes the checkpoint again before it
-      // completes, so a failed write here cannot strand a confirmed publish with its share consumed.
-      try {
-        await beginNamedPublishFinalization(this.store, {
-          assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId,
-        }, () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
-      } catch (err) {
-        this.log.warn(
-          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          `Failed to write publish checkpoint for <${assertionUri}>: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      }
-    }
-
-    // Exact scope owns published-root cleanup. A caller's explicit request to
-    // clear every remaining share is a separate family-wide destructive action
-    // that runs only after a confirmed publish/update.
-    if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true) {
-      await publisher.clearRemainingSharedMemory(
-        contextGraphId,
-        opts?.subGraphName,
-        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-      );
-    }
-
-    // All publication kinds share the lifecycle mutation; updates then record their provenance.
-    if (result.status === 'confirmed' || result.status === 'tentative') {
-      try {
-        const vmKaId = result.onChainResult ? packedKaId ?? result.onChainResult.kaId ?? result.kaId : undefined;
-        await this.publishedNamedKaVmLifecycleWriter({
-          contextGraphId, agentAddress, name, subGraphName: opts?.subGraphName,
-          publishedUal: result.ual, merkleRoot: newMerkleHexBare,
-          ...(vmKaId === undefined || vmKaId === null ? {} : { packedKaId: BigInt(vmKaId) }),
-        });
-        // Update provenance follows the common lifecycle write; WM converges to VM.
-        if (operationPlan.kind === 'update') {
-          try {
-            const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
-              ? operationPlan.vmCurrentAssertion.slice(2)
-              : operationPlan.vmCurrentAssertion;
-            const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
-            // Record the
-            // revision chain via prov:wasRevisionOf <prior>. RFC ka-metadata-trim
-            // Phase 2: WM converges back to VM after the update mint, so the
-            // divergence-only stamp DELETES any stale WM row instead of
-            // duplicating the new merkle (readers COALESCE missing wm → vm).
-            await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
-            await this.store.insert([
-              { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
-              { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
-            ]);
-          } catch (err) {
-            this.log.warn(
-              opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-              `Failed to stamp update provenance for <${lifecycleUri}>: ` +
-                (err instanceof Error ? err.message : String(err)),
-            );
-          }
-        }
-      } catch (err) {
-        this.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          `Failed to stamp VM lifecycle marker for <${lifecycleUri}>: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-
-    // #1116 (round 9, reviewer 🔴 #2) — a CONFIRMED publish CONSUMES the SWM full
-    // share: the mint path (publishFromSharedMemory) and the update path both
-    // DRAIN the published roots from SWM after on-chain confirmation. The
-    // swmShareComplete marker asserts "a complete full share is resident in SWM",
-    // which no longer holds once SWM is drained. Clear it (best-effort, after the
-    // chain commit) so a post-publish finalize(layer:"swm") can't pass the gate
-    // against an empty SWM, and the next publish requires a fresh full share (which
-    // re-sets the marker via assertionPromote). Covers BOTH MINT and UPDATE.
-    if (result.status === 'confirmed') {
-      try {
-        await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, opts?.heldLifecycle);
-      } catch (err) {
-        this.log.warn(
-          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
-          `Failed to clear swmShareComplete after confirmed publish of <${lifecycleUri}>: ` +
-            (err instanceof Error ? err.message : String(err)),
-        );
-      }
-    }
-
-    if (result.status === 'confirmed') {
-      const finalization = {
-        contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
-        shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri,
-      };
-      // Updates have no mint-recovery command: keep their existing observer
-      // and never create a mint-only checkpoint for an updated version.
-      if (operationPlan.kind === 'update') {
-        await this.afterConfirmedGraphScopedVmPublishV1({ ...finalization, status: result.status,
-          ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
-      } else await operations.finishMint(finalization, opts?.operationCtx ?? createOperationContext('publishFromSWM'));
-    }
-
-    return { ...result, assertionUri, seal };
-  }
 
   async completeNamedPublishFinalization(this: DKGAgent, input: {
     contextGraphId: string; subGraphName?: string; assertionCoordinate: string;
@@ -6493,161 +6037,17 @@ export class PublishMethods extends DKGAgentBase {
    */
   async publishFromSharedMemory(this: DKGAgent, contextGraphId: string,
     selection: 'all' | { rootEntities: string[] }, options?: AgentSharedMemoryPublishOptions): Promise<PublishResult> {
-    return this.runSharedMemoryPublication(contextGraphId, selection, options,
+    return runSharedMemoryPublication.call(this, contextGraphId, selection, options,
       context => this.publishPreparedSharedMemory(contextGraphId, selection, options, context));
   }
 
-  async recordMintFromSharedMemory(this: DKGAgent, contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] }, request: MintAdoptionRequest,
-    options?: AgentSharedMemoryPublishOptions): Promise<PublishResult> {
-    return this.runSharedMemoryPublication(contextGraphId, selection, options, async ({ ctx, ctxGraphIdStr, onChainId }) => {
-      const curated = await resolvePublishTargetCuration(this, this.log, ctx,
-        { contextGraphId, explicitPolicyTargetContextGraphId: ctxGraphIdStr, logPrefix: 'mint-recording' });
-      const trustedNonManifestCatalogTriples = resolveCuratedV2CatalogCapability({ contextGraphId,
-        graphScoped: true, onChainContextGraphId: onChainId, curated });
-      return (options?.publisherOverride ?? this.publisher).recordExistingMintFromSharedMemory(contextGraphId, selection, request, {
-        ...options, operationCtx: ctx, onChainContextGraphId: onChainId, publishContextGraphId: ctxGraphIdStr,
-        publisherPeerId: this.peerId, trustedNonManifestCatalogTriples,
-      });
-    });
-  }
+
 
   /** Both receipt sources converge on the same retirement, gossip and metrics completion. */
-  async runSharedMemoryPublication(this: DKGAgent, contextGraphId: string,
-    selection: 'all' | { rootEntities: string[] }, options: AgentSharedMemoryPublishOptions | undefined,
-    acquire: (context: SharedMemoryPublicationContext) => Promise<PublishResult>): Promise<PublishResult> {
-   return withSpan('agent.publish_from_swm', async (span) => {
-    const chainId = typeof this.chain?.chainId === 'string' && this.chain.chainId !== 'none' ? this.chain.chainId : undefined;
-    const publishStartedAt = Date.now();
-    // try/catch so a throw before the success metric is still counted as an
-    // error outcome (see the direct-publish path for the rationale).
-    try {
-    span.setAttributes({
-      'dkg.context_graph_id': contextGraphId,
-      'dkg.selection': selection === 'all' ? 'all' : 'roots',
-      ...(chainId ? { 'dkg.chain_id': chainId } : {}),
-    });
-    const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
-    // A publish names the Knowledge Asset's own graph. Root-entity Knowledge
-    // Assets are read-only: peers finalize nothing else, and a Core keeps no
-    // copy of such a publish that it could promote.
-    if (options?.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
-      const scopeVersion = options?.contentScopeVersion;
-      if (scopeVersion === undefined || scopeVersion === 0 || scopeVersion === 1) {
-        throw new LegacyKnowledgeAssetReadOnlyError();
-      }
-      throw new Error(`Unsupported KA content scope version ${scopeVersion}`);
-    }
-    const effectiveSubCG = options?.subContextGraphId ?? options?.contextGraphId;
-    // `ctxGraphIdStr` doubles as `publishContextGraphId` for REMAP-flow
-    // publishes — the publisher uses its presence as a signal to DELETE the
-    // original copy from the default data graph. Keep it empty for non-REMAP
-    // publishes so we don't accidentally trigger the delete.
-    const ctxGraphIdStr = effectiveSubCG != null ? String(effectiveSubCG) : undefined;
 
-    const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
-
-    const result = await acquire({ ctx, ctxGraphIdStr, onChainId });
-
-    if (
-      result.status === 'confirmed'
-      && options?.kaUal !== undefined
-      && options.assertionVersion !== undefined
-    ) {
-      await retireLegacySwmAfterConfirmedLocalPublish(this, this.log,
-        contextGraphId,
-        options.kaUal,
-        String(options.assertionVersion),
-        options.subGraphName,
-        ctx,
-      );
-    }
-
-    span.setAttribute('dkg.publish_status', result.status);
-    if (result.status === 'failed') {
-      span.setStatus({ code: SpanStatusCode.ERROR });
-      span.addEvent('publish_failed', { error: String(result.contextGraphError ?? '') });
-    }
-
-    if (result.status === 'confirmed' && result.onChainResult) {
-      const rootEntities = result.kaManifest.map(ka => ka.rootEntity);
-
-      // Always carry the resolved on-chain CG id in the finalization gossip
-      // so receiving cores promote SWM into the per-cgId `_meta` namespace
-      // (`<cgName>/context/<cgId>/_meta`) that the RS prover reads from.
-      // Without this the prover 404'd with `KCNotFoundError` on every
-      // freshly-published KC even though the SWM payload had been
-      // replicated — see scripts/devnet-test-rfc39-comprehensive.sh
-      // Scenario A. We pass the *publisher-resolved* `onChainId` (which
-      // includes both explicit REMAP targets and the auto-lookup fallback)
-      // rather than the REMAP-only `ctxGraphIdStr`.
-      const broadcastCgId = onChainId != null ? String(onChainId) : undefined;
-      // PR #779 / #774 followup: tell receivers whether the publisher
-      // kept a root-graph copy of the canonical quads. Same-graph
-      // publishes (no explicit `subContextGraphId` / `publishContextGraphId`)
-      // dual-write to the root `<cg>` graph and the per-on-chain-id
-      // partition `<cg>/context/<ctxGraphId>` so label-scoped queries
-      // resolve. Explicit-`subContextGraphId` / remap publishes delete
-      // the root copy on purpose (`dkg-publisher.ts` ~line 1393), so
-      // receivers MUST NOT dual-write either — otherwise a remap-style
-      // KC would re-appear under the source CG's label on every replica.
-      // `ctxGraphIdStr` is the publisher-side `publishContextGraphId`
-      // (set on REMAP/explicit-subCG calls, undefined otherwise) — the
-      // exact same signal the publisher uses to gate its own root delete.
-      const keepRootCopyOnLabel = !ctxGraphIdStr;
-      const msg: FinalizationMessageMsg = {
-        ual: result.ual,
-        contextGraphId: contextGraphId,
-        kcMerkleRoot: result.merkleRoot,
-        txHash: result.onChainResult.txHash ?? '',
-        blockNumber: result.onChainResult.blockNumber ?? 0,
-        // GH#842: thread the real `(block, txIndex)` so receivers stamp the
-        // exact same materialised version as the local publish promotion —
-        // otherwise a same-block update vs publish would tie on the wire
-        // and the stale publish-promotion could clobber the update.
-        txIndex: result.onChainResult.txIndex ?? 0,
-        batchId: result.onChainResult.batchId ?? 0n,
-        startKAId: result.onChainResult.startKAId ?? 0n,
-        endKAId: result.onChainResult.endKAId ?? 0n,
-        publisherAddress: result.onChainResult.publisherAddress ?? '',
-        rootEntities,
-        timestampMs: Date.now(),
-        operationId: ctx.operationId,
-        targetContextGraphId: result.contextGraphError ? undefined : broadcastCgId,
-        subGraphName: options?.subGraphName,
-        keepRootCopyOnLabel,
-        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
-        assertionVersion: String(options.assertionVersion),
-        publicTripleCount: options.publicTripleCount ?? 0,
-        ...(options.privateMerkleRoot
-          ? { privateMerkleRoot: options.privateMerkleRoot }
-          : {}),
-        privateTripleCount: options.privateTripleCount ?? 0,
-        accessPolicy: result.accessPolicy ?? 'ownerOnly',
-        allowedPeers: result.allowedPeers ?? [],
-      };
-
-      const topic = contextGraphFinalizationTopic(contextGraphId);
-      try {
-        await this.gossip.publish(topic, encodeFinalizationMessage(msg));
-        this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${broadcastCgId ? ` (contextGraph=${broadcastCgId})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting targetContextGraphId)' : ''}`);
-      } catch {
-        this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
-      }
-    }
-
-    recordPublishOutcome(result.status, 'swm', publishStartedAt, chainId);
-
-    return result;
-    } catch (err) {
-      recordPublishOutcome('error', 'swm', publishStartedAt, chainId);
-      throw err;
-    }
-   });
-  }
 
   /** Live publication alone prepares signing, ACK and encryption capabilities. */
-  async publishPreparedSharedMemory(this: DKGAgent, contextGraphId: string,
+  private async publishPreparedSharedMemory(this: DKGAgent, contextGraphId: string,
     selection: 'all' | { rootEntities: string[] }, options: AgentSharedMemoryPublishOptions | undefined,
     { ctx, ctxGraphIdStr, onChainId }: SharedMemoryPublicationContext): Promise<PublishResult> {
     const v10ACKProvider = this.createV10ACKProvider(contextGraphId);
@@ -6879,4 +6279,613 @@ export class PublishMethods extends DKGAgentBase {
     return identityId;
   }
 
+}
+
+// Implementation-only publication stages; absent from the exported DKGAgent surface.
+async function runFinalizedAssertionPublication(this: DKGAgent, contextGraphId: string, name: string,
+  opts: FinalizedAssertionPublishOptions | undefined,
+  operations: FinalizedAssertionPublicationOperations,
+): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+  const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
+  const publisher = opts?.publisherOverride ?? this.publisher;
+  const assertionUri = contextGraphAssertionUri(
+    contextGraphId,
+    agentAddress,
+    name,
+    opts?.subGraphName,
+  );
+  const metaGraph = contextGraphMetaUri(contextGraphId);
+
+  if (operations.reservation) {
+    if (!opts?.heldLifecycle) throw new Error('Prepared reservation requires its current lifecycle lease');
+    assertAssertionLifecycleWriteLease(opts.heldLifecycle, this.writeLocks,
+      assertionLifecycleWriteLockKey(contextGraphId, name, agentAddress, opts.subGraphName));
+    if (operations.reservation.assertionUri !== assertionUri || operations.reservation.metaGraph !== metaGraph)
+      throw new Error('Prepared reservation belongs to a different assertion');
+  }
+  const { seal, scope: graphScope, kaId: packedKaId } = operations.reservation
+    ?? await readFinalizedAssertionReservation(this.store,
+      { contextGraphId, name, agentAddress, subGraphName: opts?.subGraphName }, 'agent.vmPublish.seal');
+
+  // 2. Cross-check chain target — refuse to publish a sig signed
+  //    against a different deployment than this daemon currently
+  //    points at. This is the cross-deployment safety the EIP-712
+  //    domain is buying us; surface as an early 4xx-equivalent
+  //    rather than a tx revert.
+  const chainTargetMismatch = await sealChainTargetMismatch(this.chain, seal);
+  if (chainTargetMismatch) throw new Error(`publishFromFinalizedAssertion: ${chainTargetMismatch}`);
+
+  // #1116 (round 9, reviewer 🔴 #1/#2) — MARKER GATE. A valid seal is no longer
+  // SUFFICIENT to publish: it must be backed by a LIVE complete full share
+  // resident in SWM (the swmShareComplete marker). This closes the whole
+  // seal-staleness class at the consumer: a stale full seal that survived a
+  // subset re-share (subset never re-seals) or an already-consumed share
+  // (confirmed publish drains SWM + clears the marker, round 9 step 3) would
+  // otherwise be publishable via the merkle-still-matches path under the KA
+  // name. Placed AFTER the seal-read (so a genuinely-unfinalized asset still
+  // throws "is not finalized" — preserving that precondition) and BEFORE the
+  // create-vs-update routing + SWM gather, so it covers BOTH the MINT and UPDATE
+  // paths. A legitimate full-share publish has the marker (assertionPromote set
+  // it on the full share); an UPDATE re-publish re-sets it via the required
+  // re-promote (a confirmed publish drained SWM, so a re-publish MUST re-share).
+  if (!(await publisher.hasSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName))) {
+    throw Object.assign(
+      new Error(
+        `Cannot publish "${name}" in context graph "${contextGraphId}": it is not a complete full share ` +
+          `resident in Shared Memory (a subset/partial share, an explicitly-unsealed share, or an ` +
+          `already-consumed/published share). Seal and share the full asset (entities:"all") before publishing.`,
+      ),
+      { code: 'PUBLISH_NOT_FULL_SHARE' },
+    );
+  }
+  // Current graph-scoped shares retain the operation identity needed to
+  // fence an exact late SWM replay. Older finalized fixtures and migrated
+  // stores may not have a workspace head, so confirmation remains valid
+  // without installing an over-broad tombstone for those records.
+  const rfc64WorkspaceHead = await resolveKnowledgeAssetWorkspaceHead({
+    store: this.store,
+    graphManager: new GraphManager(this.store),
+    contextGraphId,
+    kaUal: graphScope.ual,
+    subGraphName: opts?.subGraphName,
+  });
+  // Merge note (PR #1107 ← main): #1097's "auto-promote a sealed-but-unstaged
+  // assertion before publish" was dropped here. main reworked the memory
+  // model so that publishing a finalized-but-unshared assertion is an
+  // explicit caller precondition — `publishFromFinalizedAssertion` surfaces
+  // the actionable "No quads in shared memory" error and the vm/publish route
+  // maps it to a clean 409 VM_PUBLISH_PRECONDITION (see
+  // packages/cli/test/knowledge-assets-route.test.ts). Auto-promoting here
+  // defeats that precondition (it stages the data, so the publish proceeds
+  // instead of returning 409), so main's explicit share→publish contract
+  // supersedes the PR's auto-promote approach to the same issue.
+
+  // ── OT-RFC-43 A2 (decision 3) — CREATE-VS-UPDATE ROUTING ──
+  //
+  // BEFORE minting, read the per-layer VM pointer + the stamped kaId off the
+  // LIFECYCLE URN. If dkg:vmCurrentAssertion is SET this name has already
+  // been confirmed on-chain → this is an UPDATE (publish the SAME name
+  // twice), so call the update path with the existing kaId instead of a
+  // fresh mint. Otherwise → MINT, reusing the finalize-stamped kaId.
+  //
+  // This is the LOCAL named-lifecycle path only; the gossip-receiver
+  // "Complexity C" path (resolveUalByBatchId / update-handler.ts) is
+  // untouched.
+  const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, opts?.subGraphName);
+  const xsdInt = 'http://www.w3.org/2001/XMLSchema#integer';
+  const pointerRes = await this.store.query(
+    `SELECT ?vm ?kaNum WHERE { GRAPH <${metaGraph}> {
+      OPTIONAL { <${lifecycleUri}> <${VM_CURRENT_ASSERTION_PRED}> ?vm }
+      OPTIONAL { <${lifecycleUri}> <${KA_ID_PRED}> ?kaNum }
+    } } LIMIT 1`,
+    { source: 'agent.vmPublish.lifecyclePointer' },
+  );
+  const stripLit = (v?: string) => v?.replace(/^"/, '').replace(/"(\^\^<[^>]+>)?$/, '');
+  const pointerRow = pointerRes.type === 'bindings' ? pointerRes.bindings[0] : undefined;
+  const vmCurrent = stripLit(pointerRow?.['vm']);
+  const operationPlan = planKnowledgeAssetVmPublication({
+    vmCurrentAssertion: vmCurrent,
+    pricingPolicy: opts?.pricingPolicy,
+  });
+  operations.assertPlan(operationPlan);
+  const stampedNumberStr = stripLit(pointerRow?.['kaNum']);
+
+  if (
+    stampedNumberStr !== undefined
+    && stampedNumberStr !== ''
+    && BigInt(stampedNumberStr) !== BigInt(graphScope.kaNumber)
+  ) {
+    throw new Error(
+      `Lifecycle kaId number ${stampedNumberStr} does not match graph-scoped UAL number ${graphScope.kaNumber}`,
+    );
+  }
+  const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
+  const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
+  const sharedMemoryScope: SharedMemoryGraphScope = {
+    kind: 'named-lifecycle',
+    identity: {
+      agentAddress: graphScope.agentAddress,
+      kaNumber: BigInt(graphScope.kaNumber),
+    },
+  };
+  const scopedSwmQuads = await this._loadSelectedSWMQuads(
+    contextGraphId,
+    'all',
+    opts?.subGraphName,
+    sharedMemoryScope,
+  );
+  const privateStore = new PrivateContentStore(this.store, new GraphManager(this.store));
+  const scopedPrivateQuads = await privateStore.getKnowledgeAssetPrivateTriples(
+    contextGraphId,
+    graphScope,
+    opts?.subGraphName,
+  );
+  if (scopedSwmQuads.length === 0 && scopedPrivateQuads.length === 0) {
+    throw new Error(
+      `No quads in shared memory for context graph ${contextGraphId} matching graph-scoped ` +
+        `KA ${graphScope.ual} (neither public nor private content is present)`,
+    );
+  }
+  const canonicalParts = await skolemizeKnowledgeAssetParts(
+    scopedSwmQuads,
+    scopedPrivateQuads,
+    { allowCanonicalSkolemTerms: true },
+  );
+  const canonicalSwmQuads = canonicalParts.publicQuads;
+  const canonicalPrivateQuads = canonicalParts.privateQuads;
+  if (canonicalSwmQuads.length !== seal.publicTripleCount) {
+    throw new Error(
+      `Graph-scoped SWM triple count mismatch for ${graphScope.ual}: ` +
+        `seal=${seal.publicTripleCount}, store=${canonicalSwmQuads.length}`,
+    );
+  }
+  if (canonicalPrivateQuads.length !== seal.privateTripleCount) {
+    throw new Error(
+      `Graph-scoped private triple count mismatch for ${graphScope.ual}: ` +
+        `seal=${seal.privateTripleCount}, store=${canonicalPrivateQuads.length}`,
+    );
+  }
+  const privateMerkleRoot = computePrivateRoot(canonicalPrivateQuads);
+  const privateRootMatches = seal.privateMerkleRoot === undefined
+    ? privateMerkleRoot === undefined
+    : privateMerkleRoot !== undefined
+      && seal.privateMerkleRoot.length === privateMerkleRoot.length
+      && seal.privateMerkleRoot.every((byte, index) => byte === privateMerkleRoot[index]);
+  if (!privateRootMatches) {
+    throw new Error(
+      `Graph-scoped private Merkle root mismatch for ${graphScope.ual}: ` +
+        `seal=${seal.privateMerkleRoot ? ethers.hexlify(seal.privateMerkleRoot) : '(none)'}, ` +
+        `store=${privateMerkleRoot ? ethers.hexlify(privateMerkleRoot) : '(none)'}`,
+    );
+  }
+  const swmMerkleRoot = computeFlatKCRoot(
+    canonicalSwmQuads,
+    privateMerkleRoot ? [privateMerkleRoot] : [],
+  );
+  if (
+    swmMerkleRoot.length !== seal.merkleRoot.length
+    || !swmMerkleRoot.every((byte, index) => byte === seal.merkleRoot[index])
+  ) {
+    throw new Error(
+      `Graph-scoped SWM Merkle root mismatch for ${graphScope.ual}: ` +
+        `seal=${ethers.hexlify(seal.merkleRoot)}, store=${ethers.hexlify(swmMerkleRoot)}`,
+    );
+  }
+
+  let result: PublishResult;
+  if (operationPlan.kind === 'update') {
+    // ── UPDATE PATH ──
+    // The name already has a confirmed VM version. Reuse its kaId and call
+    // the on-chain update primitive. The publisher's update path recomputes
+    // the merkle from the SWM-selected quads and requires a
+    // precomputedUpdateAttestation over (kaId, newMerkleRoot, author); we
+    // mint it here from the seal's merkle using the seal's author signer.
+    const updateQuads = canonicalSwmQuads;
+    const updateAttestation = await this._buildPrecomputedUpdateAttestationForSeal(
+      packedKaId,
+      seal,
+      publisher,
+    );
+    result = await this.update(
+      packedKaId,
+      contextGraphId,
+      updateQuads.map((q) => ({ ...q, graph: '' })),
+      canonicalPrivateQuads.map((q) => ({ ...q, graph: '' })),
+      {
+        operationCtx: opts?.operationCtx,
+        onPhase: opts?.onPhase,
+        precomputedUpdateAttestation: updateAttestation,
+        publisherOverride: publisher,
+        subGraphName: opts?.subGraphName,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: graphScope.ual,
+        assertionVersion: graphScope.assertionVersion,
+        publicTripleCount: seal.publicTripleCount,
+        ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+        privateTripleCount: seal.privateTripleCount,
+        [INTERNAL_ROOTLESS_UPDATE_ORIGIN]: true,
+      },
+    );
+
+    // #1099: the update primitive (`publisher.update`) has no SWM-drain of
+    // its own — only the mint path's `publishFromSharedMemory` cleans SWM
+    // after chain confirmation. Without this, every edit-loop update left
+    // the re-shared SWM copy in place forever (locally AND on every replica
+    // that mirrored the share), so SWM and VM permanently disagreed.
+    if (result.status === 'confirmed') {
+      try {
+        await publisher.clearPublishedKnowledgeAssetSwm(
+          contextGraphId,
+          sharedMemoryScope,
+          opts?.subGraphName,
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          graphScope.ual,
+          graphScope.assertionVersion,
+        );
+        await retireLegacySwmAfterConfirmedLocalPublish(this, this.log,
+          contextGraphId,
+          graphScope.ual,
+          graphScope.assertionVersion,
+          opts?.subGraphName,
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+        );
+      } catch (err) {
+        this.log.warn(
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          `Failed to clear SWM after confirmed update of <${lifecycleUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+
+  } else {
+    // ── MINT PATH ──
+    // Round 4 review §9 — scope the SWM CONSTRUCT to the seal's
+    // `rootEntities` instead of `'all'`. The seal's rootEntities were
+    // captured at finalize time so this selection deterministically yields
+    // the post-promote SWM slice the seal commits to.
+    //
+    // OT-RFC-43 A2 (decision 1) — REUSE the finalize-stamped kaId. We thread
+    // `reservedKaId: packedKaId` down so ensureReservedKaId short-circuits
+    // (no second allocation). When no allocator stamped one (mock/no-chain),
+    // packedKaId is undefined and the publisher keeps its existing behavior.
+    // §F2 / OT-RFC-43 A2 — recover the packed id the seal's signature
+    // committed to: prefer the persisted seal.reservedKaId, else the
+    // lifecycle-URN kaId re-packed above. Both are undefined only for a
+    // legacy seal that predates the §F2 binding AND was never stamped with a
+    // lifecycle kaId.
+    // #1116 (round 5) — no-data preflight BEFORE the inner publisher's
+    // CG-not-registered guard. `publishFromSharedMemory` checks registration
+    // (throws CG_NOT_REGISTERED) BEFORE its own no-quads check, so an
+    // UNregistered CG + valid seal + EMPTY sealed SWM would surface
+    // CG_NOT_REGISTERED first — the /vm/publish route then auto-registers
+    // (burning mint gas) and only the retry hits the no-quads 409. The legacy
+    // memory.ts publish path had a SWM preflight to avoid exactly this; mirror
+    // it here so the no-data precondition fires for ALL callers regardless of
+    // registration. Match the publisher's wording so the route's existing 409
+    // mapping (/No quads in shared memory/) still applies.
+    result = await operations.mint(
+      contextGraphId,
+      'all',
+      {
+        operationCtx: opts?.operationCtx,
+        onPhase: opts?.onPhase,
+        subGraphName: opts?.subGraphName,
+        publisherNodeIdentityIdOverride: opts?.publisherNodeIdentityIdOverride,
+        publishEpochs: opts?.publishEpochs,
+        pricingPolicy: operationPlan.pricingPolicy,
+        reservedKaId: recoveredReservedKaId,
+        sharedMemoryScope,
+        contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+        kaUal: graphScope.ual,
+        assertionVersion: graphScope.assertionVersion,
+        publicTripleCount: seal.publicTripleCount,
+        ...(privateMerkleRoot ? { privateMerkleRoot } : {}),
+        privateTripleCount: seal.privateTripleCount,
+        // Wired through to the inner publisher.publish() via
+        // publishFromSharedMemory's `precomputedAttestation` option.
+        // Skips the publisher's signing entirely.
+        precomputedAttestation: {
+          expectedMerkleRoot: seal.merkleRoot,
+          authorAddress: seal.authorAddress,
+          signature: { r: seal.authorAttestationR, vs: seal.authorAttestationVS },
+          schemeVersion: seal.authorSchemeVersion,
+          // §F2 — the exact packed id the seal's signature committed to. The
+          // throw above guarantees this is defined whenever the publish is
+          // going on-chain; the `?? 0n` only survives for mock/no-chain runs
+          // where it is never submitted.
+          reservedKaId: recoveredReservedKaId ?? 0n,
+        },
+        publisherOverride: publisher,
+      },
+    );
+
+    // On confirmed mint, stamp VM pointer + publish receipt on _meta.
+    if (result.status === 'confirmed' && result.onChainResult) {
+      try {
+        const receiptQuads = buildAssertionPublishReceiptQuads({
+          assertionUri,
+          metaGraph,
+          txHash: result.onChainResult.txHash ?? '',
+          blockNumber: BigInt(result.onChainResult.blockNumber ?? 0),
+          kaId: result.onChainResult.batchId ?? 0n,
+        });
+        await this.store.insert(receiptQuads);
+      } catch (err) {
+        this.log.warn(
+          opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+          `Failed to write publish receipt for <${assertionUri}>: ` +
+            (err instanceof Error ? err.message : String(err)),
+        );
+      }
+    }
+  }
+
+  if (result.status === 'confirmed' && operationPlan.kind !== 'update') {
+    // Best-effort like the receipt: the finalization below writes the checkpoint again before it
+    // completes, so a failed write here cannot strand a confirmed publish with its share consumed.
+    try {
+      await beginNamedPublishFinalization(this.store, {
+        assertionUri, seal, shareOperationId: rfc64WorkspaceHead?.shareOperationId,
+      }, () => this.resolveRfc64CatalogAuthoringLaneV1(contextGraphId, opts?.subGraphName) !== null);
+    } catch (err) {
+      this.log.warn(
+        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+        `Failed to write publish checkpoint for <${assertionUri}>: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
+
+  // Exact scope owns published-root cleanup. A caller's explicit request to
+  // clear every remaining share is a separate family-wide destructive action
+  // that runs only after a confirmed publish/update.
+  if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true) {
+    await publisher.clearRemainingSharedMemory(
+      contextGraphId,
+      opts?.subGraphName,
+      opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+    );
+  }
+
+  // All publication kinds share the lifecycle mutation; updates then record their provenance.
+  if (result.status === 'confirmed' || result.status === 'tentative') {
+    try {
+      const vmKaId = result.onChainResult ? packedKaId ?? result.onChainResult.kaId ?? result.kaId : undefined;
+      await this.publishedNamedKaVmLifecycleWriter({
+        contextGraphId, agentAddress, name, subGraphName: opts?.subGraphName,
+        publishedUal: result.ual, merkleRoot: newMerkleHexBare,
+        ...(vmKaId === undefined || vmKaId === null ? {} : { packedKaId: BigInt(vmKaId) }),
+      });
+      // Update provenance follows the common lifecycle write; WM converges to VM.
+      if (operationPlan.kind === 'update') {
+        try {
+          const priorBare = operationPlan.vmCurrentAssertion.startsWith('0x')
+            ? operationPlan.vmCurrentAssertion.slice(2)
+            : operationPlan.vmCurrentAssertion;
+          const priorUri = `${lifecycleUri}#assertion-${priorBare}`;
+          // Record the
+          // revision chain via prov:wasRevisionOf <prior>. RFC ka-metadata-trim
+          // Phase 2: WM converges back to VM after the update mint, so the
+          // divergence-only stamp DELETES any stale WM row instead of
+          // duplicating the new merkle (readers COALESCE missing wm → vm).
+          await this._stampPointerIfDivergedFromVm(lifecycleUri, WM_CURRENT_ASSERTION_PRED, newMerkleHexBare, metaGraph);
+          await this.store.insert([
+            { subject: lifecycleUri, predicate: 'http://www.w3.org/ns/prov#wasRevisionOf', object: priorUri, graph: metaGraph },
+            { subject: priorUri, predicate: VM_CURRENT_ASSERTION_PRED, object: `"${priorBare}"`, graph: metaGraph },
+          ]);
+        } catch (err) {
+          this.log.warn(
+            opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+            `Failed to stamp update provenance for <${lifecycleUri}>: ` +
+              (err instanceof Error ? err.message : String(err)),
+          );
+        }
+      }
+    } catch (err) {
+      this.log.warn(opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+        `Failed to stamp VM lifecycle marker for <${lifecycleUri}>: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  // #1116 (round 9, reviewer 🔴 #2) — a CONFIRMED publish CONSUMES the SWM full
+  // share: the mint path (publishFromSharedMemory) and the update path both
+  // DRAIN the published roots from SWM after on-chain confirmation. The
+  // swmShareComplete marker asserts "a complete full share is resident in SWM",
+  // which no longer holds once SWM is drained. Clear it (best-effort, after the
+  // chain commit) so a post-publish finalize(layer:"swm") can't pass the gate
+  // against an empty SWM, and the next publish requires a fresh full share (which
+  // re-sets the marker via assertionPromote). Covers BOTH MINT and UPDATE.
+  if (result.status === 'confirmed') {
+    try {
+      await publisher.clearSwmShareComplete(contextGraphId, name, agentAddress, opts?.subGraphName, opts?.heldLifecycle);
+    } catch (err) {
+      this.log.warn(
+        opts?.operationCtx ?? createOperationContext('publishFromSWM'),
+        `Failed to clear swmShareComplete after confirmed publish of <${lifecycleUri}>: ` +
+          (err instanceof Error ? err.message : String(err)),
+      );
+    }
+  }
+
+  if (result.status === 'confirmed') {
+    const finalization = {
+      contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
+      shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri,
+    };
+    // Updates have no mint-recovery command: keep their existing observer
+    // and never create a mint-only checkpoint for an updated version.
+    if (operationPlan.kind === 'update') {
+      await this.observeRfc64ConfirmedVmV1({ ...finalization,
+        ctx: opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish' });
+    } else await operations.finishMint(finalization, opts?.operationCtx ?? createOperationContext('publishFromSWM'));
+  }
+
+  return { ...result, assertionUri, seal };
+}
+
+export async function recordFinalizedAssertionMint(this: DKGAgent, contextGraphId: string, name: string,
+  receipt: MintAdoptionRequest, opts?: FinalizedAssertionPublishOptions, reservation?: FinalizedAssertionReservation,
+): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+  return runFinalizedAssertionPublication.call(this, contextGraphId, name, opts, {
+    reservation,
+    assertPlan(plan) {
+      if (plan.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
+        { code: KA_MINT_RECONCILE_REFUSED_CODE });
+    },
+    mint: (id, selection, options) => recordMintFromSharedMemory.call(this, id, selection, receipt, options),
+    finishMint: async input => {
+      if (await this.completeNamedPublishFinalization(input) === 'pending')
+        throw Object.assign(new Error('Named publish catalog finalization remains pending; retry to finish it'),
+          { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    },
+  });
+}
+
+async function runSharedMemoryPublication(this: DKGAgent, contextGraphId: string,
+  selection: 'all' | { rootEntities: string[] }, options: AgentSharedMemoryPublishOptions | undefined,
+  acquire: (context: SharedMemoryPublicationContext) => Promise<PublishResult>): Promise<PublishResult> {
+ return withSpan('agent.publish_from_swm', async (span) => {
+  const chainId = typeof this.chain?.chainId === 'string' && this.chain.chainId !== 'none' ? this.chain.chainId : undefined;
+  const publishStartedAt = Date.now();
+  // try/catch so a throw before the success metric is still counted as an
+  // error outcome (see the direct-publish path for the rationale).
+  try {
+  span.setAttributes({
+    'dkg.context_graph_id': contextGraphId,
+    'dkg.selection': selection === 'all' ? 'all' : 'roots',
+    ...(chainId ? { 'dkg.chain_id': chainId } : {}),
+  });
+  const ctx = options?.operationCtx ?? createOperationContext('publishFromSWM');
+  // A publish names the Knowledge Asset's own graph. Root-entity Knowledge
+  // Assets are read-only: peers finalize nothing else, and a Core keeps no
+  // copy of such a publish that it could promote.
+  if (options?.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    const scopeVersion = options?.contentScopeVersion;
+    if (scopeVersion === undefined || scopeVersion === 0 || scopeVersion === 1) {
+      throw new LegacyKnowledgeAssetReadOnlyError();
+    }
+    throw new Error(`Unsupported KA content scope version ${scopeVersion}`);
+  }
+  const effectiveSubCG = options?.subContextGraphId ?? options?.contextGraphId;
+  // `ctxGraphIdStr` doubles as `publishContextGraphId` for REMAP-flow
+  // publishes — the publisher uses its presence as a signal to DELETE the
+  // original copy from the default data graph. Keep it empty for non-REMAP
+  // publishes so we don't accidentally trigger the delete.
+  const ctxGraphIdStr = effectiveSubCG != null ? String(effectiveSubCG) : undefined;
+
+  const onChainId = ctxGraphIdStr ?? (await this.getContextGraphOnChainId(contextGraphId)) ?? undefined;
+
+  const result = await acquire({ ctx, ctxGraphIdStr, onChainId });
+
+  if (
+    result.status === 'confirmed'
+    && options?.kaUal !== undefined
+    && options.assertionVersion !== undefined
+  ) {
+    await retireLegacySwmAfterConfirmedLocalPublish(this, this.log,
+      contextGraphId,
+      options.kaUal,
+      String(options.assertionVersion),
+      options.subGraphName,
+      ctx,
+    );
+  }
+
+  span.setAttribute('dkg.publish_status', result.status);
+  if (result.status === 'failed') {
+    span.setStatus({ code: SpanStatusCode.ERROR });
+    span.addEvent('publish_failed', { error: String(result.contextGraphError ?? '') });
+  }
+
+  if (result.status === 'confirmed' && result.onChainResult) {
+    const rootEntities = result.kaManifest.map(ka => ka.rootEntity);
+
+    // Always carry the resolved on-chain CG id in the finalization gossip
+    // so receiving cores promote SWM into the per-cgId `_meta` namespace
+    // (`<cgName>/context/<cgId>/_meta`) that the RS prover reads from.
+    // Without this the prover 404'd with `KCNotFoundError` on every
+    // freshly-published KC even though the SWM payload had been
+    // replicated — see scripts/devnet-test-rfc39-comprehensive.sh
+    // Scenario A. We pass the *publisher-resolved* `onChainId` (which
+    // includes both explicit REMAP targets and the auto-lookup fallback)
+    // rather than the REMAP-only `ctxGraphIdStr`.
+    const broadcastCgId = onChainId != null ? String(onChainId) : undefined;
+    // PR #779 / #774 followup: tell receivers whether the publisher
+    // kept a root-graph copy of the canonical quads. Same-graph
+    // publishes (no explicit `subContextGraphId` / `publishContextGraphId`)
+    // dual-write to the root `<cg>` graph and the per-on-chain-id
+    // partition `<cg>/context/<ctxGraphId>` so label-scoped queries
+    // resolve. Explicit-`subContextGraphId` / remap publishes delete
+    // the root copy on purpose (`dkg-publisher.ts` ~line 1393), so
+    // receivers MUST NOT dual-write either — otherwise a remap-style
+    // KC would re-appear under the source CG's label on every replica.
+    // `ctxGraphIdStr` is the publisher-side `publishContextGraphId`
+    // (set on REMAP/explicit-subCG calls, undefined otherwise) — the
+    // exact same signal the publisher uses to gate its own root delete.
+    const keepRootCopyOnLabel = !ctxGraphIdStr;
+    const msg: FinalizationMessageMsg = {
+      ual: result.ual,
+      contextGraphId: contextGraphId,
+      kcMerkleRoot: result.merkleRoot,
+      txHash: result.onChainResult.txHash ?? '',
+      blockNumber: result.onChainResult.blockNumber ?? 0,
+      // GH#842: thread the real `(block, txIndex)` so receivers stamp the
+      // exact same materialised version as the local publish promotion —
+      // otherwise a same-block update vs publish would tie on the wire
+      // and the stale publish-promotion could clobber the update.
+      txIndex: result.onChainResult.txIndex ?? 0,
+      batchId: result.onChainResult.batchId ?? 0n,
+      startKAId: result.onChainResult.startKAId ?? 0n,
+      endKAId: result.onChainResult.endKAId ?? 0n,
+      publisherAddress: result.onChainResult.publisherAddress ?? '',
+      rootEntities,
+      timestampMs: Date.now(),
+      operationId: ctx.operationId,
+      targetContextGraphId: result.contextGraphError ? undefined : broadcastCgId,
+      subGraphName: options?.subGraphName,
+      keepRootCopyOnLabel,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: String(options.assertionVersion),
+      publicTripleCount: options.publicTripleCount ?? 0,
+      ...(options.privateMerkleRoot
+        ? { privateMerkleRoot: options.privateMerkleRoot }
+        : {}),
+      privateTripleCount: options.privateTripleCount ?? 0,
+      accessPolicy: result.accessPolicy ?? 'ownerOnly',
+      allowedPeers: result.allowedPeers ?? [],
+    };
+
+    const topic = contextGraphFinalizationTopic(contextGraphId);
+    try {
+      await this.gossip.publish(topic, encodeFinalizationMessage(msg));
+      this.log.info(ctx, `Broadcast finalization for ${result.ual} to ${topic}${broadcastCgId ? ` (contextGraph=${broadcastCgId})` : ''}${result.contextGraphError ? ' (ctx-graph registration failed, omitting targetContextGraphId)' : ''}`);
+    } catch {
+      this.log.warn(ctx, `No peers subscribed to ${topic} yet`);
+    }
+  }
+
+  recordPublishOutcome(result.status, 'swm', publishStartedAt, chainId);
+
+  return result;
+  } catch (err) {
+    recordPublishOutcome('error', 'swm', publishStartedAt, chainId);
+    throw err;
+  }
+ });
+}
+
+async function recordMintFromSharedMemory(this: DKGAgent, contextGraphId: string,
+  selection: 'all' | { rootEntities: string[] }, request: MintAdoptionRequest,
+  options?: AgentSharedMemoryPublishOptions): Promise<PublishResult> {
+  return runSharedMemoryPublication.call(this, contextGraphId, selection, options, async ({ ctx, ctxGraphIdStr, onChainId }) => {
+    const curated = await resolvePublishTargetCuration(this, this.log, ctx,
+      { contextGraphId, explicitPolicyTargetContextGraphId: ctxGraphIdStr, logPrefix: 'mint-recording' });
+    const trustedNonManifestCatalogTriples = resolveCuratedV2CatalogCapability({ contextGraphId,
+      graphScoped: true, onChainContextGraphId: onChainId, curated });
+    return (options?.publisherOverride ?? this.publisher).recordExistingMintFromSharedMemory(contextGraphId, selection, request, {
+      ...options, operationCtx: ctx, onChainContextGraphId: onChainId, publishContextGraphId: ctxGraphIdStr,
+      publisherPeerId: this.peerId, trustedNonManifestCatalogTriples,
+    });
+  });
 }

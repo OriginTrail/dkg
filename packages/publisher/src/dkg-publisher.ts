@@ -3216,6 +3216,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async recordConfirmedPublication(content: PreparedPublicationContent, outcome: MintOrAdoptOutcome, reservedKaId: bigint | undefined, effectiveAuthorAddress: string): Promise<string> {
+    const record = async (): Promise<string> => {
       const { payload, target, execution: options, lifecycle, ctx } = content;
       const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata,
         allSkolemizedQuads, manifestEntries, publisherPeerId: normalizedPublisherPeerId } = payload;
@@ -3424,6 +3425,13 @@ export class DKGPublisher implements Publisher {
       });
 
       return ual;
+    };
+    if (!outcome.adopted) return record();
+    const { graphPublish, contextGraphId, targetMetaGraphUri } = content.target;
+    if (!graphPublish) throw new Error('Adopted mint recording requires a graph-scoped reservation');
+    // The check and all VM/private/metadata writes share custody with updates and reconciliation.
+    return withMaterializationLock(targetMetaGraphUri ?? contextGraphMetaUri(contextGraphId),
+      graphPublish.scope.ual, record);
   }
 
   private async persistPublicationPrivateSlices(content: PreparedPublicationContent): Promise<void> {

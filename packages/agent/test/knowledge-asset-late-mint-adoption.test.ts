@@ -1,3 +1,4 @@
+import * as publicationStages from '../src/dkg-agent-publish.js';
 import { transferConfirmedVmCatalogV1 } from '../src/internal/confirmed-vm-catalog-observer.js';
 import { beginNamedPublishFinalization, finishNamedPublishFinalization, readNamedPublishFinalization } from '../src/named-publish-finalization.js';
 import { NETWORK_ID } from './support/rfc64-local-catalog-repair-fixture.js';
@@ -24,6 +25,7 @@ import {
   MemoryLayer,
   contextGraphCatalogUri,
   contextGraphFinalizationTopic,
+  decodeFinalizationMessage,
   contextGraphMetaUri,
 } from '@origintrail-official/dkg-core';
 import {
@@ -241,11 +243,13 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     expect(lookup).toHaveBeenCalledOnce();
   });
 
-  it('reconcile records the late mint without a publish wallet or chain write, and is idempotent', async () => {
-    const { agent, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter());
+  it.each([undefined, 'lots'])('reconcile records the late mint without a publish wallet or chain write, and gossips once (subgraph %s)', async subGraphName => {
+    const { agent, sealed, lostMint, history, createKnowledgeAssets } = await strandedAsset(new MockChainAdapter(), undefined, subGraphName);
+    const gossip = vi.spyOn(agent.gossip, 'publish');
+    const reconcile = { ...RECONCILE, subGraphName };
 
     const reads = vi.spyOn(agent.store, 'query');
-    const reconciled = await agent.reconcileKnowledgeAssetMint(RECONCILE);
+    const reconciled = await agent.reconcileKnowledgeAssetMint(reconcile);
     // One preflight snapshot and one locked revalidation; the recorder reuses the latter.
     expect(reads.mock.calls.filter(([, options]) => options?.source === 'agent.reconcileLateMint.seal')).toHaveLength(2);
     expect(reads.mock.calls.filter(([, options]) => options?.source === 'agent.vmPublish.seal')).toHaveLength(0);
@@ -254,10 +258,19 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
       status: 'adopted', ual: sealed.kaUal, kaId: RESERVED_KA_ID.toString(),
       txHash: lostMint.txHash, blockNumber: lostMint.blockNumber, tokenAmount: '5',
     });
+    const messages = () => gossip.mock.calls.filter(([topic]) => topic === contextGraphFinalizationTopic(CONTEXT_GRAPH));
+    expect(messages()).toHaveLength(1);
+    const message = decodeFinalizationMessage(messages()[0]![1]);
+    expect(message).toMatchObject({ ual: sealed.kaUal, contextGraphId: CONTEXT_GRAPH,
+      txHash: lostMint.txHash });
+    expect(String(message.blockNumber)).toBe(String(lostMint.blockNumber));
+    expect(ethers.hexlify(message.kcMerkleRoot)).toBe(ethers.hexlify(sealed.merkleRoot));
+    expect(message.subGraphName ?? '').toBe(subGraphName ?? '');
     expect(createKnowledgeAssets).not.toHaveBeenCalled();
     expect(await history()).toMatchObject({ status: 'vm-confirmed', publishedUal: sealed.kaUal });
-    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
+    await expect(agent.reconcileKnowledgeAssetMint(reconcile))
       .resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+    expect(messages()).toHaveLength(1);
   });
 
   it('reconcile completes after a run that recorded the mint but failed before the lifecycle stamp', async () => {
@@ -285,13 +298,17 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
   it('retries a consumed-share marker deletion before reporting the mint complete', async () => {
     const { agent, sealed, lostMint, createKnowledgeAssets, updateKnowledgeCollection } = await strandedAsset(new MockChainAdapter());
+    const gossip = vi.spyOn(agent.gossip, 'publish');
+    const finalizations = () => gossip.mock.calls.filter(([topic]) => topic === contextGraphFinalizationTopic(CONTEXT_GRAPH));
     const clear = vi.spyOn(agent.publisher, 'clearSwmShareComplete').mockRejectedValueOnce(new Error('one-shot marker deletion failure'));
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
     expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(true);
     expect(await readNamedPublishFinalization(agent.store, { assertionUri: ASSERTION, seal: sealed })).toEqual({ kind: 'complete' });
-    const record = vi.spyOn(agent, 'recordFinalizedAssertionMint');
+    expect(finalizations()).toHaveLength(1);
+    const record = vi.spyOn(publicationStages, 'recordFinalizedAssertionMint');
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted', txHash: lostMint.txHash });
     expect(await agent.publisher.hasSwmShareComplete(CONTEXT_GRAPH, NAME, AUTHOR)).toBe(false);
+    expect(finalizations()).toHaveLength(1);
     expect(clear).toHaveBeenCalledTimes(2); expect(record).not.toHaveBeenCalled();
     expect(createKnowledgeAssets).not.toHaveBeenCalled(); expect(updateKnowledgeCollection).not.toHaveBeenCalled();
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
@@ -576,7 +593,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
     // A new complete share of the published asset, as an edit cycle leaves it.
     await store.insert([{ subject: LIFECYCLE, predicate: SWM_SHARE_COMPLETE_PRED, object: '"true"', graph: META_GRAPH }]);
 
-    await expect(agent.recordFinalizedAssertionMint(CONTEXT_GRAPH, NAME, {}, { agentAddress: AUTHOR }))
+    await expect(publicationStages.recordFinalizedAssertionMint.call(agent, CONTEXT_GRAPH, NAME, {}, { agentAddress: AUTHOR }))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_REFUSED_CODE });
     expect(updateKnowledgeCollection).not.toHaveBeenCalled();
   });
@@ -778,7 +795,7 @@ describe('a named asset whose publish mined after the node stopped waiting', () 
 
   it('fails retryably when the record-only publish does not confirm', async () => {
     const { agent } = await strandedAsset(new MockChainAdapter());
-    vi.spyOn(agent, 'recordFinalizedAssertionMint').mockResolvedValueOnce({ status: 'tentative' } as never);
+    vi.spyOn(publicationStages, 'recordFinalizedAssertionMint').mockResolvedValueOnce({ status: 'tentative' } as never);
 
     await expect(agent.reconcileKnowledgeAssetMint(RECONCILE))
       .rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE, message: expect.stringMatching(/ended tentative/) });

@@ -1,3 +1,4 @@
+import * as adoptedRecord from '../src/adopted-mint-record.js';
 import { withAssertionLifecycleWriteLease, assertionLifecycleWriteLockKey } from '../src/store-write-locks.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -39,6 +40,9 @@ import {
   generateGraphKnowledgeAssetMetadata,
   generatedPrivateCatalogTripleKeys,
   mintOrAdoptKnowledgeAssets,
+  withMaterializationLock,
+  writeMaterializedVersion,
+  computeFlatKCRootV10,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
 } from '../src/index.js';
 import { prepareMintAdoption, adoptMintForRecording } from '../src/adopt-existing-mint.js';
@@ -572,4 +576,68 @@ it.each(['unresolved-graph', 'non-v10-adapter'] as const)('balances local public
     expect(phases.filter(([phase]) => phase === 'chain')).toEqual([['chain', 'start'], ['chain', 'end']]);
     expect((await store.listGraphs()).length).toBeGreaterThan(0);
   } finally { await store.close(); }
+});
+
+
+function newerMaterialization(f: Awaited<ReturnType<typeof strandedPublishFixture>>) {
+  const metaGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+  const quad = { ...LOT, object: '"Version two"', graph: f.vmGraph };
+  const root = computeFlatKCRootV10([{ ...quad, graph: '' }], []);
+  const metadata = generateGraphKnowledgeAssetMetadata({
+    ual: f.ual, contextGraphId: CONTEXT_GRAPH, merkleRoot: root,
+    publisherPeerId: 'chain-reconcile-v2', accessPolicy: 'public', allowedPeers: [], timestamp: new Date(0),
+    assertionVersion: 2, authorAddress: createGraphKnowledgeAssetScope(f.ual, 2).agentAddress,
+    publicTripleCount: 1, privateTripleCount: 0, assertionGraph: f.vmGraph,
+  }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization',
+    provenance: { batchId: f.kaId, materializedVersion: { blockNumber: 200, txIndex: 0 } } } });
+  const write = async () => {
+    await f.store.deleteByPattern({ graph: f.vmGraph });
+    await f.store.deleteByPattern({ graph: metaGraph, subject: f.ual });
+    await f.store.insert([quad, ...metadata]);
+    await writeMaterializedVersion(f.store, metaGraph, f.ual, { blockNumber: 200, txIndex: 0 });
+  };
+  return { metaGraph, quad, root, write };
+}
+
+it('serializes adoption record checking and writes with a competing newer materializer', async () => {
+  const f = await strandedPublishFixture();
+  await f.strand();
+  const newer = newerMaterialization(f);
+  let entered!: () => void, resume!: () => void;
+  const checking = new Promise<void>(resolve => { entered = resolve; });
+  const continued = new Promise<void>(resolve => { resume = resolve; });
+  const check = adoptedRecord.adoptedMintAlreadyRecorded;
+  const spy = vi.spyOn(adoptedRecord, 'adoptedMintAlreadyRecorded').mockImplementation(async (...args) => {
+    const accepted = await check(...args); entered(); await continued; return accepted;
+  });
+  const adoption = f.publish({});
+  let update: Promise<void> | undefined;
+  try {
+    await Promise.race([checking, adoption.then(() => { throw new Error('adoption bypassed its record check'); })]);
+    let materializerEntered = false;
+    update = withMaterializationLock(newer.metaGraph, f.ual, async () => { materializerEntered = true; await newer.write(); });
+    await new Promise<void>(resolve => setImmediate(resolve));
+    expect(materializerEntered, 'the competing materializer must wait for the complete adoption write').toBe(false);
+    resume();
+    await expect(adoption).resolves.toMatchObject({ status: 'confirmed' });
+    await update;
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store, { contextGraphId: CONTEXT_GRAPH, ual: f.ual }))
+      .toMatchObject({ state: 'confirmed', envelope: { assertionVersion: '2', merkleRoot: newer.root } });
+    const data = await f.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${f.vmGraph}> { ?s ?p ?o } }`);
+    expect(data.type === 'quads' && data.quads.map(q => q.object)).toEqual(['"Version two"']);
+  } finally { resume(); await Promise.allSettled([adoption, ...(update ? [update] : [])]); spy.mockRestore(); await f.store.close(); }
+});
+
+it('refuses adopted-mint writes when a newer version already owns the materialized record', async () => {
+  const f = await strandedPublishFixture();
+  try {
+    await f.strand();
+    const newer = newerMaterialization(f);
+    await withMaterializationLock(newer.metaGraph, f.ual, newer.write);
+    await expect(f.publish({})).rejects.toMatchObject({ reason: 'existing-record-conflict' });
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store, { contextGraphId: CONTEXT_GRAPH, ual: f.ual }))
+      .toMatchObject({ state: 'confirmed', envelope: { assertionVersion: '2', merkleRoot: newer.root } });
+    const data = await f.store.query(`CONSTRUCT { ?s ?p ?o } WHERE { GRAPH <${f.vmGraph}> { ?s ?p ?o } }`);
+    expect(data.type === 'quads' && data.quads.map(q => q.object)).toEqual(['"Version two"']);
+  } finally { await f.store.close(); }
 });

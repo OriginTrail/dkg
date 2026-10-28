@@ -1,3 +1,4 @@
+import { recordFinalizedAssertionMint } from './dkg-agent-publish.js';
 import { readFinalizedAssertionReservation, FinalizedAssertionReservationError, type FinalizedAssertionReservation as SealedReservation } from './internal/finalized-assertion-reservation.js';
 import { readNamedPublishFinalization } from './named-publish-finalization.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -247,7 +248,7 @@ async function assertReservationUnchanged(
 
 async function recordThroughPublish(agent: DKGAgent, target: Target,
   evidence: PreparedMintAdoption, heldLifecycle: AssertionLifecycleWriteLease, reservation: SealedReservation): Promise<OnChainPublishResult> {
-  const published = await agent.recordFinalizedAssertionMint(target.contextGraphId, target.name,
+  const published = await recordFinalizedAssertionMint.call(agent, target.contextGraphId, target.name,
     { kind: 'prepared', evidence },
     { heldLifecycle, subGraphName: target.subGraphName, agentAddress: target.agentAddress }, reservation);
   if (published.status !== 'confirmed' || !published.onChainResult) {
