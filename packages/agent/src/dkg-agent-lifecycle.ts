@@ -7846,12 +7846,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       normalizeWireId: hash => this.contextGraphWireId(hash),
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId), options });
     const { subscription: canonicalNext, adoptedWire, previousWireId, nextWireId, retainsInactiveBinding } = plan;
-    const currentWire = this.resolveWireOnlyContextGraphSubscription(contextGraphId);
-    if (this.subscribedContextGraphs.get(contextGraphId) !== previous
-      || currentWire?.localId !== wireOnlySubscription?.localId
-      || currentWire?.subscription !== wireOnlySubscription?.subscription)
-      throw new Error('Subscription source changed during write');
-
     this.invalidateListContextGraphsCache();
     if (options?.retireNamePlaceholder === true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     if (adoptedWire) {
