@@ -18,9 +18,7 @@ export type FinalizedPlacementDecisionV1<Lane = unknown> =
   | Readonly<{
     status: 'ready';
     lane: Lane;
-    currentInventoryScope: Readonly<SwmAuthorInventoryScopeV1>;
     inventoryScope: Readonly<SwmAuthorInventoryScopeV1>;
-    scope: Readonly<AuthorCatalogScopeV1>;
   } & ({ action: 'place-private-row'; capacityScope: Readonly<AuthorCatalogScopeV1> }
     | { action: 'retire-public-row'; capacityScope: undefined })>;
 
@@ -53,10 +51,9 @@ export function resolveFinalizedPlacementDecisionV1<Lane extends PlacementLaneV1
       });
     }
     const inventoryScope = repair.version === 1 ? repair.inventoryScope : currentInventoryScope;
-    const scope = Object.freeze({ ...inventoryScope, bucketCount: '1' }) as AuthorCatalogScopeV1;
-    const common = { status: 'ready' as const, lane, currentInventoryScope, inventoryScope, scope };
+    const common = { status: 'ready' as const, lane, inventoryScope };
     return lane.acceptsFinalizedVmRepair
-      ? Object.freeze({ ...common, action: 'place-private-row', capacityScope: scope })
+      ? Object.freeze({ ...common, action: 'place-private-row', capacityScope: Object.freeze({ ...inventoryScope, bucketCount: '1' }) as AuthorCatalogScopeV1 })
       : Object.freeze({ ...common, action: 'retire-public-row', capacityScope: undefined });
   } catch (error) {
     return Object.freeze({ status: 'unavailable', error: error instanceof Error ? error : new Error(String(error)), capacityScope: pinnedCapacityScope });

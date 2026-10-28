@@ -2,7 +2,7 @@ import type { ContextGraphBindingState } from '../context-graph-binding-state.js
 // SPDX-License-Identifier: Apache-2.0
 import {
   computeCanonicalGraphScopedAuthorSealDigestV1,
-  createOperationContext, parseContextGraphAssertionUri, type ContextGraphIdV1,
+  createOperationContext, parseContextGraphAssertionStorageUri, type ContextGraphIdV1,
 } from '@origintrail-official/dkg-core';
 import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
@@ -39,7 +39,7 @@ export async function recoverConfirmedCatalogObligationV1(
   ports.assertCurrent();
   const { chain, signal } = ports;
   if (!chain.resolveCanonicalFinalizationReceipt || !chain.getKAContextGraphId || !chain.getDKGKnowledgeAssetsAddress) throw invalidEvidence();
-  const coordinate = parseContextGraphAssertionUri(evidence.assertionUri);
+  const coordinate = parseContextGraphAssertionStorageUri(evidence.assertionUri);
   if (!coordinate || coordinate.scope !== evidence.contextGraphId || coordinate.name !== evidence.assertionCoordinate) throw invalidEvidence();
   const query = { store: ports.store, contextGraphId: evidence.contextGraphId as ContextGraphIdV1,
     agentAddress: coordinate.agentAddress, assertionCoordinate: evidence.assertionCoordinate,

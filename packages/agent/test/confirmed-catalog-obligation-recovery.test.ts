@@ -14,7 +14,7 @@ import { authorSealV1, assertionSealV1, AUTHOR, CONTEXT_GRAPH_ID } from './suppo
 
 const stores: OxigraphStore[] = [];
 afterEach(async () => { vi.restoreAllMocks(); for (const store of stores.splice(0)) await store.close(); });
-async function fixture(archived = false, assertionVersion = '1', owner = AUTHOR) {
+async function fixture(archived = false, assertionVersion = '1', owner: string = AUTHOR) {
   const store = new OxigraphStore(); stores.push(store);
   const seal = await authorSealV1(103n, assertionVersion); const raw = assertionSealV1(seal);
   const name = 'confirmed-recovery'; const subject = contextGraphAssertionUri(CONTEXT_GRAPH_ID, owner, name);
@@ -46,8 +46,8 @@ async function fixture(archived = false, assertionVersion = '1', owner = AUTHOR)
 }
 
 describe('caller-retained confirmed catalog evidence', () => {
-  it.each([false, true])('retains a distinct lifecycle owner through JSON recovery (archived=%s)', async archived => {
-    const owner = `0x${'77'.repeat(20)}` as typeof AUTHOR;
+  it.each([false, true].flatMap(archived => [`0x${'77'.repeat(20)}`, '12D3KooWPeerLifecycleCaseSensitive'].map(owner => ({ archived, owner }))))(
+    'retains a distinct lifecycle owner $owner through JSON recovery (archived=$archived)', async ({ archived, owner }) => {
     const f = await fixture(archived, '1', owner);
     const error = new ConfirmedCatalogObligationErrorV1({
       catalogObligationRequired: true, contextGraphId: CONTEXT_GRAPH_ID,
@@ -70,6 +70,11 @@ describe('caller-retained confirmed catalog evidence', () => {
     const wrongOwner = { ...retained, assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, AUTHOR, retained.assertionCoordinate) };
     await expect(recoverConfirmedCatalogObligationV1(wrongOwner, f.ports)).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
     expect(f.observe).not.toHaveBeenCalled();
+    if (!owner.startsWith('0x')) {
+      const wrongCase = { ...retained, assertionUri: contextGraphAssertionUri(CONTEXT_GRAPH_ID, owner.toLowerCase(), retained.assertionCoordinate) };
+      await expect(recoverConfirmedCatalogObligationV1(wrongCase, f.ports)).rejects.toMatchObject({ code: 'CONFIRMED_CATALOG_RECOVERY_INVALID' });
+      expect(f.observe).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
+    }
   });
 
   it.each([false, true])('authenticates the exact %s archived local seal without submitting a transaction', async archived => {

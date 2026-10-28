@@ -10,7 +10,7 @@ import {
   contextGraphMetaUri,
   contextGraphPrivateUri,
   contextGraphSubGraphPrivateUri,
-  parseGraphScopedAssertionSealCandidate, parseGraphScopedAssertionSealStructure, parseContextGraphAssertionUri,
+  parseGraphScopedAssertionSealCandidate, parseGraphScopedAssertionSealStructure, parseContextGraphAssertionStorageUri,
   type AssertionSeal,
   type ContextGraphIdV1,
   type GraphScopedAssertionSealCandidate,
@@ -52,7 +52,7 @@ export async function resolveConfirmedLifecycleSealEvidenceV1(params: ResolveDur
   & { readonly sealDigest: string; readonly signingAuthor: string }): Promise<ConfirmedLifecycleSealEvidenceV1 | undefined> {
   return resolveDurableSeal(params, (rows, subject) => {
     const seal = parseGraphScopedAssertionSealStructure(rows, subject);
-    const lifecycleCoordinate = parseContextGraphAssertionUri(subject);
+    const lifecycleCoordinate = parseContextGraphAssertionStorageUri(subject);
     if (!seal || !lifecycleCoordinate || seal.authorAddress.toLowerCase() !== params.signingAuthor.toLowerCase()) return undefined;
     return { seal, lifecycleCoordinate, signingAuthor: seal.authorAddress };
   });
@@ -128,23 +128,14 @@ async function resolveArchivedSeal<T extends { seal: AssertionSeal }>(
   return candidates[0];
 }
 
-/** The lowercase and the EIP-55 spelling of one assertion subject; see the note above. */
+/** EVM owners have two equivalent spellings; peer-ID lifecycle owners are case-sensitive. */
 function assertionUriSpellingsV1(
   params: ResolveDurableGraphScopedAuthorSealCandidateParamsV1,
 ): readonly string[] {
-  return Object.freeze(Array.from(new Set([
-    contextGraphAssertionUri(
-      params.contextGraphId,
-      params.agentAddress.toLowerCase(),
-      params.assertionCoordinate,
-      params.subGraphName,
-    ),
-    contextGraphAssertionUri(
-      params.contextGraphId,
-      ethers.getAddress(params.agentAddress),
-      params.assertionCoordinate,
-      params.subGraphName,
-    ),
-  ])));
+  const owners = /^0x[0-9a-fA-F]{40}$/.test(params.agentAddress)
+    ? [params.agentAddress.toLowerCase(), ethers.getAddress(params.agentAddress)]
+    : [params.agentAddress];
+  return Object.freeze(Array.from(new Set(owners.map(owner => contextGraphAssertionUri(
+    params.contextGraphId, owner, params.assertionCoordinate, params.subGraphName,
+  )))));
 }
-

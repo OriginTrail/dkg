@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import {
-  assertAssertionCoordinateV1, assertContextGraphIdV1, assertCanonicalGraphScopedAuthorSealV1, snapshotExactDataRecord,
-  canonicalGraphScopedAuthorSealFromAssertionSealV1, parseContextGraphAssertionUri,
+  assertSafeIri, assertAssertionCoordinateV1, assertContextGraphIdV1, assertCanonicalGraphScopedAuthorSealV1, snapshotExactDataRecord,
+  canonicalGraphScopedAuthorSealFromAssertionSealV1, parseContextGraphAssertionStorageUri,
   type CanonicalGraphScopedAuthorSealV1,
 } from '@origintrail-official/dkg-core';
 import type { OnChainPublishResult } from '@origintrail-official/dkg-chain';
@@ -41,7 +41,7 @@ export function parseConfirmedCatalogObligationRecoveryV1(input: unknown): Reado
     assertContextGraphIdV1(value.contextGraphId, 'confirmed recovery contextGraphId');
     assertAssertionCoordinateV1(value.assertionCoordinate, 'confirmed recovery assertionCoordinate');
     assertCanonicalGraphScopedAuthorSealV1(seal);
-    const coordinate = typeof value.assertionUri === 'string' ? parseContextGraphAssertionUri(value.assertionUri) : undefined;
+    const coordinate = typeof value.assertionUri === 'string' ? parseContextGraphAssertionStorageUri(assertSafeIri(value.assertionUri)) : undefined;
     if (!coordinate || coordinate.scope !== value.contextGraphId || coordinate.name !== value.assertionCoordinate) {
       throw new Error('Invalid recovery lifecycle coordinate');
     }

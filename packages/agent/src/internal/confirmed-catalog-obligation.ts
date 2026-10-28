@@ -45,21 +45,28 @@ export function selectConfirmedCatalogObligationForAgentV1(
   });
 }
 
-/** Refuse incompatible immutable identities before any publication preparation or submission. */
-export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmissionHostV1, config: CatalogAdmissionConfigurationV1, params: CatalogPublicationIdentityV1): boolean {
-  // Empty names are dropped by workspace/queue routing. Refuse them before
-  // selection so a named-lane exclusion cannot become a root publication.
+/** One lazy selection and identity boundary for admission and confirmed observation. */
+function normalizeCatalogPublicationIdentityV1(params: CatalogPublicationIdentityV1,
+  select: () => 'required' | 'excluded'): Pick<RequiredConfirmedPublicationV1,
+    'contextGraphId' | 'assertionCoordinate' | 'subGraphName' | 'catalogObligationRequired'> | undefined {
+  // Empty names are dropped by workspace/queue routing, even on excluded lanes.
   if (params.subGraphName === '') throw new CatalogPublicationAdmissionError(new Error('Publication subGraphName must be non-empty or omitted'));
-  // Persisted selection wins; older requests without evidence use current applicability.
-  const required = params.catalogObligationRequired
-    ?? (selectConfirmedCatalogObligationForAgentV1(host, config, params) === 'required');
-  if (!required) return false;
+  const required = params.catalogObligationRequired ?? (select() === 'required');
+  if (!required) return undefined;
+  // Keep provider failures outside the identity-error mapping.
   try {
     if (params.subGraphName != null) throw new Error('Confirmed publication catalog obligations require a root graph identity');
-    assertContextGraphIdV1(params.contextGraphId);
-    assertAssertionCoordinateV1(params.assertionCoordinate);
+    const { contextGraphId, assertionCoordinate } = params;
+    assertContextGraphIdV1(contextGraphId);
+    assertAssertionCoordinateV1(assertionCoordinate);
+    return Object.freeze({ contextGraphId, assertionCoordinate, subGraphName: null, catalogObligationRequired: true });
   } catch (error) { throw new CatalogPublicationAdmissionError(error); }
-  return true;
+}
+
+/** Refuse incompatible immutable identities before any publication preparation or submission. */
+export function assertConfirmedCatalogPublicationAdmissionV1(host: CatalogAdmissionHostV1, config: CatalogAdmissionConfigurationV1, params: CatalogPublicationIdentityV1): boolean {
+  return normalizeCatalogPublicationIdentityV1(params,
+    () => selectConfirmedCatalogObligationForAgentV1(host, config, params)) !== undefined;
 }
 
 /** Catalog-selected publications must have representable recovery evidence before a send. */
@@ -81,15 +88,8 @@ interface ConfirmationObserverPortsV1 {
 /** Resolve legacy selection once and narrow the durable writer to validated root identities. */
 export function normalizeConfirmedPublicationV1(params: ObserveRfc64ConfirmedVmParamsV1,
   select: () => 'required' | 'excluded'): RequiredConfirmedPublicationV1 | undefined {
-  if (params.subGraphName === '') throw new CatalogPublicationAdmissionError(new Error('Publication subGraphName must be non-empty or omitted'));
-  const required = params.catalogObligationRequired ?? (select() === 'required');
-  if (!required) return undefined;
-  if (params.subGraphName != null) throw new CatalogPublicationAdmissionError(
-    new Error('Confirmed publication catalog obligations require a root graph identity'));
-  const { contextGraphId, assertionCoordinate } = params;
-  assertContextGraphIdV1(contextGraphId, 'confirmed publish contextGraphId');
-  assertAssertionCoordinateV1(assertionCoordinate, 'confirmed publish assertionCoordinate');
-  return { ...params, contextGraphId, assertionCoordinate, subGraphName: null, catalogObligationRequired: true };
+  const identity = normalizeCatalogPublicationIdentityV1(params, select);
+  return identity === undefined ? undefined : { ...params, ...identity };
 }
 
 /** Own the durable confirmation tail separately from transaction submission. */

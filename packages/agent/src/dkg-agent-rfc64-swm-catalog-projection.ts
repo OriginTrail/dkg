@@ -238,11 +238,11 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
     const decision = this.resolveRfc64FinalizedPlacementDecisionV1(params);
     if (decision.status === 'unavailable') throw decision.error;
     if (decision.status === 'inactive') throw new CatalogRepairLaneInactiveErrorV1('RFC-64 finalized-private placement repair lane is inactive');
-    const { lane, currentInventoryScope, inventoryScope, scope, action } = decision;
+    const { lane, inventoryScope, action } = decision;
     if (action === 'retire-public-row') {
       // Public VM discovery is chain-owned; this owed transition removes only the exact SWM row.
       const removed = await this.removeRfc64SwmAuthorInventoryRowStrictV1({
-        contextGraphId: params.contextGraphId, scope: currentInventoryScope, expectedRow: params,
+        contextGraphId: params.contextGraphId, scope: inventoryScope, expectedRow: params,
       });
       if (removed.status !== 'applied' && removed.status !== 'absent') {
         throw new Error('RFC-64 confirmed public inventory transition did not complete');
@@ -252,6 +252,7 @@ export class Rfc64SwmCatalogProjectionMethods extends DKGAgentBase {
       });
       return { status: removed.status === 'applied' ? 'applied' : 'already-absent', action: 'public-retirement' };
     }
+    const scope = decision.capacityScope;
     const persistence = this.rfc64PersistenceV1;
     if (persistence === undefined) throw new CatalogRepairConditionErrorV1('persistence_unavailable', 'RFC-64 persistence is unavailable');
     const covered = await placement.measure('coverage', () => this.rfc64CatalogCoversConfirmedSwmRowV1({

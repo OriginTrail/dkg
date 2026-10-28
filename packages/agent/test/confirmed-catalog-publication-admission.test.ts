@@ -162,3 +162,14 @@ it.each([true, false])('refuses empty subgraphs before publication preparation (
   expect(f.entered).not.toHaveBeenCalled(); expect(f.submit).not.toHaveBeenCalled();
   expect(f.sign).not.toHaveBeenCalled(); expect(f.consume).not.toHaveBeenCalled(); expect(f.reserve).not.toHaveBeenCalled();
 });
+
+
+it.each(invalidIdentities)('confirmation maps the same invalid identity $name/$contextGraphId', identity => {
+  const select = vi.fn(() => 'required' as const);
+  const params = { contextGraphId: identity.contextGraphId, assertionCoordinate: identity.name } as Parameters<typeof normalizeConfirmedPublicationV1>[0];
+  expect(() => normalizeConfirmedPublicationV1(params, select)).toThrow(expect.objectContaining({ code: 'CATALOG_PUBLICATION_ADMISSION_INVALID' }));
+  expect(select).toHaveBeenCalledOnce();
+  select.mockClear();
+  expect(normalizeConfirmedPublicationV1({ ...params, catalogObligationRequired: false }, select)).toBeUndefined();
+  expect(select).not.toHaveBeenCalled();
+});
