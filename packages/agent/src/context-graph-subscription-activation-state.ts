@@ -45,11 +45,65 @@ interface ActivationAttempt {
 
 export type SubscriptionLifecycleEvent = Readonly<{ id: string } & (
   | { kind: 'dormancy'; reason: ContextGraphDormancyReason | undefined }
-  | { kind: 'saved'; reason: ContextGraphDormancyReason | undefined; persisted: boolean; active: boolean; hosted: boolean }
+  | { kind: 'persistence-acknowledged' | 'intent-replaced'; reason: ContextGraphDormancyReason | undefined; persisted: boolean; active: boolean; hosted: boolean }
   | { kind: 'cleared' | 'deactivated' }
 )>;
 
 type SubscriptionActivationCommit = Readonly<{ id: string; kind: 'activated'; subscription: ContextGraphSub }>;
+type TransitionEvent = SubscriptionLifecycleEvent | SubscriptionActivationCommit | { id: string; kind: 'cancelled' };
+type SubscriptionFacts = { persisted: boolean; active: boolean; hosted: boolean };
+type TransitionDecision = {
+  facts: SubscriptionFacts;
+  reason: ContextGraphDormancyReason | undefined;
+  pending: boolean;
+  slot: 'retain' | 'release' | 'acquire';
+  clearRevision: boolean;
+  settlement: ActivationOutcome | undefined;
+};
+function shouldHoldRollingSlot(subscription: ContextGraphSub, persisted: boolean,
+  status: ContextGraphSubscriptionRehydrationInternalStatus | null): boolean {
+  return status?.rehydrationEnabled === true && status.activationCap > 0 && persisted
+    && subscription.coreHosted !== true && subscription.subscribed
+    && !rehydratedSubscriptionReachedSafeState(subscription);
+}
+/** Event semantics are decided once, before any shared collection or waiter is changed. */
+function reduceSubscriptionTransition(event: TransitionEvent, current: {
+  facts: SubscriptionFacts; reason: ContextGraphDormancyReason | undefined; pending: boolean;
+  live: ContextGraphSub | undefined; status: ContextGraphSubscriptionRehydrationInternalStatus | null;
+}): TransitionDecision {
+  const normalized = (persisted: boolean, liveActive: boolean, hosted: boolean,
+    reason: ContextGraphDormancyReason | undefined, settlement: ActivationOutcome | undefined,
+    slot: TransitionDecision['slot'] = reason === undefined ? 'retain' : 'release', clearRevision = false): TransitionDecision => {
+    const active = persisted && liveActive && reason === undefined;
+    return { facts: { persisted, active, hosted: active && hosted }, reason,
+      pending: reason === 'activationCap', slot, clearRevision, settlement };
+  };
+  switch (event.kind) {
+    case 'persistence-acknowledged':
+      return normalized(event.persisted, event.active, event.hosted, event.reason, undefined);
+    case 'intent-replaced':
+      return normalized(event.persisted, event.active, event.hosted, event.reason, { kind: 'cancelled' });
+    case 'dormancy':
+      return normalized(current.facts.persisted, Boolean(current.live?.subscribed || current.live?.coreHosted),
+        current.live?.coreHosted === true, event.reason,
+        event.reason === 'authorityUnavailable' || event.reason === 'activationCap' ? undefined : { kind: 'cancelled' });
+    case 'cleared':
+      return normalized(false, false, false, undefined, { kind: 'cancelled' }, 'release', true);
+    case 'deactivated':
+      return normalized(current.facts.persisted, false, false, 'deactivated', { kind: 'cancelled' });
+    case 'activated':
+      return normalized(true, true, event.subscription.coreHosted === true, undefined,
+        { kind: 'committed', subscription: event.subscription },
+        shouldHoldRollingSlot(event.subscription, true, current.status) ? 'acquire' : 'release');
+    case 'cancelled':
+      return { facts: current.facts, reason: current.reason, pending: current.pending,
+        slot: 'retain', clearRevision: false, settlement: { kind: 'cancelled' } };
+    default: {
+      const exhaustive: never = event;
+      throw new Error(`Unknown subscription transition: ${String(exhaustive)}`);
+    }
+  }
+}
 
 export interface SubscriptionActivationPorts {
   readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
@@ -79,7 +133,7 @@ export class ContextGraphSubscriptionActivations {
     this.startupAccounting = { ...options, persistedTotal: 0, activated: 0,
       hostedActivated: 0, hostedActivatedIds: [], capDisabled: options.activationCap === 0,
       completedAt: 0, updatedAt: Date.now() };
-    this.apply(rows.map(row => ({ id: row.id, kind: 'saved', persisted: true,
+    this.apply(rows.map(row => ({ id: row.id, kind: 'persistence-acknowledged', persisted: true,
       active: false, hosted: false,
       reason: options.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled' })));
   }
@@ -113,14 +167,12 @@ export class ContextGraphSubscriptionActivations {
       ? this.ports.contextGraphSubscriptionDormancyById.get(id)
         ?? ((this.startupAccounting ?? this.ports.getStatus())?.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled')
       : undefined;
-    this.apply([{ id, kind: 'saved', reason, persisted: isPersisted, active, hosted: live?.coreHosted === true }]);
+    this.apply([{ id, kind: 'persistence-acknowledged', reason, persisted: isPersisted, active, hosted: live?.coreHosted === true }]);
   }
   /** One policy owns slot occupancy during startup, activation commit and readiness changes. */
   private reconcileRollingSlot(id: string, subscription: ContextGraphSub, persisted: boolean): boolean {
     const ports = this.ports, status = this.startupAccounting ?? ports.getStatus();
-    const eligible = status?.rehydrationEnabled === true && status.activationCap > 0
-      && persisted && subscription.coreHosted !== true && subscription.subscribed;
-    if (eligible && !rehydratedSubscriptionReachedSafeState(subscription)) {
+    if (shouldHoldRollingSlot(subscription, persisted, status)) {
       ports.contextGraphSubscriptionRehydrationSlotIds.add(id);
       return false;
     }
@@ -148,14 +200,13 @@ export class ContextGraphSubscriptionActivations {
     attempt.listeners.clear();
   }
   cancel(id: string): void {
-    const attempt = this.pending.get(id);
-    if (attempt) this.settle(attempt, { kind: 'cancelled' });
+    this.apply([{ id, kind: 'cancelled' }]);
   }
   /** A new live intent supersedes the dormant activation independently of disk I/O. */
   replaceLiveIntent(id: string, subscription: ContextGraphSub): void {
     if (!this.pending.has(id) && (!this.ports.contextGraphSubscriptionDormancyById.has(id)
       || (!subscription.subscribed && !subscription.coreHosted))) return;
-    this.transition({ id, kind: 'saved',
+    this.transition({ id, kind: 'intent-replaced',
       persisted: this.ports.contextGraphSubscriptionRehydrationAccountedIds.has(id),
       active: subscription.subscribed || subscription.coreHosted === true,
       hosted: subscription.coreHosted === true,
@@ -171,52 +222,48 @@ export class ContextGraphSubscriptionActivations {
   }
   /** Explicit lifecycle facts use the same bookkeeping operation as activation. */
   transition(event: SubscriptionLifecycleEvent): void { this.transitionBatch([event]); }
-  /** Apply the entire batch and its accounting before cancelling any waiters. */
-  transitionBatch(events: Iterable<SubscriptionLifecycleEvent>): void {
-    for (const { id, after } of this.apply(events)) {
-      if (after !== 'authorityUnavailable' && after !== 'activationCap') this.cancel(id);
-    }
-  }
-  private apply(events: Iterable<SubscriptionLifecycleEvent | SubscriptionActivationCommit>): SubscriptionDormancyTransition[] {
+  /** Apply all collection and accounting effects before notifying any waiter. */
+  transitionBatch(events: Iterable<SubscriptionLifecycleEvent>): void { this.apply(events); }
+  private apply(events: Iterable<TransitionEvent>): void {
     const ports = this.ports;
     const changes: SubscriptionAccountingChange[] = [];
-    const cleanup: string[] = [];
-    const hostedBefore = new Set((this.startupAccounting ?? ports.getStatus())?.hostedActivatedIds ?? []);
-    let released = false;
-    const transitions = [...new Map([...events].map(event => [event.id, event])).values()].map(event => {
-      const { id, kind } = event;
-      const wasPersisted = ports.contextGraphSubscriptionRehydrationAccountedIds.has(id);
-      const before = { persisted: wasPersisted,
-        active: wasPersisted && !ports.contextGraphSubscriptionDormancyById.has(id), hosted: hostedBefore.has(id) };
-      const live = kind === 'activated' ? event.subscription : ports.subscribedContextGraphs.get(id);
-      const reason = kind === 'saved' || kind === 'dormancy' ? event.reason
-        : kind === 'deactivated' ? 'deactivated' : undefined;
-      const persisted = kind === 'activated' || (kind === 'saved' ? event.persisted : kind !== 'cleared' && wasPersisted);
-      const liveActive = kind === 'activated' || (kind === 'saved' ? event.active
-        : kind === 'dormancy' && Boolean(live?.subscribed || live?.coreHosted));
-      const active = persisted && liveActive && reason === undefined;
-      const after = { persisted, active, hosted: active && (kind === 'saved' ? event.hosted : live?.coreHosted === true) };
-      const dormancy = applyDormancy(ports.contextGraphSubscriptionDormancyById, id, reason);
-      if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)) return dormancy;
-      if (persisted) ports.contextGraphSubscriptionRehydrationAccountedIds.add(id);
-      else ports.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
-      changes.push({ id, before, after });
-      if (reason === 'activationCap') ports.contextGraphSubscriptionRehydrationPendingIds.add(id);
-      else ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
-      if (kind === 'activated') released = this.reconcileRollingSlot(id, event.subscription, true) || released;
-      else if (reason !== undefined || kind === 'cleared') released = ports.contextGraphSubscriptionRehydrationSlotIds.delete(id) || released;
-      if (kind === 'cleared') cleanup.push(id);
-      return dormancy;
-    });
     const status = this.startupAccounting ?? ports.getStatus();
+    const hostedBefore = new Set(status?.hostedActivatedIds ?? []);
+    const plans = [...new Map([...events].map(event => [event.id, event])).values()].map(event => {
+      const id = event.id;
+      const persisted = ports.contextGraphSubscriptionRehydrationAccountedIds.has(id);
+      const reason = ports.contextGraphSubscriptionDormancyById.get(id);
+      const before = { persisted, active: persisted && reason === undefined, hosted: hostedBefore.has(id) };
+      return { id, before, decision: reduceSubscriptionTransition(event, {
+        facts: before, reason, pending: ports.contextGraphSubscriptionRehydrationPendingIds.has(id),
+        live: ports.subscribedContextGraphs.get(id), status,
+      }) };
+    });
+    let released = false;
+    for (const { id, before, decision } of plans) {
+      applyDormancy(ports.contextGraphSubscriptionDormancyById, id, decision.reason);
+      if ((Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)) continue;
+      if (decision.facts.persisted) ports.contextGraphSubscriptionRehydrationAccountedIds.add(id);
+      else ports.contextGraphSubscriptionRehydrationAccountedIds.delete(id);
+      changes.push({ id, before, after: decision.facts });
+      if (decision.pending) ports.contextGraphSubscriptionRehydrationPendingIds.add(id);
+      else ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+      if (decision.slot === 'acquire') ports.contextGraphSubscriptionRehydrationSlotIds.add(id);
+      else if (decision.slot === 'release') released = ports.contextGraphSubscriptionRehydrationSlotIds.delete(id) || released;
+    }
     if (status && changes.length) {
       const next = accountSubscriptionChanges(status, changes);
       if (this.startupAccounting) this.startupAccounting = next;
       else ports.setStatus(next);
     }
-    for (const id of cleanup) ports.clearPersistRevision(id);
+    for (const { id, decision } of plans) {
+      if (decision.clearRevision && !(Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id)) ports.clearPersistRevision(id);
+    }
     if (released) ports.slotReleased();
-    return transitions;
+    for (const { id, decision } of plans) {
+      const attempt = this.pending.get(id);
+      if (attempt && decision.settlement) this.settle(attempt, decision.settlement);
+    }
   }
   private assertOwned(attempt: ActivationAttempt): void {
     if (this.pending.get(attempt.intent.id) !== attempt) throw changed();
@@ -301,7 +348,6 @@ export class ContextGraphSubscriptionActivations {
     if (this.pending.get(id) !== attempt || ports.subscribedContextGraphs.get(id) !== live
       || (!live.subscribed && !live.coreHosted)) throw changed();
     this.apply([{ id, kind: 'activated', subscription: live }]);
-    this.settle(attempt, { kind: 'committed', subscription: live });
     ports.publish(id);
     return live;
   }

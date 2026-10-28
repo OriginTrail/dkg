@@ -79,29 +79,22 @@ it('accounts mixed active and dormant clear/deactivation as one batch before can
     hostedActivated: 1, hostedActivatedIds: ['active-deactivate'] });
   const waits = ids.map(id => owner.wait(id, new AbortController().signal));
   let status = agent.contextGraphSubscriptionRehydrationStatus;
-  const observations: unknown[] = [];
+  const observations: unknown[] = [], accountingWaits: Promise<unknown>[] = [];
   Object.defineProperty(agent, 'contextGraphSubscriptionRehydrationStatus', {
     get: () => status,
     set: next => {
+      accountingWaits.push(...ids.map(id => owner.wait(id, new AbortController().signal).catch(error => error.message)));
       observations.push({ status: next, dormancy: [...agent.contextGraphSubscriptionDormancyById],
         pending: [...agent.contextGraphSubscriptionRehydrationPendingIds],
         slots: [...agent.contextGraphSubscriptionRehydrationSlotIds] });
       status = next;
     },
   });
-  const beforeCancel: unknown[] = [], cancel = owner.cancel.bind(owner);
-  vi.spyOn(owner, 'cancel').mockImplementation(id => {
-    beforeCancel.push({ id, status: agent.getContextGraphSubscriptionRehydrationStatus(),
-      pending: [...agent.contextGraphSubscriptionRehydrationPendingIds], slots: [...agent.contextGraphSubscriptionRehydrationSlotIds] });
-    cancel(id);
-  });
   agent.recordContextGraphSubscriptionClear(ids.slice(0, 2), ids.slice(2));
   expect(observations).toEqual([{ status: expect.objectContaining({ persistedTotal: 2, activated: 0, hostedActivated: 0 }),
     dormancy: expect.arrayContaining([[ids[2], 'deactivated'], [ids[3], 'deactivated']]),
     pending: [], slots: [] }]);
-  expect(beforeCancel).toEqual(expect.arrayContaining(ids.map(id => ({ id,
-    status: expect.objectContaining({ persistedTotal: 2, activated: 0, dormant: 2 }), pending: [], slots: [] }))));
-  expect(beforeCancel).toHaveLength(4);
+  expect(await Promise.all(accountingWaits)).toEqual(ids.map(() => ({ kind: 'cancelled' })));
   expect(agent.clearContextGraphSubscriptionPersistRevisionStateIfIdle.mock.calls).toEqual([[ids[0]], [ids[1]]]);
   expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({ persistedTotal: 2, activated: 0, hostedActivated: 0, dormant: 2 });
   expect([...agent.contextGraphSubscriptionRehydrationPendingIds]).toEqual([]);
