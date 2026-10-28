@@ -43,7 +43,7 @@ describe('query caller-provided store labels', () => {
       ]));
       const queryEngine = new DKGQueryEngine(store);
       const inventory = vi.spyOn(queryEngine, 'listContextGraphQueryPartitionReads');
-      const authority = vi.fn(async () => ({ outcome }));
+      const authority = vi.fn(async () => ({ outcome, grantScope: outcome === 'allowed' ? 'caller' : 'none' }));
       const agent = Object.assign(Object.create(ContextGraphPartitionQueryMethods.prototype),
         { queryEngine, resolveContextGraphReadAuthority: authority }) as DKGAgent;
       const options = { callerAgentAddress: '0xreader', signal: new AbortController().signal, priority: 'background' as const, source: 'inventory-caller' };
