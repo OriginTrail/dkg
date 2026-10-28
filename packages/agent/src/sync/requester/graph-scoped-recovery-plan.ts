@@ -7,7 +7,6 @@ import {
 } from '../graph-scoped-swm-recovery.js';
 import type { GraphScopedSwmRecoveryParseInput } from '../graph-scoped-swm-head-parser.js';
 import { collectPublicSnapshotManifest } from './public-snapshot-manifest.js';
-import { setAsideHeadsMayOwnRef } from '../graph-scoped-swm-set-aside.js';
 
 /** One round owns the original evidence, accepted descriptors and ref exclusions together. */
 export function createGraphScopedRecoveryPlan(input: GraphScopedSwmRecoveryParseInput, parse: boolean) {
@@ -27,8 +26,9 @@ export function createGraphScopedRecoveryPlan(input: GraphScopedSwmRecoveryParse
       if (result.setAside.length > 0) {
         const sources = collectPublicSnapshotManifest(originalMetadata).sourceSubjectsByRef;
         blocksEveryRef = result.setAside.some(head => head.operationSubjects.length === 0);
-        for (const ref of sources.keys()) {
-          if (setAsideHeadsMayOwnRef(result.setAside, ref, sources)) blockedRefs.add(ref);
+        const rejectedSubjects = new Set(result.setAside.flatMap(head => head.operationSubjects));
+        for (const [ref, subjects] of sources) {
+          for (const subject of subjects) if (rejectedSubjects.has(subject)) { blockedRefs.add(ref); break; }
         }
         const first = result.setAside[0]!;
         diagnostic = `set aside ${result.setAside.length} graph-scoped head(s) and kept ${descriptors.length}: ${first.headSubject}: ${first.error.message}`;
@@ -48,7 +48,9 @@ export function createGraphScopedRecoveryPlan(input: GraphScopedSwmRecoveryParse
     if (descriptor.snapshotSource.locator.kind === 'graph') graphBackedDescriptors.push(descriptor);
     else {
       const ref = descriptor.snapshotSource.locator.ref;
-      byRef.set(ref, [...(byRef.get(ref) ?? []), descriptor]);
+      let bucket = byRef.get(ref);
+      if (bucket === undefined) { bucket = []; byRef.set(ref, bucket); }
+      bucket.push(descriptor);
     }
   }
   const snapshotDescriptorsByRef: ReadonlyMap<string, readonly GraphScopedSwmRecoveryDescriptor[]> =
