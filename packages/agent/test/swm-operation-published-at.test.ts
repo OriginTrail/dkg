@@ -166,6 +166,19 @@ const aliasMeta = (localStamp: string, ackStamp: string): Quad[] => [
 ];
 
 describe('catch-up keeps one publishedAt on a share operation', () => {
+  it.each(['not-a-date', ' '.repeat(60_001) + EARLY])('completes a current share while quarantining unusable unreferenced history (%#)', async (badStamp) => {
+    const store = newStore();
+    const current = fx.share({ version: 2, operationId: 'current-history-test', marker: 'current', ual: UAL });
+    const historical = fx.share({ version: 1, operationId: 'old-history-test', marker: 'old', ual: UAL });
+    const meta = [...current.meta, ...operationRows(historical, stampedAt(historical.meta, historical.operationSubject, badStamp))];
+    const summary = await catchUp(store, meta, [current, historical]);
+    expect(summary.failedPhases).toBe(0);
+    expect(summary.swmCoverage).toMatchObject({ descriptorsAuthoritative: true, missingCount: 0 });
+    expect(await resolveKnowledgeAssetWorkspaceHead({ store, graphManager: new GraphManager(store),
+      contextGraphId: CG, kaUal: UAL })).toMatchObject({ shareOperationId: 'current-history-test' });
+    expect(await rowsOf(store, WS_META, historical.operationSubject)).toEqual([]);
+  });
+
   it.each([
     { peer: PEER, kept: PEER },
     { peer: LATER, kept: LOCAL },

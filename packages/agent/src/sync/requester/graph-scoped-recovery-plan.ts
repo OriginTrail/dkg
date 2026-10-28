@@ -1,3 +1,4 @@
+import { quarantineUnusableSwmHistory } from './swm-history-admission.js';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
   canonicalGraphScopedSnapshotManifestQuads,
@@ -33,8 +34,11 @@ export function createGraphScopedRecoveryPlan(input: GraphScopedSwmRecoveryParse
         const first = result.setAside[0]!;
         diagnostic = `set aside ${result.setAside.length} graph-scoped head(s) and kept ${descriptors.length}: ${first.headSubject}: ${first.error.message}`;
       }
-      verifiedMetaForInsert = canonicalizeGraphScopedSwmHeadRows({ metaQuads: originalMetadata, descriptors });
-      manifestMetadata = canonicalGraphScopedSnapshotManifestQuads(originalMetadata, descriptors);
+      const referenced = [...descriptors.flatMap(d => d.equivalentOperationSubjects.map(subject => ({ graph: d.metaGraph, subject }))),
+        ...result.setAside.flatMap(h => h.operationSubjects.map(subject => ({ graph: h.metaGraph, subject })))];
+      const admitted = quarantineUnusableSwmHistory(originalMetadata, referenced);
+      verifiedMetaForInsert = canonicalizeGraphScopedSwmHeadRows({ metaQuads: admitted, descriptors });
+      manifestMetadata = canonicalGraphScopedSnapshotManifestQuads(admitted, descriptors);
     } catch (error) {
       descriptors = [];
       descriptorsAuthoritative = false;
