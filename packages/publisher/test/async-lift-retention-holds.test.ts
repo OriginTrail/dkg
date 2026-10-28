@@ -12,7 +12,7 @@ import { TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { DEFAULT_CONTROL_GRAPH_URI, jobSubject } from '../src/async-lift-control-plane.js';
 import { kaVmPublishRequest } from '../../../scripts/testing/ka-vm-publish.js';
 import {
-  DAY, NOW, at, bySource, createRetentionTemplates, fin, keyedQuads, present, seedKeyed, spyStore, type KeyedSpec, type RetentionTemplates, type SpyHooks,
+  DAY, NOW, at, bySource, createRetentionTemplates, fin, keyedQuads, present, seedKeyed, spyStore, type KeyedSpec, type Logged, type RetentionTemplates, type SpyHooks,
 } from './_helpers/lift-retention-fixtures.js';
 import { RETENTION, captureLogger, drain, expectKeySuffix, newRetention, removedJobIds, verifiedSubjects } from './_helpers/lift-retention-sweep.js';
 
@@ -315,43 +315,56 @@ describe('fault injection between sibling deletes (AC7)', () => {
     return { jobSubjectsLeft, view: await viewOf(publisher, key), otherView: await viewOf(publisher, 'other') };
   }
 
-  /** A full run's store calls: how many there are, so every one of them can be made to fail. */
-  async function totalCalls(): Promise<number> {
+  /** A store call as two runs are aligned on it: the method and the label its caller gave it. */
+  const shape = (entry: Logged): string => `${entry.kind} ${entry.source ?? '-'}`;
+  /** The phase a batch names for a failure of `entry`: the flush runs after the claim transaction of a hold that deleted, so the delete phase is still the batch's. */
+  const phaseOf = (entry: Logged): 'scan' | 'verify' | 'delete' =>
+    entry.source === `${RETENTION}scan` ? 'scan' : entry.source?.startsWith(RETENTION) ? 'verify' : 'delete';
+
+  /** The store calls of a healthy drain over the population: each injected run is the same drain, aligned with this one call by call. */
+  async function baselineCalls(): Promise<Logged[]> {
     const t = await setup(population());
-    await drain(newRetention(t.publisher));
-    return t.log.length;
+    expect((await drain(newRetention(t.publisher))).every((r) => r.error === undefined)).toBe(true);
+    return [...t.log];
   }
 
-  it('fails the batch at EVERY store call of a run in turn and leaves, each time, an oldest-first prefix of the key gone, its newest record and live successor there, and every binding as it was', async () => {
-    const total = await totalCalls();
-    expect(total).toBeGreaterThan(15);
-    let failedRuns = 0;
-    for (let failAt = 0; failAt < total; failAt++) {
+  it('fails the run at EVERY store call of a healthy run in turn and leaves, each time and whatever the result says, an oldest-first prefix of the key gone, its newest record and live successor there, and every binding as it was; the failure is reported (online review 4396942221)', async () => {
+    const baseline = await baselineCalls();
+    expect(baseline.length).toBeGreaterThan(15);
+    let exercised = 0;
+    for (let failAt = 0; failAt < baseline.length; failAt++) {
+      const where = `call ${failAt} (${shape(baseline[failAt]!)})`;
+      // the store wrapper records the call it failed: whether the fault fired is known without asking the sweep's result
       let n = 0;
-      const t = await setup(population(), { before: () => { if (n++ === failAt) throw new Error(`injected at call ${failAt}`); } });
-      const retention = newRetention(t.publisher);
-      const result = await retention.runBatch();
-      if (result.error === undefined) continue;                                  // this call was not part of this run (cannot happen below `total`, but harmless)
-      failedRuns += 1;
-      expect(result.error.message).toBe(`injected at call ${failAt}`);
+      const fault: { fired?: Logged } = {};
+      const t = await setup(population(), { before: (entry) => { if (n++ === failAt) { fault.fired = entry; throw new Error(`injected at call ${failAt}`); } } });
+      const results = await drain(newRetention(t.publisher));
+      // the run made the healthy run's calls up to the faulted one: a call the run never reached fails here, it is not skipped as a run without an error
+      expect(fault.fired, `${where}: the fault fired`).toBeDefined();
+      expect(t.log.slice(0, failAt + 1).map(shape), `${where}: aligned with the healthy run`).toEqual(baseline.slice(0, failAt + 1).map(shape));
+      exercised += 1;
+      // checked after every fault, before the result is read: a sweep that swallowed the failure and went on deleting fails here
       const { jobSubjectsLeft, view, otherView } = await remaining(t.raw, t.other);
+      expect(jobSubjectsLeft.includes('live'), `${where}: the live successor`).toBe(true);
+      expect(jobSubjectsLeft.includes('x'), `${where}: the failed sibling`).toBe(true);
+      expect(jobSubjectsLeft.includes('o1'), `${where}: the record an older failed job hides`).toBe(true);
       // nothing but a finalized job of the key was ever removed; what is gone is a prefix of the oldest-first order
-      expect(jobSubjectsLeft.includes('live'), `call ${failAt}: the live successor`).toBe(true);
-      expect(jobSubjectsLeft.includes('x'), `call ${failAt}: the failed sibling`).toBe(true);
-      const left = order.filter((id) => jobSubjectsLeft.includes(id));
-      expect(left, `call ${failAt}: records left are a suffix of the order`).toEqual(order.slice(order.length - left.length));
+      expectKeySuffix(jobSubjectsLeft, order, where);
       // the binding decisions of both keys are what they were, whatever stage the sweep stopped in
-      expect(view, `call ${failAt}`).toBe('active:live');
-      expect(otherView, `call ${failAt}`).toBe('unbound');
-      expect(jobSubjectsLeft.includes('o1'), `call ${failAt}: the record an older failed job hides`).toBe(true);
+      expect(view, where).toBe('active:live');
+      expect(otherView, where).toBe('unbound');
+      // the failure surfaced: the batch that made the call ends with it, in that call's phase, after clean batches, and no store call follows it
+      expect(results.at(-1)!.error, `${where}: the failure is reported`).toEqual({ phase: phaseOf(fault.fired!), message: `injected at call ${failAt}` });
+      expect(results.slice(0, -1).every((r) => r.error === undefined), `${where}: no earlier batch failed`).toBe(true);
+      expect(t.log.length, `${where}: no store call after the failed one`).toBe(failAt + 1);
       // and the next, healthy run finishes the key
       const rest = await drain(newRetention(t.other));
       expect(rest.every((r) => r.error === undefined)).toBe(true);
       const after = await remaining(t.raw, t.other);
-      expect(after.jobSubjectsLeft.sort(), `call ${failAt}: after the retry`).toEqual(['live', 'o1', 'x']);
+      expect(after.jobSubjectsLeft.sort(), `${where}: after the retry`).toEqual(['live', 'o1', 'x']);
       expect(after.view).toBe('active:live');
     }
-    expect(failedRuns).toBeGreaterThan(15);
+    expect(exercised).toBe(baseline.length);
   });
 
   it('reports a failure of a job\'s second delete as an unknown outcome, never as a clean batch: the job subject is gone, the request subject may remain, the next sweep ends it', async () => {
