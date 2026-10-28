@@ -34,13 +34,17 @@ A `409` with `existingJobId` means another job for this Knowledge Asset is in th
 - **Share:** it is the same share, still running. Poll that job instead of submitting again.
 - **Publish:** it is a different publish of the same asset. An identical resubmit answers `202` with the same `jobId` instead. That job's result is not yours: wait for it to finish, then send your own request again.
 
-A `503` with a `Retry-After` header means the node is busy. Wait that long, then send the same request. If a share answer says `admissionOutcome: "indeterminate"`, a job may exist, so poll its `statusPath` first. Without `Retry-After`, waiting helps only if the answer says `retryable: true`.
+A `503` means the node is busy. Wait for `Retry-After`, then follow [Retry safely](#retry-safely). Without `Retry-After`, waiting helps only if the answer says `retryable: true`.
 
 The common answers are in the [response reference](#response-reference).
 
 ## Retry safely
 
-When an answer is lost or unclear, send the identical request again: the same context graph, sub-graph, name and author, with the same token. Never rename the Knowledge Asset or change the request to get past an unclear answer. That can share or publish the same content twice.
+Resend a request only when you know no job came of it: a `503` with `admissionOutcome: "not_admitted"`, or a publish answer with `jobCreated: false`. Send it unchanged: the same context graph, sub-graph, name and author, with the same token.
+
+If you have a job ID or a `statusPath` (an `"indeterminate"` share answer has one), poll it instead. A share is only deduplicated against running jobs: resending it after the first one succeeded creates a second job, which shares whatever the draft holds by then.
+
+If every reply was lost, [reconcile the share](#lost-every-reply-reconcile-a-share) instead of resending. Never rename the Knowledge Asset or change the request to get past an unclear answer; that can share or publish the same content twice.
 
 An empty status read or job list does not prove that a job never existed.
 
@@ -70,12 +74,12 @@ Every answer carries `mutationRetryAllowed: false`: no answer on its own makes a
 | --- | --- |
 | `200` (share) or `202` (publish), with `jobId` | The job is stored. Poll it |
 | `400 KA_ATOMIC_SHARE_REQUIRED` | Drop the `entities` array: a share always takes the whole Knowledge Asset |
-| `409` with `existingJobId` | Share: the same share is still running; poll it. Publish: a different publish of this asset is in the way; its result is not yours, so send your request again after it finishes |
+| `409` with `existingJobId` | Share: the same share is still running; poll it. Publish: another publish of this asset is in the way; resend yours after it finishes |
 | `409 PUBLISH_INTENT_STALE` or `PUBLISH_NOT_FULL_SHARE` | The shared content is out of date or not fully shared. See [Stale update intents](../use-dkg/async-publisher-wallets.md#stale-update-intents) |
 | `503 PROMOTE_ADMISSION_UNAVAILABLE`, `admissionOutcome: "not_admitted"` | No share job was written. Send the same request after `Retry-After` |
-| `503 PROMOTE_ADMISSION_UNAVAILABLE`, `admissionOutcome: "indeterminate"` | A share job may exist. Poll `statusPath`, or send the same request |
+| `503 PROMOTE_ADMISSION_UNAVAILABLE`, `admissionOutcome: "indeterminate"` | A share job may exist. Poll `statusPath` before anything else |
 | `503 STORE_SCHEDULER_BUSY` or `STORE_OPERATION_TIMEOUT` | The store is busy. Send the same request after `Retry-After` |
-| `503 async_publisher_unavailable`, or `async-promote worker is not available` | No job was written. If `retryable` is `true`, try again shortly. Otherwise an operator must set up [Async Publisher Wallets](../use-dkg/async-publisher-wallets.md) or turn on the share worker (`promoteQueue.enabled`) |
+| `503 async_publisher_unavailable`, or `async-promote worker is not available` | No job was written. If `retryable` is `true`, retry shortly; otherwise an operator must set up [Async Publisher Wallets](../use-dkg/async-publisher-wallets.md) or enable the share worker (`promoteQueue.enabled`) |
 | `503 LIFT_JOB_PENDING_CHAIN_PROOF` | An earlier publish of this asset may have sent a transaction. See [Held jobs](../use-dkg/async-publisher-wallets.md#held-jobs) |
 | `404` on a status read | Unknown, cleared or removed job. Not proof that it never ran |
 
