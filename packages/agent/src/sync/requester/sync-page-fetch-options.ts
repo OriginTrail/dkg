@@ -46,4 +46,3 @@ export interface SyncPageFetchOptions {
    */
   readonly shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
 }
-

@@ -10,9 +10,10 @@
  * daemon. `stop()` clears the pending timeouts, lets a batch that is already running finish (for a bounded time) and starts no further tick.
  *
  * What a sweep is and how it is created is not this module's business (retention-sweeps.ts holds the registry); it only needs the small `RetentionSweep` shape, so
- * the publisher's sweep (P11) plugs in without a change here.
+ * the share sweep (P10b) and the publisher sweep (P11) run on it unchanged.
  */
 import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { VmPublishRetentionAccess } from '@origintrail-official/dkg-publisher';
 import type { ActiveRetentionMode, ResolvedRetentionConfig } from '../retention-config.js';
 
 export type RetentionQueueName = 'share' | 'publisher';
@@ -52,7 +53,7 @@ export interface RetentionSweep {
 export interface RetentionUsageView extends RetentionSweepCounters {
   readonly queue: RetentionQueueName;
   readonly mode: ActiveRetentionMode;
-  /** Ticks that have run to the end (a failed tick counts). */
+  /** Ticks since this sweep's timer started (the daemon starts it after the API is listening), each counted when it ends, whatever it did: skipped and failed ticks too. */
   readonly ticks: number;
 }
 
@@ -61,6 +62,8 @@ export type RetentionAgent = Pick<DKGAgent, 'store' | 'promoteQueue'>;
 
 export interface RetentionSweepContext {
   readonly agent: RetentionAgent;
+  /** The daemon's admission instance of the publisher queue (`publisherControl`): the publisher sweep reaches the queue's claim transaction only through it. Absent in a test of another queue. */
+  readonly publisher?: VmPublishRetentionAccess;
   readonly settings: ResolvedRetentionConfig;
   readonly log: (message: string) => void;
 }

@@ -50,8 +50,8 @@ import type { RetentionQueueName, RetentionUsageView } from './retention-timer.j
  * started, calls that joined one, calls served from the result cache, probes kept in it, and calls probed outright.
  * `-` when the sample carries none.
  *
- * Queue retention (OT-RFC-73 P10b) appends fields only while a retention sweep runs (a queue whose mode is not `off`), so the line is unchanged by default. Per
- * sweep, with the prefix `share_retention` (the publisher's, when P11 adds it, is `lift_retention`):
+ * Queue retention (OT-RFC-73 P10b, P11) appends fields only while a retention sweep runs (a queue whose mode is not `off`), so the line is unchanged by default. Per
+ * sweep, with the prefix `share_retention` (the publisher's is `lift_retention`, with the single class `finalized` and the publisher's own reasons):
  *     share_retention=report share_retention_ticks=12 share_retention_deleted=cancelled:0,retired_no_effect:0,succeeded:0
  *     share_retention_kept=failed_retained:2,too_recent:40 share_retention_skipped=clock_jump:1 share_retention_errors=scan:1
  *     share_retention_pass_scanned=300 share_retention_pass_would_delete=cancelled:1,retired_no_effect:0,succeeded:240 share_retention_pass_deleted=cancelled:0,...
