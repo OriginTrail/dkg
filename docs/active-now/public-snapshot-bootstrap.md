@@ -17,7 +17,7 @@ configuration automatically.
   canonicalization and complete-content verifier. One to four workers are chosen
   within local CPU and free-memory limits. A changed inventory refuses preparation.
 - Native loading consumes only verified, locally sanitized N-Quads. An explicitly
-  pinned Java/Blazegraph runtime builds a private journal with strict parsing,
+  configured Java executable and SHA-256-pinned Blazegraph JAR build a private journal with strict parsing,
   then every asset and all public quads are read back. Positive and negative
   queries retain their two-second limit. Core-cache trust metadata remains durable.
 - A prepared journal reports `verified-unpublished`, `current: false` and

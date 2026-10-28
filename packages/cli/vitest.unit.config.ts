@@ -268,6 +268,7 @@ export default defineConfig({
           'test/rpc-usage-log.test.ts',
           'test/rpc-usage-snapshot-route.test.ts',
           'test/publisher-runner-rpc-usage.test.ts',
+          'test/publisher-runtime-cleanup.test.ts',
           'test/publisher-startup-admission.test.ts',
           'test/publisher-startup-lifecycle.test.ts',
           'test/daemon-publisher-startup-cancellation.test.ts',
@@ -353,6 +354,7 @@ export default defineConfig({
           'test/oxigraph-orphan-policy.test.ts',
           'test/oxigraph-reclaim-policy.test.ts',
           'test/oxigraph-orphan-native.test.ts',
+          'test/process-inventory.test.ts',
           'test/oxigraph-managed.test.ts',
           // Opt-in via BLAZEGRAPH_INTEGRATION_TEST=1. Skips silently
           // (no fetch / no docker spawn) when the env-var is unset, so

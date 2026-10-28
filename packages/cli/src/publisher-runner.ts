@@ -50,6 +50,7 @@ import {
   type V10ACKProviderParams,
   type SnapshotPageIndexStore,
   type WorkspacePublicSnapshotStore,
+  type StorageAckCopyCleanupWriter,
 } from '@origintrail-official/dkg-publisher';
 import { createTripleStore, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
@@ -235,6 +236,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  storageAckCopyCleanup?: StorageAckCopyCleanupWriter;
   startupSignal?: AbortSignal;
 }): Promise<PublisherRuntime | null> {
   if (!isPublisherRuntimeEnabled(args.config.publisher)) {
@@ -278,6 +280,7 @@ export async function startPublisherRuntimeIfEnabled(args: {
       publishEncryptionFactory: args.publishEncryptionFactory,
       knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
       publicSnapshotStore: args.publicSnapshotStore,
+      storageAckCopyCleanup: args.storageAckCopyCleanup,
       startPaused: resolvePublisherStartPaused(process.env.DKG_PUBLISHER_START_PAUSED),
       startupSignal: args.startupSignal,
     });
@@ -395,6 +398,7 @@ interface PublisherRuntimeBaseArgs {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  storageAckCopyCleanup?: StorageAckCopyCleanupWriter;
   closeStoreOnStop: boolean;
   // #1829 — daemon-only append-only journal writes (OFF for standalone `dkg publisher run`).
   journalWrites?: boolean;
@@ -568,6 +572,7 @@ export async function createPublisherRuntimeFromAgent(args: {
   publishEncryptionFactory?: PublishEncryptionFactory;
   knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
+  storageAckCopyCleanup?: StorageAckCopyCleanupWriter;
   startPaused?: boolean;
   startupSignal?: AbortSignal;
 }): Promise<PublisherRuntime> {
@@ -584,6 +589,7 @@ export async function createPublisherRuntimeFromAgent(args: {
     v10ACKProviderFactory: args.v10ACKProviderFactory,
     publishEncryptionFactory: args.publishEncryptionFactory,
     knowledgeAssetVmPublishHandler: args.knowledgeAssetVmPublishHandler,
+    storageAckCopyCleanup: args.storageAckCopyCleanup,
     publicSnapshotStore: args.publicSnapshotStore
       ?? createPublicSnapshotStore(args.dataDir, args.config, { store: args.store }),
     closeStoreOnStop: false,
@@ -655,6 +661,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
           publisherNodeIdentityId: identityId,
           publisherPrivateKey: wallet.privateKey,
           publicSnapshotStore: args.publicSnapshotStore,
+          storageAckCopyCleanupWriter: args.storageAckCopyCleanup,
         }),
       });
     }
@@ -662,28 +669,20 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     const publishers = new Map<string, DKGPublisher>(
       wallets.map((wallet) => [wallet.address, wallet.publisher]),
     );
-    // GH#2270 PR-3 r2 — the recovery factories take adapters, not publishers. Built here, from the
-    // wallets, where `chain` is a public field rather than something to assert through.
+    // Recovery factories use the adapters owned by these wallet runtimes.
     const chainAdapters = chainAdaptersForWallets(wallets);
     const hasChainRecovery = [...chainAdapters.values()].some(hasChainPublishLookup);
-    // GH#2270 follow-up (🟡 3823952723) — ONE closure, used by both the runtime's own publisher and
-    // the runtime handle the daemon's admission instance asks. These two answers are required to be
-    // identical; computing them twice is precisely the drift this bridge exists to prevent, so they
-    // share function identity rather than a copied body.
+    // Runtime and daemon admission share one recovery-capability closure.
     const canSettleHeldJob = createRuntimeRecoveryCapability(chainAdapters);
 
     const scopedKnowledgeAssetVmPublishHandler = scopeKnowledgeAssetVmPublishHandler(
       publishers,
       args.knowledgeAssetVmPublishHandler,
     );
-    // PR #2300 r2 (🟡 3809616683) — no shared verifier instance: the `recovered` verdict CARRIES
-    // its canonical update evidence to the finalizer, so a recognized update is verified once per
-    // recovery by construction, with no cache and no temporal coupling between the factories.
+    // Recovered verdicts carry canonical evidence so the finalizer never repeats verification.
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
       chainProofResolver: hasChainRecovery ? createChainProofResolver(chainAdapters) : undefined,
-      // Receipt waiting is detached only when this runtime has the independent chain-proof lane
-      // that can move the resulting tx-bearing `broadcast` record. Direct library consumers retain
-      // the historical blocking `processNext()` contract by default.
+      // Detach only with independent chain proof; library processNext() remains blocking by default.
       detachReceiptReconciliation: hasChainRecovery,
       // r20 (🔴 3815617109) — `hasChainRecovery` is `.some(...)`, so on a node mixing a capable
       // adapter with a legacy one the resolvers are installed for the whole node. The honesty

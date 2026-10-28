@@ -21,6 +21,8 @@ export default defineConfig({
       "test/public-snapshot-checkpoint.test.ts",
       "test/public-snapshot-native-boundaries.test.ts",
       "test/public-checkpoint-job-ownership.test.ts",
+      "test/context-graph-lifecycle-cache.test.ts",
+      "test/storage-ack-copy-cleanup-writer.test.ts",
       "test/held-metadata-controls.test.ts",
       "test/recipient-key-route-scopes.test.ts",
       "test/public-snapshot-catch-up.test.ts",
@@ -171,7 +173,14 @@ export default defineConfig({
       "test/exact-asset-wire-parse.test.ts",
       "test/swm/host-catchup-sign.test.ts",
       "test/swm/host-catchup-wire.test.ts",
+      "test/swm/host-catchup-requester.test.ts",
       "test/swm/host-mode-store.test.ts",
+      "test/swm/host-mode-store-durable-writes.test.ts",
+      "test/swm/host-mode-store-tail-recovery.test.ts",
+      "test/swm/host-mode-store-cold-init.test.ts",
+      "test/swm/host-mode-store-dirsync-retries.test.ts",
+      "test/swm/host-mode-store-dirsync-model.test.ts",
+      "test/swm/host-mode-store-crash.e2e.test.ts",
       "test/swm/host-mode-key-canonicalization.test.ts",
       "test/swm/host-mode-strip-ciphertext.test.ts",
       "test/rs-heal-stranded-kc-decorated.test.ts",
@@ -496,6 +505,9 @@ export default defineConfig({
       // #3296 — a newer stored head proves an asset held only with its content.
       "test/swm-stored-head-proof.test.ts",
       "test/swm-head-identity-preservation.test.ts",
+      // One publishedAt per share operation, and a defective head set aside
+      // instead of every descriptor of its graph.
+      "test/swm-operation-published-at.test.ts",
       // #2079 — the already-materialized witness: the warm-path win, the count
       // gate that keeps it self-healing, and the digest binding that makes an
       // equal-count version change safe.
