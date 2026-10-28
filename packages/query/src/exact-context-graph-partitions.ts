@@ -1,4 +1,4 @@
-import { describeScopedContentGraph } from './scoped-content-partition.js';
+import { describeScopedContentGraph, assertionRegistrationCandidates } from './scoped-content-partition.js';
 import { registeredSubGraphBranches } from './registered-sub-graphs.js';
 import { registeredAssertionGraphPattern, CHILD_CONTEXT_GRAPH_PREDICATES, decodePartitionMetadataFact } from './partition-metadata-facts.js';
 // SPDX-License-Identifier: Apache-2.0
@@ -47,8 +47,12 @@ export async function authorizeExactContextGraphPartitions(
     const description = describeScopedContentGraph(graph, contextGraphId);
     if (!description) continue;
     if (!subGraph && description.subGraphName) names.add(description.subGraphName);
-    for (const parent of description.assertionAncestors) assertionParents.add(parent);
-    for (const ancestor of description.contextGraphAncestors) childCandidates.add(ancestor);
+    if (description.kind === 'draft') {
+      for (const parent of assertionRegistrationCandidates(graph)) assertionParents.add(parent);
+    }
+    // Only exact admission needs metadata for every possible child-CG ancestor.
+    const parts = graph.slice(root.length + 1).split('/');
+    for (let i = 0; i < parts.length; i++) childCandidates.add(`${root}/${parts.slice(0, i + 1).join('/')}`);
   }
 
   const revisionSource = asGraphWriteRevisionSource(store);

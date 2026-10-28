@@ -1,3 +1,4 @@
+import type { QueryOptions } from './query-engine.js';
 import type { StoreSchedulerBusyReason } from '@origintrail-official/dkg-storage';
 
 export type LookupType =
@@ -104,3 +105,9 @@ export interface ContextGraphNamedGraphStats {
   entityCount: number;
   tripleCount: number;
 }
+
+/** Typed inventory and aggregates implement partition routing, draft ownership and bounded store reads only. */
+export type ContextGraphPartitionReadOptions = Pick<QueryOptions,
+  'graphSuffix' | 'subGraphName' | 'includeSharedMemory' | 'includeWorkspace'
+  | 'includeSharedMemoryMeta' | 'draftAccess' | 'timeout' | 'maxResponseBytes'
+  | 'signal' | 'priority' | 'source'>;

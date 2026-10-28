@@ -214,6 +214,8 @@ export const PUBLISHER_TAGGING_ROWS: readonly TaggingRow[] = [
       'writeJob', 'writeJobRequest', 'deleteJob', 'deleteJobRequest',
       'walletLock.write', 'walletLock.delete', 'walletLock.read', 'walletLock.ownership', 'walletLock.sweep',
       'appendJournalEntry', 'allocateJournalSeq',
+      // P11: bulk clear's sibling read (under the claim lock and the job lock) and retention's verify, wallet-lock and sibling reads (inside the claim transaction).
+      'clear.siblings', 'retention.siblings', 'retention.verify', 'retention.walletLocks',
     ].map((name) => `${LIFT}${name}`),
   },
   {
@@ -231,6 +233,13 @@ export const PUBLISHER_TAGGING_ROWS: readonly TaggingRow[] = [
     row: 'Bounded page and COUNT reads (P9a): listPage(), getStats(). Decided: normal, the caller\'s lane',
     lane: 'normal',
     sources: ['listPage', 'stats'].map((name) => `${LIFT}${name}`),
+  },
+  {
+    // P11: the retention candidate scan runs outside the claim lock and is not queue control work, so it is the one background row of the sweep.
+    id: 'retention-scan',
+    row: 'Publisher retention candidate scan (P11): outside the claim lock, explicit background lane, no control tag',
+    lane: 'background',
+    sources: [`${LIFT}retention.scan`],
   },
   {
     id: 'queue-usage',
@@ -327,6 +336,12 @@ export const LABEL_TO_BASE: Readonly<Record<string, string>> = Object.freeze({
   'publisher.asyncLift.stats': 'publisher.asyncLift.list',
 });
 
+/**
+ * Labels of calls the base SHA never made at all: P11's bulk clear reads the lifecycle siblings of each job it removes. They are additions to the workload, not
+ * relabelled base calls, so the AC2 traces leave them out (the boundary oracle still audits their lane and tag).
+ */
+export const ADDED_LABELS: ReadonlySet<string> = new Set(['publisher.asyncLift.clear.siblings']);
+
 /** A call's source label with the labels this PR adds mapped back to the base label of the same operation. */
 const baseSourceOf = (call: Pick<RecordedStoreCall, 'source'>): string | undefined =>
   call.source === undefined ? undefined : (LABEL_TO_BASE[call.source] ?? call.source);
@@ -343,7 +358,7 @@ const tally = (keys: Iterable<string>): Record<string, number> => {
  * the call's source label, after the label mapping. A call with no label is counted under `(unlabelled)`.
  */
 export function laneTrace(calls: readonly RecordedStoreCall[]): Record<string, number> {
-  return tally(calls.map((call) => {
+  return tally(calls.filter((call) => !ADDED_LABELS.has(call.source ?? '')).map((call) => {
     const source = baseSourceOf(call);
     return `${resolveLane(call, false)} ${source === undefined ? '(unlabelled)' : storeOperationFamily(source)}`;
   }));
@@ -357,7 +372,7 @@ export function laneTrace(calls: readonly RecordedStoreCall[]): Record<string, n
  * `(unlabelled:<method>)`, so the option-less `createGraph` and `flush` calls stay apart from unlabelled queries.
  */
 export function sourceTrace(calls: readonly RecordedStoreCall[]): Record<string, number> {
-  return tally(calls.map((call) => {
+  return tally(calls.filter((call) => !ADDED_LABELS.has(call.source ?? '')).map((call) => {
     const source = baseSourceOf(call);
     return `${resolveLane(call, false)} ${source ?? `(unlabelled:${call.method})`}`;
   }));

@@ -5,6 +5,8 @@ import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection 
 import { completionTrace } from './async-lift-completion-trace.js';
 import { traceProcessNext } from './async-lift-claim-trace.js';
 import { LiftJobListingSelectors } from './lift-job-listing-selectors.js';
+import { clearTerminalJobsGuarded, LIFT_CLEAR_SIBLINGS_SOURCE } from './async-lift-guarded-clear.js';
+import { createLiftRetentionAccess, type LiftRetentionAccess } from './async-lift-retention-access.js';
 import { lifecycleKeyOfJob } from './lift-job-store-selectors.js';
 import { AsyncLiftQueueScheduler } from './async-lift-queue-scheduler.js';
 import { LiftJobChainObservations } from './lift-job-chain-observations.js';
@@ -18,8 +20,7 @@ import {
   type ChainProofScheduleTurn,
 } from './chain-proof-retry-schedule.js';
 import { ReconciliationSnapshotCoordinator } from './reconciliation-snapshot-coordinator.js';
-import type { Quad, TripleStore } from '@origintrail-official/dkg-storage';
-import { controlStoreOptions, deleteByPatternWithoutCount, GraphManager, PrivateContentStore } from '@origintrail-official/dkg-storage';
+import { controlStoreOptions, deleteByPatternWithoutCount, GraphManager, PrivateContentStore, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
 import {
   GRAPH_KA_CONTENT_SCOPE_VERSION,
   LegacyKnowledgeAssetReadOnlyError,
@@ -98,7 +99,6 @@ import {
   deriveLiftJobRetryProjection,
   describeHeldBlocker,
   isAutomaticallyRetryableLiftJob,
-  isBulkClearableTerminalLiftJob,
   isClearableTerminalLiftJob,
   isTargetedClearableLiftJob,
   decideChainProofDisposition,
@@ -2834,22 +2834,22 @@ export class TripleStoreAsyncLiftPublisher
   async clear(status: 'finalized' | 'failed'): Promise<number> {
     return this.journalCompletion.runPublicOperation(async (owner) => {
       await this.ensureGraph();
-      const jobs = await this.list({ status });
-      let cleared = 0;
-      for (const snapshot of jobs) {
-        await this.claimCoordinator.runJobTransaction(owner, snapshot.jobId, async (transaction) => {
-          if (transaction.kind === 'missing') return;
-          const { current: job, scope } = transaction;
-          // #1837 — the shared terminal-clear authority (skips retry_recovery-failed jobs, whose
-          // pending tx recovery may still finalize), narrowed for the bulk lane by GH#2270's
-          // evidence guard. `clearTerminalJob` keeps the unnarrowed predicate on purpose.
-          if (!isBulkClearableTerminalLiftJob(job)) return;
-          await scope.commitRemoval();
-          cleared += 1;
-        });
-      }
-      return cleared;
+      // #1837 — the shared terminal-clear authority (skips retry_recovery-failed jobs, whose pending tx recovery may still finalize),
+      // narrowed for the bulk lane by GH#2270's evidence guard; since OT-RFC-73 P11 also the sibling guard (async-lift-guarded-clear.ts).
+      return await clearTerminalJobsGuarded({
+        jobs: await this.list({ status }),
+        transact: (jobId, work) => this.claimCoordinator.runClaimJobTransaction(owner, jobId, async (transaction) => {
+          if (transaction.kind !== 'missing') await work(transaction.current, transaction.scope);
+        }),
+        siblings: (key) => this.jobSelectors.vmPublishCandidates(key, controlStoreOptions('publisher', LIFT_CLEAR_SIBLINGS_SOURCE)),
+      });
     });
+  }
+
+  /** OT-RFC-73 P11: the retention sweep's window onto the claim transaction (async-lift-retention-access.ts). */
+  retentionAccess(): LiftRetentionAccess {
+    return createLiftRetentionAccess({ store: this.store, graphUri: this.graphUri, walletLockGraphUri: DEFAULT_WALLET_LOCK_GRAPH_URI,
+      ensureGraph: () => this.ensureGraph(), journal: this.journalCompletion, claims: this.claimCoordinator, selectors: this.jobSelectors });
   }
 
   /**

@@ -1,4 +1,4 @@
-import type { ContextGraphPartitionRead } from './query-types.js';
+import type { ContextGraphPartitionRead, ContextGraphPartitionReadOptions } from './query-types.js';
 import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions, selectLegacyScopedRoutePartitions } from './scoped-content-graph-policy.js';
 import { readPartitionStatistics, type NamedGraphStatsBatchGate } from './named-graph-statistics.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
@@ -332,7 +332,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   /** Carry admission requirements with the authorized inventory across caller boundaries. */
-  async listContextGraphQueryPartitionReads(contextGraphId: string, options?: QueryOptions): Promise<ContextGraphPartitionRead[]> {
+  async listContextGraphQueryPartitionReads(contextGraphId: string, options?: ContextGraphPartitionReadOptions): Promise<ContextGraphPartitionRead[]> {
     const opts = { ...options, includeSharedMemory: options?.includeSharedMemory ?? options?.includeWorkspace ?? true };
     const policy = createScopedContentGraphRoutePolicy(contextGraphId, opts);
     const reads = createQueryStoreReadContext(this.store, opts);
@@ -342,7 +342,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
   }
 
   /** Inventory, bounded aggregates and fresh candidate admission have one owner. */
-  async readContextGraphNamedGraphStats(contextGraphId: string, options: QueryOptions = {}, aroundBatch?: NamedGraphStatsBatchGate) {
+  async readContextGraphNamedGraphStats(contextGraphId: string, options: ContextGraphPartitionReadOptions = {}, aroundBatch?: NamedGraphStatsBatchGate) {
     const opts = { ...options, includeSharedMemory: options.includeSharedMemory ?? options.includeWorkspace ?? true };
     const partitions = await this.listContextGraphQueryPartitionReads(contextGraphId, opts);
     return readPartitionStatistics(this.store, contextGraphId, partitions, opts, aroundBatch);

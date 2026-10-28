@@ -6,13 +6,12 @@ function isDraft(tail: string): boolean {
   return first === '_working_memory' || first === 'assertion';
 }
 
-/** Pure storage-layout description, shared by metadata planning and classification. */
+/** Pure storage-layout identity; authority dependencies are planned by the caller. */
 export function describeScopedContentGraph(graph: string, contextGraphId: string): {
   kind: ContentPartition['kind'] | 'shared-root'; subGraphName?: string; draftOwner?: string | null;
-  assertionAncestors: readonly string[]; contextGraphAncestors: readonly string[];
 } | undefined {
   const root = contextGraphDataUri(contextGraphId);
-  if (graph === root) return { kind: 'content', assertionAncestors: [], contextGraphAncestors: [] };
+  if (graph === root) return { kind: 'content' };
   if (!graph.startsWith(`${root}/`)) return undefined;
   const tail = graph.slice(root.length + 1);
   if (!tail) return undefined;
@@ -23,9 +22,7 @@ export function describeScopedContentGraph(graph: string, contextGraphId: string
     subGraphName = first;
     partition = tail.length === first.length ? '' : tail.slice(first.length + 1);
   }
-  const parts = tail.split('/');
-  const contextGraphAncestors = parts.map((_part, i) => `${root}/${parts.slice(0, i + 1).join('/')}`);
-  const base = { subGraphName, contextGraphAncestors, assertionAncestors: [] as string[] };
+  const base = { subGraphName };
   if (partition === '_shared_memory_meta') return { ...base, kind: 'shared-metadata' };
   if (isExcludedContentGraphTail(tail)) return undefined;
   if (!partition) return { ...base, kind: 'content' };
@@ -33,13 +30,21 @@ export function describeScopedContentGraph(graph: string, contextGraphId: string
   if (partition.startsWith('_shared_memory/')) return { ...base, kind: 'shared' };
   if (partition.startsWith('_verifiable_memory/')) return { ...base, kind: 'verified' };
   if (!isDraft(partition)) return undefined;
-  const assertionAncestors = [graph];
+  return { ...base, kind: 'draft', draftOwner: partition.split('/')[1] ?? null };
+}
+
+/** Draft registration can authorize an assertion graph and its named descendants. */
+export function* assertionRegistrationCandidates(graph: string): Generator<string> {
+  yield graph;
   let offset = graph.indexOf(ASSERTION_NAMED_GRAPH_PREFIX);
   while (offset >= 0) {
-    assertionAncestors.push(graph.slice(0, offset));
+    yield graph.slice(0, offset);
     offset = graph.indexOf(ASSERTION_NAMED_GRAPH_PREFIX, offset + ASSERTION_NAMED_GRAPH_PREFIX.length);
   }
-  return { ...base, kind: 'draft', draftOwner: partition.split('/')[1] ?? null, assertionAncestors };
+}
+function hasRegisteredAssertionAncestor(graph: string, registered: Set<string>): boolean {
+  for (const parent of assertionRegistrationCandidates(graph)) if (registered.has(parent)) return true;
+  return false;
 }
 
 export function classifyScopedContentGraph(graph: string, contextGraphId: string,
@@ -52,7 +57,7 @@ export function classifyScopedContentGraph(graph: string, contextGraphId: string
   const scope = { graph, broadScopeEligible: subGraphName === undefined || registeredSubGraphs.has(subGraphName),
     ...(subGraphName ? { subGraphName } : {}) };
   if (kind === 'draft') {
-    if (!description.assertionAncestors.some(parent => registeredAssertionGraphs.has(parent))) return undefined;
+    if (!hasRegisteredAssertionAncestor(graph, registeredAssertionGraphs)) return undefined;
     return Object.freeze({ ...scope, kind, draftOwner: description.draftOwner ?? null });
   }
   return Object.freeze({ ...scope, kind });

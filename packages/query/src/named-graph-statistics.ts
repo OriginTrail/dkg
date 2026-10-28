@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { assertSafeIri } from '@origintrail-official/dkg-core';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
-import type { QueryOptions } from './query-engine.js';
-import type { ContextGraphNamedGraphStats, ContextGraphPartitionRead } from './query-types.js';
+import type { ContextGraphNamedGraphStats, ContextGraphPartitionRead, ContextGraphPartitionReadOptions } from './query-types.js';
 import { createScopedContentGraphRoutePolicy } from './scoped-content-graph-policy.js';
 import { authorizeExactContextGraphPartitions } from './exact-context-graph-partitions.js';
 import { createQueryStoreReadContext } from './query-store-read-context.js';
@@ -14,11 +13,11 @@ export type NamedGraphStatsBatchGate = (admission: ContextGraphPartitionRead['ad
 
 /** Only generated aggregates reach this path: it accepts graph identities, not SPARQL. */
 export async function readNamedGraphStatisticsBatch(store: TripleStore, contextGraphId: string,
-  graphs: readonly string[], options: QueryOptions = {}): Promise<ContextGraphNamedGraphStats[]> {
+  graphs: readonly string[], options: ContextGraphPartitionReadOptions = {}): Promise<ContextGraphNamedGraphStats[]> {
   options.signal?.throwIfAborted();
   if (graphs.length === 0) return [];
   if (graphs.length > NAMED_GRAPH_STATS_BATCH_SIZE) throw new Error('Statistics batch exceeds eight graphs');
-  if (options.includePrivate) throw new Error('Named graph statistics only admit public partitions');
+  if ('includePrivate' in options && options.includePrivate) throw new Error('Named graph statistics only admit public partitions');
   const candidates = [...new Set(graphs)].map(graph => assertSafeIri(graph));
   const policy = createScopedContentGraphRoutePolicy(contextGraphId, options);
   const reads = createQueryStoreReadContext(store, options);
@@ -40,7 +39,7 @@ function parseCount(value: string | undefined): number {
 }
 
 export async function readPartitionStatistics(store: TripleStore, contextGraphId: string,
-  partitions: readonly ContextGraphPartitionRead[], options: QueryOptions,
+  partitions: readonly ContextGraphPartitionRead[], options: ContextGraphPartitionReadOptions,
   aroundBatch: NamedGraphStatsBatchGate = (_admission, read) => read()): Promise<ContextGraphNamedGraphStats[]> {
   const stats: ContextGraphNamedGraphStats[] = [];
   for (const admission of ['public', 'shared-memory'] as const) {

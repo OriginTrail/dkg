@@ -281,14 +281,21 @@ describe('caller-bound graph reads', () => {
 
   it('forwards HTTP cancellation to the typed statistics operation', async () => {
     const h = fixture(routes[5], decisions.allowed);
+    let suppliedSignal: AbortSignal | undefined;
+    let initiallyAborted: boolean | undefined;
     h.agent.readContextGraphNamedGraphStats.mockImplementation(async (_id, options) => {
-      expect(options?.signal?.aborted).toBe(false);
+      suppliedSignal = options?.signal;
+      initiallyAborted = suppliedSignal?.aborted;
       h.ctx.req.emit('aborted');
-      expect(options?.signal?.aborted).toBe(true);
       return [];
     });
     await routes[5].run(h.ctx);
     expect(h.agent.readContextGraphNamedGraphStats).toHaveBeenCalledOnce();
+    expect(suppliedSignal).toBeInstanceOf(AbortSignal);
+    expect(initiallyAborted).toBe(false);
+    expect(suppliedSignal?.aborted).toBe(true);
+    expect(h.res.writableEnded).toBe(false);
+    expect(h.res.body).toBe('');
   });
 
   it('keeps an accepted agent credential scoped when authentication is disabled', async () => {

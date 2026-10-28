@@ -1,97 +1,51 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createOperationContext } from '@origintrail-official/dkg-core';
-import type { StorePressureSnapshot } from '@origintrail-official/dkg-storage';
+import { StorePriorityScheduler } from '@origintrail-official/dkg-storage';
 import { RecoveryMaterializationOwner, type RecoveryMaterializationPorts } from '../src/durable-recovery-materialization.js';
 import type { DurableRecoveryAuthority } from '../src/durable-recovery-authority.js';
 import * as materialization from '../src/sync/requester/graph-scoped-materialization.js';
 import * as laneYield from '../src/sync/requester/store-lane-yield.js';
-import { STORE_LANE_YIELD_MAX_MS, yieldStoreBackgroundLane } from '../src/sync/requester/store-lane-yield.js';
+import { yieldStoreBackgroundLane } from '../src/sync/requester/store-lane-yield.js';
 
 afterEach(() => vi.restoreAllMocks());
 
-function lane(backgroundQueued: number, backgroundInflight = 0): StorePressureSnapshot {
-  return {
-    ackInflight: 0, normalInflight: 0, backgroundInflight,
-    ackQueued: 0, normalQueued: 0, backgroundQueued,
-    maxConcurrent: 4, ackReservedSlots: 1,
-  };
-}
-
-/** A clock that only moves when the yield sleeps. */
-function fakeTime() {
-  let now = 0;
-  const sleeps: number[] = [];
-  return {
-    now: () => now,
-    sleep: async (ms: number) => { sleeps.push(ms); now += ms; },
-    sleeps,
-  };
-}
-
 describe('yielding the store background lane between asset writes', () => {
-  it('costs one event-loop turn when the lane is idle or unreported', async () => {
-    const time = fakeTime();
-    for (const store of [{ getPressureSnapshot: () => lane(0) }, {}]) {
-      // Work queued for the next turn has run by the time the yield returns.
-      let queuedTurnRan = false;
-      setImmediate(() => { queuedTurnRan = true; });
-      await yieldStoreBackgroundLane({ store, previousWriteMs: 5_000, ...time });
-      expect(queuedTurnRan).toBe(true);
-    }
-    expect(time.sleeps).toEqual([]);
+  it('lets event-loop callbacks run before the next admission', async () => {
+    let ran = false;
+    setImmediate(() => { ran = true; });
+    await yieldStoreBackgroundLane();
+    expect(ran).toBe(true);
   });
 
-  it('waits while other work is queued or running, until the lane clears', async () => {
-    const time = fakeTime();
-    const snapshots = [lane(2), lane(1, 1), lane(0, 1), lane(0)];
-    await yieldStoreBackgroundLane({
-      store: { getPressureSnapshot: () => snapshots.shift() ?? lane(0) },
-      previousWriteMs: 5_000,
-      ...time,
+  it('observes cancellation before and during the yield', async () => {
+    const before = new AbortController();
+    before.abort(new Error('before'));
+    await expect(yieldStoreBackgroundLane({ signal: before.signal })).rejects.toThrow('before');
+    const during = new AbortController();
+    setImmediate(() => during.abort(new Error('during')));
+    await expect(yieldStoreBackgroundLane({ signal: during.signal })).rejects.toThrow('during');
+  });
+
+  it('lets existing FIFO admission run queued work between recovery writes', async () => {
+    const scheduler = new StorePriorityScheduler({ maxConcurrent: 1, ackReservedSlots: 0,
+      healthReservedSlots: 0, backgroundReservedSlots: 0 });
+    const order: string[] = [];
+    let release!: () => void;
+    const first = scheduler.run('background', 'recovery.first', async () => {
+      order.push('first'); await new Promise<void>(resolve => { release = resolve; });
     });
-    expect(time.sleeps).toEqual([50, 50, 50]);
-  });
-
-  it('never waits longer than the previous write took, nor past its ceiling', async () => {
-    const busy = { getPressureSnapshot: () => lane(1, 1) };
-    const short = fakeTime();
-    await yieldStoreBackgroundLane({ store: busy, previousWriteMs: 120, ...short });
-    expect(short.sleeps).toEqual([50, 50, 20]);
-    const long = fakeTime();
-    await yieldStoreBackgroundLane({ store: busy, previousWriteMs: 60_000, ...long });
-    expect(long.now()).toBe(STORE_LANE_YIELD_MAX_MS);
-    const none = fakeTime();
-    await yieldStoreBackgroundLane({ store: busy, previousWriteMs: -5, ...none });
-    expect(none.sleeps).toEqual([]);
-  });
-
-  it('stops waiting when the operation is cancelled', async () => {
-    const controller = new AbortController();
-    const time = fakeTime();
-    await yieldStoreBackgroundLane({
-      store: { getPressureSnapshot: () => lane(1) },
-      previousWriteMs: 5_000,
-      signal: controller.signal,
-      now: time.now,
-      sleep: async (ms) => { await time.sleep(ms); controller.abort(); },
-    });
-    expect(time.sleeps).toEqual([50]);
-  });
-
-  it('waits with real timers when no clock is injected', async () => {
-    let calls = 0;
-    const started = Date.now();
-    await yieldStoreBackgroundLane({
-      store: { getPressureSnapshot: () => (calls++ < 1 ? lane(1) : lane(0)) },
-      previousWriteMs: 1_000,
-    });
-    expect(calls).toBe(2);
-    expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+    const queued = scheduler.run('background', 'other.queued', async () => { order.push('queued'); });
+    release();
+    await first;
+    await yieldStoreBackgroundLane();
+    await scheduler.run('background', 'recovery.second', async () => { order.push('second'); });
+    await queued;
+    expect(order).toEqual(['first', 'queued', 'second']);
   });
 
   it('runs between the writes of one recovery operation, never before its first', async () => {
     const asset = { contextGraphId: 'graph', ual: 'asset' } as materialization.VerifiedGraphScopedAsset;
-    const store = { getPressureSnapshot: () => lane(0) };
+    const store = {};
     const subscription = { onChainId: '1' };
     const ports = {
       store: () => store,
@@ -124,8 +78,7 @@ describe('yielding the store background lane between asset writes', () => {
     }
 
     expect(order).toEqual(['write', 'yield', 'write', 'yield', 'write']);
-    expect(yields.mock.calls[0]![0]).toMatchObject({ store });
-    expect(yields.mock.calls[0]![0].previousWriteMs).toBeGreaterThanOrEqual(0);
+    expect(yields.mock.calls[0]![0]).toEqual({ signal: undefined });
     // A new operation starts without a previous write to yield after.
     const next = new RecoveryMaterializationOwner(ports).forOperation({
       ctx: createOperationContext('sync'), contextGraphId: 'graph', authority,
