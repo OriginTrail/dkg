@@ -229,6 +229,7 @@ export default defineConfig({
       "test/context-graph-dormant-admission-boundary.test.ts",
       "test/context-graph-automatic-discovery-binding.test.ts",
       "test/context-graph-activation-custody.test.ts",
+      "test/context-graph-activation-completion.test.ts",
       "test/context-graph-dormant-predecessor-retirement.test.ts",
       "test/swm-host-dormancy.test.ts",
       "test/context-graph-subscription-rolling-checks.test.ts",

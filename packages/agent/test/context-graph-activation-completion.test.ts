@@ -167,3 +167,39 @@ it.each([false, true])('explicit subscription retires dormant activation before 
   expect(a.getSubscribedContextGraphs().get(id)?.subscribed).toBe(true);
   } finally { pendingSave.resolve(); }
 });
+
+
+it('preserves explicit custody of the same provisional row after paused preparation resumes', async () => {
+  const { a, id, row, topics, events } = await fixture();
+  const gate = Promise.withResolvers<void>();
+  const activation = a.activatePersistedContextGraphSubscriptionRecord(row, { prepare: () => gate.promise });
+  const rejected = expect(activation).rejects.toThrow('ownership changed');
+  const provisional = a.subscribedContextGraphs.get(id);
+  a.subscribeToContextGraph(id, { persist: false, deferSharedMemoryGossipSubscribe: true });
+  expect(a.subscribedContextGraphs.get(id)).toBe(provisional);
+  const ownedTopics = new Set(topics);
+  expect(ownedTopics.size).toBeGreaterThan(0);
+  gate.resolve(); await rejected;
+  expect(a.subscribedContextGraphs.get(id)).toBe(provisional);
+  expect(provisional.subscribed).toBe(true);
+  expect(topics).toEqual(ownedTopics);
+  expect(events).toEqual([]);
+});
+
+it('owns capped-to-unavailable scheduling and terminal accounting before notifying waiters', async () => {
+  const { a, id } = await fixture();
+  a.transitionContextGraphSubscriptionDormancy(id, 'activationCap');
+  expect(a.contextGraphSubscriptionRehydrationPendingIds.has(id)).toBe(true);
+  a.transitionContextGraphSubscriptionDormancy(id, 'authorityUnavailable');
+  expect(a.contextGraphSubscriptionRehydrationPendingIds.has(id)).toBe(false);
+  const observations: unknown[] = [];
+  const wait = a.contextGraphSubscriptionActivations.wait(id, new AbortController().signal).then(() => {
+    observations.push({ pending: a.contextGraphSubscriptionRehydrationPendingIds.has(id),
+      slot: a.contextGraphSubscriptionRehydrationSlotIds.has(id),
+      dormant: a.contextGraphSubscriptionDormancyById.get(id),
+      activated: a.contextGraphSubscriptionRehydrationStatus.activated });
+  });
+  a.recordContextGraphSubscriptionClear([], [id]);
+  await wait;
+  expect(observations).toEqual([{ pending: false, slot: false, dormant: 'deactivated', activated: 0 }]);
+});

@@ -2,7 +2,7 @@
 import type { AgentWorkLifetime } from './agent-work-lifetime.js';
 import { SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { accountSubscriptionChanges, type SubscriptionAccountingChange } from './context-graph-subscription-accounting.js';
-import { rehydratedSubscriptionReachedSafeState, type PersistedContextGraphSubscriptionActivationOptions, type PersistedContextGraphSubscriptionActivationPorts } from './context-graph-subscription-authority-recovery.js';
+import { releaseRollingSubscriptionSlot, rehydratedSubscriptionReachedSafeState, type PersistedContextGraphSubscriptionActivationOptions, type PersistedContextGraphSubscriptionActivationPorts } from './context-graph-subscription-authority-recovery.js';
 import type { ContextGraphSub, ContextGraphSubscriptionRecord, ContextGraphSubscriptionRehydrationInternalStatus } from './dkg-agent-types.js';
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { contextGraphSubscriptionAdmissionPremisesEqual, isContextGraphSubscriptionStoredAgain } from './context-graph-subscription-policy.js';
@@ -97,6 +97,23 @@ export class ContextGraphSubscriptionActivations {
     this.ports.contextGraphSubscriptionDormancyById.clear();
     for (const row of rows) this.attemptFor(row);
   }
+  resetScheduler(): void {
+    this.ports.contextGraphSubscriptionRehydrationPendingIds.clear();
+    this.ports.contextGraphSubscriptionRehydrationSlotIds.clear();
+  }
+  /** Canonical readiness changes own rolling slot occupancy and its notification. */
+  updateReadiness(id: string, subscription: ContextGraphSub, release: 'deactivation' | 'activation-rollback' | 'rolling-rollback' = 'deactivation'): boolean {
+    const ports = this.ports, status = ports.getStatus();
+    const eligible = status?.rehydrationEnabled === true && status.activationCap > 0
+      && ports.contextGraphSubscriptionRehydrationAccountedIds.has(id)
+      && subscription.coreHosted !== true && subscription.subscribed;
+    if (eligible && !rehydratedSubscriptionReachedSafeState(subscription)) {
+      ports.contextGraphSubscriptionRehydrationSlotIds.add(id);
+      return false;
+    }
+    return releaseRollingSubscriptionSlot(ports.contextGraphSubscriptionRehydrationSlotIds,
+      { request: () => { ports.slotReleased(); return true; } }, id, eligible ? 'readiness' : release);
+  }
   private attemptFor(row: ContextGraphSubscriptionRecord): ActivationAttempt {
     const current = this.pending.get(row.id);
     if (current && (sameDurableIntent(current.intent, row)
@@ -121,7 +138,6 @@ export class ContextGraphSubscriptionActivations {
   replaceLiveIntent(id: string, subscription: ContextGraphSub): void {
     if (!this.pending.has(id) && (!this.ports.contextGraphSubscriptionDormancyById.has(id)
       || (!subscription.subscribed && !subscription.coreHosted))) return;
-    this.ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
     this.transition({ id, kind: 'saved',
       persisted: this.ports.contextGraphSubscriptionRehydrationAccountedIds.has(id),
       active: subscription.subscribed || subscription.coreHosted === true,
@@ -146,7 +162,15 @@ export class ContextGraphSubscriptionActivations {
       const reason = kind === 'saved' || kind === 'dormancy' ? event.reason
         : kind === 'deactivated' ? 'deactivated' : undefined;
       const dormancy = applyDormancy(ports.contextGraphSubscriptionDormancyById, id, reason);
-      if (kind === 'dormancy' || (kind !== 'activated' && (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id))) return dormancy;
+      if ((kind !== 'activated' && (Object.values(SYSTEM_CONTEXT_GRAPHS) as string[]).includes(id))) return dormancy;
+      if (reason === 'activationCap') ports.contextGraphSubscriptionRehydrationPendingIds.add(id);
+      else ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
+      if (reason !== undefined) released = ports.contextGraphSubscriptionRehydrationSlotIds.delete(id) || released;
+      if (kind === 'dormancy') {
+        const live = ports.subscribedContextGraphs.get(id);
+        changes.push({ dormancy, kind: 'saved', persisted: ports.contextGraphSubscriptionRehydrationAccountedIds.has(id),
+          active: Boolean(live?.subscribed || live?.coreHosted), hosted: live?.coreHosted === true });
+      } else
       if (kind === 'activated') {
         ports.contextGraphSubscriptionRehydrationPendingIds.delete(id);
         if (event.claimRollingSlot && !event.subscription.coreHosted && !rehydratedSubscriptionReachedSafeState(event.subscription))
@@ -201,9 +225,10 @@ export class ContextGraphSubscriptionActivations {
       return this.commit(attempt, ports.commit, options.claimRollingSlot === true);
     } catch (error) {
       try {
-        // Before network effects, preserve a concurrently replaced generation.
-        // All network ports are synchronous, so later changes belong to this retry.
-        if (networkEffectsStarted || this.ports.subscribedContextGraphs.get(row.id) === subscription) {
+        // A live subscribe may take custody of the very same provisional row.
+        // Attempt identity, rather than row identity alone, authorizes rollback.
+        if (this.pending.get(row.id) === attempt
+          && (networkEffectsStarted || this.ports.subscribedContextGraphs.get(row.id) === subscription)) {
           try { ports.rollbackNetworkEffects(row.id, options.rollbackSlotRelease ?? 'activation-rollback'); }
           finally {
             ports.remove(row.id);

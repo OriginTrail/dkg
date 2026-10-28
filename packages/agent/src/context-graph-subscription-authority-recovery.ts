@@ -370,9 +370,9 @@ export interface RollingSubscriptionPromotionPorts {
   getStatus(): Pick<ContextGraphSubscriptionRehydrationInternalStatus, 'rehydrationEnabled' | 'activationCap'> | null;
   isCurrent(signal: AbortSignal): boolean;
   readonly contextGraphSubscriptionRollingChecks: RollingSubscriptionChecks;
-  readonly contextGraphSubscriptionRehydrationPendingIds: Set<string>;
-  readonly contextGraphSubscriptionRehydrationSlotIds: Set<string>;
-  readonly contextGraphSubscriptionDormancyById: Map<string, ContextGraphDormancyReason>;
+  readonly contextGraphSubscriptionRehydrationPendingIds: ReadonlySet<string>;
+  readonly contextGraphSubscriptionRehydrationSlotIds: ReadonlySet<string>;
+  readonly contextGraphSubscriptionDormancyById: ReadonlyMap<string, ContextGraphDormancyReason>;
   readonly contextGraphSubscriptionPersistRevisions: ReadonlyMap<string, number>;
   readonly subscribedContextGraphs: ReadonlyMap<string, ContextGraphSub>;
   readonly log: { warn(ctx: OperationContext, message: string): void; info(ctx: OperationContext, message: string): void; debug(ctx: OperationContext, message: string): void };
@@ -426,7 +426,6 @@ export async function promoteDormantContextGraphSubscriptions(
       signal.throwIfAborted();
       if (!ports.isCurrent(signal)) return 'idle';
       if (row === null) {
-        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         ports.recordContextGraphSubscriptionClear([contextGraphId]);
         continue;
       }
@@ -434,13 +433,11 @@ export async function promoteDormantContextGraphSubscriptions(
       // for activation.  A concurrent write may have removed that intent
       // after startup even when the row still exists in a custom store.
       if (!row.subscribed && !row.coreHosted) {
-        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         ports.recordContextGraphSubscriptionClear([], [contextGraphId]);
         continue;
       }
       const currentSubscription = ports.subscribedContextGraphs.get(contextGraphId);
       if (currentSubscription?.subscribed || currentSubscription?.coreHosted) {
-        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         ports.transitionDormancy(contextGraphId, undefined);
         continue;
       }
@@ -469,12 +466,10 @@ export async function promoteDormantContextGraphSubscriptions(
       signal.throwIfAborted();
       if (!ports.isCurrent(signal)) return 'idle';
       if (freshRow === null) {
-        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         ports.recordContextGraphSubscriptionClear([contextGraphId]);
         continue;
       }
       if (!freshRow.subscribed && !freshRow.coreHosted) {
-        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         ports.recordContextGraphSubscriptionClear([], [contextGraphId]);
         continue;
       }
@@ -486,7 +481,6 @@ export async function promoteDormantContextGraphSubscriptions(
       }
       const freshSubscription = ports.subscribedContextGraphs.get(contextGraphId);
       if (freshSubscription?.subscribed || freshSubscription?.coreHosted) {
-        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         ports.transitionDormancy(contextGraphId, undefined);
         continue;
       }
@@ -504,7 +498,6 @@ export async function promoteDormantContextGraphSubscriptions(
         continue;
       }
       if (authority.outcome !== 'allowed') {
-        ports.contextGraphSubscriptionRehydrationPendingIds.delete(contextGraphId);
         const { outcome, source, reason } = authority;
         const dormancy = pass.leftDormant(contextGraphId, { outcome, source, reason });
         ports.transitionDormancy(contextGraphId, dormancy);

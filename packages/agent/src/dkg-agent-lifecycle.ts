@@ -539,8 +539,6 @@ import {
   recoverDeferredContextGraphSubscriptionAuthorities,
   type DeferredContextGraphSubscriptionAuthorityRecoveryCursor,
   type PersistedContextGraphSubscriptionActivationOptions,
-  releaseRollingSubscriptionSlot,
-  rehydratedSubscriptionReachedSafeState,
   promoteDormantContextGraphSubscriptions,
   wakeDeferredContextGraphSubscriptionAuthorityRecovery,
 } from './context-graph-subscription-authority-recovery.js';
@@ -7869,18 +7867,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!preserveWireOwner) this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
     if (plan.requestsNameResolution) this.requestContextGraphNameResolutionFor(contextGraphId);
 
-    const status = this.contextGraphSubscriptionRehydrationStatus;
-    if (status?.rehydrationEnabled === true && status.activationCap > 0
-      && this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)
-      && canonicalNext.coreHosted !== true && canonicalNext.subscribed === true) {
-      if (rehydratedSubscriptionReachedSafeState(canonicalNext)) {
-        if (releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds,
-          this.contextGraphSubscriptionRehydrationPromotionRuntime, contextGraphId, 'readiness'))
-          this.log.info(createOperationContext('init'),
-            `Rehydrated context-graph subscription "${contextGraphId}" reached a safe state; rolling activation slot released`);
-      } else this.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
-    } else releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds,
-      this.contextGraphSubscriptionRehydrationPromotionRuntime, contextGraphId, options?.rollbackSlotRelease ?? 'deactivation');
+    if (this.contextGraphSubscriptionActivations.updateReadiness(contextGraphId, canonicalNext, options?.rollbackSlotRelease))
+      this.log.info(createOperationContext('init'),
+        `Rehydrated context-graph subscription "${contextGraphId}" released its rolling activation slot`);
 
     if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined
       && (this.config.nodeRole ?? 'edge') === 'edge') {
@@ -8863,7 +8852,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       },
       capped: (contextGraphId) => {
-        this.contextGraphSubscriptionRehydrationPendingIds.add(contextGraphId);
         this.requestContextGraphSubscriptionPromotion(contextGraphId);
       },
     });
@@ -8964,8 +8952,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
     const store = this.config.contextGraphSubscriptionStore;
-    this.contextGraphSubscriptionRehydrationSlotIds.clear();
-    this.contextGraphSubscriptionRehydrationPendingIds.clear();
+    this.contextGraphSubscriptionActivations.resetScheduler();
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
@@ -9137,7 +9124,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const leaveUnresolved = (row: ContextGraphSubscriptionRecord): void => {
         if (!row.coreHosted && cap > 0 && activatedUserRows + deferredUserRows >= cap) {
           this.transitionContextGraphSubscriptionDormancy(row.id, 'activationCap');
-          this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
           return;
         }
         if (!row.coreHosted) deferredUserRows += 1;
@@ -9156,7 +9142,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           && activatedUserRows >= cap
         ) {
           this.transitionContextGraphSubscriptionDormancy(row.id, 'activationCap');
-          this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
           continue;
         }
         const approvedAgentAddress = row.subscribed
