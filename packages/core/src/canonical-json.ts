@@ -216,8 +216,8 @@ class BoundedJsonWriter {
     this.appendMeasured(value, value.length);
   }
 
-  appendUtf8(value: string): void {
-    this.appendMeasured(value, UTF8.encode(value).byteLength);
+  appendValidatedUtf8(value: string, byteLength: number): void {
+    this.appendMeasured(value, byteLength);
   }
 
   finish(): string {
@@ -249,12 +249,15 @@ function writeCanonicalJsonString(
 ): void {
   writer.appendAscii('"');
   let rawStart = 0;
+  let rawBytes = 0;
   let index = 0;
 
   const flushRaw = (end: number): void => {
-    // Keep TextEncoder allocations bounded even when the source string is enormous.
-    if (end > rawStart) writer.appendUtf8(value.slice(rawStart, end));
+    // The validation scan already knows each scalar's UTF-8 width. Do not
+    // allocate and discard an encoded buffer merely to measure this segment.
+    if (end > rawStart) writer.appendValidatedUtf8(value.slice(rawStart, end), rawBytes);
     rawStart = end;
+    rawBytes = 0;
   };
 
   while (index < value.length) {
@@ -282,10 +285,12 @@ function writeCanonicalJsonString(
       if (!isLowSurrogate(next)) {
         throw new CanonicalJsonError(`${label} contains an unpaired high surrogate`);
       }
+      rawBytes += 4;
       index += 2;
     } else if (isLowSurrogate(unit)) {
       throw new CanonicalJsonError(`${label} contains an unpaired low surrogate`);
     } else {
+      rawBytes += unit < 0x80 ? 1 : unit < 0x800 ? 2 : 3;
       index += 1;
     }
 
