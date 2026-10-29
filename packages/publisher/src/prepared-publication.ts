@@ -15,6 +15,7 @@ import {isQuorumUnmetError} from './ack-errors.js';
 import {isFailClosedInlineEncrypt} from './async-lift-publish-options.js';
 
 
+import { planPublicationACK } from './prepared-publication-ack-plan.js';
 import {resolvePublicationPricing} from './publication-pricing.js';
 import type {CanonicalPublicationPayloadMeasurement} from './publication-payload-measurement.js';
 import type {PublisherPlanner} from './publisher-planning.js';
@@ -99,10 +100,9 @@ export interface PublicationPreparationPorts {
   invokeV10ACKProvider(provider: NonNullable<PublishOptions['v10ACKProvider']>, params: V10ACKProviderParams): Promise<V10CoreNodeACK[]>;
 }
 export async function preparePublication(input: PreparedPublicationContent, options: PublicationExecution, ports: PublicationPreparationPorts): Promise<PreparedPublication> {
-  const { catalogCommitment, privateRoots, catalogByteSize, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, catalogNquadsStr, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers } = input.payload;
+  const { privateRoots, payloadMeasurement, encryptableNquadsStr, kcMerkleRoot, allSkolemizedQuads, manifestEntries, effectiveAccessPolicy, kcMerkleLeafCount, normalizedAllowedPeers } = input.payload;
   const { publisherContextGraphId, graphPublish, v10CgDomain, contextGraphId } = input.target;
-  const { pricingPolicy, lifecycle, ctx, explicitPublishEpochs, publicStagingMode, seal, reservedKaId } = input;
-  const { publicByteSize, publicBytes: publicNquadsBytes } = payloadMeasurement;
+  const { pricingPolicy, lifecycle, ctx, explicitPublishEpochs, seal, reservedKaId } = input;
   const kaCount = 1;
   const entityCount = manifestEntries.length;
   const { onPhase } = options;
@@ -117,7 +117,6 @@ export async function preparePublication(input: PreparedPublicationContent, opti
   const useEncryptedInline =
     typeof inlineEncryptCb === 'function'
     && (canAttemptOnChainPublish || !isFailClosedInlineEncrypt(inlineEncryptCb));
-  const useCuratedCatalog = useEncryptedInline && catalogCommitment !== undefined;
   if (useEncryptedInline && privateRoots.length > 0 && !graphPublish) {
     throw new Error(
       'Encrypted inline publishes with privateQuads are not supported by the current V10 ACK model. ' +
@@ -125,13 +124,10 @@ export async function preparePublication(input: PreparedPublicationContent, opti
       'but not both in one publish without a mixed ACK mode that preserves curated confidentiality.',
     );
   }
-  const stagingByteSize = useCuratedCatalog
-    ? catalogByteSize
-    : publicByteSize;
-  const networkVisibleByteSize = stagingByteSize;
+  const ackPlan = planPublicationACK(input, useEncryptedInline, ports.selectPublicStagingQuads);
   const publicationPricing = resolvePublicationPricing({
     policy: pricingPolicy,
-    networkVisibleByteSize,
+    networkVisibleByteSize: ackPlan.networkVisibleByteSize,
     fullContentByteSize: payloadMeasurement.fullContentByteSize,
   });
   const finalizedPublisherPlan = await publisherPlanning.finalize({
@@ -143,7 +139,6 @@ export async function preparePublication(input: PreparedPublicationContent, opti
   const publishEpochs = finalizedPublisherPlan.publishEpochs;
   const precomputedTokenAmount = finalizedPublisherPlan.tokenAmount;
 
-  let stagingQuads: Uint8Array | undefined;
   if (useEncryptedInline) {
     const plaintextBytes = new TextEncoder().encode(encryptableNquadsStr);
     if (typeof options.encryptInlineChunked === 'function') {
@@ -156,16 +151,6 @@ export async function preparePublication(input: PreparedPublicationContent, opti
     } else {
       await options.encryptInlinePayload!(plaintextBytes);
     }
-    if (useCuratedCatalog) {
-      stagingQuads = new TextEncoder().encode(catalogNquadsStr);
-    } else {
-      stagingQuads = undefined;
-    }
-  } else {
-    stagingQuads = ports.selectPublicStagingQuads(
-      publicStagingMode,
-      publicNquadsBytes,
-    );
   }
 
   if (canAttemptOnChainPublish && seal?.reservedKaId !== undefined) {
@@ -201,7 +186,7 @@ export async function preparePublication(input: PreparedPublicationContent, opti
       billableByteSize: publicationPricing.billableByteSize.toString(),
       pricingPolicy: publicationPricing.policy,
       encryptedInline: useEncryptedInline,
-      catalogCommitment: useCuratedCatalog ? 'present' : 'absent',
+      catalogCommitment: ackPlan.ackMode.kind === 'curated-catalog' ? 'present' : 'absent',
     },
   });
 
@@ -256,17 +241,12 @@ export async function preparePublication(input: PreparedPublicationContent, opti
             }
           : {}),
       };
-      const lifecycleAckMode = useCuratedCatalog
-        ? 'curated_catalog'
-        : privateRoots.length > 0
-          ? 'folded_private'
-          : 'public';
       lifecycle.emit('storage_ack', 'request', {
         metadata: {
           contextGraphId: v10CgDomain,
           swmGraphId,
           subGraphName: input.target.subGraphName,
-          ackMode: lifecycleAckMode,
+          ackMode: ackPlan.ackMode.kind.replaceAll('-', '_'),
           kaCount,
           rootEntityCount: rootEntities.length,
           publicByteSize: publicationPricing.networkVisibleByteSize.toString(),
@@ -275,37 +255,13 @@ export async function preparePublication(input: PreparedPublicationContent, opti
           outcome: 'request',
         },
       });
-      if (useCuratedCatalog) {
-        if (!catalogCommitment || !stagingQuads || stagingQuads.length === 0) {
-          throw new Error('Curated catalog ACK mode requires a non-empty catalog commitment and stagingQuads');
-        }
-        v10ACKs = await ports.invokeV10ACKProvider(v10ACKProvider, {
-          ...commonACKParams,
-          stagingQuads,
-          ackMode: {
-            kind: 'curated-catalog',
-            catalogCommitment: {
-              catalogRoot: catalogCommitment.root,
-              catalogLeafCount: catalogCommitment.leafCount,
-            },
-          },
-        });
-      } else if (privateRoots.length > 0) {
-        v10ACKs = await ports.invokeV10ACKProvider(v10ACKProvider, {
-          ...commonACKParams,
-          stagingQuads,
-          ackMode: {
-            kind: 'folded-private',
-            privateMerkleRoots: privateRoots,
-          },
-        });
-      } else {
-        v10ACKs = await ports.invokeV10ACKProvider(v10ACKProvider, {
-          ...commonACKParams,
-          stagingQuads,
-          ackMode: { kind: 'public' },
-        });
+      if (ackPlan.ackMode.kind === 'curated-catalog' && !ackPlan.stagingQuads?.length) {
+        throw new Error('Curated catalog ACK mode requires a non-empty catalog commitment and stagingQuads');
       }
+      v10ACKs = await ports.invokeV10ACKProvider(v10ACKProvider, {
+        ...commonACKParams,
+        ...ackPlan,
+      });
       const provenance = v10ACKs
         .map((a) => `${a.peerId.slice(-8)}:${a.subscriptionSource ?? '?'}`)
         .join(', ');
@@ -400,8 +356,10 @@ export async function preparePublication(input: PreparedPublicationContent, opti
     reservedKaId: attestation.reservedKaId, schemeVersion: attestation.schemeVersion });
   const authorSig = ethers.Signature.from({ r: ethers.hexlify(attestation.signature.r),
     yParityAndS: ethers.hexlify(attestation.signature.vs) });
-  if (useCuratedCatalog && (!catalogCommitment || catalogCommitment.root.length !== 32
-    || catalogCommitment.leafCount <= 0 || catalogCommitment.root.every(b => b === 0))) {
+  const catalogCommitment = ackPlan.ackMode.kind === 'curated-catalog'
+    ? ackPlan.ackMode.catalogCommitment : undefined;
+  if (catalogCommitment && (catalogCommitment.catalogRoot.length !== 32
+    || catalogCommitment.catalogLeafCount <= 0 || catalogCommitment.catalogRoot.every(b => b === 0))) {
     throw new Error('OT-RFC-49: dkg-publisher refused to submit a curated publish with an empty catalog commitment');
   }
   return { kind: 'on-chain', submission: {
@@ -415,8 +373,8 @@ export async function preparePublication(input: PreparedPublicationContent, opti
       author: { address: attestation.authorAddress, schemeVersion: attestation.schemeVersion,
         signature: { r: ethers.getBytes(authorSig.r), vs: ethers.getBytes(authorSig.yParityAndS) } },
       ackSignatures: v10ACKs.map(ack => ({ identityId: ack.nodeIdentityId, r: ack.signatureR, vs: ack.signatureVS })),
-      catalogRoot: useCuratedCatalog ? catalogCommitment?.root : undefined,
-      catalogLeafCount: useCuratedCatalog ? catalogCommitment?.leafCount : undefined,
+      catalogRoot: catalogCommitment?.catalogRoot,
+      catalogLeafCount: catalogCommitment?.catalogLeafCount,
     }, chainId: v10ChainId, graphPublish, v10ACKs, lifecycle, ctx,
     diagnostics: { contextGraphId, publisherAddress, entityCount, publicRecordCount: allSkolemizedQuads.length,
       hiddenCommitmentCount: privateRoots.length, billableByteSize: publicationPricing.billableByteSize,
