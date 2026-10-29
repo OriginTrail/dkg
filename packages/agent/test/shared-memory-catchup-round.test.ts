@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createSharedMemoryCatchupRoundAggregation,
   foldSharedMemoryRound,
+  classifySharedMemoryRound,
   sharedMemoryCatchupPlaneProven,
 } from '../src/sync/shared-memory-catchup-round.js';
 import {
@@ -14,6 +15,23 @@ function round(values: Partial<SharedMemorySyncResult>): SharedMemorySyncResult 
 }
 
 describe('#2105 shared-memory catch-up round aggregation', () => {
+  it.each([
+    ['inserts', { completedPhases: 1, insertedDataTriples: 3 }, 3, 0],
+    ['held', { completedPhases: 1, alreadyHeldAssets: 2 }, 0, 2],
+    ['failed inserts', { completedPhases: 1, insertedDataTriples: 3, failedPhases: 1 }, 0, 0],
+    ['failed held', { completedPhases: 1, alreadyHeldAssets: 2, failedPhases: 1 }, 0, 0],
+    ['deferred catalog', { completedPhases: 1, alreadyHeldAssets: 2, catalogDeferredAssets: 1 }, 0, 0],
+  ] as const)('normalizes %s once for transfer totals and peer evidence', (_name, input, data, held) => {
+    const payload = round(input);
+    const aggregate = createSharedMemoryCatchupRoundAggregation();
+    const result = foldSharedMemoryRound(aggregate, 'peer', payload);
+    expect(result).toEqual(classifySharedMemoryRound(payload));
+    expect(result.contentEvidence.cleanDataTriples).toBe(data);
+    expect(result.contentEvidence.cleanHeldAssets).toBe(held);
+    expect(aggregate.cleanDataTriples).toBe(data);
+    expect(aggregate.cleanHeldAssets).toBe(held);
+  });
+
   it('uses canonical response evidence for legacy data-only and partially deferred rounds', () => {
     const aggregate = createSharedMemoryCatchupRoundAggregation();
     const legacy = round({ insertedTriples: 3, deferredBackpressure: 1 });

@@ -3,6 +3,7 @@
 import {
   classifyDurableProgress,
   type DurableProgressClassification,
+  type DurableProgressSummary,
 } from './durable-progress.js';
 import {
   emptySharedMemorySyncResult,
@@ -11,6 +12,33 @@ import {
   type SharedMemorySyncAggregate,
   type SharedMemorySyncResult,
 } from './shared-memory-diagnostics.js';
+
+/** Normalized per-round content proof; consumers derive totals or peer counts from this record. */
+export interface SharedMemoryRoundContentEvidence {
+  readonly cleanDataTriples: number;
+  readonly cleanHeldAssets: number;
+  readonly verifiedPrivateOnly: boolean;
+  readonly emptyResponse: boolean;
+  readonly incompleteResponder: boolean;
+}
+export interface SharedMemoryRoundClassification extends DurableProgressClassification {
+  readonly contentEvidence: SharedMemoryRoundContentEvidence;
+}
+type SharedMemoryRoundSummary = DurableProgressSummary & Pick<SharedMemorySyncResult,
+  'alreadyHeldAssets' | 'catalogDeferredAssets' | 'supersededUnprovenAssets' | 'swmCoverage'>;
+
+/** Normalize content once, retaining the selected-provider classifier's freshness verdict. */
+export function classifySharedMemoryRound(shared: SharedMemoryRoundSummary,
+  progress: DurableProgressClassification = classifyDurableProgress(shared)): SharedMemoryRoundClassification {
+  const clean = progress.completedWithoutFailure;
+  return { ...progress, contentEvidence: {
+    cleanDataTriples: clean ? progress.insertedDataTriples : 0,
+    cleanHeldAssets: clean && sharedMemoryRoundFoundNothingMissing(shared) ? shared.alreadyHeldAssets ?? 0 : 0,
+    verifiedPrivateOnly: clean && (shared.verifiedPrivateOnlyResponses ?? 0) > 0,
+    emptyResponse: clean && (shared.emptyResponses ?? 0) > 0,
+    incompleteResponder: !clean && (shared.failedPeers ?? 0) === 0,
+  } };
+}
 
 export interface SharedMemoryCatchupPeerSets {
   readonly responded: Set<string>;
@@ -62,23 +90,17 @@ export function foldSharedMemoryRound(
   peerId: string,
   shared: SharedMemorySyncResult,
   options: FoldSharedMemoryRoundOptions = {},
-): DurableProgressClassification {
-  const progress = options.progress ?? classifyDurableProgress(shared);
+): SharedMemoryRoundClassification {
+  const progress = classifySharedMemoryRound(shared, options.progress);
   aggregate.diagnostics = mergeFleetSharedMemoryDiagnostics(aggregate.diagnostics, shared);
   aggregate.insertedDataTriples += progress.insertedDataTriples;
   if (options.countJobDeferral !== false) {
     aggregate.jobDeferredBackpressure += shared.deferredBackpressure ?? 0;
   }
 
-  if (progress.completedWithoutFailure) {
-    aggregate.peers.completedCleanly.add(peerId);
-    if (sharedMemoryRoundFoundNothingMissing(shared)) {
-      aggregate.cleanHeldAssets += shared.alreadyHeldAssets ?? 0;
-    }
-    if (progress.insertedDataTriples > 0) {
-      aggregate.cleanDataTriples += progress.insertedDataTriples;
-    }
-  }
+  if (progress.completedWithoutFailure) aggregate.peers.completedCleanly.add(peerId);
+  aggregate.cleanHeldAssets += progress.contentEvidence.cleanHeldAssets;
+  aggregate.cleanDataTriples += progress.contentEvidence.cleanDataTriples;
   if (progress.denied) aggregate.peers.denied.add(peerId);
 
   if (progress.responded) aggregate.peers.responded.add(peerId);

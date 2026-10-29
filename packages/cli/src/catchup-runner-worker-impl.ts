@@ -29,6 +29,7 @@ import {
 import {
   addCatchupPlaneEvidence,
   catchupPeerPlaneEvidence,
+  catchupSharedMemoryPlaneEvidence,
   catchupPlaneCompletedWithoutFailure,
   catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
@@ -449,11 +450,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     });
     passTracker.recordPeerRound(peerId, shared.swmCoverage, progress.completedWithoutFailure);
 
-    const evidence = catchupPeerPlaneEvidence(shared, {
-      completedWithoutFailure: progress.completedWithoutFailure,
-      fromAuthority,
-      plane: 'shared-memory',
-    });
+    const evidence = catchupSharedMemoryPlaneEvidence(progress.contentEvidence);
     if (sharedResult.selectedScopeProven) evidence.selectedScopeCompletePeers = 1;
     addCatchupPlaneEvidence(cleanPlaneCompletions.sharedMemory, evidence);
     if (fromAuthority) {
