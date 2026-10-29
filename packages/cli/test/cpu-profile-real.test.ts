@@ -31,6 +31,7 @@ it('writes a loadable profile with function names and leaves no session or liste
   const report = JSON.parse(line!.slice(PREFIX.length)) as {
     result: { path: string; seconds: number; recordedMs: number; bytes: number; stoppedEarly: boolean };
     failure: string;
+    logged: string[];
     closed: boolean[];
     listener: string | null;
   };
@@ -43,6 +44,12 @@ it('writes a loadable profile with function names and leaves no session or liste
 
   expect(report.result).toMatchObject({ seconds: 1, stoppedEarly: false });
   expect(report.result.recordedMs).toBeGreaterThanOrEqual(900);
+  // Both recordings started; only the first was written.
+  expect(report.logged).toEqual([
+    '[cpu-profile] recording for 1 s',
+    `[cpu-profile] wrote ${report.result.path} (${report.result.recordedMs} ms, ${report.result.bytes} bytes)`,
+    '[cpu-profile] recording for 0.2 s',
+  ]);
   expect(basename(report.result.path)).toMatch(/^cpu-\d{4}-\d\d-\d\dT\d\d-\d\d-\d\d-\d{3}Z\.cpuprofile$/);
   expect((await readdir(directory)).sort()).toEqual(['blocked', basename(report.result.path)].sort());
   expect((await stat(report.result.path)).size).toBe(report.result.bytes);

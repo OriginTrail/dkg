@@ -12,12 +12,14 @@ const directory = process.argv[2];
 if (!directory) throw new Error('usage: cpu-profile-real.fixture.ts <directory>');
 
 const sessions: Session[] = [];
+const logged: string[] = [];
 const recorder = new CpuProfileRecorder({
   openSession: async () => {
     const session = new Session();
     sessions.push(session);
     return session;
   },
+  log: (line) => { logged.push(line); },
 });
 
 /** Named so the profile can be checked for function names. */
@@ -50,6 +52,7 @@ const failure = await recorder.record({ seconds: 0.2, clamped: false, directory:
 console.log(`CPU_PROFILE_FIXTURE ${JSON.stringify({
   result,
   failure,
+  logged,
   closed: await Promise.all(sessions.map(isClosed)),
   listener: inspectorListenerUrl() ?? null,
 })}`);

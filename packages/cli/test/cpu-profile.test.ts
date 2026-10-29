@@ -83,8 +83,13 @@ async function until(condition: () => boolean): Promise<void> {
 
 const count = (calls: string[], call: string) => calls.filter((entry) => entry === call).length;
 
+/** The node-log lines of the recorders in the current test. */
+const logged: string[] = [];
+const log = (line: string) => { logged.push(line); };
+
 let directory: string;
 beforeEach(async () => {
+  logged.length = 0;
   directory = await mkdtemp(join(tmpdir(), 'cpu-profile-'));
 });
 afterEach(async () => {
@@ -139,7 +144,7 @@ describe('CpuProfileRecorder', () => {
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
     const inspector = fakeInspector();
     let now = Date.parse('2026-10-29T12:00:00.000Z');
-    const recorder = new CpuProfileRecorder({ openSession: inspector.openSession, now: () => now });
+    const recorder = new CpuProfileRecorder({ log, openSession: inspector.openSession, now: () => now });
 
     const recording = recorder.record({ seconds: 60, clamped: true, directory });
     await until(() => vi.getTimerCount() === 1);
@@ -164,11 +169,15 @@ describe('CpuProfileRecorder', () => {
     // Readable by the node's own user only (POSIX permission bits).
     expect(process.platform === 'win32' || ((await stat(result.path)).mode & 0o777) === 0o600).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
+    expect(logged).toEqual([
+      '[cpu-profile] recording for 60 s',
+      `[cpu-profile] wrote ${result.path} (60000 ms, ${result.bytes} bytes)`,
+    ]);
   });
 
   it('creates a missing directory for the file', async () => {
     const inspector = fakeInspector();
-    const recorder = new CpuProfileRecorder({ openSession: inspector.openSession, now: steppingClock() });
+    const recorder = new CpuProfileRecorder({ log, openSession: inspector.openSession, now: steppingClock() });
     const nested = join(directory, 'diagnostics');
     const result = await recorder.record({ seconds: 0.01, clamped: false, directory: nested });
     expect(await readdir(nested)).toEqual([result.path.slice(nested.length + 1)]);
@@ -176,7 +185,7 @@ describe('CpuProfileRecorder', () => {
 
   it('refuses a second profile while one runs, and records again once it ends', async () => {
     const inspector = fakeInspector();
-    const recorder = new CpuProfileRecorder({ openSession: inspector.openSession, now: steppingClock() });
+    const recorder = new CpuProfileRecorder({ log, openSession: inspector.openSession, now: steppingClock() });
     const first = recorder.record({ seconds: 0.2, clamped: false, directory });
 
     await expect(recorder.record({ seconds: 1, clamped: false, directory })).rejects.toBeInstanceOf(CpuProfileBusyError);
@@ -202,7 +211,7 @@ describe('CpuProfileRecorder', () => {
     'closes its session when %s fails, writes nothing and records again afterwards',
     async (method, calls) => {
       const inspector = fakeInspector({ method });
-      const recorder = new CpuProfileRecorder({ openSession: inspector.openSession, now: steppingClock() });
+      const recorder = new CpuProfileRecorder({ log, openSession: inspector.openSession, now: steppingClock() });
 
       await expect(recorder.record({ seconds: 0.01, clamped: false, directory })).rejects.toThrow(`${method} failed`);
       expect(inspector.calls).toEqual(calls);
@@ -216,7 +225,7 @@ describe('CpuProfileRecorder', () => {
 
   it('closes its session when the file cannot be written', async () => {
     const inspector = fakeInspector();
-    const recorder = new CpuProfileRecorder({ openSession: inspector.openSession, now: steppingClock() });
+    const recorder = new CpuProfileRecorder({ log, openSession: inspector.openSession, now: steppingClock() });
     const notADirectory = join(directory, 'blocked');
     await writeFile(notADirectory, '');
 
@@ -231,7 +240,7 @@ describe('CpuProfileRecorder', () => {
     ['connected', { connect: true }, ['connect']],
   ] as const)('reports an inspector session that cannot be %s as unavailable', async (_label, fail, calls) => {
     const inspector = fakeInspector({ ...fail });
-    const recorder = new CpuProfileRecorder({ openSession: inspector.openSession });
+    const recorder = new CpuProfileRecorder({ log, openSession: inspector.openSession });
 
     const refused = await recorder.record({ seconds: 0.01, clamped: false, directory }).catch((error: unknown) => error);
     expect(refused).toBeInstanceOf(CpuProfileUnavailableError);
@@ -247,7 +256,7 @@ describe('CpuProfileRecorder', () => {
 
   it('stops the running profile when shutdown begins, still writes it, and refuses later ones', async () => {
     const inspector = fakeInspector();
-    const recorder = new CpuProfileRecorder({ openSession: inspector.openSession, now: steppingClock() });
+    const recorder = new CpuProfileRecorder({ log, openSession: inspector.openSession, now: steppingClock() });
     const recording = recorder.record({ seconds: 60, clamped: false, directory });
     await until(() => inspector.calls.includes('Profiler.start'));
 
@@ -258,6 +267,7 @@ describe('CpuProfileRecorder', () => {
     expect(performance.now() - endedAt).toBeLessThan(1_000);
     expect(result).toMatchObject({ seconds: 60, stoppedEarly: true });
     expect(JSON.parse(await readFile(result.path, 'utf8'))).toEqual(PROFILE);
+    expect(logged.at(-1)).toMatch(/^\[cpu-profile\] wrote .*, stopped early at shutdown\)$/);
     expect(inspector.calls).toEqual(['connect', 'Profiler.enable', 'Profiler.start', 'Profiler.stop', 'disconnect']);
 
     await expect(recorder.record({ seconds: 1, clamped: false, directory })).rejects.toMatchObject({
@@ -269,7 +279,7 @@ describe('CpuProfileRecorder', () => {
 
   it('refuses a profile once shutdown has begun, without opening a session', async () => {
     const inspector = fakeInspector();
-    const recorder = new CpuProfileRecorder({ openSession: inspector.openSession });
+    const recorder = new CpuProfileRecorder({ log, openSession: inspector.openSession });
     recorder.end();
     await expect(recorder.record({ seconds: 1, clamped: false, directory })).rejects.toBeInstanceOf(CpuProfileUnavailableError);
     expect(inspector.calls).toEqual([]);
@@ -344,10 +354,6 @@ async function callRoute(
 }
 
 describe('POST /api/diagnostics/cpu-profile', () => {
-  beforeEach(() => {
-    vi.spyOn(console, 'log').mockImplementation(() => {});
-  });
-
   it('refuses an agent-scoped token before it reads the request or records', async () => {
     const answer = await callRoute(AGENT, { body: '{"seconds":30}' });
     expect(answer.status).toBe(403);
@@ -364,8 +370,6 @@ describe('POST /api/diagnostics/cpu-profile', () => {
     const answer = await callRoute(authentication);
     expect(answer).toMatchObject({ status: 200, body: { ...RESULT } });
     expect(answer.record).toHaveBeenCalledExactlyOnceWith({ seconds: 10, clamped: false, directory: '/node-home/diagnostics' });
-    // The node log says where the profile went.
-    expect(console.log).toHaveBeenCalledExactlyOnceWith(`[cpu-profile] wrote ${RESULT.path} (10004 ms, 4096 bytes)`);
   });
 
   it('records into the diagnostics directory of the node home by default', async () => {
@@ -473,9 +477,8 @@ describe('a CPU profile during graceful shutdown', () => {
   });
 
   it('does not hold the HTTP server close: the profile is written and answered at once', async () => {
-    vi.spyOn(console, 'log').mockImplementation(() => {});
     const inspector = fakeInspector();
-    const recorder = new CpuProfileRecorder({ openSession: inspector.openSession, now: steppingClock() });
+    const recorder = new CpuProfileRecorder({ log, openSession: inspector.openSession, now: steppingClock() });
     const server = createServer(async (req, res) => {
       const path = req.url ?? '/';
       const ctx = { req, res, path, url: new URL(`http://127.0.0.1${path}`), authentication: OPERATOR } as unknown as RequestContext;

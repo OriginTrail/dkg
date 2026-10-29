@@ -47,13 +47,20 @@ export interface CpuProfileRecording {
 export class CpuProfileRecorder {
   readonly #openSession: () => Promise<CpuProfilerSession>;
   readonly #now: () => number;
+  /** The node log: when a profile starts and where it was written. */
+  readonly #log: (line: string) => void;
   /** Set while a profile runs; ends its wait early (`true`) or at its duration (`false`). */
   #wake: ((stoppedEarly: boolean) => void) | undefined;
   #ended = false;
 
-  constructor(deps: { openSession?: () => Promise<CpuProfilerSession>; now?: () => number } = {}) {
+  constructor(deps: {
+    openSession?: () => Promise<CpuProfilerSession>;
+    now?: () => number;
+    log?: (line: string) => void;
+  } = {}) {
     this.#openSession = deps.openSession ?? openInspectorSession;
     this.#now = deps.now ?? Date.now;
+    this.#log = deps.log ?? console.log;
   }
 
   /** Record for `seconds`, write `<directory>/cpu-<start time>.cpuprofile` and return where. */
@@ -92,6 +99,7 @@ export class CpuProfileRecorder {
       await session.post('Profiler.enable');
       await session.post('Profiler.start');
       const startedAt = this.#now();
+      this.#log(`[cpu-profile] recording for ${recording.seconds} s`);
       const timer = setTimeout(() => wake(false), recording.seconds * 1000);
       const stoppedEarly = await woken;
       clearTimeout(timer);
@@ -101,7 +109,9 @@ export class CpuProfileRecorder {
       await mkdir(recording.directory, { recursive: true, mode: 0o700 });
       const path = join(recording.directory, `cpu-${new Date(startedAt).toISOString().replace(/[:.]/g, '-')}.cpuprofile`);
       await writeFile(path, json, { flag: 'wx', mode: 0o600 });
-      return { path, seconds: recording.seconds, clamped: recording.clamped, recordedMs, bytes: Buffer.byteLength(json), stoppedEarly };
+      const bytes = Buffer.byteLength(json);
+      this.#log(`[cpu-profile] wrote ${path} (${recordedMs} ms, ${bytes} bytes${stoppedEarly ? ', stopped early at shutdown' : ''})`);
+      return { path, seconds: recording.seconds, clamped: recording.clamped, recordedMs, bytes, stoppedEarly };
     } finally {
       // Disconnecting ends the session: V8 disables its profiler, which also
       // stops a recording that an error left running.

@@ -29,7 +29,6 @@ export async function handleCpuProfileRoutes(
   const recorder = options.recorder ?? daemonCpuProfiles;
   try {
     const result = await recorder.record({ ...request, directory: options.directory ?? join(dkgDir(), 'diagnostics') });
-    console.log(`[cpu-profile] wrote ${result.path} (${result.recordedMs} ms, ${result.bytes} bytes)`);
     jsonResponse(res, 200, result);
   } catch (error) {
     if (error instanceof CpuProfileBusyError) return jsonResponse(res, 409, { code: error.code, error: error.message });
