@@ -2,17 +2,18 @@
 import { createMainThreadTimeSlice } from '../../main-thread-time-slice.js';
 import type { StatementSync } from 'node:sqlite';
 import {
+  decodeStoredRfc64FinalizedPrivatePlacementRepairV1,
   digestRfc64FinalizedPrivatePlacementRepairV1,
   encodeRfc64FinalizedPrivatePlacementRepairV1,
-  parseRfc64FinalizedPrivatePlacementRepairV1,
+  rfc64FinalizedPrivatePlacementRepairKeyV1,
   snapshotRfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64FinalizedPrivatePlacementRepairV1,
   type Rfc64PrivatePlacementFailureWriteV1,
 } from '../finalized-private-placement-repair-store-v1.js';
 import { parsePrivatePlacementFailureStateV1, type PrivatePlacementFailureStateV1 } from '../private-placement-failure-state-v1.js';
-import { sqlBlobsEqualV1 } from './scalars.js';
 import { INVENTORY_V1_STATEMENT_SQL } from './statements.js';
 type SqlRowV1 = Record<string, unknown>;
+type DecodedRowV1 = Readonly<{ json: string; repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1> }>;
 interface Host {
   assertOpen(): void;
   prepare(sql: string): StatementSync;
@@ -26,14 +27,23 @@ interface Host {
 
 /** Same owned connection, transactions, latency bounds and exact commit recovery as inventory. */
 export class FinalizedPrivateRepairPersistenceV1 {
+  /**
+   * GH#3134 — what the last listing decoded, by row digest. A stored row is never rewritten, so a
+   * listing decodes and checks only bytes it has not seen under their digest: a changed row is
+   * decoded and checked again, and a removed one leaves with the next listing.
+   */
+  #decoded = new Map<string, DecodedRowV1>();
   constructor(private readonly host: Host) {}
   listFinalizedPrivatePlacementRepairs(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[] {
     this.host.assertOpen();
-    return this.host.read(() => {
+    const decoded = new Map<string, DecodedRowV1>();
+    const repairs = this.host.read(() => {
       const query = this.host.prepare(INVENTORY_V1_STATEMENT_SQL.listFinalizedPrivatePlacementRepairs);
       const rows = this.host.statement(() => query.all() as SqlRowV1[]);
-      return Object.freeze(rows.map((row) => this.decodeFinalizedPrivatePlacementRepair(row)));
+      return Object.freeze(rows.map((row) => this.decodeFinalizedPrivatePlacementRepair(row, decoded)));
     });
+    this.#decoded = decoded;
+    return repairs;
   }
 
   async listFinalizedPrivatePlacementRepairsAsync(signal: AbortSignal): Promise<readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[]> {
@@ -43,16 +53,18 @@ export class FinalizedPrivateRepairPersistenceV1 {
     const rows = this.host.read(() => this.host.statement(() =>
       this.host.prepare(INVENTORY_V1_STATEMENT_SQL.listFinalizedPrivatePlacementRepairs).all() as SqlRowV1[]));
     const repairs: Rfc64FinalizedPrivatePlacementRepairV1[] = [];
+    const decoded = new Map<string, DecodedRowV1>();
     const checkpoint = createMainThreadTimeSlice({ sliceMs: 8, maxIterations: 32 });
     for (const row of rows) {
       signal.throwIfAborted();
       this.host.assertOpen();
-      repairs.push(this.decodeFinalizedPrivatePlacementRepair(row));
+      repairs.push(this.decodeFinalizedPrivatePlacementRepair(row, decoded));
       const pause = checkpoint();
       if (pause) await pause;
     }
     signal.throwIfAborted();
     this.host.assertOpen();
+    this.#decoded = decoded;
     return Object.freeze(repairs);
   }
 
@@ -139,6 +151,7 @@ export class FinalizedPrivateRepairPersistenceV1 {
 
   private decodeFinalizedPrivatePlacementRepair(
     row: SqlRowV1,
+    decoded: Map<string, DecodedRowV1>,
   ): Readonly<Rfc64FinalizedPrivatePlacementRepairV1> {
     if (!(row.repair_digest instanceof Uint8Array)
       || row.repair_digest.byteLength !== 32
@@ -147,24 +160,22 @@ export class FinalizedPrivateRepairPersistenceV1 {
         'finalized-private placement repair row has invalid storage types',
       );
     }
-    const bytes = new TextEncoder().encode(row.repair_json);
-    const repair = parseRfc64FinalizedPrivatePlacementRepairV1(bytes);
-    if (!sqlBlobsEqualV1(
-      row.repair_digest,
-      digestRfc64FinalizedPrivatePlacementRepairV1(bytes),
-    ) || !sqlBlobsEqualV1(
-      bytes,
-      encodeRfc64FinalizedPrivatePlacementRepairV1(repair),
-    )) {
+    const json = row.repair_json;
+    const id = Buffer.from(row.repair_digest.buffer, row.repair_digest.byteOffset, 32).toString('hex');
+    const known = this.#decoded.get(id);
+    const repair = known !== undefined && known.json === json ? known.repair
+      : decodeStoredRfc64FinalizedPrivatePlacementRepairV1(new TextEncoder().encode(json), row.repair_digest);
+    if (repair === undefined) {
       throw this.host.corrupt(
         'finalized-private placement repair row is not canonical or digest-bound',
       );
     }
+    decoded.set(id, { json, repair });
     return repair;
   }
 
   readFinalizedPrivatePlacementFailure(repair: Rfc64FinalizedPrivatePlacementRepairV1): PrivatePlacementFailureStateV1 | null {
-    const digest = digestRfc64FinalizedPrivatePlacementRepairV1(encodeRfc64FinalizedPrivatePlacementRepairV1(repair));
+    const digest = repairDigestV1(repair);
     return this.host.read(() => this.readFailure(digest));
   }
 
@@ -172,7 +183,7 @@ export class FinalizedPrivateRepairPersistenceV1 {
     this.host.assertOpen();
     // Validate the entire batch before opening one owned transaction.
     const rows = entries.map(({ repair, state }) => {
-      const digest = digestRfc64FinalizedPrivatePlacementRepairV1(encodeRfc64FinalizedPrivatePlacementRepairV1(repair));
+      const digest = repairDigestV1(repair);
       const validated = parsePrivatePlacementFailureStateV1(state);
       if (validated === null) throw new TypeError('Invalid private placement failure state');
       return { digest, validated, json: JSON.stringify(validated) };
@@ -200,4 +211,9 @@ export class FinalizedPrivateRepairPersistenceV1 {
     try { return parsePrivatePlacementFailureStateV1(JSON.parse(String(row.state_json))); }
     catch { return null; }
   }
+}
+
+/** The row digest of `repair`, from the key a listed snapshot keeps (GH#3134). */
+function repairDigestV1(repair: Readonly<Rfc64FinalizedPrivatePlacementRepairV1>): Uint8Array {
+  return Uint8Array.from(Buffer.from(rfc64FinalizedPrivatePlacementRepairKeyV1(repair), 'hex'));
 }

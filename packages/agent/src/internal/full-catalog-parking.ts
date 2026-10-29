@@ -135,6 +135,12 @@ export class FullCatalogParkingV1 {
   readonly #namedAtMs = new Map<string, number>();
   /** The applied head of each full scope as the current pass read it: one read a scope a pass. */
   readonly #passHeads = new Map<string, AppliedHeadV1 | null | undefined>();
+  /**
+   * GH#3134 — the digest of each frozen scope a marker was decided under. The supervisor keeps a
+   * marker's decision while its lane stays the same, so a pass decides its parked markers without
+   * hashing their scope again.
+   */
+  readonly #scopeDigests = new WeakMap<object, Digest32V1>();
 
   constructor(dependencies: FullCatalogParkingDependenciesV1, now: () => number = () => Date.now()) {
     this.#dependencies = dependencies;
@@ -347,8 +353,14 @@ export class FullCatalogParkingV1 {
   }
 
   #scopeDigest(scope: Readonly<AuthorCatalogScopeV1> | undefined): Digest32V1 | undefined {
+    if (scope === undefined) return undefined;
+    const known = this.#scopeDigests.get(scope);
+    if (known !== undefined) return known;
     try {
-      return scope === undefined ? undefined : computeAuthorCatalogScopeDigestV1(scope);
+      const digest = computeAuthorCatalogScopeDigestV1(scope);
+      // A scope's fields are scalars: a frozen one cannot change.
+      if (Object.isFrozen(scope)) this.#scopeDigests.set(scope, digest);
+      return digest;
     } catch { return undefined; }
   }
 

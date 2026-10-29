@@ -60,6 +60,17 @@ export function resolveFinalizedPlacementDecisionV1<Lane extends PlacementLaneV1
   }
 }
 
+/**
+ * Everything `resolveFinalizedPlacementDecisionV1` reads of an available authority: a marker's
+ * decision stays valid while this stays the same (GH#3134). Undefined while it is unavailable.
+ */
+export function finalizedPlacementDecisionInputV1(authority: FinalizedPlacementAuthorityV1): string | undefined {
+  if (authority.status === 'unavailable') return undefined;
+  if (authority.status === 'inactive') return 'inactive';
+  const { kind, acceptsFinalizedVmRepair, scopeBase } = authority.lane;
+  return JSON.stringify([kind, acceptsFinalizedVmRepair, scopeBase]);
+}
+
 /** A graph transition is independent of any marker's pinned compatibility. */
 export type FinalizedPlacementAuthorityV1<Lane extends PlacementLaneV1 = PlacementLaneV1> = CatalogAuthoringLaneDecisionV1<Lane>;
 export function readFinalizedPlacementAuthorityV1(read: () => FinalizedPlacementAuthorityV1): FinalizedPlacementAuthorityV1 {
