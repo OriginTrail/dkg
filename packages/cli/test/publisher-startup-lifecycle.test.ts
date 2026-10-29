@@ -53,7 +53,7 @@ describe('publisher startup ownership and cancellation', () => {
       await addPublisherWallet(dataDir, ethers.Wallet.createRandom().privateKey);
     }
     // Keep real wallet adapters, publisher construction and AsyncLiftRunner.
-    // Only identity I/O is replaced: no endpoint or daemon is ever contacted.
+    // Identity I/O and wallet-attempt preparation are replaced; no endpoint or daemon is contacted.
     const identity = vi.spyOn(EVMChainAdapter.prototype, 'getIdentityId')
       .mockImplementation(async function (this: EVMChainAdapter) {
         chains.add(this);
@@ -62,7 +62,9 @@ describe('publisher startup ownership and cancellation', () => {
     const destroy = vi.spyOn(EVMChainAdapter.prototype, 'destroy');
     const start = vi.spyOn(AsyncLiftRunner.prototype, 'start');
     const stop = vi.spyOn(AsyncLiftRunner.prototype, 'stop');
-    const processNext = vi.spyOn(TripleStoreAsyncLiftPublisher.prototype, 'processNext')
+    const prepareWallet = vi.spyOn(TripleStoreAsyncLiftPublisher.prototype as unknown as {
+      prepareScheduledWallet(walletId: string): Promise<null>;
+    }, 'prepareScheduledWallet')
       .mockResolvedValue(null);
     const closeStore = vi.spyOn(store, 'close');
     const controller = new AbortController();
@@ -86,7 +88,7 @@ describe('publisher startup ownership and cancellation', () => {
       log: vi.fn(),
     };
     return {
-      store, identity, destroy, start, stop, processNext, closeStore, controller,
+      store, identity, destroy, start, stop, prepareWallet, closeStore, controller,
       begin() {
         const startup = startPublisherRuntimeIfEnabled(args);
         startups.push(startup);
@@ -130,7 +132,7 @@ describe('publisher startup ownership and cancellation', () => {
     await expect(startup.then(() => undefined)).rejects.toBe(reason);
     expect(f.start).toHaveBeenCalledTimes(1);
     expect(f.stop).toHaveBeenCalledTimes(2);
-    expect(f.processNext).not.toHaveBeenCalled();
+    expect(f.prepareWallet).not.toHaveBeenCalled();
     expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
     await expectBorrowedStoreOpen(f);
   });
@@ -145,7 +147,7 @@ describe('publisher startup ownership and cancellation', () => {
     expect(f.start).toHaveBeenCalledTimes(1);
     expect(createGraph).toHaveBeenCalledTimes(1);
     expect(f.stop).toHaveBeenCalledTimes(1);
-    expect(f.processNext).not.toHaveBeenCalled();
+    expect(f.prepareWallet).not.toHaveBeenCalled();
     expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
     await expectBorrowedStoreOpen(f);
   });
@@ -170,7 +172,7 @@ describe('publisher startup ownership and cancellation', () => {
     expect(f.destroy).toHaveBeenCalledTimes(2);
     expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
     expect(f.start).not.toHaveBeenCalled();
-    expect(f.processNext).not.toHaveBeenCalled();
+    expect(f.prepareWallet).not.toHaveBeenCalled();
     await expectBorrowedStoreOpen(f);
   });
 
@@ -194,7 +196,7 @@ describe('publisher startup ownership and cancellation', () => {
     // noncooperating physical read returns, not merely reject a late result.
     await vi.waitFor(() => expect(outcome).toBe(reason));
     expect(f.start).not.toHaveBeenCalled();
-    expect(f.processNext).not.toHaveBeenCalled();
+    expect(f.prepareWallet).not.toHaveBeenCalled();
     expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
     await expectBorrowedStoreOpen(f);
     release.resolve(11n);
@@ -222,7 +224,7 @@ describe('publisher startup ownership and cancellation', () => {
     expect(runtime?.wallets).toHaveLength(2);
     expect(f.identity).toHaveBeenCalledTimes(2);
     expect(f.start).toHaveBeenCalledTimes(1);
-    expect(f.processNext).toHaveBeenCalledTimes(2);
+    expect(f.prepareWallet).toHaveBeenCalledTimes(2);
     expect(f.destroy).not.toHaveBeenCalled();
     await runtime!.stop();
     expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
@@ -267,7 +269,7 @@ describe('publisher startup ownership and cancellation', () => {
     expect(f.identity).toHaveBeenCalledTimes(1);
     expect(f.destroy.mock.contexts).toEqual(f.identity.mock.contexts);
     expect(f.start).not.toHaveBeenCalled();
-    expect(f.processNext).not.toHaveBeenCalled();
+    expect(f.prepareWallet).not.toHaveBeenCalled();
     await expectBorrowedStoreOpen(f);
   });
 });

@@ -344,6 +344,9 @@ describe('publisher wallets', () => {
     let runtime: Awaited<ReturnType<typeof createPublisherRuntimeFromAgent>> | undefined;
     let agent: DKGAgent | undefined;
 
+    // Funding-aware claims require native gas even when the execution result is stubbed.
+    const provider = createProvider();
+    await provider.send('hardhat_setBalance', [wallet.address, ethers.toQuantity(ethers.parseEther('1'))]);
     await addPublisherWallet(dataDir, wallet.privateKey);
     await expect(createEVMAdapter(wallet.privateKey).getIdentityId()).resolves.toBe(0n);
 
