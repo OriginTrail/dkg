@@ -62,6 +62,37 @@ describe('rootless KA graph scope wire contract', () => {
     expect(decoded.accessPolicy).toBe('allowList');
     expect(decoded.allowedPeers).toEqual(['12D3KooWReaderB', '12D3KooWReaderA']);
     expectGraphScope(decoded);
+    // No seal unless the author sends one.
+    expect(decoded.assertionName).toBeUndefined();
+    expect(decoded.authorSeal).toBeUndefined();
+  });
+
+  it('carries the author seal and the assertion name with a share (GH#3294)', () => {
+    const authorSeal = new TextEncoder().encode('{"canonical":"author seal bytes"}');
+    const encoded = encodeSharePublishRequest({
+      contextGraphId: 'curated-cg',
+      nquads: new TextEncoder().encode('<urn:s> <urn:p> "value" .'),
+      manifest: [],
+      publisherPeerId: '12D3KooWPublisher',
+      shareOperationId: 'share-2',
+      timestampMs: 1,
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      kaUal: UAL,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      subGraphName: 'reports',
+      assertionName: 'report-1',
+      authorSeal,
+    });
+    const decoded = decodeSharePublishRequest(encoded);
+    expect(decoded.assertionName).toBe('report-1');
+    expect(new Uint8Array(decoded.authorSeal ?? [])).toEqual(authorSeal);
+    // Field numbers are wire contract: 20 (key a201) is the name, 21 (key aa01)
+    // the seal bytes, both length-delimited.
+    const hex = Buffer.from(encoded).toString('hex');
+    expect(hex).toContain(`a20108${Buffer.from('report-1').toString('hex')}`);
+    expect(hex).toContain(`aa01${authorSeal.length.toString(16).padStart(2, '0')}${Buffer.from(authorSeal).toString('hex')}`);
   });
 
   it('round-trips one KA scope through publish ACK intent', () => {

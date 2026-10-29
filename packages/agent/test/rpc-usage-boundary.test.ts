@@ -16,19 +16,29 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 const drain = DKGAgentBase.prototype.drainRpcUsage;
 
 describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', () => {
+  it('includes foreign registration RPC in daemon billing telemetry and drains it once', () => {
+    let pending = true;
+    const cache = { drainRpcUsage: () => { const count = pending ? 5 : 0; pending = false;
+      return { byMethod: { eth_call: count }, lifetimeTotal: 5 }; } };
+    const owner = { chain: { drainRpcUsage: () => ({ byMethod: { eth_getLogs: 2 }, lifetimeTotal: 2 }) },
+      config: { coreChainCacheNetworks: [{ registry: cache }] } };
+    expect(drain.call(owner as never)).toMatchObject({ byMethod: { eth_getLogs: 2, eth_call: 5 }, lifetimeTotal: 7 });
+    expect(drain.call(owner as never)).toMatchObject({ byMethod: { eth_getLogs: 2 }, lifetimeTotal: 7 });
+    expect(drain.call(owner as never).byMethod.eth_call ?? 0).toBe(0);
+  });
   it('delegates to the adapter and passes the window through VERBATIM', () => {
     const window = {
       byMethod: { eth_call: 42, eth_getLogs: 7 },
       ethCallByConsumer: { 'pcaNFT.getAccountInfo': 42 },
       lifetimeTotal: 49,
     };
-    const out = drain.call({ chain: { drainRpcUsage: () => window } } as never);
+    const out = drain.call({ config: { coreChainCacheNetworks: [] }, chain: { drainRpcUsage: () => window } } as never);
     expect(out).toBe(window); // same object — no reshaping/copying in the boundary
   });
 
   it('returns the real MockChainAdapter empty window (capability present, no transport)', () => {
     const chain = new MockChainAdapter();
-    const out = drain.call({ chain } as never);
+    const out = drain.call({ config: { coreChainCacheNetworks: [] }, chain } as never);
     expect(out).toEqual({
       byMethod: {},
       ethCallByConsumer: {},
@@ -38,7 +48,7 @@ describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', ()
   });
 
   it('collapses a missing adapter capability to a concrete EMPTY window (consumers never see undefined)', () => {
-    const out = drain.call({ chain: {} } as never);
+    const out = drain.call({ config: { coreChainCacheNetworks: [] }, chain: {} } as never);
     expect(out).toEqual({
       byMethod: {},
       ethCallByConsumer: {},
@@ -52,7 +62,7 @@ describe('DKGAgent.drainRpcUsage — the adapter→agent telemetry boundary', ()
     // method must exist on the composed class's prototype chain.
     expect(typeof DKGAgent.prototype.drainRpcUsage).toBe('function');
     const window = { byMethod: { eth_sendRawTransaction: 3 }, ethCallByConsumer: {}, lifetimeTotal: 3 };
-    const out = DKGAgent.prototype.drainRpcUsage.call({ chain: { drainRpcUsage: () => window } } as never);
+    const out = DKGAgent.prototype.drainRpcUsage.call({ config: { coreChainCacheNetworks: [] }, chain: { drainRpcUsage: () => window } } as never);
     expect(out).toBe(window);
   });
 });

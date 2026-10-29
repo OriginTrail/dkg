@@ -1,6 +1,20 @@
 import { getEventListeners } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { startRequestAbortLifecycle } from '../src/request-abort-lifecycle.js';
+import { isTransportTimeoutError, startRequestAbortLifecycle } from '../src/request-abort-lifecycle.js';
+
+describe('isTransportTimeoutError', () => {
+  it('recognizes direct and wrapped transport deadlines without classifying caller aborts', () => {
+    const deadline = new DOMException('deadline passed', 'TimeoutError');
+    expect(isTransportTimeoutError(deadline)).toBe(true);
+    const readAbort = new Error('read aborted', { cause: deadline });
+    readAbort.name = 'AbortError';
+    expect(isTransportTimeoutError(readAbort)).toBe(true);
+    expect(isTransportTimeoutError(new DOMException('caller stopped', 'AbortError'))).toBe(false);
+    expect(isTransportTimeoutError(new Error('send timeout'))).toBe(false);
+    expect(isTransportTimeoutError({ name: 'TimeoutError' })).toBe(false);
+    expect(isTransportTimeoutError(new Error('caller stopped', { cause: deadline }))).toBe(false);
+  });
+});
 
 /** Size of Node's internal `AbortSignal.any` dependant set on `signal` (0 if absent). */
 function dependantCount(signal: AbortSignal): number {

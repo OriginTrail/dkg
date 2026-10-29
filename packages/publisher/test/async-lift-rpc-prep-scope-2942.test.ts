@@ -91,7 +91,7 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
       const failed = expectFailed(await publisher.processNext('wallet-1'));
 
       expect(failed.failure.failedFromState).toBe('claimed');
-      expect(failed.failure.code).toBe('canonicalization_failed');
+      expect(failed.failure.code).toBe('validation_unknown');
       expect(failed.failure.retryable).toBe(false);
       expect(failed.timestamps.nextRetryAt).toBeUndefined();
     });
@@ -110,7 +110,7 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
       expect(failed.failure.failedFromState).toBe('claimed');
       expect(failed.failure.code).toBe('workspace_unavailable');
       expect(failed.failure.message).not.toContain('SECRET-API-KEY');
-      expect(failed.failure.message).toContain('rpc.example');
+      expect(failed.failure.validationDiagnostic).toEqual({ stage: 'initial_preflight', cause: 'rpc_transport' });
     });
 
     it('keeps a claimed job that carries an UNACCOUNTED inherited hash held, never scheduled', async () => {
@@ -158,7 +158,7 @@ describe('GH#2942 typed transient RPC failure: scope edges', () => {
 
       const failed = expectFailed(await session.recordExecutionFailure('claimed', exhaustedWithoutKeywords()));
 
-      expect(failed.failure.code).toBe('canonicalization_failed');
+      expect(failed.failure.code).toBe('validation_unknown');
     });
   });
 

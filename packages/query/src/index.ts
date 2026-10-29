@@ -1,5 +1,17 @@
+export {
+  QueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from './query-result-size-error.js';
 export * from './query-engine.js';
 export * from './query-types.js';
+export { QueryMaterializationBudget } from './query-store-read-context.js';
+export {
+  QUERY_MATERIALIZATION_TOO_LARGE,
+  QueryMaterializationTooLargeError,
+  isQueryMaterializationTooLargeError,
+  type QueryMaterializationTooLargeErrorLike,
+} from './query-materialization-error.js';
 export { DKGQueryEngine, resolveViewGraphs, type ViewResolution } from './dkg-query-engine.js';
 export {
   CALLER_SPARQL_REJECTED_CODE,
@@ -8,6 +20,11 @@ export {
   type CallerSparqlRejectedErrorLike,
 } from './caller-sparql-error.js';
 export { QueryHandler, type QueryHandlerDeps } from './query-handler.js';
+export {
+  WITHHELD_GRAPH_QUERY_CODE,
+  WithheldGraphQueryError,
+  isWithheldGraphQueryError,
+} from './withheld-graph-scope.js';
 export {
   validateReadOnlySparql,
   detectSparqlQueryForm,
@@ -29,3 +46,5 @@ export {
   type SparqlForm,
   type EmptyQueryResultShape,
 } from './sparql-guard.js';
+
+export type { NamedGraphStatsBatchGate } from './named-graph-statistics.js';

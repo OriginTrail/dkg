@@ -220,6 +220,30 @@ describe('experimental exact-batch dedicated duplex transport', () => {
     expect(f.server.status).toBe('closed'); expect(f.client.status).toBe('closed');
   });
 
+  it('uses one Core refusal frame after response bytes have already been sent', async () => {
+    const f = fixture();
+    registerExperimentalExactBatchResponder(f.routerServer, options,
+      async () => ({ assetUals: UALS, context: undefined }), async (_context, session) => {
+        await session.send(frame(K.META, 0, 0, text.encode('metadata')));
+        await session.send(frame(K.DATA, 0, 0, text.encode('incomplete body')));
+        throw new ExactBatchResponderRefusal('BUSY');
+      });
+    const received = await exchangeExperimentalExactBatch(f.routerClient, PEER, start(),
+      { ...options, assetUals: UALS }, async session => {
+        const frames: ExactBatchFrame[] = [];
+        for (let item = await session.next(); item; item = await session.next()) frames.push(item);
+        return frames;
+      });
+    await f.settled();
+    expect(received).toEqual([
+      frame(K.META, 0, 0, text.encode('metadata')),
+      frame(K.DATA, 0, 0, text.encode('incomplete body')),
+      frame(K.REFUSE, 255, 0, text.encode('BUSY')),
+    ]);
+    expect(f.server.sentKinds).toEqual([K.META, K.DATA, K.REFUSE]);
+    expect(f.server.aborts).toBe(0); expect(f.client.aborts).toBe(0);
+  });
+
   it('sends no refusal into a scope that was cancelled while the responder worked', async () => {
     const f = fixture(), respond = vi.fn(async () => {});
     registerExperimentalExactBatchResponder(f.routerServer, options, async () => {

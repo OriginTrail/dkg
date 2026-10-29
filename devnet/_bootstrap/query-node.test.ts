@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 /**
  * `queryNode` reads a SELECT answer through the shared `select-response.ts`. This proves,
  * without a devnet, that doing so changed nothing that any suite can see: for a generated
@@ -118,9 +119,7 @@ describe('queryNode reads a SELECT answer as it did before the shared module', (
           cases += 1;
           if ('returned' in expected) accepted += 1;
           else rejected += 1;
-          try {
-            expect(actual).toStrictEqual(expected);
-          } catch {
+          if (!isDeepStrictEqual(actual, expected)) {
             disagreements.push(`${body}\n  now: ${JSON.stringify(actual)}\n  was: ${JSON.stringify(expected)}`);
           }
         }

@@ -19,6 +19,8 @@ test('empty, all-skipped, failing, malformed and non-JUnit reports cannot emit c
   fs.writeFileSync(path.join(pkg, 'package.json'), JSON.stringify({ devDependencies: { vitest: '*' } }));
   fs.writeFileSync(path.join(pkg, 'src/main.ts'), 'export const answer = 42;');
   execFileSync('git', ['init', '-q', root]);
+  // A commit otherwise starts detached Git maintenance, which can outlive the test and race the fixture's removal.
+  execFileSync('git', ['config', 'maintenance.auto', 'false'], { cwd: root });
   execFileSync('git', ['-c', 'user.name=Fixture', '-c', 'user.email=fixture@example.invalid', 'commit', '-qm', 'fixture', '--allow-empty'], { cwd: root });
   const receipt = path.join(pkg, 'test-results/example.coverage.json');
   const run = (xml) => runVitestJunit(['--lane', 'example'], { repoRoot: root, coverage: true, spawnProcess: () => {

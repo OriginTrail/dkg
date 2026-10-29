@@ -257,3 +257,29 @@ export function isQuorumUnmetError(err: unknown): err is QuorumUnmetError {
 
 /** Exposed for unit tests + future PR5 integration. */
 export const _internal_RPC_PRECONDITION_METHODS = RPC_PRECONDITION_METHODS;
+
+/** Preserve the shared publish/update pre-dial quorum error contract. */
+export function assertACKCandidateQuorum(corePeers: string[], requiredACKs: number): void {
+    if (corePeers.length === 0) {
+      // Pre-dial impossibility — wrap in the typed surface but preserve
+      // the legacy `ACK collection failed: no connected core peers` text
+      // so log greps + existing tests keep matching.
+      throw new QuorumUnmetError({
+        collected: 0,
+        required: requiredACKs,
+        dialled: 0,
+        peerOutcomes: [],
+        legacyMessage: 'ACK collection failed: no connected core peers',
+      });
+    }
+    if (corePeers.length < requiredACKs) {
+      throw new QuorumUnmetError({
+        collected: 0,
+        required: requiredACKs,
+        dialled: corePeers.length,
+        peerOutcomes: corePeers.map((peerId) => ({ peerId, reason: 'pool_below_quorum' })),
+        legacyMessage:
+          `ACK collection failed: need ${requiredACKs} ACKs but only ${corePeers.length} core peers connected — quorum impossible`,
+      });
+    }
+}

@@ -46,16 +46,17 @@ describe('runPromoteJob diagnostics', () => {
     queue.fail = async (jobId, claimToken, error) => {
       order.push('queue.fail.begin');
       diagnosticPresentWhenFailBegan = promoteFailureDiagnostics(logs).length === 1;
-      await fail(jobId, claimToken, error);
+      const transition = await fail(jobId, claimToken, error);
       order.push('queue.fail.end');
+      return transition;
     };
 
     const result = await runPromoteJob({
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw failure;
       },
       now: fixture.clock.now,
@@ -107,8 +108,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw failure;
       },
       now: fixture.clock.now,
@@ -135,8 +136,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
       now: fixture.clock.now,
@@ -164,16 +165,17 @@ describe('runPromoteJob diagnostics', () => {
     const fail = queue.fail.bind(queue);
     let failCompleted = false;
     queue.fail = async (jobId, claimToken, error) => {
-      await fail(jobId, claimToken, error);
+      const transition = await fail(jobId, claimToken, error);
       failCompleted = true;
+      return transition;
     };
 
     const resultPromise = runPromoteJob({
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
       },
       now: fixture.clock.now,
@@ -219,8 +221,8 @@ describe('runPromoteJob diagnostics', () => {
         job,
         queue,
         workerId: 'worker-test',
-        runPromote: async (_request, markPromoteStarted) => {
-          await markPromoteStarted();
+        runPromote: async (_request) => {
+
           throw new Error('[promote:assertionScopedQuads] unknown fatal failure');
         },
         now: fixture.clock.now,
@@ -249,8 +251,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 2 };
       },
       now: fixture.clock.now,
@@ -261,7 +263,7 @@ describe('runPromoteJob diagnostics', () => {
       },
     });
 
-    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(result).toEqual({ outcome: 'succeeded', result: { promotedCount: 2 } });
     expect(logs).toContain(`memoryGraphChanged emit failed for ${job.jobId}: event stream closed`);
   });
 
@@ -278,8 +280,8 @@ describe('runPromoteJob diagnostics', () => {
       job,
       queue: failingQueue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         // Hold the promote open until one heartbeat has failed.
         await heartbeatFailed.promise;
         return { promotedCount: 1 };
@@ -289,7 +291,7 @@ describe('runPromoteJob diagnostics', () => {
       log: (message) => { logs.push(message); },
     });
 
-    expect(result).toEqual({ outcome: 'succeeded' });
+    expect(result).toEqual({ outcome: 'succeeded', result: { promotedCount: 1 } });
     expect(logs).toContain(`Heartbeat error for ${job.jobId}: store unavailable`);
   });
 

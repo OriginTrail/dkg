@@ -1,0 +1,34 @@
+{
+  "command": [
+    "pnpm",
+    "--dir",
+    "packages/agent",
+    "exec",
+    "vitest",
+    "run",
+    "--config",
+    "vitest.unit.config.ts",
+    "test/rfc64-catalog-head-replay-peers.test.ts",
+    "-t",
+    "GH\\-3502:\\ a\\ change\\ before\\ the\\ first\\ replay\\ after\\ an\\ empty\\ owner\\ restart\\ triggers\\ the\\ real\\ notice\\ receiver",
+    "--reporter=json",
+    "--outputFile=<report>"
+  ],
+  "exitCode": 1,
+  "rawReportSha256": "3cbd93844365b9c144a574b9d67c14cf52834fffc2854c15993bc48030d076d3",
+  "assertions": [
+    {
+      "ancestorTitles": [
+        "an agent answering a peer's replay request it cannot serve now"
+      ],
+      "fullName": "an agent answering a peer's replay request it cannot serve now GH-3502: a change before the first replay after an empty owner restart triggers the real notice receiver",
+      "status": "failed",
+      "title": "GH-3502: a change before the first replay after an empty owner restart triggers the real notice receiver",
+      "duration": 1459.6379579999993,
+      "failureMessages": [
+        "AssertionError: GH-3502: late replay must trigger a fresh owner pull without another write or resubscribe: expected \"syncSharedMemoryFromPeerDetailed\" to be called with arguments: [ \u2026(3) ]\n\nNumber of calls: 0\n\n    at Proxy.<anonymous> (file://<checkout>/node_modules/.pnpm/@vitest+expect@4.0.18/node_modules/@vitest/expect/dist/index.js:1420:10)\n    at Proxy.<anonymous> (file://<checkout>/node_modules/.pnpm/@vitest+expect@4.0.18/node_modules/@vitest/expect/dist/index.js:1090:14)\n    at Proxy.methodWrapper (file://<checkout>/node_modules/.pnpm/chai@6.2.2/node_modules/chai/index.js:1700:25)\n    at <checkout>/packages/agent/test/rfc64-catalog-head-replay-peers.test.ts:264:8\n    at processTicksAndRejections (node:internal/process/task_queues:103:5)\n    at file://<checkout>/node_modules/.pnpm/@vitest+runner@4.0.18/node_modules/@vitest/runner/dist/index.js:915:20"
+      ],
+      "meta": {}
+    }
+  ]
+}

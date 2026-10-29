@@ -2,7 +2,9 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { CG, MEMBER, POLICY, privateCatalogReadinessFixture as fixture, readinessApplied, readinessHead, readinessTarget } from './_helpers/private-catalog-readiness-fixture.js';
+import { Rfc64CatalogReplayConnectionRuntimeV1 } from '../src/rfc64/catalog-replay-connection-runtime-v1.js';
 import { evaluateRfc64CatalogCompletionV1 } from '../src/rfc64/catalog-completion-evidence-v1.js';
+import { rfc64CatalogTargetExactIdentityKeyV1 } from '../src/rfc64/catalog-operational-targets-v1.js';
 import { loadRfc64OperationalAppliedHeadsV1 } from '../src/rfc64/catalog-operational-applied-heads-v1.js';
 
 type Fixture = Awaited<ReturnType<typeof fixture>>;
@@ -24,6 +26,34 @@ describe('approved private catalog readiness handoff', () => {
     expect(f.agent.resolveContextGraphSubscriptionBootstrapAuthority).toHaveBeenCalledWith(CG, {
       callerAgentAddress: MEMBER, allowSubscriptionFallback: false,
     });
+  });
+
+  it('withholds corroborated readiness while a second peer owns deferred overflow custody', async () => {
+    const f = await fixture();
+    await expect(f.run()).resolves.toBe(true);
+    f.commit.mockClear();
+    let selected = ['unrelated-graph'];
+    const reserveDeferred = vi.fn((cg: string) => f.state.replay.reserveDeferred(cg, POLICY));
+    const reservePeer = vi.fn((cg: string, peer: string) => f.state.replay.reservePeer(cg, POLICY, peer));
+    const runtime = new Rfc64CatalogReplayConnectionRuntimeV1({
+      admittedConnectedPeerIds: () => [], selectContextGraphIds: () => selected,
+      reserveFence: reservePeer, reserveDeferredFence: reserveDeferred,
+      schedule: () => false, wait: async () => undefined, warn: vi.fn(),
+      reannounce: async () => ({ failed: 0 }), replay: async () => ({ failed: 0 }),
+    }, 60_000, 1);
+    const occupied = runtime.prepareConnectionOpen('occupied-peer')!;
+    selected = ['unrelated-graph', CG];
+    const reservation = runtime.prepareConnectionOpen('overflow-peer')!;
+    expect(reserveDeferred).toHaveBeenCalledWith(CG);
+    expect(reservePeer.mock.calls.some(([cg]) => cg === CG)).toBe(false);
+    expect(f.state.replay.status(CG, POLICY)?.active).toBe(true);
+    await expect(f.run()).resolves.toBe(false);
+    expect(f.commit).not.toHaveBeenCalled();
+    reservation.reject();
+    expect(f.state.replay.status(CG, POLICY)?.active).toBe(false);
+    await expect(f.run()).resolves.toBe(true);
+    expect(f.commit).toHaveBeenCalledOnce();
+    occupied.reject(); runtime.reset();
   });
 
   it('cannot certify a partial restored catalog after losing a second advertised head', async () => {
@@ -89,6 +119,69 @@ describe('approved private catalog readiness handoff', () => {
     });
     expect(evidence.rowProjection).toEqual({ expectedRowCount: '1', missingRowCount: '0' });
     expect(evidence.expectedCatalogHeadDigest).toBe(evidence.catalogHeadDigest);
+    expect(evidence.corroborated).toBe(false);
+  });
+
+  it.each([false, true])('projects the newest retained head regardless of promise order (reverse=%s)', async (reverse) => {
+    const f = await fixture({ restored: true });
+    const heads = await loadRfc64OperationalAppliedHeadsV1(f.state.persistence as never);
+    const two = readinessTarget(readinessHead({ version: '2' }));
+    const three = readinessTarget(readinessHead({ version: '3' }));
+    const promises = reverse ? [three, two] : [two, three];
+    const evidence = evaluateRfc64CatalogCompletionV1({ heads, targets: [], promisedTargets: promises,
+      promisedRowCounts: new Map(), replay: null, targetCapacityExceeded: false });
+    expect(evidence.pendingTargets).toHaveLength(2);
+    expect(evidence.liveTargetsPending).toBe(false);
+    expect(evidence.expectedCatalogHeadDigest).toBe(three.catalogHeadObjectDigest);
+    expect(evidence.corroborated).toBe(false);
+    const live = evaluateRfc64CatalogCompletionV1({ heads, targets: [three], promisedTargets: promises,
+      promisedRowCounts: new Map(), replay: null, targetCapacityExceeded: false });
+    expect(live.pendingTargets).toHaveLength(2);
+    expect(live.liveTargetsPending).toBe(true);
+    expect(live.expectedCatalogHeadDigest).toBe(three.catalogHeadObjectDigest);
+  });
+
+  it.each([false, true])('shares newest-head resolution for digest and counts after an older fork (reverse=%s)', async (reverse) => {
+    const f = await fixture({ restored: true });
+    const heads = await loadRfc64OperationalAppliedHeadsV1(f.state.persistence as never);
+    const older = readinessTarget(readinessHead({ version: '2' }));
+    const fork = readinessTarget(readinessHead({ version: '2', totalRows: '0' }));
+    const newest = readinessTarget(readinessHead({ version: '3', totalRows: '4' }));
+    const promisedTargets = reverse ? [newest, fork, older] : [older, fork, newest];
+    const evidence = evaluateRfc64CatalogCompletionV1({ heads, targets: [], promisedTargets,
+      promisedRowCounts: new Map([[rfc64CatalogTargetExactIdentityKeyV1(newest), '4']]),
+      replay: null, targetCapacityExceeded: false });
+    expect(evidence.expectedCatalogHeadDigest).toBe(newest.catalogHeadObjectDigest);
+    expect(evidence.rowProjection).toEqual({ expectedRowCount: '4', missingRowCount: '3' });
+    expect(evidence.liveTargetsPending).toBe(false);
+    const noCounts = evaluateRfc64CatalogCompletionV1({ heads, targets: [], promisedTargets,
+      promisedRowCounts: new Map(), replay: null, targetCapacityExceeded: false });
+    expect(noCounts.expectedCatalogHeadDigest).toBe(newest.catalogHeadObjectDigest);
+    expect(noCounts.rowProjection).toEqual({ expectedRowCount: null, missingRowCount: null });
+  });
+
+  it.each([false, true])('keeps both projections ambiguous for a newest-version fork (reverse=%s)', async (reverse) => {
+    const f = await fixture({ restored: true });
+    const heads = await loadRfc64OperationalAppliedHeadsV1(f.state.persistence as never);
+    const left = readinessTarget(readinessHead({ version: '2' }));
+    const right = readinessTarget(readinessHead({ version: '2', totalRows: '0' }));
+    const evidence = evaluateRfc64CatalogCompletionV1({ heads, targets: [],
+      promisedTargets: reverse ? [right, left] : [left, right],
+      promisedRowCounts: new Map([[rfc64CatalogTargetExactIdentityKeyV1(left), '1'], [rfc64CatalogTargetExactIdentityKeyV1(right), '0']]),
+      replay: null, targetCapacityExceeded: false });
+    expect(evidence.expectedCatalogHeadDigest).toBeNull();
+    expect(evidence.rowProjection).toEqual({ expectedRowCount: null, missingRowCount: null });
+  });
+
+  it('reports an unknown expected digest for competing retained heads at the applied version', async () => {
+    const f = await fixture({ restored: true });
+    const heads = await loadRfc64OperationalAppliedHeadsV1(f.state.persistence as never);
+    const conflict = readinessTarget(readinessHead({ totalRows: '0' }));
+    const evidence = evaluateRfc64CatalogCompletionV1({ heads, targets: [], promisedTargets: [conflict],
+      promisedRowCounts: new Map(), replay: null, targetCapacityExceeded: false });
+    expect(evidence.pendingTargets).toEqual([conflict]);
+    expect(evidence.expectedCatalogHeadDigest).toBeNull();
+    expect(evidence.liveTargetsPending).toBe(false);
     expect(evidence.corroborated).toBe(false);
   });
 

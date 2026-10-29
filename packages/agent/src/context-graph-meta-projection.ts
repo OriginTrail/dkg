@@ -10,24 +10,19 @@ import {
   contextGraphDataUri,
   contextGraphMetaGraphUri,
 } from '@origintrail-official/dkg-core';
-import { WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES as RECIPIENT_AUTHORITY_PREDICATES } from '@origintrail-official/dkg-publisher';
-import type { Quad, QueryOptions, TripleStore } from '@origintrail-official/dkg-storage';
+import { resolveWorkspaceAgentRecipientKeys, WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES as RECIPIENT_AUTHORITY_PREDICATES } from '@origintrail-official/dkg-publisher';
+import { storeLaneInflightLimit, type Quad, type QueryOptions, type TripleStore } from '@origintrail-official/dkg-storage';
 import { strip, stripLiteral } from './dkg-agent-utils.js';
 import { mapWithConcurrency } from './map-with-concurrency.js';
 import { cloneMetaRecord } from './internal/context-graph-meta-record-copy.js';
+import { ContextGraphMetaCacheEntry, throwIfMetaReadAborted } from './internal/context-graph-meta-cache-entry.js';
+import { RecipientKeyCollect } from './internal/recipient-key-collect.js';
 import type { StoreMutation } from './internal/store-mutation.js';
 import { PeerGateRevision } from './internal/peer-gate-revision.js';
 import { RecipientKeyRouteFence } from './internal/recipient-key-route-fence.js';
 
 import type { ContextGraphMetaRecord, ContextGraphSubGraphMeta, ContextGraphDelegationMeta } from './internal/context-graph-meta-record.js';
 export type { ContextGraphMetaRecord, ContextGraphSubGraphMeta, ContextGraphDelegationMeta } from './internal/context-graph-meta-record.js';
-
-interface ProjectionEntry {
-  value?: ContextGraphMetaRecord;
-  inflight?: Promise<ContextGraphMetaRecord>;
-  dirty: boolean;
-  invalidationVersion: number;
-}
 
 export interface ContextGraphReadAuthorityFactsSnapshot {
   /** True only while no projection source has changed since capture began. */
@@ -145,11 +140,12 @@ function emptyContextGraphMetaRecord(
 }
 
 export class ContextGraphMetaProjection {
-  private readonly entries = new Map<string, ProjectionEntry>();
+  private readonly entries = new Map<string, ContextGraphMetaCacheEntry>();
   private authorityFactsRevision = 0;
   private allFactsRevision = 0;
   /** What a recipient resolution depends on: key and route facts, and each graph's peer allowlist (GH#3067). */
   readonly recipientKeyRouteFence: RecipientKeyRouteFence;
+  readonly recipientKeyCollect: RecipientKeyCollect;
   readonly peerGateRevision = new PeerGateRevision(PROJECTION_RECORD_PREDICATES);
 
   /** Historical callbacks remain bound and also notify the recipient fence. */
@@ -181,6 +177,7 @@ export class ContextGraphMetaProjection {
 
   constructor(private readonly store: TripleStore) {
     this.recipientKeyRouteFence = new RecipientKeyRouteFence(store);
+    this.recipientKeyCollect = new RecipientKeyCollect(this.recipientKeyRouteFence, (agent) => resolveWorkspaceAgentRecipientKeys(store, agent));
   }
 
   /** Invalidate request-local absence proofs when projection sources change. */
@@ -209,7 +206,7 @@ export class ContextGraphMetaProjection {
     for (const id of ids) {
       const entry = this.entries.get(id);
       const value = entry?.value;
-      if (entry?.inflight || (value && (
+      if (entry?.hasInflight || (value && (
         value.accessPolicy !== undefined || value.hasAgentGate || value.hasPeerGate
         || value.onChainId !== undefined
       ))) present.add(id);
@@ -217,7 +214,12 @@ export class ContextGraphMetaProjection {
     const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
     const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
     const batches = [...chunks(ids, 128)];
-    await mapWithConcurrency(batches, 4, async (batch) => {
+    // Ordinary reads should not fill the store queue with their own siblings.
+    // A dedicated control queue has its own admission policy, not this lane's.
+    const readWidth = options.controlQueue === undefined
+      ? Math.min(4, storeLaneInflightLimit(this.store, options.priority) ?? 4)
+      : 4;
+    await mapWithConcurrency(batches, readWidth, async (batch) => {
       options.signal?.throwIfAborted();
       const idsByUri = new Map(batch.map((id) => [contextGraphDataUri(id), id]));
       const values = batch.map((id) => (
@@ -274,37 +276,13 @@ export class ContextGraphMetaProjection {
   }
 
   async get(contextGraphId: string, options: QueryOptions = {}): Promise<ContextGraphMetaRecord> {
-    const existing = this.entries.get(contextGraphId);
-    if (existing?.inflight) {
-      if (!existing.dirty) return cloneMetaRecord(await raceAgainstAbort(existing.inflight, options.signal));
-      await raceAgainstAbort(existing.inflight, options.signal);
-      return this.get(contextGraphId, options);
+    throwIfMetaReadAborted(options.signal);
+    let entry = this.entries.get(contextGraphId);
+    if (!entry) {
+      entry = new ContextGraphMetaCacheEntry();
+      this.entries.set(contextGraphId, entry);
     }
-    if (existing?.value && !existing.dirty) return cloneMetaRecord(existing.value);
-
-    const entry = existing ?? { dirty: true, invalidationVersion: 0 };
-    const rebuildVersion = entry.invalidationVersion;
-    entry.dirty = false;
-    const rebuildOptions = options.source ? { source: options.source } : {};
-    const inflight = this.rebuild(contextGraphId, rebuildOptions)
-      .then((record) => {
-        entry.value = record;
-        entry.inflight = undefined;
-        // A fresh-read request during the rebuild leaves the version as it is.
-        entry.dirty ||= entry.invalidationVersion !== rebuildVersion;
-        this.entries.set(contextGraphId, entry);
-        return record;
-      })
-      .catch((err) => {
-        entry.inflight = undefined;
-        entry.dirty = true;
-        this.entries.set(contextGraphId, entry);
-        throw err;
-      });
-
-    entry.inflight = inflight;
-    this.entries.set(contextGraphId, entry);
-    return cloneMetaRecord(await raceAgainstAbort(inflight, options.signal));
+    return cloneMetaRecord(await entry.get(options, (readOptions) => this.rebuild(contextGraphId, readOptions)));
   }
 
   markDirty(contextGraphId: string, changesPeerGate = true): void {
@@ -312,11 +290,12 @@ export class ContextGraphMetaProjection {
     this.authorityFactsRevision += 1;
     const existing = this.entries.get(contextGraphId);
     if (existing) {
-      existing.dirty = true;
-      existing.invalidationVersion += 1;
+      existing.invalidate();
       return;
     }
-    this.entries.set(contextGraphId, { dirty: true, invalidationVersion: 1 });
+    const entry = new ContextGraphMetaCacheEntry();
+    entry.invalidate();
+    this.entries.set(contextGraphId, entry);
   }
 
   /**
@@ -326,7 +305,7 @@ export class ContextGraphMetaProjection {
    */
   requireFreshRead(contextGraphId: string): void {
     const existing = this.entries.get(contextGraphId);
-    if (existing) existing.dirty = true;
+    if (existing) existing.requireFreshRead();
   }
 
   /** Destructive graph mutations invalidate their target cache and request-local revisions. */
@@ -345,8 +324,18 @@ export class ContextGraphMetaProjection {
     const contextGraphId =
       contextGraphIdFromMetaGraphUri(graphUri) ?? contextGraphIdFromCatalogGraphUri(graphUri);
     if (contextGraphId) {
+      // Lifecycle stamps cannot change this projection. Still fence any fact on the CG
+      // subject: read-authority absence proofs inspect all its predicates, not only this set.
+      if (subject !== undefined && isSafeIri(subject) && subject !== contextGraphDataUri(contextGraphId)
+        && predicate !== undefined && isSafeIri(predicate)
+        && !PROJECTION_RECORD_PREDICATES.has(predicate)
+        && !WORKSPACE_RECIPIENT_AUTHORITY_PREDICATES.has(predicate)) return;
       this.markDirty(contextGraphId, false);
-      this.peerGateRevision.noteRemoval(contextGraphId, { subject, predicate });
+      // Catalog reads admit only the disclosure floor, never peers or roster.
+      // Keep projection/node-wide and recipient-key invalidation independent.
+      if (!isSafeIri(graphUri) || contextGraphIdFromCatalogGraphUri(graphUri) === null) {
+        this.peerGateRevision.noteRemoval(contextGraphId, { subject, predicate });
+      }
       return;
     }
     // Key lookup scans every named graph, and an atomic replacement can delete
@@ -360,8 +349,7 @@ export class ContextGraphMetaProjection {
     this.authorityFactsRevision += 1;
     this.allFactsRevision += 1;
     for (const entry of this.entries.values()) {
-      entry.dirty = true;
-      entry.invalidationVersion += 1;
+      entry.invalidate();
     }
   }
 
@@ -375,7 +363,8 @@ export class ContextGraphMetaProjection {
       const contextGraphId = this.contextGraphIdTouchedByQuad(quad);
       if (!contextGraphId) continue;
       touched.add(contextGraphId);
-      this.markDirty(contextGraphId);
+      this.markDirty(contextGraphId, !isSafeIri(quad.graph)
+        || contextGraphIdFromCatalogGraphUri(quad.graph) !== contextGraphId);
     }
     // Generic update and complete-graph replace paths call markAllDirty(); one
     // conservative bump here closes the recipient-key insertion race.
@@ -890,25 +879,4 @@ function contextGraphIdFromCatalogGraphUri(uri: string): string | null {
   const tail = uri.slice(CONTEXT_GRAPH_PREFIX.length, -'/_catalog'.length);
   if (!tail) return null;
   return tail;
-}
-
-function raceAgainstAbort<T>(work: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
-  if (!signal) return work;
-  throwIfAborted(signal);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => {
-      const reason = signal.reason;
-      reject(reason instanceof Error ? reason : new Error(String(reason ?? 'aborted')));
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    work.then(resolve, reject).finally(() => {
-      signal.removeEventListener('abort', onAbort);
-    });
-  });
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  const reason = signal.reason;
-  throw reason instanceof Error ? reason : new Error(String(reason ?? 'aborted'));
 }

@@ -53,7 +53,7 @@ const LANE_GROUPS = {
   kosava_node_ui: [{ id: 'node-ui', packages: ['node-ui', 'node-store'], shards: 1 }],
   kosava_supporting: [{
     id: 'supporting', shards: 1, concurrency: 3, maxWorkers: 2,
-    packages: ['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'],
+    packages: ['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'kafka-source', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'],
   }],
   kosava_hardhat_plugins: [{ id: 'plugins', packages: ['random-sampling', 'kafka-plugin'], shards: 1 }],
 };
@@ -89,6 +89,11 @@ export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
         row: rows.length, suite: group.id, shard: group.shards === 1 ? 0 : index + 1, shards: group.shards,
         label: group.shards === 1 ? group.label ?? group.id : `${group.id} [${index + 1}/${group.shards}]`,
         sidecars: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
+        ...(group.runner === 'agent' ? {
+          // Unit shards now include enough production-agent fixtures to exceed ten
+          // minutes on hosted runners; retain room for coverage receipt upload.
+          timeoutMinutes: 12,
+        } : {}),
       });
     }
     jobs[job] = packages;

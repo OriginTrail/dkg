@@ -47,6 +47,7 @@ export type {
   PropertyAnnotation,
   // Graph model
   GraphNode,
+  NodeDecorations,
   GraphEdge,
   ProvenanceInfo,
   ChangeSet,

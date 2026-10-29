@@ -1,4 +1,17 @@
+export type { ContextGraphPartitionRead, ContextGraphNamedGraphStats } from '@origintrail-official/dkg-query';
+export type { ContextGraphPartitionInventoryOptions } from './internal/context-graph-partition-query.js';
+export { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogTransactionEvidenceV1, type ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
+export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
+export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
+export {
+  QUERY_RESULT_TOO_LARGE,
+  QueryResultTooLargeError,
+  asQueryResultTooLargeError,
+  isQueryResultTooLargeError,
+  type QueryResultTooLargeErrorLike,
+} from './query-result-too-large-error.js';
 export {
   authorityIndexTrustDomain,
   planAuthorityIndexBootstrap,
@@ -19,6 +32,7 @@ export {
 export {
   generateCustodialAgent, registerSelfSovereignAgent, agentFromPrivateKey,
   generateAgentToken, hashAgentToken,
+  agentKeystorePath, readAgentKeystore, assertKeystoreHoldsNoPayerKey,
   ensureWorkspaceEncryptionKey,
   appendCustodialWorkspaceEncryptionKey,
   revokeCustodialWorkspaceEncryptionKey,
@@ -213,6 +227,8 @@ export {
 } from './ccl-policy.js';
 export { ContextGraphPolicyAuthorizationError } from './dkg-agent-ownership.js';
 export { DKGAgent } from './dkg-agent.js';
+export type { PrivateAccessRequest, PrivateAccessResponse } from './private-access-request.js';
+export { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 export type { DiscoverContextGraphsFromChainOptions } from './context-graph-discovery-options.js';
 export {
   CONTEXT_GRAPH_STORAGE_DISCOVERY_ID_BUDGET,
@@ -249,6 +265,8 @@ export type {
   PublishAuthorCatalogGenesisParamsV1,
   Rfc64CatalogAuthorSignerV1,
   Rfc64CatalogRuntimeSelectionStatusV1,
+  Rfc64CatalogSelectionV1,
+  Rfc64CatalogConnectionReplayStatusV1,
 } from './dkg-agent-rfc64-catalog.js';
 export type {
   ReconcileRfc64PublicRootCatalogExactSetParamsV1,
@@ -263,6 +281,13 @@ export type {
   Rfc64PublicCatalogAuthorRepairStatusV1,
   Rfc64SwmCatalogProjectionSupervisorStatusV1,
 } from './dkg-agent-rfc64-swm-catalog-projection-supervisor.js';
+export type {
+  CatalogHeadDeliveryStatusV1,
+} from './internal/catalog-head-delivery-report.js';
+export type {
+  FinalizedPrivatePlacementQueueStatusV1,
+} from './internal/catalog-placement-timing.js';
+export { committedSharePendingCatalogHandoff, type CommittedSharePendingCatalogHandoff } from './internal/promote/inventory-recovery-failure.js';
 export type {
   Rfc64CatalogShadowExecutionStatusV1,
 } from './rfc64/catalog-shadow-observability-v1.js';
@@ -343,6 +368,7 @@ export {
   SWM_CATCHUP_FALLBACK_PROBE_LIMIT,
   SWM_CATCHUP_PEER_GOOD_TTL_MS,
   SWM_CATCHUP_PEER_NEGATIVE_TTL_MS,
+  swmCatchupOwnerPeerIds,
   type SelectSwmCatchupPeersInput,
   type SelectSwmCatchupPeersResult,
   type SwmCatchupPeerOutcome,
@@ -634,6 +660,7 @@ export {
   mergeFleetSharedMemoryDiagnostics,
   mergeSamePeerSharedMemoryDiagnostics,
   selectSwmSnapshotCoverage,
+  sharedMemoryRoundFoundNothingMissing,
 } from './sync/shared-memory-diagnostics.js';
 // 2026-07-08 sync-storm mitigation (#1233) — resolve the opt-in `agents/_meta`
 // fetch flag. Exported on the public surface so the CLI daemon lifecycle resolves
@@ -642,3 +669,8 @@ export {
 // exported. The serve-side resolver `shouldWithholdAgentsDurableMeta` stays
 // internal; only the in-agent lifecycle (at its env boundary) + tests use it.
 export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-policy.js';
+
+export type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
+
+export { CatalogPublicationAdmissionError, CATALOG_PUBLICATION_ADMISSION_CODE } from './catalog-publication-admission-error.js';
+export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';

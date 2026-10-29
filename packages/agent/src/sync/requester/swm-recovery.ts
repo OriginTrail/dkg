@@ -1,3 +1,4 @@
+import { quarantineUnusableSwmHistory } from './swm-history-admission.js';
 import { snapshotOperation, type WorkspaceSnapshotScope } from '@origintrail-official/dkg-publisher';
 import type { Quad } from '@origintrail-official/dkg-storage';
 import {
@@ -396,7 +397,7 @@ async function recoverContextGraphSwmUnlocked(
       completed: false,
     };
   }
-  const metaQuads = deps.includeRootScope === false
+  let metaQuads = deps.includeRootScope === false
     ? meta.quads.filter((quad) => (
       isNamedSubgraphSharedMemoryMetaGraph(deps.contextGraphId, quad.graph)
     ))
@@ -426,6 +427,10 @@ async function recoverContextGraphSwmUnlocked(
     excludedSubGraphNames: excluded,
   });
 
+  // Admit history before any incremental or final apply can replace active heads.
+  metaQuads = quarantineUnusableSwmHistory(metaQuads, graphScopedDescriptors.flatMap(descriptor =>
+    descriptor.equivalentOperationSubjects.map(subject => ({ graph: descriptor.metaGraph, subject }))));
+
   // Classify legacy roots from metadata alone. The verifier does not need data
   // rows to derive entityCreators, and this lets a rootless-only CG avoid the
   // expensive aggregate `_shared_memory` query entirely. That query is both
@@ -445,6 +450,8 @@ async function recoverContextGraphSwmUnlocked(
   const incrementallyReadyGraphs = new Set<string>();
   /** Graph keys whose ASSERTION GRAPH was actually (re)written this run. */
   const rewrittenGraphKeys = new Set<string>();
+  /** Graph keys whose exact content the store already held, so this run wrote none of it. */
+  const heldGraphKeys = new Set<string>();
   let incrementallyReplacedGraphs = 0;
   let incrementallyInsertedDataQuads = 0;
   let incrementallyInsertedMetaQuads = 0;
@@ -501,6 +508,7 @@ async function recoverContextGraphSwmUnlocked(
           incrementallyInsertedMetaQuads += insertableMeta.length;
           rewrittenGraphKeys.add(graphKey);
         }
+        heldGraphKeys.add(graphKey);
         incrementallyReadyGraphs.add(graphKey);
         continue;
       }
@@ -713,6 +721,9 @@ async function recoverContextGraphSwmUnlocked(
     const retainedReady = retainedSnapshotRef !== undefined
       && snapshotWalkProgress?.isResolved(retainedSnapshotRef) === true;
     if (incrementallyReadyGraphs.has(graphKey) || retainedReady) {
+      // A ref an earlier round resolved was re-validated as still materialized
+      // before this round's walk, which then skipped it.
+      if (!incrementallyReadyGraphs.has(graphKey)) heldGraphKeys.add(graphKey);
       graphAssets.push(Object.freeze({
         descriptor,
         kind: rewrittenGraphKeys.has(graphKey)
@@ -777,6 +788,7 @@ async function recoverContextGraphSwmUnlocked(
     insertedDataQuads: applied.insertedRootQuads + applied.insertedGraphQuads,
     insertedMetaQuads: applied.insertedMetaQuads,
     droppedDataTriples: processed.droppedDataTriples,
+    alreadyHeldGraphs: heldGraphKeys.size,
     ...snapshotProgress,
     completed: true,
   };

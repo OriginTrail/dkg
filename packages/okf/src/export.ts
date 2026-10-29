@@ -1,5 +1,5 @@
 /**
- * The clean inverse of the importer (ADR 0005): reconstruct a conformant OKF
+ * The clean inverse of the importer (ADR 0009): reconstruct a conformant OKF
  * bundle from imported Knowledge Assets. Designed so that
  *
  *   import(bundle) → exportBundle(...) → import(...)
