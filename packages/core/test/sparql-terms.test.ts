@@ -49,6 +49,13 @@ describe('formatSparqlTerm, the one serializer', () => {
     expect((error as SparqlTermValidationError).kind).toBe(kind);
   });
 
+  it('renders an IRI or datatype that is not absolute: SPARQL allows it, storage\'s policy reports it', () => {
+    expect(formatSparqlTerm('integer', { position: 'object' })).toBe('<integer>');
+    expect(formatSparqlTerm('"42"^^integer', { position: 'object' })).toBe('"42"^^<integer>');
+    expect(formatSparqlTerm('"42"^^<integer>', { position: 'object' })).toBe('"42"^^<integer>');
+    expect(formatSparqlTerm('http://ex.org/%zz', { position: 'predicate' })).toBe('<http://ex.org/%zz>');
+  });
+
   it('keeps the core validator message for callers that match on it', () => {
     expect(() => formatSparqlTerm('urn:a b', { position: 'graph' })).toThrow(/^Unsafe or empty IRI value: urn:a b$/);
     expect(() => formatSparqlTerm('"x\ny"', { position: 'object' })).toThrow(/^Unsafe RDF term/);

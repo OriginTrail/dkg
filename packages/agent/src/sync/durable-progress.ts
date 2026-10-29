@@ -6,11 +6,15 @@ import type { DurableSyncResult } from '../dkg-agent-types.js';
  * classified without first manufacturing a full requester result.
  */
 export interface DurableProgressSummary {
+  readonly bytesReceived?: number;
+  readonly emptyResponses?: number;
   readonly insertedTriples?: number;
   readonly insertedDataTriples?: number;
   readonly insertedMetaTriples?: number;
   readonly metaOnlyResponses?: number;
   readonly verifiedPrivateOnlyResponses?: number;
+  /** Assets of a completed generation already stored and current on chain; durable only. */
+  readonly verifiedHeldAssets?: number;
   readonly dataRejectedMissingMeta?: number;
   readonly rejectedKcs?: number;
   readonly resumedPhases?: number;
@@ -31,11 +35,16 @@ export interface DurableProgressClassificationOptions {
 
 /** Typed policy decisions shared by reconnect and explicit catch-up paths. */
 export interface DurableProgressClassification {
+  /** A present plane answered; a deferred plane must carry partial evidence. */
+  readonly responded: boolean;
   readonly insertedDataTriples: number;
   readonly hasInsertedData: boolean;
   readonly hasMetadataEvidence: boolean;
   readonly hasVerifiedPrivateOnlyResponse: boolean;
+  /** A completed generation was found already stored and current: readiness proof without inserts. */
+  readonly hasVerifiedHeldAssets: boolean;
   readonly hasCleanVerifiedPrivateOnlyCompletion: boolean;
+  readonly hasCleanVerifiedHeldCompletion: boolean;
   readonly integrityRejected: boolean;
   readonly metadataOnly: boolean;
   readonly timedOut: boolean;
@@ -68,6 +77,7 @@ export function classifyDurableProgress(
   const checkpointAdvances = progress?.checkpointAdvances ?? 0;
   const resumedPhases = progress?.resumedPhases ?? 0;
   const verifiedPrivateOnlyResponses = progress?.verifiedPrivateOnlyResponses ?? 0;
+  const hasVerifiedHeldAssets = (progress?.verifiedHeldAssets ?? 0) > 0;
 
   const timedOut = (progress?.timedOutPhases ?? 0) > 0;
   const transportFailed = (progress?.failedPeers ?? 0) > 0;
@@ -99,20 +109,29 @@ export function classifyDurableProgress(
     && !denied
     && !integrityRejected;
 
+  const completedWithoutFailure = progress != null
+    && options.complete !== false
+    && completedPhases > 0
+    && !hasBlockingFailure;
+  const hasCleanVerifiedHeldCompletion = hasVerifiedHeldAssets && completedWithoutFailure;
+  const unprovenHeldCompletion = hasVerifiedHeldAssets && !hasCleanVerifiedHeldCompletion;
+
   const metadataOnly = !hasCleanVerifiedPrivateOnlyCompletion
+    && !hasCleanVerifiedHeldCompletion
     && (progress?.insertedDataTriples ?? 0) === 0
     && (
       metaOnlyResponses > 0
       || (insertedMetaTriples > 0 && insertedTriples > 0)
     );
   const insertedDataTriples = progress?.insertedDataTriples
-    ?? (metadataOnly ? 0 : insertedTriples);
+    ?? (hasVerifiedHeldAssets ? Math.max(0, insertedTriples - insertedMetaTriples) : metadataOnly ? 0 : insertedTriples);
   const hasInsertedData = insertedDataTriples > 0;
 
   const madeReconnectProgress = !integrityRejected && (
     hasInsertedData
     || hasCleanVerifiedPrivateOnlyCompletion
-    || (!metadataOnly && (completedPhases > 0 || checkpointAdvances > 0))
+    || hasCleanVerifiedHeldCompletion
+    || (!unprovenHeldCompletion && !metadataOnly && (completedPhases > 0 || checkpointAdvances > 0))
   );
 
   // Explicit catch-up historically also treats a resumed completed phase as
@@ -123,17 +142,19 @@ export function classifyDurableProgress(
     || checkpointAdvances > 0
     || (completedPhases > 0 && resumedPhases > 0);
 
-  const completedWithoutFailure = progress != null
-    && options.complete !== false
-    && completedPhases > 0
-    && !hasBlockingFailure;
 
   return {
+    responded: progress != null && !transportFailed && (!deferredByBackpressure
+      || (progress.bytesReceived ?? 0) > 0 || completedPhases > 0
+      || (progress.emptyResponses ?? 0) > 0 || insertedMetaTriples > 0
+      || (progress.insertedDataTriples ?? insertedTriples) > 0),
     insertedDataTriples,
     hasInsertedData,
     hasMetadataEvidence,
     hasVerifiedPrivateOnlyResponse,
     hasCleanVerifiedPrivateOnlyCompletion,
+    hasCleanVerifiedHeldCompletion,
+    hasVerifiedHeldAssets,
     integrityRejected,
     metadataOnly,
     timedOut,
@@ -149,13 +170,14 @@ export function classifyDurableProgress(
     madeReadinessProgress,
     completedWithoutFailure,
     completedReadinessCleanly: completedWithoutFailure
-      && (hasInsertedData || hasVerifiedPrivateOnlyResponse),
+      && (hasInsertedData || hasVerifiedPrivateOnlyResponse || hasVerifiedHeldAssets),
     cleanNonMetadataResponse: !transportFailed
       && !phaseFailed
       && !timedOut
       && !denied
       && !integrityRejected
-      && !metadataOnly,
+      && !metadataOnly
+      && !unprovenHeldCompletion,
   };
 }
 
@@ -201,6 +223,7 @@ const DURABLE_SYNC_COUNTER_REDUCERS = {
   emptyResponses: 'sum',
   metaOnlyResponses: 'sum',
   verifiedPrivateOnlyResponses: 'sum',
+  verifiedHeldAssets: 'sum',
   dataRejectedMissingMeta: 'sum',
   rejectedKcs: 'sum',
   failedPeers: 'max',
@@ -297,6 +320,8 @@ export class DurableSyncAccumulator {
   hasTerminalBoundary(): boolean {
     return this.observedTerminalBoundaries > 0;
   }
+
+  diagnosticsSnapshot(): InitializedDurableSyncDiagnostics { return { ...this.diagnostics }; }
 
   finalize(): InitializedDurableSyncResult {
     return {
@@ -402,7 +427,7 @@ export function finalizeDurableSyncCompletion(
 
 export type InitializedDurableSyncResult = DurableSyncResult & Required<Pick<
   DurableSyncResult,
-  'backoffWorthyFailures' | 'deferredBackpressure'
+  'backoffWorthyFailures' | 'deferredBackpressure' | 'verifiedHeldAssets'
 >>;
 
 export type InitializedDurableSyncDiagnostics = Omit<InitializedDurableSyncResult, 'complete'>;

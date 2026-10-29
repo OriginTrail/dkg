@@ -11,6 +11,31 @@ function abortCalls(spy: ReturnType<typeof vi.spyOn>): number {
 }
 
 describe('AbortableStoreWorkLifecycle signal ownership', () => {
+  it('owns retained activity and closes its tokens while still draining HTTP work before reuse', async () => {
+    const activity = vi.fn();
+    const lifecycle = new AbortableStoreWorkLifecycle({ onActivityChange: activity });
+    const first = lifecycle.retainActivity();
+    const second = lifecycle.retainActivity();
+    expect(activity.mock.calls).toEqual([[1], [2]]);
+    first.release(); first.release();
+    expect(activity.mock.calls).toEqual([[1], [2], [1]]);
+    let finish!: () => void;
+    const work = lifecycle.run(undefined, () => new Promise<void>(resolve => { finish = resolve; }));
+    let closed = false;
+    const closing = lifecycle.close(new Error('closed')).then(() => { closed = true; });
+    await Promise.resolve();
+    expect(closed).toBe(false);
+    expect(activity.mock.calls.at(-1)).toEqual([1]);
+    second.release();
+    finish(); await work; await closing;
+    expect(activity.mock.calls.at(-1)).toEqual([0]);
+    const next = lifecycle.retainActivity();
+    expect(activity.mock.calls.at(-1)).toEqual([1]);
+    next.release();
+    expect(activity.mock.calls.at(-1)).toEqual([0]);
+    await lifecycle.close(new Error('closed again'));
+  });
+
   it('shares one abort race for pre-abort, registration races, rejection, and late cleanup', async () => {
     const preAborted = new AbortController();
     const preAbortReason = new Error('already stopped');
@@ -184,6 +209,41 @@ describe('AbortableStoreWorkLifecycle signal ownership', () => {
     await Promise.resolve();
 
     expect(abortCalls(callerRemove)).toBe(1);
+  });
+
+  it('reports the canonical admitted-work set and isolates observer failures', async () => {
+    const activity: number[] = [];
+    const lifecycle = new AbortableStoreWorkLifecycle({
+      onActivityChange: (activeOperations) => {
+        activity.push(activeOperations);
+        if (activeOperations === 2) throw new Error('observer failed');
+      },
+    });
+    const releases: Array<() => void> = [];
+    const first = lifecycle.run(undefined, async () => await new Promise<void>((resolve) => {
+      releases.push(resolve);
+    }));
+    const second = lifecycle.run(undefined, async () => await new Promise<void>((resolve) => {
+      releases.push(resolve);
+    }));
+
+    expect(activity).toEqual([1, 2]);
+    releases[0]!();
+    await first;
+    expect(activity).toEqual([1, 2, 1]);
+    releases[1]!();
+    await second;
+    expect(activity).toEqual([1, 2, 1, 0]);
+  });
+
+  it('does not report work rejected before admission by a synchronous start failure', () => {
+    const onActivityChange = vi.fn();
+    const lifecycle = new AbortableStoreWorkLifecycle({ onActivityChange });
+
+    expect(() => lifecycle.run(undefined, () => {
+      throw new Error('start failed');
+    })).toThrow('start failed');
+    expect(onActivityChange).not.toHaveBeenCalled();
   });
 
   // The raw close signal that `run()` used to hand to its callback is gone on

@@ -52,7 +52,7 @@ Run a quick subset while iterating on benchmark wiring:
 DKG_ESBENCH_PAYLOAD_SIZES=10kb pnpm bench
 ```
 
-The root ESBench config is `esbench.config.mjs`. It was verified against ESBench `0.8.1`, whose CLI runs suites with `esbench --config <file>` and generates reports from saved result files with `esbench report <patterns...> --config <file>`.
+The ESBench config is `bench/esbench.config.mjs`. Run it from the repository root: its suite globs, temp directory and output paths are relative to the working directory, not to the config file. It was verified against ESBench `0.8.1`, whose CLI runs suites with `esbench --config <file>` and generates reports from saved result files with `esbench report <patterns...> --config <file>`.
 
 ## HTML Reports
 
@@ -157,7 +157,7 @@ Keep baseline files local unless a PR explicitly needs to share benchmark artifa
 Use the same machine, Node version, and terminal session shape for both runs.
 
 ```bash
-git checkout main
+git checkout testnet-canary
 pnpm install --frozen-lockfile
 pnpm bench:baseline
 
@@ -165,6 +165,8 @@ git checkout <feature-branch>
 pnpm install --frozen-lockfile
 pnpm bench:compare
 ```
+
+Pull requests target `testnet-canary`, so it is the baseline branch.
 
 `pnpm bench:compare` reads `bench/results/baseline.json`, writes the current run to `bench/results/compare.json`, and writes an HTML report to `bench/results/compare.html`. ESBench includes the previous-run diff in the text and HTML reports.
 

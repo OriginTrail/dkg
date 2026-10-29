@@ -1,3 +1,4 @@
+export type { AsyncLiftClaimControl } from './async-lift-claim-gate.js';
 export type {
   AsyncLiftAdmissionContext,
   ActiveLiftJobClaim,
@@ -9,6 +10,8 @@ export type {
   AsyncLiftRetryOutcome,
   AsyncLiftRetryStateReader,
   AsyncKnowledgeAssetVmPublishExecutionInput,
+  AsyncKnowledgeAssetVmPublishExecutionResult,
+  AsyncKnowledgeAssetVmPublishCertifiedResult,
   AsyncKnowledgeAssetVmPublishJobHandler,
   AsyncKnowledgeAssetVmPublishPreflightInput,
   AsyncKnowledgeAssetVmPublishPreflightResult,

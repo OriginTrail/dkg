@@ -50,3 +50,29 @@ export function compareRows(a: SyncRow, b: SyncRow): number {
 export function metaSubjectKey(row: SyncRow): string {
   return `${row.g}\n${row.s}`;
 }
+
+/**
+ * Serialize the largest prefix that fits the negotiated response target.
+ * Pagination advances by the number of N-Quads actually parsed by the
+ * requester, so returning a prefix is cursor-safe. Always emit one row when a
+ * non-empty input contains an unexpectedly oversized row; that guarantees
+ * forward progress and leaves the transport's existing hard frame limit as the
+ * final safety boundary for that pathological single row.
+ */
+export function serializeResponderRowsWithinByteBudget(
+  rows: readonly SyncRow[],
+  maxBytes: number,
+): string {
+  const safeMaxBytes = Math.max(1, Math.floor(maxBytes));
+  const page: string[] = [];
+  let bytes = 0;
+  for (const row of rows) {
+    const serialized = serializeResponderRow(row);
+    const rowBytes = serializedResponderRowByteLength(row) + (page.length > 0 ? 1 : 0);
+    if (page.length > 0 && bytes + rowBytes > safeMaxBytes) break;
+    page.push(serialized);
+    bytes += rowBytes;
+    if (bytes >= safeMaxBytes) break;
+  }
+  return page.join('\n');
+}

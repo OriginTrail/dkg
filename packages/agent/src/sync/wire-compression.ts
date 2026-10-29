@@ -13,6 +13,7 @@ const EXACT_SYNC_GZIP_PROFILE = Object.freeze({
   maxRows: EXACT_SYNC_GZIP_MAX_ROWS,
   maxHeapBytesEstimate: EXACT_SYNC_GZIP_MAX_HEAP_BYTES_ESTIMATE,
 });
+export type ExactSyncGzipProfile = typeof EXACT_SYNC_GZIP_PROFILE;
 const MAGIC = new TextEncoder().encode('DKGZQ01\n');
 const HEADER_BYTES = 20;
 const CODEC_TIMEOUT_MS = 5_000;
@@ -42,8 +43,17 @@ function lines(bytes: Uint8Array): number {
 export async function encodeNegotiatedExactSyncResponse(bytes: Uint8Array, options: {
   readonly request: CompressionRequest; readonly signal?: AbortSignal;
 }): Promise<Uint8Array> {
+  return encodeResolvedExactSyncResponse(bytes, {
+    profile: resolveExactSyncGzipProfile(options.request), signal: options.signal,
+  });
+}
+
+/** Encode with the request profile already chosen by the authenticated responder. */
+export async function encodeResolvedExactSyncResponse(bytes: Uint8Array, options: {
+  readonly profile: ExactSyncGzipProfile | undefined; readonly signal?: AbortSignal;
+}): Promise<Uint8Array> {
   options.signal?.throwIfAborted();
-  const profile = resolveExactSyncGzipProfile(options.request);
+  const profile = options.profile;
   if (!profile || bytes.byteLength === 0) return bytes;
   if (bytes.byteLength > profile.maxInflatedBytes || lines(bytes) > profile.maxRows) {
     throw new RangeError('Exact sync decoded page exceeds bounded transport profile');

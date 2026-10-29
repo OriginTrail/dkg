@@ -1,3 +1,4 @@
+import { confirmedCatalogPendingFixture } from './_helpers/confirmed-catalog-response-fixture.js';
 import * as configModule from '../src/config.js';
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync } from 'node:fs';
@@ -777,12 +778,14 @@ describe('ApiClient', () => {
       globalThis.fetch = fetch;
       await client.query('SELECT * { ?s ?p ?o }', 'my-contextGraph', {
         includeContextGraphPartitions: true,
+        includeSharedMemoryMeta: true,
       });
 
       const body = JSON.parse(calls[0].opts.body as string);
       expect(body.sparql).toBe('SELECT * { ?s ?p ?o }');
       expect(body.contextGraphId).toBe('my-contextGraph');
       expect(body.includeContextGraphPartitions).toBe(true);
+      expect(body.includeSharedMemoryMeta).toBe(true);
     });
 
     // LU-2 (SPEC_CG_MEMORY_MODEL): the legacy participantIdentityIds /
@@ -1098,6 +1101,24 @@ describe('ApiClient', () => {
       expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/operational-wallets`);
       expect(calls[0].opts.method).toBe('POST');
       expect(JSON.parse(calls[0].opts.body as string)).toEqual({ address: '0x' + '1'.repeat(40) });
+    });
+
+    it('requestJoin() POSTs the signed request, with reRequest only when asked for (#3421)', async () => {
+      const body = { ok: true, status: 'approved', joinState: 'approved-metadata-pending', delivered: 0 };
+      const { fetch, calls } = createTrackingFetch({ ok: true, status: 200, body });
+      globalThis.fetch = fetch;
+      const delegation = { agentAddress: '0x' + '3'.repeat(40) };
+      await expect(client.requestJoin('owner/graph', delegation, '12D3KooWCurator')).resolves.toEqual(body);
+      await client.requestJoin('owner/graph', delegation, '12D3KooWCurator', 'joiner', { reRequest: true });
+      expect(calls[0].url).toBe(`http://127.0.0.1:${PORT}/api/context-graph/owner%2Fgraph/request-join`);
+      expect(calls[0].opts.method).toBe('POST');
+      expect(JSON.parse(calls[0].opts.body as string)).toEqual({ delegation, curatorPeerId: '12D3KooWCurator' });
+      expect(JSON.parse(calls[1].opts.body as string)).toEqual({
+        delegation,
+        curatorPeerId: '12D3KooWCurator',
+        agentName: 'joiner',
+        reRequest: true,
+      });
     });
 
     it('removeOperationalWallet() DELETEs the address route', async () => {
@@ -1624,6 +1645,18 @@ describe('ApiClient — GitHub-shaped knowledge-assets SDK (OT-RFC-43 §10.5)', 
     await client.publishFromFinalizedAssertion('cg', 'plain');
     expect(calls[0].url).toBe(`${base}/api/knowledge-assets/plain/vm/publish`);
     expect(JSON.parse(calls[0].opts.body as string)).toEqual({ contextGraphId: 'cg' });
+  });
+
+  it.each(['publishAssertion', 'publishFromFinalizedAssertion'] as const)('%s retains the complete pending recovery response without republishing', async helper => {
+    const pending = confirmedCatalogPendingFixture();
+    const calls = track({ ...pending, assertionUri: pending.recovery.assertionUri });
+    const result = helper === 'publishAssertion'
+      ? await client.publishAssertion('cg', 'asset', [])
+      : await client.publishFromFinalizedAssertion('cg', 'asset');
+    expect(result).toEqual({ ...pending, assertionUri: pending.recovery.assertionUri });
+    expect(result.catalogObligationPending).toBe(true);
+    expect(calls).toHaveLength(helper === 'publishAssertion' ? 2 : 1);
+    expect(calls.filter(call => call.url.endsWith('/vm/publish'))).toHaveLength(1);
   });
 
   it('publishAssertion runs the create → per-KA /vm/publish two-call sequence', async () => {

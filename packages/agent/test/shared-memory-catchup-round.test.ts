@@ -65,13 +65,37 @@ function workerFold() {
       progress: classifyDurableProgress(item.result),
       diagnosticsResult: { ...item.result },
       countJobDeferral: !item.continuation,
-      trackSucceeded: false,
     });
   }
   return aggregate;
 }
 
 describe('#2105 shared-memory catch-up round aggregation', () => {
+  it('uses canonical response evidence for legacy data-only and partially deferred rounds', () => {
+    const aggregate = createSharedMemoryCatchupRoundAggregation();
+    const legacy = round({ insertedTriples: 3, deferredBackpressure: 1 });
+    delete (legacy as Partial<SharedMemorySyncResult>).insertedDataTriples;
+    const progress = foldSharedMemoryRound(aggregate, 'legacy-peer', legacy);
+    expect(progress.responded).toBe(true);
+    expect(progress.hasBlockingFailure).toBe(true);
+    expect(aggregate.peers.responded.has('legacy-peer')).toBe(true);
+    expect(aggregate.insertedDataTriples).toBe(3);
+    expect(sharedMemoryCatchupPlaneProven(aggregate)).toBe(false);
+    expect(aggregate.jobDeferredBackpressure).toBe(1);
+  });
+
+  it('preserves clean already-held readiness without counting it as inserted data', () => {
+    const aggregate = createSharedMemoryCatchupRoundAggregation();
+    foldSharedMemoryRound(aggregate, 'held-peer', round({ completedPhases: 1, alreadyHeldAssets: 2 }));
+    expect(aggregate.cleanDataTriples).toBe(0);
+    expect(aggregate.cleanHeldAssets).toBe(2);
+    expect(sharedMemoryCatchupPlaneProven(aggregate)).toBe(true);
+    foldSharedMemoryRound(aggregate, 'yield-peer', round({ deferredBackpressure: 1 }), { countJobDeferral: false });
+    expect(sharedMemoryCatchupPlaneProven(aggregate)).toBe(true);
+    expect(aggregate.jobDeferredBackpressure).toBe(0);
+    expect(aggregate.diagnostics.deferredBackpressure).toBe(1);
+  });
+
   it('keeps the diagnostics object stable while folding later rounds', () => {
     const diagnostics = emptySharedMemorySyncResult();
     const aggregate = createSharedMemoryCatchupRoundAggregation(diagnostics);

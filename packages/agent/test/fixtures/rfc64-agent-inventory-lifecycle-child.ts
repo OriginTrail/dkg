@@ -10,7 +10,7 @@ if (!dataDirectory) {
 // that the operating-system lease is recoverable without JavaScript cleanup.
 const agent = Object.create(DKGAgent.prototype) as any;
 Object.assign(agent, {
-  config: { dataDir: dataDirectory },
+  config: { dataDir: dataDirectory, coreChainCacheNetworks: [] },
   rfc64InventoryV1: undefined,
 });
 

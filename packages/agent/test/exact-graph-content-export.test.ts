@@ -1,3 +1,4 @@
+import { fixtureRoot } from './verified-asset-root-fixture.js';
 import { describe, expect, it, vi } from 'vitest';
 import {
   BlazegraphStore,
@@ -31,19 +32,14 @@ function body(count: number): Quad[] {
 }
 
 function httpStore(quads: Quad[], options: {
-  beforeCount?: string;
-  afterCount?: string;
+  count?: string;
   replaceRows?: Array<Record<string, string>>;
   rejectLargeRead?: boolean;
 } = {}) {
   const store = new BlazegraphStore('http://127.0.0.1:1/namespace/unused/sparql');
-  let counts = 0;
   const query = vi.spyOn(store, 'query').mockImplementation(async (sparql): Promise<QueryResult> => {
     if (sparql.includes('COUNT(*)')) {
-      counts += 1;
-      return { type: 'bindings', bindings: [{ count: counts === 1
-        ? options.beforeCount ?? String(quads.length)
-        : options.afterCount ?? String(quads.length) }] };
+      return { type: 'bindings', bindings: [{ count: options.count ?? String(quads.length) }] };
     }
     const offset = Number(/OFFSET\s+(\d+)/.exec(sparql)?.[1] ?? 0);
     const limit = Number(/LIMIT\s+(\d+)/.exec(sparql)?.[1] ?? quads.length + 1);
@@ -69,13 +65,13 @@ async function verify(store: TripleStore, quads: Quad[], override: Partial<Param
 }
 
 describe('bounded exact graph export', () => {
-  it('verifies a KA through one bounded payload query and two count fences', async () => {
+  it('verifies a KA through one bounded payload query and a final count fence', async () => {
     const quads = body(1_000);
     const { store, query } = httpStore(quads);
     const result = await verify(store, quads);
     expect(result.status).toBe('verified');
     if (result.status === 'verified') expect(result.quads).toEqual(quads);
-    expect(query).toHaveBeenCalledTimes(3);
+    expect(query).toHaveBeenCalledTimes(2);
     const payload = query.mock.calls.find(([sparql]) => sparql.includes('SELECT ?s ?p ?o'))!;
     expect(payload[0]).toContain('LIMIT 1001');
     expect(payload[0]).not.toContain('OFFSET');
@@ -108,16 +104,16 @@ describe('bounded exact graph export', () => {
     expect((await verify(store, quads, { expectedPublicQuadsDigest: 'wrong' })).status).toBe('head-mismatch');
   });
 
-  it('rejects a preflight count mismatch before reading the body', async () => {
-    const { store, query } = httpStore(body(4), { beforeCount: '5' });
+  it('rejects overflow from the payload even when the count response would match', async () => {
+    const { store, query } = httpStore(body(5), { count: '4' });
     expect(await verify(store, body(4))).toMatchObject({ status: 'count-mismatch', actualCount: 5 });
     expect(query).toHaveBeenCalledTimes(1);
   });
 
   it('rejects a count-changing mutation at the postflight fence', async () => {
-    const { store, query } = httpStore(body(4), { afterCount: '3' });
+    const { store, query } = httpStore(body(4), { count: '3' });
     expect(await verify(store, body(4))).toMatchObject({ status: 'count-mismatch', actualCount: 3 });
-    expect(query).toHaveBeenCalledTimes(3);
+    expect(query).toHaveBeenCalledTimes(2);
   });
 
   it('rejects duplicate rows even when their count matches', async () => {
@@ -130,7 +126,7 @@ describe('bounded exact graph export', () => {
   it('rejects malformed rows and invalid count literals', async () => {
     const malformed = httpStore(body(1), { replaceRows: [{ s: 'urn:a', p: 'urn:b' }] });
     await expect(verify(malformed.store, body(1))).rejects.toBeInstanceOf(ExactGraphReadError);
-    const invalidCount = httpStore(body(1), { beforeCount: '1.0' });
+    const invalidCount = httpStore(body(1), { count: '1.0' });
     await expect(verify(invalidCount.store, body(1))).rejects.toMatchObject({ code: 'INVALID_QUERY_RESULT' });
   });
 
@@ -149,7 +145,7 @@ describe('bounded exact graph export', () => {
     expect(supportsBoundedExactGraphExport(unknown)).toBe(false);
     expect(unknown.query).not.toHaveBeenCalled();
     const expectedQuadCount = EXACT_GRAPH_EXPORT_MAX_ROWS + 1;
-    const { store, query } = httpStore([], { beforeCount: String(expectedQuadCount) });
+    const { store, query } = httpStore([], { count: String(expectedQuadCount) });
     await expect(readExactGraph(store, graph, {
       expectedQuadCount, profile: 'bounded-single-result',
     })).rejects.toMatchObject({ code: 'QUAD_COUNT_MISMATCH' });
@@ -256,10 +252,11 @@ async function coldRecoveryFixture(name: string, localCgId: string) {
   }, { status: 'confirmed', confirmation: { kind: 'finalized-materialization', provenance: {
     batchId: kaId, materializedVersion: { blockNumber: 100, txIndex: 0 },
   } } });
-  const asset = { contextGraphId: localCgId, ual: scope.ual, assertionVersion: 1n, assertionGraph,
+  const asset = {
+      merkleRootHex: fixtureRoot(metadataQuads), contextGraphId: localCgId, ual: scope.ual, assertionVersion: 1n, assertionGraph,
     metaGraph: `did:dkg:context-graph:${localCgId}/_meta`,
     dataQuads: publicQuads.map((quad) => ({ ...quad, graph: assertionGraph })), metadataQuads };
-  const targetOptions = { isTargetCurrent: () => true, revalidateTarget: async () => true, deferActiveFetch: true };
+  const targetOptions = { isTargetCurrent: () => true, revalidateTarget: async () => true };
   /** The exact fetch the batch runs: a verified, authenticated, atomically committed materialization. */
   const installVerifiedFetch = () => {
     internals.syncExactKnowledgeAssetsFromPeerDetailed = async () => {

@@ -1,8 +1,10 @@
 import { isAbsoluteRfc3987IriV1 } from './absolute-rfc3987-iri.js';
+import { isRdfBlankNodeLabel } from './blank-node-label.js';
 import { escapeRdfLiteral } from './rdf-literal-escape.js';
 
 export { isAbsoluteRfc3987IriV1 };
 export { escapeRdfLiteral };
+export { isSparqlVariableNameRaw } from './sparql-lexical-primitives.js';
 
 const NTRIPLES_ECHAR_VALUES: Readonly<Record<string, string>> = Object.freeze({
   b: '\b',
@@ -103,7 +105,6 @@ const RDF_LITERAL_LEXICAL_PATTERN =
   /^"((?:[^"\\]|\\.)*)"(?:@([A-Za-z0-9-]+)|\^\^(?:<([^>]+)>|([^<].*)))?$/;
 const RDF_LITERAL_BODY_PATTERN =
   /^(?:[^"\\\u0000-\u0008\u000A-\u001F\u007F]|\\(?:[tbnrf"'\\]|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}))*$/;
-const RDF_LANGUAGE_TAG_PATTERN = /^[A-Za-z]+(?:-[A-Za-z0-9]+)*$/;
 
 /**
  * Split the broad RDF literal lexical form shared by storage parsing and hash
@@ -324,7 +325,7 @@ function parseRdfLiteralTermWith(
   });
   if (value === null) return null;
   if (lexical.suffix.kind === 'language') {
-    if (!RDF_LANGUAGE_TAG_PATTERN.test(lexical.suffix.language)) return null;
+    if (!isRdfLanguageTag(lexical.suffix.language)) return null;
     return { kind: 'language', value, language: lexical.suffix.language };
   }
   if (lexical.suffix.kind === 'datatype') {
@@ -345,6 +346,69 @@ export function parseRdfLiteralTerm(
   options: ParseRdfLiteralTermOptions = {},
 ): RdfLiteralTerm | null {
   return parseRdfLiteralTermWith(term, CANONICAL_RDF_LITERAL_GRAMMAR, options);
+}
+
+/**
+ * Parse a SPARQL TSV literal with either quote delimiter. Raw controls other
+ * than TSV's tab/line delimiters are allowed; datatype IRIs remain encoded so
+ * callers can normalize and validate them before canonical serialization.
+ */
+export function parseSparqlTsvLiteralTerm(
+  input: string,
+  options: ParseRdfLiteralTermOptions = {},
+): RdfLiteralTerm | null {
+  const delimiter = input.charCodeAt(0);
+  if (delimiter !== 0x22 && delimiter !== 0x27) return null;
+  const surrogatePolicy = options.combineSurrogatePairs === true ? 'combine' : 'reject';
+  let copyStart = 1;
+  let pieces: string[] | undefined;
+  let index = 1;
+  // Avoid quantified-alternation regexes: valid multi-megabyte result cells
+  // can exhaust the regex engine's stack. Copy spans only at actual escapes.
+  for (; index < input.length; index += 1) {
+    const code = input.charCodeAt(index);
+    if (code === delimiter) break;
+    if (code === 0x09 || code === 0x0a || code === 0x0d) return null;
+    if (code !== 0x5c) continue;
+    const escape = scanNTriplesEscape(input, index, surrogatePolicy);
+    if (escape.kind === 'invalid') return null;
+    (pieces ??= []).push(input.slice(copyStart, index), escape.decoded);
+    copyStart = escape.nextIndex;
+    index = escape.nextIndex - 1;
+  }
+  if (index === input.length) return null;
+  let value = input.slice(copyStart, index);
+  if (pieces) {
+    pieces.push(value);
+    value = pieces.join('');
+  }
+  const suffix = input.slice(index + 1);
+  if (suffix === '') return { kind: 'plain', value };
+  if (suffix.startsWith('@')) {
+    const language = suffix.slice(1);
+    return isRdfLanguageTag(language) ? { kind: 'language', value, language } : null;
+  }
+  if (suffix.startsWith('^^<') && suffix.length > 4 && suffix.indexOf('>', 3) === suffix.length - 1) {
+    return { kind: 'typed', value, datatype: suffix.slice(3, -1) };
+  }
+  return null;
+}
+
+function isRdfLanguageTag(language: string): boolean {
+  let primary = true;
+  let segmentLength = 0;
+  for (let index = 0; index < language.length; index += 1) {
+    const code = language.charCodeAt(index);
+    if (code === 0x2d) {
+      if (segmentLength === 0) return false;
+      primary = false;
+      segmentLength = 0;
+    } else if ((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)
+      || (!primary && code >= 0x30 && code <= 0x39)) {
+      segmentLength += 1;
+    } else return false;
+  }
+  return segmentLength > 0;
 }
 
 /**
@@ -369,18 +433,6 @@ export function canonicalizeRdfObjectTerm(object: string): string {
   if (datatype === null || !isAbsoluteRfc3987IriV1(datatype)) return object;
   return formatCanonicalRdfLiteralTerm({ ...literal, datatype });
 }
-
-// SPARQL 1.1 BLANK_NODE_LABEL, which N-Triples and N-Quads share.
-const PN_CHARS_BASE =
-  'A-Za-z\\u00C0-\\u00D6\\u00D8-\\u00F6\\u00F8-\\u02FF\\u0370-\\u037D\\u037F-\\u1FFF' +
-  '\\u200C-\\u200D\\u2070-\\u218F\\u2C00-\\u2FEF\\u3001-\\uD7FF\\uF900-\\uFDCF' +
-  '\\uFDF0-\\uFFFD\\u{10000}-\\u{EFFFF}';
-const PN_CHARS_U = `${PN_CHARS_BASE}_`;
-const PN_CHARS = `${PN_CHARS_U}\\-0-9\\u00B7\\u0300-\\u036F\\u203F-\\u2040`;
-const BLANK_NODE_LABEL_PATTERN = new RegExp(
-  `^_:[${PN_CHARS_U}0-9](?:[${PN_CHARS}.]*[${PN_CHARS}])?$`,
-  'u',
-);
 
 /** A term of a quad written through a DKG write route, by kind. */
 export type WritableRdfTerm =
@@ -412,7 +464,8 @@ export function parseWritableRdfTerm(term: string): WritableRdfTerm | null {
     return { kind: 'literal', value: literal };
   }
   if (term.startsWith('_:')) {
-    return BLANK_NODE_LABEL_PATTERN.test(term) ? { kind: 'blank-node', value: term.slice(2) } : null;
+    const label = term.slice(2);
+    return isRdfBlankNodeLabel(label) ? { kind: 'blank-node', value: label } : null;
   }
   const iri = term.startsWith('<') && term.endsWith('>') ? term.slice(1, -1) : term;
   return isAbsoluteRfc3987IriV1(iri) ? { kind: 'iri', value: iri } : null;

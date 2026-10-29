@@ -18,6 +18,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 import { projectRfc64CatalogTransportStateV1 } from '../src/rfc64/catalog-rollout-authority-v1.js';
+import { stubRecipientRevisions } from './_helpers/recipient-fence-stub.js';
 
 const CG = '0x1111111111111111111111111111111111111111/public-p2p';
 const CURATOR = '0x8ba1f109551bD432803012645Ac136ddd64DBA72';
@@ -92,7 +93,11 @@ function joinedMember(options: {
   const isContextGraphPublicOnChain = vi.fn(async () => options.publicOnChain === true);
   const warn = vi.fn();
   const agent = {
-    contextGraphMetaProjection: { readAuthorityFactsRevision: 0 },
+    contextGraphMetaProjection: {
+      ...stubRecipientRevisions(store),
+      readAuthorityFactsRevision: 0,
+      readContextGraphAuthorityFactsRevision: () => '0:0',
+    },
     resolveContextGraphAgentGateAuthority:
       WorkspaceCryptoMethods.prototype.resolveContextGraphAgentGateAuthority,
     resolveSwmRegisteredAuthority: WorkspaceCryptoMethods.prototype.resolveSwmRegisteredAuthority,

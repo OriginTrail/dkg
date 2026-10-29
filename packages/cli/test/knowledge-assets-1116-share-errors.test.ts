@@ -17,6 +17,9 @@
  */
 
 import { afterEach, describe, expect, it } from 'vitest';
+import { randomUUID } from 'node:crypto';
+import { TripleStoreAsyncPromoteQueue, CuratorRejectedError } from '@origintrail-official/dkg-publisher';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { createServer, type Server } from 'node:http';
 import { mkdtemp } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
@@ -31,6 +34,7 @@ import {
   formatPublishAuthorNotCustodialMessage,
 } from '@origintrail-official/dkg-core';
 import {
+  createPromotePostCommitFailure,
   AsyncLiftJobConflictError,
   LiftJobPendingChainProofError,
   PUBLISH_PRICING_POLICY_UPDATE_UNSUPPORTED_CODE,
@@ -47,6 +51,8 @@ import { addPublisherWallet } from '../src/publisher-wallets.js';
 import { createPublisherRuntimeFromAgent, type AsyncPublisherAvailability } from '../src/publisher-runner.js';
 import { createKnowledgeAssetVmPublishHandler } from '../src/daemon/lifecycle.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
+import { classifyPromoteError } from '../src/daemon/worker/async-promote-worker.js';
+import { attachCommittedShare, inventoryHandoffPendingFailure } from '../../agent/src/internal/promote/inventory-recovery-failure.js';
 
 const CG_ID = 'issue-1116-cg';
 const ASSERTION_NAME = 'seal-asset';
@@ -112,8 +118,12 @@ function rootlessIntent(snapshot: {
 describe('#1116 share/seal route error mapping (fake agent)', () => {
   let server: Server | undefined;
   let baseUrl: string;
+  let shareStore: OxigraphStore | undefined;
 
   afterEach(async () => {
+    daemonState.promoteWorkerAvailable = false;
+    await shareStore?.close();
+    shareStore = undefined;
     if (server) {
       await new Promise<void>((resolve, reject) => {
         server!.close((err) => (err ? reject(err) : resolve()));
@@ -146,6 +156,19 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
             ? { error: new Error('test publisher startup failure') }
             : {}),
         };
+    // Keep the route fixture's promote callback, with a real durable owner.
+    const shareQueue = typeof assertion.promote === 'function'
+      ? new TripleStoreAsyncPromoteQueue(shareStore = new OxigraphStore()) : undefined;
+    if (shareQueue) {
+      daemonState.promoteWorkerAvailable = true;
+      assertion.admitDurableShare = (request: any, workerId: string) => shareQueue.enqueueAndClaim(request, workerId);
+      assertion.prepareDurableShare = async (_cg: string, _name: string, opts: any) => ({
+        agentAddress: opts?.agentAddress ?? ROOTLESS_AUTHOR,
+        recoveryBinding: { version: 1, sealDigest: `0x${'11'.repeat(32)}`, inventoryRequired: false,
+          intent: { version: 1, operationId: randomUUID(), timestampMs: Date.now(),
+            confirmationRequired: false, accessPolicy: 'public', allowedPeers: [] } },
+      });
+    }
     const agent = {
       async listContextGraphs() {
         return [{
@@ -159,6 +182,7 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
       async contextGraphExists(cgId: string) {
         return cgId === CG_ID;
       },
+      promoteQueue: shareQueue,
       resolveAgentByToken: () => undefined,
       assertion,
       // Agent-level methods (e.g. publishFromFinalizedAssertion /
@@ -284,6 +308,40 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     });
   });
 
+  it('preserves a stronger acknowledgement conflict as 409 with recovery ownership', async () => {
+    await startWith({ promote: async () => {
+      throw Object.assign(new Error('Existing operation cannot satisfy stronger acknowledgement'),
+        { code: 'KA_PROMOTE_ACK_REQUIREMENT_CONFLICT' });
+    } });
+    const res = await post('swm/share', { contextGraphId: CG_ID, awaitCuratorAck: true });
+    expect(res.status).toBe(409);
+    expect(res.body).toMatchObject({ code: 'KA_PROMOTE_ACK_REQUIREMENT_CONFLICT',
+      recoveryState: 'inspection-required', retryable: false });
+    expect(res.body.recoveryJobId).toEqual(expect.any(String));
+  });
+
+  it.each([[false, 'network-cg'], [false, 'timeout'], [true, 'ordinary']])('exposes permanent share recovery ownership (one-shot=%s, graph=%s)', async (oneShot, rejectedGraph) => {
+    await startWith({
+      history: async () => null, create: async () => {}, write: async () => {},
+      finalize: async () => ({ merkleRoot: new Uint8Array(32), authorAddress: ROOTLESS_AUTHOR }),
+      promote: async () => { throw new CuratorRejectedError(rejectedGraph as string); },
+    });
+    const res = oneShot
+      ? await postRoot({ contextGraphId: CG_ID, name: 'rejected', quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"' }], finalize: true, alsoShareSwm: true })
+      : await post('swm/share', { contextGraphId: CG_ID });
+    expect(res.status).toBe(oneShot ? 207 : 409);
+    expect(res.body).toMatchObject({ recoveryState: 'inspection-required', retryable: false });
+    expect(res.body.recoveryJobId).toEqual(expect.any(String));
+    expect(res.body.recoveryStatusUrl).toBe(`/api/knowledge-assets/swm/share-jobs/${res.body.recoveryJobId}`);
+    if (!oneShot) expect(res.body).toMatchObject({ code: 'CURATOR_REJECTED', curatorDelivery: 'rejected' });
+    if (!oneShot) {
+      const repeat = await post('swm/share', { contextGraphId: CG_ID });
+      expect(repeat.status).toBe(409);
+      expect(repeat.body).toMatchObject({ code: 'SHARE_OWNER_CONFLICT', recoveryState: 'inspection-required',
+        retryable: false, recoveryJobId: res.body.recoveryJobId, recoveryStatusUrl: res.body.recoveryStatusUrl });
+    }
+  });
+
   it('swm/share: KA_NAMED_GRAPH_SHARE_UNSUPPORTED → 409 { code, error, namedGraphs }', async () => {
     await startWith({
       promote: async () => {
@@ -302,6 +360,123 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.body.code).toBe('KA_NAMED_GRAPH_SHARE_UNSUPPORTED');
     expect(String(res.body.error)).toContain('named-graph');
     expect(res.body.namedGraphs).toEqual(['urn:test:graph:one']);
+  });
+
+  it('returns 409 for protected durable cancellation and still cancels an ordinary queued job', async () => {
+    await startWith({
+      promote: async () => { throw createPromotePostCommitFailure(new Error('interrupted')); },
+      cancelPromoteAsync: async (id: string) => new TripleStoreAsyncPromoteQueue(shareStore!).cancel(id),
+      getPromoteAsyncStatus: async (id: string) => new TripleStoreAsyncPromoteQueue(shareStore!).getStatus(id),
+    });
+    const share = await post('swm/share', { contextGraphId: CG_ID });
+    const queue = new TripleStoreAsyncPromoteQueue(shareStore!);
+    const before = await queue.getStatus(share.body.recoveryJobId);
+    const cancel = await fetch(`${baseUrl}/api/knowledge-assets/swm/share-jobs/${share.body.recoveryJobId}`, { method: 'DELETE' });
+    expect(cancel.status).toBe(409);
+    expect(await queue.getStatus(share.body.recoveryJobId)).toEqual(before);
+    const ordinary = await queue.enqueue({ contextGraphId: CG_ID, assertionName: 'ordinary', entities: 'all' });
+    const ordinaryCancel = await fetch(`${baseUrl}/api/knowledge-assets/swm/share-jobs/${ordinary}`, { method: 'DELETE' });
+    expect(ordinaryCancel.status).toBe(200);
+    expect(await queue.getStatus(ordinary)).toMatchObject({ state: 'failed', reason: 'cancelled' });
+  });
+
+  it.each(['pending', 'inspection-store', 'before-admission', 'terminal'])('one-shot %s keeps its partial contract and VM continuation', async kind => {
+    let vmCalls = 0;
+    const storeFailure = () => new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'insert', outcome: 'indeterminate', storeOperation: 'insert' });
+    const assertion: Record<string, unknown> = {
+      create: async () => 'did:dkg:assertion:partial', write: async () => {},
+      finalize: async () => ({ merkleRoot: new Uint8Array(32), authorAddress: ROOTLESS_AUTHOR }),
+      promote: async () => {
+        if (kind === 'pending') throw createPromotePostCommitFailure(new Error('interrupted'));
+        if (kind === 'inspection-store') throw storeFailure();
+        throw new CuratorRejectedError(CG_ID);
+      },
+    };
+    await startWith(assertion, { publishFromFinalizedAssertion: async () => {
+      vmCalls++;
+      return { onChainResult: { status: 'confirmed' } };
+    } });
+    if (kind === 'before-admission') assertion.prepareDurableShare = async () => { throw storeFailure(); };
+    const response = await fetch(`${baseUrl}/api/knowledge-assets`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ contextGraphId: CG_ID, name: 'partial', finalize: true, alsoShareSwm: true, alsoPublishVm: true,
+        quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"' }] }) });
+    const body = await response.json();
+    expect(response.status).toBe(kind === 'terminal' ? 207 : 503);
+    expect(vmCalls).toBe(kind === 'terminal' ? 1 : 0);
+    if (kind !== 'terminal') expect(response.headers.get('retry-after')).toBe('1');
+    if (kind === 'before-admission') expect(body.recoveryJobId).toBeUndefined();
+    else expect(body).toMatchObject({ recoveryJobId: expect.any(String),
+      recoveryState: kind === 'pending' ? 'pending' : 'inspection-required', retryable: kind === 'pending' });
+    if (kind !== 'terminal') expect(body).toMatchObject({ created: true, partial: true, failedPhase: 'swm-share' });
+  });
+
+  it.each(['standalone', 'one-shot', 'one-shot-with-vm'])('answers a committed share with a pending catalog handoff during an authoring-lane transition (%s)', async mode => {
+    let vmCalls = 0;
+    const pendingHandoff = () => attachCommittedShare(
+      inventoryHandoffPendingFailure('inactive-lane', 'Durable share inventory remains pending: inactive-lane'),
+      { promotedCount: 1, sealed: true, publishReady: true, shareOperationId: 'committed-operation' });
+    await startWith({
+      create: async () => 'did:dkg:assertion:transition', write: async () => {},
+      finalize: async () => ({ merkleRoot: new Uint8Array(32), authorAddress: ROOTLESS_AUTHOR }),
+      promote: async () => { throw pendingHandoff(); },
+    }, { publishFromFinalizedAssertion: async () => {
+      vmCalls++;
+      return { status: 'confirmed', onChainResult: { status: 'confirmed' } };
+    } });
+    const response = mode === 'standalone'
+      ? await fetch(`${baseUrl}/api/knowledge-assets/${ASSERTION_NAME}/swm/share`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ contextGraphId: CG_ID }) })
+      : await fetch(`${baseUrl}/api/knowledge-assets`, { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextGraphId: CG_ID, name: ASSERTION_NAME, finalize: true, alsoShareSwm: true,
+          ...(mode === 'one-shot-with-vm' ? { alsoPublishVm: true } : {}),
+          quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"v"' }] }) });
+    const body = await response.json();
+    expect(response.status).toBe(mode === 'standalone' ? 200 : 201);
+    expect(response.headers.get('retry-after')).toBeNull();
+    expect(body).toMatchObject({ swmShared: true, promotedCount: 1, sealed: true, publishReady: true,
+      shareOperationId: 'committed-operation', catalogHandoff: { state: 'pending', reason: 'inactive-lane', recoveryJobId: expect.any(String) } });
+    const jobId = body.catalogHandoff.recoveryJobId;
+    expect(body.catalogHandoff.recoveryStatusUrl).toBe(`/api/knowledge-assets/swm/share-jobs/${jobId}`);
+    if (mode !== 'standalone') expect(body.status).toBe(mode === 'one-shot' ? 'swm-shared' : 'vm-confirmed');
+    expect(vmCalls).toBe(mode === 'one-shot-with-vm' ? 1 : 0);
+    for (const field of ['partial', 'phase', 'failedPhase', 'retryAction', 'recoveryState', 'code', 'error', 'errors']) {
+      expect(body).not.toHaveProperty(field);
+    }
+    expect(classifyPromoteError(pendingHandoff(), { boundRecovery: true })).toMatchObject({ classification: 'transient',
+      retryable: true, diagnostic: { code: 'PROMOTE_RETRYABLE_FAILURE' } });
+    const queue = new TripleStoreAsyncPromoteQueue(shareStore!);
+    expect(await queue.getStatus(jobId)).toMatchObject({ state: 'failed_retrying',
+      attempt: { lastError: { diagnosticCode: 'PROMOTE_RETRYABLE_FAILURE', retryable: true } } });
+    expect(await queue.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
+    const repeat = await post('swm/share', { contextGraphId: CG_ID });
+    expect(repeat.status).toBe(503);
+    expect(repeat.body).toMatchObject({ code: 'SHARE_OWNER_CONFLICT', recoveryState: 'pending', recoveryJobId: jobId });
+    expect(repeat.body).not.toHaveProperty('catalogHandoff');
+  });
+
+  it.each(['standalone', 'one-shot'])('%s post-commit failure returns a durable recovery handle and protects the queue row', async mode => {
+    await startWith({
+      create: async () => 'did:dkg:assertion:owned-share',
+      write: async () => undefined,
+      finalize: async () => ({ assertionUri: 'did:dkg:assertion:owned-share', merkleRoot: new Uint8Array(32),
+        authorAddress: ROOTLESS_AUTHOR, schemeVersion: 1, chainId: 1n,
+        kav10Address: `0x${'ef'.repeat(20)}`, eip712Digest: `0x${'12'.repeat(32)}` }),
+      promote: async () => { throw createPromotePostCommitFailure(new Error('lifecycle insert interrupted')); },
+    });
+    const res = mode === 'standalone'
+      ? await post('swm/share', { contextGraphId: CG_ID })
+      : await postRoot({ contextGraphId: CG_ID, name: ASSERTION_NAME, quads: [{
+        subject: 'urn:owned-share', predicate: 'https://schema.org/name', object: '"owned"', graph: '',
+      }], finalize: true, alsoShareSwm: true });
+    expect(res.status).toBe(503);
+    expect(res.body).toMatchObject({ code: 'PROMOTE_POST_COMMIT_FAILURE', retryable: true,
+      recoveryState: 'pending', retryAction: 'resume_existing_knowledge_asset' });
+    expect(res.body.recoveryStatusUrl).toBe(`/api/knowledge-assets/swm/share-jobs/${res.body.recoveryJobId}`);
+    if (mode === 'one-shot') expect(res.body).toMatchObject({ partial: true, failedPhase: 'swm-share', name: ASSERTION_NAME });
+    const queue = new TripleStoreAsyncPromoteQueue(shareStore!);
+    expect(await queue.getStatus(res.body.recoveryJobId)).toMatchObject({ state: 'failed_retrying',
+      attempt: { lastError: { diagnosticCode: 'PROMOTE_POST_COMMIT_FAILURE', retryable: true } } });
+    expect(await queue.clearTerminalJob(res.body.recoveryJobId)).toEqual({ outcome: 'rejected', reason: 'nonterminal' });
   });
 
   it('wm/finalize (layer:swm): rejects read-only before invoking the engine', async () => {
@@ -425,6 +600,137 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(finalizeCalls[0]?.opts?.preSignedAuthorAttestation?.address).toBe(preSignedAuthor);
   });
 
+  it.each(['KA_SLOT_ALREADY_CLAIMED', 'KA_RESERVED_ID_MISMATCH'])('atomic create reports %s without attempting writes', async (code) => {
+    const writeCalls: unknown[] = [];
+    await startWith({
+      history: async () => null,
+      create: async () => { throw Object.assign(new Error('KA slot is already owned by another lifecycle'), { code }); },
+      write: async (...args: unknown[]) => { writeCalls.push(args); },
+    });
+    const result = await postRoot({
+      contextGraphId: CG_ID, name: 'slot-conflict',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
+    });
+    expect(result.status).toBe(409);
+    expect(result.body).toEqual({
+      code, error: 'KA slot is already owned by another lifecycle',
+    });
+    expect(writeCalls).toHaveLength(0);
+  });
+
+  it('keeps atomic creation recovery coordinates for an already finalized lifecycle', async () => {
+    await startWith({
+      history: async () => null,
+      create: async () => { throw Object.assign(new Error('already finalized'), { code: 'KA_ASSERTION_ALREADY_FINALIZED' }); },
+    });
+    const result = await postRoot({
+      contextGraphId: CG_ID, name: 'sealed-conflict',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
+    });
+    expect(result.status).toBe(409);
+    expect(result.body).toEqual({
+      code: 'KA_ASSERTION_ALREADY_FINALIZED', error: 'already finalized',
+      retryAction: 'resume_existing_knowledge_asset', retryKnowledgeAssetName: 'sealed-conflict',
+    });
+  });
+
+  it('atomic create uses a node/admin pre-signed author and exact reserved slot as the fresh storage lane', async () => {
+    const preSignedAuthor = `0x${'ab'.repeat(20)}`;
+    const reservedKaId = (BigInt(preSignedAuthor) << 96n) | 27n;
+    const createCalls: any[] = [];
+    const writeCalls: any[] = [];
+    const finalizeCalls: any[] = [];
+
+    await startWith({
+      history: async () => null,
+      create: async (...args: any[]) => {
+        createCalls.push(args);
+        return 'did:dkg:assertion:presigned-atomic';
+      },
+      write: async (...args: any[]) => { writeCalls.push(args); },
+      finalize: async (...args: any[]) => {
+        finalizeCalls.push(args);
+        return {
+          assertionUri: 'did:dkg:assertion:presigned-atomic',
+          merkleRoot: new Uint8Array(32),
+          authorAddress: preSignedAuthor,
+          schemeVersion: 1,
+          chainId: 1n,
+          kav10Address: `0x${'ef'.repeat(20)}`,
+          eip712Digest: `0x${'12'.repeat(32)}`,
+        };
+      },
+    });
+
+    const res = await postRoot({
+      contextGraphId: CG_ID,
+      name: 'presigned-atomic',
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }],
+      finalize: true,
+      preSignedAuthorAttestation: {
+        address: preSignedAuthor,
+        reservedKaId: reservedKaId.toString(),
+        signature: {
+          r: `0x${'01'.repeat(32)}`,
+          vs: `0x${'02'.repeat(32)}`,
+        },
+      },
+    });
+
+    expect(res.status).toBe(201);
+    expect(createCalls[0]?.[2]).toMatchObject({
+      agentAddress: preSignedAuthor,
+      reservedKaId,
+    });
+    expect(writeCalls[0]?.[3]).toMatchObject({ agentAddress: preSignedAuthor });
+    expect(finalizeCalls[0]?.[2]).toMatchObject({
+      agentAddress: preSignedAuthor,
+      preSignedAuthorAttestation: {
+        address: preSignedAuthor,
+        reservedKaId,
+      },
+    });
+  });
+
+  it.each(['swm/share', 'swm/share-async'])('%s preserves the scoped token lane after lowercase signed atomic create', async (verb) => {
+    const signedAuthor = `0x${'ab'.repeat(20)}`;
+    const caller = ethers.getAddress(signedAuthor);
+    const token = 'scoped-atomic';
+    const reservedKaId = (BigInt(signedAuthor) << 96n) | 27n;
+    let storedAuthor: string | undefined;
+    const lanes: string[] = [];
+    const promote = async (_cg: string, _name: string, opts: { agentAddress: string }) => {
+      lanes.push(opts.agentAddress);
+      if (opts.agentAddress !== storedAuthor) throw new Error('Missing stored lifecycle');
+      return { promotedCount: 1, sealed: true, publishReady: true, jobId: 'scoped-share' };
+    };
+    daemonState.promoteWorkerAvailable = true;
+    await startWith({
+      history: async () => null,
+      create: async (_cg: string, _name: string, opts: { agentAddress: string }) => {
+        storedAuthor = opts.agentAddress;
+        return 'did:dkg:assertion:scoped';
+      },
+      write: async (_cg: string, _name: string, _quads: unknown, opts: { agentAddress: string }) => { lanes.push(opts.agentAddress); },
+      finalize: async (_cg: string, _name: string, opts: { agentAddress: string }) => {
+        lanes.push(opts.agentAddress);
+        return { assertionUri: 'did:dkg:assertion:scoped', merkleRoot: new Uint8Array(32), authorAddress: signedAuthor, schemeVersion: 1, chainId: 1n, kav10Address: `0x${'ef'.repeat(20)}`, eip712Digest: `0x${'12'.repeat(32)}` };
+      },
+      promote, promoteAsync: promote,
+    }, { resolveAgentByToken: (candidate?: string) => candidate === token ? caller : undefined },
+    { requestToken: token, requestAgentAddress: caller });
+    expect((await postRoot({ contextGraphId: CG_ID, name: ASSERTION_NAME,
+      quads: [{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: '' }], finalize: true,
+      preSignedAuthorAttestation: { address: signedAuthor, reservedKaId: reservedKaId.toString(),
+        signature: { r: `0x${'01'.repeat(32)}`, vs: `0x${'02'.repeat(32)}` } },
+    })).status).toBe(201);
+    expect(storedAuthor).toBe(caller);
+    // Ordinary share and an explicit same-address selector must find that lane.
+    expect((await post(verb, { contextGraphId: CG_ID })).status).toBe(200);
+    expect((await post(verb, { contextGraphId: CG_ID, selectedAuthorAgentAddress: signedAuthor })).status).toBe(200);
+    expect(lanes).toEqual([caller, caller, caller, caller]);
+  });
+
   it('swm/share: an unrelated promote error still propagates (not silently 409ed)', async () => {
     // Guard: the new 409 branch must only catch UNSEALED_SHARE_BLOCKED. Any
     // other error rethrows to the outer handler (→ 500 here).
@@ -436,6 +742,74 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
 
     const res = await post('swm/share', { contextGraphId: CG_ID });
     expect(res.status).toBeGreaterThanOrEqual(500);
+  });
+
+  it('swm/share selects a resident pre-signed author lane without changing authorship', async () => {
+    const selected = `0x${'7b'.repeat(20)}`;
+    const stored = ethers.getAddress(selected);
+    const calls: any[] = [];
+    await startWith({
+      history: async () => ({ agentAddress: stored }),
+      promote: async (...args: any[]) => {
+        calls.push(args);
+        return { promotedCount: 1, sealed: true, publishReady: true };
+      },
+    });
+
+    const res = await post('swm/share', {
+      contextGraphId: CG_ID,
+      selectedAuthorAgentAddress: selected,
+    });
+
+    expect(res.status).toBe(200);
+    expect(calls[0]?.[2]).toMatchObject({
+      agentAddress: stored,
+      authorAgentAddress: stored,
+    });
+  });
+
+  it('swm/share-async keeps the selected resident author lane in the queued job', async () => {
+    const selected = `0x${'7c'.repeat(20)}`;
+    const stored = ethers.getAddress(selected);
+    const calls: any[] = [];
+    daemonState.promoteWorkerAvailable = true;
+    await startWith({
+      history: async () => ({ agentAddress: stored }),
+      promoteAsync: async (...args: any[]) => {
+        calls.push(args);
+        return { jobId: 'selected-author-share' };
+      },
+    });
+
+    const res = await post('swm/share-async', {
+      contextGraphId: CG_ID,
+      selectedAuthorAgentAddress: selected,
+    });
+
+    expect(res.status).toBe(200);
+    expect(calls[0]?.[2]).toMatchObject({
+      agentAddress: stored,
+      authorAgentAddress: stored,
+    });
+  });
+
+  it.each(['swm/share', 'swm/share-async'])('%s rejects another author lane for an agent-scoped caller', async (verb) => {
+    const caller = `0x${'7d'.repeat(20)}`;
+    const token = 'scoped-share-token';
+    let calls = 0;
+    daemonState.promoteWorkerAvailable = true;
+    await startWith({
+      promote: async () => { calls++; return { promotedCount: 1 }; },
+      promoteAsync: async () => { calls++; return { jobId: 'unexpected' }; },
+    }, {
+      resolveAgentByToken: (candidate?: string) => candidate === token ? caller : undefined,
+    }, { requestToken: token, requestAgentAddress: caller });
+    const res = await post(verb, {
+      contextGraphId: CG_ID,
+      selectedAuthorAgentAddress: `0x${'7e'.repeat(20)}`,
+    });
+    expect(res.status).toBe(403);
+    expect(calls).toBe(0);
   });
 
   it('vm/publish-async preflights the immutable share snapshot before enqueue', async () => {
@@ -1419,6 +1793,36 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
         expect(enqueued).toHaveLength(0);
       });
 
+      // GH#3294 — the agent raises it only on the queued lane, for a KA whose seal and
+      // share this node holds without the author's lifecycle record (a curator's view).
+      it(`${lane} maps a raised ASYNC_PUBLISH_FOREIGN_AUTHOR to 409 and enqueues nothing`, async () => {
+        const foreignAuthor = () => {
+          throw Object.assign(
+            new Error('this node holds the seal and the share of the author, not its lifecycle record'),
+            { code: 'ASYNC_PUBLISH_FOREIGN_AUTHOR' },
+          );
+        };
+        const enqueued: unknown[] = [];
+        await startWith({}, {
+          publishFromFinalizedAssertion: foreignAuthor,
+          resolveFinalizedAssertionVmPublishIntent: foreignAuthor,
+        }, {}, {
+          enqueueKnowledgeAssetVmPublish: async (intent: unknown) => {
+            enqueued.push(intent);
+            return 'job-should-not-exist';
+          },
+        });
+
+        const res = await post(lane, {
+          contextGraphId: CG_ID,
+          selectedAuthorAgentAddress: SELECTED,
+        });
+
+        expect(res.status).toBe(409);
+        expect(res.body.code).toBe('ASYNC_PUBLISH_FOREIGN_AUTHOR');
+        expect(enqueued).toHaveLength(0);
+      });
+
       // `null` included deliberately: a present-but-null selector is a common client
       // serialization of "nothing selected", and treating it as absent would fall back
       // to normal author resolution and could publish a different author with 200.
@@ -1941,6 +2345,22 @@ describe('#1116 share/seal route error mapping (fake agent)', () => {
     expect(res.status).toBe(409);
     expect(res.body.code).toBe('UNSEALED_PULL_FROM_BLOCKED');
     expect(String(res.body.error)).toContain('unsealed Knowledge Asset');
+  });
+
+  it.each([
+    { code: 'SUB_GRAPH_NOT_FOUND', status: 400 },
+    { code: 'KA_PROMOTE_RECOVERY_REQUIRED', status: 409 },
+    { code: 'STORE_OPERATION_TIMEOUT', status: 503 },
+    { code: 'WM_RECOVERY_UNAVAILABLE', status: 503 },
+    { code: 'WM_RECOVERY_VERIFICATION_FAILED', status: 500 },
+  ])('wm/pull-from preserves structured $code errors after delegation', async ({ code, status }) => {
+    await startWith({ pullFrom: async () => {
+      throw Object.assign(new Error('bounded pull failure'), { code, retryable: true });
+    } });
+    const res = await post('wm/pull-from', { contextGraphId: CG_ID, layer: 'swm' });
+    expect(res.status).toBe(status);
+    expect(res.body.code).toBe(code);
+    if (status === 503) expect(res.body.retryable).toBe(true);
   });
 
   it('wm/pull-from: an unrelated pull error still propagates (not silently 409ed)', async () => {

@@ -10,6 +10,7 @@ import {
   type TimestampMsV1,
 } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { RFC64_PUBLIC_CATALOG_ANNOUNCE_MAX_PEERS_V1 } from '../src/rfc64/catalog-peers-v1.js';
@@ -19,6 +20,8 @@ import {
 } from '../src/rfc64/catalog-replay-recovery-runtime-v1.js';
 import { computeRfc64AppliedInventoryDigestV1 } from
   '../src/rfc64/public-catalog-inventory-completeness-v1.js';
+import { composeRfc64UnregisteredCatalogAuthorityV1 } from
+  '../src/rfc64/release-native-catalog-authority-v1.js';
 import {
   RFC64_PUBLIC_CATALOG_HEAD_ANNOUNCEMENT_KIND_V1,
   RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2,
@@ -140,7 +143,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     });
   });
 
-  it('still fails the Context Graph when the bounded worklist overflows', async () => {
+  it('reports spent transport budget as failed and unobserved', async () => {
     const churnPeer = 'peer-reconnect-churn';
     let runtime!: Rfc64CatalogReplayRecoveryRuntimeV1<Target>;
     const created = createRuntime({
@@ -159,7 +162,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)).toMatchObject({
       failed: true,
       unresolvedPeerCount: 0,
-      unverified: false,
+      unverified: true,
     });
   });
 
@@ -306,7 +309,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       contextGraphId: CG,
       policyDigest: POLICY,
       kind: 'connection-demand',
-      demand: { peerId: HEALTHY_PEER, generation: 1 },
+      demand: runtime.markPeerPending(CG, POLICY, HEALTHY_PEER)!,
     });
     expect(runtime.status(CG, POLICY)?.failed).toBe(true);
   });
@@ -382,6 +385,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
     expect(runtime.status(CG, POLICY)?.unresolvedPeerCount).toBe(1);
 
     // A local fault neither attributes a new provider nor clears a retained one.
+    // With no fresh provider response, retained rows are no longer corroborated.
     localFault = true;
     await expect(fullRun(runtime, [FAILING_PEER, HEALTHY_PEER]))
       .resolves.toEqual({ requested: 0, failed: 2 });
@@ -389,7 +393,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       active: false,
       failed: false,
       unresolvedPeerCount: 1,
-      unverified: false,
+      unverified: true,
     });
   });
 
@@ -470,7 +474,7 @@ describe('RFC-64 catalog replay recovery: provider failure reporting', () => {
       contextGraphId: CG,
       policyDigest: POLICY,
       kind: 'connection-demand',
-      demand: { peerId: FAILING_PEER, generation: 1 },
+      demand: runtime.markPeerPending(CG, POLICY, FAILING_PEER)!,
     });
     expect(requestedPeers(requestPeer)).toEqual([FAILING_PEER, FAILING_PEER]);
   });
@@ -594,7 +598,7 @@ const PROJECTION = new TextEncoder().encode(
   + '<https://example.org/alice> <https://schema.org/name> "Alice" .\n',
 );
 
-async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
+async function authorSeal(assertionVersion = '1'): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaNumber = 2647n;
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const typedData = buildAuthorAttestationTypedData({
@@ -621,7 +625,7 @@ async function authorSeal(): Promise<CanonicalGraphScopedAuthorSealV1> {
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
     kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`,
-    assertionVersion: '1',
+    assertionVersion,
     publicTripleCount: '2',
     privateTripleCount: '0',
     privateMerkleRoot: null,
@@ -827,6 +831,153 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     expect(status.stableReason).not.toBe('catalog-replay-incomplete');
   });
 
+  it.each([
+    { authors: 'the owner alone', accessPolicy: 1 as const, memberAddresses: [AUTHOR], soleAuthor: true },
+    {
+      authors: 'the owner and another member',
+      accessPolicy: 1 as const,
+      memberAddresses: [AUTHOR, `0x${'ab'.repeat(20)}` as typeof AUTHOR],
+      soleAuthor: false,
+    },
+    { authors: 'anyone, in a public graph', accessPolicy: 0 as const, memberAddresses: [], soleAuthor: false },
+  ])('keeps curated local owner parity when nonproviders cannot corroborate its head only if the owner is the sole author (authors: $authors)', async ({ accessPolicy, memberAddresses, soleAuthor }) => {
+    const contextGraphId = `${AUTHOR}/curated-owner-replay`;
+    const edge = await startAgent({
+      name: 'curated-owner-replay',
+      activation: activation('catalog'),
+    });
+    const authority = composeRfc64UnregisteredCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      ownerAddress: AUTHOR,
+      accessPolicy,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '0',
+      memberAddresses,
+      rosterVersion: '0',
+    });
+    edge.acceptRfc64CatalogAccessSnapshotV1({
+      policy: authority.policy,
+      policyDigest: authority.policyDigest,
+      roster: authority.roster,
+    });
+    const localAgents = vi.spyOn(edge, 'listLocalAgents').mockReturnValue([
+      { agentAddress: AUTHOR },
+    ] as ReturnType<typeof edge.listLocalAgents>);
+    vi.spyOn(edge, 'readRfc64CatalogResponsibilitiesV1').mockReturnValue([{
+      contextGraphId,
+      responsible: true,
+      responsibilityReason: 'private-membership',
+      active: true,
+      mode: 'catalog',
+      selectionSource: 'default',
+    }]);
+    const scope = Object.freeze({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      governanceChainId: null,
+      governanceContractAddress: null,
+      ownershipTransitionDigest: null,
+      subGraphName: null,
+      authorAddress: AUTHOR,
+      era: '0',
+      bucketCount: '1',
+    }) as AuthorCatalogScopeV1;
+    const publication = await edge.publishAuthorCatalogGenesisV1({
+      scope,
+      author: Object.freeze({
+        address: AUTHOR,
+        signMessage: (digest: Uint8Array) => AUTHOR_WALLET.signMessage(digest),
+      }),
+      peers: [],
+      issuedAt: GENESIS_ISSUED_AT,
+      catalogIssuerDelegationEffectiveAt: DELEGATION_EFFECTIVE_AT,
+      catalogIssuerDelegationExpiresAt: DELEGATION_EXPIRES_AT,
+    });
+    const catalogScopeDigest = computeAuthorCatalogScopeDigestV1(scope);
+    const persistence = (edge as any).rfc64PersistenceV1;
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest,
+      authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: null,
+      currentCatalogHeadDigest: publication.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({
+        catalogScopeDigest,
+        rows: [],
+      }),
+      catalogVersion: publication.announcement.catalogVersion,
+      inventoryRowCount: '0',
+    });
+    const nonprovider = '12D3KooWCuratedNonprovider';
+    vi.spyOn(edge.node.libp2p, 'getPeers').mockReturnValue([
+      { toString: () => nonprovider },
+    ] as never);
+    vi.spyOn(replayService(edge), 'requestCatalogHeadReplay').mockRejectedValue(
+      new Rfc64PublicCatalogTransportErrorV1(
+        'catalog-transport-wire',
+        'nonprovider did not answer replay',
+      ),
+    );
+
+    await edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(contextGraphId);
+    const status = (await edge.readRfc64CatalogOperationalStatusV1())
+      .find((row) => row.contextGraphId === contextGraphId);
+    if (!soleAuthor) {
+      // Another member, or any author of a public graph, may hold a catalog
+      // this node never heard of: nothing corroborated the inventory.
+      expect(status).toMatchObject({
+        authorityState: 'accepted',
+        phase: 'unknown-freshness',
+        expectedRowCount: null,
+        missingRowCount: null,
+      });
+      return;
+    }
+    expect(status).toMatchObject({
+      authorityState: 'accepted',
+      appliedRowCount: '0',
+      expectedRowCount: '0',
+      missingRowCount: '0',
+      stableReason: null,
+    });
+    expect(status?.expectedCatalogHeadDigest).toBe(status?.appliedCatalogHeadDigest);
+    expect(status?.expectedInventoryDigest).toBe(status?.appliedInventoryDigest);
+
+    localAgents.mockReturnValue([]);
+    const unowned = (await edge.readRfc64CatalogOperationalStatusV1())
+      .find((row) => row.contextGraphId === contextGraphId);
+    expect(unowned).toMatchObject({
+      phase: 'unknown-freshness',
+      expectedRowCount: null,
+      missingRowCount: null,
+    });
+
+    // The roster rotates to one member who is not the owner. The owner's heads
+    // stay applied, but the only author now allowed is someone else.
+    localAgents.mockReturnValue([
+      { agentAddress: AUTHOR },
+    ] as ReturnType<typeof edge.listLocalAgents>);
+    const rotated = composeRfc64UnregisteredCatalogAuthorityV1({
+      networkId: NETWORK_ID,
+      contextGraphId,
+      ownerAddress: AUTHOR,
+      accessPolicy,
+      publishPolicy: 0,
+      publishAuthorityAccountId: '0',
+      memberAddresses: [`0x${'ab'.repeat(20)}` as typeof AUTHOR],
+      rosterVersion: '1',
+    });
+    (edge as any).rfc64PublicCatalogServiceV1.acceptAuthoritativePolicySnapshot({
+      policy: rotated.policy,
+      policyDigest: rotated.policyDigest,
+      roster: rotated.roster,
+    });
+    const otherSoleMember = (await edge.readRfc64CatalogOperationalStatusV1())
+      .find((row) => row.contextGraphId === contextGraphId);
+    expect(otherSoleMember?.phase).not.toBe('complete');
+    expect(otherSoleMember).toMatchObject({ expectedRowCount: null, missingRowCount: null });
+  });
+
   it('reports a verified promised row missing after its head announcement was lost', async () => {
     const edge = await startAgent({
       name: 'replay-promised-row-missing',
@@ -910,8 +1061,8 @@ describe('RFC-64 operational status: provider failure reporting', () => {
     )).resolves.toEqual({ requested: 1, failed: 1 });
 
     // Nothing blocks the graph and nothing is applying the successor -- the
-    // target tracker never saw it -- so only the row gap keeps it off
-    // `complete`.
+    // target tracker never saw it -- the retained head obligation and row
+    // gap both keep it off `complete` without claiming active application.
     expect(await readStatus(edge)).toMatchObject({
       phase: 'known-incomplete',
       stableReason: null,
@@ -923,6 +1074,60 @@ describe('RFC-64 operational status: provider failure reporting', () => {
         unresolvedReplayPeers: 1,
       }),
     });
+  });
+
+  it.each(['replacement', 'removal'] as const)('retains an unapplied %s head when no positive row gap remains', async (change) => {
+    const edge = await startAgent({ name: `retained-head-${change}`, activation: activation('catalog') });
+    const genesis = await applyConsistentGenesisHead(edge);
+    const asset = { assertionCoordinate: 'retained-head-row' as never, projectionBytes: PROJECTION, seal: await authorSeal() };
+    const first = await edge.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: { objectDigest: genesis.headObjectDigest, signatureVariantDigest: genesis.signatureVariantDigest },
+      author: AUTHOR_WALLET, catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: [asset], deployment: DEPLOYMENT, issuedAt: SUCCESSOR_ISSUED_AT, peers: [],
+    });
+    // Install a fixture snapshot derived from the genuine signed one-row set,
+    // using the same inventory commitment as the receiver's durable barrier.
+    const persistence = (edge as any).rfc64PersistenceV1;
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest: first.catalogScopeDigest, authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: genesis.headObjectDigest,
+      currentCatalogHeadDigest: first.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({ catalogScopeDigest: first.catalogScopeDigest, rows: first.assets }),
+      catalogVersion: first.announcement.catalogVersion, inventoryRowCount: first.inventoryRowCount,
+    });
+    const successor = await edge.publishOpenAuthorCatalogExactSetSuccessorV1({
+      previousHead: { objectDigest: first.headObjectDigest, signatureVariantDigest: first.signatureVariantDigest },
+      author: AUTHOR_WALLET, catalogIssuerAuthorization: genesis.catalogIssuerAuthorization,
+      assets: change === 'removal' ? [] : [{ ...asset, seal: await authorSeal('2') }],
+      deployment: DEPLOYMENT, issuedAt: '1773900002000' as TimestampMsV1, peers: [],
+    });
+    expect(successor.inventoryRowCount).toBe(change === 'removal' ? '0' : '1');
+    const providerPeer = '12D3KooWRetainedHeadProvider';
+    const emptyPeer = '12D3KooWRetainedHeadEmptyPeer';
+    const peers = vi.spyOn(edge.node.libp2p, 'getPeers');
+    const replay = vi.spyOn(replayService(edge), 'requestCatalogHeadReplay');
+    peers.mockReturnValue([{ toString: () => providerPeer }] as never);
+    replay.mockResolvedValue({ kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [successor.announcement] });
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID)).resolves.toEqual({ requested: 1, failed: 1 });
+    peers.mockReturnValue([{ toString: () => providerPeer }, { toString: () => emptyPeer }] as never);
+    replay.mockImplementation(async ({ remotePeerId }) => {
+      if (remotePeerId === providerPeer) throw new Rfc64PublicCatalogTransportErrorV1('catalog-transport-wire', 'provider unreachable');
+      return { kind: RFC64_PUBLIC_CATALOG_HEAD_REPLAY_COMPLETION_KIND_V2, heads: [] };
+    });
+    await expect(edge.requestRfc64CatalogHeadReplaysFromConnectedPeersV1(CONTEXT_GRAPH_ID)).resolves.toEqual({ requested: 1, failed: 1 });
+    const status = await readStatus(edge);
+    expect(status).toMatchObject({ phase: 'known-incomplete', stableReason: null, catalogVersion: '2',
+      expectedRowCount: change === 'removal' ? '0' : '1', appliedRowCount: '1', missingRowCount: '0', expectedInventoryDigest: null });
+    expect(status.expectedCatalogHeadDigest).not.toBe(status.appliedCatalogHeadDigest);
+
+    // Once that exact head is durably applied, the retained promise is satisfied.
+    persistence.inventory.compareAndSwapAppliedCatalogHeadV1({
+      catalogScopeDigest: successor.catalogScopeDigest, authorAddress: AUTHOR,
+      expectedCurrentCatalogHeadDigest: first.headObjectDigest, currentCatalogHeadDigest: successor.headObjectDigest,
+      appliedInventoryDigest: computeRfc64AppliedInventoryDigestV1({ catalogScopeDigest: successor.catalogScopeDigest, rows: successor.assets }),
+      catalogVersion: successor.announcement.catalogVersion, inventoryRowCount: successor.inventoryRowCount,
+    });
+    expect(await readStatus(edge)).toMatchObject({ phase: 'complete', catalogVersion: '2', missingRowCount: '0' });
   });
 
   it('still blocks a Context Graph whose provider promises a head this node never applied', async () => {
@@ -970,20 +1175,24 @@ describe('RFC-64 operational status: provider failure reporting', () => {
       activation: activation('catalog'),
     });
     await applyConsistentGenesisHead(edge);
-    const acceptedPolicySnapshot = vi.spyOn(
-      (edge as any).rfc64PublicCatalogServiceV1,
-      'acceptedPolicySnapshot',
-    );
+    const service = (edge as any).rfc64PublicCatalogServiceV1;
+    const original = service.acceptedPolicySnapshot.bind(service);
+    const statusRequest = new AsyncLocalStorage<boolean>();
+    let reads = 0;
+    vi.spyOn(service, 'acceptedPolicySnapshot').mockImplementation((...args: unknown[]) => {
+      if (statusRequest.getStore() && args[1] === CONTEXT_GRAPH_ID) reads++;
+      return original(...args);
+    });
 
-    await readStatus(edge);
+    // Background replay also reads policy. Count this request's async chain,
+    // not unrelated supervisor work that can overlap on a busy CI runner.
+    await statusRequest.run(true, () => readStatus(edge));
 
     // The promised-target fence and the replay status must share one snapshot.
     // Reading it a second time spans the durable promised-row load, so an
     // accepted policy that rotates in that window pairs an old-digest promise
     // set with a null replay status, and the projection then publishes numbers
     // built from promises the runtime dropped at the rotation.
-    expect(acceptedPolicySnapshot.mock.calls.filter(
-      ([, contextGraphId]) => contextGraphId === CONTEXT_GRAPH_ID,
-    )).toHaveLength(1);
+    expect(reads).toBe(1);
   });
 });

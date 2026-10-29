@@ -4,11 +4,10 @@
  * These tests verify the full end-to-end flows across 2+ nodes with EVMChainAdapter:
  *
  * 1. ContextGraph publish: write → replicate → collect receiver sigs → on-chain → finalization
- * 2. Legacy two-layer context graph publish (participant sigs): refused by gated receivers
- * 3. verify for already-published KCs
- * 4. Negative: insufficient receiver signatures → publish rejected
- * 5. Negative: insufficient participant signatures → context graph registration rejected
- * 6. Edge node as context graph participant
+ * 2. Two-layer context graph publish (participant sigs): refused by the publishing agent,
+ *    because it exists only without a per-KA scope
+ * 3. Negative: insufficient receiver signatures → publish rejected
+ * 4. Edge node as context graph participant
  */
 import { describe, it, expect, afterAll, beforeAll } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
@@ -394,11 +393,10 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     await sleep(1500);
   }, 20_000);
 
-  it('a gated receiver refuses the legacy two-layer context-graph publish', async () => {
+  it('the agent refuses the two-layer context-graph publish, which carries no per-KA scope', async () => {
     // The sub-context-graph publish with participant signatures exists only on
-    // the legacy (not graph-scoped) path. A 10.0.19 Core cannot keep a copy of
-    // such a publish that it could promote to VM, so it declines the ACK with
-    // CORE_VM_PROMOTION_DISABLED and nothing is published.
+    // the root-entity path. Root-entity Knowledge Assets are read-only, so the
+    // publishing agent refuses it and nothing is published on either node.
     const ctx = getSharedContext();
     await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'context-protocol-entity', [
       { subject: ENTITY_2, predicate: 'http://schema.org/name', object: '"Context Protocol Entity"' },
@@ -423,7 +421,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
     );
 
     expect(outcome.status).not.toBe('confirmed');
-    expect(outcome.error).toContain('CORE_VM_PROMOTION_DISABLED');
+    expect(outcome.error).toContain('Legacy root-scoped Knowledge Assets are read-only');
     const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
     for (const node of [nodeA, nodeB]) {
       const data = await node.query(
@@ -443,49 +441,7 @@ describe('E2E: Context graph publish with receiver + participant signatures', ()
 });
 
 // ========================================================================
-// 3. verify for Already-Published KCs
-// ========================================================================
-
-describe('E2E: Publish KC directly to context graph', () => {
-  let nodeA: PublishProtocolAgent;
-
-  afterAll(async () => {
-    try { await nodeA?.stop(); } catch {}
-  });
-
-  it('declines legacy direct publish from a lone core through its local ACK handler', async () => {
-    nodeA = await createPublishProtocolAgent({
-      kaNumberAllocator: makeTestKaNumberAllocator(),
-      name: 'DirectCGA',
-      listenPort: 0,
-      skills: [],
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-      nodeRole: 'core',
-    });
-
-    await nodeA.start();
-    await sleep(500);
-
-    await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Direct CG E2E', description: '' });
-    await nodeA.registerContextGraph(CONTEXT_GRAPH);
-    nodeA.subscribeToContextGraph(CONTEXT_GRAPH);
-    await sleep(500);
-
-    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'direct-cg-publish', [
-      { subject: ENTITY_3, predicate: 'http://schema.org/name', object: '"Direct CG Publish"' },
-    ]);
-    await sleep(2000);
-
-    // The publishing core now requests its own ACK. Legacy non-graph-scoped
-    // data cannot be promoted to VM, so the local handler declines explicitly.
-    await expect(
-      nodeA.publishFromSharedMemory(CONTEXT_GRAPH, 'all'),
-    ).rejects.toThrow(/CORE_VM_PROMOTION_DISABLED/);
-  }, 20_000);
-});
-
-// ========================================================================
-// 4. Negative: Insufficient Receiver Signatures
+// 3. Negative: Insufficient Receiver Signatures
 // ========================================================================
 
 describe('E2E: Publish rejected with insufficient receiver signatures', () => {
@@ -529,65 +485,13 @@ describe('E2E: Publish rejected with insufficient receiver signatures', () => {
 
     // Self is a candidate, but one core cannot satisfy a two-ACK quorum.
     await expect(
-      nodeA.publishFromSharedMemory(
-        CONTEXT_GRAPH,
-        'all',
-      ),
+      nodeA.publishFromFinalizedAssertion(CONTEXT_GRAPH, 'lonely-data'),
     ).rejects.toThrow(/need 2 ACKs but only 1 core peers connected/);
   }, 20_000);
 });
 
 // ========================================================================
-// 5. Negative: Insufficient Participant Signatures for Context Graph
-// ========================================================================
-
-describe('E2E: Context graph registration rejected with insufficient participant sigs', () => {
-  let nodeA: PublishProtocolAgent;
-
-  afterAll(async () => {
-    try { await nodeA?.stop(); } catch {}
-  });
-
-  it('declines legacy context graph publish from a lone core through its local ACK handler', async () => {
-    const ctx = getSharedContext();
-    nodeA = await createPublishProtocolAgent({
-      kaNumberAllocator: makeTestKaNumberAllocator(),
-      name: 'ParticipantA',
-      listenPort: 0,
-      skills: [],
-      chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
-      nodeRole: 'core',
-    });
-
-    await nodeA.start();
-    await sleep(500);
-
-    await nodeA.createContextGraph({ id: CONTEXT_GRAPH, name: 'Participant Test', description: '' });
-    const cgResult = await nodeA.registerContextGraph(CONTEXT_GRAPH, {
-      accessPolicy: 0,
-      publishPolicy: 1,
-    });
-    const contextGraphId = cgResult.onChainId;
-    await bindAndSubscribePublicContextGraph(nodeA, CONTEXT_GRAPH, contextGraphId);
-
-    await stageRootlessAssertion(nodeA, CONTEXT_GRAPH, 'needs-sigs', [
-      { subject: ENTITY_1, predicate: 'http://schema.org/name', object: '"Needs Sigs"' },
-    ]);
-
-    // The local core participates in ACK collection and declines this legacy
-    // non-graph-scoped payload because it cannot promote a copy to VM.
-    await expect(
-      nodeA.publishFromSharedMemory(
-        CONTEXT_GRAPH,
-        'all',
-        { subContextGraphId: contextGraphId },
-      ),
-    ).rejects.toThrow(/CORE_VM_PROMOTION_DISABLED/);
-  }, 20_000);
-});
-
-// ========================================================================
-// 6. Edge Node as Context Graph Participant
+// 4. Edge Node as Context Graph Participant
 // ========================================================================
 
 describe('E2E: Edge node participates in context graph governance', () => {
@@ -656,37 +560,10 @@ describe('E2E: Edge node participates in context graph governance', () => {
     ]);
     await sleep(5000);
 
-    /**
-     * When enshrining to context graph:
-     * - Receiver sigs come from core nodes (storage attestation)
-     * - Participant sigs come from both core AND edge nodes (governance)
-     *
-     * Edge node should be able to sign (contextGraphId, merkleRoot)
-     * even though it has no stake and isn't in the sharding table.
-     *
-     * RC11 / PR1+PR2 (review fix): the only peer in coreNode's mesh is
-     * an EDGE node, which does not register the StorageACK handler.
-     * `ACKCollector.collect` therefore either sees zero "known core
-     * peers" and throws "no connected core peers", or falls through to
-     * the edge peer and fails at protocol negotiation. The publisher
-     * rethrows verbatim (PR1+PR3) and `publishFromSharedMemory`
-     * REJECTS — no silent tentative-downgrade.
-     *
-     * PR2 also defers the data-graph insert until either on-chain
-     * confirmation OR an intentional-local-skip branch fires. A reject
-     * is neither, so the pre-PR2 "triples still land in the data graph
-     * on tentative" invariant this test used to validate is GONE on
-     * purpose (it was the LU-1 / PR2 verifiable-memory leak — see
-     * `automated.test.ts §2`).
-     *
-     * What's still meaningful to check here is the inverse: the failed
-     * publish does NOT leak its triples into the data graph on the
-     * publishing core. The participant-sig governance layer this test
-     * was named after is exercised by §1/§2/§5 above with a real
-     * multi-core mesh; preserving this test as a regression for "edge
-     * peer cannot stand in for a core ACK signer" + "failed publish
-     * doesn't leak" keeps both PR1 and PR2 covered in this file.
-     */
+    // The participant-signature publish into a sub context graph exists only
+    // on the root-entity path, which the agent refuses. What stays meaningful
+    // here: the refused publish leaks none of its triples into the data graph
+    // of the publishing core.
     await expect(
       coreNode.publishFromSharedMemory(
         CONTEXT_GRAPH,
@@ -699,7 +576,7 @@ describe('E2E: Edge node participates in context graph governance', () => {
           ],
         },
       ),
-    ).rejects.toThrow();
+    ).rejects.toThrow('Legacy root-scoped Knowledge Assets are read-only');
 
     const ctxDataGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/context/${contextGraphId}`;
     const data = await coreNode.query(

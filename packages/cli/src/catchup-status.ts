@@ -43,6 +43,8 @@ export interface CatchupStatusResponse {
   readonly finishedAt?: number;
   readonly result?: CatchupJobResult;
   readonly error?: string;
+  /** VM is inapplicable only under the current allowed unregistered authority. */
+  readonly durablePlane?: 'required' | 'not-applicable';
   readonly graphSync?: Rfc64SelectedSwmGraphSyncStatus;
   /**
    * Set when the job was requested for an on-chain name hash that resolved to

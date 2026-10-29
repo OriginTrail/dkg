@@ -227,6 +227,7 @@ import {
   sleep,
   deriveBlockExplorerUrl,
 } from '../http-utils.js';
+import { requireNodeAdmin } from '../node-admin-guard.js';
 import {
   normalizeRepo,
   isValidRepoSpec,
@@ -451,16 +452,19 @@ export async function handleAgentChatRoutes(ctx: RequestContext): Promise<void> 
   } = actor;
 
 
-  // POST /api/agent/register — register a new agent on this node
+  // POST /api/agent/register — register a new agent on this node. Node-admin
+  // only: registration mints a new API token (and, for custodial agents, a
+  // node-held key), which is an operator decision.
   if (req.method === "POST" && path === "/api/agent/register") {
+    if (!requireNodeAdmin(authentication, res, 'POST /api/agent/register', 'register agents')) return;
     const body = await readBody(req, SMALL_BODY_BYTES);
     const parsed = JSON.parse(body);
-    const { name, publicKey, framework } = parsed;
+    const { name, publicKey, framework, address } = parsed;
     if (!name || typeof name !== "string") {
       return jsonResponse(res, 400, { error: 'Missing required field "name"' });
     }
     try {
-      const record = await agent.registerAgent(name, { publicKey, framework });
+      const record = await agent.registerAgent(name, { publicKey, framework, address });
       validTokens.add(record.authToken);
       const response: Record<string, unknown> = {
         agentAddress: record.agentAddress,

@@ -43,12 +43,14 @@ test('parses NUL-delimited git name-status output without shell-splitting file n
 });
 
 test('non-PR events run every lane while full-PR overrides preserve the Solidity gate', () => {
-  // Every trigger the planning workflows declare other than pull_request,
-  // the nightly schedule included: these full runs are the post-merge net.
+  // Every trigger the planning workflows declare other than pull_request.
+  // The nightly dispatcher enters through workflow_dispatch; keep checking
+  // legacy schedule events too while the default branch is being promoted.
   const triggers = new Set(['ci.yml', 'evm-integration.yml'].flatMap((name) => Object.keys(
     parse(fs.readFileSync(path.join(REPO_ROOT, '.github/workflows', name), 'utf8')).on,
   )));
-  assert.ok(triggers.has('schedule'), 'ci.yml runs nightly');
+  assert.ok(triggers.has('workflow_dispatch'), 'ci.yml accepts the nightly dispatcher');
+  triggers.add('schedule');
   triggers.delete('pull_request');
   for (const eventName of triggers) {
     const plan = planCi({ eventName });
@@ -236,6 +238,7 @@ test('leaf and shared package snapshots include conservative downstream consumer
 
   const core = pullRequestPlan([change('packages/core/src/index.ts')]);
   assert.deepEqual(selectedLanes(core), [
+    'chain_rpc_node26',
     'tornado_core',
     'tornado_blazegraph',
     'tornado_publisher',
@@ -291,7 +294,21 @@ test('control-plane changes force full Node/EVM CI without overriding the Solidi
     'scripts/lib/ci-delta.mjs',
     'scripts/lib/ci-results.mjs',
     'scripts/lib/ci-routing.mjs',
-    'scripts/unrelated-maintenance.mjs',
+    'scripts/testing/package.json',
+    'scripts/test-evm-integration.sh',
+    'test-policy/coverage-baselines.json',
+    // The CLI build copies these assets into the output every lane restores.
+    'scripts/copy-cli-runtime-assets.mjs',
+    'scripts/build.mjs',
+    // A repository script no build-only family lists fails closed.
+    'scripts/new-helper.sh',
+    // What the CLI's install hooks run, in every job's install.
+    'packages/cli/scripts/verify-node-sqlite-runtime.mjs',
+    'packages/cli/scripts/bundle-markitdown-binaries.mjs',
+    'packages/cli/scripts/markitdown-bundle-validation.mjs',
+    'packages/cli/markitdown-build-info.json',
+    'packages/cli/markitdown-targets.json',
+    'packages/cli/scripts/markitdown-entry.py',
   ];
 
   for (const filePath of controlPlanePaths) {
@@ -329,6 +346,14 @@ test('ordinary network-sim changes remain a narrow delta after the trust hardeni
   assert.equal(plan.mode, 'delta');
   assert.equal(plan.fullCi, false);
   assert.deepEqual(selectedLanes(plan), ['kosava_supporting']);
+  assert.deepEqual(plan.evmScopes, []);
+});
+
+test('Kafka source edits select the supporting test lane and shared build', () => {
+  const plan = pullRequestPlan([change('packages/kafka-source/src/kafka.mjs')]);
+  assert.equal(plan.mode, 'delta');
+  assert.deepEqual(selectedLanes(plan), ['kosava_supporting']);
+  assert.equal(needsSharedBuild(plan), true);
   assert.deepEqual(plan.evmScopes, []);
 });
 

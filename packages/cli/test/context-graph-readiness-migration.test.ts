@@ -8,6 +8,7 @@ import {
   migrateLegacyContextGraphReadiness,
   parseProjectSyncedReadinessPayload,
   persistProjectSyncedReadiness,
+  persistCatalogReadiness,
   type ContextGraphReadinessStore,
 } from '../src/context-graph-readiness.js';
 
@@ -74,7 +75,40 @@ function fixture(options: {
 }
 
 describe('legacy context-graph readiness provenance migration', () => {
-  it('normalizes a legacy PROJECT_SYNCED payload without private-only evidence', () => {
+  it('persists a freshly verified catalog handoff as SWM proof without manufacturing VM proof', async () => {
+    const f = fixture({ confirmedMeta: true, subscription: { subscribed: true, synced: false, sharedMemorySynced: false } });
+    const emit = vi.fn();
+    Object.assign(f.agent, {
+      eventBus: { emit },
+      withVerifiedPrivateCatalogSubscriptionReadinessV1: vi.fn(async (_id: string, commit: () => void) => { commit(); return true; }),
+    });
+    await expect(persistCatalogReadiness({
+      agent: f.agent, store: f.store, contextGraphId: f.contextGraphId,
+    })).resolves.toBe(true);
+    expect(f.getProvenance()).toMatchObject({ version: 1, durableVerified: false, sharedMemoryVerified: true });
+    expect(f.subscriptions.get(f.contextGraphId)).toMatchObject({ synced: true, sharedMemorySynced: true, metaSynced: true, pendingMeta: false });
+    expect(emit).toHaveBeenCalledWith('project:synced', { contextGraphId: f.contextGraphId, dataSynced: 0, sharedMemorySynced: 0 });
+  });
+
+  it('does not treat a catalog completion hint as proof', async () => {
+    const f = fixture({ confirmedMeta: true, subscription: { subscribed: true, synced: false, sharedMemorySynced: false } });
+    Object.assign(f.agent, { withVerifiedPrivateCatalogSubscriptionReadinessV1: vi.fn(async () => false) });
+    await expect(persistCatalogReadiness({
+      agent: f.agent, store: f.store, contextGraphId: f.contextGraphId,
+    })).resolves.toBe(false);
+    expect(f.getProvenance()).toBeNull();
+    expect(f.markContextGraphSubscriptionState).not.toHaveBeenCalled();
+  });
+
+  it('requires the live catalog verifier instead of accepting a hint on an older agent', async () => {
+    const f = fixture({ confirmedMeta: true });
+    await expect(persistCatalogReadiness({
+      agent: f.agent, store: f.store, contextGraphId: f.contextGraphId,
+    })).resolves.toBe(false);
+    expect(f.getProvenance()).toBeNull();
+  });
+
+  it('normalizes a legacy PROJECT_SYNCED payload without private-only or held-content evidence', () => {
     expect(parseProjectSyncedReadinessPayload({
       contextGraphId: 'legacy-project-synced',
       dataSynced: 2,
@@ -83,8 +117,25 @@ describe('legacy context-graph readiness provenance migration', () => {
       contextGraphId: 'legacy-project-synced',
       dataSynced: 2,
       sharedMemorySynced: 0,
+      sharedMemoryHeldAssets: 0,
+      durableHeldAssets: 0,
       verifiedPrivateOnlyResponses: 0,
     });
+  });
+
+  it('rejects a PROJECT_SYNCED payload whose held-content count is not a number', () => {
+    expect(parseProjectSyncedReadinessPayload({
+      contextGraphId: 'malformed-held', dataSynced: 0, sharedMemorySynced: 0, sharedMemoryHeldAssets: '3',
+    })).toBeNull();
+    expect(parseProjectSyncedReadinessPayload({
+      contextGraphId: 'malformed-held', dataSynced: 0, sharedMemorySynced: 0, sharedMemoryHeldAssets: Number.NaN,
+    })).toBeNull();
+    expect(parseProjectSyncedReadinessPayload({
+      contextGraphId: 'malformed-held', dataSynced: 0, sharedMemorySynced: 0, durableHeldAssets: '6',
+    })).toBeNull();
+    expect(parseProjectSyncedReadinessPayload({
+      contextGraphId: 'held-generation', dataSynced: 0, sharedMemorySynced: 0, durableHeldAssets: 6,
+    })).toMatchObject({ durableHeldAssets: 6 });
   });
 
   it('resets an unproven private row once and preserves newly verified provenance on restart', async () => {
@@ -263,6 +314,63 @@ describe('PROJECT_SYNCED readiness provenance', () => {
       durableVerified: true,
       sharedMemoryVerified: true,
     });
+  });
+
+  it('persists shared-memory proof from a round that found nothing missing (#3296)', async () => {
+    // The inline catch-up of a node that already held every asset its peer
+    // served: nothing was inserted, and the plane is proven all the same.
+    const f = fixture({ confirmedMeta: true });
+
+    await expect(persistProjectSyncedReadiness({
+      agent: f.agent,
+      store: f.store,
+      contextGraphId: f.contextGraphId,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+      sharedMemoryHeldAssets: 3,
+    })).resolves.toBe(true);
+
+    expect(f.getProvenance()).toMatchObject({
+      version: 1,
+      durableVerified: false,
+      sharedMemoryVerified: true,
+    });
+  });
+
+  it('persists durable proof from a round that found its whole generation stored and current', async () => {
+    // A restarted node whose durable recovery found every asset of the
+    // generation already stored here: nothing was inserted, and the plane is proven.
+    const f = fixture({ confirmedMeta: true });
+
+    await expect(persistProjectSyncedReadiness({
+      agent: f.agent,
+      store: f.store,
+      contextGraphId: f.contextGraphId,
+      dataSynced: 0,
+      sharedMemorySynced: 0,
+      durableHeldAssets: 6,
+    })).resolves.toBe(true);
+
+    expect(f.getProvenance()).toMatchObject({
+      version: 1,
+      durableVerified: true,
+      sharedMemoryVerified: false,
+    });
+  });
+
+  it('does not take a held-content count that is zero or not finite as proof', async () => {
+    for (const sharedMemoryHeldAssets of [0, Number.NaN, Number.POSITIVE_INFINITY]) {
+      const f = fixture({ confirmedMeta: true });
+      await expect(persistProjectSyncedReadiness({
+        agent: f.agent,
+        store: f.store,
+        contextGraphId: f.contextGraphId,
+        dataSynced: 0,
+        sharedMemorySynced: 0,
+        sharedMemoryHeldAssets,
+      })).resolves.toBe(false);
+      expect(f.getProvenance()).toBeNull();
+    }
   });
 
   it('persists verified private-only durable proof across restart migration', async () => {

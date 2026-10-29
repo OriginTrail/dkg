@@ -29,16 +29,18 @@ import {
 import {
   addCatchupPlaneEvidence,
   catchupPeerPlaneEvidence,
-  catchupPeerResponded,
-  catchupPeerSucceeded,
   catchupPlaneCompletedWithoutFailure,
   catchupPlaneProvenByAuthorityHostedEmpty,
   catchupPlaneProvenByData,
   catchupPlaneProvenBySelectedScope,
+  type CatchupPlaneCompletionEvidence,
+} from './catchup-proof.js';
+import {
+  catchupPeerResponded,
+  catchupPeerSucceeded,
   isCatchupPlaneNotAttempted,
   type CatchupJobResult,
   type CatchupLegacySharedMemoryFallback,
-  type CatchupPlaneCompletionEvidence,
   type CatchupPlaneNotAttempted,
   type CatchupRunRequest,
 } from './catchup-runner.js';
@@ -314,7 +316,6 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.sharedMemory,
     {
       responded: peersResponded,
-      succeeded: peersSucceeded,
       denied: deniedPeers,
     },
   );
@@ -447,10 +448,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
         ? {
           ...shared,
           swmCoverage: { ...shared.swmCoverage, fromAuthority },
-        }
-        : shared,
+        } : shared,
       countJobDeferral: !continuation,
-      trackSucceeded: false,
     });
     passTracker.recordPeerRound(peerId, shared.swmCoverage, progress.completedWithoutFailure);
 
@@ -650,9 +649,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       diagnostics.durable.rejectedKcs += durable.rejectedKcs;
       diagnostics.durable.failedPeers += durable.failedPeers;
       diagnostics.durable.failedPhases += durable.failedPhases ?? 0;
-      diagnostics.durable.deferredBackpressure =
-        (diagnostics.durable.deferredBackpressure ?? 0)
-        + (durable.deferredBackpressure ?? 0);
+      diagnostics.durable.deferredBackpressure += durable.deferredBackpressure ?? 0;
       deferredBackpressure += durable.deferredBackpressure ?? 0;
       diagnostics.durable.deniedPhases =
         (diagnostics.durable.deniedPhases ?? 0) + (durable.deniedPhases ?? 0);
@@ -904,7 +901,6 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.authorityUnanswered = !authorityAnswered.durable;
   }
   diagnostics.noProtocolPeers = noProtocolPeers;
-  diagnostics.sharedMemory = sharedAggregation.diagnostics;
   if (
     request.includeSharedMemory
     && (

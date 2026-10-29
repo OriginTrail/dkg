@@ -93,7 +93,7 @@ export class FinalizationRecoveryWorker {
       );
     } finally {
       if (this.#running) {
-        this.schedule(selected >= this.#batchSize ? 0 : this.#pollIntervalMs);
+        this.schedule(this.#pollIntervalMs);
       }
     }
   }

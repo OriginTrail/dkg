@@ -65,7 +65,7 @@ PR runs use seed `640905` and 100 cases. Scheduled CI records the run-number see
 
 ```sh
 DKG_PROPERTY_SEED=640905 DKG_PROPERTY_PATH='PATH_FROM_FAILURE' \
-  pnpm exec vitest run --config vitest.properties.config.ts -t 'FAILING_TEST_NAME'
+  pnpm exec vitest run --config test-policy/vitest.properties.config.ts -t 'FAILING_TEST_NAME'
 ```
 
 These are bounded pilots, not a claim of exhaustive distributed-protocol verification. Broader revoke/key-rotation, RDF equivalence and Solidity accounting models can extend the same pattern after their independent oracles are specified. No additional Foundry framework is justified by the pilot evidence yet.

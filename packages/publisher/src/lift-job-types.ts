@@ -90,6 +90,8 @@ export interface KnowledgeAssetVmPublishRequest {
   readonly publishEpochs?: number;
   /** Immutable token-pricing basis captured when the queued publish is admitted. */
   readonly pricingPolicy?: PublicationPricingPolicy;
+  /** Admission-time catalog obligation survives rollout changes during confirmed recovery. */
+  readonly catalogObligationRequired?: boolean;
   readonly clearSharedMemoryAfter?: boolean;
   readonly publisherNodeIdentityIdOverride?: LiftJobBigInt;
 }
@@ -170,6 +172,9 @@ export interface LiftJobTimestamps {
   readonly broadcastAt?: number;
   /** RPC endpoint acceptance, durably recorded after the pre-send WAL checkpoint. */
   readonly rpcAcceptedAt?: number;
+  /** First receipt/finality observations; separate from completion of local job transitions. */
+  readonly receiptObservedAt?: number;
+  readonly finalityObservedAt?: number;
   readonly includedAt?: number;
   readonly finalizedAt?: number;
   readonly failedAt?: number;

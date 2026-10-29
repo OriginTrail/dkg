@@ -4,9 +4,12 @@ import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 import {
   DKGEvent,
+  DKG_ONTOLOGY,
   PROTOCOL_JOIN_REQUEST,
+  SYSTEM_CONTEXT_GRAPHS,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
   computeWorkspaceAgentEncryptionKeyProofPayload,
+  contextGraphDataGraphUri,
   encodeWorkspaceEncryptionKey,
   generateWorkspaceRecipientEncryptionKey,
 } from '@origintrail-official/dkg-core';
@@ -284,6 +287,126 @@ describe('context graph open enrollment policy', () => {
       callerAgentAddress: ownerAddress,
     });
   }
+
+  it('replays catalog authority only after the approved requester receives its join notice', async () => {
+    const { agent, owner } = await boot();
+    const curatorDialAddress = `/ip4/127.0.0.1/tcp/9090/p2p/${agent.peerId}`;
+    const curatorLanAddress = `/ip4/192.168.1.20/tcp/9090/p2p/${agent.peerId}`;
+    Object.defineProperty(agent.node, 'multiaddrs', {
+      value: [curatorDialAddress, curatorLanAddress],
+      configurable: true,
+    });
+    vi.spyOn(agent, 'resolveRfc64CatalogServingAuthorityV1')
+      .mockReturnValue({ track2Enabled: true } as any);
+    vi.spyOn(agent, 'readRfc64CurrentCuratorAuthorityBindingV1').mockResolvedValue(null);
+    const deliver = vi.spyOn(agent, 'deliverPrivateJoinNotification')
+      .mockResolvedValueOnce({ delivered: true, peerId: 'approved-peer', error: null })
+      .mockResolvedValueOnce({ delivered: false, peerId: 'queued-peer', error: 'queued' });
+    const refresh = vi.spyOn(agent, 'reconcileRfc64CatalogAccessAuthorityV1')
+      .mockResolvedValue(null);
+    const replay = vi.spyOn(agent, 'reannounceRfc64CatalogAfterJoinApprovalV1')
+      .mockResolvedValue(true);
+
+    await agent.notifyJoinApproval('private-join-replay', owner.agentAddress, 'generation');
+    expect(deliver).toHaveBeenCalledOnce();
+    expect(JSON.parse((deliver.mock.calls[0]![3] as (peerId: string) => string)('approved-peer')).curatorDialAddress)
+      .toBe(curatorLanAddress);
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(replay).toHaveBeenCalledWith(
+      'private-join-replay', owner.agentAddress, 'approved-peer',
+    );
+
+    await agent.notifyJoinApproval('private-join-replay', owner.agentAddress, 'generation');
+    expect(refresh).toHaveBeenCalledOnce();
+    expect(replay).toHaveBeenCalledOnce();
+  });
+
+  it('sends a loopback curator hint when the approved requester joined over a direct local connection', async () => {
+    const { agent, owner } = await boot();
+    const loopback = `/ip4/127.0.0.1/tcp/9090/p2p/${agent.peerId}`;
+    const lan = `/ip4/192.168.1.20/tcp/9090/p2p/${agent.peerId}`;
+    const requesterPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    Object.defineProperty(agent.node, 'multiaddrs', {
+      value: [loopback, lan], configurable: true,
+    });
+    const originKey = agent.joinRequestTrackingKey(
+      'private-join-local', owner.agentAddress.toLowerCase(), 'generation',
+    );
+    agent.joinRequestOriginPeers.set(originKey, requesterPeerId);
+    vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([{
+      remotePeer: { toString: () => requesterPeerId },
+      remoteAddr: { toString: () => `/ip4/127.0.0.1/tcp/56789/p2p/${requesterPeerId}` },
+    } as any]);
+    vi.spyOn(agent, 'readRfc64CurrentCuratorAuthorityBindingV1').mockResolvedValue(null);
+    const deliver = vi.spyOn(agent, 'deliverPrivateJoinNotification')
+      .mockResolvedValue({ delivered: false, peerId: requesterPeerId, error: 'queued' });
+
+    await agent.notifyJoinApproval('private-join-local', owner.agentAddress, 'generation');
+
+    const initialPayload = (deliver.mock.calls[0]![3] as (peerId: string) => string)(requesterPeerId);
+    expect(JSON.parse(initialPayload).curatorDialAddress).toBe(loopback);
+
+    vi.spyOn(agent, 'getJoinRequestStatus').mockResolvedValue('approved');
+    vi.spyOn(agent, 'getStoredJoinRequestGeneration').mockResolvedValue('generation');
+    await agent.redeliverJoinApproval('private-join-local', owner.agentAddress);
+    const redeliveryPayload = (deliver.mock.calls[1]![3] as (peerId: string) => string)(requesterPeerId);
+    expect(redeliveryPayload).toBe(initialPayload);
+  });
+
+  it('redelivers a loopback hint to a registry-resolved local requester after origin tracking is gone', async () => {
+    const { agent, owner } = await boot();
+    const loopback = `/ip4/127.0.0.1/tcp/9090/p2p/${agent.peerId}`;
+    const lan = `/ip4/192.168.1.20/tcp/9090/p2p/${agent.peerId}`;
+    const requesterPeerId = '12D3KooWQz2bQbQueABKRSjV9koF8VYsXk5TdCsUmPf5zAEZg3q6';
+    Object.defineProperty(agent.node, 'multiaddrs', {
+      value: [loopback, lan], configurable: true,
+    });
+    vi.spyOn(agent.node.libp2p, 'getConnections').mockReturnValue([{
+      remotePeer: { toString: () => requesterPeerId },
+      remoteAddr: { toString: () => `/ip4/127.0.0.1/tcp/56789/p2p/${requesterPeerId}` },
+    } as any]);
+    vi.spyOn(agent.discovery, 'findAgents').mockResolvedValue([{
+      agentAddress: owner.agentAddress, peerId: requesterPeerId,
+    }] as any);
+    vi.spyOn(agent, 'getJoinRequestStatus').mockResolvedValue('approved');
+    vi.spyOn(agent, 'getStoredJoinRequestGeneration').mockResolvedValue('generation');
+    vi.spyOn(agent, 'readRfc64CurrentCuratorAuthorityBindingV1').mockResolvedValue(null);
+    const send = vi.spyOn((agent as any).messenger, 'sendReliable')
+      .mockResolvedValue({ delivered: true });
+
+    await agent.redeliverJoinApproval('private-join-local', owner.agentAddress);
+    await agent.redeliverJoinApproval('private-join-local', owner.agentAddress);
+
+    expect(send).toHaveBeenCalledTimes(2);
+    const firstBytes = send.mock.calls[0]![2] as Uint8Array;
+    const secondBytes = send.mock.calls[1]![2] as Uint8Array;
+    expect(secondBytes).toEqual(firstBytes);
+    expect(JSON.parse(new TextDecoder().decode(firstBytes)).curatorDialAddress).toBe(loopback);
+  });
+
+  it('retains an exact approved-peer replay demand when authority is still settling', async () => {
+    const { agent, owner } = await boot();
+    vi.spyOn(agent, 'resolveRfc64CatalogServingAuthorityV1')
+      .mockReturnValue({ track2Enabled: true } as any);
+    vi.spyOn(agent, 'readRfc64CurrentCuratorAuthorityBindingV1').mockResolvedValue(null);
+    vi.spyOn(agent, 'deliverPrivateJoinNotification')
+      .mockResolvedValue({ delivered: true, peerId: 'approved-peer', error: null });
+    const refresh = vi.spyOn(agent, 'reconcileRfc64CatalogAccessAuthorityV1')
+      .mockResolvedValue(null);
+    const replay = vi.spyOn(agent, 'reannounceRfc64CatalogAfterJoinApprovalV1')
+      .mockResolvedValue(false);
+    const retry = vi.spyOn(agent, 'scheduleRfc64CatalogAfterJoinApprovalRetryV1')
+      .mockReturnValue(true);
+
+    await agent.notifyJoinApproval('private-join-pending-replay', owner.agentAddress, 'generation');
+
+    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(replay).toHaveBeenCalledTimes(3);
+    expect(retry).toHaveBeenCalledOnce();
+    expect(retry).toHaveBeenCalledWith(
+      'private-join-pending-replay', owner.agentAddress, 'approved-peer',
+    );
+  });
 
   async function buildColdKeyDelegation(input: {
     wallet: ethers.Wallet;
@@ -804,6 +927,54 @@ describe('context graph open enrollment policy', () => {
     )).sort()).toEqual(
       refreshed.workspaceEncryptionKeys.map((entry) => entry.publicEncryptionKey).sort(),
     );
+  }, 30_000);
+
+  it('answers a repeated request of an admitted member of a registered public graph as already a member (#3421)', async () => {
+    const { agent, owner } = await boot();
+    const contextGraphId = 'public-registered-member-repeat';
+    await agent.createContextGraph({
+      id: contextGraphId,
+      name: 'Registered public graph',
+      description: '',
+      accessPolicy: 0,
+      callerAgentAddress: owner.agentAddress,
+    });
+    const joiner = await agent.registerAgent('public-member', { framework: 'test' });
+    const first = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    await expect(agent.processIncomingJoinRequest(contextGraphId, first, joiner.name, agent.peerId))
+      .resolves.toMatchObject({ status: 'pending' });
+    await agent.approveJoinRequest(contextGraphId, joiner.agentAddress, owner.agentAddress);
+
+    // Registered on chain as public: its chain record names no participants,
+    // so the member recovery roster has none. The curator's allowlist does.
+    const registered = vi.spyOn(agent, 'resolveSwmRegisteredAuthority')
+      .mockResolvedValue({ kind: 'public', onChainId: 7n });
+    await expect(agent.getMemberRecoveryRosterSource(contextGraphId)).resolves.toBeNull();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const repeat = await agent.signJoinRequest(contextGraphId, joiner.agentAddress);
+    await expect(agent.processIncomingJoinRequest(contextGraphId, repeat, joiner.name, agent.peerId))
+      .resolves.toMatchObject({ status: 'approved', alreadyMember: true });
+
+    expect(registered).toHaveBeenCalled();
+    expect(await agent.getJoinRequestStatus(contextGraphId, joiner.agentAddress)).toBe('approved');
+    expect(await agent.listPendingJoinRequests(contextGraphId)).toEqual([]);
+
+    // Only the graph's own metadata names its members: an agent that the
+    // replicated system graphs list as allowed still waits for the approver.
+    const listedElsewhere = await agent.registerAgent('listed-elsewhere', { framework: 'test' });
+    await (agent as any).store.insert([SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, SYSTEM_CONTEXT_GRAPHS.AGENTS].map((systemGraph) => ({
+      subject: contextGraphDataGraphUri(contextGraphId),
+      predicate: DKG_ONTOLOGY.DKG_ALLOWED_AGENT,
+      object: JSON.stringify(listedElsewhere.agentAddress),
+      graph: contextGraphDataGraphUri(systemGraph),
+    })));
+    (agent as any).contextGraphMetaProjection.markDirty(contextGraphId);
+    expect((await agent.getCgMeta(contextGraphId)).allowedAgents.map((address: string) => address.toLowerCase()))
+      .toContain(listedElsewhere.agentAddress.toLowerCase());
+    const request = await agent.signJoinRequest(contextGraphId, listedElsewhere.agentAddress);
+    await expect(agent.processIncomingJoinRequest(contextGraphId, request, listedElsewhere.name, agent.peerId))
+      .resolves.toMatchObject({ status: 'pending' });
+    expect(await agent.getJoinRequestStatus(contextGraphId, listedElsewhere.agentAddress)).toBe('pending');
   }, 30_000);
 
   it('requires a carrier-matched replay to cache keys before private manual approval', async () => {

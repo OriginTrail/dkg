@@ -72,6 +72,9 @@ export interface StorageAckLedgerEntry {
   readonly subGraphName?: string;
 }
 
+/** `dkg:shareOperationId` prefix of every operation a StorageACK persisted. */
+export const STORAGE_ACK_OPERATION_ID_PREFIX = 'storage-ack-';
+
 /**
  * The share-operation id of the ACK copy for (UAL, version, Merkle root): the
  * same id for the same content, whichever request stored it.
@@ -82,7 +85,7 @@ export function storageAckOperationId(
   merkleRoot: Uint8Array | string,
 ): string {
   const root = typeof merkleRoot === 'string' ? merkleRoot.toLowerCase() : ethers.hexlify(merkleRoot);
-  return `storage-ack-${ethers.keccak256(ethers.toUtf8Bytes([
+  return `${STORAGE_ACK_OPERATION_ID_PREFIX}${ethers.keccak256(ethers.toUtf8Bytes([
     kaUal,
     String(assertionVersion),
     root,

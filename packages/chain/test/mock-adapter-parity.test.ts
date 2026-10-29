@@ -68,7 +68,7 @@ const EVM_METHODS = collectMethodNames(EVMChainAdapter);
 const MOCK_METHODS = collectMethodNames(MockChainAdapter);
 const NO_CHAIN_METHODS = collectMethodNames(NoChainAdapter);
 
-// Normal protected prototype methods that are deliberately outside the
+// Normal protected/private prototype methods that are deliberately outside the
 // ChainAdapter API. Keeping this boundary explicit prevents production method
 // shape from being chosen merely to evade the runtime parity audit.
 const EVM_INTERNAL_METHODS = new Set<string>([
@@ -81,6 +81,11 @@ const EVM_INTERNAL_METHODS = new Set<string>([
   // The mock implements that public reader directly from its in-memory event
   // state and has no ethers TransactionReceipt to project.
   'projectCanonicalFinalizationReceipt',
+  // TS-private receipt facts/history beneath the verifier and confirmation reader.
+  // TypeScript erases private visibility on the prototype; the mock implements
+  // the public capabilities from its event state without ethers logs or root history.
+  'firstMatchingUpdateReceiptFacts',
+  'authenticateUpdateReceipt',
   // Physical EVM contract-binding and one-log generation fences. These are
   // protected implementation details rather than ChainAdapter capabilities;
   // the mock has neither Hub-bound contract handles nor a persisted one-log.
@@ -116,12 +121,16 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'resolvePublisherPublishPlan', // EVM signer-pool planning; mock has one signerAddress
   'signMessageAs',          // pool-specific wallet-key signing; mock has no adapter-held private keys
   'getOperationalPrivateKey', // mock has no wallet keys
+  'operationalSigning',     // optional; absent, an adapter is taken to sign with local wallets, as the mock's do
   'getRequiredPublishTokenAmount', // TODO: missing on mock, cross-check below
   // Snapshot reuse requires a finalized block hash plus the exact physical
   // DKGKnowledgeAssets address and binding generation. Mock snapshots
   // intentionally carry none of that EVM evidence, so absence preserves the
   // caller's live-read path instead of manufacturing a true lease.
   'knowledgeAssetVersionSnapshotIsCurrent',
+  // Optional finalized snapshot capability requires a canonical block hash and
+  // deployment addresses. Fixtures opt in explicitly; the mock must not invent evidence.
+  'readPublicGraphSnapshot',
   // TypeScript `private` is erased at runtime; these are adapter-internal
   // helpers that survived into the prototype and are not part of the
   // ChainAdapter contract. They must remain EVM-only.
@@ -180,6 +189,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'readHubContractAddress',
   'init',
   'initContracts',          // TS-private: init() body extracted so RPC-exhaustion can be wrapped as RPC_ENDPOINTS_EXHAUSTED
+  // TS-private: re-arms the initialization concurrent callers share, on a
+  // Hub rotation. The mock has no Hub bindings to initialize.
+  'rearmInit',
   'requireV9',
   'getBlockTimestamp',
   'getFinalizedBlockTimestamp',
@@ -190,13 +202,17 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'getTransactionReceiptWithFailover',
   'getTransactionWithFailover',
   'waitForReceiptWithFailover',
-  'signPopulatedTransaction',
+  // Protected same-nonce speed-up behind that receipt wait; the mock mines
+  // nothing it could re-price.
+  'createStuckTransactionRecovery',
+  'prepareSignerTransaction',
+  'signPreparedTransaction',
   // #1336 read-facade + populate plumbing: the chain-concept read facades over
   // the `RpcFailoverClient` transport — `readContract` (string-method point read),
   // `readContractWithOptions` (the cancellable string-method variant),
   // `readContractWith` (policy/classifier-bearing contract read), and the raw
   // `readProvider` — plus the event-log scan wrapper, the contract rebind helper,
-  // and the populate+sign-across-providers delegator. Protected EVM-only helpers
+  // and the prepare-across-providers delegator. Protected EVM-only helpers
   // over `this.providers[]` (the mock has no RPC provider pool), not ChainAdapter
   // contract methods — same category as the write-failover helpers above.
   'readContract',
@@ -207,9 +223,8 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   'readProviderRetryingNull',
   'queryFilterWithFailover',
   'rebindContract',
-  'populateAndSignAcrossProviders',
+  'prepareAcrossProviders',
   'sendSignedTransactionAndWait',
-  'sendPopulatedTransaction',
   'sendContractTransaction',
   // TS-private / protected write-serialization plumbing. The EVM adapter uses
   // this scope to expose an unlocked sender only while the per-wallet serializer
@@ -226,7 +241,9 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // TS-private header-timestamp policy shared by the two publish-receipt parsers above
   // (`skipBlockTimestamp`: 0 for a caller that never reads it, else the finalized header read).
   // EVM receipt plumbing — the mock builds its publish results without a block header.
-  'receiptBlockTimestamp',
+  'enrichPublishReceipt',
+  'decodeV10PublishReceipt',
+  'decodeV9PublishReceipt',
   // TS-private V10 TRAC-allowance helper backing publish/update. Encodes
   // the `chain.approvalPolicy` dispatch and the `transferFrom(..., 1n)`
   // floor; the mock has no ERC-20 allowance surface to mirror.
@@ -235,10 +252,10 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
   // forced re-approve retry on a stale-RPC `TooLowAllowance` revert; the
   // mock has no ERC-20 allowance surface to mirror.
   'confirmAllowanceVisible',
-  // TS-private populate+sign helper with shared stale-allowance recovery
+  // TS-private preparation helper with shared stale-allowance recovery
   // (#888) backing both V10 write paths (publish + update); the mock has no
   // populate/gas-estimation surface to mirror.
-  'populateAndSignV10WithAllowanceRecovery',
+  'prepareV10WithAllowanceRecovery',
   // TS-private shared dispatch for the two V10 write paths (#953). Serializes
   // the populate→sign→broadcast→confirm nonce window per operational wallet
   // via KeyedSerializer. The mock has no nonce/broadcast surface to mirror —

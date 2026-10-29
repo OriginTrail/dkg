@@ -1,3 +1,4 @@
+import { stubDurableSync } from './_helpers/stub-durable-sync.js';
 import { describe, it, expect, beforeAll, afterAll, DKGAgentWallet, buildAgentProfile, collectPublishableMultiaddrs, CclEvaluator, DiscoveryClient, ProfileManager, encrypt, decrypt, ed25519ToX25519Private, ed25519ToX25519Public, x25519SharedSecret, DKGAgent as RealDKGAgent, AGENT_REGISTRY_CONTEXT_GRAPH, parseCclPolicy, OxigraphStore, getGenesisQuads, computeNetworkId, PROTOCOL_SYNC, PROTOCOL_STORAGE_ACK, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, contextGraphMetaUri, sparqlString, DKGQueryEngine, sha256, EVMChainAdapter, MockChainAdapter, createEVMAdapter, getSharedContext, createProvider, takeSnapshot, revertSnapshot, HARDHAT_KEYS, mintTokens, ethers, tmpdir, mkdtemp, readFile, readdir, rm, join, fileURLToPath, _wrapAgentPublisherForSeal, CapturingContextGraphChainAdapter, AsyncSignerAddressContextGraphChainAdapter, SignerListContextGraphChainAdapter, PcaCuratedRegistrationChainAdapter, NonRegisteringACKChainAdapter, FlakyRegistrationACKChainAdapter, TransientIdentityFailureChainAdapter, BrandNewCoreTransientChainAdapter, PermanentProfileFailureChainAdapter, RetryPathPermanentFailureChainAdapter, ContextAuthorizedPublisherChainAdapter, buildSnapshotFactQuads, ReferenceEvaluator, loadYaml, CCL_FACT_NS, OperationalKeyOnlyPublishChainAdapter, ExternalOperationalKeyPublishChainAdapter, AddressOnlyExternalOperationalKeyPublishChainAdapter, AsyncAddressSignMessageAsPublishChainAdapter, GenericSignMessageExternalOperationalKeyPublishChainAdapter, MultiSignerGenericSignMessagePublishChainAdapter, SingleAddressMismatchedGenericSignMessagePublishChainAdapter, SingleSignerAdapterPublishChainAdapter, ReservingAuthorityContextGraphChainAdapter, type Quad, type ChainAdapter, type CreateOnChainContextGraphParams, type CreateOnChainContextGraphResult, type OnChainPublishResult, type V10PublishDirectParams } from './agent.shared';
 import { DKGEvent } from '@origintrail-official/dkg-core';
 import { getSyncCheckpointKey } from '../src/sync/checkpoint/state.js';
@@ -172,7 +173,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           rejectedKcs: 0,
           failedPeers: 0,
         }));
-        (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+        stubDurableSync((agent as any), syncFromPeerDetailed);
         const syncSharedMemoryFromPeerDetailed = recorder(async () => ({
           insertedTriples: 2,
           fetchedMetaTriples: 0,
@@ -190,10 +191,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         }));
         (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
 
-        const recovery = await agent.syncVmRecoveryFromConnectedPeers('runtime-contextGraph', {
+        const recovery = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           includeSharedMemory: true,
         });
-        const result = recovery.catchup;
+        const result = recovery;
 
         expect(peerStoreReads).toBe(3);
         // Background catch-up carries no admission priority override, but it
@@ -223,7 +224,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         expect(result.peersTried).toBe(1);
         expect(result.dataSynced).toBe(5);
         expect(result.sharedMemorySynced).toBe(2);
-        expect(recovery.cleanMissPeerIds).toEqual([remotePeer.toString()]);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([remotePeer.toString()]);
         expect(result.diagnostics.noProtocolPeers).toBe(0);
         expect(result.diagnostics.durable.failedPeers).toBe(0);
         expect(result.diagnostics.sharedMemory.failedPeers).toBe(0);
@@ -254,24 +255,24 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent.node.libp2p.peerStore as any).get = async () => ({
           protocols: [PROTOCOL_SYNC],
         } as any);
-        (agent as any).syncFromPeerDetailed = async () => ({
+        stubDurableSync((agent as any), async () => ({
           ...cleanDurableSyncResult(),
           completedPhases: 1,
           emptyResponses: 1,
-        });
+        }));
         (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
           ...cleanSharedMemorySyncResult(),
           completedPhases: 1,
           emptyResponses: 1,
         });
 
-        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+        const recovery = await agent.syncContextGraphFromConnectedPeers(
           'runtime-contextGraph',
           { includeSharedMemory: true },
         );
 
-        expect(recovery.catchup.sharedMemorySynced).toBe(0);
-        expect(recovery.cleanMissPeerIds).toEqual([remotePeer.toString()]);
+        expect(recovery.sharedMemorySynced).toBe(0);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([remotePeer.toString()]);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -302,11 +303,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent.node.libp2p.peerStore as any).get = async () => ({
           protocols: [PROTOCOL_SYNC],
         } as any);
-        (agent as any).syncFromPeerDetailed = async () => ({
+        stubDurableSync((agent as any), async () => ({
           ...cleanDurableSyncResult(),
           completedPhases: 1,
           emptyResponses: 1,
-        });
+        }));
         (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
           ...cleanSharedMemorySyncResult(),
           completedPhases: 1,
@@ -314,12 +315,12 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           ...failure,
         });
 
-        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+        const recovery = await agent.syncContextGraphFromConnectedPeers(
           'runtime-contextGraph',
           { includeSharedMemory: true },
         );
 
-        expect(recovery.cleanMissPeerIds).toEqual([]);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([]);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -346,11 +347,11 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent.node.libp2p.peerStore as any).get = async () => ({
           protocols: [PROTOCOL_SYNC],
         } as any);
-        (agent as any).syncFromPeerDetailed = async () => ({
+        stubDurableSync((agent as any), async () => ({
           ...cleanDurableSyncResult(),
           completedPhases: 1,
           emptyResponses: 1,
-        });
+        }));
         const syncSharedMemoryFromPeerDetailed = recorder(async (peerId: string) => ({
           ...cleanSharedMemorySyncResult(),
           completedPhases: 1,
@@ -359,7 +360,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         }));
         (agent as any).syncSharedMemoryFromPeerDetailed = syncSharedMemoryFromPeerDetailed;
 
-        const recovery = await agent.syncVmRecoveryFromConnectedPeers(
+        const recovery = await agent.syncContextGraphFromConnectedPeers(
           'runtime-contextGraph',
           { includeSharedMemory: true },
         );
@@ -368,8 +369,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           cleanPeer.toString(),
           timedOutPeer.toString(),
         ]);
-        expect(recovery.cleanMissPeerIds).toEqual([cleanPeer.toString()]);
-        expect(recovery.catchup.diagnostics.sharedMemory.timedOutPhases).toBe(1);
+        expect(recovery.cleanSharedMemoryPeerIds).toEqual([cleanPeer.toString()]);
+        expect(recovery.diagnostics.sharedMemory.timedOutPhases).toBe(1);
       } finally {
         await agent.stop().catch(() => {});
       }
@@ -397,6 +398,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         } as any));
 
         const durableResult = (overrides: Partial<{
+          complete: boolean;
           insertedTriples: number;
           insertedDataTriples: number;
           timedOutPhases: number;
@@ -427,7 +429,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
 
         const syncFromPeerDetailedQueue: any[] = [];
         const syncFromPeerDetailed = recorder(async () => syncFromPeerDetailedQueue.shift());
-        (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+        stubDurableSync((agent as any), syncFromPeerDetailed);
         syncFromPeerDetailedQueue.push(durableResult({ timedOutPhases: 1 }));
 
         const timeoutOnly = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
@@ -482,6 +484,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           insertedTriples: 1,
           insertedDataTriples: 1,
           completedPhases: 1,
+          complete: true,
         }));
 
         await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
@@ -555,10 +558,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent.node.libp2p.peerStore as any).get = recorder(async () => ({
           protocols: [PROTOCOL_SYNC],
         } as any));
-        (agent as any).syncFromPeerDetailed = recorder(async () => ({
+        stubDurableSync((agent as any), recorder(async () => ({
           ...cleanDurableSyncResult(),
           deferredBackpressure: 1,
-        }));
+        })));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
@@ -594,7 +597,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           protocols: [PROTOCOL_SYNC],
         } as any));
 
-        (agent as any).syncFromPeerDetailed = recorder(async (peerId: string) => {
+        stubDurableSync((agent as any), recorder(async (peerId: string) => {
           if (peerId === deniedPeer.toString()) {
             return {
               insertedTriples: 0,
@@ -616,6 +619,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             };
           }
           return {
+            complete: true,
             insertedTriples: 1,
             fetchedMetaTriples: 0,
             fetchedDataTriples: 1,
@@ -633,7 +637,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             failedPeers: 0,
             deniedPhases: 0,
           };
-        });
+        }));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
@@ -671,7 +675,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           protocols: [PROTOCOL_SYNC],
         } as any));
 
-        (agent as any).syncFromPeerDetailed = recorder(async (peerId: string) => ({
+        stubDurableSync((agent as any), recorder(async (peerId: string) => ({
           insertedTriples: 0,
           fetchedMetaTriples: 0,
           fetchedDataTriples: 0,
@@ -688,7 +692,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           rejectedKcs: 0,
           failedPeers: 0,
           deniedPhases: peerId === deniedPeer.toString() ? 1 : 0,
-        }));
+        })));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
@@ -723,7 +727,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           protocols: [PROTOCOL_SYNC],
         } as any));
 
-        (agent as any).syncFromPeerDetailed = recorder(async () => ({
+        stubDurableSync((agent as any), recorder(async () => ({
           insertedTriples: 1,
           fetchedMetaTriples: 1,
           fetchedDataTriples: 0,
@@ -740,7 +744,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           rejectedKcs: 0,
           failedPeers: 0,
           deniedPhases: 1,
-        }));
+        })));
         (agent as any).syncSharedMemoryFromPeerDetailed = recorder(async () => ({
           insertedTriples: 1,
           fetchedMetaTriples: 1,
@@ -796,7 +800,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           protocols: [PROTOCOL_SYNC],
         } as any));
 
-        (agent as any).syncFromPeerDetailed = recorder(async () => ({
+        stubDurableSync((agent as any), recorder(async () => ({
           insertedTriples: 1,
           fetchedMetaTriples: 1,
           fetchedDataTriples: 0,
@@ -813,7 +817,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           rejectedKcs: 0,
           failedPeers: 0,
           deniedPhases: 0,
-        }));
+        })));
         (agent as any).syncSharedMemoryFromPeerDetailed = recorder(async () => ({
           insertedTriples: 1,
           fetchedMetaTriples: 1,
@@ -870,7 +874,8 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         } as any));
         const syncedEvents: unknown[] = [];
         agent.eventBus.on(DKGEvent.PROJECT_SYNCED, (event) => syncedEvents.push(event));
-        (agent as any).syncFromPeerDetailed = recorder(async () => ({
+        stubDurableSync((agent as any), recorder(async () => ({
+          complete: true,
           insertedTriples: 1,
           fetchedMetaTriples: 1,
           fetchedDataTriples: 0,
@@ -889,7 +894,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
           failedPeers: 0,
           failedPhases: 0,
           deniedPhases: 0,
-        }));
+        })));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
@@ -926,7 +931,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         const seenCalls: string[][] = [];
 
         (agent as any).getPeerProtocols = async () => [PROTOCOL_SYNC];
-        (agent as any).syncFromPeerDetailed = async (_peerId: string, contextGraphIds?: string[]) => {
+        stubDurableSync((agent as any), async (_peerId: string, contextGraphIds?: string[]) => {
           seenCalls.push([...(contextGraphIds ?? [SYSTEM_CONTEXT_GRAPHS.AGENTS, SYSTEM_CONTEXT_GRAPHS.ONTOLOGY, ...((agent as any).config.syncContextGraphs ?? [])])]);
           return {
             fetchedMetaTriples: 0,
@@ -946,7 +951,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             failedPeers: 0,
             deniedPhases: 0,
           };
-        };
+        });
         (agent as any).refreshMetaSyncedFlags = async () => undefined;
         (agent as any).discoverContextGraphsFromStore = async () => {
           (agent as any).config.syncContextGraphs = ['new-private-cg'];
@@ -1035,7 +1040,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent as any).waitForSyncProtocol = recorder(async () => true);
 
         const triedPeers: string[] = [];
-        (agent as any).syncFromPeerDetailed = recorder(async (...args: unknown[]) => {
+        stubDurableSync((agent as any), recorder(async (...args: unknown[]) => {
           triedPeers.push(String(args[0]));
           return {
             insertedTriples: 0,
@@ -1054,7 +1059,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             rejectedKcs: 0,
             failedPeers: 0,
           };
-        });
+        }));
 
         await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph');
 
@@ -1091,7 +1096,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent as any).waitForSyncProtocol = recorder(async () => true);
 
         const triedPeers: string[] = [];
-        (agent as any).syncFromPeerDetailed = recorder(async (...args: unknown[]) => {
+        stubDurableSync((agent as any), recorder(async (...args: unknown[]) => {
           triedPeers.push(String(args[0]));
           return {
             insertedTriples: 0,
@@ -1108,7 +1113,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             failedPeers: 0,
             deniedPhases: 0,
           };
-        });
+        }));
 
         const firstResult = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           maxPeers: 1,
@@ -1165,13 +1170,13 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         );
 
         const triedPeers: string[] = [];
-        (agent as any).syncFromPeerDetailed = recorder(async (peerId: string) => {
+        stubDurableSync((agent as any), recorder(async (peerId: string) => {
           triedPeers.push(peerId);
           return {
             ...cleanDurableSyncResult(),
             emptyResponses: 1,
           };
-        });
+        }));
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           maxPeers: 1,
@@ -1208,7 +1213,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent as any).discovery.findAgents = recorder(async () => []);
         (agent as any).waitForSyncProtocol = recorder(async () => false);
         const syncFromPeerDetailed = recorder(async () => undefined);
-        (agent as any).syncFromPeerDetailed = syncFromPeerDetailed;
+        stubDurableSync((agent as any), syncFromPeerDetailed);
 
         const result = await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           maxPeers: 1,
@@ -1332,7 +1337,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent as any).waitForSyncProtocol = recorder(async () => true);
 
         const triedPeers: string[] = [];
-        (agent as any).syncFromPeerDetailed = recorder(async (...args: unknown[]) => {
+        stubDurableSync((agent as any), recorder(async (...args: unknown[]) => {
           triedPeers.push(String(args[0]));
           return {
             insertedTriples: 0,
@@ -1349,7 +1354,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
             failedPeers: 0,
             deniedPhases: 0,
           };
-        });
+        }));
 
         await agent.syncContextGraphFromConnectedPeers('runtime-contextGraph', {
           maxPeers: 1,
@@ -1423,7 +1428,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         // the object-branch logic. A zero-valued object exercises the
         // real object-branch accounting while preserving the intended
         // "clean, no-backoff, made-no-progress" semantics.
-        (agent as any).syncFromPeerDetailed = recorder(async () => cleanDurableSyncResult());
+        stubDurableSync((agent as any), recorder(async () => cleanDurableSyncResult()));
         (agent as any).syncSharedMemoryFromPeerDetailed = recorder(async () => cleanSharedMemorySyncResult());
         (agent as any).discoverContextGraphsFromStore = recorder(async () => 0);
 
@@ -1480,7 +1485,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         // metaSynced-scope-only test above for the full rationale — a
         // bare number masks accounting drift by taking the number
         // happy-path in every `runSyncOnConnect` accounting helper).
-        (agent as any).syncFromPeerDetailed = recorder(async () => cleanDurableSyncResult());
+        stubDurableSync((agent as any), recorder(async () => cleanDurableSyncResult()));
         (agent as any).syncSharedMemoryFromPeerDetailed = recorder(async () => cleanSharedMemorySyncResult());
         (agent as any).discoverContextGraphsFromStore = recorder(async () => 0);
 
@@ -1538,7 +1543,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         (agent.node.libp2p.peerStore as any).get = async (peerId: any) => {
           try { return await origGet(peerId); } catch { return { protocols: [PROTOCOL_SYNC] }; }
         };
-        (agent as any).syncFromPeerDetailed = syncFromPeer;
+        stubDurableSync((agent as any), syncFromPeer);
         (agent as any).discoverContextGraphsFromStore = async () => {};
         (agent as any).syncSharedMemoryFromPeerDetailed = async () => ({
           fetchedMetaTriples: 0,

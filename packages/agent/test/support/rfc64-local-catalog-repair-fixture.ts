@@ -1,9 +1,12 @@
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
   assertCanonicalGraphScopedAuthorSealV1,
+  assertUnsignedContextGraphPolicyEnvelopeV1,
+  GRAPH_KA_CONTENT_SCOPE_VERSION,
   buildAssertionSealQuads,
   buildAuthorAttestationTypedData,
   computeAuthorCatalogScopeDigestV1,
@@ -16,10 +19,17 @@ import {
   type CatalogSealDeploymentProfileV1,
   type ContextGraphIdV1,
   type Digest32V1,
+  type DecimalU64V1,
   type EvmAddressV1,
   type NetworkIdV1,
 } from '@origintrail-official/dkg-core';
-import { GraphManager, OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
+import {
+  GraphManager,
+  OxigraphStore,
+  type Quad,
+  type StorePriorityScheduler,
+  type TripleStore,
+} from '@origintrail-official/dkg-storage';
 import {
   computeFlatKCRootV10,
   storeKnowledgeAssetOperationPublicQuads,
@@ -30,6 +40,7 @@ import { afterEach, expect } from 'vitest';
 
 import { DKGAgent } from '../../src/index.js';
 import type {
+  Rfc64CatalogActivationInputV1,
   Rfc64PublicCatalogActivationInputV1,
 } from '../../src/rfc64/public-catalog-activation-config-v1.js';
 import {
@@ -86,12 +97,17 @@ afterEach(async () => {
 
 interface StartRepairAgentOptionsV1 {
   readonly name: string;
+  readonly nodeRole?: 'core' | 'edge';
   readonly dataDir?: string;
   readonly storePath?: string;
+  /** Replaces the in-memory store, for example with {@link scheduledRepairStoreV1}. */
+  readonly store?: TripleStore;
   readonly syncContextGraphs?: readonly string[];
   readonly autoPublish?: Rfc64PublicCatalogAutoPublishConfigV1;
   readonly bootstrap?: Rfc64PublicCatalogBootstrapConfigV1;
   readonly activation?: Rfc64PublicCatalogActivationInputV1;
+  readonly rollout?: Rfc64CatalogActivationInputV1['rollout'];
+  readonly catalogActivation?: Rfc64CatalogActivationInputV1;
   readonly beforeStart?: (agent: DKGAgent) => void | Promise<void>;
 }
 
@@ -107,21 +123,22 @@ export async function startRepairAgentV1(
     listenHost: '127.0.0.1',
     listenPort: 0,
     bootstrapPeers: [],
-    nodeRole: 'edge',
-    store: new OxigraphStore(options.storePath),
+    nodeRole: options.nodeRole ?? 'edge',
+    store: options.store ?? new OxigraphStore(options.storePath),
     syncSharedMemoryOnConnect: false,
     syncReconcilerEnabled: false,
     vmReconcilerEnabled: false,
     syncOnConnectEnabled: false,
     durableSyncEnabled: false,
     agentProfileHeartbeatMs: 0,
-    syncContextGraphs: options.syncContextGraphs
-      ?? (options.activation !== undefined && options.activation.enabled !== false
+    rfc64CatalogActivation: options.catalogActivation ?? (options.rollout === undefined ? undefined : { rollout: options.rollout }),
+    syncContextGraphs: options.syncContextGraphs === undefined
+      ? (options.activation !== undefined && options.activation.enabled !== false
         ? options.activation.bootstrap?.acceptedPublicPolicies.map(
           ({ policyEnvelope }) => policyEnvelope.payload.contextGraphId,
         ) ?? []
-        : []),
-    ...(options.activation === undefined ? {} : {
+        : []) : [...options.syncContextGraphs],
+    ...(options.activation === undefined && options.catalogActivation?.deploymentProfile === undefined ? {} : {
       networkIdentity: {
         networkId: await computeNetworkId(),
         chainId: NATIVE_DEPLOYMENT.networkId,
@@ -141,6 +158,49 @@ export async function startRepairAgentV1(
   return agent;
 }
 
+/**
+ * A store whose queries are admitted by `scheduler`, as the daemon's store
+ * adapters admit theirs, and which reports that scheduler's pressure. `observe`
+ * runs work and reports how many queries that work held at once, admitted or
+ * still waiting.
+ */
+export function scheduledRepairStoreV1(inner: TripleStore, scheduler: StorePriorityScheduler) {
+  const windows = new AsyncLocalStorage<{ held: number; mostHeld: number; queries: number }>();
+  const store = new Proxy(inner, {
+    get(target, property) {
+      if (property === 'getPressureSnapshot') return () => scheduler.snapshot;
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== 'function') return value;
+      if (property !== 'query') return value.bind(target);
+      const query: TripleStore['query'] = (sparql, options) => {
+        const window = windows.getStore();
+        if (window !== undefined) {
+          window.queries += 1;
+          window.held += 1;
+          window.mostHeld = Math.max(window.mostHeld, window.held);
+        }
+        return scheduler.run(
+          options?.priority,
+          options?.source ?? 'repair-fixture.query',
+          () => target.query(sparql, options),
+          options?.signal,
+        ).finally(() => {
+          if (window !== undefined) window.held -= 1;
+        });
+      };
+      return query;
+    },
+  });
+  return {
+    store,
+    async observe<T>(work: () => Promise<T>) {
+      const window = { held: 0, mostHeld: 0, queries: 0 };
+      const result = await windows.run(window, work);
+      return { result, mostHeld: window.mostHeld, queries: window.queries };
+    },
+  };
+}
+
 export function catalogScopeDigestV1(): Digest32V1 {
   return computeAuthorCatalogScopeDigestV1({
     networkId: NETWORK_ID,
@@ -150,8 +210,8 @@ export function catalogScopeDigestV1(): Digest32V1 {
     ownershipTransitionDigest: null,
     subGraphName: null,
     authorAddress: AUTHOR,
-    era: '0',
-    bucketCount: '1',
+    era: '0' as DecimalU64V1,
+    bucketCount: '1' as DecimalU64V1,
   });
 }
 
@@ -164,9 +224,11 @@ export function bootstrapConfigV1(
     contextGraphId: CONTEXT_GRAPH_ID,
     ownerAddress: AUTHOR,
   });
+  const policyEnvelope = unsignedOpenContextGraphPolicyEnvelopeV1(policy);
+  assertUnsignedContextGraphPolicyEnvelopeV1(policyEnvelope);
   return {
     acceptedPublicPolicies: [{
-      policyEnvelope: unsignedOpenContextGraphPolicyEnvelopeV1(policy),
+      policyEnvelope,
       targets: includeRemoteTarget ? [{
         authorAddress: AUTHOR,
         providers: ['12D3KooWRepairProvider'],
@@ -178,6 +240,7 @@ export function bootstrapConfigV1(
 
 export async function authorSealV1(
   kaNumber: bigint,
+  assertionVersion = '1',
 ): Promise<CanonicalGraphScopedAuthorSealV1> {
   const kaId = ((BigInt(AUTHOR) << 96n) | kaNumber).toString();
   const assertionMerkleRoot = ethers.hexlify(
@@ -207,7 +270,7 @@ export async function authorSealV1(
     assertionFinalizedAt: '2026-07-19T12:34:56.789Z',
     contentScopeVersion: '2',
     kaUal: `did:dkg:${NETWORK_ID}/${AUTHOR}/${kaNumber}`,
-    assertionVersion: '1',
+    assertionVersion,
     publicTripleCount: String(PROJECTION_QUADS.length),
     privateTripleCount: '0',
     privateMerkleRoot: null,
@@ -258,6 +321,7 @@ export async function seedDurableWorkspaceAssetV1(
   agent: DKGAgent,
   suffix: string,
   reservedKaId: bigint,
+  accessPolicy: 'public' | 'ownerOnly' = 'public',
 ): Promise<Readonly<{
   seal: AssertionSeal;
   scopeDigest: Digest32V1;
@@ -285,7 +349,7 @@ export async function seedDurableWorkspaceAssetV1(
     kav10Address: seal.kav10Address,
     reservedKaId: seal.reservedKaId!,
     finalizedAtIso: seal.finalizedAtIso,
-    contentScopeVersion: seal.contentScopeVersion!,
+    contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
     kaUal: seal.kaUal!,
     assertionVersion: seal.assertionVersion!,
     publicTripleCount: seal.publicTripleCount!,
@@ -302,7 +366,7 @@ export async function seedDurableWorkspaceAssetV1(
     quads: PROJECTION_QUADS,
     privateTripleCount: 0,
     publisherPeerId: agent.peerId,
-    accessPolicy: 'public',
+    accessPolicy,
     agentAddress: AUTHOR,
     timestamp: new Date('2026-07-19T12:35:00.000Z'),
   });
@@ -326,7 +390,7 @@ export async function seedDurableWorkspaceAssetV1(
       ownershipTransitionDigest: null,
       subGraphName: null,
       authorAddress: AUTHOR,
-      era: '0',
+      era: '0' as DecimalU64V1,
     }),
   });
 }

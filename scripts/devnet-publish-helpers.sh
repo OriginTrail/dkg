@@ -743,3 +743,38 @@ devnet_quads_for_root_json() {
     console.log(JSON.stringify(quads));
   '
 }
+
+# Mine <count> blocks on the devnet chain: [port]. One block each, in a single
+# JSON-RPC batch of evm_mine calls, with the same one second of chain time per
+# block. Not hardhat_mine: for the blocks inside a hardhat_mine range Hardhat
+# answers a historical state read (eth_getCode at a block number) as if the
+# contract did not exist. A node that searches for a contract's deployment
+# block afterwards lands at the end of that range and rebuilds its Context
+# Graph authority index without the graphs created before it.
+devnet_mine_blocks() {
+  local count="$1" port="${2:-${HARDHAT_PORT:-8545}}"
+  node -e '
+    const n = Number(process.argv[1]);
+    process.exit(Number.isInteger(n) && n >= 1 && n <= 5000 ? 0 : 2);
+  ' "$count" || return 2
+  # The batch and its answer go through pipes: at a few thousand calls either
+  # one is larger than a single command-line argument may be.
+  node -e '
+    process.stdout.write(JSON.stringify(Array.from({ length: Number(process.argv[1]) },
+      (_, i) => ({ jsonrpc: "2.0", id: i + 1, method: "evm_mine", params: [] }))));
+  ' "$count" \
+    | curl -sS --max-time 120 -X POST -H 'Content-Type: application/json' \
+      --data-binary @- "http://127.0.0.1:${port}" 2>/dev/null \
+    | node -e '
+      let input = "";
+      process.stdin.on("data", (chunk) => { input += chunk; }).on("end", () => {
+        let answers;
+        try { answers = JSON.parse(input); } catch { process.exit(1); }
+        const mined = Array.isArray(answers) && answers.length === Number(process.argv[1])
+          && answers.every((answer) => answer !== null && typeof answer === "object"
+            && !("error" in answer) && "result" in answer);
+        process.exit(mined ? 0 : 1);
+      });
+    ' "$count"
+}
+

@@ -631,6 +631,179 @@ describe('VM recovery microbatch host — adversarial integration', () => {
     expect(result.hasImmediateRecoveryWork).toBe(false);
   });
 
+  it('re-verifies a fetched batch side by side and gives each target its own result', async () => {
+    const holder = '12D3KooWPostFetchBatchHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/post-fetch-batch';
+    // The holder serves the probe and, of the seven that follow, only the odd ordinals.
+    const served = new Set([0, 1, 3, 5, 7]);
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchPostFetch',
+      localCgId,
+      peers: [holder],
+      targetCount: 8,
+      onFetch: (_peerId, requested, recovered) => {
+        for (const target of requested) if (served.has(target.ordinal)) recovered.add(target.ordinal);
+        return requested.every((target) => served.has(target.ordinal)) ? 'found' : 'incomplete';
+      },
+    });
+    agents.push(harness.agent);
+    // The re-verification is where each target's chain reads are issued. The
+    // lower the ordinal, the longer it takes, so a batch finishes in an order
+    // that is not its target order.
+    const reverify = harness.internals.reconcileChainOrdinal;
+    const finished: number[] = [];
+    let active = 0;
+    let maxActive = 0;
+    harness.internals.reconcileChainOrdinal = async (cg, onChainCgId, ordinal, headBlock, options) => {
+      active += 1;
+      maxActive = Math.max(maxActive, active);
+      try {
+        await new Promise<void>((resolve) => { setTimeout(resolve, (8 - ordinal) * 3); });
+        return await reverify(cg, onChainCgId, ordinal, headBlock, options);
+      } finally {
+        active -= 1;
+        finished.push(ordinal);
+      }
+    };
+
+    const result = await harness.internals.recoverVmReconcileBatch(
+      localCgId, 1n, harness.targets, 100, () => true,
+    );
+
+    expect(harness.fetched).toEqual([
+      { peerId: holder, uals: [harness.targets[0]!.ual] },
+      { peerId: holder, uals: harness.targets.slice(1).map(({ ual }) => ual) },
+    ]);
+    // Bounded like the scan, and the seven did not finish in target order.
+    expect(maxActive).toBe(DKGAgentBase.VM_RECONCILE_ORDINAL_CONCURRENCY);
+    expect(finished.slice(1)).not.toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect([...finished].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5, 6, 7]);
+    for (const target of harness.targets) {
+      const outcome = result.outcomes.get(target.ordinal);
+      const record = harness.internals.vmReconcileRotationState.get(
+        harness.internals.vmReconcileRotationSlotKey(target),
+      );
+      if (served.has(target.ordinal)) {
+        expect(outcome).toEqual({ status: 'reconciled', blockNumber: 100 });
+        // A recovered target's rotation record is cleared.
+        expect(record).toBeUndefined();
+      } else {
+        // A target the holder did not serve stays pending, as itself, and
+        // keeps its rotation record with this holder marked as asked.
+        expect(outcome).toMatchObject({
+          status: 'pending',
+          recovery: { ordinal: target.ordinal, ual: target.ual, kaId: target.kaId },
+        });
+        expect(record).toBeDefined();
+        expect([...record!.attemptedPeerIds]).toEqual([holder]);
+      }
+    }
+  });
+
+  it('stops re-verifying after a target throws and waits for the targets in flight', async () => {
+    const peerId = '12D3KooWPostFetchFailureHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/post-fetch-failure';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchPostFetchFailure',
+      localCgId,
+      peers: [peerId],
+      targetCount: 7,
+      onFetch: (_peerId, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+    const reverify = harness.internals.reconcileChainOrdinal;
+    const started: number[] = [];
+    const finished: number[] = [];
+    let releaseSiblings!: () => void;
+    const siblingGate = new Promise<void>((resolve) => { releaseSiblings = resolve; });
+    harness.internals.reconcileChainOrdinal = async (cg, onChainCgId, ordinal, headBlock, options) => {
+      started.push(ordinal);
+      if (ordinal === 0) throw new Error('re-verification of ordinal 0 failed');
+      await siblingGate;
+      finished.push(ordinal);
+      return reverify(cg, onChainCgId, ordinal, headBlock, options);
+    };
+
+    let settled = false;
+    const batch = harness.internals.executeVmRecoveryBatch({
+      localCgId,
+      onChainCgId: 1n,
+      peerId,
+      attempts: harness.targets.map((target, index) => ({
+        entry: {
+          index,
+          target,
+          prepared: { slotKey: harness.internals.vmReconcileRotationSlotKey(target), suppressed: false },
+        },
+        installedRecord: undefined,
+        candidatePeerIds: [peerId],
+      })),
+      unavailablePeerIds: [],
+      headBlock: 100,
+      isRecoveryCurrent: () => true,
+      ctx: createOperationContext('system'),
+    }).finally(() => { settled = true; });
+    batch.catch(() => undefined);
+
+    await vi.waitFor(() => expect(started).toEqual([0, 1, 2, 3, 4]));
+    await new Promise<void>((resolve) => { setImmediate(resolve); });
+    // Ordinal 0 threw. The four beside it are still running, so the batch has
+    // not settled, and the two that had not started never do.
+    expect(settled).toBe(false);
+    expect(finished).toEqual([]);
+
+    releaseSiblings();
+    await expect(batch).rejects.toThrow('re-verification of ordinal 0 failed');
+    expect([...finished].sort((a, b) => a - b)).toEqual([1, 2, 3, 4]);
+    expect(started).toEqual([0, 1, 2, 3, 4]);
+  });
+
+  it('reports a batch whose lifecycle ended during re-verification as stale', async () => {
+    const peerId = '12D3KooWPostFetchStaleHolder';
+    const localCgId = '0x0000000000000000000000000000000000000001/post-fetch-stale';
+    const harness = await createRecoveryHarness({
+      name: 'MicrobatchPostFetchStale',
+      localCgId,
+      peers: [peerId],
+      targetCount: 2,
+      onFetch: (_peerId, requested, recovered) => {
+        for (const target of requested) recovered.add(target.ordinal);
+        return 'found';
+      },
+    });
+    agents.push(harness.agent);
+    let current = true;
+    const reverify = harness.internals.reconcileChainOrdinal;
+    harness.internals.reconcileChainOrdinal = async (cg, onChainCgId, ordinal, headBlock, options) => {
+      current = false;
+      return reverify(cg, onChainCgId, ordinal, headBlock, options);
+    };
+
+    const result = await harness.internals.executeVmRecoveryBatch({
+      localCgId,
+      onChainCgId: 1n,
+      peerId,
+      attempts: harness.targets.map((target, index) => ({
+        entry: {
+          index,
+          target,
+          prepared: { slotKey: harness.internals.vmReconcileRotationSlotKey(target), suppressed: false },
+        },
+        installedRecord: undefined,
+        candidatePeerIds: [peerId],
+      })),
+      unavailablePeerIds: [],
+      headBlock: 100,
+      isRecoveryCurrent: () => current,
+      ctx: createOperationContext('system'),
+    });
+
+    expect(result).toEqual({ kind: 'stale-after-attempt' });
+  });
+
   it('retains no attempt evidence when stale at executor entry', async () => {
     const peerId = '12D3KooWStaleExecutorHolder';
     const localCgId = '0x0000000000000000000000000000000000000001/stale-entry';

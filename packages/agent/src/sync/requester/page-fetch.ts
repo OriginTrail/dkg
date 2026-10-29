@@ -1,3 +1,5 @@
+export type { SyncPageFetchOptions } from './sync-page-fetch-options.js';
+import { eligibleDurableBoundarySource, type VerifiedDurableBoundary } from '../durable-recovery-boundary-seed.js';
 import {
   assertSyncWorkAdmission,
   composeSyncWorkAdmission,
@@ -30,8 +32,7 @@ import {
   type SyncCheckpointStore,
 } from '../checkpoint/state.js';
 import {
-  resolveManifestCheckpointDecision,
-  resolveResponderResumeDecision,
+  resolveManifestResumePlan,
   resolveResponderSessionLossCleanup,
 } from './manifest-resume-policy.js';
 import {
@@ -159,7 +160,7 @@ export function deleteSyncPageCheckpoint(
   checkpointStore.delete(checkpointKey);
 }
 
-function isSyncResponderSessionInvalidError(err: unknown): boolean {
+export function isSyncResponderSessionInvalidError(err: unknown): boolean {
   if (!(err instanceof Error)) return false;
   const message = err.message.toLowerCase();
   return message.includes('sync session') && (
@@ -212,6 +213,8 @@ export type SyncPageResult = SyncPageResultFields & SharedMemoryCompletionFields
 export interface SyncPageProgress {
   readonly resumedFromOffset: number;
   readonly nextOffset: number;
+  readonly acceptedQuads: number; readonly acceptedHeapBytesEstimate: number;
+  readonly pageQuads: readonly Quad[];
 }
 
 function acceptedIncompletePrefixResult(
@@ -403,47 +406,6 @@ class AdaptiveSyncPageSizer {
   }
 }
 
-/**
- * Optional modifiers for one Agent-owned page fetch.
- *
- * Keep these named: checkpoint identity, cancellation, recovery semantics and
- * accumulation ceilings are independent concerns. A positional tail made it
- * too easy for a new modifier to occupy an older modifier's slot.
- */
-export interface SyncPageFetchOptions {
-  readonly workAdmission?: SyncWorkAdmission;
-  readonly snapshotRef?: string;
-  readonly sinceBatchId?: string;
-  readonly signal?: AbortSignal;
-  readonly recovery?: boolean;
-  readonly forceFreshSession?: boolean;
-  /** Completed canonical META generation that defines a durable DATA plan. */
-  readonly manifestDigest?: DurableManifestDigest;
-  /** Canonical prefix proof for any candidate checkpoint offset. */
-  readonly manifestPrefixDigestAtOffset?: (
-    offset: number,
-  ) => DurableManifestPrefixDigest | undefined;
-  readonly assetUals?: string[];
-  /**
-   * Permit the selected-SWM transfer owner to retain a validated metadata
-   * prefix after a retryable transport interruption. Checkpoint identity is
-   * intentionally independent of this transfer policy.
-   */
-  readonly returnAcceptedPrefixOnRetryableTransportFailure?: boolean;
-  readonly requesterScope?: SyncCheckpointScope;
-  /** Override used by proof-only callers that own a private in-memory store. */
-  readonly checkpointStore?: SyncCheckpointStore;
-  /** Proof-only requester state is invocation-local and must not survive this call. */
-  readonly ephemeralRequesterState?: boolean;
-  readonly maxAcceptedQuads?: number;
-  readonly maxAcceptedHeapBytesEstimate?: number;
-  /**
-   * Soft owner boundary evaluated only after a page made forward progress.
-   * Returning true yields an incomplete prefix without classifying the peer as
-   * timed out; callers must still verify and checkpoint a safe graph boundary.
-   */
-  readonly shouldStopAfterPage?: (progress: SyncPageProgress) => boolean;
-}
 
 export class SyncPageAccumulationLimitError extends Error {
   readonly code = 'SYNC_PAGE_ACCUMULATION_LIMIT' as const;
@@ -501,6 +463,7 @@ interface FetchSyncPagesParams {
   forceFreshSession?: boolean;
   /** Enforces generation identity for durable DATA continuation state. */
   manifestDigest?: DurableManifestDigest;
+  durableResumeBoundary?: VerifiedDurableBoundary;
   /** Allows a changed generation to retain a cryptographically identical prefix. */
   manifestPrefixDigestAtOffset?: (
     offset: number,
@@ -664,7 +627,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     checkpointStore,
     forceFreshSession,
     manifestDigest,
-    manifestPrefixDigestAtOffset,
+    manifestPrefixDigestAtOffset, durableResumeBoundary,
     recovery,
     buildSyncRequest,
     sinceBatchId,
@@ -699,80 +662,38 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
   throwIfAborted(signal);
   const phaseTelemetry = createRequesterPhaseTelemetry({ includeSharedMemory, phase });
   const checkpointKey = checkpointKeyForFetch(params);
-  if (forceFreshSession) {
-    checkpointStore.delete(checkpointKey);
-    unfinishedSyncResponderSessions.delete(checkpointKey);
-  }
-  let checkpoint = checkpointStore.get(checkpointKey);
-  const savedPrefixDigest = checkpoint && manifestDigest
-    ? manifestPrefixDigestAtOffset?.(checkpoint.offset)
-    : undefined;
-  const manifestCheckpointDecision = resolveManifestCheckpointDecision({
-    checkpoint,
-    manifestDigest,
-    prefixDigestAtOffset: savedPrefixDigest,
-    hasExactAssetFilter: assetUals !== undefined,
-  });
-  if (manifestCheckpointDecision.kind === 'reset') {
-    // OFFSET has meaning only inside the exact META generation that produced
-    // it. A missing/changed prefix or a store that cannot persist the binding
-    // restarts both the verified and raw responder coordinates.
-    deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
-    checkpoint = undefined;
-  } else if (manifestCheckpointDecision.kind === 'rebind-and-prime') {
-    checkpointStore.setManifestBoundOffset(
-      checkpointKey,
-      checkpoint!.offset,
-      manifestDigest!,
-      Date.now(),
-      manifestCheckpointDecision.prefixDigest,
-    );
-    unfinishedSyncResponderSessions.delete(checkpointKey);
-    checkpoint = checkpointStore.get(checkpointKey);
-    logInfo(
-      ctx,
-      `Reusing verified durable prefix for "${contextGraphId}" through offset ${checkpoint?.offset ?? 0} after META generation change`,
-    );
-  } else if (manifestCheckpointDecision.prefixUpgrade) {
-    // Upgrade an otherwise generation-bound checkpoint so a later suffix
-    // change or responder restart can reuse its verified prefix safely.
-    checkpointStore.setManifestBoundOffset(
-      checkpointKey,
-      checkpoint!.offset,
-      manifestDigest!,
-      Date.now(),
-      manifestCheckpointDecision.prefixUpgrade,
-    );
-    checkpoint = checkpointStore.get(checkpointKey);
-  }
+  const existingCheckpoint = checkpointStore.get(checkpointKey);
+  const proposedCheckpoint = !forceFreshSession && !includeSharedMemory && phase === 'data' && assetUals === undefined
+    ? eligibleDurableBoundarySource(checkpointStore, checkpointKey, durableResumeBoundary) : undefined;
   const usesPageSession = usesResponderSession(includeSharedMemory, phase);
   const sessionStartedAt = Date.now();
-  // A successful caller deletes the checkpoint after verification/storage.
-  // The process-local cache can outlive that synchronous delete, so never let
-  // a cache-only token resurrect a completed snapshot at offset zero.
-  if (!checkpoint) unfinishedSyncResponderSessions.delete(checkpointKey);
-  const savedResponderSession = usesPageSession
-    ? (
-        getPersistedSyncResponderSession(checkpoint, manifestDigest, sessionStartedAt)
-        ?? (checkpoint
-          ? getUnfinishedSyncResponderSession(checkpointKey, manifestDigest, sessionStartedAt)
-          : undefined)
-      )
+  // A cache-only token cannot resurrect a completed snapshot at offset zero.
+  const existingSession = usesPageSession && existingCheckpoint
+    ? getPersistedSyncResponderSession(existingCheckpoint, manifestDigest, sessionStartedAt)
+      ?? getUnfinishedSyncResponderSession(checkpointKey, manifestDigest, sessionStartedAt)
     : undefined;
-  const responderSessionStartedFresh = savedResponderSession === undefined;
-  const responderResumeDecision = resolveResponderResumeDecision({
-    checkpoint,
-    usesPageSession,
-    savedResponderSessionOffset: savedResponderSession?.responderSessionOffset,
-    manifestRebindNeedsPriming: manifestCheckpointDecision.kind === 'rebind-and-prime',
-  });
-  if (responderResumeDecision.kind === 'reset-unmappable') {
-    // A verified manifest coordinate is not necessarily a raw responder
-    // coordinate. Once the immutable token is gone, restart instead of
-    // guessing that both coordinate spaces match.
+  const plan = resolveManifestResumePlan({ checkpoint: existingCheckpoint, proposedCheckpoint,
+    manifestDigest, prefixDigestAtOffset: manifestPrefixDigestAtOffset,
+    hasExactAssetFilter: assetUals !== undefined, usesPageSession, forceFreshSession,
+    savedResponderSessionOffset: existingSession?.responderSessionOffset, nowMs: sessionStartedAt });
+  // Apply the final binding exactly once. A proposed source never becomes an
+  // intermediate persisted checkpoint, and cannot carry another peer's token.
+  if (plan.checkpointAction === 'reset' || plan.checkpointAction === 'replace') {
     deleteSyncPageCheckpoint(checkpointStore, checkpointKey);
-    checkpoint = undefined;
   }
+  if (plan.checkpointAction === 'replace' || plan.checkpointAction === 'upgrade') {
+    const update = plan.update;
+    checkpointStore.setManifestBoundOffset(checkpointKey, update.offset, update.manifestDigest,
+      update.nowMs, update.manifestPrefixDigest);
+    if (existingCheckpoint?.manifestDigest !== update.manifestDigest) logInfo(ctx,
+      `Reusing verified durable prefix for "${contextGraphId}" through offset ${update.offset} after META generation change`);
+  }
+  const checkpoint = checkpointStore.get(checkpointKey);
+  if (!checkpoint) unfinishedSyncResponderSessions.delete(checkpointKey);
+  const savedResponderSession = plan.checkpointAction === 'reset' || plan.checkpointAction === 'replace'
+    ? undefined : existingSession;
+  const responderSessionStartedFresh = savedResponderSession === undefined;
+  const responderResumeDecision = plan.resume;
   const verifiedOffset = responderResumeDecision.verifiedOffset;
   let offset = responderResumeDecision.rawOffset;
   const responderSessionNeedsPriming = responderResumeDecision.kind === 'prime';
@@ -794,8 +715,8 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
   let bytesReceived = 0;
   let decodedBytesReceived = 0;
   let decodedRowsReceived = 0;
-  const decodePage = async (bytes: Uint8Array) => {
-    const decoded = await decodeNegotiatedExactSyncResponse(bytes, { allowCompression: usesExactGzip, signal,
+  const decodePage = async (page: { bytes: Uint8Array; body: string }) => {
+    const decoded = await decodeNegotiatedExactSyncResponse(page.bytes, { allowCompression: usesExactGzip, signal,
       maxInflatedBytes: usesExactGzip ? Math.max(0, admittedByteLimit! - decodedBytesReceived) : undefined });
     const nextDecodedBytes = decodedBytesReceived + decoded.bytes.byteLength;
     if (admittedByteLimit !== undefined && nextDecodedBytes > admittedByteLimit) {
@@ -806,7 +727,10 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       throw new SyncPageAccumulationLimitError('quads', nextDecodedRows, profile.maxRows);
     }
     decodedBytesReceived = nextDecodedBytes; decodedRowsReceived = nextDecodedRows;
-    return decodeSyncResponse(decoded.bytes);
+    // The response validator already decoded these wire bytes (GH#1665). Reuse
+    // that text unless the negotiated decode produced new bytes, which only an
+    // inflated gzip frame does.
+    return decoded.bytes === page.bytes ? page.body : decodeSyncResponse(decoded.bytes);
   };
   let acceptedHeapBytesEstimate = 0;
   let responsePages = 0;
@@ -860,55 +784,80 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
     }
     : undefined;
 
+  const retainResponderSession = () => {
+    if (!responderSession) return;
+    // Fetch owns the token's liveness, not durable progress. Keep its raw
+    // coordinate paired with the verified starting boundary until settlement
+    // commits a new boundary. Fetched progress belongs only to the result.
+    persistUnfinishedSyncResponderSession(checkpointStore, checkpointKey, {
+      ...responderSession,
+      expiresAt: responsePages > 0
+        ? Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS : responderSession.expiresAt,
+    }, manifestDigest, manifestPrefixDigestAtOffset?.(resumedFromOffset),
+    !includeSharedMemory && phase === 'data' && manifestDigest !== undefined
+      ? rawResumedFromOffset : offset);
+  };
+
   const requestPage = async (
     requestOffset: number,
     selectPageSize: () => number,
     onRetry: (attempt: number, delay: number, error: unknown) => void,
-  ): Promise<Uint8Array> => sendSyncRequest({
-    remotePeerId,
-    // Leave part of this round for a fresh request after a stalled attempt.
-    // Recompute after authentication on every retry; transport admission then
-    // applies the remaining monotonic private-job allowance.
-    timeoutMs: syncPageTimeoutMs,
-    attemptTimeoutMs: ({ remainingAttempts }) => Math.min(
-      syncPageTimeoutMs,
-      Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
-    ),
-    workAdmission,
-    retryAttempts: syncPageRetryAttempts,
-    signal,
-    contextGraphId,
-    offset: requestOffset,
-    protocolId: protocolSync,
-    plane: syncPlaneFor(includeSharedMemory),
-    phase,
-    requestFactory: async () => {
-      throwIfAborted(signal);
-      successfulPageSize = selectPageSize();
-      const request = await buildSyncRequest(
-        contextGraphId,
-        requestOffset,
-        successfulPageSize,
-        includeSharedMemory,
-        remotePeerId,
-        phase,
-        snapshotRef,
-        sinceBatchId,
-        syncSessionId,
-        recovery,
-        assetUals,
-      );
-      throwIfAborted(signal);
-      return request;
-    },
-    send,
-    validateResponse: (responseBytes) => {
-      if (decodeSyncResponse(responseBytes) === LEGACY_SYNC_BUSY_RESPONSE) {
-        throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
-      }
-    },
-    onRetry,
-  });
+  ): Promise<{ bytes: Uint8Array; body: string }> => {
+    // Validation and parsing share this one decoded body. Keep it scoped to a
+    // single page request so a rejected retry can never leak its sentinel or
+    // payload into a later accepted attempt.
+    let decodedBody: string | undefined;
+    const bytes = await sendSyncRequest({
+      remotePeerId,
+      // Leave part of this round for a fresh request after a stalled attempt.
+      // Recompute after authentication on every retry; transport admission then
+      // applies the remaining monotonic private-job allowance.
+      timeoutMs: syncPageTimeoutMs,
+      attemptTimeoutMs: ({ remainingAttempts }) => Math.min(
+        syncPageTimeoutMs,
+        Math.max(1, Math.floor(Math.max(0, params.deadline - Date.now()) / remainingAttempts)),
+      ),
+      workAdmission,
+      retryAttempts: syncPageRetryAttempts,
+      signal,
+      contextGraphId,
+      offset: requestOffset,
+      protocolId: protocolSync,
+      plane: syncPlaneFor(includeSharedMemory),
+      phase,
+      requestFactory: async () => {
+        throwIfAborted(signal);
+        successfulPageSize = selectPageSize();
+        const request = await buildSyncRequest(
+          contextGraphId,
+          requestOffset,
+          successfulPageSize,
+          includeSharedMemory,
+          remotePeerId,
+          phase,
+          snapshotRef,
+          sinceBatchId,
+          syncSessionId,
+          recovery,
+          assetUals,
+        );
+        throwIfAborted(signal);
+        return request;
+      },
+      send,
+      validateResponse: (responseBytes) => {
+        decodedBody = decodeSyncResponse(responseBytes);
+        if (decodedBody === LEGACY_SYNC_BUSY_RESPONSE) {
+          throw makeLegacySyncBusyError(remotePeerId, contextGraphId, phase);
+        }
+      },
+      onRetry,
+    });
+    if (decodedBody === undefined) {
+      throw new Error('Sync response validator did not decode the accepted page');
+    }
+    return { bytes, body: decodedBody };
+  };
 
   try {
     if (
@@ -925,7 +874,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
         syncPageSize,
         Math.max(adaptivePageSizer.current(), SYNC_PAGE_SIZE + 1),
       );
-      const primeBytes = await requestPage(
+      const primePage = await requestPage(
         0,
         () => primePageSize,
         (attempt, delay, err) => {
@@ -936,6 +885,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
           );
         },
       );
+      const primeBytes = primePage.bytes;
       throwIfAborted(signal);
       const nextBytesReceived = bytesReceived + primeBytes.byteLength;
       if (admittedByteLimit !== undefined && nextBytesReceived > admittedByteLimit) {
@@ -945,7 +895,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       }
       let primeBody: string;
       try {
-        primeBody = await decodePage(primeBytes);
+        primeBody = await decodePage(primePage);
       } catch (error) {
         // The priming response crossed the wire too. A malformed compressed
         // body or resource refusal cannot be treated as a retryable transport
@@ -986,7 +936,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       // The shared request helper rebuilds auth material on every attempt and
       // is also used by generation priming, so both modes keep identical
       // transport/replay semantics.
-      const responseBytes = await requestPage(
+      const responsePage = await requestPage(
         curOffset,
         () => adaptivePageSizer.current(),
         (attempt, delay, err) => {
@@ -997,6 +947,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
           logWarn(ctx, `Sync page retry ${attempt}/${syncPageRetryAttempts} for offset ${offset} (delay ${Math.round(delay)}ms${pageSizeNote}): ${err instanceof Error ? err.message : String(err)}`);
         },
       );
+      const responseBytes = responsePage.bytes;
       const transportDurationMs = Date.now() - transportStartedAt;
       throwIfAborted(signal);
       responsePages += 1;
@@ -1016,7 +967,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       let parseDurationMs = 0;
       try {
         const decodeStartedAt = Date.now();
-        const nquadsText = await decodePage(responseBytes);
+        const nquadsText = await decodePage(responsePage);
         decodeDurationMs = Date.now() - decodeStartedAt;
         bytesReceived = nextBytesReceived;
         if (
@@ -1099,7 +1050,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       // probes upward only after sustained success, at most doubling each time.
       adaptivePageSizer.onPageSuccess();
 
-      if (shouldStopAfterPage?.({ resumedFromOffset, nextOffset: offset })) {
+      if (shouldStopAfterPage?.({ resumedFromOffset, nextOffset: offset, acceptedQuads: allQuads.length, acceptedHeapBytesEstimate, pageQuads: parsed.quads })) {
         yielded = true;
         break;
       }
@@ -1194,24 +1145,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
         // one page with this token: keep the session so a retry can resume from
         // the last certified checkpoint. Recovery never persists a responder
         // session to resume (see the timeout branch below + Codex #1173).
-        const refreshedResponderSession = responsePages > 0
-          ? {
-              ...responderSession,
-              // The responder touches both its token and immutable row-list
-              // TTL on every successfully served page. Mirror that sliding
-              // expiry locally so a long, progressing snapshot is not forced
-              // back to offset zero merely because it crossed ten minutes.
-              expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
-            }
-          : responderSession;
-        persistUnfinishedSyncResponderSession(
-          checkpointStore,
-          checkpointKey,
-          refreshedResponderSession,
-          manifestDigest,
-          manifestPrefixDigestAtOffset?.(resumedFromOffset),
-          offset,
-        );
+        retainResponderSession();
       }
     }
     if (
@@ -1340,20 +1274,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
       // even without a process restart. Persistent stores additionally write
       // the token through setResponderSession(); the process-local path keeps
       // older/custom checkpoint stores correct within one daemon lifetime.
-      const refreshedResponderSession = responsePages > 0
-        ? {
-            ...responderSession,
-            expiresAt: Date.now() + DURABLE_DATA_SYNC_SESSION_TTL_MS,
-          }
-        : responderSession;
-      persistUnfinishedSyncResponderSession(
-        checkpointStore,
-        checkpointKey,
-        refreshedResponderSession,
-        manifestDigest,
-        manifestPrefixDigestAtOffset?.(resumedFromOffset),
-        offset,
-      );
+      retainResponderSession();
     } else {
       forgetUnfinishedSyncResponderSession(checkpointStore, checkpointKey);
     }
@@ -1378,9 +1299,7 @@ async function fetchSyncPagesWithState(params: AdmittedFetchSyncPagesParams): Pr
 
   return {
     quads: allQuads,
-    ...(hasCompleteQuadRawOffsetMapping
-      ? { quadRawOffsets: allQuadRawOffsets }
-      : {}),
+    ...(hasCompleteQuadRawOffsetMapping ? { quadRawOffsets: allQuadRawOffsets } : {}),
     bytesReceived,
     decodedBytesReceived,
     resumedFromOffset,

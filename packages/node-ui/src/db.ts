@@ -1321,6 +1321,8 @@ export class DashboardDB {
     // idempotent and keeps the audit bound fail-closed on every open.
     ensureJoinPolicyAuditCapTrigger();
 
+    // Historical V29 schema is retained for compatibility. Its rows are no
+    // longer read, written or pruned by VM reconcile (GH#2990).
     if (version < 29) {
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS vm_reconcile_negative_cache (
@@ -1466,7 +1468,6 @@ export class DashboardDB {
     // Reconcile negatives are accelerators, never historical records. Once the
     // retry window elapses they must not survive indefinitely or accumulate one
     // row per previously-seen KA across restarts.
-    this.db.prepare(`DELETE FROM vm_reconcile_negative_cache WHERE next_retry_at < ?`).run(Date.now());
     // Universal Messenger idempotency table. Shorter TTL than the
     // operator retention: no realistic dedup window extends beyond
     // a day. The protocol_outbox table is intentionally not pruned
@@ -2080,47 +2081,6 @@ export class DashboardDB {
 
   private contextGraphJoinPolicyKey(contextGraphId: string): string {
     return `contextGraphJoinPolicy:${contextGraphId}`;
-  }
-
-  upsertVmReconcileNegative(record: VmReconcileNegativeRow): void {
-    this.stmt('upsertVmReconcileNegative', `
-      INSERT INTO vm_reconcile_negative_cache (
-        cache_key, context_graph_id, failures, next_retry_at, swm_gen,
-        candidate_namespaces, peer_topology_key, updated_at
-      ) VALUES (
-        @cache_key, @context_graph_id, @failures, @next_retry_at, @swm_gen,
-        @candidate_namespaces, @peer_topology_key, @updated_at
-      )
-      ON CONFLICT(cache_key) DO UPDATE SET
-        context_graph_id = excluded.context_graph_id,
-        failures = excluded.failures,
-        next_retry_at = excluded.next_retry_at,
-        swm_gen = excluded.swm_gen,
-        candidate_namespaces = excluded.candidate_namespaces,
-        peer_topology_key = excluded.peer_topology_key,
-        updated_at = excluded.updated_at
-    `).run(record);
-  }
-
-  getVmReconcileNegative(cacheKey: string): VmReconcileNegativeRow | undefined {
-    return this.stmt(
-      'getVmReconcileNegative',
-      'SELECT * FROM vm_reconcile_negative_cache WHERE cache_key = ?',
-    ).get(cacheKey) as VmReconcileNegativeRow | undefined;
-  }
-
-  deleteVmReconcileNegative(cacheKey: string): void {
-    this.stmt(
-      'deleteVmReconcileNegative',
-      'DELETE FROM vm_reconcile_negative_cache WHERE cache_key = ?',
-    ).run(cacheKey);
-  }
-
-  deleteVmReconcileNegativesForContextGraph(contextGraphId: string): void {
-    this.stmt(
-      'deleteVmReconcileNegativesForContextGraph',
-      'DELETE FROM vm_reconcile_negative_cache WHERE context_graph_id = ?',
-    ).run(contextGraphId);
   }
 
   upsertSelectedVmReconcileCursor(record: SelectedVmReconcileCursorRow): void {
@@ -3732,17 +3692,6 @@ export interface ContextGraphReadinessProvenance {
   durableVerified: boolean;
   sharedMemoryVerified: boolean;
   updatedAt: number;
-}
-
-export interface VmReconcileNegativeRow {
-  cache_key: string;
-  context_graph_id: string;
-  failures: number;
-  next_retry_at: number;
-  swm_gen: string;
-  candidate_namespaces: string;
-  peer_topology_key: string;
-  updated_at: number;
 }
 
 export interface SelectedVmReconcileCursorRow {
