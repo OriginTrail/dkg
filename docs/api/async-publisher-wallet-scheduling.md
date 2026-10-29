@@ -1,6 +1,7 @@
 # Async publisher wallet scheduling
 
-The daemon rotates sparse publishing work across free publisher wallets. It orders wallet
+The daemon rotates sparse publishing work across free publisher wallets. Funding observations
+for free lanes start concurrently. The runner then orders wallet
 selection and durable claims, then releases that scheduling turn immediately after the claim
 is recorded: up to all configured wallets can execute concurrently. A busy wallet is skipped;
 wallets with different service times are not expected to finish equal numbers of jobs.
@@ -26,6 +27,10 @@ worker proves the publish was never dispatched and the durable job carries no tr
 history. The immutable request, admission identity and original acceptance timestamp stay the
 same. The claim/recovery journal records the transition and previous wallet. Historical failed
 jobs are not silently revived.
+
+The runtime explicitly selects `fundingRecoveryPolicy: 'proof-first'`. Library consumers keep
+the legacy failure policy by default; installing an eligibility observer does not change that
+durable recovery contract. Both execution paths use the same failure-disposition decision.
 
 A signed transaction already recorded by the write-ahead boundary is different. Insufficient
 funds reported after that boundary does not erase its hash or release its nonce. A prior

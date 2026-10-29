@@ -9,12 +9,16 @@ import {
 import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 import { isRpcPreconditionError } from './ack-errors.js';
 import type { ExecutionFailureEvidence } from './async-lift-publisher-types.js';
-import { isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
+import { isDefinitivePreAcceptanceSendFailure, isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
+import { isPublisherFundingFailure } from './async-lift-wallet-funding.js';
+import { buildLiftJobAcceptedReset, getLiftJobTransactionEvidence, isKnowledgeAssetVmPublishJobRequest } from './async-lift-publisher-utils.js';
 import {
   createLiftJobFailureMetadata,
   type LiftJobFailureCode,
   type LiftJobFailureMetadata,
   type LiftJobState,
+  type LiftJob,
+  type LiftJobAccepted,
 } from './lift-job.js';
 import { isStoreOperationProvenNotStarted } from './promote-replay-safety.js';
 import { isKnowledgeAssetWorkspaceHeadCorruptError } from './workspace-resolution.js';
@@ -192,6 +196,40 @@ export interface ExecutionFailureInput {
   readonly evidence?: ExecutionFailureEvidence;
   /** Lazy: read only when a timeout is recorded, so a clock that advances per call is read as often as ever. */
   readonly now: () => number;
+}
+
+export type ExecutionFailureDisposition =
+  | { readonly kind: 'retain' }
+  | { readonly kind: 'reset'; readonly job: LiftJobAccepted }
+  | { readonly kind: 'fail'; readonly failure: LiftJobFailureMetadata };
+
+/** One durable decision for both executor paths. Eligibility/cooldowns grant no replay authority. */
+export function executionFailureDisposition(
+  input: ExecutionFailureInput, current: LiftJob, policy: 'legacy' | 'proof-first',
+): ExecutionFailureDisposition {
+  if (current.status === 'broadcast' || current.status === 'included') {
+    const legacyNamedAmbiguity = isKnowledgeAssetVmPublishJobRequest(current.request)
+      && input.evidence?.neverDispatched === false && !isDefinitivePreAcceptanceSendFailure(input.error);
+    if (policy === 'proof-first' || legacyNamedAmbiguity) return { kind: 'retain' };
+  }
+  if (policy === 'proof-first' && isPublisherFundingFailure(input.error)
+    && getLiftJobTransactionEvidence(current)
+    && !(current.recovery?.action === 'reset_to_accepted' && current.recovery.txHashAccounted === true)) {
+    return { kind: 'fail', failure: createLiftJobFailureMetadata({
+      failedFromState: 'broadcast', code: 'wallet_unavailable',
+      message: 'A prior signed publication remains unresolved; reconcile its transaction before selecting another wallet',
+      errorPayloadRef: `urn:dkg:publisher:error:${current.jobId}`,
+    }) };
+  }
+  if (policy === 'proof-first' && isPublisherFundingFailure(input.error)
+    && input.evidence?.neverDispatched === true && current.status === 'validated'
+    && !getLiftJobTransactionEvidence(current)) {
+    return { kind: 'reset', job: buildLiftJobAcceptedReset(current, {
+      now: input.now(), recoveredFrom: 'validated', txHashChecked: undefined, stampRetriedAt: false,
+      walletIdChecked: current.claim.walletId,
+    }) };
+  }
+  return { kind: 'fail', failure: mapExecutionFailure(input) };
 }
 
 /**

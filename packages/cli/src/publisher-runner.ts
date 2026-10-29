@@ -662,6 +662,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     );
     // Recovered verdicts carry canonical evidence so the finalizer never repeats verification.
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
+      fundingRecoveryPolicy: 'proof-first',
       walletEligibility: new AsyncLiftWalletFunding(new Map(wallets.map(({ address, chain }) =>
         [address, chain.getPublisherGasFunding?.bind(chain)]))),
       chainProofResolver: hasChainRecovery ? createChainProofResolver(chainAdapters) : undefined,

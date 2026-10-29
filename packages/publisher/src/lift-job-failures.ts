@@ -203,7 +203,7 @@ export const LIFT_JOB_FAILURE_POLICIES: Record<LiftJobFailureCode, BuiltInLiftJo
   validation_timeout: { code: 'validation_timeout', phase: 'validation', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
   // DEAD CODE — no production producer; see the dead-code follow-up.
   wallet_claim_timeout: { code: 'wallet_claim_timeout', phase: 'broadcast', mode: 'timeout', retryable: true, resolution: 'reset_to_accepted', timeoutHandling: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
-  // DEAD CODE — no production producer; see the dead-code follow-up.
+  // Also holds an inherited transaction whose current attempt cannot fund publication.
   wallet_unavailable: { code: 'wallet_unavailable', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: false },
   quorum_unmet: { code: 'quorum_unmet', phase: 'broadcast', mode: 'retryable', retryable: true, resolution: 'reset_to_accepted', provenIneffective: false, autoRetry: true },
   // The adapter rejects this before signing or broadcasting. A bounded retry can

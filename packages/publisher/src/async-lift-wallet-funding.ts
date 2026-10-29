@@ -1,29 +1,10 @@
 import type { PublisherGasFundingObservation } from '@origintrail-official/dkg-chain';
 import { claimTrace } from './async-lift-claim-trace.js';
 import { isDefinitivePreAcceptanceSendFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
-import type { LiftJob } from './lift-job.js';
-import { buildLiftJobAcceptedReset, getLiftJobTransactionEvidence } from './async-lift-publisher-utils.js';
-import type { LiftJobTransitionScope } from './lift-job-transition-scope.js';
-import type { ExecutionFailureEvidence } from './async-lift-publisher-types.js';
 
 export function isPublisherFundingFailure(error: unknown): boolean {
   return readPublishErrorFacts(error).code === 'PUBLISHER_GAS_FUNDING_UNAVAILABLE'
     || isDefinitivePreAcceptanceSendFailure(error);
-}
-
-/** Only the fenced worker's positional no-dispatch proof authorizes this same-job reset. */
-export async function deferUndispatchedFunding(
-  policy: AsyncLiftWalletEligibility | undefined, current: LiftJob, scope: LiftJobTransitionScope,
-  error: unknown, evidence: ExecutionFailureEvidence | undefined, now: () => number,
-): Promise<LiftJob | undefined> {
-  if (!policy || !isPublisherFundingFailure(error)) return undefined;
-  if (current.claim?.walletId) policy.defer(current.claim.walletId);
-  if (evidence?.neverDispatched !== true || current.status !== 'validated'
-    || getLiftJobTransactionEvidence(current)) return undefined;
-  return scope.commitRecoveryReset(buildLiftJobAcceptedReset(current, {
-    now: now(), recoveredFrom: 'validated', txHashChecked: undefined, stampRetriedAt: false,
-    walletIdChecked: current.claim.walletId,
-  }));
 }
 
 export interface AsyncLiftWalletEligibility {

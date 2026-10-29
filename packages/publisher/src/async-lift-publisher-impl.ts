@@ -1,5 +1,5 @@
 import { atLiftValidationStage } from './lift-validation-error.js';
-import { deferUndispatchedFunding, isPublisherFundingFailure } from './async-lift-wallet-funding.js';
+import { isPublisherFundingFailure } from './async-lift-wallet-funding.js';
 import { createAsyncLiftClaimControl } from './async-lift-claim-gate.js';
 import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
@@ -116,12 +116,11 @@ import type { LiftJobPage, LiftJobPageRequest } from './lift-job-page.js';
 import { isSafeJobId } from './job-id.js';
 import { persistLiftJobRecord } from './job-record-atomic-write.js';
 import {
-  isDefinitivePreAcceptanceSendFailure,
   mapPublishExceptionToLiftJobFailure,
   mapPublishResultToLiftJobSuccess,
   type AsyncLiftPublishFailureInput,
 } from './async-lift-publish-result.js';
-import { isKnowledgeAssetPublishPreconditionFailure, mapExecutionFailure } from './async-lift-execution-failure.js';
+import { isKnowledgeAssetPublishPreconditionFailure, executionFailureDisposition } from './async-lift-execution-failure.js';
 import { prepareAsyncPublishPayload, type AsyncPreparedPublishPayload, type LiftResolvedPublishSlice } from './async-lift-publish-options.js';
 import { validateLiftPublishPayload } from './async-lift-validation.js';
 import { computePrivateRootV10 } from './merkle.js';
@@ -596,6 +595,7 @@ export class TripleStoreAsyncLiftPublisher
   private readonly heldJobSettlement: HeldJobSettlementCapability;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly walletEligibility?: AsyncLiftPublisherConfig['walletEligibility'];
+  private readonly fundingRecoveryPolicy: 'legacy' | 'proof-first';
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
@@ -660,6 +660,7 @@ export class TripleStoreAsyncLiftPublisher
     config: AsyncLiftPublisherConfig = {},
   ) {
     this.walletEligibility = config.walletEligibility;
+    this.fundingRecoveryPolicy = config.fundingRecoveryPolicy ?? 'legacy';
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.queueScheduler = new AsyncLiftQueueScheduler(store, this.graphUri);
     this.chainObservations = LiftJobChainObservations.shared(store, this.graphUri);
@@ -800,7 +801,7 @@ export class TripleStoreAsyncLiftPublisher
     return await this.claimCoordinator.claimNext(walletId);
   }
 
-  private async prepareWalletClaim(walletId: string): Promise<boolean> {
+  async prepareWalletClaim(walletId: string): Promise<boolean> {
     if (!this.walletEligibility) return true;
     await this.ensureGraph();
     const candidates = await this.jobSelectors.claimCandidates(this.now());
@@ -1000,12 +1001,12 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async processNext(walletId: string): Promise<PersistedLiftJob | null> {
+    if (!await this.prepareWalletClaim(walletId)) return null;
     return this.processNextScheduled(walletId, () => {});
   }
 
   async processNextScheduled(walletId: string, onClaimed: () => void): Promise<PersistedLiftJob | null> {
     return traceProcessNext(walletId, async () => {
-      if (!await this.prepareWalletClaim(walletId)) return null;
       const outcome = await this.claimCoordinator.processClaim(
         walletId,
         async (session) => await this.jobHandlerFor(session.claim.request).process(session),
@@ -1113,10 +1114,6 @@ export class TripleStoreAsyncLiftPublisher
       },
     }));
     if (publishAttempt.kind === 'failed') {
-      if (this.walletEligibility && broadcastRecorder.outcome === 'recorded-durable') {
-        if (isPublisherFundingFailure(publishAttempt.error)) this.walletEligibility.defer(walletId);
-        return this.getRequiredJob(claimed.jobId);
-      }
       return await session.recordExecutionFailure(
         'broadcast',
         publishAttempt.error,
@@ -1279,20 +1276,6 @@ export class TripleStoreAsyncLiftPublisher
     });
     if (executionAttempt.kind === 'failed') {
       const error = executionAttempt.error;
-      // A durable write-ahead means the signed transaction may already be on the wire.
-      if (broadcastRecorder.outcome === 'recorded-durable'
-        && (this.walletEligibility || !isDefinitivePreAcceptanceSendFailure(error))) {
-        if (isPublisherFundingFailure(error)) this.walletEligibility?.defer(walletId);
-        // Ambiguous post-write-ahead failure — leave the job in 'broadcast' so recovery's
-        // interrupted-broadcast path reconciles it on chain, never resend. Receipt timeout is
-        // UNKNOWN, not failed. The tx-bearing job retains the wallet until
-        // chain proof finalizes, proves a revert, or proves create absence. The reconciliation
-        // demand poke for this job fires at the processNext ownership boundary, not here —
-        // this frame still holds the coordinator's active-processing marker.
-        return await this.getRequiredJob(claimed.jobId);
-      }
-      // Without runtime routing, preserve #1867's historical terminal classification.
-      // With routing, only a proven pre-dispatch failure may requeue this same job.
       return await this.failKnowledgeAssetVmPublishExecution(session, error, broadcastRecorder);
     }
     if (executionAttempt.value.kind === 'detached') {
@@ -3122,18 +3105,18 @@ export class TripleStoreAsyncLiftPublisher
     error: unknown,
     evidence?: ExecutionFailureEvidence,
   ): Promise<LiftJob> {
-    // What failed and how it is recorded is decided by the pure `mapExecutionFailure`; this method only
-    // reads the persisted record (under the transition lock) and persists the answer.
-    const deferred = await deferUndispatchedFunding(this.walletEligibility, current, scope, error, evidence, () => this.now());
-    if (deferred) return deferred;
-    return await this.commitFailure(current, scope, mapExecutionFailure({
+    if (isPublisherFundingFailure(error) && current.claim?.walletId) this.walletEligibility?.defer(current.claim.walletId);
+    const disposition = executionFailureDisposition({
       jobId: current.jobId,
       currentStatus: current.status,
       requestedOrigin: failedFromState,
       error,
       evidence,
       now: () => this.now(),
-    }));
+    }, current, this.fundingRecoveryPolicy);
+    if (disposition.kind === 'retain') return current;
+    if (disposition.kind === 'reset') return scope.commitRecoveryReset(disposition.job);
+    return this.commitFailure(current, scope, disposition.failure);
   }
 
   /**

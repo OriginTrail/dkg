@@ -216,12 +216,20 @@ export class AsyncLiftRunner {
   private async processWallet(walletId: string) {
     const scheduled = this.config.publisher.processNextScheduled;
     if (!scheduled) return this.config.publisher.processNext(walletId);
+    const prepare = this.config.publisher.prepareWalletClaim;
     const previous = this.claimTurn;
     let release!: () => void;
     this.claimTurn = new Promise<void>((resolve) => { release = resolve; });
+    // Observe rejection immediately while preparation overlaps the preceding claim turn.
+    const preparation = prepare && Promise.resolve().then(() => prepare.call(this.config.publisher, walletId)).then(
+      (eligible) => ({ eligible }), (error: unknown) => ({ error }),
+    );
     await previous;
     try {
+      const prepared = await preparation;
       if (this.stopped) return null;
+      if (prepared && 'error' in prepared) throw prepared.error;
+      if (prepared && !prepared.eligible) return null;
       // Only selection/claim is ordered. The durable claim acknowledgement immediately
       // admits the next free lane while this wallet's publisher continues independently.
       return await scheduled.call(this.config.publisher, walletId, release);

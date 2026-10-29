@@ -70,6 +70,53 @@ describe('async publisher wallet fairness (#3591)', () => {
       await stopping;
     } finally { vi.useRealTimers(); }
   });
+
+  it('overlaps six funding preparations but admits durable claims in selected order', async () => {
+    vi.useFakeTimers();
+    let prepareDone!: () => void, executeDone!: () => void;
+    const preparing = new Promise<void>((resolve) => { prepareDone = resolve; });
+    const executing = new Promise<void>((resolve) => { executeDone = resolve; });
+    const started: string[] = [];
+    const prepareWalletClaim = vi.fn(async () => { await preparing; return true; });
+    const publisher = createRunnerPublisher({ prepareWalletClaim,
+      processNextScheduled: async (walletId, claimed) => {
+        started.push(walletId); claimed(); await executing;
+        return { jobId: `job-${walletId}` } as LiftJob;
+      },
+    });
+    const runner = new AsyncLiftRunner({ publisher, walletIds: wallets });
+    try {
+      await runner.start();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(prepareWalletClaim).toHaveBeenCalledTimes(6);
+      expect(started).toEqual([]);
+      prepareDone(); await vi.advanceTimersByTimeAsync(0);
+      expect(started).toEqual(wallets);
+    } finally {
+      const stopping = runner.stop(); executeDone(); prepareDone();
+      await stopping; vi.useRealTimers();
+    }
+  });
+
+  it('settles started funding reads on stop without admitting a claim', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    const preparing = new Promise<void>((resolve) => { release = resolve; });
+    const scheduled = vi.fn(async () => null);
+    const publisher = createRunnerPublisher({
+      prepareWalletClaim: async () => { await preparing; return true; }, processNextScheduled: scheduled,
+    });
+    const runner = new AsyncLiftRunner({ publisher, walletIds: wallets });
+    try {
+      await runner.start(); await vi.advanceTimersByTimeAsync(0);
+      let stopped = false;
+      const stopping = runner.stop().then(() => { stopped = true; });
+      await vi.advanceTimersByTimeAsync(0);
+      expect(stopped).toBe(false);
+      release(); await stopping;
+      expect(scheduled).not.toHaveBeenCalled();
+    } finally { release(); await runner.stop(); vi.useRealTimers(); }
+  });
   it('rotates 60 isolated arrivals across all six free wallets', async () => {
     vi.useFakeTimers();
     const f = fixture();
