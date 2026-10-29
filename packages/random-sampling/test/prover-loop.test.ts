@@ -11,9 +11,10 @@ import { startProverLoop, type TickableProver } from '../src/prover-loop.js';
 import {
   classifyTickOutcome,
   type TickFailureKind,
-  type TickOutcome,
   type TickOutcomeHealth,
-} from '../src/prover.js';
+} from '../src/prover-health.js';
+import type { TickOutcome } from '../src/prover.js';
+import { ChallengeTickError } from '../src/prover-challenge-error.js';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
@@ -238,7 +239,7 @@ describe('startProverLoop 24h health window', () => {
       if (step instanceof Error) throw step;
       return step;
     });
-    const loop = startProverLoop({ prover, intervalMs: INTERVAL_MS, now: () => Date.now() });
+    const loop = startProverLoop({ prover, intervalMs: INTERVAL_MS });
     loop.start();
     await vi.advanceTimersByTimeAsync(0);
     const advance = async (ticks: number): Promise<void> => {
@@ -319,6 +320,19 @@ describe('startProverLoop 24h health window', () => {
       proofsSubmitted24h: 0,
       lastFailureClassification: 'error',
       lastFailureAt: new Date(START + 2 * INTERVAL_MS).toISOString(),
+    });
+    await loop.stop();
+  });
+
+  it('counts a thrown challenged period even when the next tick moves to a new period', async () => {
+    const { loop, advance } = await startScripted([
+      new ChallengeTickError(new Error('RPC failed after receiving challenge'), PERIOD_A),
+      { kind: 'submitted', txHash: '0xb', kaId: 3n, cgId: 2n, chunkId: 0n, period: PERIOD_B },
+    ]);
+    expect(loop.getStatus()).toMatchObject({ challengesReceived24h: 1, proofsSubmitted24h: 0 });
+    await advance(1);
+    expect(loop.getStatus()).toMatchObject({
+      challengesReceived24h: 2, proofsSubmitted24h: 1, lastFailureClassification: 'error',
     });
     await loop.stop();
   });

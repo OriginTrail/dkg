@@ -1,3 +1,4 @@
+import { ChallengeTickError } from './prover-challenge-error.js';
 /**
  * Random Sampling prover orchestrator.
  *
@@ -50,109 +51,9 @@ import {
 import { InMemoryProverWal } from './wal.js';
 import { SolvedPeriodSkip } from './solved-period-skip.js';
 
-/**
- * On-chain identity of the proof period a challenge-scoped outcome belongs to.
- * A node holds at most one challenge per proof period, so this pair is also the
- * node's challenge identity: the WAL's `PeriodKey` without the constant node id.
- */
-export interface ChallengePeriod {
-  readonly epoch: bigint;
-  readonly periodStartBlock: bigint;
-}
-
-/**
- * Outcome reported by `tick()`. The orchestrator's caller (the
- * agent's epoch loop) uses these to drive observability + retry
- * cadence — never to decide "should I tick again", because the next
- * tick is governed by chain state, not the previous outcome.
- *
- * Every outcome reached while holding a challenge carries its `period`, so
- * observers can tell repeated ticks on one challenge from distinct challenges.
- */
-export type TickOutcome =
-  /** Reserved. Currently unreachable — see `tickImpl` for why we no
-   *  longer trust view-side `isValid: false`. Kept in the union so
-   *  downstream consumers (`prover-loop`, `random-sampling-bind`)
-   *  can pattern-match on it without breakage if a stricter
-   *  period-closed gate is reintroduced (e.g. duration == 0). */
-  | { kind: 'period-closed' }
-  | { kind: 'no-challenge'; reason: 'no-eligible-cg' | 'no-eligible-kc' }
-  | { kind: 'already-solved'; period: ChallengePeriod }
-  | { kind: 'cg-not-found'; kaId: bigint; period: ChallengePeriod }
-  | { kind: 'kc-not-synced'; kaId: bigint; cgId: bigint; period: ChallengePeriod }
-  | {
-      kind: 'data-corrupted';
-      kaId: bigint;
-      cgId: bigint;
-      reason: 'root-mismatch' | 'leaf-count-mismatch' | 'meta-graph-bug';
-      period: ChallengePeriod;
-    }
-  | { kind: 'submit-stale'; period: ChallengePeriod }
-  | {
-      kind: 'submitted';
-      txHash: string;
-      kaId: bigint;
-      cgId: bigint;
-      chunkId: bigint;
-      period: ChallengePeriod;
-    }
-  | { kind: 'error'; error: Error };
-
-/** Outcome kinds that mean a tick made no proof progress. */
-export type TickFailureKind = Extract<
-  TickOutcome['kind'],
-  'cg-not-found' | 'kc-not-synced' | 'data-corrupted' | 'submit-stale' | 'error'
->;
-
-/** What one tick outcome contributes to the prover's health counters. */
-export interface TickOutcomeHealth {
-  /** Challenge (proof period) the tick worked on, or null when it held none. */
-  readonly challenge: ChallengePeriod | null;
-  /** Whether the tick submitted a proof for `challenge`. */
-  readonly proofSubmitted: boolean;
-  /** Failure classification, or null for a healthy outcome. */
-  readonly failure: TickFailureKind | null;
-}
-
-const NO_TICK_HEALTH_SIGNAL: TickOutcomeHealth = Object.freeze({
-  challenge: null,
-  proofSubmitted: false,
-  failure: null,
-});
-
-/**
- * Classify one outcome for health reporting. The switch is exhaustive over
- * `TickOutcome`, so a new kind fails compilation here until its health
- * semantics are decided.
- */
-export function classifyTickOutcome(outcome: TickOutcome): TickOutcomeHealth {
-  switch (outcome.kind) {
-    case 'period-closed':
-    case 'no-challenge':
-      return NO_TICK_HEALTH_SIGNAL;
-    case 'already-solved':
-      return { challenge: outcome.period, proofSubmitted: false, failure: null };
-    case 'submitted':
-      return { challenge: outcome.period, proofSubmitted: true, failure: null };
-    case 'cg-not-found':
-    case 'kc-not-synced':
-    case 'data-corrupted':
-    case 'submit-stale':
-      return { challenge: outcome.period, proofSubmitted: false, failure: outcome.kind };
-    case 'error':
-      // A thrown tick carries no challenge identity. A later tick in the same
-      // proof period still records that period.
-      return { challenge: null, proofSubmitted: false, failure: 'error' };
-    default: {
-      // Compile-time guard only: bookkeeping inside the prover loop must never
-      // throw, so an impossible runtime value contributes nothing.
-      const exhaustive: never = outcome;
-      void exhaustive;
-      return NO_TICK_HEALTH_SIGNAL;
-    }
-  }
-}
-
+import type { TickOutcome, ChallengePeriod } from './prover-outcome.js';
+export type { TickOutcome, ChallengePeriod } from './prover-outcome.js';
+export type { TickFailureKind } from './prover-health.js';
 export interface RandomSamplingProverDeps {
   chain: ChainAdapter;
   store: TripleStore;
@@ -332,7 +233,11 @@ export class RandomSamplingProver {
   /** Single-flight tick. Concurrent callers await the same result. */
   async tick(): Promise<TickOutcome> {
     if (this.inflight) return this.inflight;
-    this.inflight = this.tickImpl().finally(() => {
+    const observation: { period?: ChallengePeriod } = {};
+    this.inflight = this.tickImpl(observation).catch((error: unknown) => {
+      if (observation.period) throw new ChallengeTickError(error, observation.period);
+      throw error;
+    }).finally(() => {
       this.inflight = null;
     });
     return this.inflight;
@@ -521,7 +426,7 @@ export class RandomSamplingProver {
     }
   }
 
-  private async tickImpl(): Promise<TickOutcome> {
+  private async tickImpl(observation: { period?: ChallengePeriod }): Promise<TickOutcome> {
     if (
       !this.chain.getActiveProofPeriodStatus ||
       !this.chain.createChallenge ||
@@ -649,12 +554,14 @@ export class RandomSamplingProver {
     }
     if (currentExisting !== null && !currentExisting.solved && !unsolvedStale) {
       challenge = currentExisting;
+      observation.period = { epoch: challenge.epoch, periodStartBlock: challenge.activeProofPeriodStartBlock };
       observedDurationInBlocks = status.proofingPeriodDurationInBlocks;
       cgId = await this.chain.getKAContextGraphId(challenge.knowledgeAssetId);
     } else {
       try {
         const created = await this.chain.createChallenge();
         challenge = created.challenge;
+        observation.period = { epoch: challenge.epoch, periodStartBlock: challenge.activeProofPeriodStartBlock };
         // A challenge created by this transaction pins the then-effective
         // duration. Unlike an older challenge, it cannot carry a duration from
         // a previous epoch's schedule.

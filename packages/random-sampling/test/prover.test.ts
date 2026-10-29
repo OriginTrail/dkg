@@ -459,7 +459,7 @@ describe('RandomSamplingProver — mid-period update (content pinning)', () => {
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
 
     await expect(prover.tick()).resolves.toMatchObject({
-      kind: 'data-corrupted',
+      kind: 'data-corrupted', period: DEFAULT_PERIOD,
       reason: 'root-mismatch',
     });
     await store.delete([
@@ -482,7 +482,7 @@ describe('RandomSamplingProver — mid-period update (content pinning)', () => {
     }
 
     await expect(prover.tick()).resolves.toMatchObject({
-      kind: 'data-corrupted',
+      kind: 'data-corrupted', period: DEFAULT_PERIOD,
       reason: 'root-mismatch',
     });
     expect(submitProof).toHaveBeenCalledTimes(1);
@@ -537,7 +537,7 @@ describe('RandomSamplingProver — data-corruption retry cooldown', () => {
     const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID });
 
     await expect(prover.tick()).resolves.toMatchObject({
-      kind: 'data-corrupted',
+      kind: 'data-corrupted', period: DEFAULT_PERIOD,
       kaId: fixture.kaId,
       cgId: fixture.cgId,
       reason: 'leaf-count-mismatch',
@@ -558,7 +558,7 @@ describe('RandomSamplingProver — data-corruption retry cooldown', () => {
     // The cooldown is finite: the next tick attempts extraction again and
     // surfaces the mismatch instead of suppressing it forever.
     await expect(prover.tick()).resolves.toMatchObject({
-      kind: 'data-corrupted',
+      kind: 'data-corrupted', period: DEFAULT_PERIOD,
       reason: 'leaf-count-mismatch',
     });
     expect(querySpy.mock.calls.length).toBeGreaterThan(firstExtractQueries);
@@ -1552,6 +1552,48 @@ describe('RandomSamplingProver — short-circuits', () => {
     expect(repairMissingKnowledgeAsset).toHaveBeenCalledOnce();
     await prover.close();
   });
+
+  it.each(['existing-cg-lookup', 'challenge-wal', 'proof-submit', 'submitted-wal'] as const)(
+    'preserves the received period when %s throws', async (stage) => {
+      const fixture: KCFixture = {
+        cgId: 11n, kaId: 7n, ual: 'did:dkg:hardhat:31337/0xpub/7',
+        rootEntities: ['urn:e:1'],
+        publicTriples: [{ subject: 'urn:e:1', predicate: 'urn:p:k', object: '"a"' }],
+      };
+      const { root, leafCount } = await seedKC(store, fixture);
+      const failure = new Error('unmapped challenge failure');
+      const challenge = makeChallenge({ knowledgeAssetId: fixture.kaId, chunkId: 0n });
+      const chain = makeChain({
+        status: { activeProofPeriodStartBlock: 1000n, isValid: true },
+        challengeForNode: stage === 'existing-cg-lookup' ? challenge : null,
+        createChallenge: async () => ({ challenge, contextGraphId: fixture.cgId,
+          hash: '0x', blockNumber: 1, success: true }),
+        expectedRoot: root, expectedLeafCount: leafCount, cgIdForKc: fixture.cgId,
+        submitProof: async () => {
+          if (stage === 'proof-submit') throw failure;
+          return { hash: '0xproof', blockNumber: 1, success: true };
+        },
+      });
+      if (stage === 'existing-cg-lookup') {
+        vi.spyOn(chain, 'getKAContextGraphId').mockRejectedValue(failure);
+      }
+      const wal = new InMemoryProverWal();
+      const append = wal.append.bind(wal);
+      vi.spyOn(wal, 'append').mockImplementation(async (entry) => {
+        if ((stage === 'challenge-wal' && entry.status === 'challenge')
+          || (stage === 'submitted-wal' && entry.status === 'submitted')) throw failure;
+        await append(entry);
+      });
+      const prover = new RandomSamplingProver({ chain, store, identityId: IDENTITY_ID, wal });
+      try {
+        await expect(prover.tick()).rejects.toMatchObject({
+          message: failure.message, cause: failure, period: DEFAULT_PERIOD,
+        });
+      } finally {
+        await prover.close();
+      }
+    },
+  );
 
   it('returns submit-stale when submitProof throws ChallengeNoLongerActiveError', async () => {
     const fixture: KCFixture = {
