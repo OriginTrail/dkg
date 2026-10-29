@@ -64,12 +64,15 @@ interface ObservedChallenge {
 /** Process-local distinct-period health, expired by first observation time. */
 export class ProverHealth {
   private readonly challenges = new Map<string, ObservedChallenge>();
+  // Keep the current period's original identity even after its window expires.
+  // A long proof period or halted chain can keep returning it indefinitely.
+  private currentChallengeKey: string | null = null;
   private lastFailureClassification: TickFailureKind | null = null;
   private lastFailureAt: string | null = null;
 
   private prune(at: number): void {
     for (const [key, observed] of this.challenges) {
-      if (observed.firstSeenAt <= at - HEALTH_WINDOW_MS) this.challenges.delete(key);
+      if (key !== this.currentChallengeKey && observed.firstSeenAt <= at - HEALTH_WINDOW_MS) this.challenges.delete(key);
     }
   }
 
@@ -78,6 +81,7 @@ export class ProverHealth {
     const health = classifyTickOutcome(outcome);
     if (health.challenge !== null) {
       const key = `${health.challenge.epoch}:${health.challenge.periodStartBlock}`;
+      this.currentChallengeKey = key;
       let observed = this.challenges.get(key);
       if (observed === undefined) {
         observed = { firstSeenAt: at, proofSubmitted: false };
@@ -93,12 +97,15 @@ export class ProverHealth {
 
   snapshot(at: number) {
     this.prune(at);
+    let challengesReceived24h = 0;
     let proofsSubmitted24h = 0;
     for (const observed of this.challenges.values()) {
+      if (observed.firstSeenAt <= at - HEALTH_WINDOW_MS) continue;
+      challengesReceived24h += 1;
       if (observed.proofSubmitted) proofsSubmitted24h += 1;
     }
     return {
-      challengesReceived24h: this.challenges.size,
+      challengesReceived24h,
       proofsSubmitted24h,
       lastFailureClassification: this.lastFailureClassification,
       lastFailureAt: this.lastFailureAt,

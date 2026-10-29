@@ -337,6 +337,19 @@ describe('startProverLoop 24h health window', () => {
     await loop.stop();
   });
 
+  it.each([true, false])('keeps an expired current period excluded when read before its next tick: %s', async (readBeforeTick) => {
+    const { loop, advance } = await startScripted([
+      { kind: 'submitted', txHash: '0xa', kaId: 1n, cgId: 2n, chunkId: 0n, period: PERIOD_A },
+      { kind: 'already-solved', period: PERIOD_A },
+      { kind: 'already-solved', period: PERIOD_A },
+    ]);
+    vi.setSystemTime(START + DAY_MS);
+    if (readBeforeTick) expect(loop.getStatus()).toMatchObject({ challengesReceived24h: 0, proofsSubmitted24h: 0 });
+    await advance(2);
+    expect(loop.getStatus()).toMatchObject({ challengesReceived24h: 0, proofsSubmitted24h: 0, submittedCount: 1 });
+    await loop.stop();
+  });
+
   it('drops a period 24 hours after it was first seen', async () => {
     const { loop, advance } = await startScripted([
       { kind: 'submitted', txHash: '0xa', kaId: 1n, cgId: 2n, chunkId: 0n, period: PERIOD_A },
