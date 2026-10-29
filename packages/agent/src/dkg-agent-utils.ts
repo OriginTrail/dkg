@@ -15,6 +15,7 @@
 
 import type { Quad } from '@origintrail-official/dkg-storage';
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { selectVerifiedDurableSyncQuads } from './sync/durable-integrity.js';
 
 export type JsonLdDocument = Record<string, unknown> | Record<string, unknown>[];
@@ -68,8 +69,8 @@ export function strip(s: string): string {
 
 export function stripLiteral(s: string): string {
   if (s.startsWith('"') && s.endsWith('"')) return unescapeLiteralContent(s.slice(1, -1));
-  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return unescapeLiteralContent(match[1]);
+  const body = rdfLiteralBody(s);
+  if (body !== undefined) return unescapeLiteralContent(body);
   return s;
 }
 

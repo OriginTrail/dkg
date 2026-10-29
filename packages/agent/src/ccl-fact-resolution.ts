@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { DKG_ONTOLOGY, contextGraphDataUri, contextGraphSharedMemoryUri, contextGraphDataGraphUri, contextGraphWorkspaceGraphUri, sparqlString } from '@origintrail-official/dkg-core';
 import { DKG_ENDORSES } from './endorse.js';
 import type { TripleStore } from '@origintrail-official/dkg-storage';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import type { CclFactTuple } from './ccl-evaluator.js';
 
 const CCL_FACT_NS = 'https://example.org/ccl-fact#';
@@ -213,8 +214,8 @@ function strip(value: string): string {
 
 function stripLiteral(s: string): string {
   if (s.startsWith('"') && s.endsWith('"')) return unescapeLiteralContent(s.slice(1, -1));
-  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return unescapeLiteralContent(match[1]);
+  const body = rdfLiteralBody(s);
+  if (body !== undefined) return unescapeLiteralContent(body);
   return s;
 }
 

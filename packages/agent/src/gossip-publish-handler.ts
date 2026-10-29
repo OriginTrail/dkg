@@ -32,6 +32,7 @@ import {
   validatePublishRequest, parseSimpleNQuads, ensureSubGraphRegistration,
   type KAMetadata,
 } from '@origintrail-official/dkg-publisher';
+import { rdfLiteralBody } from '@origintrail-official/dkg-rdf-utils';
 import { ethers } from 'ethers';
 import type { ContextGraphMetaRecord } from './context-graph-meta-projection.js';
 import type {
@@ -1043,7 +1044,5 @@ export class GossipPublishHandler {
 
 function stripLiteral(s: string): string {
   if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
-  const match = s.match(/^"(.*)"(\^\^.*|@.*)?$/);
-  if (match) return match[1];
-  return s;
+  return rdfLiteralBody(s) ?? s;
 }
