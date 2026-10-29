@@ -8,6 +8,7 @@ import { createServer, request as httpRequest, type Server, type ServerResponse 
 import type { AddressInfo } from 'node:net';
 import { Readable } from 'node:stream';
 import { mkdtemp, readdir, readFile, rm, stat, writeFile } from 'node:fs/promises';
+import type { Profiler } from 'node:inspector';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { dkgDir } from '../src/config.js';
@@ -35,7 +36,7 @@ const AGENT = requestAuthentication({ kind: 'agent', agentAddress: '0x0000000000
 const OPERATOR = requestAuthentication({ kind: 'nodeOperator' });
 const AUTH_DISABLED = requestAuthentication({ kind: 'anonymous', mode: 'disabled' });
 
-const PROFILE = {
+const PROFILE: Profiler.Profile = {
   nodes: [{ id: 1, callFrame: { functionName: '(root)', scriptId: '0', url: '', lineNumber: -1, columnNumber: -1 }, hitCount: 1, children: [] }],
   startTime: 1_000,
   endTime: 2_000,
@@ -45,9 +46,16 @@ const PROFILE = {
 
 type ProfilerMethod = 'Profiler.enable' | 'Profiler.start' | 'Profiler.stop';
 
-/** An inspector stand-in that records every session call in order. */
+/** An inspector stand-in, typed by the recorder's session contract, that records every call in order. */
 function fakeInspector(fail: { open?: boolean; connect?: boolean; method?: ProfilerMethod } = {}) {
   const calls: string[] = [];
+  function post(method: 'Profiler.enable' | 'Profiler.start'): Promise<void>;
+  function post(method: 'Profiler.stop'): Promise<Profiler.StopReturnType>;
+  async function post(method: ProfilerMethod): Promise<void | Profiler.StopReturnType> {
+    calls.push(method);
+    if (method === fail.method) throw new Error(`${method} failed`);
+    return method === 'Profiler.stop' ? { profile: PROFILE } : undefined;
+  }
   const openSession = async (): Promise<CpuProfilerSession> => {
     if (fail.open) throw new Error('inspector is not available in this build');
     return {
@@ -55,11 +63,7 @@ function fakeInspector(fail: { open?: boolean; connect?: boolean; method?: Profi
         calls.push('connect');
         if (fail.connect) throw new Error('connect refused');
       },
-      async post(method: string) {
-        calls.push(method);
-        if (method === fail.method) throw new Error(`${method} failed`);
-        return method === 'Profiler.stop' ? { profile: PROFILE } : undefined;
-      },
+      post,
       disconnect() { calls.push('disconnect'); },
     };
   };
@@ -95,6 +99,7 @@ beforeEach(async () => {
 afterEach(async () => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  vi.unstubAllEnvs();
   await rm(directory, { recursive: true, force: true });
 });
 
@@ -131,11 +136,13 @@ describe('CPU profile request', () => {
     expect('error' in parsed && parsed.error).toMatch(error);
   });
 
-  it('gives the client the clamped recording plus a grace for writing', () => {
+  it('gives the client the clamped recording plus a grace for writing, in whole milliseconds', () => {
     expect(cpuProfileRequestTimeoutMs()).toBe(70_000);
     expect(cpuProfileRequestTimeoutMs(30)).toBe(90_000);
     expect(cpuProfileRequestTimeoutMs(600)).toBe(120_000);
     expect(cpuProfileRequestTimeoutMs(0.2)).toBe(61_000);
+    // AbortSignal.timeout refuses a fractional delay.
+    expect(cpuProfileRequestTimeoutMs(1.2345)).toBe(61_235);
   });
 });
 
@@ -373,8 +380,10 @@ describe('POST /api/diagnostics/cpu-profile', () => {
   });
 
   it('records into the diagnostics directory of the node home by default', async () => {
+    vi.stubEnv('DKG_HOME', directory);
     const answer = await callRoute(OPERATOR, { directory: null });
-    expect(answer.record).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ directory: join(dkgDir(), 'diagnostics') }));
+    expect(dkgDir()).toBe(directory);
+    expect(answer.record).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ directory: join(directory, 'diagnostics') }));
   });
 
   it.each([
@@ -437,6 +446,9 @@ describe('POST /api/diagnostics/cpu-profile', () => {
   });
 
   it('is reached through the daemon router, behind the same gate', async () => {
+    // The router uses the daemon's own recorder; anything it recorded would
+    // land in this test's temporary node home, never in a real one.
+    vi.stubEnv('DKG_HOME', directory);
     const dispatch = async (authentication: AllowedHttpAuthentication, body: string) => {
       const res = fakeRes();
       await handleRequest({

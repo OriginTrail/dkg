@@ -82,7 +82,7 @@ describe('dkg debug cpu-profile', () => {
     expect(f.connect).not.toHaveBeenCalled();
   });
 
-  it.each([
+  it.each<[Error | string, RegExp]>([
     [ApiClient.httpError(403, 'POST /api/diagnostics/cpu-profile requires a node-level admin token; agent-scoped tokens cannot record a CPU profile of the node.'),
       /requires a node-level admin token/],
     [ApiClient.httpError(409, 'A CPU profile is already being recorded on this node; try again when it ends.'), /already being recorded/],
@@ -117,13 +117,16 @@ describe('ApiClient.recordCpuProfile', () => {
 
     await expect(client.recordCpuProfile(30)).resolves.toEqual(RESULT);
     await expect(client.recordCpuProfile()).resolves.toEqual(RESULT);
+    // The node takes any positive duration; its deadline is whole milliseconds.
+    await expect(client.recordCpuProfile(1.2345)).resolves.toEqual(RESULT);
 
     expect(calls.map(({ url, init }) => [url, init.method, init.body])).toEqual([
       ['http://127.0.0.1:9200/api/diagnostics/cpu-profile', 'POST', '{"seconds":30}'],
       ['http://127.0.0.1:9200/api/diagnostics/cpu-profile', 'POST', '{}'],
+      ['http://127.0.0.1:9200/api/diagnostics/cpu-profile', 'POST', '{"seconds":1.2345}'],
     ]);
     expect((calls[0].init.headers as Record<string, string>).Authorization).toBe('Bearer operator-token');
     // The recording plus a minute, even where the long deadline is shorter.
-    expect(deadlines).toEqual([90_000, 70_000]);
+    expect(deadlines).toEqual([90_000, 70_000, 61_235]);
   });
 });

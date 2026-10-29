@@ -9,13 +9,15 @@
 // so the test runner's coverage is not lost.
 
 import { mkdir, writeFile } from 'node:fs/promises';
+import type { Profiler } from 'node:inspector';
 import { join } from 'node:path';
 import type { CpuProfileResult } from '../cpu-profile-wire.js';
 
-/** The part of a `node:inspector/promises` Session the recorder uses. */
+/** The part of a `node:inspector/promises` Session the recorder uses, with its response types. */
 export interface CpuProfilerSession {
   connect(): void;
-  post(method: string): Promise<unknown>;
+  post(method: 'Profiler.enable' | 'Profiler.start'): Promise<void>;
+  post(method: 'Profiler.stop'): Promise<Profiler.StopReturnType>;
   disconnect(): void;
 }
 
@@ -103,7 +105,7 @@ export class CpuProfileRecorder {
       const timer = setTimeout(() => wake(false), recording.seconds * 1000);
       const stoppedEarly = await woken;
       clearTimeout(timer);
-      const { profile } = await session.post('Profiler.stop') as { profile: unknown };
+      const { profile } = await session.post('Profiler.stop');
       const recordedMs = this.#now() - startedAt;
       const json = JSON.stringify(profile);
       await mkdir(recording.directory, { recursive: true, mode: 0o700 });

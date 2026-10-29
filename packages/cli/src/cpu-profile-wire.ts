@@ -56,8 +56,11 @@ export function parseCpuProfileRequest(body: string): CpuProfileRequestParse {
   return { seconds, clamped: seconds !== requested };
 }
 
-/** The client's deadline for one profile request of `seconds` (the node's default when absent). */
+/**
+ * The client's deadline for one profile request of `seconds` (the node's
+ * default when absent), in whole milliseconds as `AbortSignal.timeout` requires.
+ */
 export function cpuProfileRequestTimeoutMs(seconds = CPU_PROFILE_DEFAULT_SECONDS): number {
   const recorded = Math.min(CPU_PROFILE_MAX_SECONDS, Math.max(CPU_PROFILE_MIN_SECONDS, seconds));
-  return recorded * 1000 + CPU_PROFILE_RESPONSE_GRACE_MS;
+  return Math.ceil(recorded * 1000) + CPU_PROFILE_RESPONSE_GRACE_MS;
 }

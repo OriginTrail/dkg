@@ -74,6 +74,8 @@ describe('CPU profile on a live daemon (mock chain)', () => {
 
   it('refuses a second profile while one runs, and a stop of the node ends the running one', async () => {
     const running = call(CPU_PROFILE_PATH, operatorToken, { seconds: 600 });
+    // Awaited below; this only keeps a failure before that from going unhandled.
+    running.catch(() => {});
     await untilLogged('[cpu-profile] recording for 60 s');
 
     const second = await call(CPU_PROFILE_PATH, operatorToken, { seconds: 1 });
