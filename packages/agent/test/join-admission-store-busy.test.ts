@@ -75,14 +75,21 @@ function harness(keyReads: Array<() => void>, overrides: Partial<ContextGraphJoi
     commitAutomaticApproval: vi.fn(async () => true),
   } satisfies ContextGraphJoinPolicyStore;
   let keyRead = 0;
+  // Retry marks as the agent keeps them: a marked request skips the join ingress limits.
+  const retryMarks = new Map<string, { policyEpoch: number | undefined }>();
+  const markKey = (contextGraphId: string, signed: { signature: string }) => `${contextGraphId}\0${signed.signature}`;
   const host = {
     policyStore,
     verifyJoinRequest: () => {},
-    getRetryableAdmission: () => null,
-    markRetryableAdmission: vi.fn(),
-    clearRetryableAdmission: vi.fn(),
-    reserveIngress: () => () => {},
-    chargeVerifiedIngress: () => {},
+    getRetryableAdmission: (contextGraphId, signed) => retryMarks.get(markKey(contextGraphId, signed)) ?? null,
+    markRetryableAdmission: vi.fn((contextGraphId: string, signed: { signature: string }, policyEpoch?: number) => {
+      retryMarks.set(markKey(contextGraphId, signed), { policyEpoch });
+    }),
+    clearRetryableAdmission: vi.fn((contextGraphId: string, signed: { signature: string }) => {
+      retryMarks.delete(markKey(contextGraphId, signed));
+    }),
+    reserveIngress: vi.fn(() => () => {}),
+    chargeVerifiedIngress: vi.fn(),
     validateEncryptionKeyBundle: () => {},
     cacheVerifiedEncryptionKeys: async () => {},
     withAdmissionLock: async (_cg, operation) => operation({} as ContextGraphJoinAdmissionLockToken),
@@ -166,8 +173,9 @@ describe('automatic join admission when the store is busy (#3366)', () => {
       policyEpoch: POLICY.updatedAt,
       reason: 'encryption-key-unreadable-before-commit',
     }));
-    // No membership changed, so the retry mark carries no policy epoch.
-    expect(host.markRetryableAdmission).toHaveBeenCalledWith(CONTEXT_GRAPH, signed);
+    // No retry mark: it would waive the join ingress limits for the requester's next attempts.
+    expect(host.markRetryableAdmission).not.toHaveBeenCalled();
+    expect(host.getRetryableAdmission(CONTEXT_GRAPH, signed)).toBeNull();
     expect(host.commitPreparedJoinRequestApproval).not.toHaveBeenCalled();
     expect(policyStore.markAutomaticApprovalRepairPending).not.toHaveBeenCalled();
     expect(host.emitPendingJoinRequest).not.toHaveBeenCalled();
@@ -180,8 +188,19 @@ describe('automatic join admission when the store is busy (#3366)', () => {
     await expect(process()).rejects.toMatchObject({ name: 'RetryableJoinAdmissionError' });
     expect(policyStore.reserveAutomaticApproval).not.toHaveBeenCalled();
     expect(policyStore.releaseAutomaticApproval).not.toHaveBeenCalled();
-    expect(host.markRetryableAdmission).toHaveBeenCalledWith(CONTEXT_GRAPH, signed);
+    expect(host.markRetryableAdmission).not.toHaveBeenCalled();
+    expect(host.getRetryableAdmission(CONTEXT_GRAPH, signed)).toBeNull();
     expect(pendingAudit()).toEqual([]);
+  });
+
+  it('makes every attempt of a deferred request pass the join ingress limits again', async () => {
+    const { host, process } = harness([ok, busy]);
+
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await expect(process()).rejects.toMatchObject({ name: 'RetryableJoinAdmissionError' });
+      expect(host.reserveIngress).toHaveBeenCalledTimes(attempt);
+      expect(host.chargeVerifiedIngress).toHaveBeenCalledTimes(attempt);
+    }
   });
 
   it('does not repeat a read that ran into the store deadline, and does not call it a verdict', async () => {

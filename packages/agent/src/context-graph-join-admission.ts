@@ -777,11 +777,11 @@ export class ContextGraphJoinAdmission {
 
   /**
    * Defer an admission whose key the store could not read, with no pending
-   * audit or notice. The requester sends it again; no membership changed, so
-   * the retry mark carries no policy epoch.
+   * audit or notice. The requester sends it again. Nothing is marked for a
+   * retry: that mark is for membership repairs and waives the join ingress
+   * limits, which every attempt of an unadmitted request must pass.
    */
   private deferForUnreadableKey(request: VerifiedIncomingJoinRequest, cause: unknown): JoinAdmissionDeferredError {
-    this.host.markRetryableAdmission(request.contextGraphId, request.delegation);
     return new JoinAdmissionDeferredError(request.contextGraphId, request.delegation.agentAddress, cause);
   }
 }
