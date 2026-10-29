@@ -636,6 +636,43 @@ test('a creation that races a conflicting one refuses instead of adding its page
   assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
 });
 
+test('two creations that write other partition sets into one new head at once both fail', async () => {
+  // Both read the new head's empty draft before either writes, then both write before either shares: the head ends
+  // with two partition-set hashes. Neither run may then write a page, and the importId is refused from then on.
+  const client = makeMockDaemon();
+  const importId = 'mixed-head';
+  const head = defaultManifestAssertionName(importId);
+  const barrier = () => { let open; const promise = new Promise((resolve) => { open = resolve; }); return { promise, open }; };
+  const draftRead = barrier();
+  const bothWritten = barrier();
+  let writes = 0;
+  const request = client.request.bind(client);
+  const write = client.writeAssertion.bind(client);
+  const promote = client.promote.bind(client);
+  client.request = async (method, path, body) => {
+    const answer = await request(method, path, body);
+    if (method === 'GET' && path.startsWith(`/api/knowledge-assets/${head}/wm/quads`)) draftRead.open();
+    return answer;
+  };
+  client.writeAssertion = async (args) => {
+    if (args.assertionName !== head) return write(args);
+    await draftRead.promise;
+    const written = await write(args);
+    if (++writes === 2) bothWritten.open();
+    return written;
+  };
+  client.promote = async (args) => {
+    if (args.assertionName === head) await bothWritten.promise;
+    return promote(args);
+  };
+  const results = await Promise.allSettled([createManifest(client, importId, ['a', 'b']), createManifest(client, importId, ['a', 'c'])]);
+  assert.deepEqual(results.map((r) => r.status), ['rejected', 'rejected']);
+  for (const r of results) assert.match(r.reason.message, /different partition set/);
+  assert.equal([...client.assets.keys()].some((name) => name.startsWith('import-partitions-')), false, 'no page was written');
+  await assert.rejects(() => load(client, importId), /head written for more than one partition set/);
+  await assert.rejects(() => createManifest(client, importId, ['a', 'b']), /different partition set/);
+});
+
 test('two overlapping creations of the same manifest both succeed', async () => {
   const client = makeMockDaemon();
   const importId = 'same-race';

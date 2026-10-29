@@ -560,29 +560,34 @@ async function sharePartitionPage(client, { contextGraphId, subGraphName, name, 
 
 /**
  * Make the head shared and for these partitions, whatever an earlier or a
- * concurrent run left: a shared head (from another run, shared after the
- * first read) or an unshared one (its draft) must carry this partition-set
- * hash, and an unshared one keeps a `startedAt` it already has.
+ * concurrent run left. An unshared head's draft must carry this partition-set
+ * hash (and keeps a `startedAt` it has), and once shared, by this or another
+ * run, the head must carry this hash and no other.
+ *
+ * The daemon offers no create that writes and seals in one step, so two runs
+ * that create the same new head with other partition sets at the same moment
+ * can both write into its draft. That head then carries two hashes: both runs
+ * fail here before writing any page, and every later run and load refuses the
+ * importId. Run one `createImportManifest` per importId at a time.
  */
 async function ensureManifestHead(client, { contextGraphId, subGraphName, importId, partitions }) {
   const name = defaultManifestAssertionName(importId);
   const hash = partitionSetHash(partitions);
   const created = await createManifestAsset(client, { contextGraphId, subGraphName, name });
-  if (created?.status === 'swm-shared') {
-    const shared = await readManifestHead({ client, importId, subGraphName });
-    if (shared === undefined) {
-      throw new Error(`createImportManifest: the head of manifest '${importId}' is shared but not visible yet; try again.`);
-    }
-    if (shared.hash !== hash) throw differentPartitionSet(importId);
-    return;
+  if (created?.status !== 'swm-shared') {
+    const left = created?.alreadyExists === true ? await readDraftTriples(client, { contextGraphId, subGraphName, name }) : [];
+    const leftHash = left.find((t) => t.predicate === IMPORT_P.partitionSetHash);
+    if (leftHash && unquote(leftHash.object) !== hash) throw differentPartitionSet(importId);
+    const keepStartedAt = left.some((t) => t.predicate === IMPORT_P.startedAt);
+    const triples = buildImportHeadTriples(importId, partitions, new Date().toISOString())
+      .filter((t) => !keepStartedAt || t.predicate !== IMPORT_P.startedAt);
+    await writeAndShare(client, { contextGraphId, subGraphName, name, created, triples });
   }
-  const left = created?.alreadyExists === true ? await readDraftTriples(client, { contextGraphId, subGraphName, name }) : [];
-  const leftHash = left.find((t) => t.predicate === IMPORT_P.partitionSetHash);
-  if (leftHash && unquote(leftHash.object) !== hash) throw differentPartitionSet(importId);
-  const keepStartedAt = left.some((t) => t.predicate === IMPORT_P.startedAt);
-  const triples = buildImportHeadTriples(importId, partitions, new Date().toISOString())
-    .filter((t) => !keepStartedAt || t.predicate !== IMPORT_P.startedAt);
-  await writeAndShare(client, { contextGraphId, subGraphName, name, created, triples });
+  const shared = await readManifestHead({ client, importId, subGraphName });
+  if (shared === undefined) {
+    throw new Error(`createImportManifest: the head of manifest '${importId}' is shared but not visible yet; try again.`);
+  }
+  if (shared.hash !== hash) throw differentPartitionSet(importId);
 }
 
 /** The triples of a Knowledge Asset's Working Memory draft. */
@@ -612,7 +617,10 @@ async function readManifestDeclarations({ client, importId, subGraphName }) {
   return { head, partitions };
 }
 
-/** The visible head's partition count and partition-set hash, or undefined. */
+/**
+ * The visible head's partition count and partition-set hash, or undefined.
+ * A head written for more than one partition set has `hash: null`.
+ */
 async function readManifestHead({ client, importId, subGraphName }) {
   const rows = bindingsOf(await querySharedMemory(client, subGraphName, `
     PREFIX imp: <${IMPORT_NS}>
@@ -623,9 +631,13 @@ async function readManifestHead({ client, importId, subGraphName }) {
       }
     }
   `));
-  return rows.length > 0
-    ? { count: Number(unquote(rows[0].count)), hash: String(unquote(rows[0].hash)) }
-    : undefined;
+  if (rows.length === 0) return undefined;
+  const hashes = new Set(rows.map((row) => String(unquote(row.hash))));
+  const counts = new Set(rows.map((row) => Number(unquote(row.count))));
+  return {
+    count: counts.size === 1 ? [...counts][0] : Number.NaN,
+    hash: hashes.size === 1 ? [...hashes][0] : null,
+  };
 }
 
 /** Every partition the manifest's visible pages declare, keyed by partition IRI. */
@@ -980,6 +992,12 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
     throw new Error(
       `No import manifest rows found for '${importId}' in context graph '${cgId}' ` +
       `sub-graph '${subGraphName}'. The manifest is missing or not visible in shared memory.`,
+    );
+  }
+  if (head.hash === null) {
+    throw new Error(
+      `Import manifest '${importId}' in context graph '${cgId}' sub-graph '${subGraphName}' has a head written for ` +
+      `more than one partition set (two runs created it at once). Pass a new importId for a new import run.`,
     );
   }
   if (declared.size < head.count) {

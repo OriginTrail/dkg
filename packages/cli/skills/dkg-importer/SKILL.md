@@ -185,7 +185,10 @@ manifest is a few small Knowledge Assets, each shared once: a head (the import,
 its partition count and a hash of the partition set), then pages of at most
 2,000 partitions, well under the 4 MiB share cap. Calling it again with the same
 partitions finishes an interrupted run and changes nothing on a complete one; a
-different partition set is refused.
+different partition set is refused. Run one `createImportManifest` per import id
+at a time: the node cannot make creating the head exclusive, so two calls that
+create it at the same moment with different partitions both fail, and that
+import id cannot be used again.
 
 ### Per-partition lifecycle
 
