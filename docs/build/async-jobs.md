@@ -27,6 +27,10 @@ Poll until `state` is `succeeded`; the node retries a `failed_retrying` job by i
 
 Publishing works the same way, once the node has [Async Publisher Wallets](../use-dkg/async-publisher-wallets.md). `POST /api/knowledge-assets/{name}/vm/publish-async` answers `202` with a `jobId`. Poll `GET /api/publisher/job?id=<job-id>` until `job.status` is `finalized`.
 
+### Read a failure
+
+A failed job carries a machine code and a short reason. For a share job they are `lastError.code` (with `lastError.diagnosticCode` when there is one) and `lastError.message`; for a publish job, `failure.code` and `failure.message`. Act on the code. The message is for people: at most 512 characters, without transaction payloads, long hex values or request details, and with any URL reduced to its host. When the node had to shorten it, the whole text, with the same parts left out, is in the node's log under the job ID.
+
 ## When the answer is not a success
 
 A `409` with `existingJobId` means another job holds this Knowledge Asset:
