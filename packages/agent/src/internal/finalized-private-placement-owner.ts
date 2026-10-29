@@ -25,13 +25,11 @@ interface ResetPlan {
   readonly repair: Rfc64FinalizedPrivatePlacementRepairV1;
   readonly state: PrivatePlacementFailureStateV1 | null;
 }
-interface LaneObservation {
-  revision?: string;
-  resetPending: boolean;
-}
-interface GraphLane extends LaneObservation {
+interface GraphLane {
   readonly id: ContextGraphIdV1;
   readonly entries: Set<RetryEntry>;
+  revision?: string;
+  resetPending: boolean;
 }
 type LaneReconciliation =
   | { readonly kind: 'decision'; readonly decision: FinalizedPlacementDecisionV1; readonly resetCommitted: boolean }
@@ -65,7 +63,6 @@ export class FinalizedPrivatePlacementOwnerV1 {
   readonly #lanes = new Map<string, GraphLane>();
   readonly #waiters = new FinalizedPrivatePlacementWaitersV1();
   readonly #runner: NextTurnRecurringTaskV1;
-  readonly #discoveryObservations = new Map<string, LaneObservation>();
   #arrivedDuringListing: Map<string, ContextGraphIdV1> | undefined;
   #waiterTimer: ReturnType<typeof setTimeout> | undefined;
 
@@ -99,19 +96,13 @@ export class FinalizedPrivatePlacementOwnerV1 {
   /** Observe an inactive edge without admitting a placement. */
   observeLaneAvailability(contextGraphId: string): void {
     if (this.closed) return;
-    const lane = this.#lanes.get(contextGraphId);
+    let lane = this.#lanes.get(contextGraphId);
+    if (!lane) {
+      lane = { id: contextGraphId as ContextGraphIdV1, entries: new Set(), resetPending: false };
+      this.#lanes.set(contextGraphId, lane);
+    }
     try {
-      const authority = this.#readAuthority(contextGraphId);
-      if (this.#arrivedDuringListing || !lane) {
-        const hint = finalizedPlacementAuthorityRevisionV1(authority);
-        if (hint === undefined) return;
-        const observation = this.#discoveryObservations.get(contextGraphId)
-          ?? { revision: lane?.revision, resetPending: lane?.resetPending ?? false };
-        const revision = JSON.stringify(hint);
-        observation.resetPending ||= observation.revision !== undefined && observation.revision !== revision;
-        observation.revision = revision;
-        this.#discoveryObservations.set(contextGraphId, observation);
-      } else this.#commitLaneReset(lane, authority);
+      this.#commitLaneReset(lane, this.#readAuthority(contextGraphId));
     } catch (error) { this.#warn('catalog_private_repair_lane_reset_failed', error); }
   }
 
@@ -172,7 +163,6 @@ export class FinalizedPrivatePlacementOwnerV1 {
     this.#waiters.releaseAll();
     this.#retries.clear();
     this.#lanes.clear();
-    this.#discoveryObservations.clear();
   }
 
   #entry(repair: Rfc64FinalizedPrivatePlacementRepairV1, key = finalizedPrivateRepairKeyV1(repair)): RetryEntry {
@@ -190,13 +180,13 @@ export class FinalizedPrivatePlacementOwnerV1 {
     return entry;
   }
 
-  #forget(key: string): void {
+  #forget(key: string, preserveLane = false): void {
     const entry = this.#retries.get(key);
     if (!entry) return;
     this.#retries.delete(key);
     const lane = this.#lanes.get(entry.repair.contextGraphId)!;
     lane.entries.delete(entry);
-    if (!lane.entries.size) this.#lanes.delete(lane.id);
+    if (!preserveLane && !lane.entries.size) this.#lanes.delete(lane.id);
   }
 
   #readAuthority(contextGraphId: string): FinalizedPlacementAuthorityV1 {
@@ -208,7 +198,13 @@ export class FinalizedPrivatePlacementOwnerV1 {
     if (hint === undefined) return false;
     const revision = JSON.stringify(hint);
     lane.resetPending ||= lane.revision !== undefined && lane.revision !== revision;
-    if (!lane.resetPending) { lane.revision = revision; return false; }
+    // Initial discovery can yield before any siblings are registered. Remember
+    // every observed edge, but defer its durable reset until the complete snapshot
+    // is registered. Even an inactive/active round trip must retain resetPending.
+    if (this.#arrivedDuringListing || lane.entries.size === 0 || !lane.resetPending) {
+      lane.revision = revision;
+      return false;
+    }
     this.#commitResets([...lane.entries].map(entry => this.#prepareReset(entry.repair)));
     // Publish the graph transition only after the complete durable batch commits.
     lane.revision = revision;
@@ -296,17 +292,13 @@ export class FinalizedPrivatePlacementOwnerV1 {
     // Establish every queued sibling before the first awaited placement. A lane
     // notification during that attempt must also reset later parked siblings.
     for (const { repair, key } of queued) this.#entry(repair, key);
-    for (const key of this.#retries.keys()) if (!currentKeys.has(key)) this.#forget(key);
-    // A successful snapshot owns observation lifetime. Transfer relevant edges
-    // only after all siblings exist; retain late arrivals for the next snapshot.
+    for (const key of this.#retries.keys()) if (!currentKeys.has(key)) this.#forget(key, true);
+    // One lane record owns observed revisions, including before discovery. A
+    // successful snapshot retires absent graphs unless a late request needs the
+    // next snapshot; failed listings leave observations intact.
     const arrivingGraphs = new Set<string>(arrivedDuringListing.values());
-    for (const [graph, observation] of this.#discoveryObservations) {
-      const lane = this.#lanes.get(graph);
-      if (lane) {
-        lane.revision = observation.revision;
-        lane.resetPending ||= observation.resetPending;
-      }
-      if (lane || !arrivingGraphs.has(graph)) this.#discoveryObservations.delete(graph);
+    for (const [graph, lane] of this.#lanes) {
+      if (lane.entries.size === 0 && !arrivingGraphs.has(graph)) this.#lanes.delete(graph);
     }
     for (const key of this.#waiters.keys()) if (!currentKeys.has(key) && !arrivedDuringListing.has(key)) this.#waiters.release(key);
     this.#options.fullCatalogs.passStarted(currentKeys);

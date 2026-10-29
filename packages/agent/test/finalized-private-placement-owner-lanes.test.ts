@@ -346,8 +346,11 @@ it('retires discovery-only observations after a successful empty snapshot', asyn
 });
 
 
-it('retains observations for a late arrival omitted by the completed snapshot', async () => {
-  const f = fixture([]); const held = deferred(); const row = repair('late-parked-obligation');
+it.each([false, true])('retains observations for a late arrival omitted by the snapshot (previous sibling: %s)', async previousSibling => {
+  const previous = repair('previous-obligation');
+  const f = fixture(previousSibling ? [previous] : []);
+  f.records.set(previous.assertionCoordinate, parked); await f.pass(); f.list.mockClear();
+  const held = deferred(); const row = repair('late-parked-obligation');
   f.list.mockImplementationOnce(async () => { await held.promise; return []; });
   try {
     f.owner.start(ctx); await vi.advanceTimersByTimeAsync(0);
