@@ -6828,7 +6828,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     let dataSynced = 0;
     let noProtocolPeers = 0;
     const cleanSharedMemoryPeerIds = new Set<string>();
-    const diagnostics: ContextGraphCatchupDiagnostics = {
+    const diagnostics: Omit<ContextGraphCatchupDiagnostics, 'sharedMemory'> = {
       noProtocolPeers: 0,
       durable: {
         fetchedMetaTriples: 0,
@@ -6849,10 +6849,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         failedPhases: 0,
         deferredBackpressure: 0,
       },
-      sharedMemory: emptySharedMemorySyncResult(),
     };
     const accessDeniedPeers = new Set<string>();
-    const sharedAggregation = createSharedMemoryCatchupRoundAggregation(diagnostics.sharedMemory, {
+    const sharedAggregation = createSharedMemoryCatchupRoundAggregation({
       responded: peersResponded, denied: accessDeniedPeers, completedCleanly: cleanSharedMemoryPeerIds,
     });
     const passTracker = new SwmCatchupPassTracker<SwmSnapshotCoverage>();
@@ -7080,7 +7079,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         config: passConfig,
         nowMs: catchupPassNowMs,
         onStop: (stop) => {
-          diagnostics.sharedMemory.continuationStopReason = stop.reason;
+          sharedAggregation.diagnostics.continuationStopReason = stop.reason;
           this.log.info(
             ctx,
             `Catch-up SWM pass loop for "${contextGraphId}" stopped after `
@@ -7121,7 +7120,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           });
         },
       });
-      diagnostics.sharedMemory.continuationPasses = execution.continuationPasses;
+      sharedAggregation.diagnostics.continuationPasses = execution.continuationPasses;
     }
     deferredBackpressure += sharedAggregation.jobDeferredBackpressure;
     diagnostics.noProtocolPeers = noProtocolPeers;
@@ -7179,7 +7178,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       cleanSharedMemoryPeerIds: Object.freeze([...cleanSharedMemoryPeerIds]),
       denied: accessDeniedPeers.size > 0,
       deniedPeers: accessDeniedPeers.size,
-      diagnostics,
+      diagnostics: { ...diagnostics, sharedMemory: sharedAggregation.diagnostics },
     };
   }
 

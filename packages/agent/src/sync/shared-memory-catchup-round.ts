@@ -28,11 +28,10 @@ export interface SharedMemoryCatchupRoundAggregation {
 }
 
 export function createSharedMemoryCatchupRoundAggregation(
-  diagnostics: SharedMemorySyncAggregate = emptySharedMemorySyncResult(),
   peers: Partial<SharedMemoryCatchupPeerSets> = {},
 ): SharedMemoryCatchupRoundAggregation {
   return {
-    diagnostics,
+    diagnostics: emptySharedMemorySyncResult(),
     insertedDataTriples: 0,
     jobDeferredBackpressure: 0,
     cleanDataTriples: 0,
@@ -65,14 +64,7 @@ export function foldSharedMemoryRound(
   options: FoldSharedMemoryRoundOptions = {},
 ): DurableProgressClassification {
   const progress = options.progress ?? classifyDurableProgress(shared);
-  const mergedDiagnostics = mergeFleetSharedMemoryDiagnostics(
-    aggregate.diagnostics,
-    shared,
-  );
-  // Keep the accumulator's diagnostics object stable. Both drivers seed their
-  // public result with this same object; replacing it here leaves the result
-  // holding a stale snapshot while later rounds continue updating the new one.
-  Object.assign(aggregate.diagnostics, mergedDiagnostics);
+  aggregate.diagnostics = mergeFleetSharedMemoryDiagnostics(aggregate.diagnostics, shared);
   aggregate.insertedDataTriples += progress.insertedDataTriples;
   if (options.countJobDeferral !== false) {
     aggregate.jobDeferredBackpressure += shared.deferredBackpressure ?? 0;

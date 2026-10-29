@@ -288,7 +288,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     sharedMemory: { verifiedDataPeers: 0, emptyPeers: 0, authorityEmptyPeers: 0 },
   };
 
-  const diagnostics: NonNullable<CatchupJobResult['diagnostics']> = {
+  const diagnostics: Omit<NonNullable<CatchupJobResult['diagnostics']>, 'sharedMemory'> = {
     noProtocolPeers: 0,
     durable: {
       fetchedMetaTriples: 0,
@@ -310,10 +310,8 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       deferredBackpressure: 0,
       deniedPhases: 0,
     },
-    sharedMemory: emptySharedMemorySyncResult(),
   };
   const sharedAggregation = createSharedMemoryCatchupRoundAggregation(
-    diagnostics.sharedMemory,
     {
       responded: peersResponded,
       denied: deniedPeers,
@@ -397,7 +395,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     || catchupPlaneProvenBySelectedScope(authorityEvidence[plane])
     || catchupPlaneProvenByAuthorityHostedEmpty(
       authorityEvidence[plane],
-      diagnostics[plane],
+      plane === 'sharedMemory' ? sharedAggregation.diagnostics : diagnostics.durable,
       { isPrivate: prepared.isPrivateContextGraph },
     );
 
@@ -899,6 +897,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     diagnostics.durable.authorityUnanswered = !authorityAnswered.durable;
   }
   diagnostics.noProtocolPeers = noProtocolPeers;
+  const finalSharedMemory: NonNullable<CatchupJobResult['diagnostics']>['sharedMemory'] = { ...sharedAggregation.diagnostics };
   if (
     request.includeSharedMemory
     && (
@@ -906,7 +905,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
       || authoritativeSharedMemoryPeerIds.size > 0
     )
   ) {
-    diagnostics.sharedMemory.authorityUnanswered = !authorityAnswered.sharedMemory;
+    finalSharedMemory.authorityUnanswered = !authorityAnswered.sharedMemory;
   }
   const totalDeferredBackpressure = deferredBackpressure
     + sharedAggregation.jobDeferredBackpressure;
@@ -934,7 +933,7 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     denied: deniedPeers.size > 0,
     deniedPeers: deniedPeers.size,
     cleanPlaneCompletions,
-    diagnostics,
+    diagnostics: { ...diagnostics, sharedMemory: finalSharedMemory },
   };
 }
 

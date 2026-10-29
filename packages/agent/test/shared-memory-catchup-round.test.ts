@@ -95,17 +95,13 @@ describe('#2105 shared-memory catch-up round aggregation', () => {
     expect(aggregate.diagnostics.deferredBackpressure).toBe(1);
   });
 
-  it('keeps the diagnostics object stable while folding later rounds', () => {
-    const diagnostics = emptySharedMemorySyncResult();
-    const aggregate = createSharedMemoryCatchupRoundAggregation(diagnostics);
-    const published = aggregate.diagnostics;
-
+  it('owns the accumulated diagnostics across successive rounds', () => {
+    const aggregate = createSharedMemoryCatchupRoundAggregation();
     foldSharedMemoryRound(aggregate, 'peer-a', round({ bytesReceived: 10 }));
+    const firstRound = aggregate.diagnostics;
     foldSharedMemoryRound(aggregate, 'peer-b', round({ bytesReceived: 20 }));
-
-    expect(aggregate.diagnostics).toBe(published);
-    expect(diagnostics).toBe(published);
-    expect(published.bytesReceived).toBe(30);
+    expect(firstRound.bytesReceived).toBe(10);
+    expect(aggregate.diagnostics.bytesReceived).toBe(30);
   });
 
   it('keeps inline and Worker diagnostics and distinct-peer counters identical', () => {
