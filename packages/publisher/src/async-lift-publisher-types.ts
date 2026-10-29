@@ -216,6 +216,8 @@ export interface AsyncLiftPublisher {
   list(filter?: { status?: LiftJobState; contextGraphId?: string }): Promise<PersistedLiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<PersistedLiftJob | null>;
+  /** Claim acknowledgement releases scheduling order while execution remains concurrent. */
+  processNextScheduled?(walletId: string, onClaimed: () => void): Promise<PersistedLiftJob | null>;
   /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
   /** @deprecated Prefer `administrative.recordPublishFailureById`; workers use a claim session. */
@@ -797,6 +799,8 @@ export type AsyncKnowledgeAssetVmPublishRecoveryResolver = (
 ) => Promise<AsyncKnowledgeAssetVmPublishRecoveryEvidence | null>;
 
 export interface AsyncLiftPublisherConfig {
+  /** Optional runtime routing policy; observations never replace durable wallet ownership. */
+  walletEligibility?: import('./async-lift-wallet-funding.js').AsyncLiftWalletEligibility;
   graphUri?: string;
   maxRetries?: number;
   retryBackoffBaseMs?: number;

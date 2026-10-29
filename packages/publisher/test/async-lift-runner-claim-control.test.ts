@@ -9,7 +9,7 @@ describe('AsyncLiftRunner claim control', () => {
   it('observes the publisher gate for startup maintenance and later live pause/resume', async () => {
     const store = new OxigraphStore();
     const publisher = new TripleStoreAsyncLiftPublisher(store);
-    const processNext = vi.spyOn(publisher, 'processNext');
+    const processNext = vi.spyOn(publisher, 'processNextScheduled');
     const runner = new AsyncLiftRunner({ publisher, walletIds: ['wallet-1'],
       startPaused: true, pollIntervalMs: 60_000 });
     try {

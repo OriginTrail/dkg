@@ -103,6 +103,8 @@ const EVM_INTERNAL_METHODS = new Set<string>([
 // These are not parity violations. Additions here require a code-review
 // because each one is a silent divergence from the production adapter.
 const MOCK_EXEMPT_FROM_EVM = new Set<string>([
+  // Optional native fee-market observation; mock chains have no native gas balance.
+  'getPublisherGasFunding',
   // Pure EVM bookkeeping surfaces that the mock has no reason to emulate.
   'getContract',            // resolves a Contract from the Hub — not applicable off-chain
   'getBlockNumber',         // the mock exposes its own block counter differently (advanceBlock)
@@ -423,6 +425,8 @@ const MOCK_EXEMPT_FROM_EVM = new Set<string>([
 ]);
 
 const NO_CHAIN_EXEMPT_FROM_EVM = new Set<string>([
+  // Optional native fee-market observation; no-chain mode has no gas funding.
+  'getPublisherGasFunding',
   // NoChainAdapter is intentionally minimal — it throws on most things.
   // The matrix below enforces that every *required* ChainAdapter method is
   // covered; helper getters are exempt.

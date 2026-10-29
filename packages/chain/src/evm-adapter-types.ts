@@ -195,6 +195,8 @@ export interface EVMAdapterOptions extends EVMAdapterBaseConfig {
    * publish/read-only usage; admin-only operations fail when invoked.
    */
   allowNoAdminSigner?: boolean;
+  /** Async runtime only: check the exact prepared publish/update gas cost before signing. */
+  publisherFundingAwareClaims?: boolean;
 }
 
 /**

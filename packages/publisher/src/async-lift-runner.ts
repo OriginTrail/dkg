@@ -1,4 +1,5 @@
 import type { AsyncLiftPublisher, AsyncLiftClaimControl } from './async-lift-publisher.js';
+import { AsyncLiftWalletPool } from './async-lift-wallet-pool.js';
 import { assertNodeTimerDelayMs, asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 
 export interface AsyncLiftRunnerConfig {
@@ -59,8 +60,11 @@ export class AsyncLiftRunner {
   private readonly walletWakePending = new Set<string>();
   /** At most one parked idle sleeper per wallet, resolvable by work/release pokes or stop(). */
   private readonly walletSleepers = new Map<string, () => void>();
+  private readonly walletPool: AsyncLiftWalletPool;
+  private claimTurn: Promise<void> = Promise.resolve();
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
+    this.walletPool = new AsyncLiftWalletPool(config.walletIds);
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.errorBackoffMs = config.errorBackoffMs ?? 1000;
     this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
@@ -138,9 +142,11 @@ export class AsyncLiftRunner {
     this.unsubscribeScheduler = this.config.publisher.reconciliationScheduling
       ?.attachScheduler?.({
         onReconciliationDemand: () => this.demandTransactionReconciliation(),
-        onWalletRelease: (walletId) => this.wakeWallet(walletId),
+        onWalletRelease: (walletId) => {
+          if (this.config.walletIds.includes(walletId)) this.wakeWorkers();
+        },
         onWorkAvailable: () => {
-          for (const walletId of this.config.walletIds) this.wakeWallet(walletId);
+          this.wakeWorkers();
         },
       });
     this.scheduleTransactionReconciliation();
@@ -170,17 +176,24 @@ export class AsyncLiftRunner {
     await this.config.publisher.drainDetachedExecutions?.();
   }
 
-  private async walletLoop(walletId: string): Promise<void> {
+  private async walletLoop(workerId: string): Promise<void> {
     while (!this.stopped) {
       try {
         const gate = this.config.publisher.claimControl;
-        if (gate && gate.state !== 'running') { await this.idleWalletWait(walletId); continue; }
-        const processed = await this.config.publisher.processNext(walletId);
+        if (gate && gate.state !== 'running') { await this.idleWalletWait(workerId); continue; }
+        const walletId = this.walletPool.acquire();
+        if (walletId === undefined) { await this.idleWalletWait(workerId); continue; }
+        let processed;
+        try {
+          processed = await this.processWallet(walletId);
+        } finally {
+          this.walletPool.release(walletId, processed != null);
+        }
         if (!processed && !this.stopped) {
           // Interruptible idle wait: a wallet-release poke ends it early, and one that landed
           // during processNext is latched and skips it entirely. The error backoff below stays
           // deliberately un-interruptible — failure pacing must not be poked away.
-          await this.idleWalletWait(walletId);
+          await this.idleWalletWait(workerId);
         }
       } catch (error) {
         try {
@@ -193,6 +206,25 @@ export class AsyncLiftRunner {
         }
       }
     }
+  }
+
+  private wakeWorkers(): void {
+    for (const workerId of this.config.walletIds) this.wakeWallet(workerId);
+  }
+
+  private async processWallet(walletId: string) {
+    const scheduled = this.config.publisher.processNextScheduled;
+    if (!scheduled) return this.config.publisher.processNext(walletId);
+    const previous = this.claimTurn;
+    let release!: () => void;
+    this.claimTurn = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      if (this.stopped) return null;
+      // Only selection/claim is ordered. The durable claim acknowledgement immediately
+      // admits the next free lane while this wallet's publisher continues independently.
+      return await scheduled.call(this.config.publisher, walletId, release);
+    } finally { release(); }
   }
 
   /** Work arrived or the wallet was released: invite a claim without bypassing its ownership. */

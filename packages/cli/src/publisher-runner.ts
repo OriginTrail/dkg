@@ -1,3 +1,5 @@
+import { scopeKnowledgeAssetVmPublishHandler } from './publisher-wallet-handler.js';
+export { scopeKnowledgeAssetVmPublishHandler } from './publisher-wallet-handler.js';
 import { createPublisherLiveControl } from './publisher-live-control.js';
 import type { PublisherRuntime, PublisherRuntimeWallet } from './publisher-runtime-types.js';
 export type { PublisherRuntime, PublisherRuntimeWallet } from './publisher-runtime-types.js';
@@ -24,6 +26,7 @@ import {
 import {
   ACKCollector,
   AsyncLiftRunner,
+  AsyncLiftWalletFunding,
   type AsyncLiftRunnerConfig,
   DKGPublisher,
   FileWorkspacePublicSnapshotStore,
@@ -96,6 +99,7 @@ export function createPublisherWalletChain(
       ...chainBase,
       privateKey,
       allowNoAdminSigner: true,
+      publisherFundingAwareClaims: true,
       chainEventLogBindingSource,
     }))
     : new NoChainAdapter();
@@ -604,27 +608,6 @@ export async function createPublisherRuntimeFromAgent(args: {
  * claimed job. Keeping this as one handler prevents execution, preflight, and
  * recovery from accidentally selecting different publisher instances.
  */
-export function scopeKnowledgeAssetVmPublishHandler(
-  publishers: Map<string, DKGPublisher>,
-  handler: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'],
-): AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'] {
-  if (!handler) return undefined;
-  const publisherFor = (walletId: string): DKGPublisher => {
-    const publisher = publishers.get(walletId);
-    if (!publisher) throw new Error(`No publisher configured for wallet ${walletId}`);
-    return publisher;
-  };
-  return {
-    execute: (input) => handler.execute({ ...input, publisher: publisherFor(input.walletId) }),
-    preflight: handler.preflight
-      ? (input) => handler.preflight!({ ...input, publisher: publisherFor(input.walletId) })
-      : undefined,
-    finalizeRecovered: handler.finalizeRecovered
-      ? (input) => handler.finalizeRecovered!({ ...input, publisher: publisherFor(input.walletId) })
-      : undefined,
-  };
-}
-
 async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): Promise<PublisherRuntime> {
   const startup = new PublisherStartupAdmission(args.startupSignal);
   const ownedChains: ChainAdapter[] = [];
@@ -679,6 +662,8 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
     );
     // Recovered verdicts carry canonical evidence so the finalizer never repeats verification.
     const asyncPublisher = new TripleStoreAsyncLiftPublisher(args.store, {
+      walletEligibility: new AsyncLiftWalletFunding(new Map(wallets.map(({ address, chain }) =>
+        [address, chain.getPublisherGasFunding?.bind(chain)]))),
       chainProofResolver: hasChainRecovery ? createChainProofResolver(chainAdapters) : undefined,
       // Detach only with independent chain proof; library processNext() remains blocking by default.
       detachReceiptReconciliation: hasChainRecovery,

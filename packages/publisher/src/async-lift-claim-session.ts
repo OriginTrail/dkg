@@ -187,6 +187,7 @@ export interface AsyncLiftClaimCoordinatorDependencies {
   readonly journalCompletion: AsyncLiftJournalCompletion;
   readonly ensureGraph: () => Promise<void>;
   readonly isPaused: () => boolean;
+  readonly walletEligible?: (walletId: string) => boolean;
   readonly readStatus: (jobId: string) => Promise<LiftJobPayloadDecodeResult>;
   readonly nextClaimCandidate: (section: JournalSection, now: number) => Promise<LiftJobAccepted | undefined>;
   readonly toClaimed: (current: LiftJobAccepted, walletId: string) => LiftJobClaimed;
@@ -259,8 +260,9 @@ export class AsyncLiftClaimCoordinator {
   ): Promise<ActiveLiftJobClaim | null> {
     return await owner.runCanonical((section) => this.withClaimLock(async (trace) => {
       await this.dependencies.ensureGraph();
-      const idle = (result: 'paused' | 'wallet-active' | 'no-candidate' | 'stale-candidate'): null => { trace.emit('claim_outcome', { result }); return null; };
+      const idle = (result: 'paused' | 'wallet-active' | 'wallet-ineligible' | 'no-candidate' | 'stale-candidate'): null => { trace.emit('claim_outcome', { result }); return null; };
       if (this.dependencies.isPaused()) return idle('paused');
+      if (this.dependencies.walletEligible?.(walletId) === false) return idle('wallet-ineligible');
       if (await this.hasActiveWalletLock(walletId, trace)) return idle('wallet-active');
 
       const next = await this.dependencies.nextClaimCandidate(section, this.config.now());
@@ -269,6 +271,7 @@ export class AsyncLiftClaimCoordinator {
         const current = await this.getStatus(next.jobId);
         if (!current || current.status !== 'accepted') return null;
         const now = this.config.now();
+        if (this.dependencies.walletEligible?.(walletId) === false) return null;
         const tokenNonce = this.config.claimTokenGenerator();
         if (typeof tokenNonce !== 'string' || tokenNonce.length === 0) {
           throw new Error('claimTokenGenerator must return a non-empty string');
@@ -312,6 +315,7 @@ export class AsyncLiftClaimCoordinator {
     walletId: string,
     handler: (session: WorkerLiftJobClaimSession) => Promise<LiftJob>,
     onProcessingReleased?: (release: AsyncLiftClaimProcessingRelease) => void,
+    onClaimed?: () => void,
   ): Promise<AsyncLiftClaimProcessingOutcome> {
     let cleanup = (): void => {};
     let decision: AsyncLiftClaimProcessingDecision;
@@ -319,6 +323,7 @@ export class AsyncLiftClaimCoordinator {
       decision = await this.dependencies.journalCompletion.runPublicOperation(async (owner): Promise<AsyncLiftClaimProcessingDecision> => {
         const claim = await this.claimNextInternal(owner, walletId, true);
         if (!claim) return { kind: 'idle' };
+        try { onClaimed?.(); } catch { /* Scheduling cannot change ownership. */ }
         let release: AsyncLiftClaimProcessingRelease = { kind: 'faulted' };
         // Capture this exact epoch now; invoke only after the operation's journals settle.
         cleanup = () => {
@@ -947,13 +952,15 @@ export class AsyncLiftClaimCoordinator {
   private async writeWalletLock(lock: WalletLockRecord): Promise<void> {
     await this.walletLocks.write(lock);
     if (lock.status === 'active') asyncAdmissionUsage.liftWalletBusy(lock.walletId, this.config.now());
-    claimTrace.emit('wallet_lock_written', { jobId: lock.jobId, expiresAt: lock.expiresAt, lockStatus: lock.status }, lock.walletId);
+    claimTrace.emit('wallet_lock_written', { jobId: lock.jobId, acquiredAt: lock.acquiredAt, expiresAt: lock.expiresAt, lockStatus: lock.status }, lock.walletId);
   }
 
   private async deleteWalletLock(walletId: string, ownership?: WalletLockSnapshot): Promise<void> {
     await this.walletLocks.delete(walletId);
     asyncAdmissionUsage.liftWalletFree(walletId, this.config.now());
-    claimTrace.emit('wallet_lock_deleted', {}, walletId);
+    claimTrace.emit('wallet_lock_deleted', {
+      jobId: ownership?.jobId,
+    }, walletId);
     if (ownership) completionTrace.walletOwnershipReleased(ownership.jobId, walletId, ownership.claimToken);
     this.dependencies.notifyWalletRelease(walletId);
   }

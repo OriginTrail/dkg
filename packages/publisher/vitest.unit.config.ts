@@ -3,6 +3,8 @@ import { defineConfig } from 'vitest/config';
 export default defineConfig({
   test: {
     include: [
+      'test/async-lift-wallet-fairness.test.ts',
+      'test/async-lift-wallet-funding.test.ts',
       'test/workspace-operation-timestamp.test.ts',
       'test/access-client-bounds.test.ts',
       'test/assertion-lifecycle-candidates.test.ts',

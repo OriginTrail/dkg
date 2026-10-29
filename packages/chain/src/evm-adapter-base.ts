@@ -15,6 +15,7 @@
 import { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 export { decodeConvictionCostCovered } from './conviction-cost-covered.js';
 import { JsonRpcProvider, Wallet, Contract, ethers } from 'ethers';
+import { PublisherGasFunding } from './publisher-gas-funding.js';
 import { createOperationalSignerPool, isExternalEvmSigner, operationalPrivateKeyOf, signTransactionOnce, type EvmSigner } from './evm-signer.js';
 export type { EvmSigner } from './evm-signer.js';
 import { createFilterErrorSilencer, installFilterNotFoundConsoleSuppressor, formatProviderError } from './filter-error-silencer.js';
@@ -694,6 +695,7 @@ export class EVMChainAdapterBase {
 
   /** The configured chain's fee floor (see evm-fee-policy.ts), if it has one. */
   protected readonly feeFloor?: ChainFeeFloor;
+  private readonly publisherGasFunding?: PublisherGasFunding;
 
   protected readonly configuredStaticChainId?: bigint;
 
@@ -1346,6 +1348,7 @@ export class EVMChainAdapterBase {
   }
 
   constructor(config: EVMAdapterConfig) {
+    if (config.publisherFundingAwareClaims) this.publisherGasFunding = new PublisherGasFunding();
     if (config.chainEventLogStore !== undefined
       && config.chainEventLogBindingSource !== undefined) {
       throw new TypeError('An EVM adapter cannot own and borrow the one-log runtime at the same time');
@@ -2015,13 +2018,13 @@ export class EVMChainAdapterBase {
     return { signedTx, txHash: parsed.hash ?? '0x', ...(nonce === undefined ? {} : { nonce }) };
   }
 
-  /**
-   * #888: prepare a V10 write tx (shared by publish + update) with the one-shot
-   * stale-allowance recovery of `prepareV10WriteWithAllowanceRecovery`: the
-   * per-endpoint preparation, and a forced `ensureV10ApproveTrac(force=true)`
-   * sent by `approvalSender`. Both write paths sign the result once, inside their
-   * per-wallet serializer window, strictly pre-broadcast / pre-WAL.
-   */
+  async getPublisherGasFunding() {
+    return this.readProvider('async publisher gas funding', (p) =>
+      (this.publisherGasFunding ?? new PublisherGasFunding()).read(p, this.signer.address, this.feeFloor, this.maxFeePerGasWei),
+    { policy: 'failOpenFundingRead', skipPreferred: true });
+  }
+
+  /** Shared pre-sign V10 preparation, including one-shot stale-allowance recovery. */
   protected async prepareV10WithAllowanceRecovery(
     signer: EvmSigner,
     kaContract: Contract,
@@ -2032,7 +2035,7 @@ export class EVMChainAdapterBase {
     reapproveLabel: string,
     approvalSender: ContractWriteSender = this.sendContractTransaction.bind(this),
   ): Promise<PreparedTransaction> {
-    return prepareV10WriteWithAllowanceRecovery(method, signer.address, {
+    const prepared = await prepareV10WriteWithAllowanceRecovery(method, signer.address, {
       prepare: () => this.prepareAcrossProviders(
         kaContract,
         method,
@@ -2043,6 +2046,9 @@ export class EVMChainAdapterBase {
       ),
       forceReapprove: () => this.ensureV10ApproveTrac(signer, kav10Address, tokenAmount, reapproveLabel, true, approvalSender),
     });
+    return this.publisherGasFunding
+      ? this.readProvider('async publisher prepared gas funding', (p) => this.publisherGasFunding!.assertPrepared(prepared, p), { policy: 'failOpenFundingRead', skipPreferred: true })
+      : prepared;
   }
 
   protected async sendSignedTransactionAndWait(

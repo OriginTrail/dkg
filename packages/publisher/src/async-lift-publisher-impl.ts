@@ -1,9 +1,10 @@
 import { atLiftValidationStage } from './lift-validation-error.js';
+import { deferUndispatchedFunding, isPublisherFundingFailure } from './async-lift-wallet-funding.js';
 import { createAsyncLiftClaimControl } from './async-lift-claim-gate.js';
 import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
 import { completionTrace } from './async-lift-completion-trace.js';
-import { traceProcessNext } from './async-lift-claim-trace.js';
+import { claimTrace, traceProcessNext } from './async-lift-claim-trace.js';
 import { LiftJobListingSelectors } from './lift-job-listing-selectors.js';
 import { clearTerminalJobsGuarded, LIFT_CLEAR_SIBLINGS_SOURCE, readStoredLifecycleKeys } from './async-lift-guarded-clear.js';
 import { createLiftRetentionAccess, type LiftRetentionAccess } from './async-lift-retention-access.js';
@@ -594,6 +595,7 @@ export class TripleStoreAsyncLiftPublisher
   /** 3825614002 — this instance's ROLE, resolved once from its wiring. */
   private readonly heldJobSettlement: HeldJobSettlementCapability;
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
+  private readonly walletEligibility?: AsyncLiftPublisherConfig['walletEligibility'];
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
@@ -657,6 +659,7 @@ export class TripleStoreAsyncLiftPublisher
     private readonly store: TripleStore,
     config: AsyncLiftPublisherConfig = {},
   ) {
+    this.walletEligibility = config.walletEligibility;
     this.graphUri = config.graphUri ?? DEFAULT_GRAPH_URI;
     this.queueScheduler = new AsyncLiftQueueScheduler(store, this.graphUri);
     this.chainObservations = LiftJobChainObservations.shared(store, this.graphUri);
@@ -733,6 +736,7 @@ export class TripleStoreAsyncLiftPublisher
           );
         },
         notifyWalletRelease: (walletId) => this.notifyWalletRelease(walletId),
+        walletEligible: (walletId) => this.walletEligibility?.isEligible(walletId) ?? true,
         mutations: {
           update: async (current, scope, status, data = {}) =>
             await this.applyClaimUpdateTransition(current, scope, status, data),
@@ -792,7 +796,16 @@ export class TripleStoreAsyncLiftPublisher
 
 
   async claimNext(walletId: string): Promise<ActiveLiftJobClaim | null> {
+    if (!await this.prepareWalletClaim(walletId)) return null;
     return await this.claimCoordinator.claimNext(walletId);
+  }
+
+  private async prepareWalletClaim(walletId: string): Promise<boolean> {
+    if (!this.walletEligibility) return true;
+    await this.ensureGraph();
+    const candidates = await this.jobSelectors.claimCandidates(this.now());
+    if (!candidates.nextAccepted && (!this.autoRetryEnabled || candidates.dueRetries.length === 0)) return false;
+    return this.walletEligibility.prepare(walletId);
   }
 
   readonly administrative: AsyncLiftAdministrativeMutations = {
@@ -987,11 +1000,17 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async processNext(walletId: string): Promise<PersistedLiftJob | null> {
+    return this.processNextScheduled(walletId, () => {});
+  }
+
+  async processNextScheduled(walletId: string, onClaimed: () => void): Promise<PersistedLiftJob | null> {
     return traceProcessNext(walletId, async () => {
+      if (!await this.prepareWalletClaim(walletId)) return null;
       const outcome = await this.claimCoordinator.processClaim(
         walletId,
         async (session) => await this.jobHandlerFor(session.claim.request).process(session),
         (release) => this.onClaimProcessingReleased(release),
+        onClaimed,
       );
       return outcome.kind === 'idle' ? null : outcome.job;
     });
@@ -1094,6 +1113,10 @@ export class TripleStoreAsyncLiftPublisher
       },
     }));
     if (publishAttempt.kind === 'failed') {
+      if (this.walletEligibility && broadcastRecorder.outcome === 'recorded-durable') {
+        if (isPublisherFundingFailure(publishAttempt.error)) this.walletEligibility.defer(walletId);
+        return this.getRequiredJob(claimed.jobId);
+      }
       return await session.recordExecutionFailure(
         'broadcast',
         publishAttempt.error,
@@ -1256,12 +1279,10 @@ export class TripleStoreAsyncLiftPublisher
     });
     if (executionAttempt.kind === 'failed') {
       const error = executionAttempt.error;
-      // #1864 — switch on the typed pre-send boundary outcome (no `executorReturned` flag,
-      // no `getStatus` re-read). The tx send happens strictly AFTER the write-ahead durably
-      // records 'broadcast' (fsync inside recordDurableBroadcastBeforeSend, whose failure
-      // rolls the transition back), so a 'recorded-durable' outcome means the tx may be on
-      // the wire.
-      if (broadcastRecorder.outcome === 'recorded-durable' && !isDefinitivePreAcceptanceSendFailure(error)) {
+      // A durable write-ahead means the signed transaction may already be on the wire.
+      if (broadcastRecorder.outcome === 'recorded-durable'
+        && (this.walletEligibility || !isDefinitivePreAcceptanceSendFailure(error))) {
+        if (isPublisherFundingFailure(error)) this.walletEligibility?.defer(walletId);
         // Ambiguous post-write-ahead failure — leave the job in 'broadcast' so recovery's
         // interrupted-broadcast path reconciles it on chain, never resend. Receipt timeout is
         // UNKNOWN, not failed. The tx-bearing job retains the wallet until
@@ -1270,14 +1291,8 @@ export class TripleStoreAsyncLiftPublisher
         // this frame still holds the coordinator's active-processing marker.
         return await this.getRequiredJob(claimed.jobId);
       }
-      // #1867 — either the tx never left ('not-reached' / 'rolled-back-pre-send'), or a
-      // DEFINITIVE pre-acceptance reject (e.g. insufficient funds at eth_sendRawTransaction)
-      // on a durably-recorded broadcast: record an immediate terminal failure rather than a
-      // ~15-min recovery chase. Its code comes from the publish mapper (insufficient_funds for
-      // the whitelisted rejects), and GH#2270 PR-3 is why that matters more than it used to: a
-      // failed KA VM job IS chain-recovery-chased now, but only while it is held, and
-      // `insufficient_funds` is proven-ineffective — so a whitelisted reject lands terminal and
-      // stays out of the dispatcher's queue instead of costing a chain read every tick.
+      // Without runtime routing, preserve #1867's historical terminal classification.
+      // With routing, only a proven pre-dispatch failure may requeue this same job.
       return await this.failKnowledgeAssetVmPublishExecution(session, error, broadcastRecorder);
     }
     if (executionAttempt.value.kind === 'detached') {
@@ -2933,6 +2948,9 @@ export class TripleStoreAsyncLiftPublisher
     this.registerJournalAppend(section, canonical, kind, () => {
       if (status === 'accepted') this.notifyWorkAvailable();
       if (status === 'finalized') this.chainObservations.completion.terminal(jobId);
+      if (status === 'finalized' || status === 'failed') claimTrace.emit('wallet_job_settled', {
+        jobId, status, failureCode: canonical.status === 'failed' ? canonical.failure?.code : undefined,
+      }, canonical.claim?.walletId);
     });
     if (status === 'finalized' && completionTrace.enabled) {
       section.afterSuccessfulJobSettlement(jobId, () => completionTrace.terminalOperationSettled(jobId));
@@ -3106,6 +3124,8 @@ export class TripleStoreAsyncLiftPublisher
   ): Promise<LiftJob> {
     // What failed and how it is recorded is decided by the pure `mapExecutionFailure`; this method only
     // reads the persisted record (under the transition lock) and persists the answer.
+    const deferred = await deferUndispatchedFunding(this.walletEligibility, current, scope, error, evidence, () => this.now());
+    if (deferred) return deferred;
     return await this.commitFailure(current, scope, mapExecutionFailure({
       jobId: current.jobId,
       currentStatus: current.status,
