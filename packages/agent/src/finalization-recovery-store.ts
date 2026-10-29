@@ -286,7 +286,10 @@ export function planFinalizationRecoveryAttempt(
 export interface FinalizationRecoveryHealth {
   available: boolean;
   closed: boolean;
-  /** False only when a node-wide limit is reached; see `fullQuotas` for the rest. */
+  /**
+   * Whether the inbox can take new finalizations. A node-wide limit makes it
+   * false; a full source or graph quota alone does not (see `fullQuotas`).
+   */
   ready?: boolean;
   canonicalReceiptCapability?: 'supported' | 'unsupported' | 'not-configured' | 'unknown';
   degradedReason?: string;
