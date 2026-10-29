@@ -15,7 +15,10 @@ import {
   openSqliteFinalizationRecoveryStore,
   type SqliteFinalizationRecoveryStore,
 } from '../src/finalization-recovery-sqlite-store.js';
-import type { FinalizationRecoveryEntry } from '../src/finalization-recovery-store.js';
+import type {
+  FinalizationRecoveryEntry,
+  FinalizationRecoveryFailureCode,
+} from '../src/finalization-recovery-store.js';
 import {
   VERIFIED_MEMORY_SUPERSESSION_REASON,
   supersedeEntryHeldInVerifiedMemory,
@@ -278,6 +281,12 @@ describe('finalization recovery of an assertion already in Verified Memory', () 
 
   it.each([
     [
+      'it settles normally',
+      chain(),
+      'applied' as const,
+      { state: 'SETTLED' },
+    ],
+    [
       'its receipt is pending',
       chain({ resolveCanonicalFinalizationReceipt: async () => ({ status: 'pending' }) }),
       'applied' as const,
@@ -339,7 +348,7 @@ describe('supersedeEntryHeldInVerifiedMemory', () => {
       entry: entry(),
       candidate: liveInput().candidate,
       merkleRoot: ROOT_HEX,
-      result: { outcome: 'deferred', failureCode: 'workspace-unavailable' as const },
+      failureCode: 'workspace-unavailable' as FinalizationRecoveryFailureCode | undefined,
       materializer: { hasExactVerifiedMemoryCopy: vi.fn(async () => true) },
       supersede: vi.fn(async () => true),
       log: capturingLog().log,
@@ -358,10 +367,10 @@ describe('supersedeEntryHeldInVerifiedMemory', () => {
   });
 
   it.each([
-    ['an applied attempt', { outcome: 'applied' }],
-    ['another deferral', { outcome: 'deferred', failureCode: 'apply-deferred' as const }],
-  ])('leaves %s alone', async (_label, result) => {
-    const call = input({ result });
+    ['an attempt that was not deferred', undefined],
+    ['another deferral', 'apply-deferred' as const],
+  ])('leaves %s alone', async (_label, failureCode) => {
+    const call = input({ failureCode });
     await expect(supersedeEntryHeldInVerifiedMemory(call)).resolves.toBe(false);
     expect(call.materializer.hasExactVerifiedMemoryCopy).not.toHaveBeenCalled();
   });

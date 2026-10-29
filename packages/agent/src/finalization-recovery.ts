@@ -2036,7 +2036,8 @@ export class FinalizationRecovery<
           { kind: 'recovery', entry: replayEntry },
         );
         if (await supersedeEntryHeldInVerifiedMemory({
-          entry: replayEntry, candidate, merkleRoot: input.merkleRoot, result,
+          entry: replayEntry, candidate, merkleRoot: input.merkleRoot,
+          failureCode: result.outcome === 'deferred' ? result.failureCode : undefined,
           materializer: this.materializer, log: this.log,
           supersede: (reason) => this.transition(replayEntry, 'SUPERSEDED', reason),
         })) return deferredRetryDelay === undefined ? 'none' as const : 'recovered' as const;

@@ -23,11 +23,8 @@ export interface VerifiedMemorySupersessionInput {
   readonly candidate: ParsedGraphScopedFinalization;
   /** The chain-current root that replay matched the entry against. */
   readonly merkleRoot: string;
-  /** The materialization attempt replay just made; only a deferral has a failure code. */
-  readonly result: {
-    readonly outcome: string;
-    readonly failureCode?: FinalizationRecoveryFailureCode;
-  };
+  /** Why the materialization replay just attempted was deferred; undefined when it was not. */
+  readonly failureCode: FinalizationRecoveryFailureCode | undefined;
   readonly materializer: {
     hasExactVerifiedMemoryCopy(query: ExactVerifiedMemoryCopyQuery): Promise<boolean>;
   };
@@ -55,7 +52,7 @@ export async function supersedeEntryHeldInVerifiedMemory(
   input: VerifiedMemorySupersessionInput,
 ): Promise<boolean> {
   const { entry } = input;
-  if (input.result.failureCode !== 'workspace-unavailable' || entry.state !== 'RECEIVED') {
+  if (input.failureCode !== 'workspace-unavailable' || entry.state !== 'RECEIVED') {
     return false;
   }
   let held: boolean;
