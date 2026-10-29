@@ -574,6 +574,10 @@ describe('metadata refresh on a node with one sync slot and no queue (#3280)', (
       const restarted = new AbortController();
       member.agent.node.stopSignal = restarted.signal;
       expect(dependencies.stopSignal!()).toBe(restarted.signal);
+      // The recovery scope is the node's live sync scope.
+      expect(dependencies.inRecoveryScope!()).toBe(false);
+      (member.agent.config as { syncContextGraphs?: string[] }).syncContextGraphs = [contextGraphId];
+      expect(dependencies.inRecoveryScope!()).toBe(true);
     } finally {
       run.mockRestore();
       await store.close();

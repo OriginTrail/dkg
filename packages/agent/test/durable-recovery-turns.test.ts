@@ -339,6 +339,7 @@ type Step = 'progress' | 'meta' | 'missing' | 'done';
  * holds it until the test releases the slice.
  */
 function oneSlotNode(steps: Record<string, Step[]>, options: { selected?: readonly string[]; stop?: AbortSignal } = {}) {
+  const outOfScope = new Set<string>();
   const { clock, advance } = manualClock();
   const store = new MemorySyncCheckpointStore();
   const turns = new DurableRecoveryTurns(clock);
@@ -409,6 +410,7 @@ function oneSlotNode(steps: Record<string, Step[]>, options: { selected?: readon
       asked.push(clock.now());
       return selected.has(graph) || holder === undefined;
     },
+    inRecoveryScope: () => !outOfScope.has(graph),
   });
   const run = (graph: string, candidatePeerIds?: string[]) => runner.run({
     contextGraphId: graph,
@@ -428,6 +430,7 @@ function oneSlotNode(steps: Record<string, Step[]>, options: { selected?: readon
     run, release, health, advance, turns, attempts, asked, refused, ran, pending, warnings,
     takeSlot: () => { holder = 'other'; },
     freeSlot: () => { holder = undefined; },
+    unsubscribe: (graph: string) => { outOfScope.add(graph); },
   };
 }
 
@@ -486,6 +489,26 @@ describe('durable recovery under local backpressure', () => {
 
     expect((await node.run('g')).outcome).toBe('deferred');
     expect(order).toEqual(['refused', 'round ended', 'next microtask']);
+  });
+
+  it('retries no graph that left the recovery scope while it waited', async () => {
+    const node = oneSlotNode({ g: ['done'], h: ['progress', 'done'] });
+    node.takeSlot();
+    expect((await node.run('g')).outcome).toBe('deferred');
+    node.unsubscribe('g');
+    node.freeSlot();
+
+    // The back-off ends with the slot free, but g is no longer one the node recovers: no round.
+    node.advance(1_000);
+    await macrotask();
+    await macrotask();
+    expect(node.attempts).toEqual([{ graph: 'g', peerId: PEERS[0] }]);
+    expect(node.turns.isDeferred('g')).toBe(false);
+    // g has left the line: another graph's slice hands the slot to nobody and continues.
+    const h = node.run('h');
+    for (const graph of ['h', 'h']) await node.release(graph);
+    expect((await h).outcome).toBe('terminal');
+    expect(node.attempts.map(({ graph }) => graph)).toEqual(['g', 'h', 'h']);
   });
 
   it('gives graphs turns slice by slice under one slot', async () => {

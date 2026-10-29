@@ -92,6 +92,8 @@ export interface DurableRecoveryRunnerDependencies {
   stopSignal?(): AbortSignal | undefined;
   /** Whether the node's sync admission would take a slice of this graph now. A read: nothing is claimed. */
   admissionAvailable?(): boolean;
+  /** Whether the node still recovers this graph (its sync scope). The runner retries no graph that left it. */
+  inRecoveryScope?(): boolean;
 }
 
 const PROGRESS_COUNTERS = [
@@ -167,6 +169,11 @@ export class DurableRecoveryRunner {
     const retry: DurableRecoveryRetry = {
       // One macrotask later, so that the coordinator no longer lists the refused owner this retry follows.
       run: () => setImmediate(() => {
+        // An unsubscribed graph is not retried: its turn ends here and it leaves the line.
+        if (dependencies.inRecoveryScope?.() === false) {
+          this.turns.roundEnded(contextGraphId);
+          return;
+        }
         this.run(input).catch((error: unknown) => dependencies.logWarn(
           `Durable recovery retry for "${contextGraphId}" failed: ${error instanceof Error ? error.message : String(error)}`,
         ));

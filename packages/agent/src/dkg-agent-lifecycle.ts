@@ -6618,6 +6618,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         logInfo: (message) => this.log.info(ctx, message),
         logWarn: (message) => this.log.warn(ctx, message),
         stopSignal: () => this.node.stopSignal ?? undefined,
+        inRecoveryScope: () => (this.config.syncContextGraphs ?? []).includes(contextGraphId),
         // The terms of the round's own admission (`executeSlice` above).
         admissionAvailable: () => !syncAdmissionWouldBeRefused(resolveAgentSyncGlobalBackpressure(this.config), {
           contextGraphId, lane: 'durable', priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
