@@ -1,3 +1,4 @@
+import { assertConfirmedCatalogPublicationAdmissionV1, selectConfirmedCatalogObligationForAgentV1 } from '../src/internal/confirmed-catalog-obligation.js';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -1529,6 +1530,17 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       (author as any).config.rfc64CatalogAuthoringPolicy.byContextGraph,
     )).toEqual([publicContextGraphId]);
     const seal = assertionSealFromCanonical(await authorSeal(25n, PROJECTION_QUADS));
+    const config = (author as any).config;
+    const selection = { plan: config.rfc64CatalogExecutionPlan, authoring: config.rfc64CatalogAuthoringPolicy };
+    const identity = { contextGraphId: CONTEXT_GRAPH_ID, assertionCoordinate: '界'.repeat(100) };
+    expect(selectConfirmedCatalogObligationForAgentV1(author, selection, identity)).toBe('excluded');
+    expect(() => assertConfirmedCatalogPublicationAdmissionV1(author, selection, identity)).not.toThrow();
+    const markerStore = (author as any).rfc64PersistenceV1.finalizedPrivatePlacementRepairs;
+    const beforeMarkers = markerStore.list();
+    await expect(author.observeRfc64ConfirmedVmV1({ ...identity, seal, assertionUri: 'urn:private-legacy-name',
+      ctx: createOperationContext('publish'), publicationLabel: 'publish' })).resolves.toBeUndefined();
+    expect(markerStore.list()).toEqual(beforeMarkers);
+
     await expect(author.recordRfc64PublicCatalogAssetV1({
       contextGraphId: publicContextGraphId,
       assertionCoordinate: 'legacy-public-still-active' as never,
@@ -2141,6 +2153,9 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       authorAddress: AUTHOR,
     })?.rows).toHaveLength(2);
 
+    // Private inventory/catalog rows remain tier-neutral after VM confirmation.
+    // A completed obligation must not retract either exact signed asset.
+    const inventoryBeforeVm = author.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest, authorAddress: AUTHOR });
     const announcementCountBeforeVm = announce.mock.calls.length;
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -2156,13 +2171,13 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest,
       authorAddress: AUTHOR,
     })).toMatchObject({
-      head: { payload: { totalRows: '1' } },
-      rows: [expect.objectContaining({ assertionCoordinate: allowListCoordinate })],
+      head: { payload: { totalRows: '2' } },
+      rows: expect.arrayContaining([expect.objectContaining({ assertionCoordinate }), expect.objectContaining({ assertionCoordinate: allowListCoordinate })]),
     });
     expect(author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toMatchObject({ catalogVersion: '3', inventoryRowCount: '1' });
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
     await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
@@ -2172,8 +2187,8 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
         catalogScopeDigest: catalogScopeDigest(),
         authorAddress: AUTHOR,
       })?.currentCatalogHeadDigest,
-      catalogVersion: '3',
-      inventoryRowCount: '1',
+      catalogVersion: '2',
+      inventoryRowCount: '2',
     });
     await author.observeRfc64ConfirmedVmV1({
       contextGraphId: CONTEXT_GRAPH_ID,
@@ -2188,20 +2203,21 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     expect(author.readRfc64SwmAuthorInventorySnapshotV1({
       inventoryScopeDigest,
       authorAddress: AUTHOR,
-    })).toMatchObject({ head: { payload: { totalRows: '0' } }, rows: [] });
+    })).toMatchObject({ head: { payload: { totalRows: '2' } }, rows: expect.arrayContaining([expect.objectContaining({ assertionCoordinate }), expect.objectContaining({ assertionCoordinate: allowListCoordinate })]) });
     expect(author.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toMatchObject({ catalogVersion: '4', inventoryRowCount: '0' });
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
     await whenDeliveredAndReceiverIdle(provider);
     expect(provider.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
-    })).toMatchObject({ catalogVersion: '4', inventoryRowCount: '0' });
-    expect(announce).toHaveBeenCalledTimes(announcementCountBeforeVm + 2);
+    })).toMatchObject({ catalogVersion: '2', inventoryRowCount: '2' });
+    expect(announce).toHaveBeenCalledTimes(announcementCountBeforeVm);
     expect(announce.mock.calls.at(-1)?.[0]).toMatchObject({
       peers: [providerPeerId],
     });
+    expect(author.readRfc64SwmAuthorInventorySnapshotV1({ inventoryScopeDigest, authorAddress: AUTHOR })).toEqual(inventoryBeforeVm);
   }, 60_000);
 
   it('repairs durable selected-private inventory through its complete provider on restart', async () => {
@@ -2694,9 +2710,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
       inventoryScopeDigest: scopeDigest,
       authorAddress: AUTHOR,
     })).toMatchObject({
-      head: { payload: { version: '1', totalRows: '0' } },
-      rows: [],
+      head: { payload: { version: '0', totalRows: '1' } },
     });
+    expect(restarted.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list())
+      .toMatchObject([{ version: 2, inventoryScope: null, seal: canonicalSeal }]);
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,
@@ -2704,6 +2721,10 @@ ordinaryNativeWiringDescribe('RFC-64 DKGAgent production native catalog wiring',
     releaseConfirmationProjection();
     await restarted.whenRfc64SwmCatalogProjectionSupervisorIdleV1();
     catalogReadSpy.mockRestore();
+    expect(restarted.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list()).toEqual([]);
+    expect(restarted.readRfc64SwmAuthorInventorySnapshotV1({
+      inventoryScopeDigest: scopeDigest, authorAddress: AUTHOR,
+    })).toMatchObject({ head: { payload: { version: '1', totalRows: '0' } }, rows: [] });
     expect(restarted.readRfc64AppliedCatalogHeadV1({
       catalogScopeDigest: catalogScopeDigest(),
       authorAddress: AUTHOR,

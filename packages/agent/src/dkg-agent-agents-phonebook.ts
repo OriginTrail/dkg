@@ -28,6 +28,11 @@ import {
   type AgentsPhonebookFetchTrigger,
   type OnDemandAgentsPhonebookDeps,
 } from './sync/on-demand-agents-phonebook.js';
+import { PeerProfileFollowUp, peerProfileFollowUpFor } from './sync/peer-profile-follow-up.js';
+import type { PeerSyncSession } from './sync/peer-sync-session.js';
+
+/** Wall-clock budget of one follow-up pull of a peer's `agents` graph. */
+const PEER_PROFILE_PULL_TIMEOUT_MS = 60_000;
 
 export class AgentsPhonebookMethods extends DKGAgentBase {
   /**
@@ -114,6 +119,29 @@ export class AgentsPhonebookMethods extends DKGAgentBase {
     } catch {
       return 'unknown';
     }
+  }
+
+  /**
+   * The connect-time pass has just pulled the `agents` graph from `peerId`:
+   * while that peer's own profile is still missing, pull the graph from it
+   * again shortly after (`sync/peer-profile-follow-up.ts`). Never throws.
+   */
+  followUpPeerAgentProfile(this: DKGAgent, peerId: string, session: PeerSyncSession): void {
+    const followUp = peerProfileFollowUpFor(session, () => new PeerProfileFollowUp({
+      hasProfile: async (peer, signal) => (await this.discovery.findAgentByPeerId(peer, { signal })) !== null,
+      isConnected: (peer) => this.node.isStarted
+        && this.node.libp2p.getConnections().some((connection) => connection.remotePeer.toString() === peer),
+      pullAgents: async (peer, signal) => {
+        await this.syncFromPeerDetailed(peer, [SYSTEM_CONTEXT_GRAPHS.AGENTS], undefined, undefined, undefined, {
+          signal,
+          totalTimeoutMs: PEER_PROFILE_PULL_TIMEOUT_MS,
+          stopOnBackoffWorthyFailure: true,
+          source: 'catchup-background',
+        });
+      },
+      logInfo: (message) => this.log.info(createOperationContext('sync'), message),
+    }));
+    void followUp.observePull(peerId);
   }
 
   createOnDemandAgentsPhonebookDeps(this: DKGAgent): OnDemandAgentsPhonebookDeps {

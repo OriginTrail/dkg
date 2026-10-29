@@ -1,3 +1,4 @@
+import { CATALOG_PUBLICATION_ADMISSION_CODE } from '@origintrail-official/dkg-agent';
 import { classifyPromoteAdmissionError } from './promote-admission-response.js';
 import type { AssertionFailureResponse } from './assertion-failure-response.js';
 import { classifyPromoteRecoveryError, type PromoteRecoveryContext } from './promote-recovery-response.js';
@@ -138,4 +139,11 @@ export function classifyAssertionError(e: any, context?: PromoteRecoveryContext)
 export function respondAssertionError(res: RequestContext["res"], e: any, context?: PromoteRecoveryContext): void {
   const failure = classifyAssertionError(e, context);
   jsonResponse(res, failure.status, failure.body, undefined, failure.headers);
+}
+
+/** Only pre-publication immutable-identity failures receive this client classification. */
+export function respondCatalogPublicationAdmissionError(res: RequestContext['res'], error: unknown): boolean {
+  if (typeof error !== 'object' || error === null || !('code' in error) || error.code !== CATALOG_PUBLICATION_ADMISSION_CODE) return false;
+  jsonResponse(res, 400, { code: CATALOG_PUBLICATION_ADMISSION_CODE, error: error instanceof Error ? error.message : String(error) });
+  return true;
 }

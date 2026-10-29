@@ -51,6 +51,7 @@ import {
   startDaemonLogRotationChecks,
 } from './log-rotation.js';
 import { startResourceUsageLog } from './resource-usage-log.js';
+import { readAsyncQueueDepth, startAsyncAdmissionUsageLog } from './async-admission-usage-log.js';
 import { resolveUpdateTelemetryVersionStatus } from './update-telemetry-status.js';
 const { homedir } = osModule;
 import { fileURLToPath } from 'node:url';
@@ -83,7 +84,7 @@ import {
   type ContextGraphOnChainIdResolution,
   type DKGAgentConfig,
 } from '@origintrail-official/dkg-agent';
-import { isExternalBackend } from '@origintrail-official/dkg-storage';
+import { configureStoreControlPath, isExternalBackend, logStoreControlPathGeometry } from '@origintrail-official/dkg-storage';
 import { BackpressureMonitor, computeNetworkId, createOperationContext, createLogRedactor, DKGEvent, Logger, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, pickNetworkTunables, isKaPublishLifecycleDebugLoggingEnabled, setKaPublishLifecycleDebugLoggingEnabled, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import {
   DEFAULT_REQUIRED_ACKS,
@@ -217,6 +218,7 @@ import { startActivationCatchups } from './context-graph-activation-catchup.js';
 import { cancelContextGraphReadinessRepeats } from './context-graph-readiness-repeat.js';
 import { endContextGraphWriteReadinessWaits } from './context-graph-write-readiness.js';
 import { startContextGraphCatchupProgress } from './context-graph-catchup-progress-sources.js';
+import { beginAsyncAdmissionTrace } from './async-admission-trace.js';
 import { authenticateHttpRequest, canAdministerNode, loadTokens } from '../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../extraction/index.js';
@@ -464,6 +466,9 @@ import {
 
 import { handleRequest } from './handle-request.js';
 import { configureApiQueryPriority } from './api-query-priority.js';
+import { configureWritePreflightCoalescing } from './write-preflight-coalescing.js';
+import { startRetention, type RetentionHandle } from './retention-sweeps.js';
+import { resolveRetentionConfig } from '../retention-config.js';
 import { loadRoutePlugins, countConfiguredPluginSpecs } from './plugin-loader.js';
 import type { MemoryGraphChangedEvent, MemoryGraphLayer } from './routes/context.js';
 import { buildChatMemoryStack } from './memory-tool-context.js';
@@ -1306,6 +1311,11 @@ async function runDaemonInnerWithStartupOwnership(
     info: log,
     warn: log,
   });
+  // The store control path's default and config setting depend on the configured backend (OT-RFC-73 P14). This
+  // runs before any store call can build the path; a later configuration would be refused with a warning.
+  configureStoreControlPath({ backend: config.store?.backend ?? 'oxigraph-worker', configured: config.store?.controlReservedSlots }, { warn: log });
+  logStoreControlPathGeometry({ info: log, warn: log });
+  const writePreflightCoalescing = configureWritePreflightCoalescing(process.env, { info: log, warn: log });
 
   const startupLogRotationMessage = startupLogRotation
     && describeDaemonLogRotation(startupLogRotation, 'during startup');
@@ -1430,6 +1440,8 @@ async function runDaemonInnerWithStartupOwnership(
   if (isPublisherRuntimeEnabled(config.publisher)) {
     resolvePublisherRetryTuning(config.publisher);
   }
+  // OT-RFC-73 P10b: a bad queue-retention value fails the boot here and the error names the key (the default is off for both queues).
+  const retentionSettings = resolveRetentionConfig(config.queueRetention);
   const { name: selectedNetworkConfig, network } = await loadResolvedNetworkConfig(
     config,
     loadNetworkConfig,
@@ -1908,6 +1920,8 @@ async function runDaemonInnerWithStartupOwnership(
     // Forward the operator retry budget to publishAsync producers (#1836).
     publisherMaxRetries: config.publisher?.maxRetries,
     syncAgentsMeta: resolveSyncAgentsMeta(config.syncAgentsMeta, process.env.DKG_SYNC_AGENTS_META),
+    // The agent's write-preflight policy: how long sharing stays off after a policy write of unknown outcome (0 = strict).
+    writePreflightUnresolvedWriteWindowMs: writePreflightCoalescing.unresolvedWriteWindowMs,
     queryAccess: config.queryAccess,
     chainAdapter: mockChainAdapter,
     // Only forward chain to the agent when both required fields resolved.
@@ -2146,6 +2160,7 @@ async function runDaemonInnerWithStartupOwnership(
   // torn down in `shutdown` before `agent.stop()` so the queue store is
   // still open when we wait for in-flight promotes to drain.
   let promoteWorkerLifecycle: PromoteWorkerDaemonLifecycle | null = null;
+  let daemonRetention: RetentionHandle | null = null;
   let shuttingDown = false;
 
   const publisherControl = createPublisherControlFromStore(agent.store, {
@@ -2445,6 +2460,8 @@ async function runDaemonInnerWithStartupOwnership(
         postCommitRecoveryIntervalMs: promoteWorkerConfig?.postCommitRecoveryIntervalMs,
       },
     });
+    // Queue retention (off by default) runs only here, in the daemon's admission instance, over each queue's own store object (the share queue's, and `publisherControl`'s).
+    daemonRetention = startRetention({ runtime: 'daemon-admission', settings: retentionSettings, agent, publisher: publisherControl, log });
 
     publisherStartupTimer = setTimeout(() => {
       if (publisherStartupController.signal.aborted) return;
@@ -2465,6 +2482,7 @@ async function runDaemonInnerWithStartupOwnership(
           }),
           publishEncryptionFactory: (publishOptions) => resolveDaemonPublishEncryption(agent, publishOptions),
           knowledgeAssetVmPublishHandler: createKnowledgeAssetVmPublishHandler(agent),
+          storageAckCopyCleanup: agent.storageAckCopyCleanup,
           publicSnapshotStore,
           log,
           startupSignal: publisherStartupController.signal,
@@ -2656,17 +2674,15 @@ async function runDaemonInnerWithStartupOwnership(
       }
       return countContextGraphsFromGraphUris(graphUris, knownContextGraphIds, shadowContextGraphIds);
     },
-    // The count getters below each issue a data-proportional full-scan COUNT,
-    // but the only caller is the 30 s metrics tick (metricsSource is consumed
-    // solely by MetricsCollector — no on-demand /api/status path), so each tick
-    // already re-reads the store fresh and there is nothing concurrent to
-    // coalesce. They are intentionally left uncached so a snapshot never serves
-    // a stale count and can't mask a store outage. The context-graph count
+    // These getters share one exact, low-frequency reconciled snapshot. Active
+    // dashboards therefore do not launch five data-proportional COUNT scans;
+    // a cheap ASK liveness probe prevents a cached snapshot from masking a
+    // store outage, and failed reconciliation nulls the affected metric fields.
+    // The context-graph count
     // avoids the composite context-graph listing enrichment path. It uses the
     // cached store graph inventory plus backed subscription/declaration evidence,
     // then dedupes local layer graphs. It intentionally includes private CG graphs
     // that are backed by local subscription/declaration state.
-    // These COUNTs are cheap (~0.015 CPU-s/tick on a 75k-triple store).
     // Unscoped reads: after a core-cache snapshot job they count the content
     // outside the core-cache-marked graphs.
     ...createStoreCountMetrics((sparql, options) => agent.query(sparql, options)),
@@ -2904,6 +2920,12 @@ async function runDaemonInnerWithStartupOwnership(
   });
   // Memory, store lanes and sync slots, one `resource_usage` line every 5 minutes.
   const resourceUsageLog = startResourceUsageLog();
+  // How the async share and publish queues are doing, one `async_admission_usage` line every 5 minutes.
+  const asyncAdmissionUsageLog = startAsyncAdmissionUsageLog({
+    readDepth: (signal) => readAsyncQueueDepth(agent.store, signal),
+    shareWorkerCounters: () => promoteWorkerLifecycle?.getSupervisor()?.getCounters() ?? null,
+    retention: () => daemonRetention?.usage() ?? [],
+  });
 
   // A time window cannot bound a same-day compatibility-log storm. This
   // independent maintenance helper enforces only the published count cap;
@@ -3405,6 +3427,7 @@ async function runDaemonInnerWithStartupOwnership(
       // Resolve CORS origin once per request (request-scoped, not global)
       const reqCorsOrigin = resolveCorsOrigin(req, corsAllowed) ?? null;
       (res as any).__corsOrigin = reqCorsOrigin;
+      beginAsyncAdmissionTrace(req.method, reqUrl.pathname, res);
 
       // Rate limiting — include CORS headers so browsers surface 429 instead of opaque CORS failure
       const clientIp = req.socket.remoteAddress ?? 'unknown';
@@ -3709,6 +3732,8 @@ async function runDaemonInnerWithStartupOwnership(
         clearInterval(pruneTimer);
         daemonLogRotationChecks.stop();
         resourceUsageLog.stop();
+        asyncAdmissionUsageLog.stop();
+        await daemonRetention?.stop();
         await runChainDiscoveryScan.close().catch((err: unknown) => {
           log(`Chain discovery scan drain error: ${err instanceof Error ? err.message : String(err)}`);
         });

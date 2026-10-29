@@ -69,6 +69,7 @@ function fixture(route: Route, decision: ContextGraphReadAuthorityDecision, oper
   const agent = { resolveContextGraphReadAuthority: authority,
     listCclEvaluations: read, evaluateCclPolicy: read, listCclPolicies: read, resolveCclPolicy: read,
     assertion: { history: read, query: read, listPromoteAsyncJobs: vi.fn(async () => []), getPromoteAsyncStatus: vi.fn(async () => job) },
+    readContextGraphNamedGraphStats: vi.fn<DKGAgent['readContextGraphNamedGraphStats']>(async () => []),
     listSubGraphs: vi.fn(async () => []), getContextGraphAllowedAgents: read, query,
     canReadContextGraph: vi.fn(async () => decision.outcome === 'allowed'),
   };
@@ -253,26 +254,48 @@ describe('caller-bound graph reads', () => {
     },
   );
 
-  it('returns subgraph counts through the bearer-scoped physical query', async () => {
+  it('returns subgraph counts through caller-bound typed statistics', async () => {
     const h = fixture(routes[5], decisions.allowed);
     const nodeAddress = '0x1111111111111111111111111111111111111111';
     Object.assign(h.ctx.agent, { agentAddress: nodeAddress });
     h.agent.listSubGraphs.mockResolvedValue([{ name: 'docs', uri: `did:dkg:context-graph:${CG}/docs` }] as never);
-    h.query.mockResolvedValue({ bindings: [
-      { g: `did:dkg:context-graph:${CG}/docs/assertion/${CALLER}/one`, entities: '2', triples: '5' },
-      { g: { value: `did:dkg:context-graph:${CG}/docs` }, entities: { value: '3' }, triples: { value: '7' } },
-      { g: `did:dkg:context-graph:${CG}/_meta`, entities: '99', triples: '99' },
-      { g: 'did:dkg:context-graph:other/docs', entities: '99', triples: '99' },
-    ] } as never);
+    h.agent.readContextGraphNamedGraphStats.mockResolvedValue([
+      { graph: `did:dkg:context-graph:${CG}/docs/assertion/${CALLER}/one`, entityCount: 2, tripleCount: 5 },
+      { graph: `did:dkg:context-graph:${CG}/docs`, entityCount: 3, tripleCount: 7 },
+      { graph: `did:dkg:context-graph:${CG}/_meta`, entityCount: 99, tripleCount: 99 },
+      { graph: 'did:dkg:context-graph:other/docs', entityCount: 99, tripleCount: 99 },
+    ]);
     await routes[5].run(h.ctx);
-    expect(h.query).toHaveBeenCalledExactlyOnceWith(expect.any(String), expect.objectContaining({
-      contextGraphId: CG, includeContextGraphPartitions: true, callerAgentAddress: CALLER,
-    }));
+    expect(h.agent.readContextGraphNamedGraphStats).toHaveBeenCalledExactlyOnceWith(CG, {
+      callerAgentAddress: CALLER, signal: expect.any(AbortSignal),
+      priority: 'background', source: 'node-ui.sub-graph-stats',
+    });
+    expect(h.agent.readContextGraphNamedGraphStats.mock.calls[0][1]?.signal?.aborted).toBe(false);
+    expect(h.query).not.toHaveBeenCalled();
     expect(CALLER).not.toBe(nodeAddress);
     expect(h.res.statusCode).toBe(200);
     expect(JSON.parse(h.res.body)).toMatchObject({ contextGraphId: CG,
       subGraphs: [{ name: 'docs', entityCount: 5, tripleCount: 12 }],
     });
+  });
+
+  it('forwards HTTP cancellation to the typed statistics operation', async () => {
+    const h = fixture(routes[5], decisions.allowed);
+    let suppliedSignal: AbortSignal | undefined;
+    let initiallyAborted: boolean | undefined;
+    h.agent.readContextGraphNamedGraphStats.mockImplementation(async (_id, options) => {
+      suppliedSignal = options?.signal;
+      initiallyAborted = suppliedSignal?.aborted;
+      h.ctx.req.emit('aborted');
+      return [];
+    });
+    await routes[5].run(h.ctx);
+    expect(h.agent.readContextGraphNamedGraphStats).toHaveBeenCalledOnce();
+    expect(suppliedSignal).toBeInstanceOf(AbortSignal);
+    expect(initiallyAborted).toBe(false);
+    expect(suppliedSignal?.aborted).toBe(true);
+    expect(h.res.writableEnded).toBe(false);
+    expect(h.res.body).toBe('');
   });
 
   it('keeps an accepted agent credential scoped when authentication is disabled', async () => {

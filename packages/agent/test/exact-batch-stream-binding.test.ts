@@ -515,7 +515,8 @@ describe('exact batch normal verifier/materializer binding', () => {
       const metadataReads = f.reads.filter(source => source === 'sync.responder.exactAssetExport.metadata').length;
       await run(f, warm);
       expect(f.reads.filter(source => source === 'sync.responder.exactAssetExport.payload')).toHaveLength(payloadReads);
-      expect(f.reads.filter(source => source === 'sync.responder.exactAssetExport.metadata')).toHaveLength(metadataReads + 6);
+      // Each warm lease checks admission/end; the prefetched third lease also checks after ACK.
+      expect(f.reads.filter(source => source === 'sync.responder.exactAssetExport.metadata')).toHaveLength(metadataReads + 7);
       expect(f.exportCounts).toEqual([1, 1, 1, 0, 0, 0]);
       expect(f.exportCache.stats()).toMatchObject({ exports: 3, encodedCacheHits: 3, encodedCacheEntries: 3 });
       expect(f.chainReads.length - chainReads).toBe(9);
@@ -913,4 +914,38 @@ describe('exact batch normal verifier/materializer binding', () => {
       expect(f.exportCache.stats().encodedCacheEntries).toBe(1);
     } finally { release(); wire.abort(); await Promise.allSettled([streamed, ...(legacy ? [legacy] : [])]); await f.close(); }
   });
+});
+
+it('withholds a prefetched asset made private during ACK wait using real metadata', async () => {
+  const f = await fixture(3, 12);
+  const controller = new AbortController();
+  const credit = Promise.withResolvers<void>();
+  const acquire = f.exportCache.acquireEncoded.bind(f.exportCache);
+  const released = vi.fn();
+  const acquired = vi.spyOn(f.exportCache, 'acquireEncoded').mockImplementation(async request => {
+    const lease = await acquire(request);
+    return lease && request.assetUal === f.items[2]!.ual
+      ? { ...lease, release: () => { released(); lease.release(); } } : lease;
+  });
+  const sent: ExactBatchFrame[] = [];
+  let ackIndex = 0;
+  const authorized = await f.binding.authorizeRequest(f.signed, 'requester', controller.signal);
+  const result = f.binding.respond(authorized.context, {
+    assetUals: f.receiver.assetUals, windowSize: 2, signal: controller.signal,
+    send: async frame => { sent.push(frame); },
+    next: async () => { await credit.promise; return { kind: K.ACK, assetIndex: ackIndex++, sequence: 1, payload: new Uint8Array() }; },
+  }, 'requester').then(() => ({ ok: true }), error => ({ error }));
+  try {
+    await vi.waitFor(() => expect(acquired).toHaveBeenCalledTimes(3));
+    const lease = await acquired.mock.results[2]!.value;
+    expect(lease).not.toBeNull();
+    const access = f.items[2]!.meta.find(quad => quad.predicate === 'http://dkg.io/ontology/accessPolicy')!;
+    expect(access).toBeDefined();
+    await f.backing.delete([access]);
+    await f.backing.insert([{ ...access, object: '"ownerOnly"' }]);
+    credit.resolve();
+    expect(await result).toHaveProperty('error');
+    expect(sent.filter(frame => frame.assetIndex === 2 && (frame.kind === K.META || frame.kind === K.DATA))).toEqual([]);
+    expect(released).toHaveBeenCalledOnce();
+  } finally { credit.resolve(); controller.abort(); await result; await f.close(); }
 });

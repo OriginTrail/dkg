@@ -34,10 +34,8 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-import {
-  externalStorePriorityScheduler,
-  type StorePriorityScheduler,
-} from '../store-priority-scheduler.js';
+import { externalStorePriorityScheduler, type StorePriorityScheduler } from '../store-priority-scheduler.js';
+import { selectStoreScheduler } from '../store-control-path.js';
 import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
@@ -335,7 +333,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
       operation,
     );
     const source = options?.source ?? `blazegraph.${operation}`;
-    const scheduled = this.scheduler.run(
+    const scheduled = selectStoreScheduler(this.scheduler, options).run(
       options?.priority,
       source,
       async () => {
@@ -528,7 +526,7 @@ export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapabil
         'replaceGraphAndSubject',
       );
     } catch (error) {
-      await this.sparqlUpdate(
+      if (plan.cleanup) await this.sparqlUpdate(
         plan.cleanup,
         { ...options, source: 'blazegraph.replaceGraphAndSubject.cleanup' },
         'replaceGraphAndSubject',
