@@ -123,22 +123,25 @@ export async function selectFinalizedAssertionPublication(host: FinalizedAsserti
       `Lifecycle kaId number ${stampedNumberStr} does not match graph-scoped UAL number ${graphScope.kaNumber}`,
     );
   }
-  return { contextGraphId, name, opts, agentAddress, publisher, assertionUri, metaGraph, seal, graphScope,
-    packedKaId, rfc64WorkspaceHead, lifecycleUri, operationPlan, catalogObligationRequired };
+  // Both operations share one sealed identity/scope/lifecycle context. Only the
+  // discriminated operation plan determines which execution boundary accepts it.
+  const sharedMemoryScope: SharedMemoryGraphScope = { kind: 'named-lifecycle',
+    identity: { agentAddress: graphScope.agentAddress, kaNumber: BigInt(graphScope.kaNumber) } };
+  const context = { contextGraphId, name, opts, agentAddress, publisher, assertionUri, metaGraph, seal, graphScope,
+    packedKaId, rfc64WorkspaceHead, lifecycleUri, catalogObligationRequired, sharedMemoryScope,
+    newMerkleHexBare: ethers.hexlify(seal.merkleRoot).slice(2),
+    recoveredReservedKaId: seal.reservedKaId ?? packedKaId, privateMerkleRoot: seal.privateMerkleRoot };
+  return operationPlan.kind === 'update'
+    ? { ...context, kind: 'update' as const, operationPlan }
+    : { ...context, kind: 'mint' as const, operationPlan };
 }
 type FinalizedAssertionSelection = Awaited<ReturnType<typeof selectFinalizedAssertionPublication>>;
+type FinalizedAssertionPublicationContext = Omit<FinalizedAssertionSelection, 'kind' | 'operationPlan'>;
+type FinalizedAssertionMintPlan = Extract<FinalizedAssertionSelection, { kind: 'mint' }>;
+type FinalizedAssertionUpdatePlan = Extract<FinalizedAssertionSelection, { kind: 'update' }>;
 
-export async function prepareFinalizedAssertionUpdateContent(host: FinalizedAssertionUpdateContentHost, selected: FinalizedAssertionSelection) {
-  const { contextGraphId, opts, graphScope, seal, packedKaId } = selected;
-  const newMerkleHexBare = ethers.hexlify(seal.merkleRoot).slice(2);
-  const recoveredReservedKaId = seal.reservedKaId ?? packedKaId;
-  const sharedMemoryScope: SharedMemoryGraphScope = {
-    kind: 'named-lifecycle',
-    identity: {
-      agentAddress: graphScope.agentAddress,
-      kaNumber: BigInt(graphScope.kaNumber),
-    },
-  };
+export async function prepareFinalizedAssertionUpdateContent(host: FinalizedAssertionUpdateContentHost, selected: FinalizedAssertionUpdatePlan) {
+  const { contextGraphId, opts, graphScope, seal, sharedMemoryScope } = selected;
   const scopedSwmQuads = await host._loadSelectedSWMQuads(
     contextGraphId,
     'all',
@@ -203,20 +206,14 @@ export async function prepareFinalizedAssertionUpdateContent(host: FinalizedAsse
     );
   }
 
-  return { ...selected, newMerkleHexBare, recoveredReservedKaId, sharedMemoryScope, canonicalSwmQuads, canonicalPrivateQuads, privateMerkleRoot };
+  return { ...selected, canonicalSwmQuads, canonicalPrivateQuads, privateMerkleRoot };
 }
 type PreparedFinalizedAssertionContent = Awaited<ReturnType<typeof prepareFinalizedAssertionUpdateContent>>;
 
 /** Named lifecycle planning carries the sealed target; publisher owns mint content loading and validation. */
-export function finalizedAssertionMintPlan(selected: FinalizedAssertionSelection) {
-  const { seal, graphScope, packedKaId } = selected;
-  const sharedMemoryScope: SharedMemoryGraphScope = { kind: 'named-lifecycle',
-    identity: { agentAddress: graphScope.agentAddress, kaNumber: BigInt(graphScope.kaNumber) } };
-  return { ...selected, newMerkleHexBare: ethers.hexlify(seal.merkleRoot).slice(2),
-    recoveredReservedKaId: seal.reservedKaId ?? packedKaId, sharedMemoryScope,
-    privateMerkleRoot: seal.privateMerkleRoot };
+export function finalizedAssertionMintPlan(selected: FinalizedAssertionMintPlan): FinalizedAssertionMintPlan {
+  return selected;
 }
-type FinalizedAssertionMintPlan = ReturnType<typeof finalizedAssertionMintPlan>;
 
 export function finalizedMintContentOptions(prepared: FinalizedAssertionMintPlan, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): SharedMemoryMintRecordingOptions & { publisherOverride: DKGPublisher } {
   const { opts, publisher, recoveredReservedKaId, sharedMemoryScope, graphScope, seal, privateMerkleRoot } = prepared;
@@ -252,7 +249,7 @@ export function finalizedMintOptions(prepared: FinalizedAssertionMintPlan, prici
     publisherNodeIdentityIdOverride: prepared.opts?.publisherNodeIdentityIdOverride, publishEpochs: prepared.opts?.publishEpochs };
 }
 
-async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionLifecycleHost, prepared: FinalizedAssertionMintPlan, result: PublishResult): Promise<boolean> {
+async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionLifecycleHost, prepared: FinalizedAssertionPublicationContext, result: PublishResult): Promise<boolean> {
   const { contextGraphId, name, opts, publisher, agentAddress, packedKaId, lifecycleUri, newMerkleHexBare } = prepared;
   const ctx = opts?.operationCtx ?? createOperationContext('publishFromSWM');
   if (result.status === 'confirmed' && opts?.clearSharedMemoryAfter === true)
@@ -271,7 +268,7 @@ async function stampFinalizedPublicationLifecycle(host: FinalizedAssertionLifecy
   }
 }
 
-async function consumeFinalizedPublicationShare(host: Pick<FinalizedAssertionLifecycleHost, 'log'>, prepared: FinalizedAssertionMintPlan,
+async function consumeFinalizedPublicationShare(host: Pick<FinalizedAssertionLifecycleHost, 'log'>, prepared: FinalizedAssertionPublicationContext,
   result: PublishResult): Promise<void> {
   if (result.status !== 'confirmed') return;
   const { contextGraphId, name, opts, publisher, agentAddress, lifecycleUri } = prepared;
@@ -283,14 +280,14 @@ async function consumeFinalizedPublicationShare(host: Pick<FinalizedAssertionLif
   }
 }
 
-export function finalizedPublicationIdentity(prepared: FinalizedAssertionMintPlan) {
+export function finalizedPublicationIdentity(prepared: FinalizedAssertionPublicationContext) {
   const { contextGraphId, name, opts, rfc64WorkspaceHead, seal, assertionUri } = prepared;
   return { contextGraphId, subGraphName: opts?.subGraphName, assertionCoordinate: name,
     shareOperationId: rfc64WorkspaceHead?.shareOperationId, seal, assertionUri };
 }
 
 async function observeFinalizedPublicationCatalog(host: Pick<FinalizedAssertionMintHost, 'observeRfc64ConfirmedVmV1'>,
-  prepared: FinalizedAssertionMintPlan, result: PublishResult): Promise<void> {
+  prepared: FinalizedAssertionPublicationContext, result: PublishResult): Promise<void> {
   return observeConfirmedPublicationWithRecoveryV1({ ...finalizedPublicationIdentity(prepared),
     status: result.status, confirmedTransaction: result.onChainResult, catalogObligationRequired: prepared.catalogObligationRequired,
     ctx: prepared.opts?.operationCtx ?? createOperationContext('publishFromSWM'), publicationLabel: 'publish',

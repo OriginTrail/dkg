@@ -5822,7 +5822,7 @@ export class PublishMethods extends DKGAgentBase {
   async publishFromFinalizedAssertion(this: DKGAgent, contextGraphId: string, name: string,
     opts?: FinalizedAssertionPublishOptions): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
     const selected = await selectFinalizedAssertionPublication(finalizedAssertionSelectionHost.call(this), contextGraphId, name, opts);
-    if (selected.operationPlan.kind === 'update') {
+    if (selected.kind === 'update') {
       const host = finalizedAssertionUpdateHost.call(this, (kaId, cg, quads, privateQuads, updateOpts) =>
         this.update(kaId, cg, quads, privateQuads, { ...updateOpts, [INTERNAL_ROOTLESS_UPDATE_ORIGIN]: true }));
       const prepared = await prepareFinalizedAssertionUpdateContent(host, selected);
@@ -6308,7 +6308,7 @@ export async function recordFinalizedAssertionMint(this: DKGAgent, contextGraphI
 ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
   if (!recording?.reservation || !recording.heldLifecycle) throw new Error('Prepared recording requires its reservation and lifecycle lease');
   const selected = await selectFinalizedAssertionPublication(finalizedAssertionSelectionHost.call(this), contextGraphId, name, opts, recording);
-  if (selected.operationPlan.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
+  if (selected.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
     { code: KA_MINT_RECONCILE_REFUSED_CODE });
   const prepared = finalizedAssertionMintPlan(selected);
   const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintContentOptions(prepared, selected.operationPlan.pricingPolicy));

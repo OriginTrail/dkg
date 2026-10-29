@@ -20,3 +20,24 @@ void selection.update;
 void mint._buildPrecomputedUpdateAttestationForSeal;
 // @ts-expect-error Mint completion does not load or canonicalize SWM content.
 void mint._loadSelectedSWMQuads;
+
+import {
+  completeFinalizedAssertionMint, createFinalizedAssertionMintCheckpoint,
+  finalizedAssertionMintPlan, prepareFinalizedAssertionUpdateContent, publishFinalizedAssertionUpdate,
+  type FinalizedAssertionUpdateHost,
+} from '../src/internal/finalized-assertion-publication.js';
+import type { PublishResult } from '@origintrail-official/dkg-publisher';
+declare const updatePlan: Awaited<ReturnType<typeof prepareFinalizedAssertionUpdateContent>>;
+declare const mintPlan: ReturnType<typeof finalizedAssertionMintPlan>;
+declare const updateHost: FinalizedAssertionUpdateHost;
+declare const result: PublishResult;
+void completeFinalizedAssertionMint(mint, mintPlan, result);
+void publishFinalizedAssertionUpdate(updateHost, updatePlan);
+// @ts-expect-error Update preparation cannot enter mint-only lifecycle completion.
+void completeFinalizedAssertionMint(mint, updatePlan, result);
+// @ts-expect-error Updates cannot create mint-recovery checkpoints.
+void createFinalizedAssertionMintCheckpoint(mint, updatePlan);
+// @ts-expect-error Mint selection cannot enter the update execution boundary.
+void publishFinalizedAssertionUpdate(updateHost, mintPlan);
+// @ts-expect-error Update selection cannot be converted into a mint plan.
+void finalizedAssertionMintPlan(updatePlan);
