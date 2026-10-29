@@ -98,6 +98,30 @@ describe('jobFailureText', () => {
     expect(reason.length).toBe(JOB_FAILURE_REASON_MAX_LENGTH);
   });
 
+  it('takes linear work on a detail block whose close never comes', () => {
+    const started = performance.now();
+    const unclosed = `failed (error=1, code=X, version=1.2.${'1'.repeat(60_000)}`;
+    expect(jobFailureText(unclosed).detail.startsWith('failed (error=1, code=X, version=1.2.[hex, 30000 bytes]')).toBe(true);
+    expect(jobFailureReason(`${unclosed} (data=1, code=Y, version=6.16.0)`)).toBe('failed (code=Y)');
+    expect(jobFailureReason(`missing (code=X, version=6.0.0-beta-exports.16)`)).toBe('missing (code=X)');
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+
+  it('drops a detail block that the read limit cut before its close, from its start', () => {
+    const request = 'request failed (request={ "headers": { "authorization": "Bearer SECRET" }, "body": "'
+      + `${'x'.repeat(70_000)}" }, code=SERVER_ERROR, version=6.16.0)`;
+    for (const text of [request, `${ETHERS_THROTTLED}; then ${request}`]) {
+      const { reason, detail } = jobFailureText(text);
+      for (const out of [reason, detail]) {
+        expect(out).not.toContain('SECRET');
+        expect(out).not.toContain('authorization');
+      }
+    }
+    expect(jobFailureText(request).detail).toBe('request failed…');
+    expect(jobFailureText(`${ETHERS_THROTTLED}; then ${request}`).detail)
+      .toBe('server response 429 Too Many Requests (code=SERVER_ERROR); then request failed…');
+  });
+
   it('is unchanged by a second pass, so a stored reason reads back as it was written', () => {
     for (const text of [ETHERS_REVERT, ETHERS_THROTTLED, ETHERS_REFUSED, `${'x '.repeat(600)}`, PROMOTE_POST_COMMIT_FAILURE_MESSAGE]) {
       const reason = jobFailureReason(text);
@@ -157,6 +181,20 @@ describe('a publish job failure records a short reason', () => {
     });
     expect(short.message).toBe('execution reverted (unknown custom error) (code=CALL_EXCEPTION)');
     expect(logged).toHaveLength(0);
+  });
+
+  it('never logs the contents of a detail block that the read limit cut', () => {
+    const failure = createLiftJobFailureMetadata({
+      failedFromState: 'broadcast',
+      code: 'rpc_unavailable',
+      message: `${'endpoint refused the request; '.repeat(40)}send failed `
+        + `(request={ "headers": { "authorization": "Bearer SECRET" }, "body": "${'x'.repeat(70_000)}`,
+      errorPayloadRef: 'urn:dkg:publisher:error:job-cut',
+    });
+    expect(failure.message.length).toBeLessThanOrEqual(JOB_FAILURE_REASON_MAX_LENGTH);
+    expect(logged).toHaveLength(1);
+    expect(logged[0]!.message.endsWith('endpoint refused the request; send failed…')).toBe(true);
+    expect(logged[0]!.message).not.toContain('SECRET');
   });
 
   it('on the broadcast path, with the code the raw text classifies to', () => {
