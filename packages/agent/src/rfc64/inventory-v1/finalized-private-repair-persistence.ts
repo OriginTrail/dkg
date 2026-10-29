@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
-import { CatalogWorkSliceV1 } from '../../internal/catalog-work-slice.js';
+import { createMainThreadTimeSlice } from '../../main-thread-time-slice.js';
 import type { StatementSync } from 'node:sqlite';
 import {
   digestRfc64FinalizedPrivatePlacementRepairV1,
@@ -43,12 +43,12 @@ export class FinalizedPrivateRepairPersistenceV1 {
     const rows = this.host.read(() => this.host.statement(() =>
       this.host.prepare(INVENTORY_V1_STATEMENT_SQL.listFinalizedPrivatePlacementRepairs).all() as SqlRowV1[]));
     const repairs: Rfc64FinalizedPrivatePlacementRepairV1[] = [];
-    const slice = new CatalogWorkSliceV1();
+    const checkpoint = createMainThreadTimeSlice({ sliceMs: 8, maxIterations: 32 });
     for (const row of rows) {
       signal.throwIfAborted();
       this.host.assertOpen();
       repairs.push(this.decodeFinalizedPrivatePlacementRepair(row));
-      const pause = slice.checkpoint();
+      const pause = checkpoint();
       if (pause) await pause;
     }
     signal.throwIfAborted();

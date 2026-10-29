@@ -12,7 +12,7 @@ import { finalizedPrivateRepairKeyV1 } from './finalized-private-placement-key.j
 import type { CatalogPlacementTimingV1, CatalogPlacementAttemptV1, CatalogPlacementWaiterObserverV1, FinalizedPrivatePlacementQueueStatusV1 } from './catalog-placement-timing.js';
 import type { FullCatalogParkingV1 } from './full-catalog-parking.js';
 import { FinalizedPrivatePlacementWaitersV1 } from './finalized-private-placement-waiters.js';
-import { CatalogWorkSliceV1 } from './catalog-work-slice.js';
+import { createMainThreadTimeSlice } from '../main-thread-time-slice.js';
 import { NextTurnRecurringTaskV1 } from './next-turn-recurring-task.js';
 
 interface RetryEntry {
@@ -269,7 +269,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
     this.#arrivedDuringListing = arrivedDuringListing;
     timing.passReading();
     const repairs = await this.#dependencies.listFinalizedPrivateRepairsAsync(signal);
-    const slice = new CatalogWorkSliceV1();
+    const checkpoint = createMainThreadTimeSlice({ sliceMs: 8, maxIterations: 32 });
     const queued: Array<{ repair: Rfc64FinalizedPrivatePlacementRepairV1; key: string }> = [];
     const currentKeys = new Set<string>();
     for (const repair of repairs) {
@@ -277,7 +277,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
       const key = finalizedPrivateRepairKeyV1(repair);
       queued.push({ repair, key });
       currentKeys.add(key);
-      const pause = slice.checkpoint();
+      const pause = checkpoint();
       if (pause) await pause;
     }
     if (signal.aborted) return;
@@ -292,7 +292,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
     this.#options.fullCatalogs.passStarted(currentKeys);
     const blockedGraphs = new Set<ContextGraphIdV1>();
     await mapWithConcurrency(queued, 1, async ({ repair, key }) => {
-      const pause = slice.checkpoint();
+      const pause = checkpoint();
       if (pause) await pause;
       if (signal.aborted) return;
       const entry = this.#entry(repair, key);
