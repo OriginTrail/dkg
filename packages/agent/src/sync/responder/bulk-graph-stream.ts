@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 import { createHash } from 'node:crypto';
-import { BULK_GRAPH_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
-  createOperationContext, registerBulkGraphResponder, type ProtocolRouter, type BulkGraphSession, type DuplexStreamOptions } from '@origintrail-official/dkg-core';
+import { GRAPH_TRANSFER_KIND as K, BULK_GRAPH_CHUNK_BYTES, BULK_GRAPH_FRAME_BYTES,
+  createOperationContext, registerBulkGraphResponder, registerPublicCheckpointResponder, type ProtocolRouter, type BulkGraphSession, type DuplexStreamOptions } from '@origintrail-official/dkg-core';
 import { BULK_STAGING_BYTES, BULK_STAGING_ASSETS, bulkChunkHash, bulkJson, readBulkJson, encodeBulkRefusal, encodeBulkChunkEnd,
   validateBulkGraphRequest, type BulkGraphRequest, type BulkAssetHeader } from '../bulk-graph-contract.js';
 import type { PublicAssetResponderOptions, PublicAssetServingOptions } from './public-asset-responder.js';
@@ -11,7 +11,10 @@ const EMPTY = new Uint8Array();
 /** Public-only, shares the existing responder admission and verified prepared-content cache. */
 export function registerPublicBulkGraph(router: ProtocolRouter,
   options: PublicAssetResponderOptions & Pick<DuplexStreamOptions, 'onInboundFailure'>): void {
-  registerBulkGraphResponder(router, async (bytes, peer, signal) => {
+  // The new protocol only acknowledges immutable checkpoint persistence. The old
+  // protocol retains COMMIT = applied graph data; negotiation cannot confuse them.
+  for (const register of [registerBulkGraphResponder, registerPublicCheckpointResponder]) {
+  register(router, async (bytes, peer, signal) => {
     const request = validateBulkGraphRequest(readBulkJson(bytes));
     return options.admission.withPreAuthorizationAdmission(peer, signal, async () => {
       // The ordinary public graph authorizer is still mandatory. It authorizes graph
@@ -25,23 +28,25 @@ export function registerPublicBulkGraph(router: ProtocolRouter,
     });
   }, (request, session, peer) => options.admission.withAuthorizedResponseAdmission(peer, request.contextGraphId,
     session.signal, () => servePublicBulkChunk(request, session, options)), options);
+  }
 }
 
 export async function servePublicBulkChunk(request: BulkGraphRequest, session: Pick<BulkGraphSession, 'signal' | 'next' | 'send'>, options: PublicAssetServingOptions): Promise<void> {
   const context = createOperationContext('sync');
   const hash = bulkChunkHash(request);
-  // Encoded prefix offsets are the single ledger for sent, credited and durable progress.
+  // Track sent, credited and finally acknowledged bytes. The negotiated protocol
+  // defines whether final acknowledgement means application or persistence.
   const offsets = [0];
-  let credited = 0, committed = 0;
+  let credited = 0, acknowledged = 0;
   const lengthAt = (index: number) => offsets[index + 1]! - offsets[index]!;
   const readControl = async () => {
     const frame = await session.next();
     if (frame.kind === K.CREDIT) {
       if (frame.index !== credited || credited >= offsets.length - 1 || frame.sequence !== lengthAt(credited)) throw new Error('Invalid bulk receipt credit');
       credited++;
-    } else if (frame.kind === K.COMMIT) {
-      if (frame.index !== committed || committed >= credited || frame.sequence !== lengthAt(committed)) throw new Error('Invalid bulk durable acknowledgement');
-      committed++;
+    } else if (frame.kind === K.FINAL_ACK) {
+      if (frame.index !== acknowledged || acknowledged >= credited || frame.sequence !== lengthAt(acknowledged)) throw new Error('Invalid bulk durable acknowledgement');
+      acknowledged++;
     } else throw new Error('Unexpected bulk receiver control');
   };
   for (const [index, assetUal] of request.assetUals.entries()) {
@@ -90,5 +95,5 @@ export async function servePublicBulkChunk(request: BulkGraphRequest, session: P
   if (!assets) throw new Error('Bulk graph chunk made no progress');
   await session.send({ kind: K.CHUNK_END, index: assets, sequence: bytes,
     payload: encodeBulkChunkEnd({ digest: hash.digest('hex'), assets, encodedBytes: bytes }) });
-  while (committed < assets) await readControl();
+  while (acknowledged < assets) await readControl();
 }

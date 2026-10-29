@@ -1,3 +1,4 @@
+export { buildEvmDeploymentId } from './chain-adapter.js';
 export * from './public-graph-snapshot.js';
 export type { CoreChainCacheRegistry } from './core-chain-cache-registry.js';
 export { createEvmCoreChainCacheRegistry, CORE_CHAIN_CACHE_MAX_RPC_ENDPOINTS } from './evm-core-chain-cache.js';
