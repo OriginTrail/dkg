@@ -4,6 +4,7 @@ packages:
   - "packages/cli/test-fixtures/sample-kafka-extension"
   - "demo"
   - "devnet/ack-candidate-isolation"
+  - "devnet/openclaw-persist-turn"
   - "devnet/agent-provenance"
   - "devnet/agent-restart-gossip"
   - "devnet/core-peers-features"
@@ -44,3 +45,4 @@ packages:
   - "devnet/public-cg-hash-subscription"
   - "devnet/issue-2052-system-records"
   - "devnet/node-store-persistence"
+  - "devnet/swm-host-store-durability"

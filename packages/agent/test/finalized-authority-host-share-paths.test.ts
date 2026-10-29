@@ -13,6 +13,7 @@ import {
   encodeWorkspacePublishRequest,
 } from '@origintrail-official/dkg-core';
 import { DKGAgent, agentFromPrivateKey, type AgentKeyRecord } from '../src/index.js';
+import { localGossipSigner, type WorkspaceGossipSigner } from '../src/external-author-signing.js';
 import { initializeRfc64LegacySwmBoundaryV1 } from '../src/rfc64/legacy-swm-boundary-v1.js';
 import { resolveRfc64PersistenceRootV1 } from '../src/rfc64/persistence-layout-v1.js';
 import { SwmHostModeStore } from '../src/swm/host-mode-store.js';
@@ -105,7 +106,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'FinalizedSwmSyncGate', chainAdapter: chain });
     vi.spyOn(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(undefined);
-    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveMetadataConfirmation').mockResolvedValue({ outcome: 'confirmed' });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
     // Served fresh (a cache hit inside the tick), so the private roster decides.
@@ -137,7 +138,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'FinalizedSwmSyncFallback', chainAdapter: chain });
     vi.spyOn(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(undefined);
-    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveMetadataConfirmation').mockResolvedValue({ outcome: 'confirmed' });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(7n));
     const live = vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
@@ -323,7 +324,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
       accessPolicy: 1,
       participantAgents: [member.agentAddress],
     });
-    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveMetadataConfirmation').mockResolvedValue({ outcome: 'confirmed' });
     const accessChecks = vi.spyOn(agent, 'canUseSharedMemoryForContextGraph');
     // Only the recipient resolver asks for the live roster. Each of its reads
     // after the first, one per stability attempt, starts a reconcile.
@@ -355,7 +356,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     // authority fact, so it cost no further attempt and moved no revision.
     expect(recipientReads).toBe(2);
     expect(reconciles).toHaveLength(1);
-    expect(accessChecks).toHaveBeenCalledWith(privateGraph);
+    expect(accessChecks).toHaveBeenCalledWith(privateGraph, { onAuthorityWait: expect.any(Function) });
     expect(projection.readAuthorityFactsRevision).toBe(nodeWide);
     expect(projection.readContextGraphAuthorityFactsRevision(privateGraph)).toBe(perGraph);
   });
@@ -388,7 +389,7 @@ describe('finalized authority on the SWM host/sync and share paths', () => {
     const chain = new MockChainAdapter();
     agent = await DKGAgent.create({ name: 'FinalizedStaleRosterGates', chainAdapter: chain });
     vi.spyOn(agent, 'resolveAcceptedRfc64SharedMemoryAuthorityV1').mockReturnValue(undefined);
-    vi.spyOn(agent, 'hasConfirmedSharedMemoryMetaState').mockResolvedValue(true);
+    vi.spyOn(agent, 'resolveMetadataConfirmation').mockResolvedValue({ outcome: 'confirmed' });
     vi.spyOn(agent, 'resolveContextGraphRegistrationBinding')
       .mockResolvedValue(registeredBinding(14n));
     const nameHash = agent.contextGraphNameCommitment(contextGraphId);
@@ -493,7 +494,7 @@ interface HostModeIngestInternals {
   encodeWorkspaceGossipMessage(
     contextGraphId: string,
     message: Uint8Array,
-    resolvedSigner?: AgentKeyRecord & { privateKey: string },
+    resolvedSigner?: WorkspaceGossipSigner,
   ): Promise<Uint8Array>;
   ingestSwmHostModeEnvelope(contextGraphId: string, data: Uint8Array, fromPeerId: string): Promise<void>;
   getSwmHostModeStats(): Promise<{ perCg?: Record<string, { entries: number }> } | undefined>;
@@ -726,7 +727,7 @@ describe('the mutable publish policy bit from the finalized authority index', ()
         privateTripleCount: 0,
         accessPolicy: 'public',
         allowedPeers: [],
-      }), { ...signer, privateKey: signer.privateKey });
+      }), localGossipSigner(signer.agentAddress, signer.privateKey));
     }
 
     async function hostedEntries(host: HostModeIngestInternals, contextGraphId: string) {

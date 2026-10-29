@@ -15,12 +15,12 @@ import {
   computeFlatKCRootV10,
   generateKnowledgeAssetShareMetadata,
   workspacePublicQuadsDigest,
-  type WorkspacePublicSnapshotStore,
 } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import type { FinalizedSwmTwinRetirement } from
   '../src/sync/requester/finalized-swm-twin-reconciliation.js';
 import {
+  SwmTargetExecutorSessionFactoryV1,
   SwmTargetExecutorV1,
   type SwmTargetExecutorPortsV1,
 } from '../src/sync/requester/swm-target-executor.js';
@@ -77,12 +77,10 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       }),
       recordDrops: () => undefined,
       invalidateListContextGraphsCache: () => undefined,
-      markMetaProjectionDirty: () => undefined,
       recoveryMutation: createSwmRecoveryMutationRuntimeV1({
         store,
         recordDrops: () => undefined,
         invalidateListContextGraphsCache: () => undefined,
-        markMetaProjectionDirty: () => undefined,
       }),
       setCheckpoint: () => undefined,
       deleteCheckpoint: () => undefined,
@@ -223,12 +221,10 @@ describe('SwmTargetExecutorV1 private recovery wiring', () => {
       }),
       recordDrops: () => undefined,
       invalidateListContextGraphsCache: () => undefined,
-      markMetaProjectionDirty: () => undefined,
       recoveryMutation: createSwmRecoveryMutationRuntimeV1({
         store,
         recordDrops: () => undefined,
         invalidateListContextGraphsCache: () => undefined,
-        markMetaProjectionDirty: () => undefined,
       }),
       setCheckpoint: () => undefined,
       deleteCheckpoint: () => undefined,
@@ -274,32 +270,32 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
     await Promise.all(stores.splice(0).map((store) => store.close()));
   });
 
-  it('keeps retired SWM metadata out of the bulk append when legacy marker retirement fails', async () => {
+  /**
+   * A finalized asset whose shared-memory snapshot a peer still serves: VM is
+   * local with the same bytes, so a round writes the snapshot and retires it.
+   * `retireMarker` undefined: the node has no legacy marker lane.
+   */
+  async function finalizedTwinRounds(
+    contextGraphId: string,
+    options: { readonly retireMarker?: () => Promise<void> } = {},
+  ) {
     const store = new OxigraphStore();
     stores.push(store);
-    const contextGraphId = 'public-finalized-twin-marker-deferral';
-    const author = '0x1111111111111111111111111111111111111111';
-    const ual = `did:dkg:hardhat:31337/${author}/7`;
+    const ual = `did:dkg:hardhat:31337/0x2222222222222222222222222222222222222222/9`;
     const dkg = 'http://dkg.io/ontology/';
     const xsdInteger = 'http://www.w3.org/2001/XMLSchema#integer';
     const scope = createGraphKnowledgeAssetScope(ual, 1);
     const vmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, scope);
-    const swmGraph = knowledgeAssetLayerGraphUri(
-      contextGraphId,
-      MemoryLayer.SharedWorkingMemory,
-      scope,
-    );
+    const swmGraph = knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.SharedWorkingMemory, scope);
     const vmMetaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
     const swmMetaGraph = contextGraphWorkspaceMetaGraphUri(contextGraphId);
-    const shareOperationId = 'finalized-twin-marker-deferral-op';
+    const shareOperationId = `${contextGraphId}-op`;
     const operationSubject = `urn:dkg:share:${contextGraphId}:${shareOperationId}`;
     const headSubject = `${ual}#dkg-swm-head`;
     const payload: Quad[] = [
-      { subject: 'urn:twin:a', predicate: 'http://schema.org/status', object: '"finalized"', graph: '' },
-      { subject: 'urn:twin:b', predicate: 'http://schema.org/status', object: '"finalized"', graph: '' },
+      { subject: 'urn:twin:c', predicate: 'http://schema.org/status', object: '"finalized"', graph: '' },
     ];
     const digest = workspacePublicQuadsDigest(payload);
-    // Finalized VM is already local: the SWM snapshot below arrives second.
     await store.insert([
       ...payload.map((quad) => ({ ...quad, graph: vmGraph })),
       { subject: ual, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: vmMetaGraph },
@@ -334,19 +330,13 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       { subject: headSubject, predicate: `${dkg}shareOperationId`, object: `"${shareOperationId}"`, graph: swmMetaGraph },
     ];
     const snapshots = new Map<string, Quad[]>([[digest, payload]]);
-    const publicSnapshotStore: WorkspacePublicSnapshotStore = {
-      putSnapshot: async (input) => {
-        snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
-        return { ref: input.digest, byteLength: 0 };
-      },
-      getSnapshot: async (ref) => snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null,
-    };
     const subjectRows = async (subject: string) => {
       const result = await store.query(
         `SELECT ?p ?o WHERE { GRAPH <${swmMetaGraph}> { <${subject}> ?p ?o } }`,
       );
       return result.type === 'bindings' ? result.bindings : [];
     };
+    // What each retirement found: the copy's graph quads, then its head rows.
     const swmRowsWhenRetired: number[] = [];
     // Stand-in for the publisher's named-lifecycle cleanup: graph, then head and operation.
     const retireFinalizedSwmTwin = vi.fn(async (candidate: FinalizedSwmTwinRetirement) => {
@@ -359,26 +349,15 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
       await store.deleteByPattern({ graph: swmMetaGraph, subject: operationSubject });
     });
     const invalidateListContextGraphsCache = vi.fn();
-    let invalidationsBeforeMarkerRetirement = -1;
-    const retireLegacySwmAfterVerifiedVmTwin = vi.fn(async () => {
-      invalidationsBeforeMarkerRetirement = invalidateListContextGraphsCache.mock.calls.length;
-      throw new Error('legacy boundary store unavailable');
-    });
     const logInfo = vi.fn();
     const logWarn = vi.fn();
     const ctx = createOperationContext('sync');
-    const executor = new SwmTargetExecutorV1({
+    const ports: SwmTargetExecutorPortsV1 = {
       store,
       writeLocks: new Map(),
       listSubGraphs: async () => [],
       createContextGraphSyncDeadline: () => Number.MAX_SAFE_INTEGER,
-      fetchSyncPages: async (
-        _ctx,
-        _peerId,
-        _contextGraphId,
-        _includeSharedMemory,
-        phase,
-      ) => {
+      fetchSyncPages: async (_ctx, _peerId, _contextGraphId, _includeSharedMemory, phase) => {
         const quads = phase === 'meta' ? remoteMeta.map((quad) => ({ ...quad })) : [];
         return {
           quads,
@@ -399,60 +378,224 @@ describe('SwmTargetExecutorV1 public finalized-twin wiring', () => {
         emptyResponses: 0,
         entityCreators: [],
       }),
-      publicSnapshotStore,
+      publicSnapshotStore: {
+        putSnapshot: async (input) => {
+          snapshots.set(input.digest, input.quads.map((quad) => ({ ...quad })));
+          return { ref: input.digest, byteLength: 0 };
+        },
+        getSnapshot: async (ref) => snapshots.get(ref)?.map((quad) => ({ ...quad })) ?? null,
+      },
       recordDrops: () => undefined,
       invalidateListContextGraphsCache,
-      markMetaProjectionDirty: () => undefined,
       recoveryMutation: createSwmRecoveryMutationRuntimeV1({
         store,
         recordDrops: () => undefined,
         invalidateListContextGraphsCache: () => undefined,
-        markMetaProjectionDirty: () => undefined,
       }),
       setCheckpoint: () => undefined,
       deleteCheckpoint: () => undefined,
       deletePublicCheckpoint: () => undefined,
       ensureOwnedMap: () => new Map(),
       retireFinalizedSwmTwin,
-      retireLegacySwmAfterVerifiedVmTwin,
+      ...(options.retireMarker === undefined ? {} : { retireLegacySwmAfterVerifiedVmTwin: options.retireMarker }),
       logInfo,
       logWarn,
       logDebug: () => undefined,
-    });
-
-    const summary = await executor.syncPublicTarget({
+    };
+    const sessions = new SwmTargetExecutorSessionFactoryV1(ports);
+    // Each round is a catch-up job's own session, as on a node.
+    const round = () => sessions.createSession().syncPublicTarget({
       ctx,
       remotePeerId: 'peer-source',
       contextGraphId,
       remainingContextGraphs: 1,
       mode: { kind: 'ordinary' },
     });
+    // A share that brings the copy back: graph, head and operation, as its apply writes them.
+    const shareAgain = () => store.insert([
+      ...payload.map((quad) => ({ ...quad, graph: swmGraph })),
+      ...remoteMeta,
+    ]);
+    // A later publication finalized another version: VM metadata moved on, its graph name did not.
+    const finalizeLaterVersion = async () => {
+      await store.deleteByPattern({ graph: vmMetaGraph, subject: ual, predicate: `${dkg}assertionVersion` });
+      await store.insert([
+        { subject: ual, predicate: `${dkg}assertionVersion`, object: `"2"^^<${xsdInteger}>`, graph: vmMetaGraph },
+      ]);
+    };
+    // A partial replay left one row of the head, and nothing else of the copy.
+    const leavePartialHead = () => store.insert([
+      { subject: headSubject, predicate: `${dkg}assertionVersion`, object: `"1"^^<${xsdInteger}>`, graph: swmMetaGraph },
+    ]);
+    return {
+      store, ual, payload, vmGraph, swmGraph, headSubject, operationSubject, subjectRows, swmRowsWhenRetired,
+      retireFinalizedSwmTwin, invalidateListContextGraphsCache, logInfo, logWarn, ctx, round, shareAgain,
+      finalizeLaterVersion, leavePartialHead,
+    };
+  }
+  type FinalizedTwinRounds = Awaited<ReturnType<typeof finalizedTwinRounds>>;
+  const loggedTimes = (log: { readonly mock: { readonly calls: readonly (readonly unknown[])[] } }, text: string) => (
+    log.mock.calls.filter(([, message]) => String(message).includes(text)).length
+  );
 
-    expect(summary.failedPhases).toBe(0);
+  it('keeps retired SWM metadata out of the bulk append when legacy marker retirement fails', async () => {
+    const contextGraphId = 'public-finalized-twin-marker-deferral';
+    let invalidationsBeforeMarkerRetirement = -1;
+    const retireMarker = vi.fn(async () => {
+      invalidationsBeforeMarkerRetirement = rounds.invalidateListContextGraphsCache.mock.calls.length;
+      throw new Error('legacy boundary store unavailable');
+    });
+    const rounds = await finalizedTwinRounds(contextGraphId, { retireMarker });
+
+    expect((await rounds.round()).failedPhases).toBe(0);
     // The snapshot was materialized with its head, then the twin was retired.
-    expect(retireFinalizedSwmTwin).toHaveBeenCalledOnce();
-    expect(swmRowsWhenRetired).toEqual([payload.length, 5]);
-    expect(retireLegacySwmAfterVerifiedVmTwin).toHaveBeenCalledExactlyOnceWith({
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(rounds.swmRowsWhenRetired).toEqual([rounds.payload.length, 5]);
+    expect(retireMarker).toHaveBeenCalledExactlyOnceWith({
       contextGraphId,
-      kaUal: ual,
+      kaUal: rounds.ual,
       assertionVersion: '1',
       subGraphName: undefined,
     });
     // The round's closing bulk append must not put the retired rows back.
-    expect(await store.countQuads(swmGraph)).toBe(0);
-    expect(await subjectRows(headSubject)).toEqual([]);
-    expect(await subjectRows(operationSubject)).toEqual([]);
-    expect(await store.countQuads(vmGraph)).toBe(payload.length);
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+    expect(await rounds.subjectRows(rounds.headSubject)).toEqual([]);
+    expect(await rounds.subjectRows(rounds.operationSubject)).toEqual([]);
+    expect(await rounds.store.countQuads(rounds.vmGraph)).toBe(rounds.payload.length);
     // The retirement itself is still completed and reported; only the marker is deferred.
-    expect(invalidateListContextGraphsCache.mock.calls.length)
+    expect(rounds.invalidateListContextGraphsCache.mock.calls.length)
       .toBeGreaterThan(invalidationsBeforeMarkerRetirement);
-    expect(logInfo).toHaveBeenCalledWith(
-      ctx,
-      `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${ual}`,
+    expect(rounds.logInfo).toHaveBeenCalledWith(
+      rounds.ctx,
+      `Retired byte-identical SWM twin after SWM recovery found finalized VM for ${rounds.ual}`,
     );
-    expect(logWarn).toHaveBeenCalledWith(
-      ctx,
+    expect(rounds.logWarn).toHaveBeenCalledWith(
+      rounds.ctx,
       expect.stringMatching(/legacy SWM boundary.*legacy boundary store unavailable/),
     );
+  });
+
+  it.each([
+    ['done', { retireMarker: async () => undefined }],
+    // The proof does not wait on the marker: its cleanup has a lifecycle of its own.
+    ['failed', { retireMarker: async () => { throw new Error('legacy boundary store unavailable'); } }],
+    ['no-lane', {}],
+  ] as const)('writes nothing in a later round for a snapshot it retired as a finalized twin (marker %s)', async (label, options) => {
+    const rounds = await finalizedTwinRounds(`public-finalized-twin-remembered-${label}`, options);
+    expect((await rounds.round()).failedPhases).toBe(0);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+
+    const later = await rounds.round();
+    expect(later.failedPhases).toBe(0);
+    expect(later.alreadyHeldAssets).toBe(1);
+    expect(later.swmCoverage).toMatchObject({ snapshotsResolved: 1, snapshotsTotal: 1, missingCount: 0 });
+    // Not written and retired a second time: the copy stays gone, VM stays whole.
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+    expect(await rounds.store.countQuads(rounds.vmGraph)).toBe(rounds.payload.length);
+    expect(rounds.logInfo).toHaveBeenCalledWith(
+      rounds.ctx,
+      expect.stringContaining('1 snapshot(s) already retired here as finalized Verified Memory twins'),
+    );
+  });
+
+  it('retires a copy a share brought back as it holds the twin, and writes nothing', async () => {
+    const rounds = await finalizedTwinRounds('public-finalized-twin-shared-again');
+    await rounds.round();
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+
+    await rounds.shareAgain();
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(rounds.payload.length);
+    // The proof that holds the twin finds the copy back, and retires it.
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(loggedTimes(rounds.logInfo, 'already retired here as finalized Verified Memory twins')).toBe(1);
+    expect(loggedTimes(rounds.logInfo, 'Retired byte-identical SWM twin')).toBe(2);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(2);
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+
+    // Its head and operation rows stayed out of the round's writes: a third round finds nothing to retire.
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    ['its graph dropped', (rounds: FinalizedTwinRounds) => rounds.store.dropGraph(rounds.vmGraph)],
+    ['a later version finalized', (rounds: FinalizedTwinRounds) => rounds.finalizeLaterVersion()],
+  ] as const)('takes the snapshot again once Verified Memory no longer proves the retirement (%s)', async (label, change) => {
+    const rounds = await finalizedTwinRounds(`public-finalized-twin-vm-${label.replace(/ /g, '-')}`);
+    await rounds.round();
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+
+    await change(rounds);
+    const later = await rounds.round();
+    // Not held: the round wrote the snapshot back, and its own proof keeps the copy.
+    expect(later.failedPhases).toBe(0);
+    expect(later.alreadyHeldAssets).toBe(0);
+    expect(loggedTimes(rounds.logInfo, 'already retired here as finalized Verified Memory twins')).toBe(0);
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(rounds.payload.length);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+  });
+
+  it('takes the snapshot the usual way when the proof that would hold it cannot run', async () => {
+    const rounds = await finalizedTwinRounds('public-finalized-twin-proof-failed');
+    await rounds.round();
+    await rounds.shareAgain();
+    rounds.retireFinalizedSwmTwin.mockImplementationOnce(async () => {
+      throw new Error('store unavailable');
+    });
+
+    const later = await rounds.round();
+    expect(later.failedPhases).toBe(0);
+    expect(loggedTimes(rounds.logWarn, 'its proof did not run: store unavailable')).toBe(1);
+    expect(loggedTimes(rounds.logInfo, 'already retired here as finalized Verified Memory twins')).toBe(0);
+    // The usual way proved the twin and retired the copy, and remembered it: a third round holds it.
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(3);
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(3);
+  });
+
+  it('takes the snapshot the usual way when a row of its head was left, so the twin and its marker can retire', async () => {
+    const headRowsWhenAsked: number[] = [];
+    const retireMarker = vi.fn(async () => {
+      headRowsWhenAsked.push((await rounds.subjectRows(rounds.headSubject)).length);
+    });
+    const rounds = await finalizedTwinRounds('public-finalized-twin-partial-head', { retireMarker });
+    await rounds.round();
+    await rounds.leavePartialHead();
+
+    // Not held: the round wrote the snapshot back with a whole head, and retired the twin with it.
+    const later = await rounds.round();
+    expect(later.failedPhases).toBe(0);
+    expect(loggedTimes(rounds.logInfo, 'already retired here as finalized Verified Memory twins')).toBe(0);
+    expect(rounds.swmRowsWhenRetired).toEqual([rounds.payload.length, 5, rounds.payload.length, 5]);
+    expect(await rounds.subjectRows(rounds.headSubject)).toEqual([]);
+    expect(await rounds.store.countQuads(rounds.swmGraph)).toBe(0);
+    // Its marker's owner was asked once no row of the head was left, which a marker needs to retire.
+    expect(headRowsWhenAsked).toEqual([0, 0]);
+
+    // A third round holds it.
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledTimes(2);
+  });
+
+  it('asks the twin\'s cleanup owner again in each round that holds it', async () => {
+    const contextGraphId = 'public-finalized-twin-cleanup-asked-again';
+    const retireMarker = vi.fn(async () => undefined);
+    const rounds = await finalizedTwinRounds(contextGraphId, { retireMarker });
+    await rounds.round();
+    expect(retireMarker).toHaveBeenCalledOnce();
+
+    // The owner retires a marker only while one is outstanding: the round asks without knowing.
+    expect((await rounds.round()).alreadyHeldAssets).toBe(1);
+    expect(rounds.retireFinalizedSwmTwin).toHaveBeenCalledOnce();
+    expect(retireMarker).toHaveBeenCalledTimes(2);
+    expect(retireMarker).toHaveBeenLastCalledWith({
+      contextGraphId,
+      kaUal: rounds.ual,
+      assertionVersion: '1',
+      subGraphName: undefined,
+    });
   });
 });

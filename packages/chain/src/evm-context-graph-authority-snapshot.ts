@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 import { ethers } from 'ethers';
+import type { ContextGraphAuthorityIndexProjection } from './context-graph-authority-index-projection.js';
 import type { ContextGraphAuthoritySnapshot } from './chain-adapter.js';
 import type { ContextGraphAuthorityIndexState } from './context-graph-authority-index-checkpoint.js';
 import { assertContextGraphAuthorityIndexId, type ContextGraphAuthorityIndexId } from './context-graph-authority-index-id.js';
@@ -53,4 +54,16 @@ export function authoritySnapshotV1(
     rosterVersion: state.rosterVersion.toString(10),
     sourceBlockNumber: state.sourceBlockNumber.toString(10),
   });
+}
+
+/** One interpretation of name bindings for both normal and retained reads. */
+export function projectAuthoritySnapshotsByNameHashesV1(
+  nameHashes: readonly string[],
+  { view, chainId, contractAddress }: ContextGraphAuthorityIndexProjection,
+): Readonly<{ complete: boolean; value: ReadonlyMap<string, ContextGraphAuthoritySnapshot> }> {
+  const snapshots = new Map<string, ContextGraphAuthoritySnapshot>();
+  for (const [nameHash, state] of view.statesByNameHashes(nameHashes)) {
+    snapshots.set(nameHash, authoritySnapshotV1(state, chainId, contractAddress));
+  }
+  return { complete: snapshots.size === nameHashes.length, value: snapshots };
 }

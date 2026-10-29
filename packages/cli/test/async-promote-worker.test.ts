@@ -18,6 +18,10 @@ vi.mock('@origintrail-official/dkg-publisher', () => import('../../publisher/src
 import {
   OxigraphStore,
   StoreOperationTimeoutError,
+  StoreSchedulerBusyError,
+  activeDefaultStoreWorkPriority,
+  withDefaultStoreWorkPriority,
+  type StoreWorkPriority,
 } from '@origintrail-official/dkg-storage';
 import {
   TripleStoreAsyncPromoteQueue,
@@ -27,7 +31,13 @@ import {
   type PromoteRequest,
 } from '@origintrail-official/dkg-publisher';
 import { classifyExactSwmGraphReplaceFailure } from '../../publisher/test/_helpers/promote-replay-safety.js';
-import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
+import {
+  expectShareTaggingTable,
+  recordShareStore,
+  resolveLane,
+  withControlPath,
+} from '../../publisher/test/_helpers/share-control-recorder.js';
+import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE, SWM_INVENTORY_HANDOFF_PENDING_CODE, asyncAdmissionUsage } from '@origintrail-official/dkg-core';
 import {
   createPromoteWorkerSupervisor,
   runPromoteJob,
@@ -41,6 +51,7 @@ import {
 } from './_helpers/async-promote-worker-fixture.js';
 import { createClaimFailureBackoff } from '../src/daemon/worker/claim-failure-backoff.js';
 import { promoteJobToView } from '../src/daemon/routes/promote-job-view.js';
+import { promoteAttemptAuthorityReason } from '../src/daemon/worker/async-promote-attempt-diagnostics.js';
 
 const PROMOTE_RETRYABLE_FAILURE_CODE = 'PROMOTE_RETRYABLE_FAILURE';
 
@@ -102,14 +113,119 @@ describe('runPromoteJob', () => {
     ({ queue, logs, makeRequest, enqueueAndClaim } = fixture);
   });
 
+  describe('async admission usage figures', () => {
+    beforeEach(() => asyncAdmissionUsage.reset());
+
+    it('times every claimNext, an idle one and one that throws', async () => {
+      let throwing = false;
+      const wrappedQueue = Object.create(queue) as AsyncPromoteQueue;
+      wrappedQueue.claimNext = async (workerId: string) => {
+        if (throwing) throw new Error('store unavailable');
+        return queue.claimNext(workerId);
+      };
+      const sup = createPromoteWorkerSupervisor({
+        agent: {
+          promoteQueue: wrappedQueue,
+          assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
+        } as any,
+        workerConcurrency: 1,
+        pollIntervalMs: 60_000,
+        heartbeatIntervalMs: 0,
+        log: () => {},
+        workerIdPrefix: 'usage',
+      });
+      await sup.start();
+      expect(await sup.tickOnce()).toBe(0);
+      throwing = true;
+      expect(await sup.tickOnce()).toBe(0);
+      await sup.stop();
+
+      expect(asyncAdmissionUsage.take().shareClaim.n).toBe(2);
+    });
+
+    it('measures each lease renewal, and shows one still waiting as pending', async () => {
+      const job = await enqueueAndClaim();
+      const release = deferred();
+      const finishPromote = deferred();
+      const heartbeat = queue.heartbeat.bind(queue);
+      vi.spyOn(queue, 'heartbeat').mockImplementation(async (...args) => {
+        await release.promise;
+        return heartbeat(...args);
+      });
+      const run = runPromoteJob({
+        job, queue, workerId: 'worker-test',
+        runPromote: async () => { await finishPromote.promise; return { promotedCount: 1 }; },
+        now: fixture.clock.now, heartbeatIntervalMs: 5, log: message => logs.push(message),
+      });
+
+      await vi.waitFor(() => expect(asyncAdmissionUsage.take().shareHeartbeat.pending).toBeGreaterThan(0));
+      release.resolve();
+      finishPromote.resolve();
+      expect(await run).toMatchObject({ outcome: 'succeeded' });
+
+      const { shareHeartbeat } = asyncAdmissionUsage.take();
+      expect(shareHeartbeat.n).toBeGreaterThan(0);
+      expect(shareHeartbeat.pending).toBe(0);
+    });
+
+    it('keeps a lease renewal failure on the worker\'s own handler', async () => {
+      const job = await enqueueAndClaim();
+      const finishPromote = deferred();
+      const failure = new Error('store went away');
+      vi.spyOn(queue, 'heartbeat').mockRejectedValue(failure);
+      const run = runPromoteJob({
+        job, queue, workerId: 'worker-test',
+        runPromote: async () => { await finishPromote.promise; return { promotedCount: 1 }; },
+        now: fixture.clock.now, heartbeatIntervalMs: 5, log: message => logs.push(message),
+      });
+
+      await vi.waitFor(() => expect(logs.some((message) => message.includes(`Heartbeat error for ${job.jobId}: store went away`))).toBe(true));
+      finishPromote.resolve();
+      await run;
+
+      expect(asyncAdmissionUsage.take().shareHeartbeat.n).toBeGreaterThan(0);
+    });
+  });
+
+  it('retries a definitely-not-started marker write without running promotion twice', async () => {
+    const job = await enqueueAndClaim();
+    const marker = queue.recordCommitMarker.bind(queue);
+    const writes = vi.spyOn(queue, 'recordCommitMarker').mockRejectedValueOnce(
+      new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'replaceSubject', outcome: 'not_started' }),
+    );
+    writes.mockImplementationOnce(marker);
+    const promote = vi.fn(async (_request: PromoteRequest) => {
+       return { promotedCount: 1 };
+    });
+    expect(await runPromoteJob({ job, queue, workerId: 'worker-test', runPromote: promote,
+      now: fixture.clock.now, heartbeatIntervalMs: 0, bookkeepingRetryIntervalMs: 0,
+      sleep: async () => undefined, log: message => logs.push(message),
+    })).toMatchObject({ outcome: 'succeeded' });
+    expect(promote).toHaveBeenCalledTimes(1);
+    expect(writes.mock.calls.filter(call => call[2] === 'promoteStarted')).toHaveLength(2);
+    expect((await queue.getStatus(job.jobId))?.state).toBe('succeeded');
+  });
+
+  it('classifies a legacy marker failure before invoking promotion and records an unacknowledged start', async () => {
+    const job = await enqueueAndClaim();
+    vi.spyOn(queue, 'recordCommitMarker').mockRejectedValueOnce(new Error('marker acknowledgement unavailable'));
+    const promote = vi.fn(async () => ({ promotedCount: 1 }));
+    const result = await runPromoteJob({ job, queue, workerId: 'worker-test', runPromote: promote,
+      now: fixture.clock.now, heartbeatIntervalMs: 0, log: message => logs.push(message) });
+    expect(result.outcome).toBe('failed_terminal');
+    expect(promote).not.toHaveBeenCalled();
+    expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
+    expect(promoteFailureDiagnostics(logs)).toEqual([expect.objectContaining({ promoteStartedMarkerPersisted: false })]);
+  });
+
   it('on success, records the recovery commit marker and transitions to succeeded', async () => {
     const job = await enqueueAndClaim();
     const result = await runPromoteJob({
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 42 };
       },
       now: fixture.clock.now,
@@ -159,8 +275,8 @@ describe('runPromoteJob', () => {
       job,
       queue: failingQueue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 99 };
       },
       now: fixture.clock.now,
@@ -195,8 +311,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 7 };
       },
       now: fixture.clock.now,
@@ -222,8 +338,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         return { promotedCount: 0 };
       },
       now: fixture.clock.now,
@@ -240,8 +356,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw new Error('fetch failed');
       },
       now: fixture.clock.now,
@@ -274,8 +390,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw { code: PROMOTE_RETRYABLE_FAILURE_CODE };
       },
       now: fixture.clock.now,
@@ -304,8 +420,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), {
           code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
           reason: 'finalized-name-absence-unaccepted',
@@ -323,6 +439,217 @@ describe('runPromoteJob', () => {
     });
     expect(JSON.stringify(diagnostic)).not.toContain('private detail');
     expect(diagnostic).not.toHaveProperty('causeCode');
+    // An authority error that carries no throw site logs none.
+    expect(diagnostic).not.toHaveProperty('authoritySite');
+  });
+
+  // #3421 — the job view named a retryable attempt's cause only as "a promote
+  // prerequisite is temporarily unavailable"; it now says which one.
+  it('keeps the authority reason of a retryable attempt on the job and shows it in the view', async () => {
+    const job = await enqueueAndClaim();
+    const result = await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request) => {
+        throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), {
+          code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+          reason: 'approved-member-metadata-pending',
+        }));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    expect(result.outcome).toBe('failed_retrying');
+    const [stored] = await queue.list({});
+    expect(stored.attempt.lastError).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+      authorityReason: 'approved-member-metadata-pending',
+    });
+    expect(promoteJobToView(stored).lastError).toMatchObject({
+      code: 'transient',
+      retryable: true,
+      diagnosticCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      authorityReason: 'approved-member-metadata-pending',
+    });
+    expect(JSON.stringify(stored.attempt.lastError)).not.toContain('private detail');
+    expect(promoteFailureDiagnostics(logs)[0]).toMatchObject({ authorityReason: 'approved-member-metadata-pending' });
+  });
+
+  it.each([
+    {
+      case: 'a reason outside the closed set',
+      thrown: () => createPromoteRetryableFailure(Object.assign(new Error('x'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'not-a-known-reason',
+      })),
+    },
+    {
+      case: 'an error that is not a retryable prerequisite',
+      thrown: () => Object.assign(new Error('x'), {
+        code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+        reason: 'approved-member-metadata-pending',
+      }),
+    },
+  ])('keeps no authority reason for $case', async ({ thrown }) => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async (_request) => { throw thrown(); },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+
+    const [stored] = await queue.list({});
+    expect(stored.attempt.lastError).toBeDefined();
+    expect(stored.attempt.lastError).not.toHaveProperty('authorityReason');
+    expect(promoteJobToView(stored).lastError).not.toHaveProperty('authorityReason');
+  });
+
+  it('reads no authority reason from a failure whose cause cannot be read', () => {
+    const hostile = Object.defineProperty(new Error('x'), 'cause', {
+      get() { throw new Error('hostile getter'); },
+    });
+    expect(promoteAttemptAuthorityReason(hostile, {
+      classification: 'transient',
+      retryable: true,
+      diagnostic: { name: 'PromoteRetryableFailureError', code: PROMOTE_RETRYABLE_FAILURE_CODE },
+    })).toEqual({});
+  });
+
+  // GH#3067 — the log said which authority reason ended an attempt but not
+  // which check raised it, so a loop failure and a failed chain read looked alike.
+  describe('throw site and store failure of an attempt (GH#3067)', () => {
+    async function logOf(thrown: unknown) {
+      const job = await enqueueAndClaim();
+      const result = await runPromoteJob({
+        job,
+        queue,
+        workerId: 'worker-test',
+        runPromote: async (_request) => {
+
+          throw thrown;
+        },
+        now: fixture.clock.now,
+        heartbeatIntervalMs: 0,
+        log: (message) => logs.push(message),
+      });
+      return { result, diagnostic: promoteFailureDiagnostics(logs)[0], job };
+    }
+
+    const authorityCause = (extra: Record<string, unknown>) => Object.assign(new Error('private detail'), {
+      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
+      reason: 'chain-participant-authority-unavailable',
+      detail: 'private detail',
+      ...extra,
+    });
+
+    it.each([
+      'transport-unavailable',
+      'transport-changed',
+      'revision-moved',
+      'recipient-set-changed',
+    ])('logs the closed throw site %s behind a retryable authority failure', async (site) => {
+      const { diagnostic } = await logOf(createPromoteRetryableFailure(authorityCause({ site })));
+
+      expect(diagnostic).toMatchObject({
+        errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+        authorityReason: 'chain-participant-authority-unavailable',
+        authoritySite: site,
+      });
+      expect(JSON.stringify(diagnostic)).not.toContain('private detail');
+    });
+
+    it.each([
+      'AKIAIOSFODNN7EXAMPLE',
+      'https://rpc.example/key',
+      'toString',
+      '__proto__',
+      'constructor',
+      'x'.repeat(1_000),
+      42,
+      null,
+      { site: 'revision-moved' },
+    ])('drops a throw site that is not in the closed set (%j) without leaking it', async (site) => {
+      const { result, diagnostic } = await logOf(createPromoteRetryableFailure(authorityCause({ site })));
+
+      expect(result.outcome).toBe('failed_retrying');
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+      expect(diagnostic).toMatchObject({ authorityReason: 'chain-participant-authority-unavailable' });
+      if (typeof site === 'string') expect(JSON.stringify(diagnostic)).not.toContain(site);
+    });
+
+    it('survives a throw site whose getter throws and still does the queue bookkeeping', async () => {
+      const hostile = authorityCause({});
+      Object.defineProperty(hostile, 'site', { get() { throw new Error('hostile getter'); } });
+
+      const { result, diagnostic, job } = await logOf(createPromoteRetryableFailure(hostile));
+
+      expect(result.outcome).toBe('failed_retrying');
+      expect(await queue.getStatus(job.jobId)).toMatchObject({ state: 'failed_retrying' });
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+    });
+
+    it('does not read a throw site from an error that is not an authority error', async () => {
+      const { diagnostic } = await logOf(createPromoteRetryableFailure(
+        Object.assign(new Error('x'), { code: 'SOMETHING_ELSE', reason: 'chain-participant-authority-unavailable', site: 'revision-moved' }),
+      ));
+
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+    });
+
+    it.each([
+      {
+        name: 'a queue wait timeout',
+        thrown: () => new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'publisher.asyncPromote.claimNext.candidates'),
+        storeFailure: 'queue_wait',
+      },
+      {
+        name: 'a full queue',
+        thrown: () => new StoreSchedulerBusyError('queue_full', 'normal', 'publisher.asyncPromote.write'),
+        storeFailure: 'queue_full',
+      },
+      {
+        name: 'a store deadline before the operation started',
+        thrown: () => new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query', outcome: 'not_started' }),
+        storeFailure: 'store_timeout_not_started',
+      },
+      {
+        name: 'a store deadline of a read that was already running',
+        thrown: () => new StoreOperationTimeoutError({ backend: 'blazegraph', operation: 'query', outcome: 'indeterminate' }),
+        storeFailure: 'store_timeout_indeterminate',
+      },
+    ])('names $name from a closed set instead of an unknown error', async ({ thrown, storeFailure }) => {
+      const { diagnostic } = await logOf(thrown());
+
+      expect(diagnostic).toMatchObject({ storeFailure });
+      expect(diagnostic).not.toHaveProperty('authorityReason');
+      expect(diagnostic).not.toHaveProperty('authoritySite');
+    });
+
+    it('names a store failure that a retryable promote failure wraps as its cause', async () => {
+      const { diagnostic } = await logOf(createPromoteRetryableFailure(
+        new StoreSchedulerBusyError('queue_wait_timeout', 'normal', 'agent.query'),
+      ));
+
+      expect(diagnostic).toMatchObject({ storeFailure: 'queue_wait' });
+    });
+
+    it('does not invent a store failure for an error that only looks like one', async () => {
+      const { diagnostic } = await logOf(Object.assign(new Error('queue wait timeout'), {
+        code: 'NOT_A_STORE_ERROR',
+        reason: 'queue_wait_timeout',
+        outcome: 'not_started',
+      }));
+
+      expect(diagnostic).not.toHaveProperty('storeFailure');
+    });
   });
 
   it('names the legacy SWM retirement fence behind a retryable promote, from a closed set', async () => {
@@ -331,8 +658,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(
           new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
           { code: 'RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS' },
@@ -354,6 +681,31 @@ describe('runPromoteJob', () => {
       .toBe('RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS');
   });
 
+  it('names a pending catalog inventory handoff behind a retryable bound share replay', async () => {
+    const job = await enqueueAndClaim();
+    await runPromoteJob({
+      job,
+      queue,
+      workerId: 'worker-test',
+      runPromote: async () => {
+        throw createPromoteRetryableFailure(Object.assign(
+          new Error('Durable share inventory remains pending: inactive-lane'),
+          { code: 'SWM_INVENTORY_HANDOFF_PENDING', reason: 'inactive-lane' },
+        ));
+      },
+      now: fixture.clock.now,
+      heartbeatIntervalMs: 0,
+      log: (message) => logs.push(message),
+    });
+    expect(promoteFailureDiagnostics(logs)[0]).toMatchObject({
+      classification: 'transient',
+      retryable: true,
+      errorCode: PROMOTE_RETRYABLE_FAILURE_CODE,
+      causeCode: 'SWM_INVENTORY_HANDOFF_PENDING',
+    });
+    expect(SWM_INVENTORY_HANDOFF_PENDING_CODE).toBe('SWM_INVENTORY_HANDOFF_PENDING');
+  });
+
   describe('a promote refused by the legacy SWM retirement fence', () => {
     const fenceFailure = () => createPromoteRetryableFailure(Object.assign(
       new Error('RFC-64 legacy SWM boundary retirement is in progress; retry promotion'),
@@ -370,9 +722,9 @@ describe('runPromoteJob', () => {
           job: claimed,
           queue,
           workerId: 'worker-test',
-          runPromote: async (request, markPromoteStarted) => {
+          runPromote: async (request) => {
             seen.push(request);
-            await markPromoteStarted();
+
             if (refuse) throw fenceFailure();
             return { promotedCount: 1 };
           },
@@ -405,30 +757,38 @@ describe('runPromoteJob', () => {
       expect(seen[1]).toEqual(seen[0]);
     });
 
-    it('ends failed yet still retryable when the fence outlasts every attempt; recover requeues it', async () => {
+    it('keeps retrying past its attempt budget for an hour after enqueue, then ends failed yet retryable; recover requeues it', async () => {
       await queue.enqueue(makeRequest({ assertionName: 'fenced-forever' }));
-      for (let attempt = 0; attempt < 3; attempt += 1) {
+      // One attempt every 10 minutes: the budget of 3 is spent after 20 minutes,
+      // the window of the typed prerequisite failure ends at 60.
+      for (let attempt = 1; attempt <= 7; attempt += 1) {
         const claimed = await queue.claimNext('worker-test');
         expect(claimed).not.toBeNull();
         await runPromoteJob({
           job: claimed!,
           queue,
           workerId: 'worker-test',
-          runPromote: async (_request, markPromoteStarted) => {
-            await markPromoteStarted();
+          runPromote: async (_request) => {
+
             throw fenceFailure();
           },
           now: fixture.clock.now,
           heartbeatIntervalMs: 0,
           log: (message) => logs.push(message),
         });
+        if (attempt < 7) {
+          expect((await queue.list({}))[0]).toMatchObject({
+            state: 'failed_retrying',
+            attempt: { count: attempt, maxRetries: 3 },
+          });
+        }
         fixture.clock.advance(10 * 60_000);
       }
       const [job] = await queue.list({});
-      expect(job).toMatchObject({ state: 'failed', attempt: { count: 3 } });
+      expect(job).toMatchObject({ state: 'failed', attempt: { count: 7 } });
       expect(promoteJobToView(job)).toMatchObject({
         state: 'failed',
-        attempts: 3,
+        attempts: 7,
         maxAttempts: 3,
         lastError: {
           code: 'transient',
@@ -458,8 +818,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(new Error('private detail'), { code }));
       },
       now: fixture.clock.now,
@@ -479,8 +839,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromoteRetryableFailure(Object.assign(new Error('private graph id'), {
           code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
           reason: 'local-existence-unavailable',
@@ -513,8 +873,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw replaySafeFailure;
       },
       now: fixture.clock.now,
@@ -569,7 +929,7 @@ describe('runPromoteJob', () => {
     expect((await queue.getStatus(job.jobId))?.state).toBe('failed');
     expect(promoteFailureDiagnostics(logs)).toEqual([
       expect.objectContaining({
-        promoteStartedMarkerPersisted: false,
+        promoteStartedMarkerPersisted: true,
         swmCommitObserved: false,
         classification: 'fatal',
         retryable: false,
@@ -624,8 +984,8 @@ describe('runPromoteJob', () => {
       job,
       queue,
       workerId: 'worker-test',
-      runPromote: async (_request, markPromoteStarted) => {
-        await markPromoteStarted();
+      runPromote: async (_request) => {
+
         throw createPromotePostCommitFailure(new Error('durable tail failed'));
       },
       now: fixture.clock.now,
@@ -670,7 +1030,7 @@ describe('createPromoteWorkerSupervisor', () => {
   function makeAgentStub(promote: (req: PromoteRequest) => Promise<{ promotedCount: number }>) {
     return {
       promoteQueue: queue,
-      assertion: {
+      assertion: { prepareQueuedShare: async (job: any) => ({ job }),
         async promote(
           cgId: string,
           name: string,
@@ -796,7 +1156,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: firstClaimLeaseless,
-        assertion: { promote: async () => ({ promotedCount: 1 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
@@ -1057,7 +1417,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 4,
       pollIntervalMs: 60_000,
@@ -1083,7 +1443,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 4,
       pollIntervalMs: 60_000,
@@ -1127,7 +1487,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 60_000,
@@ -1163,7 +1523,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 0 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 0 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 60_000,
@@ -1308,7 +1668,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: { promote: async () => ({ promotedCount: 1 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
@@ -1357,7 +1717,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const sup = createPromoteWorkerSupervisor({
       agent: {
         promoteQueue: wrappedQueue,
-        assertion: {
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }),
           async promote() {
             promoteStarted.resolve();
             return releasePromote.promise;
@@ -1407,7 +1767,7 @@ describe('createPromoteWorkerSupervisor', () => {
     nowFn += 60_000; // lease expired
 
     const sup = createPromoteWorkerSupervisor({
-      agent: { promoteQueue: recoverableQueue, assertion: { promote: async () => ({ promotedCount: 1 }) } } as any,
+      agent: { promoteQueue: recoverableQueue, assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) } } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1_000_000,
       heartbeatIntervalMs: 0,
@@ -1426,7 +1786,7 @@ describe('createPromoteWorkerSupervisor', () => {
     const shortLeaseQueue = new TripleStoreAsyncPromoteQueue(store, { leaseMs: 1_000 });
     const agent = {
       promoteQueue: shortLeaseQueue,
-      assertion: { promote: async () => ({ promotedCount: 1 }) },
+      assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
     } as any;
 
     expect(() => createPromoteWorkerSupervisor({
@@ -1452,7 +1812,7 @@ describe('createPromoteWorkerSupervisor', () => {
             throw new Error('must not poll after failed recovery');
           },
         },
-        assertion: { promote: async () => ({ promotedCount: 1 }) },
+        assertion: { prepareQueuedShare: async (job: any) => ({ job }), promote: async () => ({ promotedCount: 1 }) },
       } as any,
       workerConcurrency: 1,
       pollIntervalMs: 1,
@@ -1599,5 +1959,114 @@ describe('createPromoteWorkerSupervisor', () => {
       await sup.stop();
       expect((await queue.getStats()).succeeded).toBe(1);
     });
+  });
+});
+
+/**
+ * OT-RFC-73 AC1, share queue's required wake-path scenario (the worker-tick guard). `enqueue` calls `notifyWorkAvailable()` from
+ * inside the queue mutex and the supervisor starts its tick synchronously from it, so whatever the queue's tagging puts on
+ * that chain follows the worker. The queue tags with explicit store options, never an ambient lane, and issues the wake with no
+ * lane scope: the claimed job's data-plane calls carry no control tag and inherit no ambient lane, whichever lane the enqueueing
+ * caller was scoped to. The recorder sits on the one store both the queue and the job's data-plane work use.
+ */
+describe('share control path: the wake from inside the mutex (OT-RFC-73 AC1)', () => {
+  const SHARE_GRAPHS = ['urn:dkg:promote-queue:control-plane'];
+  const DATA_GRAPH = 'urn:test:worker-wake:data';
+
+  async function runWakeScenario(ambient: StoreWorkPriority, pathOn: boolean) {
+    const recorder = recordShareStore(new OxigraphStore());
+    const queue = new TripleStoreAsyncPromoteQueue(recorder.store, { now: () => Date.now(), backoff: () => 50, maxRetries: 2 });
+    const wakes: Array<{ ambient: StoreWorkPriority | undefined; beforeEnqueueSettled: boolean }> = [];
+    let enqueueSettled = false;
+    const observedQueue = new Proxy(queue, {
+      get(target, prop) {
+        if (prop === 'workScheduling') {
+          return {
+            attachScheduler: (scheduler: { onWorkAvailable(): void }) => target.workScheduling.attachScheduler({
+              onWorkAvailable: () => {
+                wakes.push({ ambient: activeDefaultStoreWorkPriority(), beforeEnqueueSettled: !enqueueSettled });
+                scheduler.onWorkAvailable();
+              },
+            }),
+          };
+        }
+        const value = Reflect.get(target, prop, target) as unknown;
+        return typeof value === 'function' ? (value as (...args: unknown[]) => unknown).bind(target) : value;
+      },
+    }) as AsyncPromoteQueue;
+    const promoted = deferred();
+    const sup = createPromoteWorkerSupervisor({
+      agent: {
+        promoteQueue: observedQueue,
+        assertion: {
+          prepareQueuedShare: async (job: unknown) => ({ job }),
+          // The claimed job's data-plane work, on the store the queue uses.
+          async promote() {
+            await recorder.store.query(`SELECT ?s WHERE { GRAPH <${DATA_GRAPH}> { ?s ?p ?o } } LIMIT 1`, { source: 'test.worker.dataPlane' });
+            await recorder.store.insert([{ subject: 'urn:test:worker-wake:s', predicate: 'urn:test:p', object: '"v"', graph: DATA_GRAPH }],
+              { source: 'test.worker.dataPlane' });
+            promoted.resolve();
+            return { promotedCount: 1 };
+          },
+        },
+      } as never,
+      workerConcurrency: 1,
+      pollIntervalMs: 60_000,
+      heartbeatIntervalMs: 0,
+      log: () => {},
+      workerIdPrefix: 'wake',
+    });
+    let lanes: string[] = [];
+    await withControlPath(pathOn, async () => {
+      await sup.start();
+      const jobId = await withDefaultStoreWorkPriority(ambient, () => queue.enqueue({ contextGraphId: 'cg', assertionName: 'wake-path', entities: 'all' }));
+      enqueueSettled = true;
+      await Promise.race([
+        promoted.promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('wake timed out')), 2_000)),
+      ]);
+      await vi.waitFor(async () => { expect((await queue.getStatus(jobId))?.state).toBe('succeeded'); });
+      await sup.stop();
+      lanes = recorder.calls.map(resolveLane); // resolved while the path is injected
+      expectShareTaggingTable(recorder.calls, SHARE_GRAPHS, { pathOn });
+    });
+    return { calls: recorder.calls, lanes, wakes };
+  }
+
+  it.each([
+    { ambient: 'background' as const, pathOn: true },
+    { ambient: 'background' as const, pathOn: false },
+    { ambient: 'health' as const, pathOn: true },
+    { ambient: 'health' as const, pathOn: false },
+  ])('enqueue inside the $ambient lane (control path on: $pathOn) -> synchronous wake -> worker tick', async ({ ambient, pathOn }) => {
+    const { calls, lanes, wakes } = await runWakeScenario(ambient, pathOn);
+
+    // The wake is delivered synchronously from the enqueue, and with no lane scope although the enqueue had one.
+    expect(wakes.length).toBeGreaterThanOrEqual(1);
+    expect(wakes[0]).toEqual({ ambient: undefined, beforeEnqueueSettled: true });
+    expect(wakes.every((wake) => wake.ambient === undefined)).toBe(true);
+
+    // The claimed job's data-plane calls: no control tag, no priority, and no ambient lane inherited from the enqueue caller.
+    const dataPlane = calls.filter((call) => call.source === 'test.worker.dataPlane');
+    expect(dataPlane.map((call) => call.method)).toEqual(['query', 'insert']);
+    for (const call of dataPlane) {
+      expect(call.options?.controlQueue).toBeUndefined();
+      expect(call.options?.priority).toBeUndefined();
+      expect(call.ambient).toBeUndefined();
+    }
+    expect(dataPlane.map((call) => lanes[call.index])).toEqual(['normal', 'normal']);
+
+    // The worker tick's own queue reads carry the control tag and inherit nothing either.
+    const claim = calls.filter((call) => call.source === 'publisher.asyncPromote.claimNext.candidates');
+    expect(claim.length).toBeGreaterThanOrEqual(1);
+    for (const call of claim) {
+      expect(call.options?.controlQueue).toBe('share');
+      expect(call.ambient).toBeUndefined();
+    }
+
+    // The enqueue itself ran in the caller's lane scope; its control calls ignore that scope when the path is on.
+    const conflictCheck = calls.find((call) => call.source === 'publisher.asyncPromote.findActiveConflict')!;
+    expect(conflictCheck.ambient).toBe(ambient);
+    expect(lanes[conflictCheck.index]).toBe(pathOn ? 'control:share' : ambient);
   });
 });

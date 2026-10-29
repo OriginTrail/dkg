@@ -18,8 +18,13 @@ import {
   type SwmAuthorInventorySnapshotV1,
   type UnsignedSwmAuthorInventoryHeadEnvelopeV1,
 } from '@origintrail-official/dkg-core';
+import {
+  StorePriorityScheduler,
+  isStoreSchedulerBusyError,
+  storeLaneInflightLimit,
+} from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import {
   prepareRfc64SwmInventoryCatalogTargetV1,
@@ -199,6 +204,130 @@ describe('RFC-64 R1.1 signed SWM inventory to catalog target', () => {
       resolveAsset,
     })).rejects.toMatchObject({ code: 'swm-catalog-reconcile-signature' });
     expect(resolveAsset).not.toHaveBeenCalled();
+  });
+});
+
+describe('RFC-64 R1.1 catalog target fan-out width', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** Ten signed rows and a resolver that reports how many rows it holds at once. */
+  async function tenRows(read: () => Promise<void>) {
+    const seals = await Promise.all(Array.from({ length: 10 }, (_, i) => authorSeal(BigInt(i + 1))));
+    const rows = seals.map((seal, i) => ({
+      ...inventoryRow(seal, PROJECTION), assertionCoordinate: `width-${i}`, shareOperationId: `width-share-${i}`,
+    } as SwmAuthorInventoryRowV1));
+    const snapshot = await signedSnapshot(rows, AUTHOR_WALLET);
+    const held = { now: 0, most: 0 };
+    const resolveAsset = async (row: Readonly<SwmAuthorInventoryRowV1>) => {
+      held.now += 1;
+      held.most = Math.max(held.most, held.now);
+      try {
+        await read();
+      } finally {
+        held.now -= 1;
+      }
+      return {
+        assertionCoordinate: row.assertionCoordinate,
+        projectionBytes: PROJECTION,
+        seal: seals.find((seal) => seal.kaUal === row.kaUal)!,
+      };
+    };
+    return { snapshot, resolveAsset, held };
+  }
+
+  it.each([
+    [1, 1],
+    [3, 3],
+    [8, 8],
+    // Never wider than the module's own bound, whatever the caller asks for.
+    [100, 8],
+  ])('given a width of %i it resolves at most %i rows at once', async (allowed, expected) => {
+    const { snapshot, resolveAsset, held } = await tenRows(() => new Promise((resolve) => setTimeout(resolve, 1)));
+
+    const prepared = await prepareRfc64SwmInventoryCatalogTargetV1({
+      snapshot, resolveAsset, resolveConcurrency: allowed,
+    });
+
+    expect(prepared.assets).toHaveLength(10);
+    expect(held.most).toBe(expected);
+  });
+
+  it.each([undefined, 0, -2, 2.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    'keeps its own width of eight for the unusable width %s',
+    async (unusable) => {
+      const { snapshot, resolveAsset, held } = await tenRows(() => new Promise((resolve) => setTimeout(resolve, 1)));
+
+      await prepareRfc64SwmInventoryCatalogTargetV1({
+        snapshot, resolveAsset, resolveConcurrency: unusable,
+      });
+
+      expect(held.most).toBe(8);
+    },
+  );
+
+  describe('through a store lane that admits one read at a time', () => {
+    const READ_MS = 30;
+    const QUEUE_WAIT_MS = 100;
+
+    /** The store capacity of the incident: one background read at a time. */
+    function oneSlotBackgroundLane() {
+      const scheduler = new StorePriorityScheduler({
+        maxConcurrent: 4, ackReservedSlots: 1, healthReservedSlots: 1,
+        normalReservedSlots: 1, backgroundReservedSlots: 1,
+        queueWaitTimeoutMs: QUEUE_WAIT_MS, now: Date.now,
+      });
+      const store = { getPressureSnapshot: () => scheduler.snapshot };
+      const read = () => scheduler.run(
+        'background',
+        'agent.rfc64.swmInventory.catalogReconcile.seal',
+        () => new Promise<void>((resolve) => setTimeout(resolve, READ_MS)),
+      );
+      return { scheduler, store, read };
+    }
+
+    /** Run the fake clock in small steps, so work queued by one step is seen by the next. */
+    async function settle<T>(task: Promise<T>): Promise<T | { readonly failure: unknown }> {
+      let settled = false;
+      const outcome = task.then((value) => value, (failure: unknown) => ({ failure }))
+        .finally(() => { settled = true; });
+      for (let step = 0; step < 100 && !settled; step += 1) await vi.advanceTimersByTimeAsync(10);
+      expect(settled).toBe(true);
+      return outcome;
+    }
+
+    it('fails when it fans out wider: its later reads wait out the deadline behind their siblings', async () => {
+      let lane!: ReturnType<typeof oneSlotBackgroundLane>;
+      const { snapshot, resolveAsset } = await tenRows(() => lane.read());
+      vi.useFakeTimers();
+      lane = oneSlotBackgroundLane();
+
+      const outcome = await settle(prepareRfc64SwmInventoryCatalogTargetV1({ snapshot, resolveAsset }));
+
+      expect(outcome).toMatchObject({ failure: { code: 'swm-catalog-reconcile-resolution' } });
+      const { cause } = (outcome as { failure: { cause: unknown } }).failure;
+      expect(isStoreSchedulerBusyError(cause)).toBe(true);
+      expect(cause).toMatchObject({ reason: 'queue_wait_timeout', priority: 'background' });
+    });
+
+    it('resolves every row when it is as wide as the lane', async () => {
+      let lane!: ReturnType<typeof oneSlotBackgroundLane>;
+      const { snapshot, resolveAsset, held } = await tenRows(() => lane.read());
+      vi.useFakeTimers();
+      lane = oneSlotBackgroundLane();
+      const width = storeLaneInflightLimit(lane.store, 'background');
+
+      const outcome = await settle(prepareRfc64SwmInventoryCatalogTargetV1({
+        snapshot, resolveAsset, resolveConcurrency: width,
+      }));
+
+      expect(width).toBe(1);
+      expect(outcome).toMatchObject({ assets: expect.any(Array) });
+      expect((outcome as { assets: unknown[] }).assets).toHaveLength(10);
+      expect(held.most).toBe(1);
+      expect(lane.scheduler.snapshot).toMatchObject({ backgroundInflight: 0, backgroundQueued: 0 });
+    });
   });
 });
 

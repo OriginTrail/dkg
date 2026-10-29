@@ -1,17 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { resolveWorkspaceAgentRecipientKeys } from '@origintrail-official/dkg-publisher';
 import { ethers } from 'ethers';
 import {
   DKG_ONTOLOGY,
   WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-  computeWorkspaceAgentEncryptionKeyProofPayload,
   computeWorkspaceAgentEncryptionKeyRevocationPayload,
   contextGraphDataUri,
   contextGraphMetaUri,
-  encodeWorkspaceEncryptionKey,
-  generateWorkspaceRecipientEncryptionKey,
-  workspaceAgentEncryptionKeyId,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 
@@ -20,64 +17,11 @@ import { WorkspaceCryptoMethods } from '../src/dkg-agent-crypto.js';
 import { Rfc64CatalogMethods } from '../src/dkg-agent-rfc64-catalog.js';
 import { SwmSubstrateMethods } from '../src/dkg-agent-swm-substrate.js';
 import { ContextGraphMetaProjection } from '../src/context-graph-meta-projection.js';
+import { createProjectionMutationObserver } from '../src/internal/projection-mutation-observer.js';
+import { CONTEXT_GRAPH_ID, JOIN_KEY_CACHE_GRAPH, PROFILE_GRAPH, ROUTES_CHANGED, TRANSPORT_CHANGED, signedKeyFixture, signedKeyQuads } from './_helpers/signed-private-keys.js';
+import { stubFence, stubRecipientRevisions } from './_helpers/recipient-fence-stub.js';
 
-const CONTEXT_GRAPH_ID = '0x1111111111111111111111111111111111111111/accepted-private';
-const PROFILE_GRAPH = 'did:dkg:context-graph:agents';
 const CURATOR_PEER_ID = '12D3KooWAcceptedPrivateCurator';
-
-function signedKeyFixture(wallet: ethers.HDNodeWallet, peerId?: string): {
-  quads: Quad[];
-  publicKeyBytes: Uint8Array;
-  recipientKeyId: string;
-} {
-  const agentUri = `did:dkg:agent:${ethers.getAddress(wallet.address)}`;
-  const key = generateWorkspaceRecipientEncryptionKey(
-    agentUri,
-    `${agentUri}#accepted-private-x25519`,
-  );
-  const publicKeyBytes = key.publicKeyBytes!;
-  const proof = wallet.signingKey.sign(ethers.hashMessage(
-    computeWorkspaceAgentEncryptionKeyProofPayload({
-      agentAddress: wallet.address,
-      encryptionKeyAlgorithm: WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519,
-      publicKeyBytes,
-    }),
-  )).serialized;
-  return {
-    publicKeyBytes,
-    recipientKeyId: workspaceAgentEncryptionKeyId(wallet.address, publicKeyBytes),
-    quads: [
-      {
-        subject: agentUri,
-        predicate: DKG_ONTOLOGY.DKG_PUBLIC_ENCRYPTION_KEY,
-        object: `"${encodeWorkspaceEncryptionKey(publicKeyBytes)}"`,
-        graph: PROFILE_GRAPH,
-      },
-      {
-        subject: agentUri,
-        predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_ALGORITHM,
-        object: `"${WORKSPACE_AGENT_ENCRYPTION_KEY_ALGORITHM_X25519}"`,
-        graph: PROFILE_GRAPH,
-      },
-      {
-        subject: agentUri,
-        predicate: DKG_ONTOLOGY.DKG_ENCRYPTION_KEY_PROOF,
-        object: `"${proof}"`,
-        graph: PROFILE_GRAPH,
-      },
-      ...(peerId === undefined ? [] : [{
-        subject: agentUri,
-        predicate: DKG_ONTOLOGY.DKG_PEER_ID,
-        object: `"${peerId}"`,
-        graph: PROFILE_GRAPH,
-      }]),
-    ],
-  };
-}
-
-function signedKeyQuads(wallet: ethers.HDNodeWallet, peerId?: string): Quad[] {
-  return signedKeyFixture(wallet, peerId).quads;
-}
 
 function approvedUnregisteredAuthority(approvedAgentAddress: string) {
   return {
@@ -175,6 +119,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(store),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -220,6 +165,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(store),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -254,6 +200,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     ]);
 
     let metadataRevision = 7;
+    let peerGateRevision = '0:0';
     let allowedPeers = [peerA, peerB];
     let transportReads = 0;
     let finalReadEntered!: () => void;
@@ -264,6 +211,9 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(store),
+        peerGateRevision: { read: () => peerGateRevision },
+        readContextGraphAuthorityFactsRevision: () => '0:0',
         get readAuthorityFactsRevision() { return metadataRevision; },
       },
       resolveSwmTransportAuthority: vi.fn(async () => {
@@ -284,6 +234,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       });
     await entered;
     allowedPeers = [peerA];
+    peerGateRevision = '0:1';
     metadataRevision += 1;
     releaseFinalRead();
 
@@ -291,47 +242,68 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       /has no recipient key advertised by a peer in the context graph allowlist/,
     );
     expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(2);
+    // The collect, then the one the moved gate revision asks for, which refuses.
     expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
   });
 
-  it('retries an unchanged recipient snapshot after an unrelated authority revision moves', async () => {
-    const member = ethers.Wallet.createRandom();
-    const peerId = '12D3KooWAcceptedPrivateStableRetryPeer';
-    const store = new OxigraphStore();
-    stores.push(store);
-    await store.insert(signedKeyQuads(member, peerId));
+  describe.each([
+    {
+      moved: 'a recipient key or route fact',
+      expectedReads: 3,
+      expectedPeerGateReads: 2,
+      move: (host: { fence: ReturnType<typeof stubFence>; node: { revision: number } }) => { host.fence.revision += 1; },
+    },
+    {
+      moved: 'only unrelated authority facts',
+      expectedReads: 2,
+      expectedPeerGateReads: 1,
+      move: (host: { fence: ReturnType<typeof stubFence>; node: { revision: number } }) => { host.node.revision += 1; },
+    },
+  ])('a private roster whose snapshot sees $moved move during the first confirmation', (scenario) => {
+    it(`collects ${scenario.expectedReads - 1} time(s) and resolves the same recipients`, async () => {
+      const member = ethers.Wallet.createRandom();
+      const peerId = '12D3KooWAcceptedPrivateStableRetryPeer';
+      const store = new OxigraphStore();
+      stores.push(store);
+      await store.insert(signedKeyQuads(member, peerId));
 
-    let metadataRevision = 19;
-    let transportReads = 0;
-    const host = {
-      store,
-      contextGraphMetaProjection: {
-        get readAuthorityFactsRevision() { return metadataRevision; },
-      },
-      resolveSwmTransportAuthority: vi.fn(async () => {
-        transportReads += 1;
-        if (transportReads === 2) metadataRevision += 1;
-        return {
-          kind: 'private-roster' as const,
-          participantAgents: [member.address],
-        };
-      }),
-      getContextGraphAllowedPeers: vi.fn(async () => [peerId]),
-      ensureAgentsInOnDemandPhonebook: vi.fn(),
-    };
+      const moves = { fence: stubFence(), node: { revision: 19 } };
+      let transportReads = 0;
+      const host = {
+        store,
+        contextGraphMetaProjection: {
+          recipientKeyRouteFence: moves.fence,
+          recipientKeyCollect: { resolve: (agent: string) => resolveWorkspaceAgentRecipientKeys(store, agent) },
+          peerGateRevision: { read: () => '0:0' },
+          readContextGraphAuthorityFactsRevision: () => '0:0',
+          get readAuthorityFactsRevision() { return moves.node.revision; },
+        },
+        resolveSwmTransportAuthority: vi.fn(async () => {
+          transportReads += 1;
+          if (transportReads === 2) scenario.move(moves);
+          return {
+            kind: 'private-roster' as const,
+            participantAgents: [member.address],
+          };
+        }),
+        getContextGraphAllowedPeers: vi.fn(async () => [peerId]),
+        ensureAgentsInOnDemandPhonebook: vi.fn(),
+      };
 
-    await expect(WorkspaceCryptoMethods.prototype
-      .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
-        contextGraphId: CONTEXT_GRAPH_ID,
-      })).resolves.toMatchObject({
-        requiresEncryption: true,
-        recipients: [expect.objectContaining({
-          agentAddress: ethers.getAddress(member.address),
-          peerId,
-        })],
-      });
-    expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(3);
-    expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(2);
+      await expect(WorkspaceCryptoMethods.prototype
+        .resolveWorkspaceAgentRecipientsForCurrentAuthority.call(host as never, {
+          contextGraphId: CONTEXT_GRAPH_ID,
+        })).resolves.toMatchObject({
+          requiresEncryption: true,
+          recipients: [expect.objectContaining({
+            agentAddress: ethers.getAddress(member.address),
+            peerId,
+          })],
+        });
+      expect(host.resolveSwmTransportAuthority).toHaveBeenCalledTimes(scenario.expectedReads);
+      expect(host.getContextGraphAllowedPeers).toHaveBeenCalledTimes(scenario.expectedPeerGateReads);
+      expect(moves.fence.ensureReady).toHaveBeenCalledTimes(scenario.expectedReads - 1);
+    });
   });
 
   it('retries unchanged legacy plaintext after an unrelated authority revision moves', async () => {
@@ -343,6 +315,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(store),
         get readAuthorityFactsRevision() { return metadataRevision; },
       },
       resolveSwmTransportAuthority: vi.fn(async () => {
@@ -373,13 +346,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const store = createListContextGraphsCacheInvalidatingStore(
       innerStore,
       () => undefined,
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) {
-          projection.markDirtyForGraph(targetGraph);
-          if (quads) projection.markDirtyFromQuads(quads);
-        } else if (quads) projection.markDirtyFromQuads(quads);
-        else projection.markAllDirty();
-      },
+      createProjectionMutationObserver(() => projection),
     );
     projection = new ContextGraphMetaProjection(store);
     await store.insert(key.quads);
@@ -465,13 +432,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const store = createListContextGraphsCacheInvalidatingStore(
       innerStore,
       () => undefined,
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) {
-          projection.markDirtyForGraph(targetGraph);
-          if (quads) projection.markDirtyFromQuads(quads);
-        } else if (quads) projection.markDirtyFromQuads(quads);
-        else projection.markAllDirty();
-      },
+      createProjectionMutationObserver(() => projection),
     );
     projection = new ContextGraphMetaProjection(store);
     await store.insert(inJoinCache(oldKey.quads));
@@ -539,13 +500,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const store = createListContextGraphsCacheInvalidatingStore(
       innerStore,
       () => undefined,
-      (quads, targetGraph) => {
-        if (targetGraph !== undefined) {
-          projection.markDirtyForGraph(targetGraph);
-          if (quads) projection.markDirtyFromQuads(quads);
-        } else if (quads) projection.markDirtyFromQuads(quads);
-        else projection.markAllDirty();
-      },
+      createProjectionMutationObserver(() => projection),
     );
     projection = new ContextGraphMetaProjection(store);
     // A live session whose member subscription for the graph is installed:
@@ -556,6 +511,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
         live: () => ({ manager: {} }),
         sharedMemoryGossipRegistered: new Set([CONTEXT_GRAPH_ID]),
       },
+      subscribedContextGraphs: new Map([[CONTEXT_GRAPH_ID, { subscribed: true }]]),
       contextGraphMetaProjection: projection,
       gossipWireIdFor: (contextGraphId: string) => contextGraphId,
       rfc64LegacySwmMemberTransportAllowedForContextGraph: () => true,
@@ -657,18 +613,6 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
   }
 
   /** The confirmation read no longer matched the roster the keys were resolved for. */
-  const TRANSPORT_CHANGED = {
-    reason: 'chain-participant-authority-unavailable',
-    detail: 'retry recipient resolution against the current private authority',
-  };
-  /** The resolved (agent, key, peer) set differed after a revision moved. */
-  const ROUTES_CHANGED = {
-    reason: 'chain-participant-authority-unavailable',
-    detail: 'recipient routes changed while retrying against current private authority',
-  };
-
-  const JOIN_KEY_CACHE_GRAPH = 'urn:dkg:local:join-encryption-key-cache';
-
   /** Both members' keys in the profile graph, and a peer gate that names both peers. */
   const profileKeysBehindPeerGate = (context: RecipientChangeContext): Quad[] => [
     ...context.memberKey.quads,
@@ -832,6 +776,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const host = {
       store,
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(store),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -870,7 +815,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     ]);
     const host = {
       store,
-      contextGraphMetaProjection: { readAuthorityFactsRevision: 3 },
+      contextGraphMetaProjection: { readAuthorityFactsRevision: 3, ...stubRecipientRevisions(store) },
       resolveSwmTransportAuthority: vi.fn()
         .mockResolvedValueOnce({ kind: 'legacy-unregistered' as const })
         .mockResolvedValueOnce({
@@ -979,6 +924,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const retainedRoster = vi.fn(() => [retainedRemovedMember.address]);
     const host = {
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1015,7 +961,9 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     }));
     const host = {
       contextGraphMetaProjection: {
-        get readAuthorityFactsRevision() { return metadataRevision; },
+        ...stubRecipientRevisions(),
+        // The gate compares the graph's own roster revision, not the node-wide one.
+        peerGateRevision: { read: () => `0:${metadataRevision}` },
       },
       resolveSwmTransportAuthority,
       getCgMeta: vi.fn(async () => ({
@@ -1048,7 +996,9 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     });
     const host = {
       contextGraphMetaProjection: {
-        get readAuthorityFactsRevision() { return metadataRevision; },
+        ...stubRecipientRevisions(),
+        // The gate compares the graph's own roster revision, not the node-wide one.
+        peerGateRevision: { read: () => `0:${metadataRevision}` },
       },
       resolveSwmTransportAuthority,
       getCgMeta: vi.fn(async () => ({
@@ -1076,7 +1026,9 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     });
     const host = {
       contextGraphMetaProjection: {
-        get readAuthorityFactsRevision() { return metadataRevision; },
+        ...stubRecipientRevisions(),
+        // The gate compares the graph's own roster revision, not the node-wide one.
+        peerGateRevision: { read: () => `0:${metadataRevision}` },
       },
       resolveSwmTransportAuthority,
       getCgMeta: vi.fn(async () => ({
@@ -1104,6 +1056,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     let privateAuthorityActive = false;
     const host = {
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1145,6 +1098,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     ));
     const host = {
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1198,6 +1152,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
     const getLocalMetadataMemberRecoveryGate = vi.fn(async () => [invitedMember.address]);
     const host = {
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1236,6 +1191,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
       : approvedUnregisteredAuthority(staleLocalMember.address));
     const host = {
       contextGraphMetaProjection: {
+        ...stubRecipientRevisions(),
         readAuthorityFactsRevision: 0,
         readContextGraphAuthorityFactsRevision: () => '0:0',
       },
@@ -1256,6 +1212,7 @@ describe('accepted private RFC-64 SWM authority precedence', () => {
   it('fails recovery closed when metadata authority facts change during the read', async () => {
     const removed = ethers.Wallet.createRandom();
     const contextGraphMetaProjection = {
+      ...stubRecipientRevisions(),
       readAuthorityFactsRevision: 4,
       readContextGraphAuthorityFactsRevision() {
         return `0:${this.readAuthorityFactsRevision}`;

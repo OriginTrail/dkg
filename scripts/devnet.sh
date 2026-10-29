@@ -50,10 +50,14 @@
 #   DEVNET_SNAPSHOT_GC_INTERVAL_MS
 #                 How often the snapshot collector runs (only written when set;
 #                 the node default is 5 minutes).
+#   DEVNET_RPC_BUDGET=shipped
+#                 Keep each node's shipped chain RPC request budget. By default
+#                 (`local`) nodes get a budget sized for the one local chain
+#                 they share: see devnet_chain_config_block.
 #
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEVNET_DIR="${DEVNET_DIR:-$REPO_ROOT/.devnet}"
 HARDHAT_PORT="${HARDHAT_PORT:-8545}"
 NUM_NODES="${2:-6}"
@@ -90,6 +94,7 @@ DEVNET_DOCKER_NAME_PREFIX="${DEVNET_DOCKER_NAME_PREFIX:-devnet}"
 DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES="${DEVNET_SNAPSHOT_GC_HARD_RESERVE_BYTES:-268435456}"
 DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TRIGGER_FREE_BYTES:-536870912}"
 DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES="${DEVNET_SNAPSHOT_GC_TARGET_FREE_BYTES:-1073741824}"
+DEVNET_RPC_BUDGET="${DEVNET_RPC_BUDGET:-local}"
 BLAZEGRAPH_PORT="${DEVNET_BLAZEGRAPH_PORT:-9999}"
 BLAZEGRAPH_CONTAINER="${DEVNET_DOCKER_NAME_PREFIX}-blazegraph"
 BLAZEGRAPH_LOG_MAX_SIZE="200m"
@@ -270,7 +275,7 @@ start_hardhat() {
       );
       child.unref();
       if (!child.pid) process.exit(1);
-      console.log(child.pid);
+      process.stdout.write(String(child.pid) + "\n");
     ')
   echo "$hh_pid" > "$pidfile"
   log "Hardhat node started (PID $hh_pid)"
@@ -576,6 +581,43 @@ stop_blazegraph() {
   fi
 }
 
+# The "chain" member of one node's config.json.
+#
+# A node's shipped RPC request budget is sized for a public provider it shares
+# with other users: 10 requests/second, with background work held back for a
+# random part of the first 30 seconds so that nodes restarting together do not
+# all ask at once. Every devnet node talks to one local chain, where neither
+# limit protects anything, so a node gets a budget sized for that chain.
+#
+# DEVNET_RPC_BUDGET=shipped leaves the block out, for a run that is meant to
+# exercise the shipped budget. A node on another version (DEVNET_VERSION_LAYOUT)
+# keeps its shipped budget as well: only the code under test is known to read
+# this block.
+devnet_chain_config_block() {
+  local hub_addr="$1" version_ref="$2" rpc_budget=""
+  case "$DEVNET_RPC_BUDGET" in
+    local)
+      if [ "$version_ref" = "current" ]; then
+        rpc_budget=',
+    "rpcRequestBudget": { "maxRequestsPerSecond": 1000, "burstRequests": 1000, "startupJitterMs": 0 }'
+      fi
+      ;;
+    shipped) ;;
+    *)
+      echo "[devnet] DEVNET_RPC_BUDGET must be 'local' or 'shipped' (got '$DEVNET_RPC_BUDGET')" >&2
+      return 1
+      ;;
+  esac
+  cat <<EOCHAIN
+"chain": {
+    "type": "evm",
+    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
+    "hubAddress": "${hub_addr}",
+    "chainId": "evm:31337"${rpc_budget}
+  }
+EOCHAIN
+}
+
 create_node_config() {
   local node_num="$1"
   local node_dir="$DEVNET_DIR/node${node_num}"
@@ -712,6 +754,9 @@ create_node_config() {
       \"intervalMs\": ${DEVNET_SNAPSHOT_GC_INTERVAL_MS}"
   fi
 
+  local chain_block
+  chain_block="$(devnet_chain_config_block "$hub_addr" "$(node_version_ref "$node_num" "$node_role")")"
+
   cat > "$node_dir/config.json" <<EOCONF
 {
   "name": "devnet-node-${node_num}",
@@ -741,12 +786,7 @@ create_node_config() {
   ${rs_block}
   ${publisher_block}
   ${epcis_block}
-  "chain": {
-    "type": "evm",
-    "rpcUrl": "http://127.0.0.1:${HARDHAT_PORT}",
-    "hubAddress": "${hub_addr}",
-    "chainId": "evm:31337"
-  }
+  ${chain_block}
 }
 EOCONF
 
@@ -916,22 +956,11 @@ node_cli_entry() {
   version_cli_entry "$(node_version_ref "$node_num" "$role")"
 }
 
-# Older checkouts report only a short commit from /api/status without the
-# build-info file release packages carry. Give devnet worktrees truthful full
-# checkout metadata so release-layout checks can pin the exact tag commit.
+# Modern compilers own their output identity. Historical checkouts receive
+# truthful metadata from the identity captured before their build begins.
 write_devnet_version_build_info() {
-  local dest="$1" info="$1/packages/cli/build-info.json"
-  [ -f "$info" ] && return 0
-  local commit
-  commit="$(git -C "$dest" rev-parse HEAD)"
-  node -e '
-    const fs = require("node:fs");
-    const [path, commit] = process.argv.slice(1);
-    fs.writeFileSync(path, JSON.stringify({
-      commit, commitShort: commit.slice(0, 8),
-      buildTime: new Date().toISOString(), distTag: "devnet", ciRun: null,
-    }, null, 2) + "\n");
-  ' "$info" "$commit"
+  local dest="$1" before="${2:-}"
+  node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --ensure-devnet "$dest" "$before"
 }
 
 # Check out <ref> as a worktree under DEVNET_VERSIONS_DIR and build it once.
@@ -943,8 +972,8 @@ prepare_version() {
     return 1
   fi
   local dest="$DEVNET_VERSIONS_DIR/$ref"
-  if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ]; then
-    write_devnet_version_build_info "$dest"
+  if [ -f "$dest/packages/cli/dist/cli.js" ] && [ "${DEVNET_VERSION_REBUILD:-0}" != "1" ] &&
+    node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --check-devnet-cache "$dest"; then
     log "Version '$ref' already prepared at $dest"
     return 0
   fi
@@ -953,9 +982,11 @@ prepare_version() {
     log "Checking out version '$ref' as a worktree at $dest ..."
     git -C "$REPO_ROOT" worktree add --force "$dest" "$ref"
   fi
-  write_devnet_version_build_info "$dest"
+  local before
+  before="$(node "$(dirname "${BASH_SOURCE[0]}")/stamp-cli-build-info.mjs" --capture-devnet "$dest")"
   log "Building version '$ref' (runs once, then cached) ..."
   ( cd "$dest" && pnpm install --prefer-offline && pnpm run build )
+  write_devnet_version_build_info "$dest" "$before"
   log "Version '$ref' prepared at $dest"
 }
 
@@ -1015,7 +1046,13 @@ start_node() {
     const fs = require('fs');
     const dir = process.env.DEVNET_DIR;
     const cfgPath = process.env.NODE_DIR + '/config.json';
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'));
+    // The members a test set when it added this node (addnode's
+    // DEVNET_ADDNODE_CONFIG_OVERRIDES), applied here only, on every start: the
+    // defaults below are derived from them (an overridden nodeRole or
+    // authorityIndex), and they win over the values generated below.
+    const overridesPath = process.env.NODE_DIR + '/addnode-overrides.json';
+    const overrides = fs.existsSync(overridesPath) ? JSON.parse(fs.readFileSync(overridesPath, 'utf8')) : {};
+    const cfg = { ...JSON.parse(fs.readFileSync(cfgPath, 'utf8')), ...overrides };
     if (process.env.RELAY_ARG) cfg.relay = process.env.RELAY_ARG;
     const n = Number(process.env.NODE_NUM);
     // Bootstrap targets are the CORE nodes among 1..n-1, read from each node's
@@ -1047,6 +1084,7 @@ start_node() {
         maxTailBlocks: 2000,
       };
     }
+    Object.assign(cfg, overrides);
     fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2));
   "
 
@@ -1070,6 +1108,9 @@ start_node() {
   local cli_entry
   cli_entry="$(node_cli_entry "$node_num")"
   log "Node $node_num launching from $cli_entry"
+  # Shutdown uses the running node's launch identity, independent of the next
+  # invocation's DEVNET_VERSION_LAYOUT. Publish the record before spawning.
+  record_node_cli_entry "$node_num" "$cli_entry"
   # Use the CLI's detached supervisor. `restart-node` is commonly called from
   # short-lived devnet test scripts; foreground mode leaves the worker in that
   # shell's process group and can make the daemon disappear after the helper
@@ -1095,7 +1136,10 @@ start_node() {
       auth_args=(-H "Authorization: Bearer $auth_token")
     fi
   fi
-  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-30}
+  # 120 s, not 30: a Core that restarts into a running network has taken 70 s
+  # to answer on a busy machine, and a restart that gives up early aborts the
+  # suite that asked for it. The loop ends as soon as the node answers.
+  local max_wait=${DEVNET_NODE_READY_TIMEOUT:-120}
   [ "$node_num" -eq 1 ] && max_wait=$(( max_wait > 120 ? max_wait : 120 ))
   local ready=false
   # CRITICAL: declare loop variable `local` so we don't clobber the OUTER
@@ -1159,41 +1203,34 @@ start_node() {
   fi
 }
 
+record_node_cli_entry() {
+  local node_dir="$DEVNET_DIR/node$1"
+  printf '%s\n' "$2" > "$node_dir/.devnet-cli-entry.tmp.$$"
+  mv "$node_dir/.devnet-cli-entry.tmp.$$" "$node_dir/.devnet-cli-entry"
+}
+
+run_devnet_process_control() {
+  local action="$1" selected="${2:-}" node_dir num entry
+  local entries=()
+  # Old launches have no durable entry record. Only their node-specific configured
+  # version may fill that gap; a launch record always owns the process identity.
+  if [ -n "$DEVNET_VERSION_LAYOUT" ]; then
+    for node_dir in "$DEVNET_DIR"/node*; do
+      [ -d "$node_dir" ] || continue
+      num="${node_dir##*/node}"
+      case "$num" in ''|*[!0-9]*) continue ;; esac
+      [ -z "$selected" ] || [ "$selected" = "$num" ] || continue
+      [ ! -e "$node_dir/.devnet-cli-entry" ] || continue
+      entry="$(node_cli_entry "$num")"
+      entries+=("$num" "$entry")
+    done
+  fi
+  node --experimental-strip-types "$REPO_ROOT/scripts/devnet-node-process-control.mjs" \
+    "$action" "$REPO_ROOT" "$DEVNET_DIR" "$selected" ${entries[@]+"${entries[@]}"}
+}
+
 collect_devnet_node_pids() {
-  local node_num="${1:-}"
-  local pids="" f pid root_node ps_pids children
-  if [ -n "$node_num" ]; then
-    root_node="$DEVNET_DIR/node${node_num}"
-    for f in "$root_node/devnet.pid" "$root_node/daemon.pid"; do
-      [ -f "$f" ] || continue
-      pid=$(cat "$f" 2>/dev/null || true)
-      [ -n "$pid" ] && pids+=" $pid"
-    done
-  else
-    root_node="$DEVNET_DIR/node"
-    for f in "$DEVNET_DIR"/node*/devnet.pid "$DEVNET_DIR"/node*/daemon.pid; do
-      [ -f "$f" ] || continue
-      pid=$(cat "$f" 2>/dev/null || true)
-      [ -n "$pid" ] && pids+=" $pid"
-    done
-  fi
-
-  if command -v ps >/dev/null 2>&1; then
-    ps_pids=$(ps eww -axo pid=,command= 2>/dev/null | awk -v root="$root_node" '
-      index($0, "DKG_HOME=" root) > 0 || index($0, root "/") > 0 { print $1 }
-    ' 2>/dev/null || true)
-    for pid in $ps_pids; do pids+=" $pid"; done
-  fi
-
-  if [ -n "$pids" ] && command -v ps >/dev/null 2>&1; then
-    children=$(ps -A -o pid=,ppid= 2>/dev/null | awk -v plist="$pids" '
-      BEGIN { n = split(plist, arr, " "); for (i=1;i<=n;i++) if (arr[i] != "") parents[arr[i]] = 1 }
-      { if ($2 in parents) print $1 }
-    ' 2>/dev/null || true)
-    for pid in $children; do pids+=" $pid"; done
-  fi
-
-  echo "$pids" | tr ' ' '\n' | awk 'NF && !seen[$0]++' | tr '\n' ' '
+  run_devnet_process_control collect "${1:-}"
 }
 
 refresh_node_pidfile() {
@@ -1243,44 +1280,7 @@ refresh_node_pidfile() {
 }
 
 stop_devnet_node_processes() {
-  local node_num="${1:-}"
-  local pids pid any_alive node_label
-  pids=$(collect_devnet_node_pids "$node_num")
-  [ -n "$(echo "$pids" | tr -d ' ')" ] || return 0
-
-  node_label="nodes"
-  [ -n "$node_num" ] && node_label="node $node_num"
-  log "Stopping $node_label (pids=$pids)..."
-  for pid in $pids; do
-    [ "$pid" = "$$" ] && continue
-    kill -0 "$pid" 2>/dev/null || continue
-    kill "$pid" 2>/dev/null || true
-  done
-
-  for _ in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    any_alive=false
-    for pid in $pids; do
-      [ "$pid" = "$$" ] && continue
-      if kill -0 "$pid" 2>/dev/null; then
-        any_alive=true
-        break
-      fi
-    done
-    [ "$any_alive" = false ] && break
-    sleep 1
-  done
-
-  for pid in $pids; do
-    [ "$pid" = "$$" ] && continue
-    kill -0 "$pid" 2>/dev/null || continue
-    kill -9 "$pid" 2>/dev/null || true
-  done
-
-  if [ -n "$node_num" ]; then
-    rm -f "$DEVNET_DIR/node${node_num}/devnet.pid" "$DEVNET_DIR/node${node_num}/daemon.pid" "$DEVNET_DIR/node${node_num}/api.port"
-  else
-    rm -f "$DEVNET_DIR"/node*/devnet.pid "$DEVNET_DIR"/node*/daemon.pid "$DEVNET_DIR"/node*/api.port
-  fi
+  run_devnet_process_control stop "${1:-}"
 }
 
 stop_devnet_nodes_only() {
@@ -2171,6 +2171,8 @@ cmd_clean() {
 # itself so it can assert on every step.
 #
 # Usage: devnet.sh addnode <num> [core|edge]
+#   DEVNET_ADDNODE_CONFIG_OVERRIDES='{"key": value, ...}'  config.json members
+#                                   to set before the node's first start
 cmd_addnode() {
   local node_num="${2:-}"
   local role="${3:-core}"
@@ -2198,7 +2200,44 @@ cmd_addnode() {
   fi
 
   log "Adding node $node_num (role=$role)..."
+  # One mkdir claims the folder: it fails when another caller made the folder
+  # since the check above, so only the caller that created it goes on. A caller
+  # that names a mark (DEVNET_ADDNODE_MARK_NAME, a file name, with
+  # DEVNET_ADDNODE_MARK_TEXT) has it written into the folder before anything
+  # else happens there, the daemon's start included: it can then tell its own
+  # node from another caller's even when this addnode is interrupted.
+  if ! mkdir "$DEVNET_DIR/node${node_num}" 2>/dev/null; then
+    echo "[devnet] node${node_num} already exists at $DEVNET_DIR/node${node_num}"
+    exit 1
+  fi
+  if [ -n "${DEVNET_ADDNODE_MARK_NAME:-}" ]; then
+    case "$DEVNET_ADDNODE_MARK_NAME" in
+      */*|.|..)
+        echo "[devnet] DEVNET_ADDNODE_MARK_NAME must be a file name; node${node_num} was not started"
+        rm -rf "$DEVNET_DIR/node${node_num}"
+        exit 1 ;;
+    esac
+    printf '%s\n' "${DEVNET_ADDNODE_MARK_TEXT:-}" > "$DEVNET_DIR/node${node_num}/$DEVNET_ADDNODE_MARK_NAME"
+  fi
   DEVNET_NODE_ROLE_OVERRIDE="$role" create_node_config "$node_num"
+
+  # A test that needs the new node to differ from the first second it runs
+  # (the addresses it announces, for one: what a peer has once learnt about a
+  # node it keeps) passes a JSON object here. addnode checks it and keeps it
+  # beside the node's config; start_node applies it, on the first start and on
+  # every later one (see there).
+  if [ -n "${DEVNET_ADDNODE_CONFIG_OVERRIDES:-}" ]; then
+    if ! node -e '
+      const overrides = JSON.parse(process.env.DEVNET_ADDNODE_CONFIG_OVERRIDES);
+      if (overrides === null || typeof overrides !== "object" || Array.isArray(overrides)) throw new Error("not a JSON object");
+    '; then
+      echo "[devnet] DEVNET_ADDNODE_CONFIG_OVERRIDES must be a JSON object; node${node_num} was not started"
+      rm -rf "$DEVNET_DIR/node${node_num}"
+      exit 1
+    fi
+    printf '%s\n' "$DEVNET_ADDNODE_CONFIG_OVERRIDES" > "$DEVNET_DIR/node${node_num}/addnode-overrides.json"
+    log "Node $node_num config: DEVNET_ADDNODE_CONFIG_OVERRIDES kept for every start"
+  fi
 
   # Reuse the cluster's shared auth token so the test can talk to the new
   # node with the same bearer used everywhere else.
@@ -2267,6 +2306,7 @@ case "${1:-}" in
   addnode)          cmd_addnode "$@" ;;
   stop-node)        cmd_stop_node "$@" ;;
   restart-node)     cmd_restart_node "$@" ;;
+  start-node)       start_node "${2:?node number required}" ;;
   prepare-version)  cmd_prepare_version "$@" ;;
   stop)         cmd_stop ;;
   status)       cmd_status ;;

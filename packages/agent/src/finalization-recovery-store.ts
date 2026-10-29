@@ -369,3 +369,12 @@ export interface FinalizationRecoveryStore {
   health(): Promise<FinalizationRecoveryHealth>;
   close(): Promise<void>;
 }
+
+/**
+ * Creates the durable finalization inbox for one agent data directory.
+ * The factory must return a fresh, open store. The agent owns the returned
+ * store and closes it during normal startup rollback or shutdown.
+ */
+export type FinalizationRecoveryStoreFactory = (
+  dataDir: string,
+) => Promise<FinalizationRecoveryStore>;

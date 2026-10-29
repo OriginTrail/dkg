@@ -641,6 +641,39 @@ describe('MessageStreamPool', () => {
     await pool.close();
   });
 
+  // The relay-only gate retires the stream on a later send's pass. A request
+  // that `send()` took but that still awaits the open sits neither in flight
+  // nor in the queue; retiring the stream under it would fail it with "pool
+  // closed" although the pool is open.
+  it('closePeerIfIdle leaves a stream alone while a request sent to it is on its way to the queue', async () => {
+    const node = makeFakeNode();
+    const pool = new MessageStreamPool(node, {
+      peerIdFromString: stubPeerIdFromString,
+      keepaliveIntervalMs: 0,
+      idleTimeoutMs: 0,
+    });
+    const encode = (text: string) => new TextEncoder().encode(text);
+    const first = pool.send(PEER_A, encode('one'));
+    await flush();
+    await flush();
+    const stream = node.state.streams.get(PEER_A)!;
+    stream.feed(encodeFrame(FrameType.RESPONSE, encode('ok1')));
+    await first;
+    await flush();
+
+    const second = pool.send(PEER_A, encode('two'));
+    await expect(pool.closePeerIfIdle(PEER_A)).resolves.toBe(false);
+    await flush();
+    stream.feed(encodeFrame(FrameType.RESPONSE, encode('ok2')));
+    expect(new TextDecoder().decode(await second)).toBe('ok2');
+    expect(node.state.dials.get(PEER_A)).toBe(1);
+
+    // Answered, the stream is quiescent again and the retire lands.
+    await flush();
+    await expect(pool.closePeerIfIdle(PEER_A)).resolves.toBe(true);
+    await pool.close();
+  });
+
   it('aborting an in-flight request tears down the stream so the pool does not stall (Codex #560 round 1)', async () => {
     const node = makeFakeNode();
     const pool = new MessageStreamPool(node, {

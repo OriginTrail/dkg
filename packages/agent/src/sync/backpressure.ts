@@ -15,6 +15,16 @@ import {
   PriorityAdmissionQueue,
   type PriorityAdmission,
 } from './priority-admission-queue.js';
+import { sharedMemoryReserve, sharedMemoryReserveFor } from './shared-memory-reserve.js';
+import { controlPlaneReserve, controlPlaneReserveFor } from './control-plane-reserve.js';
+import {
+  ReservedSyncSlots,
+  recordSyncReserves,
+  withSyncReserveCapacity,
+  type SyncReserve,
+} from './sync-reserve.js';
+import { nonNegativeInteger, parseIntegerEnv } from './sync-switches.js';
+import { traceSyncAdmission } from './admission-trace.js';
 
 export interface SyncBackpressureSnapshot {
   inflight: number;
@@ -70,6 +80,12 @@ interface GlobalQueuePayload {
   admissionClass: SyncAdmissionClass;
   limit: number;
   automaticBackgroundLimit: number;
+  /** Set for a shared-memory pull or a control-plane fetch, which may hold a reserved slot instead. */
+  reserve?: SyncReserve;
+  /** Set for a shared-memory pull admitted with `reservedSlotOnly`. */
+  reservedOnly?: boolean;
+  /** Set at start: the admission holds a reserved slot, not a general one. */
+  reserved?: boolean;
   label: string;
   contextGraphId?: string;
   source: SyncAdmissionSource;
@@ -308,17 +324,30 @@ const capacityTracker = new SyncCapacityTracker();
 let lastLimit: number | null = null;
 let lastQueueLimit: number | null = null;
 
+const reservedSlots = new ReservedSyncSlots();
+// A pull admitted with `reservedSlotOnly` never takes a general slot, free or not.
+const generalCapacityAvailable = (payload: GlobalQueuePayload): boolean => !payload.reservedOnly
+  && capacityTracker.canRun(
+    payload.capacityClaim,
+    payload.admissionClass,
+    payload.policy,
+    payload.automaticBackgroundLimit,
+  );
+
 const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
   now: () => performance.now(),
-  canRun: (entry) => capacityTracker.canRun(
-    entry.payload.capacityClaim,
-    entry.payload.admissionClass,
-    entry.payload.policy,
-    entry.payload.automaticBackgroundLimit,
-  ),
+  canRun: (entry) => generalCapacityAvailable(entry.payload)
+    || reservedSlots.canTake(entry.payload.reserve),
   onStart: (entry) => {
     const { capacityClaim, admissionClass } = entry.payload;
-    const releaseCapacity = capacityTracker.start(capacityClaim, admissionClass);
+    // Started right after `canRun` said yes: a general slot whenever one is
+    // free and allowed, so a reserved slot never narrows what other work may admit.
+    const reserve = generalCapacityAvailable(entry.payload) ? undefined : entry.payload.reserve;
+    entry.payload.reserved = reserve !== undefined;
+    if (reserve) reservedSlots.take(reserve);
+    const releaseCapacity = reserve
+      ? () => reservedSlots.give(reserve)
+      : capacityTracker.start(capacityClaim, admissionClass);
     lastLimit = entry.payload.limit;
     getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
     return () => {
@@ -327,7 +356,8 @@ const queue = new PriorityAdmissionQueue<GlobalQueuePayload>({
     };
   },
   onStartFailureRollback: (entry) => {
-    capacityTracker.rollback(entry.payload.capacityClaim, entry.payload.admissionClass);
+    if (entry.payload.reserved) reservedSlots.give(entry.payload.reserve!);
+    else capacityTracker.rollback(entry.payload.capacityClaim, entry.payload.admissionClass);
     getMetrics().syncGlobalInflight.record(capacityTracker.inflightCount);
   },
   onDepthChange: (depth) => getMetrics().syncBackgroundQueueDepth.record(depth),
@@ -391,7 +421,7 @@ function syncGlobalPressureCapacity(
 function configureResolvedSyncGlobalPolicy(
   policy: SyncGlobalBackpressurePolicy,
 ): SyncGlobalBackpressurePolicy {
-  queue.configureObservabilityCapacity(syncGlobalPressureCapacity(policy));
+  queue.configureObservabilityCapacity(withSyncReserveCapacity(syncGlobalPressureCapacity(policy), policy));
   return policy;
 }
 const automaticBackgroundLimits = new WeakMap<object, number>();
@@ -402,7 +432,8 @@ export type SyncBackpressureBusyReason = 'queue_full' | 'queue_timeout' | 'displ
 export class SyncBackpressureBusyError extends Error {
   readonly reason: SyncBackpressureBusyReason;
 
-  constructor(message: string, reason: SyncBackpressureBusyReason = 'queue_full') {
+  /** `state`: slots and queue when an admission was refused at once (`queue_full`), for its reporter. */
+  constructor(message: string, reason: SyncBackpressureBusyReason = 'queue_full', readonly state?: string) {
     super(message);
     this.name = 'SyncBackpressureBusyError';
     this.reason = reason;
@@ -431,6 +462,11 @@ export interface SyncAdmissionOptions {
   priorityClass?: SyncPriorityClass;
   source?: SyncAdmissionSource;
   selectedSwmPriority?: boolean;
+  /**
+   * A shared-memory pull that may run only in a reserved shared-memory slot,
+   * never in a general one. Ignored where no reserve applies.
+   */
+  reservedSlotOnly?: boolean;
   agingThresholdMs?: number;
 }
 
@@ -481,28 +517,42 @@ function syncAdmissionTerms(
   const queueTimeoutMs = isPartitionedPolicy(policy) && admissionClass === 'fast'
     ? policy.partitions.fast.queueTimeoutMs
     : undefined;
+  // A shared-memory pull or a control-plane fetch may also run in a reserved
+  // slot. A pull that cannot start waits in its reserve's bounded queue and is
+  // deferred after that queue's timeout; a reserve without a queue of its own
+  // leaves its work to wait where it would wait without one.
+  const reserve = sharedMemoryReserveFor(policy, lane, admissionClass === 'fast')
+    ?? controlPlaneReserveFor(policy, normalizedSource);
+  const ownQueue = reserve?.queue && { pool: reserve.pool, ...reserve.queue };
   return {
-    queueTimeoutMs,
+    queueTimeoutMs: ownQueue?.timeoutMs ?? queueTimeoutMs,
     queued: {
       payload: {
         policy,
         admissionClass,
         limit,
         automaticBackgroundLimit: automaticBackgroundLimits.get(policy) ?? limit,
+        reserve,
+        reservedOnly: reserve !== undefined && options.reservedSlotOnly === true,
         label: options.label,
         contextGraphId: options.contextGraphId,
         source: normalizedSource,
         capacityClaim,
       } satisfies GlobalQueuePayload,
-      ownerKey,
-      ownerQueueLimit,
+      ownerKey: ownQueue?.pool ?? ownerKey,
+      ownerQueueLimit: ownQueue ? undefined : ownerQueueLimit,
+      queuePool: ownQueue?.pool,
       lane: schedulerLane,
       priority: options.priority ?? 0,
       priorityClass: options.priorityClass ?? 'default',
       agingThresholdMs: options.agingThresholdMs ?? DEFAULT_SYNC_PRIORITY_AGING_MS,
-      queueLimit,
+      queueLimit: ownQueue?.limit ?? queueLimit,
     },
   };
+}
+
+function reservedSlotState(reserve: SyncReserve | undefined): string {
+  return reserve ? reservedSlots.describe(reserve, queue.countOwner(reserve.pool)) : '';
 }
 
 function acquire(
@@ -515,110 +565,40 @@ function acquire(
   lastLimit = limit;
   lastQueueLimit = queueLimit;
   const queuedBefore = queue.length;
+  const { reserve } = terms.queued.payload;
   return queue.acquire({
     ...terms.queued,
     signal: options.signal,
     timeoutMs: terms.queueTimeoutMs,
-    createBusyError: () => new SyncBackpressureBusyError(
-      `Sync backpressure rejected ${options.label} `
-        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queuedBefore}/${queueLimit})`,
-    ),
+    createBusyError: () => {
+      const state = `global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queuedBefore}/${queueLimit}`
+        + reservedSlotState(reserve);
+      return new SyncBackpressureBusyError(`Sync backpressure rejected ${options.label} (${state})`, 'queue_full', state);
+    },
     createDisplacedError: (victim) => new SyncBackpressureBusyError(
         `Sync backpressure displaced ${victim.payload.contextGraphId ?? 'queued work'} for higher-priority ${options.label}`,
         'displaced',
       ),
     createTimeoutError: () => new SyncBackpressureBusyError(
-      `Sync backpressure timed out ${options.label} waiting for the fast partition`,
+      reserve?.queue === undefined
+        ? `Sync backpressure timed out ${options.label} waiting for the fast partition`
+        : `Sync backpressure timed out ${options.label} after ${reserve.queue.timeoutMs} ms waiting for a `
+          + `${reserve.pool} slot (global inflight=${capacityTracker.inflightCount}/${limit}`
+          + `${reservedSlotState(reserve)})`,
       'queue_timeout',
     ),
   });
 }
 
-export function parseBooleanEnv(name: string): boolean | undefined {
-  const raw = process.env[name]?.trim().toLowerCase();
-  if (!raw) return undefined;
-  if (raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on' || raw === 'enabled') return true;
-  if (raw === '0' || raw === 'false' || raw === 'no' || raw === 'off' || raw === 'disabled') return false;
-  return undefined;
-}
-
-export function resolveBooleanSwitch(
-  configValue: boolean | undefined,
-  envName: string,
-  defaultValue: boolean,
-): boolean {
-  return parseBooleanEnv(envName) ?? configValue ?? defaultValue;
-}
-
-/** Effective activation of the periodic peer-sync reconciler (the timer that
- * re-syncs stale connected peers). Kept as one public resolver so runtime
- * gates and operator-facing status cannot disagree about
- * config/default/environment precedence. It does not gate chain-driven VM
- * reconciliation; see {@link resolveVmReconcilerEnabled}. */
-export function resolveSyncReconcilerEnabled(configValue?: boolean): boolean {
-  return resolveBooleanSwitch(
-    configValue,
-    'DKG_SYNC_RECONCILER_ENABLED',
-    true,
-  );
-}
-
-/** Effective activation of chain-driven VM reconciliation: core-hosted
- * recording, the KA-registered nudge, and the VM reconcile sweep. A core's
- * StorageACK finality gate keys off this switch, so a core with it off
- * declines every StorageACK. Same precedence as every other switch here:
- * environment, then config, then the default (on). */
-export function resolveVmReconcilerEnabled(configValue?: boolean): boolean {
-  return resolveBooleanSwitch(
-    configValue,
-    'DKG_VM_RECONCILER_ENABLED',
-    true,
-  );
-}
-
-/** Effective activation of the exact-batch stream wire: the requester on any
- * node and, on a core, the responder. Environment only; default off.
- * `DKG_EXPERIMENTAL_EXACT_BATCH_STREAM` is the name this switch was first
- * deployed under. It is read only when the current name is not set, so a node
- * configured before the rename keeps its setting. */
-export function resolveExactBatchStreamEnabled(): boolean {
-  return parseBooleanEnv('DKG_EXACT_BATCH_STREAM_ENABLED')
-    ?? parseBooleanEnv('DKG_EXPERIMENTAL_EXACT_BATCH_STREAM')
-    ?? false;
-}
-
-function parseIntegerEnv(name: string): number | undefined {
-  const raw = process.env[name]?.trim();
-  if (!raw) return undefined;
-  const parsed = Number(raw);
-  return Number.isInteger(parsed) ? parsed : undefined;
-}
-
-function positiveInteger(value: number | undefined): number | undefined {
-  return Number.isInteger(value) && typeof value === 'number' && value > 0 ? value : undefined;
-}
-
-function nonNegativeInteger(value: number | undefined): number | undefined {
-  return Number.isInteger(value) && typeof value === 'number' && value >= 0 ? value : undefined;
-}
-
-export function resolvePositiveIntegerSwitch(
-  configValue: number | undefined,
-  envName: string,
-): number | undefined {
-  const value = parseIntegerEnv(envName) ?? configValue;
-  if (value == null) return undefined;
-  return positiveInteger(value);
-}
-
-export function resolveNonNegativeIntegerSwitch(
-  configValue: number | undefined,
-  envName: string,
-): number | undefined {
-  const value = parseIntegerEnv(envName) ?? configValue;
-  if (value == null) return undefined;
-  return nonNegativeInteger(value);
-}
+export {
+  parseBooleanEnv,
+  resolveBooleanSwitch,
+  resolveExactBatchStreamEnabled,
+  resolveNonNegativeIntegerSwitch,
+  resolvePositiveIntegerSwitch,
+  resolveSyncReconcilerEnabled,
+  resolveVmReconcilerEnabled,
+} from './sync-switches.js';
 
 export function resolveSyncGlobalBackpressure(
   config: SyncGlobalBackpressureConfig,
@@ -663,6 +643,7 @@ export function resolveSyncGlobalBackpressure(
   // consuming that slot before exact VM or selected-SWM recovery arrives.
   automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
   selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
+  recordSyncReserves(policy, sharedMemoryReserve(), controlPlaneReserve());
   return configureResolvedSyncGlobalPolicy(policy);
 }
 
@@ -811,6 +792,8 @@ function resolvePartitionedSyncGlobalBackpressure(
   }) as SyncGlobalBackpressurePolicy;
   automaticBackgroundLimits.set(policy, selectedRecoveryIds.size > 0 && limit > 1 ? limit - 1 : limit);
   selectedRecoveryScopeIds.set(policy, selectedRecoveryIds);
+  // Control-plane work has the fast partition here, so no reserve of its own.
+  recordSyncReserves(policy, sharedMemoryReserve());
   return policy;
 }
 
@@ -857,6 +840,8 @@ export async function withGlobalSyncBackpressure<T>(
     label: string;
     signal?: AbortSignal;
     logInfo?: (ctx: OperationContext, message: string) => void;
+    /** Reports a refusal at once in place of its `logInfo` line (`control-plane-refusals.ts`). */
+    reportRefusal?: (ctx: OperationContext, error: SyncBackpressureBusyError) => void;
   },
   work: () => Promise<T>,
 ): Promise<T> {
@@ -876,26 +861,37 @@ export async function withGlobalSyncBackpressure<T>(
     admission = acquire(options.policy, options);
   } catch (error) {
     if (error instanceof SyncBackpressureBusyError) {
-      options.logInfo?.(options.ctx, error.message);
+      if (options.reportRefusal) options.reportRefusal(options.ctx, error);
+      else options.logInfo?.(options.ctx, error.message);
     }
     throw error;
   }
 
+  const { reserve } = admission.entry.payload;
   if (admission.status === 'queued') {
     options.logInfo?.(
       options.ctx,
-      `Sync backpressure queued ${options.label} `
-        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${admission.queuedBefore}/${queueLimit})`,
+      `Sync backpressure queued ${options.label}`
+        + `${admission.entry.payload.reservedOnly ? ` for a reserved ${reserve?.pool} slot` : ''} `
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${admission.queuedBefore}/${queueLimit}`
+        + `${reservedSlotState(reserve)})`,
     );
   }
   const release = await admission.release;
   try {
     options.logInfo?.(
       options.ctx,
-      `Sync backpressure running ${options.label} `
-        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queue.length}/${queueLimit})`,
+      `Sync backpressure running ${options.label}`
+        + `${admission.entry.payload.reserved ? ` in a reserved ${reserve?.pool} slot` : ''} `
+        + `(global inflight=${capacityTracker.inflightCount}/${limit}, queued=${queue.length}/${queueLimit}`
+        + `${reservedSlotState(reserve)})`,
     );
-    return await work();
+    return await traceSyncAdmission(options.label, work, {
+      slot: admission.entry.payload.reserved ? reserve?.pool : 'general',
+      limit,
+      queueLimit,
+      partitioned: options.policy.partitions !== undefined,
+    });
   } finally {
     release();
   }

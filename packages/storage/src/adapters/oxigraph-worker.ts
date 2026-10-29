@@ -1,14 +1,15 @@
+import { oxigraphGraphEnumerationVisibility } from '../graph-enumeration-visibility.js';
+import { serializableQueryOptions } from './serializable-query-options.js';
+import { registerStoreRecoveryGeneration, storeWorkerExecutionFailure } from '../store-recovery-generation.js';
+import { runTrackedStoreWrite } from '../tracked-store-write.js';
+import { assertSubjectAndInsertPayload } from '../atomic-subject-insert.js';
 import { Worker } from 'node:worker_threads';
 import { existsSync } from 'node:fs';
 import { sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { TripleStore, Quad, TripleStoreQueryOptions, QueryResult, UpdateOptions } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import {
-  GraphWriteGenTracker,
-  type GraphWriteLifecycle,
-  type GraphWriteScope,
-} from '../graph-write-gen.js';
+import { GraphWriteGenTracker, type GraphWriteLifecycle } from '../graph-write-gen.js';
 import {
   RFC64_EXACT_BINDINGS_RESULT_ERROR_CODE_V1,
   Rfc64ExactBindingsReadResultErrorV1,
@@ -184,6 +185,7 @@ const TERMINAL: ReadonlySet<WorkerLifecycle> = new Set<WorkerLifecycle>([
 ]);
 
 export class OxigraphWorkerStore implements TripleStore {
+  readonly graphEnumerationVisibility = oxigraphGraphEnumerationVisibility;
   readonly writeRevisionCoverage = 'all-writers' as const;
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
@@ -222,7 +224,7 @@ export class OxigraphWorkerStore implements TripleStore {
   // definite-assignment assertion instead of an initializer.
   private worker!: Worker;
   private nextId = 0;
-  private pending = new Map<number, { resolve: (v: any) => void; reject: (e: Error) => void }>();
+  private pending = new Map<number, { method: string; generation: number; resolve: (v: any) => void; reject: (e: Error) => void }>();
   // #1609: per-graph write generations, bumped client-side around every
   // mutation RPC and globally around persisted-worker replacement. Feeds
   // cache consumers via `asGraphWriteRevisionSource` / `asGraphWriteGenSource`.
@@ -285,13 +287,12 @@ export class OxigraphWorkerStore implements TripleStore {
    * tier and the MAX_CONSECUTIVE_RESPAWNS give-up bound.
    */
   private consecutiveRespawnFailures = 0;
+  private recoveryGeneration = 0;
 
   constructor(persistPath?: string, opts?: OxigraphWorkerStoreOptions) {
     this.operationTimeoutMs = normalizeNonNegativeInt(opts?.operationTimeoutMs, DEFAULT_OPERATION_TIMEOUT_MS);
 
-    // Resolve the worker impl with a small search path so this keeps
-    // working in all three deployment shapes we actually run in:
-    //
+    // Resolve the worker impl across production, source-test and unbuilt trees:
     //   1. Production / npm install / built monorepo — this module is
     //      loaded from `dist/adapters/oxigraph-worker.js`, so the
     //      sibling `./oxigraph-worker-impl.js` resolves correctly.
@@ -301,9 +302,7 @@ export class OxigraphWorkerStore implements TripleStore {
     //      twin in `dist/adapters/` does as long as the caller ran
     //      `pnpm --filter ...dkg-storage build` first. Redirect to
     //      that path so the adapter is runnable in dev loops.
-    //   3. Neither file exists — genuinely unbuilt tree. Throw a loud,
-    //      actionable error explaining the fix (`pnpm build`), matching
-    //      the expectation in `test/storage.test.ts`.
+    //   3. Neither exists: report the required build.
     const siblingJsUrl = new URL('./oxigraph-worker-impl.js', import.meta.url);
     const siblingJsPath = fileURLToPath(siblingJsUrl);
     let workerPath: string | null = existsSync(siblingJsPath) ? siblingJsPath : null;
@@ -327,6 +326,8 @@ export class OxigraphWorkerStore implements TripleStore {
     this.workerPath = workerPath;
     this.persistPath = persistPath;
     this.spawnWorker();
+    registerStoreRecoveryGeneration(this, () => ({ generation: this.recoveryGeneration,
+      ready: this.lifecycle === 'live' && !this.workerExited && !this.replacementRevisionLifecycle }));
   }
 
   /**
@@ -427,7 +428,7 @@ export class OxigraphWorkerStore implements TripleStore {
       // how a testnet node served HTTP for DAYS with a dead store — green
       // /api/status, 503 on every write — and nothing in the logs said why.
       console.error('[oxigraph-worker] worker thread error (thread is going down):', err);
-      for (const [, p] of this.pending) p.reject(err);
+      for (const [, p] of this.pending) p.reject(storeWorkerExecutionFailure(err, p.method, p.generation));
       this.pending.clear();
     });
     // Once the worker exits, no pending op can ever get a reply. Settle them all
@@ -457,6 +458,7 @@ export class OxigraphWorkerStore implements TripleStore {
       // Distinguish the two unexpected exits up front so the log and the
       // lifecycle transition below agree on what just happened.
       const inMemoryLost = !intentional && this.persistPath === undefined;
+      if (!intentional && !inMemoryLost) this.recoveryGeneration++;
       if (!intentional && !inMemoryLost && !this.replacementRevisionLifecycle) {
         this.replacementRevisionLifecycle = this.writeGen.beginWrite({ kind: 'all' });
       }
@@ -488,7 +490,7 @@ export class OxigraphWorkerStore implements TripleStore {
               `oxigraph-worker restarted — retry: the worker exited unexpectedly (code ${code}) before the ` +
                 'operation completed, so its outcome is unknown; a replacement worker is being spawned.',
             );
-        for (const [, p] of this.pending) p.reject(err);
+        for (const [, p] of this.pending) p.reject(storeWorkerExecutionFailure(err, p.method, p.generation));
         this.pending.clear();
       }
       // Route the state transition. close() already moved us to 'closing' and
@@ -706,6 +708,7 @@ export class OxigraphWorkerStore implements TripleStore {
         if (typeof timer.unref === 'function') timer.unref();
       }
       this.pending.set(id, {
+        method, generation: this.recoveryGeneration,
         resolve: (v) => { cleanup(); resolve(v as T); },
         reject: (e) => { cleanup(); reject(e); },
       });
@@ -740,19 +743,19 @@ export class OxigraphWorkerStore implements TripleStore {
   // head-of-line fairness should run on an external SPARQL server, not by
   // silently fragmenting this insert into non-atomic chunks.
   async insert(quads: Quad[]): Promise<void> {
-    await this.runTrackedWrite(
+    await runTrackedStoreWrite(this.writeGen,
       { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
       () => this.call('insert', quads),
     );
   }
   async delete(quads: Quad[]): Promise<void> {
-    await this.runTrackedWrite(
+    await runTrackedStoreWrite(this.writeGen,
       { kind: 'graphs', graphs: [...new Set(quads.map((q) => q.graph || ''))] },
       () => this.call('delete', quads),
     );
   }
   async deleteByPattern(pattern: Partial<Quad>): Promise<number> {
-    return this.runTrackedWrite(
+    return runTrackedStoreWrite(this.writeGen,
       pattern.graph
         ? { kind: 'graphs', graphs: [pattern.graph] }
         : { kind: 'all' },
@@ -768,10 +771,10 @@ export class OxigraphWorkerStore implements TripleStore {
   async update(sparql: string, _options?: UpdateOptions): Promise<void> {
     // A raw UPDATE's write scope is not derivable at the call site
     // (`touchedGraphs` hints only membership changes) — unscoped lifecycle.
-    await this.runTrackedWrite({ kind: 'all' }, () => this.call('update', sparql));
+    await runTrackedStoreWrite(this.writeGen, { kind: 'all' }, () => this.call('update', sparql));
   }
   async replaceGraph(graphUri: string, quads: Quad[]): Promise<void> {
-    await this.runTrackedWrite(
+    await runTrackedStoreWrite(this.writeGen,
       { kind: 'graphs', graphs: [graphUri] },
       () => this.call('replaceGraph', graphUri, quads),
     );
@@ -783,7 +786,7 @@ export class OxigraphWorkerStore implements TripleStore {
     metadataSubject: string,
     metadataQuads: Quad[],
   ): Promise<void> {
-    await this.runTrackedWrite(
+    await runTrackedStoreWrite(this.writeGen,
       { kind: 'graphs', graphs: [graphUri, metaGraphUri] },
       () => this.call(
         'replaceGraphAndSubject',
@@ -799,8 +802,17 @@ export class OxigraphWorkerStore implements TripleStore {
     // The worker dispatch is generic (`store[method](...args)`), so this routes
     // to the worker's embedded OxigraphStore.replaceSubject — one atomic
     // single-message commit, same contract as insert/replaceGraph.
-    await this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
+    await runTrackedStoreWrite(this.writeGen, { kind: 'graphs', graphs: [graphUri] }, () =>
       this.call('replaceSubject', graphUri, subject, quads));
+  }
+  async replaceSubjectAndInsert(
+    graphUri: string, subject: string, replacementQuads: Quad[], insertQuads: Quad[],
+    options?: TripleStoreQueryOptions,
+  ): Promise<void> {
+    if (options?.signal?.aborted) throw asAbortError(options.signal.reason);
+    assertSubjectAndInsertPayload(graphUri, subject, replacementQuads, insertQuads);
+    await runTrackedStoreWrite(this.writeGen, { kind: 'graphs', graphs: [graphUri] }, () =>
+      this.call('replaceSubjectAndInsert', graphUri, subject, replacementQuads, insertQuads));
   }
   async rfc64AuthorCommitCasV1(
     input: Rfc64AuthorCommitCasInputV1,
@@ -808,7 +820,7 @@ export class OxigraphWorkerStore implements TripleStore {
   ): Promise<Rfc64AuthorCommitCasResultV1> {
     if (options?.signal?.aborted) throw asAbortError(options.signal.reason);
     const manifest = normalizeRfc64AuthorCommitCasV1(input);
-    return this.runTrackedWrite(
+    return runTrackedStoreWrite(this.writeGen,
       { kind: 'graphs', graphs: [...manifest.touchedGraphs] },
       () => this.call<Rfc64AuthorCommitCasResultV1>(
         'rfc64AuthorCommitCasNormalizedV1',
@@ -817,23 +829,23 @@ export class OxigraphWorkerStore implements TripleStore {
     );
   }
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
-    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql);
+    return this.callWithTimeout<QueryResult>(this.operationTimeoutMs, options?.signal, 'query', sparql, serializableQueryOptions(options));
   }
   async hasGraph(graphUri: string, options?: TripleStoreQueryOptions): Promise<boolean> {
     return this.callWithTimeout<boolean>(this.operationTimeoutMs, options?.signal, 'hasGraph', graphUri);
   }
   async createGraph(graphUri: string): Promise<void> { return this.call('createGraph', graphUri); }
   async dropGraph(graphUri: string): Promise<void> {
-    await this.runTrackedWrite(
+    await runTrackedStoreWrite(this.writeGen,
       { kind: 'graphs', graphs: [graphUri] },
       () => this.call('dropGraph', graphUri),
     );
   }
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
-    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs');
+    return this.callWithTimeout<string[]>(this.operationTimeoutMs, options?.signal, 'listGraphs', serializableQueryOptions(options));
   }
   async deleteBySubjectPrefix(graphUri: string, prefix: string): Promise<number> {
-    return this.runTrackedWrite({ kind: 'graphs', graphs: [graphUri] }, () =>
+    return runTrackedStoreWrite(this.writeGen, { kind: 'graphs', graphs: [graphUri] }, () =>
       this.call<number>('deleteBySubjectPrefix', graphUri, prefix));
   }
 
@@ -845,19 +857,6 @@ export class OxigraphWorkerStore implements TripleStore {
     return this.writeGen.getWriteRevision(graphPrefix);
   }
 
-  private async runTrackedWrite<T>(
-    scope: GraphWriteScope,
-    work: () => Promise<T>,
-  ): Promise<T> {
-    const lifecycle = this.writeGen.beginWrite(scope);
-    try {
-      return await work();
-    } finally {
-      // One worker message is transactional; a returned error means it settled
-      // without a partial write, while success publishes the committed state.
-      lifecycle.settle();
-    }
-  }
   async countQuads(graphUri?: string): Promise<number> { return this.call('countQuads', graphUri); }
   async flush(): Promise<void> { return this.call('flush'); }
 

@@ -58,9 +58,9 @@ describe('typed transport preference composition', () => {
     expect(policy.preferredPeer(otherGraph, '1', [peerId])).toBe(peerId);
     expect(h.internals.vmReconcilePublicCoreTransportPreferencePolicy).toBe(policy);
 
-    h.internals.closeVmReconcileRotationState();
+    h.internals.workLifetime.close(); h.internals.closeVmReconcileRotationState();
     expect(policy.preferredPeer(otherGraph, '1', [peerId])).toBeUndefined();
-    h.internals.openVmReconcileRotationState();
+    h.internals.workLifetime.open(); h.internals.openVmReconcileRotationState();
     expect(h.internals.vmReconcilePublicCoreTransportPreferencePolicy).toBe(policy);
     expect(remember(graphId)).toBe(true);
   });

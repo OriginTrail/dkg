@@ -1,5 +1,7 @@
 
 import { verifiedDelegationKeyIds, verifyJoinEncryptionKeyBundle } from './internal/join-encryption-key-bundle.js';
+import { answerJoinFromHeldApproval } from './internal/context-graph-authority/approved-member-metadata-pending.js';
+import { joinAdmissionActiveMembers } from './internal/context-graph-authority/join-admission-members.js';
 import type { PeerSyncConnection } from './p2p/peer-connection.js';
 // SPDX-License-Identifier: Apache-2.0
 
@@ -141,7 +143,7 @@ import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
 import { ed25519ToX25519Private, ed25519ToX25519Public } from './encryption.js';
-import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, collectPublishableMultiaddrs, type AgentProfileConfig } from './profile.js';
+import { AGENT_REGISTRY_CONTEXT_GRAPH, canonicalAgentDidSubject, type AgentProfileConfig } from './profile.js';
 import {
   computeDelegationDigest,
   computeWorkspaceEncryptionKeysAttestationDigest,
@@ -254,6 +256,11 @@ type JoinApprovalRetryEntry = {
   lastError: string;
 };
 import { multiaddr } from '@multiformats/multiaddr';
+import {
+  requesterHasDirectLoopbackConnection,
+  selectCuratorJoinDialAddress,
+} from './curator-dial-address.js';
+import { recoverCuratorConnectionBeforeQueueing } from './curator-peer-connection.js';
 import { buildCclPolicyQuads, buildPolicyApprovalQuads, buildPolicyRevocationQuads, hashCclPolicy, type CclPolicyRecord, type PolicyApprovalBinding } from './ccl-policy.js';
 import { CclEvaluator, parseCclPolicy, validateCclPolicy, type CclEvaluationResult, type CclFactTuple } from './ccl-evaluator.js';
 import { buildCclEvaluationQuads } from './ccl-evaluation-publish.js';
@@ -577,6 +584,37 @@ async function withJoinEncryptionKeyCacheLock<T>(
   } finally {
     if (tails.get(agentSubject) === tail) tails.delete(agentSubject);
   }
+}
+
+function curatorJoinDialAddress(agent: DKGAgent, requesterPeerId: string): string | undefined {
+  return selectCuratorJoinDialAddress(agent.node.multiaddrs, agent.peerId, {
+    preferLoopback: requesterHasDirectLoopbackConnection(
+      agent.node.libp2p.getConnections(), requesterPeerId,
+    ),
+  });
+}
+
+function joinApprovalPayload(
+  agent: DKGAgent,
+  contextGraphId: string,
+  agentAddress: string,
+  requestGeneration: string,
+  curatorBinding: Awaited<ReturnType<DKGAgent['readRfc64CurrentCuratorAuthorityBindingV1']>>,
+): (targetPeerId: string) => string {
+  return (targetPeerId) => {
+    const curatorDialAddress = curatorJoinDialAddress(agent, targetPeerId);
+    return JSON.stringify({
+      type: 'join-approved',
+      contextGraphId,
+      agentAddress,
+      requestGeneration,
+      ...(curatorDialAddress === undefined ? {} : { curatorDialAddress }),
+      ...(curatorBinding === null ? {} : {
+        curatorAgentAddress: curatorBinding.agentAddress,
+        curatorAuthorityEra: curatorBinding.authorityEra,
+      }),
+    });
+  };
 }
 
 export class JoinRequestMethods extends DKGAgentBase {
@@ -1088,7 +1126,7 @@ export class JoinRequestMethods extends DKGAgentBase {
       getContextGraphMeta: (contextGraphId) => this.getCgMeta(contextGraphId),
       getActiveMembers: (contextGraphId) => withRpcUsageSite(
         CG_AUTH_RPC_SITES.joinAdmissionRoster,
-        () => this.getMemberRecoveryRosterSource(contextGraphId),
+        () => joinAdmissionActiveMembers(this, contextGraphId),
       ),
       getContextGraphOwner: (contextGraphId) => this.getContextGraphOwner(contextGraphId),
       resolveLocalOwnerAddress: (ownerDid) => this.resolveLocalJoinPolicyOwnerAddress(ownerDid),
@@ -1569,7 +1607,8 @@ export class JoinRequestMethods extends DKGAgentBase {
    * Return a just-applied decision to pending when the notification handler
    * could not commit its downstream durable state. The generation/status
    * guard prevents compensation from overwriting a newer request or a
-   * concurrent conflicting decision.
+   * concurrent conflicting decision; with `curatorPeerId`, a decision of
+   * another curator is left alone too. Resolves whether it changed the state.
    */
   async restoreRequesterJoinDecisionAfterFailedApply(
     this: DKGAgent,
@@ -1577,21 +1616,24 @@ export class JoinRequestMethods extends DKGAgentBase {
     agentAddress: string,
     requestGeneration: string,
     appliedStatus: 'approved' | 'rejected',
-  ): Promise<void> {
+    curatorPeerId?: string,
+  ): Promise<boolean> {
     const key = requesterJoinStateKey(contextGraphId, agentAddress);
-    await withRequesterJoinStateLock(this, key, async () => {
+    return withRequesterJoinStateLock(this, key, async () => {
       const current = await this.readRequesterJoinRequestState(contextGraphId, agentAddress);
       if (
         !current ||
         current.requestGeneration !== requestGeneration ||
-        current.status !== appliedStatus
+        current.status !== appliedStatus ||
+        (curatorPeerId !== undefined && current.curatorPeerId !== curatorPeerId)
       ) {
-        return;
+        return false;
       }
       await this.writeRequesterJoinRequestState(contextGraphId, agentAddress, {
         ...current,
         status: 'pending',
       });
+      return true;
     });
   }
 
@@ -2522,16 +2564,9 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
-    const payload = JSON.stringify({
-      type: 'join-approved',
-      contextGraphId,
-      agentAddress,
-      requestGeneration: resolvedGeneration,
-      ...(curatorBinding === null ? {} : {
-        curatorAgentAddress: curatorBinding.agentAddress,
-        curatorAuthorityEra: curatorBinding.authorityEra,
-      }),
-    });
+    const payload = joinApprovalPayload(
+      this, contextGraphId, agentAddress, resolvedGeneration, curatorBinding,
+    );
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,
       agentAddress,
@@ -2654,16 +2689,9 @@ export class JoinRequestMethods extends DKGAgentBase {
       contextGraphId,
       { admitWhileOpen: true },
     ).catch(() => null);
-    const payload = JSON.stringify({
-      type: 'join-approved',
-      contextGraphId,
-      agentAddress,
-      requestGeneration,
-      ...(curatorBinding === null ? {} : {
-        curatorAgentAddress: curatorBinding.agentAddress,
-        curatorAuthorityEra: curatorBinding.authorityEra,
-      }),
-    });
+    const payload = joinApprovalPayload(
+      this, contextGraphId, agentAddress, requestGeneration, curatorBinding,
+    );
     const result = await this.deliverPrivateJoinNotification(
       contextGraphId,
       agentAddress,
@@ -3100,10 +3128,9 @@ export class JoinRequestMethods extends DKGAgentBase {
     contextGraphId: string,
     agentAddress: string,
     requestGeneration: string,
-    payload: string,
+    payload: string | ((targetPeerId: string) => string),
     label: 'join-approval' | 'join-rejection',
   ): Promise<{ delivered: boolean; peerId: string | null; error: string | null }> {
-    const payloadBytes = new TextEncoder().encode(payload);
     const ctx = createOperationContext('system');
     const addrLower = agentAddress.toLowerCase();
 
@@ -3178,6 +3205,11 @@ export class JoinRequestMethods extends DKGAgentBase {
     }
 
     try {
+      // Resolve the exact recipient before encoding the approval. The outbox
+      // then persists these final bytes unchanged across later retries.
+      const payloadBytes = new TextEncoder().encode(
+        typeof payload === 'function' ? payload(targetPeerId) : payload,
+      );
       // rc.9 PR-10: send via the Universal Messenger substrate. If
       // the substrate can't deliver synchronously it enqueues into
       // the SQLite outbox and retries in the background — this
@@ -3235,14 +3267,12 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
+    options: { reRequest?: boolean } = {},
+  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean; approvedMetadataPending?: boolean }> {
     const key = requesterJoinStateKey(contextGraphId, delegation.agentAddress);
-    return withRequesterJoinForwardLock(this, key, () => this.forwardJoinRequestOnce(
-      contextGraphId,
-      delegation,
-      agentName,
-      curatorPeerId,
-    ));
+    return withRequesterJoinForwardLock(this, key, async () => (options.reRequest === true ? undefined
+      : await answerJoinFromHeldApproval(this, contextGraphId, delegation.agentAddress, curatorPeerId))
+      ?? this.forwardJoinRequestOnce(contextGraphId, delegation, agentName, curatorPeerId));
   }
 
   async forwardJoinRequestOnce(this: DKGAgent,
@@ -3250,7 +3280,7 @@ export class JoinRequestMethods extends DKGAgentBase {
     delegation: SignedAgentDelegation,
     agentName: string | undefined,
     curatorPeerId: string,
-  ): Promise<{ delivered: number; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
+  ): Promise<{ delivered: number; queued?: boolean; errors: string[]; alreadyMember?: boolean; autoApproved?: boolean }> {
     if (!curatorPeerId) {
       // Required: V10 invites carry the curator's libp2p peer-id
       // (`<cgId>\n<peerId>`). Without it we can't authenticate the
@@ -3324,9 +3354,10 @@ export class JoinRequestMethods extends DKGAgentBase {
     if (curatorPeerId !== this.peerId) {
       recordAcceptedBy(curatorPeerId);
       try {
-        // rc.9 PR-10: substrate send. queued surfaces as a throw
-        // (matches the legacy sendToPeer ergonomics so the existing
-        // catch path with broadcast fallback still kicks in).
+        await recoverCuratorConnectionBeforeQueueing(
+          { node: this.node, peerResolver: this.peerResolver, log: this.log },
+          curatorPeerId, AbortSignal.timeout(JOIN_REQUEST_SEND_TIMEOUT_MS), ctx,
+        );
         const sendResult = await this.messenger.sendReliable(
           curatorPeerId,
           PROTOCOL_JOIN_REQUEST,
@@ -3336,11 +3367,15 @@ export class JoinRequestMethods extends DKGAgentBase {
         if (!sendResult.delivered) {
           // `delivered:false` means Messenger durably queued this exact
           // request; it is still accepted for eventual delivery. Preserve the
-          // generation so the later curator decision can be matched, while
-          // continuing the immediate broadcast fallback for lower latency.
+          // generation and trusted curator. A durable queue acceptance is
+          // pending success rather than a synchronous delivery failure.
           acceptedForDelivery = true;
           recordAcceptedBy(curatorPeerId);
-          throw new Error(`substrate queued (transport): ${sendResult.error}`);
+          this.log.info(
+            ctx,
+            `Queued join request for "${contextGraphId}" from ${agentAddress} to curator ${curatorPeerId.slice(-8)}`,
+          );
+          return { delivered: 0, queued: true, errors };
         }
         const responseBytes = sendResult.response;
         const response = JSON.parse(new TextDecoder().decode(responseBytes));

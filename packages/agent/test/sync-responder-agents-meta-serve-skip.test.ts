@@ -237,3 +237,73 @@ describe('sync responder — injected servingWithheld predicate', () => {
     expect(out).toContain('"Open"');
   });
 });
+
+// A Core refreshes the owner's definition of a hosted graph before it serves
+// it: the injected `beforeServingDurableMeta` is awaited once per durable
+// `_meta` snapshot (its first page), never for a later page, a shared-memory
+// request, another phase or a withheld graph.
+describe('sync responder — injected beforeServingDurableMeta hook', () => {
+  let cap: ReturnType<typeof captureHandler>;
+  let served: Array<{ contextGraphId: string; signal: AbortSignal | undefined }>;
+  let shouldWithhold: (contextGraphId: string) => boolean;
+  /** The hook's completion, released by the test; `undefined` completes it at once. */
+  let release: (() => void) | undefined;
+  let store: OxigraphStore;
+
+  beforeEach(async () => {
+    served = [];
+    shouldWithhold = () => false;
+    release = undefined;
+    store = new OxigraphStore();
+    await store.insert([
+      { graph: USER_META, subject: USER_ENTITY, predicate: `${DKG_NS}createdAt`, object: '"2026-07-08T00:00:00Z"' },
+      { graph: USER_ENTITY, subject: USER_ENTITY, predicate: `${DKG_NS}nodeRole`, object: '"core"' },
+    ]);
+    cap = captureHandler();
+    registerSyncHandler({
+      register: cap.register,
+      protocolSync: '/origintrail/dkg/sync/1.0.0',
+      syncDeniedResponse: 'sync-denied',
+      syncPageSize: 5000,
+      sharedMemoryTtlMs: 0,
+      store,
+      peerId: 'self-peer',
+      parseSyncRequest: (data) => JSON.parse(new TextDecoder().decode(data)) as SyncRequestEnvelope,
+      authorizeSyncRequest: async () => true,
+      shouldWithholdDurableMeta: (contextGraphId) => shouldWithhold(contextGraphId),
+      beforeServingDurableMeta: (contextGraphId, signal) => {
+        served.push({ contextGraphId, signal });
+        return new Promise<void>((resolve) => { release = resolve; });
+      },
+      logWarn: noopLog,
+      logDebug: noopLog,
+    });
+  });
+
+  it('is awaited before the first page of a durable meta snapshot: the page carries what the hook installed', async () => {
+    let settled = false;
+    const response = cap.invoke({ contextGraphId: USER_CG, offset: 0, limit: 5000, includeSharedMemory: false, phase: 'meta' })
+      .finally(() => { settled = true; });
+    // The hook was called and holds the response.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(served.map((call) => call.contextGraphId)).toEqual([USER_CG]);
+    expect(release).toBeDefined();
+    expect(settled).toBe(false);
+    // What a Core's refresh installs while the request waits.
+    await store.insert([{ graph: USER_META, subject: USER_ENTITY, predicate: `${DKG_NS}refreshedAt`, object: '"2026-10-17T00:00:00Z"' }]);
+    release!();
+    const out = await response;
+    expect(settled).toBe(true);
+    expect(lineGraphsFromNquads(out).has(USER_META)).toBe(true);
+    expect(out).toContain(`${DKG_NS}refreshedAt`);
+  });
+
+  it('is not called for a later page, a shared-memory request, another phase or a withheld graph', async () => {
+    await cap.invoke({ contextGraphId: USER_CG, offset: 5000, limit: 5000, includeSharedMemory: false, phase: 'meta' });
+    await cap.invoke({ contextGraphId: USER_CG, offset: 0, limit: 5000, includeSharedMemory: true, phase: 'meta' });
+    await cap.invoke({ contextGraphId: USER_CG, offset: 0, limit: 5000, includeSharedMemory: false, phase: 'data' });
+    shouldWithhold = (contextGraphId) => contextGraphId === USER_CG;
+    await cap.invoke({ contextGraphId: USER_CG, offset: 0, limit: 5000, includeSharedMemory: false, phase: 'meta' });
+    expect(served).toEqual([]);
+  });
+});

@@ -420,72 +420,78 @@ interface Rfc64OperationalRowProjectionV1 {
   readonly missingRowCount: string | null;
 }
 
-export function projectRfc64OperationalRowCountsV1(
+/** The newest candidate in one scope; ambiguity concerns that version only. */
+export type Rfc64ExpectedHeadV1 = Readonly<{
+  catalogVersion: string;
+  catalogHeadObjectDigest: Digest32V1;
+  appliedRowCount: string;
+  ambiguous: boolean;
+  source: Readonly<{ kind: 'applied'; rowCount: string }>
+    | Readonly<{ kind: 'target'; target: Rfc64PublicCatalogHeadAnnouncementV1 }>;
+}>;
+
+/** Resolve version/fork evidence once for both digest and numeric projections. */
+export function resolveRfc64ExpectedHeadsV1(
   heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
   targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
-  promisedRowCounts: ReadonlyMap<string, string | null>,
-): Readonly<Rfc64OperationalRowProjectionV1> {
-  if (heads.length === 0 && targets.length === 0) {
-    return Object.freeze({ expectedRowCount: null, missingRowCount: null });
-  }
-  const appliedByScope = new Map(heads.map((head) => [head.scopeKey, head]));
-  const expectedByScope = new Map(heads.map(({ scopeKey, snapshot }) => [scopeKey, {
+): ReadonlyMap<string, Rfc64ExpectedHeadV1> {
+  const expectedByScope = new Map<string, Rfc64ExpectedHeadV1>(heads.map(({ scopeKey, snapshot }) => [scopeKey, Object.freeze({
     catalogVersion: snapshot.catalogVersion,
     catalogHeadObjectDigest: snapshot.currentCatalogHeadDigest,
-    rowCount: snapshot.inventoryRowCount as string | null,
-    target: null as Rfc64PublicCatalogHeadAnnouncementV1 | null,
-  }]));
-  // A fork is a property of the newest version in a scope, not of the order
-  // the targets arrive in: `authoritativeTargets` preserves insertion order and
-  // the promised half arrives in peer-completion order, so deciding as the loop
-  // walks would let the same state report an ambiguous pair or a definite one
-  // depending on which peer answered first. The scope's maximum version is
-  // resolved first, and only a digest disagreement AT that maximum is ambiguous
-  // -- a strictly newer head settles the branch the older fork was on.
-  const ambiguousScopes = new Set<string>();
+    appliedRowCount: snapshot.inventoryRowCount,
+    ambiguous: false,
+    source: Object.freeze({ kind: 'applied' as const, rowCount: snapshot.inventoryRowCount }),
+  })]));
+  // Arrival order cannot choose between forks. Only disagreement at the maximum
+  // version is ambiguous; a strictly newer head supersedes an older fork.
   for (const target of targets) {
     const scopeKey = rfc64CatalogTargetScopeKeyV1(target);
     const current = expectedByScope.get(scopeKey);
     const targetVersion = BigInt(target.catalogVersion);
     if (current === undefined || targetVersion > BigInt(current.catalogVersion)) {
-      expectedByScope.set(scopeKey, {
+      expectedByScope.set(scopeKey, Object.freeze({
         catalogVersion: target.catalogVersion,
         catalogHeadObjectDigest: target.catalogHeadObjectDigest,
-        rowCount: null,
-        target,
-      });
-      ambiguousScopes.delete(scopeKey);
-    } else if (
-      targetVersion === BigInt(current.catalogVersion)
-      && target.catalogHeadObjectDigest !== current.catalogHeadObjectDigest
-    ) {
-      ambiguousScopes.add(scopeKey);
+        appliedRowCount: current?.appliedRowCount ?? '0',
+        ambiguous: false,
+        source: Object.freeze({ kind: 'target' as const, target }),
+      }));
+    } else if (targetVersion === BigInt(current.catalogVersion)
+      && target.catalogHeadObjectDigest !== current.catalogHeadObjectDigest) {
+      expectedByScope.set(scopeKey, Object.freeze({ ...current, ambiguous: true }));
     }
   }
-  if (ambiguousScopes.size > 0) {
+  return expectedByScope;
+}
+
+export function projectRfc64ResolvedRowCountsV1(
+  expectedByScope: ReadonlyMap<string, Rfc64ExpectedHeadV1>,
+  promisedRowCounts: ReadonlyMap<string, string | null>,
+): Readonly<Rfc64OperationalRowProjectionV1> {
+  if (expectedByScope.size === 0) {
     return Object.freeze({ expectedRowCount: null, missingRowCount: null });
   }
-
   let expected = 0n;
   let missing = 0n;
-  for (const [scopeKey, projected] of expectedByScope) {
-    const targetRowCount = projected.target === null
-      ? projected.rowCount
-      : promisedRowCounts.get(
-          rfc64CatalogTargetExactIdentityKeyV1(projected.target),
-        ) ?? null;
-    if (targetRowCount === null) {
+  for (const projected of expectedByScope.values()) {
+    const targetRowCount = projected.source.kind === 'applied'
+      ? projected.source.rowCount
+      : promisedRowCounts.get(rfc64CatalogTargetExactIdentityKeyV1(projected.source.target)) ?? null;
+    if (projected.ambiguous || targetRowCount === null) {
       return Object.freeze({ expectedRowCount: null, missingRowCount: null });
     }
     const expectedForScope = BigInt(targetRowCount);
-    const appliedForScope = BigInt(
-      appliedByScope.get(scopeKey)?.snapshot.inventoryRowCount ?? '0',
-    );
+    const appliedForScope = BigInt(projected.appliedRowCount);
     expected += expectedForScope;
     if (expectedForScope > appliedForScope) missing += expectedForScope - appliedForScope;
   }
-  return Object.freeze({
-    expectedRowCount: expected.toString(10),
-    missingRowCount: missing.toString(10),
-  });
+  return Object.freeze({ expectedRowCount: expected.toString(10), missingRowCount: missing.toString(10) });
+}
+
+export function projectRfc64OperationalRowCountsV1(
+  heads: readonly Readonly<Rfc64OperationalAppliedHeadV1>[],
+  targets: readonly Rfc64PublicCatalogHeadAnnouncementV1[],
+  promisedRowCounts: ReadonlyMap<string, string | null>,
+): Readonly<Rfc64OperationalRowProjectionV1> {
+  return projectRfc64ResolvedRowCountsV1(resolveRfc64ExpectedHeadsV1(heads, targets), promisedRowCounts);
 }

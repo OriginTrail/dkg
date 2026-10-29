@@ -597,7 +597,7 @@ log "Launching chain event listener"
 # not from cwd. We hardlink/copy into the package dir, then run from there.
 EVENT_SCRIPT_RUN="$REPO_ROOT/packages/evm-module/.soak-event-listener-r${ROUND}.js"
 cp "$OUT_DIR/event-listener.js" "$EVENT_SCRIPT_RUN"
-( cd "$REPO_ROOT/packages/evm-module" && node "$EVENT_SCRIPT_RUN" ) \
+( cd "$REPO_ROOT/packages/evm-module" && exec node "$EVENT_SCRIPT_RUN" ) \
   > "$OUT_DIR/event-listener.log" 2>&1 &
 echo $! > "$EVENT_PIDFILE"
 
@@ -742,6 +742,9 @@ function isPlannedRestartPublishFailure(p) {
   const endMs = (Number(restartWindow.apiReadyTs ?? 0) + Number(restartWindow.graceSec ?? 0)) * 1000;
   if (!startMs || !endMs || tsMs < startMs || tsMs > endMs) return false;
   const output = String(p.out ?? "");
+  // A publish to the stopped node that started as the planned stop began is
+  // killed with it (SIGTERM, exit 143), whatever it had printed by then.
+  if (Number(p.rc) === 143 && Number(p.node) === Number(restartWindow.node)) return true;
   // The CLI can fail before its HTTP request when its own node is the one
   // deliberately stopped. Only excuse that diagnostic for the stopped node;
   // another node losing its API in this window remains a blocking failure.

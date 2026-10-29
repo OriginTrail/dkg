@@ -146,16 +146,15 @@ describe('receipt-hint lane: failure and retry', () => {
     // fails. Nothing may release (write-before-release is the invariant), the hint stays
     // retryable, and the next pass persists the stamp before freeing the wallet.
     const { publisher, jobId, releaseTail } = await h.parkedHintScenario();
-    const originalReplace = h.store.replaceSubject.bind(h.store);
+    const originalReplace = h.store.replaceSubjectAndInsert.bind(h.store);
     let failNextJobWrite = true;
-    (h.store as unknown as { replaceSubject: typeof originalReplace }).replaceSubject =
-      async (graphUri: string, subject: string, quads: never) => {
-        if (failNextJobWrite && subject === jobSubject(jobId)) {
-          failNextJobWrite = false;
-          throw new Error('transient store failure on the included write');
-        }
-        return originalReplace(graphUri, subject, quads);
-      };
+    h.store.replaceSubjectAndInsert = async (...args) => {
+      if (failNextJobWrite && args[1] === jobSubject(jobId)) {
+        failNextJobWrite = false;
+        throw new Error('transient store failure on the included write');
+      }
+      return originalReplace(...args);
+    };
     try {
       expect(await publisher.reconciliationScheduling.reconcile())
         .toEqual({ reconciled: 0, pendingWork: true });

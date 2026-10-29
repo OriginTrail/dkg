@@ -262,6 +262,7 @@ export interface MessageStreamPoolOptions {
 }
 
 interface PendingRequest {
+  peerIdStr: string;
   payload: Uint8Array;
   resolve: (response: Uint8Array) => void;
   reject: (err: Error) => void;
@@ -405,6 +406,7 @@ export class MessageStreamPool {
 
     return new Promise<Uint8Array>((resolve, reject) => {
       const req: PendingRequest = {
+        peerIdStr,
         payload,
         resolve,
         reject,
@@ -635,23 +637,21 @@ export class MessageStreamPool {
   }
 
   /**
-   * Close the stream held for `peerIdStr` once it is quiescent.
-   * Returns `true` when a live stream existed and was closed;
-   * `false` when the peer holds no stream OR the stream still has
-   * in-flight / queued work.
+   * Close the stream held for `peerIdStr` once it is quiescent. Returns
+   * `true` when a live stream existed and was closed; `false` when the peer
+   * holds no stream OR still has work: a request in flight, queued, or taken
+   * by `send()` and not yet queued (it awaits the open; closing now would
+   * fail it with "pool closed" while the pool is open).
    *
-   * The busy case is deliberately left alone rather than force-
-   * aborted: rejecting live requests here would reproduce the exact
-   * all-in-flight-requests-die failure the caller is trying to route
-   * around. Callers that want the stream gone stop feeding it new
-   * sends and invoke this again on their next pass — an active
-   * stream drains naturally (or hits the pool's own idle/reset
-   * teardown) and the retire lands then.
+   * The busy case is deliberately left alone rather than force-aborted:
+   * rejecting live requests here would reproduce the all-in-flight-requests-
+   * die failure the caller routes around. Callers that want the stream gone
+   * stop feeding it and invoke this again on their next pass.
    */
   async closePeerIfIdle(peerIdStr: string, reason = 'peer stream retired'): Promise<boolean> {
     const state = this.peers.get(peerIdStr);
     if (!state || state.closed) return false;
-    if (state.inFlight !== null || state.queue.length > 0) return false;
+    if ([...this.outstanding].some((request) => request.peerIdStr === peerIdStr)) return false;
     await this.closePeer(state, reason);
     return true;
   }

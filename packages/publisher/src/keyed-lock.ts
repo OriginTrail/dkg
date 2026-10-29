@@ -38,6 +38,19 @@ export async function withKeyedLocks<T>(
   }
 }
 
+/** Acquire all keys immediately or leave the map untouched; never queue a callback.
+ * Availability inspection and the canonical helper's gate installation are synchronous.
+ */
+export async function tryWithKeyedLocks<T>(
+  lockMap: Map<string, Promise<void>>,
+  keys: string[],
+  fn: () => Promise<T>,
+): Promise<{ acquired: true; value: T } | { acquired: false }> {
+  if (keys.some(key => lockMap.has(key))) return { acquired: false };
+  const value = await withKeyedLocks(lockMap, keys, fn);
+  return { acquired: true, value };
+}
+
 /**
  * The per-KA SWM write-lock key.
  *

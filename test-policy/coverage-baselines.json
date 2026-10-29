@@ -6,6 +6,23 @@
   "platform": "darwin-arm64",
   "scope": "Production src and extension/src; test helpers, declarations and JSON excluded. Whole-package floors round measured percentages down with one point of platform headroom, retaining existing floors where the measured source scope still meets them.",
   "packages": {
+    "kafka-source": {
+      "measuredAt": "2026-10-20",
+      "node": "22.23.1",
+      "platform": "darwin-arm64",
+      "measured": {
+        "lines": 95.62,
+        "functions": 86.66,
+        "branches": 87.71,
+        "statements": 93.24
+      },
+      "thresholds": {
+        "lines": 94,
+        "functions": 85,
+        "branches": 86,
+        "statements": 92
+      }
+    },
     "adapter-elizaos": {
       "measured": {
         "lines": 39.43,

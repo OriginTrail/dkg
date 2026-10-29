@@ -144,7 +144,7 @@ describe('published snapshot cleanup integration', () => {
     const f = await fixture();
     const asset = await f.seed(41);
     vi.spyOn(f.snapshots.lifecycle, 'markPublished').mockRejectedValueOnce(new Error('disk error'));
-    await expect(asset.clear()).resolves.toBeUndefined();
+    await expect(asset.clear()).resolves.toBe(true);
     expect(await f.store.countQuads(asset.swm)).toBe(0);
     expect(await f.store.countQuads(asset.vm)).toBe(quads.length);
     f.advance();
@@ -191,7 +191,7 @@ describe('published snapshot cleanup: store queries', () => {
     try {
       const clearing = asset.clear();
       await vi.advanceTimersByTimeAsync(2_000);
-      await expect(clearing).resolves.toBeUndefined();
+      await expect(clearing).resolves.toBe(true);
     } finally { vi.useRealTimers(); }
     expect(await f.store.countQuads(asset.swm)).toBe(0);
     expect(await f.store.countQuads(asset.vm)).toBe(quads.length);
@@ -387,7 +387,7 @@ describe('published snapshot cleanup: storage ACK copies of the published asset'
     const update = f.store.update!.bind(f.store);
     vi.spyOn(f.store, 'update').mockImplementation((sparql, options) =>
       isAckUpdate(sparql) ? Promise.reject(new Error('store offline')) : update(sparql, options));
-    await expect(asset.clear()).resolves.toBeUndefined();
+    await expect(asset.clear()).resolves.toBe(true);
     expect(await f.store.countQuads(asset.swm)).toBe(0);
     expect(await f.store.countQuads(asset.vm)).toBe(quads.length);
     for (const id of ['a', 'b']) expect(await rowsOf(f, ackSubject(id))).toBe(5);
@@ -692,7 +692,7 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     const v3 = await share(f, 3); // shared while that confirmation is pending: the head now names version 3
     await f.store.insert(v2.quads.map(q => ({ ...q, graph: VM }))); // version 2 confirms and is durable in VM
     const before = await metaRows(f);
-    await confirm(f, 2);
+    expect(await confirm(f, 2)).toBe(true);
     const after = await metaRows(f);
     // Version 3 is durable nowhere else: its StorageACK copy, its operation, the head and the graph stay as they were.
     for (const subject of [v3.copy, v3.operation, HEAD]) expect(after.get(subject), subject).toEqual(before.get(subject));
@@ -835,7 +835,7 @@ describe('published snapshot cleanup: bounded by the version a publication confi
     const before = await metaRows(f);
     const records: { level: string; message: string }[] = [];
     Logger.setSink(record => { records.push({ level: record.level, message: record.message }); });
-    try { await confirm(f, 2); } finally { Logger.setSink(null); }
+    try { expect(await confirm(f, 2)).toBe(false); } finally { Logger.setSink(null); }
     expect(await metaRows(f)).toEqual(before);
     expect(await f.store.countQuads(SWM)).toBe(v2.quads.length);
     const warnings = records.filter(record => record.level === 'warn');

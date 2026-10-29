@@ -1,5 +1,9 @@
-import type { RegisteredContextGraphAuthorityUnavailableReason } from '@origintrail-official/dkg-agent';
+import type {
+  ContextGraphAuthorityFailureSite,
+  RegisteredContextGraphAuthorityUnavailableReason,
+} from '@origintrail-official/dkg-agent';
 import type { PromoteJob } from '@origintrail-official/dkg-publisher';
+import { isStoreOperationTimeoutError, isStoreSchedulerBusyError } from '@origintrail-official/dkg-storage';
 import { diagnosticPromoteStage } from '../promote-stage-diagnostics.js';
 import {
   safePromoteErrorIdentity,
@@ -21,23 +25,63 @@ const SAFE_PROMOTE_AUTHORITY_REASONS = Object.freeze({
   'chain-participant-authority-unavailable': true,
   'chain-participant-authority-invalid': true,
   'rfc64-private-read-roster-unavailable': true,
+  'approved-member-metadata-pending': true,
 } as const satisfies Record<RegisteredContextGraphAuthorityUnavailableReason
-  | 'rfc64-private-read-roster-unavailable', true>);
+  | 'rfc64-private-read-roster-unavailable' | 'approved-member-metadata-pending', true>);
 
-function safePromoteAuthorityReason(cause: unknown): string | undefined {
+/**
+ * Which check of the recipient stability loop raised an authority failure
+ * (GH#3067): the same closed set the agent exports as a type. Free text such as
+ * `detail` stays out of the log; it can carry RPC error text.
+ */
+const SAFE_PROMOTE_AUTHORITY_SITES = Object.freeze({
+  'transport-unavailable': true,
+  'transport-changed': true,
+  'revision-moved': true,
+  'recipient-set-changed': true,
+} as const satisfies Record<ContextGraphAuthorityFailureSite, true>);
+
+/** A string field of an authority error, only when it is a member of a closed set. */
+function safePromoteAuthorityToken(
+  cause: unknown,
+  field: 'reason' | 'site',
+  allowed: object,
+): string | undefined {
   if ((typeof cause !== 'object' && typeof cause !== 'function') || cause === null) {
     return undefined;
   }
   try {
     if (Reflect.get(cause, 'code') !== 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE') return undefined;
-    const reason = Reflect.get(cause, 'reason');
-    return typeof reason === 'string'
-      && Object.hasOwn(SAFE_PROMOTE_AUTHORITY_REASONS, reason)
-      ? reason
-      : undefined;
+    const value = Reflect.get(cause, field);
+    return typeof value === 'string' && Object.hasOwn(allowed, value) ? value : undefined;
   } catch {
     return undefined;
   }
+}
+
+type PromoteStoreFailure =
+  | 'queue_wait'
+  | 'queue_full'
+  | 'store_timeout_not_started'
+  | 'store_timeout_indeterminate';
+
+/**
+ * A raw store failure behind an attempt (a scheduler rejection or a store
+ * deadline) from the storage package's own guards, so the log names it instead of
+ * `unknown`. Closed tokens only; the error's message and operation never leave.
+ */
+function safePromoteStoreFailure(error: unknown): PromoteStoreFailure | undefined {
+  try {
+    if (isStoreSchedulerBusyError(error)) {
+      return error.reason === 'queue_full' ? 'queue_full' : 'queue_wait';
+    }
+    if (isStoreOperationTimeoutError(error)) {
+      return error.outcome === 'not_started' ? 'store_timeout_not_started' : 'store_timeout_indeterminate';
+    }
+  } catch {
+    // A hostile getter never changes the queue bookkeeping.
+  }
+  return undefined;
 }
 
 function safePromoteAuthorityOrigin(cause: unknown): 'agent-gate-revision' | undefined {
@@ -54,6 +98,36 @@ function safePromoteAuthorityOrigin(cause: unknown): 'agent-gate-revision' | und
       : undefined;
   } catch {
     return undefined;
+  }
+}
+
+/** The wrapped cause of a retryable prerequisite failure, the only one whose identity is read. */
+function retryablePromoteCause(err: unknown, classified: ClassifiedPromoteError): unknown {
+  return classified.diagnostic?.code === 'PROMOTE_RETRYABLE_FAILURE'
+    && (typeof err === 'object' || typeof err === 'function')
+    && err !== null
+    ? Reflect.get(err, 'cause')
+    : undefined;
+}
+
+/**
+ * The closed-set authority reason of a retryable prerequisite failure, for the
+ * attempt error the queue keeps, so the job view names what the attempt waited
+ * for (for example `approved-member-metadata-pending`, #3421).
+ */
+export function promoteAttemptAuthorityReason(
+  err: unknown,
+  classified: ClassifiedPromoteError,
+): { authorityReason?: string } {
+  try {
+    const authorityReason = safePromoteAuthorityToken(
+      retryablePromoteCause(err, classified),
+      'reason',
+      SAFE_PROMOTE_AUTHORITY_REASONS,
+    );
+    return authorityReason === undefined ? {} : { authorityReason };
+  } catch {
+    return {};
   }
 }
 
@@ -76,12 +150,10 @@ export function logPromoteAttemptFailure(input: {
     // The queue marker hides arbitrary cause text. A typed authority reason or
     // retry cause code is a closed, privacy-bounded value that identifies which
     // prerequisite kept this pre-commit attempt from making progress.
-    const cause = input.classified.diagnostic?.code === 'PROMOTE_RETRYABLE_FAILURE'
-      && (typeof input.err === 'object' || typeof input.err === 'function')
-      && input.err !== null
-      ? Reflect.get(input.err, 'cause')
-      : undefined;
-    const authorityReason = safePromoteAuthorityReason(cause);
+    const cause = retryablePromoteCause(input.err, input.classified);
+    const authorityReason = safePromoteAuthorityToken(cause, 'reason', SAFE_PROMOTE_AUTHORITY_REASONS);
+    const authoritySite = safePromoteAuthorityToken(cause, 'site', SAFE_PROMOTE_AUTHORITY_SITES);
+    const storeFailure = safePromoteStoreFailure(input.err) ?? safePromoteStoreFailure(cause);
     const authorityOrigin = safePromoteAuthorityOrigin(cause);
     const causeCode = safePromoteRetryCauseCode(cause);
     input.log(
@@ -103,6 +175,8 @@ export function logPromoteAttemptFailure(input: {
           ?? safePromoteErrorIdentity(input.err, 'code')
           ?? 'unknown',
         ...(authorityReason === undefined ? {} : { authorityReason }),
+        ...(authoritySite === undefined ? {} : { authoritySite }),
+        ...(storeFailure === undefined ? {} : { storeFailure }),
         ...(authorityOrigin === undefined ? {} : { authorityOrigin }),
         ...(causeCode === undefined ? {} : { causeCode }),
       })}`,

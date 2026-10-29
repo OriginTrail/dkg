@@ -25,6 +25,7 @@ const publicCatalogActivation = await import(
 const chainAuthorityReadBudgets = await import(
   '@origintrail-official/dkg-agent/chain-authority-read-budgets'
 );
+const inventoryRollback = await import('@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback');
 const registeredAuthorityContract = await import(
   '@origintrail-official/dkg-agent/dist/registered-context-graph-authority.js'
 );
@@ -48,7 +49,8 @@ const expectedRfc64PublicCatalogReconciliationOutcomes = [
 ];
 
 if (
-  typeof root.DKGAgent !== 'function'
+  typeof root.resolveWorkingMemoryIdentityAliases !== 'function'
+  || typeof root.DKGAgent !== 'function'
   || typeof legacyAgent.DKGAgent !== 'function'
   || typeof legacyAgentBase.createListContextGraphsCacheInvalidatingStore !== 'function'
   || typeof legacyAgentPublish.createKnowledgeAssetVmPublishIntentKey !== 'function'
@@ -243,6 +245,13 @@ if (
 if (typeof publicCatalogActivation.resolveRfc64PublicCatalogControlsV1 !== 'function') {
   throw new Error('public RFC-64 activation subpath did not expose catalog-control normalization');
 }
+if (
+  typeof inventoryRollback.planRfc64InventoryRollbackV1 !== 'function'
+  || typeof inventoryRollback.prepareRfc64InventoryForRollbackV1 !== 'function'
+  || !inventoryRollback.INVENTORY_SCHEMA_FIRST_RELEASES_V1?.length
+) {
+  throw new Error('RFC-64 inventory rollback subpath did not expose its rollback preparation');
+}
 
 const digestAuthor = '0x1111111111111111111111111111111111111111';
 const digestRows = [10, 2].map((number) => ({
@@ -274,11 +283,18 @@ const publicRfc64Modules = [
   'swm-author-inventory-producer-v1.js',
 ];
 const blockedRfc64Modules = [
+  'private-placement-failure-state-v1.js',
+  'inventory-v1/finalized-private-repair-persistence.js',
+  'inventory-v1/schema-migrations.js',
+  'inventory-v1/pre-migration-copy.js',
+  'inventory-v1/rollback.js',
+  'catalog-projection-discovery-v1.js',
   'catalog-repair-diagnostics-v1.js',
   'catalog-repair-retry-v1.js',
   'catalog-synchronization-error-v1.js',
   'catalog-access-policy-v1.js',
   'catalog-authority-config-v1.js',
+  'manual-catalog-authority-scope-v1.js',
   'catalog-authority-refresh-binding-v1.js',
   'catalog-authority-refresh-loop-v1.js',
   'catalog-authority-revision-projection-v1.js',
@@ -289,6 +305,7 @@ const blockedRfc64Modules = [
   'release-native-catalog-authority-v1.js',
   'legacy-swm-boundary-v1.js',
   'legacy-swm-boundary-codec-v1.js',
+  'legacy-swm-boundary-fence-v1.js',
   'catalog-operational-targets-v1.js',
   'private-read-roster-v1.js',
   'catalog-rollout-authority-v1.js',
@@ -296,12 +313,14 @@ const blockedRfc64Modules = [
   'applied-catalog-authority-transition-v1.js',
   'catalog-semantic-authority-transition-v1.js',
   'public-catalog-native-errors-v1.js',
+  'projection-store-read-back-v1.js',
   'catalog-applied-head-coordinator-v1.js',
   'catalog-native-scoped-read-capability-v1-internal.js',
   'catalog-native-scoped-read-provider-v1.js',
   'catalog-head-lineage-v1.js',
   'catalog-limits-v1.js',
   'catalog-peers-v1.js',
+  'catalog-policy-decision-probe-v1.js',
   'catalog-transport-authorization-v1.js',
   'catalog-transport-wire-v1-internal.js',
   'control-envelope-signer-v1.js',
@@ -312,6 +331,8 @@ const blockedRfc64Modules = [
   'control-object-store-v1.js',
   'durable-file-store-v1.js',
   'inventory-v1/exact-record.js',
+  'inventory-persistence-failure.js',
+  'inventory-v1/open-error.js',
   'inventory-v1/swm-author-inventory-auth-v1.js',
   'inventory-v1/swm-author-inventory-commit-plan.js',
   'inventory-v1/swm-author-inventory-contracts.js',
@@ -321,6 +342,7 @@ const blockedRfc64Modules = [
   'finalized-policy-agent-precommit-v1.js',
   'finalized-policy-verifier-v1.js',
   'finalized-private-placement-repair-store-v1.js',
+  'owed-share-inventory-store-v1.js',
   'catalog-synchronization-evidence-v1.js',
   'finalized-swm-retirement-lifecycle-receipt-v1.js',
   'finalized-vm-agent-precommit-v1.js',
@@ -344,11 +366,15 @@ const blockedRfc64Modules = [
   'public-catalog-reconciliation-failure-v1.js',
   'public-catalog-reconciliation-outcome-v1.js',
   'public-catalog-receiver-task-lifecycle-v1.js',
+  'announced-current-head-retry-v1.js',
   'public-catalog-receiver-v1.js',
   'public-catalog-service-v1.js',
+  'public-catalog-head-delivery-v1.js',
+  'public-catalog-head-fanout-v1.js',
   'public-catalog-issuer-delegation-v1.js',
   'public-catalog-successor-asset-v1.js',
   'public-catalog-successor-producer-v1.js',
+  'public-catalog-successor-row-binding-v1.js',
   'public-catalog-transport-v1.js',
   'recoverable-author-attestation-v1.js',
   'secure-filesystem-policy-v1.js',
@@ -357,16 +383,30 @@ const blockedRfc64Modules = [
   'swm-inventory-catalog-reconciler-v1.js',
   'swm-catalog-durable-asset-resolver-v1.js',
   'swm-inventory-shadow-runtime-v1.js',
+  'swm-inventory-observation-retry-v1.js',
+  'swm-inventory-settlement-outlook-v1.js',
   'abort-v1.js',
   'catalog-mutation-runtime-v1.js',
   'catalog-replay-connection-runtime-v1.js',
+  'catalog-replay-connection-adapter-v1.js',
+  'catalog-replay-evidence-v1.js',
+  'catalog-replay-peer-work-v1.js',
+  'catalog-replay-selection-v1.js',
+  'catalog-replay-types-v1.js',
+  'catalog-selection-types-v1.js',
+  'catalog-replay-run-reporter-v1.js',
+  'catalog-replay-scope-lifecycle-v1.js',
   'catalog-replay-generation-v1.js',
   'catalog-replay-recovery-runtime-v1.js',
+  'catalog-replay-peer-worklist-v1.js',
+  'catalog-replay-peer-lane-v1.js',
+  'catalog-replay-transport-v1.js',
   'catalog-replay-snapshot-runtime-v1.js',
   'catalog-operational-applied-heads-v1.js',
   'catalog-operational-reads-v1.js',
   'catalog-completion-evidence-v1.js',
   'private-catalog-subscription-readiness-v1.js',
+  'registered-private-empty-vm-proof-v1.js',
   'catalog-runtime-v1.js',
   'background-work-dispatcher-v1.js',
   'supervisor-status-v1.js',

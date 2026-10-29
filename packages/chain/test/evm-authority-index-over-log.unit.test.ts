@@ -90,6 +90,8 @@ interface SeedOptions {
   coveredFrom?: number;
   head?: number;
   fetchedAtMs?: number;
+  /** The cursor's CAS token; a committed tick pass moves it. */
+  revision?: number;
   /** Replaces the single default creation row. */
   rows?: readonly ReturnType<typeof creationRow>[];
 }
@@ -102,7 +104,7 @@ function seedLog(
   const head = options.head ?? HEAD;
   store.seed(SCOPE, {
     cursor: {
-      revision: 1,
+      revision: options.revision ?? 1,
       lineage: hash(0x01),
       deploymentBlockNumber: DEPLOY_BLOCK,
       settledBlockNumber: head - 50,
@@ -281,7 +283,7 @@ function makeReader(options: {
         }),
   });
   reader.snapshots.open();
-  return { reader, index, calls, authorityLogs, attempts, usage };
+  return { reader, index, provider, calls, authorityLogs, attempts, usage };
 }
 
 /** The same `ContextGraphCreated`, as the LIVE scan would deliver it. */
@@ -754,6 +756,208 @@ describe('Context Graph authority index over the one log', () => {
     expect(calls.getLogs).toBeGreaterThan(0);
   });
 
+  describe('a BOUNDED read of a name the log does not hold', () => {
+    const bounded = { freshness: 'bounded' as const };
+
+    it('is answered by the fold, with ZERO chain reads', async () => {
+      // The read a member of an unregistered graph repeats for its sync and
+      // query checks. Its decision is corrected by its next read, and it
+      // already takes "absent" from a fold another read left in the cache.
+      const store = seededStore();
+      const { reader, calls } = makeReader({ store, source: logSource(store) });
+
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH, bounded))
+        .toBeNull();
+      expect(await reader.resolveFinalizedContextGraphAuthoritySnapshotByNameHash(
+        ABSENT_NAME_HASH, bounded,
+      )).toBeNull();
+      const ids = await reader.resolveFinalizedContextGraphIdsByNameHashes(
+        [ABSENT_NAME_HASH, NAME_HASH], bounded,
+      );
+      expect([...ids]).toEqual([[NAME_HASH, 7n]]);
+      const snapshots = await reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+        [ABSENT_NAME_HASH, NAME_HASH], bounded,
+      );
+      expect([...snapshots.keys()]).toEqual([NAME_HASH]);
+      expect(calls.getLogs).toBe(0);
+      expect(calls.getBlock).toBe(0);
+    });
+
+    it('reports the fold as a fold, never as a scan of the pool', async () => {
+      const store = seededStore({ fetchedAtMs: NOW_MS - 1_000 });
+      const evidence: ContextGraphAuthorityProjectionServedEvidence[] = [];
+      const { reader } = makeReader({ store, source: logSource(store) });
+
+      for (const _read of [1, 2]) {
+        expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH, {
+          ...bounded,
+          onContextGraphAuthorityProjectionServed: (served) => { evidence.push(served); },
+        })).toBeNull();
+      }
+      expect(evidence).toEqual([
+        { source: 'log', ageMs: 1_000 },
+        { source: 'log', ageMs: 1_000 },
+      ]);
+    });
+
+    it('costs one fold a tick however often it is asked and however far the chain moved', async () => {
+      // Twelve sweeps two seconds apart, on a chain that mines a block a
+      // second while the tick commits every six. Before, every one of these
+      // reads found the head moved and bought a head read and a paged scan.
+      const clock = { nowMs: NOW_MS };
+      let liveHead = LIVE_HEAD;
+      let pointReads = 0;
+      const store = seededStore({ fetchedAtMs: clock.nowMs });
+      const { reader, calls } = makeReader({
+        store,
+        source: logSource(store, {
+          now: () => clock.nowMs,
+          // The one read a fold may need: the hash of the block its durable
+          // cursor sits on, when the log holds no event from that block.
+          readBlockHash: async (blockNumber) => { pointReads += 1; return hash(blockNumber); },
+        }),
+        now: () => clock.nowMs,
+        latestBlockNumber: () => liveHead,
+      });
+
+      let ticks = 1;
+      for (let sweep = 1; sweep <= 12; sweep += 1) {
+        clock.nowMs += 2_000;
+        liveHead += 2;
+        if (sweep % 3 === 0) {
+          // The tick commits a pass: a higher head, a new revision.
+          ticks += 1;
+          seedLog(store, { head: HEAD + sweep, fetchedAtMs: clock.nowMs, revision: ticks });
+        }
+        const snapshots = await reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+          [ABSENT_NAME_HASH], bounded,
+        );
+        expect(snapshots.size).toBe(0);
+      }
+
+      expect(calls.getLogs).toBe(0);
+      expect(calls.getBlock).toBe(0);
+      expect(pointReads).toBeLessThanOrEqual(ticks);
+    });
+
+    it('sees the registration as soon as the tick has committed it', async () => {
+      const clock = { nowMs: NOW_MS };
+      const store = seededStore({ fetchedAtMs: clock.nowMs });
+      const { reader, calls } = makeReader({
+        store,
+        source: logSource(store, {
+          now: () => clock.nowMs,
+          readBlockHash: async (blockNumber) => hash(blockNumber),
+        }),
+        now: () => clock.nowMs,
+      });
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH, bounded))
+        .toBeNull();
+
+      // One second later the graph is registered and the tick commits it.
+      clock.nowMs += 1_000;
+      seedLog(store, {
+        head: HEAD + 5,
+        fetchedAtMs: clock.nowMs,
+        revision: 2,
+        rows: [creationRow(20, 7n, NAME_HASH), creationRow(HEAD + 3, 9n, ABSENT_NAME_HASH)],
+      });
+
+      // The retained "absent" is inside its tick and is still not served: the
+      // log moved under it. Its fence falls back to one head read, as it did
+      // before, and the new fold answers. No log scan is bought.
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH, bounded))
+        .toBe(9n);
+      expect(calls.getLogs).toBe(0);
+      expect(calls.getBlock).toBe(1);
+    });
+
+    it('still reads live when the log cannot answer at all', async () => {
+      // A tick that has gone quiet is refused its anchor, for this read as for
+      // every other, and the registration above the old cursor is found.
+      const store = seededStore({ fetchedAtMs: NOW_MS - (3 * TICK_MS) - 1 });
+      const { reader, calls, authorityLogs } = makeReader({ store, source: logSource(store) });
+      authorityLogs.push(liveCreationLog(LIVE_HEAD - 10, 9n, ABSENT_NAME_HASH));
+
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH, bounded))
+        .toBe(9n);
+      expect(calls.getLogs).toBeGreaterThan(0);
+    });
+
+    it('still refuses a name two finalized graphs commit', async () => {
+      const store = seededStore({
+        rows: [creationRow(20, 7n, NAME_HASH), creationRow(30, 9n, NAME_HASH)],
+      });
+      const { reader, calls } = makeReader({ store, source: logSource(store) });
+
+      await expect(reader.resolveFinalizedContextGraphIdsByNameHashes(
+        [NAME_HASH, ABSENT_NAME_HASH], bounded,
+      )).rejects.toThrow(/is ambiguous across 2 finalized Context Graphs/);
+      expect(calls.getLogs).toBe(0);
+    });
+
+    it('is answered by one provider scan a tick on a node whose log cannot answer', async () => {
+      // No chain index at all: the fold is not there to take the read. The
+      // scan a bounded read buys then answers the bounded reads of its tick.
+      const clock = { nowMs: NOW_MS };
+      let liveHead = LIVE_HEAD;
+      const { reader, calls, authorityLogs } = makeReader({
+        now: () => clock.nowMs,
+        latestBlockNumber: () => liveHead,
+      });
+
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH, bounded))
+        .toBeNull();
+      expect(calls.getLogs).toBe(1);
+      const afterFirstScan = { ...calls };
+
+      // The chain mines on; the sweeps of this tick ask nothing of the provider.
+      for (const elapsedMs of [1_000, 3_000, TICK_MS - 1]) {
+        clock.nowMs = NOW_MS + elapsedMs;
+        liveHead += 3;
+        expect(await reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+          [ABSENT_NAME_HASH], bounded,
+        )).toEqual(new Map());
+      }
+      expect(calls).toEqual(afterFirstScan);
+
+      // The graph was registered meanwhile. The first read of the next tick
+      // scans again and finds it.
+      authorityLogs.push(liveCreationLog(liveHead, 9n, ABSENT_NAME_HASH));
+      clock.nowMs = NOW_MS + TICK_MS;
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH, bounded))
+        .toBe(9n);
+      expect(calls.getLogs).toBe(2);
+    });
+
+    it('leaves a LIVE read of the same name on the provider scan, each time the chain moved', async () => {
+      const clock = { nowMs: NOW_MS };
+      let liveHead = LIVE_HEAD;
+      const store = seededStore({ fetchedAtMs: clock.nowMs });
+      const { reader, calls } = makeReader({
+        store,
+        source: logSource(store, { now: () => clock.nowMs }),
+        now: () => clock.nowMs,
+        latestBlockNumber: () => liveHead,
+      });
+
+      for (let read = 1; read <= 3; read += 1) {
+        clock.nowMs += 1_000;
+        liveHead += 1;
+        expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH)).toBeNull();
+        expect(calls.getLogs).toBe(read);
+      }
+      // A bounded read in between is answered beside it and changes nothing
+      // for the next live one.
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH, bounded))
+        .toBeNull();
+      clock.nowMs += 1_000;
+      liveHead += 1;
+      expect(await reader.resolveFinalizedContextGraphIdByNameHash(ABSENT_NAME_HASH)).toBeNull();
+      expect(calls.getLogs).toBe(4);
+    });
+  });
+
   it('propagates an ambiguity the fold proves, WITHOUT buying a scan first', async () => {
     // The admission predicate is the caller's own projection and it can throw:
     // two finalized creations committing one name hash is a deterministic,
@@ -1135,19 +1339,70 @@ describe('Context Graph authority index over the one log', () => {
       });
   });
 
-  it('refuses the fold when the tick committed underneath it', async () => {
+  it('retries a moved log revision then falls back within the same provider', async () => {
     const store = seededStore();
     // The fence, and only the fence: the anchor resolves, the pages read, and
     // then the log moves before the answer is handed over.
     const moved = vi.fn(async () => false);
     const source = { ...logSource(store), anchorHolds: moved };
-    const { reader, attempts } = makeReader({ store, source });
+    const { reader, attempts, calls } = makeReader({ store, source });
 
-    await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).rejects.toThrow(
-      /chain event log moved under/,
-    );
-    // Retryable, not fatal: the transport asked for a second attempt.
-    expect(attempts).toHaveLength(2);
-    expect(moved).toHaveBeenCalled();
+    await expect(reader.resolveFinalizedContextGraphIdByNameHash(NAME_HASH)).resolves.toBe(7n);
+    // The first moved revision reacquires the log; the second drops to the live
+    // scan against this provider instead of being misclassified as its outage.
+    expect(moved).toHaveBeenCalledTimes(2);
+    expect(calls.getLogs).toBe(1);
+    expect(attempts).toHaveLength(0);
+  });
+
+  it.each([
+    ['registered', NAME_HASH, true],
+    ['unregistered', ABSENT_NAME_HASH, false],
+  ] as const)('keeps the %s batch name-binding read available across local log movement',
+    async (_kind, nameHash, present) => {
+      const store = seededStore();
+      const moved = vi.fn(async () => false);
+      const source = { ...logSource(store), anchorHolds: moved };
+      const { reader, attempts, calls } = makeReader({
+        store, source, exhaustsOnFailover: true,
+      });
+
+      const snapshots = await reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+        [nameHash], { freshness: 'live' },
+      );
+
+      expect(snapshots.has(nameHash)).toBe(present);
+      expect(moved).toHaveBeenCalledTimes(2);
+      expect(calls.getLogs).toBe(1);
+      expect(attempts).toHaveLength(0);
+    });
+
+  it('propagates a failed live scan after local log movement', async () => {
+    const store = seededStore();
+    const source = { ...logSource(store), anchorHolds: vi.fn(async () => false) };
+    const { reader, provider } = makeReader({ store, source, exhaustsOnFailover: true });
+    vi.spyOn(provider, 'getLogs').mockRejectedValue(new Error('live scan unavailable'));
+
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+      [ABSENT_NAME_HASH], { freshness: 'live' },
+    )).rejects.toThrow('live scan unavailable');
+  });
+
+  it('does not retry or fall back after abort during the local revision fence', async () => {
+    const store = seededStore();
+    const controller = new AbortController();
+    const moved = vi.fn(async () => {
+      controller.abort(new DOMException('test abort', 'AbortError'));
+      return false;
+    });
+    const source = { ...logSource(store), anchorHolds: moved };
+    const { reader, calls, attempts } = makeReader({ store, source });
+
+    await expect(reader.resolveFinalizedContextGraphAuthoritySnapshotsByNameHashes(
+      [ABSENT_NAME_HASH], { freshness: 'live', signal: controller.signal },
+    )).rejects.toMatchObject({ name: 'AbortError' });
+    expect(moved).toHaveBeenCalledTimes(1);
+    expect(calls.getLogs).toBe(0);
+    expect(attempts).toHaveLength(1);
   });
 });

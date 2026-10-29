@@ -42,10 +42,13 @@ import {
   VM_RECONCILE_SHUTDOWN_TIMEOUT_ERROR_CODE,
 } from '@origintrail-official/dkg-agent';
 import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
+import type { PublisherLiveControl } from '../publisher-live-control.js';
 
 /**
- * The FIRST thing graceful shutdown does: close catch-up admission, announce,
- * and give the supervisor's liveness watcher its signal.
+ * The FIRST thing graceful shutdown does: close catch-up admission, end the
+ * share admission waits, stop what would start catch-up jobs later (activation
+ * catch-ups, readiness repeats), announce, and give the supervisor's liveness
+ * watcher its signal.
  *
  * ## Why the flag write and the first await live in the SAME function
  *
@@ -71,13 +74,55 @@ import { CATCHUP_SHUTDOWN_DRAIN_BUDGET_MS } from './catchup-telemetry.js';
  * The `removeApiPort` failure stays swallowed: this runs before the cleanup
  * IIFE, and it is idempotent with the later `cleanupStateFiles()` call, so a
  * failure here lands us exactly where a failed late removal would.
+ *
+ * `endShareAdmissionWaits` runs first too (GH#3052): a share held back by a
+ * legacy SWM fence is refused at once from here on, so the promote worker
+ * records its job and retries it after the restart, instead of the shutdown
+ * deadline cutting the promote off in the middle (which leaves the job to an
+ * operator). A failure there is logged and does not stop the shutdown.
+ *
+ * `stopCatchupTriggers` follows, still before the first await: the activation
+ * catch-ups (their listener and pending admission reads) and the pending
+ * readiness repeats would only start jobs that are refused from here on. A
+ * failure there is logged and does not stop the shutdown either.
+ *
+ * `endWriteReadinessWaits` runs before the first await as well: a write that
+ * waits for its graph's catch-up (`context-graph-write-readiness.ts`) is
+ * refused at once, retryable, so it does not hold the HTTP server's close,
+ * which comes before the catch-up drain, until the shutdown deadline.
  */
 export async function beginGracefulShutdown(deps: {
   state: { catchupAcceptingJobs: boolean };
+  /** Install the terminal claim fence now; HTTP and existing execution drain later. */
+  publisherControl?: Pick<PublisherLiveControl, 'close'>;
   removeApiPort: () => Promise<void>;
   log: (message: string) => void;
+  endShareAdmissionWaits?: () => void;
+  /** Refuses the writes that wait for their graph's catch-up, and every later one that would. */
+  endWriteReadinessWaits?: () => void;
+  /** Stops the triggers of later catch-up jobs. */
+  stopCatchupTriggers?: () => void;
 }): Promise<void> {
   deps.state.catchupAcceptingJobs = false;
+  const reportControlClose = (error: unknown) => deps.log(`Publisher control shutdown error: ${error instanceof Error ? error.message : String(error)}`);
+  // close() fences synchronously. Do not await a resume that HTTP teardown must drain.
+  try { void deps.publisherControl?.close().catch(reportControlClose); }
+  catch (error) { reportControlClose(error); }
+  try {
+    deps.endShareAdmissionWaits?.();
+  } catch (err: any) {
+    deps.log(`Share admission wait shutdown error: ${err?.message ?? String(err)}`);
+  }
+  try {
+    deps.endWriteReadinessWaits?.();
+  } catch (err: any) {
+    deps.log(`Write readiness wait shutdown error: ${err?.message ?? String(err)}`);
+  }
+  try {
+    deps.stopCatchupTriggers?.();
+  } catch (err: any) {
+    deps.log(`Catch-up trigger stop error: ${err?.message ?? String(err)}`);
+  }
   deps.log('Shutting down...');
   await deps.removeApiPort().catch((err: any) =>
     deps.log(`Early api.port cleanup error: ${err?.message ?? String(err)}`),
@@ -89,6 +134,7 @@ export interface ProducerQuiescentTeardownSteps {
    * dependencies are still alive. The outer shutdown deadline bounds this. */
   closeServer: () => Promise<void>;
   /** Close the daemon-owned MCP child before the DKG agent/store retires. */
+  closeEntitySearch: () => Promise<void>;
   closeLocalLlm: () => Promise<void>;
   /** Grace period for retained catch-up jobs, WHILE THE WORKER IS ALIVE,
    *  followed by a terminal record for every job still owed one. */
@@ -133,6 +179,7 @@ export type TeardownStepName = keyof ProducerQuiescentTeardownSteps;
  */
 const TEARDOWN_ORDER = [
   'closeServer',
+  'closeEntitySearch',
   'closeLocalLlm',
   'drainCatchupJobs',
   'flushTelemetry',
@@ -309,6 +356,7 @@ export async function closeDaemonBackingStoresAfterTeardown(
 export interface ProducerQuiescentTeardownDeps {
   /** HTTP-layer operation that ends permanent streams, stops admission, and drains finite callbacks. */
   closeHttpServer: () => Promise<void>;
+  closeEntitySearch: () => Promise<void>;
   closeLocalLlm: () => Promise<void>;
   drainCatchupJobs: (budgetMs: number, log: (message: string) => void) => Promise<unknown>;
   flushTelemetry: (options: { log: (message: string) => void }) => Promise<void>;
@@ -332,6 +380,7 @@ export function buildProducerQuiescentTeardownSteps(
 ): ProducerQuiescentTeardownSteps {
   return {
     closeServer: () => deps.closeHttpServer(),
+    closeEntitySearch: () => deps.closeEntitySearch(),
     closeLocalLlm: () => deps.closeLocalLlm(),
     drainCatchupJobs: async () => {
       await deps.drainCatchupJobs(
