@@ -1,4 +1,4 @@
-import { bindConfirmedPublication, bindSealedGraphPublication, requireSealedGraphRecording, type PublicationRecording, type ConfirmedPublicationRecording } from './prepared-publication-recording.js';
+import { requireSealedGraphRecording, type PublicationRecording, type ConfirmedPublicationRecording } from './prepared-publication-recording.js';
 import type { MintRecordingOptions, SharedMemoryMintRecordingOptions, SealedMintRecordingTarget } from './publisher.js';
 import { replaceRecordedMintAccess, classifyMintRecord, writeMintMetadata } from './adopted-mint-record.js';
 import type { MintAdoptionRequest } from './adopt-existing-mint.js';
@@ -2537,11 +2537,12 @@ export class DKGPublisher implements Publisher {
     });
     options.onPhase?.('chain', 'start');
     try {
-      if (prepared.kind === 'local') return await this.recordPublication({ kind: 'local', content, acquisition: prepared }, options);
+      if (prepared.kind === 'local') return await this.recordPublication({ ...prepared, content }, options);
       const receipt = await acquirePreparedPublication(prepared, {
         chain: this.chain, log: this.log, ensureReservedKaId: this.ensureReservedKaId.bind(this),
       });
-      return await this.recordPublication(bindConfirmedPublication(content, receipt), options);
+      return await this.recordPublication(receipt.kind === 'adopted'
+        ? { ...receipt, content: requireSealedGraphRecording(content) } : { ...receipt, content }, options);
     } finally { options.onPhase?.('chain', 'end'); }
   }
 
@@ -2568,8 +2569,8 @@ export class DKGPublisher implements Publisher {
         kaId: attestation.reservedKaId, merkleRoot: payload.kcMerkleRoot,
         contextGraphId: publisherContextGraphId, authorAddress: attestation.authorAddress,
       }, request);
-      return await this.recordPublication(bindSealedGraphPublication(content, { kind: 'confirmed', outcome, reservedKaId: content.reservedKaId,
-        effectiveAuthorAddress: attestation.authorAddress }), options);
+      return await this.recordPublication({ kind: 'adopted', content, receipt: outcome.result, evidence: outcome.evidence,
+        reservedKaId: content.reservedKaId, effectiveAuthorAddress: attestation.authorAddress }, options);
     } finally { options.onPhase?.('chain', 'end'); }
   }
 
@@ -3067,28 +3068,28 @@ export class DKGPublisher implements Publisher {
 
   private async recordPublication(recording: PublicationRecording,
     options: Pick<PublicationExecution, 'onPhase' | 'onPublishConfirmed'>): Promise<PublishResult> {
-    const { content, acquisition } = recording;
+    const { content } = recording;
     const { payload, target, lifecycle, ctx } = content;
     const { privateRoots, effectiveAccessPolicy, normalizedAllowedPeers, kcMerkleRoot, allSkolemizedQuads, manifestEntries } = payload;
     const { graphPublish, contextGraphId, publisherContextGraphId } = target;
     const { onPhase } = options;
     let ual = '';
-    const onChainResult = acquisition.kind === 'confirmed' ? acquisition.outcome.result : undefined;
-    const usedV10Path = acquisition.kind === 'confirmed';
-    const localChainSkipReason = acquisition.kind === 'local' ? 'no-chain' : undefined;
-    const v10ACKs = acquisition.kind === 'confirmed' ? acquisition.v10ACKs : undefined;
+    const onChainResult = recording.kind !== 'local' ? recording.receipt : undefined;
+    const usedV10Path = recording.kind !== 'local';
+    const localChainSkipReason = recording.kind === 'local' ? 'no-chain' : undefined;
+    const v10ACKs = recording.kind !== 'local' ? recording.v10ACKs : undefined;
     if (recording.kind !== 'local') {
       // Receipt notification releases wallet custody independently of local materialization.
-      if (recording.acquisition.outcome.result.txHash) bestEffortNotify(options.onPublishConfirmed, { txHash: recording.acquisition.outcome.result.txHash });
+      if (recording.receipt.txHash) bestEffortNotify(options.onPublishConfirmed, { txHash: recording.receipt.txHash });
       try {
         ual = await this.recordConfirmedPublication(recording);
       } catch (error) {
-        throw publicationAcquisitionFailure(error, this.log, ctx, lifecycle, publisherContextGraphId ?? 0n, recording.acquisition.v10ACKs?.length ?? 0);
+        throw publicationAcquisitionFailure(error, this.log, ctx, lifecycle, publisherContextGraphId ?? 0n, recording.v10ACKs?.length ?? 0);
       }
       onPhase?.('chain:metadata', 'start');
       this.log.info(ctx, `On-chain confirmed: UAL=${ual} batchId=${onChainResult!.batchId} tx=${onChainResult!.txHash}`);
     } else {
-      ual = await recordTentativePublication(recording.acquisition, content, {
+      ual = await recordTentativePublication(recording, content, {
         chainId: this.chain.chainId, store: this.store, log: this.log,
         replaceExactKnowledgeAssetGraph: this.replaceExactKnowledgeAssetGraph.bind(this),
         persistFinalizedPrivateSlices: () => this.persistPublicationPrivateSlices(content),
@@ -3180,7 +3181,7 @@ export class DKGPublisher implements Publisher {
   }
 
   private async recordConfirmedPublication(recording: ConfirmedPublicationRecording): Promise<string> {
-    const { content, acquisition: { outcome, reservedKaId, effectiveAuthorAddress } } = recording;
+    const { content, receipt: onChainResult, reservedKaId, effectiveAuthorAddress } = recording;
     const record = async (): Promise<string> => {
       const { payload, target, lifecycle, ctx } = content;
       const { privateRoots, kcMerkleRoot, effectiveAccessPolicy, normalizedAllowedPeers, kaMetadata,
@@ -3189,14 +3190,13 @@ export class DKGPublisher implements Publisher {
       const normalizedQuads = allSkolemizedQuads.map(q => ({ ...q, graph: dataGraph }));
       // Evidence may have aged while waiting for the shared materialization lock.
       // Revalidate before classification, VM writes or the caller's SWM cleanup.
-      if (recording.kind === 'sealed-graph' && outcome.adopted) {
-        await readPreparedMintAdoption(outcome.evidence, this.chain, {
+      if (recording.kind === 'adopted') {
+        await readPreparedMintAdoption(recording.evidence, this.chain, {
           kaId: recording.content.reservedKaId, merkleRoot: kcMerkleRoot,
           contextGraphId: recording.content.target.publisherContextGraphId,
           authorAddress: recording.content.seal.authorAddress,
         });
       }
-      const onChainResult = outcome.result;
       let ual = '';
       const mintMetaGraph = target.targetMetaGraphUri ?? contextGraphMetaUri(contextGraphId);
       const recordDisposition = graphPublish !== undefined ? await classifyMintRecord(this.store, {
@@ -3206,7 +3206,7 @@ export class DKGPublisher implements Publisher {
         privateTripleCount: graphPublish.privateTripleCount,
         ...(graphPublish.expectedPrivateMerkleRoot ? { privateMerkleRoot: graphPublish.expectedPrivateMerkleRoot } : {}),
       }, onChainResult) : 'absent';
-      if (outcome.adopted) this.log.info(ctx, `Adopted the existing mint of KA ${onChainResult.kaId ?? onChainResult.batchId}: tx=${onChainResult.txHash} block=${onChainResult.blockNumber}`
+      if (recording.kind === 'adopted') this.log.info(ctx, `Adopted the existing mint of KA ${onChainResult.kaId ?? onChainResult.batchId}: tx=${onChainResult.txHash} block=${onChainResult.blockNumber}`
         + (recordDisposition === 'confirmed' ? '; keeping the record this node already holds' : ''));
       const kaId = onChainResult.kaId ?? onChainResult.batchId;
       if (reservedKaId !== undefined && kaId !== reservedKaId) {

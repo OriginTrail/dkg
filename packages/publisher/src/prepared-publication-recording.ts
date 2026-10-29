@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
-import { MintAdoptionRefusedError, type MintOrAdoptOutcome } from './adopt-existing-mint.js';
+import { MintAdoptionRefusedError } from './adopt-existing-mint.js';
 import type { PublicationAcquisition } from './prepared-publication-acquisition.js';
 import type { PreparedLocalPublication, PreparedPublicationContent, PreparedSealedGraphPublicationContent } from './prepared-publication.js';
 
+/** Adoption requires the reservation whose receipt will be revalidated under the write lock. */
 export function requireSealedGraphRecording(content: PreparedPublicationContent): PreparedSealedGraphPublicationContent {
   const { target, seal } = content;
   const { graphPublish, publisherContextGraphId } = target;
@@ -10,28 +11,15 @@ export function requireSealedGraphRecording(content: PreparedPublicationContent)
     throw new Error('Recording an existing mint requires a sealed graph-scoped publish');
   if (seal.reservedKaId !== graphPublish.expectedPackedKaId)
     throw new Error('Recording an existing mint requires the sealed reserved KA id');
+  if (BigInt(graphPublish.scope.assertionVersion) !== 1n)
+    throw new MintAdoptionRefusedError('assertion-version-mismatch', seal.reservedKaId, 'A mint receipt proves only initial assertion version 1');
   return { ...content, seal, reservedKaId: seal.reservedKaId,
     target: { ...target, graphPublish, publisherContextGraphId } };
 }
+
+/** Execution source is the only discriminant; content shape is a separate requirement. */
 export type ConfirmedPublicationRecording =
-  | { kind: 'sealed-graph'; content: PreparedSealedGraphPublicationContent; acquisition: PublicationAcquisition }
-  | { kind: 'live'; content: PreparedPublicationContent;
-      acquisition: PublicationAcquisition & { outcome: MintOrAdoptOutcome & { adopted: false } } };
+  | (Extract<PublicationAcquisition, { kind: 'adopted' }> & { content: PreparedSealedGraphPublicationContent })
+  | (Extract<PublicationAcquisition, { kind: 'live' }> & { content: PreparedPublicationContent });
 export type PublicationRecording = ConfirmedPublicationRecording
-  | { kind: 'local'; content: PreparedPublicationContent; acquisition: PreparedLocalPublication };
-
-/** Pair the receipt with its required reservation before handing it to the recorder. */
-export function bindConfirmedPublication(content: PreparedPublicationContent, acquisition: PublicationAcquisition): ConfirmedPublicationRecording {
-  if (content.target.graphPublish && content.seal) {
-    return bindSealedGraphPublication(requireSealedGraphRecording(content), acquisition);
-  }
-  if (acquisition.outcome.adopted) throw new Error('Adopted mint recording requires a graph-scoped reservation');
-  return { kind: 'live', content, acquisition: { ...acquisition, outcome: { ...acquisition.outcome, adopted: false } } };
-}
-
-export function bindSealedGraphPublication(content: PreparedSealedGraphPublicationContent,
-  acquisition: PublicationAcquisition): Extract<ConfirmedPublicationRecording, { kind: 'sealed-graph' }> {
-  if (acquisition.outcome.adopted && BigInt(content.target.graphPublish.scope.assertionVersion) !== 1n)
-    throw new MintAdoptionRefusedError('assertion-version-mismatch', content.reservedKaId, 'A mint receipt proves only initial assertion version 1');
-  return { kind: 'sealed-graph', content, acquisition };
-}
+  | (PreparedLocalPublication & { content: PreparedPublicationContent });

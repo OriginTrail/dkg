@@ -78,20 +78,6 @@ export interface MintAdoptionExpectation {
   authorAddress: string;
 }
 
-/**
- * Verify the existing mint of `expected.kaId` against the seal and return it
- * as the publish result: the original transaction, block, publisher and TRAC
- * cost, never the retry's quote. The mint must also still be the asset's
- * current version. `revert` is the `KaIdAlreadyMinted` failure that led here,
- * if any; it becomes the refusal's `cause`.
- */
-export async function adoptExistingMint(
-  chain: ChainAdapter,
-  expected: MintAdoptionExpectation,
-  options: { txHash?: string; revert?: unknown; signal?: AbortSignal } = {},
-): Promise<OnChainPublishResult> {
-  return publishResultFromMint(await resolveVerifiedMintEvidence(chain, expected, options));
-}
 async function resolveVerifiedMintEvidence(chain: ChainAdapter, expected: MintAdoptionExpectation,
   options: { txHash?: string; revert?: unknown; signal?: AbortSignal }): Promise<KnowledgeAssetMintEvidence> {
   const refuse = (reason: MintAdoptionRefusalReason, detail: string) =>
@@ -233,7 +219,7 @@ export async function readPreparedMintAdoption(token: PreparedMintAdoption, chai
 
 /** Verify receipt evidence directly; local record policy belongs to the recorder. */
 export async function adoptMintForRecording(chain: ChainAdapter, expected: MintAdoptionExpectation,
-  request: MintAdoptionRequest): Promise<MintOrAdoptOutcome> {
+  request: MintAdoptionRequest): Promise<Extract<MintOrAdoptOutcome, { adopted: true }>> {
   const evidence = request.kind === 'prepared' ? request.evidence : await prepareMintAdoption(chain, expected, request.txHash);
   return { result: await readPreparedMintAdoption(evidence, chain, expected), adopted: true, evidence };
 }

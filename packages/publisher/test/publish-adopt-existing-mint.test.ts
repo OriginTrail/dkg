@@ -36,16 +36,14 @@ import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
 import { DKGPublisher } from '../src/dkg-publisher.js';
 import {
   MintAdoptionRefusedError,
-  adoptExistingMint,
   generateGraphKnowledgeAssetMetadata,
   generatedPrivateCatalogTripleKeys,
-  mintOrAdoptKnowledgeAssets,
   withMaterializationLock,
   writeMaterializedVersion,
   computeFlatKCRootV10,
   readConfirmedGraphKnowledgeAssetMetadataEnvelope,
 } from '../src/index.js';
-import { prepareMintAdoption, adoptMintForRecording } from '../src/adopt-existing-mint.js';
+import { prepareMintAdoption, adoptMintForRecording, mintOrAdoptKnowledgeAssets } from '../src/adopt-existing-mint.js';
 import { PublisherPlanner } from '../src/publisher-planning.js';
 import { buildSeal, mockSealCtx } from './_helpers/seal.js';
 import { mockChainStubACKProvider } from './_helpers/acks.js';
@@ -475,13 +473,20 @@ describe('adoption refuses what the chain cannot prove', () => {
     blockNumber: 100, blockHash: `0x${'bb'.repeat(32)}`, txIndex: 0, blockTimestamp: 0, ...overrides,
   });
   const chainAnswering = (resolution: KnowledgeAssetMintResolution) => ({
+    isReceiptBlockFinalAndCanonical: async () => true,
     resolveKnowledgeAssetMint: async () => resolution,
     readKnowledgeAssetVersionSnapshot: async () => null,
   }) as unknown as ChainAdapter;
 
   it('refuses on an adapter that cannot look up mints and current versions', async () => {
-    await expect(adoptExistingMint({} as ChainAdapter, expected))
+    await expect(prepareMintAdoption({} as ChainAdapter, expected))
       .rejects.toMatchObject({ reason: 'lookup-unsupported', retryable: false });
+  });
+
+  it('refuses an adapter without canonical receipt revalidation', async () => {
+    const chain = chainAnswering({ status: 'confirmed', mint: mint() });
+    delete chain.isReceiptBlockFinalAndCanonical;
+    await expect(prepareMintAdoption(chain, expected)).rejects.toMatchObject({ reason: 'lookup-unsupported' });
   });
 
   it.each([
@@ -489,7 +494,7 @@ describe('adoption refuses what the chain cannot prove', () => {
     ['a receipt for another id', { status: 'confirmed', mint: mint({ kaId: kaId + 1n }) }, 'mint-receipt-invalid'],
     ['another author', { status: 'confirmed', mint: mint({ authorAddress: ethers.getAddress(`0x${'cd'.repeat(20)}`) }) }, 'author-mismatch'],
   ] as const)('refuses %s', async (_case, resolution, reason) => {
-    await expect(adoptExistingMint(chainAnswering(resolution as KnowledgeAssetMintResolution), expected))
+    await expect(prepareMintAdoption(chainAnswering(resolution as KnowledgeAssetMintResolution), expected))
       .rejects.toMatchObject({ reason, retryable: false });
   });
 

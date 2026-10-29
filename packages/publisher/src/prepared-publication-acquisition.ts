@@ -1,17 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 import { graphScopeTargetsChain } from './graph-scope-chain-target.js';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import type { ChainAdapter, OnChainPublishResult } from '@origintrail-official/dkg-chain';
 import type { Logger, OperationContext } from '@origintrail-official/dkg-core';
 import type { V10CoreNodeACK } from './publisher.js';
 import { createWriteAheadHook } from './publisher-write-ahead.js';
 import type { PublishLifecycleLogger } from './publish-lifecycle-logger.js';
-import { mintOrAdoptKnowledgeAssets, type MintOrAdoptOutcome } from './adopt-existing-mint.js';
+import { mintOrAdoptKnowledgeAssets, type PreparedMintAdoption } from './adopt-existing-mint.js';
 import type { PreparedOnChainPublication } from './prepared-publication.js';
 
-export interface PublicationAcquisition {
-  kind: 'confirmed'; outcome: MintOrAdoptOutcome; reservedKaId: bigint | undefined;
+interface PublicationReceipt {
+  receipt: OnChainPublishResult; reservedKaId: bigint | undefined;
   effectiveAuthorAddress: string; v10ACKs?: V10CoreNodeACK[];
 }
+export type PublicationAcquisition = PublicationReceipt & (
+  | { kind: 'live' }
+  | { kind: 'adopted'; evidence: PreparedMintAdoption }
+);
 interface PublicationAcquisitionPorts {
   chain: ChainAdapter;
   log: Logger;
@@ -56,7 +60,8 @@ export async function acquirePreparedPublication(input: PreparedOnChainPublicati
         ...(writeAhead.onBeforeReplacementBroadcast ? { onBeforeReplacementBroadcast: writeAhead.onBeforeReplacementBroadcast } : {}),
       }, graphPublish !== undefined);
       if (!outcome.adopted) outcome.result.tokenAmount = submission.tokenAmount;
-      return { kind: 'confirmed', outcome, reservedKaId, effectiveAuthorAddress: submission.author.address, v10ACKs };
+      const receipt = { receipt: outcome.result, reservedKaId, effectiveAuthorAddress: submission.author.address, v10ACKs };
+      return outcome.adopted ? { ...receipt, kind: 'adopted', evidence: outcome.evidence } : { ...receipt, kind: 'live' };
     } finally {
       if (writeAhead.didWriteAhead()) onPhase?.('chain:writeahead', 'end');
     }

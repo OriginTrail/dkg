@@ -17,11 +17,8 @@ export * from './publication-pricing.js';
 export {
   MINT_ADOPTION_REFUSED_CODE,
   MintAdoptionRefusedError,
-  adoptExistingMint,
-  mintOrAdoptKnowledgeAssets,
   type MintAdoptionExpectation,
   type MintAdoptionRefusalReason,
-  type MintOrAdoptOutcome,
 } from './adopt-existing-mint.js';
 export { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 export * from './publication-payload-measurement.js';
