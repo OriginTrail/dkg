@@ -218,18 +218,19 @@ function repairCount(path: string): number {
 }
 
 const confirmedUal = `did:dkg:otp:20430/0x${'11'.repeat(20)}/7`;
+const laterConfirmedUal = `did:dkg:otp:20430/0x${'11'.repeat(20)}/8`;
 
 /**
  * A confirmed catalog placement and its failure diagnostic, as 10.0.27 keeps
  * them: a version 2 repair row, which releases before 10.0.27 refuse to read.
  */
-function addConfirmedPlacement(path: string): void {
+function addConfirmedPlacement(path: string, kaUal = confirmedUal): void {
   const database = new DatabaseSync(path);
   try {
-    const digest = new Uint8Array(32).fill(0x33);
+    const digest = createHash('sha256').update(kaUal).digest();
     database.prepare(
       'INSERT INTO rfc64_finalized_private_placement_repairs_v1 (repair_digest, repair_json) VALUES (?, ?)',
-    ).run(digest, JSON.stringify({ ...repair, version: 2, inventoryScope: null, kaUal: confirmedUal, seal: {} }));
+    ).run(digest, JSON.stringify({ ...repair, version: 2, inventoryScope: null, kaUal, seal: {} }));
     database.prepare(
       'INSERT INTO rfc64_private_placement_failures_v1 (repair_digest, state_json) VALUES (?, ?)',
     ).run(digest, JSON.stringify(failure));
@@ -595,6 +596,77 @@ describe('RFC-64 inventory rollback', () => {
 
     expect(prepared).toMatchObject({ outcome: 'compatible', removedConfirmedCatalogPlacements: [] });
     expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1, 2], failures: 2 });
+  });
+
+  it('removes no placement when a later deletion fails, and removes them all on the next attempt', async () => {
+    const dataDir = dataDirectory();
+    await writeV6(dataDir);
+    addConfirmedPlacement(databasePath(dataDir));
+    addConfirmedPlacement(databasePath(dataDir), laterConfirmedUal);
+    // The second of the two deletions fails, as an I/O error there would stop it.
+    const injector = new DatabaseSync(databasePath(dataDir));
+    injector.exec(`CREATE TRIGGER rollback_test_second_deletion
+      BEFORE DELETE ON rfc64_finalized_private_placement_repairs_v1
+      WHEN (SELECT count(*) FROM rfc64_finalized_private_placement_repairs_v1) < 3
+      BEGIN SELECT RAISE(ABORT, 'the second deletion failed'); END`);
+    injector.close();
+    const prepareFor10026 = () => prepareRfc64InventoryForRollbackV1(
+      dataDir, INVENTORY_V1_USER_VERSION, { removeConfirmedCatalogPlacements: true },
+    );
+
+    await expect(prepareFor10026()).rejects.toSatisfy((error: unknown) =>
+      error instanceof Error && !(error instanceof Rfc64InventoryRollbackRefusedErrorV1)
+      && error.message.includes('the second deletion failed'));
+    expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1, 2, 2], failures: 3 });
+
+    const repaired = new DatabaseSync(databasePath(dataDir));
+    repaired.exec('DROP TRIGGER rollback_test_second_deletion');
+    repaired.close();
+    // The lease was released, so the next attempt runs.
+    const prepared = await prepareFor10026();
+    prepared.release();
+    expect([...prepared.removedConfirmedCatalogPlacements].sort()).toEqual([confirmedUal, laterConfirmedUal]);
+    expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1], failures: 1 });
+  });
+
+  it('keeps the placements and the v6 schema when lowering fails after their removal', async () => {
+    const dataDir = dataDirectory();
+    await writeV6(dataDir);
+    addConfirmedPlacement(databasePath(dataDir));
+    const downMigration = INVENTORY_SCHEMA_DOWNGRADES_V1[0]!.sql;
+    const { exec } = DatabaseSync.prototype;
+    const failing = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (this: DatabaseSync, sql) {
+      if (sql === downMigration) throw new Error('disk I/O error');
+      return exec.call(this, sql);
+    });
+
+    try {
+      await expect(prepareRfc64InventoryForRollbackV1(dataDir, 5, { removeConfirmedCatalogPlacements: true }))
+        .rejects.toThrow('disk I/O error');
+    } finally {
+      failing.mockRestore();
+    }
+
+    expect(headerUserVersion(databasePath(dataDir))).toBe(6);
+    expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1, 2], failures: 2 });
+  });
+
+  it('leaves a repair row it cannot parse as it is', async () => {
+    const dataDir = dataDirectory();
+    await writeV6(dataDir);
+    const database = new DatabaseSync(databasePath(dataDir));
+    database.prepare(
+      'INSERT INTO rfc64_finalized_private_placement_repairs_v1 (repair_digest, repair_json) VALUES (?, ?)',
+    ).run(new Uint8Array(32).fill(0x55), 'not a repair');
+    database.close();
+
+    const prepared = await prepareRfc64InventoryForRollbackV1(
+      dataDir, INVENTORY_V1_USER_VERSION, { removeConfirmedCatalogPlacements: true },
+    );
+    prepared.release();
+
+    expect(prepared.removedConfirmedCatalogPlacements).toEqual([]);
+    expect(repairCount(databasePath(dataDir))).toBe(2);
   });
 
   it('holds the inventory lease until it is released, so no node can migrate the database forward', async () => {
