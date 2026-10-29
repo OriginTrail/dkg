@@ -63,3 +63,7 @@ ownership while local finalization continues, so busy duration is not the same a
 publication latency. Diagnostic failures cannot grant claims, undo durable writes or change
 the publish outcome. Raw RPC errors, signed transactions and wallet keys are not emitted by
 these scheduling events.
+
+An existing terminal `insufficient_funds` job is skipped by both automatic and manual retry.
+After repairing its funding, an operator can use the existing guarded clear and resubmit flow.
+This change does not revive historical terminal jobs.
