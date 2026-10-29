@@ -4,9 +4,9 @@ import { assertCheckpointMemory, checkpointJavaArguments } from '../src/snapshot
 vi.mock('node:os', () => ({ availableParallelism: vi.fn(() => 8), totalmem: vi.fn(() => 8 * 2 ** 30) }));
 afterEach(() => vi.restoreAllMocks());
 it('retains the existing heap and caps Java parallelism without inflating a smaller CPU allowance', () => {
-  expect(checkpointJavaArguments()).toEqual(['-Xms256m', '-Xmx3g', '-XX:ActiveProcessorCount=4']);
+  expect(checkpointJavaArguments()).toEqual(['-Xms256m', '-Xmx3g', '-XX:ActiveProcessorCount=4', '-Dcom.bigdata.hostname=127.0.0.1']);
   vi.mocked(os.availableParallelism).mockReturnValue(2);
-  expect(checkpointJavaArguments()).toEqual(['-Xms256m', '-Xmx3g', '-XX:ActiveProcessorCount=2']);
+  expect(checkpointJavaArguments()).toEqual(['-Xms256m', '-Xmx3g', '-XX:ActiveProcessorCount=2', '-Dcom.bigdata.hostname=127.0.0.1']);
 });
 it('keeps the memory floor inclusive and honors the tighter constrained allowance', () => {
   vi.spyOn(process, 'constrainedMemory').mockReturnValue(4 * 2 ** 30);

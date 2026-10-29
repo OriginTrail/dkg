@@ -12,5 +12,8 @@ export function assertCheckpointMemory(): void {
     throw new Error('Native bootstrap requires a 4 GiB memory allowance; use incremental recovery');
 }
 export function checkpointJavaArguments(): string[] {
-  return ['-Xms256m', '-Xmx3g', `-XX:ActiveProcessorCount=${Math.min(4, availableParallelism())}`];
+  // This runtime is private and loopback-only. Blazegraph's banner otherwise
+  // resolves the machine's canonical hostname before either loader or server starts.
+  return ['-Xms256m', '-Xmx3g', `-XX:ActiveProcessorCount=${Math.min(4, availableParallelism())}`,
+    '-Dcom.bigdata.hostname=127.0.0.1'];
 }
