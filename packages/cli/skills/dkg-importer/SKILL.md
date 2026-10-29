@@ -177,16 +177,15 @@ await createImportManifest({
 });
 ```
 
-`createImportManifest` writes a single `urn:dkg:import:<id>` assertion to the
-`meta` sub-graph listing every partition with `initialStatus = "pending"`, and
-shares it to SWM so a peer node (or this node after a restart) can read it back
-to resume.
-
-> **Known limit.** `scripts/lib/manifest.mjs` still shares the manifest with a
-> list of root URIs, which the node now refuses (`400 KA_ATOMIC_SHARE_REQUIRED`).
-> Until the helper is updated, `createImportManifest` and `markPartitionStatus`
-> fail against a current node. Keep import progress in a local file meanwhile
-> (one line per partition and status), and resume from it.
+`createImportManifest` writes the `urn:dkg:import:<id>` manifest to the `meta`
+sub-graph, listing every partition with `initialStatus = "pending"`, and shares
+it to SWM so a peer node (or this node after a restart) can read it back to
+resume. A share always covers a whole Knowledge Asset and seals it, so the
+manifest is a few small Knowledge Assets, each shared once: a head (the import,
+its partition count and a hash of the partition set), then pages of at most
+2,000 partitions, well under the 4 MiB share cap. Calling it again with the same
+partitions finishes an interrupted run and changes nothing on a complete one; a
+different partition set is refused.
 
 ### Per-partition lifecycle
 
@@ -206,13 +205,20 @@ for (const part of partitions) {
 ```
 
 Status events are append-only — each `markPartitionStatus` call writes a fresh
-`StatusEvent` triple with a timestamp and shares it to SWM, so peers (or a
-resume on a different node) see the progress, not just the local WM.
+`StatusEvent` with a timestamp as a small Knowledge Asset of its own and shares
+it to SWM, so peers (or a resume on a different node) see the progress, not
+just the local WM. A shared asset is sealed, so an event is never added to one
+that was shared before. To record many partitions at once, use
+`markPartitionStatuses({ client, importId, subGraphName, statuses: [{ partitionKey, status }] })`:
+one asset for the whole batch.
+
 `loadImportManifest` resolves the "current" status as the latest event per
-partition using a standard "max row" SPARQL pattern (`FILTER NOT EXISTS`
-against any later event), which avoids the classic `SAMPLE`+`MAX`
-decorrelation foot-gun. This append-only pattern also avoids needing SPARQL
-DELETE/INSERT and gives you a complete audit trail for free.
+partition (by `recordedAt`, then event IRI). Each shared Knowledge Asset is its
+own graph in SWM and a query is answered one asset at a time, so the helper
+reads partitions and events separately (inside `GRAPH ?g`) and joins them
+itself. It fails when part of the manifest is not visible yet, so a resume
+never skips a partition it cannot see. This append-only pattern also avoids
+needing SPARQL DELETE/INSERT and gives you a complete audit trail for free.
 
 ### Resume
 
@@ -576,8 +582,9 @@ promote job is queued / running.
   seals and shares the whole draft as it stands.
 - **Don't skip the manifest because "this import will only take 30 seconds".**
   30-second imports are exactly the ones interrupted by a laptop sleep / OS
-  update / coffee refill that breaks the network. Manifest cost is one
-  assertion; restart cost without one is the entire import.
+  update / coffee refill that breaks the network. Manifest cost is a few small
+  assertions, plus one per status write (`markPartitionStatuses` batches
+  them); restart cost without one is the entire import.
 - **Don't `await Promise.all(partitions.map(importOne))` with N > 4.** The
   daemon serialises intra-assertion writes anyway; >4 concurrent assertions
   just inflates memory pressure without throughput gain.
@@ -625,7 +632,7 @@ promote job is queued / running.
    e. Persist jobId; do NOT mark partition done yet.
 4. Reconciliation pass: for each in-flight jobId,
      GET /api/knowledge-assets/swm/share-jobs/<jobId> until state ∈ {succeeded, failed}.
-     - succeeded → markPartitionStatus(..., 'done')
+     - succeeded → markPartitionStatus(..., 'done'), or one markPartitionStatuses call for the pass
      - failed + lastError.code=cap_exceeded → split the content into smaller Knowledge Assets and enqueue each
      - failed + lastError.code=fatal → fix root cause + POST .../recover
      - failed_retrying → wait; worker will auto-retry transient errors

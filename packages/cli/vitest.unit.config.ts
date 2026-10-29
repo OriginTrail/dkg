@@ -74,6 +74,8 @@ export default defineConfig({
           'test/lan-addresses.test.ts',
           'test/reconcile-503-mapping.test.ts',
           'test/sealed-create-retry-route.test.ts',
+          // Mock-chain live daemon running scripts/lib/manifest.mjs; no Hardhat.
+          'test/import-manifest-live.test.ts',
           'test/config.test.ts',
           'test/status-route-rpc.test.ts',
           // Pure: in-process status route and a chain adapter over scripted endpoints.
