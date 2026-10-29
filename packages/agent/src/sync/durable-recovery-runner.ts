@@ -58,6 +58,13 @@ export interface DurableRecoveryRunnerDependencies {
   connectRequestedPeer(peerId: string): Promise<void>;
   primeConnections(): Promise<void>;
   liveConnectionPeerIds(): string[];
+  /**
+   * Whether the peer's identity probe is in its retry backoff. A round leaves a
+   * requested peer that is in backoff when the round starts out, with no
+   * connect or admission attempt, and asks again once the window has ended.
+   * Every other peer goes to `admitPeer`. Without it, every peer is asked.
+   */
+  isAdmissionBackedOff?(peerId: string): boolean;
   admitPeer(peerId: string): Promise<boolean>;
   isPrivateContextGraph(): Promise<boolean>;
   orderPeerIds(
@@ -248,7 +255,11 @@ export class DurableRecoveryRunner {
             ...(preferredPeerId ? [preferredPeerId] : []),
             ...(options.candidatePeerIds ?? []),
           ])];
+      // Requested peers in probe backoff when the round starts sit it out:
+      // their failed probe was logged once, and asking would only repeat a skip.
+      const backedOff = new Set(requestedPeerIds.filter((peerId) => deps.isAdmissionBackedOff?.(peerId) === true));
       for (const peerId of requestedPeerIds) {
+        if (backedOff.has(peerId)) continue;
         try {
           await deps.connectRequestedPeer(peerId);
         } catch (error) {
@@ -275,7 +286,7 @@ export class DurableRecoveryRunner {
         : [...new Set([...requestedPeerIds, ...liveConnectionPeerIds])];
       const admittedPeerIds: string[] = [];
       for (const peerId of connectedPeerIds) {
-        if (await deps.admitPeer(peerId)) admittedPeerIds.push(peerId);
+        if (!backedOff.has(peerId) && await deps.admitPeer(peerId)) admittedPeerIds.push(peerId);
       }
       const privateOnly = await deps.isPrivateContextGraph().catch(() => false);
       const discoveryOrdered = options.restrictToCandidatePeerIds

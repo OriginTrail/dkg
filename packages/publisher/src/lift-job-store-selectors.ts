@@ -113,9 +113,9 @@ export class LiftJobStoreSelectors {
 
   /**
    * The same read with the caller's options, so a sweep can label its own reads (OT-RFC-73 P11). Admission calls the one-argument method above: it has no policy argument.
-   * `oneRecordPerJob` is the retention sweep's alone (online review 4396325296): the read keeps one record per job id, the last row's, so two records of one id leave the
-   * engine's row order to decide which one the caller sees. Admission keeps that answer; a caller that deletes records must not judge a key from it, and with the flag the
-   * read throws for such a key instead (`refuseTwoRecordsOfOneJob`).
+   * `oneRecordPerJob` is for the callers that delete records, the retention sweep and bulk clear (online review 4396325296, #3562): the read keeps one record per job id, the
+   * last row's, so two records of one id leave the engine's row order to decide which one the caller sees. Admission keeps that answer; a caller that deletes records must
+   * not judge a key from it, and with the flag the read throws for such a key instead (`refuseTwoRecordsOfOneJob`).
    */
   async vmPublishCandidates(lifecycleKey: string, options: QueryOptions, oneRecordPerJob = false): Promise<PersistedLiftJob[]> {
     const scanLegacy = this.legacyScan.scanRequired();

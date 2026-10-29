@@ -93,6 +93,9 @@ const RECOVERED: AsyncLiftChainProofResolution = {
 /** The three verdicts that establish nothing about the transaction. */
 const UNRESOLVED_VERDICTS = ['pending-mempool', 'pending-awaiting-confirmation', 'unrecognized', 'inconclusive'] as const;
 
+/** The operator's by-id clear of a held job: it carries the pending-transaction override (#3573). */
+const OPERATOR_CLEAR = { pendingTransactionOverride: { kind: 'nodeOperator' } } as const;
+
 describe('GH#2270 proof-first chain dispatcher', () => {
   const h = createAsyncLift2270Harness();
   const { createPublisher, failAfterRecordedTxHash, failWithUnmetQuorum } = h;
@@ -635,7 +638,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
       // The transaction is untouched — nothing was resent, the evidence is preserved.
       expect(after?.broadcast?.txHash ?? after?.recovery?.txHashChecked).toBe(TX_HASH);
       // And the exit the comment promised now actually exists.
-      expect((await publisher.clearTerminalJob(held.jobId)).outcome).toBe('cleared');
+      expect((await publisher.clearTerminalJob(held.jobId, OPERATOR_CLEAR)).outcome).toBe('cleared');
     });
 
     // PR #2300 r1 (🟡 3809054845) — the create-only release rule over RAW transition types,
@@ -1132,7 +1135,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
 
       const recovering = publisher.recover();
       await gated.whenEntered;
-      expect((await publisher.clearTerminalJob(held.jobId)).outcome).toBe('cleared');
+      expect((await publisher.clearTerminalJob(held.jobId, OPERATOR_CLEAR)).outcome).toBe('cleared');
       gated.release();
 
       expect(await recovering).toBe(0);
@@ -1168,7 +1171,7 @@ describe('GH#2270 proof-first chain dispatcher', () => {
 
       const recovering = publisher.recover();
       await gated.whenEntered;
-      expect((await publisher.clearTerminalJob(held.jobId)).outcome).toBe('cleared');
+      expect((await publisher.clearTerminalJob(held.jobId, OPERATOR_CLEAR)).outcome).toBe('cleared');
       const successorId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
       gated.release();
 
