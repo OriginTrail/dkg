@@ -687,7 +687,7 @@ test('manifest helpers reject custom assertionName overrides', async () => {
     () => markPartitionStatuses({
       client, importId: 'custom-name', statuses: [{ partitionKey: 'a', status: 'done' }], subGraphName: 'meta', assertionName: 'x',
     }),
-    /no longer accepts `assertionName`/,
+    /does not accept `assertionName`/,
   );
 });
 

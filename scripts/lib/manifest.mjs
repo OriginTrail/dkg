@@ -791,7 +791,7 @@ export async function markPartitionStatuses({
 }) {
   if (assertionName !== undefined) {
     throw new Error(
-      'markPartitionStatuses no longer accepts `assertionName`: manifest assertion names are derived from importId so resume/status writes target the same assertion.',
+      'markPartitionStatuses does not accept `assertionName`: manifest assertion names are derived from importId so resume/status writes target the same assertion.',
     );
   }
   if (!client?.cgId) {
