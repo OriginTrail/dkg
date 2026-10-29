@@ -8,7 +8,6 @@ import {
   WALLET_FUNDING_COOLDOWN_BASE_MS as BASE,
   WALLET_FUNDING_COOLDOWN_MAX_MS as MAX,
   WALLET_FUNDING_EVIDENCE_TTL_MS as EVIDENCE_TTL,
-  WALLET_FUNDING_READING_TTL_MS as READING_TTL,
   WALLET_FUNDING_READ_TIMEOUT_MS as READ_TIMEOUT,
   refusedTransactionCostWei,
   type AsyncLiftWalletBalanceReader,
@@ -54,7 +53,6 @@ describe('AsyncLiftWalletFunding (#3591)', () => {
     const { funding, reads } = gate();
     expect(funding.mayClaim('w1')).toBe(true);
     expect(funding.mayClaim('w2')).toBe(true);
-    funding.recordSpend('w1');
     expect(funding.mayClaim('w1')).toBe(true);
     expect(reads).toEqual([]);
   });
@@ -86,7 +84,6 @@ describe('AsyncLiftWalletFunding (#3591)', () => {
     expect(g.funding.mayClaim('w1')).toBe(false);
     await g.settle();
     expect(g.funding.mayClaim('w1')).toBe(true);
-    expect(g.funding.mayClaim('w2')).toBe(false);
   });
 
   it('caps the cooldown at ten minutes', async () => {
@@ -168,47 +165,19 @@ describe('AsyncLiftWalletFunding (#3591)', () => {
     expect(g.funding.mayClaim('w1')).toBe(true);
   });
 
-  it('holds every wallet to a stated cost for an hour, from a reading taken since its last job', async () => {
+  it('keeps only the refused wallet out: a stated cost never applies to another wallet', async () => {
     const g = gate();
+    // An expensive publication is refused on w1, stating 2047.
     g.fund('w1', 1907n);
-    g.fund('w2', 5_000n);
-    g.fund('w3', 100n);
     g.funding.recordRefusal('w1', STATED);
     await g.settle();
-
-    expect(g.funding.mayClaim('w2')).toBe(false);
-    await g.settle();
+    // w2 holds less than that cost, yet may pay for a cheaper job: it claims, and nothing reads it.
+    g.fund('w2', 500n);
     expect(g.funding.mayClaim('w2')).toBe(true);
-    expect(g.funding.mayClaim('w2')).toBe(true);
-    expect(g.reads.filter((walletId) => walletId === 'w2')).toHaveLength(1);
-    // Its job spent funds: the reading before it no longer counts.
-    g.advance(1);
-    g.funding.recordSpend('w2');
-    g.advance(1);
-    expect(g.funding.mayClaim('w2')).toBe(false);
-    await g.settle();
-    expect(g.funding.mayClaim('w2')).toBe(true);
-    // An old reading does not count either.
-    g.advance(READING_TTL + 1);
-    expect(g.funding.mayClaim('w2')).toBe(false);
-    await g.settle();
-    expect(g.funding.mayClaim('w2')).toBe(true);
-
-    // A wallet below the cost is kept out like a refused one, until it covers it.
-    expect(g.funding.mayClaim('w3')).toBe(false);
-    await g.settle();
-    expect(g.funding.mayClaim('w3')).toBe(false);
-    g.fund('w3', 2_047n);
-    g.advance(BASE);
-    expect(g.funding.mayClaim('w3')).toBe(false);
-    await g.settle();
     expect(g.funding.mayClaim('w3')).toBe(true);
-
-    // After the hour the cost is no longer applied.
-    g.advance(EVIDENCE_TTL);
-    const reads = g.reads.length;
-    expect(g.funding.mayClaim('w4')).toBe(true);
-    expect(g.reads).toHaveLength(reads);
+    await g.settle();
+    expect(g.reads).toEqual(['w1']);
+    expect(g.funding.mayClaim('w1')).toBe(false);
   });
 
   it('gives a refused wallet that was never topped up one more attempt after an hour', async () => {
@@ -238,9 +207,6 @@ describe('AsyncLiftWalletFunding (#3591)', () => {
     expect(g.funding.mayClaim('w1')).toBe(false);
     await g.settle();
     expect(g.funding.mayClaim('w1')).toBe(true);
-    expect(g.funding.mayClaim('w2')).toBe(false);
-    await g.settle();
-    expect(g.funding.mayClaim('w2')).toBe(true);
   });
 
   it('counts a reader that throws or does not answer as unreadable, and reads once at a time', async () => {
@@ -255,33 +221,37 @@ describe('AsyncLiftWalletFunding (#3591)', () => {
       },
     });
     g.funding.recordRefusal('w1', STATED);
-    expect(g.funding.mayClaim('w2')).toBe(false);
-    expect(g.funding.mayClaim('w2')).toBe(false);
     await vi.advanceTimersByTimeAsync(0);
-    expect(reads).toEqual(['w1', 'w2']);
-    await vi.advanceTimersByTimeAsync(READ_TIMEOUT);
-    expect(g.pokes.sort()).toEqual(['w1', 'w2']);
-    expect(g.funding.mayClaim('w2')).toBe(true);
-
-    hang = false;
+    expect(reads).toEqual(['w1']);
+    // The refusal's reading is still pending when the cooldown ends: no second reading starts.
     g.advance(BASE);
     expect(g.funding.mayClaim('w1')).toBe(false);
+    expect(g.funding.mayClaim('w1')).toBe(false);
     await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toEqual(['w1']);
+    await vi.advanceTimersByTimeAsync(READ_TIMEOUT);
+    expect(g.pokes).toEqual(['w1']);
+
+    hang = false;
+    expect(g.funding.mayClaim('w1')).toBe(false);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(reads).toEqual(['w1', 'w1']);
+    expect(g.pokes).toEqual(['w1', 'w1']);
+    // A thrown read is unreadable, and an unreadable balance does not keep the wallet out.
     expect(g.funding.mayClaim('w1')).toBe(true);
     expect(vi.getTimerCount()).toBe(0);
   });
 
   it('counts a malformed reading as unreadable instead of throwing in the claim', async () => {
-    const g = gate({ reader: async () => ({ native: '5000', trac: -1n }) as unknown as AsyncLiftWalletBalances });
-    g.funding.recordRefusal('w1', STATED);
-    expect(g.funding.mayClaim('w2')).toBe(false);
-    await g.settle();
-    expect(g.funding.mayClaim('w2')).toBe(true);
-    const undefinedReading = gate({ reader: async () => undefined as unknown as AsyncLiftWalletBalances });
-    undefinedReading.funding.recordRefusal('w1', STATED);
-    expect(undefinedReading.funding.mayClaim('w2')).toBe(false);
-    await undefinedReading.settle();
-    expect(undefinedReading.funding.mayClaim('w2')).toBe(true);
+    for (const answer of [{ native: '5000', trac: -1n }, undefined]) {
+      const g = gate({ reader: async () => answer as unknown as AsyncLiftWalletBalances });
+      g.funding.recordRefusal('w1', STATED);
+      await g.settle();
+      g.advance(BASE);
+      expect(g.funding.mayClaim('w1')).toBe(false);
+      await g.settle();
+      expect(g.funding.mayClaim('w1')).toBe(true);
+    }
   });
 
   it('without a reader, keeps a refused wallet out for its cooldown only', () => {

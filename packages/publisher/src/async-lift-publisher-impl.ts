@@ -3082,7 +3082,6 @@ export class TripleStoreAsyncLiftPublisher
   // the release path: the listener belongs to the caller's scheduler, and its failure must not
   // touch lock state.
   private notifyWalletRelease(walletId: string): void {
-    this.walletFunding.recordSpend(walletId);
     this.queueScheduler.walletRelease(walletId);
   }
 

@@ -2,27 +2,27 @@
  * #3591 — can a publisher wallet pay for its next publication? The claim asks this, so a job is
  * never claimed by a wallet the chain has just refused for funds while another wallet could pay.
  *
- * The answer rests on evidence, never on a guess. Until the chain has refused a publication for
- * funds, every wallet may claim and no balance is read. A definitive refusal (the node turned the
- * transaction away before the mempool, or the adapter found no funded wallet before signing) then:
- *   - keeps the refused wallet out of claims for a cooldown that doubles while the wallet stays
- *     short (30 s to 10 min). After each cooldown a fresh balance reading decides: the wallet is
- *     back once it covers the cost the node stated, or, when the node stated none, once its native
- *     balance, its TRAC balance or the coverage of its Publishing Conviction Account grew since the
- *     refusal (a top-up, a registered or funded account, a new epoch's allowance);
- *   - teaches the node the cost a publication needs, when the node stated it (`have X want Y`,
- *     `balance X, tx cost Y`). For an hour after that, a wallet claims only with a reading, taken
- *     since its last job, that covers that cost. A wallet below it is kept out like a refused one.
+ * The answer rests on evidence about each wallet, never on a guess. Until the chain refuses a
+ * wallet's publication for funds, the wallet claims freely and nothing is read. A definitive
+ * refusal (the node turned the transaction away before the mempool, or the adapter found no funded
+ * wallet before signing) keeps that wallet, and only that wallet, out of claims for a cooldown that
+ * doubles while it stays short (30 s to 10 min). After each cooldown a fresh balance reading
+ * decides: the wallet is back once it covers the cost the node stated for the refused transaction
+ * (`have X want Y`, `balance X, tx cost Y`), or, when the node stated none, once its native
+ * balance, its TRAC balance or the coverage of its Publishing Conviction Account grew since the
+ * refusal (a top-up, a registered or funded account, a new epoch's allowance).
  *
- * Both are bounded by the same hour: a refused wallet with no top-up gets one more attempt after
- * it, because a stated cost goes stale when the gas price falls. Gas and balances can still change
- * between the claim and the send; the refusal that follows is again definitive, so the job is
- * retried rather than lost (`insufficient_funds` is in the automatic retry lane).
+ * A stated cost is the cost of one transaction, so it never applies to other wallets: costs vary
+ * with the operation, the payload and the gas price, and another wallet may pay for a cheaper job.
+ * A refused wallet with no top-up gets one more attempt after an hour, because a stated cost also
+ * goes stale when the gas price falls. Gas and balances can still change between the claim and
+ * the send; the refusal that follows is again definitive, so the job is retried rather than lost
+ * (`insufficient_funds` is in the automatic retry lane).
  *
- * Readings happen only when a wallet with a candidate job asks to claim, or right after a refusal,
- * and never under the claim lock: the claim gets `false` while a reading is pending, and the
- * reading's end pokes the wallet's loop. A reading that fails or does not answer in time counts as
- * unreadable, and an unreadable balance never keeps a wallet out on its own.
+ * Readings happen only for a refused wallet: right after the refusal, and when its cooldown is over
+ * and it has a candidate job. They never run under the claim lock: the claim gets `false` while a
+ * reading is pending, and the reading's end pokes the wallet's loop. A reading that fails or does
+ * not answer in time counts as unreadable, and an unreadable balance never keeps a wallet out.
  *
  * State is in memory. After a restart a wallet that is still short is refused once more before
  * it is kept out again; the refused job itself keeps its retry schedule in the store.
@@ -44,10 +44,8 @@ export type AsyncLiftWalletBalanceReader = (walletId: string) => Promise<AsyncLi
 
 export const WALLET_FUNDING_COOLDOWN_BASE_MS = 30_000;
 export const WALLET_FUNDING_COOLDOWN_MAX_MS = 10 * 60_000;
-/** How long a stated cost is applied, and how long a refused wallet stays out without a top-up. */
+/** How long a refused wallet stays out without a top-up before it gets one more attempt. */
 export const WALLET_FUNDING_EVIDENCE_TTL_MS = 60 * 60_000;
-/** A reading older than this no longer shows that a wallet can pay the learned cost. */
-export const WALLET_FUNDING_READING_TTL_MS = 60_000;
 /** A balance read that has not answered by then counts as unreadable. */
 export const WALLET_FUNDING_READ_TIMEOUT_MS = 15_000;
 
@@ -58,7 +56,7 @@ interface WalletExclusion {
   cooldownMs: number;
   /** No claim and no new reading before this. */
   until: number;
-  /** The cost the node stated for the refused transaction, or the learned cost the wallet was below. */
+  /** The cost the node stated for the refused transaction. */
   readonly requiredNativeWei?: bigint;
   /** Read right after the refusal: a later reading above it shows a top-up. */
   balancesAtRefusal?: AsyncLiftWalletBalances;
@@ -74,13 +72,10 @@ interface WalletFundingRecord {
   excluded?: WalletExclusion;
   reading?: WalletReading;
   pendingRead?: Promise<void>;
-  /** The wallet's last job ended here; a reading from before it no longer describes the wallet. */
-  spentAt?: number;
 }
 
 export class AsyncLiftWalletFunding {
   private readonly wallets = new Map<string, WalletFundingRecord>();
-  private requirement?: { readonly nativeWei: bigint; readonly learnedAt: number };
 
   constructor(private readonly options: {
     readonly readBalances?: AsyncLiftWalletBalanceReader;
@@ -94,64 +89,37 @@ export class AsyncLiftWalletFunding {
     const now = this.options.now();
     const wallet = this.wallets.get(walletId);
     const excluded = wallet?.excluded;
-    if (wallet && excluded) {
-      if (now < excluded.until) return false;
-      if (now - excluded.since < WALLET_FUNDING_EVIDENCE_TTL_MS && this.options.readBalances) {
-        const reading = wallet.reading;
-        if (!reading || reading.at < excluded.until) return this.read(walletId);
-        if (!replenished(excluded, reading.balances)) {
-          excluded.cooldownMs = Math.min(WALLET_FUNDING_COOLDOWN_MAX_MS, excluded.cooldownMs * 2);
-          excluded.until = now + excluded.cooldownMs;
-          return false;
-        }
+    if (!wallet || !excluded) return true;
+    if (now < excluded.until) return false;
+    if (now - excluded.since < WALLET_FUNDING_EVIDENCE_TTL_MS && this.options.readBalances) {
+      const reading = wallet.reading;
+      if (!reading || reading.at < excluded.until) return this.read(walletId);
+      if (!replenished(excluded, reading.balances)) {
+        excluded.cooldownMs = Math.min(WALLET_FUNDING_COOLDOWN_MAX_MS, excluded.cooldownMs * 2);
+        excluded.until = now + excluded.cooldownMs;
+        return false;
       }
-      wallet.excluded = undefined;
     }
-    const requirement = this.requirement;
-    if (!requirement || now - requirement.learnedAt >= WALLET_FUNDING_EVIDENCE_TTL_MS || !this.options.readBalances) {
-      return true;
-    }
-    const reading = wallet?.reading;
-    if (!reading || reading.at <= (wallet?.spentAt ?? -Infinity) || now - reading.at > WALLET_FUNDING_READING_TTL_MS) {
-      return this.read(walletId);
-    }
-    if (covers(reading.balances.native, requirement.nativeWei)) return true;
-    this.exclude(walletId, now, requirement.nativeWei, reading.balances);
-    return false;
+    wallet.excluded = undefined;
+    return true;
   }
 
   /** The chain refused this wallet's publication for funds, definitively. */
   recordRefusal(walletId: string, error: unknown): void {
     const now = this.options.now();
-    const stated = refusedTransactionCostWei(error);
-    if (stated !== undefined) this.requirement = { nativeWei: stated, learnedAt: now };
-    const exclusion = this.exclude(walletId, now, stated ?? this.wallets.get(walletId)?.excluded?.requiredNativeWei);
-    this.walletRecord(walletId).reading = undefined;
-    this.read(walletId, (balances) => { exclusion.balancesAtRefusal ??= balances; });
-  }
-
-  /** The wallet's job ended: what it spent makes its last reading stale. */
-  recordSpend(walletId: string): void {
-    this.walletRecord(walletId).spentAt = this.options.now();
-  }
-
-  private exclude(
-    walletId: string,
-    now: number,
-    requiredNativeWei: bigint | undefined,
-    balancesAtRefusal?: AsyncLiftWalletBalances,
-  ): WalletExclusion {
     const wallet = this.walletRecord(walletId);
     const prior = wallet.excluded;
     const cooldownMs = prior ? Math.min(WALLET_FUNDING_COOLDOWN_MAX_MS, prior.cooldownMs * 2) : WALLET_FUNDING_COOLDOWN_BASE_MS;
-    wallet.excluded = {
+    const requiredNativeWei = refusedTransactionCostWei(error) ?? prior?.requiredNativeWei;
+    const exclusion: WalletExclusion = {
       since: prior?.since ?? now,
       cooldownMs,
       until: now + cooldownMs,
       ...(requiredNativeWei !== undefined ? { requiredNativeWei } : {}),
-      ...(balancesAtRefusal ? { balancesAtRefusal } : {}),
     };
-    return wallet.excluded;
+    wallet.excluded = exclusion;
+    wallet.reading = undefined;
+    this.read(walletId, (balances) => { exclusion.balancesAtRefusal ??= balances; });
   }
 
   /** Start one reading for this wallet unless one is pending; the claim waits for it (`false`). */

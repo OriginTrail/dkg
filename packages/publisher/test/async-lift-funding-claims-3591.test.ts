@@ -16,13 +16,15 @@ import { WALLET_FUNDING_COOLDOWN_BASE_MS } from '../src/async-lift-wallet-fundin
 import { KA_VM_EXECUTOR_TX_HASH, kaVmPublishRequest, stageKnowledgeAssetShareSnapshot } from '../../../scripts/testing/ka-vm-publish.js';
 import { completeResult } from './_helpers/journal-completion.js';
 
-/** What the node says the refused transaction needed. */
+/** What a publication costs unless a test prices it otherwise; the node states it when it refuses. */
 const COST = 2_047n;
 const RETRY_MS = 10;
 
 function fixture(store = new OxigraphStore()) {
   const clock = { now: 1_000 };
   const balances = new Map<string, bigint>();
+  /** Publication costs by request name. */
+  const costs = new Map<string, bigint>();
   /** What each wallet's Publishing Conviction Account can still cover. */
   const coverage = new Map<string, bigint>();
   /** Wallets with no TRAC of their own: the adapter finds them unfundable before signing unless an account covers them. */
@@ -36,20 +38,21 @@ function fixture(store = new OxigraphStore()) {
   let refusedTx = 0;
   let ids = 0;
   const handler: NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']> = {
-    execute: async ({ walletId, publishOptions }) => {
+    execute: async ({ walletId, request, publishOptions }) => {
       signed.push(walletId);
       const early = beforeSigning.shift();
       if (early !== undefined) throw early;
       if (tracShort.has(walletId) && (coverage.get(walletId) ?? 0n) === 0n) {
         throw Object.assign(new Error('No operational wallet has enough funds to publish'), { code: NO_FUNDED_PUBLISHER_WALLET_CODE });
       }
-      const covered = (balances.get(walletId) ?? 0n) >= COST;
+      const cost = costs.get(request.name) ?? COST;
+      const covered = (balances.get(walletId) ?? 0n) >= cost;
       const txHash = covered ? KA_VM_EXECUTOR_TX_HASH : (`0x${(++refusedTx).toString(16).padStart(64, 'a')}` as `0x${string}`);
       await publishOptions.onBeforeBroadcast?.({ txHash, operationKind: 'create' });
       if (ambiguous.delete(walletId)) throw new Error('ETIMEDOUT: request timed out');
       // The node turns away what the wallet cannot pay for, before the mempool, and says why.
       if (!covered) {
-        throw new Error(`insufficient funds for gas * price + value: address 0x00000000000000000000000000000000000000a1 have ${balances.get(walletId) ?? 0n} want ${COST}`);
+        throw new Error(`insufficient funds for gas * price + value: address 0x00000000000000000000000000000000000000a1 have ${balances.get(walletId) ?? 0n} want ${cost}`);
       }
       await publishOptions.onBroadcastAccepted?.({ txHash, operationKind: 'create' });
       return completeResult();
@@ -64,6 +67,7 @@ function fixture(store = new OxigraphStore()) {
     tracShort,
     fund: (walletId: string, wei: bigint) => { balances.set(walletId, wei); },
     cover: (walletId: string, wei: bigint) => { coverage.set(walletId, wei); },
+    price: (name: string, wei: bigint) => { costs.set(name, wei); },
     publisher: () => new TripleStoreAsyncLiftPublisher(store, {
       now: () => clock.now,
       idGenerator: () => `job-${++ids}`,
@@ -115,9 +119,7 @@ describe('funding-aware claims and retry after a top-up (#3591)', () => {
     // The refused hash travels on, accounted for: the refusal proved it can never take effect.
     expect(waiting?.recovery).toMatchObject({ txHashChecked: refused.broadcast!.txHash, txHashAccounted: true });
 
-    // A cost is known now, so the funded wallet first reads its balance, then claims.
-    expect(await publisher.processNext('funded')).toBeNull();
-    await settle();
+    // Another wallet claims it at once: the refused wallet's stated cost was that wallet's own.
     const done = await publisher.processNext('funded');
     expect(done).toMatchObject({ jobId, status: 'finalized', claim: { walletId: 'funded' } });
     expect(f.signed).toEqual(['short', 'funded']);
@@ -131,16 +133,16 @@ describe('funding-aware claims and retry after a top-up (#3591)', () => {
     await stageKnowledgeAssetShareSnapshot({ store: f.store });
     const { jobId } = await refuseOn(f, publisher, 'short-a', 'waiting');
 
+    // The retry goes to the other wallet, which is refused as well.
     f.clock.now += RETRY_MS;
     expect(await publisher.processNext('short-a')).toBeNull();
-    // The other wallet reads its balance once and stays out: it is below the stated cost.
-    expect(await publisher.processNext('short-b')).toBeNull();
-    await settle();
-    expect(await publisher.processNext('short-b')).toBeNull();
-    await settle();
+    expect(await publisher.processNext('short-b')).toMatchObject({ jobId, status: 'failed', failure: { code: 'insufficient_funds' } });
+    // Both are out now: the next retry waits as accepted, and neither wallet claims it.
+    f.clock.now += RETRY_MS;
+    expect(await publisher.processNext('short-a')).toBeNull();
     expect(await publisher.processNext('short-b')).toBeNull();
     expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
-    expect(f.signed).toEqual(['short-a']);
+    expect(f.signed).toEqual(['short-a', 'short-b']);
 
     // Topped up: after its cooldown the wallet reads its balance again and claims.
     f.fund('short-b', 5_000n);
@@ -148,7 +150,22 @@ describe('funding-aware claims and retry after a top-up (#3591)', () => {
     expect(await publisher.processNext('short-b')).toBeNull();
     await settle();
     expect(await publisher.processNext('short-b')).toMatchObject({ jobId, status: 'finalized', claim: { walletId: 'short-b' } });
-    expect(f.signed).toEqual(['short-a', 'short-b']);
+    expect(f.signed).toEqual(['short-a', 'short-b', 'short-b']);
+  });
+
+  it('lets a cheaper job proceed on a smaller wallet after an expensive job was refused', async () => {
+    const f = fixture();
+    f.fund('short', 1_907n);
+    f.fund('small', 500n);
+    f.price('cheap', 100n);
+    const publisher = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+    await refuseOn(f, publisher, 'short', 'expensive');
+
+    // The node stated 2047 for the expensive transaction. That is no minimum for other wallets.
+    const cheap = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'cheap' }));
+    expect(await publisher.processNext('small')).toMatchObject({ jobId: cheap, status: 'finalized', claim: { walletId: 'small' } });
+    expect(f.signed).toEqual(['short', 'small']);
   });
 
   it('lets a wallet refused before signing back once a Publishing Conviction Account covers it, with no transfer to the wallet', async () => {
@@ -215,8 +232,6 @@ describe('funding-aware claims and retry after a top-up (#3591)', () => {
 
     f.clock.now += RETRY_MS;
     expect(await publisher.processNext('short')).toBeNull();
-    expect(await publisher.processNext('funded')).toBeNull();
-    await settle();
     f.beforeSigning.push(new QuorumUnmetError({ collected: 2, required: 3, dialled: 2 }));
     const failed = await publisher.processNext('funded') as PersistedFailedJob;
     expect(failed).toMatchObject({ jobId, status: 'failed', failure: { code: 'quorum_unmet' } });
