@@ -3,7 +3,8 @@ import { createServer, type Server } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, resolve } from 'node:path';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import type oxigraph from 'oxigraph';
 import { startOxigraphSparqlEndpoint } from './helpers/oxigraph-sparql-endpoint.js';
@@ -72,7 +73,7 @@ async function run(mode: string, populated: 'named' | 'default' | false,
     await writeFile(join(home, 'guard.mjs'), `import fs from 'node:fs/promises'; import {syncBuiltinESMExports} from 'node:module'; fs.statfs=async path=>({bavail:String(path).endsWith('journal')?1:100000000,bsize:4096}); syncBuiltinESMExports();`);
     args.push('--import', join(home, 'guard.mjs'));
   }
-  args.push(resolve('scripts/ingest-floor-benchmark.mjs'), '--manifest', join(home, 'manifest.json'),
+  args.push(fileURLToPath(new URL('../scripts/ingest-floor-benchmark.mjs', import.meta.url)), '--manifest', join(home, 'manifest.json'),
     '--endpoint', options.trailingSlash ? `${url}/` : url, '--mode', mode, '--out', join(home, 'out.json'), '--storage-path', join(home, 'journal'));
   if (options.group !== undefined) args.push('--group', String(options.group));
   await mkdir(join(home, 'journal'));
