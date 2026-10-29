@@ -6,4 +6,5 @@ it('normal chain configuration binds to exactly the EVM adapter deployment witho
   const adapter = new EVMChainAdapter({ ...chain, privateKey: chain.operationalKeys[0], allowNoAdminSigner: true });
   expect(checkpointChainBinding({ dataDir: '/unused', name: 'binding', chainConfig: chain })).toEqual({ chainId: adapter.chainId, deploymentId: adapter.deploymentId });
   expect(() => checkpointChainBinding({ dataDir: '/unused', name: 'binding' })).toThrow('explicit chain');
+  expect(() => checkpointChainBinding({ dataDir: '/unused', name: 'binding', chainConfig: { ...chain, operationalKeys: undefined } })).toThrow();
 });

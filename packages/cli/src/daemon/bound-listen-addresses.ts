@@ -59,4 +59,3 @@ export function getBoundListenMultiaddrs(libp2p: unknown): string[] | null {
   // listener evidence.
   return null;
 }
-

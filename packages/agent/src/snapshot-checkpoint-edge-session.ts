@@ -3,6 +3,7 @@ import { attachCheckpointInventory, type CheckpointInventory } from './snapshot-
 import { assertCheckpointMemory } from './snapshot-checkpoint-profile.js';
 import { join } from 'node:path';
 import type { BlazegraphStore } from '@origintrail-official/dkg-storage';
+import { operationalSignerSourceOf } from './agent-chain-signer-source.js';
 import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
 import type { DKGAgentConfig } from './dkg-agent-types.js';
 import type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
@@ -14,7 +15,7 @@ export type CheckpointEdgeConfig = DKGAgentConfig & { dataDir: string };
 export function checkpointChainBinding(config: CheckpointEdgeConfig) {
   if (config.chainAdapter) return { chainId: config.chainAdapter.chainId, deploymentId: config.chainAdapter.deploymentId };
   const chain = config.chainConfig;
-  if (!chain?.chainId || !chain.hubAddress) throw new Error('Checkpoint requires an explicit chain deployment');
+  if (!chain?.chainId || !chain.hubAddress || !operationalSignerSourceOf(chain)) throw new Error('Checkpoint requires an explicit chain deployment');
   return { chainId: chain.chainId, deploymentId: buildEvmDeploymentId(chain as { chainId: string; hubAddress: string }) };
 }
 
