@@ -47,4 +47,3 @@ export type TickOutcome =
       period?: ChallengePeriod;
     }
   | { kind: 'error'; error: Error; period?: ChallengePeriod };
-
