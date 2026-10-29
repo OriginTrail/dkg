@@ -1,5 +1,8 @@
+import type { ContextGraphPartitionRead, ContextGraphPartitionReadOptions } from './query-types.js';
+import { createScopedContentGraphRoutePolicy, selectScopedRoutePartitions, selectScopedRouteGraphs, selectLegacyScopedRouteGraphs } from './scoped-content-graph-policy.js';
+import { normalizeContextGraphPartitionReadOptions, readPartitionStatistics, type NamedGraphStatsBatchGate } from './named-graph-statistics.js';
 import { QueryResultTooLargeError } from './query-result-size-error.js';
-import { selectContentPartitions, type ContentPartition } from './content-partition-policy.js';
+import { type ContentPartition } from './content-partition-policy.js';
 import { classifyScopedContentGraph, isKnownChildContextGraphPartition } from './scoped-content-partition.js';
 import { stripSparqlLiteralValue } from './query-binding.js';
 import { readScopedContentGraphCatalog, readRegisteredViewSubGraphs, readChildContextGraphAuthority } from './scoped-content-graph-catalog.js';
@@ -332,6 +335,23 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     );
   }
 
+  /** Carry admission requirements with the authorized inventory across caller boundaries. */
+  async listContextGraphQueryPartitionReads(contextGraphId: string, options?: ContextGraphPartitionReadOptions): Promise<ContextGraphPartitionRead[]> {
+    const opts = normalizeContextGraphPartitionReadOptions(options);
+    const policy = createScopedContentGraphRoutePolicy(contextGraphId, opts);
+    const reads = createQueryStoreReadContext(this.store, opts);
+    const discovery = await this.resolveScopedContentGraphDiscovery(contextGraphId, reads);
+    const inventory = new Set(discovery.inventory);
+    return selectScopedRoutePartitions(policy, discovery.partitions).filter(read => inventory.has(read.graph));
+  }
+
+  /** Inventory, bounded aggregates and fresh candidate admission have one owner. */
+  async readContextGraphNamedGraphStats(contextGraphId: string, options: ContextGraphPartitionReadOptions = {}, aroundBatch?: NamedGraphStatsBatchGate) {
+    const opts = normalizeContextGraphPartitionReadOptions(options);
+    const partitions = await this.listContextGraphQueryPartitionReads(contextGraphId, opts);
+    return readPartitionStatistics(this.store, contextGraphId, partitions, opts, aroundBatch);
+  }
+
   async query(sparql: string, options?: QueryOptions): Promise<QueryResult> {
     const prepared = prepareSparql(sparql);
     if (prepared.status === 'malformed-uchar') {
@@ -380,30 +400,31 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const execute = (discovery: ScopedContentGraphDiscoverySnapshot | null) => {
       const lane = discovery ? { query: reads.query,
         listGraphsByPrefix: async (prefix: string) => filterRouteGraphsByPrefix(discovery.inventory, prefix) } : reads;
-      const variableContentGraphs = discovery ? selectContentPartitions(
-        discovery.partitions, plan.draftAccess, plan.graphs.subGraphName, plan.includeSharedMemoryMeta) : [];
+      const { policy } = plan;
+      const variableContentGraphs = discovery ? selectScopedRouteGraphs(policy, discovery.partitions) : [];
       return this.executeScoped(scope, plan, lane, variableContentGraphs, reads.catalog);
     };
     switch (plan.discovery.catalog.kind) {
       case 'none': return execute(null);
-      case 'shared': return this.resolveScopedContentGraphDiscovery(plan.contextGraphId, reads).then(execute);
+      case 'shared': return this.resolveScopedContentGraphDiscovery(plan.policy.contextGraphId, reads).then(execute);
       case 'admission-owned': return plan.discovery.catalog.owner.withQueryReadAdmission(async () =>
-        execute(await this.discoverScopedContentGraphDiscovery(plan.contextGraphId, reads.catalog)), storeOptions(options));
+        execute(await this.discoverScopedContentGraphDiscovery(plan.policy.contextGraphId, reads.catalog)), storeOptions(options));
     }
   }
 
   private async executeScoped(initialGraphScope: PreparedGraphScope,
     plan: ScopedQueryReadPlan, reads: StoreReadLane, variableContentGraphs: readonly string[], catalogReads: StoreReadLane): Promise<QueryResult> {
-    const { staticContentGraphs, subGraphName, metaAllowList, staticPrivateAllowList } = plan.graphs;
+    const { subGraphName, staticPrivateAllowList } = plan.policy;
     const partitions = new Map<string, string[]>();
     for (const { root, prefix } of plan.discovery.contentPrefixes) {
       partitions.set(root, await this.discoverGraphsByPrefix(prefix, reads));
     }
-    const allowedGraphs = staticContentGraphs.flatMap(graph => [graph, ...(partitions.get(graph) ?? [])]);
+    const { policy } = plan;
+    const allowedGraphs = selectLegacyScopedRouteGraphs(policy, partitions);
     const privateAllowList = plan.discovery.privatePartitions
-      ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.contextGraphId, catalogReads, subGraphName))]
+      ? [...staticPrivateAllowList, ...(await this.discoverGraphScopedPrivateGraphs(plan.policy.contextGraphId, catalogReads, subGraphName))]
       : staticPrivateAllowList;
-    const explicitAllowedGraphs = [...allowedGraphs, ...metaAllowList, ...privateAllowList];
+    const explicitAllowedGraphs = [...allowedGraphs, ...privateAllowList];
     const variableAllowedGraphs = [...new Set([...explicitAllowedGraphs, ...variableContentGraphs])];
     // Explicit IRIs retain static route authority; only opted-in variables gain
     // classified same-CG content selected for this caller and sub-graph.
@@ -412,7 +433,7 @@ export class DKGQueryEngine implements GraphAwareQueryEngine {
     const resolve = (target: { root: string; family: 'data' | 'shared-memory' }) => resolveLegacyRouteScope(
       routedScope, target.root, target.family, prefix => this.discoverGraphsByPrefix(prefix, reads),
       plan.fallbackPolicy);
-    const route = plan.execution;
+    const route = plan.policy.execution;
     if (route.kind === 'combined') {
       const dataScope = await resolve(route.data);
       const sharedScope = await resolve(route.sharedMemory);

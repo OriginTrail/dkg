@@ -46,3 +46,5 @@ export {
   type SparqlForm,
   type EmptyQueryResultShape,
 } from './sparql-guard.js';
+
+export type { NamedGraphStatsBatchGate } from './named-graph-statistics.js';

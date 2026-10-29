@@ -473,7 +473,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
 
   kaCmd
     .command('cancel-share-job <job-id>')
-    .description('Cancel a queued or retrying async SWM share job')
+    .description('Cancel a queued async SWM share job')
     .action(async (jobId: string) => runAction(async () => {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetCancelShareJob(jobId);

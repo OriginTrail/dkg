@@ -12,7 +12,7 @@ import { queryWithPublicSnapshotTrust } from './public-snapshot-evidence.js';
 
 import { sharedMemoryAdmissionError, sharedMemoryAdmissionFailsClosed } from './swm-read-admission.js';
 import { deniedResult } from './query-denied-result.js';
-import { resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
+import { resolveCallerDraftAccess, resolveWorkingMemoryIdentityAliases } from './working-memory-identity.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
 import { resolveRfc64PrivateReadRoster } from './rfc64/private-read-roster-v1.js';
 import { createHash, randomUUID } from 'node:crypto';
@@ -631,9 +631,6 @@ export class QueryMethods extends DKGAgentBase {
     // `canonicaliseWmId`), so A-1 isolation is unaffected.
     const wmAddressAliases = opts.view === 'working-memory'
       ? resolveWmIdentity(effectiveWmAddress).aliases : undefined;
-    // Ordinary dashboard scans may read only the authenticated caller's drafts.
-    // Explicit exclusion (the bounded product route) grants no draft owners.
-    const partitionOwner = callerAgentAddressStr ?? this.defaultAgentAddress ?? this.peerId;
 
     const budget = publicQueryBudget(opts.maxResponseBytes);
     const execute = () => {
@@ -645,8 +642,7 @@ export class QueryMethods extends DKGAgentBase {
       includeSharedMemory: opts.includeSharedMemory,
       includeContextGraphPartitions: opts.includeContextGraphPartitions,
       includeSharedMemoryMeta: opts.includeSharedMemoryMeta,
-      draftAccess: opts.excludeWorkingMemoryPartitions === true || !partitionOwner ? { kind: 'none' }
-        : { kind: 'owners', owners: [partitionOwner, ...(resolveWmIdentity(partitionOwner).aliases ?? [])] },
+      draftAccess: resolveCallerDraftAccess({ defaultAgentAddress: this.defaultAgentAddress, peerId: this.peerId }, callerAgentAddressStr, opts.excludeWorkingMemoryPartitions === true),
       includePrivate: opts.includePrivate,
       signal: opts.signal,
       priority: opts.priority,

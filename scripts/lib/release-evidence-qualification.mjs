@@ -65,11 +65,16 @@ function receiptDescriptor(value, label) {
     && !value.file.startsWith('/') && value.file.split('/').every(part => part && part !== '.' && part !== '..'),
   `${label} requires a safe relative artifact path`);
 }
+// A full nightly run is optional evidence; a decision that names one names it completely.
+export const hasNightly = decision => decision.nightly !== undefined && decision.nightly !== null;
+export const selectedRuns = decision => hasNightly(decision) ? [decision.ci, decision.nightly] : [decision.ci];
 function validateDecisionShape(decision) {
   object(decision, 'release decision');
   runDescriptor(decision.ci, 'ci');
-  runDescriptor(decision.nightly, 'nightly');
-  receiptDescriptor(decision.nightly.receipt, 'nightly receipt');
+  if (hasNightly(decision)) {
+    runDescriptor(decision.nightly, 'nightly');
+    receiptDescriptor(decision.nightly.receipt, 'nightly receipt');
+  }
   object(decision.harness, 'harness');
   assert.ok(Array.isArray(decision.harness.attempts) && decision.harness.attempts.length, 'missing harness attempts');
   const ids = new Set();
@@ -103,7 +108,6 @@ export function validateReleaseDecision(decision, { expected, manifest, tree }) 
   assert.equal(decision.harness.profile, HARNESS_PROFILE, 'wrong harness profile');
 }
 function qualifyNightly({ decision, expected, runs, nightly, authenticatedNightlyDigest }) {
-  successfulRun(decision.ci, expected.commit, runs);
   const nightlyRun = successfulRun(decision.nightly, expected.commit, runs);
   assert.ok(['workflow_dispatch', 'schedule'].includes(nightlyRun.event), 'nightly must be a full dispatched or scheduled run');
   assert.equal(authenticatedNightlyDigest, decision.nightly.receipt.sha256, 'nightly receipt differs from authenticated Actions artifact');
@@ -153,7 +157,7 @@ function qualifyCiHistory({ decision, expected, runs, history }) {
     assert.ok(isFailedRun(actual), 'prior failure is not a failed run');
     assert.ok(['product', 'test', 'environment', 'unknown'].includes(failure.classification), 'CI failure lacks classification');
     assert.match(failure.issue ?? '', /^https:\/\/github\.com\/OriginTrail\/dkg\/issues\/\d+$/, 'CI failure needs an owning issue');
-    const replacement = [decision.ci, decision.nightly].find(row => String(row.runId) === String(failure.supersededBy?.runId)
+    const replacement = selectedRuns(decision).find(row => String(row.runId) === String(failure.supersededBy?.runId)
       && row.attempt === failure.supersededBy?.attempt);
     assert.ok(replacement, 'unresolved CI failure');
     const next = runs.get(`${replacement.runId}/${replacement.attempt}`);
@@ -161,10 +165,13 @@ function qualifyCiHistory({ decision, expected, runs, history }) {
   }
 }
 export function qualifyReleaseEvidence(snapshot) {
-  qualifyNightly(snapshot);
+  const { decision } = snapshot;
+  successfulRun(decision.ci, snapshot.expected.commit, snapshot.runs);
+  if (hasNightly(decision)) qualifyNightly(snapshot);
   qualifyHarnessHistory(snapshot);
   qualifyCiHistory(snapshot);
-  return { outcome: 'PASS', candidate: snapshot.decision.candidate,
-    harness: { commit: snapshot.decision.harness.commit, profile: HARNESS_PROFILE },
+  return { outcome: 'PASS', candidate: decision.candidate,
+    nightly: hasNightly(decision) ? { runId: String(decision.nightly.runId), attempt: decision.nightly.attempt } : null,
+    harness: { commit: decision.harness.commit, profile: HARNESS_PROFILE },
     decisionSha256: snapshot.decisionSha256 };
 }

@@ -9,6 +9,12 @@ const summary = read('docs/SUMMARY.md');
 const pages = [...summary.matchAll(/\]\(([^\s)]+)(?:\s+"[^"]*")?\)/g)].map(m => `docs/${m[1]}`);
 if (pages.length !== new Set(pages).size) failures.push('SUMMARY.md contains duplicate targets');
 
+// A published page must not send readers to a docs page that GitBook does not publish. The archive index pages are exempt:
+// they point into the unpublished engineering archive on purpose.
+const posix = path => path.split('\\').join('/');
+const linksUnpublishedPage = (page, rel) =>
+  !page.startsWith('docs/archive/') && /^docs\/.+\.md$/.test(posix(rel)) && !pages.includes(posix(rel));
+
 // Check only the published corpus, not deliberately unpublished engineering archives.
 function validateLinks() {
   for (const page of pages) {
@@ -30,6 +36,8 @@ function validateLinks() {
         failures.push(`${page}: missing/outside-repository link ${target}`);
       } else if (statSync(absolute).isDirectory() && !existsSync(resolve(absolute, 'README.md'))) {
         failures.push(`${page}: link to a directory without README.md: ${target}`);
+      } else if (linksUnpublishedPage(page, rel)) {
+        failures.push(`${page}: links to unpublished page ${target}; add it to SUMMARY.md or drop the link`);
       }
     }
   }

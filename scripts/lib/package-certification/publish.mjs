@@ -128,6 +128,10 @@ function stopped({ stop, otp, completed, planned, remaining, version }) {
     ? `${remaining} tags are not on ${version}, and a re-run moves only those.`
     : `the registry shows every tag on ${version}.`}`;
 }
+// A release decision may name no nightly run; say so wherever tags move on it.
+function noteEvidence(result, log) {
+  if (result?.nightly === null) log('Release evidence names no nightly run: it rests on the CI run and the harness profile');
+}
 // Moves only the (package, tag) pairs the registry does not show on the
 // version, so a re-run continues where an earlier run stopped.
 async function promote({ manifest, tags, bundle, receiptFile, expected, registry, otp, dryRun, readTags, runner, askOtp, parallel, settle, log, prepareEvidence }) {
@@ -143,7 +147,8 @@ async function promote({ manifest, tags, bundle, receiptFile, expected, registry
   const progress = { mode: 'promote', dryRun, reused: [], alreadyOnVersion: manifest.packages.length * tags.length - planned.length, completed: [], planned: planned.map(describe) };
   log(`${manifest.packages.length} packages, tags ${tags.join(', ')}: ${progress.alreadyOnVersion} already on ${expected.version}, ${planned.length} to move`);
   // Finish potentially slow authenticated acquisition before asking for a code.
-  const { recheckLocalIntegrity } = await prepareEvidence();
+  const { result, recheckLocalIntegrity } = await prepareEvidence();
+  noteEvidence(result, log);
   // Asked for after the reads, so the code is fresh when the writes start.
   const entered = dryRun || planned.length === 0 ? undefined : otp || (askOtp ? await askOtp() : undefined);
   const code = entered === undefined ? undefined : String(entered).replace(/\s/g, '');
@@ -234,6 +239,7 @@ export async function preparedRelease({
   // Recheck package AND evidence bytes after acquisition and immediately before
   // mutation; no build-info generation/build/repack exists in this path.
   const evidence = evidenceFile ? await prepareEvidence({ evidenceFile, expected, manifest, rootDir }) : undefined;
+  noteEvidence(evidence?.result, log);
   verifyCertificate(bundle, receiptFile, expected);
   evidence?.recheckLocalIntegrity();
   try {

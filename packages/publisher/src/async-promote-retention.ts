@@ -24,7 +24,7 @@
  * judges the same rows again - deleted ones are gone). Throws only for invalid configuration, and when the queue's admission coordinator cannot be found (below).
  *
  * What a deletion costs a caller: `getStatus(jobId)` of a deleted job becomes `null`, a retained-job reconciliation reports `absent_or_pruned` (see
- * docs/api/share-reconciliation.md), and a client that lost every reply and retries the same selector after the window is admitted again. The journal of the
+ * packages/publisher/docs/async-queue-internals.md, Share reconciliation), and a client that lost every reply and retries the same selector after the window is admitted again. The journal of the
  * publisher queue is not touched, and no job of any other graph.
  *
  * The sweep must see the queue's own admission coordinator, and it never makes one: a coordinator created for a store object the queue was never built with is

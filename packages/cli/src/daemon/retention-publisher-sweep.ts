@@ -13,7 +13,7 @@
  * Mode `off` builds nothing and touches neither the publisher nor the store.
  *
  * What may be deleted is decided by the core, never here: a `finalized` job 7 days after it finished, in the key's oldest-first order and never past an older record of its
- * lifecycle key that is kept (docs/promote-queue-operations.md states the rule and its limits). Every failed job and every job that is not finished is kept.
+ * lifecycle key that is kept (packages/publisher/docs/async-queue-internals.md states the rule and its limits). Every failed job and every job that is not finished is kept.
  *
  * If the sweep cannot be built (the daemon handed in no publisher, or the core refuses a setting) the factory throws, and the starter logs it as an error naming the cause and
  * runs no publisher retention. The daemon keeps running: retention is an optional janitor and not starting it is the safe side (nothing is judged, nothing is deleted, every

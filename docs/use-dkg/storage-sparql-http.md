@@ -5,15 +5,25 @@ audience: human+agent
 doc_type: how-to
 ---
 
-# Using an external SPARQL store (Oxigraph server, etc.)
+# Storage Backends
 
-The DKG node can use any **SPARQL 1.1 Protocol**–compliant store you run yourself, instead of its default daemon-managed local Oxigraph server (or the embedded `oxigraph-worker` fallback). That gives you:
+A DKG node keeps its knowledge in a triple store. The store you choose decides how large your graphs can grow, how the data is kept on disk, and whether you can reuse a store you already run. Most nodes keep the default.
+
+## Store defaults
+
+New installs use a **daemon-managed local Oxigraph server** (`store.backend: "oxigraph-server"`). `dkg init`, `dkg openclaw/hermes/mcp setup` and the wizard default all write this block. The daemon fetches the pinned `oxigraph` binary on first boot and runs it on loopback. It gives concurrent reads (MVCC) and incremental RocksDB persistence.
+
+A config with **no** `store` block falls back to the embedded, in-process **`oxigraph-worker`**. It is a single-writer store that rewrites its N-Quads dump under `dataDir` on every flush. It suits development and small nodes.
+
+The async share and publish queues can also get store slots of their own, called the store control path. It is on for Blazegraph and managed Oxigraph stores on hosts with more than 2 CPUs. It is off for other backends, including `sparql-http`, and on hosts with 2 CPUs or fewer. The embedded store never uses it. To change it, see [Async Queue Operations](async-queue-operations.md#store-control-path).
+
+## External SPARQL store: `sparql-http`
+
+The node can use any **SPARQL 1.1 Protocol**–compliant store you run yourself, instead of the managed Oxigraph server. That gives you:
 
 - **Real on-disk persistence** (e.g. Oxigraph server with RocksDB)
 - **Larger graphs** without holding everything in the Node process
 - **Existing infrastructure** (GraphDB, Blazegraph, Jena Fuseki, Neptune, Stardog)
-
-## Backend: `sparql-http`
 
 Configure the node to use the **`sparql-http`** backend with a **query endpoint**. `updateEndpoint` is optional and defaults to `queryEndpoint`, which covers stores that use one URL for both query and update.
 
@@ -154,6 +164,12 @@ Size the daemon service and Oxigraph scope independently, while keeping their co
 - **Apache Jena Fuseki:** Typically `http://host:3030/dataset/query` and `http://host:3030/dataset/update`.
 - **GraphDB, Neptune, Stardog:** Use the vendor’s SPARQL query and update URLs; add `auth` if required.
 
+### Store concurrency budget
+
+The node's shared store queue runs at most `DKG_STORE_MAX_CONCURRENT` operations at once (4 by default), capped at the host's CPU count (but at least 2). One slot stays reserved for storage acknowledgements and one for health checks. Where the [store control path](async-queue-operations.md#store-control-path) is on, the job queues get up to three more slots on top of that (one for sharing, two for publishing), so a 4-slot node can send the store up to 7 operations at once. To make the shared limit cover every store call, switch the control path off as well.
+
+A remote store that is slow because of request latency, not CPU, can sometimes do more at once. `DKG_STORE_CONCURRENCY_POLICY=configured` removes the CPU cap, so `DKG_STORE_MAX_CONCURRENT` becomes the exact size of the shared queue; the two reserved slots stay reserved. Raise it only after comparing queue waits, completed work and the store's own load before and after, on your store and workload. To roll back, remove the variables and restart.
+
 ### Blazegraph provisioned by `dkg init` (Docker)
 
 When you pick the `blazegraph` backend in `dkg init` and leave the URL blank, the CLI offers to provision a container itself. For new containers, the provisioner uses the pinned multi-architecture image and data path declared in `blazegraph-image.json`, stores the journal in a named Docker volume, and uses `--restart unless-stopped`. Blazegraph output uses Docker's compressed `local` log driver with a 4 GB rotation budget (`200m` × 20 files), so an unattended container cannot fill the host disk. The provisioner auto-bumps the host port if 9999 is taken and is idempotent — re-running `dkg init` against an already-provisioned namespace reuses the running container.
@@ -180,21 +196,3 @@ const agent = await DKGAgent.create({
 await agent.start();
 ```
 
-## Store defaults
-
-New installs default to a **daemon-managed local Oxigraph server** (`store.backend: "oxigraph-server"`): `dkg init`, `dkg openclaw/hermes/mcp setup`, or accepting the wizard default writes this block. The daemon fetches the pinned `oxigraph` binary on first boot and runs it on loopback, giving MVCC concurrent reads and incremental RocksDB persistence.
-
-If a config has **no** `store` block at all, the runtime falls back to the embedded in-process **`oxigraph-worker`** (a single-writer store that rewrites its on-disk N-Quads dump under `dataDir` on every flush) — fine for development and small nodes. For very large graphs or existing infrastructure, use `sparql-http` with an external store.
-
-### Queue control slots (`store.controlReservedSlots`)
-
-The async share and publisher queues can run their own store calls on a few dedicated store slots (share 1, publisher 2), so queue bookkeeping does not wait behind client reads or data-plane work. They are **on by default** for `"backend": "blazegraph"` and for managed `"backend": "oxigraph-server"` (the default above) on a host with more than 2 CPUs, and off by default for `sparql-http` (any other SPARQL store, a Blazegraph reached through it included) and every other backend; the embedded `oxigraph-worker` never uses them. If share completion is slow under bursts of many concurrent shares, switch the slots off and report it. Set `controlReservedSlots` in the `store` block to override the default: `0` (or `"0"`) switches the slots off, and per-queue values such as `"share:1,publisher:2"` switch them on for any backend and host. `DKG_STORE_CONTROL_RESERVED_SLOTS`, when set, wins over it. A malformed value leaves the slots off with a warning. The daemon reads it once at start (restart after a change) and logs the result as `Store control path: ...`. `dkg init` and `dkg openclaw/hermes/mcp setup --store ...` keep it when they rewrite the `store` block; only a switch to the embedded store removes it with the block. Details, the log line and what to watch: [Queue control schedulers](backpressure-observability.md#queue-control-schedulers).
-
-```json
-{
-  "store": {
-    "backend": "oxigraph-server",
-    "controlReservedSlots": 0
-  }
-}
-```

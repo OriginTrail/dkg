@@ -1028,7 +1028,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
     /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */
     retryBackoffMaxMs?: number;
   };
-  /** WM → SWM worker, enabled by default; see docs/promote-queue-operations.md. */
+  /** WM → SWM worker, enabled by default; see docs/use-dkg/async-queue-operations.md. */
   promoteQueue?: {
     /** Default 5. Attempt budget; typed prerequisites also retain their retry window. */
     maxRetries?: number;
@@ -1055,7 +1055,7 @@ export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLi
      */
     postCommitRecoveryIntervalMs?: number;
   };
-  queueRetention?: import('./retention-config.js').RetentionConfigInput; // async queue retention, default off; docs/promote-queue-operations.md
+  queueRetention?: import('./retention-config.js').RetentionConfigInput; // async queue retention, default off; docs/use-dkg/async-queue-operations.md
   /**
    * Allowed CORS origins. When unset, only the API port's loopback origins
    * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`)
