@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: Apache-2.0
+import { CatalogWorkSliceV1 } from '../../internal/catalog-work-slice.js';
 import type { StatementSync } from 'node:sqlite';
 import {
   digestRfc64FinalizedPrivatePlacementRepairV1,
@@ -33,6 +34,26 @@ export class FinalizedPrivateRepairPersistenceV1 {
       const rows = this.host.statement(() => query.all() as SqlRowV1[]);
       return Object.freeze(rows.map((row) => this.decodeFinalizedPrivatePlacementRepair(row)));
     });
+  }
+
+  async listFinalizedPrivatePlacementRepairsAsync(signal: AbortSignal): Promise<readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[]> {
+    this.host.assertOpen();
+    signal.throwIfAborted();
+    // Copy rows in one synchronous read transaction. Never hold SQLite across a yield.
+    const rows = this.host.read(() => this.host.statement(() =>
+      this.host.prepare(INVENTORY_V1_STATEMENT_SQL.listFinalizedPrivatePlacementRepairs).all() as SqlRowV1[]));
+    const repairs: Rfc64FinalizedPrivatePlacementRepairV1[] = [];
+    const slice = new CatalogWorkSliceV1();
+    for (const row of rows) {
+      signal.throwIfAborted();
+      this.host.assertOpen();
+      repairs.push(this.decodeFinalizedPrivatePlacementRepair(row));
+      const pause = slice.checkpoint();
+      if (pause) await pause;
+    }
+    signal.throwIfAborted();
+    this.host.assertOpen();
+    return Object.freeze(repairs);
   }
 
   putFinalizedPrivatePlacementRepair(

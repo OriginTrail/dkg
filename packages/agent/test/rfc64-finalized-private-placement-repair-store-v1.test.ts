@@ -3,6 +3,7 @@ import type { Rfc64FinalizedPrivatePlacementRepairV1 } from '../src/rfc64/finali
 // SPDX-License-Identifier: Apache-2.0
 
 import { mkdtemp, readdir, rm } from 'node:fs/promises';
+import { setImmediate as nextTurn } from 'node:timers';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -73,6 +74,53 @@ async function openStore(dataDir: string) {
 }
 
 describe('RFC-64 finalized-private placement repair store', () => {
+  it('yields while decoding a snapshot and does not hold the database transaction open', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-sliced-'));
+    roots.push(dataDir);
+    const store = await openStore(dataDir);
+    for (let i = 0; i < 100; i++) await store.put({ ...repair, assertionCoordinate: `asset-${i}` as AssertionCoordinateV1 });
+    const before = store.list();
+    let finished = false;
+    const listing = store.listAsync(new AbortController().signal).then(rows => { finished = true; return rows; });
+    await new Promise<void>(resolve => nextTurn(resolve));
+    expect(finished).toBe(false);
+    // Writes are legal between slices; the listing still represents its original snapshot.
+    await store.delete(before[0]!);
+    await store.put({ ...repair, assertionCoordinate: 'later' as AssertionCoordinateV1 });
+    expect(await listing).toEqual(before);
+    expect(await store.listAsync(new AbortController().signal)).toEqual(store.list());
+  });
+
+  it('cancels decoding and rejects a listing whose inventory closes between slices', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-cancel-'));
+    roots.push(dataDir);
+    const store = await openStore(dataDir);
+    for (let i = 0; i < 100; i++) await store.put({ ...repair, assertionCoordinate: `asset-${i}` as AssertionCoordinateV1 });
+    const controller = new AbortController();
+    const listing = store.listAsync(controller.signal);
+    controller.abort(new Error('cancel listing'));
+    await expect(listing).rejects.toThrow('cancel listing');
+    const closing = store.listAsync(new AbortController().signal);
+    inventories.pop()!.close();
+    await expect(closing).rejects.toThrow();
+  });
+
+  it('rejects altered durable bytes on asynchronous reads rather than using a stale decoded value', async () => {
+    const { DatabaseSync } = await import('node:sqlite');
+    const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-corrupt-list-'));
+    roots.push(dataDir);
+    const store = await openStore(dataDir);
+    await store.put(repair);
+    expect(await store.listAsync(new AbortController().signal)).toEqual([repair]);
+    const db = new DatabaseSync(join(dataDir, 'rfc64-sync', 'inventory-v1.sqlite3'));
+    try {
+      db.prepare('UPDATE rfc64_finalized_private_placement_repairs_v1 SET repair_json = ?').run(
+        new TextDecoder().decode(encodeRfc64FinalizedPrivatePlacementRepairV1({ ...repair, assertionCoordinate: 'altered' as AssertionCoordinateV1 })),
+      );
+      await expect(store.listAsync(new AbortController().signal)).rejects.toThrow(/digest-bound/);
+    } finally { db.close(); }
+  });
+
   it('durably retains confirmation in the inventory database until exact completion', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'rfc64-private-placement-repair-'));
     roots.push(dataDir);
@@ -103,6 +151,7 @@ describe('RFC-64 finalized-private placement repair store', () => {
     inventories.pop()?.close();
     const restarted = await openStore(dataDir);
     expect(restarted.list()).toEqual(expect.arrayContaining([repair, confirmed]));
+    expect(await restarted.listAsync(new AbortController().signal)).toEqual(restarted.list());
     await restarted.delete(confirmed);
     expect(restarted.list()).toEqual([repair]);
   });

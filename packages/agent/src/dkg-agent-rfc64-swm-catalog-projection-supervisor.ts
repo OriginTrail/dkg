@@ -136,6 +136,7 @@ interface ProjectionOwnerDependenciesV1 {
   readonly readRepairRevision: (
     contextGraphId: ContextGraphIdV1, authorAddress: EvmAddressV1,
   ) => CatalogRepairRevisionHintV1 | null;
+  readonly listFinalizedPrivateRepairsAsync?: (signal: AbortSignal) => Promise<readonly Rfc64FinalizedPrivatePlacementRepairV1[]>;
   readonly listFinalizedPrivateRepairs: () => readonly Readonly<
     Rfc64FinalizedPrivatePlacementRepairV1
   >[];
@@ -195,7 +196,10 @@ export class Rfc64SwmCatalogProjectionOwnerV1 implements Rfc64CatalogWorkloadOwn
       localAuthors.map(authorAddress => ({ contextGraphId: policyEnvelope.payload.contextGraphId as ContextGraphIdV1, authorAddress })));
     discoverDurableCatalogRepairsV1(() => candidates, repairs, newPendingRepairV1, error => { throw error; });
     this.#discoverDurableRepairs(repairs, ctx);
-    const hasFinalizedPrivateRepairs = this.#dependencies.listFinalizedPrivateRepairs().length > 0;
+    // An async-capable owner discovers emptiness in its background pass. Avoid
+    // decoding the entire durable queue synchronously merely to test its length.
+    const hasFinalizedPrivateRepairs = this.#dependencies.listFinalizedPrivateRepairsAsync !== undefined
+      || this.#dependencies.listFinalizedPrivateRepairs().length > 0;
     const existing = this.#state;
     if (existing !== undefined) {
       if (existing.runner.closed || existing.privatePlacement.closed) return;

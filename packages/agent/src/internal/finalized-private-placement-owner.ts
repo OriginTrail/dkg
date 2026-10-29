@@ -12,6 +12,7 @@ import { finalizedPrivateRepairKeyV1 } from './finalized-private-placement-key.j
 import type { CatalogPlacementTimingV1, CatalogPlacementAttemptV1, CatalogPlacementWaiterObserverV1, FinalizedPrivatePlacementQueueStatusV1 } from './catalog-placement-timing.js';
 import type { FullCatalogParkingV1 } from './full-catalog-parking.js';
 import { FinalizedPrivatePlacementWaitersV1 } from './finalized-private-placement-waiters.js';
+import { CatalogWorkSliceV1 } from './catalog-work-slice.js';
 import { NextTurnRecurringTaskV1 } from './next-turn-recurring-task.js';
 
 interface RetryEntry {
@@ -34,6 +35,7 @@ type LaneReconciliation =
   | { readonly kind: 'decision'; readonly decision: FinalizedPlacementDecisionV1; readonly resetCommitted: boolean }
   | { readonly kind: 'blocked'; readonly resetCommitted: false };
 interface Dependencies {
+  listFinalizedPrivateRepairsAsync?(signal: AbortSignal): Promise<readonly Rfc64FinalizedPrivatePlacementRepairV1[]>;
   listFinalizedPrivateRepairs(): readonly Rfc64FinalizedPrivatePlacementRepairV1[];
   readFinalizedPlacementAuthority(contextGraphId: string): FinalizedPlacementAuthorityV1;
   repairFinalizedPrivatePlacement(repair: Rfc64FinalizedPrivatePlacementRepairV1, placement: CatalogPlacementAttemptV1): Promise<void>;
@@ -61,6 +63,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
   readonly #lanes = new Map<string, GraphLane>();
   readonly #waiters = new FinalizedPrivatePlacementWaitersV1();
   readonly #runner: NextTurnRecurringTaskV1;
+  #arrivedDuringListing: Set<string> | undefined;
   #waiterTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(dependencies: Dependencies, options: Options) {
@@ -73,6 +76,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
         try { await this.#runPass(signal); }
         catch (error) { failed = true; throw error; }
         finally {
+          this.#arrivedDuringListing = undefined;
           options.timing().passEnded();
           options.fullCatalogs.passEnded();
           // Failed queue reads must not spin on an already-due waiter.
@@ -101,6 +105,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
 
   request(repair: Rfc64FinalizedPrivatePlacementRepairV1, observer?: CatalogPlacementWaiterObserverV1): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
     const key = finalizedPrivateRepairKeyV1(repair);
+    this.#arrivedDuringListing?.add(key);
     this.#options.timing().owed(key);
     const rejected = (): Rfc64FinalizedPrivatePlacementRepairRequestV1 => {
       try { observer?.released(); } catch { /* Observation cannot prevent waiter settlement. */ }
@@ -157,12 +162,10 @@ export class FinalizedPrivatePlacementOwnerV1 {
     this.#lanes.clear();
   }
 
-  #entry(repair: Rfc64FinalizedPrivatePlacementRepairV1): RetryEntry {
-    const key = finalizedPrivateRepairKeyV1(repair);
+  #entry(repair: Rfc64FinalizedPrivatePlacementRepairV1, key = finalizedPrivateRepairKeyV1(repair)): RetryEntry {
     let entry = this.#retries.get(key);
     if (!entry) {
       entry = { repair, retry: new FinalizedPrivateRepairRetryV1(), failureHistoryRead: false, attempts: 0 };
-      this.#restoreFailureHistory(entry);
       this.#retries.set(key, entry);
       let lane = this.#lanes.get(repair.contextGraphId);
       if (!lane) {
@@ -257,21 +260,43 @@ export class FinalizedPrivatePlacementOwnerV1 {
   }
 
   async #runPass(signal: AbortSignal): Promise<void> {
-    const repairs = this.#dependencies.listFinalizedPrivateRepairs();
-    const currentKeys = new Set(repairs.map(finalizedPrivateRepairKeyV1));
     const timing = this.#options.timing();
-    timing.passStarted(currentKeys);
-    // Establish every queued sibling before the first awaited placement. A lane
-    // notification during that attempt must also reset later parked siblings.
-    for (const repair of repairs) this.#entry(repair);
-    for (const key of this.#retries.keys()) if (!currentKeys.has(key)) this.#forget(key);
-    for (const key of this.#waiters.keys()) if (!currentKeys.has(key)) this.#waiters.release(key);
-    this.#options.fullCatalogs.passStarted(currentKeys);
-    const blockedGraphs = new Set<ContextGraphIdV1>();
-    await mapWithConcurrency(repairs, 1, async repair => {
+    const arrivedDuringListing = new Set<string>();
+    this.#arrivedDuringListing = arrivedDuringListing;
+    timing.passReading();
+    const repairs = this.#dependencies.listFinalizedPrivateRepairsAsync
+      ? await this.#dependencies.listFinalizedPrivateRepairsAsync(signal)
+      : this.#dependencies.listFinalizedPrivateRepairs();
+    const slice = new CatalogWorkSliceV1();
+    const queued: Array<{ repair: Rfc64FinalizedPrivatePlacementRepairV1; key: string }> = [];
+    const currentKeys = new Set<string>();
+    for (const repair of repairs) {
       if (signal.aborted) return;
       const key = finalizedPrivateRepairKeyV1(repair);
-      const entry = this.#entry(repair);
+      queued.push({ repair, key });
+      currentKeys.add(key);
+      const pause = slice.checkpoint();
+      if (pause) await pause;
+    }
+    if (signal.aborted) return;
+    this.#arrivedDuringListing = undefined;
+    timing.passStarted(currentKeys);
+    for (const key of arrivedDuringListing) timing.owed(key);
+    // Establish every queued sibling before the first awaited placement. A lane
+    // notification during that attempt must also reset later parked siblings.
+    for (const { repair, key } of queued) this.#entry(repair, key);
+    for (const key of this.#retries.keys()) if (!currentKeys.has(key)) this.#forget(key);
+    for (const key of this.#waiters.keys()) if (!currentKeys.has(key) && !arrivedDuringListing.has(key)) this.#waiters.release(key);
+    this.#options.fullCatalogs.passStarted(currentKeys);
+    const blockedGraphs = new Set<ContextGraphIdV1>();
+    await mapWithConcurrency(queued, 1, async ({ repair, key }) => {
+      const pause = slice.checkpoint();
+      if (pause) await pause;
+      if (signal.aborted) return;
+      const entry = this.#entry(repair, key);
+      // Read durable hints inside the sliced loop. Lane resets still read any
+      // not-yet-restored sibling before committing the complete reset batch.
+      this.#restoreFailureHistory(entry);
       const lane = this.#reconcileLane(repair, blockedGraphs);
       if (lane.kind === 'blocked') return;
       // Capacity still owns admission and wakeups, even after a durable scheduling reset.

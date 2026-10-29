@@ -1,3 +1,4 @@
+import { listFinalizedPrivateRepairsAsyncV1 } from './rfc64/finalized-private-placement-repair-store-v1.js';
 import { PublicSnapshotSessionMethods } from './public-snapshot-session.js';
 import type { StorageAckCopyCleanupWriter } from '@origintrail-official/dkg-publisher';
 import type { AssertionPullFromOptions, AssertionPullFromResult } from '@origintrail-official/dkg-publisher';
@@ -1065,6 +1066,7 @@ export class DKGAgent extends DKGAgentBase {
             headRevision: headDigest,
           };
         },
+        listFinalizedPrivateRepairsAsync: signal => listFinalizedPrivateRepairsAsyncV1(this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs, signal),
         listFinalizedPrivateRepairs: () => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.list() ?? [],
         readPrivateFailure: (repair) => this.rfc64PersistenceV1?.finalizedPrivatePlacementRepairs.readFailure(repair) ?? null,
         writePrivateFailures: entries => {
