@@ -173,7 +173,13 @@ test('manifest asset names are valid, bounded and distinct', () => {
     assert.match(name, /^[A-Za-z0-9._-]+$/);
   }
   assert.equal(new Set(names).size, names.length);
-  assert.equal(partitionPageAssertionName('short', 3, ['k']).startsWith('import-manifest-short-part-3-'), true);
+  assert.match(partitionPageAssertionName('short', 3, ['k']), /^import-partitions-short-[0-9a-f]{16}-3-[0-9a-f]{12}$/);
+  assert.match(statusBatchAssertionName('short', statusEventUri('short', 'k')), /^import-status-short-[0-9a-f]{16}-[0-9a-f]{24}$/);
+  // Heads are `import-manifest-…`: no page or status batch of any import can take another import's head name.
+  for (const id of ['alpha', 'alpha-part-0-a49ba8bb2e51', longId]) {
+    assert.equal(partitionPageAssertionName(id, 0, ['p1']).startsWith('import-manifest-'), false);
+    assert.equal(statusBatchAssertionName(id, statusEventUri(id, 'p1')).startsWith('import-manifest-'), false);
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -647,6 +653,24 @@ test('two overlapping creations of the same manifest both succeed', async () => 
   await createManifest(client, importId, ['b', 'a']);
   assert.equal(raced, true);
   assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
+});
+
+test('an import whose id reads like another import\'s page name keeps both manifests apart', async () => {
+  const client = makeMockDaemon();
+  const lookalike = `alpha-part-0-${partitionSetHash(['p1']).slice(0, 12)}`;
+  await createManifest(client, lookalike, ['q1']);
+  await createManifest(client, 'alpha', ['p1']);
+  assert.deepEqual(statuses(await load(client, 'alpha')), [['p1', 'pending']]);
+  assert.deepEqual(statuses(await load(client, lookalike)), [['q1', 'pending']]);
+});
+
+test('createImportManifest fails instead of succeeding when an asset of another origin holds a page name', async () => {
+  const client = makeMockDaemon();
+  await client.request('POST', '/api/knowledge-assets', {
+    contextGraphId: client.cgId, name: partitionPageAssertionName('squatted', 0, ['a']), subGraphName: 'meta', alsoShareSwm: true,
+    quads: [{ subject: 'urn:other:thing', predicate: 'urn:other:p', object: '"x"' }],
+  });
+  await assert.rejects(() => createManifest(client, 'squatted', ['a']), /1 of 1 partitions of manifest 'squatted' are not visible/);
 });
 
 test('createImportManifest writes the whole head when the interrupted run created it but wrote nothing', async () => {

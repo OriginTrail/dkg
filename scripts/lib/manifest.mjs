@@ -18,10 +18,10 @@
  *   - the import head (`defaultManifestAssertionName(importId)`): the
  *     Import node, its `startedAt`, its partition count and a hash of its
  *     partition keys;
- *   - partition pages (`<head>-part-<n>-<hash>`): each declares a
+ *   - partition pages (`import-partitions-<id>-<n>-<hash>`): each declares a
  *     size-bounded batch of the partitions, in key order, well under the
  *     share size cap of one Knowledge Asset;
- *   - status batches (`<head>-status-<hash>`): one per `markPartitionStatus`
+ *   - status batches (`import-status-<id>-<hash>`): one per `markPartitionStatus`
  *     or `markPartitionStatuses` call.
  *
  * Every asset is its own named graph in SWM, and a sub-graph query is
@@ -180,15 +180,21 @@ function shortHash(value, length) {
 }
 
 /**
- * `<head>-<suffix>`. When that is too long for an assertion name, the head is
- * shortened and a hash of the `importId` keeps names of different imports apart.
+ * `import-<kind>-<slug>-<id hash>-<suffix>`. Heads are `import-manifest-…`, so
+ * a page or a status batch can never take another import's head name, and the
+ * hash of the `importId` keeps the assets of different imports apart however
+ * their ids read. The slug only helps a reader; it is cut to fit 256 characters.
  */
-function manifestPartAssertionName(importId, suffix) {
-  const head = defaultManifestAssertionName(importId);
-  const name = `${head}-${suffix}`;
-  if (name.length <= MAX_ASSERTION_NAME_LENGTH) return name;
-  const tail = `-${shortHash(importId, 12)}-${suffix}`;
-  return `${head.slice(0, MAX_ASSERTION_NAME_LENGTH - tail.length)}${tail}`;
+function manifestPartAssertionName(kind, importId, suffix) {
+  const tail = `-${shortHash(importId, 16)}-${suffix}`;
+  const prefix = `import-${kind}`;
+  const slug = importId
+    .replace(/[^A-Za-z0-9._-]+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, MAX_ASSERTION_NAME_LENGTH - prefix.length - tail.length - 1)
+    .replace(/-+$/g, '');
+  return `${prefix}${slug ? `-${slug}` : ''}${tail}`;
 }
 
 /** A hash of a set of partition keys, independent of their order. */
@@ -201,12 +207,12 @@ export function partitionSetHash(keys) {
  * partition keys, so a page that declares other keys never reuses the name.
  */
 export function partitionPageAssertionName(importId, pageIndex, keys) {
-  return manifestPartAssertionName(importId, `part-${pageIndex}-${partitionSetHash(keys).slice(0, 12)}`);
+  return manifestPartAssertionName('partitions', importId, `${pageIndex}-${partitionSetHash(keys).slice(0, 12)}`);
 }
 
 /** Knowledge Asset name of a status batch, from the IRI of its first event. */
 export function statusBatchAssertionName(importId, firstEventIri) {
-  return manifestPartAssertionName(importId, `status-${shortHash(firstEventIri, 24)}`);
+  return manifestPartAssertionName('status', importId, shortHash(firstEventIri, 24));
 }
 
 /** Stable URI for a Partition within an Import. */
@@ -541,13 +547,15 @@ async function writeAndShare(client, { contextGraphId, subGraphName, name, creat
 }
 
 /**
- * Share a partition page, or leave it alone when an earlier run shared it.
- * Its name carries a hash of its keys, so an existing page holds these keys.
+ * Share a partition page, or leave it alone when it is shared already (by an
+ * earlier or a concurrent run). Answers whether it was; the caller then checks
+ * that its partitions are visible, since only its name says it is this page.
  */
 async function sharePartitionPage(client, { contextGraphId, subGraphName, name, triples }) {
   const created = await createManifestAsset(client, { contextGraphId, subGraphName, name });
-  if (created?.status === 'swm-shared') return;
+  if (created?.status === 'swm-shared') return { foundShared: true };
   await writeAndShare(client, { contextGraphId, subGraphName, name, created, triples });
+  return { foundShared: false };
 }
 
 /**
@@ -754,16 +762,29 @@ export async function createImportManifest({
     await ensureManifestHead(client, { contextGraphId: cgId, subGraphName, importId, partitions });
   }
   const pageAssertionNames = [];
+  let unverified = false;
   for (const [index, keys] of partitionPages(importId, partitions, { maxPartitions: maxPartitionsPerPage }).entries()) {
     const name = partitionPageAssertionName(importId, index, keys);
     pageAssertionNames.push(name);
     if (keys.every((key) => visibleKeys.has(key))) continue;
-    await sharePartitionPage(client, {
+    const { foundShared } = await sharePartitionPage(client, {
       contextGraphId: cgId,
       subGraphName,
       name,
       triples: keys.flatMap((key) => buildPartitionTriples(importId, key)),
     });
+    unverified ||= foundShared;
+  }
+  // A page found shared is this manifest's only if its partitions now show: never report an incomplete manifest done.
+  if (unverified) {
+    const declared = new Set([...(await readDeclaredPartitions({ client, importId, subGraphName })).values()].map((p) => p.key));
+    const missing = partitions.filter((key) => !declared.has(key));
+    if (missing.length > 0) {
+      throw new Error(
+        `createImportManifest: ${missing.length} of ${partitions.length} partitions of manifest '${importId}' are not visible ` +
+        `although their pages' assets are shared; an asset of another origin may hold a page's name.`,
+      );
+    }
   }
   return { assertionName: head, importUri: importIri, pageAssertionNames };
 }
