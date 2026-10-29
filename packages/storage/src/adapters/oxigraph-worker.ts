@@ -28,6 +28,7 @@ import {
   type WorkerResponseV1,
 } from '../worker-error-protocol.js';
 import { raceStoreWorkAgainstAbort } from '../abortable-store-work-lifecycle.js';
+import type { OxigraphStoreOptions } from './oxigraph-read-only.js';
 
 /**
  * Default per-operation timeout for the embedded worker store. The worker is
@@ -86,7 +87,7 @@ function sleep(ms: number): Promise<void> {
   });
 }
 
-export interface OxigraphWorkerStoreOptions {
+export interface OxigraphWorkerStoreOptions extends OxigraphStoreOptions {
   /**
    * Per-operation timeout in milliseconds for READ-ONLY ops. Default 120_000.
    * 0 disables it. Mutations are intentionally never bounded (see
@@ -239,8 +240,9 @@ export class OxigraphWorkerStore implements TripleStore {
   private readonly operationTimeoutMs: number;
   /** Resolved path of the compiled worker impl; reused verbatim on respawn. */
   private readonly workerPath: string;
-  /** Persistence file handed to every spawned worker (undefined = in-memory). */
+  /** Persistence file handed to every spawned worker (undefined = in-memory), and whether it is opened read-only. */
   private readonly persistPath: string | undefined;
+  private readonly readOnly: boolean;
   /**
    * Single source of truth for the store's high-level POLICY state (see
    * WorkerLifecycle). It subsumes the former `respawnGaveUp` boolean (⇔ state
@@ -325,6 +327,7 @@ export class OxigraphWorkerStore implements TripleStore {
     }
     this.workerPath = workerPath;
     this.persistPath = persistPath;
+    this.readOnly = opts?.readOnly === true;
     this.spawnWorker();
     registerStoreRecoveryGeneration(this, () => ({ generation: this.recoveryGeneration,
       ready: this.lifecycle === 'live' && !this.workerExited && !this.replacementRevisionLifecycle }));
@@ -390,7 +393,7 @@ export class OxigraphWorkerStore implements TripleStore {
    */
   private spawnWorker(): void {
     const worker = new Worker(this.workerPath, {
-      workerData: { persistPath: this.persistPath },
+      workerData: { persistPath: this.persistPath, readOnly: this.readOnly },
     });
     this.worker = worker;
     this.workerExited = false;
@@ -910,10 +913,7 @@ export class OxigraphWorkerStore implements TripleStore {
   }
 }
 
-registerTripleStoreAdapter('oxigraph-worker', async (opts) => {
-  const filePath = opts?.path as string | undefined;
-  return new OxigraphWorkerStore(filePath, {
-    operationTimeoutMs:
-      typeof opts?.operationTimeoutMs === 'number' ? (opts.operationTimeoutMs as number) : undefined,
-  });
-});
+registerTripleStoreAdapter('oxigraph-worker', async (opts) => new OxigraphWorkerStore(opts?.path as string | undefined, {
+  operationTimeoutMs: typeof opts?.operationTimeoutMs === 'number' ? (opts.operationTimeoutMs as number) : undefined,
+  readOnly: opts?.readOnly === true,
+}));
