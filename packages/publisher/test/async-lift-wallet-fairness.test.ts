@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AsyncLiftRunner, type LiftJob } from '../src/index.js';
 import { createRunnerPublisher } from './_helpers/async-lift-runner-fixture.js';
+import { AsyncLiftWalletPool } from '../src/async-lift-wallet-pool.js';
 
 const wallets = Array.from({ length: 6 }, (_, i) => `wallet-${i}`);
 
@@ -32,6 +33,43 @@ function fixture(scheduled = false) {
 }
 
 describe('async publisher wallet fairness (#3591)', () => {
+  it('visits every free wallet during staggered empty polls, so replenishment needs no new admission', () => {
+    const pool = new AsyncLiftWalletPool(wallets);
+    const visited = [];
+    for (let i = 0; i < wallets.length; i += 1) {
+      const walletId = pool.acquire()!;
+      visited.push(walletId);
+      pool.release(walletId, false);
+    }
+    expect(visited).toEqual(wallets);
+  });
+
+  it('discovers a replenished later wallet by polling without a new work notification', async () => {
+    vi.useFakeTimers();
+    let funded = false;
+    let queued = true;
+    const used: string[] = [];
+    const publisher = createRunnerPublisher({
+      processNextScheduled: async (walletId, claimed) => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        if (!funded || !queued || walletId !== wallets[2]) return null;
+        queued = false; used.push(walletId); claimed();
+        return { jobId: 'retained-waiting-job' } as LiftJob;
+      },
+    });
+    const runner = new AsyncLiftRunner({ publisher, walletIds: wallets });
+    try {
+      await runner.start();
+      await vi.advanceTimersByTimeAsync(100);
+      expect(used).toEqual([]);
+      funded = true;
+      await vi.advanceTimersByTimeAsync(2500);
+      expect(used).toEqual([wallets[2]]);
+      const stopping = runner.stop();
+      await vi.advanceTimersByTimeAsync(100);
+      await stopping;
+    } finally { vi.useRealTimers(); }
+  });
   it('rotates 60 isolated arrivals across all six free wallets', async () => {
     vi.useFakeTimers();
     const f = fixture();

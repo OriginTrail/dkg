@@ -2,6 +2,7 @@
 export class AsyncLiftWalletPool {
   private readonly active = new Set<string>();
   private cursor = 0;
+  private workCursor = 0;
 
   constructor(private readonly walletIds: readonly string[]) {
     if (new Set(walletIds).size !== walletIds.length) throw new Error('Publisher wallet IDs must be unique');
@@ -9,9 +10,11 @@ export class AsyncLiftWalletPool {
 
   acquire(): string | undefined {
     for (let offset = 0; offset < this.walletIds.length; offset += 1) {
-      const walletId = this.walletIds[(this.cursor + offset) % this.walletIds.length]!;
+      const index = (this.cursor + offset) % this.walletIds.length;
+      const walletId = this.walletIds[index]!;
       if (this.active.has(walletId)) continue;
       this.active.add(walletId);
+      this.cursor = (index + 1) % this.walletIds.length;
       return walletId;
     }
     return undefined;
@@ -19,8 +22,12 @@ export class AsyncLiftWalletPool {
 
   release(walletId: string, processed: boolean): void {
     this.active.delete(walletId);
-    // Empty polling must not spend the rotation: six idle checks would wrap straight back
-    // to wallet zero before the next sparse arrival. Advance only after actual work.
-    if (processed) this.cursor = (this.walletIds.indexOf(walletId) + 1) % this.walletIds.length;
+    if (processed) {
+      this.workCursor = (this.walletIds.indexOf(walletId) + 1) % this.walletIds.length;
+      this.cursor = this.workCursor;
+    }
   }
+
+  /** New work starts after actual prior work; idle polls independently visit every wallet. */
+  workAvailable(): void { this.cursor = this.workCursor; }
 }

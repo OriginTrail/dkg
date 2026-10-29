@@ -146,6 +146,7 @@ export class AsyncLiftRunner {
           if (this.config.walletIds.includes(walletId)) this.wakeWorkers();
         },
         onWorkAvailable: () => {
+          this.walletPool.workAvailable();
           this.wakeWorkers();
         },
       });
