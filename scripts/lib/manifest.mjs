@@ -104,6 +104,13 @@ export const PAGE_MAX_PARTITIONS = 2000;
  */
 export const STATUS_BATCH_MAX_BYTES = 192 * 1024;
 
+/**
+ * Rows per read. The daemon refuses a query answer above 10 MiB, and the
+ * declarations and the status history of a large import go well past that,
+ * so they are read in ordered pages of this many rows.
+ */
+export const QUERY_PAGE_ROWS = 1000;
+
 /** Stable URI for an Import. Slug is `encodeURIComponent`'d. */
 export function importUri(importId) {
   return `urn:dkg:import:${encodeURIComponent(importId)}`;
@@ -394,6 +401,31 @@ function querySharedMemory(client, subGraphName, sparql) {
   });
 }
 
+/**
+ * Every row of `SELECT <select> WHERE { <where> }`, read in pages in
+ * `orderBy` order. A row written between two pages can make a later page
+ * repeat a row, never skip one; the callers keep one entry per subject.
+ */
+async function selectAllRows(client, subGraphName, { select, where, orderBy }) {
+  const rows = [];
+  let previousFirst;
+  for (let offset = 0; ; offset += QUERY_PAGE_ROWS) {
+    const page = bindingsOf(await querySharedMemory(client, subGraphName, `
+      PREFIX imp: <${IMPORT_NS}>
+      SELECT ${select} WHERE { ${where} }
+      ORDER BY ${orderBy} LIMIT ${QUERY_PAGE_ROWS} OFFSET ${offset}
+    `));
+    // A store that ignored LIMIT or OFFSET would keep this loop reading for ever.
+    const first = JSON.stringify(page[0]);
+    if (page.length > QUERY_PAGE_ROWS || (offset > 0 && page.length > 0 && first === previousFirst)) {
+      throw new Error('The query answer ignored its LIMIT or OFFSET, so the manifest cannot be read in pages.');
+    }
+    previousFirst = first;
+    rows.push(...page);
+    if (page.length < QUERY_PAGE_ROWS) return rows;
+  }
+}
+
 function nquadsBytes(triples) {
   let bytes = 0;
   for (const t of triples) {
@@ -491,20 +523,30 @@ function compareStrings(a, b) {
  * (nothing to do), sealed by a share that did not complete (share it), or
  * still open (write again: a triple the draft already holds is not added
  * twice, then share).
+ *
+ * `triples` is the part's triples, or a function that gets what the earlier
+ * run left in the asset (none for a new one), returns what to write, and may
+ * refuse to go on.
  */
 async function shareManifestPart(client, { contextGraphId, subGraphName, name, triples }) {
   const created = await client.request('POST', '/api/knowledge-assets', { contextGraphId, name, subGraphName });
   if (created?.status === 'swm-shared') return;
+  const left = typeof triples === 'function' && created?.alreadyExists === true
+    ? await readDraftTriples(client, { contextGraphId, subGraphName, name })
+    : [];
+  const toWrite = typeof triples === 'function' ? triples(left) : triples;
   if (created?.status !== 'wm-sealed') {
-    await client.writeAssertion({
-      contextGraphId,
-      assertionName: name,
-      subGraphName,
-      triples: triples({ reused: created?.alreadyExists === true }),
-    });
+    await client.writeAssertion({ contextGraphId, assertionName: name, subGraphName, triples: toWrite });
   }
   const shared = await client.promote({ contextGraphId, assertionName: name, subGraphName });
   assertShared(shared, name);
+}
+
+/** The triples of a Knowledge Asset's Working Memory draft. */
+async function readDraftTriples(client, { contextGraphId, subGraphName, name }) {
+  const params = new URLSearchParams({ contextGraphId, subGraphName });
+  const res = await client.request('GET', `/api/knowledge-assets/${encodeURIComponent(name)}/wm/quads?${params}`);
+  return Array.isArray(res?.quads) ? res.quads : [];
 }
 
 function assertShared(result, name) {
@@ -520,36 +562,38 @@ function assertShared(result, name) {
  * every declared partition.
  */
 async function readManifestDeclarations({ client, importId, subGraphName }) {
-  const headRows = bindingsOf(await querySharedMemory(client, subGraphName, `
-    PREFIX imp: <${IMPORT_NS}>
-    SELECT ?count ?hash WHERE {
-      GRAPH ?g {
-        <${importUri(importId)}> imp:partitionCount ?count ;
-                       imp:partitionSetHash ?hash .
+  const [headAnswer, partitions] = await Promise.all([
+    querySharedMemory(client, subGraphName, `
+      PREFIX imp: <${IMPORT_NS}>
+      SELECT ?count ?hash WHERE {
+        GRAPH ?g {
+          <${importUri(importId)}> imp:partitionCount ?count ;
+                                   imp:partitionSetHash ?hash .
+        }
       }
-    }
-  `));
+    `),
+    readDeclaredPartitions({ client, importId, subGraphName }),
+  ]);
+  const headRows = bindingsOf(headAnswer);
   const head = headRows.length > 0
     ? { count: Number(unquote(headRows[0].count)), hash: String(unquote(headRows[0].hash)) }
     : undefined;
-  return { head, partitions: await readDeclaredPartitions({ client, importId, subGraphName }) };
+  return { head, partitions };
 }
 
 /** Every partition the manifest's visible pages declare, keyed by partition IRI. */
 async function readDeclaredPartitions({ client, importId, subGraphName }) {
-  const importIri = importUri(importId);
-  const declared = await querySharedMemory(client, subGraphName, `
-    PREFIX imp: <${IMPORT_NS}>
-    SELECT ?part ?key ?initial WHERE {
-      GRAPH ?g {
-        <${importIri}> imp:partition ?part .
+  const rows = await selectAllRows(client, subGraphName, {
+    select: '?part ?key ?initial',
+    where: `GRAPH ?g {
+        <${importUri(importId)}> imp:partition ?part .
         ?part imp:key ?key ;
               imp:initialStatus ?initial .
-      }
-    }
-  `);
+      }`,
+    orderBy: '?part ?key ?initial',
+  });
   const partitions = new Map();
-  for (const row of bindingsOf(declared)) {
+  for (const row of rows) {
     const part = bareUri(row.part);
     if (!partitions.has(part)) partitions.set(part, { key: unquote(row.key), initial: unquote(row.initial) });
   }
@@ -558,19 +602,18 @@ async function readDeclaredPartitions({ client, importId, subGraphName }) {
 
 /** The latest status event of each partition of the import that has one, keyed by partition IRI. */
 async function readLatestStatusEvents({ client, importId, subGraphName }) {
-  const res = await querySharedMemory(client, subGraphName, `
-    PREFIX imp: <${IMPORT_NS}>
-    SELECT ?part ?ev ?status ?recordedAt WHERE {
-      GRAPH ?g {
+  const rows = await selectAllRows(client, subGraphName, {
+    select: '?part ?ev ?status ?recordedAt',
+    where: `GRAPH ?g {
         ?part imp:statusEvent ?ev .
         ?ev imp:status ?status ;
             imp:recordedAt ?recordedAt .
         FILTER(STRSTARTS(STR(?part), "${importUri(importId)}#part:"))
-      }
-    }
-  `);
+      }`,
+    orderBy: '?ev ?part ?status ?recordedAt',
+  });
   const latest = new Map();
-  for (const row of bindingsOf(res)) {
+  for (const row of rows) {
     const event = {
       part: bareUri(row.part),
       ev: bareUri(row.ev),
@@ -597,6 +640,13 @@ function compareEvents(a, b) {
 function timestamp(value) {
   const ms = Date.parse(value);
   return Number.isNaN(ms) ? Number.NEGATIVE_INFINITY : ms;
+}
+
+function differentPartitionSet(importId) {
+  return new Error(
+    `createImportManifest: manifest '${importId}' already exists with a different partition set. ` +
+    `Refusing to merge old and new partitions; pass a new importId for a new import run.`,
+  );
 }
 
 /**
@@ -662,20 +712,23 @@ export async function createImportManifest({
     (existing.head !== undefined && existing.head.hash !== partitionSetHash(partitions)) ||
     [...visibleKeys].some((key) => !requested.has(key))
   ) {
-    throw new Error(
-      `createImportManifest: manifest '${importId}' already exists with a different partition set. ` +
-      `Refusing to merge old and new partitions; pass a new importId for a new import run.`,
-    );
+    throw differentPartitionSet(importId);
   }
 
   if (existing.head === undefined) {
     const headTriples = buildImportHeadTriples(importId, partitions, new Date().toISOString());
+    const hash = partitionSetHash(partitions);
     await shareManifestPart(client, {
       contextGraphId: cgId,
       subGraphName,
       name: head,
-      // An interrupted earlier run already wrote its `startedAt`: keep that one.
-      triples: ({ reused }) => headTriples.filter((t) => !reused || t.predicate !== IMPORT_P.startedAt),
+      // A head an interrupted run left unshared must be for these partitions, and keeps its `startedAt`.
+      triples: (left) => {
+        const leftHash = left.find((t) => t.predicate === IMPORT_P.partitionSetHash);
+        if (leftHash && unquote(leftHash.object) !== hash) throw differentPartitionSet(importId);
+        const hasStartedAt = left.some((t) => t.predicate === IMPORT_P.startedAt);
+        return headTriples.filter((t) => !hasStartedAt || t.predicate !== IMPORT_P.startedAt);
+      },
     });
   }
   const pageAssertionNames = [];
@@ -687,7 +740,7 @@ export async function createImportManifest({
       contextGraphId: cgId,
       subGraphName,
       name,
-      triples: () => keys.flatMap((key) => buildPartitionTriples(importId, key)),
+      triples: keys.flatMap((key) => buildPartitionTriples(importId, key)),
     });
   }
   return { assertionName: head, importUri: importIri, pageAssertionNames };
@@ -876,7 +929,10 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
 
   const cgId = client.cgId;
   const importIri = importUri(importId);
-  const { head, partitions: declared } = await readManifestDeclarations({ client, importId, subGraphName });
+  const [{ head, partitions: declared }, latest] = await Promise.all([
+    readManifestDeclarations({ client, importId, subGraphName }),
+    readLatestStatusEvents({ client, importId, subGraphName }),
+  ]);
   if (head === undefined) {
     throw new Error(
       `No import manifest rows found for '${importId}' in context graph '${cgId}' ` +
@@ -890,7 +946,13 @@ export async function loadImportManifest({ client, importId, subGraphName }) {
       `again with the same partitions to finish it, or wait until this node has received all of it.`,
     );
   }
-  const latest = await readLatestStatusEvents({ client, importId, subGraphName });
+  if (partitionSetHash([...declared.values()].map((p) => p.key)) !== head.hash) {
+    throw new Error(
+      `Import manifest '${importId}' in context graph '${cgId}' sub-graph '${subGraphName}' declares partitions ` +
+      `its head does not list: another partition set was written under the same importId. ` +
+      `Pass a new importId for a new import run.`,
+    );
+  }
   const partitions = [...declared].map(([part, { key, initial }]) => {
     const event = latest.get(part);
     return {

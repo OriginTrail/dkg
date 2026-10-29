@@ -18,6 +18,7 @@ import {
   IMPORT_T,
   IMPORT_P,
   PAGE_MAX_PARTITIONS,
+  QUERY_PAGE_ROWS,
   STATUS_BATCH_MAX_BYTES,
   importUri,
   partitionUri,
@@ -199,15 +200,21 @@ function httpError(status, body) {
  *     without `GRAPH` is answered one asset graph at a time, so a join
  *     across assets finds nothing, and one with a `UNION` finds nothing at
  *     all; `GRAPH ?g` ranges over the sub-graph's assets;
- *   - only `graphSuffix: '_shared_memory'` reads shared memory.
+ *   - only `graphSuffix: '_shared_memory'` reads shared memory, and an answer
+ *     above `maxResponseBytes` is refused (413), as the query route caps its
+ *     answers at 10 MiB;
+ *   - `wm/quads` returns an asset's draft.
+ *
+ * `ignore: 'limit' | 'offset'` drops that clause from every query, as a
+ * store that does not honour it would.
  *
  * Shared memory is a real SPARQL store, so the helper's queries run as
  * written. `bindingShape: 'cell'` returns SPARQL 1.1 results-JSON cells, as
  * the SPARQL-HTTP adapter does; the default is the flat N-Triples form.
  */
-function makeMockDaemon({ bindingShape = 'flat' } = {}) {
+function makeMockDaemon({ bindingShape = 'flat', maxResponseBytes = 10 * 1024 * 1024, ignore } = {}) {
   const store = new oxigraph.Store();
-  /** @type {Map<string, { subGraphName: string, graph: string, draft: Set<string>, status: string }>} */
+  /** @type {Map<string, { subGraphName: string, graph: string, draft: Map<string, object>, status: string }>} */
   const assets = new Map();
   /** @type {Array<{ method: string, path: string, body: any }>} */
   const requests = [];
@@ -225,15 +232,16 @@ function makeMockDaemon({ bindingShape = 'flat' } = {}) {
   }
 
   const term = (value) => (/^["<_]/.test(value) ? value : `<${value}>`);
+  const line = (t) => `<${t.subject}> <${t.predicate}> ${term(t.object)}`;
   function write(asset, triples) {
     if (asset.status !== 'draft-open') {
       throw httpError(409, { code: 'KA_WM_LIFECYCLE_REQUIRED', error: 'not an active Working Memory draft' });
     }
-    for (const t of triples) asset.draft.add(`<${t.subject}> <${t.predicate}> ${term(t.object)}`);
+    for (const t of triples) asset.draft.set(line(t), { subject: t.subject, predicate: t.predicate, object: t.object });
   }
   function share(asset) {
     if (asset.status === 'swm-shared') return { swmShared: true, promotedCount: 0, sealed: true };
-    store.load([...asset.draft].map((line) => `${line} <${asset.graph}> .\n`).join(''), { format: 'application/n-quads' });
+    store.load([...asset.draft.keys()].map((l) => `${l} <${asset.graph}> .\n`).join(''), { format: 'application/n-quads' });
     const promotedCount = asset.draft.size;
     asset.draft.clear();
     asset.status = 'swm-shared';
@@ -251,6 +259,8 @@ function makeMockDaemon({ bindingShape = 'flat' } = {}) {
   function answer(results) {
     if (results.every((r) => typeof r === 'boolean')) return { result: { boolean: results.some(Boolean) } };
     const bindings = results.flat().map((row) => Object.fromEntries([...row].map(([name, value]) => [name, binding(value)])));
+    const bytes = Buffer.byteLength(JSON.stringify(bindings), 'utf8');
+    if (bytes > maxResponseBytes) throw httpError(413, { error: `query answer of ${bytes} bytes exceeds ${maxResponseBytes}` });
     return { result: { bindings } };
   }
 
@@ -263,6 +273,12 @@ function makeMockDaemon({ bindingShape = 'flat' } = {}) {
     store,
     async request(method, path, body) {
       record(method, path, body);
+      const quads = method === 'GET' && path.match(/^\/api\/knowledge-assets\/([^/?]+)\/wm\/quads\?/);
+      if (quads) {
+        const asset = assets.get(decodeURIComponent(quads[1]));
+        if (!asset) throw httpError(404, { error: 'not found' });
+        return { quads: [...asset.draft.values()].map((t) => ({ ...t, graph: '' })), count: asset.draft.size };
+      }
       if (method !== 'POST' || path !== '/api/knowledge-assets') throw new Error(`unexpected request ${method} ${path}`);
       const existing = assets.get(body.name);
       if (existing) {
@@ -276,7 +292,7 @@ function makeMockDaemon({ bindingShape = 'flat' } = {}) {
       const asset = {
         subGraphName: body.subGraphName,
         graph: `did:dkg:context-graph:${this.cgId}/${body.subGraphName}/_shared_memory/0xagent/${++kaNumber}`,
-        draft: new Set(),
+        draft: new Map(),
         status: 'draft-open',
       };
       assets.set(body.name, asset);
@@ -310,6 +326,8 @@ function makeMockDaemon({ bindingShape = 'flat' } = {}) {
     },
     async query({ sparql, graphSuffix, subGraphName }) {
       queries.push({ sparql, graphSuffix, subGraphName });
+      if (ignore === 'limit') sparql = sparql.replace(/\bLIMIT \d+/, '');
+      if (ignore === 'offset') sparql = sparql.replace(/\bOFFSET \d+/, '');
       const graphs = graphSuffix !== '_shared_memory' ? [] : [...assets.values()]
         .filter((asset) => asset.status === 'swm-shared' && asset.subGraphName === subGraphName)
         .map((asset) => oxigraph.namedNode(asset.graph));
@@ -533,6 +551,78 @@ test('createImportManifest preserves the original startedAt when it resumes the 
   await createManifest(client, importId, ['src/foo.ts']);
   const startedAt = client.store.match(oxigraph.namedNode(importUri(importId)), oxigraph.namedNode(IMPORT_P.startedAt), null, null);
   assert.equal(startedAt.length, 1, 'a resumed head must not gain a second imp:startedAt');
+});
+
+test('createImportManifest refuses another partition set over a head that an interrupted run left unshared', async () => {
+  const client = makeMockDaemon();
+  const importId = 'unshared-head';
+  const head = defaultManifestAssertionName(importId);
+  client.failures.push({ match: (r) => r.path === `/api/knowledge-assets/${head}/swm/share`, error: httpError(503, { code: 'STORE_SCHEDULER_BUSY' }) });
+  await assert.rejects(() => createManifest(client, importId, ['a', 'b']), /503/);
+  assert.equal(client.assets.get(head).status, 'wm-sealed');
+
+  client.requests.length = 0;
+  await assert.rejects(() => createManifest(client, importId, ['a', 'c']), /different partition set/);
+  assert.equal(client.assets.get(head).status, 'wm-sealed', 'the old head is not shared');
+  assert.deepEqual(client.requests.filter((r) => r.method === 'POST').map((r) => r.path), ['/api/knowledge-assets'],
+    'nothing is written or shared for the other set');
+
+  // The same set resumes: the sealed head is shared as it is, then the page.
+  await createManifest(client, importId, ['b', 'a']);
+  assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
+});
+
+test('createImportManifest writes the whole head when the interrupted run created it but wrote nothing', async () => {
+  const client = makeMockDaemon();
+  const importId = 'empty-head';
+  const head = defaultManifestAssertionName(importId);
+  client.failures.push({ match: (r) => r.path === `/api/knowledge-assets/${head}/wm/write`, error: httpError(503, { code: 'STORE_OPERATION_TIMEOUT' }) });
+  await assert.rejects(() => createManifest(client, importId, ['a']), /503/);
+  assert.equal(client.assets.get(head).draft.size, 0);
+  await createManifest(client, importId, ['a']);
+  const importNode = oxigraph.namedNode(importUri(importId));
+  assert.equal(client.store.match(importNode, oxigraph.namedNode(IMPORT_P.startedAt), null, null).length, 1);
+  assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending']]);
+});
+
+test('loadImportManifest refuses partitions that the head does not list', async () => {
+  const client = makeMockDaemon();
+  const importId = 'stray-page';
+  await createManifest(client, importId, ['a', 'b']);
+  // A page another partition set left behind, shared late (for example by a share's recovery job).
+  await client.request('POST', '/api/knowledge-assets', {
+    contextGraphId: client.cgId, name: 'stray', subGraphName: 'meta', alsoShareSwm: true,
+    quads: buildInitialManifestTriples(importId, ['a', 'z'], '2026-01-15T09:00:00.000Z')
+      .filter((t) => t.subject !== importUri(importId) || t.predicate === IMPORT_P.partition),
+  });
+  await assert.rejects(() => load(client, importId), /declares partitions its head does not list/);
+});
+
+test('reads are paged, so a manifest and history larger than one query answer still load', async () => {
+  const client = makeMockDaemon({ maxResponseBytes: 512 * 1024 });
+  const keys = Array.from({ length: 2 * QUERY_PAGE_ROWS + 10 }, (_, i) => `src/${String(i).padStart(5, '0')}/${'x'.repeat(60)}.ts`);
+  await createManifest(client, 'paged', keys);
+  await markPartitionStatuses({ client, importId: 'paged', subGraphName: 'meta', statuses: keys.map((partitionKey) => ({ partitionKey, status: 'in_progress' })) });
+  await markPartitionStatuses({ client, importId: 'paged', subGraphName: 'meta', statuses: keys.map((partitionKey) => ({ partitionKey, status: 'done' })) });
+  const unpaged = `SELECT ?ev WHERE { GRAPH ?g { ?part <${IMPORT_P.statusEvent}> ?ev } }`;
+  await assert.rejects(() => client.query({ sparql: unpaged, graphSuffix: '_shared_memory', subGraphName: 'meta' }), /413/,
+    'the whole history is more than one answer may carry');
+  client.queries.length = 0;
+  const state = await load(client, 'paged');
+  assert.equal(state.partitions.length, keys.length);
+  assert.ok(state.partitions.every((p) => p.status === 'done'));
+  const selects = client.queries.filter((q) => /SELECT \?(part|ev)/.test(q.sparql));
+  assert.ok(selects.length >= 6, `expected paged reads, got ${selects.length} queries`);
+  assert.ok(selects.every((q) => new RegExp(`LIMIT ${QUERY_PAGE_ROWS} OFFSET \\d+`).test(q.sparql)));
+});
+
+test('a store that ignores LIMIT or OFFSET makes the paged reads fail instead of looping', async () => {
+  for (const ignore of ['limit', 'offset']) {
+    const client = makeMockDaemon({ ignore });
+    const importId = `ignored-${ignore}`;
+    await createManifest(client, importId, Array.from({ length: QUERY_PAGE_ROWS + 1 }, (_, i) => `k${i}`));
+    await assert.rejects(() => load(client, importId), /ignored its LIMIT or OFFSET/);
+  }
 });
 
 test('createImportManifest rejects reuse with a different partition set', async () => {
