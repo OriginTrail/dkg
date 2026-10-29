@@ -141,7 +141,7 @@ describe('async publisher gas eligibility (#3591)', () => {
       knowledgeAssetVmPublishHandler: { execute: async ({ request, publishOptions }) => {
         if (request.name === 'expensive') throw new InsufficientPublisherFundsError('No funded publisher wallet', [
           { address: 'a', nativeWei: 10n ** 18n, tracWei: 5n },
-        ]);
+        ], { cause: Object.assign(new Error('ERC20InsufficientBalance'), { code: 'CALL_EXCEPTION' }) });
         await publishOptions.onBeforeBroadcast!({ txHash: KA_VM_EXECUTOR_TX_HASH, operationKind: 'create' });
         return completeResult();
       } },
@@ -243,6 +243,9 @@ describe('async publisher gas eligibility (#3591)', () => {
 
   it.each([
     ['RPC insufficient-funds error', () => new Error('insufficient funds for gas * price + value')],
+    ['wrapped native RPC error', () => new InsufficientPublisherFundsError('No funded publisher wallet', [], {
+      cause: Object.assign(new Error('insufficient funds for gas * price + value'), { code: 'INSUFFICIENT_FUNDS' }),
+    })],
     ['native prepared-cost guard', () => new PublisherGasFundingError({
       observedAt: Date.now(), balanceWei: 0n, requiredWei: 2n, gasLimit: 1n, feePerGasWei: 2n,
     })],
@@ -320,7 +323,9 @@ describe('async publisher gas eligibility (#3591)', () => {
     if (recorded) expect(job?.broadcast?.txHash).toBe(KA_VM_EXECUTOR_TX_HASH);
   });
 
-  it.each(['insufficient funds', 'timeout', 'nonce too low', 'already known'])(
+  it.each(['insufficient funds', 'timeout', 'nonce too low', 'already known',
+    new InsufficientPublisherFundsError('No funded publisher wallet', [], { cause: Object.assign(new Error('insufficient funds for gas'), { code: 'INSUFFICIENT_FUNDS' }) }),
+  ])(
     'retains signed history and original wallet after post-WAL %s', async (message) => {
       const f = fundingFixture();
       const store = new OxigraphStore();
@@ -329,7 +334,7 @@ describe('async publisher gas eligibility (#3591)', () => {
         walletEligibility: f.funding, fundingRecoveryPolicy: 'proof-first',
         knowledgeAssetVmPublishHandler: { execute: async ({ publishOptions }) => {
           await publishOptions.onBeforeBroadcast!({ txHash: KA_VM_EXECUTOR_TX_HASH, nonce: 7, operationKind: 'create' });
-          throw new Error(message);
+          throw typeof message === 'string' ? new Error(message) : message;
         } },
       });
       const id = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());

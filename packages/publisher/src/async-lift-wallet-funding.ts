@@ -1,4 +1,4 @@
-import type { PublisherGasFundingObservation } from '@origintrail-official/dkg-chain';
+import { InsufficientPublisherFundsError, type PublisherGasFundingObservation } from '@origintrail-official/dkg-chain';
 import { claimTrace } from './async-lift-claim-trace.js';
 import { isDefinitivePreAcceptanceSendFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
 
@@ -9,6 +9,13 @@ export function isPublisherFundingFailure(error: unknown): boolean {
 
 /** Only native-gas failures can become eligible through this wallet's native balance read. */
 export function isPublisherNativeGasFailure(error: unknown): boolean {
+  if (hasNativeGasFacts(error)) return true;
+  try { return error instanceof InsufficientPublisherFundsError && hasNativeGasFacts(error.cause); }
+  catch { return false; }
+}
+
+/** Only the chain's known funding wrapper grants access to its immediate cause. */
+function hasNativeGasFacts(error: unknown): boolean {
   const { code, lowerMessage } = readPublishErrorFacts(error);
   return code === 'PUBLISHER_GAS_FUNDING_UNAVAILABLE'
     || (!lowerMessage.includes('revert') && (code === 'INSUFFICIENT_FUNDS' || /insufficient funds for gas\b/.test(lowerMessage)));
