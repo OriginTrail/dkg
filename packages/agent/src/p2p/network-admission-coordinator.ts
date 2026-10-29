@@ -1,8 +1,10 @@
+import { setTimeout as delay } from 'node:timers/promises';
 import { randomUUID } from 'node:crypto';
 import {
   PROTOCOL_NETWORK_IDENTITY,
   createOperationContext,
   isTransportTimeoutError,
+  isProtocolUnsupportedError,
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
@@ -91,7 +93,7 @@ const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
 export const MAX_IDENTITY_PROBE_CONCURRENCY = 4;
 
 export interface NetworkIdentityProtocolRegistrar {
-  register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void;
+  register(protocolId: string, handler: (data: Uint8Array) => Promise<Uint8Array>): void | Promise<void>;
 }
 
 class InFlightAdmissionAttempt {
@@ -255,8 +257,8 @@ export class NetworkAdmissionCoordinator {
     return [...peers].filter((peer) => this.isAcceptedPeer(peer.toString()));
   }
 
-  registerIdentityProtocol(router: NetworkIdentityProtocolRegistrar): void {
-    router.register(PROTOCOL_NETWORK_IDENTITY, async (data) => {
+  async registerIdentityProtocol(router: NetworkIdentityProtocolRegistrar): Promise<void> {
+    await router.register(PROTOCOL_NETWORK_IDENTITY, async (data) => {
       if (!this.enabled || !this.identity?.networkId) {
         throw new Error('network identity is not configured');
       }
@@ -417,6 +419,25 @@ export class NetworkAdmissionCoordinator {
     throw new NetworkAdmissionProbeError(remotePeer, message);
   }
 
+  /** Released peers may still register identity after listening. Keep that compatibility here,
+   * bounded by the existing probe budget and cancelled with the shared admission attempt. */
+  private async sendStartupCompatibleIdentityProbe(peerId: string, data: Uint8Array,
+    timeoutMs: number, signal: AbortSignal): Promise<Uint8Array> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      signal.throwIfAborted();
+      try {
+        return await this.sendIdentityProbe(peerId, data, { timeoutMs: Math.max(1, deadline - Date.now()), signal });
+      } catch (error) {
+        signal.throwIfAborted();
+        const remaining = deadline - Date.now();
+        if (!isProtocolUnsupportedError(error) || remaining <= 0) throw error;
+        await delay(Math.min(500, remaining), undefined, { signal });
+        if (Date.now() >= deadline) throw error;
+      }
+    }
+  }
+
   private async probePeer(
     remotePeer: CanonicalPeerId,
     ctx: OperationContext,
@@ -440,20 +461,20 @@ export class NetworkAdmissionCoordinator {
     try {
       const data = new TextEncoder().encode(JSON.stringify(request));
       try {
-        response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeTimeoutMs, signal });
+        response = await this.sendStartupCompatibleIdentityProbe(remotePeer, data, this.probeTimeoutMs, signal);
       } catch (error) {
         if (signal.aborted) throw abortErrorFromSignal(signal.reason);
         if (!isTransportTimeoutError(error)) throw error;
         // A busy peer can miss the first deadline. The same shared owner makes
         // exactly one longer attempt before recording any failure/backoff.
-        response = await this.sendIdentityProbe(remotePeer, data, { timeoutMs: this.probeRetryTimeoutMs, signal });
+        response = await this.sendStartupCompatibleIdentityProbe(remotePeer, data, this.probeRetryTimeoutMs, signal);
       }
     } catch (err) {
       if (signal.aborted) throw abortErrorFromSignal(signal.reason);
       const message = err instanceof Error ? err.message : String(err);
       // Every transport probe failure is retryable-transient — including a
       // multistream "could not negotiate"/`na`. That `na` is ambiguous: a
-      // same-network peer that is still booting answers it during the window
+      // released same-network peer that is still booting answers it during the window
       // between `libp2p.start()` and `registerIdentityProtocol()`, and it is
       // indistinguishable by message from a peer that will never support the
       // protocol. Treating it as a long "unsupported-protocol" blackhole would

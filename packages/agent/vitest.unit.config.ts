@@ -479,6 +479,7 @@ export default defineConfig({
       "test/network-admission-coordinator.test.ts",
       "test/network-admission-slow-probe.test.ts",
       "test/network-admission-connect-race.test.ts",
+      "test/network-admission-startup-compatibility.test.ts",
       "test/explicit-connect-admission.test.ts",
       "test/sync-responder-agents-meta-serve-skip.test.ts",
       "test/messenger-substrate.test.ts",

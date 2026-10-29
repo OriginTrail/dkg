@@ -87,20 +87,6 @@ export interface SendOptions {
    * multi-path wires; the pooled wire keeps its own frame ceiling.
    */
   maxReadBytes?: number;
-  /**
-   * Keep retrying, with the router's usual backoff, when the peer refuses the
-   * protocol ("no such protocol" from multistream-select). Default `false`: a
-   * refusal means the peer does not speak the protocol on any wire variant the
-   * router tried, so `send()` fails fast instead of re-negotiating it.
-   *
-   * Set it only for a protocol whose refusal can be TRANSIENT because the peer
-   * registers the handler during startup: multistream answers `na` in the
-   * window between `libp2p.start()` and that registration, and cannot be told
-   * apart from a peer that will never speak it. The network-identity probe is
-   * the one such caller: it gates every other protocol, so a refusal while the
-   * peer is still booting must not cost a full admission backoff.
-   */
-  retryOnProtocolRefusal?: boolean;
 }
 
 export interface AdmissionCheckOptions {
@@ -526,12 +512,12 @@ export class ProtocolRouter {
     protocolId: string,
     handler: DKGStreamHandler,
     options?: ProtocolRegistrationOptions,
-  ): void {
+  ): Promise<void> {
     this.handlers.set(protocolId, handler);
     const libp2p = this.node.libp2p;
 
     const limit = options?.maxReadBytes ?? this.maxReadBytes;
-    libp2p.handle(protocolId, async (stream: Stream, connection) => {
+    const registered = libp2p.handle(protocolId, async (stream: Stream, connection) => {
       // Codex (#669#discussion_r3302188320): cache the stopSignal once at
       // handler entry and reuse it for every step of the inbound lifecycle.
       // The previous code re-read `this.node.stopSignal` three times — at
@@ -619,6 +605,7 @@ export class ProtocolRouter {
     if (overlay) {
       this.installPoolInboundHandler(protocolId, overlay.pool);
     }
+    return registered;
   }
 
   unregister(protocolId: string): void {
@@ -953,7 +940,6 @@ export class ProtocolRouter {
       throw new Error('single-use payloads cannot use parallelPaths > 1');
     }
     const maxReadBytes = resolveSendMaxReadBytes(opts.maxReadBytes, this.maxReadBytes);
-    const retryOnProtocolRefusal = opts.retryOnProtocolRefusal === true;
     const overallStartedAt = Date.now();
     const overallDeadline = lifecycle.deadline;
     const stopSignal = this.node.stopSignal;
@@ -1248,10 +1234,8 @@ export class ProtocolRouter {
         // recoverable: the pooled -> one-shot wire-variant fallback above has
         // already run inside this same `send()`, so this refusal is the
         // one-shot wire's too, and re-negotiating the same protocol only
-        // burns the retry budget and the send deadline. A caller that knows the
-        // refusal can be transient (a booting peer) opts back in.
-        const retryable = isRecoverableSendError(err) ||
-          (retryOnProtocolRefusal && isProtocolUnsupportedError(err));
+        // burns the retry budget and the send deadline.
+        const retryable = isRecoverableSendError(err);
         if (!retryable || attempt >= maxAttempts - 1) throw err;
         const backoff = (attempt + 1) * 500;
         // Make the backoff abortable so the overall deadline is

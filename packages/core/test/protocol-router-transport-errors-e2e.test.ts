@@ -8,7 +8,6 @@ import {
 } from '../src/protocol-router.js';
 import { POOLED_MESSAGE_PROTOCOL } from '../src/message-stream-pool.js';
 import { classifyTransportError } from '../src/transport-error.js';
-import { watchProtocolRefusal } from '../../../scripts/testing/protocol-refusal.js';
 
 /**
  * End-to-end coverage of the typed transport-error classification: two REAL
@@ -22,10 +21,6 @@ import { watchProtocolRefusal } from '../../../scripts/testing/protocol-refusal.
  *  - the in-line pooled -> one-shot wire-variant fallback still runs first,
  *    inside the same `send()`, when the peer speaks only the one-shot wire;
  *  - a peer that speaks NEITHER wire costs one pooled and one one-shot attempt;
- *  - a refusal is retried only when the caller opts in (`retryOnProtocolRefusal`,
- *    for a peer that is still booting); the late handler is registered from the
- *    sender's observation of its first refusal, not from a timer, so a slow dial
- *    cannot make that test pass without a retry;
  *  - genuinely transient failures (a stream reset by the responder, a peer
  *    that went away) are still retried with backoff.
  */
@@ -150,54 +145,16 @@ describe('ProtocolRouter typed transport errors (two real libp2p nodes)', () => 
     expect(elapsedMs).toBeLessThan(FAIL_FAST_BUDGET_MS);
   }, 15_000);
 
-  it('fails fast against a peer that registers the protocol only after refusing it, unless the caller opts into retrying a refusal', async () => {
-    const { sender, receiverRouter, receiver, senderRouter } = await pair();
+  it('does not retry refusals; a separate send can use a newly registered handler', async () => {
+    const { receiverRouter, receiver, senderRouter, sender } = await pair();
     const protocol = '/test/registers-late/1.0.0';
-    let handled = 0;
-    const echo = async (data: Uint8Array): Promise<Uint8Array> => {
-      handled += 1;
-      return enc.encode(`echo:${dec.decode(data)}`);
-    };
-
-    // Default: the refusal is final for this send().
-    const failure = await senderRouter
-      .send(receiver.peerId, protocol, enc.encode('one'))
-      .then(() => undefined, (err: unknown) => err);
-    expect((failure as Error).name).toBe('UnsupportedProtocolError');
-    expect(handled).toBe(0);
-
-    // A booting peer: multistream answers `na` until the handler is registered.
-    // The handler appears only once the sender has seen its own `dialProtocol`
-    // refused, never on a timer (see `watchProtocolRefusal`), so the send can
-    // only get through by a retry. retryOnProtocolRefusal keeps the router's
-    // in-line retry, which is what the network-identity probe uses.
-    const watch = watchProtocolRefusal(sender.libp2p, protocol, () => {
-      receiverRouter.register(protocol, echo);
-    });
-    let response: Uint8Array;
-    let respondedAfterRefusalMs = 0;
-    try {
-      // Bounded by the send's own deadline: if the refusal is never seen the
-      // handler is never registered and this rejects, it does not hang.
-      response = await senderRouter
-        .send(receiver.peerId, protocol, enc.encode('two'), {
-          retryOnProtocolRefusal: true,
-          timeoutMs: 10_000,
-        })
-        .catch(watch.failWithContext('send did not get through'));
-      respondedAfterRefusalMs = watch.msSinceFirstRefusal();
-    } finally {
-      watch.dispose();
-    }
-    expect(dec.decode(response)).toBe('echo:two');
-    // The refusal was observed, and it is what registered the handler. The one
-    // refused dial ended the first attempt; the retry got through.
-    expect(watch.refusedDials).toBe(1);
-    expect(watch.registrations).toBe(1);
-    expect(handled).toBe(1);
-    // The retry waited out at least one backoff step (500 ms) after the refusal.
-    expect(respondedAfterRefusalMs).toBeGreaterThanOrEqual(450);
-  }, 20_000);
+    const dial = vi.spyOn(sender.libp2p, 'dialProtocol');
+    await expect(senderRouter.send(receiver.peerId, protocol, enc.encode('one')))
+      .rejects.toMatchObject({ name: 'UnsupportedProtocolError' });
+    expect(dial).toHaveBeenCalledTimes(1);
+    await receiverRouter.register(protocol, async data => data);
+    expect(await senderRouter.send(receiver.peerId, protocol, enc.encode('two'))).toEqual(enc.encode('two'));
+  }, 15_000);
 
   it('still retries a stream the responder resets mid-send, and succeeds on the retry', async () => {
     const { receiver, senderRouter, receiverRouter } = await pair();

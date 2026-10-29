@@ -1462,6 +1462,136 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     });
   }
 
+  /** This is the network-ready boundary: identity is served before peers can dial us. */
+  async initializeNetworkAdmission(this: DKGAgent): Promise<void> {
+    const network = new LibP2PNetwork(this.node);
+    // Local helper: race a lookup against an optional AbortSignal so
+    // an in-flight SPARQL query honours the resolver's outer deadline.
+    // Codex PR #499 round 5 race: re-check signal.aborted INSIDE the
+    // listener-attach Promise so we don't lose the one-shot 'abort'
+    // event between the early gate and addEventListener.
+    const raceAgainstAbort = <T>(lookup: Promise<T | null>, signal: AbortSignal | undefined): Promise<T | null> => {
+      if (!signal) return lookup;
+      return Promise.race<T | null>([
+        lookup,
+        new Promise<null>((resolve) => {
+          if (signal.aborted) {
+            resolve(null);
+            return;
+          }
+          signal.addEventListener('abort', () => resolve(null), { once: true });
+        }),
+      ]);
+    };
+
+    const peerResolver = new PeerResolver({
+      network,
+      registry: new StubNetworkStateRegistry(),
+      agentDirectory: {
+        // Wraps DiscoveryClient.findAgentByPeerId in the resolver's
+        // minimal AgentDirectoryLookup shape so packages/core doesn't
+        // need to know about the agents-CG SPARQL surface. Replaced
+        // when RFC 04 Phase 2 lands — at that point, the registry
+        // step takes precedence and this fallback is rarely hit.
+        //
+        // Codex review feedback on PR #496 round 5: the previous
+        // revision dropped `opts.signal` entirely, leaving the
+        // resolver's documented cancellation guarantee unhonored at
+        // the only production AgentDirectoryLookup. DiscoveryClient
+        // itself doesn't (yet) accept an AbortSignal, so we honor
+        // the contract at the adapter boundary instead: if the
+        // signal aborts the adapter resolves to `null` immediately,
+        // unblocking the resolver and the outer caller. The
+        // underlying SPARQL fetch then completes in the background
+        // and its result is discarded — a small leak in the abort
+        // path, acceptable given:
+        //   (a) it's bounded by the discovery client's own internal
+        //       timeout
+        //   (b) RFC 04 Phase 2 replaces this fallback path entirely
+        //   (c) the alternative (refactoring DiscoveryClient end-to-
+        //       end signal threading) is out of scope for this PR
+        // The follow-up to plumb signals into DiscoveryClient is
+        // tracked separately.
+        findRelayForPeer: async (peerId, opts) => {
+          if (opts?.signal?.aborted) return null;
+          const lookup = this.discovery.findAgentByPeerId(peerId)
+            .then((agent) => agent?.relayAddress ?? null);
+          return raceAgainstAbort(lookup, opts?.signal);
+        },
+        // PR feat/chain-agents-cg-phonebook: richer lookup that
+        // returns direct multiaddrs + relayAddress + lastSeen so the
+        // resolver can prime the peerStore with current dialable
+        // addrs and filter by freshness. The resolver falls through
+        // to `findRelayForPeer` if this returns null.
+        findAgentDialAddresses: async (peerId, opts) => {
+          if (opts?.signal?.aborted) return null;
+          const lookup = this.discovery.findAgentByPeerId(peerId)
+            .then((agent) => {
+              if (!agent) return null;
+              const lastSeenMs = agent.lastSeen ? Date.parse(agent.lastSeen) : undefined;
+              return {
+                multiaddrs: agent.multiaddrs ?? [],
+                relayAddress: agent.relayAddress,
+                lastSeenMs: Number.isFinite(lastSeenMs) ? lastSeenMs : undefined,
+              };
+            });
+          return raceAgainstAbort(lookup, opts?.signal);
+        },
+      },
+      agentDirectoryStaleThresholdMs: AGENT_PROFILE_STALE_THRESHOLD_MS,
+      // Bootstrap is a libp2p-startup concern (`bootstrap({ list })` in
+      // peerDiscovery, see node.ts) — not a per-peer resolution concern.
+      // Removed here per Codex review feedback on PR #496.
+      //
+      // Note: `defaultPerStepTimeoutMs` is intentionally NOT wired from
+      // operator config. Production callers (`connectToPeerId`, chat /
+      // routed sends) always pass an explicit `perStepTimeoutMs`
+      // derived from their own deadline budget, so any constructor
+      // default would be a silent no-op for those paths. The
+      // constructor option survives as a test-fixture surface.
+      // Codex review of PR #698 round 2 caught this.
+    });
+    this.peerResolver = peerResolver;
+    this.networkAdmission = new NetworkAdmissionService({
+      networkId: this.config.networkIdentity?.networkId,
+      selfPeerId: this.node.peerId.toString(),
+    });
+    this.networkAdmissionCoordinator = new NetworkAdmissionCoordinator({
+      admission: this.networkAdmission,
+      identity: this.config.networkIdentity,
+      cacheIdentities: this.config.coreChainCacheNetworks.map(n => n.identity),
+      selfPeerId: this.node.peerId.toString(),
+      sign: (payload) => this.wallet.sign(payload),
+      sendIdentityProbe: (peerId, data, options) =>
+        this.router.send(peerId, PROTOCOL_NETWORK_IDENTITY, data, options),
+      getConnections: () => this.node.libp2p.getConnections() as any,
+      deletePeerFromPeerStore: async (peerId) => {
+        const { peerIdFromString } = await import('@libp2p/peer-id');
+        await this.node.libp2p.peerStore.delete(peerIdFromString(peerId));
+      },
+      cleanupRejectedPeerState: (peerId) => this.clearNetworkRejectedPeerState(peerId),
+      // Transport half of the verdict: stop libp2p (kad-dht, relay discovery,
+      // reconnect queue) from redialing a peer of another network for exactly
+      // the quarantine just applied, and lift that as soon as the peer proves
+      // it belongs to this one.
+      onPeerRejected: (peerId, quarantineMs) => { this.node.denyPeerAfterNetworkMismatch(peerId, quarantineMs); },
+      onPeerVerified: (peerId) => { this.node.clearPeerNetworkMismatchDenial(peerId); },
+      log: this.log,
+    });
+    this.router = new ProtocolRouter(this.node, {
+      network,
+      peerResolver,
+      // Both admission phases — the probing full check and the cached-verdict
+      // pre-read gate — installed as one policy from one coordinator; see
+      // createNetworkAdmissionRouterPolicy for why they must not be wired
+      // separately.
+      ...createNetworkAdmissionRouterPolicy(this.networkAdmissionCoordinator),
+      admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
+      publicDirectAddressesOnly: this.config.publicAddressesOnly === true,
+    });
+    await this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
+  }
+
   async start(this: DKGAgent): Promise<void> {
     if (this.vmReconcileShutdownBlocked) {
       throw new VmReconcileShutdownTimeoutError(DKGAgentBase.VM_RECONCILE_SHUTDOWN_TIMEOUT_MS);
@@ -1545,7 +1675,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         logWarn: (message) => this.log.warn(ctx, message),
       });
 
-      await this.node.start();
+      await this.node.start({ beforeListen: () => this.initializeNetworkAdmission() });
     } catch (cause) {
       const failures: unknown[] = [cause];
       try {
@@ -1670,131 +1800,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.loadAgentsFromStore();
     await this.reconcileDefaultAgent();
 
-    const network = new LibP2PNetwork(this.node);
-    // Local helper: race a lookup against an optional AbortSignal so
-    // an in-flight SPARQL query honours the resolver's outer deadline.
-    // Codex PR #499 round 5 race: re-check signal.aborted INSIDE the
-    // listener-attach Promise so we don't lose the one-shot 'abort'
-    // event between the early gate and addEventListener.
-    const raceAgainstAbort = <T>(lookup: Promise<T | null>, signal: AbortSignal | undefined): Promise<T | null> => {
-      if (!signal) return lookup;
-      return Promise.race<T | null>([
-        lookup,
-        new Promise<null>((resolve) => {
-          if (signal.aborted) {
-            resolve(null);
-            return;
-          }
-          signal.addEventListener('abort', () => resolve(null), { once: true });
-        }),
-      ]);
-    };
-
-    const peerResolver = new PeerResolver({
-      network,
-      registry: new StubNetworkStateRegistry(),
-      agentDirectory: {
-        // Wraps DiscoveryClient.findAgentByPeerId in the resolver's
-        // minimal AgentDirectoryLookup shape so packages/core doesn't
-        // need to know about the agents-CG SPARQL surface. Replaced
-        // when RFC 04 Phase 2 lands — at that point, the registry
-        // step takes precedence and this fallback is rarely hit.
-        //
-        // Codex review feedback on PR #496 round 5: the previous
-        // revision dropped `opts.signal` entirely, leaving the
-        // resolver's documented cancellation guarantee unhonored at
-        // the only production AgentDirectoryLookup. DiscoveryClient
-        // itself doesn't (yet) accept an AbortSignal, so we honor
-        // the contract at the adapter boundary instead: if the
-        // signal aborts the adapter resolves to `null` immediately,
-        // unblocking the resolver and the outer caller. The
-        // underlying SPARQL fetch then completes in the background
-        // and its result is discarded — a small leak in the abort
-        // path, acceptable given:
-        //   (a) it's bounded by the discovery client's own internal
-        //       timeout
-        //   (b) RFC 04 Phase 2 replaces this fallback path entirely
-        //   (c) the alternative (refactoring DiscoveryClient end-to-
-        //       end signal threading) is out of scope for this PR
-        // The follow-up to plumb signals into DiscoveryClient is
-        // tracked separately.
-        findRelayForPeer: async (peerId, opts) => {
-          if (opts?.signal?.aborted) return null;
-          const lookup = this.discovery.findAgentByPeerId(peerId)
-            .then((agent) => agent?.relayAddress ?? null);
-          return raceAgainstAbort(lookup, opts?.signal);
-        },
-        // PR feat/chain-agents-cg-phonebook: richer lookup that
-        // returns direct multiaddrs + relayAddress + lastSeen so the
-        // resolver can prime the peerStore with current dialable
-        // addrs and filter by freshness. The resolver falls through
-        // to `findRelayForPeer` if this returns null.
-        findAgentDialAddresses: async (peerId, opts) => {
-          if (opts?.signal?.aborted) return null;
-          const lookup = this.discovery.findAgentByPeerId(peerId)
-            .then((agent) => {
-              if (!agent) return null;
-              const lastSeenMs = agent.lastSeen ? Date.parse(agent.lastSeen) : undefined;
-              return {
-                multiaddrs: agent.multiaddrs ?? [],
-                relayAddress: agent.relayAddress,
-                lastSeenMs: Number.isFinite(lastSeenMs) ? lastSeenMs : undefined,
-              };
-            });
-          return raceAgainstAbort(lookup, opts?.signal);
-        },
-      },
-      agentDirectoryStaleThresholdMs: AGENT_PROFILE_STALE_THRESHOLD_MS,
-      // Bootstrap is a libp2p-startup concern (`bootstrap({ list })` in
-      // peerDiscovery, see node.ts) — not a per-peer resolution concern.
-      // Removed here per Codex review feedback on PR #496.
-      //
-      // Note: `defaultPerStepTimeoutMs` is intentionally NOT wired from
-      // operator config. Production callers (`connectToPeerId`, chat /
-      // routed sends) always pass an explicit `perStepTimeoutMs`
-      // derived from their own deadline budget, so any constructor
-      // default would be a silent no-op for those paths. The
-      // constructor option survives as a test-fixture surface.
-      // Codex review of PR #698 round 2 caught this.
-    });
-    this.peerResolver = peerResolver;
-    this.networkAdmission = new NetworkAdmissionService({
-      networkId: this.config.networkIdentity?.networkId,
-      selfPeerId: this.node.peerId.toString(),
-    });
-    this.networkAdmissionCoordinator = new NetworkAdmissionCoordinator({
-      admission: this.networkAdmission,
-      identity: this.config.networkIdentity,
-      cacheIdentities: this.config.coreChainCacheNetworks.map(n => n.identity),
-      selfPeerId: this.node.peerId.toString(),
-      sign: (payload) => this.wallet.sign(payload),
-      sendIdentityProbe: (peerId, data, options) =>
-        this.router.send(peerId, PROTOCOL_NETWORK_IDENTITY, data, { ...options, retryOnProtocolRefusal: true }), // a booting peer answers `na` until its handler registers
-      getConnections: () => this.node.libp2p.getConnections() as any,
-      deletePeerFromPeerStore: async (peerId) => {
-        const { peerIdFromString } = await import('@libp2p/peer-id');
-        await this.node.libp2p.peerStore.delete(peerIdFromString(peerId));
-      },
-      cleanupRejectedPeerState: (peerId) => this.clearNetworkRejectedPeerState(peerId),
-      // Transport half of the verdict: stop libp2p (kad-dht, relay discovery,
-      // reconnect queue) from redialing a peer of another network for exactly
-      // the quarantine just applied, and lift that as soon as the peer proves
-      // it belongs to this one.
-      onPeerRejected: (peerId, quarantineMs) => { this.node.denyPeerAfterNetworkMismatch(peerId, quarantineMs); },
-      onPeerVerified: (peerId) => { this.node.clearPeerNetworkMismatchDenial(peerId); },
-      log: this.log,
-    });
-    this.router = new ProtocolRouter(this.node, {
-      network,
-      peerResolver,
-      // Both admission phases — the probing full check and the cached-verdict
-      // pre-read gate — installed as one policy from one coordinator; see
-      // createNetworkAdmissionRouterPolicy for why they must not be wired
-      // separately.
-      ...createNetworkAdmissionRouterPolicy(this.networkAdmissionCoordinator),
-      admissionExemptProtocols: [PROTOCOL_NETWORK_IDENTITY],
-      publicDirectAddressesOnly: this.config.publicAddressesOnly === true,
-    });
     this.messenger = new Messenger({
       router: this.router,
       idempotencyStore,
@@ -1812,7 +1817,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // remains the step-2 DHT lookup inside resolve(), so we don't
       // lose any pre-existing recovery path.
       resolvePeer: async (peerId, { signal }) => {
-        await peerResolver.connect(peerId, { signal }).catch(() => undefined);
+        await this.peerResolver.connect(peerId, { signal }).catch(() => undefined);
       },
     });
     // A remote join handler that aborts before persisting its decision can be
@@ -1849,7 +1854,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     await this.rehydrateContextGraphsFromDurableState();
     await this.restoreSwmHostModeSubscriptions();
 
-    this.networkAdmissionCoordinator.registerIdentityProtocol(this.router);
 
     // Register protocol handlers. PROTOCOL_ACCESS migrated onto the
     // Universal Messenger substrate in rc.9 PR-8 — handler is
