@@ -232,6 +232,19 @@ describe('AsyncLiftWalletFunding (#3591)', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('counts a malformed reading as unreadable instead of throwing in the claim', async () => {
+    const g = gate({ reader: async () => ({ native: '5000', trac: -1n }) as unknown as AsyncLiftWalletBalances });
+    g.funding.recordRefusal('w1', STATED);
+    expect(g.funding.mayClaim('w2')).toBe(false);
+    await g.settle();
+    expect(g.funding.mayClaim('w2')).toBe(true);
+    const undefinedReading = gate({ reader: async () => undefined as unknown as AsyncLiftWalletBalances });
+    undefinedReading.funding.recordRefusal('w1', STATED);
+    expect(undefinedReading.funding.mayClaim('w2')).toBe(false);
+    await undefinedReading.settle();
+    expect(undefinedReading.funding.mayClaim('w2')).toBe(true);
+  });
+
   it('without a reader, keeps a refused wallet out for its cooldown only', () => {
     const g = gate({ reader: null });
     g.funding.recordRefusal('w1', STATED);

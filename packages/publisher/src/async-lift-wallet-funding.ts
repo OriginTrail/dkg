@@ -197,7 +197,11 @@ async function boundedRead(reader: AsyncLiftWalletBalanceReader, walletId: strin
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      Promise.resolve().then(() => reader(walletId)).catch(() => UNREADABLE),
+      // Only bigints count: a reader's malformed answer must not throw inside the claim lock.
+      Promise.resolve().then(() => reader(walletId)).then(
+        (balances) => ({ native: weiOrNull(balances?.native), trac: weiOrNull(balances?.trac) }),
+        () => UNREADABLE,
+      ),
       new Promise<AsyncLiftWalletBalances>((resolve) => {
         timer = setTimeout(() => resolve(UNREADABLE), WALLET_FUNDING_READ_TIMEOUT_MS);
         timer.unref?.();
@@ -206,6 +210,10 @@ async function boundedRead(reader: AsyncLiftWalletBalanceReader, walletId: strin
   } finally {
     clearTimeout(timer);
   }
+}
+
+function weiOrNull(value: unknown): bigint | null {
+  return typeof value === 'bigint' && value >= 0n ? value : null;
 }
 
 /**
