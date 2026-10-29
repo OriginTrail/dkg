@@ -18,6 +18,7 @@ import {
   type ActionOpts,
 } from '../cli-helpers.js';
 import { parseOptionalPositiveInteger } from '../cli-option-parsers.js';
+import { parseJobListPagingOptions, readJobList } from '../job-list-paging.js';
 import { addFinalizedPublishOptions, parseFinalizedPublishOptions } from './finalized-publish-command-options.js';
 
 const SHARE_JOB_STATES: readonly KnowledgeAssetShareJobState[] = [
@@ -187,7 +188,11 @@ function assertOneShotShareComplete(result: KnowledgeAssetCreateResponse, name: 
   }
 }
 
-function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): void {
+function assertPublishComplete(result: KnowledgeAssetPublishResponse, name: string, contextGraphId: string): asserts result is Extract<KnowledgeAssetPublishResponse, { catalogObligationPending?: false }> {
+  if (result.catalogObligationPending === true) {
+    console.log(JSON.stringify(result, null, 2));
+    throw new Error('Publication is confirmed but catalog observation is pending. Retain this response and retry its observation; do not republish');
+  }
   assertNoLifecycleErrors(result, `Knowledge asset VM publish completed partially for "${name}" in ${contextGraphId}`);
   if (result.error) {
     throw new Error(`Knowledge asset VM publish completed partially for "${name}" in ${contextGraphId}: ${result.error}`);
@@ -420,27 +425,39 @@ export function registerKnowledgeAssetCommand(program: Command): void {
       .description('List async SWM share jobs')
       .option('--state <state>', `Comma-separated state filter (${SHARE_JOB_STATES.join('|')})`)
       .option('--limit <n>', 'Maximum jobs to return (1-1000)')
+      .option('--cursor <cursor>', 'Print one page, the one after this cursor (the "Next cursor" of an earlier page)')
+      .option('--page-size <n>', 'Print one page of this many jobs (1-1000, 100 by default); with --all, jobs per request')
+      .option('--all', 'Page through to the end and print every job, in enqueue order')
       .option('--json', 'Print JSON'),
   )
     .action(async (opts: ActionOpts) => runAction(async () => {
+      const paging = parseJobListPagingOptions(opts);
       const limit = parseOptionalPositiveInteger(opts.limit, '--limit');
       const states = parseShareJobStates(opts.state);
       const client = await ApiClient.connect();
-      const result = await client.knowledgeAssetShareJobs({
+      const filter = {
         ...(opts.contextGraphId || opts.contextGraph ? { contextGraphId: requiredContextGraphId(opts) } : {}),
         ...(states ? { state: states } : {}),
-        ...(limit !== undefined ? { limit } : {}),
-      });
+      };
+      const result = await readJobList(
+        paging,
+        () => client.knowledgeAssetShareJobs({ ...filter, ...(limit !== undefined ? { limit } : {}) }),
+        (cursor, pageSize) => client.knowledgeAssetShareJobs({ ...filter, cursor, pageSize }),
+      );
       if (opts.json) {
         console.log(JSON.stringify(result, null, 2));
         return;
       }
-      if (result.jobs.length === 0) {
+      // A single page (the only answer with `complete`) can be empty while more follow, so it prints its footer instead.
+      if (result.jobs.length === 0 && result.complete === undefined) {
         console.log('No Knowledge Asset share jobs found.');
         return;
       }
       for (const job of result.jobs) {
         console.log(`${job.jobId}\t${job.state}\t${job.contextGraphId}\t${job.assertionName}`);
+      }
+      if (result.complete !== undefined) {
+        console.log(result.nextCursor ? `Next cursor: ${result.nextCursor}` : 'No further jobs when this page was read.');
       }
     }));
 
@@ -456,7 +473,7 @@ export function registerKnowledgeAssetCommand(program: Command): void {
 
   kaCmd
     .command('cancel-share-job <job-id>')
-    .description('Cancel a queued or retrying async SWM share job')
+    .description('Cancel a queued async SWM share job')
     .action(async (jobId: string) => runAction(async () => {
       const client = await ApiClient.connect();
       const result = await client.knowledgeAssetCancelShareJob(jobId);

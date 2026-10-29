@@ -1440,7 +1440,7 @@ describe('Context Graph subscription authority retry', () => {
             metadataBootstrap: 'forbidden',
           } as const;
     });
-    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
     vi.useFakeTimers();
 
@@ -1687,7 +1687,7 @@ describe('Context Graph subscription authority retry', () => {
           metadataBootstrap: 'eligible',
         } as const;
       });
-      const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+      const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
       vi.useFakeTimers();
 
       await agent.start();
@@ -1763,7 +1763,7 @@ describe('Context Graph subscription authority retry', () => {
         ));
       // Pass-through spy: every decision below comes from the real resolver.
       const lookups = vi.spyOn(node, 'resolveContextGraphSubscriptionBootstrapAuthority');
-      const subscribe = vi.spyOn(node, 'subscribeToContextGraph');
+      const subscribe = vi.spyOn(node, 'installContextGraphSubscription');
       vi.useFakeTimers();
       await node.start();
       return {
@@ -2019,7 +2019,7 @@ describe('Context Graph subscription authority retry', () => {
           onChainId: 7n,
         } as const;
       });
-    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
 
     await agent.start();

@@ -1479,7 +1479,7 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
       }
     });
 
-    it('updates only the affected dormant rehydration diagnostic after a successful persisted write', async () => {
+    it('keeps a persistence acknowledgement dormant until explicit subscription replaces its intent', async () => {
       const rows = Array.from({ length: 66 }, (_, i) => ({
         id: `one-write-cg-${String(i).padStart(3, '0')}`,
         name: `One Write CG ${i}`,
@@ -1522,6 +1522,10 @@ describe('DKGAgent config — syncContextGraphs and queryAccess warning', () => 
         await new Promise<void>((resolve) => setTimeout(resolve, 0));
 
         expect(saved.map((r) => r.id)).toContain('one-write-cg-064');
+        expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+          activated: 64, dormant: 2, dormantIds: ['one-write-cg-064', 'one-write-cg-065'],
+        });
+        agent.subscribeToContextGraph('one-write-cg-064');
         const afterStatus = agent.getContextGraphSubscriptionRehydrationStatus();
         expect(afterStatus).toMatchObject({
           persistedTotal: 66,

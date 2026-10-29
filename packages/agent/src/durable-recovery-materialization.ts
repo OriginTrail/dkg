@@ -35,7 +35,12 @@ export interface RecoveryMaterializationScope {
   readonly isCurrent?: () => boolean;
   readonly onAtomicCommitStarted?: (contextGraphId: string, ual: string) => void;
 }
+export interface HeldAssetFence {
+  binding(): Readonly<{ onChainId?: string; generation: number }>;
+  assertCurrent(): void;
+}
 export interface RecoveryMaterialization {
+  withHeldAssetFence<T>(operation: (fence: HeldAssetFence) => Promise<T>, signal?: AbortSignal): Promise<T>;
   readonly authenticateChallengePinnedAsset: ChallengeExactAssetFetchContext['authenticateChallengePinnedAsset'];
   readonly storeGraphScopedAsset: NonNullable<DurableSyncContext['storeGraphScopedAsset']>;
 }
@@ -79,9 +84,23 @@ export class RecoveryMaterializationOwner {
       asAbortError: asSyncFetchAbortError,
       track: (run) => ports.track(run),
     });
-    // How long this operation's last asset write held the store, if it wrote one.
-    let previousWriteMs: number | undefined;
+    let wroteAsset = false;
     return {
+      withHeldAssetFence: (operation, signal) => runGraphScopedOperation({
+        contextGraphId, signal,
+        closedError: () => asSyncFetchAbortError(new Error('Held asset recovery is closed for node shutdown')),
+        bindingChangedError: () => asSyncFetchAbortError(new Error(`Subscription for ${contextGraphId} changed during held recovery`)),
+        operation: control => {
+          const assertCurrent = () => { control.adoptEquivalentSubscription(); control.assertOwnershipCurrent(); };
+          return operation({
+            assertCurrent,
+            binding: () => {
+              assertCurrent();
+              return { onChainId: control.subscription?.onChainId, generation: ports.bindingGeneration(contextGraphId) };
+            },
+          });
+        },
+      }),
       authenticateChallengePinnedAsset: ({
         asset,
         commitment,
@@ -126,8 +145,8 @@ export class RecoveryMaterializationOwner {
         operation: async (control): Promise<GraphScopedMaterializationOutcome> => {
           const storeCallStartedAt = Date.now();
           // This operation's asset writes run back to back: let queued store work in between them.
-          if (previousWriteMs !== undefined) {
-            await yieldStoreBackgroundLane({ store: ports.store(), previousWriteMs, signal: operationSignal });
+          if (wroteAsset) {
+            await yieldStoreBackgroundLane({ signal: operationSignal });
           }
           const { isBindingCurrent, recaptureBindingGeneration, assertCurrent } = control;
           const authenticationStartedAt = Date.now();
@@ -170,9 +189,9 @@ export class RecoveryMaterializationOwner {
             assertCurrent();
           }
           assertCurrent();
+          const writeStartedAt = Date.now();
           onAtomicCommitStarted?.(asset.contextGraphId, asset.ual);
           assertCurrent();
-          const writeStartedAt = Date.now();
           const outcome = await materializeVerifiedGraphScopedAsset({
             store: ports.store(),
             asset: authentication.asset,
@@ -195,11 +214,11 @@ export class RecoveryMaterializationOwner {
           });
           const storeFinishedAt = Date.now();
           if (outcome === 'applied') await ports.reconcile(authentication.asset, ctx);
-          previousWriteMs = Date.now() - writeStartedAt;
           ports.logTiming(ctx, `Recovery store timing: laneWait=${authenticationStartedAt - storeCallStartedAt}ms `
             + `authentication=${authenticationFinishedAt - authenticationStartedAt}ms `
             + `binding=${writeStartedAt - authenticationFinishedAt}ms store=${storeFinishedAt - writeStartedAt}ms `
             + `reconcile=${Date.now() - storeFinishedAt}ms outcome=${outcome}`);
+          wroteAsset = true;
           return outcome;
         },
       }),

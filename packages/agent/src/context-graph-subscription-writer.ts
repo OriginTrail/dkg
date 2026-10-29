@@ -76,3 +76,25 @@ export function projectContextGraphSubscriptionWrite(input: {
         && previous?.subscribed !== true && previous?.coreHosted !== true }),
   } as const;
 }
+
+/** Options for subscribing this node to one context graph. */
+export interface ContextGraphSubscribeOptions {
+  trackSyncScope?: boolean;
+  persist?: boolean;
+  deferSharedMemoryGossipSubscribe?: boolean;
+  /** Internal activation transaction: wire retirement belongs to its commit. */
+  deferWireAdoption?: boolean;
+  syncMode?: 'on-demand' | 'always-on';
+  /** Authoritative numeric slot established by the admission owner. */
+  onChainId?: string;
+  /** Authenticated name commitment belonging to the numeric slot. */
+  onChainHash?: string;
+}
+
+/** Internal network teardown options; explicit unsubscribe owns intent replacement. */
+export interface ContextGraphUnsubscribeOptions {
+  persist?: boolean;
+  updateRehydrationStatus?: boolean;
+  rollbackSlotRelease?: ContextGraphSubscriptionRollbackSlotRelease;
+  supersededBy?: string;
+}

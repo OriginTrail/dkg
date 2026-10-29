@@ -1,3 +1,5 @@
+import { admitQueuedCatalogPublicationV1 } from './internal/queued-catalog-publication-admission.js';
+import { ConfirmedCatalogObligationErrorV1, type ConfirmedCatalogObligationInputV1 } from './confirmed-catalog-obligation-error.js';
 // SPDX-License-Identifier: Apache-2.0
 import { repairPublishedDescriptor, type PublishedDescriptorRepairInput } from './published-descriptor-repair.js';
 import { incompleteNamedKaLifecycleOwner } from './incomplete-named-ka-lifecycle.js';
@@ -16,13 +18,13 @@ import { finalizeQueuedKnowledgeAssetVmPublish, retireLegacySwmAfterConfirmedLoc
  * `this: DKGAgent` so cross-calls resolve against the composed class.
  */
 
-
 import { buildInlinePayload, buildInlineChunked } from './internal/curated-inline-encryption.js';
 import { createContextGraphAuthorityError } from './internal/context-graph-authority/context-graph-authority.js';
 import { isAdmittedContextGraphSubscription } from './context-graph-subscription-policy.js';
-import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
+import { planKnowledgeAssetVmPublication, isGraphScopedKnowledgeAssetVmPublishRequest, assertionSealFromQueuedKnowledgeAssetVmPublishRequest, type KnowledgeAssetVmPublishRequestWithoutIntentKey, type FinalizedAssertionVmPublishOptions, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 export { type KnowledgeAssetVmPublishRequestWithoutIntentKey, createKnowledgeAssetVmPublishIntentKey } from './internal/knowledge-asset-vm-publish-request.js';
 import { randomUUID } from 'node:crypto';
+import { assertConfirmedCatalogPublicationAdmissionV1, assertConfirmedCatalogSealAdmissionV1 } from './internal/confirmed-catalog-obligation.js';
 import { preflightKnowledgeAssetVmPublishSnapshot } from './vm-publish-snapshot-preflight.js';
 import {
   DKGNode, ProtocolRouter, GossipSubManager, TypedEventBus, DKGEvent,
@@ -909,6 +911,10 @@ function normalizeWorkspaceGossipPublishInput(
 }
 
 export class PublishMethods extends DKGAgentBase {
+  admitConfirmedCatalogPublicationV1(this: DKGAgent, identity: Parameters<typeof assertConfirmedCatalogPublicationAdmissionV1>[2]): boolean {
+    return assertConfirmedCatalogPublicationAdmissionV1(this, { plan: this.config.rfc64CatalogExecutionPlan, authoring: this.config.rfc64CatalogAuthoringPolicy }, identity);
+  }
+
   /**
    * Before a share into a public graph goes out, make the graph's owner one of
    * its followers, connecting to it through a relay when the two nodes are not
@@ -1762,6 +1768,8 @@ export class PublishMethods extends DKGAgentBase {
     opts?: PublishAsyncOpts,
   ): Promise<{ captureID: string }> {
     const contextGraphId = normalizePublishContextGraphId(contextGraphIdOrUal);
+    const assertionName = `async-${randomUUID()}`;
+    this.admitConfirmedCatalogPublicationV1({ contextGraphId, assertionCoordinate: assertionName, subGraphName: opts?.subGraphName });
     const ctx = opts?.operationCtx ?? createOperationContext('publish');
 
     const exists = await this.contextGraphExists(contextGraphId);
@@ -1913,7 +1921,6 @@ export class PublishMethods extends DKGAgentBase {
           );
         })(),
     );
-    const assertionName = `async-${randomUUID()}`;
 
     // Reuse the named-KA lifecycle rather than maintaining a second async
     // content model. Finalize canonicalizes the complete RDF set once, assigns
@@ -4678,6 +4685,7 @@ export class PublishMethods extends DKGAgentBase {
       publisherOverride?: DKGPublisher;
     },
   ): Promise<KnowledgeAssetVmPublishRequest> {
+    const catalogObligationRequired = this.admitConfirmedCatalogPublicationV1({ contextGraphId, assertionCoordinate: name, subGraphName: opts?.subGraphName });
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     // GH#1778 — the ENQUEUING caller (token holder for the route path, or an
     // explicit author selector for a direct caller), persisted alongside the
@@ -4779,6 +4787,7 @@ export class PublishMethods extends DKGAgentBase {
     if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
+    assertConfirmedCatalogSealAdmissionV1(catalogObligationRequired, seal);
     if (
       seal.kaUal === undefined
       || seal.assertionVersion === undefined
@@ -4888,6 +4897,7 @@ export class PublishMethods extends DKGAgentBase {
       ...(callerAgentAddress ? { callerAgentAddress } : {}),
       ...(opts?.subGraphName ? { subGraphName: opts.subGraphName } : {}),
       shareOperationId,
+      catalogObligationRequired,
       roots: [],
       contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
       kaUal: seal.kaUal,
@@ -4962,6 +4972,7 @@ export class PublishMethods extends DKGAgentBase {
     this: DKGAgent,
     request: KnowledgeAssetVmPublishRequest,
   ): Promise<void> {
+    admitQueuedCatalogPublicationV1(this, request);
     return preflightKnowledgeAssetVmPublishSnapshot({
       store: this.store, publicSnapshotStore: this.publicSnapshotStore, log: this.log, request,
     });
@@ -4969,12 +4980,11 @@ export class PublishMethods extends DKGAgentBase {
 
   async preflightQueuedKnowledgeAssetVmPublishExecution(
     this: DKGAgent,
-    request: KnowledgeAssetVmPublishRequest,
+    inputRequest: KnowledgeAssetVmPublishRequest,
     opts?: { publisherOverride?: DKGPublisher },
   ): Promise<AsyncKnowledgeAssetVmPublishPreflightResult> {
-    if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
-      throw new LegacyKnowledgeAssetReadOnlyError();
-    }
+    const { graphScopedRequest: request } = admitQueuedCatalogPublicationV1(this, inputRequest);
+    if (!request) throw new LegacyKnowledgeAssetReadOnlyError();
     createGraphKnowledgeAssetScope(request.kaUal, request.assertionVersion);
     const bareRoot = (value?: string | null): string | undefined => {
       const trimmed = value?.trim().toLowerCase();
@@ -5276,6 +5286,27 @@ export class PublishMethods extends DKGAgentBase {
 
     let trustedPublicQuadsDigest: string | undefined;
     let trustedPublisherPeerId = this.peerId;
+    const observeConfirmedPublication = () => this.afterConfirmedGraphScopedVmPublishV1({
+      status: 'confirmed',
+      // Older confirmed root jobs lack selection evidence: retain rather than waive their obligation.
+      catalogObligationRequired: request.catalogObligationRequired ?? !request.subGraphName,
+      confirmedTransaction: { txHash: recovered.txHash, blockNumber: recovered.receiptBlockNumber,
+        batchId: recovered.reservedKaId, kaId: recovered.reservedKaId },
+      contextGraphId: request.contextGraphId,
+      subGraphName: request.subGraphName,
+      assertionCoordinate: request.name,
+      shareOperationId: request.shareOperationId,
+      seal: assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request),
+      assertionUri: contextGraphAssertionUri(
+        request.contextGraphId,
+        request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
+        request.name,
+        request.subGraphName,
+      ),
+      ctx,
+      publicationLabel: 'queued publish',
+    });
+
     if (!recovered.materialization.superseded) {
       let snapshot: Awaited<ReturnType<typeof resolveKnowledgeAssetOperationPublicQuads>>
         | undefined;
@@ -5372,6 +5403,8 @@ export class PublishMethods extends DKGAgentBase {
       // an unbounded write phase late. One boundary, one check — rather than a signal threaded
       // hopefully through N layers, which is how the last four rounds each missed the next one.
       throwIfRecoveryDeadlineReached(signal);
+      // A newer version does not discharge this transaction's original obligation.
+      await observeConfirmedPublication();
       await this._writeQueuedKnowledgeAssetVmPublishReceipt(
         request,
         recovered.txHash,
@@ -5482,26 +5515,7 @@ export class PublishMethods extends DKGAgentBase {
     // retired the exact SWM twin; complete its lane-specific signed inventory
     // transition as well so a public catalog cannot retain an unresolvable
     // asset after recovery (private lanes keep their finalized placement).
-    const catalogCompletionRecorded = await this.afterConfirmedGraphScopedVmPublishV1({
-      status: 'confirmed',
-      contextGraphId: request.contextGraphId,
-      subGraphName: request.subGraphName,
-      assertionCoordinate: request.name,
-      shareOperationId: request.shareOperationId,
-      seal: assertionSealFromQueuedKnowledgeAssetVmPublishRequest(request),
-      assertionUri: contextGraphAssertionUri(
-        request.contextGraphId,
-        request.agentAddress ?? this.defaultAgentAddress ?? this.peerId,
-        request.name,
-        request.subGraphName,
-      ),
-      ctx,
-      publicationLabel: 'queued publish',
-    });
-    if (!catalogCompletionRecorded) {
-      throw Object.assign(new Error('Named KA recovery catalog finalization is not durably recorded; recovery will retry'),
-        { code: 'KA_VM_RECOVERY_INCONSISTENT' });
-    }
+    await observeConfirmedPublication();
 
     // SWM-source materialization owns its exact transition. VM-only recovery
     // must not run a second, unlocked cleanup: a newer unpublished assertion
@@ -5515,7 +5529,7 @@ export class PublishMethods extends DKGAgentBase {
 
   async publishQueuedKnowledgeAssetVmPublish(
     this: DKGAgent,
-    request: KnowledgeAssetVmPublishRequest,
+    inputRequest: KnowledgeAssetVmPublishRequest,
     publishOptions: PublishOptions,
     opts?: {
       operationCtx?: OperationContext;
@@ -5525,6 +5539,7 @@ export class PublishMethods extends DKGAgentBase {
       onPostConfirmationStep?: LiftJobTailStepObserver;
     },
   ): Promise<AsyncKnowledgeAssetVmPublishExecutionResult & { assertionUri: string; seal: AssertionSeal }> {
+    const { graphScopedRequest: request } = admitQueuedCatalogPublicationV1(this, inputRequest);
     const ctx = opts?.operationCtx ?? publishOptions.operationCtx ?? createOperationContext('publishFromSWM');
     const publisher = opts?.publisherOverride ?? this.publisher;
     // GH#2270 PR-3 r4 — the cross-cutting execution hooks, gathered ONCE and threaded UNCHANGED
@@ -5541,21 +5556,21 @@ export class PublishMethods extends DKGAgentBase {
       ...pickPublishLifecycleHooks(publishOptions),
       onPhase: opts?.onPhase ?? publishOptions.onPhase,
     };
-    const capturedPricingPolicy = request.pricingPolicy ?? 'network-visible';
+    const capturedPricingPolicy = inputRequest.pricingPolicy ?? 'network-visible';
     const executionPricingPolicy = publishOptions.pricingPolicy ?? capturedPricingPolicy;
     if (executionPricingPolicy !== capturedPricingPolicy) {
       throw Object.assign(
         new Error(
-          `Queued VM publish for "${request.name}" has pricingPolicy=${executionPricingPolicy}, `
+          `Queued VM publish for "${inputRequest.name}" has pricingPolicy=${executionPricingPolicy}, `
             + `but its immutable request captured pricingPolicy=${capturedPricingPolicy}.`,
         ),
         { code: 'PUBLISH_INTENT_STALE' },
       );
     }
-    if (request.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
+    if (inputRequest.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
-    if (!isGraphScopedKnowledgeAssetVmPublishRequest(request)) {
+    if (!request) {
       throw new Error('Queued graph-scoped VM publish has an incomplete KA content envelope');
     }
     const graphScope = createGraphKnowledgeAssetScope(
@@ -5858,25 +5873,9 @@ export class PublishMethods extends DKGAgentBase {
   async publishFromFinalizedAssertion(this: DKGAgent,
     contextGraphId: string,
     name: string,
-    opts?: {
-      subGraphName?: string;
-      agentAddress?: string;
-      /** GH#1778 — token/caller identity hint (routes); NOT an author selector. */
-      callerAgentAddress?: string;
-      /**
-       * GH#1786 — selects among the authors already resident at this coordinate.
-       * Coexists with `callerAgentAddress`; never changes the caller identity.
-       */
-      selectedAuthorAgentAddress?: string;
-      operationCtx?: OperationContext;
-      onPhase?: PhaseCallback;
-      publisherNodeIdentityIdOverride?: bigint;
-      publishEpochs?: number;
-      pricingPolicy?: PublishOptions['pricingPolicy'];
-      clearSharedMemoryAfter?: boolean;
-      publisherOverride?: DKGPublisher;
-    },
+    opts?: FinalizedAssertionVmPublishOptions,
   ): Promise<PublishResult & { assertionUri: string; seal: AssertionSeal }> {
+    const catalogObligationRequired = this.admitConfirmedCatalogPublicationV1({ contextGraphId, assertionCoordinate: name, subGraphName: opts?.subGraphName });
     const agentAddress = await this.resolveFinalizedAssertionPublishAuthor(contextGraphId, name, opts);
     const publisher = opts?.publisherOverride ?? this.publisher;
     const assertionUri = contextGraphAssertionUri(
@@ -5903,6 +5902,7 @@ export class PublishMethods extends DKGAgentBase {
     if (seal.contentScopeVersion !== GRAPH_KA_CONTENT_SCOPE_VERSION) {
       throw new LegacyKnowledgeAssetReadOnlyError();
     }
+    assertConfirmedCatalogSealAdmissionV1(catalogObligationRequired, seal);
     if (
       seal.kaUal === undefined
       || seal.assertionVersion === undefined
@@ -6441,7 +6441,8 @@ export class PublishMethods extends DKGAgentBase {
 
     await this.afterConfirmedGraphScopedVmPublishV1({
       status: result.status,
-      contextGraphId,
+      confirmedTransaction: result.onChainResult,
+      contextGraphId, catalogObligationRequired,
       subGraphName: opts?.subGraphName,
       assertionCoordinate: name,
       shareOperationId: rfc64WorkspaceHead?.shareOperationId,
@@ -6456,20 +6457,11 @@ export class PublishMethods extends DKGAgentBase {
 
   private async afterConfirmedGraphScopedVmPublishV1(
     this: DKGAgent,
-    input: Readonly<{
-      status: PublishResult['status'];
-      contextGraphId: string;
-      subGraphName?: string;
-      assertionCoordinate: string;
-      shareOperationId?: string;
-      seal: AssertionSeal;
-      assertionUri: string;
-      ctx: OperationContext;
-      publicationLabel: 'publish' | 'queued publish';
-    }>,
-  ): Promise<boolean> {
-    if (input.status !== 'confirmed') return false;
-    return await this.observeRfc64ConfirmedVmV1(input);
+    input: ConfirmedCatalogObligationInputV1,
+  ): Promise<void> {
+    if (input.status !== 'confirmed') return;
+    try { await this.observeRfc64ConfirmedVmV1(input); }
+    catch (cause) { throw new ConfirmedCatalogObligationErrorV1(input, input.confirmedTransaction, cause); }
   }
 
 

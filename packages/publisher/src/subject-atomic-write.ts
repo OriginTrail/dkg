@@ -11,6 +11,7 @@ import {
   deleteByPatternWithoutCount,
   tryReplaceSubjectAtomically,
   type Quad,
+  type QueryOptions,
   type TripleStore,
 } from '@origintrail-official/dkg-storage';
 
@@ -37,21 +38,23 @@ import {
  * `subject` in `graphUri`, so it never widens to touch a co-located subject (e.g. the lift
  * queue's immutable request row).
  *
- * `source` is passed through per-queue (`publisher.asyncLift.writeJob` /
+ * The last argument is passed through per-queue (`publisher.asyncLift.writeJob` /
  * `publisher.asyncPromote.writeJob`) so storage-side instrumentation still attributes the
- * write to its originating queue.
+ * write to its originating queue. A plain string is the `source` label; a `QueryOptions`
+ * object (priority, signal, ...) reaches the atomic call and both fallback calls unchanged.
  */
 export async function replaceSubjectAtomicallyOrFallback(
   store: TripleStore,
   graphUri: string,
   subject: string,
   quads: Quad[],
-  source: string,
+  options: string | QueryOptions,
 ): Promise<void> {
+  const queryOptions: QueryOptions = typeof options === 'string' ? { source: options } : options;
   // Enforce the atomic path's single-subject contract on BOTH paths, before either runs.
   assertSubjectReplacementPayload(graphUri, subject, quads);
-  const replaced = await tryReplaceSubjectAtomically(store, graphUri, subject, quads, { source });
+  const replaced = await tryReplaceSubjectAtomically(store, graphUri, subject, quads, queryOptions);
   if (replaced) return;
-  await deleteByPatternWithoutCount(store, { subject, graph: graphUri });
-  await store.insert(quads);
+  await deleteByPatternWithoutCount(store, { subject, graph: graphUri }, queryOptions);
+  await store.insert(quads, queryOptions);
 }

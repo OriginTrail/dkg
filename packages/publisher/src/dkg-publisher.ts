@@ -417,6 +417,7 @@ export interface DurableRootPromotionAtomicCompanionResolver {
 }
 
 export interface DKGPublisherConfig {
+  storageAckCopyCleanupWriter?: import('./storage-ack-copy-cleanup.js').StorageAckCopyCleanupWriter;
   store: TripleStore;
   /** Trusted queue ownership scope, explicitly supplied by the composing agent. */
   promoteOwnershipReader?: PromoteOwnershipReader;
@@ -449,14 +450,9 @@ export interface DKGPublisherConfig {
   workspaceAgentRecipientResolver?: WorkspaceAgentRecipientResolver;
   /** Encrypts private/agent-gated SWM gossip with the node's Sender Key epoch state. */
   workspaceSenderKeyEncryptor?: WorkspaceSenderKeyEncryptor;
-  /** Optional out-of-Oxigraph store for immutable public SWM operation snapshots. */
   publicSnapshotStore?: WorkspacePublicSnapshotStore;
-  /**
-   * OT-RFC-43 Option 1 — when present, the publisher allocates a deterministic
-   * packed reservedKaId for each V10 mint (and reconciles the per-author floor
-   * against the chain on first use). Omit for mock/no-chain or pre-Option-1
-   * flows; the real EVM adapter then throws on the missing reservedKaId.
-   */
+  /** Allocate packed mint IDs and reconcile the author floor on first use.
+   * Optional for mocks; real EVM publishing requires a reserved ID. */
   kaAllocator?: KaIdAllocator;
   /**
    * Synchronous root-only resolver for metadata that must share the SWM graph's
@@ -1095,7 +1091,7 @@ export class DKGPublisher implements Publisher {
     this.setWorkspaceAgentRecipientResolver(config.workspaceAgentRecipientResolver);
     this.workspaceSenderKeyEncryptor = config.workspaceSenderKeyEncryptor;
     this.publicSnapshotStore = config.publicSnapshotStore;
-    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle);
+    this.publishedSnapshotRetirement = new PublishedSnapshotRetirement(this.store, config.publicSnapshotStore?.lifecycle, config.storageAckCopyCleanupWriter);
     this.publisherPlanner = new PublisherPlanner({
       chain: this.chain,
       resolvePublisherAddressSelection: (contextGraphId, options) =>
@@ -6433,7 +6429,7 @@ export class DKGPublisher implements Publisher {
     const metaGraph = contextGraphMetaUri(contextGraphId);
     const lifecycleUri = assertionLifecycleUri(contextGraphId, agentAddress, name, subGraphName);
     const res = await this.store.query(
-      `ASK { GRAPH <${metaGraph}> { <${lifecycleUri}> <${SWM_SHARE_COMPLETE_PRED}> ?o } }`,
+      `ASK { GRAPH <${metaGraph}> { <${lifecycleUri}> <${SWM_SHARE_COMPLETE_PRED}> ?o } }`, { source: 'publisher.hasSwmShareComplete' },
     );
     return res.type === 'boolean' && res.value;
   }

@@ -142,11 +142,11 @@ export class PublicSnapshotMethods extends DKGAgentBase {
         asAbortError: reason => new Error("Snapshot job ownership changed", { cause: reason }),
         track: run => { this.workLifetime.track(run); },
         operation: async control => {
-          let readingInitialInventory = true;
-          const assertCurrent = () => {
-            if (readingInitialInventory) control.adoptEquivalentSubscription();
+          const assertInitialInventoryCurrent = () => {
+            control.adoptEquivalentSubscription();
             control.assertCurrent();
           };
+          const assertCurrent = () => control.assertCurrent();
           const isCurrent = () => { try { assertCurrent(); return true; } catch { return false; } };
           const sourcePlan = await createPublicSnapshotSourcePlan({
             config: this.config, chain: this.chain, peerId: this.peerId, router: this.router,
@@ -155,22 +155,20 @@ export class PublicSnapshotMethods extends DKGAgentBase {
             ensurePeerConnected: (peer, options) => this.ensurePeerConnected(peer, options),
           }, normalized, signal, rpcScope);
           const peers = sourcePlan.inventoryPeers;
-          assertCurrent();
+          assertInitialInventoryCurrent();
           const expected = {
             chainId: this.chain.chainId,
             deploymentId: this.chain.deploymentId!,
             contextGraphId,
             onChainId,
           };
-          const read = createPublicSnapshotReader({ mode, chain:this.chain, request: sourcePlan.request,
-            peers, signal, expected, assertCurrent });
-          const initial = await read();
+          const readerOptions = { mode, chain: this.chain, request: sourcePlan.request, peers, signal, expected };
+          const initial = await createPublicSnapshotReader({ ...readerOptions, assertCurrent: assertInitialInventoryCurrent })();
           const snapshot = initial.snapshot;
-          assertCurrent();
+          assertInitialInventoryCurrent();
           if (subscription?.onChainHash && subscription.onChainHash.toLowerCase() !== snapshot.nameHash.toLowerCase())
             throw new Error("Graph name binding differs from requested snapshot");
           // From admission onward every captured write premise stays strict.
-          readingInitialInventory = false;
           // A validated public snapshot admits this job without scheduling the
           // daemon's separate legacy subscribe/catch-up pipeline.
           control.admitSubscription(() => {
@@ -179,9 +177,10 @@ export class PublicSnapshotMethods extends DKGAgentBase {
           assertCurrent();
           if (mode === "core-cache") await markCoreTrustedGraph(this.store, contextGraphId);
           assertCurrent();
+          const readFresh = createPublicSnapshotReader({ ...readerOptions, assertCurrent });
           const caughtUp = await recoverPublicSnapshotToCurrent({
             initial, deadline: startedAt + 3_600_000, signal, assertCurrent,
-            readFresh: () => read(true),
+            readFresh: () => readFresh(true),
             recover: async observation => {
               const evidence = new PublicSnapshotEvidence(observation, isCurrent);
               const uals = observation.snapshot.assets.map(a => buildKnowledgeAssetUalFromOnChainIdV1(

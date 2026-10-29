@@ -398,7 +398,7 @@ describe('rolling activation and the chain request lane', () => {
 
       expect(host.contextGraphSubscriptionRehydrationPendingIds.has(ID)).toBe(false);
       expect(host.recordContextGraphSubscriptionClear).toHaveBeenCalledWith([ID]);
-      expect(host.contextGraphSubscriptionDormancyById.get(ID)).toBe('activationCap');
+      expect(host.contextGraphSubscriptionDormancyById.has(ID)).toBe(false);
       expect(host.log.warn).not.toHaveBeenCalled();
     });
   });

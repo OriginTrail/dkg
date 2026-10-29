@@ -4,6 +4,229 @@ All notable changes to the DKG V10 node are documented here. The format is based
 
 ## [Unreleased]
 
+## [10.0.27] - 2026-10-29
+
+10.0.27 makes nodes steadier and faster under load. Core nodes settle
+quickly after a restart, queries and syncs do less work for the same
+answers, and the queues that share and publish knowledge get store
+capacity of their own, with a clear view of where their time goes.
+
+### Highlights
+
+- **Steady after a restart.** A node catches up each context graph once
+  and then settles: it keeps verified shared memory as it is, ends a
+  context graph's readiness checks when they stop finding anything new,
+  and resumes an interrupted recovery where it stopped (#3401, #3413,
+  #3510, #3526, #3558).
+- **Faster queries.** Limited selects stop early inside the store,
+  single-pattern reads over many verified context graphs skip a per-match
+  duplicate check, and query authorization leaves room for other queries
+  (#3144, #3415, #3550, #3552, #3553).
+- **Publishing that keeps up.** The share and publish queues get store
+  slots of their own, their admission checks stay fast however long their
+  history grows, and their job lists come a page at a time (#3527, #3528,
+  #3529, #3535, #3536, #3537, #3538, #3548, #3564, #3567).
+- **A clear view of the queues.** Every five minutes a node logs one
+  `async_admission_usage` line that shows how admission, the store and the
+  queue workers spend their time (#3511, #3512, #3513).
+- **Members stay in step.** After a context graph's owner restarts, its
+  members receive the change they missed within seconds, and a share made
+  while a node is still starting gets its inventory entry as soon as the
+  node is ready (#3377, #3502, #3541).
+- **Syncs that scale.** Nodes build snapshots from small context graph
+  partitions in batches, replay their catalogs in bounded rounds when they
+  reconnect, and fetch fresh public snapshots from two Core nodes at once
+  (#3173, #3556, #3558).
+- **Safer data.** Nodes that host shared memory for other members write it
+  crash-safely, and a publication confirmed on chain completes its catalog
+  step even when the node could not store it straight away (#2937,
+  #3174).
+- **Easier to operate.** `dkg doctor` checks nodes configured in
+  `config.yaml`, the API and CLI page through large job lists, and
+  operators can size the store's concurrency themselves (#3247, #3410,
+  #3548).
+
+### Before you upgrade
+
+- Check `config.json` for a `queueRetention` block. This release reads it:
+  a cleanup mode set there starts at the first start, and a wrong value
+  stops the node from starting. Leave cleanup `off` on production nodes.
+- On Blazegraph and managed Oxigraph stores on hosts with more than 2
+  CPUs, the share and publish queues use store slots of their own, and the
+  node logs `Store control path: on (...)` at start. If share or publish
+  jobs get slower, set `"controlReservedSlots": 0` in the `store` block and
+  restart.
+- API clients: handle HTTP 413 from `/api/query` for a response above
+  10 MiB, and retry a share or publish answered with 503 and
+  `Retry-After`.
+- Nothing changes on chain. "Updating from 10.0.26" in
+  `docs/use-dkg/updates-and-rollback.md` has the same steps.
+
+The details follow: compatibility, the full upgrade table, and every
+change.
+
+### Compatibility
+
+**No smart-contract, ABI or deployment registry changes, and no new
+network protocols.** The RFC-64 inventory database stays on schema 6. Its
+confirmed catalog placements (#3174) are rows that 10.0.26 cannot read, so
+`dkg rollback` to 10.0.26 removes them first; see the upgrade table.
+Owed-inventory markers (#3377) are small files in a new directory under
+the RFC-64 persistence directory. The async share and publish queues keep
+their jobs in the store, and the paging parameters are optional, so
+clients that do not send them get the lists as before (#3548).
+
+### Upgrading from 10.0.26
+
+| Change | Impact | Action |
+| --- | --- | --- |
+| The async queues get store slots of their own by default (#3527, #3535, #3536, #3564, #3567) | On for Blazegraph and managed Oxigraph (`oxigraph-server`, the `dkg init` default) on hosts with more than 2 CPUs; off for `sparql-http`, the embedded store and hosts with 2 CPUs or fewer. The share queue gets 1 slot and the publisher queue 2, beside the shared store scheduler. The daemon logs `Store control path: on (...)` or `off (...)` once at start; offline `dkg publisher` commands and in-process agents keep them off unless the environment variable is set | None. If share or publish jobs get slower, set `"controlReservedSlots": 0` in the `store` block of `config.json`, or `DKG_STORE_CONTROL_RESERVED_SLOTS=0`, which wins, and restart. See `docs/use-dkg/async-queue-operations.md` |
+| Finished-job cleanup ships for evaluation, off by default (#3539, #3549, #3555) | 10.0.26 ignored `queueRetention` in `config.json`; this release reads it. A `report` or `delete` mode set there starts at the first start, and an invalid value or unknown key stops `dkg start` and the daemon. `delete` cannot be undone | Leave it `off` on production nodes. Check `config.json` for `queueRetention` before you update |
+| Publisher clear keeps related jobs, and offline commands wait for the daemon (#3555) | Bulk clear (`POST /api/publisher/clear`, `dkg publisher clear finalized\|failed`) keeps a finalized job while an older failed job of the same asset remains, so the count it returns can be smaller. `dkg publisher cancel`, `retry` and `clear` exit 1 with `DKG_DAEMON_RUNNING` while a daemon runs, and leave the store to it | Read the returned count. Use the running daemon's API, or run `dkg stop` first |
+| Job lists can be paged (#3537, #3538, #3548) | `GET /api/knowledge-assets/swm/share-jobs` and `GET /api/publisher/jobs` take `pageSize` (1 to 1,000) and `cursor` and answer `{ jobs, nextCursor, complete }`; `dkg ka share-jobs` and `dkg publisher jobs` take `--page-size`, `--cursor` and `--all`. Without them the routes answer as before, except that an unknown publisher `status` answers `400 PUBLISHER_LIST_STATUS_INVALID`. `GET /api/publisher/stats` counts in the store | Page large queues and stop on `complete`. Do not combine `limit` with paging |
+| Concurrent write checks share one store read (#3530) | Concurrent share or publish requests from one caller to one context graph share one write-preflight check, and store pressure in its follow-up reads answers a retryable 503 with `Retry-After: 1`. The daemon logs `Write preflight coalescing: on, result cache: off` at start | Retry a 503 that carries `Retry-After`. `DKG_WRITE_PREFLIGHT_COALESCING=0` turns the sharing off |
+| A usage line every five minutes (#3511, #3512, #3513) | `async_admission_usage`, at start, every five minutes and when idle, with matching OpenTelemetry instruments; it costs one background count per interval. The store's rejection metric gains an `operation_family` label | None. The fields are described in `packages/cli/docs/async-admission-usage-line.md` |
+| Public queries have a response budget (#2911) | `/api/query` reads at most 10 MiB of a public query's store response and answers HTTP 413 above it; the bounded v1 route keeps its 422 | Narrow or page a query that returns more |
+| `dkg doctor` reads `config.yaml` (#3247) | On a node configured in `config.yaml` the doctor runs every config check, and `dkg update` on such a Core runs the Core checks. A malformed config file makes the doctor warn, report the file and exit 2 | Fix what the doctor reports |
+| Shared memory hosting writes crash-safely (#2937) | A node that hosts shared memory for other members syncs each acknowledged append to disk before it answers | None |
+| An optional store concurrency policy (#3410) | `DKG_STORE_CONCURRENCY_POLICY=configured` lets `DKG_STORE_MAX_CONCURRENT` go above the CPU count, with one slot each kept for acknowledgements and health checks. The default stays `cpu` | None |
+| `dkg rollback` to 10.0.26 removes confirmed catalog placements (#3174) | A publication confirmed on chain whose catalog step the node has not stored yet is kept as a confirmed catalog placement, a new kind of row in the RFC-64 inventory database. 10.0.26 does not start on a database that holds one. `dkg rollback`, and `dkg rollback --stores-for` for a version installed by hand, remove these rows and their failure diagnostics for any release before 10.0.27, and name the assets; 10.0.26 does not finish their catalog step | Roll back with `dkg rollback`, or ready the stores with `dkg rollback --stores-for <version>` before starting an older version installed by hand |
+
+### Fixed
+
+- **A node settles after a restart** (#3510): catch-up counts finalized
+  shared memory that Verified Memory already holds with the same bytes as
+  held, and remembers up to 20,000 such snapshots for 6 hours in memory.
+  A context graph's readiness checks end after two attempts in a row that
+  resolve nothing new.
+- **One `publishedAt` per shared memory operation** (#3526): each operation
+  keeps its earliest valid stamp, so conflicting, malformed or oversized
+  older stamps leave a context graph's sync running. Duplicate stamps
+  already stored are cleaned up on stores that support SPARQL UPDATE.
+- **Recovery resumes where it stopped** (#3401, #3413): an interrupted
+  full-graph recovery resumes from the part it already verified, also for
+  assets over 100,000 rows or 10 MiB. After a restart, recovery skips
+  unchanged context graphs and fetches only the assets the store lacks,
+  with a bounded full recovery where it cannot.
+- **Fresh public snapshot sync keeps up with a changing context graph**
+  (#3558, bringing in #3523): it fetches from two Core nodes at once, one
+  transfer per node, and recovers by itself after a restart, a cancelled
+  subscription activation or a failed save. A holdings check that stalls
+  for 30 s hands over to normal recovery.
+- **Members receive the change they missed after an owner restart**
+  (#3502): a member that reconnects to the restarted owner of a public
+  context graph is told of the latest change at once. The owner logs
+  `SWM change notice for … sub-graph "…" (…) to new follower …: reached`.
+- **Shares admitted before the catalog authority is ready get their
+  inventory entry** (#3377, #3541): such a share leaves a durable marker,
+  and the node writes the owed inventory row once the authority is ready,
+  also across restarts. Pending markers leave shares in other context
+  graphs to go ahead, and recovery wakes by itself when periodic retries
+  are turned off. A waiting replay logs
+  `causeCode: SWM_INVENTORY_HANDOFF_PENDING`.
+- **A publication confirmed on chain completes its catalog step** (#3174):
+  the node keeps the obligation and completes it later without a new
+  transaction. Empty sub-graph names are refused up front.
+- **Private publishing stays steady while other agents update their keys**
+  (#3547): recipient checks hold while an unrelated agent updates its key
+  or peer route.
+- **Catalog replay on reconnect runs in bounded rounds** (#3173): two peer
+  streams and at most eight context graphs per round, with each context
+  graph's backoff kept.
+- **The node UI reads context graph statistics in bounded batches**
+  (#3015): at most eight graph partitions at a time, with the caller's
+  read access checked for each batch.
+- **Nodes that host shared memory write it crash-safely** (#2937): a
+  temporary file, fsync and rename, so an acknowledged write survives a
+  crash, and a torn tail is repaired before the next write.
+- **`dkg doctor` checks a node configured in `config.yaml`** (#3247): the
+  daemon loads `config.yaml` when there is no `config.json`, but the doctor
+  read only `config.json`. On such a node it reported "No config file" and
+  skipped every config check. It also took a Core node for an Edge node, so
+  install-layout described the node's release slots as legacy Edge state.
+  The doctor now reads the file the daemon loads and reports a YAML syntax
+  error as malformed YAML. A malformed `config.json` or `config.yaml` no
+  longer stops `dkg doctor` with a stack trace: it warns, runs its checks
+  and reports the file.
+
+### Changed
+
+- **The async queues have a control path** (#3527, #3535, #3536, #3564,
+  #3567): the schedulers `store-control-share` (1 slot) and
+  `store-control-publisher` (2 slots) carry the queues' bookkeeping, that
+  is admission checks, job writes, claims, leases and job-state reads,
+  beside the shared store scheduler and without taking its capacity. The
+  slots show in `/api/status`, `/api/diagnostics/backpressure`, the
+  `resource_usage` line and the `"priority": "control"` field of a 503.
+  A refusal on a slot answers a retryable 503 with `Retry-After: 1`. See
+  the upgrade table for the defaults.
+- **Queue admission costs stay flat as history grows** (#3528, #3529): the
+  share duplicate check reads only its selector's unfinished jobs, and the
+  `vm/publish-async` admission reads only the asset's own key after one
+  scan for older unindexed jobs per process.
+- **Job lists and statistics read the store in bounded steps** (#3537,
+  #3538, #3548): the share queue's list, statistics and recovery sweep and
+  the publisher queue's list read a bounded number of rows at a time, and
+  the list routes accept paging; see the upgrade table. A list without a
+  cursor logs a warning above 5,000 rows.
+- **Write preflight checks are shared** (#3530): see the upgrade table.
+  `DKG_WRITE_PREFLIGHT_CACHE` (off by default) adds a short result cache,
+  with `DKG_WRITE_PREFLIGHT_CACHE_TTL_MS` (2,000 ms, 100 to 10,000).
+- **Query plans do less work** (#3144, #3415, #3550, #3552, #3553): a plain
+  `SELECT … LIMIT n` applies its limit inside the store; a single-pattern
+  select over many verified context graphs skips a per-match duplicate
+  check; exact graph verification makes two store calls; managed Oxigraph
+  results decode with fewer allocations; and query authorization caps its
+  parallel metadata reads at the store lane's capacity.
+- **Snapshot building reads small partitions together** (#3556): up to 64
+  partitions per store request when the store is idle, 32 under background
+  load and 8 while interactive work waits, so a snapshot build holds more
+  partitions in memory at once (41 to 57 MiB more at its peak in the
+  benchmark).
+- **Publication keeps its authority caches** (#3397) when their inputs
+  have not changed.
+- **Releases move every npm dist-tag on one one-time code, and stable
+  promotion checks the candidate's evidence first** (#3507, #3525, #3571):
+  for maintainers; see `RELEASE_PROCESS.md`.
+
+### Added
+
+- **`async_admission_usage`** (#3511, #3512, #3513): a logfmt line and
+  OpenTelemetry instruments for store rejections and waits, HTTP admission
+  by route, phase and code, share-queue heartbeats and publisher pick-up
+  and queue depth; see `packages/cli/docs/async-admission-usage-line.md`.
+- **`store.controlReservedSlots`** (#3564) and
+  **`DKG_STORE_CONTROL_RESERVED_SLOTS`** (#3527): `0` turns the queue
+  slots off, `share:1,publisher:2` sets them.
+- **Finished-job cleanup, off by default** (#3539, #3549, #3555):
+  `queueRetention.share` and `queueRetention.publisher` in `config.json`,
+  with `mode` (`off`, `report` or `delete`), `intervalMs`, `batchSize`,
+  `rescanIntervalMs` and age windows of at least 24 hours. With a mode on,
+  the daemon logs an `async_promote_retention_pass` summary. See
+  `docs/use-dkg/async-queue-operations.md` before you turn it on.
+- **`DKG_STORE_CONCURRENCY_POLICY`** (#3410), **`DKG_WRITE_PREFLIGHT_COALESCING`**,
+  **`DKG_WRITE_PREFLIGHT_CACHE`** and **`DKG_WRITE_PREFLIGHT_CACHE_TTL_MS`**
+  (#3530).
+- **A Kafka source handler for the DKG Source Worker** (#3392): each Kafka
+  record becomes a private Working Memory knowledge asset, acknowledged
+  after a sealed readback. It is a workspace package and is not published
+  to npm.
+- **Async queue documentation** (#3570): `docs/use-dkg/async-queue-operations.md`,
+  `docs/build/async-jobs.md` and "Updating from 10.0.26" in
+  `docs/use-dkg/updates-and-rollback.md`; and the OKF to RDF mapping as
+  ADR 0009 (#3237).
+
+### Tests and tooling
+
+- Broader tests for the MCP server, EPCIS, the graph viewer, the Kafka
+  plugin, the prime agent bridge, shared memory retention, Node 26 RPC
+  dispatch and script temp repositories (#3238, #3491, #3508, #3509,
+  #3522, #3534, #3546, #3560, #3561), the devnet member-sharing suite
+  (#3500), the network simulator (#3490, #3559), the async queue
+  contention benchmark (#3514, #3531, #3545), installed-package
+  certification on `main` and nightly campaigns on `testnet-canary`
+  (#3499, #3542).
+
 ## [10.0.26] - 2026-10-25
 
 10.0.26 makes collaboration between AI agents dependable on any network.

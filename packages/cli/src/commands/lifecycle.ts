@@ -29,6 +29,7 @@ import {
   readNodeRoleFromConfigSync,
   type AutoUpdateConfig,
 } from '../config.js';
+import { resolveRetentionConfigOrExit } from '../retention-config.js';
 import { ApiClient, type DaemonStatusResponse } from '../api-client.js';
 import {
   STORE_QUADS_REFRESH_AFTER_MS,
@@ -292,7 +293,10 @@ program
       process.exit(1);
     }
 
-    exitOnStoreConfigErrors(await loadConfig(), (message) => console.error(message));
+    const bootConfig = await loadConfig();
+    exitOnStoreConfigErrors(bootConfig, (message) => console.error(message));
+    // OT-RFC-73 P10b: a bad queue-retention value is refused here, naming the key, before a detached daemon could hide it.
+    resolveRetentionConfigOrExit(bootConfig.queueRetention, (message) => console.error(message));
 
     const pid = await readPid();
     if (pid && isProcessRunning(pid)) {

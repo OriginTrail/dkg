@@ -1,6 +1,9 @@
+import { exactRecoveryActionOutcome } from './sync/durable-recovery-action.js';
+import { runGraphOwnedDurableRecovery, type AgentGraphOwnedRecoveryRequest } from './durable-recovery-owned-round.js';
 // SPDX-License-Identifier: Apache-2.0
 import type { ContextGraphDormancyReason } from './context-graph-subscription-dormancy.js';
 import { isCommittedSubscription, waitForSubscriptionActivation, type OwnedSubscriptionActivation } from './context-graph-subscription-activation-state.js';
+import type { DurableRecoveryRoundOutcome } from './sync/durable-recovery-round.js';
 import { normalizeExactAssetFetchPolicy } from './sync/requester/durable-sync-compat.js';
 import { exactAssetFetchSessionPolicy, requireUalOnlyExactAssetSelection } from './sync/requester/exact-durable-fetch.js';
 import { runDurableRecovery } from './durable-recovery-execution.js';
@@ -50,7 +53,7 @@ import { setTimeout as waitForPeerEventTurn } from 'node:timers/promises';
 import { PeerSyncSession } from './sync/peer-sync-session.js';
 import { captureExactBatchStreamRefusalScope } from './sync/exact-batch-stream-capability.js';
 import { createStorageACKRegistrationPlan } from './p2p/storage-ack-registrar.js';
-import { isRedundantLimitedConnection, syncOpenedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
+import { isRedundantLimitedConnection, syncOpenedPeerConnection, syncClosedPeerConnection, type PeerConnectionSyncPorts } from './sync/peer-connection.js';
 import { isLegacySyncGraphCandidateV1 } from './sync/legacy-sync-graph-candidate.js';
 import { ProtocolRouter, GossipSubManager, DKGEvent,
   registerExperimentalExactBatchResponder,
@@ -539,8 +542,6 @@ import {
   recoverDeferredContextGraphSubscriptionAuthorities,
   type DeferredContextGraphSubscriptionAuthorityRecoveryCursor,
   type PersistedContextGraphSubscriptionActivationOptions,
-  releaseRollingSubscriptionSlot,
-  rehydratedSubscriptionReachedSafeState,
   promoteDormantContextGraphSubscriptions,
   wakeDeferredContextGraphSubscriptionAuthorityRecovery,
 } from './context-graph-subscription-authority-recovery.js';
@@ -1199,6 +1200,13 @@ function sameStringArray(a: readonly string[], b: readonly string[]): boolean {
 
 
 export class LifecycleSyncMethods extends DKGAgentBase {
+  /**
+   * The rest of a finalized twin's cleanup once its shared-memory copy is retired: the asset's row
+   * in its author's SWM inventory, and its legacy SWM boundary marker. Idempotent: the marker is
+   * retired only while one is outstanding (a process-local read decides, with no store I/O), and
+   * the row is removed only while the author's inventory still holds it. A caller that proves the
+   * twin retired again asks again, and what an earlier call left behind goes then.
+   */
   async retireLegacySwmAfterVerifiedVmTwin(
     this: DKGAgent,
     input: Readonly<{
@@ -3110,23 +3118,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }, evt.detail), (error) => handleSyncError(evt.detail.remotePeer.toString(), error));
     }, { signal });
 
-    // Remember when the last live connection to a peer is gone. A3 keeps
-    // `lastSuccessfulSyncAt` and reconciler backoff across relay flaps, but
-    // the next `connection:open` must not suppress catch-up using a sync
-    // timestamp from before an offline gap. `lastSyncDisconnectedAt` is the
-    // boundary that distinguishes stale pre-disconnect success from a fresh
-    // sync in the current live session.
     this.node.libp2p.addEventListener('connection:close', (evt) => {
-      const remotePeer = evt.detail.remotePeer.toString();
-      if (remotePeer === this.node.libp2p.peerId.toString()) return;
-      const stillConnected = this.node.libp2p
-        .getPeers()
-        .some((p) => p.toString() === remotePeer);
-      if (stillConnected) return;
-      this.peerCapabilityRegistry.forget(remotePeer);
-      this.closeRfc64CatalogConnectionReplaySessionV1(remotePeer);
-      peerEvents.forgetSkippedNoSync(remotePeer);
-      this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
+      syncClosedPeerConnection({ remotePeer: evt.detail.remotePeer.toString(),
+        localPeerId: this.node.libp2p.peerId.toString(), connectedPeers: this.node.libp2p.getPeers(),
+        onLastConnectionClosed: remotePeer => {
+          this.peerCapabilityRegistry.forget(remotePeer);
+          peerEvents.forgetSkippedNoSync(remotePeer);
+          this.lastSyncDisconnectedAt.set(remotePeer, Date.now());
+          this.noteRfc64CatalogReplayPeerDisconnectedV1(remotePeer);
+        } });
     }, { signal });
 
     // Event-driven sync-retry: libp2p emits `peer:update` whenever a
@@ -5062,6 +5062,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     )).result;
   }
 
+  async runGraphOwnedDurableRecoveryRound(this: DKGAgent, request: AgentGraphOwnedRecoveryRequest): Promise<DurableRecoveryRoundOutcome> {
+    const host = DKGAgentBase.createDurableRecoveryCapabilities(this);
+    return runGraphOwnedDurableRecovery({ ...request, host,
+      authority: host.resolveOrdinaryAuthority(request.ctx, {}) });
+  }
+
   async runLegacyDurableSyncDetailed(this: DKGAgent,
     ctx: OperationContext,
     remotePeerId: string,
@@ -5629,7 +5635,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       // an unfinished offset-zero requester session remains cached.
       forceFreshSession,
       manifestDigest,
-      manifestPrefixDigestAtOffset,
+      manifestPrefixDigestAtOffset, durableResumeBoundary,
       shouldStopAfterPage,
       workAdmission,
       // Exact VM recovery filter. Included in checkpoint, coalescing, wire and
@@ -5779,7 +5785,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       ephemeralRequesterState,
       forceFreshSession,
       manifestDigest,
-      manifestPrefixDigestAtOffset,
+      manifestPrefixDigestAtOffset, durableResumeBoundary,
       shouldStopAfterPage,
       workAdmission: effectiveWorkAdmission,
       buildSyncRequest: this.buildSyncRequest.bind(this),
@@ -6591,22 +6597,23 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         isSyncCapable: (peerId) => this.waitForSyncProtocol({
           toString: () => peerId,
         }),
-        executeSlice: (peerId, durableMetaContinuation) => this.syncFromPeerDetailed(
-          peerId,
-          [contextGraphId],
-          undefined,
-          undefined,
-          undefined,
-          {
-            stopOnBackoffWorthyFailure: true,
-            totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
-            settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
-            signal: this.node.stopSignal ?? undefined,
-            priority: FOREGROUND_CATCHUP_SYNC_PRIORITY,
-            source: 'vm-recovery',
-            durableMetaContinuation,
-          },
-        ),
+        executeSlice: async (peerId, recovery) => {
+          if (!durableSyncEnabled(this.config) || !await this.canUseLegacyDurableSyncForContextGraphV1(contextGraphId)) {
+            return { result: createIncompleteDurableSyncResult(), decision: { strategy: 'not-started' } };
+          }
+          return this.runGraphOwnedDurableRecoveryRound({ ctx, remotePeerId: peerId, contextGraphId,
+            recovery,
+            options: { stopOnBackoffWorthyFailure: true, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
+              settlementSliceTimeoutMs: DURABLE_RECOVERY_SETTLEMENT_SLICE_TIMEOUT_MS,
+              signal: this.node.stopSignal ?? undefined, priority: FOREGROUND_CATCHUP_SYNC_PRIORITY, source: 'vm-recovery' },
+          });
+        },
+        executeExactSlice: async (peerId, assetUals) => {
+          const exact = await this.syncExactKnowledgeAssetsFromPeerDetailed(peerId, contextGraphId, assetUals, {
+            signal: this.node.stopSignal, totalTimeoutMs: DURABLE_RECOVERY_HARD_TIMEOUT_MS,
+          });
+          return exactRecoveryActionOutcome(exact.result, exact.disposition === 'found');
+        },
         logDebug: (message) => this.log.debug(ctx, message),
         logInfo: (message) => this.log.info(ctx, message),
         logWarn: (message) => this.log.warn(ctx, message),
@@ -6615,8 +6622,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
   }
 
   /**
-   * The live connections' remote peers (one per peer id, in connection order)
-   * that pass network admission: the catch-up candidate set. A still-open
+   * Live remote peers passing network admission form the catch-up candidate set. A still-open
    * connection to a peer that failed the network-identity proof (another DKG
    * network's relay, say) must never become a sync peer. Both catch-up runners
    * (in-process and the CLI worker bridge) select from this one predicate.
@@ -7008,6 +7014,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     const accessDeniedPeers = new Set<string>();
     let cleanDurableDataSynced = 0;
     let cleanDurablePrivateOnlyCompletions = 0;
+    /** Assets of clean durable rounds that found the whole generation already stored and current. */
+    let cleanDurableHeldAssets = 0;
     let cleanSharedMemoryDataSynced = 0;
     /** Assets of clean SWM rounds that found nothing missing: already held here. */
     let cleanSharedMemoryHeldAssets = 0;
@@ -7077,6 +7085,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         cleanDurableDataSynced += r.durable.insertedDataTriples;
         cleanDurablePrivateOnlyCompletions +=
           durableProgress.hasVerifiedPrivateOnlyResponse ? 1 : 0;
+        cleanDurableHeldAssets += r.durable.verifiedHeldAssets ?? 0;
       }
       if (sharedMemoryCompletedCleanly) {
         cleanSharedMemoryDataSynced += r.shared!.insertedDataTriples;
@@ -7261,7 +7270,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     // deliver. A clean round that found nothing missing proves the plane too:
     // the node received those writes earlier and holds what that peer holds.
     const durableCompletedCleanly =
-      cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0;
+      cleanDurableDataSynced > 0 || cleanDurablePrivateOnlyCompletions > 0 || cleanDurableHeldAssets > 0;
     const sharedMemoryCompletedCleanly = cleanSharedMemoryDataSynced > 0 || cleanSharedMemoryHeldAssets > 0;
     if (durableCompletedCleanly || sharedMemoryCompletedCleanly) {
       this.markContextGraphSubscriptionState(contextGraphId, {
@@ -7276,6 +7285,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         dataSynced: cleanDurableDataSynced,
         sharedMemorySynced: cleanSharedMemoryDataSynced,
         sharedMemoryHeldAssets: cleanSharedMemoryHeldAssets,
+        durableHeldAssets: cleanDurableHeldAssets,
         verifiedPrivateOnlyResponses: cleanDurablePrivateOnlyCompletions,
       });
     }
@@ -7839,12 +7849,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       normalizeWireId: hash => this.contextGraphWireId(hash),
       syncScoped: (this.config.syncContextGraphs ?? []).includes(contextGraphId), options });
     const { subscription: canonicalNext, adoptedWire, previousWireId, nextWireId, retainsInactiveBinding } = plan;
-    const currentWire = this.resolveWireOnlyContextGraphSubscription(contextGraphId);
-    if (this.subscribedContextGraphs.get(contextGraphId) !== previous
-      || currentWire?.localId !== wireOnlySubscription?.localId
-      || currentWire?.subscription !== wireOnlySubscription?.subscription)
-      throw new Error('Subscription source changed during write');
-
     this.invalidateListContextGraphsCache();
     if (options?.retireNamePlaceholder === true) this.retireLiveContextGraphNamePlaceholderFor(contextGraphId);
     if (adoptedWire) {
@@ -7868,18 +7872,9 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     if (!preserveWireOwner) this.wireIdToLocalCgId.set(nextWireId, contextGraphId);
     if (plan.requestsNameResolution) this.requestContextGraphNameResolutionFor(contextGraphId);
 
-    const status = this.contextGraphSubscriptionRehydrationStatus;
-    if (status?.rehydrationEnabled === true && status.activationCap > 0
-      && this.contextGraphSubscriptionRehydrationAccountedIds.has(contextGraphId)
-      && canonicalNext.coreHosted !== true && canonicalNext.subscribed === true) {
-      if (rehydratedSubscriptionReachedSafeState(canonicalNext)) {
-        if (releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds,
-          this.contextGraphSubscriptionRehydrationPromotionRuntime, contextGraphId, 'readiness'))
-          this.log.info(createOperationContext('init'),
-            `Rehydrated context-graph subscription "${contextGraphId}" reached a safe state; rolling activation slot released`);
-      } else this.contextGraphSubscriptionRehydrationSlotIds.add(contextGraphId);
-    } else releaseRollingSubscriptionSlot(this.contextGraphSubscriptionRehydrationSlotIds,
-      this.contextGraphSubscriptionRehydrationPromotionRuntime, contextGraphId, options?.rollbackSlotRelease ?? 'deactivation');
+    if (this.contextGraphSubscriptionActivations.updateReadiness(contextGraphId, canonicalNext, options?.rollbackSlotRelease))
+      this.log.info(createOperationContext('init'),
+        `Rehydrated context-graph subscription "${contextGraphId}" released its rolling activation slot`);
 
     if (this.config.rfc64CatalogExecutionPlan.selectedAuthority[contextGraphId] !== undefined
       && (this.config.nodeRole ?? 'edge') === 'edge') {
@@ -8023,15 +8018,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
 
   /** Record an acknowledged durable write and its explicit activation transition. */
   recordContextGraphSubscriptionPersistence(this: DKGAgent, contextGraphId: string, persisted?: Pick<ContextGraphSubscriptionRecord, 'subscribed' | 'coreHosted'>): void {
-    const live = this.subscribedContextGraphs.get(contextGraphId);
-    const isPersisted = persisted?.subscribed === true || persisted?.coreHosted === true;
-    const isActive = live?.subscribed === true || live?.coreHosted === true;
-    const reason = isPersisted && !isActive
-      ? this.contextGraphSubscriptionDormancyById.get(contextGraphId)
-        ?? (this.contextGraphSubscriptionRehydrationStatus?.rehydrationEnabled ? 'authorityUnavailable' : 'rehydrationDisabled')
-      : undefined;
-    this.contextGraphSubscriptionActivations.transition({ id: contextGraphId, reason, kind: 'saved',
-      persisted: isPersisted, active: isActive, hosted: live?.coreHosted === true });
+    this.contextGraphSubscriptionActivations.recordPersistence(contextGraphId, persisted);
   }
 
   recordContextGraphSubscriptionClear(this: DKGAgent,
@@ -8173,7 +8160,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     for (const peer of libp2p.getPeers() as Array<{ toString(): string }>) {
       const remotePeer = peer.toString();
       if (remotePeer === localPeerId) continue;
-      const reservation = this.prepareRfc64CatalogConnectionReplayV1(remotePeer);
+      const reservation = this.prepareRfc64CatalogGraphActivationReplayV1(remotePeer, contextGraphId);
       if (reservation === null) continue;
       attempted += 1;
       try {
@@ -8748,11 +8735,11 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         // clear followed by a new subscribe must still start a separate line.
         continueContextGraphSubscriptionLine(previous, restored);
       },
-      rollbackNetworkEffects: (contextGraphId, rollbackSlotRelease) => this.unsubscribeFromContextGraph(
+      rollbackNetworkEffects: (contextGraphId, rollbackSlotRelease) => this.removeContextGraphSubscriptionNetwork(
         contextGraphId, { persist: false, updateRehydrationStatus: false, rollbackSlotRelease },
       ),
       trackSync: (contextGraphId) => this.trackSyncContextGraph(contextGraphId),
-      subscribe: (contextGraphId) => this.subscribeToContextGraph(contextGraphId, {
+      subscribe: (contextGraphId) => this.installContextGraphSubscription(contextGraphId, {
         trackSyncScope: false,
         persist: false, deferWireAdoption: true,
         syncMode: 'always-on',
@@ -8862,7 +8849,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         );
       },
       capped: (contextGraphId) => {
-        this.contextGraphSubscriptionRehydrationPendingIds.add(contextGraphId);
         this.requestContextGraphSubscriptionPromotion(contextGraphId);
       },
     });
@@ -8963,8 +8949,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return;
     }
     const store = this.config.contextGraphSubscriptionStore;
-    this.contextGraphSubscriptionRehydrationSlotIds.clear();
-    this.contextGraphSubscriptionRehydrationPendingIds.clear();
+    this.contextGraphSubscriptionActivations.resetScheduler();
     if (!store) return;
     const ctx = createOperationContext('init');
     let authorityBudget: RehydrationAuthorityBudget | undefined;
@@ -9025,6 +9010,12 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
 
+      this.contextGraphSubscriptionActivations.beginRehydration(rows, {
+        rehydrationEnabled: this.config.contextGraphSubscriptionRehydrationEnabled,
+        systemExcluded: persistedRows.length - nonSystemRows.length,
+        activationCap: cap,
+      });
+
       // Restore exact saved identity before discovery, independently of every
       // activation gate (disabled, capped or authority-denied). Inactive rows
       // cannot admit gossip, sync or RFC-64 authority; installation owns no
@@ -9039,23 +9030,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       }
       if (!this.config.contextGraphSubscriptionRehydrationEnabled) {
         for (const row of rows) this.transitionContextGraphSubscriptionDormancy(row.id, 'rehydrationDisabled');
-        this.contextGraphSubscriptionRehydrationAccountedIds.clear();
-        for (const row of rows) {
-          this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
-        }
-        const completedAt = Date.now();
-        this.contextGraphSubscriptionRehydrationStatus = {
-          rehydrationEnabled: false,
-          persistedTotal: rows.length,
-          systemExcluded: persistedRows.length - nonSystemRows.length,
-          hostedActivated: 0,
-          hostedActivatedIds: [],
-          activated: 0,
-          activationCap: cap,
-          capDisabled: cap === 0,
-          completedAt,
-          updatedAt: completedAt,
-        };
+        this.contextGraphSubscriptionActivations.completeRehydration();
         if (rows.length > 0) {
           this.log.info(
             ctx,
@@ -9113,7 +9088,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       );
       const toActivate = [...hostedRows, ...userRows];
       const dormancyById = this.contextGraphSubscriptionDormancyById;
-      const activatedRows: ContextGraphSubscriptionRecord[] = [];
       let activatedUserRows = 0;
       // #2815: every row's authority may need a chain read, and start() (with
       // the daemon API behind it) waits for this loop. Past the budget, a row
@@ -9147,7 +9121,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const leaveUnresolved = (row: ContextGraphSubscriptionRecord): void => {
         if (!row.coreHosted && cap > 0 && activatedUserRows + deferredUserRows >= cap) {
           this.transitionContextGraphSubscriptionDormancy(row.id, 'activationCap');
-          this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
           return;
         }
         if (!row.coreHosted) deferredUserRows += 1;
@@ -9166,7 +9139,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           && activatedUserRows >= cap
         ) {
           this.transitionContextGraphSubscriptionDormancy(row.id, 'activationCap');
-          this.contextGraphSubscriptionRehydrationPendingIds.add(row.id);
           continue;
         }
         const approvedAgentAddress = row.subscribed
@@ -9263,7 +9235,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           );
           continue;
         }
-        activatedRows.push(row);
         if (!row.coreHosted) activatedUserRows += 1;
         const restorePendingMeta = restrictedApprovalBootstrap;
         const healedOnChainId = readAuthority.outcome === 'allowed'
@@ -9271,7 +9242,6 @@ export class LifecycleSyncMethods extends DKGAgentBase {
           : undefined;
         await this.activatePersistedContextGraphSubscriptionRecord(row, {
           restorePendingMeta,
-          claimRollingSlot: cap > 0,
           onChainId: healedOnChainId,
           ...(healedOnChainId !== undefined && healedOnChainId !== row.onChainId
             ? {
@@ -9315,31 +9285,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         }
       }
       const skipped = dormancyById.size;
-      this.contextGraphSubscriptionRehydrationAccountedIds.clear();
-      for (const row of rows) {
-        this.contextGraphSubscriptionRehydrationAccountedIds.add(row.id);
-      }
-      const completedAt = Date.now();
-      this.contextGraphSubscriptionRehydrationStatus = {
-        rehydrationEnabled: true,
-        persistedTotal: rows.length,
-        systemExcluded: persistedRows.length - nonSystemRows.length,
-        hostedActivated: activatedRows.filter((r) => r.coreHosted).length,
-        hostedActivatedIds: activatedRows.filter((r) => r.coreHosted).map((r) => r.id),
-        activated: activatedRows.length,
-        activationCap: cap,
-        capDisabled: cap === 0,
-        completedAt,
-        updatedAt: completedAt,
-      };
+      const status = this.contextGraphSubscriptionActivations.completeRehydration();
       const dormancy = projectContextGraphDormancy(dormancyById);
       if (rows.length > 0) {
         this.log.info(
           ctx,
-          `Rehydrated ${activatedRows.length} of ${rows.length} non-system persisted context-graph subscription(s)` +
+          `Rehydrated ${status.activated} of ${rows.length} non-system persisted context-graph subscription(s)` +
             (skipped > 0
               ? ` (${skipped} left dormant; ` +
-                `${activatedRows.filter((r) => r.coreHosted).length} hosted restored)`
+                `${status.hostedActivated} hosted restored)`
               : ''),
         );
       }
@@ -9377,6 +9331,10 @@ export class LifecycleSyncMethods extends DKGAgentBase {
     } catch (err) {
       this.log.warn(ctx, `Failed to rehydrate persisted context-graph subscriptions: ${err instanceof Error ? err.message : String(err)}`);
     } finally {
+      if (this.contextGraphSubscriptionActivations.finishPartialRehydration()) {
+        wakeDeferredContextGraphSubscriptionAuthorityRecovery(this.contextGraphSubscriptionAuthorityRecoveryRuntime);
+        this.contextGraphSubscriptionRehydrationPromotionRuntime?.request();
+      }
       authorityBudget?.dispose();
       startupPlan.finish();
     }

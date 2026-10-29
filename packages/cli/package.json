@@ -1,6 +1,6 @@
 {
   "name": "@origintrail-official/dkg",
-  "version": "10.0.26",
+  "version": "10.0.27",
   "type": "module",
   "dkgBuildIdentity": "compiler",
   "engines": {

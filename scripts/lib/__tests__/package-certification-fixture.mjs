@@ -16,11 +16,27 @@ export function releaseGitFixture(expected) {
     [`ls-remote origin refs/tags/${tag}`, `${object}\trefs/tags/${tag}`],
     [`rev-parse ${tag}^{commit}`, expected.commit],
   ]);
-  return { tag, gitRunner: (command, args) => {
+  // Publication-unit fixtures isolate registry/tag behavior. The decision verifier
+  // and its CLI requirement have independent integration and refusal tests.
+  return { tag, evidenceFile: 'fixture-decision.json', prepareEvidence: () => ({ recheckLocalIntegrity: () => {} }), gitRunner: (command, args) => {
     assert.equal(command, 'git');
     assert.ok(responses.has(args.join(' ')), `unexpected git operation: ${args.join(' ')}`);
     return responses.get(args.join(' '));
   } };
+}
+// A registry's dist-tags, faked for promotion: what `runner` writes is what
+// `readTags` reads back. `write` sees every npm call first; throwing fails it.
+export function fakeDistTags({ write = () => {} } = {}) {
+  const tags = new Map();
+  return {
+    readTags: pkg => ({ ...tags.get(pkg.name) }),
+    runner: (command, args, options) => {
+      write(command, args, options);
+      if (args[0] !== 'dist-tag') return;
+      const [, , spec, channel] = args, at = spec.lastIndexOf('@');
+      tags.set(spec.slice(0, at), { ...tags.get(spec.slice(0, at)), [channel]: spec.slice(at + 1) });
+    },
+  };
 }
 export function archive(files) {
   const records = [];

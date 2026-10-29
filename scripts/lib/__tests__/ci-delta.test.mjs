@@ -349,6 +349,14 @@ test('ordinary network-sim changes remain a narrow delta after the trust hardeni
   assert.deepEqual(plan.evmScopes, []);
 });
 
+test('Kafka source edits select the supporting test lane and shared build', () => {
+  const plan = pullRequestPlan([change('packages/kafka-source/src/kafka.mjs')]);
+  assert.equal(plan.mode, 'delta');
+  assert.deepEqual(selectedLanes(plan), ['kosava_supporting']);
+  assert.equal(needsSharedBuild(plan), true);
+  assert.deepEqual(plan.evmScopes, []);
+});
+
 test('every tested workspace is represented by the routing manifest', () => {
   const manifests = [
     ...fs.readdirSync(path.join(REPO_ROOT, 'packages'), { withFileTypes: true })

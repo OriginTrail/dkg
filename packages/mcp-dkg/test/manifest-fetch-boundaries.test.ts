@@ -112,3 +112,29 @@ describe('manifest fetch scope and validation', () => {
     await expect(fetchManifest({ client, contextGraphId: graph })).rejects.toBe(error);
   });
 });
+
+it('ignores null binding rows and treats typed non-binding responses as missing manifest data', async () => {
+  const fetcher = vi
+    .fn<typeof fetch>()
+    .mockResolvedValueOnce(Response.json({ result: { type: 'boolean', value: false } }))
+    .mockResolvedValueOnce(
+      Response.json({
+        result: {
+          type: 'bindings',
+          bindings: [
+            null,
+            row(ManifestP.network, 'testnet'),
+            row(ManifestP.agentsMd, 'urn:template'),
+          ],
+        },
+      }),
+    )
+    .mockResolvedValueOnce(Response.json({ result: { type: 'quads', quads: [] } }));
+  const client = new DkgClient({ config: makeConfig(), fetcher });
+  await expect(fetchManifest({ client, contextGraphId: graph })).rejects.toThrow(
+    'No manifest published',
+  );
+  const result = await fetchManifest({ client, contextGraphId: graph });
+  expect(result.network).toBe('testnet');
+  expect(result.agentsMd).toBeUndefined();
+});

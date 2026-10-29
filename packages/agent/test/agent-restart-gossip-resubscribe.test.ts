@@ -475,8 +475,8 @@ describe('DKGAgent same-instance restart re-subscribes gossip', () => {
     agent.subscribeToContextGraph(OTHER_CG, { persist: false });
     await agent.stop();
 
-    const subscribe = agent.subscribeToContextGraph.bind(agent);
-    vi.spyOn(agent, 'subscribeToContextGraph').mockImplementation((id, options) => {
+    const subscribe = agent.installContextGraphSubscription.bind(agent);
+    vi.spyOn(agent, 'installContextGraphSubscription').mockImplementation((id, options) => {
       if (id === CG) throw new Error('boom');
       return subscribe(id, options);
     });

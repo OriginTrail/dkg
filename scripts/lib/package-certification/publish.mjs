@@ -1,9 +1,13 @@
 import path from 'node:path';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
+import { createInterface } from 'node:readline';
+import { Writable } from 'node:stream';
+import { isDeepStrictEqual } from 'node:util';
 import { verifyReleaseTag } from '../release-policy.mjs';
 import { fileIdentity, verifyCertificate } from './bundle.mjs';
 import { run } from '../release-process.mjs';
+import { prepareReleaseEvidence } from '../release-evidence.mjs';
 
 function validateRegistry(registry) {
   if (!registry) return;
@@ -58,36 +62,186 @@ function mutate(command, args) {
   const result = spawnSync(command, args, { stdio: 'inherit' });
   if (result.error || result.status !== 0) throw new Error('npm mutation failed; inspect npm output and obtain a fresh OTP if needed');
 }
-export function preparedRelease({
-  mode, bundle, receiptFile, expected, rootDir, tag, tags, registry, otp,
-  dryRun = false, readDist = pkg => registryDist(pkg, registry), runner = mutate,
+// npm without a terminal: stdin is closed, so npm cannot fall back to its
+// interactive or web authentication prompt. The one-time code reaches npm in
+// its environment, never its arguments, and a failure carries npm's error code
+// only, never its output or arguments.
+function quietNpm(args, { otp, timeout = 60_000, mutation = false } = {}) {
+  const env = Object.fromEntries(Object.entries(process.env).filter(([key]) =>
+    key.toLowerCase() !== 'npm_config_otp' && (!mutation || key.toLowerCase() !== 'npm_config_fetch_retries')));
+  // A 429 must reach the scheduler immediately, before another write starts.
+  // npm's default retry delays would outlast this wrapper's timeout.
+  if (mutation) env.npm_config_fetch_retries = '0';
+  if (otp) env.npm_config_otp = otp;
+  return new Promise((resolve, reject) => {
+    const child = spawn('npm', args, { stdio: ['ignore', 'pipe', 'pipe'], env });
+    let stdout = '', stderr = '', timedOut = false;
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    const timer = setTimeout(() => { timedOut = true; child.kill('SIGKILL'); }, timeout);
+    child.on('error', error => { clearTimeout(timer); reject(Object.assign(new Error('npm did not start'), { code: error.code })); });
+    child.on('close', (status, signal) => {
+      clearTimeout(timer);
+      if (status === 0) return resolve(stdout);
+      const code = timedOut ? 'ETIMEDOUT' : signal ?? /npm (?:error|ERR!) code (\S+)/.exec(stderr)?.[1];
+      reject(Object.assign(new Error(`npm failed${code ? ` (${code})` : ''}`), { code }));
+    });
+  });
+}
+// The dist-tags endpoint npm itself reads before a tag write. `npm view` reads
+// the package document, which the registry's CDN can serve minutes stale.
+export async function registryDistTags(pkg, registry) {
+  validateRegistry(registry);
+  let listing;
+  try { listing = await quietNpm(['dist-tag', 'ls', pkg.name, ...(registry ? ['--registry', registry] : [])]); }
+  catch { throw new Error(`Registry dist-tags unavailable for ${pkg.name}`); }
+  return Object.fromEntries([...listing.matchAll(/^([^\s:]+): (\S+)$/gm)].map(([, name, version]) => [name, version]));
+}
+// The terminal echoes nothing: readline reads it in raw mode and writes its
+// echo into a sink.
+export function promptOtp({ input = process.stdin, output = process.stderr } = {}) {
+  const prompt = createInterface({ input, output: new Writable({ write: (_chunk, _encoding, done) => done() }), terminal: true });
+  output.write('npm one-time code (hidden; use one that has just appeared): ');
+  return new Promise((resolve, reject) => {
+    prompt.once('line', resolve);
+    prompt.once('SIGINT', () => reject(new Error('Cancelled; no tag moved')));
+    prompt.once('close', () => reject(new Error('No one-time code entered; no tag moved')));
+  }).finally(() => { prompt.close(); output.write('\n'); });
+}
+async function inParallel(items, limit, fn) {
+  const results = [];
+  let next = 0;
+  const lane = async () => { while (next < items.length) { const index = next++; results[index] = await fn(items[index]); } };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, lane));
+  return results;
+}
+function stopped({ stop, otp, completed, planned, remaining, version }) {
+  if (!stop) return `npm accepted every tag write, but the registry does not show ${remaining} of them on ${version} (listed above). Check again in a minute with --dry-run, and run the same command again for any it still lists.`;
+  const at = `${stop.pair.channel} of ${stop.pair.pkg.name}`;
+  const cause = stop.reason ? `Promotion stopped before ${at}: ${stop.reason}.`
+    : stop.code === 'E429' ? `npm is rate-limiting one-time codes (E429 at ${at}). Wait about ten minutes, then run the same command again with a fresh code.`
+    : stop.code === 'EOTP' && otp ? `npm no longer accepts the one-time code (EOTP at ${at}). Run the same command again with a fresh code.`
+    : stop.code === 'EOTP' ? `npm needs a one-time code (EOTP at ${at}). Run the same command in a terminal to be asked for one, or pass --otp or NPM_CONFIG_OTP.`
+    : stop.code === 'E401' ? `npm refused the login (E401 at ${at}). Check npm whoami, run npm login if it fails, then run the same command again.`
+    : `npm could not move ${at}${stop.code ? ` (${stop.code})` : ''}. Fix the cause, then run the same command again.`;
+  return `${cause} npm accepted ${completed} of ${planned} tag moves; ${remaining > 0
+    ? `${remaining} tags are not on ${version}, and a re-run moves only those.`
+    : `the registry shows every tag on ${version}.`}`;
+}
+// A release decision may name no nightly run; say so wherever tags move on it.
+function noteEvidence(result, log) {
+  if (result?.nightly === null) log('Release evidence names no nightly run: it rests on the CI run and the harness profile');
+}
+// Moves only the (package, tag) pairs the registry does not show on the
+// version, so a re-run continues where an earlier run stopped.
+async function promote({ manifest, tags, bundle, receiptFile, expected, registry, otp, dryRun, readTags, runner, askOtp, parallel, settle, log, prepareEvidence }) {
+  const describe = ({ pkg, channel }) => ({ package: pkg.name, tag: channel });
+  const readPackages = read => inParallel(manifest.packages, parallel, async pkg => {
+    const current = await read(pkg);
+    return { pkg, moves: tags.map(channel => ({ pkg, channel, now: current === null ? 'not readable' : current?.[channel] ?? 'unset' })) };
+  });
+  const pending = pairs => pairs.filter(({ pkg, now }) => now !== pkg.version);
+  const before = await readPackages(readTags);
+  const lanes = before.map(({ pkg, moves }) => ({ pkg, moves: pending(moves) })).filter(lane => lane.moves.length > 0);
+  const planned = lanes.flatMap(lane => lane.moves);
+  const progress = { mode: 'promote', dryRun, reused: [], alreadyOnVersion: manifest.packages.length * tags.length - planned.length, completed: [], planned: planned.map(describe) };
+  log(`${manifest.packages.length} packages, tags ${tags.join(', ')}: ${progress.alreadyOnVersion} already on ${expected.version}, ${planned.length} to move`);
+  // Finish potentially slow authenticated acquisition before asking for a code.
+  const { result, recheckLocalIntegrity } = await prepareEvidence();
+  noteEvidence(result, log);
+  // Asked for after the reads, so the code is fresh when the writes start.
+  const entered = dryRun || planned.length === 0 ? undefined : otp || (askOtp ? await askOtp() : undefined);
+  const code = entered === undefined ? undefined : String(entered).replace(/\s/g, '');
+  if (code !== undefined && !/^\d{6,8}$/.test(code)) throw new Error('A one-time code is 6 to 8 digits; no tag moved');
+  // Recheck package AND evidence bytes after acquisition and the prompt,
+  // immediately before the first write.
+  verifyCertificate(bundle, receiptFile, expected);
+  recheckLocalIntegrity();
+  if (dryRun) for (const { pkg, channel, now } of planned) log(`Would move ${channel} of ${pkg.name} to ${pkg.version} (now ${now})`);
+  if (planned.length === 0) log('Nothing to move');
+  if (dryRun || planned.length === 0) return progress;
+  let stop;
+  const intact = pkg => {
+    try { return isDeepStrictEqual(fileIdentity(path.join(bundle, pkg.tarball)), { size: pkg.size, sha256: pkg.sha256, integrity: pkg.integrity }); } catch { return false; }
+  };
+  const move = async pair => {
+    if (stop) return false;
+    const { pkg, channel } = pair;
+    if (!intact(pkg)) {
+      stop ??= { pair, reason: `the bundle's tarball of ${pkg.name} changed` };
+      return false;
+    }
+    try {
+      await runner('npm', ['dist-tag', 'add', `${pkg.name}@${pkg.version}`, channel, ...(registry ? ['--registry', registry] : [])], { otp: code });
+    } catch (error) {
+      // Only npm's error code: runner errors can carry npm's arguments.
+      stop ??= { pair, code: typeof error?.code === 'string' ? error.code : undefined };
+      return false;
+    }
+    progress.completed.push(describe(pair));
+    log(`Moved ${channel} of ${pkg.name} to ${pkg.version}`);
+    return true;
+  };
+  // The first write goes alone, so npm refuses a stale or mistyped code once
+  // rather than once per parallel write: refused codes count towards its rate
+  // limit. Then packages in parallel, each package's tags in sequence: two
+  // writes to one package's dist-tags at once can fail with E409 Conflict.
+  if (await move(lanes[0].moves.shift())) {
+    await inParallel(lanes.filter(lane => lane.moves.length > 0), parallel, async lane => { for (const pair of lane.moves) if (!await move(pair)) return; });
+  }
+  // npm has accepted tag writes before that the registry never showed.
+  if (settle > 0) await new Promise(resolve => setTimeout(resolve, settle));
+  const remaining = (await readPackages(async pkg => { try { return await readTags(pkg); } catch { return null; } }))
+    .flatMap(({ moves }) => pending(moves));
+  progress.remaining = remaining.map(pair => ({ ...describe(pair), now: pair.now }));
+  for (const { pkg, channel, now } of remaining) log(`Not on ${pkg.version} yet: ${channel} of ${pkg.name} is ${now}`);
+  if (!stop && remaining.length === 0) {
+    log(`Done: every listed tag of the ${manifest.packages.length} packages is on ${expected.version}`);
+    return progress;
+  }
+  const error = new Error(stopped({ stop, otp: code, completed: progress.completed.length, planned: planned.length, remaining: remaining.length, version: expected.version }));
+  error.progress = progress;
+  throw error;
+}
+export async function preparedRelease({
+  mode, bundle, receiptFile, expected, rootDir, tag, tags, registry, otp, evidenceFile,
+  dryRun = false, readDist = pkg => registryDist(pkg, registry),
+  readTags = pkg => registryDistTags(pkg, registry),
+  runner = mode === 'promote' ? (_command, args, options) => quietNpm(args, { ...options, mutation: true }) : mutate,
+  askOtp = process.stdin.isTTY ? promptOtp : null, parallel = 8, settle = 4_000,
   gitRunner = (cmd, args) => run(cmd, args, { cwd: rootDir }),
-  log = console.log,
+  log = console.log, prepareEvidence = prepareReleaseEvidence,
 }) {
   assert.ok(['publish', 'promote'].includes(mode));
   validateRegistry(registry);
   assert.ok(tags?.length > 0 && new Set(tags).size === tags.length && tags.every(t => /^[a-z][a-z0-9-]*$/.test(t)), 'invalid/duplicate dist-tags');
   if (mode === 'publish') assert.equal(tags.length, 1, 'publish accepts exactly one initial dist-tag');
+  if (mode === 'promote' || tags.some(channel => ['latest', 'mainnet'].includes(channel))) {
+    assert.ok(typeof evidenceFile === 'string' && evidenceFile, 'release decision file is required for promotion');
+  }
   const { manifest } = verifyCertificate(bundle, receiptFile, expected);
+  if (evidenceFile) await prepareEvidence({ evidenceFile, expected, manifest, rootDir });
   const problems = verifyReleaseTag({ tag, version: expected.version, runner: gitRunner });
   assert.deepEqual(problems, [], 'release signed-tag/version/ancestry preflight failed');
   assert.equal(gitRunner('git', ['rev-parse', `${tag}^{commit}`]), expected.commit, 'tag does not identify prepared source');
   // Preflight EVERY package before even the first mutation. A matching version
   // alone cannot make a partial publication safe to resume.
   const state = checkRegistrySet(manifest, readDist, { allowMissing: mode === 'publish' });
+  if (mode === 'promote') return promote({ manifest, tags, bundle, receiptFile, expected, registry, otp, dryRun, readTags, runner, askOtp, parallel, settle, log,
+    prepareEvidence: () => prepareEvidence({ evidenceFile, expected, manifest, rootDir }) });
   const existing = new Set(state.filter(s => s.exists).map(s => s.pkg.name));
-  const ordered = mode === 'publish' ? publicationOrder(manifest) : manifest.packages;
-  const operations = ordered.filter(pkg => mode !== 'publish' || !existing.has(pkg.name)).flatMap(pkg => tags.map(channel => ({
+  const operations = publicationOrder(manifest).filter(pkg => !existing.has(pkg.name)).flatMap(pkg => tags.map(channel => ({
     pkg, channel, tarball: path.join(bundle, pkg.tarball),
-    args: mode === 'publish'
-      ? ['publish', path.join(bundle, pkg.tarball), '--access', 'public', '--tag', channel]
-      : ['dist-tag', 'add', `${pkg.name}@${pkg.version}`, channel],
+    args: ['publish', path.join(bundle, pkg.tarball), '--access', 'public', '--tag', channel],
   })));
   const describe = ({ pkg, channel }) => ({ package: pkg.name, tag: channel });
-  const progress = { mode, dryRun, reused: state.filter(s => mode === 'publish' && s.exists).map(s => s.pkg.name), completed: [], planned: operations.map(describe) };
+  const progress = { mode, dryRun, reused: state.filter(s => s.exists).map(s => s.pkg.name), completed: [], planned: operations.map(describe) };
   // Recheck package AND evidence bytes after acquisition and immediately before
   // mutation; no build-info generation/build/repack exists in this path.
+  const evidence = evidenceFile ? await prepareEvidence({ evidenceFile, expected, manifest, rootDir }) : undefined;
+  noteEvidence(evidence?.result, log);
   verifyCertificate(bundle, receiptFile, expected);
+  evidence?.recheckLocalIntegrity();
   try {
     for (const operation of operations) {
       const { pkg, channel, tarball, args } = operation;

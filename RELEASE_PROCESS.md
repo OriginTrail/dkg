@@ -200,14 +200,109 @@ The initial receipt is written before execution, so SIGKILL or host loss also
 leaves non-passing evidence, but cannot guarantee cleanup. Inspect resources
 named `dkg-cert-<receipt.runId>-*` after a forced termination. `*-data/` contains disposable local wallet keys and is
 local diagnosis only: exclude it from uploads. Portable evidence is the complete
-bundle plus attempt top-level JSON/JSONL/log files. The separately named manual
-`package-certification.yml` workflow uploads those files, with no npm credentials.
-It is opt-in and does not run global npm installs on unrelated PRs. Availability
-of workflow dispatch depends on the workflow reaching the default branch.
-It does not change the immutable planner, required checks or branch protections.
+bundle plus attempt top-level JSON/JSONL/log files. The separately named
+`package-certification.yml` workflow runs automatically on every push to `main`,
+including release PR merges, and certifies the exact pushed commit. It prepares
+the full package set, certifies both installation layouts, verifies the receipt,
+and runs the missing-UI negative control. Package bytes and attempt evidence are
+uploaded for 14 days, including evidence from failed attempts, with no npm
+credentials or publication. A failed run marks that commit's certification check
+as failed; it does not undo the merge or automatically promote a release.
+
+Maintainers can also dispatch a manual rehearsal for a full candidate SHA once
+the workflow reaches the default branch. The workflow does not run on unrelated
+PRs. Both automatic and manual runs use the selected SHA consistently for checkout,
+certification, verification and artifact naming. This post-merge check does not
+change the immutable planner, required checks or branch protections.
 Required script tests continue through `pnpm test:scripts`; any activation as a
 required candidate gate needs a separately reviewed trusted-controller pin/route
 update and maintainer branch-protection decision.
+
+### 6a.1) Verify the complete release decision
+
+Package installation alone does not qualify promotion. Before changing a dist-tag,
+assemble a portable `decision.json` next to all harness `suite-state.json`
+attempts (and the downloaded nightly receipt, when the decision names a nightly
+run), then run:
+
+```bash
+pnpm release:verify-evidence --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
+  --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 \
+  --evidence "$EVIDENCE/decision.json"
+```
+
+Promotion completes fresh authenticated CI history and artifact acquisition before asking for an OTP. Immediately after the prompt, it rechecks the installed-package certificate, decision bytes and every local evidence receipt against that qualified snapshot before the first registry write. This local check performs no GitHub requests; changed evidence requires a new qualification. CI history is qualified as of the pre-prompt acquisition, not continuously monitored while the maintainer enters a code.
+
+The version-1 decision has these fields (full object IDs and SHA-256 file hashes
+are required; placeholders below are explanatory and cannot certify):
+
+```json
+{
+  "schemaVersion": 1,
+  "candidate": {
+    "commit": "<final product commit>", "tree": "<git tree>", "version": "<version>",
+    "sourceInputsDigest": "<manifest source input digest>", "packageSetDigest": "<manifest package set digest>"
+  },
+  "ci": { "runId": "<successful CI run>", "attempt": 1 },
+  "nightly": {
+    "runId": "<successful full nightly run>", "attempt": 1,
+    "receipt": { "file": "nightly-profile-summary.json", "sha256": "<file hash>" }
+  },
+  "harness": {
+    "commit": "<full harness commit>", "profile": "local-release-v1",
+    "attempts": [{ "id": "qualification-1", "receipt": { "file": "qualification-1/suite-state.json", "sha256": "<file hash>" } }]
+  },
+  "priorCiFailures": []
+}
+```
+
+The `nightly` entry is optional. Leave it out (or set it to `null`) to release on
+the CI run and the harness profile alone: `release:verify-evidence` then reports
+`"nightly": null`, and promotion logs that the evidence names no nightly run. A
+decision that names a nightly run must name it completely, and that run is
+checked in full as described below.
+
+Use the integrated harness profile from OriginTrail/dkg-blackbox-harness #47.
+It requires eight registration/policy cells, eight functional scenarios and the
+overlap leg, all with verified builds and successful process/run identities.
+Keep raw child runs with suite-state. The release helper verifies their recorded
+contract and identities; local harness evidence still relies on the trusted
+operator/executor, like locally produced package certificates. It is not a
+cryptographic attestation that an arbitrary operator ran the tests.
+
+The helper queries GitHub using `gh` credentials: CI must be complete/successful
+on the final commit. When the decision names a nightly run, its receipt must
+byte-match the authenticated `nightly-profile-summary` artifact of the latest run
+attempt, and the helper recomputes the nightly completeness check (all seven browser shards, mandatory lifecycle cases
+and 1,000 property trials). Deleted/expired artifacts are a qualification gap;
+archive them before the workflow retention expires, and re-run if the online
+source required for verification is no longer available.
+
+Every failed CI attempt found for that commit must appear in `priorCiFailures`
+with `runId`, `attempt`, `classification` (`product`, `test`, `environment` or
+`unknown`), an owning GitHub `issue`, and a later successful
+`supersededBy: {runId, attempt}` matching the selected CI run (or the nightly run,
+when the decision names one). Keep every
+local harness attempt in order. A failed attempt requires
+`resolution: {classification, issue, supersededBy}`; classification is `product`,
+`test`, `environment` or `unknown`, and supersededBy identifies a later complete
+passing harness attempt. A failure cannot be dismissed solely by relabeling it.
+Local attempt history is operator supplied; the verifier does not claim to
+discover unarchived private runs.
+
+Selected CI must be a successful push, scheduled or dispatched run of the
+candidate itself. Pull-request and merge-queue runs are ineligible here: GitHub's
+API head SHA alone does not prove the synthetic merge tree they checked out.
+The same complete dispatched nightly may satisfy both CI and nightly entries.
+
+Promotion and direct `latest`/`mainnet` publication require `--evidence`, including
+dry-runs. Canary publication can precede qualification. The package, registry and
+signed-tag checks still apply. A new candidate requires fresh receipts at its
+exact commit; this first implementation does not reuse receipts across equal
+trees. Run `pnpm qa:check-regressions` and `pnpm qa:incident-status` to inspect
+proven detectors and explicitly unresolved incident gaps before the human release
+decision. Archive the decision, package bundle/certificate and raw campaign
+records with the release; credentials and OTPs must not enter those artifacts.
 
 ### 6b) Publish the same bytes, verify the registry, then promote manually
 
@@ -229,9 +324,12 @@ pnpm release:publish-prepared --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt
   --tag "v$VERSION" --dist-tag canary
 pnpm release:verify-published --bundle "$BUNDLE" --commit "$COMMIT" --version "$VERSION" \
   --profile installed-local-rdf-v1 --tags canary
+# Promotion reads every package's dist-tags first, then asks for one npm
+# one-time code (typing is hidden) and moves every remaining tag with it.
+# --otp or NPM_CONFIG_OTP skips the question; --dry-run shows the plan only.
 pnpm release:promote --bundle "$BUNDLE" --certificate "$ATTEMPT/receipt.json" \
   --commit "$COMMIT" --version "$VERSION" --profile installed-local-rdf-v1 \
-  --tag "v$VERSION" --tags testnet
+  --tag "v$VERSION" --tags testnet --evidence "$EVIDENCE/decision.json"
 ```
 
 Choose `latest` only for the stable release at the existing human-controlled
@@ -255,12 +353,24 @@ Publication orders internal runtime dependencies before their consumers, so an
 exposed CLI tag never depends on candidate packages still awaiting publication.
 Cycles fail before mutation. Dry-run and execution use the same ordered plan.
 Promotion requires all versions to exist with matching integrity before its first
-tag update. Both paths recheck package/evidence bytes immediately before mutation.
+tag update. It then reads every package's dist-tags and plans only the tags not on
+the version yet, reporting how many already are. Only after those reads does it
+ask for the one-time code, so the code is fresh when the writes start; it asks in
+a terminal, unless `--otp` or `NPM_CONFIG_OTP` supplies one. npm runs with stdin
+closed, so it cannot fall back to its web authentication prompt, and receives the
+code in its environment, never its arguments. The first write goes alone, so a
+stale or mistyped code is refused once; then eight packages are written at a time,
+each package's tags in sequence (two writes to one package's dist-tags at once can
+fail with E409 Conflict). On a stale code (EOTP) or a rate limit (E429) no new write
+starts, and the command reports what moved and what to do: take a fresh code, or
+wait about ten minutes. It then reads the registry again and lists every tag still
+not on the version, because npm has accepted tag writes before that never showed.
+Both paths recheck package/evidence bytes immediately before mutation.
 Cross-package changes are **not atomic**: failures report exact completed/reused
-packages and tags. Re-running promotion is idempotent after the complete integrity
-preflight; obtain a fresh OTP if it expired. Dry-run performs reads only and never
-prints OTPs or registry credentials. The supported wrapper cannot prevent a
-credential holder bypassing it with direct npm commands.
+packages and tags, and re-running promotion after the complete integrity preflight
+moves only the tags still missing. Dry-run performs reads only, asks for no code
+and never prints OTPs or registry credentials. The supported wrapper cannot prevent
+a credential holder bypassing it with direct npm commands.
 
 ### 6c) Create the GitHub Release (manual)
 

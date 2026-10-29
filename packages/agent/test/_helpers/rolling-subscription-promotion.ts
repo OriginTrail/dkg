@@ -68,8 +68,10 @@ export function createRollingPromotionFixture(
     log: { warn: vi.fn<RollingSubscriptionPromotionPorts['log']['warn']>(), info: vi.fn<RollingSubscriptionPromotionPorts['log']['info']>(), debug: vi.fn<RollingSubscriptionPromotionPorts['log']['debug']>() },
     touchStatus: vi.fn(),
     activated: vi.fn<(id: string) => void>(),
-    transitionDormancy: (id: string, reason: ContextGraphDormancyReason | undefined) => { if (reason === undefined) host.contextGraphSubscriptionDormancyById.delete(id); else host.contextGraphSubscriptionDormancyById.set(id, reason); },
-    recordContextGraphSubscriptionClear: vi.fn<RollingSubscriptionPromotionPorts['recordContextGraphSubscriptionClear']>(),
+    transitionDormancy: (id: string, reason: ContextGraphDormancyReason | undefined) => activations.transition({ id, kind: 'dormancy', reason }),
+    recordContextGraphSubscriptionClear: vi.fn<RollingSubscriptionPromotionPorts['recordContextGraphSubscriptionClear']>((removed, revoked = []) => activations.transitionBatch([
+      ...removed.map(id => ({ id, kind: 'cleared' as const })), ...revoked.map(id => ({ id, kind: 'deactivated' as const })),
+    ])),
     persistContextGraphSubscriptionStrict: vi.fn<PersistedContextGraphSubscriptionActivationPorts['persistBinding']>(async () => undefined),
     reconcileRfc64CatalogResponsibilityV1: vi.fn<RollingSubscriptionActivationPorts['reconcile']>(async () => undefined),
     resolveContextGraphSubscriptionBootstrapAuthority: vi.fn<DKGAgent['resolveContextGraphSubscriptionBootstrapAuthority']>(options.answer ?? (async () => options.authority === 'unavailable'
@@ -87,7 +89,7 @@ export function createRollingPromotionFixture(
           remove: id => { host.subscribedContextGraphs.delete(id); },
           rollbackNetworkEffects() {}, trackSync() {}, subscribe() {}, persistMembership() {},
           commit: () => live, persistBinding: host.persistContextGraphSubscriptionStrict,
-        }, { claimRollingSlot: activationOptions.claimRollingSlot });
+        });
       }
     }),
   };

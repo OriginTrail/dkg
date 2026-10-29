@@ -2,6 +2,7 @@ import { afterEach, beforeEach, expect, vi } from 'vitest';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { setStoreControlPathForTesting } from '@origintrail-official/dkg-storage';
 import { resolveShutdownPolicy } from '../../src/daemon/shutdown-policy.js';
 
 const mocks = vi.hoisted(() => ({
@@ -174,6 +175,8 @@ export function installDaemonLifecycleWiringFixture() {
     vi.restoreAllMocks();
     vi.clearAllMocks();
     vi.useRealTimers();
+    // Each boot configures the process-wide store control path; leave none behind for the next.
+    setStoreControlPathForTesting(undefined);
     process.stdout.write = stdoutWrite;
     process.stderr.write = stderrWrite;
     process.removeAllListeners('uncaughtException');

@@ -1,5 +1,5 @@
 /**
- * Bundle-aware OKF import (the two passes from ADR 0005 / SPEC §3–§5).
+ * Bundle-aware OKF import (the two passes from CONTEXT.md / SPEC §3–§5).
  *
  * Pass 1 — index the bundle: classify concept vs. reserved files, parse each
  * concept's frontmatter, derive a deterministic subject IRI per concept ID, and
