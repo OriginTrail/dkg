@@ -87,9 +87,27 @@ are in-memory stores and provide no restart durability.
   flush. The atomic snapshot protocol protects the previously persisted file
   from a torn overwrite; it cannot make unflushed memory durable.
 
+### Read-only open
+
+`readOnly: true` in the adapter options (`{ readOnly: true }` as the second
+`OxigraphStore` constructor argument) opens the persistence file for reading
+only. It is for a process that reads a store another process owns, such as the
+CLI's offline `dkg publisher jobs`, `job` and `stats`.
+
+- Construction loads the file as above.
+- A write that would change the data rejects with `OxigraphStoreReadOnlyError`
+  (code `DKG_STORE_READ_ONLY`, also across the worker boundary) before the
+  in-memory data changes.
+- `flush()` and `close()` write nothing. What the reader loaded can be older
+  than the file by then, and writing it back would replace the owner's newer
+  data.
+- A file that fails to parse stays where it is, unchanged, and construction
+  throws.
+
 The executable regression contract is in
-[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts) and
-[`test/oxigraph-large-persistence.test.ts`](test/oxigraph-large-persistence.test.ts).
+[`test/oxigraph-persistence.test.ts`](test/oxigraph-persistence.test.ts),
+[`test/oxigraph-large-persistence.test.ts`](test/oxigraph-large-persistence.test.ts) and
+[`test/oxigraph-read-only.test.ts`](test/oxigraph-read-only.test.ts).
 After building the storage dependency closure, run
 `node scripts/repro/oxigraph-large-snapshot.mjs` from the repository root for
 the larger native-worker check. It writes about 558 MB, verifies every value,

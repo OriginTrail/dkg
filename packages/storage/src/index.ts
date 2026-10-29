@@ -312,6 +312,11 @@ export {
 } from './graph-knowledge-asset-metadata-loader.js';
 
 export { OxigraphStore } from './adapters/oxigraph.js';
+export {
+  OXIGRAPH_STORE_READ_ONLY_CODE,
+  OxigraphStoreReadOnlyError,
+  type OxigraphStoreOptions,
+} from './adapters/oxigraph-read-only.js';
 export { OxigraphWorkerStore } from './adapters/oxigraph-worker.js';
 export {
   BlazegraphStore,
