@@ -48,8 +48,6 @@ export function createSharedMemoryCatchupRoundAggregation(
 export interface FoldSharedMemoryRoundOptions {
   /** Selected-provider freshness may resolve historical yield counters. */
   readonly progress?: DurableProgressClassification;
-  /** Coverage may carry authority attribution used only in aggregate diagnostics. */
-  readonly diagnosticsResult?: SharedMemorySyncResult;
   /** Extra best-effort passes cannot demote readiness earned by pass one. */
   readonly countJobDeferral?: boolean;
 }
@@ -69,7 +67,7 @@ export function foldSharedMemoryRound(
   const progress = options.progress ?? classifyDurableProgress(shared);
   const mergedDiagnostics = mergeFleetSharedMemoryDiagnostics(
     aggregate.diagnostics,
-    options.diagnosticsResult ?? shared,
+    shared,
   );
   // Keep the accumulator's diagnostics object stable. Both drivers seed their
   // public result with this same object; replacing it here leaves the result

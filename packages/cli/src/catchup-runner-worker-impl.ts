@@ -441,14 +441,12 @@ async function runCatchup(request: CatchupRunRequest): Promise<CatchupJobResult>
     fromAuthority: boolean;
     continuation: boolean;
   }): DurableProgressClassification => {
-    const shared = sharedResult.payload;
+    const payload = sharedResult.payload;
+    const shared = payload.swmCoverage
+      ? { ...payload, swmCoverage: { ...payload.swmCoverage, fromAuthority } }
+      : payload;
     const progress = foldSharedMemoryRound(sharedAggregation, peerId, shared, {
       progress: sharedResult.progress,
-      diagnosticsResult: shared.swmCoverage
-        ? {
-          ...shared,
-          swmCoverage: { ...shared.swmCoverage, fromAuthority },
-        } : shared,
       countJobDeferral: !continuation,
     });
     passTracker.recordPeerRound(peerId, shared.swmCoverage, progress.completedWithoutFailure);

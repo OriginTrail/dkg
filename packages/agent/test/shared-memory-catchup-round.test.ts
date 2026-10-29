@@ -63,7 +63,6 @@ function workerFold() {
   for (const item of syntheticRounds) {
     foldSharedMemoryRound(aggregate, item.peerId, item.result, {
       progress: classifyDurableProgress(item.result),
-      diagnosticsResult: { ...item.result },
       countJobDeferral: !item.continuation,
     });
   }
