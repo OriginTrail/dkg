@@ -317,7 +317,7 @@ With the path on, every store call on the publish queue's three graphs (`urn:dkg
 - the point reads (`GET /api/publisher/job`, `/job-payload`, `/job-by-intent` and `/journal`);
 - cancel and the removal of one job (`clear-job`);
 - the job listing that a bulk `POST /api/publisher/retry` takes while it holds the claim lock;
-- the per-job work of a bulk `POST /api/publisher/clear`: the job read under its locks, the sibling read (`publisher.asyncLift.clear.siblings`) and the removal;
+- the per-job work of a bulk `POST /api/publisher/clear`: the job read under its locks, the read of its stored lifecycle-key triples (`publisher.asyncLift.clear.keys`), the sibling read (`publisher.asyncLift.clear.siblings`) and the removal;
 - the publisher retention sweep's verify, wallet-lock and sibling reads (`publisher.asyncLift.retention.verify`, `.walletLocks`, `.siblings`) and its deletes.
 
 Everything else keeps its lane. The unlocked reads stay on the normal lane, because they hold no lock and the control slots are for the calls that do. Some of them read the whole history: `GET /api/publisher/jobs` without `pageSize` or `cursor`, the job listing of a bulk `POST /api/publisher/clear`, the reconciliation inventory and the boot backfill. The others are bounded: `GET /api/publisher/stats` (one `COUNT` grouped by state) and the paged job read (`listPage`). The publisher retention sweep's scan of finished jobs (`publisher.asyncLift.retention.scan`) runs on `background`, and so do the queue-depth counts behind the `async_admission_usage` line. The claimed job's own work (workspace reads, validation, the publish, post-confirmation store work) never carries the control tag, whatever lane the claim ran in.
