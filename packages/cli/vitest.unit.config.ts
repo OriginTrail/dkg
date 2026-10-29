@@ -32,6 +32,7 @@ export default defineConfig({
           'test/mcp-launch-command.test.ts',
           'test/mcp-physical-config.test.ts',
           'test/mcp-config-metadata.test.ts',
+          'test/rdf-parser.test.ts',
           'test/api-client.test.ts',
           'test/context-graph-read-model.test.ts',
           'test/finalized-publish-options.test.ts',
@@ -386,6 +387,7 @@ export default defineConfig({
           // at both async admission routes.
           'test/write-preflight-store-busy-route.test.ts',
           'test/http-literal-size-validation.test.ts',
+          'test/writable-quad-terms.test.ts',
           'test/http-quad-term-validation.test.ts',
           // CLI subprocess smoke with stub daemon only; no hardhat needed.
           'test/context-graph-join-policy-cli.test.ts',
