@@ -6,14 +6,18 @@ import {
   type DkgNetworkIdentity,
   type OperationContext,
 } from '@origintrail-official/dkg-core';
-import { NetworkAdmissionService, type NetworkAdmissionVerdict } from './network-admission.js';
+import {
+  NetworkAdmissionService,
+  type NetworkAdmissionProbeBackoff,
+  type NetworkAdmissionVerdict,
+} from './network-admission.js';
 import {
   makeNetworkIdentityRequest,
   parseNetworkIdentityRequest,
   signNetworkIdentityResponse,
   verifyNetworkIdentityResponse,
 } from './network-identity-proof.js';
-import { canonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
+import { canonicalPeerIdString, tryCanonicalPeerIdString, type CanonicalPeerId } from './peer-id.js';
 import { mapWithConcurrencySettled } from '../map-with-concurrency.js';
 
 export interface NetworkAdmissionConnection {
@@ -159,11 +163,12 @@ class InFlightAdmissionAttempt {
  * A retryable identity-probe failure.
  *
  * Logging contract: the coordinator logs the failed probe itself, once, with
- * its reason and the backoff it starts. A backed-off skip throws this error
- * too, but no new probe ran: it repeats the reason of the probe that opened
- * the backoff window. Callers handle the error without logging it again
- * (GH#1578: one warning per failed probe, not one per connection callback).
- * A new throw site must keep that contract or use another error type.
+ * its reason and the backoff it starts. A backed-off skip throws the subclass
+ * {@link NetworkAdmissionProbeBackoffError}: no new probe ran, and it repeats
+ * the reason of the probe that opened the backoff window. Callers handle
+ * either error without logging it again at warning level (GH#1578, GH#3579:
+ * one warning per failed probe, not one per caller or per skip). A new throw
+ * site must keep that contract or use another error type.
  */
 export class NetworkAdmissionProbeError extends Error {
   readonly code = 'NETWORK_ADMISSION_PROBE_FAILED';
@@ -171,6 +176,21 @@ export class NetworkAdmissionProbeError extends Error {
   constructor(peerId: string, reason: string) {
     super(`Network identity probe failed for ${peerId}: ${reason}`);
     this.name = 'NetworkAdmissionProbeError';
+  }
+}
+
+/**
+ * An automatic admission attempt skipped inside a failed probe's backoff
+ * window. No probe ran, so the peer is simply not admitted yet; automatic
+ * probes resume after `retryAfterMs`.
+ */
+export class NetworkAdmissionProbeBackoffError extends NetworkAdmissionProbeError {
+  readonly retryAfterMs: number;
+
+  constructor(peerId: string, backoff: Pick<NetworkAdmissionProbeBackoff, 'reason' | 'retryAfterMs'>) {
+    super(peerId, `retryable probe backed off for ${backoff.retryAfterMs}ms after ${backoff.reason}`);
+    this.name = 'NetworkAdmissionProbeBackoffError';
+    this.retryAfterMs = backoff.retryAfterMs;
   }
 }
 
@@ -240,6 +260,20 @@ export class NetworkAdmissionCoordinator {
   isRejectedPeer(peerId: string): boolean {
     if (!this.enabled) return false;
     return this.admission.isRejectedPeer(peerId);
+  }
+
+  /**
+   * Whether an automatic admission attempt would skip the peer now: it has no
+   * cached verdict and no probe in flight, and a failed probe's backoff window
+   * is still open. Callers can leave such a peer out instead of asking.
+   */
+  isProbeBackedOff(peerId: string): boolean {
+    if (!this.enabled) return false;
+    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
+    // The checks of ensureVerdictWithPolicy, in its order.
+    if (!canonicalPeerId || this.admission.cachedVerdict(canonicalPeerId) !== undefined) return false;
+    return !this.inFlight.has(canonicalPeerId)
+      && this.admission.getRetryableProbeBackoff(canonicalPeerId) !== undefined;
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
@@ -384,12 +418,7 @@ export class NetworkAdmissionCoordinator {
 
   private assertProbeNotSuppressed(remotePeerId: CanonicalPeerId): void {
     const backoff = this.admission.getRetryableProbeBackoff(remotePeerId);
-    if (backoff) {
-      throw new NetworkAdmissionProbeError(
-        remotePeerId,
-        `retryable probe backed off for ${backoff.retryAfterMs}ms after ${backoff.reason}`,
-      );
-    }
+    if (backoff) throw new NetworkAdmissionProbeBackoffError(remotePeerId, backoff);
   }
 
   /**

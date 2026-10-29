@@ -89,4 +89,38 @@ describe('listAdmittedConnectedPeers', () => {
       await agent.stop().catch(() => {});
     }
   });
+
+  // GH#3579: the shared check logs no second warning for a probe the coordinator reported.
+  it('connects the preferred catch-up peer only once the shared recovery check admits it', async () => {
+    const agent = await DKGAgent.create({
+      name: 'PreferredCatchupAdmission',
+      listenHost: '127.0.0.1',
+      chainAdapter: new MockChainAdapter(),
+      rfc64CatalogActivation: { enabled: false },
+    });
+    const checks: string[] = [];
+    const connected: string[] = [];
+    try {
+      await agent.start();
+      (agent as any).isPrivateContextGraph = async () => false;
+      (agent as any).primeCatchupConnections = async () => undefined;
+      (agent as any).ensurePeerAdmittedForRecovery = async (peerId: string, _ctx: unknown, label: string) => {
+        checks.push(`${label}:${peerId}`);
+        return peerId === PEER_A;
+      };
+      (agent as any).ensurePeerConnected = async (peerId: string) => { connected.push(peerId); };
+      (agent.node.libp2p as any).getConnections = () => [];
+      (agent as any).selectCatchupPeers = () => [];
+
+      for (const preferredPeerId of [PEER_A, PEER_B]) {
+        (agent as any).resolvePreferredSyncPeerId = async () => preferredPeerId;
+        await agent.syncContextGraphFromConnectedPeers(`preferred-catchup-${preferredPeerId.slice(-6)}`);
+      }
+
+      expect(checks).toEqual([`Preferred catchup peer:${PEER_A}`, `Preferred catchup peer:${PEER_B}`]);
+      expect(connected).toEqual([PEER_A]);
+    } finally {
+      await agent.stop().catch(() => {});
+    }
+  });
 });
