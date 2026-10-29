@@ -2,7 +2,7 @@
 import { createServer } from 'node:net';
 import { checkpointJavaArguments } from './snapshot-checkpoint-profile.js';
 import { setTimeout as delay } from 'node:timers/promises';
-import { BlazegraphStore } from '@origintrail-official/dkg-storage';
+import { BlazegraphStore, StorePriorityScheduler } from '@origintrail-official/dkg-storage';
 import { startSnapshotNativeProcess } from './snapshot-native-process.js';
 
 async function choosePort(): Promise<number> {
@@ -16,7 +16,12 @@ async function choosePort(): Promise<number> {
 
 class OwnedNativeStore extends BlazegraphStore {
   private closing?: Promise<void>;
-  constructor(endpoint: string, private readonly stopProcess: () => Promise<void>) { super(endpoint); }
+  constructor(endpoint: string, private readonly stopProcess: () => Promise<void>) {
+    // The private Blazegraph 2.x runtime can lose SELECT bindings under concurrent
+    // requests. Keep one physical owner, including control calls and admitted reads;
+    // retain the existing bounded queue, cancellation and operation deadlines.
+    super(endpoint, { isolatedScheduler: new StorePriorityScheduler({ maxConcurrent: 1 }) });
+  }
   override close(): Promise<void> {
     return this.closing ??= (async () => { try { await super.close(); } finally { await this.stopProcess(); } })();
   }

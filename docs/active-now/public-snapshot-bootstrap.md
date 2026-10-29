@@ -35,6 +35,12 @@ is a separate ordinary catch-up job with the existing one-hour budget.
 The initial native profile permits at most 100,000 assets, 1 GiB encoded and
 8 GiB expanded, reserves 7 GiB disk space, and needs a minimum 4 GiB machine or
 container memory allowance. The JVM uses at most a 3 GiB heap and four CPUs.
+The private store admits one request at a time, including control operations and
+the full body of admitted reads. This avoids overlapping requests to the pinned
+Blazegraph runtime, where full-data testing observed missing mandatory SELECT
+bindings. Its queue and operation deadlines are unchanged; ordinary external
+stores retain their existing concurrency and control capacity. Incomplete
+metadata still fails validation; it is never accepted or silently retried.
 Peak disk planning includes retained inputs and a separate journal. This is an
 explicit profile, not a promise that every device can run it.
 

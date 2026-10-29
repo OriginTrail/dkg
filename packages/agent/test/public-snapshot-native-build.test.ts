@@ -10,7 +10,8 @@ vi.mock('node:fs/promises', async original => ({ ...await original<typeof import
 vi.mock('../src/snapshot-native-process.js', () => ({ startSnapshotNativeProcess: vi.fn() }));
 vi.mock('../src/snapshot-checkpoint-audit.js', () => ({ auditSnapshotCheckpoint: vi.fn() }));
 const closeStore = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock('@origintrail-official/dkg-storage', () => ({ BlazegraphStore: class { async close() { await closeStore(); } } }));
+vi.mock('@origintrail-official/dkg-storage', async original => ({ ...await original<object>(),
+  BlazegraphStore: class { async close() { await closeStore(); } } }));
 const processes: { stop: ReturnType<typeof vi.fn>; assertRunning: ReturnType<typeof vi.fn>; closed: Promise<number> }[] = [];
 beforeEach(() => {
   vi.clearAllMocks(); processes.length = 0;

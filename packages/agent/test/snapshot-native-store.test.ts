@@ -4,7 +4,8 @@ import { openSnapshotNativeStore } from '../src/snapshot-native-store.js';
 import { startSnapshotNativeProcess } from '../src/snapshot-native-process.js';
 
 const closeClient = vi.hoisted(() => vi.fn(async () => {}));
-vi.mock('@origintrail-official/dkg-storage', () => ({ BlazegraphStore: class { async close() { await closeClient(); } } }));
+vi.mock('@origintrail-official/dkg-storage', async importOriginal => ({ ...await importOriginal<object>(),
+  BlazegraphStore: class { async close() { await closeClient(); } } }));
 vi.mock('../src/snapshot-native-process.js', () => ({ startSnapshotNativeProcess: vi.fn() }));
 vi.mock('node:timers/promises', () => ({ setTimeout: vi.fn(async () => {}) }));
 const stop = vi.fn(async () => {});
