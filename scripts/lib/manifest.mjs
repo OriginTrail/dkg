@@ -107,7 +107,7 @@ export const STATUS_BATCH_MAX_BYTES = 192 * 1024;
 /**
  * Rows per read. The daemon refuses a query answer above 10 MiB, and the
  * declarations and the status history of a large import go well past that,
- * so they are read in ordered pages of this many rows.
+ * so they are read in keyset pages of this many rows.
  */
 export const QUERY_PAGE_ROWS = 1000;
 
@@ -402,27 +402,35 @@ function querySharedMemory(client, subGraphName, sparql) {
 }
 
 /**
- * Every row of `SELECT <select> WHERE { <where> }`, read in pages in
- * `orderBy` order. A row written between two pages can make a later page
- * repeat a row, never skip one; the callers keep one entry per subject.
+ * Every distinct row of `<pattern>` matched inside `GRAPH ?g`, read in pages
+ * ordered by the IRI variable `key`, each page after the last key of the page
+ * before (a keyset cursor: a page reads only what follows it, and a row
+ * written in between cannot shift the pages). The callers' keys name one
+ * subject each, so the rows of one key are never split by a page boundary.
  */
-async function selectAllRows(client, subGraphName, { select, where, orderBy }) {
+async function selectAllRows(client, subGraphName, { select, pattern, key }) {
   const rows = [];
-  let previousFirst;
-  for (let offset = 0; ; offset += QUERY_PAGE_ROWS) {
+  let after;
+  for (;;) {
+    const cursor = after === undefined ? '' : `FILTER(STR(${key}) > ${JSON.stringify(after)})`;
     const page = bindingsOf(await querySharedMemory(client, subGraphName, `
       PREFIX imp: <${IMPORT_NS}>
-      SELECT ${select} WHERE { ${where} }
-      ORDER BY ${orderBy} LIMIT ${QUERY_PAGE_ROWS} OFFSET ${offset}
+      SELECT DISTINCT ${select} WHERE {
+        GRAPH ?g {
+          ${pattern}
+          ${cursor}
+        }
+      }
+      ORDER BY STR(${key}) LIMIT ${QUERY_PAGE_ROWS}
     `));
-    // A store that ignored LIMIT or OFFSET would keep this loop reading for ever.
-    const first = JSON.stringify(page[0]);
-    if (page.length > QUERY_PAGE_ROWS || (offset > 0 && page.length > 0 && first === previousFirst)) {
-      throw new Error('The query answer ignored its LIMIT or OFFSET, so the manifest cannot be read in pages.');
+    const last = page.length > 0 ? bareUri(page[page.length - 1][key.slice(1)]) : undefined;
+    // A store that ignored LIMIT or the cursor would keep this loop reading for ever.
+    if (page.length > QUERY_PAGE_ROWS || (after !== undefined && last === after)) {
+      throw new Error('The query answer ignored its LIMIT or its cursor, so the manifest cannot be read in pages.');
     }
-    previousFirst = first;
     rows.push(...page);
     if (page.length < QUERY_PAGE_ROWS) return rows;
+    after = last;
   }
 }
 
@@ -585,12 +593,10 @@ async function readManifestDeclarations({ client, importId, subGraphName }) {
 async function readDeclaredPartitions({ client, importId, subGraphName }) {
   const rows = await selectAllRows(client, subGraphName, {
     select: '?part ?key ?initial',
-    where: `GRAPH ?g {
-        <${importUri(importId)}> imp:partition ?part .
-        ?part imp:key ?key ;
-              imp:initialStatus ?initial .
-      }`,
-    orderBy: '?part ?key ?initial',
+    pattern: `<${importUri(importId)}> imp:partition ?part .
+          ?part imp:key ?key ;
+                imp:initialStatus ?initial .`,
+    key: '?part',
   });
   const partitions = new Map();
   for (const row of rows) {
@@ -604,13 +610,11 @@ async function readDeclaredPartitions({ client, importId, subGraphName }) {
 async function readLatestStatusEvents({ client, importId, subGraphName }) {
   const rows = await selectAllRows(client, subGraphName, {
     select: '?part ?ev ?status ?recordedAt',
-    where: `GRAPH ?g {
-        ?part imp:statusEvent ?ev .
-        ?ev imp:status ?status ;
-            imp:recordedAt ?recordedAt .
-        FILTER(STRSTARTS(STR(?part), "${importUri(importId)}#part:"))
-      }`,
-    orderBy: '?ev ?part ?status ?recordedAt',
+    pattern: `?part imp:statusEvent ?ev .
+          ?ev imp:status ?status ;
+              imp:recordedAt ?recordedAt .
+          FILTER(STRSTARTS(STR(?part), "${importUri(importId)}#part:"))`,
+    key: '?ev',
   });
   const latest = new Map();
   for (const row of rows) {

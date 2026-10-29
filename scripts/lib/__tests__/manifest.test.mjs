@@ -205,8 +205,8 @@ function httpError(status, body) {
  *     answers at 10 MiB;
  *   - `wm/quads` returns an asset's draft.
  *
- * `ignore: 'limit' | 'offset'` drops that clause from every query, as a
- * store that does not honour it would.
+ * `ignore: 'limit' | 'cursor'` drops the LIMIT or the paging cursor's FILTER
+ * from every query, as a store that does not honour it would.
  *
  * Shared memory is a real SPARQL store, so the helper's queries run as
  * written. `bindingShape: 'cell'` returns SPARQL 1.1 results-JSON cells, as
@@ -327,7 +327,7 @@ function makeMockDaemon({ bindingShape = 'flat', maxResponseBytes = 10 * 1024 * 
     async query({ sparql, graphSuffix, subGraphName }) {
       queries.push({ sparql, graphSuffix, subGraphName });
       if (ignore === 'limit') sparql = sparql.replace(/\bLIMIT \d+/, '');
-      if (ignore === 'offset') sparql = sparql.replace(/\bOFFSET \d+/, '');
+      if (ignore === 'cursor') sparql = sparql.replace(/FILTER\(STR\(\?\w+\) > "[^"]*"\)/, '');
       const graphs = graphSuffix !== '_shared_memory' ? [] : [...assets.values()]
         .filter((asset) => asset.status === 'swm-shared' && asset.subGraphName === subGraphName)
         .map((asset) => oxigraph.namedNode(asset.graph));
@@ -611,17 +611,18 @@ test('reads are paged, so a manifest and history larger than one query answer st
   const state = await load(client, 'paged');
   assert.equal(state.partitions.length, keys.length);
   assert.ok(state.partitions.every((p) => p.status === 'done'));
-  const selects = client.queries.filter((q) => /SELECT \?(part|ev)/.test(q.sparql));
+  const selects = client.queries.filter((q) => /SELECT DISTINCT \?(part|ev)/.test(q.sparql));
   assert.ok(selects.length >= 6, `expected paged reads, got ${selects.length} queries`);
-  assert.ok(selects.every((q) => new RegExp(`LIMIT ${QUERY_PAGE_ROWS} OFFSET \\d+`).test(q.sparql)));
+  assert.ok(selects.every((q) => q.sparql.includes(`LIMIT ${QUERY_PAGE_ROWS}`) && !/\bOFFSET\b/.test(q.sparql)),
+    'keyset pages: a LIMIT and a cursor, never an OFFSET');
 });
 
-test('a store that ignores LIMIT or OFFSET makes the paged reads fail instead of looping', async () => {
-  for (const ignore of ['limit', 'offset']) {
+test('a store that ignores LIMIT or the cursor makes the paged reads fail instead of looping', async () => {
+  for (const ignore of ['limit', 'cursor']) {
     const client = makeMockDaemon({ ignore });
     const importId = `ignored-${ignore}`;
     await createManifest(client, importId, Array.from({ length: QUERY_PAGE_ROWS + 1 }, (_, i) => `k${i}`));
-    await assert.rejects(() => load(client, importId), /ignored its LIMIT or OFFSET/);
+    await assert.rejects(() => load(client, importId), /ignored its LIMIT or its cursor/);
   }
 });
 
