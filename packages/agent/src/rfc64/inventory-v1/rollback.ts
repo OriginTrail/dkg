@@ -292,10 +292,10 @@ function removeConfirmedCatalogPlacements(sqlite: SqliteModuleV1, databasePath: 
   let removed: Array<{ digest: Uint8Array; ual: string }> = [];
   try {
     database.exec('PRAGMA busy_timeout = 0');
-    const tables = new Set((database.prepare(
-      "SELECT name FROM sqlite_schema WHERE type = 'table'",
-    ).all() as Array<{ name: string }>).map((row) => row.name));
-    if (!tables.has('rfc64_finalized_private_placement_repairs_v1')) return [];
+    const table = database.prepare(
+      "SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'rfc64_finalized_private_placement_repairs_v1'",
+    ).get();
+    if (table === undefined) return [];
     database.exec('BEGIN IMMEDIATE');
     transactionOpen = true;
     const rows = database.prepare(
@@ -305,16 +305,11 @@ function removeConfirmedCatalogPlacements(sqlite: SqliteModuleV1, databasePath: 
       const ual = confirmedPlacementUal(row.repair_json);
       return ual === null ? [] : [{ digest: row.repair_digest, ual }];
     });
-    const deleteFailure = tables.has('rfc64_private_placement_failures_v1')
-      ? database.prepare('DELETE FROM rfc64_private_placement_failures_v1 WHERE repair_digest = ?')
-      : null;
+    // Each failure diagnostic goes with its repair (ON DELETE CASCADE).
     const deleteRepair = database.prepare(
       'DELETE FROM rfc64_finalized_private_placement_repairs_v1 WHERE repair_digest = ?',
     );
-    for (const row of removed) {
-      deleteFailure?.run(row.digest);
-      deleteRepair.run(row.digest);
-    }
+    for (const row of removed) deleteRepair.run(row.digest);
     database.exec('COMMIT');
     transactionOpen = false;
     committed = true;
