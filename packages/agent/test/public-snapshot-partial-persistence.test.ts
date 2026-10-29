@@ -1,3 +1,4 @@
+import { PublicSnapshotSessionMethods } from '../src/public-snapshot-session.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { exactAssetUalsForSelection } from '../src/sync/exact-assets.js';
 import * as exactRecovery from '../src/exact-recovery-execution.js';
@@ -37,7 +38,7 @@ function fixture(store:OxigraphStore, mode:'core-cache'|'rpc-only', last:'missin
   const snapshot=sealPublicGraphSnapshot({version:1,chainId:'evm:31337',deploymentId:'test',contextGraphId:graph,onChainId:'1',nameHash:ethers.id(graph),contextGraphStorage:address,assetStorage:address,blockNumber:'10',blockHash:`0x${'a'.repeat(64)}`,finalityConfirmations:1,observedAt,expiresAt:observedAt+120000,accessPolicy:0,
     assets:Array.from({length:count},(_,i)=>({id:((BigInt(address)<<96n)|BigInt(i+1)).toString(),root,version:'1'}))});
   const assets=new Map(Array.from({length:11},(_,i)=>{const a=asset(i+1);return [a.ual,a];}));
-  const a:any={started:true,vmReconcileRotationClosed:false,workLifetime: new AgentWorkLifetime(),
+  const a:any={withPublicSnapshotSession: PublicSnapshotSessionMethods.prototype.withPublicSnapshotSession,started:true,vmReconcileRotationClosed:false,workLifetime: new AgentWorkLifetime(),
     log:{info:vi.fn(),warn:vi.fn(),debug:vi.fn()},
 
     subscribedContextGraphs:new Map(),store,

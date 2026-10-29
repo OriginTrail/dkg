@@ -61,7 +61,7 @@ A re-submit of a Knowledge Asset is matched to its newest job, by context graph,
 
 `POST /api/publisher/clear-job { "jobId": "…" }` removes one job, even the newest. Clearing a single job is API-only for now. After you clear the newest job, a re-submit can restart an older failed job of the same asset. It also removes a [held](#held-jobs) job: check its transaction first, or a re-submit can publish again.
 
-If the daemon does not answer, `dkg publisher cancel`, `retry` and `clear` refuse to write the store directly while the node home's `daemon.pid` names a running process. They print `Refusing to run "dkg publisher <command>" offline` and exit 1. Try again once the daemon answers, or run `dkg stop` first.
+If the daemon does not answer, `dkg publisher cancel`, `retry` and `clear` refuse to write the store directly while the node home's `daemon.pid` names a running process. They print `Refusing to run "dkg publisher <command>" offline` and exit 1. Try again once the daemon answers, or run `dkg stop` first. `jobs`, `job` and `stats` refuse in the same way; with no daemon running they open the store read-only.
 
 Old finalized jobs can also be removed on a timer. This cleanup is off by default; see [Async Queue Operations](async-queue-operations.md#clean-up-finished-jobs).
 

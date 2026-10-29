@@ -1,3 +1,4 @@
+import { PublicSnapshotSessionMethods } from '../src/public-snapshot-session.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
 import { PublicSnapshotProofRuntime } from '../src/public-snapshot-proof-runtime.js';
 import { getEventListeners } from 'node:events';
@@ -352,7 +353,7 @@ it('retains the snapshot slot and physical ownership until all cancelled probes 
     await new Promise<void>(resolve => { releases.push(resolve); });
     throw new Error('transport retired');
   });
-  const agent = { started: true, peerId: 'requester', workLifetime: lifetime, chain: f.chain,
+  const agent = { withPublicSnapshotSession: PublicSnapshotSessionMethods.prototype.withPublicSnapshotSession, started: true, peerId: 'requester', workLifetime: lifetime, chain: f.chain,
     contextGraphSubscriptionDormancyById: new Map(),
     waitForContextGraphSubscriptionActivation: LifecycleSyncMethods.prototype.waitForContextGraphSubscriptionActivation,
     subscribedContextGraphs: new Map(), contextGraphBindingState: { capture: () => 0, isGenerationCurrent: () => true },

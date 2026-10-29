@@ -94,8 +94,21 @@ export interface DurableBatchProcessWireResult
   verifiedMetaIndexes: number[];
 }
 
+type WorkerOperations = {
+  verify: { args: [Quad[], Quad[], boolean]; result: SyncVerifyResult };
+  parseAndFilter: { args: [string, string, string]; result: SyncParseResult };
+  processSharedMemory: { args: [Quad[], Quad[]]; result: SharedMemoryProcessResult };
+  processDurableBatch: { args: [Quad[], Quad[], boolean, DurableBatchVerificationMode]; result: DurableBatchProcessWireResult };
+  processSharedMemoryBatch: {
+    args: [Quad[], Quad[], string, readonly string[] | undefined, readonly string[] | undefined];
+    result: SharedMemoryBatchProcessResult;
+  };
+};
+
 export class SyncVerifyWorker {
   private readonly worker: Worker;
+  private closing: Promise<void> | undefined;
+  private failure: Error | undefined;
   private nextId = 0;
   private readonly pending = new Map<number, {
     resolve: (value: any) => void;
@@ -202,34 +215,38 @@ export class SyncVerifyWorker {
       if (message.error) pending.reject(new Error(message.error));
       else pending.resolve(message.result);
     });
-    this.worker.on('error', (error) => {
-      for (const [, pending] of this.pending) pending.reject(error);
-      this.pending.clear();
+    this.worker.on('error', error => this.fail(error));
+    this.worker.on('exit', code => this.fail(new Error(`Sync verification worker exited (${code})`)));
+  }
+
+  private fail(error: Error): void {
+    this.failure ??= error;
+    for (const pending of this.pending.values()) pending.reject(this.failure);
+    this.pending.clear();
+  }
+
+  private dispatch<M extends keyof WorkerOperations>(
+    method: M, ...args: WorkerOperations[M]['args']
+  ): Promise<WorkerOperations[M]['result']> {
+    if (this.failure) return Promise.reject(this.failure);
+    const id = this.nextId++;
+    return new Promise<WorkerOperations[M]['result']>((resolve, reject) => {
+      this.pending.set(id, { resolve, reject });
+      try { this.worker.postMessage({ id, method, args }); }
+      catch (error) { this.pending.delete(id); reject(error); }
     });
   }
 
   verify(dataQuads: Quad[], metaQuads: Quad[], acceptUnverified: boolean): Promise<SyncVerifyResult> {
-    const id = this.nextId++;
-    return new Promise<SyncVerifyResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'verify', args: [dataQuads, metaQuads, acceptUnverified] });
-    });
+    return this.dispatch('verify', dataQuads, metaQuads, acceptUnverified);
   }
 
   parseAndFilter(nquadsText: string, graphUri: string, contextGraphId: string): Promise<SyncParseResult> {
-    const id = this.nextId++;
-    return new Promise<SyncParseResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'parseAndFilter', args: [nquadsText, graphUri, contextGraphId] });
-    });
+    return this.dispatch('parseAndFilter', nquadsText, graphUri, contextGraphId);
   }
 
   processSharedMemory(wsDataQuads: Quad[], wsMetaQuads: Quad[]): Promise<SharedMemoryProcessResult> {
-    const id = this.nextId++;
-    return new Promise<SharedMemoryProcessResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({ id, method: 'processSharedMemory', args: [wsDataQuads, wsMetaQuads] });
-    });
+    return this.dispatch('processSharedMemory', wsDataQuads, wsMetaQuads);
   }
 
   /**
@@ -248,20 +265,7 @@ export class SyncVerifyWorker {
     // reorder their arrays once this method returns.
     const stableDataQuads = dataQuads.slice();
     const stableMetaQuads = metaQuads.slice();
-    const id = this.nextId++;
-    return new Promise<DurableBatchProcessWireResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({
-        id,
-        method: 'processDurableBatch',
-        args: [
-          stableDataQuads,
-          stableMetaQuads,
-          acceptUnverified,
-          mode,
-        ],
-      });
-    }).then((wireResult) => {
+    return this.dispatch('processDurableBatch', stableDataQuads, stableMetaQuads, acceptUnverified, mode).then((wireResult) => {
       const {
         verifiedDataIndexes,
         verifiedMetaIndexes,
@@ -282,19 +286,16 @@ export class SyncVerifyWorker {
     registeredSubGraphNames?: readonly string[],
     excludedSubGraphNames?: readonly string[],
   ): Promise<SharedMemoryBatchProcessResult> {
-    const id = this.nextId++;
-    return new Promise<SharedMemoryBatchProcessResult>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
-      this.worker.postMessage({
-        id,
-        method: 'processSharedMemoryBatch',
-        args: [wsDataQuads, wsMetaQuads, contextGraphId, registeredSubGraphNames, excludedSubGraphNames],
-      });
-    });
+    return this.dispatch('processSharedMemoryBatch', wsDataQuads, wsMetaQuads, contextGraphId,
+      registeredSubGraphNames, excludedSubGraphNames);
   }
 
   async close(): Promise<void> {
-    await this.worker.terminate();
+    if (!this.closing) {
+      this.fail(new Error('Sync verification worker closed'));
+      this.closing = this.worker.terminate().then(() => undefined);
+    }
+    await this.closing;
   }
 }
 

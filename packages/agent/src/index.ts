@@ -2,6 +2,7 @@ export type { ContextGraphPartitionRead, ContextGraphNamedGraphStats } from '@or
 export type { ContextGraphPartitionInventoryOptions } from './internal/context-graph-partition-query.js';
 export { ConfirmedCatalogObligationErrorV1, parseConfirmedCatalogObligationRecoveryV1, type ConfirmedCatalogTransactionEvidenceV1, type ConfirmedCatalogObligationRecoveryV1 } from './confirmed-catalog-obligation-error.js';
 export { normalizePublicSnapshotSyncOptions } from './public-snapshot-options.js';
+export type { PublicSnapshotSourceOptions, PublicCheckpointSourceOptions, PublicCheckpointPreparationOptions } from './public-snapshot-options.js';
 export type { PublicSnapshotSyncOptions } from './dkg-agent-public-snapshot.js';
 export { isPublicSnapshotMode, type PublicSnapshotMode } from './public-snapshot-mode.js';
 export { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
@@ -678,5 +679,12 @@ export {
   type KnowledgeAssetMintReconcileResult,
 } from './knowledge-asset-mint-reconcile.js';
 
+export { createFreshPublicCheckpointEdge, openFreshPublicCheckpointEdge } from './snapshot-fresh-edge.js';
+export { preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
+export { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
+
+export { resumePublicCheckpointEdge, openResumablePublicCheckpointEdge } from './snapshot-resume-edge.js';
 export { CatalogPublicationAdmissionError, CATALOG_PUBLICATION_ADMISSION_CODE } from './catalog-publication-admission-error.js';
 export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
+
+export type { PreparedSnapshotCheckpoint, SnapshotCheckpointManifest, VerifiedNativeSnapshotCheckpoint, NativeSnapshotCheckpointReport, PublicCheckpointPreparationResult } from './snapshot-checkpoint-contract.js';

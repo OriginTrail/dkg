@@ -1,0 +1,64 @@
+// SPDX-License-Identifier: Apache-2.0
+import { decodeSnapshotBootstrapRecord, type SnapshotBootstrapRecord } from './snapshot-bootstrap-record.js';
+import { CheckpointInventory } from './snapshot-checkpoint-inventory.js';
+import { constants } from 'node:fs';
+import { lstat, open, readFile, statfs } from 'node:fs/promises';
+import { isAbsolute, join } from 'node:path';
+import { normalizePublicSnapshotSyncOptions, type PublicCheckpointSourceOptions } from './public-snapshot-options.js';
+import { nativeCheckpointShaFile } from './snapshot-checkpoint-files.js';
+import { CHECKPOINT_PROFILE as PROFILE } from './snapshot-checkpoint-profile.js';
+import { checkpointLifetime } from './snapshot-checkpoint-lifetime.js';
+import { nativeCheckpointProperties } from './snapshot-native-properties.js';
+import { openCheckpointEdgeSession, checkpointChainBinding, type CheckpointEdgeConfig } from './snapshot-checkpoint-edge-session.js';
+
+/** Explicit restart of an Edge created by createFreshPublicCheckpointEdge. */
+export async function openResumablePublicCheckpointEdge(options: {
+  config: CheckpointEdgeConfig;
+  runtime: { java: string; jarSha256: string };
+  sync: PublicCheckpointSourceOptions;
+  signal: AbortSignal;
+}) {
+  const { config, runtime } = options;
+  const sync = normalizePublicSnapshotSyncOptions(options.sync);
+  const binding = checkpointChainBinding(config);
+  if (!isAbsolute(config.dataDir) || !isAbsolute(runtime.java) || config.store || config.storeConfig || config.nodeRole === 'core')
+    throw new Error('Invalid checkpoint Edge restart');
+  options.signal.throwIfAborted();
+  const folder = join(config.dataDir, 'checkpoint-store');
+  if (!(await lstat(config.dataDir)).isDirectory() || !(await lstat(folder)).isDirectory()) throw new Error('Unsafe checkpoint Edge directory');
+  const file = await open(join(folder, 'BOOTSTRAP-COMPLETE.json'), constants.O_RDONLY | constants.O_NOFOLLOW);
+  let complete: SnapshotBootstrapRecord;
+  try {
+    const info = await file.stat();
+    if (!info.isFile() || info.size > 64 * 1024) throw new Error('Invalid bootstrap completion record');
+    complete = decodeSnapshotBootstrapRecord(JSON.parse(await file.readFile('utf8')));
+  } finally { await file.close(); }
+  if (complete.chainId !== binding.chainId
+    || complete.deploymentId !== binding.deploymentId || complete.contextGraphId !== sync.contextGraphId
+    || complete.onChainId !== sync.onChainId || complete.mode !== sync.mode || complete.runtimeSha256 !== runtime.jarSha256
+    || !/^[a-f0-9]{64}$/.test(runtime.jarSha256)) throw new Error('Checkpoint Edge restart binding mismatch');
+  if (await nativeCheckpointShaFile(join(folder, 'runtime.jar')) !== runtime.jarSha256
+    || !(await lstat(join(folder, 'store.jnl'))).isFile()
+    || await readFile(join(folder, 'store.properties'), 'utf8') !== nativeCheckpointProperties(join(folder, 'store.jnl')))
+    throw new Error('Checkpoint Edge runtime changed');
+  const disk = await statfs(folder);
+  if (disk.bavail * disk.bsize <= PROFILE.diskReserveBytes) throw new Error('Checkpoint disk reserve unavailable');
+  const inventory = await CheckpointInventory.load(folder);
+  const lifetime = checkpointLifetime(options.signal, Date.now() + PROFILE.jobTimeoutMs, 'Checkpoint catch-up deadline exceeded');
+  try {
+    const session = await openCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal, inventory);
+    return { ...session, async complete() {
+      try { return await session.complete(); } finally { lifetime.dispose(); }
+    }, dispose: () => lifetime.dispose() };
+  } catch (error) { lifetime.dispose(); throw error; }
+}
+
+/** SDK convenience wrapper; the standard daemon owns the split lifecycle directly. */
+export async function resumePublicCheckpointEdge(options: Parameters<typeof openResumablePublicCheckpointEdge>[0]) {
+  const session = await openResumablePublicCheckpointEdge(options);
+  try {
+    await session.agent.start();
+    return { agent: session.agent, dataDir: session.dataDir, result: await session.complete() };
+  } catch (error) { await session.agent.stop(); throw error; }
+  finally { session.dispose(); }
+}
