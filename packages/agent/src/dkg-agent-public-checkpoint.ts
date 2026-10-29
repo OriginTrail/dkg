@@ -24,9 +24,19 @@ export class PublicCheckpointMethods extends PublicSnapshotSessionMethods {
     if (runtime && (!runtime.java || !runtime.jar || !/^[a-f0-9]{64}$/.test(runtime.jarSha256)))
       throw new Error('Native checkpoint runtime is not configured');
     if (!this.config.dataDir) throw new Error('Checkpoint requires a persistent data directory');
+    const { prepared, native } = await this.preparePublicCheckpointHandoff(options, runtime);
+    return { directory: prepared.directory, assets: prepared.manifest.assets.length,
+      inventoryDigest: prepared.manifest.observation.snapshot.inventoryDigest, mode: prepared.manifest.observation.mode,
+      committed: 0, current: false, activeStoreChanged: false, state: 'verified-unpublished', ...(native ? { native } : {}) };
+  }
+
+  /** Local composition only: carries verified in-memory handoff, never caller-supplied manifests. */
+  async preparePublicCheckpointHandoff(this: DKGAgent, options: PublicCheckpointPreparationOptions,
+    runtime?: { java: string; jar: string; jarSha256: string }) {
+    if (!this.config.dataDir) throw new Error('Checkpoint requires a persistent data directory');
     return this.withPublicSnapshotSession(options, async session => {
       const { initial, sourcePlan: plan, signal, deadline, assertInitialInventoryCurrent: assertCurrent,
-        readBeforeAdmission: read, normalized: { mode } } = session;
+        readBeforeAdmission: read } = session;
       const readFresh = () => readPublicSnapshotWithAdmission({ read: () => read(true), signal, deadline, assertCurrent });
       // No subscription admission, metadata writes, reconciliation, or active-store mutation.
       const prepared = await preparePublicSnapshotCheckpoint({ router: this.router,
@@ -37,9 +47,7 @@ export class PublicCheckpointMethods extends PublicSnapshotSessionMethods {
       const native = runtime ? await buildNativeSnapshotCheckpoint(prepared, { ...runtime, signal,
         assertInventoryCurrent: async () => { const fresh = await readFresh(); assertCurrent(); assertCheckpointInventoryUnchanged(initial, fresh); },
       }) : undefined;
-      return { directory: prepared.directory, assets: prepared.manifest.assets.length,
-        inventoryDigest: initial.snapshot.inventoryDigest, mode, committed: 0, current: false,
-        activeStoreChanged: false, state: 'verified-unpublished', ...(native ? { native } : {}) } satisfies PublicCheckpointPreparationResult;
+      return { prepared, native };
     }, { ownershipError: 'Checkpoint ownership changed' });
   }
 }

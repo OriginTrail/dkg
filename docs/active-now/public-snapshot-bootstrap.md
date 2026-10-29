@@ -69,16 +69,14 @@ Preparation does not activate an Edge.
 `createFreshPublicCheckpointEdge({ config, prepared, native, runtime, sync,
 signal })` accepts a verified preparation and native result, explicit runtime
 pin, ordinary snapshot source policy and a config with a **nonexistent** absolute
-`dataDir` and a matching chain adapter. It returns `{ agent, result, dataDir }`
+`dataDir` and a matching chain adapter or explicit chain configuration. It returns `{ agent, result, dataDir }`
 only when authenticated catch-up reports current coverage. Call `agent.stop()`
 to close the owned local store process. Never open the same journal concurrently.
 
 `resumePublicCheckpointEdge({ config, runtime: { java, jarSha256 }, sync,
 signal })` reopens only a successfully initialized checkpoint Edge, with the same
 chain, deployment, graph and evidence mode. It verifies the copied runtime and
-local store properties and performs fresh catch-up before returning. Use this
-explicit entry point to restart this experimental Edge; the standard daemon does
-not yet discover or manage the native journal automatically.
+local store properties and performs fresh catch-up before returning. The normal daemon can now own this lifecycle through the fresh profile below.
 
 ## Validation and rollout boundary
 
@@ -88,3 +86,42 @@ work, WAN transfer, RPC latency, Blackbox startup and initial rule sampling. The
 are not a mainnet under-ten-minute result. Keep the feature experimental until
 Blackbox installation/restart orchestration and an authorized live comparison
 have passed. No default or release promotion is implied by local verification.
+
+## Normal daemon and Blackbox integration (experimental)
+
+A new Edge can set `publicSnapshotBootstrap` in its local `config.json`:
+
+```json
+{
+  "version": 1,
+  "source": {
+    "contextGraphId": "<graph>", "onChainId": "14", "mode": "core-cache",
+    "sourcePolicy": "DKG_Core_chain_cache", "trustedCorePeerIds": []
+  },
+  "runtime": { "java": "/absolute/java11", "jar": "/absolute/pinned.jar", "jarSha256": "<sha256>" }
+}
+```
+
+The profile requires `nodeRole: "edge"` and no `store` setting. It refuses an
+initialized or unknown data directory. The ordinary daemon owns preparation,
+full verification, native activation, API startup and shutdown. Its private
+journal lives in `public-checkpoint-edge`; preparation remains separate for
+diagnosis. On restart it opens that journal and performs authenticated current
+catch-up. A network change, testnet reset, failed attempt or incompatible runtime
+fails closed; it does not convert or erase an existing store.
+
+During bootstrap the API returns HTTP 503 with `ready: false`. This is liveness,
+not completed sync. The existing one-hour job budget includes daemon preparation;
+normal readiness, coverage and initial rule checks still follow. The SDK also
+exposes `openFreshPublicCheckpointEdge` and `openResumablePublicCheckpointEdge`
+for lifecycle owners: register handlers, start the agent, call `complete()`,
+then dispose the job lifetime. Stop the agent on any failure.
+
+`dkg sync bootstrap-capabilities` advertises installed support. `defaultEligible`
+is deliberately false until a separately authorized end-to-end mainnet comparison
+passes. Blackbox's matching installer can explicitly select `--store native` for
+a fresh default-graph profile with Java 11, the verified pinned runtime and more
+than 18 GiB free. Ordinary installs keep their current backend. Existing native
+profiles retain their compatible DKG runtime during Blackbox upgrades; a DKG
+runtime upgrade requires a separately verified compatible package. Community
+protections, custom graph/source choices and explicit opt-outs remain intact.

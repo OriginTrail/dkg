@@ -5,6 +5,10 @@ import { normalizePublicSnapshotSyncOptions } from '@origintrail-official/dkg-ag
 import { ApiClient } from '../api-client.js';
 
 export function registerSyncCheckpointCommand(sync: Command): void {
+  sync.command('bootstrap-capabilities')
+    .description('Describe installed native bootstrap support without starting a node')
+    .action(() => console.log(JSON.stringify({ version: 1, freshOnly: true, daemonRestart: true, defaultEligible: false,
+      checks: 'full-content-and-current-authority', jobTimeoutMs: 3_600_000 })));
   sync.command('prepare-bootstrap')
     .description('Prepare a verified public bootstrap checkpoint; leaves the active store unchanged')
     .requiredOption('--request <json-file>', 'Public graph, chain evidence mode and core source policy')

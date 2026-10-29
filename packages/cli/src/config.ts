@@ -632,10 +632,10 @@ export interface LoggingConfig {
   /** Emit detailed KA publish lifecycle logs. Default: false. */
   kaPublishLifecycleDebug?: boolean;
 }
-
 export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
   /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
   DKG_Core_chain_cache?: boolean;
+  publicSnapshotBootstrap?: import('./daemon/public-checkpoint-config.js').DaemonPublicCheckpointConfig;
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.

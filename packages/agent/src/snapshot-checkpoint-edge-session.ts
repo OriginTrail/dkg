@@ -3,15 +3,23 @@ import { attachCheckpointInventory, type CheckpointInventory } from './snapshot-
 import { assertCheckpointMemory } from './snapshot-checkpoint-profile.js';
 import { join } from 'node:path';
 import type { BlazegraphStore } from '@origintrail-official/dkg-storage';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
+import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
 import type { DKGAgentConfig } from './dkg-agent-types.js';
 import type { PublicSnapshotSyncOptions } from './public-snapshot-options.js';
 import { openSnapshotNativeStore } from './snapshot-native-store.js';
 
-export type CheckpointEdgeConfig = DKGAgentConfig & { dataDir: string; chainAdapter: ChainAdapter };
+export type CheckpointEdgeConfig = DKGAgentConfig & { dataDir: string };
+
+/** Resolve the same deployment identity as the normal EVM adapter, without making RPC calls. */
+export function checkpointChainBinding(config: CheckpointEdgeConfig) {
+  if (config.chainAdapter) return { chainId: config.chainAdapter.chainId, deploymentId: config.chainAdapter.deploymentId };
+  const chain = config.chainConfig;
+  if (!chain?.chainId || !chain.hubAddress) throw new Error('Checkpoint requires an explicit chain deployment');
+  return { chainId: chain.chainId, deploymentId: buildEvmDeploymentId(chain as { chainId: string; hubAddress: string }) };
+}
 
 /** Starts only this Edge's private store; normal snapshot recovery determines current coverage. */
-export async function startCheckpointEdgeSession(config: CheckpointEdgeConfig, java: string,
+export async function openCheckpointEdgeSession(config: CheckpointEdgeConfig, java: string,
   sync: PublicSnapshotSyncOptions, signal: AbortSignal, inventory: CheckpointInventory) {
   assertCheckpointMemory();
   signal.throwIfAborted();
@@ -24,14 +32,27 @@ export async function startCheckpointEdgeSession(config: CheckpointEdgeConfig, j
     const { DKGAgent } = await import('./dkg-agent.js');
     agent = await DKGAgent.create({ ...config, nodeRole: 'edge', store });
     attachCheckpointInventory(agent, inventory);
-    await agent.start(); signal.throwIfAborted();
-    await agent.waitForPublicCheckpointStartup(sync.contextGraphId, signal);
-    const result = await agent.syncPublicGraphSnapshot({ ...sync, transport: 'exact', signal });
-    signal.throwIfAborted();
-    if (!result.current) throw new Error('Checkpoint Edge did not reach current coverage');
-    return { agent, result, dataDir: config.dataDir };
+    const ownedAgent = agent;
+    return { agent: ownedAgent, dataDir: config.dataDir, async complete() {
+      signal.throwIfAborted();
+      await ownedAgent.waitForPublicCheckpointStartup(sync.contextGraphId, signal);
+      const result = await ownedAgent.syncPublicGraphSnapshot({ ...sync, transport: 'exact', signal });
+      signal.throwIfAborted();
+      if (!result.current) throw new Error('Checkpoint Edge did not reach current coverage');
+      return result;
+    } };
   } catch (error) {
     try { await agent?.stop(); } finally { await store?.close(); }
     throw error;
   }
+}
+
+/** SDK convenience; daemon callers register their lifecycle handlers before starting. */
+export async function startCheckpointEdgeSession(config: CheckpointEdgeConfig, java: string,
+  sync: PublicSnapshotSyncOptions, signal: AbortSignal, inventory: CheckpointInventory) {
+  const session = await openCheckpointEdgeSession(config, java, sync, signal, inventory);
+  try {
+    await session.agent.start();
+    return { agent: session.agent, dataDir: session.dataDir, result: await session.complete() };
+  } catch (error) { await session.agent.stop(); throw error; }
 }

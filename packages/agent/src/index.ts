@@ -673,11 +673,11 @@ export { resolveSyncAgentsMeta, parseBooleanEnv } from './sync/agents-meta-polic
 
 export type { CoreChainCacheNetwork } from './core-chain-cache-config.js';
 
-export { createFreshPublicCheckpointEdge } from './snapshot-fresh-edge.js';
+export { createFreshPublicCheckpointEdge, openFreshPublicCheckpointEdge } from './snapshot-fresh-edge.js';
 export { preparePublicSnapshotCheckpoint } from './public-snapshot-checkpoint.js';
 export { buildNativeSnapshotCheckpoint } from './snapshot-native-build.js';
 
-export { resumePublicCheckpointEdge } from './snapshot-resume-edge.js';
+export { resumePublicCheckpointEdge, openResumablePublicCheckpointEdge } from './snapshot-resume-edge.js';
 export { CatalogPublicationAdmissionError, CATALOG_PUBLICATION_ADMISSION_CODE } from './catalog-publication-admission-error.js';
 export type { SwmHostCatchupOptions, SwmHostCatchupResult, SwmHostCatchupEntryReport, SwmConnectedHostCatchupOptions, SwmConnectedHostCatchupResult } from './swm/host-catchup-types.js';
 

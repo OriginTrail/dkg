@@ -2,11 +2,10 @@
 import { encodeSnapshotBootstrapRecord } from './snapshot-bootstrap-record.js';
 import { CheckpointInventory } from './snapshot-checkpoint-inventory.js';
 import { nativeCheckpointProperties } from './snapshot-native-properties.js';
-import { startCheckpointEdgeSession } from './snapshot-checkpoint-edge-session.js';
+import { openCheckpointEdgeSession, checkpointChainBinding } from './snapshot-checkpoint-edge-session.js';
 import { constants } from 'node:fs';
 import { copyFile, mkdir, open, readFile, stat, statfs } from 'node:fs/promises';
 import { isAbsolute, join } from 'node:path';
-import type { ChainAdapter } from '@origintrail-official/dkg-chain';
 import type { DKGAgentConfig } from './dkg-agent-types.js';
 import { assertCheckpointInventoryUnchanged } from './public-snapshot-checkpoint.js';
 import type { PreparedSnapshotCheckpoint, VerifiedNativeSnapshotCheckpoint } from './snapshot-checkpoint-contract.js';
@@ -17,7 +16,7 @@ import { normalizePublicSnapshotSyncOptions, type PublicCheckpointSourceOptions 
 import { writeCheckpointFile, syncCheckpointDirectory } from './snapshot-checkpoint-files.js';
 
 interface FreshCheckpointEdgeOptions {
-  config: DKGAgentConfig & { dataDir: string; chainAdapter: ChainAdapter };
+  config: DKGAgentConfig & { dataDir: string };
   prepared: PreparedSnapshotCheckpoint;
   native: VerifiedNativeSnapshotCheckpoint;
   runtime: { java: string; jar: string; jarSha256: string };
@@ -28,15 +27,16 @@ interface FreshCheckpointEdgeOptions {
 /**
  * Explicit SDK bootstrap for a NEW Edge. Never changes an existing Edge's
  * endpoint, config, credentials, private/community data, or original journal.
- * The returned agent has also completed ordinary authenticated catch-up. Its
+ * Call complete() after starting the returned agent to authenticate catch-up. Its
  * stop() owns the copied journal's local server; failed attempts stay on disk.
  */
-export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEdgeOptions) {
+export async function openFreshPublicCheckpointEdge(options: FreshCheckpointEdgeOptions) {
   const { config, prepared, native, runtime } = options;
   const snapshot = prepared.manifest.observation.snapshot;
+  const binding = checkpointChainBinding(config);
   const sync = normalizePublicSnapshotSyncOptions(options.sync);
   if (!isAbsolute(config.dataDir) || config.store || config.storeConfig || config.nodeRole === 'core'
-    || config.chainAdapter.chainId !== snapshot.chainId || config.chainAdapter.deploymentId !== snapshot.deploymentId
+    || binding.chainId !== snapshot.chainId || binding.deploymentId !== snapshot.deploymentId
     || sync.contextGraphId !== snapshot.contextGraphId || sync.onChainId !== snapshot.onChainId
     || sync.mode !== prepared.manifest.observation.mode) throw new Error('Fresh checkpoint Edge binding mismatch');
   if (!isAbsolute(runtime.java) || !isAbsolute(runtime.jar) || runtime.jarSha256 !== native.runtimeSha256
@@ -71,22 +71,35 @@ export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEd
     await syncCheckpointDirectory(folder);
     assertCheckpointInventoryUnchanged(prepared.manifest.observation, prepared.manifest.freshObservation);
     const inventory = await CheckpointInventory.create(folder, prepared.manifest.freshObservation);
-    const session = await startCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal, inventory);
+    const session = await openCheckpointEdgeSession(config, runtime.java, sync, lifetime.signal, inventory);
     agent = session.agent;
-    const { result } = session;
-    lifetime.signal.throwIfAborted();
-    await writeCheckpointFile(join(folder, 'BOOTSTRAP-COMPLETE.json'), encodeSnapshotBootstrapRecord({ version: 1,
-      chainId: snapshot.chainId, deploymentId: snapshot.deploymentId, contextGraphId: snapshot.contextGraphId,
-      onChainId: snapshot.onChainId, mode: sync.mode,
-      initialJournalSha256: native.journalSha256, runtimeSha256: runtime.jarSha256,
-      result: { ...result, current: true, completeAsOfSnapshot: true } }));
-    await syncCheckpointDirectory(folder);
-    lifetime.signal.throwIfAborted();
-    return { agent, result, dataDir: config.dataDir };
+    return { agent, dataDir: config.dataDir, async complete() {
+      try {
+        const result = await session.complete();
+        lifetime.signal.throwIfAborted();
+        await writeCheckpointFile(join(folder, 'BOOTSTRAP-COMPLETE.json'), encodeSnapshotBootstrapRecord({ version: 1,
+          chainId: snapshot.chainId, deploymentId: snapshot.deploymentId, contextGraphId: snapshot.contextGraphId,
+          onChainId: snapshot.onChainId, mode: sync.mode,
+          initialJournalSha256: native.journalSha256, runtimeSha256: runtime.jarSha256,
+          result: { ...result, current: true, completeAsOfSnapshot: true } }));
+        await syncCheckpointDirectory(folder);
+        lifetime.signal.throwIfAborted();
+        return result;
+      } finally { lifetime.dispose(); }
+    }, dispose: () => lifetime.dispose() };
   } catch (error) {
+    lifetime.dispose();
     await agent?.stop();
     throw error;
-  } finally {
-    lifetime.dispose();
   }
+}
+
+/** Starts a fresh SDK Edge and returns only after authenticated current coverage. */
+export async function createFreshPublicCheckpointEdge(options: FreshCheckpointEdgeOptions) {
+  const session = await openFreshPublicCheckpointEdge(options);
+  try {
+    await session.agent.start();
+    return { agent: session.agent, dataDir: session.dataDir, result: await session.complete() };
+  } catch (error) { await session.agent.stop(); throw error; }
+  finally { session.dispose(); }
 }
