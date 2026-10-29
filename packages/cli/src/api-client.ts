@@ -1560,7 +1560,7 @@ export class ApiClient {
 
   // #1837 — atomic by-exact-jobId TERMINAL clear (distinct from publisherCancel and the
   // status-scoped publisherClear). cleared / already_absent resolve normally (200);
-  // rejected (nonterminal/unknown → 409, malformed → 400) throws via the post() helper
+  // rejected (nonterminal/pending_transaction/unknown → 409, malformed → 400) throws via the post() helper
   // carrying { outcome:'rejected', reason } in the response body.
   //
   // GH#2270 follow-up (🔴 3824098486) — `allowPendingTransaction` opts in to clearing a job whose
