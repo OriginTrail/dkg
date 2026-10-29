@@ -4,6 +4,8 @@ import { escapeRdfLiteral } from './rdf-literal-escape.js';
 
 export { isAbsoluteRfc3987IriV1 };
 export { escapeRdfLiteral };
+export { rdfLiteralBody } from './rdf-literal-body.js';
+export type { RdfLiteralBodyOptions } from './rdf-literal-body.js';
 export { isSparqlVariableNameRaw } from './sparql-lexical-primitives.js';
 
 const NTRIPLES_ECHAR_VALUES: Readonly<Record<string, string>> = Object.freeze({
