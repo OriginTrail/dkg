@@ -11,7 +11,7 @@ import { decodeV9UpdateReceiptLog, decodeV10UpdateReceiptLog, type UpdateReceipt
  */
 
 import { EVMChainAdapterBase, decodeConvictionCostCovered, type EvmSigner } from './evm-adapter-base.js';
-import { numericChainIdOf } from './evm-adapter-storage-reads.js';
+import { readPinnedMintState } from './evm-mint-state-proof.js';
 import { ethers, Contract } from 'ethers';
 import type {
   BatchMintParams,
@@ -38,58 +38,12 @@ import { reconcilePublisherCandidateFunding, type PublisherPcaPricingEvidence } 
 import { errorCode, errorMessage } from './evm-adapter-errors.js';
 import { isRetryableRpcError } from './evm-adapter-rpc.js';
 import { isChainRpcTransportError } from './chain-rpc-transport-error.js';
-import { resolveEvmFinalityAnchorBlockV1 } from './evm-finality-anchor.js';
 
 type PublisherCandidatePlan = PublisherPublishPlan & {
   signer: EvmSigner;
   address: string;
   pcaPricing: PublisherPcaPricingEvidence;
 };
-
-/**
- * GH#2270 PR-3 r2 — does this error mean "that ERC-721 token does not exist"?
- *
- * Deliberately narrow. A `false` from the caller authorises a resend, so only the shapes OpenZeppelin
- * and ethers produce for a nonexistent token qualify: the typed `ERC721NonexistentToken` custom
- * error, or the classic `ERC721: invalid token ID` / `owner query for nonexistent token` strings.
- * Every other CALL_EXCEPTION — a paused contract, a decode failure, an endpoint returning garbage —
- * is left to the caller's `null`, which holds.
- */
-const NONEXISTENT_TOKEN_LEGACY_REASONS = new Set([
-  'erc721: invalid token id',
-  'erc721: owner query for nonexistent token',
-]);
-
-function isNonexistentTokenRevert(err: unknown): boolean {
-  const e = err as {
-    code?: unknown;
-    reason?: unknown;
-    revert?: { name?: unknown } | null;
-  };
-  if (e?.code !== 'CALL_EXCEPTION') return false;
-  // r21 (🔴 3816664734) — EXACT identification only. This classifier guards the one path
-  // allowed to resend a held create, so "probably absent" is not good enough: a substring scan
-  // over the joined reason/shortMessage/message accepted unrelated reverts that merely CONTAIN a
-  // recognized phrase — `paused: nonexistent token checks unavailable` matched — and with the
-  // nonce consumed that fabricated the absence conjunction and authorized a second publish.
-  // The decoded custom-error NAME is authoritative; the two legacy strings are matched whole, as
-  // reasons, never as substrings of a longer message. Everything else falls through to the
-  // caller's `null`, which holds the job.
-  if (typeof e.revert?.name === 'string' && e.revert.name === 'ERC721NonexistentToken') return true;
-  return typeof e.reason === 'string'
-    && NONEXISTENT_TOKEN_LEGACY_REASONS.has(e.reason.trim().toLowerCase());
-}
-
-/**
- * The chain-proof snapshot's own fail-closed anchor verdict.
- *
- * Distinguishes "this endpoint cannot give me a usable anchor" — an EMPTY VIEW
- * that must fail over — from a transport error or an abort, which the retry
- * machinery classifies itself.
- */
-class ChainProofAnchorUnavailableError extends Error {
-  override readonly name = 'ChainProofAnchorUnavailableError';
-}
 
 export class PublishMethods extends EVMChainAdapterBase {
   async resolvePublisherPublishPlan(
@@ -635,82 +589,14 @@ export class PublishMethods extends EVMChainAdapterBase {
   ): Promise<FinalizedChainProofSnapshot | null> {
     await this.init();
     try {
-      // `readProviderRetryingNull`, not `readProvider`: an endpoint that cannot serve the
-      // configured confirmation-depth block is an EMPTY VIEW, so the whole pinned snapshot moves
-      // to the next endpoint. The callback still reads the block, nonce and minted state from ONE
-      // provider, so failover cannot splice facts from different chain views.
-      return await this.readProviderRetryingNull(
-        'confirmation-depth chain-proof snapshot',
-        async (provider) => {
-          // r19 (🔴 3816490449) — the endpoint's IDENTITY, before any of its facts are believed.
-          // This snapshot authorizes release-by-absence, so a wrong-chain RPC reporting a spent
-          // nonce and an unminted KA id fabricates exactly the conjunction that requeues a job —
-          // and the original transaction can then mine alongside the replacement. r17 closed this
-          // for the version snapshot and did not sweep the sibling readers, which is the whole
-          // reason it is still open here. Note the shared static-mode validator cannot serve:
-          // it returns early under `staticNetwork: false`, the mode this fan-out runs in.
-          // A mismatch is an EMPTY VIEW, not a verdict, so failover reaches a correct endpoint.
-          const expectedChainId = numericChainIdOf(this.chainId);
-          if (expectedChainId !== undefined) {
-            const network = await provider.getNetwork();
-            if (BigInt(network.chainId) !== expectedChainId) return null;
-          }
-          // Resolved through the shared anchor so this path gets the checks it
-          // was missing: an endpoint answering a DIFFERENT height than the one
-          // asked for was previously accepted here, and this snapshot decides a
-          // publish tx never landed and the job may be resent — the one place a
-          // wrong-height answer fabricates exactly the conjunction that requeues
-          // a job. An empty view, not a verdict, so failover reaches a correct
-          // endpoint (see `readProviderRetryingNull` above).
-          const block = await resolveEvmFinalityAnchorBlockV1({
-            finalityConfirmations: this.finalityConfirmations,
-            readHead: () => provider.getBlock('latest'),
-            readBlockAt: (anchorBlockNumber) => provider.getBlock(anchorBlockNumber),
-            unavailable: (detail) => new ChainProofAnchorUnavailableError(
-              `chain-proof snapshot anchor: ${detail}`,
-            ),
-          }).catch((error: unknown) => {
-            // ONLY the resolver's own fail-closed verdicts become an empty view
-            // (`readProviderRetryingNull` fails over on null without a thrown
-            // sentinel polluting stickiness). A transport failure or an abort
-            // still propagates to the failover machinery exactly as it did
-            // before this path used the shared resolver.
-            if (error instanceof ChainProofAnchorUnavailableError) return null;
-            throw error;
-          });
-          if (block === null) return null;
-          const accountNonce = await provider.getTransactionCount(params.address, block.number);
-          let kaMinted: boolean | null = null;
-          const storage = this.contracts.knowledgeAssetStorage;
-          if (storage) {
-            try {
-              const owner: string = await this.rebindContract(storage as Contract, provider)
-                .ownerOf(params.kaId, { blockTag: block.number });
-              // r21 (🔴 3816664734) — a SUCCESSFUL zero-address owner is not proof of absence.
-              // A compliant ERC721 reverts for a nonexistent token; a zero owner means the
-              // endpoint or contract answered something this classifier cannot interpret, and
-              // interpreting it as "unminted" would authorize a resend on a malformed reply.
-              const ownerAddress = ethers.getAddress(owner);
-              kaMinted = ownerAddress === ethers.ZeroAddress ? null : true;
-            } catch (err) {
-              // A revert (CALL_EXCEPTION) or a decode failure (BAD_DATA) is a CHAIN answer for
-              // this endpoint and classifies in place. Anything else — NETWORK_ERROR, a timeout,
-              // a bare fetch failure — is an absence of information about THIS endpoint, so it
-              // RETHROWS and the whole pinned snapshot fails over to the next one; swallowing it
-              // as `null` would let one flaky read on an otherwise healthy endpoint block a
-              // provable release, and no fallback here can splice (the snapshot restarts whole).
-              const code = (err as { code?: unknown })?.code;
-              if (code !== 'CALL_EXCEPTION' && code !== 'BAD_DATA') throw err;
-              kaMinted = isNonexistentTokenRevert(err) ? false : null;
-            }
-          }
-          return { blockNumber: block.number, blockHash: block.hash, accountNonce, kaMinted };
-        },
-        { signal: options.signal },
-      );
-    } catch {
-      return null;
-    }
+      const storage = this.contracts.knowledgeAssetStorage;
+      return await this.readProviderRetryingNull('confirmation-depth chain-proof snapshot', provider =>
+        readPinnedMintState(provider, {
+          chainId: this.chainId, finalityConfirmations: this.finalityConfirmations, kaId: params.kaId,
+          readOwner: storage ? (kaId, blockTag) => this.rebindContract(storage, provider).ownerOf(kaId, { blockTag }) : undefined,
+        }, async blockNumber => ({ accountNonce: await provider.getTransactionCount(params.address, blockNumber) })),
+      { signal: options.signal });
+    } catch { return null; }
   }
 
   /**

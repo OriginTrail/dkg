@@ -1,3 +1,4 @@
+import { formatSparqlTerm } from '@origintrail-official/dkg-core';
 // SPDX-License-Identifier: Apache-2.0
 
 import { deleteByPatternWithoutCount, tryUpdateWithTouchedGraphs, type Quad, type TripleStore } from '@origintrail-official/dkg-storage';
@@ -44,4 +45,13 @@ export function createPublishedNamedKaVmLifecycleWriter({ updateStore, fallbackS
     // Only absent or typed unsupported capability reaches this ordered path.
     await applyOrderedReplacements(fallbackStore, plan.replacements);
   };
+}
+
+/** Completion requires every row from the writer's mutation, including its final fallback writes. */
+export async function publishedNamedKaVmLifecycleMatches(store: TripleStore, input: PublishedNamedKaVmLifecycleInput): Promise<boolean> {
+  const plan = buildNamedKaVmLifecycleMutation(input);
+  const triples = plan.replacements.map(row => `${formatSparqlTerm(row.subject, { position: 'subject' })} ${formatSparqlTerm(row.predicate, { position: 'predicate' })} ${formatSparqlTerm(row.object, { position: 'object' })} .`).join(' ');
+  const result = await store.query(`ASK { GRAPH ${formatSparqlTerm(plan.graph, { position: 'graph' })} { ${triples} } }`,
+    { source: 'agent.publish.namedKaVmLifecycle.complete' });
+  return result.type === 'boolean' && result.value;
 }

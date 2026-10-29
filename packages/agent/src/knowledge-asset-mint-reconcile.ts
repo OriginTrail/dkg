@@ -25,7 +25,7 @@ import {
 } from '@origintrail-official/dkg-publisher';
 import type { AssertionHistoryDescriptor, DKGAgent } from './dkg-agent.js';
 import { verifyNamedMintRecord } from './internal/verified-named-mint-record.js';
-import type { PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
+import { publishedNamedKaVmLifecycleMatches, type PublishedNamedKaVmLifecycleWriter } from './named-ka-vm-lifecycle.js';
 import { sealChainTargetMismatch } from './seal-chain-target.js';
 
 /** The mint was recorded but the lifecycle did not complete; retrying resumes it. */
@@ -131,6 +131,8 @@ export async function reconcileLateMint(
   // A minted version is complete only with its publish receipt; the publish
   // path writes that receipt best-effort, so a missing one is completed here.
   const complete = async (state: AssertionHistoryDescriptor | null | undefined) => isRecorded(state, sealRoot, ual)
+    && await publishedNamedKaVmLifecycleMatches(host.store, { contextGraphId, name, agentAddress, subGraphName,
+      publishedUal: ual, merkleRoot: sealRoot, packedKaId: reservation.kaId })
     && (BigInt(reservation.scope.assertionVersion) !== 1n || await hasPublishReceipt(host, reservation))
     && (await readNamedPublishFinalization(host.store, reservation)).kind === 'complete'
     && !(await host.hasSwmShareComplete(contextGraphId, name, agentAddress, subGraphName));
@@ -299,8 +301,8 @@ async function completeRecordedLifecycle(
     if (failureMode === 'stop') throw completion.failures[0].error;
     const catalogFailure = completion.failures.find(failure => failure.stage === 'catalog');
     if (catalogFailure) throw catalogFailure.error;
-    // Resident publication retains best-effort writes; the final state check
-    // below reconcile's lease reports any missing receipt/lifecycle completion.
+    throw Object.assign(new Error('Named mint lifecycle completion failed; retry to repair all metadata.',
+      { cause: completion.failures[0].error }), { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
   }
   return mint;
 }

@@ -67,13 +67,19 @@ function mintLookupAdapter(
   };
   const provider = {
     getBlockNumber: vi.fn(async () => endpoint.head),
-    getBlock: vi.fn(async (height: number) => (height <= endpoint.head
-      ? { number: height, hash: height === MINT_BLOCK ? endpoint.hashAtMintHeight : ethers.ZeroHash, timestamp: 1_700_000_000 }
-      : null)),
+    getNetwork: vi.fn(async () => ({ chainId: 31337n })),
+    getTransactionCount: vi.fn(async () => { throw new Error('mint lookup must not read an account nonce'); }),
+    getBlock: vi.fn(async (tag: number | 'latest') => {
+      const height = tag === 'latest' ? endpoint.head : tag;
+      return height <= endpoint.head
+        ? { number: height, hash: height === MINT_BLOCK ? endpoint.hashAtMintHeight : ethers.ZeroHash, timestamp: 1_700_000_000 }
+        : null;
+    }),
   };
   const queryEventLogsPage = vi.fn(async () => ({ logs: scan.finds ? [{ transactionHash: TX_HASH }] : [], provider: undefined }));
   const chain = Object.assign(Object.create(EVMChainAdapter.prototype) as EVMChainAdapter, {
     init: vi.fn(async () => undefined),
+    chainId: 'evm:31337',
     finalityConfirmations: CONFIRMATIONS,
     kaHighWaterScanPageSize: 2_000,
     contracts: {
@@ -89,7 +95,10 @@ function mintLookupAdapter(
     },
     getTransactionReceiptWithFailover: vi.fn(async (hash: string) => (hash === TX_HASH ? receipt : null)),
     getTransactionWithFailover: vi.fn(async (hash: string) => (state.pendingTransactions?.includes(hash) ? { hash } : null)),
-    readFinalizedChainProofSnapshot: vi.fn(async () => ({ kaMinted: state.kaMinted ?? true })),
+    rebindContract: vi.fn(() => ({ ownerOf: vi.fn(async () => {
+      if (state.kaMinted === false) throw Object.assign(new Error('not minted'), { code: 'CALL_EXCEPTION', revert: { name: 'ERC721NonexistentToken' } });
+      return AUTHOR;
+    }) })),
     resolveContractDeployBlock: vi.fn(async () => ({ fromBlock: 0, head: 1_000, scanProviders: [] })),
     queryEventLogsPage,
     readProviderRetryingNull: vi.fn(async (_label: string, read: (p: typeof provider) => Promise<unknown>) => read(provider)),
@@ -194,4 +203,10 @@ describe('resolveKnowledgeAssetMint without a final mint receipt', () => {
 
     await expect(chain.resolveKnowledgeAssetMint(KA_ID)).rejects.toThrow(/requires DKGKnowledgeAssets and ContextGraphStorage/);
   });
+});
+
+it('proves a free mint id without reading an unrelated account nonce', async () => {
+  const { chain, provider } = mintLookupAdapter({ head: FINAL_HEAD, hashAtMintHeight: MINT_BLOCK_HASH }, { finds: false }, { kaMinted: false });
+  await expect(chain.resolveKnowledgeAssetMint(KA_ID)).resolves.toEqual({ status: 'not-minted' });
+  expect(provider.getTransactionCount).not.toHaveBeenCalled();
 });

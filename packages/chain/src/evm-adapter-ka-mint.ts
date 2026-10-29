@@ -4,12 +4,13 @@
  * Recover a Knowledge Asset mint the node did not observe — a publish whose
  * transaction mined after the node stopped waiting for it.
  *
- * Mixin holder; see evm-adapter.ts for the assembly. It extends
- * PublishMethods to reach the pinned chain-proof snapshot.
+ * Mixin holder; see evm-adapter.ts for the assembly. Mint-state proof reads
+ * are composed independently of publish-recovery orchestration.
  */
 
 import { ethers, type Contract, type JsonRpcProvider } from 'ethers';
-import { PublishMethods } from './evm-adapter-publish.js';
+import { EVMChainAdapterBase } from './evm-adapter-base.js';
+import { readPinnedMintState } from './evm-mint-state-proof.js';
 import {
   decodeKnowledgeAssetMintReceipt,
   type KnowledgeAssetMintLookupOptions,
@@ -21,7 +22,7 @@ const MINT_LOOKUP_MAX_SCAN_PAGES = 1_500;
 
 type MintReceiptContracts = Parameters<typeof decodeKnowledgeAssetMintReceipt>[1];
 
-export class KnowledgeAssetMintMethods extends PublishMethods {
+export class KnowledgeAssetMintMethods extends EVMChainAdapterBase {
   /**
    * Find and verify the transaction that minted `kaId`.
    *
@@ -55,8 +56,11 @@ export class KnowledgeAssetMintMethods extends PublishMethods {
       : await this.resolveMintTransaction(options.txHash, kaId, contracts, options);
     if (hinted?.status === 'confirmed') return hinted;
 
-    const author = ethers.getAddress(ethers.toBeHex(kaId >> 96n, 20));
-    const snapshot = await this.readFinalizedChainProofSnapshot({ address: author, kaId }, options);
+    const snapshot = await this.readProviderRetryingNull('confirmation-depth mint-state snapshot', provider =>
+      readPinnedMintState(provider, {
+        chainId: this.chainId, finalityConfirmations: this.finalityConfirmations, kaId,
+        readOwner: (id, blockTag) => this.rebindContract(knowledgeAssets, provider).ownerOf(id, { blockTag }),
+      }, async () => ({})), { signal: options.signal }).catch(() => null);
     if (snapshot?.kaMinted === false) {
       return hinted?.status === 'pending' ? hinted : { status: 'not-minted' };
     }

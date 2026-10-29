@@ -1,3 +1,4 @@
+import { applyPublishedNamedKaVmLifecycle } from '../src/named-ka-vm-lifecycle.js';
 import { Logger, type ContextGraphIdV1 } from '@origintrail-official/dkg-core';
 import { assertionLifecycleWriteLockKey, withAssertionLifecycleWriteLease } from '@origintrail-official/dkg-publisher';
 import * as publicationStages from '../src/dkg-agent-publish.js';
@@ -160,15 +161,54 @@ describe('late-mint adoption', () => {
     else await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted' });
   });
 
+  it('supplies encryption through the live resolver for valid sealed content', async () => {
+    const chain = new WalletMockChain();
+    const { agent, accessPolicy } = await strandedAsset(chain, wallet.address);
+    accessPolicy.mockResolvedValue(1);
+    vi.spyOn(chain, 'getContextGraphFinalizedCreation').mockResolvedValue({ nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)), accessPolicy: 1 });
+    const encrypt = vi.fn(async (bytes: Uint8Array) => bytes);
+    vi.spyOn(agent, '_resolveInlineEncryption').mockResolvedValue({ encryptInlinePayload: encrypt, encryptInlineChunked: undefined });
+    vi.spyOn(agent, 'createV10ACKProvider').mockReturnValue(async () => [
+      { peerId: 'stub-core', signatureR: ZERO, signatureVS: ZERO, nodeIdentityId: 1n }]);
+    await expect(agent.publishFromFinalizedAssertion(CONTEXT_GRAPH, NAME, { agentAddress: AUTHOR }))
+      .resolves.toMatchObject({ status: 'confirmed' });
+    expect(encrypt).toHaveBeenCalled();
+  });
+
+  it('repairs a fallback lifecycle failure after publishedUal before claiming completion', async () => {
+    const { agent, store, sealed, history } = await strandedAsset(new MockChainAdapter());
+    vi.spyOn(agent, 'publishedNamedKaVmLifecycleWriter').mockImplementation(input => applyPublishedNamedKaVmLifecycle(store, input));
+    const insert = store.insert.bind(store);
+    let failed = false;
+    const predicate = 'http://dkg.io/ontology/assertionGraph';
+    vi.spyOn(store, 'insert').mockImplementation(async rows => {
+      if (!failed && rows.some(q => q.subject === LIFECYCLE && q.predicate === predicate)) {
+        failed = true;
+        throw new Error('injected assertionGraph insertion failure');
+      }
+      return insert(rows);
+    });
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).rejects.toMatchObject({ code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
+    expect(failed).toBe(true);
+    expect(await history()).toMatchObject({ publishedUal: sealed.kaUal, vmCurrentAssertion: ethers.hexlify(MERKLE_ROOT).slice(2) });
+    const pointer = () => store.query(`SELECT ?g WHERE { GRAPH <${META_GRAPH}> { <${LIFECYCLE}> <${predicate}> ?g } }`);
+    expect(await pointer()).toMatchObject({ type: 'bindings', bindings: [] });
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toMatchObject({ status: 'adopted' });
+    const repaired = await pointer();
+    expect(repaired.type === 'bindings' && repaired.bindings[0]?.g).toContain('/_verifiable_memory/');
+    await expect(agent.reconcileKnowledgeAssetMint(RECONCILE)).resolves.toEqual({ status: 'already-published', ual: sealed.kaUal });
+  });
+
   it.each(['live', 'local', 'record'] as const)('publisher owns sealed-content rejection for %s mint acquisition', async kind => {
     const chain = new WalletMockChain();
-    const { agent, store, sealed, history, createKnowledgeAssets, updateKnowledgeCollection } = await strandedAsset(chain, wallet.address);
+    const { agent, store, sealed, history, createKnowledgeAssets, updateKnowledgeCollection, accessPolicy } = await strandedAsset(chain, wallet.address);
+    accessPolicy.mockResolvedValue(1);
+    vi.spyOn(chain, 'getContextGraphFinalizedCreation').mockResolvedValue({ nameHash: ethers.keccak256(ethers.toUtf8Bytes(CONTEXT_GRAPH)), accessPolicy: 1 });
     if (kind === 'local') vi.spyOn(chain, 'isV10Ready').mockReturnValue(false);
     const acks = vi.fn(async () => [{ peerId: 'stub-core', signatureR: ZERO, signatureVS: ZERO, nodeIdentityId: 1n }]);
-    const encrypt = vi.fn(async () => undefined);
+    const encrypt = vi.fn(async (bytes: Uint8Array) => bytes);
     vi.spyOn(agent, 'createV10ACKProvider').mockReturnValue(acks);
-    const publish = agent.publisher.publish.bind(agent.publisher);
-    vi.spyOn(agent.publisher, 'publish').mockImplementation(options => publish({ ...options, encryptInlinePayload: encrypt }));
+    vi.spyOn(agent, '_resolveInlineEncryption').mockResolvedValue({ encryptInlinePayload: encrypt, encryptInlineChunked: undefined });
     const graphs = (await store.listGraphs()).filter(graph => graph.startsWith(contextGraphSharedMemoryUri(CONTEXT_GRAPH)));
     let changed = 0;
     for (const graph of graphs) {

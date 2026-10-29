@@ -137,7 +137,7 @@ export async function selectFinalizedAssertionPublication(host: FinalizedAsserti
 }
 type FinalizedAssertionSelection = Awaited<ReturnType<typeof selectFinalizedAssertionPublication>>;
 type FinalizedAssertionPublicationContext = Omit<FinalizedAssertionSelection, 'kind' | 'operationPlan'>;
-type FinalizedAssertionMintPlan = Extract<FinalizedAssertionSelection, { kind: 'mint' }>;
+export type FinalizedAssertionMintPlan = Extract<FinalizedAssertionSelection, { kind: 'mint' }>;
 type FinalizedAssertionUpdatePlan = Extract<FinalizedAssertionSelection, { kind: 'update' }>;
 
 export async function prepareFinalizedAssertionUpdateContent(host: FinalizedAssertionUpdateContentHost, selected: FinalizedAssertionUpdatePlan) {
@@ -210,12 +210,7 @@ export async function prepareFinalizedAssertionUpdateContent(host: FinalizedAsse
 }
 type PreparedFinalizedAssertionContent = Awaited<ReturnType<typeof prepareFinalizedAssertionUpdateContent>>;
 
-/** Named lifecycle planning carries the sealed target; publisher owns mint content loading and validation. */
-export function finalizedAssertionMintPlan(selected: FinalizedAssertionMintPlan): FinalizedAssertionMintPlan {
-  return selected;
-}
-
-export function finalizedMintContentOptions(prepared: FinalizedAssertionMintPlan, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): SharedMemoryMintRecordingOptions & { publisherOverride: DKGPublisher } {
+export function finalizedMintContentOptions(prepared: FinalizedAssertionMintPlan): SharedMemoryMintRecordingOptions & { publisherOverride: DKGPublisher } {
   const { opts, publisher, recoveredReservedKaId, sharedMemoryScope, graphScope, seal, privateMerkleRoot } = prepared;
   return {
         operationCtx: opts?.operationCtx,
@@ -224,7 +219,7 @@ export function finalizedMintContentOptions(prepared: FinalizedAssertionMintPlan
         accessPolicy: prepared.rfc64WorkspaceHead?.access.accessPolicy,
         allowedPeers: prepared.rfc64WorkspaceHead ? [...prepared.rfc64WorkspaceHead.access.allowedPeers] : undefined,
         publisherPeerId: prepared.rfc64WorkspaceHead?.publisherPeerId,
-        pricingPolicy,
+        pricingPolicy: prepared.operationPlan.pricingPolicy,
         reservedKaId: recoveredReservedKaId,
         sharedMemoryScope,
         contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
@@ -244,8 +239,8 @@ export function finalizedMintContentOptions(prepared: FinalizedAssertionMintPlan
   };
 }
 
-export function finalizedMintOptions(prepared: FinalizedAssertionMintPlan, pricingPolicy: AgentSharedMemoryPublishOptions['pricingPolicy']): AgentSharedMemoryPublishOptions {
-  return { ...finalizedMintContentOptions(prepared, pricingPolicy),
+export function finalizedMintOptions(prepared: FinalizedAssertionMintPlan): AgentSharedMemoryPublishOptions {
+  return { ...finalizedMintContentOptions(prepared),
     publisherNodeIdentityIdOverride: prepared.opts?.publisherNodeIdentityIdOverride, publishEpochs: prepared.opts?.publishEpochs };
 }
 

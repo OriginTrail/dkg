@@ -2,7 +2,7 @@ import { completeNamedPublishFinalization } from './internal/complete-named-publ
 import type { SharedMemoryMintRecordingOptions } from '@origintrail-official/dkg-publisher';
 import type { MintAdoptionRequest } from '@origintrail-official/dkg-publisher';
 import type { AgentSharedMemoryPublishOptions, SharedMemoryPublicationContext, FinalizedAssertionPublishOptions, FinalizedAssertionRecordingContext } from './internal/agent-publish-options.js';
-import { selectFinalizedAssertionPublication, prepareFinalizedAssertionUpdateContent, finalizedAssertionMintPlan,
+import { selectFinalizedAssertionPublication, prepareFinalizedAssertionUpdateContent,
   finalizedMintContentOptions, finalizedMintOptions, completeFinalizedAssertionMint, createFinalizedAssertionMintCheckpoint,
   publishFinalizedAssertionUpdate, type FinalizedAssertionSelectionHost, type FinalizedAssertionMintHost, type FinalizedAssertionUpdateHost,
 } from './internal/finalized-assertion-publication.js';
@@ -5828,10 +5828,9 @@ export class PublishMethods extends DKGAgentBase {
       const prepared = await prepareFinalizedAssertionUpdateContent(host, selected);
       return { ...await publishFinalizedAssertionUpdate(host, prepared), assertionUri: prepared.assertionUri, seal: prepared.seal };
     }
-    const prepared = finalizedAssertionMintPlan(selected);
-    const result = await this.publishFromSharedMemory(contextGraphId, 'all', finalizedMintOptions(prepared, selected.operationPlan.pricingPolicy));
-    await completeFinalizedAssertionMint(finalizedAssertionMintHost.call(this), prepared, result);
-    return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
+    const result = await this.publishFromSharedMemory(contextGraphId, 'all', finalizedMintOptions(selected));
+    await completeFinalizedAssertionMint(finalizedAssertionMintHost.call(this), selected, result);
+    return { ...result, assertionUri: selected.assertionUri, seal: selected.seal };
   }
 
   private afterConfirmedGraphScopedVmPublishV1(this: DKGAgent, input: ConfirmedCatalogObligationInputV1): Promise<void> {
@@ -6310,12 +6309,11 @@ export async function recordFinalizedAssertionMint(this: DKGAgent, contextGraphI
   const selected = await selectFinalizedAssertionPublication(finalizedAssertionSelectionHost.call(this), contextGraphId, name, opts, recording);
   if (selected.kind === 'update') throw Object.assign(new Error(`"${name}" already has a confirmed VM version; recording a mint must not send an update.`),
     { code: KA_MINT_RECONCILE_REFUSED_CODE });
-  const prepared = finalizedAssertionMintPlan(selected);
-  const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintContentOptions(prepared, selected.operationPlan.pricingPolicy));
-  if (result.status === 'confirmed' && !await createFinalizedAssertionMintCheckpoint(finalizedAssertionMintHost.call(this), prepared))
+  const result = await recordMintFromSharedMemory.call(this, contextGraphId, 'all', receipt, finalizedMintContentOptions(selected));
+  if (result.status === 'confirmed' && !await createFinalizedAssertionMintCheckpoint(finalizedAssertionMintHost.call(this), selected))
     throw Object.assign(new Error('Recorded mint checkpoint could not be persisted; reconciliation cannot complete it.'),
       { code: KA_MINT_RECONCILE_INCOMPLETE_CODE });
-  return { ...result, assertionUri: prepared.assertionUri, seal: prepared.seal };
+  return { ...result, assertionUri: selected.assertionUri, seal: selected.seal };
 }
 
 async function runSharedMemoryPublication(this: DKGAgent, contextGraphId: string,

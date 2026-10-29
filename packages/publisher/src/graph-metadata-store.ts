@@ -8,8 +8,9 @@ async function readGraphKnowledgeAssetMetadataRows(
   store: TripleStore,
   contextGraphId: string,
   ual: string,
+  metaGraphUri?: string,
 ): Promise<ReadonlyArray<Pick<Quad, 'predicate' | 'object'>>> {
-  const metaGraph = `did:dkg:context-graph:${contextGraphId}/_meta`;
+  const metaGraph = metaGraphUri ?? `did:dkg:context-graph:${contextGraphId}/_meta`;
   assertSafeIri(metaGraph);
   assertSafeIri(ual);
   const result = await store.query(
@@ -37,14 +38,14 @@ async function readGraphKnowledgeAssetMetadataRows(
  */
 export async function readConfirmedGraphKnowledgeAssetMetadataEnvelope(
   store: TripleStore,
-  input: { contextGraphId: string; ual: string },
+  input: { contextGraphId: string; ual: string; metaGraphUri?: string },
 ): Promise<ConfirmedGraphKnowledgeAssetMetadataRead> {
-  const rows = await readGraphKnowledgeAssetMetadataRows(store, input.contextGraphId, input.ual);
+  const rows = await readGraphKnowledgeAssetMetadataRows(store, input.contextGraphId, input.ual, input.metaGraphUri);
   return parseConfirmedGraphKnowledgeAssetMetadataEnvelope(rows, input);
 }
 
 /** Read tentative and confirmed records through the same structural validator. */
 export async function readGraphKnowledgeAssetMetadataEnvelope(store: TripleStore,
-  input: { contextGraphId: string; ual: string }): Promise<GraphKnowledgeAssetMetadataRead> {
-  return parseGraphKnowledgeAssetMetadataEnvelope(await readGraphKnowledgeAssetMetadataRows(store, input.contextGraphId, input.ual), input);
+  input: { contextGraphId: string; ual: string; metaGraphUri?: string }): Promise<GraphKnowledgeAssetMetadataRead> {
+  return parseGraphKnowledgeAssetMetadataEnvelope(await readGraphKnowledgeAssetMetadataRows(store, input.contextGraphId, input.ual, input.metaGraphUri), input);
 }

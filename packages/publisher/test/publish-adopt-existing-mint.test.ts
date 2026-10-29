@@ -841,3 +841,30 @@ for (const lane of ['explicit', 'duplicate-mint'] as const) {
     } finally { release(); await Promise.allSettled([pending, locking]); await f.store.close(); }
   });
 }
+
+
+it.each(['absent', 'tentative'] as const)('records a custom metadata target with %s custom metadata without touching the default record', async customState => {
+  const f = await strandedPublishFixture();
+  const metaGraphUri = 'urn:test:custom-mint-meta';
+  const defaultGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/_meta`;
+  const ready = vi.spyOn(f.chain, 'isV10Ready').mockReturnValue(false);
+  const options = { ...f.publishOptions, contextGraphId: CONTEXT_GRAPH, quads: [LOT] };
+  const rows = async (graph: string) => {
+    const result = await f.store.query(`SELECT ?s ?p ?o WHERE { GRAPH <${graph}> { ?s ?p ?o } }`);
+    if (result.type !== 'bindings') throw new Error('expected metadata rows');
+    return result.bindings.map(row => JSON.stringify(row)).sort();
+  };
+  try {
+    await f.publisher.publish(options);
+    const originalDefault = await rows(defaultGraph);
+    if (customState === 'tentative') await f.publisher.publish({ ...options, targetMetaGraphUri: metaGraphUri });
+    ready.mockRestore();
+    const customOptions = { ...options, targetMetaGraphUri: metaGraphUri };
+    await expect(f.publisher.publish(customOptions)).resolves.toMatchObject({ status: 'confirmed' });
+    expect(await readConfirmedGraphKnowledgeAssetMetadataEnvelope(f.store, { contextGraphId: CONTEXT_GRAPH, ual: f.ual, metaGraphUri }))
+      .toMatchObject({ state: 'confirmed', envelope: { transactionHash: f.chain.mintTxHashes[0] } });
+    // Re-enter the confirmed-record/access replacement path too.
+    await expect(f.publisher.publish(customOptions)).resolves.toMatchObject({ status: 'confirmed' });
+    expect(await rows(defaultGraph)).toEqual(originalDefault);
+  } finally { ready.mockRestore(); await f.store.close(); }
+});

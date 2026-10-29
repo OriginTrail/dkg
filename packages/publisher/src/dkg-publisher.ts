@@ -3198,8 +3198,9 @@ export class DKGPublisher implements Publisher {
       }
       const onChainResult = outcome.result;
       let ual = '';
+      const mintMetaGraph = target.targetMetaGraphUri ?? contextGraphMetaUri(contextGraphId);
       const recordDisposition = graphPublish !== undefined ? await classifyMintRecord(this.store, {
-        contextGraphId, ual: graphPublish.scope.ual, assertionVersion: graphPublish.scope.assertionVersion,
+        contextGraphId, metaGraphUri: mintMetaGraph, ual: graphPublish.scope.ual, assertionVersion: graphPublish.scope.assertionVersion,
         assertionGraph: knowledgeAssetLayerGraphUri(contextGraphId, MemoryLayer.VerifiableMemory, graphPublish.scope, target.subGraphName),
         merkleRoot: kcMerkleRoot, publicTripleCount: graphPublish.publicTripleCount,
         privateTripleCount: graphPublish.privateTripleCount,
@@ -3311,7 +3312,7 @@ export class DKGPublisher implements Publisher {
         );
       }
       if (graphPublish) {
-        if (recordDisposition === 'confirmed') await replaceRecordedMintAccess(this.store, contextGraphId, graphPublish.scope.ual, confirmedQuads);
+        if (recordDisposition === 'confirmed') await replaceRecordedMintAccess(this.store, mintMetaGraph, graphPublish.scope.ual, confirmedQuads);
         await replaceLocallyTrustedKnowledgeAssetControls(
           this.store,
           graphPublish.scope.ual,
@@ -3351,7 +3352,7 @@ export class DKGPublisher implements Publisher {
       } else {
         await this.store.insert(vmQuads);
       }
-      if (recordDisposition !== 'confirmed') await writeMintMetadata(this.store, contextGraphId, ual, confirmedQuads, recordDisposition);
+      if (recordDisposition !== 'confirmed') await writeMintMetadata(this.store, mintMetaGraph, ual, confirmedQuads, recordDisposition);
       // GH #1078 — supersede/persist private slices only now that the chain
       // has confirmed (before returning 'confirmed', so no read sees the KA
       // confirmed without its private data).
