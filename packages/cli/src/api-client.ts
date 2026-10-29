@@ -1,4 +1,5 @@
 import { createPublicCheckpointClient } from './public-checkpoint-client.js';
+import { normalizeContextGraphIdOrUri } from './context-graph-identifiers.js';
 import type { FinalizedAssertionPublishResponse, KnowledgeAssetPublishResponse } from './knowledge-asset-publish-response.js';
 export type { KnowledgeAssetPublishResponse, ConfirmedCatalogObligationPendingResponseV1, ConfirmedCatalogTransactionResponseV1 } from './knowledge-asset-publish-response.js';
 import type { QueryOptions } from './query-options.js';
@@ -127,9 +128,11 @@ function knowledgeAssetMutationDeadline(name: string, contextGraphId: string, su
 
 /** An unanswered async admission may still have stored a job: point at the job list, not at a re-run. */
 function asyncJobAdmissionDeadline(kind: 'share' | 'publish', name: string, contextGraphId: string): RequestDeadline {
+  // Jobs are stored under the bare ID, and the share-job list compares its filter as given.
+  const id = normalizeContextGraphIdOrUri(contextGraphId);
   const jobList = kind === 'share'
-    ? `dkg ka share-jobs --context-graph-id ${contextGraphId}`
-    : `dkg publisher jobs --context-graph ${contextGraphId}`;
+    ? `dkg ka share-jobs --context-graph-id ${id}`
+    : `dkg publisher jobs --context-graph ${id}`;
   return { outcomeUnknownHint: `A ${kind} job for "${name}" may exist: look for it with \`${jobList}\` before retrying.` };
 }
 

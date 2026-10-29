@@ -1763,6 +1763,14 @@ describe('ApiClient per-route timeout classes', () => {
     expect((err as Error).message).toContain(`A ${kind} job for "asset" may exist: look for it with \`${jobList}\` before retrying.`);
   });
 
+  it('names the stored context graph ID in the job-list hint when the request used its URI', async () => {
+    // The share-job list compares its filter as given, and jobs are stored under the bare ID.
+    slowDaemon(400);
+    const err = await timed(100).knowledgeAssetShareAsync('did:dkg:context-graph:research', 'asset').catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(DaemonOutcomeUnknownError);
+    expect((err as Error).message).toContain('`dkg ka share-jobs --context-graph-id research`');
+  });
+
   it('other writes past the long deadline keep the plain timeout error', async () => {
     slowDaemon(400);
     // A create that neither shares nor publishes has nothing long in flight.
