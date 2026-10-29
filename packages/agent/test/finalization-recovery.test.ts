@@ -123,6 +123,7 @@ function recoveryMaterializer() {
     recoverVerifiedEvidence: async () => undefined,
     replayVerified: async () => 'promoted' as const,
     invalidateVerified: async () => 'invalidated' as const,
+    hasExactVerifiedMemoryCopy: async () => false,
     isRetryableError: (error: unknown) => error instanceof StoreSchedulerBusyError,
   };
 }

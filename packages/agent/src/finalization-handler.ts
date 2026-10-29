@@ -64,9 +64,8 @@ import {
   type FinalizationRecoveryPreparedMaterialization,
   type FinalizationRecoveryReplayOutcome,
 } from './finalization-recovery.js';
-import {
-  FinalizationRecoveryWorker,
-} from './finalization-recovery-worker.js';
+import { FinalizationRecoveryWorker } from './finalization-recovery-worker.js';
+import { holdsExactVerifiedMemoryCopy, reportUnmatchedGraphScopedSwmHead } from './finalization-verified-memory-copy.js';
 import type {
   FinalizationRecoveryEntry,
   FinalizationRecoveryStore,
@@ -399,6 +398,7 @@ export class FinalizationHandler {
         ? createOperationContext('sync', candidate.msg.operationId)
         : createOperationContext('sync')),
       invalidateVerified: (input) => this.invalidateVerifiedGraphScopedFinalization(input),
+      hasExactVerifiedMemoryCopy: (query) => holdsExactVerifiedMemoryCopy(this.store, query),
       isRetryableError: (error) => error instanceof StoreSchedulerBusyError,
     };
     this.recovery = new FinalizationRecovery(
@@ -771,7 +771,7 @@ export class FinalizationHandler {
       || (head.privateMerkleRoot?.toLowerCase() ?? undefined)
         !== (privateMerkleRoot ? ethers.hexlify(privateMerkleRoot).toLowerCase() : undefined)
     ) {
-      this.log.warn(ctx, `Finalization: no matching graph-scoped SWM head for ${scope.ual}`);
+      await reportUnmatchedGraphScopedSwmHead(this.store, this.log, ctx, contextGraphId, parsed);
       return undefined;
     }
     const trustedWireAccess = wireAccessPolicy !== undefined
