@@ -176,7 +176,7 @@ describe('durable recovery on the real libp2p peer store', () => {
       },
       syncCheckpoints: new MemorySyncCheckpointStore(),
       log: { debug: () => undefined, info: () => undefined, warn: () => undefined },
-      networkAdmissionCoordinator: { ensureAdmitted: async () => true },
+      networkAdmissionCoordinator: { ensureAdmitted: async () => true, isProbeBackedOff: () => false },
       resolvePreferredSyncPeerId: async () => undefined,
       ensurePeerConnected: async () => undefined,
       primeCatchupConnections: async () => undefined,
