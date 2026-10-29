@@ -157,10 +157,10 @@ it('uses the validated outbox settings and store captured before asynchronous st
     messengerOutboxDrain: limits, messengerStores: stores,
   });
   const realStart = agent.node.start.bind(agent.node);
-  vi.spyOn(agent.node, 'start').mockImplementation(async () => {
+  vi.spyOn(agent.node, 'start').mockImplementation(async (...args) => {
     limits.batchSize = 0;
     stores.outboxStore = invalidStore;
-    await realStart();
+    await realStart(...args);
   });
   try {
     await agent.start();

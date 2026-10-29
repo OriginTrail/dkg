@@ -988,15 +988,8 @@ export class DKGNode {
       ...(peerStoreOverrides !== undefined
         ? { peerStore: peerStoreOverrides }
         : {}),
-      // `nodeInfo.userAgent` is libp2p's only knob for the identify
-      // protocol's `agentVersion` PB field — every remote peer reads
-      // it back as `Peer.metadata.AgentVersion`. Without it, libp2p
-      // defaults to `js-libp2p/<version>`, a libp2p-toolkit version
-      // that tells a remote operator nothing about which DKG release
-      // this peer is running. The daemon (see
-      // packages/cli/src/daemon/lifecycle.ts) sets `nodeVersion` to
-      // `dkg/<semver>` so /api/peer-info can answer "which DKG release
-      // is each peer running?" from the wire.
+      // Advertise the DKG release in Identify's AgentVersion instead of libp2p's
+      // toolkit version. The daemon supplies dkg/<semver> for /api/peer-info.
       ...(this.config.nodeVersion
         ? { nodeInfo: { userAgent: this.config.nodeVersion } }
         : {}),
@@ -1687,7 +1680,7 @@ export class DKGNode {
   }
 
   get isStarted(): boolean {
-    return this.node !== null;
+    return this.node?.status === 'started';
   }
 
   /**

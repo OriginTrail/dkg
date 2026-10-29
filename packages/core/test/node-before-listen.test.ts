@@ -23,6 +23,7 @@ describe('node network-ready boundary', () => {
     try {
       await entered.promise;
       expect(n.libp2p.status).toBe('stopped');
+      expect(n.isStarted).toBe(false);
       expect(n.multiaddrs).toEqual([]);
       expect(n.libp2p.getProtocols()).toContain('/test/required/1');
     } finally {
@@ -30,6 +31,7 @@ describe('node network-ready boundary', () => {
       await starting;
     }
     expect(n.libp2p.status).toBe('started');
+    expect(n.isStarted).toBe(true);
     expect(n.multiaddrs.length).toBeGreaterThan(0);
   });
 
@@ -46,5 +48,6 @@ describe('node network-ready boundary', () => {
     expect(() => n.libp2p).toThrow();
     await n.start();
     expect(n.libp2p.status).toBe('started');
+    expect(n.isStarted).toBe(true);
   });
 });

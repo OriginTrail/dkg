@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => ({
     getMultiaddrs: vi.fn(() => []),
     getPeers: vi.fn(() => []),
     addEventListener: vi.fn(),
+    start: vi.fn(),
+    status: 'started',
     stop: vi.fn(),
     dial: vi.fn(),
   })),

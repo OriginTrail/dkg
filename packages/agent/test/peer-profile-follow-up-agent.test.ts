@@ -30,6 +30,7 @@ async function connectingAgent(name: string, nodeRole: 'core' | 'edge', publishe
   agent.config.syncContextGraphs = [];
   agent.config.syncSharedMemoryOnConnect = false;
   agent.node.node = {
+      status: 'started',
     getPeers: () => [{ toString: () => PEER }],
     getConnections: () => [{ remotePeer: { toString: () => PEER } }],
   };

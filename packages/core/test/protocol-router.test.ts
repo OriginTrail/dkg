@@ -1509,45 +1509,7 @@ describe('ProtocolRouter', () => {
       expect(dialCalls).toBe(2);
     });
 
-    it('retries a refusal when the caller opts in with retryOnProtocolRefusal (a peer that is still booting)', async () => {
-      let dialCalls = 0;
-      const router = makeRouter({
-        onResolve: () => undefined,
-        dialBehavior: async () => {
-          dialCalls += 1;
-          // multistream answers `na` until the peer registers its handler.
-          if (dialCalls < 2) throw new UnsupportedProtocolError('Protocol selection failed - could not negotiate /dkg/test/1.0.0');
-          return makeStubStream(new Uint8Array([0x0B])) as any;
-        },
-      });
-
-      const startedAt = Date.now();
-      const result = await router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), {
-        retryOnProtocolRefusal: true,
-      });
-      expect(result).toEqual(new Uint8Array([0x0B]));
-      expect(dialCalls).toBe(2);
-      // One backoff step (500 ms) before the second attempt, as for any recoverable error.
-      expect(Date.now() - startedAt).toBeGreaterThanOrEqual(450);
-    });
-
-    it('with retryOnProtocolRefusal a persistent refusal still ends after the router\'s three attempts', async () => {
-      let dialCalls = 0;
-      const router = makeRouter({
-        onResolve: () => undefined,
-        dialBehavior: async () => {
-          dialCalls += 1;
-          throw new UnsupportedProtocolError('Protocol selection failed - could not negotiate /dkg/test/1.0.0');
-        },
-      });
-
-      await expect(
-        router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), { retryOnProtocolRefusal: true }),
-      ).rejects.toMatchObject({ name: 'UnsupportedProtocolError' });
-      expect(dialCalls).toBe(3);
-    });
-
-    it('does not replay a single-use payload after a refusal even when the caller opts in', async () => {
+    it('does not replay a single-use payload after a protocol refusal', async () => {
       let dialCalls = 0;
       const router = makeRouter({
         onResolve: () => undefined,
@@ -1560,7 +1522,6 @@ describe('ProtocolRouter', () => {
       await expect(
         router.send(FAKE_PEER_ID, '/dkg/test/1.0.0', new Uint8Array([1]), {
           payloadReuse: 'single-use',
-          retryOnProtocolRefusal: true,
         }),
       ).rejects.toMatchObject({ name: 'UnsupportedProtocolError' });
       expect(dialCalls).toBe(1);

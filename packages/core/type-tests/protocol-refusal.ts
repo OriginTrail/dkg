@@ -50,3 +50,8 @@ void count;
 watchProtocolRefusal({}, PROTOCOL, () => {});
 // @ts-expect-error type arguments that disagree with the host's own
 watchProtocolRefusal<number, FakeDialOptions, string>(host, PROTOCOL, () => {});
+
+import type { SendOptions } from '../src/protocol-router.js';
+// @ts-expect-error Identity startup compatibility belongs to admission, not generic sends.
+const startupRetry: SendOptions = { retryOnProtocolRefusal: true };
+void startupRetry;

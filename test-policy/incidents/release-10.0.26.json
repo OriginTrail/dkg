@@ -45,7 +45,7 @@
     "status": "detector-proven",
     "proof": {
       "file": "test-policy/incidents/evidence/GH-3475/receipt.json",
-      "sha256": "13b1235c8b1181cd81224c703f9d4a4bd6ab92f64ddb3e41d6e65680f9e9b1f0"
+      "sha256": "2dcc86cbca8b29406ef9c41a42678f6bc154f4a713bfb54796aab7b604579594"
     },
     "owner": "packages/agent maintainers",
     "links": [
