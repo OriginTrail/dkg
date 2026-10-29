@@ -8,8 +8,8 @@
  * once: it tries no other peer and charges no peer. Its graph then waits in a
  * line, in the order graphs were first refused, and the runner retries it:
  * - when a graph-owned slice that ran in a slot ends: the slot goes to the
- *   first graph in line, and an owner that would continue waits at the back of
- *   the line for its next turn;
+ *   first graph in line whose slice the admission would take, and an owner
+ *   that would continue waits at the back of the line for its next turn;
  * - after its own back-off (1 s doubling to 60 s, plus up to a quarter more),
  *   when the admission would take its slice then (for a slot that other sync
  *   work held, or another slot that frees) and no turn is being handed over.
@@ -18,8 +18,9 @@
  * So graphs take turns slice by slice, where before the first owner kept the
  * slot until its graph was complete, and a refused graph neither asks again at
  * once nor waits for a trigger once the slot is free. Slots are not all alike
- * (a selected graph may take one that background recovery may not), so a turn
- * that its graph cannot use goes back to the owner that handed it over.
+ * (a selected graph may take one that background recovery may not): a graph
+ * whose slice the admission would not take is passed over, and a turn that its
+ * graph still cannot use goes to the first waiting owner that can use it.
  *
  * A waiting owner holds no admission. It stops waiting, and its round ends
  * deferred, when no graph-owned slice has run in a slot for
@@ -90,11 +91,11 @@ type Waiter =
     timer: unknown;
   }
   /**
-   * Given a turn: by `givenBy` when an owner handed it over, or by its own
-   * back-off (`retried`), which hands it no slot. It keeps its place until its
-   * slice runs or is refused, or its round ends.
+   * Given a turn: with a slot that a slice released, or by its own back-off
+   * (`retried`), which hands it no slot. It keeps its place until its slice
+   * runs or is refused, or its round ends.
    */
-  | { readonly state: 'woken'; readonly refusals: number; readonly givenBy?: string; readonly retried?: true };
+  | { readonly state: 'woken'; readonly refusals: number; readonly retried?: true };
 
 export class DurableRecoveryTurns {
   private readonly clock: DurableRecoveryTurnsClock;
@@ -141,15 +142,17 @@ export class DurableRecoveryTurns {
 
   /**
    * The graph's slice found no free slot: it keeps its place in line, or joins
-   * the back, and asks again after its back-off. A turn it was handed goes back
-   * to the owner that handed it over.
+   * the back, and asks again after its back-off. A slot it was handed and could
+   * not use goes to the first waiting owner whose slice the admission would
+   * take; refused graphs ask again only after their own back-off.
    */
   refused(contextGraphId: string, retry: DurableRecoveryRetry): void {
-    const giver = this.giverOf(contextGraphId);
+    const waiter = this.line.get(contextGraphId);
+    const handedSlot = waiter?.state === 'woken' && !waiter.retried;
     this.holders.delete(contextGraphId);
     this.handingOver.delete(contextGraphId);
-    this.defer(contextGraphId, (this.line.get(contextGraphId)?.refusals ?? 0) + 1, retry);
-    if (giver !== undefined) this.returnTurn(giver);
+    this.defer(contextGraphId, (waiter?.refusals ?? 0) + 1, retry);
+    if (handedSlot) this.wakeFirst((candidate) => candidate.state === 'parked');
   }
 
   /**
@@ -161,7 +164,9 @@ export class DurableRecoveryTurns {
    */
   handOver(contextGraphId: string, retry: DurableRecoveryRetry, stop?: AbortSignal): Promise<boolean> {
     if (stop?.aborted) return Promise.resolve(false);
-    if (![...this.line.values()].some((waiter) => waiter.state !== 'woken')) return Promise.resolve(true);
+    // No graph waits whose slice the admission would take: the owner keeps its turn.
+    const next = this.first();
+    if (next === undefined) return Promise.resolve(true);
     this.holders.delete(contextGraphId);
     const turn = new Promise<boolean>((resolve) => {
       const onStop = () => {
@@ -178,35 +183,21 @@ export class DurableRecoveryTurns {
         state: 'parked', refusals: 0, retry, resume, timer: this.parkedTimer(contextGraphId, DURABLE_RECOVERY_PARKED_IDLE_MS),
       });
     });
-    this.wakeFirst(contextGraphId);
+    this.wake(next[0], next[1], {});
     return turn;
   }
 
   /**
    * The graph's round ended. A turn it still holds goes to the first graph in
-   * line, or back to the owner that handed it over if no slice used it. A
-   * graph that asked again on its own and used no slot hands nothing on.
+   * line whose slice the admission would take. A graph that asked again on its
+   * own and used no slot hands nothing on.
    */
   roundEnded(contextGraphId: string): void {
     this.handingOver.delete(contextGraphId);
     if (!this.holders.delete(contextGraphId)) return;
     const waiter = this.line.get(contextGraphId);
-    const giver = this.giverOf(contextGraphId);
     if (waiter?.state === 'woken') this.leaveLine(contextGraphId);
-    if (giver !== undefined) this.returnTurn(giver);
-    else if (waiter?.state !== 'woken' || !waiter.retried) this.wakeFirst();
-  }
-
-  /** The owner that handed the graph its turn, while it still waits for it back. */
-  private giverOf(contextGraphId: string): string | undefined {
-    const waiter = this.line.get(contextGraphId);
-    const giver = waiter?.state === 'woken' ? waiter.givenBy : undefined;
-    return giver !== undefined && this.line.get(giver)?.state === 'parked' ? giver : undefined;
-  }
-
-  private returnTurn(giver: string): void {
-    const waiter = this.line.get(giver);
-    if (waiter?.state === 'parked') this.wake(giver, waiter, {});
+    if (waiter?.state !== 'woken' || !waiter.retried) this.wakeFirst();
   }
 
   private defer(contextGraphId: string, refusals: number, retry: DurableRecoveryRetry): void {
@@ -245,19 +236,25 @@ export class DurableRecoveryTurns {
     }, ms);
   }
 
-  private wakeFirst(givenBy?: string): void {
+  /** The first waiting graph, in line order, that `eligible` admits and whose slice the admission would take. */
+  private first(
+    eligible: (waiter: Exclude<Waiter, { state: 'woken' }>) => boolean = () => true,
+  ): [string, Exclude<Waiter, { state: 'woken' }>] | undefined {
     for (const [contextGraphId, waiter] of this.line) {
-      if (waiter.state !== 'woken') {
-        this.wake(contextGraphId, waiter, givenBy === undefined ? {} : { givenBy });
-        return;
-      }
+      if (waiter.state !== 'woken' && eligible(waiter) && waiter.retry.admissible()) return [contextGraphId, waiter];
     }
+    return undefined;
+  }
+
+  private wakeFirst(eligible?: (waiter: Exclude<Waiter, { state: 'woken' }>) => boolean): void {
+    const next = this.first(eligible);
+    if (next !== undefined) this.wake(next[0], next[1], {});
   }
 
   private wake(
     contextGraphId: string,
     waiter: Exclude<Waiter, { state: 'woken' }>,
-    turn: { readonly givenBy?: string; readonly retried?: true },
+    turn: { readonly retried?: true },
   ): void {
     this.clock.clearTimeout(waiter.timer);
     this.line.set(contextGraphId, { state: 'woken', refusals: waiter.refusals, ...turn });

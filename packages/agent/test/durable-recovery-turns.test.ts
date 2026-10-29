@@ -158,38 +158,62 @@ describe('durable recovery turns', () => {
     expect(runs).toEqual(['b', 'c']);
   });
 
-  it('gives a turn back to the owner that handed it over when its graph cannot use it', async () => {
+  it('passes a slot its graph could not use to the first waiting owner that can, without trying the graphs that cannot', async () => {
     const { clock } = manualClock();
     const turns = new DurableRecoveryTurns(clock);
     const runs: string[] = [];
     const resumed: string[] = [];
-    const handOver = () => {
-      void turns.handOver('s', retryOf(runs, 's')).then((turn) => { resumed.push(`s:${turn}`); });
-    };
+    let cFits = false;
     turns.sliceStarting('s');
     turns.refused('b', retryOf(runs, 'b'));
-    turns.refused('c', retryOf(runs, 'c'));
+    turns.refused('c', retryOf(runs, 'c', () => cFits));
     turns.sliceRan('s');
-    handOver();
+    void turns.handOver('s', retryOf(runs, 's')).then((turn) => { resumed.push(`s:${turn}`); });
     expect(runs).toEqual(['b']);
 
-    // b's kind of slot is still taken: s, whose kind is free, has its turn back, and b keeps its place.
+    // Other work took b's kind of slot first: the slot goes to s, whose kind is free. c, whose kind is
+    // not, is not tried; b keeps its place and asks again after its back-off.
     turns.sliceStarting('b');
     turns.refused('b', retryOf(runs, 'b'));
     await Promise.resolve();
     expect(resumed).toEqual(['s:true']);
+    expect(runs).toEqual(['b']);
     expect(turns.isDeferred('b')).toBe(true);
+    expect(turns.isDeferred('c')).toBe(true);
 
+    // With no graph in line whose slice would be taken, s keeps its turn and does not wait.
     turns.sliceStarting('s');
     turns.sliceRan('s');
-    handOver();
-    expect(runs).toEqual(['b', 'b']);
-    // A round that finds no peer gives the turn back too.
+    turns.refused('b', retryOf(runs, 'b', () => false));
+    await expect(turns.handOver('s', retryOf(runs, 's'))).resolves.toBe(true);
+    // Once c's kind is free, the slot s releases goes to c.
+    cFits = true;
+    turns.roundEnded('s');
+    expect(runs).toEqual(['b', 'c']);
+  });
+
+  it('resumes a parked owner when a slot passed on after another graph\'s slice is refused', async () => {
+    const { clock } = manualClock();
+    const turns = new DurableRecoveryTurns(clock);
+    const runs: string[] = [];
+    let aTurn: boolean | undefined;
+    turns.sliceStarting('a');
+    turns.refused('b', retryOf(runs, 'b'));
+    turns.refused('c', retryOf(runs, 'c'));
+    turns.sliceRan('a');
+    void turns.handOver('a', retryOf(runs, 'a')).then((turn) => { aTurn = turn; });
+    expect(runs).toEqual(['b']);
+    // b runs and is complete: the slot goes to c, which waited before a.
+    turns.sliceStarting('b');
+    turns.sliceRan('b');
     turns.roundEnded('b');
+    expect(runs).toEqual(['b', 'c']);
+    // c cannot use it after all. a can, and resumes at once, without a timer.
+    turns.sliceStarting('c');
+    turns.refused('c', retryOf(runs, 'c'));
     await Promise.resolve();
-    expect(resumed).toEqual(['s:true', 's:true']);
-    expect(runs).toEqual(['b', 'b']);
-    expect(turns.isDeferred('c')).toBe(true);
+    expect(aTurn).toBe(true);
+    expect(runs).toEqual(['b', 'c']);
   });
 
   it('passes on a turn its graph did not use, keeps the place of a graph refused in its turn, and passes nothing on for a retry', () => {
@@ -199,8 +223,8 @@ describe('durable recovery turns', () => {
 
     turns.sliceStarting('a');
     turns.refused('b', retryOf(runs, 'b'));
-    turns.refused('c', retryOf(runs, 'c', () => false));
-    turns.refused('d', retryOf(runs, 'd', () => false));
+    turns.refused('c', retryOf(runs, 'c'));
+    turns.refused('d', retryOf(runs, 'd'));
     turns.roundEnded('a');
     expect(runs).toEqual(['b']);
 
@@ -210,7 +234,7 @@ describe('durable recovery turns', () => {
 
     // Other work took the slot before c's slice: c keeps its place, and nobody else is woken.
     turns.sliceStarting('c');
-    turns.refused('c', retryOf(runs, 'c', () => false));
+    turns.refused('c', retryOf(runs, 'c'));
     expect(runs).toEqual(['b', 'c']);
     expect(turns.isDeferred('c')).toBe(true);
 
@@ -228,6 +252,7 @@ describe('durable recovery turns', () => {
     advance(1_000);
     expect(runs).toEqual(['b', 'c', 'c', 'd', 'f']);
     turns.refused('g', retryOf(runs, 'g', () => false));
+    turns.refused('h', retryOf(runs, 'h'));
     turns.roundEnded('f');
     expect(runs).toEqual(['b', 'c', 'c', 'd', 'f']);
   });
@@ -236,32 +261,32 @@ describe('durable recovery turns', () => {
     const { clock, advance } = manualClock();
     const turns = new DurableRecoveryTurns(clock);
     const runs: string[] = [];
-    // Other work holds the slot whenever the admission is asked.
-    const busy = () => false;
+    // The slot is free when a slice releases it, and then taken again by other work.
+    let free = true;
+    const fits = () => free;
     turns.sliceStarting('a');
-    turns.refused('d1', retryOf(runs, 'd1', busy));
-    turns.refused('d2', retryOf(runs, 'd2', busy));
+    turns.refused('d1', retryOf(runs, 'd1', fits));
+    turns.refused('d2', retryOf(runs, 'd2', fits));
     turns.sliceRan('a');
     let aTurn: boolean | undefined;
-    void turns.handOver('a', retryOf(runs, 'a')).then((turn) => { aTurn = turn; });
+    void turns.handOver('a', retryOf(runs, 'a', () => false)).then((turn) => { aTurn = turn; });
     expect(runs).toEqual(['d1']);
     // d1 uses the slot it was handed, and its graph is complete: the slot goes to d2, which waited before a.
     turns.sliceStarting('d1');
     turns.sliceRan('d1');
     turns.roundEnded('d1');
     expect(runs).toEqual(['d1', 'd2']);
-    // Other work took the slot first: no graph-owned slice holds a turn, and a keeps waiting.
+    // Other work took the slot first: no graph-owned slice holds a turn, and a's kind is taken too.
+    free = false;
     turns.sliceStarting('d2');
-    turns.refused('d2', retryOf(runs, 'd2', busy));
+    turns.refused('d2', retryOf(runs, 'd2', fits));
 
     // A slice of another graph runs halfway through: the wait starts over from it.
     advance(DURABLE_RECOVERY_PARKED_IDLE_MS / 2);
     turns.sliceStarting('y');
     turns.sliceRan('y');
     turns.roundEnded('y');
-    expect(runs).toEqual(['d1', 'd2', 'd2']);
-    turns.sliceStarting('d2');
-    turns.refused('d2', retryOf(runs, 'd2', busy));
+    expect(runs).toEqual(['d1', 'd2']);
     advance(DURABLE_RECOVERY_PARKED_IDLE_MS - 1);
     await Promise.resolve();
     expect(aTurn).toBeUndefined();
@@ -270,9 +295,10 @@ describe('durable recovery turns', () => {
     await Promise.resolve();
     expect(aTurn).toBe(false);
     expect(turns.isDeferred('a')).toBe(true);
-    // It waits as a refused graph now, and is retried after its back-off.
-    advance(1_000);
-    expect(runs.at(-1)).toBe('a');
+    // a waits as a refused graph now. Its own kind of slot stays taken, so only d2 is retried once the slot is free.
+    free = true;
+    advance(2_000);
+    expect(runs).toEqual(['d1', 'd2', 'd2']);
   });
 
   it('keeps time with the process clock by default', async () => {
@@ -536,13 +562,12 @@ describe('durable recovery under local backpressure', () => {
     await settle(() => node.pending.length === 1);
     expect((await node.run('b')).outcome).toBe('deferred');
 
-    // Each slice of s hands its turn to b, which cannot use it and gives it back at once: no wait for a timer.
+    // b's kind of slot stays taken: s never hands its turn to b, waits for nothing, and b is not tried again.
     for (const graph of ['s', 's', 's']) await node.release(graph);
     expect((await s).outcome).toBe('terminal');
     expect(node.ran).toEqual(['s', 's', 's']);
-    // When s is complete its turn goes to b once more, which still cannot use it.
-    await settle(() => node.refused.length === 4);
-    expect(node.refused).toEqual(['b', 'b', 'b', 'b']);
+    await macrotask();
+    expect(node.refused).toEqual(['b']);
   });
 
   it('ends the round of a waiting owner at once when the node stops, with the deferral on its peer too', async () => {
