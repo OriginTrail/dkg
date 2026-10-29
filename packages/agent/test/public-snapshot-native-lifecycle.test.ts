@@ -7,7 +7,7 @@ import { resumePublicCheckpointEdge } from '../src/snapshot-resume-edge.js';
 import { startSnapshotNativeProcess } from '../src/snapshot-native-process.js';
 import { handoffFixture } from './helpers/native-checkpoint-fixture.js';
 
-const lifecycle = vi.hoisted(() => ({ events: [] as string[], current: true, startupFails: false,
+const lifecycle = vi.hoisted(() => ({ events: [] as string[], current: true, startupFails: false, startFails: false,
   startup: vi.fn(), create: vi.fn(), stop: vi.fn(), sync: vi.fn(), close: vi.fn(), processStop: vi.fn() }));
 vi.mock('node:fs/promises', async original => ({ ...await original<typeof import('node:fs/promises')>(), statfs: vi.fn() }));
 vi.mock('../src/snapshot-native-process.js', () => ({ startSnapshotNativeProcess: vi.fn() }));
@@ -17,16 +17,17 @@ vi.mock('@origintrail-official/dkg-storage', async original => ({
 }));
 vi.mock('../src/dkg-agent.js', () => ({ DKGAgent: { create: lifecycle.create } }));
 beforeEach(() => {
-  vi.clearAllMocks(); lifecycle.startup.mockReset(); lifecycle.events.length = 0; lifecycle.current = true; lifecycle.startupFails = false;
+  vi.clearAllMocks(); lifecycle.startup.mockReset(); lifecycle.events.length = 0; lifecycle.current = true; lifecycle.startupFails = false; lifecycle.startFails = false;
   vi.mocked(statfs).mockResolvedValue({ bavail: 20 * 2 ** 30, bsize: 1 } as never);
   vi.stubGlobal('fetch', vi.fn(async () => new Response('', { status: 200 })));
   lifecycle.processStop.mockImplementation(async () => { lifecycle.events.push('process stopped'); });
   lifecycle.close.mockImplementation(async () => { lifecycle.events.push('store closed'); });
   vi.mocked(startSnapshotNativeProcess).mockResolvedValue({ stop: lifecycle.processStop, assertRunning: vi.fn(), closed: Promise.resolve(0) });
   lifecycle.create.mockImplementation(async config => {
-    lifecycle.stop.mockImplementation(async () => { await config.store.close(); });
+    let started = false;
+    lifecycle.stop.mockImplementation(async () => { if (started) await config.store.close(); });
     lifecycle.sync.mockImplementation(async () => { lifecycle.events.push('catchup'); return { current: lifecycle.current, alreadyPresent: 1, completeAsOfSnapshot: true, assets: 1, committed: 1, inventoryDigest: 'c'.repeat(64) }; });
-    return { start: async () => { lifecycle.events.push('start'); },
+    return { start: async () => { if (lifecycle.startFails) throw new Error('listen failed'); started = true; lifecycle.events.push('start'); },
       waitForPublicCheckpointStartup: async (graph: string, signal: AbortSignal) => {
         await lifecycle.startup(graph, signal);
         lifecycle.events.push('startup barrier'); if (lifecycle.startupFails) throw new Error('startup failed');
@@ -36,6 +37,19 @@ beforeEach(() => {
 afterEach(() => { vi.unstubAllGlobals(); vi.useRealTimers(); });
 
 describe('fresh checkpoint Edge and restart ownership', () => {
+  it.each(['fresh', 'resume'] as const)('closes the native store when the %s agent never starts', async mode => {
+    const f = await handoffFixture();
+    if (mode === 'resume') {
+      const initial = await createFreshPublicCheckpointEdge(f.options);
+      await initial.agent.stop();
+    }
+    lifecycle.close.mockClear(); lifecycle.processStop.mockClear();
+    lifecycle.startFails = true;
+    const start = mode === 'fresh' ? createFreshPublicCheckpointEdge : resumePublicCheckpointEdge;
+    await expect(start(f.options)).rejects.toThrow('listen failed');
+    expect(lifecycle.close).toHaveBeenCalledTimes(1);
+    expect(lifecycle.processStop).toHaveBeenCalledTimes(1);
+  });
   it('keeps fresh and resumed Edges alive after their former job deadlines and caller cancellation', async () => {
     const f = await handoffFixture(), caller = new AbortController(); f.options.signal = caller.signal;
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] });
