@@ -14,7 +14,7 @@ import {
 } from '@origintrail-official/dkg-core';
 import {
   withMaterializationLock,
-  readPreparedMintAdoption,
+  revalidatePreparedMintAdoption,
   prepareMintAdoption,
   withAssertionLifecycleWriteLease,
   assertionLifecycleWriteLockKey,
@@ -175,7 +175,7 @@ export async function reconcileLateMint(
     // One owner reacquires VM custody, refreshes chain evidence and holds it through completion.
     return withMaterializationLock(lockedReservation.metaGraph, lockedReservation.scope.ual, async () =>
       completeRecordedLifecycle(host, lockedReservation, target,
-        await readPreparedMintAdoption(evidence, host.chain, expected), heldLifecycle, share === 'resident' ? 'continue' : 'stop'));
+        await revalidatePreparedMintAdoption(evidence, host.chain, expected), heldLifecycle, share === 'resident' ? 'continue' : 'stop'));
   });
 
   const after = await lifecycle();

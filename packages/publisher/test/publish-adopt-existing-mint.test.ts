@@ -522,7 +522,7 @@ describe('adoption refuses what the chain cannot prove', () => {
   });
 });
 
-it('prepared receipt evidence is adapter/reservation-bound and avoids a second slow lookup', async () => {
+it('prepared receipt acquisition is immutable, adapter/reservation-bound and leaves refresh to recording', async () => {
   const f = await strandedPublishFixture();
   try {
     const original = await f.strand();
@@ -531,6 +531,8 @@ it('prepared receipt evidence is adapter/reservation-bound and avoids a second s
     const lookup = vi.spyOn(f.chain, 'resolveKnowledgeAssetMint');
     const evidence = await prepareMintAdoption(f.chain, expected, original.txHash);
     const request = { kind: 'prepared' as const, evidence };
+    const canonical = vi.spyOn(f.chain, 'isReceiptBlockFinalAndCanonical');
+    const current = vi.spyOn(f.chain, 'readKnowledgeAssetVersionSnapshot');
     await expect(adoptMintForRecording(f.chain, expected, request))
       .resolves.toMatchObject({ result: { txHash: original.txHash }, adopted: true });
     expect(lookup).toHaveBeenCalledOnce();
@@ -539,6 +541,14 @@ it('prepared receipt evidence is adapter/reservation-bound and avoids a second s
     await expect(adoptMintForRecording(new MockChainAdapter(), expected, request))
       .rejects.toThrow(/does not match/);
     await expect(adoptMintForRecording(f.chain, expected, { kind: 'prepared', evidence: {} as never })).rejects.toThrow(/does not match/);
+    const acquired = await adoptMintForRecording(f.chain, expected, request);
+    acquired.result.merkleRoot.fill(0);
+    expect((await adoptMintForRecording(f.chain, expected, request)).result.merkleRoot).toEqual(f.sealedRoot);
+    expect(canonical).not.toHaveBeenCalled();
+    expect(current).not.toHaveBeenCalled();
+    await f.publisher.recordExistingMintFromSharedMemory(CONTEXT_GRAPH, 'all', request, f.publishOptions);
+    expect(canonical).toHaveBeenCalledOnce();
+    expect(current).toHaveBeenCalledOnce();
     expect(lookup).toHaveBeenCalledOnce();
   } finally { await f.store.close(); }
 });
@@ -561,7 +571,7 @@ it('nested share cleanup requires the current lease for its exact lifecycle and 
 });
 
 
-it.each(['superseded', 'reorged'] as const)('revalidates prepared mint evidence after it becomes %s', async stale => {
+it.each(['superseded', 'reorged'] as const)('recording revalidates prepared mint evidence after it becomes %s', async stale => {
   const f = await strandedPublishFixture();
   try {
     const original = await f.strand();
@@ -574,7 +584,7 @@ it.each(['superseded', 'reorged'] as const)('revalidates prepared mint evidence 
         newByteSize: 1n, newMerkleLeafCount: 1, authorAddress: ethers.ZeroAddress,
         authorR: new Uint8Array(32), authorVS: new Uint8Array(32) });
     } else vi.spyOn(f.chain, 'isReceiptBlockFinalAndCanonical').mockResolvedValue(false);
-    await expect(adoptMintForRecording(f.chain, expected, { kind: 'prepared', evidence }))
+    await expect(f.publisher.recordExistingMintFromSharedMemory(CONTEXT_GRAPH, 'all', { kind: 'prepared', evidence }, f.publishOptions))
       .rejects.toMatchObject({ reason: stale === 'superseded' ? 'superseded' : 'mint-not-final' });
     expect(lookup).toHaveBeenCalledOnce();
     await expectNothingRecorded(f);

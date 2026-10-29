@@ -165,7 +165,7 @@ import {
   type PublisherAddressResolution,
   type PublisherSigner,
 } from './publisher-planning.js';
-import { adoptMintForRecording, readPreparedMintAdoption } from './adopt-existing-mint.js';
+import { adoptMintForRecording, revalidatePreparedMintAdoption } from './adopt-existing-mint.js';
 import { graphScopeTargetsChain } from './graph-scope-chain-target.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
@@ -3191,7 +3191,7 @@ export class DKGPublisher implements Publisher {
       // Evidence may have aged while waiting for the shared materialization lock.
       // Revalidate before classification, VM writes or the caller's SWM cleanup.
       if (recording.kind === 'adopted') {
-        await readPreparedMintAdoption(recording.evidence, this.chain, {
+        await revalidatePreparedMintAdoption(recording.evidence, this.chain, {
           kaId: recording.content.reservedKaId, merkleRoot: kcMerkleRoot,
           contextGraphId: recording.content.target.publisherContextGraphId,
           authorAddress: recording.content.seal.authorAddress,

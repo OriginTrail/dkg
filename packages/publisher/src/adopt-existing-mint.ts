@@ -180,7 +180,7 @@ export async function mintOrAdoptKnowledgeAssets(
         `the contract reports KA ${mintedKaId} already minted`, { cause: error });
     }
     const evidence = await prepareVerifiedMintAdoption(chain, expected, { revert: error });
-    return { result: await readPreparedMintAdoption(evidence, chain, expected), adopted: true, evidence };
+    return { result: publishResultFromMint(preparedMintEvidence(evidence, chain, expected)), adopted: true, evidence };
   }
 }
 
@@ -202,26 +202,33 @@ async function prepareVerifiedMintAdoption(chain: ChainAdapter, expected: MintAd
   preparedEvidence.set(token, { chain, expected: { ...expected, merkleRoot: Uint8Array.from(expected.merkleRoot) }, mint: { ...mint, merkleRoot: Uint8Array.from(mint.merkleRoot) } });
   return token;
 }
-/** Revalidate prepared evidence inside the lifecycle lease, without rescanning creation logs. */
-export async function readPreparedMintAdoption(token: PreparedMintAdoption, chain: ChainAdapter,
-  expected: MintAdoptionExpectation): Promise<OnChainPublishResult> {
+/** Access the immutable prepared receipt without RPCs; only lock owners refresh freshness. */
+function preparedMintEvidence(token: PreparedMintAdoption, chain: ChainAdapter,
+  expected: MintAdoptionExpectation): KnowledgeAssetMintEvidence {
   const evidence = preparedEvidence.get(token);
   if (!evidence || evidence.chain !== chain || evidence.expected.kaId !== expected.kaId
     || evidence.expected.contextGraphId !== expected.contextGraphId
     || evidence.expected.authorAddress.toLowerCase() !== expected.authorAddress.toLowerCase()
     || ethers.hexlify(evidence.expected.merkleRoot) !== ethers.hexlify(expected.merkleRoot))
     throw new Error('Prepared mint evidence does not match the current sealed reservation');
-  if (!chain.isReceiptBlockFinalAndCanonical || !await chain.isReceiptBlockFinalAndCanonical(evidence.mint))
+  return evidence.mint;
+}
+
+/** The recording/completion lock owner refreshes evidence before persisting current state. */
+export async function revalidatePreparedMintAdoption(token: PreparedMintAdoption, chain: ChainAdapter,
+  expected: MintAdoptionExpectation): Promise<OnChainPublishResult> {
+  const mint = preparedMintEvidence(token, chain, expected);
+  if (!chain.isReceiptBlockFinalAndCanonical || !await chain.isReceiptBlockFinalAndCanonical(mint))
     throw new MintAdoptionRefusedError('mint-not-final', expected.kaId, 'the prepared mint block is no longer final and canonical');
-  await assertMintCurrent(chain, expected, evidence.mint);
-  return publishResultFromMint(evidence.mint);
+  await assertMintCurrent(chain, expected, mint);
+  return publishResultFromMint(mint);
 }
 
 /** Verify receipt evidence directly; local record policy belongs to the recorder. */
 export async function adoptMintForRecording(chain: ChainAdapter, expected: MintAdoptionExpectation,
   request: MintAdoptionRequest): Promise<Extract<MintOrAdoptOutcome, { adopted: true }>> {
   const evidence = request.kind === 'prepared' ? request.evidence : await prepareMintAdoption(chain, expected, request.txHash);
-  return { result: await readPreparedMintAdoption(evidence, chain, expected), adopted: true, evidence };
+  return { result: publishResultFromMint(preparedMintEvidence(evidence, chain, expected)), adopted: true, evidence };
 }
 
 function publishResultFromMint(mint: KnowledgeAssetMintEvidence): OnChainPublishResult {
@@ -230,7 +237,7 @@ function publishResultFromMint(mint: KnowledgeAssetMintEvidence): OnChainPublish
     kaId: mint.kaId,
     startKAId: mint.kaId,
     endKAId: mint.kaId,
-    merkleRoot: mint.merkleRoot,
+    merkleRoot: Uint8Array.from(mint.merkleRoot),
     knowledgeAssetsContract: mint.knowledgeAssetsContract,
     txHash: mint.txHash,
     blockNumber: mint.blockNumber,

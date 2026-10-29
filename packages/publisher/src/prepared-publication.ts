@@ -4,7 +4,8 @@
 import {GRAPH_KA_CONTENT_SCOPE_VERSION, type CatalogRootResult, type GraphKnowledgeAssetScope, type Logger, type OperationContext} from '@origintrail-official/dkg-core';
 import type { KAMetadata } from './metadata.js';
 import type {Quad} from '@origintrail-official/dkg-storage';
-import type {PublishOptions, KAManifestEntry, V10CoreNodeACK, V10ACKProviderParams} from './publisher.js';
+import { pickPublishLifecycleHooks } from './publish-lifecycle-hooks.js';
+import type {PublishLifecycleHooks, PublishOptions, KAManifestEntry, V10CoreNodeACK, V10ACKProviderParams} from './publisher.js';
 import type { V10PublishParams } from '@origintrail-official/dkg-chain';
 import { buildAuthorAttestationTypedData } from '@origintrail-official/dkg-core';
 import { ethers } from 'ethers';
@@ -80,8 +81,7 @@ export function assertPreparedPublicationContentSeal(content: PreparedPublicatio
   }
 }
 /** Live execution capabilities never enter the shared recording payload. */
-export type PublicationExecution = Pick<PublishOptions, 'onPhase' | 'onPublishConfirmed' | 'onBroadcastAccepted' | 'onBeforeBroadcast'
-  | 'encryptInlinePayload' | 'encryptInlineChunked' | 'v10ACKProvider' | 'fromSharedMemory'>;
+export type PublicationExecution = PublishLifecycleHooks & Pick<PublishOptions, 'encryptInlinePayload' | 'encryptInlineChunked' | 'v10ACKProvider' | 'fromSharedMemory'>;
 /** Recording a sealed graph preserves the validated reservation instead of optional target fields. */
 export interface PreparedSealedGraphPublicationContent extends PreparedPublicationContent {
   target: PreparedPublicationContent['target'] & {
@@ -105,7 +105,9 @@ export async function preparePublication(input: PreparedPublicationContent, opti
   const { pricingPolicy, lifecycle, ctx, explicitPublishEpochs, seal, reservedKaId } = input;
   const kaCount = 1;
   const entityCount = manifestEntries.length;
-  const { onPhase } = options;
+  // Confirmation belongs to recording; submission forwards every other lifecycle hook.
+  const { onPublishConfirmed: _recordingConfirmation, ...hooks } = pickPublishLifecycleHooks(options);
+  const { onPhase } = hooks;
   const swmGraphId = contextGraphId;
   let publishOperationId = '';
   const ensurePublishOperationIdentity = () => { publishOperationId ||= ports.allocateOperationId(); };
@@ -379,7 +381,7 @@ export async function preparePublication(input: PreparedPublicationContent, opti
     diagnostics: { contextGraphId, publisherAddress, entityCount, publicRecordCount: allSkolemizedQuads.length,
       hiddenCommitmentCount: privateRoots.length, billableByteSize: publicationPricing.billableByteSize,
       pricingPolicy: publicationPricing.policy },
-    hooks: { onPhase, onBroadcastAccepted: options.onBroadcastAccepted, onBeforeBroadcast: options.onBeforeBroadcast } };
+    hooks };
   } catch (error) {
     throw publicationAcquisitionFailure(error, ports.log, ctx, lifecycle, publisherContextGraphId ?? 0n, v10ACKs?.length ?? 0);
   }
@@ -400,6 +402,6 @@ export interface PreparedOnChainPublication {
   ctx: OperationContext;
   diagnostics: { contextGraphId: string; publisherAddress: string; entityCount: number; publicRecordCount: number;
     hiddenCommitmentCount: number; billableByteSize: bigint; pricingPolicy: string };
-  hooks: Pick<PublishOptions, 'onPhase' | 'onBroadcastAccepted' | 'onBeforeBroadcast'>;
+  hooks: Omit<PublishLifecycleHooks, 'onPublishConfirmed'>;
 }
 export type PreparedPublication = PreparedLocalPublication | PreparedOnChainPublication;
