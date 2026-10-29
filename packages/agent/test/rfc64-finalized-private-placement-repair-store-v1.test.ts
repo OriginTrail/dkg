@@ -74,10 +74,11 @@ async function openStore(dataDir: string) {
 }
 
 describe('RFC-64 finalized-private placement repair store', () => {
-  it('normalizes legacy synchronous operations and rejects cancellation before reading', async () => {
-    const list = vi.fn(() => [repair]);
+  it('rejects cancellation before invoking asynchronous operations', async () => {
+    const list = vi.fn(async () => [repair]);
     const store = createRfc64FinalizedPrivatePlacementRepairStoreV1({
-      listFinalizedPrivatePlacementRepairs: list,
+      listFinalizedPrivatePlacementRepairs: () => [repair],
+      listFinalizedPrivatePlacementRepairsAsync: list,
       readFinalizedPrivatePlacementFailure: () => null,
       writeFinalizedPrivatePlacementFailures: () => {},
       putFinalizedPrivatePlacementRepair: () => {},
@@ -90,7 +91,7 @@ describe('RFC-64 finalized-private placement repair store', () => {
     expect(list).toHaveBeenCalledTimes(1);
   });
 
-  it('binds native asynchronous operations to their owner without taking the legacy path', async () => {
+  it('preserves the asynchronous operation receiver without taking the synchronous path', async () => {
     const operations = {
       rows: [repair],
       listFinalizedPrivatePlacementRepairs: vi.fn(() => []),

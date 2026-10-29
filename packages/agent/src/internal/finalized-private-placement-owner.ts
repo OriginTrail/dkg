@@ -25,11 +25,13 @@ interface ResetPlan {
   readonly repair: Rfc64FinalizedPrivatePlacementRepairV1;
   readonly state: PrivatePlacementFailureStateV1 | null;
 }
-interface GraphLane {
-  readonly id: ContextGraphIdV1;
-  readonly entries: Set<RetryEntry>;
+interface LaneObservation {
   revision?: string;
   resetPending: boolean;
+}
+interface GraphLane extends LaneObservation {
+  readonly id: ContextGraphIdV1;
+  readonly entries: Set<RetryEntry>;
 }
 type LaneReconciliation =
   | { readonly kind: 'decision'; readonly decision: FinalizedPlacementDecisionV1; readonly resetCommitted: boolean }
@@ -63,7 +65,8 @@ export class FinalizedPrivatePlacementOwnerV1 {
   readonly #lanes = new Map<string, GraphLane>();
   readonly #waiters = new FinalizedPrivatePlacementWaitersV1();
   readonly #runner: NextTurnRecurringTaskV1;
-  #arrivedDuringListing: Set<string> | undefined;
+  readonly #discoveryObservations = new Map<string, LaneObservation>();
+  #arrivedDuringListing: Map<string, ContextGraphIdV1> | undefined;
   #waiterTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(dependencies: Dependencies, options: Options) {
@@ -90,25 +93,31 @@ export class FinalizedPrivatePlacementOwnerV1 {
 
   get running(): boolean { return this.#runner.running; }
   get closed(): boolean { return this.#runner.closed; }
-  requestPass(): boolean { return this.#runner.request(); }
+  requestPass(): boolean { return this.#runner.requestNextTurn(); }
   whenIdle(): Promise<void> { return this.#runner.whenIdle(); }
 
   /** Observe an inactive edge without admitting a placement. */
   observeLaneAvailability(contextGraphId: string): void {
     if (this.closed) return;
-    let lane = this.#lanes.get(contextGraphId);
-    if (!lane) {
-      lane = { id: contextGraphId as ContextGraphIdV1, entries: new Set(), resetPending: false };
-      this.#lanes.set(contextGraphId, lane);
-    }
+    const lane = this.#lanes.get(contextGraphId);
     try {
-      this.#commitLaneReset(lane, this.#readAuthority(contextGraphId));
+      const authority = this.#readAuthority(contextGraphId);
+      if (this.#arrivedDuringListing || !lane) {
+        const hint = finalizedPlacementAuthorityRevisionV1(authority);
+        if (hint === undefined) return;
+        const observation = this.#discoveryObservations.get(contextGraphId)
+          ?? { revision: lane?.revision, resetPending: lane?.resetPending ?? false };
+        const revision = JSON.stringify(hint);
+        observation.resetPending ||= observation.revision !== undefined && observation.revision !== revision;
+        observation.revision = revision;
+        this.#discoveryObservations.set(contextGraphId, observation);
+      } else this.#commitLaneReset(lane, authority);
     } catch (error) { this.#warn('catalog_private_repair_lane_reset_failed', error); }
   }
 
   request(repair: Rfc64FinalizedPrivatePlacementRepairV1, observer?: CatalogPlacementWaiterObserverV1): Rfc64FinalizedPrivatePlacementRepairRequestV1 {
     const key = finalizedPrivateRepairKeyV1(repair);
-    this.#arrivedDuringListing?.add(key);
+    this.#arrivedDuringListing?.set(key, repair.contextGraphId);
     this.#options.timing().owed(key);
     const rejected = (): Rfc64FinalizedPrivatePlacementRepairRequestV1 => {
       try { observer?.released(); } catch { /* Observation cannot prevent waiter settlement. */ }
@@ -163,6 +172,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
     this.#waiters.releaseAll();
     this.#retries.clear();
     this.#lanes.clear();
+    this.#discoveryObservations.clear();
   }
 
   #entry(repair: Rfc64FinalizedPrivatePlacementRepairV1, key = finalizedPrivateRepairKeyV1(repair)): RetryEntry {
@@ -198,13 +208,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
     if (hint === undefined) return false;
     const revision = JSON.stringify(hint);
     lane.resetPending ||= lane.revision !== undefined && lane.revision !== revision;
-    // Initial discovery can yield before any siblings are registered. Remember
-    // every observed edge, but defer its durable reset until the complete snapshot
-    // is registered. Even an inactive/active round trip must retain resetPending.
-    if (this.#arrivedDuringListing || lane.entries.size === 0 || !lane.resetPending) {
-      lane.revision = revision;
-      return false;
-    }
+    if (!lane.resetPending) { lane.revision = revision; return false; }
     this.#commitResets([...lane.entries].map(entry => this.#prepareReset(entry.repair)));
     // Publish the graph transition only after the complete durable batch commits.
     lane.revision = revision;
@@ -270,7 +274,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
 
   async #runPass(signal: AbortSignal): Promise<void> {
     const timing = this.#options.timing();
-    const arrivedDuringListing = new Set<string>();
+    const arrivedDuringListing = new Map<string, ContextGraphIdV1>();
     this.#arrivedDuringListing = arrivedDuringListing;
     timing.passReading();
     const repairs = await this.#dependencies.listFinalizedPrivateRepairsAsync(signal);
@@ -288,11 +292,22 @@ export class FinalizedPrivatePlacementOwnerV1 {
     if (signal.aborted) return;
     this.#arrivedDuringListing = undefined;
     timing.passStarted(currentKeys);
-    for (const key of arrivedDuringListing) timing.owed(key);
+    for (const key of arrivedDuringListing.keys()) timing.owed(key);
     // Establish every queued sibling before the first awaited placement. A lane
     // notification during that attempt must also reset later parked siblings.
     for (const { repair, key } of queued) this.#entry(repair, key);
     for (const key of this.#retries.keys()) if (!currentKeys.has(key)) this.#forget(key);
+    // A successful snapshot owns observation lifetime. Transfer relevant edges
+    // only after all siblings exist; retain late arrivals for the next snapshot.
+    const arrivingGraphs = new Set<string>(arrivedDuringListing.values());
+    for (const [graph, observation] of this.#discoveryObservations) {
+      const lane = this.#lanes.get(graph);
+      if (lane) {
+        lane.revision = observation.revision;
+        lane.resetPending ||= observation.resetPending;
+      }
+      if (lane || !arrivingGraphs.has(graph)) this.#discoveryObservations.delete(graph);
+    }
     for (const key of this.#waiters.keys()) if (!currentKeys.has(key) && !arrivedDuringListing.has(key)) this.#waiters.release(key);
     this.#options.fullCatalogs.passStarted(currentKeys);
     const blockedGraphs = new Set<ContextGraphIdV1>();

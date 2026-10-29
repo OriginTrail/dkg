@@ -315,16 +315,49 @@ it('retains the observed transition across a failed listing and failed durable r
 it('discovers an empty queue asynchronously and retains a request arriving after its snapshot', async () => {
   const f = fixture([]); const held = deferred(); const row = repair('arrived-after-empty-snapshot');
   f.list.mockImplementationOnce(async () => { await held.promise; return []; });
-  f.owner.start(ctx);
-  expect(f.syncList).not.toHaveBeenCalled();
-  await vi.advanceTimersByTimeAsync(0);
-  expect(f.list).toHaveBeenCalledTimes(1);
-  f.setRows([row]); const request = f.owner.requestFinalizedPrivate({ repair: row, ctx });
-  let settled = false; void request.whenAttempted.then(() => { settled = true; });
-  expect(request.accepted).toBe(true);
-  await Promise.resolve(); expect(settled).toBe(false);
-  held.resolve(); await f.owner.whenIdle(); await request.whenAttempted;
-  expect(f.syncList).not.toHaveBeenCalled();
-  expect(f.list).toHaveBeenCalledTimes(2);
-  expect(f.attempt).toHaveBeenCalledTimes(1);
+  try {
+    f.owner.start(ctx);
+    expect(f.list).not.toHaveBeenCalled();
+    expect(f.syncList).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(f.list).toHaveBeenCalledTimes(1);
+    f.setRows([row]); const request = f.owner.requestFinalizedPrivate({ repair: row, ctx });
+    let settled = false; void request.whenAttempted.then(() => { settled = true; });
+    expect(request.accepted).toBe(true);
+    await Promise.resolve(); expect(settled).toBe(false);
+    held.resolve(); await f.owner.whenIdle(); await request.whenAttempted;
+    expect(f.syncList).not.toHaveBeenCalled();
+    expect(f.list).toHaveBeenCalledTimes(2);
+    expect(f.attempt).toHaveBeenCalledTimes(1);
+  } finally { held.resolve(); }
+
+});
+
+
+it('retires discovery-only observations after a successful empty snapshot', async () => {
+  const f = fixture([]); await f.pass();
+  f.setActive(false); f.owner.observeLaneAvailability(graph);
+  await f.pass(); // No durable repair needs this observation.
+  const row = repair('later-independent-obligation');
+  f.setActive(true); f.setRows([row]); f.records.set(row.assertionCoordinate, parked);
+  await f.pass();
+  expect(f.attempt).not.toHaveBeenCalled();
+  expect(f.records.get(row.assertionCoordinate)).toEqual(parked);
+});
+
+
+it('retains observations for a late arrival omitted by the completed snapshot', async () => {
+  const f = fixture([]); const held = deferred(); const row = repair('late-parked-obligation');
+  f.list.mockImplementationOnce(async () => { await held.promise; return []; });
+  try {
+    f.owner.start(ctx); await vi.advanceTimersByTimeAsync(0);
+    f.setRows([row]); f.records.set(row.assertionCoordinate, parked);
+    const request = f.owner.requestFinalizedPrivate({ repair: row, ctx });
+    f.setActive(false); f.owner.observeLaneAvailability(graph);
+    f.setActive(true); f.owner.observeLaneAvailability(graph);
+    held.resolve(); await f.owner.whenIdle(); await request.whenAttempted;
+    expect(f.list).toHaveBeenCalledTimes(2);
+    expect(f.attempt).toHaveBeenCalledTimes(1);
+    expect(f.records.get(row.assertionCoordinate)).toMatchObject({ parked: false, consecutiveFailures: 0 });
+  } finally { held.resolve(); }
 });

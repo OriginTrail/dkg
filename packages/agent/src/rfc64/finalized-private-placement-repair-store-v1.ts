@@ -78,11 +78,6 @@ export interface Rfc64FinalizedPrivatePlacementRepairOperationsV1 {
   ): void;
 }
 
-/** Legacy injected operations are normalized once when constructing the store. */
-export type Rfc64FinalizedPrivatePlacementRepairInputV1 =
-  Omit<Rfc64FinalizedPrivatePlacementRepairOperationsV1, 'listFinalizedPrivatePlacementRepairsAsync'>
-  & Partial<Pick<Rfc64FinalizedPrivatePlacementRepairOperationsV1, 'listFinalizedPrivatePlacementRepairsAsync'>>;
-
 export interface Rfc64FinalizedPrivatePlacementRepairStoreV1 {
   listAsync(signal: AbortSignal): Promise<readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[]>;
   list(): readonly Readonly<Rfc64FinalizedPrivatePlacementRepairV1>[];
@@ -94,14 +89,12 @@ export interface Rfc64FinalizedPrivatePlacementRepairStoreV1 {
 }
 
 export function createRfc64FinalizedPrivatePlacementRepairStoreV1(
-  operations: Rfc64FinalizedPrivatePlacementRepairInputV1,
+  operations: Rfc64FinalizedPrivatePlacementRepairOperationsV1,
 ): Rfc64FinalizedPrivatePlacementRepairStoreV1 {
-  const listAsync = operations.listFinalizedPrivatePlacementRepairsAsync?.bind(operations)
-    ?? (async (_signal: AbortSignal) => operations.listFinalizedPrivatePlacementRepairs());
   return Object.freeze({
     listAsync: async (signal: AbortSignal) => {
       signal.throwIfAborted();
-      return listAsync(signal);
+      return operations.listFinalizedPrivatePlacementRepairsAsync(signal);
     },
     list: () => operations.listFinalizedPrivatePlacementRepairs(),
     readFailure: (repair: Rfc64FinalizedPrivatePlacementRepairV1) => operations.readFinalizedPrivatePlacementFailure(repair),

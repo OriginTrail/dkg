@@ -183,13 +183,16 @@ describe('mixed finalized placement lanes', () => {
 
   it('keeps a request arriving during an asynchronous listing until its own attempt', async () => {
     let finishFirst!: () => void;
+    let entered!: () => void;
+    const listingStarted = new Promise<void>(resolve => { entered = resolve; });
     let reads = 0;
     const later = { ...privateRepair(), assertionCoordinate: 'arrived-during-list' };
     const f = fixture(0, { listFinalizedPrivateRepairsAsync: async () => {
-      if (++reads === 1) { await new Promise<void>(resolve => { finishFirst = resolve; }); return []; }
+      if (++reads === 1) { await new Promise<void>(resolve => { finishFirst = resolve; entered(); }); return []; }
       return [later];
     } });
     f.owner.start(ctx);
+    await listingStarted;
     let releasedWithoutAttempt = false;
     const request = f.owner.requestFinalizedPrivate({ repair: later, ctx, observer: {
       cooldownSkipped: () => {}, released: attempt => { if (!attempt) releasedWithoutAttempt = true; },
