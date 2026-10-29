@@ -203,7 +203,10 @@ function httpError(status, body) {
  *   - only `graphSuffix: '_shared_memory'` reads shared memory, and an answer
  *     above `maxResponseBytes` is refused (413), as the query route caps its
  *     answers at 10 MiB;
- *   - `wm/quads` returns an asset's draft.
+ *   - `wm/quads` returns an asset's draft;
+ *   - an interrupted share can leave a recovery job owning the asset: until
+ *     `finishRecovery(name)` shares it, as the daemon's worker would, a
+ *     create, write or share of it answers 409 `KA_PROMOTE_RECOVERY_REQUIRED`.
  *
  * `ignore: 'limit' | 'cursor'` drops the LIMIT or the paging cursor's FILTER
  * from every query, as a store that does not honour it would.
@@ -220,7 +223,7 @@ function makeMockDaemon({ bindingShape = 'flat', maxResponseBytes = 10 * 1024 * 
   const requests = [];
   /** @type {Array<{ sparql: string, graphSuffix?: string, subGraphName?: string }>} */
   const queries = [];
-  /** Failures to inject: the first entry whose `match` accepts a request throws `error` instead. */
+  /** Failures to inject: the first entry whose `match` accepts a request runs `onMatch`, then throws `error`. */
   const failures = [];
   let kaNumber = 0;
 
@@ -228,7 +231,16 @@ function makeMockDaemon({ bindingShape = 'flat', maxResponseBytes = 10 * 1024 * 
     const request = { method, path, body };
     requests.push(request);
     const index = failures.findIndex((failure) => failure.match(request));
-    if (index >= 0) throw failures.splice(index, 1)[0].error;
+    if (index >= 0) {
+      const [failure] = failures.splice(index, 1);
+      failure.onMatch?.(request);
+      throw failure.error;
+    }
+  }
+  function refuseWhileRecovering(asset) {
+    if (asset?.recovering) {
+      throw httpError(409, { code: 'KA_PROMOTE_RECOVERY_REQUIRED', error: 'an unfinished share recovery owns this asset' });
+    }
   }
 
   const term = (value) => (/^["<_]/.test(value) ? value : `<${value}>`);
@@ -281,6 +293,7 @@ function makeMockDaemon({ bindingShape = 'flat', maxResponseBytes = 10 * 1024 * 
       }
       if (method !== 'POST' || path !== '/api/knowledge-assets') throw new Error(`unexpected request ${method} ${path}`);
       const existing = assets.get(body.name);
+      refuseWhileRecovering(existing);
       if (existing) {
         if (body.quads) {
           throw httpError(409, {
@@ -307,6 +320,7 @@ function makeMockDaemon({ bindingShape = 'flat', maxResponseBytes = 10 * 1024 * 
       record('POST', `/api/knowledge-assets/${assertionName}/wm/write`, { quads: triples });
       const asset = assets.get(assertionName);
       if (!asset) throw httpError(404, { error: `Assertion "${assertionName}" not found` });
+      refuseWhileRecovering(asset);
       write(asset, triples);
       return triples.length;
     },
@@ -322,7 +336,13 @@ function makeMockDaemon({ bindingShape = 'flat', maxResponseBytes = 10 * 1024 * 
         });
       }
       if (!asset) throw httpError(404, { error: `Assertion "${payload.assertionName}" not found` });
+      refuseWhileRecovering(asset);
       return share(asset);
+    },
+    finishRecovery(name) {
+      const asset = assets.get(name);
+      asset.recovering = false;
+      share(asset);
     },
     async query({ sparql, graphSuffix, subGraphName }) {
       queries.push({ sparql, graphSuffix, subGraphName });
@@ -539,6 +559,24 @@ test('createImportManifest resumes an interrupted run and finishes only what is 
   assert.deepEqual(statuses(await load(client, 'resume')), keys.map((key) => [key, 'pending']));
 });
 
+test('a resume waits for a share recovery that owns a page, then finishes the manifest', async () => {
+  const client = makeMockDaemon();
+  const keys = ['a', 'b', 'c', 'd', 'e'];
+  const second = partitionPageAssertionName('recovering', 1, ['c', 'd']);
+  client.failures.push({
+    match: (r) => r.path === `/api/knowledge-assets/${second}/swm/share`,
+    error: httpError(503, { code: 'PROMOTE_RETRYABLE_FAILURE', recoveryState: 'pending' }),
+    onMatch: () => { client.assets.get(second).recovering = true; },
+  });
+  await assert.rejects(() => createManifest(client, 'recovering', keys, { maxPartitionsPerPage: 2 }), /PROMOTE_RETRYABLE_FAILURE/);
+  // While the recovery job owns the page, a resume gets the daemon's answer and shares nothing for that page.
+  await assert.rejects(() => createManifest(client, 'recovering', keys, { maxPartitionsPerPage: 2 }), /KA_PROMOTE_RECOVERY_REQUIRED/);
+  await assert.rejects(() => load(client, 'recovering'), /incomplete in shared memory: 2 of 5 partitions are visible/);
+  client.finishRecovery(second);
+  await createManifest(client, 'recovering', keys, { maxPartitionsPerPage: 2 });
+  assert.deepEqual(statuses(await load(client, 'recovering')), keys.map((key) => [key, 'pending']));
+});
+
 test('createImportManifest preserves the original startedAt when it resumes the head', async () => {
   const client = makeMockDaemon();
   const importId = 'started-at-reuse';
@@ -589,6 +627,25 @@ test('a creation that races a conflicting one refuses instead of adding its page
   await assert.rejects(() => createManifest(client, importId, ['a', 'c']), /different partition set/);
   assert.equal(raced, true);
   assert.equal(client.assets.has(partitionPageAssertionName(importId, 0, ['a', 'c'])), false, 'no page for the other set');
+  assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
+});
+
+test('two overlapping creations of the same manifest both succeed', async () => {
+  const client = makeMockDaemon();
+  const importId = 'same-race';
+  const head = defaultManifestAssertionName(importId);
+  const request = client.request.bind(client);
+  let raced = false;
+  // The other run shares the head and the page after this one read no manifest.
+  client.request = async (method, path, body) => {
+    if (!raced && method === 'POST' && path === '/api/knowledge-assets' && body?.name === head) {
+      raced = true;
+      await createManifest(client, importId, ['a', 'b']);
+    }
+    return request(method, path, body);
+  };
+  await createManifest(client, importId, ['b', 'a']);
+  assert.equal(raced, true);
   assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
 });
 

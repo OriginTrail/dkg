@@ -524,30 +524,57 @@ function compareStrings(a, b) {
   return a < b ? -1 : a > b ? 1 : 0;
 }
 
+function createManifestAsset(client, { contextGraphId, subGraphName, name }) {
+  return client.request('POST', '/api/knowledge-assets', { contextGraphId, name, subGraphName });
+}
+
 /**
- * Write one manifest part into its own Knowledge Asset and share the whole
- * asset. A re-run finds the asset where an earlier run left it: shared
- * (nothing to do), sealed by a share that did not complete (share it), or
- * still open (write again: a triple the draft already holds is not added
- * twice, then share).
- *
- * `triples` is the part's triples, or a function that gets what the earlier
- * run left in the asset (none for a new one), returns what to write, and may
- * refuse to go on. Answers whether the asset was shared already.
+ * Write a manifest asset's triples, unless a share that did not complete
+ * already sealed it, then share the whole asset. A triple an open draft
+ * already holds is not added twice.
  */
-async function shareManifestPart(client, { contextGraphId, subGraphName, name, triples }) {
-  const created = await client.request('POST', '/api/knowledge-assets', { contextGraphId, name, subGraphName });
-  if (created?.status === 'swm-shared') return { alreadyShared: true };
-  const left = typeof triples === 'function' && created?.alreadyExists === true
-    ? await readDraftTriples(client, { contextGraphId, subGraphName, name })
-    : [];
-  const toWrite = typeof triples === 'function' ? triples(left) : triples;
+async function writeAndShare(client, { contextGraphId, subGraphName, name, created, triples }) {
   if (created?.status !== 'wm-sealed') {
-    await client.writeAssertion({ contextGraphId, assertionName: name, subGraphName, triples: toWrite });
+    await client.writeAssertion({ contextGraphId, assertionName: name, subGraphName, triples });
   }
-  const shared = await client.promote({ contextGraphId, assertionName: name, subGraphName });
-  assertShared(shared, name);
-  return { alreadyShared: false };
+  assertShared(await client.promote({ contextGraphId, assertionName: name, subGraphName }), name);
+}
+
+/**
+ * Share a partition page, or leave it alone when an earlier run shared it.
+ * Its name carries a hash of its keys, so an existing page holds these keys.
+ */
+async function sharePartitionPage(client, { contextGraphId, subGraphName, name, triples }) {
+  const created = await createManifestAsset(client, { contextGraphId, subGraphName, name });
+  if (created?.status === 'swm-shared') return;
+  await writeAndShare(client, { contextGraphId, subGraphName, name, created, triples });
+}
+
+/**
+ * Make the head shared and for these partitions, whatever an earlier or a
+ * concurrent run left: a shared head (from another run, shared after the
+ * first read) or an unshared one (its draft) must carry this partition-set
+ * hash, and an unshared one keeps a `startedAt` it already has.
+ */
+async function ensureManifestHead(client, { contextGraphId, subGraphName, importId, partitions }) {
+  const name = defaultManifestAssertionName(importId);
+  const hash = partitionSetHash(partitions);
+  const created = await createManifestAsset(client, { contextGraphId, subGraphName, name });
+  if (created?.status === 'swm-shared') {
+    const shared = await readManifestHead({ client, importId, subGraphName });
+    if (shared === undefined) {
+      throw new Error(`createImportManifest: the head of manifest '${importId}' is shared but not visible yet; try again.`);
+    }
+    if (shared.hash !== hash) throw differentPartitionSet(importId);
+    return;
+  }
+  const left = created?.alreadyExists === true ? await readDraftTriples(client, { contextGraphId, subGraphName, name }) : [];
+  const leftHash = left.find((t) => t.predicate === IMPORT_P.partitionSetHash);
+  if (leftHash && unquote(leftHash.object) !== hash) throw differentPartitionSet(importId);
+  const keepStartedAt = left.some((t) => t.predicate === IMPORT_P.startedAt);
+  const triples = buildImportHeadTriples(importId, partitions, new Date().toISOString())
+    .filter((t) => !keepStartedAt || t.predicate !== IMPORT_P.startedAt);
+  await writeAndShare(client, { contextGraphId, subGraphName, name, created, triples });
 }
 
 /** The triples of a Knowledge Asset's Working Memory draft. */
@@ -724,35 +751,14 @@ export async function createImportManifest({
   }
 
   if (existing.head === undefined) {
-    const headTriples = buildImportHeadTriples(importId, partitions, new Date().toISOString());
-    const hash = partitionSetHash(partitions);
-    const { alreadyShared } = await shareManifestPart(client, {
-      contextGraphId: cgId,
-      subGraphName,
-      name: head,
-      // A head an interrupted run left unshared must be for these partitions, and keeps its `startedAt`.
-      triples: (left) => {
-        const leftHash = left.find((t) => t.predicate === IMPORT_P.partitionSetHash);
-        if (leftHash && unquote(leftHash.object) !== hash) throw differentPartitionSet(importId);
-        const hasStartedAt = left.some((t) => t.predicate === IMPORT_P.startedAt);
-        return headTriples.filter((t) => !hasStartedAt || t.predicate !== IMPORT_P.startedAt);
-      },
-    });
-    // Another run shared the head after the first read: it must be for these partitions too.
-    if (alreadyShared) {
-      const shared = await readManifestHead({ client, importId, subGraphName });
-      if (shared === undefined) {
-        throw new Error(`createImportManifest: the head of manifest '${importId}' is shared but not visible yet; try again.`);
-      }
-      if (shared.hash !== hash) throw differentPartitionSet(importId);
-    }
+    await ensureManifestHead(client, { contextGraphId: cgId, subGraphName, importId, partitions });
   }
   const pageAssertionNames = [];
   for (const [index, keys] of partitionPages(importId, partitions, { maxPartitions: maxPartitionsPerPage }).entries()) {
     const name = partitionPageAssertionName(importId, index, keys);
     pageAssertionNames.push(name);
     if (keys.every((key) => visibleKeys.has(key))) continue;
-    await shareManifestPart(client, {
+    await sharePartitionPage(client, {
       contextGraphId: cgId,
       subGraphName,
       name,
