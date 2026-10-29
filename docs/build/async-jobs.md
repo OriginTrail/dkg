@@ -55,7 +55,7 @@ Share jobs live at `/api/knowledge-assets/swm/share-jobs/{jobId}`:
 - `POST .../recover` restarts a `failed` job.
 - `POST .../clear` removes one finished job. Clearing a single job is API-only for now.
 
-For publish jobs, a node admin cancels an `accepted` job with `POST /api/publisher/cancel` and retries failed jobs with `POST /api/publisher/retry`. `POST /api/publisher/clear-job` removes one finished job, even a [held](../use-dkg/async-publisher-wallets.md#held-jobs) one: check its transaction first, or a re-submit can publish again.
+For publish jobs, a node admin cancels an `accepted` job with `POST /api/publisher/cancel` and retries failed jobs with `POST /api/publisher/retry`. `POST /api/publisher/clear-job` removes one finished job. A [held](../use-dkg/async-publisher-wallets.md#held-jobs) one needs `"allowPendingTransaction": true`: check its transaction first, or a re-submit can publish again.
 
 The [API reference](../references/api.md) lists every route.
 

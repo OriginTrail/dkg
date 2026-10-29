@@ -99,5 +99,5 @@ Its status read returns `404`. A resend after a job succeeded or finalized is ne
 ### Cautions
 
 - While cleanup is on, only the daemon may write the queue graphs: no scripts or other tools.
-- Don't turn on publish-queue cleanup on a node that has published one Knowledge Asset thousands of times: there a pass can stall new publish jobs for seconds, even in `report` mode.
+- On a node that has published one Knowledge Asset thousands of times, cleanup reads all of that asset's jobs each time it judges one of them, as a new publish of the asset does. It checks the older jobs only as far as its short time budget allows and keeps the rest of the asset's jobs for that pass, so there `report` counts fewer jobs than the first `delete` pass removes.
 - A forward clock jump, or minutes of host sleep, pauses cleanup until a restart. Correct the clock, then restart.

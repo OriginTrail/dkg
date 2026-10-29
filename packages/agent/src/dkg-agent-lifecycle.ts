@@ -148,6 +148,8 @@ import { NetworkAdmissionService } from './p2p/network-admission.js';
 import {
   MAX_IDENTITY_PROBE_CONCURRENCY,
   NetworkAdmissionCoordinator,
+  NetworkAdmissionProbeBackoffError,
+  NetworkAdmissionProbeError,
   NetworkAdmissionRejectedError,
 } from './p2p/network-admission-coordinator.js';
 import { createNetworkAdmissionRouterPolicy } from './p2p/network-admission-protocol-adapter.js';
@@ -4469,7 +4471,15 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       return await this.networkAdmissionCoordinator.ensureAdmitted(peerId, ctx, { signal });
     } catch (err: unknown) {
       if (signal?.aborted) throw err;
+      // A skip inside a failed probe's backoff ran no probe: the peer is not
+      // admitted yet. The coordinator logged the failed probe itself, once,
+      // with that backoff, so this caller's label goes to debug (GH#3579).
+      if (err instanceof NetworkAdmissionProbeBackoffError) return false;
       const message = err instanceof Error ? err.message : String(err);
+      if (err instanceof NetworkAdmissionProbeError) {
+        this.log.debug(ctx, `${label} peer ${peerId.slice(-8)} not admitted: ${message}`);
+        return false;
+      }
       this.log.warn(ctx, `${label} admission probe failed for ${peerId.slice(-8)}: ${message}`);
       return false;
     }
@@ -6582,6 +6592,7 @@ export class LifecycleSyncMethods extends DKGAgentBase {
         primeConnections: () => this.primeCatchupConnections(),
         liveConnectionPeerIds: () => this.node.libp2p.getConnections()
           .map((connection) => connection.remotePeer.toString()),
+        isAdmissionBackedOff: (peerId) => this.networkAdmissionCoordinator.isProbeBackedOff(peerId),
         admitPeer: (peerId) => this.ensurePeerAdmittedForRecovery(
           peerId,
           ctx,
@@ -6675,17 +6686,8 @@ export class LifecycleSyncMethods extends DKGAgentBase {
       const isPrivateContextGraph = await this.isPrivateContextGraph(contextGraphId);
 
       const preferredPeerId = await this.resolvePreferredSyncPeerId(contextGraphId);
-      if (preferredPeerId) {
-        let preferredPeerAdmitted = false;
-        try {
-          preferredPeerAdmitted = await this.networkAdmissionCoordinator.ensureAdmitted(preferredPeerId, ctx);
-        } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
-          this.log.warn(ctx, `Preferred catchup peer ${preferredPeerId.slice(-8)} admission probe failed: ${message}`);
-        }
-        if (preferredPeerAdmitted) {
-          await this.ensurePeerConnected(preferredPeerId);
-        }
+      if (preferredPeerId && await this.ensurePeerAdmittedForRecovery(preferredPeerId, ctx, 'Preferred catchup peer')) {
+        await this.ensurePeerConnected(preferredPeerId);
       }
 
       await this.primeCatchupConnections();
