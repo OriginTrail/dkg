@@ -82,6 +82,7 @@ import {
   verifyCanonicalUpdateFacts,
   type PublisherChainAdapters,
 } from './publisher-chain-proof.js';
+import { createPublisherWalletBalanceReader } from './publisher-wallet-balances.js';
 
 export type { ACKTransportFactory } from '@origintrail-official/dkg-publisher';
 
@@ -664,9 +665,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       });
     }
 
-    const publishers = new Map<string, DKGPublisher>(
-      wallets.map((wallet) => [wallet.address, wallet.publisher]),
-    );
+    const publishers = new Map<string, DKGPublisher>(wallets.map((wallet) => [wallet.address, wallet.publisher]));
     // Recovery factories use the adapters owned by these wallet runtimes.
     const chainAdapters = chainAdaptersForWallets(wallets);
     const hasChainRecovery = [...chainAdapters.values()].some(hasChainPublishLookup);
@@ -696,6 +695,7 @@ async function createPublisherRuntimeFromBase(args: PublisherRuntimeBaseArgs): P
       ...args.retryTuning,
       publicSnapshotStore: args.publicSnapshotStore,
       journalWrites: args.journalWrites ?? false,
+      walletBalanceReader: createPublisherWalletBalanceReader(chainAdapters),
       knowledgeAssetVmPublishHandler: scopedKnowledgeAssetVmPublishHandler,
       publishExecutor: async ({ walletId, publishOptions }: AsyncLiftPublishExecutionInput) => {
         const publisher = publishers.get(walletId);

@@ -488,6 +488,7 @@ export {
   AsyncLiftRunner,
   type AsyncLiftRunnerConfig,
 } from './async-lift-runner.js';
+export type { AsyncLiftWalletBalanceReader, AsyncLiftWalletBalances } from './async-lift-wallet-funding.js';
 export {
   mapLiftRequestToPublishOptions,
   prepareAsyncPublishPayload,

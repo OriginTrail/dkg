@@ -83,6 +83,8 @@ export default defineConfig({
       'test/async-lift-validation-provenance.test.ts',
       'test/async-lift-chain-check-2945.test.ts',
       'test/lift-job-failure.test.ts',
+      'test/async-lift-wallet-funding.test.ts',
+      'test/async-lift-funding-claims-3591.test.ts',
       'test/async-promote-queue.test.ts',
       'test/bound-share-mutation-guard.test.ts',
       'test/share-reconciliation.test.ts',

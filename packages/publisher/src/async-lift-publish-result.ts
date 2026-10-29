@@ -327,7 +327,10 @@ function classifyPublishFailureCode(
   if (lowerMessage.includes('timeout') || lowerMessage.includes('timed out')) {
     return failedFromState === 'included' ? 'finality_timeout' : 'tx_submit_timeout';
   }
-  if (lowerMessage.includes('insufficient funds')) {
+  if (lowerMessage.includes('insufficient funds') && !lowerMessage.includes('revert')) {
+    // #3591 — `insufficient_funds` is retried automatically, so it must mean a refusal. A revert
+    // that mentions funds was mined or simulated: it is a revert, as
+    // `isDefinitivePreAcceptanceSendFailure` also reads it.
     return 'insufficient_funds';
   }
   if (lowerMessage.includes('nonce')) {

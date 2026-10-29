@@ -308,6 +308,8 @@ export default defineConfig({
           // (pending vs proven-absent vs inconclusive), and the two-state
           // resolver derived from it. Pure logic over stub adapters.
           'test/publisher-chain-proof-resolution.test.ts',
+          // #3591 — the claim gate's balance reads, through each wallet's own adapter.
+          'test/publisher-wallet-balances.test.ts',
           // #1836 — publisher.maxRetries must propagate through
           // createPublisherControlFromStore (incl. a literal 0). Pure logic.
           'test/publisher-maxretries-1836.test.ts',

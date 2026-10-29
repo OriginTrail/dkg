@@ -187,7 +187,16 @@ For TRAC payment, choose one path:
 | PCA-funded | Register the wallet address as a Publishing Conviction Account agent. |
 | Direct spend | Fund the wallet with enough TRAC and native gas. |
 
-If neither path is ready, the daemon can still start and claim jobs, but publish attempts will fail when the transaction reaches the chain.
+If neither path is ready, the daemon can still start, but publish attempts fail when the transaction reaches the chain.
+
+A refusal for funds (`insufficient_funds`) happens before the transaction enters the mempool, so it proves the transaction never took effect. The publisher therefore retries the job by itself on its bounded retry backoff, and keeps the refused wallet out of claims meanwhile:
+
+- The wallet waits 30 seconds, doubling up to 10 minutes while it stays short. After each wait the publisher reads the wallet's balance. The wallet claims again once the balance covers the cost the chain stated for the refused transaction or, when the chain stated none, once its native or TRAC balance has grown since the refusal.
+- For an hour after a refusal that stated a cost, every wallet claims only while a fresh reading of its balance covers that cost.
+- While no wallet can pay, jobs wait as `accepted` instead of failing. Top up a wallet and they continue.
+- A refused wallet that is not topped up gets one more attempt after an hour, since a stated cost goes stale when gas prices fall.
+
+The exclusion is kept in memory, so after a restart a wallet that is still short is refused once more before it is excluded again. A job that may have sent a transaction is not affected: it stays held until chain proof settles it. A job that failed with `insufficient_funds` before this behaviour existed stays failed; re-submitting its request creates a new job.
 
 ## Identity And Attribution
 

@@ -1,0 +1,192 @@
+/**
+ * #3591 — funding-aware claims and the retry after a top-up, through a real publisher.
+ *
+ * A wallet the chain refuses for funds takes no further claims. The refused job is proven
+ * ineffective (the node turned its transaction away before the mempool), so the publisher retries
+ * it by itself, and a wallet that can pay claims it; while none can, it waits as `accepted`. A job
+ * whose transaction may have been sent keeps its wallet and its hold throughout, across a restart.
+ */
+import { describe, expect, it } from 'vitest';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { QuorumUnmetError, TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
+import { isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
+import type { PersistedFailedJob } from '../src/async-lift-publisher-utils.js';
+import { WALLET_FUNDING_COOLDOWN_BASE_MS } from '../src/async-lift-wallet-funding.js';
+import { KA_VM_EXECUTOR_TX_HASH, kaVmPublishRequest, stageKnowledgeAssetShareSnapshot } from '../../../scripts/testing/ka-vm-publish.js';
+import { completeResult } from './_helpers/journal-completion.js';
+
+/** What the node says the refused transaction needed. */
+const COST = 2_047n;
+const RETRY_MS = 10;
+
+function fixture(store = new OxigraphStore()) {
+  const clock = { now: 1_000 };
+  const balances = new Map<string, bigint>();
+  /** Wallets that reached the executor, in order: a claim that was never made never signs. */
+  const signed: string[] = [];
+  /** Errors the next executions throw before signing anything. */
+  const beforeSigning: unknown[] = [];
+  /** Wallets whose next send is ambiguous: the write-ahead is recorded, then the RPC times out. */
+  const ambiguous = new Set<string>();
+  let refusedTx = 0;
+  let ids = 0;
+  const handler: NonNullable<AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler']> = {
+    execute: async ({ walletId, publishOptions }) => {
+      signed.push(walletId);
+      const early = beforeSigning.shift();
+      if (early !== undefined) throw early;
+      const covered = (balances.get(walletId) ?? 0n) >= COST;
+      const txHash = covered ? KA_VM_EXECUTOR_TX_HASH : (`0x${(++refusedTx).toString(16).padStart(64, 'a')}` as `0x${string}`);
+      await publishOptions.onBeforeBroadcast?.({ txHash, operationKind: 'create' });
+      if (ambiguous.delete(walletId)) throw new Error('ETIMEDOUT: request timed out');
+      // The node turns away what the wallet cannot pay for, before the mempool, and says why.
+      if (!covered) {
+        throw new Error(`insufficient funds for gas * price + value: address 0x00000000000000000000000000000000000000a1 have ${balances.get(walletId) ?? 0n} want ${COST}`);
+      }
+      await publishOptions.onBroadcastAccepted?.({ txHash, operationKind: 'create' });
+      return completeResult();
+    },
+  };
+  return {
+    store,
+    clock,
+    signed,
+    beforeSigning,
+    ambiguous,
+    fund: (walletId: string, wei: bigint) => { balances.set(walletId, wei); },
+    publisher: () => new TripleStoreAsyncLiftPublisher(store, {
+      now: () => clock.now,
+      idGenerator: () => `job-${++ids}`,
+      retryBackoffBaseMs: RETRY_MS,
+      retryBackoffMaxMs: RETRY_MS,
+      retryJitterRatio: 0,
+      knowledgeAssetVmPublishHandler: handler,
+      walletBalanceReader: async (walletId) => ({ native: balances.get(walletId) ?? 0n, trac: null }),
+    }),
+  };
+}
+
+/** Let a balance reading the claim started land. */
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+
+async function refuseOn(f: ReturnType<typeof fixture>, publisher: TripleStoreAsyncLiftPublisher, walletId: string, name: string) {
+  const jobId = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name }));
+  const refused = await publisher.processNext(walletId);
+  expect(refused?.jobId).toBe(jobId);
+  expect(refused?.status).toBe('failed');
+  return { jobId, refused: refused as PersistedFailedJob };
+}
+
+describe('funding-aware claims and retry after a top-up (#3591)', () => {
+  it('retries a refused job by itself, on a wallet that can pay, and the refused wallet claims nothing more', async () => {
+    const f = fixture();
+    f.fund('short', 1_907n);
+    f.fund('funded', 10_000n);
+    const publisher = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+
+    const { jobId, refused } = await refuseOn(f, publisher, 'short', 'refused');
+    expect(refused.failure).toMatchObject({ code: 'insufficient_funds', retryable: true, resolution: 'reset_to_accepted' });
+    // Proven ineffective: the refused transaction holds nothing, and the retry is scheduled.
+    expect(refused.broadcast?.txHash).toBeDefined();
+    expect(isHeldForChainProof(refused)).toBe(false);
+    expect(refused.timestamps.nextRetryAt).toBe(f.clock.now + RETRY_MS);
+    expect(publisher.describeConfiguredRetryState(refused)).toMatchObject({ autoRetryEligible: true, waitingReason: 'backoff' });
+
+    f.clock.now += RETRY_MS;
+    // The sweep reaccepts the due retry, but the refused wallet does not claim it.
+    expect(await publisher.processNext('short')).toBeNull();
+    const waiting = await publisher.getStatus(jobId);
+    expect(waiting?.status).toBe('accepted');
+    // The refused hash travels on, accounted for: the refusal proved it can never take effect.
+    expect(waiting?.recovery).toMatchObject({ txHashChecked: refused.broadcast!.txHash, txHashAccounted: true });
+
+    // A cost is known now, so the funded wallet first reads its balance, then claims.
+    expect(await publisher.processNext('funded')).toBeNull();
+    await settle();
+    const done = await publisher.processNext('funded');
+    expect(done).toMatchObject({ jobId, status: 'finalized', claim: { walletId: 'funded' } });
+    expect(f.signed).toEqual(['short', 'funded']);
+  });
+
+  it('keeps the retried job accepted while no wallet can pay, and proceeds after a top-up', async () => {
+    const f = fixture();
+    f.fund('short-a', 1_907n);
+    f.fund('short-b', 1_000n);
+    const publisher = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+    const { jobId } = await refuseOn(f, publisher, 'short-a', 'waiting');
+
+    f.clock.now += RETRY_MS;
+    expect(await publisher.processNext('short-a')).toBeNull();
+    // The other wallet reads its balance once and stays out: it is below the stated cost.
+    expect(await publisher.processNext('short-b')).toBeNull();
+    await settle();
+    expect(await publisher.processNext('short-b')).toBeNull();
+    await settle();
+    expect(await publisher.processNext('short-b')).toBeNull();
+    expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
+    expect(f.signed).toEqual(['short-a']);
+
+    // Topped up: after its cooldown the wallet reads its balance again and claims.
+    f.fund('short-b', 5_000n);
+    f.clock.now += WALLET_FUNDING_COOLDOWN_BASE_MS;
+    expect(await publisher.processNext('short-b')).toBeNull();
+    await settle();
+    expect(await publisher.processNext('short-b')).toMatchObject({ jobId, status: 'finalized', claim: { walletId: 'short-b' } });
+    expect(f.signed).toEqual(['short-a', 'short-b']);
+  });
+
+  it('after a top-up, the refused job proceeds while an ambiguous one keeps its wallet and its hold, across a restart', async () => {
+    const f = fixture();
+    f.fund('short', 1_907n);
+    f.fund('sender', 10_000n);
+    f.ambiguous.add('sender');
+    const before = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+
+    const ambiguousJob = await before.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'ambiguous' }));
+    expect(await before.processNext('sender')).toMatchObject({ jobId: ambiguousJob, status: 'broadcast' });
+    const { jobId } = await refuseOn(f, before, 'short', 'refused');
+
+    // Restart: a new publisher over the same store keeps nothing in memory. The retry schedule and
+    // the hold are in the store.
+    f.fund('short', 10_000n);
+    f.clock.now += RETRY_MS;
+    const after = f.publisher();
+    const done = await after.processNext('short');
+    expect(done).toMatchObject({ jobId, status: 'finalized', claim: { walletId: 'short' } });
+    // The ambiguous job still owns its wallet and is still waiting for chain proof.
+    expect(await after.processNext('sender')).toBeNull();
+    expect(await after.getStatus(ambiguousJob)).toMatchObject({ status: 'broadcast', claim: { walletId: 'sender' } });
+    expect(f.signed).toEqual(['sender', 'short', 'short']);
+  });
+
+  it('does not hold a re-run that fails before signing on the refused transaction', async () => {
+    const f = fixture();
+    f.fund('short', 1_907n);
+    f.fund('funded', 10_000n);
+    const publisher = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+    const { jobId } = await refuseOn(f, publisher, 'short', 'rerun');
+
+    f.clock.now += RETRY_MS;
+    expect(await publisher.processNext('short')).toBeNull();
+    expect(await publisher.processNext('funded')).toBeNull();
+    await settle();
+    f.beforeSigning.push(new QuorumUnmetError({ collected: 2, required: 3, dialled: 2 }));
+    const failed = await publisher.processNext('funded') as PersistedFailedJob;
+    expect(failed).toMatchObject({ jobId, status: 'failed', failure: { code: 'quorum_unmet' } });
+    expect(failed.broadcast).toBeUndefined();
+    expect(isHeldForChainProof(failed)).toBe(false);
+    expect(publisher.describeConfiguredRetryState(failed)).toMatchObject({ autoRetryEligible: true, waitingReason: 'backoff' });
+
+    // Its own retry keeps the inherited hash accounted, so it can never be held on it later either.
+    f.clock.now += RETRY_MS;
+    expect(await publisher.processNext('short')).toBeNull();
+    expect(await publisher.getStatus(jobId)).toMatchObject({
+      status: 'accepted',
+      recovery: { txHashChecked: failed.recovery!.txHashChecked, txHashAccounted: true },
+    });
+  });
+});
