@@ -41,7 +41,9 @@ function gate(options: { reader?: AsyncLiftWalletBalanceReader | null } = {}) {
     reads,
     pokes,
     advance: (ms: number) => { now += ms; },
-    fund: (walletId: string, native: bigint | null, trac: bigint | null = null) => { balances.set(walletId, { native, trac }); },
+    fund: (walletId: string, native: bigint | null, trac: bigint | null = null, pca?: bigint | null) => {
+      balances.set(walletId, { native, trac, ...(pca !== undefined ? { pca } : {}) });
+    },
     /** Let a pending reading land. */
     settle: () => new Promise((resolve) => setTimeout(resolve, 0)),
   };
@@ -127,6 +129,43 @@ describe('AsyncLiftWalletFunding (#3591)', () => {
     // No stated cost: other wallets are not read.
     expect(g.funding.mayClaim('w2')).toBe(true);
     expect(g.reads.filter((walletId) => walletId === 'w2')).toEqual([]);
+  });
+
+  it('lets a wallet refused with no stated cost back once its Publishing Conviction coverage grew', async () => {
+    const g = gate();
+    // Gas-funded, no TRAC, no account: the adapter found it unfundable before signing.
+    g.fund('w1', 100n, 0n, 0n);
+    g.funding.recordRefusal('w1', UNSTATED);
+    await g.settle();
+    g.advance(BASE);
+    g.funding.mayClaim('w1');
+    await g.settle();
+    expect(g.funding.mayClaim('w1')).toBe(false);
+
+    // Registered for a funded account: neither balance changed.
+    g.fund('w1', 100n, 0n, 500n);
+    g.advance(2 * BASE);
+    g.funding.mayClaim('w1');
+    await g.settle();
+    expect(g.funding.mayClaim('w1')).toBe(true);
+  });
+
+  it('lets a wallet refused with no stated cost back when a balance read at the refusal is unreadable now', async () => {
+    const g = gate();
+    g.fund('w1', 100n, 0n);
+    g.funding.recordRefusal('w1', UNSTATED);
+    await g.settle();
+    g.advance(BASE);
+    g.funding.mayClaim('w1');
+    await g.settle();
+    expect(g.funding.mayClaim('w1')).toBe(false);
+
+    // The gas read now fails: the top-up cannot be ruled out, so the cooldown-paced attempt goes ahead.
+    g.fund('w1', null, 0n);
+    g.advance(2 * BASE);
+    g.funding.mayClaim('w1');
+    await g.settle();
+    expect(g.funding.mayClaim('w1')).toBe(true);
   });
 
   it('holds every wallet to a stated cost for an hour, from a reading taken since its last job', async () => {

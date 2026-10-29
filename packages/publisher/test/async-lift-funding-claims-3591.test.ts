@@ -7,6 +7,7 @@
  * whose transaction may have been sent keeps its wallet and its hold throughout, across a restart.
  */
 import { describe, expect, it } from 'vitest';
+import { NO_FUNDED_PUBLISHER_WALLET_CODE } from '@origintrail-official/dkg-core';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { QuorumUnmetError, TripleStoreAsyncLiftPublisher, type AsyncLiftPublisherConfig } from '../src/index.js';
 import { isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
@@ -22,6 +23,10 @@ const RETRY_MS = 10;
 function fixture(store = new OxigraphStore()) {
   const clock = { now: 1_000 };
   const balances = new Map<string, bigint>();
+  /** What each wallet's Publishing Conviction Account can still cover. */
+  const coverage = new Map<string, bigint>();
+  /** Wallets with no TRAC of their own: the adapter finds them unfundable before signing unless an account covers them. */
+  const tracShort = new Set<string>();
   /** Wallets that reached the executor, in order: a claim that was never made never signs. */
   const signed: string[] = [];
   /** Errors the next executions throw before signing anything. */
@@ -35,6 +40,9 @@ function fixture(store = new OxigraphStore()) {
       signed.push(walletId);
       const early = beforeSigning.shift();
       if (early !== undefined) throw early;
+      if (tracShort.has(walletId) && (coverage.get(walletId) ?? 0n) === 0n) {
+        throw Object.assign(new Error('No operational wallet has enough funds to publish'), { code: NO_FUNDED_PUBLISHER_WALLET_CODE });
+      }
       const covered = (balances.get(walletId) ?? 0n) >= COST;
       const txHash = covered ? KA_VM_EXECUTOR_TX_HASH : (`0x${(++refusedTx).toString(16).padStart(64, 'a')}` as `0x${string}`);
       await publishOptions.onBeforeBroadcast?.({ txHash, operationKind: 'create' });
@@ -53,7 +61,9 @@ function fixture(store = new OxigraphStore()) {
     signed,
     beforeSigning,
     ambiguous,
+    tracShort,
     fund: (walletId: string, wei: bigint) => { balances.set(walletId, wei); },
+    cover: (walletId: string, wei: bigint) => { coverage.set(walletId, wei); },
     publisher: () => new TripleStoreAsyncLiftPublisher(store, {
       now: () => clock.now,
       idGenerator: () => `job-${++ids}`,
@@ -61,7 +71,11 @@ function fixture(store = new OxigraphStore()) {
       retryBackoffMaxMs: RETRY_MS,
       retryJitterRatio: 0,
       knowledgeAssetVmPublishHandler: handler,
-      walletBalanceReader: async (walletId) => ({ native: balances.get(walletId) ?? 0n, trac: null }),
+      walletBalanceReader: async (walletId) => ({
+        native: balances.get(walletId) ?? 0n,
+        trac: tracShort.has(walletId) ? 0n : null,
+        pca: coverage.get(walletId) ?? 0n,
+      }),
     }),
   };
 }
@@ -135,6 +149,35 @@ describe('funding-aware claims and retry after a top-up (#3591)', () => {
     await settle();
     expect(await publisher.processNext('short-b')).toMatchObject({ jobId, status: 'finalized', claim: { walletId: 'short-b' } });
     expect(f.signed).toEqual(['short-a', 'short-b']);
+  });
+
+  it('lets a wallet refused before signing back once a Publishing Conviction Account covers it, with no transfer to the wallet', async () => {
+    const f = fixture();
+    f.fund('agent', 10_000n);
+    f.tracShort.add('agent');
+    const publisher = f.publisher();
+    await stageKnowledgeAssetShareSnapshot({ store: f.store });
+    const { jobId, refused } = await refuseOn(f, publisher, 'agent', 'pca');
+    // Refused before signing, with no stated cost: nothing was broadcast.
+    expect(refused.failure.code).toBe('insufficient_funds');
+    expect(refused.broadcast).toBeUndefined();
+
+    f.clock.now += RETRY_MS;
+    expect(await publisher.processNext('agent')).toBeNull();
+    await settle();
+    f.clock.now += WALLET_FUNDING_COOLDOWN_BASE_MS;
+    expect(await publisher.processNext('agent')).toBeNull();
+    await settle();
+    expect(await publisher.processNext('agent')).toBeNull();
+    expect((await publisher.getStatus(jobId))?.status).toBe('accepted');
+
+    // The wallet is registered for a funded account: neither of its balances changes.
+    f.cover('agent', 500n);
+    f.clock.now += 2 * WALLET_FUNDING_COOLDOWN_BASE_MS;
+    expect(await publisher.processNext('agent')).toBeNull();
+    await settle();
+    expect(await publisher.processNext('agent')).toMatchObject({ jobId, status: 'finalized', claim: { walletId: 'agent' } });
+    expect(f.signed).toEqual(['agent', 'agent']);
   });
 
   it('after a top-up, the refused job proceeds while an ambiguous one keeps its wallet and its hold, across a restart', async () => {

@@ -191,7 +191,7 @@ If neither path is ready, the daemon can still start, but publish attempts fail 
 
 A refusal for funds (`insufficient_funds`) happens before the transaction enters the mempool, so it proves the transaction never took effect. The publisher therefore retries the job by itself on its bounded retry backoff, and keeps the refused wallet out of claims meanwhile:
 
-- The wallet waits 30 seconds, doubling up to 10 minutes while it stays short. After each wait the publisher reads the wallet's balance. The wallet claims again once the balance covers the cost the chain stated for the refused transaction or, when the chain stated none, once its native or TRAC balance has grown since the refusal.
+- The wallet waits 30 seconds, doubling up to 10 minutes while it stays short. After each wait the publisher reads the wallet's balance. The wallet claims again once the balance covers the cost the chain stated for the refused transaction or, when the chain stated none, once its native balance, its TRAC balance or what its Publishing Conviction Account can still cover has grown since the refusal. Registering the wallet as an agent of a funded account counts, with no transfer to the wallet. A balance the publisher cannot read never keeps a wallet out.
 - For an hour after a refusal that stated a cost, every wallet claims only while a fresh reading of its balance covers that cost.
 - While no wallet can pay, jobs wait as `accepted` instead of failing. Top up a wallet and they continue.
 - A refused wallet that is not topped up gets one more attempt after an hour, since a stated cost goes stale when gas prices fall.

@@ -8,7 +8,8 @@
  *   - keeps the refused wallet out of claims for a cooldown that doubles while the wallet stays
  *     short (30 s to 10 min). After each cooldown a fresh balance reading decides: the wallet is
  *     back once it covers the cost the node stated, or, when the node stated none, once its native
- *     or TRAC balance grew since the refusal (a top-up);
+ *     balance, its TRAC balance or the coverage of its Publishing Conviction Account grew since the
+ *     refusal (a top-up, a registered or funded account, a new epoch's allowance);
  *   - teaches the node the cost a publication needs, when the node stated it (`have X want Y`,
  *     `balance X, tx cost Y`). For an hour after that, a wallet claims only with a reading, taken
  *     since its last job, that covers that cost. A wallet below it is kept out like a refused one.
@@ -31,6 +32,11 @@
 export interface AsyncLiftWalletBalances {
   readonly native: bigint | null;
   readonly trac: bigint | null;
+  /**
+   * TRAC the wallet's Publishing Conviction Account can still cover this epoch: `0n` when the
+   * wallet is no agent or the account expired; `null` or absent where it is unknown.
+   */
+  readonly pca?: bigint | null;
 }
 
 /** Reads a publisher wallet's current balances from the chain. */
@@ -181,16 +187,23 @@ function covers(nativeWei: bigint | null, requiredWei: bigint): boolean {
   return nativeWei === null || nativeWei >= requiredWei;
 }
 
+/**
+ * With no stated cost, a top-up is any metric read at the refusal that is larger now: native gas,
+ * TRAC, or Publishing Conviction coverage, which grows when an account is registered for the
+ * wallet, funded, or starts a new epoch while both balances stay the same. A metric that was read
+ * then but is unreadable now may be the top-up too: an unreadable balance never keeps a wallet out.
+ * With nothing read at the refusal, the cooldown alone paces the next attempt.
+ */
 function replenished(excluded: WalletExclusion, balances: AsyncLiftWalletBalances): boolean {
   if (excluded.requiredNativeWei !== undefined) return covers(balances.native, excluded.requiredNativeWei);
   const before = excluded.balancesAtRefusal;
-  // Nothing to compare with: the cooldown alone paces the next attempt.
-  if (!before || (before.native === null && before.trac === null)) return true;
-  return grew(before.native, balances.native) || grew(before.trac, balances.trac);
-}
-
-function grew(before: bigint | null, after: bigint | null): boolean {
-  return before !== null && after !== null && after > before;
+  if (!before) return true;
+  const compared = ([
+    [before.native, balances.native],
+    [before.trac, balances.trac],
+    [before.pca ?? null, balances.pca ?? null],
+  ] as const).filter(([then]) => then !== null);
+  return compared.length === 0 || compared.some(([then, now]) => now === null || now > then!);
 }
 
 async function boundedRead(reader: AsyncLiftWalletBalanceReader, walletId: string): Promise<AsyncLiftWalletBalances> {
@@ -199,7 +212,7 @@ async function boundedRead(reader: AsyncLiftWalletBalanceReader, walletId: strin
     return await Promise.race([
       // Only bigints count: a reader's malformed answer must not throw inside the claim lock.
       Promise.resolve().then(() => reader(walletId)).then(
-        (balances) => ({ native: weiOrNull(balances?.native), trac: weiOrNull(balances?.trac) }),
+        (balances) => ({ native: weiOrNull(balances?.native), trac: weiOrNull(balances?.trac), pca: weiOrNull(balances?.pca) }),
         () => UNREADABLE,
       ),
       new Promise<AsyncLiftWalletBalances>((resolve) => {
