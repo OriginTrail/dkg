@@ -98,16 +98,14 @@ export async function listFinalizedPrivateRepairsAsyncV1(
 
 /** Guard the inventory facade without duplicating its repair forwarding methods. */
 export function guardedFinalizedPrivateRepairOperationsV1(
-  readOperations: () => Rfc64FinalizedPrivatePlacementRepairOperationsV1,
+  readOperations: () => Required<Rfc64FinalizedPrivatePlacementRepairOperationsV1>,
 ) {
   return {
     listFinalizedPrivatePlacementRepairs: () => readOperations().listFinalizedPrivatePlacementRepairs(),
     listFinalizedPrivatePlacementRepairsAsync: async (signal: AbortSignal) => {
       signal.throwIfAborted();
       const operations = readOperations();
-      const repairs = operations.listFinalizedPrivatePlacementRepairsAsync
-        ? await operations.listFinalizedPrivatePlacementRepairsAsync(signal)
-        : operations.listFinalizedPrivatePlacementRepairs();
+      const repairs = await operations.listFinalizedPrivatePlacementRepairsAsync(signal);
       readOperations(); // Recheck facade lifetime after yielding.
       return repairs;
     },

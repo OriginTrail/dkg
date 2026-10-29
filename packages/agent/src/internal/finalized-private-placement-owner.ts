@@ -57,7 +57,7 @@ export interface Rfc64FinalizedPrivatePlacementRepairRequestV1 {
 
 /** Owns private repair evidence, scheduling, persistence ordering and waiter lifetime. */
 export class FinalizedPrivatePlacementOwnerV1 {
-  readonly #dependencies: Dependencies;
+  readonly #dependencies: Dependencies & Required<Pick<Dependencies, 'listFinalizedPrivateRepairsAsync'>>;
   readonly #options: Options;
   readonly #retries = new Map<string, RetryEntry>();
   readonly #lanes = new Map<string, GraphLane>();
@@ -67,7 +67,11 @@ export class FinalizedPrivatePlacementOwnerV1 {
   #waiterTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(dependencies: Dependencies, options: Options) {
-    this.#dependencies = dependencies;
+    // Normalize synchronous test/injected owners once at their entry boundary.
+    this.#dependencies = { ...dependencies,
+      listFinalizedPrivateRepairsAsync: dependencies.listFinalizedPrivateRepairsAsync?.bind(dependencies)
+        ?? (async signal => { signal.throwIfAborted(); return dependencies.listFinalizedPrivateRepairs(); }),
+    };
     this.#options = options;
     this.#runner = new NextTurnRecurringTaskV1(new CoalescingRecurringTask({
       retryIntervalMs: options.retryIntervalMs,
@@ -264,9 +268,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
     const arrivedDuringListing = new Set<string>();
     this.#arrivedDuringListing = arrivedDuringListing;
     timing.passReading();
-    const repairs = this.#dependencies.listFinalizedPrivateRepairsAsync
-      ? await this.#dependencies.listFinalizedPrivateRepairsAsync(signal)
-      : this.#dependencies.listFinalizedPrivateRepairs();
+    const repairs = await this.#dependencies.listFinalizedPrivateRepairsAsync(signal);
     const slice = new CatalogWorkSliceV1();
     const queued: Array<{ repair: Rfc64FinalizedPrivatePlacementRepairV1; key: string }> = [];
     const currentKeys = new Set<string>();
