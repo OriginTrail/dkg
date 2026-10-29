@@ -6,6 +6,13 @@ import { rdfLiteralBody } from '../src/index.js';
 const LITERAL_PATTERN = /^"(.*)"(?:\^\^.*|@.*)?$/;
 const ANY_SUFFIX_PATTERN = /^"(.*)".*$/;
 
+// The agent and publisher helpers that `plainQuoted` replaces: a quoted term
+// first, then the backtracking pattern.
+function plainQuotedBefore(term: string): string | undefined {
+  if (term.startsWith('"') && term.endsWith('"')) return term.slice(1, -1);
+  return LITERAL_PATTERN.exec(term)?.[1];
+}
+
 // Every character that matters to those patterns, plus one that doesn't.
 const ALPHABET = ['"', '^', '@', '\n', 'a'] as const;
 
@@ -32,7 +39,8 @@ function seededRandom(seed: number): () => number {
 function mismatches(terms: readonly string[]): string[] {
   return terms
     .filter((term) => rdfLiteralBody(term) !== LITERAL_PATTERN.exec(term)?.[1]
-      || rdfLiteralBody(term, { anySuffix: true }) !== ANY_SUFFIX_PATTERN.exec(term)?.[1])
+      || rdfLiteralBody(term, { anySuffix: true }) !== ANY_SUFFIX_PATTERN.exec(term)?.[1]
+      || rdfLiteralBody(term, { plainQuoted: true }) !== plainQuotedBefore(term))
     .map((term) => JSON.stringify(term));
 }
 
@@ -72,6 +80,14 @@ describe('rdfLiteralBody', () => {
     expect(rdfLiteralBody('"a"b\n', { anySuffix: true })).toBeUndefined();
   });
 
+  it('with plainQuoted, takes any quoted term as a plain literal first', () => {
+    expect(rdfLiteralBody('"line one\nline two"', { plainQuoted: true })).toBe('line one\nline two');
+    expect(rdfLiteralBody('"a"b"', { plainQuoted: true })).toBe('a"b');
+    expect(rdfLiteralBody('"', { plainQuoted: true })).toBe('');
+    expect(rdfLiteralBody('"42"^^<http://www.w3.org/2001/XMLSchema#integer>', { plainQuoted: true })).toBe('42');
+    expect(rdfLiteralBody('<http://example.org/a>', { plainQuoted: true })).toBeUndefined();
+  });
+
   it('gives the replaced patterns\' result for every term of up to seven characters', () => {
     expect(mismatches(termsUpTo(7))).toEqual([]);
   });
@@ -98,6 +114,7 @@ describe('rdfLiteralBody', () => {
       const started = performance.now();
       rdfLiteralBody(term);
       rdfLiteralBody(term, { anySuffix: true });
+      rdfLiteralBody(term, { plainQuoted: true });
       expect(performance.now() - started).toBeLessThan(100);
     }
   });

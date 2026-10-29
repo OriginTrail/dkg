@@ -455,6 +455,5 @@ export class DiscoveryClient implements AgentPeerDiscovery {
 }
 
 function stripQuotes(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
-  return rdfLiteralBody(s) ?? s;
+  return rdfLiteralBody(s, { plainQuoted: true }) ?? s;
 }

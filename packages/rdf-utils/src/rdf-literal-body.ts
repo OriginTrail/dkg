@@ -6,6 +6,11 @@ const LINE_TERMINATOR = /[\n\r\u2028\u2029]/;
 export interface RdfLiteralBodyOptions {
   /** Accept any text after the closing quote, as `/^"(.*)".*$/` did. */
   readonly anySuffix?: boolean;
+  /**
+   * Take any term that starts and ends with a quote as a plain literal,
+   * whatever it contains, line terminators included, before the other rules.
+   */
+  readonly plainQuoted?: boolean;
 }
 
 /**
@@ -22,6 +27,7 @@ export function rdfLiteralBody(
   term: string,
   options: RdfLiteralBodyOptions = {},
 ): string | undefined {
+  if (options.plainQuoted && term.startsWith('"') && term.endsWith('"')) return term.slice(1, -1);
   if (term.charCodeAt(0) !== QUOTE || LINE_TERMINATOR.test(term)) return undefined;
   for (let close = term.lastIndexOf('"'); close > 0; close = term.lastIndexOf('"', close - 1)) {
     if (options.anySuffix || closesLiteral(term, close)) return term.slice(1, close);

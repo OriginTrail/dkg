@@ -519,8 +519,7 @@ function hexToBytes(value: string): Uint8Array {
 }
 
 function stripLiteral(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return s.slice(1, -1);
-  return rdfLiteralBody(s) ?? s;
+  return rdfLiteralBody(s, { plainQuoted: true }) ?? s;
 }
 
 function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {

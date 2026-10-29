@@ -68,10 +68,8 @@ export function strip(s: string): string {
 }
 
 export function stripLiteral(s: string): string {
-  if (s.startsWith('"') && s.endsWith('"')) return unescapeLiteralContent(s.slice(1, -1));
-  const body = rdfLiteralBody(s);
-  if (body !== undefined) return unescapeLiteralContent(body);
-  return s;
+  const body = rdfLiteralBody(s, { plainQuoted: true });
+  return body === undefined ? s : unescapeLiteralContent(body);
 }
 
 export function unescapeLiteralContent(value: string): string {
