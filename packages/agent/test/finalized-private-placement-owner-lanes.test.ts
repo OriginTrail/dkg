@@ -22,7 +22,7 @@ function repair(id: string, contextGraphId = graph): Rfc64FinalizedPrivatePlacem
       governanceContractAddress: null, ownershipTransitionDigest: null, authorAddress: author, subGraphName: null, era: '1' },
     assertionCoordinate: id, assertionVersion: '1', kaUal: `did:dkg:otp:20430/${author}/1`, sealDigest: `0x${'22'.repeat(32)}` };
 }
-function fixture(rows: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) {
+function fixture(rows: readonly Rfc64FinalizedPrivatePlacementRepairV1[], listing?: Promise<void>) {
   let pending = rows;
   let active = true;
   let refuseWrites = false;
@@ -35,16 +35,19 @@ function fixture(rows: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) {
     if (refuseWrites && entries.some(entry => entry.repair.contextGraphId === graph)) throw new Error('reset storage unavailable');
     for (const entry of entries) records.set(entry.repair.assertionCoordinate, entry.state);
   });
+  const list = vi.fn(async () => { await listing; return pending; });
+  const syncList = vi.fn(() => pending);
   const owner = new Rfc64SwmCatalogProjectionOwnerV1({
     resolvePartition: () => ({ retryIntervalMs: 0, track2Policies: [], track2Targets: [], recoveryProviderPeerIds: [] }),
     listDurableInventoryScopes: () => [], listLocalAuthorAddresses: () => [], acceptsPublicRootLane: () => true,
     readFinalizedPlacementAuthority: contextGraphId => pinnedPrivatePlacementAuthorityV1(repair('authority', contextGraphId as ContextGraphIdV1), contextGraphId === graph ? active : true, refuseAuthority && contextGraphId === graph ? new CatalogRepairConditionErrorV1('policy_conflict', 'authority unavailable') : undefined),
-    readRepairRevision: () => null, listFinalizedPrivateRepairs: () => pending,
+    readRepairRevision: () => null, listFinalizedPrivateRepairs: syncList,
+    listFinalizedPrivateRepairsAsync: list,
     readPrivateFailure: row => records.get(row.assertionCoordinate) ?? null, writePrivateFailures: write,
     repairFinalizedPrivatePlacement: attempt, reconcile: async () => null, warn: vi.fn(),
   });
   owners.push(owner);
-  return { owner, records, attempt, write,
+  return { owner, records, attempt, write, list, syncList,
     setActive: (value: boolean) => { active = value; },
     setRows: (value: readonly Rfc64FinalizedPrivatePlacementRepairV1[]) => { pending = value; },
     failWrites: (value: boolean) => { refuseWrites = value; },
@@ -272,4 +275,56 @@ it.each([false, true])('resets three sibling revisions once and retries an uncom
   f.owner.observeLaneAvailability(graph);
   expect(f.write).toHaveBeenCalledTimes(writes);
   rows.forEach(row => expect(f.records.get(row.assertionCoordinate)?.consecutiveFailures).toBe(0));
+});
+
+
+it.each([false, true])('preserves a lane transition during initial listing (active notification: %s)', async notifyActive => {
+  const row = repair('parked-before-start'); const held = deferred();
+  const f = fixture([row], held.promise);
+  f.records.set(row.assertionCoordinate, parked);
+  f.owner.start(ctx); await vi.advanceTimersByTimeAsync(0);
+  try {
+    f.setActive(false); f.owner.observeLaneAvailability(graph);
+    f.setActive(true);
+    if (notifyActive) f.owner.observeLaneAvailability(graph);
+    expect(f.write).not.toHaveBeenCalled();
+    held.resolve(); await f.owner.whenIdle();
+    expect(f.attempt).toHaveBeenCalledTimes(1);
+    expect(f.records.get(row.assertionCoordinate)).toMatchObject({ parked: false, consecutiveFailures: 0 });
+  } finally { held.resolve(); }
+});
+
+
+it('retains the observed transition across a failed listing and failed durable reset', async () => {
+  const row = repair('unread-at-start'); const held = deferred();
+  const f = fixture([row]); f.records.set(row.assertionCoordinate, parked);
+  f.list.mockImplementationOnce(async () => { await held.promise; throw new Error('queue unavailable'); });
+  f.owner.start(ctx); await vi.advanceTimersByTimeAsync(0);
+  f.setActive(false); f.owner.observeLaneAvailability(graph);
+  f.setActive(true); f.owner.observeLaneAvailability(graph);
+  held.resolve(); await f.owner.whenIdle();
+  expect(f.records.get(row.assertionCoordinate)).toEqual(parked);
+  f.failWrites(true); await f.pass();
+  expect(f.attempt).not.toHaveBeenCalled();
+  expect(f.records.get(row.assertionCoordinate)).toEqual(parked);
+  f.failWrites(false); await f.pass();
+  expect(f.attempt).toHaveBeenCalledTimes(1);
+  expect(f.records.get(row.assertionCoordinate)).toMatchObject({ parked: false, consecutiveFailures: 0 });
+});
+
+it('discovers an empty queue asynchronously and retains a request arriving after its snapshot', async () => {
+  const f = fixture([]); const held = deferred(); const row = repair('arrived-after-empty-snapshot');
+  f.list.mockImplementationOnce(async () => { await held.promise; return []; });
+  f.owner.start(ctx);
+  expect(f.syncList).not.toHaveBeenCalled();
+  await vi.advanceTimersByTimeAsync(0);
+  expect(f.list).toHaveBeenCalledTimes(1);
+  f.setRows([row]); const request = f.owner.requestFinalizedPrivate({ repair: row, ctx });
+  let settled = false; void request.whenAttempted.then(() => { settled = true; });
+  expect(request.accepted).toBe(true);
+  await Promise.resolve(); expect(settled).toBe(false);
+  held.resolve(); await f.owner.whenIdle(); await request.whenAttempted;
+  expect(f.syncList).not.toHaveBeenCalled();
+  expect(f.list).toHaveBeenCalledTimes(2);
+  expect(f.attempt).toHaveBeenCalledTimes(1);
 });

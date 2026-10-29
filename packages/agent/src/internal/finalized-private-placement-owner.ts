@@ -35,7 +35,7 @@ type LaneReconciliation =
   | { readonly kind: 'decision'; readonly decision: FinalizedPlacementDecisionV1; readonly resetCommitted: boolean }
   | { readonly kind: 'blocked'; readonly resetCommitted: false };
 interface Dependencies {
-  listFinalizedPrivateRepairsAsync?(signal: AbortSignal): Promise<readonly Rfc64FinalizedPrivatePlacementRepairV1[]>;
+  listFinalizedPrivateRepairsAsync(signal: AbortSignal): Promise<readonly Rfc64FinalizedPrivatePlacementRepairV1[]>;
   listFinalizedPrivateRepairs(): readonly Rfc64FinalizedPrivatePlacementRepairV1[];
   readFinalizedPlacementAuthority(contextGraphId: string): FinalizedPlacementAuthorityV1;
   repairFinalizedPrivatePlacement(repair: Rfc64FinalizedPrivatePlacementRepairV1, placement: CatalogPlacementAttemptV1): Promise<void>;
@@ -57,7 +57,7 @@ export interface Rfc64FinalizedPrivatePlacementRepairRequestV1 {
 
 /** Owns private repair evidence, scheduling, persistence ordering and waiter lifetime. */
 export class FinalizedPrivatePlacementOwnerV1 {
-  readonly #dependencies: Dependencies & Required<Pick<Dependencies, 'listFinalizedPrivateRepairsAsync'>>;
+  readonly #dependencies: Dependencies;
   readonly #options: Options;
   readonly #retries = new Map<string, RetryEntry>();
   readonly #lanes = new Map<string, GraphLane>();
@@ -67,11 +67,7 @@ export class FinalizedPrivatePlacementOwnerV1 {
   #waiterTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(dependencies: Dependencies, options: Options) {
-    // Normalize synchronous test/injected owners once at their entry boundary.
-    this.#dependencies = { ...dependencies,
-      listFinalizedPrivateRepairsAsync: dependencies.listFinalizedPrivateRepairsAsync?.bind(dependencies)
-        ?? (async signal => { signal.throwIfAborted(); return dependencies.listFinalizedPrivateRepairs(); }),
-    };
+    this.#dependencies = dependencies;
     this.#options = options;
     this.#runner = new NextTurnRecurringTaskV1(new CoalescingRecurringTask({
       retryIntervalMs: options.retryIntervalMs,
@@ -100,8 +96,11 @@ export class FinalizedPrivatePlacementOwnerV1 {
   /** Observe an inactive edge without admitting a placement. */
   observeLaneAvailability(contextGraphId: string): void {
     if (this.closed) return;
-    const lane = this.#lanes.get(contextGraphId);
-    if (!lane) return;
+    let lane = this.#lanes.get(contextGraphId);
+    if (!lane) {
+      lane = { id: contextGraphId as ContextGraphIdV1, entries: new Set(), resetPending: false };
+      this.#lanes.set(contextGraphId, lane);
+    }
     try {
       this.#commitLaneReset(lane, this.#readAuthority(contextGraphId));
     } catch (error) { this.#warn('catalog_private_repair_lane_reset_failed', error); }
@@ -199,7 +198,13 @@ export class FinalizedPrivatePlacementOwnerV1 {
     if (hint === undefined) return false;
     const revision = JSON.stringify(hint);
     lane.resetPending ||= lane.revision !== undefined && lane.revision !== revision;
-    if (!lane.resetPending) { lane.revision = revision; return false; }
+    // Initial discovery can yield before any siblings are registered. Remember
+    // every observed edge, but defer its durable reset until the complete snapshot
+    // is registered. Even an inactive/active round trip must retain resetPending.
+    if (this.#arrivedDuringListing || lane.entries.size === 0 || !lane.resetPending) {
+      lane.revision = revision;
+      return false;
+    }
     this.#commitResets([...lane.entries].map(entry => this.#prepareReset(entry.repair)));
     // Publish the graph transition only after the complete durable batch commits.
     lane.revision = revision;

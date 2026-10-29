@@ -578,6 +578,7 @@ describe('catalog placement timing through the finalized-private supervisor', ()
       readPrivateFailure: () => null,
       writePrivateFailures: () => {},
       listFinalizedPrivateRepairs: () => markers,
+      listFinalizedPrivateRepairsAsync: async () => markers,
       repairFinalizedPrivatePlacement: repair,
       reconcile: async () => null,
       warn: () => {},
