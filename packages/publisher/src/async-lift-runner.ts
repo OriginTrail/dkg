@@ -152,7 +152,7 @@ export class AsyncLiftRunner {
         // Least recently used first: the woken loops reach the claim in this order, so the
         // wallet that has waited longest gets the work and the others find what remains.
         onWorkAvailable: () => {
-          for (const walletId of [...this.walletsByLastUse]) this.wakeWallet(walletId);
+          for (const walletId of this.walletsByLastUse) this.wakeWallet(walletId);
         },
       });
     this.scheduleTransactionReconciliation();
