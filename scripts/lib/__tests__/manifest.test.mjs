@@ -572,6 +572,26 @@ test('createImportManifest refuses another partition set over a head that an int
   assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
 });
 
+test('a creation that races a conflicting one refuses instead of adding its pages', async () => {
+  const client = makeMockDaemon();
+  const importId = 'race';
+  const head = defaultManifestAssertionName(importId);
+  const request = client.request.bind(client);
+  let raced = false;
+  // The other run completes after this one read no manifest, just before this one creates the head.
+  client.request = async (method, path, body) => {
+    if (!raced && method === 'POST' && path === '/api/knowledge-assets' && body?.name === head) {
+      raced = true;
+      await createManifest(client, importId, ['a', 'b']);
+    }
+    return request(method, path, body);
+  };
+  await assert.rejects(() => createManifest(client, importId, ['a', 'c']), /different partition set/);
+  assert.equal(raced, true);
+  assert.equal(client.assets.has(partitionPageAssertionName(importId, 0, ['a', 'c'])), false, 'no page for the other set');
+  assert.deepEqual(statuses(await load(client, importId)), [['a', 'pending'], ['b', 'pending']]);
+});
+
 test('createImportManifest writes the whole head when the interrupted run created it but wrote nothing', async () => {
   const client = makeMockDaemon();
   const importId = 'empty-head';
