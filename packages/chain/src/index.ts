@@ -1,4 +1,5 @@
 export { buildEvmDeploymentId } from './chain-adapter.js';
+export { isPublisherNativeGasFailure } from './publisher-funding-error.js';
 export { PublisherGasFundingError } from './publisher-gas-funding.js';
 export * from './public-graph-snapshot.js';
 export type { CoreChainCacheRegistry } from './core-chain-cache-registry.js';

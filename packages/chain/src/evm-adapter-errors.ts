@@ -413,10 +413,13 @@ export interface PublisherWalletBalance {
 export class InsufficientPublisherFundsError extends Error {
   readonly code = NO_FUNDED_PUBLISHER_WALLET_CODE;
   readonly balances: PublisherWalletBalance[];
-  constructor(message: string, balances: PublisherWalletBalance[], options?: { cause?: unknown }) {
+  /** Selector positively observed every candidate at or below its native-gas floor. */
+  readonly nativeGasShortfall?: true;
+  constructor(message: string, balances: PublisherWalletBalance[], options?: { cause?: unknown; nativeGasShortfall?: boolean }) {
     super(message, options);
     this.name = 'InsufficientPublisherFundsError';
     this.balances = balances;
+    if (options?.nativeGasShortfall === true) this.nativeGasShortfall = true;
   }
 }
 

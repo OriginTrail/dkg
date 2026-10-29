@@ -25,8 +25,10 @@ read; payload selection and retry promotion remain under the canonical claim loc
 queues do not cause funding RPCs. If no wallet is eligible, jobs remain accepted and visible with their original IDs.
 Adapters without the optional native-gas observation capability retain their existing behavior.
 
-The native-gas classification also recognizes the immediate native-gas cause of the chain's
-own funding-error wrapper; arbitrary cause chains are not followed. A recognized native-gas
+The chain's funding selector marks a native shortfall only when every refreshed candidate
+has a known native balance at or below its configured gas floor. The publisher recognizes
+that marker and the immediate native-gas cause of the chain's own funding-error wrapper;
+arbitrary cause chains are not followed. A recognized native-gas
 error can return the same logical job to the accepted queue only if the fenced
 worker proves the publish was never dispatched and the durable job carries no transaction
 history. The immutable request, admission identity and original acceptance timestamp stay the

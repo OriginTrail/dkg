@@ -4,13 +4,15 @@ import { LiftPayloadValidationError, LiftValidationStageError, type LiftValidati
 import { isCatalogFloorAuthorityUnavailable } from './catalog-floor-authority-error.js';
 import {
   getChainWriteAheadHookCause,
+  isPublisherNativeGasFailure,
   isTransientRpcTransportFailureWithoutTransaction,
 } from '@origintrail-official/dkg-chain';
 import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintrail-official/dkg-core';
 import { isRpcPreconditionError } from './ack-errors.js';
 import type { ExecutionFailureEvidence } from './async-lift-publisher-types.js';
 import { isDefinitivePreAcceptanceSendFailure, isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
-import { isPublisherFundingFailure, isPublisherNativeGasFailure } from './async-lift-wallet-funding.js';
+import { isPublisherFundingFailure } from './async-lift-wallet-funding.js';
+import { hasUnaccountedTransactionEvidence } from './async-lift-retry-disposition.js';
 import { buildLiftJobAcceptedReset, getLiftJobTransactionEvidence, isKnowledgeAssetVmPublishJobRequest } from './async-lift-publisher-utils.js';
 import {
   createLiftJobFailureMetadata,
@@ -213,8 +215,7 @@ export function executionFailureDisposition(
     if (policy === 'proof-first' || legacyNamedAmbiguity) return { kind: 'retain' };
   }
   if (policy === 'proof-first' && isPublisherFundingFailure(input.error)
-    && getLiftJobTransactionEvidence(current)
-    && !(current.recovery?.action === 'reset_to_accepted' && current.recovery.txHashAccounted === true)) {
+    && hasUnaccountedTransactionEvidence(current)) {
     return { kind: 'fail', failure: createLiftJobFailureMetadata({
       failedFromState: 'broadcast', code: 'wallet_unavailable',
       message: 'A prior signed publication remains unresolved; reconcile its transaction before selecting another wallet',

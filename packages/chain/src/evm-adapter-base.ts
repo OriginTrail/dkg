@@ -2746,9 +2746,7 @@ export class EVMChainAdapterBase {
     const selected = choose(initial);
     if (selected !== undefined) return { kind: 'funded', candidate: selected };
 
-    // Cached balances are appropriate for soft routing, but a terminal
-    // whole-pool claim must be based on a fresh snapshot. Operators commonly
-    // fund a wallet and retry immediately, inside the advisory cache TTL.
+    // Terminal funding decisions require a fresh snapshot, including an immediate top-up.
     const refreshed = await this._scanCandidateFunding(candidates, fundingFor, true, true);
     const rechecked = choose(refreshed);
     if (rechecked !== undefined) return { kind: 'funded', candidate: rechecked };
@@ -2762,6 +2760,8 @@ export class EVMChainAdapterBase {
     }));
     return { kind: 'unfunded', assessments: unfunded, error: new InsufficientPublisherFundsError(
       formatNoFundedPublisherWalletMessage(diagnostics), diagnostics,
+      { nativeGasShortfall: unfunded.length > 0 && unfunded.every(({ candidate, funding }) =>
+        funding.native !== null && funding.native <= fundingFor(candidate).nativeFloorWei) },
     ) };
   }
 

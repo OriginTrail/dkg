@@ -1,5 +1,5 @@
 import { atLiftValidationStage } from './lift-validation-error.js';
-import { isPublisherNativeGasFailure } from './async-lift-wallet-funding.js';
+import { isPublisherNativeGasFailure } from '@origintrail-official/dkg-chain';
 import { createAsyncLiftClaimControl } from './async-lift-claim-gate.js';
 import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ethers } from 'ethers';
 import { PublisherGasFunding, PublisherGasFundingError } from '../src/publisher-gas-funding.js';
+import { isPublisherNativeGasFailure } from '../src/publisher-funding-error.js';
+import { InsufficientPublisherFundsError } from '../src/evm-adapter-errors.js';
 import { chainFeeFloor } from '../src/evm-fee-policy.js';
 import type { PreparedTransaction } from '../src/rpc-failover-client.js';
 
@@ -83,5 +85,26 @@ describe('publisher gas funding observations', () => {
     await expect(f.funding.read(f.provider, 'wallet')).rejects.toThrow('RPC unavailable');
     await expect(f.funding.assertPrepared({ ...f.prepared(), transaction: {} }))
       .rejects.toThrow('gas cost unavailable');
+  });
+});
+
+
+describe('native funding error normalization', () => {
+  const native = Object.assign(new Error('insufficient funds for gas * price + value'), { code: 'INSUFFICIENT_FUNDS' });
+  it.each([
+    [native, true],
+    [new PublisherGasFundingError({ observedAt: 0, balanceWei: 0n, requiredWei: 1n, gasLimit: 1n, feePerGasWei: 1n }), true],
+    [new InsufficientPublisherFundsError('unfunded', [], { nativeGasShortfall: true }), true],
+    [new InsufficientPublisherFundsError('unfunded', [], { cause: native }), true],
+    [new InsufficientPublisherFundsError('unfunded', [], { cause: Object.assign(new Error('ERC20InsufficientBalance'), { code: 'CALL_EXCEPTION' }) }), false],
+    [new Error('arbitrary wrapper', { cause: native }), false],
+    [new InsufficientPublisherFundsError('outer', [], { cause: new InsufficientPublisherFundsError('inner', [], { cause: native }) }), false],
+    [new Error('execution reverted: insufficient funds for gas'), false],
+  ])('classifies only direct or known immediate native evidence: %s', (error, expected) => {
+    expect(isPublisherNativeGasFailure(error)).toBe(expected);
+  });
+  it('fails closed on throwing inspection', () => {
+    const error = Object.defineProperty({}, 'code', { get() { throw new Error('unsafe accessor'); } });
+    expect(isPublisherNativeGasFailure(error)).toBe(false);
   });
 });

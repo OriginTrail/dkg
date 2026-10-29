@@ -243,6 +243,7 @@ describe('async publisher gas eligibility (#3591)', () => {
 
   it.each([
     ['RPC insufficient-funds error', () => new Error('insufficient funds for gas * price + value')],
+    ['selector native-floor error without a cause', () => new InsufficientPublisherFundsError('No funded publisher wallet', [], { nativeGasShortfall: true })],
     ['wrapped native RPC error', () => new InsufficientPublisherFundsError('No funded publisher wallet', [], {
       cause: Object.assign(new Error('insufficient funds for gas * price + value'), { code: 'INSUFFICIENT_FUNDS' }),
     })],

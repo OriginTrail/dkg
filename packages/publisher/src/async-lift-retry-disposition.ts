@@ -48,9 +48,9 @@ import type { AsyncLiftChainProofResolution, AsyncLiftLastChainCheck } from './a
  * `reset_to_accepted`, yet a transaction that LANDED and merely failed to record locally arrives
  * under exactly that code — resolution cannot separate the two.
  *
- * Evidence is a persisted transaction hash from either carrier (the live `broadcast` metadata, or
- * `recovery.txHashChecked`, which survives a reset that dropped the broadcast metadata), plus an
- * `included` origin, which by definition had a transaction.
+ * Hash evidence comes from live `broadcast` metadata or inherited `recovery.txHashChecked`.
+ * This status-independent predicate handles their accounting; hasBroadcastEvidence additionally
+ * treats a failed `included` origin as unconditional evidence of a transaction.
  *
  * It is deliberately NOT keyed on `failedFromState ∈ {broadcast, included}`: `quorum_unmet`'s only
  * allowed state is 'broadcast' while its producer sits before the publish tx is signed (see the
@@ -61,21 +61,21 @@ import type { AsyncLiftChainProofResolution, AsyncLiftLastChainCheck } from './a
  * Which hash a job carries is structural ({@link getLiftJobTransactionEvidence}); what carrying one
  * MEANS is policy, which is why this lives here rather than beside the field accessor.
  */
-export function hasBroadcastEvidence(job: PersistedFailedJob): boolean {
-  // A live broadcast record is unconditional: this job signed that transaction itself and nothing
-  // has accounted for it. Same for an `included` origin — inclusion implies a transaction.
+export function hasUnaccountedTransactionEvidence(job: Pick<PersistedLiftJob, 'broadcast' | 'recovery'>): boolean {
+  // A live signed hash is unconditional evidence; older recovery accounting cannot release it.
   if (job.broadcast?.txHash) return true;
-  if (job.failure.failedFromState === 'included') return true;
   // GH#2270 PR-3 r3 — the INHERITED hash, carried in the recovery record by an earlier reset. It
   // is evidence only while it remains an open question. Once the proof-first dispatcher has
-  // established the transaction's fate and released the job on the strength of it, the hash stays
-  // for audit but stops holding anything: continuing to read it as unaccounted would strand the
-  // job forever, because it can never be proven a second time — nothing new was ever sent.
+  // established its fate, the hash remains for audit without holding a new attempt.
   const recovery = job.recovery;
   if (!recovery?.txHashChecked) return false;
   // Only a RESET record can carry the accounted mark; a finalized-from-chain record is not a
   // job that is still waiting on anything.
   return recovery.action !== 'reset_to_accepted' || recovery.txHashAccounted !== true;
+}
+
+export function hasBroadcastEvidence(job: PersistedFailedJob): boolean {
+  return job.failure.failedFromState === 'included' || hasUnaccountedTransactionEvidence(job);
 }
 
 /**
