@@ -125,6 +125,14 @@ function knowledgeAssetMutationDeadline(name: string, contextGraphId: string, su
   return { outcomeUnknownHint: knowledgeAssetHistoryHint(name, contextGraphId, subGraphName) };
 }
 
+/** An unanswered async admission may still have stored a job: point at the job list, not at a re-run. */
+function asyncJobAdmissionDeadline(kind: 'share' | 'publish', name: string, contextGraphId: string): RequestDeadline {
+  const jobList = kind === 'share'
+    ? `dkg ka share-jobs --context-graph-id ${contextGraphId}`
+    : `dkg publisher jobs --context-graph ${contextGraphId}`;
+  return { outcomeUnknownHint: `A ${kind} job for "${name}" may exist: look for it with \`${jobList}\` before retrying.` };
+}
+
 export interface PublisherJobResponse {
   job: PersistedLiftJob;
   retryState: LiftJobRetryProjection;
@@ -1049,7 +1057,11 @@ export class ApiClient {
     options?: KnowledgeAssetShareAsyncOptions,
   ): Promise<{ jobId: string; state: 'queued' }> {
     assertSupportedAsyncShareOptions(options);
-    return this.post(`/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`, { contextGraphId, ...(options ?? {}) });
+    return this.post(
+      `/api/knowledge-assets/${encodeURIComponent(name)}/swm/share-async`,
+      { contextGraphId, ...(options ?? {}) },
+      asyncJobAdmissionDeadline('share', name, contextGraphId),
+    );
   }
 
   async knowledgeAssetShareJobs(options?: ShareJobsListOptions): Promise<ShareJobsListResult> {
@@ -1120,7 +1132,7 @@ export class ApiClient {
       // letting normal author resolution publish a different author.
       ...(selectedAuthorAgentAddress !== undefined ? { selectedAuthorAgentAddress } : {}),
       ...(publishOptions ? { options: publishOptions } : {}),
-    });
+    }, asyncJobAdmissionDeadline('publish', name, contextGraphId));
   }
 
   async createAssertion(
