@@ -321,15 +321,24 @@ export function selectLifecycleBindingJobs(
 /**
  * #1837 — the single terminal-clear authority, reused by both `clear(status)` (bulk, through
  * {@link isBulkClearableTerminalLiftJob}) and `clearTerminalJob(jobId)` so they cannot drift. A job
- * is clearable iff it is in a native terminal state (finalized|failed) AND is not a
- * `retry_recovery`-failed job — those may still carry a pending on-chain tx that periodic recovery
- * will finalize, so ordinary and bulk cleanup do not remove them. The separately authorized,
- * exact-job override below is their deliberate operator/owner exit. A `retry_recovery`-failed job
- * is therefore treated as NONTERMINAL-for-routine-cleanup.
+ * is clearable iff it is in a native terminal state (finalized|failed) AND is not a failed job
+ * {@link needsPendingTransactionOverride} names. A `retry_recovery` failure may still carry a
+ * pending on-chain tx that periodic recovery will finalize. Deleting a job held for chain proof
+ * turns admission's `LiftJobPendingChainProofError` back into a fresh job for the same KA (#3573:
+ * this half once applied to bulk cleanup only). The separately authorized, exact-job override
+ * below is their deliberate operator/owner exit; such a job is NONTERMINAL-for-routine-cleanup.
+ *
+ * A job whose failure PROVES its transaction had no effect is not held, so routine cleanup of
+ * reverted and unfunded attempts keeps working. Nothing is lost either way: the #1829 journal is
+ * append-only and a clear never touches it, so the txHash outlives the job record.
  */
 export function isClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
-  return isTerminalLiftJobState(job.status)
-    && !(isFailedJob(job) && job.failure.resolution === 'retry_recovery');
+  return isTerminalLiftJobState(job.status) && !needsPendingTransactionOverride(job);
+}
+
+/** #3573 — a failed job a clear removes only with the pending-transaction override: recovery owns it, or it is held. */
+export function needsPendingTransactionOverride(job: PersistedLiftJob): boolean {
+  return isFailedJob(job) && (job.failure.resolution === 'retry_recovery' || isHeldForChainProof(job));
 }
 
 /**
@@ -444,12 +453,12 @@ function ownsLiftJobAdmissionLane(job: PersistedLiftJob, agentAddress: string | 
  * What the TARGETED by-id clear may remove.
  *
  * #1837's base predicate treats transaction-bearing jobs as nonterminal-for-cleanup, because
- * periodic recovery may still finalize them from chain. That is right for bulk cleanup. The
- * explicit agent-owner/node-operator override is the exit for one exact closed-run record:
- * it accepts a pre-broadcast `validated` record, a `retry_recovery` failure, or a live
- * `broadcast`/`included` record. The append-only journal remains, and no broad clear receives this
- * authority. A `claimed` record stays denied because it can still be running before validation;
- * an operator must stop the runner and let that claim resolve before clearing it.
+ * periodic recovery may still finalize them from chain, and a job held for chain proof (#3573).
+ * The explicit agent-owner/node-operator override is the exit for one exact closed-run record: it
+ * accepts a pre-broadcast `validated` record, a failure {@link needsPendingTransactionOverride}
+ * names, or a live `broadcast`/`included` record. The append-only journal remains, and no broad
+ * clear receives this authority. A `claimed` record stays denied because it can still be running
+ * before validation; an operator must stop the runner and let that claim resolve before clearing it.
  *
  * The exception is named rather than expressed as the base predicate's complement: written that
  * way it would silently absorb every future reason a terminal job becomes protected. Additions to
@@ -493,24 +502,15 @@ export function isTargetedClearableLiftJob(
       return false;
   }
   if (job.status === 'validated' || job.status === 'broadcast' || job.status === 'included') return true;
-  return isTerminalLiftJobState(job.status)
-    && isFailedJob(job)
-    && job.failure.resolution === 'retry_recovery';
+  return needsPendingTransactionOverride(job);
 }
 
 /**
- * What BULK `clear(status)` may delete: terminal-clearable, MINUS a job {@link isHeldForChainProof}.
- *
- * Deleting a held job turns admission's `LiftJobPendingChainProofError` back into a fresh job for
- * the same KA, so bulk cleanup is safe by default and the targeted lane above is where an operator
- * accepts that risk deliberately, for one named job.
- *
- * A job whose failure PROVES its transaction had no effect is not held, so routine cleanup of
- * reverted and unfunded attempts keeps working. Nothing is lost either way: the #1829 journal is
- * append-only and a clear never touches it, so the txHash outlives the job record.
+ * What BULK `clear(status)` may delete: exactly what the by-id clear may without the override (never
+ * a held job), before the bulk lane's sibling guard (async-lift-guarded-clear.ts).
  */
 export function isBulkClearableTerminalLiftJob(job: PersistedLiftJob): boolean {
-  return isClearableTerminalLiftJob(job) && !(isFailedJob(job) && isHeldForChainProof(job));
+  return isClearableTerminalLiftJob(job);
 }
 
 /**

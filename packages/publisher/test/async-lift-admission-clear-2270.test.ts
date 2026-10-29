@@ -125,10 +125,56 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
       existingJobId: failed.jobId,
     });
 
-    // Bulk is safe by DEFAULT, not locked: naming the exact job still clears it, and that
-    // targeted call is where an operator takes the decision knowingly.
-    expect(await publisher.clearTerminalJob(failed.jobId)).toEqual({ outcome: 'cleared' });
+    // Bulk is safe by DEFAULT, not locked: naming the exact job WITH the pending-transaction
+    // override still clears it, and that targeted call is where an operator takes the decision
+    // knowingly. #3573 — naming it without the override is refused like bulk, with the reason
+    // that says what the override is for.
+    expect(await publisher.clearTerminalJob(failed.jobId))
+      .toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
+    expect(await publisher.clearTerminalJob(failed.jobId, {
+      pendingTransactionOverride: { kind: 'nodeOperator' },
+    })).toEqual({ outcome: 'cleared' });
     expect(await publisher.getStatus(failed.jobId)).toBeNull();
+  });
+
+  // #3573 — the issue's sequence. A job that broadcast and then failed after the write-ahead
+  // recorded its transaction hash is held. An agent tidying up failed jobs clears it by id; had
+  // that cleared it, the re-submit that follows would mint a second job for the KA while the
+  // first job's transaction may still land. The plain clear is refused instead, so the re-submit
+  // still answers pending-chain-proof, and only the override of the agent that enqueued the job
+  // (or of the node operator) removes it.
+  it('refuses a plain clear by id of a held job, so a re-submit still cannot mint a second job', async () => {
+    const OWNER = '0xAAaAAa00000000000000000000000000000000Aa';
+    const OTHER = '0xBBbBBb00000000000000000000000000000000Bb';
+    const publisher = createPublisher();
+    const request = kaVmPublishRequest();
+    const jobId = await publisher.enqueueKnowledgeAssetVmPublish(request, { admittedByAgentAddress: OWNER });
+    await publisher.claimNext('wallet-1');
+    await publisher.update(jobId, 'validated', { validation: KA_VM_VALIDATION });
+    await publisher.update(jobId, 'broadcast', { broadcast: { txHash: TX_HASH, walletId: 'wallet-1', operationKind: 'create' } });
+    const held = expectFailed(await publisher.recordPublishFailure(jobId, {
+      error: new Error('RPC endpoint temporarily unavailable'),
+      failedFromState: 'broadcast',
+      errorPayloadRef: 'urn:dkg:test:error:held-by-id',
+    }));
+    expect([held.failure.code, isHeldForChainProof(held)]).toEqual(['rpc_unavailable', true]);
+
+    expect(await publisher.clearTerminalJob(jobId)).toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
+    await expect(publisher.enqueueKnowledgeAssetVmPublish(request, { admittedByAgentAddress: OWNER })).rejects.toMatchObject({
+      code: 'LIFT_JOB_PENDING_CHAIN_PROOF',
+      existingJobId: jobId,
+    });
+    // Another agent's override is not the enqueuer's: refused the same way, and the job stays.
+    expect(await publisher.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OTHER },
+    })).toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
+    expect((await publisher.getStatus(jobId))?.status).toBe('failed');
+    expect((await publisher.getStats()).accepted).toBe(0);
+
+    expect(await publisher.clearTerminalJob(jobId, {
+      pendingTransactionOverride: { kind: 'agent', agentAddress: OWNER },
+    })).toEqual({ outcome: 'cleared' });
+    expect(await publisher.getStatus(jobId)).toBeNull();
   });
 
   it('still bulk-clears failed jobs with no transaction to account for', async () => {
@@ -183,9 +229,14 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
     expect(await publisher.clear('failed')).toBe(0);
     expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
 
-    // The operator's explicit exit still works, and clearing does not destroy the evidence: the
-    // #1829 journal keeps the txHash after the job record is gone.
-    expect(await publisher.clearTerminalJob(held.jobId)).toEqual({ outcome: 'cleared' });
+    // The operator's explicit exit still works (#3573: as the override, a plain clear by id is
+    // refused too), and clearing does not destroy the evidence: the #1829 journal keeps the txHash
+    // after the job record is gone.
+    expect(await publisher.clearTerminalJob(held.jobId))
+      .toEqual({ outcome: 'rejected', reason: 'pending_transaction' });
+    expect(await publisher.clearTerminalJob(held.jobId, {
+      pendingTransactionOverride: { kind: 'nodeOperator' },
+    })).toEqual({ outcome: 'cleared' });
     expect(await publisher.getStatus(held.jobId)).toBeNull();
     expect((await publisher.readJournalByJob(held.jobId)).txHashes).toContain(TX_HASH);
   });
@@ -346,8 +397,11 @@ describe('GH#2270 admission and cleanup for held jobs', () => {
     expect((await publisher.getStatus(held.jobId))?.status).toBe('failed');
     expect((await publisher.getStats()).accepted).toBe(0);
 
-    // The documented exit: clear THAT job by id, and the KA is publishable again.
-    expect(await publisher.clearTerminalJob(held.jobId)).toEqual({ outcome: 'cleared' });
+    // The documented exit: clear THAT job by id with the pending-transaction override (#3573: a
+    // plain clear by id is refused), and the KA is publishable again.
+    expect(await publisher.clearTerminalJob(held.jobId, {
+      pendingTransactionOverride: { kind: 'nodeOperator' },
+    })).toEqual({ outcome: 'cleared' });
     const minted = await publisher.enqueueKnowledgeAssetVmPublish(request);
     expect([minted === held.jobId, minted === 'finalized-1']).toEqual([false, false]);
     expect((await publisher.getStatus(minted))?.status).toBe('accepted');

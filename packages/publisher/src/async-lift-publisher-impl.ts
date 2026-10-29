@@ -101,6 +101,7 @@ import {
   isAutomaticallyRetryableLiftJob,
   isClearableTerminalLiftJob,
   isTargetedClearableLiftJob,
+  needsPendingTransactionOverride,
   decideChainProofDisposition,
   hasAutomaticRecoveryExit,
   resolveHeldJobSettlementCapability,
@@ -2895,7 +2896,8 @@ export class TripleStoreAsyncLiftPublisher
         // settles authority and state eligibility together, so a call site cannot read the
         // canonical predicate while forgetting the ownership half.
         if (!isTargetedClearableLiftJob(job, options)) {
-          return { outcome: 'rejected', reason: 'nonterminal' };
+          // #3573 — a finished job that may have sent a transaction is refused with the reason the override is for.
+          return { outcome: 'rejected', reason: needsPendingTransactionOverride(job) ? 'pending_transaction' : 'nonterminal' };
         }
         await scope.commitRemoval();
         return { outcome: 'cleared' };
