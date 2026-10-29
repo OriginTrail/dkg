@@ -172,8 +172,8 @@ const ALLOWLIST = new Map([
   [
     'packages/core/src/protocol-router.ts',
     {
-      expectedHits: 2,
-      justification: 'ProtocolRouter.send and the admission-gated, payload-free capability probe both use the injected Network transport after PeerResolver (RFC 07 PR-3)',
+      expectedHits: 1,
+      justification: 'one shared admitted stream open, used by send, duplex streams and the payload-free capability probe, dials the injected Network transport after PeerResolver (RFC 07 PR-3)',
     },
   ],
   [
