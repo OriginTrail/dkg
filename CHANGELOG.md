@@ -68,8 +68,9 @@ change.
 ### Compatibility
 
 **No smart-contract, ABI or deployment registry changes, and no new
-network protocols.** The RFC-64 inventory database stays on schema 6, so
-`dkg rollback` takes a node back to 10.0.26 without a database change.
+network protocols.** The RFC-64 inventory database stays on schema 6. Its
+confirmed catalog placements (#3174) are rows that 10.0.26 cannot read, so
+`dkg rollback` to 10.0.26 removes them first; see the upgrade table.
 Owed-inventory markers (#3377) are small files in a new directory under
 the RFC-64 persistence directory. The async share and publish queues keep
 their jobs in the store, and the paging parameters are optional, so
@@ -89,6 +90,7 @@ clients that do not send them get the lists as before (#3548).
 | `dkg doctor` reads `config.yaml` (#3247) | On a node configured in `config.yaml` the doctor runs every config check, and `dkg update` on such a Core runs the Core checks. A malformed config file makes the doctor warn, report the file and exit 2 | Fix what the doctor reports |
 | Shared memory hosting writes crash-safely (#2937) | A node that hosts shared memory for other members syncs each acknowledged append to disk before it answers | None |
 | An optional store concurrency policy (#3410) | `DKG_STORE_CONCURRENCY_POLICY=configured` lets `DKG_STORE_MAX_CONCURRENT` go above the CPU count, with one slot each kept for acknowledgements and health checks. The default stays `cpu` | None |
+| `dkg rollback` to 10.0.26 removes confirmed catalog placements (#3174) | A publication confirmed on chain whose catalog step the node has not stored yet is kept as a confirmed catalog placement, a new kind of row in the RFC-64 inventory database. 10.0.26 does not start on a database that holds one. `dkg rollback`, and `dkg rollback --stores-for` for a version installed by hand, remove these rows and their failure diagnostics for any release before 10.0.27, and name the assets; 10.0.26 does not finish their catalog step | Roll back with `dkg rollback`, or ready the stores with `dkg rollback --stores-for <version>` before starting an older version installed by hand |
 
 ### Fixed
 

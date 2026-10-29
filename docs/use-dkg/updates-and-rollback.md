@@ -125,6 +125,14 @@ The first release after 10.0.26 changes two things to check before you update.
   [Store control path](async-queue-operations.md#store-control-path). The
   daemon logs `Store control path: on (...)` or `off (...)` once at start.
 
+Going back to 10.0.26 works with `dkg rollback`. The newer release keeps a
+publication that is confirmed on chain, but whose catalog step it has not
+stored yet, as a confirmed catalog placement, and 10.0.26 does not start on an
+inventory database that holds one. `dkg rollback` removes these placements
+first and names the assets; 10.0.26 does not finish their catalog step. Before
+you start 10.0.26 that you installed by hand, run
+`dkg rollback --stores-for 10.0.26` with the newer release.
+
 ## Node.js security releases
 
 Node.js 22.23.4, 24.22.1 and 26.12.1, released on 21 October 2026, fix

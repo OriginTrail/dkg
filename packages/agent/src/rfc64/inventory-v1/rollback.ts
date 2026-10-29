@@ -75,9 +75,27 @@ export interface Rfc64InventoryRollbackPreparationV1 {
   readonly toVersion: number | null;
   /** Where a restore kept the database it replaced. */
   readonly keptPath: string | null;
+  /** KA UALs of the confirmed catalog placements removed for a target that cannot read them. */
+  readonly removedConfirmedCatalogPlacements: readonly string[];
   /** Ends the inventory lease. Call it once the node runs the target version, or on failure. */
   release(): void;
 }
+
+export interface Rfc64InventoryRollbackOptionsV1 {
+  /**
+   * The target reads only version 1 placement repairs (releases before
+   * `RFC64_CONFIRMED_CATALOG_PLACEMENT_FIRST_RELEASE_V1`), so the confirmed
+   * catalog placements (version 2) are removed, with their failure diagnostics.
+   */
+  readonly removeConfirmedCatalogPlacements?: boolean;
+}
+
+/**
+ * The first release that keeps confirmed catalog placements (version 2 rows of
+ * `rfc64_finalized_private_placement_repairs_v1`). An earlier release refuses
+ * to start on a database holding one, although the schema version is the same.
+ */
+export const RFC64_CONFIRMED_CATALOG_PLACEMENT_FIRST_RELEASE_V1 = '10.0.27';
 
 function downgradeChain(fromVersion: number, maxUserVersion: number): InventorySchemaMigrationV1[] | null {
   const chain: InventorySchemaMigrationV1[] = [];
@@ -253,6 +271,70 @@ function downgradeExactSchema(
   return true;
 }
 
+function confirmedPlacementUal(repairJson: string): string | null {
+  try {
+    const repair = JSON.parse(repairJson) as { version?: unknown; kaUal?: unknown };
+    return repair.version === 2 ? String(repair.kaUal) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Remove the confirmed catalog placements (version 2 repairs) and their failure
+ * diagnostics in one transaction; the KA UALs of the removed rows. Every other
+ * row stays, and the schema is unchanged.
+ */
+function removeConfirmedCatalogPlacements(sqlite: SqliteModuleV1, databasePath: string): string[] {
+  const database: DatabaseSyncV1 = new sqlite.DatabaseSync(databasePath);
+  let transactionOpen = false;
+  let committed = false;
+  let removed: Array<{ digest: Uint8Array; ual: string }> = [];
+  try {
+    database.exec('PRAGMA busy_timeout = 0');
+    const tables = new Set((database.prepare(
+      "SELECT name FROM sqlite_schema WHERE type = 'table'",
+    ).all() as Array<{ name: string }>).map((row) => row.name));
+    if (!tables.has('rfc64_finalized_private_placement_repairs_v1')) return [];
+    database.exec('BEGIN IMMEDIATE');
+    transactionOpen = true;
+    const rows = database.prepare(
+      'SELECT repair_digest, repair_json FROM rfc64_finalized_private_placement_repairs_v1',
+    ).all() as Array<{ repair_digest: Uint8Array; repair_json: string }>;
+    removed = rows.flatMap((row) => {
+      const ual = confirmedPlacementUal(row.repair_json);
+      return ual === null ? [] : [{ digest: row.repair_digest, ual }];
+    });
+    const deleteFailure = tables.has('rfc64_private_placement_failures_v1')
+      ? database.prepare('DELETE FROM rfc64_private_placement_failures_v1 WHERE repair_digest = ?')
+      : null;
+    const deleteRepair = database.prepare(
+      'DELETE FROM rfc64_finalized_private_placement_repairs_v1 WHERE repair_digest = ?',
+    );
+    for (const row of removed) {
+      deleteFailure?.run(row.digest);
+      deleteRepair.run(row.digest);
+    }
+    database.exec('COMMIT');
+    transactionOpen = false;
+    committed = true;
+  } catch (cause) {
+    if (transactionOpen) {
+      try { database.exec('ROLLBACK'); } catch { /* keep the removal failure */ }
+    }
+    throw cause;
+  } finally {
+    if (!committed) database.close();
+  }
+  finishChange(databasePath, `cleared of ${removed.length} confirmed catalog placement(s)`, () => {
+    // Closing the last connection folds the log into the main file.
+    database.close();
+    fsyncRegularFile(databasePath, 'inventory database without confirmed catalog placements');
+    fsyncDirectory(dirname(databasePath));
+  });
+  return removed.map((row) => row.ual);
+}
+
 /** After the database changed, a failure is reported as such, never as a refusal. */
 function finishChange(databasePath: string, change: string, finish: () => void): void {
   try {
@@ -344,18 +426,22 @@ function refusalFrom(
  * With the node stopped, give the target release an inventory database it
  * opens: lower an exact newer schema, keeping every row the target reads, or
  * else restore the pre-migration copy. Refuses, changing nothing, when neither
- * applies. The inventory lease stays held until `release()`, so a node started
- * before the version switch cannot migrate the database forward again.
+ * applies. For a target before 10.0.27 it also removes the confirmed catalog
+ * placements that target cannot read. The inventory lease stays held until
+ * `release()`, so a node started before the version switch cannot migrate the
+ * database forward again.
  */
 export async function prepareRfc64InventoryForRollbackV1(
   dataDir: string,
   maxUserVersion: number,
+  options: Rfc64InventoryRollbackOptionsV1 = {},
 ): Promise<Rfc64InventoryRollbackPreparationV1> {
   const resolvedDataDir = resolve(dataDir);
   const databasePath = resolveRfc64InventoryDatabasePathV1(resolvedDataDir);
   const unleased = (outcome: Rfc64InventoryRollbackOutcomeV1): Rfc64InventoryRollbackPreparationV1 =>
     Object.freeze({
-      outcome, databasePath, fromVersion: null, toVersion: null, keptPath: null, release: () => {},
+      outcome, databasePath, fromVersion: null, toVersion: null, keptPath: null,
+      removedConfirmedCatalogPlacements: [], release: () => {},
     });
   if (maxUserVersion <= 0) return unleased('compatible');
   if (!pathEntryExists(dirname(databasePath))) return unleased('absent');
@@ -372,9 +458,12 @@ export async function prepareRfc64InventoryForRollbackV1(
       toVersion: number | null,
       keptPath: string | null = null,
     ): Rfc64InventoryRollbackPreparationV1 => {
+      const removedConfirmedCatalogPlacements = outcome !== 'absent' && options.removeConfirmedCatalogPlacements === true
+        ? removeConfirmedCatalogPlacements(sqlite, databasePath)
+        : [];
       let released = false;
       return Object.freeze({
-        outcome, databasePath, fromVersion: userVersion, toVersion, keptPath,
+        outcome, databasePath, fromVersion: userVersion, toVersion, keptPath, removedConfirmedCatalogPlacements,
         release: () => {
           if (released) return;
           released = true;

@@ -217,6 +217,47 @@ function repairCount(path: string): number {
   }
 }
 
+const confirmedUal = `did:dkg:otp:20430/0x${'11'.repeat(20)}/7`;
+
+/**
+ * A confirmed catalog placement and its failure diagnostic, as 10.0.27 keeps
+ * them: a version 2 repair row, which releases before 10.0.27 refuse to read.
+ */
+function addConfirmedPlacement(path: string): void {
+  const database = new DatabaseSync(path);
+  try {
+    const digest = new Uint8Array(32).fill(0x33);
+    database.prepare(
+      'INSERT INTO rfc64_finalized_private_placement_repairs_v1 (repair_digest, repair_json) VALUES (?, ?)',
+    ).run(digest, JSON.stringify({ ...repair, version: 2, inventoryScope: null, kaUal: confirmedUal, seal: {} }));
+    database.prepare(
+      'INSERT INTO rfc64_private_placement_failures_v1 (repair_digest, state_json) VALUES (?, ?)',
+    ).run(digest, JSON.stringify(failure));
+  } finally {
+    database.close();
+  }
+}
+
+/** The versions of the repair rows and how many failure diagnostics remain. */
+function repairVersionsAndFailures(path: string): { versions: number[]; failures: number } {
+  const database = new DatabaseSync(path, { readOnly: true });
+  try {
+    const rows = database.prepare(
+      'SELECT repair_json FROM rfc64_finalized_private_placement_repairs_v1',
+    ).all() as Array<{ repair_json: string }>;
+    const tables = database.prepare(
+      "SELECT name FROM sqlite_schema WHERE name = 'rfc64_private_placement_failures_v1'",
+    ).all();
+    const failures = tables.length === 0 ? 0 : Number(database.prepare(
+      'SELECT count(*) AS count FROM rfc64_private_placement_failures_v1',
+    ).get()?.count);
+    const versions = rows.map((row) => (JSON.parse(row.repair_json) as { version: number }).version).sort();
+    return { versions, failures };
+  } finally {
+    database.close();
+  }
+}
+
 /** Commit `sql` and one more owed repair into the log, then kill the writer before it checkpoints. */
 async function crashAfterCommitting(path: string, sql: string, owed: typeof repair): Promise<void> {
   const bytes = encodeRfc64FinalizedPrivatePlacementRepairV1(owed);
@@ -510,6 +551,50 @@ describe('RFC-64 inventory rollback', () => {
     expect(upgraded.readFinalizedPrivatePlacementFailure(repair)).toBeNull();
     close(upgraded);
     expect(fs.existsSync(copyPath(dataDir, 5))).toBe(true);
+  });
+
+  it('removes the confirmed catalog placements a release before 10.0.27 cannot read, keeping every other row', async () => {
+    const dataDir = dataDirectory();
+    await writeV6(dataDir);
+    addConfirmedPlacement(databasePath(dataDir));
+    expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1, 2], failures: 2 });
+
+    const prepared = await prepareRfc64InventoryForRollbackV1(
+      dataDir, INVENTORY_V1_USER_VERSION, { removeConfirmedCatalogPlacements: true },
+    );
+    prepared.release();
+
+    expect(prepared).toMatchObject({ outcome: 'compatible', removedConfirmedCatalogPlacements: [confirmedUal] });
+    expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1], failures: 1 });
+    expect(headerUserVersion(databasePath(dataDir))).toBe(INVENTORY_V1_USER_VERSION);
+    const reopened = await open(dataDir);
+    expect(reopened.listFinalizedPrivatePlacementRepairs()).toEqual([repair]);
+    close(reopened);
+  });
+
+  it('removes them after lowering the schema for a release that opens v5', async () => {
+    const dataDir = dataDirectory();
+    await writeV6(dataDir);
+    addConfirmedPlacement(databasePath(dataDir));
+
+    const prepared = await prepareRfc64InventoryForRollbackV1(dataDir, 5, { removeConfirmedCatalogPlacements: true });
+    prepared.release();
+
+    expect(prepared).toMatchObject({ outcome: 'downgraded', toVersion: 5, removedConfirmedCatalogPlacements: [confirmedUal] });
+    expectOpensAsV5(databasePath(dataDir));
+    expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1], failures: 0 });
+  });
+
+  it('keeps the confirmed catalog placements for a release that reads them', async () => {
+    const dataDir = dataDirectory();
+    await writeV6(dataDir);
+    addConfirmedPlacement(databasePath(dataDir));
+
+    const prepared = await prepareRfc64InventoryForRollbackV1(dataDir, INVENTORY_V1_USER_VERSION);
+    prepared.release();
+
+    expect(prepared).toMatchObject({ outcome: 'compatible', removedConfirmedCatalogPlacements: [] });
+    expect(repairVersionsAndFailures(databasePath(dataDir))).toEqual({ versions: [1, 2], failures: 2 });
   });
 
   it('holds the inventory lease until it is released, so no node can migrate the database forward', async () => {
