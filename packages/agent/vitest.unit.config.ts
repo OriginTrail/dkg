@@ -465,6 +465,8 @@ export default defineConfig({
       "test/rootless-update-error.test.ts",
       "test/changelog-requester.test.ts",
       "test/encrypt-inline-policy.test.ts",
+      // #3044 — a publish repeats its recipient read within the share's bound.
+      "test/publish-recipient-authority-repeat.test.ts",
       // #3081 — the steps the queued executor reports after the confirmation (observation only).
       "test/queued-publish-tail-steps.test.ts",
       // #3081 — a publication does not wait for the retirement of its shared copy's marker.
