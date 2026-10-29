@@ -181,6 +181,17 @@ export class LiftJobStoreSelectors {
     return this.projectInventory(result).filter((job) => isKnowledgeAssetVmPublishJobRequest(job.request));
   }
 
+  /** Advisory existence only; no payload materialization, ordering or retry promotion. */
+  async hasRunnableWork(now: number, includeRetries: boolean): Promise<boolean> {
+    const retry = includeRetries ? `UNION { ?job <${CONTROL_STATUS}> ${literal('failed')} ; <${CONTROL_NEXT_RETRY_AT}> ?at . FILTER (?at <= ${integer(now)}) }` : '';
+    const result = await this.store.query(
+      `ASK WHERE { GRAPH <${this.graphUri}> { { ?job <${CONTROL_STATUS}> ${literal('accepted')} } ${retry} } }`,
+      { source: 'publisher.asyncLift.hasRunnableWork' },
+    );
+    if (result.type !== 'boolean') throw new Error('Queue work availability requires an ASK result');
+    return result.value;
+  }
+
   /** Select the oldest accepted payload, skipping malformed rows without starving later work. */
   async nextAccepted(): Promise<LiftJobAccepted | undefined> {
     const result = await this.store.query(

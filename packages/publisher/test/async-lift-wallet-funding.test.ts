@@ -14,10 +14,74 @@ function fundingFixture() {
     observedAt: now, balanceWei: balances.get(id)!, requiredWei: 2n, gasLimit: 1n, feePerGasWei: 2n,
   }))]));
   const funding = new AsyncLiftWalletFunding(readers, () => now);
-  return { funding, balances, readers, advance: (ms: number) => { now += ms; } };
+  return { funding, balances, readers, now: () => now, advance: (ms: number) => { now += ms; } };
 }
 
 describe('async publisher gas eligibility (#3591)', () => {
+  it('refreshes an eligible later wallet after an earlier preparation exceeds observation freshness', async () => {
+    vi.useFakeTimers();
+    const store = new OxigraphStore();
+    await stageKnowledgeAssetShareSnapshot({ store });
+    const used: string[] = [];
+    const readB = vi.fn(async () => ({ observedAt: Date.now(), balanceWei: 10n, requiredWei: 2n, gasLimit: 1n, feePerGasWei: 2n }));
+    const funding = new AsyncLiftWalletFunding(new Map([
+      ['a', async () => {
+        const observedAt = Date.now(); await new Promise((resolve) => setTimeout(resolve, 6000));
+        return { observedAt, balanceWei: 0n, requiredWei: 2n, gasLimit: 1n, feePerGasWei: 2n };
+      }], ['b', readB],
+    ]));
+    const publisher = new TripleStoreAsyncLiftPublisher(store, { walletEligibility: funding,
+      knowledgeAssetVmPublishHandler: { execute: async ({ walletId }) => {
+        used.push(walletId); throw new Error('End the claim-only fixture before signing');
+      } },
+    });
+    const id = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const runner = new AsyncLiftRunner({ publisher, walletIds: ['a', 'b'] });
+    try {
+      await runner.start(); await vi.advanceTimersByTimeAsync(6100);
+      expect(used).toEqual(['b']);
+      expect(readB.mock.calls.length).toBeGreaterThanOrEqual(2);
+      expect((await publisher.getStatus(id))?.claim?.walletId).toBe('b');
+    } finally {
+      const stopping = runner.stop(); await vi.advanceTimersByTimeAsync(6000); await stopping;
+      vi.useRealTimers(); await store.close();
+    }
+  });
+
+  it('coalesces lightweight availability reads and suppresses funding RPCs on an empty queue', async () => {
+    const f = fundingFixture(), store = new OxigraphStore();
+    const publisher = new TripleStoreAsyncLiftPublisher(store, { walletEligibility: f.funding });
+    const query = vi.spyOn(store, 'query');
+    const prepare = () => Promise.all(['a', 'b', 'a', 'b', 'a', 'b'].map((id) => publisher.claimScheduling.prepare(id)));
+    expect(await prepare()).toEqual([null, null, null, null, null, null]);
+    expect(f.readers.get('a')).not.toHaveBeenCalled(); expect(f.readers.get('b')).not.toHaveBeenCalled();
+    expect(query.mock.calls.filter(([, options]) => options?.source === 'publisher.asyncLift.hasRunnableWork')).toHaveLength(1);
+    await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest()); query.mockClear();
+    const attempts = await prepare();
+    expect(attempts.every((attempt) => attempt !== null)).toBe(true);
+    expect(query.mock.calls.filter(([, options]) => options?.source === 'publisher.asyncLift.hasRunnableWork')).toHaveLength(1);
+    expect(query.mock.calls.some(([sparql]) => sparql.includes('SELECT ?payload'))).toBe(false);
+    await store.close();
+  });
+
+  it('availability detects due retry work but leaves promotion to the canonical claim path', async () => {
+    const f = fundingFixture(), store = new OxigraphStore();
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      walletEligibility: f.funding, now: f.now, retryBackoffBaseMs: 10, retryBackoffMaxMs: 10, retryJitterRatio: 0,
+    });
+    const id = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const claim = await publisher.claimNext('a');
+    if (!claim) throw new Error('Expected original claim');
+    await publisher.openClaimSession(claim).recordExecutionFailure('claimed',
+      Object.assign(new Error('Corrupt workspace head'), { code: 'KA_WORKSPACE_HEAD_CORRUPT' }));
+    expect(await publisher.claimScheduling.prepare('b')).toBeNull();
+    f.advance(11);
+    const prepared = await publisher.claimScheduling.prepare('b');
+    expect(prepared).not.toBeNull();
+    expect((await publisher.getStatus(id))?.status).toBe('failed');
+    expect((await publisher.claimNext('b'))?.jobId).toBe(id);
+    await store.close();
+  });
   it('the real runner revisits a replenished later wallet and claims the retained job without enqueue', async () => {
     vi.useFakeTimers();
     const f = fundingFixture();

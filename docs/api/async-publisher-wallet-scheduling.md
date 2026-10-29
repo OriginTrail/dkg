@@ -1,7 +1,8 @@
 # Async publisher wallet scheduling
 
 The daemon rotates sparse publishing work across free publisher wallets. Funding observations
-for free lanes start concurrently. The runner then orders wallet
+for free lanes start concurrently through one scheduling capability, which returns a
+wallet-bound attempt. Direct processing uses that same preparation path. The runner then orders wallet
 selection and durable claims, then releases that scheduling turn immediately after the claim
 is recorded: up to all configured wallets can execute concurrently. A busy wallet is skipped;
 wallets with different service times are not expected to finish equal numbers of jobs.
@@ -18,8 +19,10 @@ remain with the existing publisher preparation.
 Insufficient gas or a funding failure defers a wallet for 30 seconds. A failed funding read
 waits five seconds instead of treating an RPC outage as insufficient funds. After the delay,
 the next attempt uses fresh observations; a funded result expires after five seconds and is
-checked again after waiting for the canonical claim lock. Empty queues do not cause funding
-RPCs. If no wallet is eligible, jobs remain accepted and visible with their original IDs.
+refreshed outside the canonical lock if it expires while waiting for a scheduling turn, then
+checked again inside the claim. Concurrent preparations share a lightweight queue existence
+read; payload selection and retry promotion remain under the canonical claim lock. Empty
+queues do not cause funding RPCs. If no wallet is eligible, jobs remain accepted and visible with their original IDs.
 Adapters without the optional native-gas observation capability retain their existing behavior.
 
 A funding error can return the same logical job to the accepted queue only if the fenced

@@ -216,10 +216,8 @@ export interface AsyncLiftPublisher {
   list(filter?: { status?: LiftJobState; contextGraphId?: string }): Promise<PersistedLiftJob[]>;
   inspectPreparedPayload(jobId: string): Promise<AsyncPreparedPublishPayload | null>;
   processNext(walletId: string): Promise<PersistedLiftJob | null>;
-  /** Claim acknowledgement releases scheduling order while execution remains concurrent. */
-  processNextScheduled?(walletId: string, onClaimed: () => void): Promise<PersistedLiftJob | null>;
-  /** Prepare independent funding observations before entering ordered claim admission. */
-  prepareWalletClaim?(walletId: string): Promise<boolean>;
+  /** Prepare concurrently, then process the wallet-bound attempt during its ordered claim turn. */
+  claimScheduling?: import('./async-lift-wallet-attempt.js').AsyncLiftClaimScheduling;
   /** @deprecated Prefer `administrative.recordPublishResultById`; workers use a claim session. */
   recordPublishResult(jobId: string, publishResult: PublishResult, options?: { publicByteSize?: number }): Promise<LiftJob>;
   /** @deprecated Prefer `administrative.recordPublishFailureById`; workers use a claim session. */

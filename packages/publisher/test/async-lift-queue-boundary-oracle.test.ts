@@ -34,6 +34,7 @@ import {
 } from './_helpers/queue-boundary-oracle.js';
 import {
   WORKER_PROBE_SOURCES,
+  runPublisherFundingScenario,
   runPublisherPagingScenario,
   runPublisherWakeScenario,
   runPublisherWorkload,
@@ -53,7 +54,7 @@ const PAGE_SOURCES = ['publisher.asyncLift.listPage', 'publisher.asyncLift.stats
  * (`async-lift-retention-control-oracle.test.ts`).
  */
 const RETENTION_ONLY_SOURCES = ['scan', 'siblings', 'verify', 'walletLocks'].map((name) => `publisher.asyncLift.retention.${name}`);
-const PAGE_ONLY_SOURCES = ['publisher.asyncLift.listPage', ...RETENTION_ONLY_SOURCES];
+const PAGE_ONLY_SOURCES = ['publisher.asyncLift.hasRunnableWork', 'publisher.asyncLift.listPage', ...RETENTION_ONLY_SOURCES];
 
 const synthetic = (over: Partial<RecordedStoreCall>): RecordedStoreCall => ({
   index: 0,
@@ -300,6 +301,27 @@ describe('publisher queue boundary oracle: claim -> processClaim', () => {
     for (const call of admission) {
       expect(call.ambient).toBe('background');
       expect(resolveLane(call, true)).toBe('control:publisher');
+    }
+  });
+});
+
+
+describe.each(STACKS)('publisher queue boundary oracle: advisory availability, %s stack', (stack) => {
+  it.each([undefined, 'background'] as const)('keeps existence reads on the caller lane (ambient %s)', async (ambient) => {
+    const run = await runPublisherFundingScenario(stack, { ambient });
+    expect(auditPublisherCalls(run.calls, { pathOn: true }).violations).toEqual([]);
+    expect(auditPublisherCalls(run.calls, { pathOn: false }).violations).toEqual([]);
+    const reads = run.calls.filter((call) => call.source === 'publisher.asyncLift.hasRunnableWork');
+    expect(reads).toHaveLength(2);
+    const on = buildStoreControlPath({ share: 1, publisher: 2 });
+    setStoreControlPathForTesting(on);
+    for (const call of reads) {
+      expect(call.method).toBe('query');
+      expect(call.graphs).toEqual(['job']);
+      expect(call.options).toEqual({ source: call.source });
+      expect(resolveLane(call, true)).toBe(ambient ?? 'normal');
+      expect(resolveLane(call, false)).toBe(ambient ?? 'normal');
+      expect(selectStoreScheduler(externalStorePriorityScheduler, call.options)).toBe(externalStorePriorityScheduler);
     }
   });
 });

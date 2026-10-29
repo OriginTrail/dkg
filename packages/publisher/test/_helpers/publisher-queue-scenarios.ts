@@ -293,3 +293,25 @@ export async function runPublisherRetentionScenario(
     await inner.close();
   }
 }
+
+/** Advisory existence reads stay outside the canonical claim path, including on an empty queue. */
+export async function runPublisherFundingScenario(
+  stack: PublisherStack,
+  options: { ambient?: StoreWorkPriority } = {},
+): Promise<WorkloadRun> {
+  const inner = new OxigraphStore();
+  try {
+    const { store, calls } = recordLiftStore(inner, stack === 'fallback' ? FALLBACK_HIDDEN : []);
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      ...clockAndIds().config, journalWrites: true,
+      walletEligibility: { prepare: async () => true, isEligible: () => true, defer: () => {} },
+    });
+    const work = async () => {
+      await publisher.claimScheduling.prepare('wallet-1');
+      await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+      await publisher.claimScheduling.prepare('wallet-1');
+    };
+    await (options.ambient === undefined ? work() : withDefaultStoreWorkPriority(options.ambient, work));
+    return { stack, calls, handlerObservations: [] };
+  } finally { await inner.close(); }
+}

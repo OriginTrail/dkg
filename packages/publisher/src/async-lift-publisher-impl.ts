@@ -596,6 +596,8 @@ export class TripleStoreAsyncLiftPublisher
   private readonly publishExecutor?: AsyncLiftPublisherConfig['publishExecutor'];
   private readonly walletEligibility?: AsyncLiftPublisherConfig['walletEligibility'];
   private readonly fundingRecoveryPolicy: 'legacy' | 'proof-first';
+  private workAvailability?: Promise<boolean>;
+  readonly claimScheduling = { prepare: (walletId: string) => this.prepareScheduledWallet(walletId) };
   private readonly knowledgeAssetVmPublishHandler?: AsyncLiftPublisherConfig['knowledgeAssetVmPublishHandler'];
   private readonly resolvedSliceOverrides?: Partial<LiftResolvedPublishSlice>;
   private readonly publicSnapshotStore?: AsyncLiftPublisherConfig['publicSnapshotStore'];
@@ -797,16 +799,28 @@ export class TripleStoreAsyncLiftPublisher
 
 
   async claimNext(walletId: string): Promise<ActiveLiftJobClaim | null> {
-    if (!await this.prepareWalletClaim(walletId)) return null;
+    if (!await this.prepareWalletEligibility(walletId)) return null;
     return await this.claimCoordinator.claimNext(walletId);
   }
 
-  async prepareWalletClaim(walletId: string): Promise<boolean> {
+  private async prepareWalletEligibility(walletId: string): Promise<boolean> {
     if (!this.walletEligibility) return true;
-    await this.ensureGraph();
-    const candidates = await this.jobSelectors.claimCandidates(this.now());
-    if (!candidates.nextAccepted && (!this.autoRetryEnabled || candidates.dueRetries.length === 0)) return false;
+    this.workAvailability ??= this.ensureGraph().then(() =>
+      this.jobSelectors.hasRunnableWork(this.now(), this.autoRetryEnabled)).finally(() => { this.workAvailability = undefined; });
+    if (!await this.workAvailability) return false;
     return this.walletEligibility.prepare(walletId);
+  }
+
+  private async prepareScheduledWallet(walletId: string) {
+    if (!await this.prepareWalletEligibility(walletId)) return null;
+    let used = false;
+    return { process: async (onClaimed: () => void) => {
+      if (used) throw new Error('Prepared wallet attempt already consumed');
+      used = true;
+      if (this.walletEligibility && !this.walletEligibility.isEligible(walletId)
+        && !await this.prepareWalletEligibility(walletId)) return null;
+      return this.processPreparedWallet(walletId, onClaimed);
+    } };
   }
 
   readonly administrative: AsyncLiftAdministrativeMutations = {
@@ -1001,11 +1015,11 @@ export class TripleStoreAsyncLiftPublisher
   }
 
   async processNext(walletId: string): Promise<PersistedLiftJob | null> {
-    if (!await this.prepareWalletClaim(walletId)) return null;
-    return this.processNextScheduled(walletId, () => {});
+    const attempt = await this.claimScheduling.prepare(walletId);
+    return attempt ? attempt.process(() => {}) : null;
   }
 
-  async processNextScheduled(walletId: string, onClaimed: () => void): Promise<PersistedLiftJob | null> {
+  private async processPreparedWallet(walletId: string, onClaimed: () => void): Promise<PersistedLiftJob | null> {
     return traceProcessNext(walletId, async () => {
       const outcome = await this.claimCoordinator.processClaim(
         walletId,

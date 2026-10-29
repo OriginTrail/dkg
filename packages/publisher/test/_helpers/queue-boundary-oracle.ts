@@ -219,6 +219,12 @@ export const PUBLISHER_TAGGING_ROWS: readonly TaggingRow[] = [
     ].map((name) => `${LIFT}${name}`),
   },
   {
+    id: 'work-availability',
+    row: 'Advisory work existence before funding observation; outside the claim lock, caller lane',
+    lane: 'normal',
+    sources: [`${LIFT}hasRunnableWork`],
+  },
+  {
     id: 'unlocked-full-history',
     row: 'Unlocked full-history reads that stay complete: list(), reconciliationInventory, boot backfill',
     lane: 'normal',

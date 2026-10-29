@@ -300,11 +300,11 @@ describe('runner accepted-work wake', () => {
       ? store : new GraphSetIndexStore(store));
     const admission = new TripleStoreAsyncLiftPublisher(handles === 'same-handle'
       ? store : new ChangelogStore(new GraphSetIndexStore(store)));
-    const processNext = vi.spyOn(publisher, 'processNextScheduled').mockImplementation(async (wallet, onClaimed) => {
+    const processNext = vi.spyOn(publisher.claimScheduling, 'prepare').mockImplementation(async (wallet) => ({ process: async (onClaimed) => {
       const claim = await publisher.claimNext(wallet);
       if (claim) onClaimed();
       return claim;
-    });
+    } }));
     const runner = new AsyncLiftRunner({ publisher, walletIds: ['wallet'], pollIntervalMs: 12_000,
       recoveryIntervalMs: 600_000, hasIncludedRecoveryResolver: true });
     try {

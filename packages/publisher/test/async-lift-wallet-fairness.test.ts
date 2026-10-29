@@ -1,9 +1,18 @@
 import { describe, expect, it, vi } from 'vitest';
-import { AsyncLiftRunner, type LiftJob } from '../src/index.js';
+import { AsyncLiftRunner, TripleStoreAsyncLiftPublisher, type AsyncLiftPublisher, type LiftJob } from '../src/index.js';
+import { OxigraphStore } from '@origintrail-official/dkg-storage';
+import { kaVmPublishRequest, stageKnowledgeAssetShareSnapshot } from '../../../scripts/testing/ka-vm-publish.js';
 import { createRunnerPublisher } from './_helpers/async-lift-runner-fixture.js';
 import { AsyncLiftWalletPool } from '../src/async-lift-wallet-pool.js';
 
 const wallets = Array.from({ length: 6 }, (_, i) => `wallet-${i}`);
+
+function scheduling(
+  process: (wallet: string, claimed: () => void) => Promise<LiftJob | null>,
+  prepare: (wallet: string) => Promise<boolean> = async () => true,
+): NonNullable<AsyncLiftPublisher['claimScheduling']> {
+  return { prepare: async (wallet) => await prepare(wallet) ? { process: (claimed) => process(wallet, claimed) } : null };
+}
 
 function fixture(scheduled = false) {
   let queued = 0;
@@ -22,17 +31,45 @@ function fixture(scheduled = false) {
       reconcile: async () => ({ reconciled: 0, pendingWork: false }),
     },
   });
-  if (scheduled) publisher.processNextScheduled = async (walletId, onClaimed) => {
-    // Different preparation/RPC times must not make the fastest wallet win every sparse job.
-    await new Promise((resolve) => setTimeout(resolve, wallets.indexOf(walletId) + 1));
+  if (scheduled) publisher.claimScheduling = scheduling(async (walletId, onClaimed) => {
     if (queued) onClaimed();
     return publisher.processNext(walletId);
-  };
+  }, async (walletId) => {
+    // Different preparation/RPC times must not make the fastest wallet win every sparse job.
+    await new Promise((resolve) => setTimeout(resolve, wallets.indexOf(walletId) + 1));
+    return true;
+  });
   const runner = new AsyncLiftRunner({ publisher, walletIds: wallets, pollIntervalMs: 60_000 });
   return { runner, counts, enqueue: (count: number) => { queued += count; hooks?.onWorkAvailable?.(); } };
 }
 
 describe('async publisher wallet fairness (#3591)', () => {
+  it('the production coordinator acknowledges real claims before blocked executions complete', async () => {
+    vi.useFakeTimers();
+    const store = new OxigraphStore();
+    await stageKnowledgeAssetShareSnapshot({ store });
+    let release!: () => void;
+    const executing = new Promise<void>((resolve) => { release = resolve; });
+    const entered: string[] = [];
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      knowledgeAssetVmPublishHandler: { execute: async ({ walletId }) => {
+        entered.push(walletId); await executing;
+        throw new Error('End the execution-only fixture before signing');
+      } },
+    });
+    for (let i = 0; i < 6; i += 1) await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({
+      name: `work-${i}`, intentKey: `sha256:${String(i).padStart(64, '0')}`,
+    }));
+    const runner = new AsyncLiftRunner({ publisher, walletIds: wallets });
+    try {
+      await runner.start(); await vi.advanceTimersByTimeAsync(0);
+      expect(entered).toHaveLength(6);
+      expect(new Set(entered)).toEqual(new Set(wallets));
+    } finally {
+      const stopping = runner.stop(); release(); await stopping;
+      vi.useRealTimers(); await store.close();
+    }
+  });
   it('visits every free wallet during staggered empty polls, so replenishment needs no new admission', () => {
     const pool = new AsyncLiftWalletPool(wallets);
     const visited = [];
@@ -50,12 +87,12 @@ describe('async publisher wallet fairness (#3591)', () => {
     let queued = true;
     const used: string[] = [];
     const publisher = createRunnerPublisher({
-      processNextScheduled: async (walletId, claimed) => {
+      claimScheduling: scheduling(async (walletId, claimed) => {
         await new Promise((resolve) => setTimeout(resolve, 1));
         if (!funded || !queued || walletId !== wallets[2]) return null;
         queued = false; used.push(walletId); claimed();
         return { jobId: 'retained-waiting-job' } as LiftJob;
-      },
+      }),
     });
     const runner = new AsyncLiftRunner({ publisher, walletIds: wallets });
     try {
@@ -78,11 +115,11 @@ describe('async publisher wallet fairness (#3591)', () => {
     const executing = new Promise<void>((resolve) => { executeDone = resolve; });
     const started: string[] = [];
     const prepareWalletClaim = vi.fn(async () => { await preparing; return true; });
-    const publisher = createRunnerPublisher({ prepareWalletClaim,
-      processNextScheduled: async (walletId, claimed) => {
+    const publisher = createRunnerPublisher({
+      claimScheduling: scheduling(async (walletId, claimed) => {
         started.push(walletId); claimed(); await executing;
         return { jobId: `job-${walletId}` } as LiftJob;
-      },
+      }, prepareWalletClaim),
     });
     const runner = new AsyncLiftRunner({ publisher, walletIds: wallets });
     try {
@@ -104,7 +141,7 @@ describe('async publisher wallet fairness (#3591)', () => {
     const preparing = new Promise<void>((resolve) => { release = resolve; });
     const scheduled = vi.fn(async () => null);
     const publisher = createRunnerPublisher({
-      prepareWalletClaim: async () => { await preparing; return true; }, processNextScheduled: scheduled,
+      claimScheduling: scheduling(scheduled, async () => { await preparing; return true; }),
     });
     const runner = new AsyncLiftRunner({ publisher, walletIds: wallets });
     try {
@@ -163,7 +200,7 @@ describe('async publisher wallet fairness (#3591)', () => {
     const counts = wallets.map(() => 0);
     let peak = 0;
     const publisher = createRunnerPublisher({
-      processNextScheduled: async (walletId, claimed) => {
+      claimScheduling: scheduling(async (walletId, claimed) => {
         if (!queued) return null;
         queued -= 1;
         expect(active.has(walletId)).toBe(false);
@@ -173,7 +210,7 @@ describe('async publisher wallet fairness (#3591)', () => {
         await new Promise((resolve) => setTimeout(resolve, walletId === wallets[0] ? 1000 : 1));
         active.delete(walletId);
         return { jobId: `job-${queued}` } as LiftJob;
-      },
+      }),
     });
     const runner = new AsyncLiftRunner({ publisher, walletIds: wallets });
     try {

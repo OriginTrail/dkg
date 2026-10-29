@@ -25,7 +25,7 @@ import {
   auditPublisherCalls,
   type RecordedStoreCall,
 } from './_helpers/queue-boundary-oracle.js';
-import { runPublisherPagingScenario, runPublisherRetentionScenario, runPublisherWorkload, type PublisherStack } from './_helpers/publisher-queue-scenarios.js';
+import { runPublisherFundingScenario, runPublisherPagingScenario, runPublisherRetentionScenario, runPublisherWorkload, type PublisherStack } from './_helpers/publisher-queue-scenarios.js';
 
 const REPO_ROOT = fileURLToPath(new URL('../../..', import.meta.url));
 const PACKAGES = join(REPO_ROOT, 'packages');
@@ -163,8 +163,8 @@ const QUEUE_FILES: Readonly<Record<string, QueueFile>> = {
   'packages/publisher/src/lift-job-store-selectors.ts': {
     role: 'sites',
     labels: [L('list'), L('reconciliationInventory'), L('findActiveVmPublish'), L('ensureVmPublishIntentIndex'), L('nextAccepted'),
-      L('claimCandidates')].sort(),
-    storeCalls: ['query', 'query', 'query', 'query', 'query', 'query'],
+      L('claimCandidates'), L('hasRunnableWork')].sort(),
+    storeCalls: ['query', 'query', 'query', 'query', 'query', 'query', 'query'],
   },
   'packages/publisher/src/lift-job-listing-selectors.ts': {
     role: 'sites',
@@ -313,7 +313,7 @@ describe('publisher queue graph references (observed)', () => {
     for (const stack of STACKS) {
       // The paging scenario is separate from the workload the AC2 lane trace compares with the base SHA, which has no page read.
       for (const run of [
-        await runPublisherWorkload(stack), await runPublisherPagingScenario(stack),
+        await runPublisherWorkload(stack), await runPublisherPagingScenario(stack), await runPublisherFundingScenario(stack),
         await runPublisherRetentionScenario(stack, { mode: 'delete' }),
       ]) {
         expect(auditPublisherCalls(run.calls, { pathOn: true }).violations).toEqual([]);
