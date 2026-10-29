@@ -20,6 +20,8 @@ import { runCuratorMetaRefreshFromPeer } from '../src/curator-meta-refresh.js';
 import { holdsAuthoritativePublicDefinitionV1 } from '../src/context-graph-meta-confirmation.js';
 import { buildAuthoritativePublicMetaQuads } from '../src/context-graph-public-meta-proof.js';
 import { LifecycleSyncMethods } from '../src/dkg-agent-lifecycle.js';
+import { DurableRecoveryRunner, type DurableRecoveryRunnerDependencies } from '../src/sync/durable-recovery-runner.js';
+import { createIncompleteDurableSyncResult } from '../src/sync/durable-progress.js';
 import type { SyncAdmissionSource, SyncSchedulerLane } from '../src/sync/policy.js';
 import { pageResult } from './_helpers/sync-requester-fixtures.js';
 
@@ -239,7 +241,7 @@ describe('reserved control-plane slot (#3280)', () => {
     expect(getSyncBackpressureSnapshot(policy)).toMatchObject({ inflight: 1, queued: 0 });
   }));
 
-  it('hands a refusal to the admission\'s reporter, which counts refused refreshes and logs every other refusal', () => withHolds(async (keep) => {
+  it('hands a refusal to the admission\'s reporter, which counts refused refreshes and durable syncs and logs every other refusal', () => withHolds(async (keep) => {
     const policy = oneSlotNoQueue();
     await running(keep(hold(longTransfer(policy))));
     await running(keep(hold(metadataRefresh(policy, 'urn:cg:first'))));
@@ -257,21 +259,29 @@ describe('reserved control-plane slot (#3280)', () => {
       await expect(withGlobalSyncBackpressure(reported(metadataRefresh(policy, contextGraphId)), async () => undefined))
         .rejects.toMatchObject({ reason: 'queue_full', state: 'global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1' });
     }
-    // Other work refused for the same lack of a slot keeps its own line.
+    // A durable sync refused for the same lack of a slot is counted under its source.
     await expect(withGlobalSyncBackpressure(reported(longTransfer(policy, 'urn:cg:second-large')), async () => undefined))
       .rejects.toMatchObject({ reason: 'queue_full', state: 'global inflight=1/1, queued=0/0' });
+    // Work of another lane keeps its own line.
+    const changelog: Admission = {
+      policy, ctx, contextGraphId: 'urn:cg:changelog', label: 'changelog:urn:cg:changelog:peer', lane: 'changelog', source: 'on-connect',
+    };
+    await expect(withGlobalSyncBackpressure(reported(changelog), async () => undefined)).rejects.toMatchObject({ reason: 'queue_full' });
     // Without a reporter the admission logs every refusal itself.
     await expect(withGlobalSyncBackpressure({ ...metadataRefresh(policy, 'urn:cg:fourth'), logInfo }, async () => undefined))
       .rejects.toMatchObject({ reason: 'queue_full' });
 
     expect(messages).toEqual([
-      'Sync backpressure rejected durable:urn:cg:second-large:peer (global inflight=1/1, queued=0/0)',
+      'Sync backpressure rejected changelog:urn:cg:changelog:peer (global inflight=1/1, queued=0/0)',
       'Sync backpressure rejected durable:control-plane (global inflight=1/1, queued=0/0, reserved control-plane inflight=1/1)',
     ]);
     summary.flush();
     expect(summaryLines).toEqual([
       expect.stringMatching(
         /^Sync backpressure rejected durable:control-plane 3 time\(s\) in the last \d+ s for 2 graph\(s\), each asked again later \(last: global inflight=1\/1, queued=0\/0, reserved control-plane inflight=1\/1\)$/,
+      ),
+      expect.stringMatching(
+        /^Sync backpressure rejected durable:on-connect 1 time\(s\) in the last \d+ s for 1 graph\(s\), each asked again later \(last: global inflight=1\/1, queued=0\/0\)$/,
       ),
     ]);
   }));
@@ -518,6 +528,54 @@ describe('metadata refresh on a node with one sync slot and no queue (#3280)', (
       ]);
       await expect(holdsAuthoritativePublicDefinitionV1(store, contextGraphId)).resolves.toBe(false);
     } finally {
+      await store.close();
+    }
+  }));
+
+  it('counts a durable sync refused at once under its source, without a line of its own', () => withHolds(async (keep) => {
+    const store = new OxigraphStore();
+    try {
+      const member = createOneSlotMember(store, `${OWNER}/durable-refusals`);
+      await running(keep(member.admit('urn:cg:other-verified', 'durable:urn:cg:other-verified:peer', 'on-connect')));
+      for (const graph of ['urn:cg:first', 'urn:cg:second']) {
+        await expect(keep(member.admit(graph, `durable:${graph}:peer`, 'vm-recovery')).done)
+          .rejects.toMatchObject({ reason: 'queue_full' });
+      }
+
+      expect(member.log.info).not.toHaveBeenCalledWith(expect.anything(), expect.stringContaining('rejected'));
+      member.stop.abort();
+      expect(member.summaryLines).toEqual([
+        expect.stringMatching(/^Sync backpressure rejected durable:vm-recovery 2 time\(s\) in the last \d+ s for 2 graph\(s\)/),
+      ]);
+    } finally {
+      await store.close();
+    }
+  }));
+
+  it('lets the recovery runner read whether a slice would be admitted now, and the current stop signal', () => withHolds(async (keep) => {
+    const contextGraphId = `${OWNER}/recovery-probe`;
+    const store = new OxigraphStore();
+    const run = vi.spyOn(DurableRecoveryRunner.prototype, 'run');
+    try {
+      const member = createOneSlotMember(store, contextGraphId);
+      let dependencies!: DurableRecoveryRunnerDependencies;
+      run.mockImplementation(async (input) => {
+        dependencies = input.dependencies;
+        return { outcome: 'deferred', result: createIncompleteDurableSyncResult(), peerResults: [], slices: 0, safeOffset: 0 };
+      });
+      await LifecycleSyncMethods.prototype.syncDurableRecoveryContextGraph.call(member.agent as never, contextGraphId);
+
+      expect(dependencies.admissionAvailable!()).toBe(true);
+      expect(dependencies.stopSignal!()).toBe(member.stop.signal);
+      await running(keep(member.admit('urn:cg:other-verified', 'durable:urn:cg:other-verified:peer', 'on-connect')));
+      // The read claims nothing: the slot is still taken by the transfer, and asking again gives the same answer.
+      expect(dependencies.admissionAvailable!()).toBe(false);
+      expect(dependencies.admissionAvailable!()).toBe(false);
+      const restarted = new AbortController();
+      member.agent.node.stopSignal = restarted.signal;
+      expect(dependencies.stopSignal!()).toBe(restarted.signal);
+    } finally {
+      run.mockRestore();
       await store.close();
     }
   }));

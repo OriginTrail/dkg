@@ -29,9 +29,16 @@ import { deleteSyncPageCheckpoint } from './requester/page-fetch.js';
 import type { DurableMetaContinuation } from './requester/durable-sync.js';
 import { DurableGraphResumePolicy } from './durable-recovery-boundary-seed.js';
 import { DurableRecoveryFetchPolicy, type DurableRecoveryAction } from './durable-recovery-fetch-policy.js';
+import { DurableRecoveryTurns, type DurableRecoveryRetry } from './durable-recovery-turns.js';
+
+/**
+ * `deferred`: a slice found no free local sync slot. The round ended there, tried
+ * no other peer and charged no peer; the runner retries the graph in its turn.
+ */
+export type DurableRecoveryExecutionOutcome = DurableRecoveryContinuationOutcome | 'deferred';
 
 export interface DurableRecoveryExecution {
-  readonly outcome: DurableRecoveryContinuationOutcome;
+  readonly outcome: DurableRecoveryExecutionOutcome;
   readonly result: DurableSyncResult;
   readonly peerResults: readonly DurableRecoveryPeerExecution[];
   readonly slices: number;
@@ -81,6 +88,10 @@ export interface DurableRecoveryRunnerDependencies {
   logDebug(message: string): void;
   logInfo(message: string): void;
   logWarn(message: string): void;
+  /** The node's current stop signal: an owner waiting for its next turn stops waiting when it fires. */
+  stopSignal?(): AbortSignal | undefined;
+  /** Whether the node's sync admission would take a slice of this graph now. A read: nothing is claimed. */
+  admissionAvailable?(): boolean;
 }
 
 const PROGRESS_COUNTERS = [
@@ -121,7 +132,17 @@ type MutablePeerExecution = {
   progressTotals: ProgressTotals;
 };
 
-/** Owns graph-level recovery single-flight, peer health, ranking and continuation. */
+/**
+ * The answer for a graph that waits for a sync slot: no slice ran. A caller that
+ * reads results per peer finds the deferral on the first peer it offered.
+ */
+function deferredExecution(options: DurableRecoveryRunOptions | undefined): DurableRecoveryExecution {
+  const result = { ...createIncompleteDurableSyncResult(), deferredBackpressure: 1 };
+  const peerId = options?.candidatePeerIds?.[0];
+  return { outcome: 'deferred', result, peerResults: peerId === undefined ? [] : [{ peerId, result }], slices: 0, safeOffset: 0 };
+}
+
+/** Owns graph-level recovery single-flight, peer health, ranking, continuation and turns at the sync slots. */
 export class DurableRecoveryRunner {
   private readonly coordinator = new DurableRecoveryCoordinator<DurableRecoveryExecution>();
 
@@ -131,19 +152,44 @@ export class DurableRecoveryRunner {
 
   private metaScopeSequence = 0;
 
+  private readonly turns: DurableRecoveryTurns;
+
+  constructor(options: { readonly turns?: DurableRecoveryTurns } = {}) {
+    this.turns = options.turns ?? new DurableRecoveryTurns();
+  }
+
   run(input: {
     readonly contextGraphId: string;
     readonly options?: DurableRecoveryRunOptions;
     readonly dependencies: DurableRecoveryRunnerDependencies;
   }): Promise<DurableRecoveryExecution> {
+    const { contextGraphId, dependencies } = input;
+    const retry: DurableRecoveryRetry = {
+      // One macrotask later, so that the coordinator no longer lists the refused owner this retry follows.
+      run: () => setImmediate(() => {
+        this.run(input).catch((error: unknown) => dependencies.logWarn(
+          `Durable recovery retry for "${contextGraphId}" failed: ${error instanceof Error ? error.message : String(error)}`,
+        ));
+      }),
+      admissible: () => dependencies.admissionAvailable?.() ?? true,
+    };
+    if (this.turns.isDeferred(contextGraphId)) {
+      // The graph waits for a sync slot and the runner retries it: answer at once, without a round.
+      this.turns.setRetry(contextGraphId, retry);
+      return Promise.resolve(deferredExecution(input.options));
+    }
     return this.coordinator.join({
-      contextGraphId: input.contextGraphId,
-      runOwner: (owner) => this.runOwner(
-        input.contextGraphId,
-        input.options ?? {},
-        owner,
-        input.dependencies,
-      ),
+      contextGraphId,
+      runOwner: (owner) => {
+        // A round hands its turn on when it settles its result, so nothing can be woken in between.
+        let ended = false;
+        const endRound = () => {
+          if (ended) return;
+          ended = true;
+          this.turns.roundEnded(contextGraphId);
+        };
+        return this.runOwner(contextGraphId, input.options ?? {}, owner, dependencies, retry, endRound).finally(endRound);
+      },
     });
   }
 
@@ -177,6 +223,8 @@ export class DurableRecoveryRunner {
     options: DurableRecoveryRunOptions,
     owner: DurableRecoveryOwnerControl,
     deps: DurableRecoveryRunnerDependencies,
+    retry: DurableRecoveryRetry,
+    endRound: () => void,
   ): Promise<DurableRecoveryExecution> {
     const progressTotals = createProgressTotals();
     const attemptedWithoutProgress = new Set<string>();
@@ -207,8 +255,9 @@ export class DurableRecoveryRunner {
     };
 
     const finish = (
-      outcome: DurableRecoveryContinuationOutcome,
+      outcome: DurableRecoveryExecutionOutcome,
     ): DurableRecoveryExecution => {
+      endRound();
       for (const continuation of metaContinuations.values()) {
         if (continuation.state) {
           deleteSyncPageCheckpoint(deps.checkpointStore, continuation.state.checkpointKey);
@@ -226,11 +275,17 @@ export class DurableRecoveryRunner {
         }
         diagnostics = accumulator.diagnosticsSnapshot();
       }
+      // An owner that stopped waiting for its next turn is deferred by local backpressure too, on its last peer as well.
+      const deferred = <T extends DurableRecoveryDiagnostics>(value: T): T => (
+        { ...value, deferredBackpressure: Math.max(1, value.deferredBackpressure ?? 0) }
+      );
+      if (outcome === 'deferred') diagnostics = deferred(diagnostics);
       return {
         outcome,
         result: { ...diagnostics, complete: outcome === 'terminal' },
         peerResults: peers.map(({ peerId, diagnostics }) => ({ peerId,
-          result: { ...diagnostics, complete: outcome === 'terminal' && peerId === lastPeerId } })),
+          result: { ...(outcome === 'deferred' && peerId === lastPeerId ? deferred(diagnostics) : diagnostics),
+            complete: outcome === 'terminal' && peerId === lastPeerId } })),
         slices,
         ...(lastPeerId ? { peerId: lastPeerId } : {}),
         ...(owner.manifestDigest ? { manifestDigest: owner.manifestDigest } : {}),
@@ -310,7 +365,11 @@ export class DurableRecoveryRunner {
       return rankDurableRecoveryPeers(candidates, canonicalManifestDigest);
     };
 
-    type ActionOutcome = { readonly diagnostics: DurableRecoveryDiagnostics; readonly next: 'terminal' | 'continue' | 'next-peer'; readonly accounting: DurableRecoveryAccounting };
+    type ActionOutcome = { readonly diagnostics: DurableRecoveryDiagnostics; readonly next: 'terminal' | 'continue' | 'next-peer' | 'deferred'; readonly accounting: DurableRecoveryAccounting };
+    // No free local sync slot: the slice never started, so it says nothing about the peer.
+    const deferredAction = (diagnostics: DurableRecoveryDiagnostics): ActionOutcome => (
+      { diagnostics, next: 'deferred', accounting: 'unchanged' }
+    );
     const failedSlice = (peerId: string, error: unknown): DurableSyncResult => {
       deps.logWarn(`Durable recovery slice ${slices} for "${contextGraphId}" from ${peerId.slice(-8)} failed: ${error instanceof Error ? error.message : String(error)}`);
       return createFailedPeerDurableSyncResult();
@@ -321,6 +380,7 @@ export class DurableRecoveryRunner {
       try { exact = await deps.executeExactSlice!(action.peerId, action.assets.map(asset => asset.ual)); }
       catch (error) { exact = exactRecoveryActionOutcome(failedSlice(action.peerId, error)); }
       const selectionComplete = exact.selection === 'complete';
+      if (!selectionComplete && (exact.diagnostics.deferredBackpressure ?? 0) > 0) return deferredAction(exact.diagnostics);
       fetchPolicy.recordExact(selectionComplete);
       if (selectionComplete) {
         attemptedWithoutProgress.clear();
@@ -358,6 +418,9 @@ export class DurableRecoveryRunner {
         round = await deps.executeSlice(action.peerId, recovery);
       } catch (error) { round = { result: failedSlice(action.peerId, error), decision: { strategy: 'not-started' } }; }
       const result = round.result;
+      if (round.decision.strategy === 'not-started' && (result.deferredBackpressure ?? 0) > 0) {
+        return deferredAction(recoveryActionDiagnostics(result));
+      }
       const after = deps.checkpointStore.get(checkpointKey);
       resume.recordSlice({ peerId: action.peerId, checkpointKey, before, after,
         rejectedOffset: round.decision.rejectedResumeOffset, candidate: seed?.kind === 'candidate' ? seed.boundary : undefined });
@@ -451,16 +514,32 @@ export class DurableRecoveryRunner {
         action = { kind: 'graph-round', peerId: candidate.peerId };
       }
 
-      this.healthFor(contextGraphId, action.peerId).attempts += 1;
       slices += 1;
       lastPeerId = action.peerId;
+      this.turns.sliceStarting(contextGraphId);
       const outcome = await (action.kind === 'exact-batch' ? executeExactAction(action) : executeGraphAction(action));
-      accountDurableRecoveryAction(this.healthFor(contextGraphId, action.peerId), outcome.accounting, outcome.diagnostics);
+      if (outcome.next === 'deferred') {
+        // The round ends here: the next peer would meet the same busy slot. The graph waits its turn.
+        this.turns.refused(contextGraphId, retry);
+        lastDiagnostics = outcome.diagnostics;
+        recordPeerSlice(action.peerId, lastDiagnostics);
+        return finish('deferred');
+      }
+      this.turns.sliceRan(contextGraphId);
+      const health = this.healthFor(contextGraphId, action.peerId);
+      health.attempts += 1;
+      accountDurableRecoveryAction(health, outcome.accounting, outcome.diagnostics);
       lastDiagnostics = outcome.diagnostics;
       accumulateProgress(progressTotals, lastDiagnostics);
       recordPeerSlice(action.peerId, lastDiagnostics);
       if (outcome.next === 'terminal') return finish('terminal');
-      if (outcome.next === 'continue') await owner.scheduleContinuation();
+      if (outcome.next === 'continue') {
+        await owner.scheduleContinuation();
+        // While graphs wait for a slot, take the next slice after them. A retained META prefix
+        // is not held through the wait: its owner keeps the turn until META is complete.
+        const metaRetained = [...metaContinuations.values()].some((continuation) => continuation.state !== undefined);
+        if (!metaRetained && !await this.turns.handOver(contextGraphId, retry, deps.stopSignal?.())) return finish('deferred');
+      }
     }
   }
 }
