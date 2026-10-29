@@ -15,6 +15,13 @@ export interface ExactVerifiedMemoryCopyQuery {
   readonly merkleRoot: Uint8Array;
 }
 
+/**
+ * How Verified Memory holds that exact assertion. `receiptless`: chain
+ * reconciliation confirmed it without recording a transaction.
+ * `receipt-backed`: it records the finalization's own transaction.
+ */
+export type ExactVerifiedMemoryCopy = 'receiptless' | 'receipt-backed';
+
 export const VERIFIED_MEMORY_SUPERSESSION_REASON =
   'exact assertion is already confirmed in Verified Memory';
 
@@ -26,7 +33,9 @@ export interface VerifiedMemorySupersessionInput {
   /** Why the materialization replay just attempted was deferred; undefined when it was not. */
   readonly failureCode: FinalizationRecoveryFailureCode | undefined;
   readonly materializer: {
-    hasExactVerifiedMemoryCopy(query: ExactVerifiedMemoryCopyQuery): Promise<boolean>;
+    findExactVerifiedMemoryCopy(
+      query: ExactVerifiedMemoryCopyQuery,
+    ): Promise<ExactVerifiedMemoryCopy | undefined>;
   };
   /** Compare-and-set of the entry's generation to SUPERSEDED. */
   readonly supersede: (reason: string) => Promise<boolean>;
@@ -35,18 +44,21 @@ export interface VerifiedMemorySupersessionInput {
 
 /**
  * Close a replayed entry whose local copy could not be prepared when Verified
- * Memory already holds its exact assertion. Chain reconciliation materializes
- * an asset on a node that never held its SWM copy; the finalization then has
- * nothing left to apply, and retrying it for the whole retry window only holds
- * its source's live inbox quota.
+ * Memory already holds its exact assertion through chain reconciliation's
+ * receiptless lane. That lane materializes an asset on a node that never held
+ * its SWM copy; the finalization then has nothing left to apply, and retrying
+ * it for the whole retry window only holds its source's live inbox quota.
  *
  * Replay calls this only after it matched the entry against the chain's
  * current root, root count and context-graph binding. The entry becomes
  * SUPERSEDED, not SETTLED: a SETTLED entry carries the receipt evidence that
  * later receipt checks revalidate, and this one has none. Only a RECEIVED
- * entry closes. A REORGED one stays owed, since a moved receipt or a late
- * publisher's access semantics are still to be applied to the copy, and so
- * does an entry whose Verified Memory read fails.
+ * entry closes, and only on a receiptless copy. A receipt-backed copy of the
+ * same transaction stays with evidence recovery, which retries until it
+ * recovers the canonical receipt and repairs a moved placement. A REORGED
+ * entry stays owed, since a moved receipt or a late publisher's access
+ * semantics are still to be applied to the copy, and so does an entry whose
+ * Verified Memory read fails.
  */
 export async function supersedeEntryHeldInVerifiedMemory(
   input: VerifiedMemorySupersessionInput,
@@ -57,11 +69,11 @@ export async function supersedeEntryHeldInVerifiedMemory(
   }
   let held: boolean;
   try {
-    held = await input.materializer.hasExactVerifiedMemoryCopy({
+    held = await input.materializer.findExactVerifiedMemoryCopy({
       contextGraphId: entry.contextGraphId,
       candidate: input.candidate,
       merkleRoot: ethers.getBytes(input.merkleRoot),
-    });
+    }) === 'receiptless';
   } catch (error) {
     input.log.info(
       `Finalization recovery could not read Verified Memory for ${entry.ual}; keeping the entry: `

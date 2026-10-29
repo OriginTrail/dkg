@@ -19,7 +19,7 @@ import {
   type FinalizationRecoveryStore,
 } from './finalization-recovery-store.js';
 import { FinalizationPublisherAuthorityObserver, type FinalizationPublisherAuthorityLiveEntry } from './finalization-publisher-authority-observer.js';
-import { supersedeEntryHeldInVerifiedMemory, type ExactVerifiedMemoryCopyQuery } from './finalization-recovery-verified-memory.js';
+import { supersedeEntryHeldInVerifiedMemory, type ExactVerifiedMemoryCopy, type ExactVerifiedMemoryCopyQuery } from './finalization-recovery-verified-memory.js';
 
 export type FinalizationRecoveryApplyOutcome =
   | 'applied'
@@ -198,8 +198,8 @@ export interface FinalizationRecoveryMaterializer<
     evidence: VerifiedGraphScopedFinalizationEvidence;
     reason: string;
   }): Promise<FinalizationRecoveryInvalidationOutcome>;
-  /** Whether Verified Memory already holds this exact assertion, verified against `merkleRoot`. */
-  hasExactVerifiedMemoryCopy(query: ExactVerifiedMemoryCopyQuery): Promise<boolean>;
+  /** How Verified Memory holds this exact assertion, verified against `merkleRoot`, if it does. */
+  findExactVerifiedMemoryCopy(query: ExactVerifiedMemoryCopyQuery): Promise<ExactVerifiedMemoryCopy | undefined>;
   isRetryableError(error: unknown): boolean;
 }
 

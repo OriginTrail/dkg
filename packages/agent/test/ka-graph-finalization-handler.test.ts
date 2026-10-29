@@ -44,7 +44,7 @@ import {
 import { FinalizationHandler } from '../src/finalization-handler.js';
 import { parseGraphScopedFinalization } from '../src/finalization-graph-envelope.js';
 import {
-  holdsExactVerifiedMemoryCopy,
+  findExactVerifiedMemoryCopy,
   reportUnmatchedGraphScopedSwmHead,
 } from '../src/finalization-verified-memory-copy.js';
 import { resolveConfirmedGraphScopedVm } from '../src/confirmed-graph-scoped-vm-resolver.js';
@@ -3965,18 +3965,18 @@ describe('graph-scoped finalization handler', () => {
     }
 
     it.each([
-      ['the exact assertion', {}, undefined, true],
-      ['another transaction, which the receiptless copy does not record', { txHash: `0x${'ef'.repeat(32)}` }, undefined, true],
-      ['another assertion version', { assertionVersion: '2' }, undefined, false],
-      ['another public triple count', { publicTripleCount: 3 }, undefined, false],
-      ['another private triple count', { privateTripleCount: 2 }, undefined, false],
-      ['another private commitment', { privateMerkleRoot: new Uint8Array(32).fill(9) }, undefined, false],
-      ['another batch', { batchId: 42n }, undefined, false],
-      ['another namespace', { subGraphName: 'other-scope' }, undefined, false],
-      ['another root', {}, new Uint8Array(32).fill(7), false],
+      ['the exact assertion', {}, undefined, 'receiptless'],
+      ['another transaction, which the receiptless copy does not record', { txHash: `0x${'ef'.repeat(32)}` }, undefined, 'receiptless'],
+      ['another assertion version', { assertionVersion: '2' }, undefined, undefined],
+      ['another public triple count', { publicTripleCount: 3 }, undefined, undefined],
+      ['another private triple count', { privateTripleCount: 2 }, undefined, undefined],
+      ['another private commitment', { privateMerkleRoot: new Uint8Array(32).fill(9) }, undefined, undefined],
+      ['another batch', { batchId: 42n }, undefined, undefined],
+      ['another namespace', { subGraphName: 'other-scope' }, undefined, undefined],
+      ['another root', {}, new Uint8Array(32).fill(7), undefined],
     ] as const)('recognizes only the exact VM assertion: %s', async (_label, variant, merkleRoot, expected) => {
       const { message } = await holdReceiptlessVmCopyOnly();
-      await expect(holdsExactVerifiedMemoryCopy(store, {
+      await expect(findExactVerifiedMemoryCopy(store, {
         contextGraphId: CG,
         candidate: candidateFor({ ...message, ...variant }),
         merkleRoot: merkleRoot ?? message.kcMerkleRoot,
@@ -3991,16 +3991,82 @@ describe('graph-scoped finalization handler', () => {
       await dropWorkspaceCopy(staged.swmGraph);
       const query = { contextGraphId: CG, merkleRoot: message.kcMerkleRoot };
 
-      await expect(holdsExactVerifiedMemoryCopy(store, { ...query, candidate: candidateFor(message) }))
-        .resolves.toBe(true);
-      await expect(holdsExactVerifiedMemoryCopy(store, {
+      await expect(findExactVerifiedMemoryCopy(store, { ...query, candidate: candidateFor(message) }))
+        .resolves.toBe('receipt-backed');
+      await expect(findExactVerifiedMemoryCopy(store, {
         ...query,
         candidate: candidateFor({ ...message, txHash: `0x${'EF'.repeat(32)}` }),
-      })).resolves.toBe(false);
-      await expect(holdsExactVerifiedMemoryCopy(store, {
+      })).resolves.toBeUndefined();
+      await expect(findExactVerifiedMemoryCopy(store, {
         ...query,
         candidate: candidateFor({ ...message, txHash: message.txHash.toUpperCase().replace('0X', '0x') }),
-      })).resolves.toBe(true);
+      })).resolves.toBe('receipt-backed');
+    });
+
+    it('leaves a receipt-backed copy to evidence recovery until its pending receipt moves, then settles', async () => {
+      const directory = await mkdtemp(join(tmpdir(), 'dkg-finalization-vm-receipt-pending-'));
+      let inbox: SqliteFinalizationRecoveryStore | undefined;
+      try {
+        const staged = await stageGraph({ accessPolicy: 'ownerOnly' });
+        const message = { ...staged.message, batchId: 42n };
+        await seedAuthenticatedLocalControls(message);
+        await handler.handleFinalizationMessage(encodeFinalizationMessage(message), CG, '12D3KooWPublisher');
+        expect(await store.countQuads(staged.vmGraph)).toBe(2);
+        await store.deleteByPattern({
+          graph: graphManager.sharedMemoryMetaUri(CG),
+          subject: `${UAL}#dkg-swm-head`,
+        });
+
+        const moved = canonicalReceipt(message);
+        moved.receipt = {
+          ...moved.receipt,
+          blockNumber: 124,
+          blockHash: `0x${'ef'.repeat(32)}`,
+          txIndex: 7,
+        };
+        let receiptPending = true;
+        const chain = {
+          ...recoveryChain(message),
+          resolveCanonicalFinalizationReceipt: async () => (
+            receiptPending ? { status: 'pending' as const } : moved
+          ),
+        } as ChainAdapter;
+        inbox = await openSqliteFinalizationRecoveryStore(directory);
+        const recoveryHandler = new FinalizationHandler(store, chain, recoveryOptions(inbox));
+        await recoveryHandler.handleFinalizationMessage(
+          encodeFinalizationMessage(message),
+          CG,
+          '12D3KooWPublisher',
+        );
+        await recoveryHandler.handleExactChainReconciledKC(
+          graphReconcileInput(message),
+          createOperationContext('system'),
+        );
+        // The receipt is not recoverable yet: the entry stays owed for the next replay.
+        expect(await inbox.list()).toMatchObject([{
+          state: 'RECEIVED',
+          failureSignature: 'workspace-unavailable',
+        }]);
+
+        receiptPending = false;
+        await expect(recoveryHandler.handleExactChainReconciledKC(
+          graphReconcileInput(message),
+          createOperationContext('system'),
+        )).resolves.toBe('already-confirmed');
+        expect(await inbox.list()).toMatchObject([{
+          state: 'SETTLED',
+          generation: 1,
+          verifiedEvidence: {
+            transactionHash: message.txHash,
+            blockNumber: 124,
+            blockHash: `0x${'ef'.repeat(32)}`,
+            txIndex: 7,
+          },
+        }]);
+      } finally {
+        await closeInbox(inbox);
+        await rm(directory, { recursive: true, force: true });
+      }
     });
 
     it('keeps the warning when the Verified Memory read fails', async () => {

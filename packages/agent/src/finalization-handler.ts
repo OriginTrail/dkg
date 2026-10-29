@@ -65,7 +65,7 @@ import {
   type FinalizationRecoveryReplayOutcome,
 } from './finalization-recovery.js';
 import { FinalizationRecoveryWorker } from './finalization-recovery-worker.js';
-import { holdsExactVerifiedMemoryCopy, reportUnmatchedGraphScopedSwmHead } from './finalization-verified-memory-copy.js';
+import { findExactVerifiedMemoryCopy, reportUnmatchedGraphScopedSwmHead } from './finalization-verified-memory-copy.js';
 import type {
   FinalizationRecoveryEntry,
   FinalizationRecoveryStore,
@@ -398,7 +398,7 @@ export class FinalizationHandler {
         ? createOperationContext('sync', candidate.msg.operationId)
         : createOperationContext('sync')),
       invalidateVerified: (input) => this.invalidateVerifiedGraphScopedFinalization(input),
-      hasExactVerifiedMemoryCopy: (query) => holdsExactVerifiedMemoryCopy(this.store, query),
+      findExactVerifiedMemoryCopy: (query) => findExactVerifiedMemoryCopy(this.store, query),
       isRetryableError: (error) => error instanceof StoreSchedulerBusyError,
     };
     this.recovery = new FinalizationRecovery(

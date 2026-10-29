@@ -5,23 +5,26 @@ import type { TripleStore } from '@origintrail-official/dkg-storage';
 import { ethers } from 'ethers';
 import { resolveConfirmedGraphScopedVm } from './confirmed-graph-scoped-vm-resolver.js';
 import type { ParsedGraphScopedFinalization } from './finalization-graph-envelope.js';
-import type { ExactVerifiedMemoryCopyQuery } from './finalization-recovery-verified-memory.js';
+import type {
+  ExactVerifiedMemoryCopy,
+  ExactVerifiedMemoryCopyQuery,
+} from './finalization-recovery-verified-memory.js';
 
 function optionalHex(value: Uint8Array | undefined): string | undefined {
   return value === undefined ? undefined : ethers.hexlify(value).toLowerCase();
 }
 
 /**
- * Whether Verified Memory holds the exact assertion a graph-scoped
- * finalization names: confirmed metadata for its version, batch and
- * namespace with the same envelope, and stored content that verifies against
+ * How Verified Memory holds the exact assertion a graph-scoped finalization
+ * names, if it does: confirmed metadata for its version, batch and namespace
+ * with the same envelope, and stored content that verifies against
  * `merkleRoot`. A copy recorded under another transaction is not that
  * assertion; a copy from the receiptless chain-reconcile lane records none.
  */
-export async function holdsExactVerifiedMemoryCopy(
+export async function findExactVerifiedMemoryCopy(
   store: TripleStore,
   query: ExactVerifiedMemoryCopyQuery,
-): Promise<boolean> {
+): Promise<ExactVerifiedMemoryCopy | undefined> {
   const { candidate } = query;
   const subGraphName = candidate.msg.subGraphName || undefined;
   const resolution = await resolveConfirmedGraphScopedVm(store, {
@@ -33,15 +36,17 @@ export async function holdsExactVerifiedMemoryCopy(
     batchId: candidate.batchId,
     ...(subGraphName ? { subGraphName } : {}),
   });
-  if (resolution.status !== 'verified') return false;
+  if (resolution.status !== 'verified') return undefined;
   const { envelope } = resolution;
-  return (
-    envelope.transactionHash === undefined
-    || envelope.transactionHash.toLowerCase() === candidate.msg.txHash.toLowerCase()
-  )
-    && envelope.publicTripleCount === candidate.publicTripleCount
-    && envelope.privateTripleCount === candidate.privateTripleCount
-    && optionalHex(envelope.privateMerkleRoot) === optionalHex(candidate.privateMerkleRoot);
+  if (
+    envelope.publicTripleCount !== candidate.publicTripleCount
+    || envelope.privateTripleCount !== candidate.privateTripleCount
+    || optionalHex(envelope.privateMerkleRoot) !== optionalHex(candidate.privateMerkleRoot)
+  ) return undefined;
+  if (envelope.transactionHash === undefined) return 'receiptless';
+  return envelope.transactionHash.toLowerCase() === candidate.msg.txHash.toLowerCase()
+    ? 'receipt-backed'
+    : undefined;
 }
 
 interface FinalizationHeadLog {
@@ -66,11 +71,11 @@ export async function reportUnmatchedGraphScopedSwmHead(
   const { ual } = candidate.scope;
   let held = false;
   try {
-    held = await holdsExactVerifiedMemoryCopy(store, {
+    held = await findExactVerifiedMemoryCopy(store, {
       contextGraphId,
       candidate,
       merkleRoot: candidate.msg.kcMerkleRoot,
-    });
+    }) !== undefined;
   } catch {
     // The warning below still names the miss.
   }

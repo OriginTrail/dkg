@@ -22,6 +22,7 @@ import type {
 import {
   VERIFIED_MEMORY_SUPERSESSION_REASON,
   supersedeEntryHeldInVerifiedMemory,
+  type ExactVerifiedMemoryCopy,
   type ExactVerifiedMemoryCopyQuery,
 } from '../src/finalization-recovery-verified-memory.js';
 
@@ -114,7 +115,7 @@ const PREPARED: Prepared = {
  * `prepared` stands for a node that holds it.
  */
 function materializer(
-  held: (query: ExactVerifiedMemoryCopyQuery) => Promise<boolean>,
+  found: (query: ExactVerifiedMemoryCopyQuery) => Promise<ExactVerifiedMemoryCopy | undefined>,
   options: { prepared?: Prepared; apply?: 'applied' | 'deferred' } = {},
 ) {
   return {
@@ -123,7 +124,7 @@ function materializer(
     recoverVerifiedEvidence: async () => undefined,
     replayVerified: async () => 'promoted' as const,
     invalidateVerified: async () => 'invalidated' as const,
-    hasExactVerifiedMemoryCopy: vi.fn(held),
+    findExactVerifiedMemoryCopy: vi.fn(found),
     isRetryableError: (error: unknown) => error instanceof StoreSchedulerBusyError,
   };
 }
@@ -172,7 +173,7 @@ describe('finalization recovery of an assertion already in Verified Memory', () 
     await withInbox(async (open) => {
       const store = await open();
       const { info, log } = capturingLog();
-      const fake = materializer(async () => true);
+      const fake = materializer(async () => 'receiptless' as const);
       const recovery = new FinalizationRecovery(store, chain(), log, fake);
       await recovery.receive(liveInput());
       expect(await store.health()).toMatchObject({
@@ -187,8 +188,8 @@ describe('finalization recovery of an assertion already in Verified Memory', () 
         lastError: VERIFIED_MEMORY_SUPERSESSION_REASON,
         failureStreak: 0,
       }]);
-      expect(fake.hasExactVerifiedMemoryCopy).toHaveBeenCalledOnce();
-      const [query] = fake.hasExactVerifiedMemoryCopy.mock.calls[0]!;
+      expect(fake.findExactVerifiedMemoryCopy).toHaveBeenCalledOnce();
+      const [query] = fake.findExactVerifiedMemoryCopy.mock.calls[0]!;
       expect(query.contextGraphId).toBe(CONTEXT_GRAPH);
       expect(query.candidate.scope.ual).toBe(UAL);
       expect(query.merkleRoot).toEqual(ROOT);
@@ -210,7 +211,7 @@ describe('finalization recovery of an assertion already in Verified Memory', () 
       await expect(restarted.processLiveOutcome(liveInput())).resolves.toEqual({ status: 'handled' });
       await expect(restarted.processDueBatch(16)).resolves.toBe(0);
       expect(await reopened.list()).toMatchObject([{ state: 'SUPERSEDED' }]);
-      expect(fake.hasExactVerifiedMemoryCopy).toHaveBeenCalledOnce();
+      expect(fake.findExactVerifiedMemoryCopy).toHaveBeenCalledOnce();
       expect(fake.prepare).toHaveBeenCalledOnce();
     });
   });
@@ -222,7 +223,7 @@ describe('finalization recovery of an assertion already in Verified Memory', () 
         store,
         chain(),
         capturingLog().log,
-        materializer(async () => true),
+        materializer(async () => 'receiptless' as const),
       );
       await recovery.receive(liveInput());
 
@@ -231,10 +232,14 @@ describe('finalization recovery of an assertion already in Verified Memory', () 
     });
   });
 
-  it('keeps the entry owed when Verified Memory does not hold the assertion', async () => {
+  it.each([
+    ['does not hold the assertion', undefined],
+    // Evidence recovery owns that copy: it retries until the receipt recovers.
+    ['holds it with a receipt of its own', 'receipt-backed' as const],
+  ])('keeps the entry owed when Verified Memory %s', async (_label, copy) => {
     await withInbox(async (open) => {
       const store = await open();
-      const fake = materializer(async () => false);
+      const fake = materializer(async () => copy);
       const recovery = new FinalizationRecovery(store, chain(), capturingLog().log, fake);
       await recovery.receive(liveInput());
 
@@ -248,7 +253,7 @@ describe('finalization recovery of an assertion already in Verified Memory', () 
         lastError: 'workspace preparation is unavailable',
       });
       expect(entry!.nextAttemptAt).toBeDefined();
-      expect(fake.hasExactVerifiedMemoryCopy).toHaveBeenCalledOnce();
+      expect(fake.findExactVerifiedMemoryCopy).toHaveBeenCalledOnce();
       expect(await store.health()).toMatchObject({
         ready: true,
         fullQuotas: { sourcePeers: 1, contextGraphs: 0 },
@@ -306,14 +311,14 @@ describe('finalization recovery of an assertion already in Verified Memory', () 
   ) => {
     await withInbox(async (open) => {
       const store = await open();
-      const fake = materializer(async () => true, { prepared: PREPARED, apply });
+      const fake = materializer(async () => 'receiptless' as const, { prepared: PREPARED, apply });
       const recovery = new FinalizationRecovery(store, replayChain, capturingLog().log, fake);
       await recovery.receive(liveInput());
 
       await expect(recovery.processDueBatch(16)).resolves.toBe(1);
       expect(await store.list()).toMatchObject([expected]);
       expect(fake.prepare).toHaveBeenCalledOnce();
-      expect(fake.hasExactVerifiedMemoryCopy).not.toHaveBeenCalled();
+      expect(fake.findExactVerifiedMemoryCopy).not.toHaveBeenCalled();
     });
   });
 });
@@ -349,7 +354,9 @@ describe('supersedeEntryHeldInVerifiedMemory', () => {
       candidate: liveInput().candidate,
       merkleRoot: ROOT_HEX,
       failureCode: 'workspace-unavailable' as FinalizationRecoveryFailureCode | undefined,
-      materializer: { hasExactVerifiedMemoryCopy: vi.fn(async () => true) },
+      materializer: {
+        findExactVerifiedMemoryCopy: vi.fn(async (): Promise<ExactVerifiedMemoryCopy | undefined> => 'receiptless'),
+      },
       supersede: vi.fn(async () => true),
       log: capturingLog().log,
       ...overrides,
@@ -362,7 +369,7 @@ describe('supersedeEntryHeldInVerifiedMemory', () => {
   ])('keeps a REORGED entry owed, since %s is still to be applied', async (_label, overrides) => {
     const call = input({ entry: entry(overrides) });
     await expect(supersedeEntryHeldInVerifiedMemory(call)).resolves.toBe(false);
-    expect(call.materializer.hasExactVerifiedMemoryCopy).not.toHaveBeenCalled();
+    expect(call.materializer.findExactVerifiedMemoryCopy).not.toHaveBeenCalled();
     expect(call.supersede).not.toHaveBeenCalled();
   });
 
@@ -372,7 +379,7 @@ describe('supersedeEntryHeldInVerifiedMemory', () => {
   ])('leaves %s alone', async (_label, failureCode) => {
     const call = input({ failureCode });
     await expect(supersedeEntryHeldInVerifiedMemory(call)).resolves.toBe(false);
-    expect(call.materializer.hasExactVerifiedMemoryCopy).not.toHaveBeenCalled();
+    expect(call.materializer.findExactVerifiedMemoryCopy).not.toHaveBeenCalled();
   });
 
   it('reports no closure when the entry moved on before the compare-and-set', async () => {
@@ -386,7 +393,7 @@ describe('supersedeEntryHeldInVerifiedMemory', () => {
   it('reports a non-Error Verified Memory failure and keeps the entry', async () => {
     const { info, log } = capturingLog();
     const call = input({
-      materializer: { hasExactVerifiedMemoryCopy: vi.fn(async () => { throw 'unreadable'; }) },
+      materializer: { findExactVerifiedMemoryCopy: vi.fn(async () => { throw 'unreadable'; }) },
       log,
     });
     await expect(supersedeEntryHeldInVerifiedMemory(call)).resolves.toBe(false);
