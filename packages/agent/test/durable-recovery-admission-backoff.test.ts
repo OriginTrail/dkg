@@ -81,6 +81,7 @@ describe('durable recovery and a peer whose identity probe backs off (GH#3579)',
     expect(h.log.warn.mock.calls[0][1]).toBe(
       `Network identity probe for ${PEER.slice(-8)} failed retryably: no route to peer (automatic probes paused for 15000ms)`,
     );
+    const askedInFirstRound = h.ensureAdmitted.mock.calls.length;
 
     for (let round = 0; round < 5; round += 1) {
       h.advance(2_000);
@@ -88,8 +89,8 @@ describe('durable recovery and a peer whose identity probe backs off (GH#3579)',
     }
     expect(h.log.warn).toHaveBeenCalledOnce();
     expect(h.sendIdentityProbe).toHaveBeenCalledOnce();
-    // The first round's connect attempt is the only one: no round inside the window asked.
-    expect(h.ensureAdmitted).toHaveBeenCalledOnce();
+    // No round inside the window asked to connect or admit the peer.
+    expect(h.ensureAdmitted).toHaveBeenCalledTimes(askedInFirstRound);
     expect(h.ensurePeerConnected).not.toHaveBeenCalled();
     expect(h.slicedPeerIds).toEqual([]);
 
@@ -147,7 +148,10 @@ describe('a durable recovery round with peers in admission backoff', () => {
   const LIVE = '12D3KooWAbLiM6Xy2TfXtFpUrXqttnTSuctW8Lo1mkauaijsNrWw';
   const OTHER = '12D3KooWPyTpqBBtU1AvzSsd5rWXCQzFcGtG44qDmeYenWcpzsge';
 
-  function round(backedOff: Set<string>, options: { restrictToCandidatePeerIds?: boolean } = {}) {
+  function round(
+    backedOff: Set<string>,
+    options: { restrictToCandidatePeerIds?: boolean; connectBacksOff?: boolean } = {},
+  ) {
     const connected: string[] = [];
     const admitted: string[] = [];
     const sliced: string[] = [];
@@ -155,7 +159,11 @@ describe('a durable recovery round with peers in admission backoff', () => {
       checkpointStore: new MemorySyncCheckpointStore(),
       isRunning: () => true,
       resolvePreferredPeerId: async () => PEER,
-      connectRequestedPeer: async (peerId) => { connected.push(peerId); },
+      connectRequestedPeer: async (peerId) => {
+        connected.push(peerId);
+        // The connect attempt's probe fails and opens a backoff window.
+        if (options.connectBacksOff) backedOff.add(peerId);
+      },
       primeConnections: async () => undefined,
       liveConnectionPeerIds: () => [LIVE],
       isAdmissionBackedOff: (peerId) => backedOff.has(peerId),
@@ -175,18 +183,24 @@ describe('a durable recovery round with peers in admission backoff', () => {
     const asked = (peerIds: string[]) => [...new Set(peerIds)].sort();
     return new DurableRecoveryRunner().run({
       contextGraphId: CG,
-      options: { candidatePeerIds: [OTHER], ...options },
+      options: { candidatePeerIds: [OTHER], restrictToCandidatePeerIds: options.restrictToCandidatePeerIds },
       dependencies,
     }).then(() => ({ connected: asked(connected), admitted: asked(admitted), sliced: asked(sliced) }));
   }
 
-  it('asks neither to connect nor to admit a backed-off requested or live peer', async () => {
+  it('asks a requested peer in backoff neither to connect nor to admit, and leaves live peers to admitPeer', async () => {
     await expect(round(new Set([PEER, LIVE]))).resolves.toEqual({
-      connected: [OTHER], admitted: [OTHER], sliced: [OTHER],
+      connected: [OTHER], admitted: [LIVE, OTHER].sort(), sliced: [LIVE, OTHER].sort(),
     });
     await expect(round(new Set([OTHER]), { restrictToCandidatePeerIds: true })).resolves.toEqual({
       connected: [], admitted: [], sliced: [],
     });
+  });
+
+  it('leaves a requested peer whose probe fails during the round to admitPeer', async () => {
+    const { connected, admitted } = await round(new Set(), { connectBacksOff: true });
+    expect(connected).toEqual([PEER, OTHER].sort());
+    expect(admitted).toEqual(expect.arrayContaining([PEER, OTHER]));
   });
 
   it('asks every peer once none is backed off', async () => {
