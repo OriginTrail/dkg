@@ -9,12 +9,116 @@ import { PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
 import {
   selectACKCandidatePeers,
   selectACKCandidateUniverse,
-} from '../src/ack-peer-selection.js';
+  selectACKCandidatePeersWithDiagnostics,
+  type ACKCandidatePeerSelectionInput,
+} from '../src/ack-peer-selection-compat.js';
+import { selectCanonicalACKCandidatePeersWithDiagnostics } from '../src/ack-peer-selection.js';
 
 const RELAYS = ['relay-1', 'relay-2', 'relay-3', 'relay-4'];
 const STAKED = ['staked-core-5', 'staked-core-6', 'staked-core-7'];
 
 describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () => {
+  it('rejects unknown wire protocols at the exported selector boundary', () => {
+    expect(() => selectACKCandidatePeers({
+      connectedPeers: ['core-1'], requiredACKs: 1,
+      protocol: '/dkg/test/unknown' as ACKCandidatePeerSelectionInput['protocol'],
+    })).toThrow(/Unsupported StorageACK protocol/);
+  });
+
+  it('plans a local core with remote protocol tiers and one diagnostic model', () => {
+    const input: ACKCandidatePeerSelectionInput = {
+      connectedPeers: ['self', 'edge', 'base-core', 'v2-core'],
+      ackCandidatePeerIds: ['v2-core', 'base-core'],
+      localCandidate: { peerId: 'self', available: true },
+      capability: {
+        mode: 'require',
+        corePeers: new Set(['base-core', 'v2-core']),
+        requestedProtocolPeers: new Set(['v2-core']),
+      },
+      protocol: PROTOCOL_STORAGE_ACK_V2,
+      requiredACKs: 3,
+    };
+    const available = selectACKCandidatePeersWithDiagnostics(input);
+    expect(available.peers).toEqual(['self', 'v2-core', 'base-core']);
+    expect(available.diagnostics[0]).toMatchObject({
+      peerId: 'self', selected: true, protocolMatch: true, reason: 'selected-local',
+    });
+    expect(available.diagnostics.find(({ peerId }) => peerId === 'edge')).toMatchObject({
+      selected: false, reason: 'not-allowlisted',
+    });
+
+    const unavailable = selectACKCandidatePeersWithDiagnostics({
+      ...input, localCandidate: { peerId: 'self', available: false },
+    });
+    expect(unavailable.peers).toEqual(['v2-core', 'base-core']);
+    expect(unavailable.diagnostics[0]).toMatchObject({
+      peerId: 'self', selected: false, protocolMatch: false, reason: 'local-unavailable',
+    });
+  });
+
+  it('preserves legacy source and runtime core ranking', () => {
+    const legacy: ACKCandidatePeerSelectionInput = {
+      connectedPeers: ['edge', 'core'],
+      knownCorePeerIds: new Set(['core']),
+      requiredACKs: 3,
+    };
+    expect(selectACKCandidatePeers(legacy)).toEqual(['core', 'edge']);
+  });
+
+  it('normalizes legacy V2 fields while retaining their diagnostic tier', () => {
+    const legacy = selectACKCandidatePeersWithDiagnostics({
+      connectedPeers: ['edge', 'base-core', 'v2-core'],
+      knownCorePeerIds: new Set(['base-core', 'v2-core']),
+      knownCorePeerIdsV2: new Set(['v2-core']),
+      protocol: PROTOCOL_STORAGE_ACK_V2,
+      requiredACKs: 2,
+    });
+    expect(legacy.peers).toEqual(['v2-core', 'base-core', 'edge']);
+    expect(legacy.diagnostics.find(({ peerId }) => peerId === 'v2-core')?.tier).toBe('v2Advertised');
+
+    const canonical = selectACKCandidatePeersWithDiagnostics({
+      connectedPeers: ['edge', 'base-core', 'v2-core'],
+      capability: {
+        mode: 'rank',
+        corePeers: new Set(['base-core', 'v2-core']),
+        requestedProtocolPeers: new Set(['v2-core']),
+      },
+      protocol: PROTOCOL_STORAGE_ACK_V2,
+      requiredACKs: 2,
+    });
+    expect(canonical.peers).toEqual(legacy.peers);
+    expect(canonical.diagnostics.find(({ peerId }) => peerId === 'v2-core')?.tier).toBe('requestedProtocol');
+    expect(selectCanonicalACKCandidatePeersWithDiagnostics({
+      connectedPeers: ['edge', 'base-core', 'v2-core'],
+      capability: {
+        mode: 'rank',
+        corePeers: new Set(['base-core', 'v2-core']),
+        requestedProtocolPeers: new Set(['v2-core']),
+      },
+      protocol: PROTOCOL_STORAGE_ACK_V2,
+    })).toEqual(canonical);
+  });
+
+  it('rejects conflicting legacy and capability ownership', () => {
+    expect(() => selectACKCandidatePeers({
+      connectedPeers: ['core'], requiredACKs: 1,
+      knownCorePeerIds: new Set(['core']),
+      capability: { mode: 'rank', corePeers: new Set(['core']) },
+    })).toThrow(/either capability or legacy/);
+  });
+
+  it('uses the same core-only gate for preflight and final selection, with edge diagnostics', () => {
+    const input: ACKCandidatePeerSelectionInput = {
+      connectedPeers: ['edge', 'core-v1', 'core-v2'],
+      capability: { mode: 'require', corePeers: new Set(['core-v1', 'core-v2']), requestedProtocolPeers: new Set(['core-v2']) },
+      protocol: PROTOCOL_STORAGE_ACK_V2,
+      requiredACKs: 2,
+    };
+    expect(selectACKCandidateUniverse(input)).toEqual(['core-v1', 'core-v2']);
+    const result = selectACKCandidatePeersWithDiagnostics(input);
+    expect(result.peers).toEqual(['core-v2', 'core-v1']);
+    expect(result.diagnostics.find((entry) => entry.peerId === 'edge')?.reason).toBe('not-core-capable');
+  });
   it('exposes every connected non-self peer as the pre-admission universe by default', () => {
     expect(selectACKCandidateUniverse({
       connectedPeers: ['self', 'classified-core', 'unclassified-core', 'unclassified-core'],
@@ -33,7 +137,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     const out = selectACKCandidatePeers({
       connectedPeers: ['trusted-core', 'untrusted-peer'],
       ackCandidatePeerIds: ['trusted-core'],
-      knownCorePeerIds: new Set(['trusted-core', 'untrusted-peer']),
+      capability: { mode: 'rank', corePeers: new Set(['trusted-core', 'untrusted-peer']) },
       requiredACKs: 3,
     });
     expect(out).toEqual(['trusted-core']);
@@ -46,7 +150,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
       connectedPeers: [...foreign, ...sameNetwork],
       preferredACKPeerIds: [...foreign, RELAYS[0]],
       verifiedSameNetworkPeerIds: new Set(sameNetwork),
-      knownCorePeerIds: new Set([...foreign, ...sameNetwork]),
+      capability: { mode: 'rank', corePeers: new Set([...foreign, ...sameNetwork]) },
       requiredACKs: 3,
     });
     expect(out).toEqual([RELAYS[0], 'same-network-core']);
@@ -57,7 +161,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
       connectedPeers: ['foreign-relay', STAKED[0], STAKED[1]],
       preferredACKPeerIds: ['foreign-relay'],
       verifiedSameNetworkPeerIds: new Set([STAKED[0], STAKED[1]]),
-      knownCorePeerIds: new Set(['foreign-relay', STAKED[0], STAKED[1]]),
+      capability: { mode: 'rank', corePeers: new Set(['foreign-relay', STAKED[0], STAKED[1]]) },
       requiredACKs: 3,
     });
     expect(out).toEqual([STAKED[0], STAKED[1]]);
@@ -68,7 +172,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
       connectedPeers: ['same-network-core', 'foreign-core'],
       ackCandidatePeerIds: ['same-network-core', 'foreign-core'],
       verifiedSameNetworkPeerIds: new Set(['same-network-core']),
-      knownCorePeerIds: new Set(['same-network-core', 'foreign-core']),
+      capability: { mode: 'rank', corePeers: new Set(['same-network-core', 'foreign-core']) },
       requiredACKs: 3,
     });
     expect(out).toEqual(['same-network-core']);
@@ -81,7 +185,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     const out = selectACKCandidatePeers({
       connectedPeers: [RELAYS[0], RELAYS[1], ...STAKED],
       preferredACKPeerIds: RELAYS,
-      knownCorePeerIds: new Set([RELAYS[0], RELAYS[1], ...STAKED]),
+      capability: { mode: 'rank', corePeers: new Set([RELAYS[0], RELAYS[1], ...STAKED]) },
       requiredACKs: 3,
     });
     expect(out).toEqual([RELAYS[0], RELAYS[1], ...STAKED]);
@@ -91,7 +195,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     const out = selectACKCandidatePeers({
       connectedPeers: ['edge-x', STAKED[0], RELAYS[0], 'edge-y', RELAYS[1]],
       preferredACKPeerIds: RELAYS,
-      knownCorePeerIds: new Set([STAKED[0], RELAYS[0]]),
+      capability: { mode: 'rank', corePeers: new Set([STAKED[0], RELAYS[0]]) },
       requiredACKs: 3,
     });
     // confirmed tier: RELAYS[0] (listed) before STAKED[0]; rest tier:
@@ -103,7 +207,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     const out = selectACKCandidatePeers({
       connectedPeers: [STAKED[0], STAKED[1], RELAYS[0], STAKED[2]],
       preferredACKPeerIds: RELAYS,
-      knownCorePeerIds: new Set([STAKED[0], STAKED[1], STAKED[2], RELAYS[0]]),
+      capability: { mode: 'rank', corePeers: new Set([STAKED[0], STAKED[1], STAKED[2], RELAYS[0]]) },
       requiredACKs: 3,
     });
     expect(out).toEqual([RELAYS[0], STAKED[0], STAKED[1], STAKED[2]]);
@@ -114,7 +218,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     const out = selectACKCandidatePeers({
       connectedPeers: [...foreign, RELAYS[0], RELAYS[1]],
       preferredACKPeerIds: RELAYS,
-      knownCorePeerIds: new Set(foreign),
+      capability: { mode: 'rank', corePeers: new Set(foreign) },
       requiredACKs: 3,
     });
     expect(out).toEqual([...foreign, RELAYS[0], RELAYS[1]]);
@@ -126,7 +230,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     const out = selectACKCandidatePeers({
       connectedPeers: [...identified, ...fallback],
       preferredACKPeerIds: ['relay-1'],
-      knownCorePeerIds: new Set(identified),
+      capability: { mode: 'rank', corePeers: new Set(identified) },
       requiredACKs: 3,
     });
     expect(out).toEqual([...identified, ...fallback]);
@@ -136,8 +240,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     const out = selectACKCandidatePeers({
       connectedPeers: [...STAKED, RELAYS[0], RELAYS[1], 'edge-x'],
       preferredACKPeerIds: RELAYS,
-      knownCorePeerIds: new Set([...STAKED, RELAYS[0], RELAYS[1]]),
-      knownCorePeerIdsV2: new Set([STAKED[0], STAKED[1], RELAYS[1]]),
+      capability: { mode: 'rank', corePeers: new Set([...STAKED, RELAYS[0], RELAYS[1]]), requestedProtocolPeers: new Set([STAKED[0], STAKED[1], RELAYS[1]]) },
       requiredACKs: 3,
       protocol: PROTOCOL_STORAGE_ACK_V2,
     });
@@ -147,8 +250,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
   it('V2 rounds include fallback candidates when the advertised tier is below quorum', () => {
     const out = selectACKCandidatePeers({
       connectedPeers: ['A', 'B', 'C', 'D', 'E', 'F', 'G'],
-      knownCorePeerIds: new Set(['A', 'B', 'C', 'D', 'E', 'F', 'G']),
-      knownCorePeerIdsV2: new Set(['A', 'B']),
+      capability: { mode: 'rank', corePeers: new Set(['A', 'B', 'C', 'D', 'E', 'F', 'G']), requestedProtocolPeers: new Set(['A', 'B']) },
       requiredACKs: 3,
       protocol: PROTOCOL_STORAGE_ACK_V2,
     });
@@ -159,7 +261,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
     const connected = ['core-1', 'core-2', 'core-3', 'core-4', 'core-5', 'core-6', 'core-7'];
     const out = selectACKCandidatePeers({
       connectedPeers: connected,
-      knownCorePeerIds: new Set(['core-1', 'core-2']),
+      capability: { mode: 'rank', corePeers: new Set(['core-1', 'core-2']) },
       requiredACKs: 3,
     });
     expect(out).toEqual(connected);
@@ -168,7 +270,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
   it('without a separate edge filter, confirmed-core quorum keeps connected fallbacks dialable', () => {
     const out = selectACKCandidatePeers({
       connectedPeers: ['core1', 'core2', 'core3', 'edge1', 'edge2'],
-      knownCorePeerIds: new Set(['core1', 'core2', 'core3']),
+      capability: { mode: 'rank', corePeers: new Set(['core1', 'core2', 'core3']) },
       requiredACKs: 3,
     });
     expect(out).toEqual(['core1', 'core2', 'core3', 'edge1', 'edge2']);
@@ -177,7 +279,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
   it('without a preference list, behavior is unchanged (cores first, everyone dialable)', () => {
     const out = selectACKCandidatePeers({
       connectedPeers: ['edge-x', STAKED[0], STAKED[1]],
-      knownCorePeerIds: new Set([STAKED[0], STAKED[1]]),
+      capability: { mode: 'rank', corePeers: new Set([STAKED[0], STAKED[1]]) },
       requiredACKs: 3,
     });
     expect(out).toEqual([STAKED[0], STAKED[1], 'edge-x']);
@@ -188,7 +290,7 @@ describe('selectACKCandidatePeers — allowlist vs preference-only ranking', () 
       connectedPeers: ['self', STAKED[0], RELAYS[0]],
       selfPeerId: 'self',
       preferredACKPeerIds: ['  ', '', ` ${RELAYS[0]} `],
-      knownCorePeerIds: new Set([STAKED[0], RELAYS[0]]),
+      capability: { mode: 'rank', corePeers: new Set([STAKED[0], RELAYS[0]]) },
       requiredACKs: 3,
     });
     expect(out).toEqual([RELAYS[0], STAKED[0]]);

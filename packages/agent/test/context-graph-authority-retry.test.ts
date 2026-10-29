@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
+  DKGEvent,
   contextGraphAppTopic,
   contextGraphFinalizationTopic,
   contextGraphPublishTopic,
@@ -9,10 +10,15 @@ import {
 import { DKGAgent } from '../src/index.js';
 import { CHAIN_POLICY_READ_TIMEOUT_MS } from '../src/dkg-agent-constants.js';
 import {
-  activatePersistedContextGraphSubscription,
+  DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
   recoverDeferredContextGraphSubscriptionAuthorities,
+  wakeDeferredContextGraphSubscriptionAuthorityRecovery,
 } from
   '../src/context-graph-subscription-authority-recovery.js';
+import { CoalescingRecurringTask } from '../src/coalescing-recurring-task.js';
+import { RollingSubscriptionChecks } from '../src/context-graph-subscription-rolling-checks.js';
+import { createTestSubscriptionActivations } from './_helpers/subscription-activation-owner.js';
+import { continueContextGraphSubscriptionLine } from '../src/context-graph-subscription-policy.js';
 
 const mockLivePolicy = (agent: DKGAgent, accessPolicy: 0 | 1) =>
   vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState').mockResolvedValue({
@@ -40,6 +46,83 @@ class ActivationTestGossip {
   }
 }
 
+describe('waking authority recovery for a row that became unavailable', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  // Recovery as its scheduler sees it: a pass that finds nothing to ask ends
+  // idle, and nothing runs after that until someone starts it again.
+  const recoveryThatFindsNothing = (pass: () => Promise<void> = async () => undefined) => {
+    let passes = 0;
+    const recovery = new CoalescingRecurringTask({
+      retryIntervalMs: DEFERRED_AUTHORITY_RECOVERY_RETRY_MS,
+      requestWhileRunning: 'drop',
+      runPass: async () => {
+        passes += 1;
+        await pass();
+        return 'idle';
+      },
+      onError: (error) => { throw error; },
+      closingMessage: 'test recovery closing',
+    });
+    return { recovery, passes: () => passes };
+  };
+
+  it('starts a recovery that had stopped, one retry interval later', async () => {
+    vi.useFakeTimers();
+    const { recovery, passes } = recoveryThatFindsNothing();
+
+    wakeDeferredContextGraphSubscriptionAuthorityRecovery(recovery);
+    await vi.advanceTimersByTimeAsync(DEFERRED_AUTHORITY_RECOVERY_RETRY_MS - 1);
+    expect(passes()).toBe(0);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(passes()).toBe(1);
+
+    // That pass found nothing and stopped again.
+    await vi.advanceTimersByTimeAsync(10 * DEFERRED_AUTHORITY_RECOVERY_RETRY_MS);
+    expect(passes()).toBe(1);
+    await recovery.close();
+  });
+
+  it('leaves a recovery alone that is due sooner', async () => {
+    vi.useFakeTimers();
+    const { recovery, passes } = recoveryThatFindsNothing();
+    recovery.schedule(1_000);
+
+    wakeDeferredContextGraphSubscriptionAuthorityRecovery(recovery);
+    wakeDeferredContextGraphSubscriptionAuthorityRecovery(recovery);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(passes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(10 * DEFERRED_AUTHORITY_RECOVERY_RETRY_MS);
+    expect(passes()).toBe(1);
+    await recovery.close();
+  });
+
+  it('starts recovery again after a pass that was already ending when the row was handed over', async () => {
+    vi.useFakeTimers();
+    let endPass!: () => void;
+    const ending = new Promise<void>((resolve) => { endPass = resolve; });
+    const { recovery, passes } = recoveryThatFindsNothing(() => ending);
+    recovery.request();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(recovery.running).toBe(true);
+
+    // The pass has counted its rows; it cannot see this one any more.
+    wakeDeferredContextGraphSubscriptionAuthorityRecovery(recovery);
+    endPass();
+    await vi.advanceTimersByTimeAsync(DEFERRED_AUTHORITY_RECOVERY_RETRY_MS - 1);
+    expect(passes()).toBe(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(passes()).toBe(2);
+    await recovery.close();
+  });
+
+  it('has nothing to start before the agent has made its recovery runtime', () => {
+    expect(() => wakeDeferredContextGraphSubscriptionAuthorityRecovery(undefined)).not.toThrow();
+  });
+});
+
 describe('Context Graph subscription authority retry', () => {
   let agent: DKGAgent | null = null;
 
@@ -62,6 +145,8 @@ describe('Context Graph subscription authority retry', () => {
     const subscriptions = new Map<string, any>();
     const syncScope = new Set<string>();
     const gossipHandlers = new Set<string>();
+    const activations = createTestSubscriptionActivations({ subscribedContextGraphs: subscriptions,
+      contextGraphSubscriptionDormancyById: new Map() });
     let failSubscribe = true;
     const ports = {
       install: () => {
@@ -69,7 +154,6 @@ describe('Context Graph subscription authority retry', () => {
         subscriptions.set(contextGraphId, subscription);
         return subscription;
       },
-      current: (id: string) => subscriptions.get(id),
       remove: (id: string) => { subscriptions.delete(id); },
       rollbackNetworkEffects: (id: string) => {
         syncScope.delete(id);
@@ -79,21 +163,25 @@ describe('Context Graph subscription authority retry', () => {
       subscribe: (id: string) => {
         // Model the real activation replacing the installed record, then a
         // topic installed before a later topic subscription throws.
-        subscriptions.set(id, { ...subscriptions.get(id), subscribed: true });
+        const previous = subscriptions.get(id), next = { ...previous, subscribed: true };
+        continueContextGraphSubscriptionLine(previous, next);
+        subscriptions.set(id, next);
         gossipHandlers.add(id);
         if (failSubscribe) throw new Error('gossip topic install failed');
       },
       persistMembership: () => undefined,
+      persistBinding: async () => undefined,
+      commit: (id: string) => subscriptions.get(id),
     };
 
-    await expect(activatePersistedContextGraphSubscription(row, ports))
+    await expect(activations.activate(row, ports))
       .rejects.toThrow('gossip topic install failed');
     expect([...subscriptions]).toEqual([]);
     expect([...syncScope]).toEqual([]);
     expect([...gossipHandlers]).toEqual([]);
 
     failSubscribe = false;
-    await expect(activatePersistedContextGraphSubscription(row, ports))
+    await expect(activations.activate(row, ports))
       .resolves.toMatchObject({ id: contextGraphId, subscribed: true });
     expect(subscriptions.get(contextGraphId)).toMatchObject({ subscribed: true });
     expect([...syncScope]).toEqual([contextGraphId]);
@@ -208,6 +296,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         coldCursor,
@@ -219,12 +308,11 @@ describe('Context Graph subscription authority retry', () => {
         activate: async (row) => {
           activationOrder.push(row.id);
           await Promise.resolve();
+          status.activated += 1;
+          dormancyById.delete(row.id);
         },
         warn: vi.fn(),
-        activated: (contextGraphId) => {
-          status.activated += 1;
-          dormancyById.delete(contextGraphId);
-        },
+        capped: vi.fn(),
       },
     );
     await recovery;
@@ -276,6 +364,7 @@ describe('Context Graph subscription authority retry', () => {
         delete: async () => undefined,
       },
       dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
       persistRevisions: new Map(),
       subscriptions: new Map(),
       coldCursor,
@@ -298,7 +387,8 @@ describe('Context Graph subscription authority retry', () => {
       }),
       activate: vi.fn(async () => undefined),
       warn: vi.fn(),
-      activated: vi.fn(),
+      capped: vi.fn(),
+
     };
     const runPass = () => recoverDeferredContextGraphSubscriptionAuthorities(
       new AbortController().signal,
@@ -361,6 +451,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         coldCursor,
@@ -376,7 +467,8 @@ describe('Context Graph subscription authority retry', () => {
         },
         activate: vi.fn(async () => undefined),
         warn: vi.fn(),
-        activated: vi.fn(),
+        capped: vi.fn(),
+
       },
     );
 
@@ -432,6 +524,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         getStatus: () => ({
@@ -452,7 +545,8 @@ describe('Context Graph subscription authority retry', () => {
         resolveAuthority,
         activate: vi.fn(),
         warn: vi.fn(),
-        activated: vi.fn(),
+        capped: vi.fn(),
+
       },
     );
 
@@ -521,6 +615,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         getStatus: () => status,
@@ -528,9 +623,9 @@ describe('Context Graph subscription authority retry', () => {
         touchStatus: () => undefined,
         clearStatus: vi.fn(),
         resolveAuthority,
-        activate: async (row) => { activated.push(row.id); },
+        activate: async (row) => { activated.push(row.id); status.activated += 1; },
         warn: vi.fn(),
-        activated: () => { status.activated += 1; },
+        capped: vi.fn(),
       },
     );
 
@@ -601,6 +696,7 @@ describe('Context Graph subscription authority retry', () => {
           delete: async () => undefined,
         },
         dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
         persistRevisions: new Map(),
         subscriptions: new Map(),
         getStatus: () => status,
@@ -620,7 +716,7 @@ describe('Context Graph subscription authority retry', () => {
         },
         activate,
         warn: vi.fn(),
-        activated: () => { status.activated += 1; },
+        capped: vi.fn(),
       },
     );
 
@@ -684,9 +780,14 @@ describe('Context Graph subscription authority retry', () => {
       // unrelated VM startup sweep from issuing another lookup and replacing
       // the resolver that represents the authority-recovery attempt.
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const retry = vi.spyOn(agent, 'retryUnavailableContextGraphSubscriptionAuthorities');
+    // The daemon catches up a subscription that comes back unsynced; it learns
+    // of every activation, whichever path made it, through this event.
+    const activations: unknown[] = [];
+    agent.eventBus.on(DKGEvent.CONTEXT_GRAPH_SUBSCRIPTION_ACTIVATED, (data) => activations.push(data));
 
     await agent.start();
     await vi.waitFor(() => expect(attempt).toBe(2));
@@ -709,10 +810,11 @@ describe('Context Graph subscription authority retry', () => {
     );
 
     expect(retry).toHaveBeenCalledOnce();
-    expect(loadAll).toHaveBeenCalledOnce();
-    expect(load).toHaveBeenCalledTimes(2);
-    expect(load).toHaveBeenNthCalledWith(1, contextGraphId);
-    expect(load).toHaveBeenNthCalledWith(2, contextGraphId);
+    expect(activations).toEqual([{ contextGraphId }]);
+    // Startup scans once; the serialized save also validates wire aliases.
+    // Its exact-local hosting read follows the two recovery-owned point reads.
+    expect(loadAll).toHaveBeenCalledTimes(2);
+    expect(load.mock.calls).toEqual([[contextGraphId], [contextGraphId], [contextGraphId]]);
     expect(resolveByNameHash.mock.calls.find(([, options]) => options?.signal)?.[1]?.signal?.aborted)
       .toBe(false);
     expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
@@ -761,6 +863,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const targetNameHash = agent.contextGraphNameCommitment(contextGraphId);
@@ -821,6 +924,7 @@ describe('Context Graph subscription authority retry', () => {
       contextGraphSubscriptionRehydrationEnabled: true,
       maxRehydratedContextGraphSubscriptions: 1,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const targetNameHash = agent.contextGraphNameCommitment(cappedContextGraphId);
@@ -833,7 +937,11 @@ describe('Context Graph subscription authority retry', () => {
       });
 
     await agent.start();
-    expect(agent.getSubscribedContextGraphs().has(cappedContextGraphId)).toBe(false);
+    expect(agent.getSubscribedContextGraphs().get(cappedContextGraphId)).toMatchObject({
+      onChainId: '8', onChainHash: targetNameHash,
+      subscribed: false, coreHosted: false, synced: false,
+      sharedMemorySynced: false, metaSynced: false,
+    });
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
       dormantReasons: { activationCap: [cappedContextGraphId] },
     });
@@ -901,6 +1009,7 @@ describe('Context Graph subscription authority retry', () => {
       contextGraphSubscriptionRehydrationEnabled: true,
       maxRehydratedContextGraphSubscriptions: 1,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
@@ -971,6 +1080,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
@@ -1046,6 +1156,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     mockLivePolicy(agent, 0);
     const reverse = vi.spyOn(chain, 'resolveContextGraphIdByNameHash')
@@ -1073,7 +1184,7 @@ describe('Context Graph subscription authority retry', () => {
     });
   }, 15_000);
 
-  it('retries a transient startup policy failure through the same durable binding', async () => {
+  it.each([false, true])('retries a transient startup policy failure with inactive legacy rows=%s', async includeInactive => {
     const contextGraphId = 'persisted-authoritative-binding-retry';
     const chain = new MockChainAdapter();
     const rows = new Map<string, any>([[contextGraphId, {
@@ -1085,6 +1196,8 @@ describe('Context Graph subscription authority retry', () => {
       syncScoped: true,
       onChainId: '7',
     }]]);
+    const inactiveId = 'inactive-legacy-row';
+    if (includeInactive) rows.set(inactiveId, { id: inactiveId, subscribed: false, coreHosted: false, onChainId: '8' });
     agent = await DKGAgent.create({
       name: 'PersistedAuthoritativeBindingRetry',
       chainAdapter: chain,
@@ -1096,6 +1209,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     let targetPolicyAttempts = 0;
     vi.spyOn(agent, 'resolveLiveOnChainAccessPolicyState')
@@ -1126,6 +1240,10 @@ describe('Context Graph subscription authority retry', () => {
       { timeout: 10_000 },
     );
 
+    if (includeInactive) {
+      expect(rows.get(inactiveId)).toMatchObject({ subscribed: false, coreHosted: false });
+      expect(agent.getSubscribedContextGraphs().get(inactiveId)?.subscribed).not.toBe(true);
+    }
     expect(targetPolicyAttempts).toBe(2);
     expect(reverse.mock.calls.some(([nameHash]) => nameHash === targetNameHash)).toBe(false);
     expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
@@ -1135,7 +1253,12 @@ describe('Context Graph subscription authority retry', () => {
     });
   }, 15_000);
 
-  it('retries unavailable subscription authority again at the exact recurring boundary', async () => {
+  it.each([
+    ['answers unavailable', 'decision'],
+    // The resolver's own failure is caught at the call site and read as
+    // retryable unavailability, never as a denial (#2834).
+    ['throws', 'thrown'],
+  ] as const)('retries subscription authority that %s again at the exact recurring boundary', async (_label, failure) => {
     const contextGraphId = 'persisted-recurring-authority-retry';
     const rows = new Map<string, any>([[contextGraphId, {
       id: contextGraphId,
@@ -1160,6 +1283,7 @@ describe('Context Graph subscription authority retry', () => {
     const resolveAuthority = vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
       .mockImplementation(async (candidateId) => {
       if (candidateId === contextGraphId && !authorityAvailable) {
+        if (failure === 'thrown') throw new Error('authority read failed');
         return {
           outcome: 'unavailable',
           source: 'registered-chain',
@@ -1185,6 +1309,10 @@ describe('Context Graph subscription authority retry', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(targetAttempts()).toBe(2);
     expect(retry).toHaveBeenCalledOnce();
+    expect(agent.getSubscribedContextGraphs().get(contextGraphId)?.subscribed).not.toBe(true);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormantReasons: { authorityUnavailable: [contextGraphId] },
+    });
 
     await vi.advanceTimersByTimeAsync(29_999);
     expect(targetAttempts()).toBe(2);
@@ -1229,6 +1357,7 @@ describe('Context Graph subscription authority retry', () => {
       },
       contextGraphSubscriptionRehydrationEnabled: true,
       syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
     });
     const attempts: string[] = [];
     vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
@@ -1311,7 +1440,7 @@ describe('Context Graph subscription authority retry', () => {
             metadataBootstrap: 'forbidden',
           } as const;
     });
-    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
     vi.useFakeTimers();
 
@@ -1336,6 +1465,368 @@ describe('Context Graph subscription authority retry', () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(attempts).toBe(2);
     expect(resolveAuthority.mock.calls.filter(([id]) => id === contextGraphId)).toHaveLength(2);
+  });
+
+  it('asks a row again that rolling activation left unavailable after recovery had gone idle', async () => {
+    // One activation slot. The start-up pass reads the first two rows; the
+    // other two are left to rolling activation by the cap.
+    const recovered = 'a-unavailable-at-start';
+    const live = 'b-live';
+    const refused = 'c-capped-denied';
+    const timedOut = 'd-capped-timed-out';
+    const rows = new Map<string, any>([recovered, live, refused, timedOut].map((id) => [id, {
+      id,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]));
+    agent = await DKGAgent.create({
+      name: 'RollingActivationWakesAuthorityRecovery',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      maxRehydratedContextGraphSubscriptions: 1,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    const allowed = {
+      outcome: 'allowed',
+      source: 'registered-chain',
+      reason: 'open-context-graph',
+      metadataBootstrap: 'not-needed',
+    } as const;
+    const denied = {
+      outcome: 'denied',
+      source: 'registered-chain',
+      reason: 'caller-not-participant',
+      metadataBootstrap: 'forbidden',
+    } as const;
+    const unavailable = (reason: string) => ({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason,
+      metadataBootstrap: 'eligible',
+    } as const);
+    const reads: string[] = [];
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        reads.push(contextGraphId);
+        const earlier = reads.filter((id) => id === contextGraphId).length - 1;
+        if (contextGraphId === live) return allowed;
+        if (contextGraphId === recovered) {
+          return earlier === 0 ? unavailable('temporary-authority-outage') : denied;
+        }
+        if (contextGraphId === refused) return denied;
+        if (contextGraphId === timedOut) {
+          // The chain answers again after the one read that timed out.
+          return earlier === 0 ? unavailable('chain-access-policy-timeout') : allowed;
+        }
+        return unavailable('unrelated-startup-probe');
+      });
+    vi.useFakeTimers();
+
+    await agent.start();
+    expect(reads.filter((id) => rows.has(id))).toEqual([recovered, live]);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      authorityUnavailable: [recovered],
+      activationCap: [refused, timedOut],
+    });
+
+    // Recovery reads its one row, gets a denial, and has nothing left to ask.
+    await vi.advanceTimersByTimeAsync(0);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      authorityUnavailable: [],
+      authorityDenied: [recovered],
+    });
+
+    // Rolling activation starts half a minute after start: a denial, a pause,
+    // then the read that times out.
+    await vi.advanceTimersByTimeAsync(30_000 + 10_000);
+    expect(reads.filter((id) => id === refused || id === timedOut)).toEqual([refused, timedOut]);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      activationCap: [],
+      authorityDenied: [recovered, refused],
+      authorityUnavailable: [timedOut],
+    });
+
+    // Nothing but recovery asks an unavailable row again, and recovery had
+    // stopped. The row starts it: one retry interval after the read that timed
+    // out, not at once, and not for the denial five seconds earlier.
+    await vi.advanceTimersByTimeAsync(24_000);
+    expect(reads.filter((id) => id === timedOut)).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(2_000);
+    expect(reads.filter((id) => id === timedOut).length).toBeGreaterThan(1);
+    expect(agent.getSubscribedContextGraphs().get(timedOut)?.subscribed).toBe(true);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      activationCap: [],
+      authorityUnavailable: [],
+      authorityDenied: [recovered, refused],
+    });
+  });
+
+  it('begins the report of rolling activation afresh when the same agent is started again', async () => {
+    // One activation slot: the first row takes it, the cap leaves the other two.
+    const live = 'b-live';
+    const capped = ['c-capped-denied', 'd-capped-denied'];
+    const rows = new Map<string, any>([live, ...capped].map((id) => [id, {
+      id,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+    }]));
+    agent = await DKGAgent.create({
+      name: 'RollingActivationReportAcrossRestart',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: {
+        loadAll: async () => [...rows.values()],
+        load: async (id) => rows.get(id) ?? null,
+        save: async (row) => { rows.set(row.id, row); },
+        delete: async (id) => { rows.delete(id); },
+      },
+      contextGraphSubscriptionRehydrationEnabled: true,
+      maxRehydratedContextGraphSubscriptions: 1,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    const reads: string[] = [];
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        reads.push(contextGraphId);
+        return contextGraphId === live
+          ? { outcome: 'allowed', source: 'registered-chain', reason: 'open-context-graph', metadataBootstrap: 'not-needed' } as const
+          : { outcome: 'denied', source: 'registered-chain', reason: 'caller-not-participant', metadataBootstrap: 'forbidden' } as const;
+      });
+    const warn = vi.spyOn((agent as any).log, 'warn');
+    const reports = (): string[] => warn.mock.calls
+      .map(([, message]) => String(message))
+      .filter((message) => message.startsWith('Left ') && message.includes(' pending persisted '));
+    const readsOfCappedRows = (): string[] => reads.filter((id) => capped.includes(id));
+
+    vi.useFakeTimers();
+    await agent.start();
+    // Rolling activation starts half a minute after start. The stop comes
+    // during the pause after its first check, before the pass could report.
+    await vi.advanceTimersByTimeAsync(30_000 + 1_000);
+    expect(readsOfCappedRows()).toEqual([capped[0]]);
+    vi.useRealTimers();
+    await agent.stop();
+    expect(reports()).toEqual([]);
+
+    reads.length = 0;
+    vi.useFakeTimers();
+    await agent.start();
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()?.dormantReasons).toMatchObject({
+      activationCap: capped,
+      authorityDenied: [],
+    });
+    await vi.advanceTimersByTimeAsync(30_000 + 10_000);
+    expect(readsOfCappedRows()).toEqual(capped);
+    // The row the first run left dormant is counted once, by this run's check.
+    expect(reports()).toEqual([
+      'Left 2 pending persisted context-graph subscription(s) dormant: ' +
+        '2 denied by registered-chain (caller-not-participant). 0 more wait for their check. ' +
+        "Inspect 'GET /api/context-graph/subscriptions' for dormant ids.",
+    ]);
+  });
+
+  for (const scenario of [
+    {
+      name: 'retires recurring recovery when the chain reports the graph unknown',
+      id: 'persisted-authority-retry-unknown',
+      reason: 'chain-access-policy-unknown',
+      retired: true,
+    },
+    {
+      name: 'keeps retrying when the authority read timed out',
+      id: 'persisted-authority-retry-timeout',
+      reason: 'chain-access-policy-timeout',
+      retired: false,
+    },
+  ] as const) {
+    it(scenario.name, async () => {
+      const contextGraphId = scenario.id;
+      const rows = new Map<string, any>([[contextGraphId, {
+        id: contextGraphId,
+        subscribed: true,
+        synced: true,
+        sharedMemorySynced: true,
+        metaSynced: true,
+        syncScoped: true,
+        onChainId: '95',
+      }]]);
+      agent = await DKGAgent.create({
+        name: `ReadAuthorityRetry-${scenario.reason}`,
+        chainAdapter: new MockChainAdapter(),
+        contextGraphSubscriptionStore: {
+          loadAll: async () => [...rows.values()],
+          load: async (id) => rows.get(id) ?? null,
+          save: async (row) => { rows.set(row.id, row); },
+          delete: async (id) => { rows.delete(id); },
+        },
+        contextGraphSubscriptionRehydrationEnabled: true,
+      });
+      let attempts = 0;
+      vi.spyOn(
+        agent,
+        'resolveContextGraphSubscriptionBootstrapAuthority',
+      ).mockImplementation(async (candidateId) => {
+        if (candidateId === contextGraphId) attempts += 1;
+        return {
+          outcome: 'unavailable',
+          source: 'registered-chain',
+          reason: candidateId === contextGraphId ? scenario.reason : 'unrelated-startup-probe',
+          metadataBootstrap: 'eligible',
+        } as const;
+      });
+      const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
+      vi.useFakeTimers();
+
+      await agent.start();
+      await vi.advanceTimersByTimeAsync(0);
+      const afterFirstPass = attempts;
+      expect(afterFirstPass).toBeGreaterThanOrEqual(1);
+      expect(subscribe.mock.calls.some(([id]) => id === contextGraphId)).toBe(false);
+
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(30_000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      const status = agent.getContextGraphSubscriptionRehydrationStatus();
+      if (scenario.retired) {
+        // The row stays durable but leaves the retry set: no more reads.
+        expect(attempts).toBe(afterFirstPass);
+        expect(rows.has(contextGraphId)).toBe(true);
+        expect(status).toMatchObject({
+          dormantIds: [contextGraphId],
+          dormantReasons: { authorityUnavailable: [], deactivated: [contextGraphId] },
+        });
+      } else {
+        expect(attempts).toBeGreaterThan(afterFirstPass);
+        expect(status).toMatchObject({
+          dormantReasons: { authorityUnavailable: [contextGraphId], deactivated: [] },
+        });
+      }
+      expect(agent.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+        onChainId: '95', onChainHash: agent.contextGraphNameCommitment(contextGraphId),
+        subscribed: false, coreHosted: false, synced: false,
+        sharedMemorySynced: false, metaSynced: false,
+      });
+    });
+  }
+
+  it('checks a chain-unknown subscription again after restart and activates it once the graph is active', async () => {
+    const contextGraphId = 'persisted-authority-unknown-restart';
+    // The only state shared by the two processes is this durable store.
+    const rows = new Map<string, any>([[contextGraphId, {
+      id: contextGraphId,
+      subscribed: true,
+      synced: true,
+      sharedMemorySynced: true,
+      metaSynced: true,
+      syncScoped: true,
+      onChainId: '95',
+    }]]);
+    const contextGraphSubscriptionStore = {
+      loadAll: async () => [...rows.values()],
+      load: async (id: string) => rows.get(id) ?? null,
+      save: async (row: any) => { rows.set(row.id, row); },
+      delete: async (id: string) => { rows.delete(id); },
+    };
+    // The chain's answer for the durable id: unknown (the id does not exist or
+    // is not active) until the graph becomes active while the node is down.
+    let graphActiveOnChain = false;
+    const startProcess = async (name: string) => {
+      const node = await DKGAgent.create({
+        name,
+        chainAdapter: new MockChainAdapter(),
+        contextGraphSubscriptionStore,
+        contextGraphSubscriptionRehydrationEnabled: true,
+        syncReconcilerEnabled: false,
+        vmReconcilerEnabled: false,
+      });
+      agent = node;
+      vi.spyOn(node, 'resolveLiveOnChainAccessPolicyState')
+        .mockImplementation(async (onChainId) => (
+          onChainId === '95' && !graphActiveOnChain
+            ? { kind: 'unavailable', reason: 'chain-access-policy-unknown' } as const
+            : { kind: 'available', accessPolicy: 0 } as const
+        ));
+      // Pass-through spy: every decision below comes from the real resolver.
+      const lookups = vi.spyOn(node, 'resolveContextGraphSubscriptionBootstrapAuthority');
+      const subscribe = vi.spyOn(node, 'installContextGraphSubscription');
+      vi.useFakeTimers();
+      await node.start();
+      return {
+        node,
+        subscribed: () => subscribe.mock.calls.some(([id]) => id === contextGraphId),
+        decisions: () => lookups.mock.calls
+          .map(([id], index) => ({ id, result: lookups.mock.settledResults[index] }))
+          .filter(({ id }) => id === contextGraphId)
+          .map(({ result }) => (result?.type === 'fulfilled' ? result.value : result)),
+      };
+    };
+
+    const first = await startProcess('AuthorityUnknownBeforeRestart');
+    await vi.advanceTimersByTimeAsync(0);
+    // Startup leaves the row dormant; the first recovery pass reads it again,
+    // gets the same answer, and retires it for this process.
+    expect(first.decisions()).toEqual([
+      expect.objectContaining({ outcome: 'unavailable', reason: 'chain-access-policy-unknown' }),
+      expect.objectContaining({ outcome: 'unavailable', reason: 'chain-access-policy-unknown' }),
+    ]);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(0);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(first.decisions()).toHaveLength(2);
+    expect(first.subscribed()).toBe(false);
+    expect(first.node.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      onChainId: '95', onChainHash: first.node.contextGraphNameCommitment(contextGraphId),
+      subscribed: false, coreHosted: false, synced: false,
+      sharedMemorySynced: false, metaSynced: false,
+    });
+    expect(first.node.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 0,
+      dormantIds: [contextGraphId],
+      dormantReasons: { authorityUnavailable: [], deactivated: [contextGraphId] },
+    });
+    vi.useRealTimers();
+    await first.node.stop();
+    agent = null;
+    expect(rows.get(contextGraphId)).toMatchObject({ subscribed: true, onChainId: '95' });
+
+    graphActiveOnChain = true;
+    const second = await startProcess('AuthorityUnknownAfterRestart');
+    // Retirement did not outlive the process: startup looks the row up again
+    // and activates it from the same durable store.
+    expect(second.decisions()).toEqual([
+      expect.objectContaining({ outcome: 'allowed', source: 'registered-chain', onChainId: 95n }),
+    ]);
+    expect(second.subscribed()).toBe(true);
+    expect(second.node.getSubscribedContextGraphs().get(contextGraphId)).toMatchObject({
+      subscribed: true,
+      onChainId: '95',
+    });
+    expect(second.node.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormant: 0,
+      dormantIds: [],
+      dormantReasons: { authorityUnavailable: [], deactivated: [] },
+    });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(second.decisions()).toHaveLength(1);
+    expect(rows.get(contextGraphId)).toMatchObject({ subscribed: true, onChainId: '95' });
   });
 
   it('does not resurrect a different subscription deleted during authority retry', async () => {
@@ -1528,7 +2019,7 @@ describe('Context Graph subscription authority retry', () => {
           onChainId: 7n,
         } as const;
       });
-    const subscribe = vi.spyOn(agent, 'subscribeToContextGraph');
+    const subscribe = vi.spyOn(agent, 'installContextGraphSubscription');
     const persistMembership = vi.spyOn(agent, 'persistLocalNodeMembership');
 
     await agent.start();
@@ -1664,21 +2155,360 @@ describe('Context Graph subscription authority retry', () => {
         } as const;
       });
 
+    const rollingPromotion = vi.spyOn(agent, 'promoteDormantContextGraphSubscriptions');
+    const askedFor = vi.spyOn(RollingSubscriptionChecks.prototype, 'prefer');
+
     await agent.start();
     await retryStarted;
     expect(agent.getSubscribedContextGraphs().has(liveContextGraphId)).toBe(true);
     releaseRetry();
 
+    // The cap has no room for the recovered row, so recovery leaves it to
+    // rolling activation instead of activating it. Rolling activation promotes
+    // it at once: the live row is already safe and holds no activation slot.
     await vi.waitFor(() => expect(
       agent!.getContextGraphSubscriptionRehydrationStatus(),
     ).toMatchObject({
-      activated: 1,
+      activated: 2,
       dormantReasons: {
-        activationCap: [coldContextGraphId],
+        activationCap: [],
         authorityUnavailable: [],
       },
     }));
+    expect(rollingPromotion).toHaveBeenCalled();
+    // The row recovery found allowed goes ahead of rows still waiting unread.
+    expect(askedFor).toHaveBeenCalledWith(coldContextGraphId);
+    askedFor.mockRestore();
     expect(agent.getSubscribedContextGraphs().has(liveContextGraphId)).toBe(true);
-    expect(agent.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(false);
+    expect(agent.getSubscribedContextGraphs().has(coldContextGraphId)).toBe(true);
   }, 15_000);
+});
+
+describe('Context Graph subscription rehydration startup authority budget (#2815)', () => {
+  let agent: DKGAgent | null = null;
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    if (agent) await agent.stop().catch(() => undefined);
+    agent = null;
+  });
+
+  const persistedRow = (id: string, onChainId: string) => ({
+    id,
+    subscribed: true,
+    synced: true,
+    sharedMemorySynced: true,
+    metaSynced: true,
+    syncScoped: true,
+    onChainId,
+  });
+  const storeOf = (rows: Map<string, any>) => ({
+    loadAll: async () => [...rows.values()],
+    load: async (id: string) => rows.get(id) ?? null,
+    save: async (row: any) => { rows.set(row.id, row); },
+    delete: async (id: string) => { rows.delete(id); },
+  });
+  const allowed = (onChainId: string) => ({
+    outcome: 'allowed',
+    source: 'registered-chain',
+    reason: 'open-context-graph',
+    metadataBootstrap: 'eligible',
+    onChainId: BigInt(onChainId),
+  } as const);
+
+  it('finishes starting at the budget and activates the unresolved rows from background recovery', async () => {
+    const rows = new Map<string, any>([
+      ['a-quick', persistedRow('a-quick', '11')],
+      ['b-unanswered', persistedRow('b-unanswered', '12')],
+      ['c-unread', persistedRow('c-unread', '13')],
+    ]);
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudget',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 200,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    const startupReads: string[] = [];
+    let starting = true;
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        if (starting) {
+          startupReads.push(contextGraphId);
+          // Without the budget this read would hold start() forever.
+          if (contextGraphId === 'b-unanswered') return new Promise(() => {});
+        }
+        return allowed(rows.get(contextGraphId).onChainId);
+      });
+
+    await agent.start();
+    starting = false;
+
+    // The row after the spent budget is never read during startup.
+    expect(startupReads).toEqual(['a-quick', 'b-unanswered']);
+    expect(agent.getSubscribedContextGraphs().get('a-quick')).toMatchObject({ subscribed: true });
+    for (const [id, onChainId] of [['b-unanswered', '12'], ['c-unread', '13']]) {
+      expect(agent.getSubscribedContextGraphs().get(id)).toMatchObject({
+        onChainId, onChainHash: agent.contextGraphNameCommitment(id),
+        subscribed: false, coreHosted: false, synced: false,
+        sharedMemorySynced: false, metaSynced: false,
+      });
+    }
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormantReasons: { authorityUnavailable: ['b-unanswered', 'c-unread'] },
+    });
+
+    // Background recovery reads both again and activates them only as allowed.
+    await vi.waitFor(() => {
+      expect(agent!.getSubscribedContextGraphs().get('b-unanswered')).toMatchObject({
+        subscribed: true,
+        onChainId: '12',
+      });
+      expect(agent!.getSubscribedContextGraphs().get('c-unread')).toMatchObject({
+        subscribed: true,
+        onChainId: '13',
+      });
+    }, { timeout: 10_000, interval: 50 });
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormant: 0,
+      dormantReasons: { authorityUnavailable: [] },
+    });
+  }, 20_000);
+
+  it('waits for every row during startup when the budget is 0', async () => {
+    const rows = new Map<string, any>([['a-slow', persistedRow('a-slow', '21')]]);
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudgetOff',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 0,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        return allowed('21');
+      });
+
+    await agent.start();
+
+    expect(agent.getSubscribedContextGraphs().get('a-slow')).toMatchObject({
+      subscribed: true,
+      onChainId: '21',
+    });
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      activated: 1,
+      dormant: 0,
+    });
+  }, 20_000);
+
+  it('past the budget, leaves user rows beyond the cap to rolling activation unread', async () => {
+    const rows = new Map<string, any>([
+      ['a-unanswered', persistedRow('a-unanswered', '41')],
+      ['b-room-left', persistedRow('b-room-left', '42')],
+      ['c-over-cap', persistedRow('c-over-cap', '43')],
+      ['d-over-cap', persistedRow('d-over-cap', '44')],
+    ]);
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudgetCap',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 100,
+      maxRehydratedContextGraphSubscriptions: 2,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    const startupReads: string[] = [];
+    let starting = true;
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        if (starting) {
+          startupReads.push(contextGraphId);
+          if (contextGraphId === 'a-unanswered') return new Promise(() => {});
+        }
+        return allowed(rows.get(contextGraphId).onChainId);
+      });
+
+    await agent.start();
+    starting = false;
+
+    // The cap (2) has room for the unanswered row and one more; the rest wait
+    // for rolling activation, as rows beyond the cap always have.
+    expect(startupReads).toEqual(['a-unanswered']);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormantReasons: {
+        authorityUnavailable: ['a-unanswered', 'b-room-left'],
+        activationCap: ['c-over-cap', 'd-over-cap'],
+      },
+    });
+    expect([...(agent as any).contextGraphSubscriptionRehydrationPendingIds].sort())
+      .toEqual(['c-over-cap', 'd-over-cap']);
+    await vi.waitFor(() => {
+      expect(agent!.getSubscribedContextGraphs().get('a-unanswered')).toMatchObject({ subscribed: true });
+      expect(agent!.getSubscribedContextGraphs().get('b-room-left')).toMatchObject({ subscribed: true });
+    }, { timeout: 10_000, interval: 50 });
+  }, 20_000);
+
+  it('hands a row the cap has no room for to rolling activation during recovery', async () => {
+    const row = persistedRow('capped-in-recovery', '51');
+    const dormancyById = new Map<string, any>([[row.id, 'authorityUnavailable']]);
+    const status = {
+      rehydrationEnabled: true,
+      persistedTotal: 2,
+      systemExcluded: 0,
+      hostedActivated: 0,
+      hostedActivatedIds: [],
+      activated: 1,
+      activationCap: 1,
+      capDisabled: false,
+      completedAt: 1,
+      updatedAt: 1,
+    };
+    const capped = vi.fn();
+    const activate = vi.fn();
+
+    await recoverDeferredContextGraphSubscriptionAuthorities(new AbortController().signal, {
+      store: {
+        loadAll: async () => [row],
+        load: async (id) => (id === row.id ? row : null),
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
+      persistRevisions: new Map(),
+      subscriptions: new Map(),
+      getStatus: () => status,
+      isCurrent: () => true,
+      touchStatus: () => undefined,
+      clearStatus: vi.fn(),
+      resolveAuthority: async () => allowed('51'),
+      activate,
+      warn: vi.fn(),
+
+      capped,
+    });
+
+    expect(activate).not.toHaveBeenCalled();
+    expect(dormancyById.get(row.id)).toBe('activationCap');
+    expect(capped).toHaveBeenCalledWith(row.id);
+  });
+
+  it('retires a denied row and a chain-unknown row for the process, and keeps asking for the rest', async () => {
+    const rows = ['denied', 'timed-out', 'unknown'].map((id, i) => persistedRow(id, String(61 + i)));
+    const dormancyById = new Map<string, any>(rows.map((row) => [row.id, 'authorityUnavailable']));
+    const unavailable = (reason: string) => ({
+      outcome: 'unavailable',
+      source: 'registered-chain',
+      reason,
+      metadataBootstrap: 'forbidden',
+      dependency: 'chain',
+    } as const);
+    const answers: Record<string, any> = {
+      denied: {
+        outcome: 'denied',
+        source: 'registered-chain',
+        reason: 'agent-not-in-chain-roster',
+        metadataBootstrap: 'forbidden',
+      },
+      'timed-out': unavailable('chain-access-policy-timeout'),
+      unknown: unavailable('chain-access-policy-unknown'),
+    };
+    let reading = '';
+    const touchedAfter: string[] = [];
+
+    await recoverDeferredContextGraphSubscriptionAuthorities(new AbortController().signal, {
+      store: {
+        loadAll: async () => rows,
+        load: async (id) => rows.find((row) => row.id === id) ?? null,
+        save: async () => undefined,
+        delete: async () => undefined,
+      },
+      dormancyById,
+      transitionDormancy: (id: string, reason: any) => { if (reason === undefined) dormancyById.delete(id); else dormancyById.set(id, reason); },
+      persistRevisions: new Map(),
+      subscriptions: new Map(),
+      getStatus: () => ({
+        rehydrationEnabled: true,
+        persistedTotal: 3,
+        systemExcluded: 0,
+        hostedActivated: 0,
+        hostedActivatedIds: [],
+        activated: 0,
+        activationCap: 64,
+        capDisabled: false,
+        completedAt: 1,
+        updatedAt: 1,
+      }),
+      isCurrent: () => true,
+      touchStatus: () => { touchedAfter.push(reading); },
+      clearStatus: vi.fn(),
+      resolveAuthority: async (row) => {
+        reading = row.id;
+        return answers[row.id];
+      },
+      activate: vi.fn(),
+      warn: vi.fn(),
+
+      capped: vi.fn(),
+    });
+
+    expect(Object.fromEntries(dormancyById)).toEqual({
+      denied: 'authorityDenied',
+      'timed-out': 'authorityUnavailable',
+      unknown: 'deactivated',
+    });
+    // Only a row whose dormancy changed moves the status timestamp.
+    expect(touchedAfter).toEqual(['denied', 'unknown']);
+  });
+
+  it('still waits for a join-approved row past the budget and defers the rows after it unread', async () => {
+    const rows = new Map<string, any>();
+    agent = await DKGAgent.create({
+      name: 'RehydrationStartupAuthorityBudgetApproval',
+      chainAdapter: new MockChainAdapter(),
+      contextGraphSubscriptionStore: storeOf(rows),
+      contextGraphSubscriptionRehydrationEnabled: true,
+      contextGraphSubscriptionRehydrationAuthorityBudgetMs: 100,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+    });
+    await agent.start();
+    rows.set('a-approved', persistedRow('a-approved', '31'));
+    rows.set('b-after-budget', persistedRow('b-after-budget', '32'));
+    // A durable join approval keeps the restricted pending-metadata bootstrap,
+    // which only the synchronous startup path can restore.
+    (agent as any).localApprovedAgentByCG.set('a-approved', '0x00000000000000000000000000000000000000aa');
+    const reads: string[] = [];
+    vi.spyOn(agent, 'resolveContextGraphSubscriptionBootstrapAuthority')
+      .mockImplementation(async (contextGraphId) => {
+        reads.push(contextGraphId);
+        if (contextGraphId === 'a-approved') {
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          return {
+            outcome: 'denied',
+            source: 'registered-chain',
+            reason: 'not-a-member',
+            metadataBootstrap: 'forbidden',
+          } as const;
+        }
+        return allowed('32');
+      });
+
+    await agent.rehydrateContextGraphSubscriptions(null);
+
+    expect(reads).toEqual(['a-approved']);
+    expect(agent.getContextGraphSubscriptionRehydrationStatus()).toMatchObject({
+      dormantReasons: {
+        authorityDenied: ['a-approved'],
+        authorityUnavailable: ['b-after-budget'],
+      },
+    });
+  }, 20_000);
 });

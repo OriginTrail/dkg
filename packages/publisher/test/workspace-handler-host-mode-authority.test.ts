@@ -180,6 +180,37 @@ describe('SharedMemoryHandler.verifyHostModeEnvelopeAuthority (LU-6 host-mode ga
     expect(verdict.accepted).toBe(true);
   });
 
+  it('reads projected authority once across the agent and peer gates', async () => {
+    const allowed = ethers.Wallet.createRandom();
+    const recipientKey = recipientKeyFor(allowed.address);
+    let metaLookups = 0;
+    const handler = new SharedMemoryHandler(store, new TypedEventBus(), {
+      sharedMemoryOwnedEntities: new Map(),
+      contextGraphMetaOracle: async () => {
+        metaLookups += 1;
+        return {
+          allowedAgents: [allowed.address],
+          participantAgents: [],
+          revokedAgents: [],
+          allowedPeers: [PUBLISHER_PEER_ID],
+        };
+      },
+    });
+
+    const raw = workspaceMessage('Host Auth Projected Once', 'op-host-auth-projected-once');
+    const encrypted = await encryptForCg(allowed.address, raw, recipientKey);
+    const wire = await signWorkspaceMessage(allowed, encrypted);
+
+    const verdict = await handler.verifyHostModeEnvelopeAuthority(
+      wire,
+      CONTEXT_GRAPH_ID,
+      PUBLISHER_PEER_ID,
+    );
+
+    expect(verdict.accepted).toBe(true);
+    expect(metaLookups).toBe(1);
+  });
+
   it('accepts when there is no peer allowlist (agent gate is the only requirement)', async () => {
     // Curated CGs with an agent gate but no peer-gate are valid;
     // any libp2p peer may relay as long as the signing agent is
@@ -478,6 +509,54 @@ describe('SharedMemoryHandler.verifyHostModeEnvelopeAuthority (LU-6 host-mode ga
         resolveOpenPublishPolicy: async () => ({ accessPolicy: 0, publishPolicy: 1 }),
       });
       expect(verdict.accepted).toBe(true);
+    });
+
+    // The verifier answers a verdict object, not a boolean: every rejection of
+    // the self-signed path must still come out as SIG_VERIFY_FAILED here.
+    it('REJECTS an open-publish envelope signed by one wallet and claiming another', async () => {
+      const signer = ethers.Wallet.createRandom();
+      const claimed = ethers.Wallet.createRandom();
+      const wire = await signWorkspaceMessage(signer, workspaceMessage('Open Spoof', 'op-open-spoof'), claimed.address);
+      const handler = makeHandler();
+
+      const verdict = await handler.verifyHostModeEnvelopeAuthority(wire, CONTEXT_GRAPH_ID, PUBLISHER_PEER_ID, {
+        resolveOpenPublishPolicy: async () => ({ accessPolicy: 0, publishPolicy: 1 }),
+      });
+      expect(verdict).toMatchObject({ accepted: false, reasonCode: 'SIG_VERIFY_FAILED' });
+    });
+
+    it('REJECTS a correctly signed open-publish envelope whose timestamp is outside the freshness window', async () => {
+      const openPublisher = ethers.Wallet.createRandom();
+      const stale = new Date(Date.now() - 60 * 60 * 1000).toISOString();
+      const wire = await signWorkspaceMessage(
+        openPublisher, workspaceMessage('Open Stale', 'op-open-stale'), openPublisher.address, stale,
+      );
+      const handler = makeHandler();
+
+      const verdict = await handler.verifyHostModeEnvelopeAuthority(wire, CONTEXT_GRAPH_ID, PUBLISHER_PEER_ID, {
+        resolveOpenPublishPolicy: async () => ({ accessPolicy: 0, publishPolicy: 1 }),
+      });
+      expect(verdict).toMatchObject({ accepted: false, reasonCode: 'SIG_VERIFY_FAILED' });
+    });
+
+    it('REJECTS an open-publish envelope without a signature', async () => {
+      const openPublisher = ethers.Wallet.createRandom();
+      const payload = workspaceMessage('Open Unsigned', 'op-open-unsigned');
+      const wire = encodeGossipEnvelope({
+        version: GOSSIP_ENVELOPE_VERSION,
+        type: GOSSIP_TYPE_WORKSPACE_PUBLISH,
+        contextGraphId: CONTEXT_GRAPH_ID,
+        agentAddress: openPublisher.address,
+        timestamp: new Date().toISOString(),
+        signature: new Uint8Array(),
+        payload,
+      });
+      const handler = makeHandler();
+
+      const verdict = await handler.verifyHostModeEnvelopeAuthority(wire, CONTEXT_GRAPH_ID, PUBLISHER_PEER_ID, {
+        resolveOpenPublishPolicy: async () => ({ accessPolicy: 0, publishPolicy: 1 }),
+      });
+      expect(verdict).toMatchObject({ accepted: false, reasonCode: 'SIG_VERIFY_FAILED' });
     });
 
     it('still REJECTS the same non-allowlisted signer when the CG is NOT open publish (publishPolicy != 1 → curated branch)', async () => {

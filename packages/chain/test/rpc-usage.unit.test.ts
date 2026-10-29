@@ -8,7 +8,7 @@
  * at the provider. Also asserts the OTel counter's bounded {rpc_method,
  * chain_id} labels, drain-resets-window semantics, and label bounding.
  */
-import { describe, it, expect, afterEach } from 'vitest';
+import { describe, it, expect, afterEach, vi, type MockInstance } from 'vitest';
 import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -64,6 +64,23 @@ function minimalConfig(overrides: Partial<EVMAdapterConfig> = {}): EVMAdapterCon
     allowNoAdminSigner: true,
     ...overrides,
   };
+}
+
+/**
+ * Resolve once every call an async spy has observed has settled, including
+ * calls that start while waiting; `mock.results` holds each returned promise.
+ * On a provider's `_send` that is a point with no JSON-RPC request in flight:
+ * the client counts a request when it dispatches it and the loopback server
+ * when it receives it, so the two counts are only guaranteed to match there.
+ */
+async function settleSpiedCalls(
+  spy: MockInstance<(...args: any[]) => Promise<unknown>>,
+): Promise<void> {
+  for (let settled = 0; settled < spy.mock.results.length;) {
+    const pending = spy.mock.results.slice(settled).map((result) => result.value);
+    settled += pending.length;
+    await Promise.all(pending);
+  }
 }
 
 describe('RPC usage accounting — raw request counts EQUAL the server-received requests', () => {
@@ -387,7 +404,7 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(cumulative.snapshot(clock)).toEqual(beforeDrain);
     expect(beforeDrain).toEqual({
       schemaVersion: 1,
-      consumerVocabularyVersion: 2,
+      consumerVocabularyVersion: 3,
       processEpoch: 'epoch-fixed',
       capturedAtUtc: '2026-09-20T12:00:00.000Z',
       capturedAtMonotonicMs: 123,
@@ -498,9 +515,9 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
   });
 
   it('retains only the frozen code-owned snapshot consumer vocabulary', () => {
-    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(2);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMER_VOCABULARY_VERSION).toBe(3);
     expect(Object.isFrozen(RPC_USAGE_SNAPSHOT_CONSUMERS)).toBe(true);
-    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(177);
+    expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toHaveLength(179);
     expect(RPC_USAGE_SNAPSHOT_CONSUMERS).toEqual(
       [...new Set(RPC_USAGE_SNAPSHOT_CONSUMERS)].sort(),
     );
@@ -1023,11 +1040,17 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       providerOptions: { batchMaxCount: 1 },
       onRequest: (method, slot) => tracker.record(method, slot),
     });
+    // Every physical JSON-RPC request, primitive or drained, goes through `_send`.
+    const sends = vi.spyOn(provider, '_send');
 
     try {
-      // Complete provider startup before the paired calls. Both sends below
-      // then enqueue in one scheduling turn and share ethers' drain timer --
-      // the exact case where the timer owner's ALS used to label its peer.
+      // `getNetwork()` detects the chain with a primitive `_send` but does not
+      // start the provider; the header send below does. Its `_start()` queues
+      // ethers' bootstrap `eth_chainId` from inside the header's consumer scope,
+      // ahead of the pair, so all three payloads share one drain timer created
+      // by that probe's send -- the case where the timer owner's ALS used to
+      // label its peers. The lifecycle probe itself must still bill as
+      // unattributed.
       await provider.getNetwork();
       const header = withRpcUsageConsumer(
         'chainIndex.lineage',
@@ -1042,8 +1065,22 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
       );
 
       await expect(Promise.all([header, authority])).resolves.toHaveLength(2);
+      // Neither paired promise waits for the probe, and it can reach the
+      // server after both paired responses. Read no count until every request
+      // has settled.
+      await settleSpiedCalls(sends);
+      // Settling `_send` leaves nothing in flight only if every request the
+      // tracker recorded at dispatch went through it. Pin that premise, so a
+      // bypassing request fails here even while still in flight, then require
+      // the server to have received exactly those requests.
+      const recorded = rpcUsageWindowTotal(tracker.drainWindow());
+      expect(sends).toHaveBeenCalledTimes(recorded);
+      expect(rpc.totalHits()).toBe(recorded);
       expect(rpc.hits('eth_getBlockByNumber')).toBe(1);
       expect(rpc.hits('eth_call')).toBe(1);
+      // getNetwork() + the startup probe: without the probe the unattributed
+      // assertion below would no longer exercise lifecycle isolation.
+      expect(rpc.hits('eth_chainId')).toBe(2);
 
       const snapshot = cumulative.snapshot();
       expect(snapshot.cumulative.methods).toMatchObject({
@@ -1164,6 +1201,31 @@ describe('RPC usage accounting — raw request counts EQUAL the server-received 
     expect(usage.byMethod.eth_call).toBe(rawEthCallHits);
     expect(usage.ethCallByConsumer['unit.eth_call.retry']).toBe(rawEthCallHits);
   }, 30_000);
+
+  it.each(['provider', 'contract', 'contractWith'] as const)('preserves default, custom and null attribution at the real %s adapter boundary', async seam => {
+    installMeter();
+    const rpc = await startLoopbackRpc(); servers.push(rpc);
+    const a: any = new EVMChainAdapter(minimalConfig({ rpcUrl: rpc.url })); adapters.push(a);
+    const contract = new Contract(HUB, ['function value() view returns (uint256)']);
+    const label = `unit.${seam}.owner`;
+    const read = (options?: { rpcUsageConsumer?: string | null }, humanLabel = label) => seam === 'provider'
+      ? a.readProvider(humanLabel, (p: any) => p.send('eth_call', [{ to: HUB, data: '0x' }, 'latest']), options)
+      : seam === 'contract'
+        ? a.readContractWithOptions(contract, humanLabel, 'value', [], options)
+        : a.readContractWith(contract, humanLabel, (c: any) => c.value(), options);
+    for (const consumer of [undefined, 'unit.custom.owner', null]) {
+      const before = rpc.hits('eth_call');
+      await read(consumer === undefined ? undefined : { rpcUsageConsumer: consumer });
+      const usage = a.drainRpcUsage(), count = rpc.hits('eth_call') - before;
+      expect(count).toBeGreaterThan(0);
+      expect(usage.byMethod.eth_call).toBe(count);
+      expect(usage.ethCallByConsumer).toEqual(consumer === null ? {} : { [consumer ?? label]: count });
+    }
+    const beforeInvalid = rpc.hits('eth_call');
+    expect(() => read({ rpcUsageConsumer: '' })).toThrow(/consumer must be/);
+    expect(() => read(undefined, ' ')).toThrow(/label must be/);
+    expect(rpc.hits('eth_call')).toBe(beforeInvalid);
+  });
 
   it('attributes failover contract-view eth_call attempts to the readContract label', async () => {
     installMeter();

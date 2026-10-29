@@ -74,6 +74,7 @@ export async function admitContextGraphAuthorityIndexCheckpoint(
           throw new ContextGraphAuthorityIndexRetryableError(
             `Context Graph authority index finalized head ${input.finalized.number} is behind `
             + `durable cursor ${checkpoint.cursor.throughBlockNumber}`,
+            'cursor-ahead',
           );
         } else {
           const anchorHash = checkpoint.cursor.throughBlockNumber === input.finalized.number

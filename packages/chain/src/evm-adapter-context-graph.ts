@@ -49,48 +49,29 @@ import { normalizeContextGraphAuthorityHash } from
   './context-graph-authority-generation.js';
 import { CONTEXT_GRAPH_AUTHORITY_FUNNEL_RPC_CONSUMER } from
   './context-graph-authority-rpc-sites.js';
+import type {
+  ContextGraphStorageRange,
+  ContextGraphStorageRangeOptions,
+} from './chain-adapter.js';
+import { readEvmContextGraphStorageRange } from './evm-context-graph-storage-range-read.js';
 
+/** Only the cursor-backed modes that stop at a page budget may carry one. */
 type ContextGraphRegistryLiveScanPlan =
-  | {
-      mode: 'explicitFromBlock' | 'listAll';
-      resumeFromWatermark: false;
-      persistProgress: false;
-      allowPartialFailure: false;
-      seedAtEnd: false;
-      pageBudget?: undefined;
-    }
-  | {
-      mode: 'incremental';
-      resumeFromWatermark: true;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: false;
-      pageBudget?: number;
-    }
-  | {
-      mode: 'seedFull';
-      resumeFromWatermark: false;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: true;
-      pageBudget?: undefined;
-    }
-  | {
-      mode: 'seedFromCursor';
-      resumeFromWatermark: true;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: true;
-      pageBudget?: number;
-    }
-  | {
-      mode: 'seedLiveTail';
-      resumeFromWatermark: false;
-      persistProgress: true;
-      allowPartialFailure: true;
-      seedAtEnd: true;
-      pageBudget?: number;
-    };
+  | { mode: 'explicitFromBlock' | 'listAll' | 'seedFull'; pageBudget?: undefined }
+  | { mode: 'incremental' | 'seedFromCursor' | 'seedLiveTail'; pageBudget?: number };
+
+type ContextGraphRegistryLiveScanMode = ContextGraphRegistryLiveScanPlan['mode'];
+
+interface ContextGraphRegistryLiveScanPolicy {
+  /** Start from the durable watermark when one exists. */
+  readonly resumesFromWatermark: boolean;
+  /** Own the watermark for the scan and advance it as pages are acknowledged. */
+  readonly persistsWatermark: boolean;
+  /** Save the watermark at head + 1 when the scan starts beyond the head. */
+  readonly seedsWatermarkAtEnd: boolean;
+  /** Report a page that fails after earlier pages as a partial scan carrying that prefix. */
+  readonly allowsPartialFailure: boolean;
+}
 
 type ContextGraphRegistryRepairScanPlan = {
   mode: 'repair';
@@ -121,6 +102,51 @@ function normalizePageBudget(value: number | undefined): number | undefined {
     : undefined;
 }
 
+const STATELESS_LIVE_SCAN_POLICY: ContextGraphRegistryLiveScanPolicy = {
+  resumesFromWatermark: false,
+  persistsWatermark: false,
+  seedsWatermarkAtEnd: false,
+  allowsPartialFailure: false,
+};
+
+/**
+ * The scan policy of every live mode, in one place, so the page loop reads
+ * named decisions instead of comparing modes. `Record` over the mode union
+ * makes a new mode a compile error until its policy is stated here: no mode
+ * picks up watermark persistence or partial-failure tolerance by default.
+ */
+const CONTEXT_GRAPH_REGISTRY_LIVE_SCAN_POLICY: Readonly<Record<
+  ContextGraphRegistryLiveScanMode,
+  ContextGraphRegistryLiveScanPolicy
+>> = {
+  explicitFromBlock: STATELESS_LIVE_SCAN_POLICY,
+  listAll: STATELESS_LIVE_SCAN_POLICY,
+  incremental: {
+    resumesFromWatermark: true,
+    persistsWatermark: true,
+    seedsWatermarkAtEnd: false,
+    allowsPartialFailure: true,
+  },
+  seedFull: {
+    resumesFromWatermark: false,
+    persistsWatermark: true,
+    seedsWatermarkAtEnd: true,
+    allowsPartialFailure: true,
+  },
+  seedFromCursor: {
+    resumesFromWatermark: true,
+    persistsWatermark: true,
+    seedsWatermarkAtEnd: true,
+    allowsPartialFailure: true,
+  },
+  seedLiveTail: {
+    resumesFromWatermark: false,
+    persistsWatermark: true,
+    seedsWatermarkAtEnd: true,
+    allowsPartialFailure: true,
+  },
+};
+
 function buildPublicContextGraphRegistryScanPlan(
   fromBlock: number | undefined,
   options: ContextGraphChainScanOptions | undefined,
@@ -149,24 +175,11 @@ function buildPublicContextGraphRegistryScanPlan(
   }
 
   if (fromBlock !== undefined) {
-    return {
-      mode: 'explicitFromBlock',
-      resumeFromWatermark: false,
-      persistProgress: false,
-      allowPartialFailure: false,
-      seedAtEnd: false,
-    };
+    return { mode: 'explicitFromBlock' };
   }
 
   if (runtimeOptions && 'incremental' in runtimeOptions && runtimeOptions.incremental === true) {
-    return {
-      mode: 'incremental',
-      resumeFromWatermark: true,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: false,
-      pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
-    };
+    return { mode: 'incremental', pageBudget: normalizePageBudget(runtimeOptions.pageBudget) };
   }
 
   if (
@@ -177,20 +190,10 @@ function buildPublicContextGraphRegistryScanPlan(
     if (runtimeOptions.resumeFromCursor === true) {
       return {
         mode: 'seedFromCursor',
-        resumeFromWatermark: true,
-        persistProgress: true,
-        allowPartialFailure: true,
-        seedAtEnd: true,
         pageBudget: normalizePageBudget(runtimeOptions.pageBudget),
       };
     }
-    return {
-      mode: 'seedFull',
-      resumeFromWatermark: false,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: true,
-    };
+    return { mode: 'seedFull' };
   }
 
   if (mode !== undefined && mode !== 'listAll') {
@@ -200,59 +203,26 @@ function buildPublicContextGraphRegistryScanPlan(
     );
   }
 
-  return {
-    mode: 'listAll',
-    resumeFromWatermark: false,
-    persistProgress: false,
-    allowPartialFailure: false,
-    seedAtEnd: false,
-  };
+  return { mode: 'listAll' };
 }
 
 function buildCursorContextGraphRegistryScanPlan(
   options: ContextGraphRegistryScanOptions,
 ): ContextGraphRegistryScanPlan {
   if (options.mode === 'incremental') {
-    return {
-      mode: 'incremental',
-      resumeFromWatermark: true,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: false,
-      pageBudget: normalizePageBudget(options.pageBudget),
-    };
+    return { mode: 'incremental', pageBudget: normalizePageBudget(options.pageBudget) };
   }
 
   if (options?.mode === 'seedFull') {
-    return {
-      mode: 'seedFull',
-      resumeFromWatermark: false,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: true,
-    };
+    return { mode: 'seedFull' };
   }
 
   if (options?.mode === 'seedFromCursor') {
-    return {
-      mode: 'seedFromCursor',
-      resumeFromWatermark: true,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: true,
-      pageBudget: normalizePageBudget(options.pageBudget),
-    };
+    return { mode: 'seedFromCursor', pageBudget: normalizePageBudget(options.pageBudget) };
   }
 
   if (options?.mode === 'seedLiveTail') {
-    return {
-      mode: 'seedLiveTail',
-      resumeFromWatermark: false,
-      persistProgress: true,
-      allowPartialFailure: true,
-      seedAtEnd: true,
-      pageBudget: normalizePageBudget(options.pageBudget),
-    };
+    return { mode: 'seedLiveTail', pageBudget: normalizePageBudget(options.pageBudget) };
   }
 
   if (options?.mode === 'repair') {
@@ -432,18 +402,19 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     scanPlan: ContextGraphRegistryLiveScanPlan,
     signal?: AbortSignal,
   ): AsyncGenerator<ContextGraphRegistryScanPage, void, unknown> {
-    const watermarkOwner = scanPlan.persistProgress
+    const policy = CONTEXT_GRAPH_REGISTRY_LIVE_SCAN_POLICY[scanPlan.mode];
+    const watermarkOwner = policy.persistsWatermark
       ? this.contextGraphRegistryScanCursor.beginWatermarkScan(registryAddress)
       : undefined;
-    if (scanPlan.persistProgress && watermarkOwner === undefined) {
+    if (policy.persistsWatermark && watermarkOwner === undefined) {
       throw new Error('ContextGraphNameRegistry live scan already has an active cursor owner');
     }
     try {
       signal?.throwIfAborted();
-      const persistedWatermark = (scanPlan.resumeFromWatermark || scanPlan.seedAtEnd)
+      const persistedWatermark = (policy.resumesFromWatermark || policy.seedsWatermarkAtEnd)
         ? await this.contextGraphRegistryScanCursor.loadWatermark(registryAddress)
         : undefined;
-      const canResumeFromWatermark = scanPlan.resumeFromWatermark && persistedWatermark !== undefined;
+      const canResumeFromWatermark = policy.resumesFromWatermark && persistedWatermark !== undefined;
       const scan = fromBlock === undefined
         ? scanPlan.mode === 'seedLiveTail'
           ? { fromBlock: 0, ...(await this.resolveLogScanHead('listContextGraphsFromChain')) }
@@ -472,7 +443,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
       );
 
       if (start > head) {
-        if (scanPlan.seedAtEnd) {
+        if (policy.seedsWatermarkAtEnd) {
           await this.contextGraphRegistryScanCursor.saveWatermark(registryAddress, head + 1, {
             owner: watermarkOwner,
             replace: replaceAheadWatermark,
@@ -523,12 +494,12 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
         scanProviders,
         mode: scanPlan.mode === 'explicitFromBlock' ? 'listAll' : scanPlan.mode,
         pageBudget: scanPlan.pageBudget,
-        allowPartialFailure: scanPlan.allowPartialFailure,
+        allowPartialFailure: policy.allowsPartialFailure,
         rpcUsageConsumer: 'listContextGraphsFromChain',
         targetBlock: head,
         completesGeneration: () => false,
         signal,
-        acknowledge: scanPlan.persistProgress
+        acknowledge: policy.persistsWatermark
           ? (() => {
               let replace = replaceAheadWatermark;
               return async (_fromBlock: number, toBlock: number) => {
@@ -1230,20 +1201,22 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     await this.init();
     const cgs = this.requireContextGraphStorage();
     const knowledgeAssetsFromLog = await this.knowledgeAssetsFromLogFor(cgs);
-    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaList(
+    // One ordinal, not the list: the read model answers it from its per-graph
+    // ordinal cache, so a walk over a graph's ordinals costs one fold per log
+    // revision instead of one per ordinal (scalar read from PR #2784).
+    const logged = await knowledgeAssetsFromLog?.readModel.readContextGraphKaAt(
       contextGraphId,
+      index,
       { view: 'latest' },
     );
     // Position IS the ordinal — the on-chain list only ever appends. An index
     // the log does not hold is NOT an out-of-range answer to invent: the chain
     // reverts on one, and callers read that revert, so the call below must be
-    // the thing that produces it.
+    // the thing that produces it. The read model returns `undefined` for it.
     if (logged !== undefined
       && knowledgeAssetsFromLog !== undefined
-      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)
-      && index >= 0n
-      && index < BigInt(logged.kaIds.length)) {
-      return logged.kaIds[Number(index)]!;
+      && this.chainEventLogBindingIsCurrent(knowledgeAssetsFromLog.binding)) {
+      return logged.kaId;
     }
     const kaId: bigint = await this.readContract(
       cgs, 'cgStorage.getContextGraphKaAt', 'getContextGraphKaAt', contextGraphId, index,
@@ -1428,6 +1401,7 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
             fromBlock,
             toBlock,
             signal: options.signal,
+            provider,
           });
         };
         const readAuthorityHistory = () => resolveContextGraphAuthorityHistory({
@@ -1650,6 +1624,30 @@ export class ContextGraphMethods extends EVMChainAdapterBase {
     options: ChainReadOptions = {},
   ): Promise<ReadonlyMap<string, bigint | null>> {
     return this.getContextGraphNameHashResolver().resolveMany(nameHashes, options.signal);
+  }
+
+  /** See ChainAdapter.hasContextGraphNameRegistry. */
+  async hasContextGraphNameRegistry(): Promise<boolean> {
+    await this.init();
+    return this.contracts.contextGraphNameRegistry !== undefined;
+  }
+
+  /**
+   * See ChainAdapter.readContextGraphStorageRange and
+   * evm-context-graph-storage-range-read.ts.
+   */
+  async readContextGraphStorageRange(
+    options: ContextGraphStorageRangeOptions,
+  ): Promise<ContextGraphStorageRange> {
+    await this.init();
+    options.signal?.throwIfAborted();
+    return readEvmContextGraphStorageRange({
+      storage: this.requireContextGraphStorage(),
+      finalityConfirmations: this.finalityConfirmations,
+      readTipProvider: (label, fn, opts) => this.readTipProvider(label, fn, opts),
+      readContractWith: (contract, label, fn, opts) => this.readContractWith(contract, label, fn, opts),
+      readBatching: this.backgroundReadBatching,
+    }, options);
   }
 }
 

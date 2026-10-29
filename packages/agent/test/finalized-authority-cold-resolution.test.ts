@@ -161,6 +161,51 @@ describe('finalized authority cold resolution single flight', () => {
     expect(attempts).toBe(2);
   });
 
+  it('does not cache a settled authority result while another physical flight is pending', async () => {
+    const coordinator = new FinalizedAuthorityColdResolutionV1({ coldTimeoutMs: () => COLD_MS });
+    let release!: () => void;
+    const pending = new Promise<void>((resolve) => { release = resolve; });
+    const unrelated = coordinator.read('graph:other', () => pending, {
+      label: 'other', requestTimeoutMs: REQUEST_MS,
+    });
+    try {
+      await expect(coordinator.read('graph:1', async () => 'unregistered', {
+        label: 'first', requestTimeoutMs: REQUEST_MS,
+      })).resolves.toBe('unregistered');
+      await expect(coordinator.read('graph:1', async () => 'registered', {
+        label: 'second', requestTimeoutMs: REQUEST_MS,
+      })).resolves.toBe('registered');
+      expect(coordinator.inFlightKeys).toEqual(['graph:other']);
+    } finally {
+      release();
+      await unrelated;
+      await coordinator.whenIdle();
+    }
+  });
+
+  it('keeps shutdown waiting for a physical operation that settles after its bounded flight', async () => {
+    vi.useFakeTimers();
+    const coordinator = new FinalizedAuthorityColdResolutionV1({ coldTimeoutMs: () => COLD_MS });
+    let release!: () => void;
+    const physical = new Promise<string>((resolve) => { release = () => resolve('late'); });
+    const read = coordinator.read('graph:1', () => physical, {
+      label: 'cold', requestTimeoutMs: REQUEST_MS,
+    }).catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(COLD_MS);
+    expect(isBoundedOperationTimeoutError(await read)).toBe(true);
+    coordinator.close();
+    let drained = false;
+    const drain = coordinator.whenIdle().then(() => { drained = true; });
+    try {
+      await vi.advanceTimersByTimeAsync(1);
+      expect(drained).toBe(false);
+    } finally {
+      release();
+      await drain;
+    }
+    expect(drained).toBe(true);
+  });
+
   it('closes every flight on shutdown and admits new flights only after reopen', async () => {
     vi.useFakeTimers();
     const coordinator = new FinalizedAuthorityColdResolutionV1({ coldTimeoutMs: () => COLD_MS });

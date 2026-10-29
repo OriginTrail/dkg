@@ -18,7 +18,8 @@ import { describe, it, expect } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { resolve, dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2 } from '@origintrail-official/dkg-core';
+import { PROTOCOL_STORAGE_ACK, PROTOCOL_STORAGE_ACK_V2, PROTOCOL_STORAGE_UPDATE_ACK, PROTOCOL_STORAGE_UPDATE_ACK_V2, STORAGE_ACK_PROTOCOLS } from '@origintrail-official/dkg-core';
+import { registerStorageACKEndpoint } from '../src/p2p/storage-ack-endpoint.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const AGENT_SRC = resolve(__dirname, '..', 'src');
@@ -41,22 +42,70 @@ describe('A-9: storage-ack protocol id (libp2p) pin', () => {
     expect(PROTOCOL_STORAGE_ACK_V2).toBe('/dkg/10.0.2/storage-ack');
   });
 
-  it('agent source registers storage-ack V1 and V2 on the messenger substrate', () => {
+  it('registers every publish and update ACK protocol from the shared registry', () => {
     // The DKGAgent god class was split into per-subsystem mixin holders, so
     // the boot-time wiring (incl. this registration) now lives in a sibling
     // file (`dkg-agent-lifecycle.ts`) rather than `dkg-agent.ts`. Scan the
     // whole agent `src` tree so the pin tracks the agent package, not one file.
-    const combined = walk(AGENT_SRC)
-      .map((f) => readFileSync(f, 'utf8'))
-      .join('\n');
-    expect(combined).toMatch(/PROTOCOL_STORAGE_ACK/);
-    // rc.9 PR-11: registration moved from `router.register` to
-    // `messenger.register` (substrate auto-wraps with envelope
-    // decode + receiver-side dedup). Pin against the new shape.
-    const registerRE = /messenger\.register\s*\(\s*PROTOCOL_STORAGE_ACK\s*,/;
-    expect(combined).toMatch(registerRE);
-    const registerV2RE = /messenger\.register\s*\(\s*PROTOCOL_STORAGE_ACK_V2\s*,/;
-    expect(combined).toMatch(registerV2RE);
+    const lifecycle = readFileSync(join(AGENT_SRC, 'dkg-agent-lifecycle.ts'), 'utf8');
+    const registrar = readFileSync(join(AGENT_SRC, 'p2p', 'storage-ack-registrar.ts'), 'utf8');
+    // Both IDs must enter the one registered endpoint through Messenger,
+    // which supplies envelope decoding and receiver-side deduplication.
+    const endpoint = readFileSync(join(AGENT_SRC, 'p2p', 'storage-ack-endpoint.ts'), 'utf8');
+    expect(STORAGE_ACK_PROTOCOLS).toEqual([
+      [PROTOCOL_STORAGE_ACK, 'publish'],
+      [PROTOCOL_STORAGE_ACK_V2, 'publish'],
+      [PROTOCOL_STORAGE_UPDATE_ACK, 'update'],
+      [PROTOCOL_STORAGE_UPDATE_ACK_V2, 'update'],
+    ]);
+    // Registration is staged locally and installed by its lifecycle owner
+    // only while the generation is still current.
+    expect(lifecycle).toMatch(/startGeneration\(createStorageACKRegistrationPlan\(/);
+    expect(registrar).toMatch(/const endpoint\s*=\s*registerStorageACKEndpoint\(/);
+    expect(registrar).toMatch(/return \{ kind: 'registered', endpoint \}/);
+    expect(readFileSync(join(AGENT_SRC, 'p2p', 'storage-ack-registration-runtime.ts'), 'utf8'))
+      .toMatch(/this\.install\(outcome\.endpoint, lease\)/);
+    expect(registrar).toMatch(/registerGroup:\s*\(entries\)\s*=>\s*ports\.messenger\.registerGroup\(entries\)/);
+    expect(endpoint).toMatch(/ports\.registerGroup\(STORAGE_ACK_PROTOCOLS\.map\(/);
+  });
+
+  it('routes every registered protocol and revokes all routes on disposal', async () => {
+    const routes = new Map<string, (data: Uint8Array, peerId: string) => Promise<Uint8Array>>();
+    let disposed = false;
+    const endpoint = registerStorageACKEndpoint({
+      registerGroup: (entries) => {
+        for (const entry of entries) routes.set(entry.protocolId, entry.handler);
+        return () => { disposed = true; routes.clear(); };
+      },
+      trackRemoteCompletion: () => {},
+      publish: () => {
+        const response = Promise.resolve(new Uint8Array([1]));
+        return { response, completion: response };
+      },
+      update: () => {
+        const response = Promise.resolve(new Uint8Array([2]));
+        return { response, completion: response };
+      },
+      publishLocal: () => {
+        const response = Promise.resolve(new Uint8Array([1]));
+        return { response, completion: response };
+      },
+      updateLocal: () => {
+        const response = Promise.resolve(new Uint8Array([2]));
+        return { response, completion: response };
+      },
+    });
+
+    expect([...routes.keys()]).toEqual(STORAGE_ACK_PROTOCOLS.map(([protocol]) => protocol));
+    for (const [protocol, kind] of STORAGE_ACK_PROTOCOLS) {
+      await expect(routes.get(protocol)!(new Uint8Array(), 'peer'))
+        .resolves.toEqual(new Uint8Array([kind === 'publish' ? 1 : 2]));
+    }
+    const stale = routes.get(PROTOCOL_STORAGE_ACK)!;
+    endpoint.dispose();
+    expect(disposed).toBe(true);
+    expect(routes.size).toBe(0);
+    expect(() => stale(new Uint8Array(), 'peer')).toThrow(/not registered/);
   });
 
   it('agent wires core-side StorageACK decline logging', () => {

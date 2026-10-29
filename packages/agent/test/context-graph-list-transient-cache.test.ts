@@ -47,6 +47,8 @@ function transientFailureAgent() {
     // rather than through the agent's owner-backed accessor.
     rfc64AuthorityReadCoordinatorV1: new Rfc64AuthorityReadCoordinatorV1(),
     subscribedContextGraphs: new Map(),
+    wireIdToLocalCgId: new Map(),
+    onChainContextGraphFacts: new Map(),
     store: {
       query: async () => ({
         type: 'bindings' as const,

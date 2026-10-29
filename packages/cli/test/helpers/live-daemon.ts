@@ -26,6 +26,7 @@ import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { ethers } from 'ethers';
+import type { RpcRequestGovernorPolicyInput } from '@origintrail-official/dkg-chain';
 import { getSharedContext, HARDHAT_KEYS } from '../../../chain/test/evm-test-context.js';
 import { TEST_SNAPSHOT_STORAGE } from '../../../../scripts/testing/snapshot-storage.js';
 
@@ -33,6 +34,50 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const CLI_ENTRY = join(__dirname, '..', '..', 'dist', 'cli.js');
 
 export const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+/**
+ * Request budget for a daemon whose chain is the suite's own loopback Hardhat
+ * node.
+ *
+ * The shipped default budget (10 rps, queue 256) exists to protect a SHARED,
+ * METERED public RPC. This harness points at a dedicated loopback Hardhat node
+ * with no such limit, so the default only makes the daemon throttle ITSELF.
+ * That matters because governor admission is awaited inside
+ * `request.getUrlFunc` (rpc-request-transport.ts), so queue wait is spent
+ * inside every RPC's own timeout window: a queued-but-healthy `eth_chainId`
+ * can burn its whole budget before it is ever dispatched. Same reasoning as
+ * status-route-rpc.test.ts.
+ *
+ * The default's start-up delay goes with it. A node holds its background
+ * requests for a random part of its first 30 s (`startupJitterMs`), so that
+ * nodes restarting together do not reach a shared endpoint at once. Against a
+ * node of its own that only makes a daemon's background chain work start at a
+ * different moment on every run, sometimes before a test's first requests and
+ * sometimes long after them.
+ */
+export const LIVE_DAEMON_RPC_REQUEST_BUDGET = Object.freeze({
+  maxRequestsPerSecond: 1_000,
+  burstRequests: 1_000,
+  startupJitterMs: 0,
+}) satisfies RpcRequestGovernorPolicyInput;
+
+/**
+ * The same address in another letter case, so a guard has to compare it
+ * case-insensitively. Returns upper case, or lower case when the EIP-55
+ * checksum already has every hex letter in upper case (about 1 in 4,000
+ * addresses). These are the two spellings EIP-55 accepts without a checksum;
+ * inverting each letter's case instead gives a bad checksum, which
+ * `ethers.isAddress` rejects. Throws for an address with no hex letters,
+ * which has no other spelling.
+ */
+export function caseVariantAddress(address: string): string {
+  const upperCase = `0x${address.slice(2).toUpperCase()}`;
+  const variant = upperCase === address ? address.toLowerCase() : upperCase;
+  if (variant === address) {
+    throw new Error(`${address} has no hex letters, so it has no other letter case`);
+  }
+  return variant;
+}
 
 export interface LiveDaemon {
   home: string;
@@ -80,20 +125,12 @@ export async function startLiveDaemon(opts: StartDaemonOpts = {}): Promise<LiveD
     ? { type: 'mock' as const }
     : (() => {
         const { rpcUrl, hubAddress } = getSharedContext();
-        // The shipped default budget (10 rps, queue 256) exists to protect a
-        // SHARED, METERED public RPC. This harness points at a dedicated
-        // loopback Hardhat node with no such limit, so the default only makes
-        // the daemon throttle ITSELF. That matters because governor admission
-        // is awaited inside `request.getUrlFunc` (rpc-request-transport.ts),
-        // so queue wait is spent inside every RPC's own timeout window: a
-        // queued-but-healthy `eth_chainId` can burn its whole budget before it
-        // is ever dispatched. Same reasoning as status-route-rpc.test.ts.
         return {
           type: 'evm' as const,
           rpcUrl,
           hubAddress,
           chainId: 'evm:31337',
-          rpcRequestBudget: { maxRequestsPerSecond: 1_000, burstRequests: 1_000 },
+          rpcRequestBudget: LIVE_DAEMON_RPC_REQUEST_BUDGET,
         };
       })();
 

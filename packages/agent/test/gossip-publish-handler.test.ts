@@ -26,12 +26,14 @@ function makePublishMessage(opts: {
   contextGraphId?: string;
   nquads?: string;
   kas?: Array<{ tokenId: number; rootEntity: string; privateMerkleRoot: Uint8Array; privateTripleCount: number }>;
+  subGraphName?: string;
 }): Uint8Array {
   return encodePublishRequest({
     ual: opts.ual ?? '',
     nquads: new TextEncoder().encode(opts.nquads ?? '<http://s> <http://p> <http://o> .'),
     contextGraphId: opts.contextGraphId ?? CONTEXT_GRAPH,
     kas: opts.kas ?? [],
+    ...(opts.subGraphName === undefined ? {} : { subGraphName: opts.subGraphName }),
     publisherIdentity: new Uint8Array(32),
     publisherAddress: '0x1111111111111111111111111111111111111111',
     startKAId: 0,
@@ -265,6 +267,73 @@ describe('GossipPublishHandler', () => {
     )).resolves.toMatchObject({ type: 'boolean', value: true });
   });
 
+  it('matches an escaped payload against a head recorded in the stored form', async () => {
+    const { store, handler } = createHandler();
+    const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
+    const kaNumber = 42n;
+    const packedKaId = (BigInt(author) << 96n) | kaNumber;
+    const ual = `did:dkg:base:8453/${author}/${kaNumber}`;
+    const scope = createGraphKnowledgeAssetScope(ual, 1);
+    const vmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.VerifiableMemory,
+      scope,
+    );
+    const graphManager = new GraphManager(store);
+    // A StorageACK receiver records the copy in the form the store returns it in.
+    await storeKnowledgeAssetOperationPublicQuads({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'escaped-head',
+      kaUal: ual,
+      assertionVersion: '1',
+      quads: [{
+        subject: 'urn:escaped:subject',
+        predicate: 'urn:escaped:predicate',
+        object: '"Women\u2019s \u{1F5D3} 12 October"',
+        graph: '',
+      }],
+      privateTripleCount: 0,
+      publisherPeerId: '12D3KooWPublisher',
+      accessPolicy: 'public',
+    });
+    await storeKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      shareOperationId: 'escaped-head',
+      kaUal: ual,
+      assertionVersion: '1',
+    });
+    // The publisher gossips the same copy with its text escaped.
+    const data = encodePublishRequest({
+      ual,
+      nquads: new TextEncoder().encode(
+        `<urn:escaped:subject> <urn:escaped:predicate> "Women\\u2019s \\uD83D\\uDDD3 12 October" <${vmGraph}> .`,
+      ),
+      contextGraphId: CONTEXT_GRAPH,
+      kas: [],
+      publisherIdentity: new Uint8Array(32),
+      publisherAddress: author,
+      startKAId: packedKaId,
+      endKAId: packedKaId,
+      chainId: 'base:8453',
+      publisherSignatureR: new Uint8Array(0),
+      publisherSignatureVs: new Uint8Array(0),
+      contentScopeVersion: GRAPH_KA_CONTENT_SCOPE_VERSION,
+      assertionVersion: '1',
+      publicTripleCount: 1,
+      privateTripleCount: 0,
+      accessPolicy: 'public',
+      allowedPeers: [],
+    });
+
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH, undefined, '12D3KooWPublisher');
+
+    expect(await store.countQuads(vmGraph)).toBe(1);
+  });
+
   it('uses durable owner and allow-list metadata instead of relay-supplied values', async () => {
     const { store, handler } = createHandler();
     const author = '0x70997970c51812dc3a010c7d01b50e0d17dc79c8';
@@ -433,6 +502,39 @@ describe('GossipPublishHandler', () => {
     expect(bindings[0]['s']).toBe('http://example.org/s');
     expect(bindings[0]['p']).toBe('http://example.org/p');
     expect(bindings[0]['o']).toBe('http://example.org/o');
+  });
+
+  it('registers the sub-graph of a publish once and hands the inserted rows to the metadata projection', async () => {
+    const store = new OxigraphStore();
+    const subscriptions = new Map<string, ContextGraphSub>();
+    const dirty: Quad[] = [];
+    const handler = new GossipPublishHandler(store, undefined, subscriptions, {
+      contextGraphExists: async () => false,
+      getContextGraphOwner: async () => null,
+      setContextGraphSubscription: (id, next) => { subscriptions.set(id, next); },
+      recordDiscoveredContextGraph: (id, metadata) => {
+        subscriptions.set(id, { ...metadata, subscribed: false, synced: false, metaSynced: false });
+      },
+      markCgMetaDirtyFromQuads: (quads) => { dirty.push(...quads); },
+    });
+    const subGraph = `did:dkg:context-graph:${CONTEXT_GRAPH}/notes`;
+    const data = makePublishMessage({
+      subGraphName: 'notes',
+      nquads: '<http://example.org/note> <http://example.org/p> <http://example.org/o> .',
+    });
+
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
+    await handler.handlePublishMessage(data, CONTEXT_GRAPH);
+
+    const result = await store.query(
+      `SELECT ?p ?o WHERE { GRAPH <did:dkg:context-graph:${CONTEXT_GRAPH}/_meta> { <${subGraph}> ?p ?o } }`,
+    );
+    const rows = result.type === 'bindings' ? result.bindings : [];
+    expect(rows.filter((row) => row['p'] === 'http://dkg.io/ontology/createdBy').map((row) => row['o']))
+      .toEqual(['did:dkg:agent:0x1111111111111111111111111111111111111111']);
+    expect(rows.filter((row) => row['p'] === 'http://dkg.io/ontology/createdAt')).toHaveLength(1);
+    // The rows of the one registration, once: the repeated publish found it complete.
+    expect(dirty.filter((quad) => quad.subject === subGraph)).toHaveLength(rows.length);
   });
 
   it('ignores empty broadcast with no UAL', async () => {

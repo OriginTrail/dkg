@@ -12,6 +12,10 @@ export type {
   NetworkAdmissionProbeBackoffOptions,
 };
 
+export type NetworkAdmissionVerdict = 'same-network' | 'cache-only' | 'rejected';
+
+type VerifiedAdmission = { kind: 'same-network' } | { kind: 'cache-only'; untilMs: number };
+
 type NetworkAdmissionQuarantineEntry =
   | { kind: 'indefinite' }
   | { kind: 'cooldown'; untilMs: number };
@@ -47,7 +51,7 @@ export class NetworkAdmissionService {
   private readonly now: () => number;
   private readonly probeRetry: NetworkAdmissionProbeRetryState;
   private readonly quarantineCooldownMs: number;
-  private readonly verifiedPeerIds = new Set<CanonicalPeerId>();
+  private readonly verifiedPeers = new Map<CanonicalPeerId, VerifiedAdmission>();
   private readonly quarantinedPeers = new Map<CanonicalPeerId, NetworkAdmissionQuarantineEntry>();
 
   constructor(options: NetworkAdmissionOptions = {}) {
@@ -72,7 +76,7 @@ export class NetworkAdmissionService {
 
   markVerifiedSameNetwork(peerId: string): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
-    this.verifiedPeerIds.add(canonicalPeerId);
+    this.verifiedPeers.set(canonicalPeerId, { kind: 'same-network' });
     this.quarantinedPeers.delete(canonicalPeerId);
     this.probeRetry.clear(canonicalPeerId);
   }
@@ -82,12 +86,17 @@ export class NetworkAdmissionService {
     this.setQuarantine(peerId, { kind: 'indefinite' });
   }
 
-  /** Apply the coordinator's bounded recovery cooldown using this service's clock. */
-  quarantinePeerForCooldown(peerId: string): void {
+  /**
+   * Apply the coordinator's bounded recovery cooldown using this service's
+   * clock. Returns the cooldown applied (ms), so transport-level refusal of the
+   * peer can mirror it exactly instead of keeping its own copy of the value.
+   */
+  quarantinePeerForCooldown(peerId: string): number {
     this.setQuarantine(peerId, {
       kind: 'cooldown',
       untilMs: this.now() + this.quarantineCooldownMs,
     });
+    return this.quarantineCooldownMs;
   }
 
   getRetryableProbeBackoff(peerId: string): NetworkAdmissionProbeBackoff | undefined {
@@ -99,9 +108,10 @@ export class NetworkAdmissionService {
     peerId: string,
     reason: string,
     kind: NetworkAdmissionProbeBackoffKind,
+    maxDelayMs?: number,
   ): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
-    this.probeRetry.recordFailure(canonicalPeerId, reason, kind);
+    this.probeRetry.recordFailure(canonicalPeerId, reason, kind, maxDelayMs);
   }
 
   /** Claim the short ACK-preflight lease owned by the active retry window. */
@@ -116,13 +126,32 @@ export class NetworkAdmissionService {
     this.probeRetry.markPreflightProbeAttempted(canonicalPeerId);
   }
 
+  markVerifiedCacheOnly(peerId: string): void {
+    const canonical = canonicalAdmissionServicePeerId(peerId);
+    const cached = [...this.verifiedPeers].filter(([, value]) => value.kind === 'cache-only');
+    if (cached.length >= 256) this.verifiedPeers.delete(cached[0][0]);
+    this.verifiedPeers.set(canonical, { kind: 'cache-only', untilMs: this.now() + 30_000 });
+    this.quarantinedPeers.delete(canonical);
+    this.probeRetry.clear(canonical);
+  }
+
+  /** One clock and canonical registry own every cached admission verdict. */
+  cachedVerdict(peerId: string): NetworkAdmissionVerdict | undefined {
+    if (!this.enabled) return 'same-network';
+    const canonical = tryCanonicalPeerIdString(peerId);
+    if (!canonical) return 'rejected';
+    if (this.isQuarantined(canonical)) return 'rejected';
+    if (canonical === this.selfPeerId) return 'same-network';
+    const entry = this.verifiedPeers.get(canonical);
+    if (entry?.kind === 'cache-only' && entry.untilMs <= this.now()) {
+      this.verifiedPeers.delete(canonical);
+      return undefined;
+    }
+    return entry?.kind;
+  }
+
   isAcceptedPeer(peerId: string): boolean {
-    if (!this.enabled) return true;
-    const canonicalPeerId = tryCanonicalPeerIdString(peerId);
-    if (!canonicalPeerId) return false;
-    if (canonicalPeerId === this.selfPeerId) return true;
-    if (this.isQuarantined(canonicalPeerId)) return false;
-    return this.verifiedPeerIds.has(canonicalPeerId);
+    return this.cachedVerdict(peerId) === 'same-network';
   }
 
   isRejectedPeer(peerId: string): boolean {
@@ -134,15 +163,15 @@ export class NetworkAdmissionService {
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
     if (!this.enabled) return new Set();
     return new Set(
-      [...this.verifiedPeerIds]
-        .filter((peerId) => !this.isQuarantined(peerId)),
+      [...this.verifiedPeers.keys()]
+        .filter((peerId) => this.cachedVerdict(peerId) === 'same-network'),
     );
   }
 
   snapshot(): NetworkAdmissionSnapshot {
     return {
       enabled: this.enabled,
-      verifiedPeerIds: [...this.verifiedPeerIds].sort(),
+      verifiedPeerIds: [...this.verifiedSameNetworkPeerIds()].sort(),
       quarantinedPeerIds: [...this.quarantinedPeers.keys()]
         .filter((peerId) => this.isQuarantined(peerId))
         .sort(),
@@ -163,7 +192,7 @@ export class NetworkAdmissionService {
   private setQuarantine(peerId: string, entry: NetworkAdmissionQuarantineEntry): void {
     const canonicalPeerId = canonicalAdmissionServicePeerId(peerId);
     this.quarantinedPeers.set(canonicalPeerId, entry);
-    this.verifiedPeerIds.delete(canonicalPeerId);
+    this.verifiedPeers.delete(canonicalPeerId);
     this.probeRetry.clear(canonicalPeerId);
   }
 }

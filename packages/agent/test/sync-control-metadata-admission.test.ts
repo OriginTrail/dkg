@@ -37,7 +37,7 @@ function selectedMeta(data: Quad[], meta: Quad[], acceptUnverified = false): Qua
 }
 
 describe('durable sync control metadata admission', () => {
-  it('keeps verified V2 controls and drops orphaned delta controls', () => {
+  it.each([false, true])('keeps verified controls and drops forged receiver fields (system override=%s)', acceptUnverified => {
     const scope = createGraphKnowledgeAssetScope(UAL, '1');
     const assertionGraph = knowledgeAssetLayerGraphUri(
       CONTEXT_GRAPH_ID,
@@ -62,6 +62,8 @@ describe('durable sync control metadata admission', () => {
       quad(poison, `${DKG}batchId`, integer(999n)),
       quad(poison, `${DKG}assertionGraph`, `${CONTEXT_GRAPH}/_verifiable_memory/attacker/999`),
       quad(poison, `${DKG}assertionVersion`, integer(999n)),
+      quad(poison, `${DKG}authenticatedSubGraphName`, '"forged"'),
+      quad(UAL, `${DKG}authenticatedSubGraphName`, '"forged"'),
     ];
     const spoofedCompanion = 'urn:unverified:spoofed-companion';
     const spoofedDescriptorLink = [
@@ -82,7 +84,10 @@ describe('durable sync control metadata admission', () => {
       descriptive,
     ];
 
-    expect(selectedMeta(data, meta)).toEqual([
+    const selection = selectVerifiedDurableSyncQuads(data, meta, acceptUnverified);
+    expect(selection.droppedSyncControlTriples).toBe(7);
+    expect(selection.consumedUnpersistedMetaTriples).toBe(7);
+    expect(selection.metaIndexes.map(index => meta[index])).toEqual([
       ...verified,
       authenticatedBatch,
       ...spoofedDescriptorLink,
@@ -222,11 +227,18 @@ describe('durable sync control metadata admission', () => {
     const subject = 'urn:system:malformed-legacy';
     const merkleRoot = quad(subject, `${DKG}merkleRoot`, `"${'00'.repeat(32)}"`);
     const meta = [
+      quad(subject, `${DKG}authenticatedSubGraphName`, '"forged-before"'),
       merkleRoot,
       quad(subject, `${DKG}batchId`, integer(999n)),
+      quad(subject, `${DKG}authenticatedSubGraphName`, '"forged-after"'),
+      quad('_:invalid', `${DKG}authenticatedSubGraphName`, '"invalid-subject"'),
     ];
 
-    expect(selectedMeta([], meta, true)).toEqual([merkleRoot]);
+    const selection = selectVerifiedDurableSyncQuads([], meta, true);
+    expect(selection.metaIndexes).toEqual([1]);
+    expect(selection.droppedSyncControlTriples).toBe(3);
+    expect(selection.droppedNonIriSubjectTriples).toBe(1);
+    expect(selection.consumedUnpersistedMetaTriples).toBe(4);
   });
 
   it('preserves batch controls bound to a verified legacy envelope', () => {

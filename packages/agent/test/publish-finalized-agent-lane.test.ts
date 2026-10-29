@@ -1,12 +1,11 @@
+import { confirmedPublicationCatalogConfigV1 } from './support/confirmed-publication-harness.js';
 import { describe, expect, it } from 'vitest';
 import {
   buildAssertionSealQuads,
   contextGraphAssertionUri,
-  contextGraphDataUri,
   contextGraphSharedMemoryUri,
   assertionLifecycleUri,
   contextGraphMetaUri,
-  createOperationContext,
   GRAPH_KA_CONTENT_SCOPE_VERSION,
 } from '@origintrail-official/dkg-core';
 import { OxigraphStore, type Quad } from '@origintrail-official/dkg-storage';
@@ -92,39 +91,6 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
       .toThrow(/not in author .* namespace/);
   });
 
-  it('keeps the legacy catalog-in-SWM helper scoped to the selected lifecycle graph', async () => {
-    const store = new OxigraphStore();
-    const agent = Object.create(DKGAgent.prototype) as any;
-    agent.store = store;
-    agent.log = makeLog();
-    const swmGraph = contextGraphSharedMemoryUri(CG);
-    const exactGraph = `${swmGraph}/${AGENT_B}/1`;
-    const cgDid = contextGraphDataUri(CG);
-
-    const selection = await agent._ensureCuratedCatalogInSwm(
-      CG,
-      { rootEntities: [ROOT] },
-      undefined,
-      createOperationContext('test'),
-      {
-        kind: 'named-lifecycle',
-        identity: { agentAddress: AGENT_B, kaNumber: 1n },
-      },
-    );
-
-    expect(selection).toEqual({ rootEntities: [ROOT, cgDid] });
-    const exact = await store.query(
-      `SELECT ?p ?o WHERE { GRAPH <${exactGraph}> { <${cgDid}> ?p ?o } }`,
-    );
-    const legacyBucket = await store.query(
-      `SELECT ?p ?o WHERE { GRAPH <${swmGraph}> { <${cgDid}> ?p ?o } }`,
-    );
-    expect(exact.type).toBe('bindings');
-    expect(exact.type === 'bindings' ? exact.bindings : []).toHaveLength(4);
-    expect(legacyBucket.type).toBe('bindings');
-    expect(legacyBucket.type === 'bindings' ? legacyBucket.bindings : []).toHaveLength(0);
-  });
-
   it('reads finalized assertions from the explicitly selected non-default agent lane', async () => {
     const store = new OxigraphStore();
     const assertionUri = contextGraphAssertionUri(CG, AGENT_B, NAME);
@@ -147,6 +113,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = DEFAULT_AGENT;
     Object.defineProperty(agent, 'peerId', {
@@ -181,11 +148,14 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
         publicQuads: [],
       };
     };
-    agent.removeRfc64SwmAuthorInventoryShadowV1 = async (input: any) => {
+    agent.commitRfc64ConfirmedInventoryRemovalV1 = async (input: any) => {
       rfc64SwmInventoryRemovalCalls.push(input);
       throw new Error('simulated escaped RFC-64 SWM inventory removal failure');
     };
-    agent.resolveRfc64CatalogAuthoringLaneV1 = () => null;
+    // Keep the public catalog obligation active so the simulated removal failure is exercised.
+    agent.resolveRfc64CatalogAuthoringLaneV1 = () => ({
+      kind: 'public', projectionTargetPolicy: 'exact-replacement', acceptsFinalizedVmRepair: false,
+    });
 
     // GH#1778 — a genuinely absent name still yields "is not finalized":
     // resolveAssertionAuthor finds no seal, returns undefined, and the caller
@@ -233,16 +203,10 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     expect(remainingClearCalls).toHaveLength(1);
     expect(remainingClearCalls[0].slice(0, 2)).toEqual([CG, undefined]);
     expect(result.status).toBe('confirmed');
-    expect(rfc64SwmInventoryRemovalCalls).toHaveLength(1);
-    expect(rfc64SwmInventoryRemovalCalls[0]).toMatchObject({
-      contextGraphId: CG,
-      seal: {
-        authorAddress: AGENT_B,
-        reservedKaId: RESERVED_KA_ID,
-        kaUal: KA_UAL,
-      },
-    });
-    expect(warnings).toEqual(expect.arrayContaining([
+    // This explicitly disabled fixture owes no catalog work. Enabled delayed
+    // removal and persistent failure are covered by native placement tests.
+    expect(rfc64SwmInventoryRemovalCalls).toEqual([]);
+    expect(warnings).not.toEqual(expect.arrayContaining([
       expect.stringContaining('simulated escaped RFC-64 SWM inventory removal failure'),
     ]));
   });
@@ -254,6 +218,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
 
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-source-empty', configurable: true });
@@ -305,6 +270,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishCalls = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-legacy-finalized', configurable: true });
@@ -350,6 +316,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     const updateCalls: any[][] = [];
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-update', configurable: true });
@@ -401,6 +368,8 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     });
     expect(cleanupCalls[0][2]).toBeUndefined();
     expect(cleanupCalls[0][4]).toBe(KA_UAL);
+    // The cleanup is bounded by the assertion version this update confirmed.
+    expect(cleanupCalls[0][5]).toBe('1');
     const legacy = await store.query(`ASK { GRAPH <${swmGraph}> { <${ROOT}> ?p ?o } }`);
     const canonical = await store.query(`ASK { GRAPH <${namedGraph}> { <${ROOT}> ?p ?o } }`);
     expect(legacy).toMatchObject({ type: 'boolean', value: true });
@@ -417,6 +386,7 @@ describe('DKGAgent publishFromFinalizedAssertion agent lane', () => {
     let publishes = 0;
     const agent = Object.create(DKGAgent.prototype) as any;
     agent.store = store;
+    agent.config = confirmedPublicationCatalogConfigV1();
     agent.chain = {};
     agent.defaultAgentAddress = AGENT_B;
     Object.defineProperty(agent, 'peerId', { value: 'peer-namespace', configurable: true });

@@ -1,9 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import {
-  assertSafeIri,
-  assertSafeRdfTerm,
-} from '@origintrail-official/dkg-core';
+import { assertSafeIri, formatSparqlTerm } from '@origintrail-official/dkg-core';
 import type { Quad } from './triple-store.js';
+import { formatGraphBlock, renderBoundedAtomicAssetUpdate } from './atomic-update-rendering.js';
+export { formatGraphBlock } from './atomic-update-rendering.js';
 
 /** Never expose these operation-internal graphs through graph enumeration. */
 export const ATOMIC_GRAPH_REPLACE_STAGING_PREFIX =
@@ -46,16 +45,13 @@ export function buildAtomicGraphReplaceUpdate(
   }
 
   const stagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
-  const triples = quads
-    .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
-    .join('\n');
   const cleanup = `DROP SILENT GRAPH <${stagingGraph}>`;
   return {
     stagingGraph,
     cleanup,
     update:
       `${cleanup};\n` +
-      `INSERT DATA {\n  GRAPH <${stagingGraph}> {\n${triples}\n  }\n};\n` +
+      `INSERT DATA {\n${formatGraphBlock(stagingGraph, quads)}\n};\n` +
       // The final MOVE must NOT be SILENT: if the staging graph is missing the
       // commit did not happen, and SILENT would report that as success while
       // the stale target content survives.
@@ -65,9 +61,9 @@ export function buildAtomicGraphReplaceUpdate(
 
 /**
  * Build one transactional SPARQL Update that replaces a complete named graph
- * and every row for one subject in a second graph. Both payloads are staged in
- * the same request, so readers never observe a new assertion with stale
- * metadata (or the reverse).
+ * and every row for one subject in a second graph. Payloads are staged by
+ * default. A bounded, disjoint replacement can use a direct transaction;
+ * both strategies publish data and metadata together after one validation.
  */
 export function buildAtomicGraphAndSubjectReplaceUpdate(
   graphUri: string,
@@ -75,12 +71,19 @@ export function buildAtomicGraphAndSubjectReplaceUpdate(
   metaGraphUri: string,
   metadataSubject: string,
   metadataQuads: readonly Quad[],
+  strategy: 'staged' | 'bounded-direct' = 'staged',
 ): AtomicGraphAndSubjectReplaceUpdate {
   const target = assertSafeIri(graphUri);
   const metaGraph = assertSafeIri(metaGraphUri);
   const subject = assertSafeIri(metadataSubject);
   assertReplacementPayload(target, graphQuads);
   assertSubjectReplacementPayload(metaGraph, subject, metadataQuads);
+
+  if (strategy === 'bounded-direct' && target !== metaGraph) {
+    const direct = renderBoundedAtomicAssetUpdate([{ graphUri: target, graphQuads,
+      metaGraphUri: metaGraph, metadataSubject: subject, metadataQuads }]);
+    if (direct) return { update: direct.update, cleanup: '', stagingGraphs: [] };
+  }
 
   const dataStagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
   const metaStagingGraph = `${ATOMIC_GRAPH_REPLACE_STAGING_PREFIX}${randomUUID()}`;
@@ -141,7 +144,7 @@ export function isAtomicGraphReplaceStagingGraph(graphUri: string): boolean {
  * immutable request record) must do that as its own separate write — the delete
  * scope and the insert scope are the same single subject, so the name never
  * diverges from the behaviour. Quads must be blank-node free; object terms are
- * validated/escaped through the same `formatObject` path as
+ * validated/escaped through the same `formatSparqlTerm` path as
  * `buildAtomicGraphReplaceUpdate`, so callers pass already-serialized RDF terms
  * rather than hand-escaping literals.
  */
@@ -214,38 +217,17 @@ export function assertSubjectReplacementPayload(
   }
 }
 
-export function formatGraphBlock(graphUri: string, quads: readonly Quad[]): string {
-  const triples = quads
-    .map((quad) => `    ${formatResource(quad.subject, 'subject')} <${assertSafeIri(unwrapIri(quad.predicate))}> ${formatObject(quad.object)} .`)
-    .join('\n');
-  return `  GRAPH <${graphUri}> {\n${triples}\n  }`;
-}
+// Compatibility exports: `dist/atomic-graph-replace.js` is a public package
+// path, and these formatters used to live here.
 
-function formatResource(term: string, role: string): string {
-  if (term.startsWith('"')) {
-    throw new Error(`Atomic graph replacement ${role} must be an IRI`);
-  }
-  return `<${assertSafeIri(unwrapIri(term))}>`;
-}
+/** @deprecated Use core's `unwrapIri`. */
+export { unwrapIri } from '@origintrail-official/dkg-core';
 
+/**
+ * @deprecated Use core's `formatSparqlTerm(term, { position: 'object' })`,
+ * which this delegates to. Literals and IRIs render as before; a blank node
+ * now throws instead of becoming the invalid IRI `<_:b0>`.
+ */
 export function formatObject(term: string): string {
-  if (term.startsWith('"')) {
-    const normalized = normalizeLiteralDatatype(term);
-    assertSafeRdfTerm(normalized);
-    return normalized;
-  }
-  return formatResource(term, 'object');
-}
-
-function normalizeLiteralDatatype(term: string): string {
-  const bareDatatype = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-  return bareDatatype
-    ? `${bareDatatype[1]}^^<${assertSafeIri(unwrapIri(bareDatatype[2]))}>`
-    : term;
-}
-
-export function unwrapIri(term: string): string {
-  return term.startsWith('<') && term.endsWith('>')
-    ? term.slice(1, -1)
-    : term;
+  return formatSparqlTerm(term, { position: 'object' });
 }

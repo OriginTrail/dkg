@@ -1,23 +1,29 @@
 import { EventEmitter } from 'node:events';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { Logger, type CanonicalLogRecord, type OperationContext } from '@origintrail-official/dkg-core';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   CclResourceNotFoundError,
   ContextGraphPolicyAuthorizationError,
+  QueryResultTooLargeError,
 } from '@origintrail-official/dkg-agent';
 import {
+  OxigraphStore,
   SparqlHttpResponseError,
   StoreOperationTimeoutError,
   StoreSchedulerBusyError,
 } from '@origintrail-official/dkg-storage';
+import { captureUnscopedQueryConsistency } from '../../agent/src/unscoped-query-consistency.js';
 import {
   configureApiQueryPriority,
   createApiQueryRequestLifecycle,
   handleQueryRoutes,
+  API_QUERY_MAX_STORE_RESPONSE_BYTES,
   normalizePublicApiQueryResult,
   resolveApiQueryPriority,
 } from '../src/daemon/routes/query.js';
 import { handleCclRoutes } from '../src/daemon/routes/ccl.js';
+import { respondToQueryFailure } from '../src/daemon/routes/query-error.js';
 import {
   respondIfStoreUnavailable,
   respondWithDaemonError,
@@ -60,6 +66,12 @@ class ResponseStub extends EventEmitter {
   }
 }
 
+/** The error a call throws: the cases below feed real agent errors to the daemon mapping. */
+function thrownBy(run: () => unknown): unknown {
+  try { run(); } catch (error) { return error; }
+  throw new Error('expected the call to throw');
+}
+
 function queryRouteContext(
   req: RequestStub,
   res: ResponseStub,
@@ -69,13 +81,13 @@ function queryRouteContext(
   return {
     req,
     res,
-    agent,
+    agent: { resolveContextGraphReadAuthority: async () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', reason: 'fixture-node', metadataBootstrap: 'eligible' }), ...agent },
     tracker,
     validTokens: new Set<string>(),
     url: new URL('http://127.0.0.1/api/query'),
     path: '/api/query',
     requestAgentAddress: '',
-    authentication: requestAuthentication({ kind: 'anonymous' }),
+    authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
   } as unknown as RequestContext;
 }
 
@@ -94,6 +106,19 @@ function cclRouteContext(
 }
 
 describe('/api/query request lifecycle', () => {
+  it('forwards metadata opt-in as an explicit boolean under the normal guarded query route', async () => {
+    for (const value of [true, false, 'true']) {
+      const req = new RequestStub({ sparql: 'SELECT ?g WHERE { GRAPH ?g { ?s ?p ?o } }',
+        contextGraphId: 'parent', includeContextGraphPartitions: true, includeSharedMemoryMeta: value });
+      const res = new ResponseStub(), query = vi.fn(async (_sparql: string, _options: Record<string, unknown>) => ({ bindings: [] }));
+      const tracker = { start() {}, startPhase() {}, completePhase() {}, complete() {}, fail() {}, cancel() {} };
+      await handleQueryRoutes(queryRouteContext(req, res, { query }, tracker));
+      expect(res.statusCode).toBe(200);
+      expect(query.mock.calls[0][1]).toMatchObject({ contextGraphId: 'parent', includeContextGraphPartitions: true,
+        includeSharedMemoryMeta: value === true });
+    }
+  });
+
   it.each([
     {
       path: '/api/ccl/policy/approve',
@@ -330,6 +355,17 @@ describe('/api/query request lifecycle', () => {
     expect(res.writableEnded).toBe(false);
   });
 
+  it.each([undefined, 'core-cache', 'rpc-only', 'auto', null, 1])('validates query evidence mode %s before execution', async chainEvidenceMode => {
+    const res = new ResponseStub();
+    const agent = { query: vi.fn(async (_sparql: string, _options: unknown) => ({ type: 'bindings', bindings: [] })) };
+    const tracker = { start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(), complete: vi.fn(), fail: vi.fn(), cancel: vi.fn() };
+    await handleQueryRoutes(queryRouteContext(new RequestStub({ sparql: 'SELECT ?s WHERE { ?s ?p ?o }', chainEvidenceMode }), res, agent, tracker));
+    const valid = chainEvidenceMode === undefined || chainEvidenceMode === 'core-cache' || chainEvidenceMode === 'rpc-only';
+    expect(res.statusCode).toBe(valid ? 200 : 400);
+    expect(agent.query).toHaveBeenCalledTimes(valid ? 1 : 0);
+    if (valid) expect(agent.query.mock.calls[0]?.[1]).toMatchObject({ chainEvidenceMode });
+  });
+
   it('passes the lifecycle admission options through the actual route handoff', async () => {
     const req = new RequestStub();
     const res = new ResponseStub();
@@ -355,12 +391,37 @@ describe('/api/query request lifecycle', () => {
     expect(receivedOptions).toMatchObject({
       priority: 'background',
       source: 'api.query',
+      maxResponseBytes: API_QUERY_MAX_STORE_RESPONSE_BYTES,
     });
     expect(receivedOptions?.signal).toBeInstanceOf(AbortSignal);
     expect((receivedOptions?.signal as AbortSignal).aborted).toBe(false);
     expect(res.statusCode).toBe(200);
     expect(tracker.complete).toHaveBeenCalledTimes(1);
     expect(tracker.fail).not.toHaveBeenCalled();
+  });
+
+  it('reports the canonical agent byte overflow as a stable 413 response', async () => {
+    const error = new QueryResultTooLargeError(
+      1_024,
+      2_048,
+    );
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const agent = { query: vi.fn(async () => { throw error; }) };
+    const tracker = {
+      start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(),
+      complete: vi.fn(), fail: vi.fn(), cancel: vi.fn(),
+    };
+
+    await handleQueryRoutes(queryRouteContext(req, res, agent, tracker));
+
+    expect(res.statusCode).toBe(413);
+    expect(JSON.parse(res.body)).toEqual(expect.objectContaining({
+      code: 'QUERY_RESULT_TOO_LARGE',
+      limitBytes: 1_024,
+      actualBytes: 2_048,
+    }));
+    expect(tracker.fail).toHaveBeenCalledWith(expect.anything(), error);
   });
 
   it('normalizes the legacy all sentinel before the agent query boundary', async () => {
@@ -459,12 +520,24 @@ describe('/api/query request lifecycle', () => {
           contextGraphId,
           source,
           reason,
+          dependency: 'store',
         },
       );
+      const records: CanonicalLogRecord[] = [];
+      Logger.setSink((record) => { records.push(record); });
+      const quiet = [
+        vi.spyOn(process.stdout, 'write').mockImplementation(() => true),
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true),
+      ];
 
-      await handleQueryRoutes(queryRouteContext(req, res, {
-        query: vi.fn(async () => { throw authorityUnavailable; }),
-      }, tracker));
+      try {
+        await handleQueryRoutes(queryRouteContext(req, res, {
+          query: vi.fn(async () => { throw authorityUnavailable; }),
+        }, tracker));
+      } finally {
+        Logger.setSink(null);
+        for (const spy of quiet) spy.mockRestore();
+      }
 
       expect(res.statusCode).toBe(503);
       expect(res.headers['Retry-After']).toBe('3');
@@ -476,6 +549,13 @@ describe('/api/query request lifecycle', () => {
       expect(tracker.fail).toHaveBeenCalledWith(expect.anything(), authorityUnavailable);
       expect(tracker.cancel).not.toHaveBeenCalled();
       expect(tracker.complete).not.toHaveBeenCalled();
+      // #2834: the response names the tracked operation, whose log line carries the attribution.
+      const tracked = tracker.start.mock.calls[0]![0] as OperationContext;
+      expect(res.headers['x-dkg-operation-id']).toBe(tracked.operationId);
+      const lines = records.filter((record) => record.operationId === tracked.operationId);
+      expect(lines).toHaveLength(1);
+      expect(lines[0]!.message).toContain(`source=${source} reason=${reason} dependency=store`);
+      expect(lines[0]!.message).not.toContain(contextGraphId);
     },
   );
 
@@ -652,4 +732,94 @@ describe('/api/query request lifecycle', () => {
 
     expect(res.statusCode).not.toBe(400);
   });
+
+  it('answers an unscoped query that lost its consistency check with a retryable 503', async () => {
+    // The agent's own error, produced the way a live node produces it: a local
+    // write lands inside the interval the query has to hold unchanged. A
+    // hand-typed copy would keep this green if the agent's marker drifted.
+    const store = new OxigraphStore();
+    let invalidated: unknown;
+    try {
+      const assertUnchanged = captureUnscopedQueryConsistency(store, () => 0);
+      await store.insert([{ subject: 'urn:s', predicate: 'urn:p', object: '"o"', graph: 'urn:g' }]);
+      invalidated = thrownBy(assertUnchanged);
+    } finally { await store.close(); }
+
+    const req = new RequestStub();
+    const res = new ResponseStub();
+    const tracker = {
+      start: vi.fn(),
+      startPhase: vi.fn(),
+      completePhase: vi.fn(),
+      complete: vi.fn(),
+      fail: vi.fn(),
+      cancel: vi.fn(),
+    };
+
+    await handleQueryRoutes(queryRouteContext(req, res, {
+      query: vi.fn(async () => { throw invalidated; }),
+    }, tracker));
+
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    const answer = JSON.parse(res.body);
+    expect(answer).toEqual({
+      error: 'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
+      code: 'UNSCOPED_QUERY_INVALIDATED',
+      retryable: true,
+    });
+    // The sentence is the one the agent threw: the text of the answer did not
+    // change with its status.
+    expect(answer.error).toBe((invalidated as Error).message);
+    // The query ran and its result was discarded: a failed operation, not a
+    // cancelled one.
+    expect(tracker.fail).toHaveBeenCalledTimes(1);
+    expect(tracker.cancel).not.toHaveBeenCalled();
+  });
+
+  it('gives the same answer to a copy of that error that lost its message at a package boundary', () => {
+    const res = new ResponseStub();
+    // Error.message is non-enumerable, so a spread or serialized copy has none.
+    expect(respondToQueryFailure(res as unknown as ServerResponse, {
+      code: 'UNSCOPED_QUERY_INVALIDATED', retryable: true,
+    })).toBe(true);
+    expect(res.statusCode).toBe(503);
+    expect(res.headers['Retry-After']).toBe('1');
+    expect(JSON.parse(res.body)).toEqual({
+      error: 'Unscoped query dataset or read authority changed; retry the query or specify contextGraphId',
+      code: 'UNSCOPED_QUERY_INVALIDATED',
+      retryable: true,
+    });
+  });
+
+  it.each([
+    ['the same code without the retryable mark', { code: 'UNSCOPED_QUERY_INVALIDATED' }],
+    // Retrying cannot give a store the coverage an unscoped query needs.
+    ['a store that can never serve an unscoped query', thrownBy(() => captureUnscopedQueryConsistency({}, () => 0))],
+    ['no error object at all', undefined],
+  ])('leaves %s to the top-level mapping, which offers no retry', async (_label, error) => {
+    const unanswered = new ResponseStub();
+    expect(respondToQueryFailure(unanswered as unknown as ServerResponse, error)).toBe(false);
+    expect(unanswered.headersSent).toBe(false);
+
+    // Through the route: it rethrows, and the daemon's top-level mapping answers 500.
+    const res = new ResponseStub();
+    const thrown = error ?? new Error('unclassified');
+    await expect(handleQueryRoutes(queryRouteContext(new RequestStub(), res, {
+      query: vi.fn(async () => { throw thrown; }),
+    }, {
+      start: vi.fn(), startPhase: vi.fn(), completePhase: vi.fn(), complete: vi.fn(), fail: vi.fn(), cancel: vi.fn(),
+    }))).rejects.toBe(thrown);
+    respondWithDaemonError(res as unknown as ServerResponse, thrown);
+    expect(res.statusCode).toBe(500);
+    expect(res.headers['Retry-After']).toBeUndefined();
+  });
+});
+
+it('the shared query responder renders the public result-size contract as 413', () => {
+  const res = new ResponseStub();
+  const error = { code: 'QUERY_RESULT_TOO_LARGE', message: 'Query result exceeds byte limit', maxBytes: 100, actualBytes: 101 };
+  expect(respondToQueryFailure(res as unknown as ServerResponse, error)).toBe(true);
+  expect(res.statusCode).toBe(413);
+  expect(JSON.parse(res.body)).toEqual({ code: error.code, error: error.message, limitBytes: 100, actualBytes: 101 });
 });

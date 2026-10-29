@@ -298,6 +298,12 @@ DELETE FROM rfc64_staged_catalog_heads_v1
 WHERE catalog_scope_digest = :scope
   AND author_address = :author;`,
 
+  listSwmAuthorHeads: `
+SELECT inventory_scope_digest, author_address, current_head_digest,
+       inventory_version_u64be, total_rows_u64be, rows_digest, signed_head_envelope
+FROM rfc64_swm_author_inventory_heads_v1
+ORDER BY inventory_scope_digest, author_address;`,
+
   getSwmAuthorHead: `
 SELECT current_head_digest, inventory_version_u64be, total_rows_u64be,
        rows_digest, signed_head_envelope, expected_head_digest,
@@ -314,6 +320,16 @@ SELECT ka_ual, assertion_coordinate, assertion_version_u64be,
 FROM rfc64_swm_author_inventory_rows_v1
 WHERE inventory_scope_digest = :scope
   AND author_address = :author;`,
+
+  getSwmAuthorRow: `
+SELECT ka_ual, assertion_coordinate, assertion_version_u64be,
+       share_operation_id, projection_digest, public_triple_count_u64be,
+       private_triple_count_u64be, seal_digest, shared_at_u64be,
+       expires_at_u64be
+FROM rfc64_swm_author_inventory_rows_v1
+WHERE inventory_scope_digest = :scope
+  AND author_address = :author
+  AND ka_ual = :kaUal;`,
 
   insertSwmAuthorHead: `
 INSERT INTO rfc64_swm_author_inventory_heads_v1 (
@@ -388,6 +404,14 @@ ON CONFLICT (repair_digest) DO NOTHING;`,
   deleteFinalizedPrivatePlacementRepair: `
 DELETE FROM rfc64_finalized_private_placement_repairs_v1
 WHERE repair_digest = :repairDigest AND repair_json = :repairJson;`,
+  getFinalizedPrivatePlacementFailure: `
+SELECT state_json FROM rfc64_private_placement_failures_v1
+WHERE repair_digest = :digest;`,
+  upsertFinalizedPrivatePlacementFailure: `
+INSERT INTO rfc64_private_placement_failures_v1 (repair_digest, state_json)
+SELECT repair_digest, :json FROM rfc64_finalized_private_placement_repairs_v1
+WHERE repair_digest = :digest
+ON CONFLICT(repair_digest) DO UPDATE SET state_json = excluded.state_json;`,
   getUnregisteredAuthoritySeed: `
 SELECT network_id, context_graph_id, owner_address, policy_digest, signed_envelope
 FROM rfc64_unregistered_authority_seeds_v1
@@ -435,8 +459,10 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   deleteAppliedHeadCas: 'rfc64.applied-head.cas-delete.v1',
   upsertStagedHead: 'rfc64.staged-head.upsert.v1',
   deleteStagedHead: 'rfc64.staged-head.delete.v1',
+  listSwmAuthorHeads: 'rfc64.swm-author-inventory.head.list.v1',
   getSwmAuthorHead: 'rfc64.swm-author-inventory.head.get.v1',
   getSwmAuthorRows: 'rfc64.swm-author-inventory.rows.get.v1',
+  getSwmAuthorRow: 'rfc64.swm-author-inventory.row.get.v1',
   insertSwmAuthorHead: 'rfc64.swm-author-inventory.head.insert.v1',
   updateSwmAuthorHeadCas: 'rfc64.swm-author-inventory.head.cas-update.v1',
   upsertSwmAuthorRow: 'rfc64.swm-author-inventory.row.upsert.v1',
@@ -446,6 +472,8 @@ export const INVENTORY_V1_STATEMENT_IDS = Object.freeze({
   listFinalizedPrivatePlacementRepairs: 'rfc64.finalized-private-placement-repair.list.v1',
   insertFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.insert.v1',
   deleteFinalizedPrivatePlacementRepair: 'rfc64.finalized-private-placement-repair.delete.v1',
+  getFinalizedPrivatePlacementFailure: 'rfc64.finalized-private-placement-failure.get.v1',
+  upsertFinalizedPrivatePlacementFailure: 'rfc64.finalized-private-placement-failure.upsert.v1',
   getUnregisteredAuthoritySeed: 'rfc64.unregistered-authority-seed.get.v1',
   insertUnregisteredAuthoritySeed: 'rfc64.unregistered-authority-seed.insert.v1',
 } as const satisfies Readonly<Record<InventoryV1StatementKey, string>>);
@@ -468,10 +496,13 @@ export const INVENTORY_V1_PERSISTENT_READ_STATEMENT_KEYS = Object.freeze([
   'getAppliedHead',
   'listAppliedHeads',
   'getStagedHead',
+  'listSwmAuthorHeads',
   'getSwmAuthorHead',
   'getSwmAuthorRows',
+  'getSwmAuthorRow',
   'listFinalizedPrivatePlacementRepairs',
   'getUnregisteredAuthoritySeed',
+  'getFinalizedPrivatePlacementFailure',
 ] as const satisfies readonly InventoryV1StatementKey[]);
 
 export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
@@ -492,4 +523,5 @@ export const INVENTORY_V1_PLAN_STATEMENT_KEYS = Object.freeze([
   'insertFinalizedPrivatePlacementRepair',
   'deleteFinalizedPrivatePlacementRepair',
   'insertUnregisteredAuthoritySeed',
+  'upsertFinalizedPrivatePlacementFailure',
 ] as const satisfies readonly InventoryV1StatementKey[]);

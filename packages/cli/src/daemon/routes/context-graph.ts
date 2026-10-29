@@ -1,3 +1,5 @@
+import { handlePublicSnapshotJob } from './public-snapshot-job.js';
+import { requireContextGraphReadAuthority } from './context-graph-read-authority.js';
 // daemon/routes/context-graph.ts
 //
 // Route handlers for context-graph (+ contextGraph, sub-graph) CRUD, participants, join flow, manifest publish/install.
@@ -12,6 +14,7 @@
 // See `packages/cli/scripts/split-handle-request.mjs` for the
 // extraction driver.
 
+import { catchupShuttingDownResponse, catchupAuthorityUnavailableResponse, authorityUnavailableResponse } from './context-graph-catchup-responses.js';
 import {
   createServer,
   type IncomingMessage,
@@ -55,6 +58,12 @@ const daemonRequire = createRequire(import.meta.url);
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+/**
+ * How long `POST /api/context-graph/subscribe` waits for connected peers to
+ * reveal the cleartext id of a graph known only by its on-chain name hash.
+ * Resolution continues in the background after this.
+ */
+const SUBSCRIBE_NAME_RESOLUTION_TIMEOUT_MS = 5_000;
 import { enrichEvmError, isPcaUnavailableError, MockChainAdapter } from '@origintrail-official/dkg-chain';
 import {
   ContextGraphAssetFetchConflictError,
@@ -62,13 +71,17 @@ import {
   ContextGraphNotFoundError,
   ContextGraphOnChainIdUnresolvedError,
   DKGAgent,
+  describeContextGraphOnChainIdResolution,
   loadOpWallets,
+  refusesPrivateContextGraphByOnChainId,
+  type ContextGraphOnChainIdRefusal,
+  type ContextGraphOnChainIdResolution,
   type ContextGraphSyncMode,
   VmReconcileQueueClosedError,
   VmReconcileQueueFullError,
   VmReconcileUnavailableError,
 } from '@origintrail-official/dkg-agent';
-import { computeNetworkId, createOperationContext, DKGEvent, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
+import { computeNetworkId, createOperationContext, Logger, PayloadTooLargeError, GET_VIEWS, TrustLevel, validateSubGraphName, validateAssertionName, validateContextGraphId, isSafeIri, assertSafeIri, sparqlIri, contextGraphSharedMemoryUri, contextGraphAssertionUri, contextGraphMetaUri, SYSTEM_CONTEXT_GRAPHS } from '@origintrail-official/dkg-core';
 import { findReservedSubjectPrefix, isSkolemizedUri } from '@origintrail-official/dkg-publisher';
 import {
   DashboardDB,
@@ -117,12 +130,11 @@ import {
 import { createPublisherControlFromStore, startPublisherRuntimeIfEnabled, type PublisherRuntime } from '../../publisher-runner.js';
 import { createCatchupRunner, type CatchupJobResult, type CatchupRunner } from '../../catchup-runner.js';
 import {
-  catchupResultHasCleanResponse,
-  classifyContextGraphCatchupReadiness,
   classifyExistingContextGraphReadiness,
   readContextGraphReadiness,
   writeContextGraphReadiness,
 } from '../../context-graph-readiness.js';
+import { settlePrivateEmptyVmAtSubscribe } from '../../context-graph-empty-vm-readiness.js';
 import { canAdministerNode, loadTokens, httpAuthGuard } from '../../auth.js';
 import { ExtractionPipelineRegistry } from '@origintrail-official/dkg-core';
 import { MarkItDownConverter, isMarkItDownAvailable, extractFromMarkdown, extractWithLlm } from '../../extraction/index.js';
@@ -163,7 +175,6 @@ import { DkgClient } from '@origintrail-official/dkg-mcp/client';
 // the project's tsconfig (`noUnusedLocals` is off).
 import {
   daemonState,
-  DEBUG_SYNC_TRACE,
   resolveAutoUpdateEnabled,
   type CorsAllowlist,
 } from '../state.js';
@@ -174,12 +185,17 @@ import {
   toCatchupStatusResponse,
 } from '../types.js';
 import {
-  beginWalkCatchupJob,
   recordCatchupRequest,
   recordSyntheticCatchupJob,
-  recordTerminalOnce,
-  releaseCatchupJob,
 } from '../catchup-telemetry.js';
+import { startContextGraphCatchupJob } from '../context-graph-catchup-job.js';
+import { followContextGraphCatchupJob } from '../context-graph-readiness-repeat.js';
+import { createStoreQueryRequestLifecycle } from '../store-query-lifecycle.js';
+import { mayFollowOnChainIdToRow } from '../context-graph-on-chain-id-gate.js';
+import {
+  admitContextGraphFollow,
+  readContextGraphSubscriptionAdmission,
+} from '../context-graph-subscription-admission.js';
 import {
   type MarkItDownTarget,
   manifestRepoRoot,
@@ -451,47 +467,43 @@ function respondReconcileError(res: ServerResponse, err: unknown): void {
   return jsonResponse(res, 500, { error: message });
 }
 
-/**
- * Refuse to mint a new catch-up job because the daemon is shutting down.
- *
- * Shaped after `respondIfStoreUnavailable` — retryable 503 plus `Retry-After`
- * — because that is what this is: the request is fine, the node just cannot
- * take on new work it will never drain. Returned from BOTH mint sites, which
- * is why I7's `result` vocabulary needed a distinct value; a 503 that clamped
- * to `unspecified` would hide the one route outcome shutdown introduces.
- */
-function catchupShuttingDownResponse(res: ServerResponse, includeSharedMemory: boolean): void {
-  recordCatchupRequest('shutting_down', includeSharedMemory);
-  return jsonResponse(
-    res,
-    503,
-    {
-      error:
-        'Node is shutting down and is no longer accepting catch-up jobs; retry once it is back up.',
-      code: 'CATCHUP_SHUTTING_DOWN',
-      retryable: true,
-    },
-    undefined,
-    { 'Retry-After': '5' },
-  );
-}
+/** How the subscribe route answers an on-chain id that names nothing subscribable. */
+const UNRESOLVED_ON_CHAIN_ID_RESPONSES = {
+  'not-found': { status: 404, code: 'CONTEXT_GRAPH_ON_CHAIN_ID_NOT_FOUND', result: 'bad_request' },
+  inactive: { status: 409, code: 'CONTEXT_GRAPH_INACTIVE', result: 'bad_request' },
+  'no-name-hash': { status: 422, code: 'CONTEXT_GRAPH_NO_NAME_HASH', result: 'bad_request' },
+  unsupported: { status: 422, code: 'CONTEXT_GRAPH_ON_CHAIN_ID_UNSUPPORTED', result: 'bad_request' },
+  private: { status: 403, code: 'CONTEXT_GRAPH_PRIVATE', result: 'forbidden' },
+  unavailable: { status: 503, code: 'CONTEXT_GRAPH_ON_CHAIN_ID_UNAVAILABLE', result: 'authority_unavailable' },
+} as const satisfies Record<
+  ContextGraphOnChainIdRefusal['kind'],
+  { status: number; code: string; result: 'bad_request' | 'forbidden' | 'authority_unavailable' }
+>;
 
-/** Fail closed without misreporting a transient authority outage as a denial. */
-function catchupAuthorityUnavailableResponse(
+/**
+ * Refuse an on-chain id (`32`, `#32`) that resolves to nothing subscribable,
+ * saying why. Only a failed chain read is retryable. Nothing is subscribed and
+ * no job is minted.
+ */
+function unresolvedOnChainIdResponse(
   res: ServerResponse,
+  resolution: ContextGraphOnChainIdRefusal,
   includeSharedMemory: boolean,
 ): void {
-  recordCatchupRequest('authority_unavailable', includeSharedMemory);
+  const { status, code, result } = UNRESOLVED_ON_CHAIN_ID_RESPONSES[resolution.kind];
+  recordCatchupRequest(result, includeSharedMemory);
+  const retryable = resolution.kind === 'unavailable';
   return jsonResponse(
     res,
-    503,
+    status,
     {
-      error: 'Context Graph read authority is temporarily unavailable; retry once chain and metadata access recover.',
-      code: 'CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE',
-      retryable: true,
+      error: describeContextGraphOnChainIdResolution(resolution),
+      code,
+      ...(resolution.kind === 'not-found' ? { latestOnChainId: resolution.latestId } : {}),
+      ...(retryable ? { retryable: true } : {}),
     },
     undefined,
-    { 'Retry-After': '3' },
+    retryable ? { 'Retry-After': '3' } : undefined,
   );
 }
 
@@ -655,6 +667,11 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   // Node-wide gates consume the principal established by authentication; route code must not
   // reinterpret token storage or agent-token resolution.
   const isNodeAdminCaller = (): boolean => canAdministerNode(authentication);
+  if (path === '/api/context-graph/snapshot-sync') {
+    if (!isNodeAdminCaller()) { jsonResponse(res,403,{error:'Node administrator required'}); return; }
+    await handlePublicSnapshotJob(ctx);
+    return;
+  }
   const writePreflightCallerAgentAddress = actor.authenticatedAgentAddress;
   const requestToken = authentication.acceptedToken;
   const writePreflightContextGraphOpts = {
@@ -1032,52 +1049,41 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const qs = new URL(req.url ?? "", "http://localhost").searchParams;
     const contextGraphId = qs.get("contextGraphId");
     if (!validateRequiredContextGraphId(contextGraphId, res)) return;
+    const lifecycle = createStoreQueryRequestLifecycle(req, res, 'node-ui.sub-graph-stats');
     try {
+      if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
       const registered = await agent.listSubGraphs(contextGraphId!);
-      // One pass enumerates *all* named graphs in the project + their
-      // distinct-subject and triple counts. Sub-graph ownership is inferred
-      // from the named-graph path segment after the context-graph id:
+      // Enumerate named graphs through the graph-set index, then aggregate
+      // exact-IRI query batches. Sub-graph ownership is inferred from the
+      // named-graph path segment after the context-graph id:
       //   did:dkg:context-graph:<cg>/<subGraph>/assertion/<author>/<name>
       //   did:dkg:context-graph:<cg>/<subGraph>   (committed sub-graph view)
-      // This is one SPARQL round-trip regardless of how many sub-graphs exist.
+      // Unlike the old GRAPH ?g aggregate, this never creates a giant VALUES
+      // allow-list or an unbounded CartesianProductJoinIterator in Oxigraph.
       const counts = new Map<string, { entityCount: number; tripleCount: number }>();
       try {
         const prefix = `did:dkg:context-graph:${contextGraphId}/`;
-        const sparql = `
-          SELECT ?g (COUNT(DISTINCT ?s) AS ?entities) (COUNT(*) AS ?triples)
-          WHERE {
-            GRAPH ?g { ?s ?p ?o }
-            FILTER(STRSTARTS(STR(?g), ${JSON.stringify(prefix)}))
-          }
-          GROUP BY ?g
-        `;
-        const result = await agent.query(sparql, {
-          contextGraphId: contextGraphId!,
-          includeContextGraphPartitions: true,
+        const graphStats = await agent.readContextGraphNamedGraphStats(contextGraphId!, {
+          callerAgentAddress: actor.authenticatedAgentAddress,
+          signal: lifecycle.signal, priority: lifecycle.priority, source: lifecycle.source,
         });
-        const parseCount = (v: any) => {
-          if (v === undefined || v === null) return 0;
-          const s = typeof v === 'string' ? v : (v && typeof v === 'object' && 'value' in v ? (v as any).value : '');
-          const m = String(s).match(/^"?(\d+)/);
-          return m ? Number(m[1]) : 0;
-        };
-        for (const row of (result?.bindings ?? []) as Array<Record<string, any>>) {
-          const g = typeof row.g === 'string' ? row.g : (row.g && typeof row.g === 'object' && 'value' in row.g ? row.g.value : undefined);
-          if (!g || !g.startsWith(prefix)) continue;
-          const tail = g.slice(prefix.length);
+        for (const row of graphStats) {
+          if (!row.graph.startsWith(prefix)) continue;
+          const tail = row.graph.slice(prefix.length);
           // tail starts with either "<subGraphName>/..." or "_meta" or "_shared_memory".
           // Only care about the first segment, but skip daemon-internal graphs.
           const firstSlash = tail.indexOf('/');
           const seg = firstSlash >= 0 ? tail.slice(0, firstSlash) : tail;
           if (!seg || seg.startsWith('_')) continue;
           const entry = counts.get(seg) ?? { entityCount: 0, tripleCount: 0 };
-          entry.entityCount += parseCount(row.entities);
-          entry.tripleCount += parseCount(row.triples);
+          entry.entityCount += row.entityCount;
+          entry.tripleCount += row.tripleCount;
           counts.set(seg, entry);
         }
       } catch {
         // Counts are best-effort — UI degrades to zeros on query failure.
       }
+      if (lifecycle.signal.aborted || res.destroyed) return;
       const items = registered.map((sg) => ({
         name: sg.name,
         uri: sg.uri,
@@ -1093,7 +1099,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         return jsonResponse(res, 400, { error: err.message });
       }
       throw err;
-    }
+    } finally { lifecycle.dispose(); }
   }
 
   // POST /api/context-graph/{id}/add-participant
@@ -1151,6 +1157,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
   if (req.method === "GET" && listParticipantsMatch) {
     const contextGraphId = decodeURIComponent(listParticipantsMatch[1]);
     try {
+      if (!(await requireContextGraphReadAuthority(ctx, contextGraphId))) return;
       const agents = await agent.getContextGraphAllowedAgents(contextGraphId);
       return jsonResponse(res, 200, { contextGraphId, allowedAgents: agents });
     } catch (err: unknown) {
@@ -1168,7 +1175,10 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req);
     try {
       const parsed = JSON.parse(body);
-      const { agentName, curatorPeerId, delegation } = parsed;
+      const { agentName, curatorPeerId, delegation, reRequest } = parsed;
+      if (reRequest !== undefined && typeof reRequest !== 'boolean') {
+        return jsonResponse(res, 400, { error: '"reRequest" must be a boolean when supplied' });
+      }
       if (!delegation || !delegation.agentAddress || !delegation.signature) {
         return jsonResponse(res, 400, {
           error: 'Missing signed delegation. Expected `delegation` field with agentAddress, signature, scope, issuedAtMs and at least one of delegateePeerId / delegateeOpKey.',
@@ -1221,8 +1231,19 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           cause: msg,
         });
       }
-      const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId);
-      if (result.delivered === 0) {
+      const result = await agent.forwardJoinRequest(contextGraphId, delegation, agentName, curatorPeerId, { reRequest });
+      if (result.approvedMetadataPending === true) {
+        // The curator approved this agent already and its member list is on its
+        // way: nothing was sent, and the curator is not asked to approve again.
+        return jsonResponse(res, 200, {
+          ok: true,
+          status: 'approved',
+          joinState: 'approved-metadata-pending',
+          delivered: 0,
+          alreadyMember: true,
+        });
+      }
+      if (result.delivered === 0 && result.queued !== true) {
         // Surface per-peer errors so the joiner can see WHY (curator
         // rejected with a specific reason, transport timed out, etc.)
         // instead of a generic "no curator". Silent error swallowing here
@@ -1241,6 +1262,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             ? 'already-member'
             : 'pending',
         delivered: result.delivered,
+        ...(result.queued === true ? { queued: true } : {}),
         ...(result.alreadyMember || result.autoApproved ? { alreadyMember: true } : {}),
         ...(result.autoApproved ? { autoApproved: true } : {}),
       });
@@ -1882,13 +1904,47 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       });
     }
     // #1102: accept `id` as an alias for `contextGraphId`.
-    const contextGraphId = parsed.contextGraphId ?? parsed.id;
-    if (!contextGraphId) {
+    const requestedContextGraphId = parsed.contextGraphId ?? parsed.id;
+    if (!requestedContextGraphId) {
       recordCatchupRequest('bad_request', shouldSyncSharedMemory);
       return jsonResponse(res, 400, {
         error: 'Missing "contextGraphId" (or "id")',
       });
     }
+    // An on-chain id (`32`, `#32`) names a graph only through the chain.
+    // Resolve it to the row this node keeps for that graph (its verified
+    // cleartext id, or the hash-keyed row discovery staged) before anything
+    // else: a subscription keyed by the number would derive its gossip
+    // topics and wire id from keccak256("32") and sync nothing.
+    // A chain read here waits the request-scoped authority budget, and a
+    // client that disconnects stops the wait (the read itself finishes
+    // detached, so a retry finds the graph).
+    const resolutionLifecycle = createStoreQueryRequestLifecycle(req, res, 'api.contextGraph.subscribe');
+    let onChainResolution: ContextGraphOnChainIdResolution;
+    try {
+      onChainResolution = await agent.resolveContextGraphOnChainIdReference?.(
+        requestedContextGraphId,
+        { signal: resolutionLifecycle.signal },
+      ) ?? { kind: 'as-given' };
+    } catch (error) {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, error);
+    } finally {
+      resolutionLifecycle.dispose();
+    }
+    if (onChainResolution.kind !== 'as-given' && onChainResolution.kind !== 'resolved') {
+      return unresolvedOnChainIdResponse(res, onChainResolution, shouldSyncSharedMemory);
+    }
+    const onChainTarget = onChainResolution.kind === 'resolved' ? onChainResolution : undefined;
+    const subscriptionTargetId: string = onChainTarget?.contextGraphId ?? requestedContextGraphId;
+    const onChainReference = onChainTarget === undefined
+      ? undefined
+      : { onChainId: onChainTarget.onChainId, message: describeContextGraphOnChainIdResolution(onChainTarget) };
+
+    // A name hash this node already resolved subscribes its verified
+    // cleartext graph; subscribing the literal hash again would create a
+    // second, empty identity for the same graph.
+    let contextGraphId: string =
+      agent.resolveContextGraphIdAlias?.(subscriptionTargetId) ?? subscriptionTargetId;
 
     // Authorization must be established BEFORE persisting subscription intent.
     // A private RFC-64 CG can be known from accepted policy authority while its
@@ -1902,21 +1958,26 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     // cannot also serve as its authorization proof. Keep a permanent denial
     // distinct from transient authority unavailability at the HTTP boundary;
     // both fail closed and leave no subscription or catch-up-job side effect.
-    const callerAddr = requestAgentAddress ?? agent.getDefaultAgentAddress();
+    let callerAddr: string | undefined;
     let readAuthority: Awaited<ReturnType<typeof agent.resolveContextGraphSubscriptionBootstrapAuthority>>;
     try {
-      readAuthority = await agent.resolveContextGraphSubscriptionBootstrapAuthority(contextGraphId, {
-        callerAgentAddress: callerAddr,
-        allowSubscriptionFallback: false,
-        // This explicit admission boundary may spend a bounded cold lookup to
-        // populate the chain adapter's reverse name-hash index. Ordinary
-        // queries and restart rehydration retain the short fail-closed timeout.
-      });
-    } catch {
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+      ({ callerAgentAddress: callerAddr, authority: readAuthority } =
+        await readContextGraphSubscriptionAdmission(agent, contextGraphId, requestAgentAddress));
+    } catch (error) {
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, error);
     }
     if (readAuthority.outcome === 'unavailable') {
-      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory);
+      // Keep graph names and caller identities out of the public body and log.
+      return catchupAuthorityUnavailableResponse(res, shouldSyncSharedMemory, readAuthority);
+    }
+    // A private graph named by its on-chain id: one decision, with one answer
+    // whether or not this node holds its cleartext id.
+    if (onChainTarget && refusesPrivateContextGraphByOnChainId(onChainTarget, readAuthority.outcome)) {
+      return unresolvedOnChainIdResponse(
+        res,
+        { kind: 'private', onChainId: onChainTarget.onChainId },
+        shouldSyncSharedMemory,
+      );
     }
     if (readAuthority.outcome === 'denied') {
       recordCatchupRequest('forbidden', shouldSyncSharedMemory);
@@ -1926,6 +1987,27 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           : 'This node has no agent authorized to read this project. Ask the curator to invite an agent first.',
       });
     }
+    // A graph known only by its on-chain name hash syncs nothing under that
+    // id: every holder keys it by the cleartext id. Give connected peers a
+    // bounded moment to reveal (and this node to verify) the cleartext first.
+    // This must stay above the shutdown guard: the guard-to-mint run below is
+    // deliberately synchronous.
+    if (agent.contextGraphNameTargetFor?.(contextGraphId)) {
+      const resolved = await agent.resolveContextGraphNameHashNow?.(contextGraphId, {
+        signal: AbortSignal.timeout(SUBSCRIBE_NAME_RESOLUTION_TIMEOUT_MS),
+      }).catch(() => null);
+      if (resolved) contextGraphId = resolved;
+    }
+    // Two notes answer two questions about the requested id: which graph an
+    // on-chain id named (`onChainReference`), and whether that graph's name
+    // is known yet (`identity`, the #2744 contract that catch-up status and
+    // the subscriptions list also carry).
+    const identity = agent.describeContextGraphIdentity?.(subscriptionTargetId) ?? null;
+    const withResolutionNotes = <T extends object>(body: T) => ({
+      ...body,
+      ...(identity ? { identity } : {}),
+      ...(onChainReference ? { onChainReference } : {}),
+    });
 
     const subMap = agent.getSubscribedContextGraphs();
     const existingSub = subMap?.get(contextGraphId);
@@ -1938,7 +2020,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     let effectiveSyncMode = lifetimePlan.effectiveSyncMode;
     const existingJobId = catchupTracker.latestByContextGraph.get(contextGraphId);
     const existingJob = existingJobId ? catchupTracker.jobs.get(existingJobId) : undefined;
-    let readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+    const readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
 
     if (existingSub?.subscribed) {
       if (existingJob && (existingJob.status === "queued" || existingJob.status === "running")) {
@@ -1958,7 +2040,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         // it needs no job-admission guard and produces no I8 point. A lifetime
         // promotion above is independently guarded because it is a mutation.
         recordCatchupRequest('deduped', shouldSyncSharedMemory);
-        return jsonResponse(res, 200, {
+        return jsonResponse(res, 200, withResolutionNotes({
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
           catchup: {
@@ -1966,7 +2048,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             includeWorkspace: existingJob.includeWorkspace,
             jobId: existingJob.jobId,
           },
-        });
+        }));
       }
 
       // The persisted bit alone is not proof on upgraded v10.0.6 nodes:
@@ -1980,6 +2062,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         readiness: readinessBeforeCatchup,
         includeSharedMemory: shouldSyncSharedMemory,
         hasConfirmedMeta: hasConfirmedExistingMeta,
+        registration: readAuthority.registration,
       });
       if (existingReadiness.alreadyReady && !forceCatchup) {
         const reusableDoneJob = existingJob?.status === 'done' ? existingJob : undefined;
@@ -2013,6 +2096,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             contextGraphId,
             includeWorkspace: shouldSyncSharedMemory,
             status: "done",
+            durablePlane: readAuthority.registration === 'unregistered' ? 'not-applicable' : 'required',
             queuedAt: Date.now(),
             startedAt: Date.now(),
             finishedAt: Date.now(),
@@ -2027,7 +2111,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           reusableDoneJob ? 'ready_replay' : 'ready_synthetic',
           shouldSyncSharedMemory,
         );
-        return jsonResponse(res, 200, {
+        return jsonResponse(res, 200, withResolutionNotes({
           subscribed: contextGraphId,
           syncMode: effectiveSyncMode,
           catchup: {
@@ -2035,7 +2119,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
             includeWorkspace: shouldSyncSharedMemory,
             jobId,
           },
-        });
+        }));
       }
 
       if (existingReadiness.statePatch) {
@@ -2051,11 +2135,8 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           existingReadiness.readinessPatch,
         );
       }
-      // The existing-state classifier may have just invalidated stale v1
-      // provenance because authoritative metadata was missing. Carry the
-      // corrected value into the queued catch-up so a later metadata-only or
-      // incomplete response cannot resurrect the pre-reset true bits.
-      readinessBeforeCatchup = readContextGraphReadiness(dashDb, contextGraphId);
+      // Any invalidation is persisted before queueing; completion reads the
+      // then-current provenance so it cannot resurrect these stale bits.
     }
 
     // First mint site. The guard belongs HERE, above
@@ -2082,150 +2163,29 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
       `[subscribe] contextGraph=${contextGraphId} includeSharedMemory=${shouldSyncSharedMemory} syncMode=${effectiveSyncMode} forceCatchup=${forceCatchup}`,
     );
 
-    const jobId = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const job: CatchupJob = {
-      jobId,
+    const subscribeJob = {
+      agent,
+      store: dashDb,
+      catchupTracker,
       contextGraphId,
-      includeWorkspace: shouldSyncSharedMemory,
-      status: "queued",
-      queuedAt: Date.now(),
+      includeSharedMemory: shouldSyncSharedMemory,
+      callerAgentAddress: callerAddr,
+      admissionAuthority: readAuthority,
     };
-    catchupTracker.jobs.set(jobId, job);
-    catchupTracker.latestByContextGraph.set(contextGraphId, jobId);
+    const started = startContextGraphCatchupJob(subscribeJob);
+    // Same synchronous run: this call's repeat sequence replaces any older one.
+    followContextGraphCatchupJob({ ...subscribeJob, requestAgentAddress }, started);
+    const { jobId } = started.job;
 
-    while (catchupTracker.jobs.size > 100) {
-      let oldestId: string | undefined;
-      let oldestQueuedAt = Number.POSITIVE_INFINITY;
-      for (const [id, entry] of catchupTracker.jobs.entries()) {
-        if (entry.queuedAt < oldestQueuedAt) {
-          oldestQueuedAt = entry.queuedAt;
-          oldestId = id;
-        }
-      }
-      if (!oldestId) break;
-      const removed = catchupTracker.jobs.get(oldestId);
-      catchupTracker.jobs.delete(oldestId);
-      if (
-        removed &&
-        catchupTracker.latestByContextGraph.get(removed.contextGraphId) === oldestId
-      ) {
-        catchupTracker.latestByContextGraph.delete(removed.contextGraphId);
-      }
+    try {
+      await settlePrivateEmptyVmAtSubscribe(agent, dashDb, contextGraphId, readAuthority, callerAddr);
+    } catch (error) {
+      // The subscription and catch-up job already exist. A best-effort early
+      // readiness write must not hide the job from its caller.
+      console.warn(`[catchup] early empty-VM settlement deferred: ${error instanceof Error ? error.name : 'unknown'}`);
     }
-
-    // Retain the continuation so graceful shutdown can drain it, and hold the
-    // ENTRY (not the jobId) in the closure below: the ledger slot is released
-    // as soon as the job settles, and looking the entry up by id afterwards
-    // would find nothing and re-emit its terminal point.
-    const ledgerEntry = beginWalkCatchupJob(job);
-
-    ledgerEntry.task = (async () => {
-      job.status = "running";
-      job.startedAt = Date.now();
-      if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} started`);
-      try {
-        const result = await daemonState.catchupRunner!.run({
-          contextGraphId: contextGraphId,
-          includeSharedMemory: shouldSyncSharedMemory,
-        });
-        job.result = result;
-        // Local scheduler pressure cut the round short. An incomplete round has
-        // no readiness to inspect and must never finalize the subscription, so
-        // short-circuit the whole classification path and report a distinct
-        // retryable status. A remote denial still wins: waiting for local
-        // capacity will never clear it.
-        if (result.deferredBackpressure > 0 && !result.denied) {
-          job.status = "deferred";
-          job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
-          if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} deferred by local scheduler: ${result.deferredBackpressure}`);
-        } else {
-          const inspectReadiness = catchupResultHasCleanResponse(result);
-          const hasConfirmedMeta = inspectReadiness
-            ? await agent.hasConfirmedMetaState(contextGraphId).catch(() => false)
-            : false;
-          const isPrivate = hasConfirmedMeta
-            ? await agent.isPrivateContextGraph(contextGraphId).catch(() => true)
-            : false;
-          const classification = classifyContextGraphCatchupReadiness({
-            result,
-            includeSharedMemory: shouldSyncSharedMemory,
-            hasConfirmedMeta,
-            isPrivate,
-            readinessBeforeCatchup,
-          });
-
-          job.status = classification.jobStatus;
-          job.error = classification.error;
-          if (classification.readinessPatch) {
-            writeContextGraphReadiness(
-              dashDb,
-              contextGraphId,
-              classification.readinessPatch,
-            );
-          }
-          if (classification.statePatch) {
-            agent.markContextGraphSubscriptionState(
-              contextGraphId,
-              classification.statePatch,
-            );
-          }
-          // The first subscribe can legitimately race ahead of metadata and
-          // the on-chain binding. Its eager RFC-64 responsibility pass then
-          // fails closed because accessPolicy is still unknown. Re-run the
-          // lifecycle decision after catch-up has installed authoritative
-          // metadata, before exposing a terminal job: otherwise an always-on
-          // subscription can be fully synced while remaining absent from the
-          // default catalog responsibility/status surface until restart.
-          await agent.reconcileRfc64CatalogResponsibilityV1(contextGraphId);
-          if (classification.eventPayload) {
-            agent.eventBus?.emit?.(DKGEvent.PROJECT_SYNCED, {
-              contextGraphId,
-              ...classification.eventPayload,
-            });
-          }
-
-          // Denial took precedence above, but a denied-yet-still-deferred round
-          // is likewise incomplete: never let it settle as a successful "done".
-          if (job.status === "done" && result.deferredBackpressure > 0) {
-            job.status = "deferred";
-            job.error = "Sync deferred by local scheduler backpressure; retry when capacity is available.";
-          }
-        }
-
-        if (DEBUG_SYNC_TRACE) {
-          if (job.status === 'denied') {
-            console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} denied by remote peer(s): ${result.deniedPeers}`);
-          }
-          console.log(
-            `[catchup] job=${jobId} contextGraph=${contextGraphId} status=${job.status} ` +
-              `peers=${result.peersTried}/${result.syncCapablePeers} ` +
-              `connected=${result.totalPeers ?? result.connectedPeers} ` +
-              `data=${result.dataSynced} swm=${result.sharedMemorySynced} denied=${result.denied}`,
-          );
-        }
-      } catch (err) {
-        job.error = err instanceof Error ? err.message : String(err);
-        job.status = "failed";
-        if (DEBUG_SYNC_TRACE) console.log(`[catchup] job=${jobId} contextGraph=${contextGraphId} threw: ${job.error}`);
-      } finally {
-        job.finishedAt = Date.now();
-        // Synchronous, guarded, and inside the retained task's `finally` so it
-        // runs before the task settles and the shutdown drain observes it. Not
-        // "before any await" — a terminal status only exists after the work.
-        recordTerminalOnce(ledgerEntry);
-        releaseCatchupJob(ledgerEntry);
-      }
-    })().catch((err: unknown) => {
-      // The body above catches everything into `job.error`, so this is a
-      // backstop for the `finally` itself. Without it a throw here would be an
-      // unhandled rejection on a detached task.
-      console.error(
-        `[catchup] job=${jobId} continuation failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
-    });
-
     recordCatchupRequest('queued', shouldSyncSharedMemory);
-    return jsonResponse(res, 200, {
+    return jsonResponse(res, 200, withResolutionNotes({
       subscribed: contextGraphId,
       syncMode: effectiveSyncMode,
       catchup: {
@@ -2233,7 +2193,7 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
         includeWorkspace: shouldSyncSharedMemory,
         jobId,
       },
-    });
+    }));
   }
 
   // POST /api/context-graph/unsubscribe
@@ -2251,14 +2211,57 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
     const body = await readBody(req, SMALL_BODY_BYTES);
     const unsubscribeParsed = JSON.parse(body);
     // #1102: accept `id` as an alias for `contextGraphId`.
-    const contextGraphId = unsubscribeParsed?.contextGraphId ?? unsubscribeParsed?.id;
-    if (!contextGraphId) {
+    const requestedContextGraphId = unsubscribeParsed?.contextGraphId ?? unsubscribeParsed?.id;
+    if (!requestedContextGraphId) {
       return jsonResponse(res, 400, { error: 'Missing "contextGraphId" (or "id")' });
+    }
+    // An on-chain id (`32`, `#32`) names the row the subscribe route created
+    // for it. Success means that subscription stopped: an on-chain id whose
+    // row is not subscribed here, or one the caller may not follow to a
+    // cleartext id, gets the same refusal, so the refusal reveals nothing.
+    const onChainLookup = agent.lookupContextGraphOnChainIdReference?.(requestedContextGraphId)
+      ?? { kind: 'as-given' as const };
+    let contextGraphId: string = requestedContextGraphId;
+    if (onChainLookup.kind === 'as-given') {
+      // A name hash this node resolved no longer keys any row: its subscription
+      // moved to the verified cleartext id, which is what must be stopped. The
+      // hash is public on chain, but following it names the graph and stops its
+      // subscription, so only a caller who could already read that graph
+      // follows it: the node operator (who can list every subscription) or an
+      // agent the subscribe route would admit to the resolved id. A caller that
+      // is refused is answered exactly as for an id that keys no row. An
+      // admission read that could not be completed gets the subscribe route's
+      // retryable 503: reporting an unsubscribe that did not happen would leave
+      // the graph syncing behind a success.
+      const alias = agent.resolveContextGraphIdAlias?.(requestedContextGraphId) ?? null;
+      if (alias !== null && alias !== requestedContextGraphId) {
+        const follow = await admitContextGraphFollow(agent, alias, {
+          isNodeAdmin: isNodeAdminCaller(),
+          agentAddress: requestAgentAddress,
+        });
+        if (follow === 'unavailable') return authorityUnavailableResponse(res);
+        if (follow === 'allowed') contextGraphId = alias;
+      }
+    } else {
+      const stoppable = onChainLookup.kind === 'held'
+        && agent.getSubscribedContextGraphs()?.get(onChainLookup.contextGraphId)?.subscribed === true
+        && await mayFollowOnChainIdToRow(agent, onChainLookup, {
+          isNodeAdmin: isNodeAdminCaller(),
+          agentAddress: requestAgentAddress,
+        });
+      if (!stoppable) {
+        return jsonResponse(res, 404, {
+          error: `On-chain Context Graph #${onChainLookup.onChainId} is not subscribed on this node.`,
+          code: 'CONTEXT_GRAPH_NOT_SUBSCRIBED',
+        });
+      }
+      contextGraphId = onChainLookup.contextGraphId;
     }
     agent.unsubscribeFromContextGraph(contextGraphId);
     const sub = agent.getSubscribedContextGraphs()?.get(contextGraphId);
     return jsonResponse(res, 200, {
       unsubscribed: contextGraphId,
+      ...(contextGraphId === requestedContextGraphId ? {} : { requestedContextGraphId }),
       subscribed: sub?.subscribed === true,
       coreHosted: sub?.coreHosted === true,
     });
@@ -2287,12 +2290,17 @@ export async function handleContextGraphRoutes(ctx: RequestContext): Promise<voi
           // `rehydration.hostedActivatedIds` so the legacy subscriptions
           // contract stays subscribed-only.
           .filter(([id, s]) => s?.subscribed === true && !systemContextGraphs.has(id))
-          .map(([id, s]) => ({
-            contextGraphId: id,
-            subscribed: s?.subscribed === true,
-            synced: s?.synced === true,
-            coreHosted: s?.coreHosted === true,
-          }))
+          .map(([id, s]) => {
+            // A row known only by its on-chain name hash syncs nothing yet.
+            const identity = agent.describeContextGraphIdentity?.(id) ?? null;
+            return {
+              contextGraphId: id,
+              subscribed: s?.subscribed === true,
+              synced: s?.synced === true,
+              coreHosted: s?.coreHosted === true,
+              ...(identity ? { identity } : {}),
+            };
+          })
       : [];
     return jsonResponse(res, 200, {
       count: subscriptions.length,

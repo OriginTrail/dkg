@@ -4,6 +4,10 @@ import {
   PROTOCOL_QUERY,
   PROTOCOL_DISCOVER,
   PROTOCOL_SYNC,
+  PROTOCOL_SYNC_POOLED,
+  PROTOCOL_SYNC_CHANGELOG,
+  PROTOCOL_NETWORK_IDENTITY,
+  advertisesSyncProtocol,
   PROTOCOL_MESSAGE,
   PROTOCOL_ACCESS,
   PROTOCOL_QUERY_REMOTE,
@@ -84,12 +88,33 @@ describe('V10 protocol stream IDs', () => {
     expect(PROTOCOL_SYNC).toBe('/dkg/10.0.2/sync');
   });
 
+  it('pooled sync overlay uses the /dkg/10.0.3/ prefix', () => {
+    expect(PROTOCOL_SYNC_POOLED).toBe('/dkg/10.0.3/sync');
+  });
+
   it('storage ACK V2 uses the /dkg/10.0.2/ prefix for field-20 capable ACKs', () => {
     expect(PROTOCOL_STORAGE_ACK_V2).toBe('/dkg/10.0.2/storage-ack');
   });
 
   it('DHT protocol is unchanged', () => {
     expect(DHT_PROTOCOL).toBe('/dkg/kad/1.0.0');
+  });
+});
+
+describe('advertisesSyncProtocol (#2822)', () => {
+  it.each([
+    { name: 'nothing advertised', protocols: [], expected: false },
+    { name: 'legacy sync id only', protocols: [PROTOCOL_SYNC], expected: true },
+    { name: 'pooled sync id only', protocols: [PROTOCOL_SYNC_POOLED], expected: true },
+    { name: 'both sync ids', protocols: [PROTOCOL_SYNC_POOLED, PROTOCOL_SYNC], expected: true },
+    // Stale identify: later pooled pulls add only the pooled id.
+    { name: 'network identity + pooled id', protocols: [PROTOCOL_NETWORK_IDENTITY, PROTOCOL_SYNC_POOLED], expected: true },
+    { name: 'network identity only', protocols: [PROTOCOL_NETWORK_IDENTITY], expected: false },
+    { name: 'changelog lane only', protocols: [PROTOCOL_SYNC_CHANGELOG], expected: false },
+    { name: 'retired sync ids', protocols: ['/dkg/10.0.0/sync', '/dkg/10.0.1/sync'], expected: false },
+    { name: 'id prefix only', protocols: ['/dkg/10.0.3/sync/extra', '/dkg/10.0.3'], expected: false },
+  ])('$name -> $expected', ({ protocols, expected }) => {
+    expect(advertisesSyncProtocol(protocols)).toBe(expected);
   });
 });
 
@@ -307,15 +332,15 @@ describe('deprecated V9 aliases still work', () => {
   });
 
   it('contextGraphFinalizationTopic maps to finalization topic', () => {
-    expect(contextGraphFinalizationTopic(id)).toBe(contextGraphFinalizationTopic(id));
+    expect(contextGraphFinalizationTopic(id)).toBe('dkg/context-graph/test-42/finalization');
   });
 
   it('contextGraphUpdateTopic maps to update topic', () => {
-    expect(contextGraphUpdateTopic(id)).toBe(contextGraphUpdateTopic(id));
+    expect(contextGraphUpdateTopic(id)).toBe('dkg/context-graph/test-42/update');
   });
 
   it('contextGraphAppTopic maps to app topic', () => {
-    expect(contextGraphAppTopic(id)).toBe(contextGraphAppTopic(id));
+    expect(contextGraphAppTopic(id)).toBe('dkg/context-graph/test-42/app');
   });
 
   it('contextGraphDataGraphUri maps to data URI', () => {
@@ -339,11 +364,11 @@ describe('deprecated V9 aliases still work', () => {
   });
 
   it('contextGraphSessionsTopic maps to sessions topic', () => {
-    expect(contextGraphSessionsTopic(id)).toBe(contextGraphSessionsTopic(id));
+    expect(contextGraphSessionsTopic(id)).toBe('dkg/context-graph/test-42/sessions');
   });
 
   it('contextGraphSessionTopic maps to session topic', () => {
-    expect(contextGraphSessionTopic(id, 'sess')).toBe(contextGraphSessionTopic(id, 'sess'));
+    expect(contextGraphSessionTopic(id, 'sess')).toBe('dkg/context-graph/test-42/sessions/sess');
   });
 
   it('all deprecated URIs use did:dkg:context-graph: prefix', () => {

@@ -29,6 +29,7 @@ export const EVM_SCOPES = Object.freeze(['chain', 'publisher', 'agent']);
 export const WORKSPACE_RULES = Object.freeze({
   'packages/core': {
     lanes: [
+      'chain_rpc_node26',
       'tornado_core',
       'tornado_blazegraph',
       'tornado_publisher',
@@ -44,6 +45,7 @@ export const WORKSPACE_RULES = Object.freeze({
   },
   'packages/rdf-utils': {
     lanes: [
+      'chain_rpc_node26',
       'tornado_core',
       'tornado_blazegraph',
       'tornado_publisher',
@@ -59,6 +61,7 @@ export const WORKSPACE_RULES = Object.freeze({
   },
   'packages/http-utils': {
     lanes: [
+      'chain_rpc_node26',
       'tornado_core',
       'tornado_blazegraph',
       'tornado_publisher',
@@ -89,6 +92,7 @@ export const WORKSPACE_RULES = Object.freeze({
   },
   'packages/chain': {
     lanes: [
+      'chain_rpc_node26',
       'tornado_core',
       'tornado_publisher',
       'tornado_agent',
@@ -99,11 +103,14 @@ export const WORKSPACE_RULES = Object.freeze({
     evmScopes: EVM_SCOPES,
   },
   'packages/query': {
+    // The UI assertion paging suite runs the real scoped query engine.
     lanes: [
+      'tornado_blazegraph',
       'tornado_publisher',
       'tornado_agent',
       'bura_cli',
       'bura_query',
+      'kosava_node_ui',
       'kosava_supporting',
       'kosava_hardhat_plugins',
     ],
@@ -113,6 +120,7 @@ export const WORKSPACE_RULES = Object.freeze({
   'packages/publisher': {
     lanes: [
       'tornado_publisher',
+      'tornado_blazegraph',
       'tornado_agent',
       'bura_cli',
       'kosava_supporting',
@@ -154,6 +162,16 @@ export const WORKSPACE_RULES = Object.freeze({
   'packages/node-ui': {
     // tornado_blazegraph: loaded by the CLI's Oxigraph launcher (see packages/cli).
     lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_node_ui_e2e', 'kosava_hardhat_plugins'],
+    evmScopes: [],
+  },
+  'packages/node-store': {
+    // Protocol persistence split out of node-ui: node-ui re-exports it, so every
+    // lane that loads node-ui loads it too (tornado_blazegraph through the CLI's
+    // Oxigraph launcher, see packages/cli). Its own tests run in kosava_node_ui
+    // and open node-ui's DashboardDB by relative path. Daemon runtime, not UI
+    // surface: like the other packages the devnet boots, the browser suite
+    // follows it after merge rather than on the PR.
+    lanes: ['tornado_blazegraph', 'bura_cli', 'kosava_node_ui', 'kosava_hardhat_plugins'],
     evmScopes: [],
   },
   'packages/graph-viz': {
@@ -212,6 +230,10 @@ export const WORKSPACE_RULES = Object.freeze({
     lanes: ['kosava_hardhat_plugins'],
     evmScopes: [],
   },
+  'packages/kafka-source': {
+    lanes: ['kosava_supporting'],
+    evmScopes: [],
+  },
   'packages/evm-module': {
     forceFull: true,
     lanes: [],
@@ -239,6 +261,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/agent': ['tornado_agent'],
   'packages/cli': ['bura_cli'],
   'packages/node-ui': ['kosava_node_ui'],
+  'packages/node-store': ['kosava_node_ui'],
   'packages/graph-viz': ['kosava_supporting'],
   'packages/epcis': ['tornado_blazegraph', 'kosava_supporting'],
   'packages/mcp-dkg': ['kosava_supporting'],
@@ -250,6 +273,7 @@ export const WORKSPACE_OWNING_LANES = Object.freeze({
   'packages/adapter-elizaos': ['kosava_supporting'],
   'packages/network-sim': ['kosava_supporting'],
   'packages/kafka-plugin': ['kosava_hardhat_plugins'],
+  'packages/kafka-source': ['kosava_supporting'],
   'packages/evm-module': ['contracts'],
   demo: ['kosava_supporting'],
 });
@@ -265,6 +289,9 @@ export const WORKSPACE_OWNING_EVM_SCOPES = Object.freeze({
 const BLAZEGRAPH_ARM64_PATTERNS = [
   /^blazegraph-image\.json$/,
   /^packages\/cli\/blazegraph-image-metadata\.cjs$/,
+  // The namespace contract the metadata parser loads, which the arm64 job's
+  // contract check runs.
+  /^packages\/storage\/blazegraph-namespace-contract\.cjs$/,
   /^packages\/cli\/(?:src|test)\/.*blazegraph.*\.(?:[cm]?[jt]s|json)$/i,
 ];
 
@@ -281,14 +308,15 @@ const BLAZEGRAPH_ARM64_PATTERNS = [
 // scripts/lib/__tests__/ci-delta-routing.test.mjs derives that set from the
 // suite's imports and fails when a file it loads is missing here.
 const IDENTITY_WALLET_EVM_PATTERNS = [
+  /^packages\/node-ui\/src\/rdf-literal\.ts$/,
   /^packages\/node-ui\/src\/ui\/web3\//,
   /^packages\/node-ui\/src\/ui\/pages\/identity-wallets\//,
-  /^packages\/node-ui\/src\/ui\/(?:api|http|identity-wallet-api|pca-api)\.ts$/,
-  /^packages\/node-ui\/src\/ui\/(?:lib\/nativeGasSymbol|stores\/wallet)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:api|agent-identity-api|assertion-identity|assertions-page|query-bindings|query-api|query-transport|http|identity-wallet-api|pca-api)\.ts$/,
+  /^packages\/node-ui\/src\/ui\/(?:lib\/(?:nativeGasSymbol|apiToken|randomUUID|read-cache)|stores\/wallet)\.ts$/,
   /^packages\/node-ui\/integration\/identity-wallet-actions-v10\.test\.ts$/,
   // The daemon route the suite drives and the CLI modules it loads.
   /^packages\/cli\/src\/daemon\/routes\/(?:identity-wallets|restricted-browser-wallet-rpc)\.ts$/,
-  /^packages\/cli\/src\/(?:daemon\/http-utils|auth|config|oxigraph-memory-limits|runtime-assets)\.ts$/,
+  /^packages\/cli\/src\/(?:daemon\/http-utils|daemon\/async-admission-trace|daemon\/reconcile-unavailable|daemon\/write-context-graph-preflight|daemon\/write-preflight-coalescing|daemon\/write-preflight-diagnostics|daemon\/write-preflight-attribution|daemon\/read-authority-diagnostics|daemon\/warning-gate|daemon\/context-graph-write-readiness|daemon\/context-graph-catchup-progress|context-graph-identifiers|auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/,
 ];
 
 // File-level triggers: lanes or EVM scopes that specific paths select on top
@@ -298,12 +326,93 @@ const IDENTITY_WALLET_EVM_PATTERNS = [
 // belong in this table, never as special cases inside planCi.
 // ci-delta-routing.test.mjs follows every relative reference from the files
 // each lane runs and fails when a file it reaches does not select that lane.
+// What pnpm install runs in every job, inside the package workspaces: the one
+// table the planner and the load-closure test both read, as explicit
+// variants that installDependency builds and checks:
+// - entrypoint(path): a file an install hook runs or loads;
+// - repositoryRead(reader, name, path): a file `reader` reads as `name` from
+//   a directory it builds at run time, which is the repository's `path`;
+// - exemption(reader, name, reason): such a read that names no repository
+//   input, and why.
+// The planner reads only INSTALL_HOOK_INPUTS, the entrypoints' and repository
+// reads' paths: a change to one needs full CI, as a change to an install hook
+// does. The routing test checks the install scripts read exactly what the
+// reads and exemptions say.
+const nonEmpty = (value, field) => {
+  if (typeof value !== 'string' || value === '') throw new Error(`an install dependency needs a ${field}`);
+  return value;
+};
+export const installDependency = Object.freeze({
+  entrypoint: (path) => Object.freeze({ kind: 'entrypoint', path: nonEmpty(path, 'path') }),
+  repositoryRead: (reader, name, path) => Object.freeze({
+    kind: 'repositoryRead', reader: nonEmpty(reader, 'reader'), name: nonEmpty(name, 'name'), path: nonEmpty(path, 'path'),
+  }),
+  exemption: (reader, name, reason) => Object.freeze({
+    kind: 'exemption', reader: nonEmpty(reader, 'reader'), name: nonEmpty(name, 'name'), reason: nonEmpty(reason, 'reason'),
+  }),
+});
+const { entrypoint, repositoryRead, exemption } = installDependency;
+const MARKITDOWN_BUNDLER = 'packages/cli/scripts/bundle-markitdown-binaries.mjs';
+export const INSTALL_HOOK_DEPENDENCIES = Object.freeze([
+  // The root and CLI preinstall, the CLI postinstall, and what they load.
+  entrypoint('packages/cli/scripts/verify-node-sqlite-runtime.mjs'),
+  entrypoint(MARKITDOWN_BUNDLER),
+  entrypoint('packages/cli/scripts/markitdown-bundle-validation.mjs'),
+  entrypoint('packages/cli/markitdown-build-info.json'),
+  // What they read from directories they build at run time.
+  repositoryRead(MARKITDOWN_BUNDLER, 'markitdown-targets.json', 'packages/cli/markitdown-targets.json'),
+  repositoryRead(MARKITDOWN_BUNDLER, 'scripts/markitdown-entry.py', 'packages/cli/scripts/markitdown-entry.py'),
+  repositoryRead(MARKITDOWN_BUNDLER, 'project.json', 'project.json'),
+  // The postinstall skips the release download only in a workspace checkout,
+  // which it tells by the CLI's tsconfig.json (isWorkspaceCheckout): without
+  // it, every job's install downloads a binary for its platform. The CLI's
+  // markitdown test packs the CLI to check the published package leaves it
+  // out.
+  repositoryRead(MARKITDOWN_BUNDLER, 'tsconfig.json', 'packages/cli/tsconfig.json'),
+  exemption(
+    MARKITDOWN_BUNDLER,
+    'package.json',
+    "the CLI's version, which names the release binary an installed package downloads; the manifest fields an install reads (install hooks, dependencies, engines) already route to full CI",
+  ),
+  exemption(MARKITDOWN_BUNDLER, 'Scripts/python.exe', 'the Python virtual environment a source build creates, outside the repository'),
+  exemption('packages/cli/scripts/verify-node-sqlite-runtime.mjs', '../package.json', "the CLI's engines.node range; an engines change already routes to full CI"),
+]);
+// The files whose change needs full CI because an install runs or reads them:
+// the entrypoints' and repository reads' paths. A dependency of another kind
+// throws, so the planner never skips one.
+export function installHookInputs(dependencies) {
+  return Object.freeze([...new Set(dependencies.flatMap((dependency) => {
+    switch (dependency.kind) {
+      case 'entrypoint':
+      case 'repositoryRead':
+        return [dependency.path];
+      case 'exemption':
+        return [];
+      default:
+        throw new Error(`unknown install dependency: ${JSON.stringify(dependency)}`);
+    }
+  }))]);
+}
+export const INSTALL_HOOK_INPUTS = installHookInputs(INSTALL_HOOK_DEPENDENCIES);
+
 export const PATH_TRIGGERS = Object.freeze([
+  {
+    patterns: [/^test-policy\/(?:README\.md|test-routes\.json)$/],
+    lanes: ['chain_rpc_node26'],
+    evmScopes: [],
+    reason: 'supported-runtime regression policy changed',
+  },
   {
     patterns: BLAZEGRAPH_ARM64_PATTERNS,
     lanes: ['bura_cli', 'bura_blazegraph_arm64'],
     evmScopes: [],
     reason: 'Blazegraph provisioning contract changed',
+  },
+  {
+    patterns: [/^blazegraph-image\.json$/],
+    lanes: ['tornado_blazegraph'],
+    evmScopes: [],
+    reason: 'the Blazegraph job runs the share promote lookup differential on the pinned image (U+001F positive control)',
   },
   {
     patterns: IDENTITY_WALLET_EVM_PATTERNS,
@@ -324,8 +433,26 @@ export const PATH_TRIGGERS = Object.freeze([
     evmScopes: [],
     reason: 'the query security tests assert the query README',
   },
+  {
+    patterns: [/^packages\/cli\/docs\/async-admission-usage-line\.md$/],
+    lanes: ['bura_cli'],
+    evmScopes: [],
+    reason: 'the CLI admission usage-log tests assert the usage-line field reference',
+  },
   // Files other packages load by relative path, outside their declared
   // dependencies.
+  {
+    patterns: [/^packages\/publisher\/src\/(?:metadata|graph-metadata-envelope|graph-knowledge-asset-controls|materialization-assertion-version|assertion-lifecycle-events|entity-share-metadata|graph-knowledge-asset-metadata|workspace-metadata-subjects)\.ts$/],
+    lanes: ['kosava_node_ui'],
+    evmScopes: [],
+    reason: 'the UI reserved-UAL regression loads the publisher metadata writer and its helpers',
+  },
+  {
+    patterns: [/^packages\/agent\/src\/sync\/(?:exact-assets|exact-batch-stream-contract|wire-compression)\.ts$/],
+    lanes: ['tornado_core'],
+    evmScopes: [],
+    reason: 'the Core stream transport tests import the Agent production codec',
+  },
   {
     patterns: [/^packages\/cli\/src\/extraction\/markdown-extractor\.ts$/],
     lanes: ['tornado_agent'],
@@ -333,7 +460,13 @@ export const PATH_TRIGGERS = Object.freeze([
     reason: 'the agent memory-layer tests import the CLI markdown extractor',
   },
   {
-    patterns: [/^packages\/cli\/src\/(?:auth|config|oxigraph-memory-limits|runtime-assets)\.ts$/],
+    patterns: [/^packages\/cli\/src\/publisher-chain-proof\.ts$/],
+    lanes: ['tornado_agent'],
+    evmScopes: [],
+    reason: 'the agent memory-layer tests load the CLI confirmed-publication proof helper',
+  },
+  {
+    patterns: [/^packages\/cli\/src\/(?:auth|boolean-env-override|config|config-file-source|entity-search\/types|oxigraph-memory-limits|retention-config|runtime-assets)\.ts$/],
     // The EPCIS lanes are Blazegraph and supporting; the CLI rule already
     // selects Blazegraph.
     lanes: ['kosava_supporting'],
@@ -351,6 +484,7 @@ export const PATH_TRIGGERS = Object.freeze([
     // reads these sources and asserts their authority RPC call sites.
     patterns: [
       /^packages\/agent\/src\/dkg-agent-(?:cg-registry|context-graph|join|lifecycle|query)\.ts$/,
+      /^packages\/agent\/src\/remote-query-handler\.ts$/,
       /^packages\/publisher\/src\/workspace-handler\.ts$/,
       /^packages\/cli\/src\/daemon\/routes\/(?:memory|query-catalog)\.ts$/,
     ],
@@ -358,11 +492,32 @@ export const PATH_TRIGGERS = Object.freeze([
     evmScopes: [],
     reason: 'the chain RPC-site census asserts their authority call sites',
   },
+  {
+    // packages/publisher/test/async-lift-queue-graph-coverage.test.ts scans every package's src for the publisher
+    // queue's graphs and labels, and reads the storage routing test (which the storage rule already routes to
+    // this lane) to keep its list of routing-covered store methods in step. This names the one file outside the
+    // publisher's own closure that names a queue graph: the chain-reset wipe in cli.
+    //
+    // It is deliberately NOT widened to packages/agent/src and packages/cli/src. That would send the publisher
+    // lane (4 shards and the Hardhat artifacts) to every agent-only or cli-only PR (about a third of the PRs
+    // merged since July 2026), and the agent layer is routed off this lane on purpose
+    // (ci-delta-routing.test.mjs). A path pattern cannot see what a file says, so the guard is a test instead:
+    // ci-delta-routing.test.mjs scans every workspace's src for the same vocabulary as the coverage test, and the
+    // build job runs it on every PR that changes code. A new reference anywhere fails that PR until its file is
+    // listed here, and listing it makes the coverage test run.
+    patterns: [
+      /^packages\/cli\/src\/daemon\/chain-reset-wipe\.ts$/,
+    ],
+    lanes: ['tornado_publisher'],
+    evmScopes: [],
+    reason: 'the publisher queue graph coverage test asserts the chain-reset wipe reference',
+  },
 ]);
 
 // Repository areas outside the package workspaces, in first-match order. An
 // entry with `full` keeps full CI with its own reason (the CI control plane,
-// unknown workflow paths, devnet install inputs). Every other entry selects
+// unknown workflow paths, devnet install inputs, repository scripts outside
+// the known families). Every other entry selects
 // the lanes that actually load the area in CI (a CI job running it, or a
 // package referencing it, directly or through another support file; the
 // routing tests follow those imports) plus the shared build job's own checks
@@ -370,11 +525,156 @@ export const PATH_TRIGGERS = Object.freeze([
 // repository-script tests and test-inventory checks cover these files, and for
 // routes with no lanes they are the only CI consumer (the suites are manual or
 // have their own workflow).
+// Repository scripts known to run only in the shared build job or by hand, by
+// family: exact script names, file-name prefixes with the extensions they
+// take, and whole directories under scripts/. The load-closure test fails if
+// a lane reads or runs one, or assembles a script path it cannot resolve, and
+// an inventory test requires every name to exist and every prefix and
+// directory to be the first route for an existing script.
+export const BUILD_ONLY_SCRIPTS = Object.freeze([
+  {
+    reason: 'devnet suites and operations run by hand, checked by the shared build job',
+    prefixes: [{ prefix: 'devnet-', extensions: ['sh', 'mjs'] }],
+    files: [
+      '_devnet-full-sweep.sh',
+      'dkg-claude.sh',
+      'epcis-smoke-test.sh',
+      'libp2p-soak-test.sh',
+      'publisher-smoke-test.sh',
+      'seed-demo.sh',
+      'swm-soak-orchestrate.sh',
+      'swm-soak-test.sh',
+      'two-laptop-test.sh',
+      'v10-rc-validation.sh',
+    ],
+  },
+  {
+    reason: 'repository checks the shared build job runs',
+    prefixes: [{ prefix: 'audit-', extensions: ['mjs', 'test.mjs'] }],
+    files: ['check-npm-metadata.mjs', 'release-packages.mjs', 'verify-w1-packet.mjs'],
+  },
+  {
+    reason: 'operator and data tools run by hand, checked by the shared build job',
+    prefixes: [
+      { prefix: 'debug-neuroweb', extensions: ['ts'] },
+      { prefix: 'dkg-v10-', extensions: ['mjs'] },
+      { prefix: 'import-', extensions: ['mjs'] },
+      { prefix: 'publisher-epoch-snapshot', extensions: ['ts'] },
+    ],
+    files: [
+      'backfill-rs-percgid-meta.mjs',
+      'chain-analysis.ts',
+      'distribute-publisher-trac.ts',
+      'drain-swm-duplicates.mjs',
+      'epoch-snapshot.ts',
+      'generate-aggregates.ts',
+      'generate-random-findings-nt.mjs',
+      'redistribute-memory.mjs',
+      'register-laptop2-agent.mjs',
+      'seed-dkg-code-project.mjs',
+      'update-repo-refs.js',
+      'verify-addresses.ts',
+      'verify-agent-provenance-deployment.mjs',
+    ],
+    directories: ['load', 'repro', 'testnet-publish-stress'],
+  },
+]);
+
+const escapeRegExp = (text) => text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+// The route pattern for scripts under scripts/: an exact name, a prefix
+// followed by word characters or hyphens and one of its extensions, or
+// anything under a directory.
+export function scriptsPattern({ files = [], prefixes = [], directories = [] }) {
+  const alternatives = [
+    ...files.map(escapeRegExp),
+    ...prefixes.map(({ prefix, extensions }) => `${escapeRegExp(prefix)}[\\w-]*\\.(?:${extensions.map(escapeRegExp).join('|')})`),
+    ...directories.map((directory) => `${escapeRegExp(directory)}\\/.+`),
+  ];
+  return new RegExp(`^scripts\\/(?:${alternatives.join('|')})$`);
+}
+
 export const SUPPORT_PATH_ROUTES = Object.freeze([
+  {
+    // The repository-script tests (and their helpers and fixtures) run only in
+    // the shared build job's script-test step.
+    pattern: /^scripts\/lib\/__tests__\//,
+    lanes: [],
+    reason: 'repository script tests run in the shared build job',
+  },
+  {
+    // CI tooling (planner-adjacent scripts, lane runners, shared CI libraries)
+    // and the fixtures package tests declare as shared inputs: every lane can
+    // depend on them.
+    pattern: /^scripts\/(?:ci|lib|testing)\//,
+    full: 'Global CI input changed',
+  },
+  {
+    // The EVM integration runner every EVM scope uses, and the runtime-asset
+    // copy the CLI package's build and prepack run, which everything using the
+    // built CLI depends on.
+    pattern: scriptsPattern({ files: ['test-evm-integration.sh', 'run-evm-integration.mjs', 'copy-cli-runtime-assets.mjs'] }),
+    full: 'Global CI input changed',
+  },
+  {
+    // The devnet bootstrap: the browser suite's Playwright setup, the devnet
+    // harnesses and the CLI's Blazegraph smoke fixture (which sources it) run it.
+    pattern: /^scripts\/(?:devnet\.sh|devnet-node-process-control\.mjs|lib\/devnet-node-process-control\.ts)$/,
+    lanes: ['kosava_node_ui_e2e', 'tornado_agent', 'bura_cli'],
+    reason: 'the browser suite, the devnet harnesses and the CLI Blazegraph smoke fixture run the devnet bootstrap',
+  },
+  {
+    pattern: /^scripts\/devnet-publish-helpers\.sh$/,
+    lanes: ['bura_cli'],
+    reason: 'the CLI devnet-publish smoke test runs the publish helpers',
+  },
+  {
+    pattern: /^scripts\/repro\/rfc64-catalog-durable-head\.mts$/,
+    lanes: ['tornado_agent'],
+    reason: 'the required agent sidecar runs the isolated catalog process-death campaign',
+  },
+  {
+    // packages/chain/test/sync-chain-abis.unit.test.ts runs a copy of it against
+    // temporary ABI directories.
+    pattern: /^scripts\/sync-chain-abis\.mjs$/,
+    lanes: ['tornado_core'],
+    reason: 'the chain lane runs the ABI sync script against temporary directories',
+  },
+  {
+    pattern: /^scripts\/repro\/publisher-live-control-(?:restart\.test|worker)\.mts$/,
+    lanes: ['bura_cli'],
+    reason: 'the required CLI lane runs the five-start publisher control durability campaign',
+  },
+  ...BUILD_ONLY_SCRIPTS.map((family) => ({ pattern: scriptsPattern(family), lanes: [], reason: family.reason })),
+  {
+    // Any other script, including a new one: its consumers are not known, so it
+    // fails closed (the build, install hooks and other workflows' scripts too).
+    pattern: /^scripts\//,
+    full: 'Repository script outside the known build-only families changed',
+  },
+  {
+    // Coverage baselines, read by the root vitest.coverage.ts every lane uses.
+    pattern: /^test-policy\/coverage-baselines\.json$/,
+    full: 'Global CI input changed',
+  },
+  {
+    // The authority mutation pilot: the core job's `pnpm test:mutation` runs
+    // Stryker with this configuration, which names the vitest config it runs.
+    pattern: /^test-policy\/(?:stryker\.config\.mjs|vitest\.mutation\.config\.ts)$/,
+    lanes: ['tornado_core'],
+    reason: 'the core job runs the mutation pilot with these configurations',
+  },
+  {
+    // The disabled-test allowlist and test routes, read by the build job's lint
+    // and test inventory.
+    pattern: /^test-policy\//,
+    lanes: [],
+    reason: 'test policy is checked by the shared build job',
+  },
   {
     // Workflows whose jobs, conditions and gates define what "CI gate" means.
     // Other top-level workflows run (or are linted) on their own.
-    pattern: /^\.github\/workflows\/(?:ci|evm-integration|rfc64-inventory-windows)\.yml$/,
+    pattern: /^\.github\/workflows\/(?:ci|evm-integration|rfc64-inventory-windows|chain-rpc-node26)\.yml$/,
     full: 'CI control-plane workflow changed',
   },
   {

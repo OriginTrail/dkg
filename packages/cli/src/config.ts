@@ -1,15 +1,16 @@
+import type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 import { normalizeOxigraphMemoryLimits, oxigraphMemorySupportError } from './oxigraph-memory-limits.js';
+import { resolveBooleanEnvOverride } from './boolean-env-override.js';
 import { readFile, writeFile, mkdir, symlink, rename, unlink, readlink } from 'node:fs/promises';
 import { resolveAsyncLiftRetryTuning, type AsyncLiftRetryTuning } from '@origintrail-official/dkg-publisher';
 import { join, dirname, basename } from 'node:path';
 import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import yaml from 'js-yaml';
+import { configFileSources, parseConfigText } from './config-file-source.js';
 import type {
   DKGAgentConfig,
   SyncAdmissionConfig,
   SyncContextGraphPriorityConfig,
-  SyncResponderSnapshotLimitsConfig,
 } from '@origintrail-official/dkg-agent';
 // The config loader must stay off the agent package ROOT at runtime: that entry
 // loads the whole agent runtime (libp2p, sync lanes, the process-wide
@@ -37,6 +38,7 @@ import {
   hasErrorCode,
   resolveDkgConfigHome,
   dkgAuthTokenPath,
+  peerIdFromRelayAddress,
   SELECTABLE_SETUP_NETWORKS,
 } from '@origintrail-official/dkg-core';
 import {
@@ -47,11 +49,12 @@ import {
   type StorageAckTiming,
 } from '@origintrail-official/dkg-publisher';
 import {
+  DEFAULT_REPLENISH_TARGET_ALLOWANCE,
+  DEFAULT_REPLENISH_TARGET_MULTIPLE,
   resolveRpcRequestGovernorPolicy,
   resolveContextGraphAuthorityIndexTickMs,
-  resolveFinalityConfirmations,
-  resolveReceiptTimeoutMs,
-  type ApprovalPolicy,
+  resolveFinalityConfirmations, resolveReceiptTimeoutMs,
+  type ApprovalPolicy, type ChainSignerSettings,
   type RpcRequestGovernorPolicyInput,
 } from '@origintrail-official/dkg-chain';
 import { runtimeAssetRoots } from './runtime-assets.js';
@@ -239,6 +242,8 @@ export interface NetworkConfig {
     finalityConfirmations?: number;
     /** See `ChainConfig.indexTickMs`. */
     indexTickMs?: number;
+    /** See `ChainConfig.boundedAuthorityReads`. */
+    boundedAuthorityReads?: boolean;
     /** See `ChainConfig.authorityReadTimeoutMs`. */
     authorityReadTimeoutMs?: number;
     /** See `ChainConfig.authorityColdResolutionTimeoutMs`. */
@@ -302,32 +307,54 @@ export interface ApprovalPolicyConfig {
    *   - `per-publish` — approve exactly each publish's TRAC cost (with the
    *     on-chain `1n` floor). Cheapest blast radius, most approve-gas at
    *     scale. Backward-compatible.
-   *   - `replenishing` — approve a configurable ceiling (default 1000 TRAC),
-   *     refill when allowance drops below `target × refillBelowFraction`
-   *     (default 10%). One approve per ~9 publishes' worth of TRAC.
-   *     **Recommended for mainnet.**
+   *   - `replenishing` — approve a ceiling sized relative to this publish's
+   *     cost (`targetAllowanceMultiple`, default 20×), refill when allowance
+   *     drops below `target × refillBelowFraction` (default 10%). At the
+   *     defaults that is one approve per 19 publishes of comparable cost,
+   *     at any publish price. **Recommended for mainnet.**
    *   - `unlimited` — approve `MaxUint256` once per wallet, never again.
    *     Lowest gas, widest blast radius. Use only if you trust the V10 KA
    *     contract absolutely.
    */
   mode?: ApprovalPolicyMode;
   /**
-   * `replenishing` only. TRAC amount (decimal wei-TRAC string — `1000 *
-   * 10^18 = '1000000000000000000000'` for 1000 TRAC) to approve up to.
-   * Defaults to `'1000000000000000000000'` (1000 TRAC).
+   * `replenishing` only. ABSOLUTE ceiling as a decimal wei-TRAC string
+   * (`1000 * 10^18 = '1000000000000000000000'` for 1000 TRAC).
+   *
+   * **Overrides `targetAllowanceMultiple` when set.** Unset (the default)
+   * means the ceiling is derived from each publish's cost. Set this when
+   * you want standing exposure bounded by an absolute TRAC figure rather
+   * than by a multiple of whatever the triggering publish happened to
+   * cost — the derived ceiling tracks the most expensive recent publish,
+   * so a single outlier raises it.
    */
   targetAllowance?: string;
   /**
+   * `replenishing` only. Ceiling multiplier over the publish cost, used
+   * when no absolute `targetAllowance` is set: the adapter approves
+   * `publishCost × targetAllowanceMultiple`. Integer >= 1; defaults to
+   * `20`. Rejected at startup if it is anything else.
+   *
+   * Sizing relative to cost avoids a flat ceiling being simultaneously too
+   * large for a small node (blast radius) and too small for a busy one
+   * (constant re-approving), and needs no config change when TRAC prices
+   * move. Pair with `refillBelowFraction`: approves are amortised over
+   * roughly `multiple × (1 - refillBelowFraction) + 1` publishes of
+   * comparable cost — 19 at the defaults.
+   */
+  targetAllowanceMultiple?: number;
+  /**
    * `replenishing` only. Refill when current allowance drops below
-   * `targetAllowance × refillBelowFraction`. Float between 0 and 1.
-   * Defaults to `0.1` (refill at 10% remaining).
+   * `target × refillBelowFraction`, where `target` is the absolute
+   * `targetAllowance` or the derived `cost × targetAllowanceMultiple`.
+   * Float between 0 and 1. Defaults to `0.1` (refill at 10% remaining).
    */
   refillBelowFraction?: number;
 }
 
 export type ApprovalPolicyConfigInput = ApprovalPolicyConfig | ApprovalPolicyMode;
 
-export interface ChainConfig {
+export interface ChainConfig extends ChainSignerSettings {
   /** 'evm' for real blockchain, omit or 'mock' for in-memory (testing only) */
   type: 'evm' | 'mock';
   /** JSON-RPC endpoint URL */
@@ -413,6 +440,12 @@ export interface ChainConfig {
    */
   indexTickMs?: number;
   /**
+   * Permit bounded Context Graph authority reads at read-only gates when the
+   * local index has a provably fresh answer. Live mutation and key gates keep
+   * reading the chain. Defaults to false in the adapter.
+   */
+  boundedAuthorityReads?: boolean;
+  /**
    * Request-scoped deadline (ms) for one on-chain Context Graph authority
    * read: liveness, access/publish policy, participant roster, or the
    * finalized-index snapshot behind a query, share, or SWM sync decision. A
@@ -456,19 +489,7 @@ export interface LargeLiteralStorageConfig {
   directory?: string;
 }
 
-export interface SharedMemoryPublicSnapshotStorageConfig {
-  enabled?: boolean;
-  directory?: string;
-  gc?: {
-    enabled?: boolean;
-    intervalMs?: number;
-    triggerFreeBytes?: number;
-    targetFreeBytes?: number;
-    hardReserveBytes?: number;
-    minAgeMs?: number;
-    staleTempAgeMs?: number;
-  };
-}
+export type { SharedMemoryPublicSnapshotStorageConfig } from '@origintrail-official/dkg-publisher';
 
 /** Optional LLM config for the Node UI chatbot (OpenAI-compatible API). */
 export interface LlmConfig {
@@ -612,7 +633,9 @@ export interface LoggingConfig {
   kaPublishLifecycleDebug?: boolean;
 }
 
-export interface DkgConfig {
+export interface DkgConfig extends Pick<DKGAgentConfig, 'syncResponderSnapshotLimits' | 'preparedContentCache'> {
+  /** Lower RPC usage by using the DKG Core chain cache. Core service defaults on. Edge use is opt-in. */
+  DKG_Core_chain_cache?: boolean;
   name: string;
   /**
    * Selects which bundled network/<name>.json overlay this node should use.
@@ -703,8 +726,16 @@ export interface DkgConfig {
    * (standing up a relay VM, sharing multiaddrs, monitoring).
    */
   preferredRelays?: string[];
+  /**
+   * Transport-level network peer isolation: refuse to dial, store or accept the relays of the other bundled
+   * DKG networks and peers that failed the network-identity proof. Defaults to true. Set false (or
+   * DKG_NETWORK_PEER_ISOLATION_ENABLED=0, which wins) to fall back to admission-only isolation without a new release.
+   */
+  networkPeerIsolationEnabled?: boolean;
   /** Public multiaddrs to announce (for VPS/cloud nodes where the public IP is not on the interface). */
   announceAddresses?: string[];
+  /** Keep LAN and VPN addresses in use on an Edge with public relays; see `lan-addresses.ts`. Default false. */
+  lanAddressesEnabled?: boolean;
   /** Bootstrap peer multiaddrs to connect to on startup (for direct peer discovery without relay). */
   bootstrapPeers?: string[];
   /** V10: context graphs to subscribe. */
@@ -734,20 +765,17 @@ export interface DkgConfig {
   queryAccess?: QueryAccessConfig;
   autoUpdate?: AutoUpdateConfig;
   /**
-   * Chain config. Field-merged on top of `network/<env>.json#chain` via
-   * `resolveChainConfig()`, so an operator can override individual fields
-   * (e.g. just `rpcUrl` to point at a private RPC) without having to
-   * restate `hubAddress` and `chainId`. Fields omitted here inherit the
-   * network defaults — including future hub rotations propagated by the
-   * auto-updater pulling a fresh network/<env>.json.
+   * Field-merged over network/<env>.json#chain by resolveChainConfig().
+   * Operators can override one field; omitted fields follow updated defaults.
    */
   chain?: Partial<ChainConfig>;
   /** Optional LLM for the Node UI chatbot (natural language → SPARQL, answers). */
   llm?: LlmConfig;
+  entitySearch?: { embedding: import('./entity-search/types.js').EntityEmbeddingConfig };
   /** Block explorer URL for TX links (default: derived from chainId). */
   blockExplorerUrl?: string;
-  /** Triple store backend override (default: oxigraph-worker with file persistence). */
-  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean };
+  /** Triple store backend override (default: oxigraph-worker with file persistence). `controlReservedSlots`: the async queues' store control path (OT-RFC-73 P14), the values of DKG_STORE_CONTROL_RESERVED_SLOTS, which wins when set; absent = the default (on for blazegraph and oxigraph-server on more than 2 CPUs). */
+  store?: { backend: string; options?: Record<string, unknown>; graphSetIndex?: boolean | GraphSetIndexConfig; changelog?: boolean; controlReservedSlots?: string | number };
   /**
    * Intentional cap on how many persisted context-graph subscriptions a node
    * ACTIVATES on boot (gossip + sync). A large stale backlog otherwise fans out
@@ -771,8 +799,18 @@ export interface DkgConfig {
   sharedMemoryPublicSnapshotStorage?: SharedMemoryPublicSnapshotStorageConfig;
   /** Disable expensive peer-connect SWM catch-up for bulk benchmark/devnet runs. */
   syncSharedMemoryOnConnect?: boolean;
-  /** Emergency switch for the periodic sync reconciler. Env DKG_SYNC_RECONCILER_ENABLED wins. */
+  /**
+   * Emergency switch for the periodic peer-sync reconciler only. Env
+   * DKG_SYNC_RECONCILER_ENABLED wins. Chain-driven VM reconciliation has its
+   * own `vmReconcilerEnabled` switch and is not affected by this one.
+   */
   syncReconcilerEnabled?: boolean;
+  /**
+   * Chain-driven VM reconciliation (core-hosted recording, KA-registered
+   * nudge, VM reconcile sweep). Env DKG_VM_RECONCILER_ENABLED wins; default
+   * on. A core with it off declines every StorageACK.
+   */
+  vmReconcilerEnabled?: boolean;
   /** Period between automatic sync-reconciler passes. Default: 5 minutes. */
   syncReconcilerIntervalMs?: number;
   /** Age after which a peer is eligible for automatic sync retry. Default: 10 minutes. */
@@ -791,6 +829,13 @@ export interface DkgConfig {
    * remains available. Env DKG_SYNC_SYSTEM_CONTEXT_GRAPHS_ON_CONNECT wins.
    */
   syncSystemContextGraphsOnConnect?: boolean;
+  /**
+   * Fetch the `agents` phonebook once, bounded and on demand, when a public
+   * wallet-scoped Context Graph needs its owner's profile to reach holders.
+   * Default true; inert when `agents` already syncs on every connect. Set
+   * false to disable. Env DKG_ON_DEMAND_AGENTS_PHONEBOOK wins.
+   */
+  onDemandAgentsPhonebook?: boolean;
   /** Emergency switch for durable/SWM sync execution. Env DKG_DURABLE_SYNC_ENABLED wins. */
   durableSyncEnabled?: boolean;
   /**
@@ -804,8 +849,6 @@ export interface DkgConfig {
   syncGlobalQueueLimit?: number;
   /** Optional partitioned fast/slow sync admission. Omit for the legacy shared limiter. */
   syncAdmission?: SyncAdmissionConfig;
-  /** Retained sync responder snapshot limits (rows and estimated bytes). */
-  syncResponderSnapshotLimits?: SyncResponderSnapshotLimitsConfig;
   /**
    * Local sync scheduling priority by Context Graph ID. Higher runs first.
    * System Context Graphs default to a deprioritized priority so they run
@@ -985,23 +1028,23 @@ export interface DkgConfig {
     /** GH#2270 — hard ceiling on the (jittered) retry delay. Default 60000. */
     retryBackoffMaxMs?: number;
   };
-  /**
-   * Async promote queue worker (WM → SWM). Unlike `publisher` which is
-   * opt-in, the promote worker is **on by default** — without it, jobs
-   * enqueued via `POST /api/knowledge-assets/{name}/swm/share-async` sit in
-   * `queued` forever. Set `enabled: false` to disable when running a
-   * read-only / forensic node where you don't want the worker mutating
-   * SWM. See `docs/specs/SPEC_ASYNC_PROMOTE_QUEUE.md` and the
-   * `dkg-node` skill (§8 "Async promote queue") for the full contract.
-   */
+  /** WM → SWM worker, enabled by default; see docs/use-dkg/async-queue-operations.md. */
   promoteQueue?: {
+    /** Default 5. Attempt budget; typed prerequisites also retain their retry window. */
+    maxRetries?: number;
+    /** Default 60_000ms; exponential retry curve base. */
+    retryBaseMs?: number;
+    /** Default 900_000ms; maximum retry delay including jitter. */
+    retryMaxMs?: number;
+    /** Default 0.2; symmetric jitter ratio in [0, 1]. */
+    retryJitterRatio?: number;
     /** Default `true`. Set `false` to disable the in-daemon worker. */
     enabled?: boolean;
     /** Default 4. Number of concurrent worker slots polling the queue. */
     workerConcurrency?: number;
-    /** Default 100ms. Polling interval per slot. */
+    /** Default 100ms. Idle full scans are bounded to once per second. */
     pollIntervalMs?: number;
-    /** Default 60_000ms (1 min). Must be >0 and shorter than the queue's 5-min lease when enabled. */
+    /** Default 60_000ms. Must be shorter than the queue's 15-minute lease when enabled. */
     heartbeatIntervalMs?: number;
     /** Default 30_000ms. Max time `stop()` waits for in-flight promotes to drain on shutdown. */
     shutdownTimeoutMs?: number;
@@ -1012,7 +1055,12 @@ export interface DkgConfig {
      */
     postCommitRecoveryIntervalMs?: number;
   };
-  /** Allowed CORS origins. Defaults to '*' when apiHost is '127.0.0.1', otherwise restrictive. */
+  queueRetention?: import('./retention-config.js').RetentionConfigInput; // async queue retention, default off; docs/use-dkg/async-queue-operations.md
+  /**
+   * Allowed CORS origins. When unset, only the API port's loopback origins
+   * (`http://127.0.0.1:<port>`, `http://localhost:<port>`, `http://[::1]:<port>`)
+   * are allowed; `apiHost: '0.0.0.0'` keeps the legacy `'*'`.
+   */
   corsOrigins?: string | string[];
   /** HTTP rate limiting settings. */
   rateLimit?: { requestsPerMinute?: number; exempt?: string[] };
@@ -1222,23 +1270,13 @@ export function resolveContextGraphSubscriptionRehydrationEnabled(
   configValue: unknown,
   envValue: string | undefined = process.env[CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV],
 ): boolean {
-  if (envValue !== undefined) {
-    const normalized = envValue.trim().toLowerCase();
-    if (normalized === '1' || normalized === 'true') return true;
-    if (normalized === '0' || normalized === 'false') return false;
-    throw new Error(
-      `${CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV} must be one of 1, 0, true, or false ` +
-      `(received ${JSON.stringify(envValue)})`,
-    );
-  }
-  if (configValue === undefined) return true;
-  if (typeof configValue !== 'boolean') {
-    throw new Error(
-      'contextGraphSubscriptionRehydrationEnabled must be a boolean ' +
-      `(received ${JSON.stringify(configValue)})`,
-    );
-  }
-  return configValue;
+  return resolveBooleanEnvOverride({
+    envName: CONTEXT_GRAPH_SUBSCRIPTION_REHYDRATION_ENV,
+    configName: 'contextGraphSubscriptionRehydrationEnabled',
+    envValue,
+    configValue,
+    defaultValue: true,
+  });
 }
 
 /**
@@ -1356,9 +1394,10 @@ export function resolveSharedMemoryTtlMs(config: DkgConfig): number | undefined 
  *   the chain adapter fall back to its built-in default
  *   (`DEFAULT_APPROVAL_POLICY`, currently `per-publish`).
  * - Throws a descriptive `Error` if the operator supplied an unparseable
- *   `targetAllowance` (e.g. `'one thousand TRAC'`). Fails fast at startup
- *   rather than silently falling back — config bugs are easier to find
- *   when they don't lurk for hours.
+ *   `targetAllowance` (e.g. `'one thousand TRAC'`), an out-of-range
+ *   `refillBelowFraction`, or a `targetAllowanceMultiple` that isn't an
+ *   integer >= 1. Fails fast at startup rather than silently falling back
+ *   — config bugs are easier to find when they don't lurk for hours.
  */
 export function resolveApprovalPolicy(
   policy: ApprovalPolicyConfig | undefined,
@@ -1385,6 +1424,24 @@ export function resolveApprovalPolicy(
       );
     }
   }
+  // A multiple below 1 would put the derived ceiling under the publish
+  // floor on every call: the adapter's floor clamp would fire every time
+  // and `replenishing` would silently behave as `per-publish` — the
+  // operator's chosen mode quietly cancelled, visible only as an approve
+  // tx per publish on the gas bill. Throw rather than clamp, matching
+  // `finalityConfirmations` ("must be an integer >= 1") and the two
+  // sibling fields here, which all reject rather than repair.
+  if (policy.targetAllowanceMultiple !== undefined) {
+    if (
+      typeof policy.targetAllowanceMultiple !== 'number'
+      || !Number.isSafeInteger(policy.targetAllowanceMultiple)
+      || policy.targetAllowanceMultiple < 1
+    ) {
+      throw new Error(
+        `chain.approvalPolicy.targetAllowanceMultiple must be an integer >= 1 (got: ${JSON.stringify(policy.targetAllowanceMultiple)})`,
+      );
+    }
+  }
   if (policy.refillBelowFraction !== undefined) {
     if (
       typeof policy.refillBelowFraction !== 'number'
@@ -1400,8 +1457,35 @@ export function resolveApprovalPolicy(
   return {
     mode,
     targetAllowance,
+    targetAllowanceMultiple: policy.targetAllowanceMultiple,
     refillBelowFraction: policy.refillBelowFraction,
   };
+}
+
+/**
+ * Operator-visible migration warning for the one replenishing-policy shape
+ * whose meaning changed when relative sizing replaced the flat 1000 TRAC
+ * default. An explicit absolute target preserves the legacy ceiling; an
+ * explicit multiple opts into the new relative ceiling.
+ */
+export function approvalPolicyMigrationWarning(
+  policy: ApprovalPolicyConfig | undefined,
+): string | undefined {
+  if (
+    policy?.mode !== 'replenishing'
+    || policy.targetAllowance !== undefined
+    || policy.targetAllowanceMultiple !== undefined
+  ) {
+    return undefined;
+  }
+  const legacyTrac = DEFAULT_REPLENISH_TARGET_ALLOWANCE / (10n ** 18n);
+  return (
+    '[warn] chain.approvalPolicy mode=replenishing has no targetAllowance or '
+    + `targetAllowanceMultiple, so it now approves ${DEFAULT_REPLENISH_TARGET_MULTIPLE}x `
+    + `the triggering publish cost instead of the legacy flat ${legacyTrac.toString()} TRAC `
+    + 'ceiling. Set chain.approvalPolicy.targetAllowance explicitly to retain a flat ceiling, '
+    + 'or targetAllowanceMultiple to keep relative sizing.'
+  );
 }
 
 /**
@@ -1826,6 +1910,17 @@ export function resolveChainConfig(
   if (operatorHasIndexTickMs || indexTickMs !== undefined) {
     merged.indexTickMs = resolveContextGraphAuthorityIndexTickMs(indexTickMs);
   }
+  const operatorHasBoundedAuthorityReads = cfg !== undefined && cfg !== null
+    && Object.prototype.hasOwnProperty.call(cfg, 'boundedAuthorityReads');
+  const boundedAuthorityReads: unknown = operatorHasBoundedAuthorityReads
+    ? cfg.boundedAuthorityReads
+    : net?.boundedAuthorityReads;
+  if (operatorHasBoundedAuthorityReads || boundedAuthorityReads !== undefined) {
+    if (typeof boundedAuthorityReads !== 'boolean') {
+      throw new TypeError('chain.boundedAuthorityReads must be a boolean');
+    }
+    merged.boundedAuthorityReads = boundedAuthorityReads;
+  }
   // Presence matters for both authority deadlines: an explicit null/zero is an
   // operator error, not a request to fall back to the network or agent default.
   for (const key of ['authorityReadTimeoutMs', 'authorityColdResolutionTimeoutMs'] as const) {
@@ -1907,7 +2002,7 @@ export async function loadNetworkConfig(network?: string): Promise<NetworkConfig
   }
 }
 
-function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
+export function loadBundledNetworkRegistry(): Readonly<Record<string, NetworkConfig>> {
   if (_bundledNetworkRegistry) return _bundledNetworkRegistry;
 
   _bundledNetworkRegistry = loadNetworkRegistryFromRoots(runtimeAssetRoots());
@@ -1954,6 +2049,84 @@ export function loadNetworkRegistryFromRoots(
   }
 
   return registry;
+}
+
+const NETWORK_PEER_ISOLATION_ENV = 'DKG_NETWORK_PEER_ISOLATION_ENABLED';
+
+/**
+ * Resolve the transport-level network peer isolation switch (default on). The
+ * environment override wins so an operator can turn it off for one boot
+ * without rewriting the config file. Same rule as every other env-overrides-
+ * config flag ({@link resolveBooleanEnvOverride}): 1, 0, true or false, and
+ * anything else, an empty value included, fails startup instead of silently
+ * picking a side.
+ */
+export function resolveNetworkPeerIsolationEnabled(
+  configValue: unknown,
+  envValue: string | undefined = process.env[NETWORK_PEER_ISOLATION_ENV],
+): boolean {
+  return resolveBooleanEnvOverride({
+    envName: NETWORK_PEER_ISOLATION_ENV,
+    configName: 'networkPeerIsolationEnabled',
+    envValue,
+    configValue,
+    defaultValue: true,
+  });
+}
+
+type NetworkRelayIdentity = Partial<Pick<NetworkConfig, 'networkId' | 'genesisId' | 'relays'>>;
+
+export interface OtherNetworkRelays {
+  /** Relay multiaddrs of the other bundled networks, one per distinct peer id. */
+  relays: string[];
+  /** Sorted names of the bundled networks those relays belong to. */
+  networkNames: string[];
+}
+
+/**
+ * Relays declared by the bundled network configs OTHER than the active one:
+ * peers this node must never dial (`DKGNodeConfig.otherNetworkRelays`), in
+ * both directions — a testnet node derives the mainnet relays exactly as a
+ * mainnet node derives the testnet ones.
+ *
+ * An entry counts as the active network when its name, networkId or genesisId
+ * matches, so a renamed copy of the active overlay is never "other". Relays
+ * whose peer id the active network or the node's effective relay set (config
+ * relay, preferred relays) also lists are dropped, as are unparseable ids such
+ * as the `PEER_ID_*` placeholders of a pre-deployment network.
+ */
+export function resolveOtherNetworkRelays(input: {
+  activeNetworkName: string;
+  activeNetwork: NetworkRelayIdentity | null | undefined;
+  localRelayPeers?: readonly string[];
+  registry?: Readonly<Record<string, NetworkRelayIdentity>>;
+}): OtherNetworkRelays {
+  const active = input.activeNetwork;
+  if (!active) return { relays: [], networkNames: [] };
+  const registry = input.registry ?? loadBundledNetworkRegistry();
+  const localPeerIds = new Set<string>();
+  for (const address of [...(active.relays ?? []), ...(input.localRelayPeers ?? [])]) {
+    const peerId = typeof address === 'string' ? peerIdFromRelayAddress(address) : undefined;
+    if (peerId) localPeerIds.add(peerId);
+  }
+
+  const seen = new Set<string>();
+  const relays: string[] = [];
+  const networkNames = new Set<string>();
+  for (const name of Object.keys(registry).sort()) {
+    const network = registry[name];
+    if (!network || name === input.activeNetworkName) continue;
+    if (network.networkId && network.networkId === active.networkId) continue;
+    if (network.genesisId && network.genesisId === active.genesisId) continue;
+    for (const address of Array.isArray(network.relays) ? network.relays : []) {
+      const peerId = typeof address === 'string' ? peerIdFromRelayAddress(address) : undefined;
+      if (!peerId || localPeerIds.has(peerId) || seen.has(peerId)) continue;
+      seen.add(peerId);
+      relays.push(address.trim());
+      networkNames.add(name);
+    }
+  }
+  return { relays, networkNames: [...networkNames] };
 }
 
 /**
@@ -2254,24 +2427,22 @@ export class DkgHomeFiles {
   get apiPortPath(): string { return join(this.home, 'api.port'); }
   get tokenPath(): string { return dkgAuthTokenPath(this.home); }
 
-  configExists(): boolean { return existsSync(this.configPath) || existsSync(this.configYamlPath); }
+  configExists(): boolean { return configFileSources(this.home).some((source) => existsSync(source.path)); }
 
   readConfigSync(): unknown {
-    if (existsSync(this.configPath)) return JSON.parse(readFileSync(this.configPath, 'utf-8'));
-    if (existsSync(this.configYamlPath)) return yaml.load(readFileSync(this.configYamlPath, 'utf-8'));
+    for (const source of configFileSources(this.home)) {
+      if (existsSync(source.path)) return parseConfigText(source, readFileSync(source.path, 'utf-8'));
+    }
     return null;
   }
 
   async loadConfig(): Promise<DkgConfig> {
-    try {
-      return mergePersistedConfig(JSON.parse(await readFile(this.configPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
-    }
-    try {
-      return mergePersistedConfig(yaml.load(await readFile(this.configYamlPath, 'utf-8')));
-    } catch (err) {
-      if (!isEnoent(err)) throw err;
+    for (const source of configFileSources(this.home)) {
+      try {
+        return mergePersistedConfig(parseConfigText(source, await readFile(source.path, 'utf-8')));
+      } catch (err) {
+        if (!isEnoent(err)) throw err;
+      }
     }
     return { ...DEFAULT_CONFIG };
   }
@@ -2309,7 +2480,7 @@ export function logPath(): string { return join(dkgDir(), 'daemon.log'); }
 export async function ensureDkgDir(): Promise<void> { await mkdir(dkgDir(), { recursive: true }); }
 
 /** Reject a misplaced trust policy instead of silently ignoring it. */
-export function assertAuthorityIndexConfigPlacement(config: Pick<DkgConfig, 'core'>): void {
+export function assertAuthorityIndexConfigPlacement(config: { core?: unknown }): void {
   if (config.core !== null && typeof config.core === 'object'
     && Object.hasOwn(config.core, 'authorityIndex')) {
     throw new TypeError(

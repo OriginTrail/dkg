@@ -27,12 +27,13 @@
  * agreement over the catalog fields.
  */
 import { TEST_SNAPSHOT_STORAGE } from '../../../scripts/testing/snapshot-storage.js';
-import { describe, it, expect, beforeAll, afterAll } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, vi } from 'vitest';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { makeTestKaNumberAllocator } from './_helpers/ka-allocator.js';
 import { DKGAgent } from '../src/index.js';
+import { createContextGraphAuthorityError } from '../src/internal/context-graph-authority/context-graph-authority.js';
 import {
   extractCatalogLeavesFromStore,
 } from '@origintrail-official/dkg-random-sampling';
@@ -129,12 +130,28 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
       kaNumberAllocator: makeTestKaNumberAllocator(), name: 'ParityPublisher', nodeRole: 'core', listenPort: 0, skills: [],
       dataDir: mkDataDir('pub'),
       sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
+      // Exercise explicit publish/remote-ACK parity without unrelated maintenance
+      // replacing the private recipient authority during a later test's promote.
+      syncSharedMemoryOnConnect: false,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+      syncOnConnectEnabled: false,
+      durableSyncEnabled: false,
+      agentProfileHeartbeatMs: 0,
       chainConfig: chainConfig(HARDHAT_KEYS.CORE_OP, HARDHAT_KEYS.CORE_ADMIN),
     });
     ackCore = await DKGAgent.create({
       kaNumberAllocator: makeTestKaNumberAllocator(), name: 'ParityAckCore', nodeRole: 'core', listenPort: 0, skills: [],
       dataDir: mkDataDir('ack'),
       sharedMemoryPublicSnapshotStorage: TEST_SNAPSHOT_STORAGE,
+      // Exercise explicit publish/remote-ACK parity without unrelated maintenance
+      // replacing the private recipient authority during a later test's promote.
+      syncSharedMemoryOnConnect: false,
+      syncReconcilerEnabled: false,
+      vmReconcilerEnabled: false,
+      syncOnConnectEnabled: false,
+      durableSyncEnabled: false,
+      agentProfileHeartbeatMs: 0,
       chainConfig: chainConfig(HARDHAT_KEYS.REC1_OP, HARDHAT_KEYS.REC1_ADMIN),
     });
     agents.push(publisher, ackCore);
@@ -283,7 +300,32 @@ describe('OT-RFC-49 WS-D — catalog producer↔extractor↔chain parity', () =>
       },
     });
     const jobId = await queue.enqueueKnowledgeAssetVmPublish(intent);
-    const processed = await queue.processNext('rfc49-async-wallet');
+    // Recipient resolution is revision-fenced: background metadata activity
+    // may correctly withhold a publish until the private authority is stable.
+    // Exercise that outcome deterministically, then use the queue's canonical
+    // retry lane rather than assuming every first claim must finalize.
+    const recipientResolver = vi.spyOn(publisher as any, 'resolveWorkspaceAgentRecipientsForCurrentAuthority')
+      .mockRejectedValueOnce(createContextGraphAuthorityError('private recipient authority changed during resolution', {
+        reason: 'chain-participant-authority-unavailable',
+        detail: 'retry recipient resolution against the current private authority',
+      }));
+    let processed;
+    try {
+      processed = await queue.processNext('rfc49-async-wallet');
+      expect(processed).toMatchObject({ jobId, status: 'failed', failure: {
+        code: 'authority_unavailable', phase: 'validation', failedFromState: 'validated', retryable: true,
+        resolution: 'reset_to_accepted',
+      } });
+      expect(queuedResult).toBeUndefined();
+      for (let retry = 0; processed?.status === 'failed' && retry < 3; retry += 1) {
+        // Only the known pre-broadcast retryable authority result may retry.
+        // Any other failure, exhausted retry budget, or missing job still fails.
+        expect(processed.failure).toMatchObject({ code: 'authority_unavailable',
+          phase: 'validation', failedFromState: 'validated', retryable: true, resolution: 'reset_to_accepted' });
+        expect(await queue.retry()).toBe(1);
+        processed = await queue.processNext('rfc49-async-wallet');
+      }
+    } finally { recipientResolver.mockRestore(); }
 
     expect(processed?.jobId).toBe(jobId);
     if (processed?.status !== 'finalized') {

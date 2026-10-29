@@ -27,6 +27,8 @@ import { mkdtemp, readFile, rm, stat, writeFile, chmod, access } from 'node:fs/p
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+  isPinnedOxigraphFile,
+  oxigraphBinaryLocations,
   resolveOxigraphBinary,
   resolveOxigraphAsset,
   OXIGRAPH_ASSETS,
@@ -255,6 +257,52 @@ describe('PATH fallback (real directories, real executables)', () => {
     } finally {
       process.env.PATH = prevPath;
       await rm(cacheDir, { recursive: true, force: true });
+    }
+  });
+
+  it('reports the binaries this node runs Oxigraph from: the selected one, the oxigraph on PATH, and the cache for pinned releases', async () => {
+    const cacheDir = await freshCache();
+    const emptyDir = await mkdtemp(join(tmpdir(), 'oxi-path-empty-'));
+    try {
+      const bundled = { path: join(cacheDir, 'oxigraph-v0.5.8'), source: 'bundled' as const, version: '0.5.8' };
+      const system = { path: join(pathDirB, 'oxigraph'), source: 'system' as const, version: '0.6.0' };
+      const opts = { cacheDir, platform: 'linux' as const };
+      // The executable oxigraph on PATH, not the non-executable decoy before it.
+      process.env.PATH = `${pathDirA}:${pathDirB}`;
+      await expect(oxigraphBinaryLocations(bundled, opts)).resolves.toEqual({
+        exact: [bundled.path, join(pathDirB, 'oxigraph')],
+        cacheDir,
+      });
+      // A PATH binary resolution selected needs no second lookup.
+      process.env.PATH = emptyDir;
+      await expect(oxigraphBinaryLocations(system, opts)).resolves.toEqual({ exact: [system.path], cacheDir });
+      // No oxigraph on PATH: the selected binary only.
+      await expect(oxigraphBinaryLocations(bundled, opts)).resolves.toEqual({ exact: [bundled.path], cacheDir });
+    } finally {
+      process.env.PATH = prevPath;
+      await rm(cacheDir, { recursive: true, force: true });
+      await rm(emptyDir, { recursive: true, force: true });
+    }
+  });
+
+  it.each([
+    ['oxigraph-v0.5.8', true],
+    ['oxigraph-v0.5.7', true],
+    ['oxigraph-v10.12.3.exe', true],
+    ['oxigraph', false],
+    ['oxigraph-server', false],
+    ['oxigraph-backup', false],
+    ['oxigraph-v0.5.8.partial', false],
+    ['oxigraph-v0.5', false],
+    ['my-oxigraph-v0.5.8', false],
+  ] as const)('takes only a pinned release name for a managed-cache Oxigraph: %s -> %s', (fileName, pinned) => {
+    expect(isPinnedOxigraphFile(fileName)).toBe(pinned);
+  });
+
+  it('names every cached download so the reclaim takes it for a pinned release', () => {
+    for (const key of Object.keys(OXIGRAPH_ASSETS)) {
+      const [platform, arch] = key.split('-') as [NodeJS.Platform, string];
+      expect(isPinnedOxigraphFile(resolveOxigraphAsset(platform, arch).fileName), key).toBe(true);
     }
   });
 

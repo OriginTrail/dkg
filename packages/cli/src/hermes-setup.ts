@@ -126,8 +126,9 @@ export async function hermesSetupAction(
     },
     {
       loadOpWallets: async (dir: string) => {
-        const { loadOpWallets } = await import('@origintrail-official/dkg-agent');
-        return loadOpWallets(dir);
+        // No wallets.json when the node signs through an external signer.
+        const { loadLocalOpWalletsUnlessExternal } = await import('./local-op-wallets.js');
+        return loadLocalOpWalletsUnlessExternal(dir);
       },
     },
   );

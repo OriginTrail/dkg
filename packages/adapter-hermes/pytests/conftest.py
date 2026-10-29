@@ -91,7 +91,7 @@ def plugin_module():
 
 
 @pytest.fixture
-def recording_client(client_module):
+def recording_client(client_module, hermes_host):
     """A DKGClient subclass whose HTTP layer is replaced by a recorder.
 
     ``posts`` captures ``(path, body)`` tuples. ``responder`` is an optional
@@ -111,3 +111,46 @@ def recording_client(client_module):
             return {"success": True, "echoed": data}
 
     return RecordingClient()
+
+
+@pytest.fixture
+def hermes_host(tmp_path, monkeypatch):
+    """An isolated host profile; never read the developer's real Hermes/DKG state."""
+    import os
+    for key in tuple(os.environ):
+        if key.startswith(("DKG_", "HERMES_DKG_")):
+            monkeypatch.delenv(key)
+    home = tmp_path / "profile"
+    home.mkdir()
+    monkeypatch.setenv("DKG_HOME", str(tmp_path / "node"))
+    monkeypatch.setitem(sys.modules, "hermes_constants", types.SimpleNamespace(get_hermes_home=lambda: home))
+    return home
+
+
+@pytest.fixture
+def provider_factory(plugin_module, hermes_host, monkeypatch):
+    """Real provider + real client routing, with only the daemon transport replaced."""
+    import importlib
+    from unittest.mock import Mock
+    client = importlib.import_module(plugin_module.__name__ + ".client")
+    post = Mock(return_value={"success": True, "assertionUri": "urn:memory"})
+    get = Mock(return_value={"peerId": "peer-local"})
+    health = Mock(return_value=True)
+    monkeypatch.setattr(client.DKGClient, "_post", post)
+    monkeypatch.setattr(client.DKGClient, "_get", get)
+    monkeypatch.setattr(client.DKGClient, "health_check", health)
+    providers = []
+
+    def create(config=None, *, initialize=True, **kwargs):
+        (hermes_host / "dkg.json").write_text(json.dumps(config or {}))
+        provider = plugin_module.DKGMemoryProvider()
+        providers.append(provider)
+        if initialize:
+            provider.initialize("session-1", **kwargs)
+        return provider
+
+    create.post, create.get, create.health = post, get, health
+    create.home = hermes_host
+    yield create
+    for provider in providers:
+        provider.shutdown()

@@ -1,4 +1,6 @@
-import { describe, it, expect } from 'vitest';
+import type { ContextGraphReadAuthorityDecision, DKGAgent } from '@origintrail-official/dkg-agent';
+import { Logger, type CanonicalLogRecord } from '@origintrail-official/dkg-core';
+import { describe, it, expect, vi } from 'vitest';
 import { handleMemoryRoutes } from '../src/daemon/routes/memory.js';
 import type { RequestContext } from '../src/daemon/routes/context.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
@@ -46,11 +48,6 @@ function fakeReq(method: string, body: unknown) {
   } as any;
 }
 
-interface Decision {
-  outcome: 'allowed' | 'denied' | 'unavailable';
-  source: string;
-  reason: string;
-}
 
 interface Probe {
   /** Args the route passed to the read-authority resolver, in call order. */
@@ -65,29 +62,31 @@ interface Probe {
   sparql: string;
   /** Memory-layer views the route actually fanned out to. */
   readonly views: string[];
+  readonly events: string[];
 }
 
 function buildCtx(opts: {
   body: unknown;
   authentication: RequestContext['authentication'];
-  decisionFor: (contextGraphId: string) => Decision;
+  decisionFor: (contextGraphId: string) => ContextGraphReadAuthorityDecision;
   swmAllowed?: boolean;
 }) {
   const res = fakeRes();
   const url = new URL('http://127.0.0.1/api/memory/search');
   const probe: Probe = {
     authorityChecks: [], swmChecks: [], storeQueried: false, vectorSearched: false, sparql: '',
-    views: [],
+    views: [], events: [],
   };
 
+  const resolveAuthority: DKGAgent['resolveContextGraphReadAuthority'] = async (contextGraphId, o = {}) => {
+    probe.events.push('authority');
+    probe.authorityChecks.push({ contextGraphId, callerAgentAddress: o.callerAgentAddress });
+    return opts.decisionFor(contextGraphId);
+  };
   const agent = {
-    resolveContextGraphReadAuthority: async (
-      contextGraphId: string,
-      o: { callerAgentAddress?: string } = {},
-    ) => {
-      probe.authorityChecks.push({ contextGraphId, callerAgentAddress: o.callerAgentAddress });
-      return opts.decisionFor(contextGraphId);
-    },
+    peerId: 'node-default-peer',
+    getDefaultAgentAddress: () => '0xnode-default-agent',
+    resolveContextGraphReadAuthority: resolveAuthority,
     canUseSharedMemoryForContextGraph: async (
       contextGraphId: string,
       o: { callerAgentAddress?: string } = {},
@@ -98,6 +97,7 @@ function buildCtx(opts: {
     // The route fans the text search out per memory-layer view through the
     // guarded `DKGAgent.query` path.
     query: async (sparql: string, o: Record<string, any> = {}) => {
+      probe.events.push('retrieve');
       probe.storeQueried = true;
       probe.sparql = sparql;
       if (o.view) probe.views.push(o.view);
@@ -141,13 +141,14 @@ function buildCtx(opts: {
     path: url.pathname,
     url,
     authentication: opts.authentication,
+    requestAgentAddress: '0xnode-default-agent',
   } as unknown as RequestContext;
 
   return { ctx, res, probe };
 }
 
-const ALLOW_CHAIN: Decision = { outcome: 'allowed', source: 'registered-chain', reason: 'chain-participant' };
-const DENY: Decision = { outcome: 'denied', source: 'registered-chain', reason: 'agent-not-in-chain-roster' };
+const ALLOW_CHAIN: ContextGraphReadAuthorityDecision = { outcome: 'allowed', grantScope: 'caller', source: 'registered-chain', reason: 'chain-participant', metadataBootstrap: 'eligible' };
+const DENY: ContextGraphReadAuthorityDecision = { outcome: 'denied', grantScope: 'none', metadataBootstrap: 'forbidden', source: 'registered-chain', reason: 'agent-not-in-chain-roster' };
 
 describe('POST /api/memory/search — context-graph read authority', () => {
   it('denies an agent-scoped caller that has no read authority for the named CG', async () => {
@@ -203,14 +204,14 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     expect(probe.authorityChecks).toEqual([]);
   });
 
-  it('gates an anonymous caller through node-local read authority', async () => {
-    // Auth-disabled / anonymous callers carry no agent identity, so the
+  it('gates an anonymous public-mode caller through node-local read authority', async () => {
+    // Anonymous public-mode callers carry no agent identity, so the
     // authority resolver falls back to the node's own membership. That is the
     // same contract `DKGAgent.query` applies, and it must still be CONSULTED
     // rather than skipped.
     const { ctx, res, probe } = buildCtx({
       body: { query: 'anything', contextGraphId: 'cg2' },
-      authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+      authentication: requestAuthentication({ kind: 'anonymous', mode: 'public' }),
       decisionFor: () => DENY,
     });
 
@@ -222,6 +223,20 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     expect(probe.authorityChecks).toEqual([
       { contextGraphId: 'cg2', callerAgentAddress: undefined },
     ]);
+  });
+
+  it('preserves tokenless auth-disabled operator memory searches', async () => {
+    const { ctx, res, probe } = buildCtx({
+      body: { query: 'anything', contextGraphId: 'cg2' },
+      authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+      decisionFor: () => DENY,
+    });
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(200);
+    expect(probe.storeQueried).toBe(true);
+    expect(probe.vectorSearched).toBe(true);
+    expect(probe.authorityChecks).toEqual([]);
+    expect(JSON.parse(res.body).resultCount).toBeGreaterThan(0);
   });
 
   it('denies BEFORE the SPARQL builder runs, and emits no results key', async () => {
@@ -240,7 +255,8 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     expect(probe.storeQueried).toBe(false);
     expect(probe.sparql).toBe('');
     const parsed = JSON.parse(res.body);
-    expect(parsed.error).toContain('cg2');
+    expect(parsed.error).toBe('Not authorized to read this context graph.');
+    expect(res.body).not.toContain('cg2');
     expect(parsed.results).toBeUndefined();
     expect(parsed.resultCount).toBeUndefined();
   });
@@ -253,17 +269,36 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       body: { query: 'anything', contextGraphId: 'cg1' },
       authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
       decisionFor: () => ({
-        outcome: 'unavailable', source: 'registered-chain', reason: 'registered-authority-error',
+        outcome: 'unavailable', metadataBootstrap: 'eligible', source: 'registered-chain', reason: 'registered-authority-error',
+        dependency: 'chain',
       }),
     });
+    const records: CanonicalLogRecord[] = [];
+    Logger.setSink((record) => { records.push(record); });
+    const quiet = [
+      vi.spyOn(process.stdout, 'write').mockImplementation(() => true),
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true),
+    ];
 
-    await handleMemoryRoutes(ctx);
+    try {
+      await handleMemoryRoutes(ctx);
+    } finally {
+      Logger.setSink(null);
+      for (const spy of quiet) spy.mockRestore();
+    }
 
     expect(res.statusCode).toBe(503);
     const body = JSON.parse(res.body);
     expect(body.retryable).toBe(true);
     expect(body.code).toBe('CONTEXT_GRAPH_READ_AUTHORITY_UNAVAILABLE');
     expect(res.headers['Retry-After']).toBe('3');
+    // #2834: the attribution goes to the daemon log under this operation id.
+    const operationId = res.headers['x-dkg-operation-id'];
+    expect(operationId).toMatch(/^[0-9a-f-]{36}$/);
+    const lines = records.filter((record) => record.operationId === operationId);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.message)
+      .toContain('source=registered-chain reason=registered-authority-error dependency=chain');
     // Per issue #2641 / PR #2649: an outage response must not disclose the CG
     // id, the authority source or the internal reason — otherwise the 503
     // becomes the enumeration oracle the denial path avoids.
@@ -285,11 +320,12 @@ describe('POST /api/memory/search — context-graph read authority', () => {
       'legacy-local-identity-participant',
       'legacy-subscription',
       'legacy-edge-subscription',
+      'renamed-for-diagnostics',
     ]) {
       const { ctx, res, probe } = buildCtx({
         body: { query: 'anything', contextGraphId: 'cg2' },
         authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
-        decisionFor: () => ({ outcome: 'allowed', source: 'legacy-local', reason }),
+        decisionFor: () => ({ outcome: 'allowed', grantScope: 'node', source: 'legacy-local', metadataBootstrap: 'eligible', reason }),
       });
 
       await handleMemoryRoutes(ctx);
@@ -304,16 +340,16 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     // The complement of the case above: `legacy-caller-participant` and the
     // agent-gate branches DO consult `callerAgentAddress`, so they must keep
     // working. Otherwise the fix would deny every legacy private CG outright.
-    for (const reason of [
-      'legacy-caller-participant',
-      'local-agent-allowlist',
-      'local-agent-and-peer-allowlist',
-      'local-public',
-    ]) {
+    for (const { reason, grantScope } of [
+      { reason: 'legacy-caller-participant', grantScope: 'caller' },
+      { reason: 'local-agent-allowlist', grantScope: 'caller' },
+      { reason: 'local-agent-and-peer-allowlist', grantScope: 'caller' },
+      { reason: 'local-public', grantScope: 'public' },
+    ] as const) {
       const { ctx, res, probe } = buildCtx({
         body: { query: 'anything', contextGraphId: 'cg1' },
         authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
-        decisionFor: () => ({ outcome: 'allowed', source: 'legacy-local', reason }),
+        decisionFor: () => ({ outcome: 'allowed', grantScope, source: 'legacy-local', metadataBootstrap: 'eligible', reason }),
       });
 
       await handleMemoryRoutes(ctx);
@@ -323,15 +359,26 @@ describe('POST /api/memory/search — context-graph read authority', () => {
     }
   });
 
-  it('lets an anonymous caller keep a node-scoped allow', async () => {
-    // A caller with no agent identity IS the node for authorization purposes,
-    // so node-scoped reasons are the correct basis for it. Narrowing them
-    // here would break auth-disabled self-reads.
+  it.each(['caller', 'public', 'node'] as const)('authorizes %s scope independently of the diagnostic reason', async grantScope => {
     const { ctx, res, probe } = buildCtx({
       body: { query: 'anything', contextGraphId: 'cg1' },
-      authentication: requestAuthentication({ kind: 'anonymous', mode: 'disabled' }),
+      authentication: requestAuthentication({ kind: 'agent', agentAddress: '0x123' }),
+      decisionFor: () => ({ outcome: 'allowed', grantScope, source: 'legacy-local', metadataBootstrap: 'eligible', reason: 'renamed-for-diagnostics' }),
+    });
+    await handleMemoryRoutes(ctx);
+    expect(res.statusCode).toBe(grantScope === 'node' ? 403 : 200);
+    expect(probe.storeQueried).toBe(grantScope !== 'node');
+    expect(probe.vectorSearched).toBe(grantScope !== 'node');
+  });
+
+  it('lets an anonymous caller keep a node-scoped allow', async () => {
+    // Public anonymous reads still resolve authority; an explicit node grant may
+    // authorize them without granting an authenticated agent the node's access.
+    const { ctx, res, probe } = buildCtx({
+      body: { query: 'anything', contextGraphId: 'cg1' },
+      authentication: requestAuthentication({ kind: 'anonymous', mode: 'public' }),
       decisionFor: () => ({
-        outcome: 'allowed', source: 'legacy-local', reason: 'legacy-peer-allowlist',
+        outcome: 'allowed', grantScope: 'node', source: 'legacy-local', metadataBootstrap: 'eligible', reason: 'legacy-peer-allowlist',
       }),
     });
 
@@ -339,6 +386,9 @@ describe('POST /api/memory/search — context-graph read authority', () => {
 
     expect(res.statusCode).toBe(200);
     expect(probe.storeQueried).toBe(true);
+    expect(probe.authorityChecks).toEqual([{ contextGraphId: 'cg1', callerAgentAddress: undefined }]);
+    expect(probe.views).not.toHaveLength(0);
+    expect(probe.events).toEqual(['authority', ...probe.views.map(() => 'retrieve')]);
   });
 
   it('drops the swm layer when the shared-memory gate refuses it', async () => {

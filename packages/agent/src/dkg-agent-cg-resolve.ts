@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: Apache-2.0
-
 /**
  * Context-graph resolution subsystem extracted from dkg-agent.ts as a mixin
  * holder: existence/curation checks, sync-request envelope parse/build/auth,
@@ -9,6 +8,9 @@
  * cross-calls resolve against the composed class.
  */
 
+import { probeContextGraphWritePreflight, type WritePreflightProbeOptions } from './context-graph-write-preflight.js';
+import { throwIfOperationAborted } from './bounded-operation.js';
+import { resolveContextGraphNameBindingTarget, type ContextGraphNameHashBindingTarget } from './context-graph-name-binding-target.js';
 import { readAgentPeerPage } from './agent-peer-discovery.js';
 import { createHash } from 'node:crypto';
 import {
@@ -35,7 +37,7 @@ import {
   decodeEncryptedWorkspacePayload, ENCRYPTED_WORKSPACE_ENVELOPE_TYPE,
   decodeSwmSenderKeyMessage, SWM_SENDER_KEY_MESSAGE_TYPE,
   getGenesisQuads, computeNetworkId, SYSTEM_CONTEXT_GRAPHS, DKG_ONTOLOGY,
-  Logger, createOperationContext, sparqlString, escapeSparqlLiteral,
+  Logger, createOperationContext, sparqlString, escapeSparqlLiteral, isSafeIri,
   TrustLevel,
   TRUST_LEVEL_PREDICATE,
   buildTrustLevelQuads,
@@ -132,7 +134,7 @@ import {
   type QueryRequest, type QueryResponse, type QueryAccessConfig, type LookupType,
 } from '@origintrail-official/dkg-query';
 import { DKGAgentWallet, type AgentWallet } from './agent-wallet.js';
-
+import { withCallerJoinState } from './internal/context-graph-authority/approved-member-metadata-pending.js';
 import { ProfileManager } from './profile-manager.js';
 import { DiscoveryClient, type SkillSearchOptions, type DiscoveredAgent, type DiscoveredOffering } from './discovery.js';
 import { MessageHandler, type SkillHandler, type SkillRequest, type SkillResponse, type ChatHandler, type ChatAclCheck } from './messaging.js';
@@ -210,6 +212,8 @@ import { fetchSyncPages, type SyncPageResult } from './sync/requester/page-fetch
 import { runDurableSync } from './sync/requester/durable-sync.js';
 import { runSharedMemorySync } from './sync/requester/shared-memory-sync.js';
 import { buildSyncRequestEnvelope, type SyncPhase } from './sync/auth/request-build.js';
+import { claimedAgentSyncRequestSigner } from './sync/auth/request-signing.js';
+import { normalizeExactSyncResponseEncoding } from './sync/wire-compression.js';
 import {
   normalizeExactAssetUals,
   requireExactAssetUals,
@@ -236,7 +240,7 @@ import {
   type WorkspaceEncryptionKeyEntry,
 } from './agent-keystore.js';
 import { GossipPublishHandler } from './gossip-publish-handler.js';
-import { FinalizationHandler, KEEP_ROOT_COPY_PREDICATE } from './finalization-handler.js';
+import { FinalizationHandler } from './finalization-handler.js';
 import { reconcileContextGraph, RecentUalSet, type ChainReconcilerDeps, type OrdinalOutcome } from './chain-reconciler.js';
 import { createCursorState, type CursorState } from './reconcile-cursor.js';
 // rc.9 PR-10: JoinApprovalRetryQueue removed — substrate outbox
@@ -258,11 +262,6 @@ type ListContextGraphsUncachedResult = {
   cacheable: boolean;
 };
 type ListContextGraphsPrivacy = 'public' | 'private' | 'unknown';
-type ContextGraphNameHashBindingTarget = {
-  localId: string;
-  subscription: ContextGraphSub;
-  nameHash?: string;
-};
 class ListContextGraphsBudgetExceeded extends Error {
   constructor(label: string) {
     super(`${label} exceeded listContextGraphs budget`);
@@ -327,7 +326,7 @@ import { chainAuthorityReadBudgetsOf } from './chain-authority-read-budgets.js';
 import { finalizedAuthorityColdResolutionOf } from
   './finalized-authority-cold-resolution.js';
 import { isTransientBootChainError } from './dkg-agent-boot.js';
-import { createAbortError, runBoundedOperation } from './bounded-operation.js';
+import { runBoundedOperation } from './bounded-operation.js';
 import type {
   ContextGraphAuthorityReadMode,
   RegisteredContextGraphAuthority,
@@ -382,7 +381,6 @@ import {
   type PeerConnectionSnapshot,
   type PeerDiagnostics,
   type ChatSendResult,
-  type ContextGraphSub,
   type ContextGraphSubscriptionRecord,
   type DurableContextGraphSubscriptionBinding,
   type ContextGraphSubscriptionStore,
@@ -440,20 +438,14 @@ import {
 } from './curator-meta-refresh.js';
 import {
   enrichContextGraphListAuthorityV1,
+  toContextGraphListOnChainFacts,
   type ListContextGraphsRow,
 } from './context-graph-list-authority-enrichment.js';
+import type { OnChainContextGraphFacts } from './context-graph-storage-discovery.js';
 import {
   CONTEXT_GRAPH_AUTHORITY_RPC_SITES as CG_AUTH_RPC_SITES,
   withRpcUsageSite,
 } from '@origintrail-official/dkg-chain';
-
-function syncAuthAbortError(reason: unknown): Error {
-  return createAbortError(reason);
-}
-
-function throwIfSyncAuthAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw syncAuthAbortError(signal.reason);
-}
 
 type InternalContextGraphListRow = ListContextGraphsRow & {
   policyKnown?: boolean;
@@ -503,6 +495,103 @@ function isPrivateContextGraphListRow(accessPolicy?: string): boolean {
   return contextGraphListRowPrivacy(accessPolicy) === 'private';
 }
 
+/**
+ * The agent state that tells a hash-only row apart and carries its chain
+ * facts. Listing methods pass their own maps in, so a renamed field fails to
+ * compile rather than silently changing what is listed.
+ */
+interface ContextGraphListChainState {
+  readonly subscribedContextGraphs: ReadonlyMap<string, { readonly onChainHash?: string }>;
+  readonly wireIdToLocalCgId: ReadonlyMap<string, string>;
+  readonly onChainContextGraphFacts: ReadonlyMap<string, OnChainContextGraphFacts>;
+}
+
+/**
+ * The on-chain id a list row may show from the metadata projection: the
+ * claimed id when this chain proves it (`provenOnChainContextGraphClaim`),
+ * otherwise undefined. The projection copies `OnChainId` from the shared
+ * ontology graph, which holds every network's claims. Both listings use
+ * this; a row with no projected id asks the agent nothing.
+ */
+function provenProjectedOnChainId(
+  agent: DKGAgent,
+  contextGraphId: string,
+  claimedOnChainId: string | undefined,
+): string | undefined {
+  if (claimedOnChainId === undefined) return undefined;
+  return agent.provenOnChainContextGraphClaim(contextGraphId, claimedOnChainId)?.onChainId;
+}
+
+/**
+ * True for a row the node knows only by its on-chain name hash: the local id
+ * is the committed wire id itself, with no cleartext behind it. This is the
+ * canonical subscription setter's placeholder predicate (the row claims that
+ * exact `onChainHash` and the reverse index points at it), so a user-chosen
+ * cleartext id that merely looks like a hash never matches.
+ */
+function isWireOnlyContextGraphListRow(state: ContextGraphListChainState, contextGraphId: string): boolean {
+  if (!/^0x[0-9a-f]{64}$/.test(contextGraphId)) return false;
+  return state.subscribedContextGraphs.get(contextGraphId)?.onChainHash?.toLowerCase() === contextGraphId
+    && state.wireIdToLocalCgId.get(contextGraphId) === contextGraphId;
+}
+
+/**
+ * Set aside the rows the node knows only by their on-chain name hash. Both
+ * listing paths apply privacy and caller annotation to the local rows alone
+ * and list every wire-only row for every caller, reduced to chain-public
+ * facts by {@link annotateContextGraphListRows}.
+ */
+function partitionWireOnlyContextGraphListRows<Row extends { id: string }>(
+  rows: readonly Row[],
+  state: ContextGraphListChainState,
+): { local: Row[]; wireOnly: Row[] } {
+  const local: Row[] = [];
+  const wireOnly: Row[] = [];
+  for (const row of rows) {
+    (isWireOnlyContextGraphListRow(state, row.id) ? wireOnly : local).push(row);
+  }
+  return { local, wireOnly };
+}
+
+/**
+ * The listed rows: the visible local rows, then the wire-only rows, each with
+ * the additive `nameKnown` and `onChain` fields.
+ *
+ * `onChain` holds chain-public facts only (see ContextGraphListOnChainFacts).
+ * A wire-only row is reduced to those facts: its name stays the hash and no
+ * locally projected field survives, so listing it for every caller never
+ * reveals more than the chain already publishes, including for a private
+ * graph. A cleartext name is shown only for rows the node itself indexes under
+ * that name (created, joined, adopted after keccak verification, or a local
+ * definition whose commitment matched); it is never guessed.
+ */
+function annotateContextGraphListRows(
+  visibleLocal: readonly ListContextGraphsRow[],
+  wireOnly: readonly ListContextGraphsRow[],
+  state: ContextGraphListChainState,
+): ListContextGraphsRow[] {
+  const withChainFacts = (row: ListContextGraphsRow, nameKnown: boolean): ListContextGraphsRow => {
+    const facts = row.onChainId ? state.onChainContextGraphFacts.get(row.onChainId) : undefined;
+    return {
+      ...row,
+      nameKnown,
+      ...(facts ? { onChain: toContextGraphListOnChainFacts(facts) } : {}),
+    };
+  };
+  return [
+    ...visibleLocal.map((row) => withChainFacts(row, true)),
+    ...wireOnly.map((row) => withChainFacts({
+      id: row.id,
+      uri: row.uri,
+      name: row.id,
+      isSystem: false,
+      subscribed: row.subscribed,
+      synced: row.synced,
+      ...(row.onChainId ? { onChainId: row.onChainId } : {}),
+    }, false)),
+  ];
+}
+
 async function applyContextGraphListPrivacy(
   agent: DKGAgent,
   rows: InternalContextGraphListRow[],
@@ -534,7 +623,7 @@ async function applyContextGraphListPrivacy(
   const annotated = await mapContextGraphListRows(visibleRows, async (r) => {
     const curatorMatch = agent.curatorDidMatchesChecksumAgent(r.curator, checksum);
     const allowlisted = await agent.callerIsAllowlistedAgentParticipant(r.id, checksum);
-    return { ...r, callerInvolved: curatorMatch || allowlisted };
+    return withCallerJoinState(agent, { ...r, callerInvolved: curatorMatch || allowlisted }, checksum);
   });
 
   return annotated
@@ -696,9 +785,9 @@ async function resolveCuratorSyncPeerWithRegistry(
     // share the same wallet address, but better than failing outright)
     if (!resolved) {
       try {
-        throwIfSyncAuthAborted(options.signal);
+        throwIfOperationAborted(options.signal);
         const peerId = await resolveWalletPeer(agent, curatorIdentifier, options.signal);
-        throwIfSyncAuthAborted(options.signal);
+        throwIfOperationAborted(options.signal);
         if (peerId) {
           curatorPeerId = peerId;
           resolved = true;
@@ -709,7 +798,7 @@ async function resolveCuratorSyncPeerWithRegistry(
           provenance = 'registry';
         }
       } catch {
-        throwIfSyncAuthAborted(options.signal);
+        throwIfOperationAborted(options.signal);
         /* registry unavailable */
       }
     }
@@ -843,15 +932,25 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         isSystem: meta.isSystem,
         subscribed: sub?.subscribed ?? false,
         synced: sub?.synced ?? false,
-        onChainId: sub?.onChainId ?? meta.onChainId,
+        // As in the default listing: a projected `OnChainId` is a claim.
+        onChainId: sub?.onChainId ?? provenProjectedOnChainId(this, id, meta.onChainId),
         policyKnown,
       };
     });
 
-    return applyContextGraphListPrivacy(
-      this,
+    const chainState: ContextGraphListChainState = {
+      subscribedContextGraphs: this.subscribedContextGraphs,
+      wireIdToLocalCgId: this.wireIdToLocalCgId,
+      onChainContextGraphFacts: this.onChainContextGraphFacts,
+    };
+    const { local, wireOnly } = partitionWireOnlyContextGraphListRows(
       rows.filter((row): row is InternalContextGraphListRow => row !== null),
-      opts,
+      chainState,
+    );
+    return annotateContextGraphListRows(
+      await applyContextGraphListPrivacy(this, local, opts),
+      wireOnly,
+      chainState,
     );
   }
 
@@ -866,6 +965,11 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
     const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
+    // The id is caller-supplied on several paths (scoped queries, HTTP routes,
+    // gossip). One that cannot be written as an IRI cannot name a stored graph,
+    // and interpolating it below would let the caller append graph patterns to
+    // this query and learn whether triples in other graphs exist.
+    if (!isSafeIri(contextGraphUri)) return false;
     const result = await this.store.query(
       `SELECT ?g WHERE {
         GRAPH ?g { <${contextGraphUri}> <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> }
@@ -945,207 +1049,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     );
   }
 
-  async probeContextGraphWritePreflight(
-    this: DKGAgent,
-    contextGraphId: string,
-    opts?: { callerAgentAddress?: string | null },
-  ): Promise<ContextGraphWritePreflightProbe> {
-    const contextGraphUri = `did:dkg:context-graph:${contextGraphId}`;
-    const ontologyGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.ONTOLOGY);
-    const agentsGraph = contextGraphDataGraphUri(SYSTEM_CONTEXT_GRAPHS.AGENTS);
-    const cgMetaGraph = contextGraphMetaGraphUri(contextGraphId);
-    const metaSubjectUri = contextGraphDataGraphUri(contextGraphId);
-    const subscriptionStore = this.config.contextGraphSubscriptionStore;
-
-    const persistedSubscriptionPromise = subscriptionStore?.load
-      ? subscriptionStore.load(contextGraphId)
-      : Promise.resolve(null);
-    // One bounded point projection over the three trusted metadata sources.
-    // Facts are intentionally collected independently: the established
-    // ContextGraphMetaProjection model permits the declaration to live in one
-    // source and policy/curator/gates in another. Requiring every source to
-    // repeat rdf:type would both reject valid gate-only graphs and, worse,
-    // ignore a cross-source private-policy ratchet. Gate presence uses EXISTS
-    // so this path returns at most one gate row per source instead of expanding
-    // a potentially large allowlist.
-    const declarationPromise = this.store.query(`
-      SELECT ?kind ?value WHERE {
-        VALUES (?sourceGraph ?sourceSubject) {
-          (<${ontologyGraph}> <${contextGraphUri}>)
-          (<${agentsGraph}> <${contextGraphUri}>)
-          (<${cgMetaGraph}> <${metaSubjectUri}>)
-        }
-        {
-          GRAPH ?sourceGraph {
-            ?sourceSubject <${DKG_ONTOLOGY.RDF_TYPE}> <${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}> .
-          }
-          BIND("declared" AS ?kind)
-        } UNION {
-          GRAPH ?sourceGraph {
-            ?sourceSubject <${DKG_ONTOLOGY.DKG_ACCESS_POLICY}> ?value .
-          }
-          BIND("access" AS ?kind)
-        } UNION {
-          GRAPH ?sourceGraph {
-            ?sourceSubject <${DKG_ONTOLOGY.DKG_CURATOR}> ?value .
-          }
-          BIND("curator" AS ?kind)
-        } UNION {
-          FILTER EXISTS {
-            VALUES ?gatePredicate {
-              <${DKG_ONTOLOGY.DKG_ALLOWED_AGENT}>
-              <${DKG_ONTOLOGY.DKG_ALLOWED_PEER}>
-              <${DKG_ONTOLOGY.DKG_PARTICIPANT_AGENT}>
-              <${DKG_ONTOLOGY.DKG_PARTICIPANT_IDENTITY_ID}>
-            }
-            GRAPH ?sourceGraph {
-              ?sourceSubject ?gatePredicate ?gateValue .
-            }
-          }
-          BIND("gate" AS ?kind)
-        }
-      }
-    `);
-
-    // Track B (write-preflight resilience): these four reads were previously
-    // combined with `Promise.all`, so a single failing store read (slow-store
-    // abort timeout, "the store is closed" after an Oxigraph worker crash)
-    // threw the WHOLE probe away — including the in-memory subscription
-    // snapshot below, which needs zero store I/O. The daemon's write
-    // preflight was then left with no evidence at all and 503'd every write
-    // until the store recovered. Settle each read individually instead:
-    // store-derived fields degrade to `undefined` (UNKNOWN — never a
-    // definitive deny) and `storeUnavailable` carries the first failure
-    // message for diagnostics, while the in-memory registry state always
-    // survives.
-    const [existsRead, hasLocalContentRead, persistedSubscriptionRead, declarationRead] =
-      await Promise.allSettled([
-        this.contextGraphExists(contextGraphId),
-        this.contextGraphHasLocalContent(contextGraphId),
-        persistedSubscriptionPromise,
-        declarationPromise,
-      ]);
-
-    let storeUnavailable = false;
-    let storeErrorMessage: string | undefined;
-    const noteStoreFailure = (reason: unknown): undefined => {
-      storeUnavailable = true;
-      if (storeErrorMessage === undefined) {
-        storeErrorMessage = reason instanceof Error ? reason.message : String(reason);
-      }
-      return undefined;
-    };
-    const exists = existsRead.status === 'fulfilled'
-      ? existsRead.value
-      : noteStoreFailure(existsRead.reason);
-    const hasLocalContent = hasLocalContentRead.status === 'fulfilled'
-      ? hasLocalContentRead.value
-      : noteStoreFailure(hasLocalContentRead.reason);
-    const persistedSubscription = persistedSubscriptionRead.status === 'fulfilled'
-      ? persistedSubscriptionRead.value
-      : noteStoreFailure(persistedSubscriptionRead.reason);
-    const declarationResult = declarationRead.status === 'fulfilled'
-      ? declarationRead.value
-      : noteStoreFailure(declarationRead.reason);
-
-    let accessPolicy: 'public' | 'private' | undefined;
-    // Tri-state: stays `undefined` (unknown) when the metadata projection read
-    // failed, so a store outage can never masquerade as "no declaration".
-    let declarationFound: boolean | undefined = declarationResult === undefined ? undefined : false;
-    const curators: string[] = [];
-    if (declarationResult && declarationResult.type === 'bindings') {
-      let sawPublic = false;
-      let sawPrivate = false;
-      let sawGate = false;
-      for (const row of declarationResult.bindings as Record<string, string>[]) {
-        const kind = typeof row['kind'] === 'string'
-          ? stripLiteral(row['kind']).trim().toLowerCase()
-          : '';
-        const value = row['value'];
-        if (kind === 'declared') declarationFound = true;
-        if (kind === 'access' && typeof value === 'string') {
-          const normalized = stripLiteral(value).trim().toLowerCase();
-          if (normalized === 'private') sawPrivate = true;
-          if (normalized === 'public') sawPublic = true;
-        }
-        if (kind === 'curator' && typeof value === 'string' && value.trim()) {
-          curators.push(value);
-        }
-        if (kind === 'gate') sawGate = true;
-      }
-      if (sawPrivate) accessPolicy = 'private';
-      else if (sawPublic) accessPolicy = 'public';
-      // Match list/projection semantics: an explicit public policy wins, but
-      // legacy/implicit allowlist gates make a graph private when no policy
-      // literal exists. This is a bounded point query for one canonical id.
-      else if (sawGate) accessPolicy = 'private';
-    }
-
-    let checksum: string | null = null;
-    const rawCaller = opts?.callerAgentAddress?.trim();
-    if (rawCaller) {
-      const didPrefix = 'did:dkg:agent:';
-      const rawAddress = rawCaller.startsWith(didPrefix) ? rawCaller.slice(didPrefix.length) : rawCaller;
-      if (ethers.isAddress(rawAddress)) checksum = ethers.getAddress(rawAddress);
-    }
-
-    let callerAuthorized: boolean | undefined;
-    if (checksum && declarationFound) {
-      if (accessPolicy === 'public') {
-        callerAuthorized = true;
-      } else if (accessPolicy === 'private') {
-        const curatorMatch = curators.some((curator) =>
-          this.curatorDidMatchesChecksumAgent(curator, checksum),
-        );
-        if (curatorMatch) {
-          callerAuthorized = true;
-        } else {
-          // The allowlist lookup is a store read too — the store can die
-          // between the settled reads above and here. Leave authorization
-          // UNKNOWN (never a deny) and flag the store instead of throwing
-          // the whole probe away.
-          try {
-            callerAuthorized = await this.callerIsAllowlistedAgentParticipant(contextGraphId, checksum);
-          } catch (err) {
-            noteStoreFailure(err);
-          }
-        }
-      }
-    }
-
-    const inMemorySubscription = this.subscribedContextGraphs.get(contextGraphId);
-    return {
-      // Required typed boundary: `storeAvailable` is the inverse of
-      // `storeUnavailable`, emitted unconditionally so consumers cannot read
-      // any store-derived fact below without first establishing the store was
-      // up. The optional `storeUnavailable`/`storeErrorMessage` pair is kept
-      // for the 503-diagnostics path (unchanged wire behaviour).
-      storeAvailable: !storeUnavailable,
-      ...(exists !== undefined ? { exists } : {}),
-      ...(hasLocalContent !== undefined ? { hasLocalContent } : {}),
-      ...(inMemorySubscription
-        ? { inMemorySubscription: {
-            subscribed: inMemorySubscription.subscribed,
-            synced: inMemorySubscription.synced,
-          } }
-        : {}),
-      ...(persistedSubscription
-        ? { persistedSubscription: {
-            subscribed: persistedSubscription.subscribed,
-            synced: persistedSubscription.synced,
-          } }
-        : {}),
-      ...(declarationFound !== undefined ? { declarationFound } : {}),
-      ...(accessPolicy ? { accessPolicy } : {}),
-      ...(curators[0] ? { curator: curators[0] } : {}),
-      ...(callerAuthorized !== undefined ? { callerAuthorized } : {}),
-      ...(storeUnavailable
-        ? {
-            storeUnavailable: true,
-            ...(storeErrorMessage !== undefined ? { storeErrorMessage } : {}),
-          }
-        : {}),
-    };
+  probeContextGraphWritePreflight(this: DKGAgent, contextGraphId: string, opts?: WritePreflightProbeOptions): Promise<ContextGraphWritePreflightProbe> {
+    return probeContextGraphWritePreflight(this, { store: this.config.contextGraphSubscriptionStore,
+      current: id => this.subscribedContextGraphs.get(id) }, contextGraphId, opts);
   }
 
   /**
@@ -1259,6 +1165,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         authPurpose: typeof parsed.authPurpose === 'string' ? parsed.authPurpose : undefined,
         authSelector: typeof parsed.authSelector === 'string' ? parsed.authSelector : undefined,
         ...normalizeByteBudgetPageHint(parsed.pageMode, parsed.pageRowsHint),
+        responseEncoding: normalizeExactSyncResponseEncoding(parsed.responseEncoding),
         targetPeerId: parsed.targetPeerId,
         requesterPeerId: parsed.requesterPeerId,
         requestId: parsed.requestId,
@@ -1440,7 +1347,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       getIdentityId: () => this.chain.getIdentityId(),
       signMessage: typeof this.chain.signMessage === 'function' ? this.chain.signMessage.bind(this.chain) : undefined,
       claimedAgentAddress: claimedAgentAddress,
-      claimedAgentPrivateKey: claimedAgent?.privateKey,
+      claimedAgentSigner: claimedAgentSyncRequestSigner(this.config?.authorSigners, claimedAgentAddress, claimedAgent),
     });
   }
 
@@ -1486,7 +1393,6 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // persist+invalidate path.
       if (catalogQuads.length > 0) {
         await this.store.insert(catalogQuads);
-        this.contextGraphMetaProjection.markDirtyFromQuads(catalogQuads);
       }
       this.syncCheckpoints.delete(result.checkpointKey);
     }
@@ -1537,9 +1443,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     remotePeerId: string,
     options: { signal?: AbortSignal } = {},
   ): Promise<boolean> {
-    throwIfSyncAuthAborted(options.signal);
+    throwIfOperationAborted(options.signal);
     const isPrivate = await this.isPrivateContextGraph(request.contextGraphId, { signal: options.signal });
-    throwIfSyncAuthAborted(options.signal);
+    throwIfOperationAborted(options.signal);
     if (!isPrivate) {
       return true;
     }
@@ -1557,9 +1463,9 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
             // Chain/RPC verifiers are not actually abortable in ethers. Do not
             // race them against request aborts: that would free responder
             // capacity while the RPC keeps running in the background.
-            throwIfSyncAuthAborted(lookupOptions?.signal);
+            throwIfOperationAborted(lookupOptions?.signal);
             const valid = await verifyIdentity.call(this.chain, recoveredAddress, claimedIdentityId);
-            throwIfSyncAuthAborted(lookupOptions?.signal);
+            throwIfOperationAborted(lookupOptions?.signal);
             return valid;
           }
         : undefined,
@@ -1579,8 +1485,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
   }
 
   /**
-   * Canonical authority for a registered context graph.
-   *
+   * Canonical registered-graph authority.
    * All security-sensitive consumers use this discriminant so an authority
    * outage cannot be confused with an unregistered graph and fall through to
    * local/RFC-64 policy. Mutation, encryption rosters, subscription admission,
@@ -1607,6 +1512,8 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       durableSubscriptionBinding?: Readonly<DurableContextGraphSubscriptionBinding>;
       /** Query authority proved exact accepted RFC-64 finalized absence. */
       allowAcceptedRfc64FinalizedAbsence?: boolean;
+      /** Read/sync-only proof from this receiver's durable private approval. */
+      allowApprovedPrivateReplicaFinalizedAbsence?: boolean;
       /**
        * Scoped reads and read-only gates may consume the complete finalized
        * authority projection; mutation, admission, and encryption-roster
@@ -1624,10 +1531,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       /**
        * How fresh this authority has to be. Defaults to `'live'`.
        *
-       * Governs only the current-state read: the one `live-current` takes,
-       * and the one a finalized `authorityReadMode` falls back to when its
-       * lane leaves the answer undecided. The finalized lanes are unaffected.
-       *
+       * Governs the registration binding and current-state read: the one
+       * `live-current` takes and the fallback when a finalized read mode
+       * leaves its own lane undecided. A bounded
+       * binding read may reuse a locally fenced finalized name-absence proof.
        * `'bounded'` lets the node's own event index answer, and is only for a
        * caller whose decision the NEXT read can correct. It must never be used
        * where the answer issues a key, permits a plaintext downgrade, or
@@ -1641,13 +1548,19 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       {
         signal: options.signal,
         registrationTimeoutMs: options.registrationTimeoutMs,
+        retainFinalizedSnapshot: options.authorityReadMode === 'finalized-index',
         ...(options.durableSubscriptionBinding === undefined
           ? {}
           : { durableSubscriptionBinding: options.durableSubscriptionBinding }),
         allowAcceptedRfc64FinalizedAbsence:
           options.allowAcceptedRfc64FinalizedAbsence,
+        allowApprovedPrivateReplicaFinalizedAbsence:
+          options.allowApprovedPrivateReplicaFinalizedAbsence,
+        ...(options.freshness === undefined ? {} : { freshness: options.freshness }),
       },
     );
+    // Preserve source-qualified non-applicability alongside the legacy read
+    // fallback; kind='unregistered' alone is deliberately not a VM exemption.
     if (registration.kind !== 'registered') return registration;
     const { onChainId } = registration;
 
@@ -1663,6 +1576,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       const finalized = await resolveFinalizedOnChainAccessPolicyState(
         {
           indexReader: this.chain.contextGraphAuthorityIndexRevisionReader,
+          registrationSnapshot: registration.finalizedSnapshot,
           authorityReads: this.rfc64AuthorityReadCoordinatorV1,
           readSnapshot: (id, readOptions) => this.readFinalizedContextGraphAuthoritySnapshotV1(id, readOptions),
           requestTimeoutMs: chainAuthorityReadBudgetsOf(this).requestTimeoutMs,
@@ -2096,22 +2010,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     this: DKGAgent,
     requestedId: string,
   ): ContextGraphNameHashBindingTarget | null {
-    const direct = this.subscribedContextGraphs.get(requestedId);
-    const mappedLocalId = this.localCgIdForWireId(
-      this.contextGraphWireId(requestedId),
-    );
-    const localId = direct === undefined ? mappedLocalId : requestedId;
-    const subscription = direct ?? this.subscribedContextGraphs.get(mappedLocalId);
-    if (subscription === undefined) return null;
-
-    const locallyAdmitted = subscription.subscribed === true
-      || subscription.coreHosted === true;
-    const nameHash = locallyAdmitted
-      ? subscription.onChainHash
-        ? this.contextGraphWireId(subscription.onChainHash)
-        : this.contextGraphNameCommitment(localId)
-      : undefined;
-    return { localId, subscription, nameHash };
+    return resolveContextGraphNameBindingTarget({
+      subscriptions: this.subscribedContextGraphs,
+      localIdForWireId: (id) => this.localCgIdForWireId(id),
+      wireId: (id) => this.contextGraphWireId(id),
+      nameCommitment: (id) => this.contextGraphNameCommitment(id),
+      isWireIdKeyedSubscription: (id) => this.isWireIdKeyedSubscription(id),
+    }, requestedId);
   }
 
   /**
@@ -2224,10 +2129,13 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     if (localId === undefined) return null;
     const current = this.subscribedContextGraphs.get(localId);
     if (current === undefined) return null;
-    const next = { ...current };
-    this.bindSubscriptionOnChainId(localId, next, onChainContextGraphId);
-    next.onChainHash = wireId;
-    this.setContextGraphSubscription(localId, next, options);
+    // Discovery proves a name commitment, which need not identify a unique
+    // registry slot. It may enrich this binding, but only an explicit verified
+    // transition may replace a previously recorded numeric id.
+    if (current.onChainId !== undefined && current.onChainId !== onChainContextGraphId) return null;
+    this.recordDiscoveredContextGraph(localId, {
+      onChainId: onChainContextGraphId, onChainHash: wireId,
+    }, options);
     return localId;
   }
 
@@ -2936,7 +2844,10 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
         ...(accessPolicy ? { accessPolicy } : {}),
         createdAt: meta.createdAt ?? r.createdAt,
         isSystem: meta.isSystem || r.isSystem,
-        onChainId: meta.onChainId ?? r.onChainId,
+        // The projection copies the `OnChainId` triple from the shared ontology
+        // graph, which holds every network's claims: show it only when this
+        // chain proves it, else the row's own binding.
+        onChainId: provenProjectedOnChainId(this, r.id, meta.onChainId) ?? r.onChainId,
       };
     });
     rows = projectedRows.map((entry) => {
@@ -2995,6 +2906,19 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       throw entry.reason;
     });
 
+    // Rows known only by their on-chain name hash skip privacy resolution and
+    // caller annotation: every caller sees them, reduced to chain-public facts.
+    const chainState: ContextGraphListChainState = {
+      subscribedContextGraphs: this.subscribedContextGraphs,
+      wireIdToLocalCgId: this.wireIdToLocalCgId,
+      onChainContextGraphFacts: this.onChainContextGraphFacts,
+    };
+    const { local: localRows, wireOnly: wireOnlyRows } = partitionWireOnlyContextGraphListRows(
+      rows,
+      chainState,
+    );
+    rows = localRows;
+
     const resolveRowPrivacy = async (row: ListContextGraphsRow): Promise<ListContextGraphsPrivacy> => {
       const explicitPrivacy = privacyByUri.get(row.uri) ?? 'unknown';
       if (explicitPrivacy !== 'unknown') return explicitPrivacy;
@@ -3028,12 +2952,16 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // Without a caller wallet we still leave `callerInvolved` unset so the UI can use the
       // curator-vs-identity fallback for OPEN graphs.
       return {
-        rows: rows.filter((r) => {
-          const privacy = rowPrivacy(r);
-          if (privacy === 'private') return false;
-          if (privacy === 'unknown') return !scopedListing;
-          return true;
-        }),
+        rows: annotateContextGraphListRows(
+          rows.filter((r) => {
+            const privacy = rowPrivacy(r);
+            if (privacy === 'private') return false;
+            if (privacy === 'unknown') return !scopedListing;
+            return true;
+          }),
+          wireOnlyRows,
+          chainState,
+        ),
         cacheable,
       };
     }
@@ -3061,7 +2989,7 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
       // `callerInvolved` must reflect ONLY the provided caller wallet.
       // Using local node identity (`creatorIsSelf`) leaks curated rows to unrelated callers.
       if (!allowlistRead.ok) return { row: r, privacy };
-      return { row: { ...r, callerInvolved: allowlistRead.value }, privacy };
+      return { row: await withCallerJoinState(this, { ...r, callerInvolved: allowlistRead.value }, checksum), privacy };
     });
     const annotated = annotatedSettled.map((entry, index) => {
       if (entry.status === 'fulfilled') return entry.value;
@@ -3069,14 +2997,18 @@ export class ContextGraphResolveMethods extends DKGAgentBase {
     });
 
     return {
-      rows: annotated
-        .filter(({ row, privacy }) => {
-          if (row.callerInvolved === true) return true;
-          if (privacy === 'unknown') return false;
-          if (privacy === 'private') return false;
-          return true;
-        })
-        .map(({ row }) => row),
+      rows: annotateContextGraphListRows(
+        annotated
+          .filter(({ row, privacy }) => {
+            if (row.callerInvolved === true) return true;
+            if (privacy === 'unknown') return false;
+            if (privacy === 'private') return false;
+            return true;
+          })
+          .map(({ row }) => row),
+        wireOnlyRows,
+        chainState,
+      ),
       cacheable,
     };
   }

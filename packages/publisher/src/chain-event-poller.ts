@@ -1,5 +1,7 @@
+import { prepareCollectionUpdateEvent, type NormalizedCollectionUpdateEvent } from './chain-event-boundary.js';
 import {
   withRpcRequestContext,
+  type KnowledgeAssetUpdateIdentity,
   type ChainAdapter,
   type ChainEvent,
 } from '@origintrail-official/dkg-chain';
@@ -38,11 +40,23 @@ export type OnContextGraphCreated = (info: {
   signal?: AbortSignal;
 }) => Promise<void>;
 
-/** Callback for KnowledgeAssetUpdated events (spec §5.1). */
+/**
+ * Callback for KnowledgeAssetUpdated events (spec §5.1). A rejection holds the
+ * collectionUpdates lane at the event's page, which is dispatched again after
+ * the lane's failure backoff, so the callback must be idempotent.
+ */
 export type OnCollectionUpdated = (info: {
   merkleRoot: Uint8Array;
   batchId: bigint;
+  /** Canonical identity, including explicit legacy/unpositioned evidence. */
+  eventIdentity: KnowledgeAssetUpdateIdentity;
   blockNumber: number;
+  /** Transaction that committed the update, when the adapter reports it. */
+  txHash?: string;
+  /** Position of the update log within its block, when available. */
+  logIndex?: number;
+  /** Fork identity of the event's block, when available. */
+  blockHash?: string;
   signal?: AbortSignal;
 }) => Promise<void>;
 
@@ -99,6 +113,12 @@ export interface ChainEventPollerConfig {
   onContextGraphCreated?: OnContextGraphCreated;
   /** Called when a KnowledgeAssetUpdated event is detected. */
   onCollectionUpdated?: OnCollectionUpdated;
+  /**
+   * Highest block the collectionUpdates lane may persist as scanned while the
+   * work its callbacks queued is not settled (see
+   * `ChainEventPollerLaneSpec.persistCeiling`).
+   */
+  collectionUpdatesPersistCeiling?: () => number | undefined;
   /** Called when an AllowListUpdated event is detected. */
   onAllowListUpdated?: OnAllowListUpdated;
   /** Called when a ProfileCreated/Updated event is detected. */
@@ -135,6 +155,7 @@ export class ChainEventPoller {
   private readonly clock: () => number;
   private readonly onContextGraphCreated?: OnContextGraphCreated;
   private readonly onCollectionUpdated?: OnCollectionUpdated;
+  private readonly collectionUpdatesPersistCeiling?: () => number | undefined;
   private readonly onAllowListUpdated?: OnAllowListUpdated;
   private readonly onProfileEvent?: OnProfileEvent;
   private readonly onKARegisteredToContextGraph?: OnKARegisteredToContextGraph;
@@ -157,7 +178,21 @@ export class ChainEventPoller {
    */
   private inFlightPoll: Promise<void> | null = null;
 
-  /** Max blocks to scan per poll — stays within typical RPC range limits. */
+  /**
+   * Max blocks one lane scans per poll: the page the lane cursor advances by
+   * (only once the whole page succeeded) and the live publish lane's seed
+   * window.
+   *
+   * It is NOT the eth_getLogs span. The EVM adapter fits each page to every
+   * provider's own span cap (learned once per provider; mainnet.base.org's is
+   * 2,000 blocks, so a page there is five requests) and fails over past
+   * history/plan limits without splitting them. Kept at 9,000 rather than
+   * lowered to the smallest cap: an uncapped or high-cap provider still reads
+   * a page in one request, a capped one spends the same requests either way,
+   * and a node 20,000 blocks behind catches up in three polls instead of ten.
+   * The trade-off is granularity: a transient failure on any request of a
+   * page replays the whole page after the lane's failure backoff.
+   */
   private static readonly MAX_RANGE = 9_000;
 
   constructor(config: ChainEventPollerConfig) {
@@ -167,6 +202,7 @@ export class ChainEventPoller {
     this.clock = config.clock ?? (() => Date.now());
     this.onContextGraphCreated = config.onContextGraphCreated;
     this.onCollectionUpdated = config.onCollectionUpdated;
+    this.collectionUpdatesPersistCeiling = config.collectionUpdatesPersistCeiling;
     this.onAllowListUpdated = config.onAllowListUpdated;
     this.onProfileEvent = config.onProfileEvent;
     this.onKARegisteredToContextGraph = config.onKARegisteredToContextGraph;
@@ -331,7 +367,14 @@ export class ChainEventPoller {
         eventTypes: () => ['KnowledgeAssetUpdated'],
         cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }),
         cadenceMs: this.intervalMs,
-        dispatch: (event, ctx, signal) => this.handleCollectionUpdated(event, ctx, signal),
+        prepare: (incoming) => {
+          const prepared = prepareCollectionUpdateEvent(incoming);
+          return { ...prepared, dispatch: (ctx, signal) => this.handleCollectionUpdated(prepared.event, ctx, signal) };
+        },
+        persistCeiling: () => this.collectionUpdatesPersistCeiling?.(),
+        // The chain index holds back 50 blocks for reorg repair. Revisiting
+        // 64 blocks also catches replacements already passed in the live cursor.
+        replayLookbackBlocks: 64,
       },
       {
         name: 'allowListUpdates',
@@ -440,7 +483,7 @@ export class ChainEventPoller {
   }
 
   private async handleCollectionUpdated(
-    event: ChainEvent,
+    event: NormalizedCollectionUpdateEvent,
     ctx: OperationContext,
     signal?: AbortSignal,
   ): Promise<void> {
@@ -451,16 +494,25 @@ export class ChainEventPoller {
       : data['merkleRoot'] as Uint8Array;
     const batchId = BigInt(data['batchId'] as string ?? '0');
 
+    const eventIdentity = event.updateIdentity;
+
     this.log.info(ctx,
       `Chain event: KnowledgeAssetUpdated block=${event.blockNumber} batchId=${batchId}`,
     );
 
-    try {
-      await this.onCollectionUpdated({ merkleRoot, batchId, blockNumber: event.blockNumber, signal });
-    } catch (err) {
-      if (signal?.aborted) throw signal.reason;
-      this.log.warn(ctx, `onCollectionUpdated callback failed: ${err instanceof Error ? err.message : String(err)}`);
-    }
+    // A failure propagates: the lane holds this page and dispatches it again
+    // after its failure backoff, so an update the callback could not record
+    // is never skipped by the persisted cursor.
+    await this.onCollectionUpdated({
+      merkleRoot,
+      batchId,
+      eventIdentity,
+      blockNumber: eventIdentity.blockNumber ?? event.blockNumber,
+      ...(eventIdentity.txHash === undefined ? {} : { txHash: eventIdentity.txHash }),
+      ...(eventIdentity.logIndex === undefined ? {} : { logIndex: eventIdentity.logIndex }),
+      ...(eventIdentity.blockHash === undefined ? {} : { blockHash: eventIdentity.blockHash }),
+      signal,
+    });
   }
 
   private async handleAllowListUpdated(

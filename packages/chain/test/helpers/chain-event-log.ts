@@ -2,6 +2,7 @@
 
 import type {
   ChainEventLogCommit,
+  ChainEventLogCountQuery,
   ChainEventLogCoverage,
   ChainEventLogQuery,
   ChainEventLogRow,
@@ -28,6 +29,7 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
   readonly #scopes = new Map<string, MemoryChainEventLogScope>();
   commits = 0;
   tombstones = 0;
+  counts = 0;
 
   async load(scope: string): Promise<ChainEventLogState | undefined> {
     return this.#scopes.get(scope)?.state;
@@ -107,7 +109,7 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
     scope: string,
     query: ChainEventLogQuery,
   ): Promise<readonly ChainEventLogRow[]> {
-    // topic0/topic1 filter the stored hex EXACTLY as the SQLite `IN (…)` does,
+    // topic0/topic1/topic2 filter the stored hex EXACTLY as the SQLite `IN (…)` does,
     // with no case folding on either side. That is the whole cross-package
     // contract behind the per-graph read, and a twin that ignored the filter
     // would let a mismatched encoding pass every test and then answer an empty
@@ -120,9 +122,18 @@ export class MemoryChainEventLogStore implements ChainEventLogStore {
         && row.blockNumber <= query.throughBlockNumber
         && (query.addresses === undefined || query.addresses.includes(row.address))
         && matches(row.topics[0], query.topic0)
-        && matches(row.topics[1], query.topic1))
+        && matches(row.topics[1], query.topic1)
+        && matches(row.topics[2], query.topic2))
       .sort((left, right) => left.blockNumber - right.blockNumber
         || left.logIndex - right.logIndex);
+  }
+
+  /** Counts exactly what {@link readEvents} returns, as the SQLite `COUNT(*)` does. */
+  async countEvents(scope: string, query: ChainEventLogCountQuery): Promise<number> {
+    this.counts += 1;
+    return (await this.readEvents(scope, query))
+      .filter((row) => query.settled === undefined || row.settled === query.settled)
+      .length;
   }
 
   async blockHashAt(scope: string, blockNumber: number): Promise<string | undefined> {

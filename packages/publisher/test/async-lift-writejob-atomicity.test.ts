@@ -72,6 +72,7 @@ describe('#1863 async-lift writeJob atomicity', () => {
     // the store deterministically WHILE the transition is parked at replaceSubject.
     const store = new Proxy(inner, {
       get(target, prop) {
+        if (prop === 'replaceSubjectAndInsert') return undefined; // Exercise the pre-compound fallback.
         if (prop === 'replaceSubject') {
           return async (graphUri: string, subject: string, quads: unknown, options?: unknown) => {
             replaceSubjectCalls++;
@@ -135,6 +136,7 @@ describe('#1863 async-lift writeJob atomicity', () => {
 
     const store = new Proxy(inner, {
       get(target, prop) {
+        if (prop === 'replaceSubjectAndInsert') return undefined; // Exercise the pre-compound fallback.
         if (prop === 'replaceSubject') return undefined; // capability absent
         if (prop === 'deleteByPattern') {
           return async (pattern: { graph?: string }, options?: unknown) => {
@@ -176,6 +178,7 @@ describe('#1863 async-lift writeJob atomicity', () => {
 
     const store = new Proxy(inner, {
       get(target, prop) {
+        if (prop === 'replaceSubjectAndInsert') return undefined; // Exercise the pre-compound fallback.
         if (prop === 'replaceSubject') {
           return async () => {
             replaceSubjectCalls++;
@@ -230,6 +233,7 @@ describe('#1863 async-lift writeJob atomicity', () => {
 
     const store = new Proxy(inner, {
       get(target, prop) {
+        if (prop === 'replaceSubjectAndInsert') return undefined; // Exercise the pre-compound fallback.
         if (prop === 'replaceSubject') {
           return async (graphUri: string, subject: string, quads: unknown, options?: unknown) => {
             if (armed) { armed = false; reachedGate(); await released; }

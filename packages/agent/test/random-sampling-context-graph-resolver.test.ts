@@ -86,6 +86,48 @@ afterEach(async () => {
 });
 
 describe('Random Sampling Context Graph resolver', () => {
+  it('rejects a stale direct binding and resolves the chain-attested graph', async () => {
+    const actual = '0x37b1Fdfd134e2b17583bCBdD3034F91504cD9C70/agent-blackbox-vm';
+    const stale = '0x457759127Ff49F1668141FD69E16277560bF20Aa/rc12-rel';
+    const host = createResolverFixture({
+      configuredContextGraphIds: [actual],
+      committedNameHash: ethers.keccak256(ethers.toUtf8Bytes(actual)),
+    });
+    host.resolveLocalCgIdByOnChainId = vi.fn(() => stale);
+    await host.store.insert([
+      {
+        subject: `did:dkg:context-graph:${stale}`,
+        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+        object: '"14"',
+        graph: 'did:dkg:context-graph:ontology',
+      },
+      {
+        subject: `did:dkg:context-graph:${actual}`,
+        predicate: `${DKG_ONTOLOGY.DKG_CONTEXT_GRAPH}OnChainId`,
+        object: '"14"',
+        graph: 'did:dkg:context-graph:ontology',
+      },
+    ]);
+
+    await expect(resolveColdBinding(host, 14n)).resolves.toBe(actual);
+    expect(host.chain.getContextGraphNameHash).toHaveBeenCalledTimes(1);
+  });
+
+  it('requires the chain name hash before accepting a direct binding', async () => {
+    const host = createResolverFixture({ committedNameHash: ethers.ZeroHash });
+    host.resolveLocalCgIdByOnChainId = vi.fn(() => 'stale-local-name');
+
+    await expect(resolveColdBinding(host, 14n)).resolves.toBeUndefined();
+  });
+
+  it('preserves the direct binding for a graph with no committed name hash', async () => {
+    const host = createResolverFixture({ committedNameHash: ethers.ZeroHash });
+    host.chain.getContextGraphNameHash = vi.fn(async () => null);
+    host.resolveLocalCgIdByOnChainId = vi.fn(() => 'opt-out-graph');
+
+    await expect(resolveColdBinding(host, 14n)).resolves.toBe('opt-out-graph');
+  });
+
   it('recovers a cold public binding from the durable ontology index', async () => {
     const localContextGraphId =
       '0x9Eb3a49f91670f6b8EFC138Df0003F0ae0A23Dd0/cold-public-proof-cg';

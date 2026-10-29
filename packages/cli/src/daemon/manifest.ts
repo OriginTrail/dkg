@@ -629,6 +629,32 @@ export function getCurrentCommitShort(): string {
   }
 }
 
+let cachedCurrentCommitFull: string | null | undefined;
+
+/** Full checkout identity for monorepo/devnet status when no build-info exists. */
+export function getCurrentCommitFull(): string | null {
+  if (cachedCurrentCommitFull !== undefined) return cachedCurrentCommitFull;
+  try {
+    const packageDir = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
+    const gitRoot = execSync('git rev-parse --show-toplevel', {
+      encoding: 'utf-8', stdio: 'pipe', cwd: packageDir,
+    }).trim();
+    // A dependency inside somebody else's Git checkout must not report the
+    // consumer's commit as this package's build identity.
+    if (resolve(gitRoot, 'packages/cli') !== packageDir) throw new Error('not a DKG source checkout');
+    const commit = execSync('git rev-parse HEAD', {
+      encoding: 'utf-8',
+      stdio: 'pipe',
+      cwd: packageDir,
+    }).trim();
+    return (cachedCurrentCommitFull = /^[0-9a-f]{40}$/i.test(commit) ? commit : null);
+  } catch { /* Not running from the DKG source checkout. */ }
+  try {
+    const commit = readFileSync(join(dkgDir(), '.current-commit'), 'utf-8').trim();
+    return (cachedCurrentCommitFull = /^[0-9a-f]{40}$/i.test(commit) ? commit : null);
+  } catch { return (cachedCurrentCommitFull = null); }
+}
+
 /**
  * RFC-41 §4.9: bundled commit metadata in published npm artifacts.
  *

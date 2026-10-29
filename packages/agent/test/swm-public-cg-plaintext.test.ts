@@ -23,6 +23,7 @@ import { describe, it, expect, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { RpcUsageTracker, withRpcUsageConsumer } from '@origintrail-official/dkg-chain';
 import { DKGAgent } from '../src/dkg-agent.js';
+import { stubRecipientRevisions } from './_helpers/recipient-fence-stub.js';
 
 // Hand-rolled call recorder: records every invocation's args and delegates to
 // the real impl, replacing the DI-seam spies on this file's agent-like stub.
@@ -120,6 +121,9 @@ function makeAgentLike(opts: {
     log,
     chain,
     store: { query: storeQuery },
+    contextGraphMetaProjection: { readAuthorityFactsRevision: 0, ...stubRecipientRevisions({ query: storeQuery } as any) },
+    swmSenderKeyStateLoaded: true,
+    loadSwmSenderKeyState: vi.fn(async () => {}),
     subscribedContextGraphs,
     wireIdToLocalCgId,
     onChainAccessPolicyCache: opts.cache ?? new Map<string, number>(),
@@ -163,6 +167,12 @@ function makeAgentLike(opts: {
   });
   agentLike.resolveWorkspaceAgentRecipientsForCurrentAuthority =
     (DKGAgent.prototype as any).resolveWorkspaceAgentRecipientsForCurrentAuthority;
+  // No graph here has an accepted owner-signed public policy (#2827), so the
+  // SWM paths keep the on-chain behaviour these tests pin.
+  agentLike.resolveSwmRegisteredAuthority = (DKGAgent.prototype as any).resolveSwmRegisteredAuthority;
+  agentLike.isContextGraphSwmPublic = (DKGAgent.prototype as any).isContextGraphSwmPublic;
+  agentLike.resolveSwmTransportAuthority = (DKGAgent.prototype as any).resolveSwmTransportAuthority;
+  agentLike.hasActiveAcceptedRfc64PublicUnregisteredAuthorityV1 = () => false;
   agentLike._resolveCuratedChainKeyContext = (DKGAgent.prototype as any)._resolveCuratedChainKeyContext;
   return agentLike;
 }

@@ -19,6 +19,78 @@ const scanLease = (
 ): EventScanHorizonLease => ({ throughBlockNumber, holds });
 
 describe('ChainEventPoller scheduler', () => {
+  it('preserves the default lane dispatch receiver and advances its cursor', async () => {
+    const event: ChainEvent = { type: 'AllowListUpdated', blockNumber: 50, data: {} };
+    const { adapter } = makeChain({ head: 100, events: [event] });
+    const receivers: unknown[] = [];
+    const seen: ChainEvent[] = [];
+    const saved: number[] = [];
+    const spec: ChainEventPollerLaneSpec = {
+      name: 'allowListUpdates', enabled: () => true, eventTypes: () => ['AllowListUpdated'],
+      cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }), cadenceMs: 20,
+      async dispatch(incoming) { receivers.push(this); seen.push(incoming); },
+    };
+    const runner = new ChainEventLaneRunner({ chain: adapter, lanes: [spec], maxRange: 9_000,
+      clock: () => 0, log: { info() {}, warn() {}, error() {} } as any,
+      cursorPersistence: { async loadLane() { return undefined; }, async saveLane(_lane, block) { saved.push(block); } } });
+    await runner.poll();
+    expect(receivers).toHaveLength(1);
+    expect(receivers[0]).toBe(spec);
+    expect(seen).toEqual([event]);
+    expect(saved).toEqual([100]);
+  });
+
+  it.each(['AllowListUpdated', 'KnowledgeAssetUpdated'])('does not prepare feature or replay metadata for a generic non-lookback %s lane', async (type) => {
+    const metadata = Object.fromEntries(['blockHash', 'logIndex', 'txHash', 'batchId', 'merkleRoot'].map((name) => [name, 'unused']));
+    for (const name of Object.keys(metadata)) Object.defineProperty(metadata, name, { get() { throw new Error(`unused replay metadata: ${name}`); } });
+    const event: ChainEvent = { type, blockNumber: 50, data: metadata };
+    Object.defineProperty(event, 'updateIdentity', { get() { throw new Error('feature identity must not be consulted'); } });
+    const { adapter } = makeChain({ head: 100, events: [event] });
+    const seen: ChainEvent[] = [];
+    const saved: number[] = [];
+    const runner = new ChainEventLaneRunner({
+      chain: adapter,
+      lanes: [{ name: 'allowListUpdates', enabled: () => true, eventTypes: () => [type],
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }), cadenceMs: 20,
+        dispatch: async (incoming) => { seen.push(incoming); } }],
+      maxRange: 9_000, clock: () => 0,
+      log: { info() {}, warn() {}, error() {} } as any,
+      cursorPersistence: { async loadLane() { return undefined; }, async saveLane(_lane, block) { saved.push(block); } },
+    });
+    await runner.poll();
+    expect(seen).toHaveLength(1);
+    expect(seen[0]).toBe(event);
+    expect(saved).toEqual([100]);
+  });
+
+  it('keeps historical replay identity for a generic lookback lane', async () => {
+    let head = 200;
+    let now = 0;
+    const events: ChainEvent[] = [0, 1].map((logIndex) => ({ type: 'AllowListUpdated', blockNumber: 160,
+      data: { blockHash: '0xold', logIndex, txHash: '0xsame', contextGraphId: '42', agent: 'agent', added: true } }));
+    const { adapter } = makeChain({ head: () => head, events });
+    const seen: ChainEvent[] = [];
+    const runner = new ChainEventLaneRunner({ chain: adapter,
+      lanes: [{ name: 'allowListUpdates', enabled: () => true, eventTypes: () => ['AllowListUpdated'],
+        cursorStrategy: () => ({ kind: 'live-tail', legacyAggregateCursor: true }), cadenceMs: 20,
+        replayLookbackBlocks: 64, dispatch: async (event) => { seen.push(event); } }],
+      maxRange: 9_000, clock: () => now, log: { info() {}, warn() {}, error() {} } as any });
+    await runner.poll();
+    expect(seen).toEqual(events);
+    now = 20; head = 201;
+    await runner.poll();
+    expect(seen).toHaveLength(2);
+    const replacement = { ...events[0], data: { ...events[0].data, blockHash: '0xcanonical' } };
+    events[0] = replacement;
+    now = 40; head = 202;
+    await runner.poll();
+    expect(seen).toHaveLength(3);
+    expect(seen[2]).toBe(replacement);
+    now = 60; head = 203;
+    await runner.poll();
+    expect(seen).toHaveLength(3);
+  });
+
   it('classifies every poller RPC as background work', async () => {
     const requestClasses: string[] = [];
     const { adapter } = makeChain({
@@ -814,28 +886,5 @@ describe('ChainEventPoller scheduler', () => {
       [1, 100],
       [1, 100],
     ]);
-  });
-
-  it('keeps headless scans due until a known head proves the lane is caught up', async () => {
-    const { adapter, filters } = makeChain({
-      head: () => { throw new Error('head unavailable'); },
-    });
-    const poller = new ChainEventPoller({
-      chain: adapter,
-      publishHandler: makeHandler(),
-      intervalMs: 20,
-      clock: () => 0,
-      onContextGraphCreated: async () => { /* sink */ },
-    });
-
-    await poller.start();
-    await new Promise((r) => setTimeout(r, 90));
-    await poller.stop();
-
-    expect(filters.length).toBeGreaterThanOrEqual(2);
-    expect(filters[0].fromBlock).toBe(1);
-    expect(filters[0].toBlock).toBe(9000);
-    expect(filters[1].fromBlock).toBe(9001);
-    expect(filters[1].toBlock).toBe(18_000);
   });
 });

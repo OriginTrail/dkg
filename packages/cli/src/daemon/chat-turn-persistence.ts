@@ -26,7 +26,20 @@ export type DurableChatTurnOutcome = {
   turnId: string;
 };
 
-/** Required storage contract for the daemon's durable-turn state machine. */
+/**
+ * Required storage contract for the daemon's durable-turn state machine.
+ *
+ * A turn is identified by `(sessionId, turnId)`, not by `turnId` alone: a turn id
+ * is only unique inside its session, so the same id in two sessions is two
+ * turns. The store has to keep their durable state apart, both the state
+ * `getChatTurnPersistenceState` reports and the turn a
+ * `recordChatTurnPersistenceTransition` completes, because this owner decides
+ * duplicate / transition / create from that state alone. `ChatMemoryManager`
+ * does, by writing each new turn under a subject scoped to its session, and by
+ * reporting no state for a turn subject written before that scheme which two
+ * sessions share: a report for such a turn is created, never dropped as a
+ * duplicate of the other session's.
+ */
 export type DurableChatTurnStore = Pick<
   ChatMemoryManager,
   | 'getChatTurnPersistenceState'

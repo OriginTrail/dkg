@@ -6,6 +6,7 @@ const SYSTEM_PREREQUISITES = ['built runtime packages', 'isolated local devnet']
 
 /** Explicit inventory semantics for every canonical and registered test lane. */
 export const TEST_LANE_METADATA = Object.freeze({
+  'chain-rpc-node26': { layer: 'transport regression', prerequisites: ['Node 26 (bundled undici 8)', 'pnpm frozen install', 'local TLS loopback'] },
   'tornado-core': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
   'tornado-publisher': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
   'tornado-agent': { layer: 'unit/component', prerequisites: UNIT_PREREQUISITES },
@@ -23,6 +24,7 @@ export const TEST_LANE_METADATA = Object.freeze({
   'browser-local': { layer: 'browser', prerequisites: [...SYSTEM_PREREQUISITES, 'Playwright Chromium'] },
   devnet: { layer: 'system', prerequisites: SYSTEM_PREREQUISITES },
   'tornado-blazegraph': { layer: 'system', prerequisites: ['built runtime packages', 'native Oxigraph binary', 'BLAZEGRAPH_TEST_URL'] },
+  'inventory-windows': { layer: 'unit/component', prerequisites: ['pnpm frozen install', 'Git'] },
   archive: { layer: 'historical', prerequisites: [] },
   scripts: { layer: 'repository tooling', prerequisites: UNIT_PREREQUISITES },
   demo: { layer: 'system', prerequisites: SYSTEM_PREREQUISITES },
@@ -32,7 +34,7 @@ export const TEST_LANE_METADATA = Object.freeze({
   'image-contract': { layer: 'container contract', prerequisites: ['Docker', 'native ARM64 runner'] },
   'shell-fixture': { layer: 'system fixture', prerequisites: SYSTEM_PREREQUISITES },
   observability: { layer: 'system', prerequisites: ['Prometheus', 'Grafana'] },
-  'ccl-python-yaml': { layer: 'Python/YAML conformance', prerequisites: ['Python 3', 'ccl_v0_1/requirements.txt'] },
+  'ccl-python-yaml': { layer: 'Python/YAML conformance', prerequisites: ['Python 3', 'PyYAML'] },
 });
 
 /** Vitest groups per controller lane. Lanes without groups run bespoke jobs
@@ -48,10 +50,10 @@ const LANE_GROUPS = {
   tornado_agent: [{ id: 'agent', packages: ['agent'], shards: AGENT_SHARD_POLICY.descriptors.length, runner: 'agent' }],
   bura_cli: [{ id: 'cli', packages: ['cli'], shards: 4, runner: 'weighted' }],
   bura_query: [{ id: 'query', packages: ['query'], shards: 1 }],
-  kosava_node_ui: [{ id: 'node-ui', packages: ['node-ui'], shards: 1 }],
+  kosava_node_ui: [{ id: 'node-ui', packages: ['node-ui', 'node-store'], shards: 1 }],
   kosava_supporting: [{
     id: 'supporting', shards: 1, concurrency: 3, maxWorkers: 2,
-    packages: ['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'],
+    packages: ['epcis', 'mcp-dkg', 'local-llm', 'network-sim', 'graph-viz', 'okf', 'kafka-source', 'adapter-elizaos', 'adapter-hermes', 'adapter-openclaw', 'adapter-prime-agent'],
   }],
   kosava_hardhat_plugins: [{ id: 'plugins', packages: ['random-sampling', 'kafka-plugin'], shards: 1 }],
 };
@@ -86,7 +88,12 @@ export function compileCiTopology(topology = CI_LANE_TOPOLOGY) {
       for (let index = 0; index < group.shards; index++) rows.push({
         row: rows.length, suite: group.id, shard: group.shards === 1 ? 0 : index + 1, shards: group.shards,
         label: group.shards === 1 ? group.label ?? group.id : `${group.id} [${index + 1}/${group.shards}]`,
-        gate1: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
+        sidecars: group.runner === 'agent' && AGENT_SHARD_POLICY.descriptors[index]?.reservedOverheadMs > 0,
+        ...(group.runner === 'agent' ? {
+          // Unit shards now include enough production-agent fixtures to exceed ten
+          // minutes on hosted runners; retain room for coverage receipt upload.
+          timeoutMinutes: 12,
+        } : {}),
       });
     }
     jobs[job] = packages;

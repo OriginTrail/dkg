@@ -18,6 +18,7 @@ describe('publisher runtime chain config projection', () => {
       receiptTimeoutMs: 1_200_000,
       finalityConfirmations: 1,
       indexTickMs: 12_000,
+      boundedAuthorityReads: true,
       maxFeePerGasWei: 100_000_000n,
       approvalPolicy: {
         mode: 'replenishing',
@@ -39,6 +40,7 @@ describe('publisher runtime chain config projection', () => {
       receiptTimeoutMs: 1_200_000,
       finalityConfirmations: 1,
       indexTickMs: 12_000,
+      boundedAuthorityReads: true,
       maxFeePerGasWei: 100_000_000n,
       approvalPolicy: {
         mode: 'replenishing',

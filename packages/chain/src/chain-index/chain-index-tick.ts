@@ -14,6 +14,7 @@ import {
   type ChainEventLogState,
   type ChainEventLogStore,
 } from './chain-event-log.js';
+import { tombstoneChainEventLogScope } from './chain-event-log-tombstones.js';
 import {
   CHAIN_EVENT_LOG_FAMILIES,
   type ChainEventDecoderRegistry,
@@ -229,7 +230,8 @@ export class ChainIndexTick {
     //
     // Stamping at the commit instead, as this did, put the whole pass between
     // the two: `#verifyChainIdentity` (a capped `watchdogPointRead`),
-    // `#fetchRange` (a capped `watchdogWideLogScan`) and
+    // `#fetchRange` (each physical `eth_getLogs` capped at the wide-scan
+    // deadline) and
     // `#resolveSettledBoundary` (another capped point read) all run AFTER the
     // head is read, so the committed stamp was `headFetch + D` for a pass
     // duration D bounded only by those policy caps. Every age measured off it
@@ -267,7 +269,10 @@ export class ChainIndexTick {
     blockRequests += verification.blockRequests;
     if (verification.outcome !== undefined) {
       if (verification.outcome === 'tombstoned') {
-        await store.tombstone(scope, cursor.revision);
+        // Through the helper, never `store.tombstone` directly: it advances the
+        // scope's tombstone generation, which is how the in-process readers
+        // that keep folds across revisions learn that the rows are gone.
+        await tombstoneChainEventLogScope(store, scope, cursor.revision);
       } else {
         await store.commit(scope, cursor.revision, {
           cursor: { ...cursor, head: { ...observedHead, fetchedAtMs: headFetchedAtMs } },

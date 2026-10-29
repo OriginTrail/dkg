@@ -46,10 +46,12 @@ export const SYNC_REQUEST_SAFE_PAGE_SIZE = Math.max(
     JAVA_WRITE_UTF_MAX_BYTES,
   ),
 );
-/** Additive wire capability understood by upgraded durable-sync responders. */
+/** Additive wire capability understood by upgraded sync responders. */
 export const SYNC_BYTE_BUDGET_PAGE_MODE = 'byte-budget-v1' as const;
-/** Maximum rows a responder may materialize for one byte-budgeted durable page. */
+/** Maximum rows a responder may materialize for one byte-budgeted sync page. */
 export const SYNC_BYTE_BUDGET_MAX_ROWS = 8_192;
+/** Exact DATA uses page-only store reads; never buffer a whole assertion. */
+export const SYNC_BYTE_BUDGET_EXACT_MAX_ROWS = 512;
 /**
  * Conservative first request for a previously unseen peer/path.
  *
@@ -159,6 +161,12 @@ export const GOSSIP_DIAL_COOLDOWN_MS = 30_000;
 /** Per-dial-attempt timeout for reconnect-on-gossip so a stuck dial can't starve the gossip handler path. */
 export const GOSSIP_DIAL_TIMEOUT_MS = 10_000;
 /**
+ * How long a private share waits for an on-demand phonebook fetch of a roster
+ * member whose encryption key it lacks (#2849). The fetch itself keeps its own
+ * budget and serves a later share if this one stops waiting.
+ */
+export const SWM_RECIPIENT_KEY_FETCH_WAIT_MS = 30_000;
+/**
  * Cooldown for catchup-on-connection:open: suppresses duplicate catchup kicks
  * when the same peer briefly has overlapping direct + relayed connections
  * (each of which fires its own connection:open).
@@ -204,9 +212,12 @@ export const SYNC_STALENESS_THRESHOLD_MS = 10 * 60_000;
  * The backoff grows the per-peer retry gap as
  * `SYNC_BACKOFF_BASE_MS * 2^(failures-1)` (capped at
  * `SYNC_BACKOFF_MAX_MS`, ±`SYNC_BACKOFF_JITTER` to de-correlate peers)
- * and resets the instant a sync succeeds. Only the periodic reconciler
- * is gated — connection:open and peer:update still trigger an immediate
- * attempt, so new information is never delayed.
+ * and resets the instant a sync succeeds. A new connection is gated as
+ * well: `queueSyncFromPeerOnConnect` skips a peer in backoff, as it skips
+ * one synced within `SYNC_STALENESS_THRESHOLD_MS` and one queued within
+ * `CATCHUP_ON_CONNECT_COOLDOWN_MS`; only an accepted authority change
+ * (`authorityScopeChanged`) passes the backoff. Shared memory such a peer
+ * holds is pulled by the change notice and the safety-net pull instead.
  */
 export const SYNC_BACKOFF_BASE_MS = 5 * 60_000;
 export const SYNC_BACKOFF_MAX_MS = 60 * 60_000;

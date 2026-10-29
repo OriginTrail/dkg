@@ -1,8 +1,8 @@
-import type {
-  ChainAdapter,
-  ChainEvent,
-  EventFilter,
-  EventScanHorizonLease,
+import {
+  type ChainAdapter,
+  type ChainEvent,
+  type EventFilter,
+  type EventScanHorizonLease,
 } from '@origintrail-official/dkg-chain';
 import { createOperationContext, type Logger, type OperationContext } from '@origintrail-official/dkg-core';
 import {
@@ -56,14 +56,31 @@ const DEFAULT_LIVE_SEED_LOOKBACK_BLOCKS = 500;
 const FAILURE_BACKOFF_INITIAL_MS = 60_000;
 const FAILURE_BACKOFF_MAX_MS = 5 * 60_000;
 
-export interface ChainEventPollerLaneSpec {
+interface ChainEventPollerLaneSchedule {
   name: ChainEventPollerLane;
   enabled(): boolean;
   eventTypes(): readonly string[];
   cursorStrategy(): ChainEventPollerLaneCursorStrategy;
   cadenceMs: number;
-  dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>;
+  /**
+   * Highest block this lane may persist as scanned, when its dispatched events
+   * left work that is not settled yet. The lane keeps scanning past it in
+   * memory; a restart replays from it, so that work is found again. Undefined
+   * leaves the persisted cursor at the scanned block.
+   */
+  persistCeiling?(): number | undefined;
+  /** Revisit this many scanned blocks so replacement-fork logs are delivered. */
+  replayLookbackBlocks?: number;
 }
+
+export type ChainEventPollerLaneSpec = ChainEventPollerLaneSchedule & (
+  | { dispatch(event: ChainEvent, ctx: OperationContext, signal?: AbortSignal): Promise<void>; prepare?: never }
+  | { dispatch?: never; prepare(event: ChainEvent): {
+    readonly event: ChainEvent;
+    readonly replayKey: string;
+    dispatch(ctx: OperationContext, signal?: AbortSignal): Promise<void>;
+  } }
+);
 
 interface ChainEventPollerLaneRuntime {
   spec: ChainEventPollerLaneSpec;
@@ -88,7 +105,10 @@ interface ChainEventLaneBoundary {
 type ChainEventLaneScheduleOutcome =
   | { kind: 'noWork'; now: number }
   | { kind: 'success'; now: number; caughtUp: boolean }
-  | { kind: 'failure'; now: number };
+  | { kind: 'failure'; now: number }
+  // A replay-identity lane whose lease expired after it dispatched new events:
+  // it scans the range again at its cadence, skipping what it dispatched.
+  | { kind: 'retry'; now: number };
 
 export interface ChainEventLaneRunnerConfig {
   chain: ChainAdapter;
@@ -112,6 +132,7 @@ export class ChainEventLaneRunner {
   private readonly cursorStore?: LaneCursorStore;
   private readonly laneState = new Map<ChainEventPollerLane, ChainEventPollerLaneState>();
   private readonly restoredLanes = new Set<ChainEventPollerLane>();
+  private readonly replayedEvents = new Map<ChainEventPollerLane, Map<number, Set<string>>>();
 
   constructor(config: ChainEventLaneRunnerConfig) {
     this.chain = config.chain;
@@ -146,9 +167,20 @@ export class ChainEventLaneRunner {
     };
 
     const scanResults: ChainEventPollerLaneScanResult[] = [];
+    // A legacy aggregate cursor refuses two leased results in one poll (see
+    // persistScanResults) and replays them both, so every later poll would
+    // repeat the same ranges. There, only one lane per poll scans under a
+    // lease; the others read the live head.
+    let leasedThisPoll = false;
     for (const lane of dueLanes) {
       signal?.throwIfAborted();
-      const boundary = await this.eventScanBoundary(lane, readLiveHead, signal);
+      const boundary = await this.eventScanBoundary(
+        lane,
+        readLiveHead,
+        signal,
+        this.cursorStore?.kind !== 'legacy' || !leasedThisPoll,
+      );
+      if (boundary.lease !== undefined) leasedThisPoll = true;
       scanResults.push(await this.scanLane(lane, boundary, now, ctx, signal));
     }
     signal?.throwIfAborted();
@@ -162,7 +194,7 @@ export class ChainEventLaneRunner {
       return await this.chain.getBlockNumber();
     } catch {
       if (signal?.aborted) signal.throwIfAborted();
-      // Head is optional; lanes can still scan their next bounded range.
+      // A failed head read holds every lane without a lease (see scanLane).
       return undefined;
     }
   }
@@ -171,16 +203,27 @@ export class ChainEventLaneRunner {
     lane: ChainEventPollerLaneRuntime,
     readLiveHead: () => Promise<number | undefined>,
     signal?: AbortSignal,
+    allowLease = true,
   ): Promise<ChainEventLaneBoundary> {
     const acquire = this.chain.acquireEventScanHorizonLease;
-    if (acquire !== undefined) {
+    if (allowLease && acquire !== undefined) {
       try {
         const lease = await acquire.call(this.chain, lane.eventTypes);
         if (
           lease !== undefined
           && Number.isSafeInteger(lease.throughBlockNumber)
           && lease.throughBlockNumber >= 0
-        ) return { head: lease.throughBlockNumber, lease };
+        ) {
+          if (lane.state.lastBlock <= lease.throughBlockNumber) {
+            return { head: lease.throughBlockNumber, lease };
+          }
+          // The horizon may lag the chain, so a cursor above it is only proven
+          // past the chain by the live head. Then scanLane resets it against
+          // that head; otherwise the lane waits for the horizon as before.
+          const liveHead = await readLiveHead();
+          if (liveHead != null && lane.state.lastBlock > liveHead) return { head: liveHead };
+          return { head: lease.throughBlockNumber, lease };
+        }
       } catch {
         if (signal?.aborted) signal.throwIfAborted();
         // Refusal or uncertainty restores this lane's live-head path.
@@ -275,8 +318,10 @@ export class ChainEventLaneRunner {
       for (const result of advancedResults) {
         signal?.throwIfAborted();
         if (!await this.scanResultLeaseHoldsForPersistence(result, now, ctx, signal)) continue;
+        const persistable = this.persistableCursor(result.lane, result.blockNumber);
+        if (persistable <= 0) continue;
         try {
-          await this.cursorStore.saveLane(result.lane.spec.name, result.blockNumber);
+          await this.cursorStore.saveLane(result.lane.spec.name, persistable);
         } catch {
           // Non-fatal - this lane will be re-scanned on restart.
         }
@@ -332,10 +377,19 @@ export class ChainEventLaneRunner {
 
     let min = Number.POSITIVE_INFINITY;
     for (const lane of activeLanes) {
-      if (lane.state.lastBlock <= 0) return 0;
-      min = Math.min(min, lane.state.lastBlock);
+      const persistable = this.persistableCursor(lane, lane.state.lastBlock);
+      if (persistable <= 0) return 0;
+      min = Math.min(min, persistable);
     }
     return Number.isFinite(min) ? min : 0;
+  }
+
+  /** The scanned block, held at the lane's persist ceiling when it has one. */
+  private persistableCursor(lane: ChainEventPollerLaneRuntime, scannedBlock: number): number {
+    const ceiling = lane.spec.persistCeiling?.();
+    return ceiling === undefined || !Number.isSafeInteger(ceiling)
+      ? scannedBlock
+      : Math.max(0, Math.min(scannedBlock, ceiling));
   }
 
   private async scanLane(
@@ -349,26 +403,48 @@ export class ChainEventLaneRunner {
     const stateBefore = { ...state };
     const { head, lease } = boundary;
 
+    if (head == null && this.chain.getBlockNumber !== undefined) {
+      // A failed head read leaves the window without an upper bound. A
+      // provider that answers a future range with [] would then carry the
+      // cursor past the chain, where every later poll finds no work. Hold the
+      // cursor and back off. (An adapter with no head read at all, like the
+      // in-memory mock, keeps its bounded page scan.)
+      this.log.warn(ctx, `Poll lane ${lane.spec.name} skipped: chain head unknown, cursor held at ${state.lastBlock}`);
+      this.applyLaneSchedule(lane, { kind: 'failure', now });
+      return { lane, blockNumber: state.lastBlock, advanced: false };
+    }
+
     this.applyCursorStrategyTransition(lane, head, ctx);
 
+    let justSeeded = false;
     if (head != null && !state.headKnown) {
       state.headKnown = true;
       if (state.lastBlock === 0 && lane.cursorStrategy.kind === 'live-tail') {
         state.lastBlock = Math.max(0, head - this.liveSeedLookbackBlocks(lane.cursorStrategy));
+        justSeeded = true;
         this.log.info(ctx, `Seeded poller cursor near chain head: lane=${lane.spec.name} head=${head} scanning from ${state.lastBlock}`);
       } else if (state.lastBlock === 0 && lane.cursorStrategy.kind === 'full-history') {
         lane.cursorStrategy.onBackfillFromGenesis?.(ctx);
       }
     }
 
-    const fromBlock = state.lastBlock + 1;
+    // A lease horizon may lag the chain, so only a live head can prove a
+    // cursor is past it (see eventScanBoundary).
+    const reset = head != null && lease === undefined && this.resetCursorPastHead(lane, head, ctx);
+
+    const lookback = lane.spec.replayLookbackBlocks ?? 0;
+    // A lagging lease cannot certify the range already passed in memory.
+    // Wait for its horizon instead of persisting that old cursor under it.
+    const fromBlock = justSeeded || (head !== undefined && head < state.lastBlock)
+      ? state.lastBlock + 1
+      : Math.max(1, state.lastBlock + 1 - lookback);
     const upperBound = head != null
       ? Math.min(fromBlock + this.maxRange - 1, head)
       : fromBlock + this.maxRange - 1;
 
     if (fromBlock > upperBound) {
       this.applyLaneSchedule(lane, { kind: 'noWork', now });
-      return { lane, blockNumber: state.lastBlock, advanced: false };
+      return { lane, blockNumber: state.lastBlock, advanced: reset };
     }
 
     const filter: EventFilter = {
@@ -379,16 +455,57 @@ export class ChainEventLaneRunner {
     const caughtUp = head != null && upperBound >= head;
     let advanced = false;
     let leaseExpired = false;
+    const remembered = this.replayedEvents.get(lane.spec.name) ?? new Map<number, Set<string>>();
+    // What this scan handed over, by block: rows it dispatched and exact
+    // replays it skipped. A block's entry exists, maybe empty, once a row of it
+    // is read; a failed dispatch adds nothing, so its retry dispatches it again.
+    const journal = new Map<number, Set<string>>();
+    let newDispatches = 0;
+    // Rows arrive in block order, so every block below the current row was read.
+    let readThrough = fromBlock - 1;
 
     try {
-      for await (const event of this.chain.listenForEvents(filter)) {
+      for await (const incoming of this.chain.listenForEvents(filter)) {
         signal?.throwIfAborted();
+        const spec = lane.spec;
+        let event = incoming;
+        let identity: string | undefined;
+        let dispatch: () => Promise<void>;
+        if (spec.prepare !== undefined) {
+          const prepared = spec.prepare(incoming);
+          event = prepared.event;
+          identity = lookback > 0 ? prepared.replayKey : undefined;
+          dispatch = () => prepared.dispatch(ctx, signal);
+        } else {
+          const handle = spec.dispatch;
+          identity = lookback > 0 ? this.replayIdentity(incoming) : undefined;
+          dispatch = () => handle.call(spec, incoming, ctx, signal);
+        }
+        // An exact replay dispatches nothing, so it needs no lease check; the
+        // check before the cursor advance still covers the whole range.
+        let atBlock: Set<string> | undefined;
+        if (identity !== undefined) {
+          readThrough = Math.max(readThrough, event.blockNumber - 1);
+          atBlock = journal.get(event.blockNumber);
+          if (atBlock === undefined) {
+            atBlock = new Set();
+            journal.set(event.blockNumber, atBlock);
+          }
+          if (remembered.get(event.blockNumber)?.has(identity) || atBlock.has(identity)) {
+            atBlock.add(identity);
+            continue;
+          }
+        }
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
           throw new Error('event scan horizon lease expired before event dispatch');
         }
         signal?.throwIfAborted();
-        await lane.spec.dispatch(event, ctx, signal);
+        await dispatch();
+        if (atBlock !== undefined && identity !== undefined) {
+          atBlock.add(identity);
+          newDispatches += 1;
+        }
         signal?.throwIfAborted();
         if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
           leaseExpired = true;
@@ -396,6 +513,7 @@ export class ChainEventLaneRunner {
         }
         signal?.throwIfAborted();
       }
+      readThrough = upperBound;
 
       signal?.throwIfAborted();
       if (lease !== undefined && !await this.eventScanLeaseHolds(lease)) {
@@ -403,21 +521,81 @@ export class ChainEventLaneRunner {
         throw new Error('event scan horizon lease expired before cursor advance');
       }
       signal?.throwIfAborted();
-      state.lastBlock = upperBound;
+      state.lastBlock = Math.max(state.lastBlock, upperBound);
+      if (lookback > 0) {
+        this.replaceReplayMemory(lane, remembered, journal, fromBlock, readThrough);
+        const oldestRetained = Math.max(1, state.lastBlock + 1 - lookback);
+        for (const block of remembered.keys()) {
+          if (block < oldestRetained) remembered.delete(block);
+        }
+      }
       advanced = true;
       this.applyLaneSchedule(lane, { kind: 'success', now, caughtUp });
     } catch (err) {
       if (signal?.aborted) signal.throwIfAborted();
       if (leaseExpired) this.restoreLaneState(state, stateBefore);
-      this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${err instanceof Error ? err.message : String(err)}`);
-      this.applyLaneSchedule(lane, { kind: 'failure', now });
+      const message = err instanceof Error ? err.message : String(err);
+      // The cursor stays put; only the replay memory learns what was delivered.
+      // A lease lasts one chain index revision, so a range whose dispatches
+      // outlast it would otherwise be dispatched again from its start forever.
+      if (lookback > 0) this.replaceReplayMemory(lane, remembered, journal, fromBlock, readThrough);
+      if (leaseExpired && newDispatches > 0) {
+        this.log.warn(
+          ctx,
+          `Poll lane ${lane.spec.name}: ${message}; kept ${newDispatches} new dispatch(es), `
+            + 'scanning the range again next poll without repeating them',
+        );
+        this.applyLaneSchedule(lane, { kind: 'retry', now });
+      } else {
+        this.log.error(ctx, `Poll lane ${lane.spec.name} failed: ${message}`);
+        this.applyLaneSchedule(lane, { kind: 'failure', now });
+      }
     }
     return {
       lane,
       blockNumber: state.lastBlock,
-      advanced,
+      // A reset cursor is saved even when its range then fails, so a restart
+      // does not reload the one past the chain.
+      advanced: advanced || reset,
       ...(advanced && lease !== undefined ? { lease, stateBefore } : {}),
     };
+  }
+
+  private replayIdentity(event: ChainEvent): string {
+    const data = event.data;
+    return [
+      event.type,
+      event.blockNumber,
+      data.blockHash,
+      data.logIndex,
+      data.txHash,
+      data.batchId,
+      data.merkleRoot,
+    ].map((part) => String(part ?? '')).join('\0');
+  }
+
+
+  /**
+   * Pulls back a cursor that an earlier head-less scan carried past the chain.
+   * A live-tail lane reseeds as it would on a cold start; a full-history lane
+   * keeps as much progress as the head allows.
+   */
+  private resetCursorPastHead(
+    lane: ChainEventPollerLaneRuntime,
+    head: number,
+    ctx: OperationContext,
+  ): boolean {
+    const state = lane.state;
+    if (state.lastBlock <= head) return false;
+    const pastHead = state.lastBlock;
+    state.lastBlock = lane.cursorStrategy.kind === 'live-tail'
+      ? Math.max(0, head - this.liveSeedLookbackBlocks(lane.cursorStrategy))
+      : head;
+    this.log.warn(
+      ctx,
+      `Poll lane ${lane.spec.name} cursor ${pastHead} is past chain head ${head}; reset to ${state.lastBlock}`,
+    );
+    return true;
   }
 
   private async revalidateScanResults(
@@ -474,6 +652,7 @@ export class ChainEventLaneRunner {
     phase: string,
   ): ChainEventPollerLaneScanResult {
     this.restoreLaneState(result.lane.state, stateBefore);
+    this.replayedEvents.delete(result.lane.spec.name);
     this.applyLaneSchedule(result.lane, { kind: 'failure', now });
     this.log.warn(
       ctx,
@@ -484,6 +663,29 @@ export class ChainEventLaneRunner {
       blockNumber: result.lane.state.lastBlock,
       advanced: false,
     };
+  }
+
+  /**
+   * Replaces the replay memory of every block a scan read (each block through
+   * `readThrough`, and one it stopped in) with what the scan handed over there,
+   * whether the scan succeeded or not. A row of another fork is no longer
+   * suppressed once a scan saw its block hold different rows, or none; blocks
+   * the scan did not reach keep what they had.
+   */
+  private replaceReplayMemory(
+    lane: ChainEventPollerLaneRuntime,
+    remembered: Map<number, Set<string>>,
+    journal: ReadonlyMap<number, Set<string>>,
+    fromBlock: number,
+    readThrough: number,
+  ): void {
+    for (const block of remembered.keys()) {
+      if ((block >= fromBlock && block <= readThrough) || journal.has(block)) remembered.delete(block);
+    }
+    for (const [block, identities] of journal) {
+      if (identities.size > 0) remembered.set(block, identities);
+    }
+    this.replayedEvents.set(lane.spec.name, remembered);
   }
 
   private async eventScanLeaseHolds(lease: EventScanHorizonLease): Promise<boolean> {
@@ -507,7 +709,7 @@ export class ChainEventLaneRunner {
 
   private applyLaneSchedule(lane: ChainEventPollerLaneRuntime, outcome: ChainEventLaneScheduleOutcome): void {
     const state = lane.state;
-    if (outcome.kind === 'noWork') {
+    if (outcome.kind === 'noWork' || outcome.kind === 'retry') {
       state.nextRunAtMs = outcome.now + lane.spec.cadenceMs;
       return;
     }

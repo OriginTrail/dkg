@@ -35,7 +35,7 @@ Solidity retains its independent coverage tool, floors and instrumentation exclu
 
 ## 2. Test execution has an explicit route
 
-`pnpm test:inventory` asks each real Vitest configuration to list its tests, parses the dedicated EVM runner, and accounts for other systems in `test-routes.json`. The output, `test-inventory.json`, lists maintenance surface, layer, command, cadence and prerequisites. A maintenance surface is a package/tool directory, not an invented human owner assignment. Newly orphaned files, empty package discovery, missing package registrations and stale secondary routes fail the gate. Secondary manual commands are recorded separately from required CI obligations.
+`pnpm test:inventory` asks each real Vitest configuration to list its tests, parses the dedicated EVM runner, and accounts for other systems in `test-routes.json`. The output, `test-inventory.json`, lists maintenance surface, layer, command, cadence and prerequisites. A maintenance surface is a package/tool directory, not an invented human owner assignment. Newly orphaned files, empty package discovery, missing package registrations and stale secondary routes fail the gate. Secondary manual commands are recorded separately from required CI obligations. A secondary route names one lane, the CI job that owns the obligation. When the same command also runs in another lane, the route's `reason` names it and a pin test enforces it: the Gate 0 harness unit tests, for example, run on the Windows inventory leg and on the Linux agent sidecar shard (`scripts/lib/__tests__/windows-persistence-ci.test.mjs`).
 
 The root Vitest watch/project list now includes all 22 runtime packages. This does not make `pnpm test` a distributed/devnet certification command. Devnet, browser, Solidity, Python and observability tools have their own routes and prerequisites.
 
@@ -65,7 +65,7 @@ PR runs use seed `640905` and 100 cases. Scheduled CI records the run-number see
 
 ```sh
 DKG_PROPERTY_SEED=640905 DKG_PROPERTY_PATH='PATH_FROM_FAILURE' \
-  pnpm exec vitest run --config vitest.properties.config.ts -t 'FAILING_TEST_NAME'
+  pnpm exec vitest run --config test-policy/vitest.properties.config.ts -t 'FAILING_TEST_NAME'
 ```
 
 These are bounded pilots, not a claim of exhaustive distributed-protocol verification. Broader revoke/key-rotation, RDF equivalence and Solidity accounting models can extend the same pattern after their independent oracles are specified. No additional Foundry framework is justified by the pilot evidence yet.

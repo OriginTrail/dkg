@@ -1,6 +1,15 @@
+import { classifyStoreReadTransport, StoreReadHttpResponseError } from '../store-read-transport-failure.js';
+import { withAdmittedReadCancellation, type AdmittedReadDeadline } from '../admitted-read-cancellation.js';
+import { refuseWithheldGraphQuery } from '../withheld-graph-query.js';
+import { executeReceiptConfirmedPublication } from '../receipt-confirmed-execution.js';
+import { buildBulkAssetGroupPlan } from './bulk-asset-group.js';
+import { buildAtomicAssetGroupUpdate, type AtomicAssetReplacement } from '../atomic-asset-group.js';
+import { prepareAtomicGraphReplace, prepareAtomicGraphAndSubjectReplace, prepareAtomicSubjectReplace, prepareAtomicSubjectAndInsert } from './atomic-write-plans.js';
 import { performance } from 'node:perf_hooks';
+import { QueryReadAdmission } from '../query-read-admission.js';
 import type {
   TripleStore,
+  BoundedQueryResponseCapability,
   Quad as DKGQuad,
   QueryOptions,
   UpdateOptions,
@@ -10,9 +19,8 @@ import type {
   ConstructResult,
 } from '../triple-store.js';
 import { registerTripleStoreAdapter } from '../triple-store.js';
-import { buildBlankNodeSafeDelete } from './sparql-http.js';
 import { decodeSparqlJsonQueryResult } from '../sparql-json-query-result.js';
-import { toBlazegraphAsciiSafeNQuads } from './blazegraph-nquads.js';
+import { quadToBlazegraphNQuad } from './blazegraph-nquads.js';
 import { SPARQL_QUERY_CONTENT_TYPE, SPARQL_UPDATE_CONTENT_TYPE } from './sparql-content-types.js';
 import {
   assertQuadLiteralsMutf8Safe,
@@ -26,32 +34,34 @@ import {
   executeRfc64SemanticReadCapabilityV1,
   type Rfc64ExactBindingsReadOperationV1,
 } from '../rfc64-exact-bindings-read-capability.js';
-import {
-  externalStorePriorityScheduler,
-  type StorePriorityScheduler,
-} from '../store-priority-scheduler.js';
-import {
-  buildAtomicGraphAndSubjectReplaceUpdate,
-  buildAtomicGraphReplaceUpdate,
-  buildAtomicSubjectReplaceUpdate,
-  isAtomicGraphReplaceStagingGraph,
-} from '../atomic-graph-replace.js';
+import { externalStorePriorityScheduler, type StorePriorityScheduler } from '../store-priority-scheduler.js';
+import { selectStoreScheduler } from '../store-control-path.js';
+import { isAtomicGraphReplaceStagingGraph } from '../atomic-graph-replace.js';
 import {
   buildRfc64AuthorCommitCasUpdateV1,
   executeRfc64AuthorCommitCasV1,
   type Rfc64AuthorCommitCasInputV1,
   type Rfc64AuthorCommitCasResultV1,
 } from '../rfc64-author-commit-cas.js';
-import { quadToNQuad } from '../bounded-rdf.js';
+import {
+  sparqlStatements,
+  type SparqlQueryPlan,
+  type SparqlUpdatePlan,
+} from './sparql-statements.js';
 import { readResponseTextBounded } from '../http-response-limit.js';
 import { scanNQuadLines, type NQuadLineScan } from '../nquads-text.js';
 import { StoreOperationTimeoutError } from '../store-operation-timeout.js';
-import type { StoreOperation, StoreOperationOutcome } from '../store-operation-outcome.js';
+import { isReadOnlyStoreOperation, type StoreOperation, type StoreOperationOutcome } from '../store-operation-outcome.js';
 import {
   createRfc64HttpSharedProjectionRunnerV1,
   RFC64_BLAZEGRAPH_PROJECTION_RESPONSE_STRATEGY_V1,
   type Rfc64HttpProjectionRequestV1,
 } from '../rfc64-http-shared-projection-runner.js';
+
+/** Every SPARQL statement this adapter builds by interpolation. */
+const statements = sparqlStatements('blazegraph');
+// Stock Blazegraph 2.1.5 recognizes this MIME type for both native write paths.
+const NQUADS_CONTENT_TYPE = 'text/x-nquads';
 
 export const DEFAULT_BLAZEGRAPH_OPERATION_TIMEOUT_MS = 30_000;
 
@@ -100,11 +110,8 @@ export interface BlazegraphStoreOptions {
   scheduler?: StorePriorityScheduler;
 }
 
-interface StoreOperationDeadline {
-  readonly signal: AbortSignal;
+interface StoreOperationDeadline extends AdmittedReadDeadline {
   markStarted(): void;
-  waitFor<T>(work: Promise<T>): Promise<T>;
-  check(): void;
   dispose(): void;
 }
 
@@ -227,7 +234,15 @@ function createStoreOperationDeadline(
  * All operations are translated to standard SPARQL 1.1 Query / Update
  * plus Blazegraph's N-Quads bulk-insert endpoint.
  */
-export class BlazegraphStore implements TripleStore {
+export class BlazegraphStore implements TripleStore, BoundedQueryResponseCapability {
+  private readonly queryAdmission = new QueryReadAdmission<AdmittedReadDeadline>();
+
+  withQueryReadAdmission<T>(work: () => Promise<T>, options?: QueryOptions): Promise<T> {
+    if (this.queryAdmission.active) return Promise.reject(new Error('Nested query read admission is not supported'));
+    return this.runStoreWork('query', options, deadline => this.queryAdmission.run(deadline, work));
+  }
+  readonly queryResponseLimitMode = 'pre-materialization' as const;
+  readonly graphEnumerationVisibility = (graph: string): boolean => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph);
   readonly queryCancellation = 'interruptible' as const;
   readonly rfc64ExactBindingsReadCertifiedV1 = true as const;
   readonly rfc64SemanticReadCertifiedV1 = true as const;
@@ -291,24 +306,41 @@ export class BlazegraphStore implements TripleStore {
   private runStoreWork<T>(
     operation: StoreOperation,
     options: QueryOptions | undefined,
+    work: (deadline: AdmittedReadDeadline) => Promise<T>,
+  ): Promise<T> {
+    if (this.queryAdmission.active && isReadOnlyStoreOperation(operation)) {
+      return this.queryAdmission.read(deadline => withAdmittedReadCancellation(deadline, options?.signal, work));
+    }
+    return this.withStoreAdmission(operation, options, async deadline => {
+      const result = await work(deadline);
+      deadline.check();
+      return result;
+    });
+  }
+
+  /** Own physical admission independently of the bounded operation outcome. */
+  private withStoreAdmission<T>(
+    operation: StoreOperation,
+    options: QueryOptions | undefined,
     work: (deadline: StoreOperationDeadline) => Promise<T>,
   ): Promise<T> {
+    if (this.queryAdmission.active) {
+      return Promise.reject(new Error('Mutations are not allowed inside a query read admission'));
+    }
     const deadline = createStoreOperationDeadline(
       this.operationTimeoutMs,
       options?.signal,
       operation,
     );
     const source = options?.source ?? `blazegraph.${operation}`;
-    const scheduled = this.scheduler.run(
+    const scheduled = selectStoreScheduler(this.scheduler, options).run(
       options?.priority,
       source,
       async () => {
         deadline.markStarted();
         try {
           deadline.check();
-          const result = await work(deadline);
-          deadline.check();
-          return result;
+          return await work(deadline);
         } finally {
           // The admitted transport/body promise has settled before this metric
           // and before the scheduler releases its slot.
@@ -333,6 +365,9 @@ export class BlazegraphStore implements TripleStore {
 
   async insert(quads: DKGQuad[], options?: QueryOptions): Promise<void> {
     if (quads.length === 0) return;
+    // The N-Quads body bypasses the SPARQL builders. Blazegraph rejects a
+    // relative IRI here but stores an RFC 3987-invalid one verbatim.
+    statements.checkIris.insert(quads);
     await this.runStoreWork('insert', {
       ...options,
       source: options?.source ?? 'blazegraph.insert',
@@ -345,17 +380,7 @@ export class BlazegraphStore implements TripleStore {
       // retains the caller's quad array, not an additional potentially-large
       // N-Quads copy for every waiting insert.
       const nquads = quads.map(quadToBlazegraphNQuad).join('\n') + '\n';
-      deadline.check();
-      const res = await deadline.waitFor(fetch(this.url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'text/x-nquads' },
-        body: nquads,
-        signal: deadline.signal,
-      }));
-      if (!res.ok) {
-        const text = await deadline.waitFor(res.text().catch(() => ''));
-        throw new Error(`Blazegraph insert failed (${res.status}): ${text.slice(0, 200)}`);
-      }
+      await this.postWriteRequest(nquads, NQUADS_CONTENT_TYPE, deadline, 'insert');
     });
   }
 
@@ -364,12 +389,7 @@ export class BlazegraphStore implements TripleStore {
     // Blazegraph is SPARQL 1.1, so blank nodes are illegal in `DELETE DATA`
     // (same constraint as Oxigraph). Reuse the shared blank-node-safe builder
     // so blank-node quads are removed via `DELETE { … } WHERE { … }`.
-    const update = buildBlankNodeSafeDelete(quads);
-    if (!update) return;
-    await this.sparqlUpdate(update, {
-      ...options,
-      source: options?.source ?? 'blazegraph.delete',
-    }, 'delete');
+    await this.runUpdatePlan(statements.deleteData(quads), options);
   }
 
   async deleteByPattern(pattern: Partial<DKGQuad>, options?: QueryOptions): Promise<number> {
@@ -396,25 +416,7 @@ export class BlazegraphStore implements TripleStore {
     pattern: Partial<DKGQuad>,
     options?: QueryOptions,
   ): Promise<void> {
-    const s = pattern.subject ? `<${escapeUri(pattern.subject)}>` : '?s';
-    const p = pattern.predicate ? `<${escapeUri(pattern.predicate)}>` : '?p';
-    const o = pattern.object ? formatTerm(pattern.object) : '?o';
-    const triple = `${s} ${p} ${o}`;
-    if (pattern.graph) {
-      await this.sparqlUpdate(
-        `DELETE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } } WHERE { GRAPH <${escapeUri(pattern.graph)}> { ${triple} } }`,
-        { ...options, source: options?.source ?? 'blazegraph.deleteByPattern' },
-        'deleteByPattern',
-      );
-    } else {
-      // `DELETE { ?g_ctx { … } }` is a syntax error — the template needs the
-      // `GRAPH` keyword. Rejected with HTTP 400 by a spec-compliant endpoint.
-      await this.sparqlUpdate(
-        `DELETE { GRAPH ?g_ctx { ${triple} } } WHERE { GRAPH ?g_ctx { ${triple} } }`,
-        { ...options, source: options?.source ?? 'blazegraph.deleteByPattern' },
-        'deleteByPattern',
-      );
-    }
+    await this.runUpdatePlan(statements.deleteByPattern(pattern), options);
   }
 
   async deleteBySubjectPrefix(graphUri: string, prefix: string, options?: QueryOptions): Promise<number> {
@@ -422,11 +424,7 @@ export class BlazegraphStore implements TripleStore {
       ...options,
       source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countBefore',
     });
-    await this.sparqlUpdate(
-      `DELETE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } } WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o . FILTER(STRSTARTS(STR(?s), "${escapeString(prefix)}")) } }`,
-      { ...options, source: options?.source ?? 'blazegraph.deleteBySubjectPrefix' },
-      'deleteBySubjectPrefix',
-    );
+    await this.runUpdatePlan(statements.deleteBySubjectPrefix(graphUri, prefix), options);
     const after = await this.countQuads(graphUri, {
       ...options,
       source: options?.source ?? 'blazegraph.deleteBySubjectPrefix.countAfter',
@@ -457,11 +455,7 @@ export class BlazegraphStore implements TripleStore {
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'BlazegraphStore.replaceGraph',
-    });
-    const plan = buildAtomicGraphReplaceUpdate(graphUri, quads);
+    const plan = prepareAtomicGraphReplace('blazegraph', graphUri, quads);
     try {
       await this.sparqlUpdate(
         plan.update,
@@ -480,6 +474,40 @@ export class BlazegraphStore implements TripleStore {
     }
   }
 
+  async replaceAssetGroup(assets: readonly AtomicAssetReplacement[], options?: QueryOptions): Promise<void> {
+    statements.checkIris.replaceAssetGroup(assets);
+    await this.withStoreAdmission('replaceAssetGroup', options, async deadline => {
+      // Choose the write strategy after admission. Receipt confirmation ends
+      // publication; reclamation drains under the same physical scheduler slot.
+      const bulk = buildBulkAssetGroupPlan(assets);
+      if (!bulk) return deadline.waitFor(this.postWriteRequest(buildAtomicAssetGroupUpdate(assets).update,
+        SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group'));
+      await executeReceiptConfirmedPublication({
+        publish: async () => {
+          await this.postWriteRequest(bulk.nquads, NQUADS_CONTENT_TYPE, deadline, 'bulk group');
+          await this.postWriteRequest(bulk.update, SPARQL_UPDATE_CONTENT_TYPE, deadline, 'bulk group');
+        },
+        readReceipt: async () => {
+          const response = await this.postReadQuery(bulk.receiptQuery,
+            'application/sparql-results+json', deadline, 64 * 1024, 'query');
+          const receipt = decodeSparqlJsonQueryResult(
+            await deadline.waitFor(readResponseTextBounded(response, 64 * 1024)), 'ask');
+          if (receipt.type !== 'boolean' || !receipt.value) throw new Error('Bulk group publication receipt missing');
+          deadline.check();
+        },
+        cleanup: async () => {
+          // The publication outcome has settled (success or failure). Detach its
+          // caller and timer before best-effort reclamation under a fresh bound.
+          deadline.dispose();
+          const cleanupDeadline = createStoreOperationDeadline(this.operationTimeoutMs, undefined, 'replaceAssetGroup');
+          try {
+            await this.postWriteRequest(bulk.cleanup, SPARQL_UPDATE_CONTENT_TYPE, cleanupDeadline, 'bulk group');
+          } finally { cleanupDeadline.dispose(); }
+        },
+      });
+    });
+  }
+
   async replaceGraphAndSubject(
     graphUri: string,
     graphQuads: DKGQuad[],
@@ -488,16 +516,8 @@ export class BlazegraphStore implements TripleStore {
     metadataQuads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    assertQuadLiteralsMutf8Safe([...graphQuads, ...metadataQuads], {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'BlazegraphStore.replaceGraphAndSubject',
-    });
-    const plan = buildAtomicGraphAndSubjectReplaceUpdate(
-      graphUri,
-      graphQuads,
-      metaGraphUri,
-      metadataSubject,
-      metadataQuads,
+    const plan = prepareAtomicGraphAndSubjectReplace(
+      'blazegraph', graphUri, graphQuads, metaGraphUri, metadataSubject, metadataQuads,
     );
     try {
       await this.sparqlUpdate(
@@ -506,7 +526,7 @@ export class BlazegraphStore implements TripleStore {
         'replaceGraphAndSubject',
       );
     } catch (error) {
-      await this.sparqlUpdate(
+      if (plan.cleanup) await this.sparqlUpdate(
         plan.cleanup,
         { ...options, source: 'blazegraph.replaceGraphAndSubject.cleanup' },
         'replaceGraphAndSubject',
@@ -521,17 +541,31 @@ export class BlazegraphStore implements TripleStore {
     quads: DKGQuad[],
     options?: QueryOptions,
   ): Promise<void> {
-    assertQuadLiteralsMutf8Safe(quads, {
-      maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
-      label: 'BlazegraphStore.replaceSubject',
-    });
     // Blazegraph runs one UPDATE request (DELETE WHERE + INSERT DATA) as a single
     // transaction, so the subject is replaced atomically. No staging/cleanup: a
     // failed request commits nothing.
+    const update = prepareAtomicSubjectReplace('blazegraph', graphUri, subject, quads);
     await this.sparqlUpdate(
-      buildAtomicSubjectReplaceUpdate(graphUri, subject, quads),
+      update,
       { ...options, source: options?.source ?? 'blazegraph.replaceSubject' },
       'replaceSubject',
+    );
+  }
+
+  async replaceSubjectAndInsert(
+    graphUri: string,
+    subject: string,
+    replacementQuads: DKGQuad[],
+    insertQuads: DKGQuad[],
+    options?: QueryOptions,
+  ): Promise<void> {
+    const update = prepareAtomicSubjectAndInsert(
+      'blazegraph', graphUri, subject, replacementQuads, insertQuads,
+    );
+    await this.sparqlUpdate(
+      update,
+      { ...options, source: options?.source ?? 'blazegraph.replaceSubjectAndInsert' },
+      'replaceSubjectAndInsert',
     );
   }
 
@@ -545,16 +579,17 @@ export class BlazegraphStore implements TripleStore {
       maxBytes: JAVA_WRITE_UTF_MAX_BYTES,
       label: 'BlazegraphStore.rfc64AuthorCommitCasV1',
     });
+    statements.checkIris.rfc64AuthorCommitCasV1(plan);
     return executeRfc64AuthorCommitCasV1({
       executeUpdate: () => this.sparqlUpdate(
         plan.update,
         { ...options, source: options?.source ?? 'blazegraph.rfc64AuthorCommitCasV1' },
         'rfc64AuthorCommitCasV1',
       ),
-      readReceipt: () => this.query(plan.receiptAsk, {
+      readReceipt: () => this.queryWithOperation(plan.receiptAsk, {
         ...options,
         source: 'blazegraph.rfc64AuthorCommitCasV1.receipt',
-      }),
+      }, 'rfc64AuthorCommitCasV1'),
       cleanup: () => this.sparqlUpdate(
         plan.cleanup,
         { ...cleanupOptions, source: 'blazegraph.rfc64AuthorCommitCasV1.cleanup' },
@@ -568,6 +603,7 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async query(sparql: string, options?: TripleStoreQueryOptions): Promise<QueryResult> {
+    refuseWithheldGraphQuery(options, 'BlazegraphStore');
     return this.queryWithOperation(sparql, options);
   }
 
@@ -581,10 +617,11 @@ export class BlazegraphStore implements TripleStore {
     // shared scanner so graph-producing queries still negotiate N-Quads
     // instead of being sent with the SELECT/ASK JSON Accept header.
     const operation = classifySparqlOperation(trimmed);
+    if (this.queryAdmission.active && operation.kind !== 'read') throw new Error('Mutations are not allowed inside a query read admission');
     const isAsk = operation.kind === 'read' && operation.form === 'ASK';
     const isConstruct = operation.kind === 'read'
       && (operation.form === 'CONSTRUCT' || operation.form === 'DESCRIBE');
-    return this.runStoreWork(
+    const result = this.runStoreWork(
       storeOperation ?? (isConstruct ? 'construct' : 'query'),
       options,
       async (deadline) => {
@@ -615,6 +652,7 @@ export class BlazegraphStore implements TripleStore {
       return decodeSparqlJsonQueryResult(text, isAsk ? 'ask' : 'select');
       },
     );
+    return operation.kind === 'read' && (storeOperation === undefined || isReadOnlyStoreOperation(storeOperation)) ? classifyStoreReadTransport(result) : result;
   }
 
   /**
@@ -635,7 +673,7 @@ export class BlazegraphStore implements TripleStore {
   private async postReadQuery(
     sparql: string,
     accept: string,
-    deadline: StoreOperationDeadline,
+    deadline: AdmittedReadDeadline,
     errorResponseByteCeiling: number | undefined,
     failureLabel: 'query' | 'construct',
   ): Promise<Response> {
@@ -645,7 +683,7 @@ export class BlazegraphStore implements TripleStore {
         ? res.text()
         : readResponseTextBounded(res, errorResponseByteCeiling)
       ).catch(() => ''));
-      throw new Error(`Blazegraph ${failureLabel} failed (${res.status}): ${text.slice(0, 300)}`);
+      throw new StoreReadHttpResponseError(res.status, `Blazegraph ${failureLabel} failed (${res.status}): ${text.slice(0, 300)}`);
     }
     return res;
   }
@@ -653,7 +691,7 @@ export class BlazegraphStore implements TripleStore {
   private async postReadRequest(
     sparql: string,
     accept: string,
-    deadline: StoreOperationDeadline,
+    deadline: AdmittedReadDeadline,
   ): Promise<Response> {
     return deadline.waitFor(fetch(this.url, {
       method: 'POST',
@@ -669,7 +707,7 @@ export class BlazegraphStore implements TripleStore {
 
   private async queryConstruct(
     sparql: string,
-    deadline: StoreOperationDeadline,
+    deadline: AdmittedReadDeadline,
     options?: TripleStoreQueryOptions,
   ): Promise<ConstructResult> {
     const res = await this.postReadQuery(
@@ -692,11 +730,7 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async hasGraph(graphUri: string, options?: QueryOptions): Promise<boolean> {
-    const r = await this.queryWithOperation(
-      `ASK { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`,
-      { ...options, source: options?.source ?? 'blazegraph.hasGraph' },
-      'hasGraph',
-    );
+    const r = await this.runQueryPlan(statements.hasGraph(graphUri), options);
     return r.type === 'boolean' && r.value;
   }
 
@@ -705,11 +739,7 @@ export class BlazegraphStore implements TripleStore {
   }
 
   async dropGraph(graphUri: string, options?: QueryOptions): Promise<void> {
-    await this.sparqlUpdate(
-      `DROP SILENT GRAPH <${escapeUri(graphUri)}>`,
-      { ...options, source: options?.source ?? 'blazegraph.dropGraph' },
-      'dropGraph',
-    );
+    await this.runUpdatePlan(statements.dropGraph(graphUri), options);
   }
 
   async listGraphs(options?: TripleStoreQueryOptions): Promise<string[]> {
@@ -721,7 +751,7 @@ export class BlazegraphStore implements TripleStore {
     if (r.type !== 'bindings') return [];
     return r.bindings
       .map((b) => b.g)
-      .filter((graph) => Boolean(graph) && !isAtomicGraphReplaceStagingGraph(graph));
+      .filter(this.graphEnumerationVisibility);
   }
 
   // -------------------------------------------------------------------
@@ -729,17 +759,7 @@ export class BlazegraphStore implements TripleStore {
   // -------------------------------------------------------------------
 
   async countQuads(graphUri?: string, options?: QueryOptions): Promise<number> {
-    const sparql = graphUri
-      ? `SELECT (COUNT(*) AS ?c) WHERE { GRAPH <${escapeUri(graphUri)}> { ?s ?p ?o } }`
-      : `SELECT (COUNT(*) AS ?c) WHERE { { ?s ?p ?o } UNION { GRAPH ?g { ?s ?p ?o } } }`;
-    const r = await this.queryWithOperation(
-      sparql,
-      {
-        ...options,
-        source: options?.source ?? 'blazegraph.countQuads',
-      },
-      'countQuads',
-    );
+    const r = await this.runQueryPlan(statements.countQuads(graphUri), options);
     if (r.type === 'bindings' && r.bindings.length > 0) {
       const cell = r.bindings[0].c ?? '';
       const digits = cell.match(/\d+/)?.[0];
@@ -760,6 +780,51 @@ export class BlazegraphStore implements TripleStore {
   // Internal helpers
   // -------------------------------------------------------------------
 
+  /**
+   * Send a statement plan under its own operation; nothing for a null plan.
+   * Blazegraph keeps no write-scope bookkeeping, so the plan's scope is not
+   * needed here.
+   */
+  private async runUpdatePlan(plan: SparqlUpdatePlan | null, options?: QueryOptions): Promise<void> {
+    if (plan === null) return;
+    await this.sparqlUpdate(
+      plan.update,
+      { ...options, source: options?.source ?? `blazegraph.${plan.operation}` },
+      plan.operation,
+    );
+  }
+
+  /** Run a statement plan's query under its own operation. */
+  private runQueryPlan(plan: SparqlQueryPlan, options?: QueryOptions): Promise<QueryResult> {
+    return this.queryWithOperation(
+      plan.sparql,
+      { ...options, source: options?.source ?? `blazegraph.${plan.operation}` },
+      plan.operation,
+    );
+  }
+
+  /** One HTTP write boundary under an existing scheduler slot and original deadline. */
+  private async postWriteRequest(
+    body: string,
+    contentType: string,
+    deadline: AdmittedReadDeadline,
+    responsePolicy: 'insert' | 'update' | 'bulk group',
+  ): Promise<void> {
+    deadline.check();
+    const response = await deadline.waitFor(fetch(this.url, {
+      method: 'POST', headers: { 'Content-Type': contentType }, body, signal: deadline.signal,
+    }));
+    if (responsePolicy === 'bulk group') {
+      // Bulk staging bounds and drains every response before the next write.
+      await deadline.waitFor(readResponseTextBounded(response, 64 * 1024));
+      if (!response.ok) throw new Error(`Blazegraph bulk group failed (${response.status})`);
+    } else if (!response.ok) {
+      const text = await deadline.waitFor(response.text().catch(() => ''));
+      const excerpt = text.slice(0, responsePolicy === 'insert' ? 200 : 300);
+      throw new Error(`Blazegraph ${responsePolicy} failed (${response.status}): ${excerpt}`);
+    }
+  }
+
   private async sparqlUpdate(
     update: string,
     options?: QueryOptions,
@@ -775,16 +840,7 @@ export class BlazegraphStore implements TripleStore {
     //
     // SPARQL_UPDATE_CONTENT_TYPE carries charset=utf-8 (see sparql-content-types.ts).
     await this.runStoreWork(operation, options, async (deadline) => {
-      const res = await deadline.waitFor(fetch(this.url, {
-        method: 'POST',
-        headers: { 'Content-Type': SPARQL_UPDATE_CONTENT_TYPE },
-        body: update,
-        signal: deadline.signal,
-      }));
-      if (!res.ok) {
-        const text = await deadline.waitFor(res.text().catch(() => ''));
-        throw new Error(`Blazegraph update failed (${res.status}): ${text.slice(0, 300)}`);
-      }
+      await this.postWriteRequest(update, SPARQL_UPDATE_CONTENT_TYPE, deadline, 'update');
     });
   }
 }
@@ -796,32 +852,6 @@ export class BlazegraphStore implements TripleStore {
 // =====================================================================
 // N-Quad serialisation / parsing helpers (shared with oxigraph adapter)
 // =====================================================================
-
-/**
- * N-Quads serializer for Blazegraph's bulk-insert wire format: a standard
- * N-Quads line ({@link quadToNQuad}) made ASCII-safe
- * ({@link toBlazegraphAsciiSafeNQuads}). This is the single serialization
- * entry point for the adapter's write path, so the Blazegraph wire-format
- * invariant lives at the serialization boundary rather than as a separate
- * post-processing pass a caller must remember to apply. The ASCII-safe pass
- * operates on the assembled line by design: it normalizes `\U` escapes and
- * relies on backslash parity across the whole line, both of which are
- * line-level properties of the rendered N-Quads, not of an individual term.
- */
-function quadToBlazegraphNQuad(q: DKGQuad): string {
-  return toBlazegraphAsciiSafeNQuads(quadToNQuad(q));
-}
-
-function formatTerm(term: string): string {
-  if (term.startsWith('"')) {
-    const m = term.match(/^("(?:[^"\\]|\\.)*")\^\^(?!<)(.+)$/);
-    if (m) return `${m[1]}^^<${m[2]}>`;
-    return term;
-  }
-  if (term.startsWith('_:')) return term;
-  if (term.startsWith('<')) return term;
-  return `<${term}>`;
-}
 
 /**
  * Parse a Blazegraph CONSTRUCT body and reject one that the engine cut short.
@@ -879,89 +909,6 @@ function parseBlazegraphConstructNQuads(text: string): DKGQuad[] {
   }
 
   return quads;
-}
-
-function escapeUri(uri: string): string {
-  return uri.replace(/[<>"{}|\\^`]/g, '');
-}
-
-function escapeString(s: string): string {
-  return s.replace(/[\\"]/g, '\\$&');
-}
-
-// =====================================================================
-// Oversized-literal guard
-// =====================================================================
-
-/**
- * Java Modified UTF-8 byte length of a string.
- *
- * Blazegraph uses `DataOutputStream.writeUTF()` for index keys, which
- * encodes strings in Java's Modified UTF-8 (MUTF-8).  The key
- * differences from standard UTF-8:
- *   - U+0000 (NUL) is encoded as 2 bytes (0xC0, 0x80) instead of 1
- *   - Supplementary codepoints (U+10000–U+10FFFF) are encoded as a
- *     UTF-16 surrogate pair, each surrogate taking 3 MUTF-8 bytes =
- *     6 bytes total (vs 4 in standard UTF-8)
- *
- * `writeUTF()` hard-caps the encoded length at 65 535 bytes.
- * Exceeding this triggers `java.io.UTFDataFormatException` and causes
- * the entire batch to fail with HTTP 500.
- */
-const BLAZEGRAPH_MUTF8_LIMIT = 65_535;
-
-function javaModifiedUtf8Length(str: string): number {
-  let len = 0;
-  for (let i = 0; i < str.length; i++) {
-    const code = str.charCodeAt(i);
-    if (code === 0) {
-      len += 2;
-    } else if (code <= 0x7f) {
-      len += 1;
-    } else if (code <= 0x7ff) {
-      len += 2;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      // High surrogate — the low surrogate at i+1 will add another 3
-      len += 3;
-    } else {
-      len += 3;
-    }
-  }
-  return len;
-}
-
-/**
- * Check quads for literal objects that would exceed Blazegraph's
- * MUTF-8 index key limit.  Throws with details about the offending
- * quads so callers know the batch was NOT fully persisted.
- */
-function rejectOversizedLiterals(quads: DKGQuad[], maxBytes: number): DKGQuad[] {
-  const rejected: Array<{ subject: string; predicate: string; mutf8Len: number }> = [];
-  const out: DKGQuad[] = [];
-  for (const q of quads) {
-    if (q.object.startsWith('"')) {
-      const mutf8Len = javaModifiedUtf8Length(q.object);
-      if (mutf8Len > maxBytes) {
-        rejected.push({
-          subject: q.subject.slice(0, 120),
-          predicate: q.predicate.slice(0, 120),
-          mutf8Len,
-        });
-        continue;
-      }
-    }
-    out.push(q);
-  }
-  if (rejected.length > 0) {
-    const details = rejected
-      .map((r) => `  subject=${r.subject} predicate=${r.predicate} (${r.mutf8Len} MUTF-8 bytes)`)
-      .join('\n');
-    throw new Error(
-      `[BlazegraphStore] ${rejected.length} quad(s) exceed Blazegraph's ${maxBytes}-byte MUTF-8 limit ` +
-      `and would cause UTFDataFormatException. Rejected quads:\n${details}`,
-    );
-  }
-  return out;
 }
 
 // =====================================================================

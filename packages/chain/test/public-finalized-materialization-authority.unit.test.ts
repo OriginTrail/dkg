@@ -2,7 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { ethers } from 'ethers';
 import { MockChainAdapter } from '../src/mock-adapter.js';
 import { resolvePublicFinalizedMaterializationAuthority } from '../src/public-finalized-materialization-authority.js';
-import { ContextGraphLiveAuthorityUnsupportedError } from '../src/chain-adapter.js';
+import {
+  ContextGraphLiveAuthorityUnsupportedError,
+  type ContextGraphLiveAuthorityReadOptions,
+} from '../src/chain-adapter.js';
 
 const ROOT = new Uint8Array(32).fill(7);
 const AUTHOR = `0x${'11'.repeat(20)}`;
@@ -316,6 +319,20 @@ describe('public finalized materialization authority', () => {
       return chain;
     }
 
+    /**
+     * `authorityChain()` with the one-read genuinely ABSENT. `MockChainAdapter`
+     * defines it on its prototype, composed from the very point reads stubbed
+     * above, so the bare `authorityChain()` takes the one-read branch and only
+     * looks like the point-read path. An own `undefined` shadows the prototype
+     * method, which is how an adapter without the optional method reads here.
+     */
+    function noOneReadChain() {
+      const chain = authorityChain();
+      (chain as { getContextGraphLiveAuthority?: unknown }).getContextGraphLiveAuthority = undefined;
+      expect(chain.getContextGraphLiveAuthority).toBeUndefined();
+      return chain;
+    }
+
     it('answers active and accessPolicy from one read, not two', async () => {
       const chain = oneReadChain();
 
@@ -377,7 +394,7 @@ describe('public finalized materialization authority', () => {
     });
 
     it('does NOT fall back on a transient failure', async () => {
-      // Retrying provider trouble as three more requests turns a bad minute
+      // Retrying provider trouble as two more requests turns a bad minute
       // into extra load. The transport owns its own retry.
       const chain = oneReadChain();
       (chain as any).getContextGraphLiveAuthority = vi.fn(async () => {
@@ -392,13 +409,73 @@ describe('public finalized materialization authority', () => {
     });
 
     it('keeps the two point reads when the adapter has no one-read', async () => {
-      const chain = authorityChain();
+      const chain = noOneReadChain();
 
       await expect(resolve(chain)).resolves.toEqual({
         kind: 'resolved', authorAddress: AUTHOR,
       });
       expect(chain.isContextGraphActiveOnChain).toHaveBeenCalledTimes(1);
       expect(chain.getContextGraphAccessPolicy).toHaveBeenCalledTimes(1);
+    });
+
+    it('hands the caller signal to the one-read, so an aborted caller can leave it', async () => {
+      // The one-read is shared in flight and a waiter's own signal is its only
+      // way out. The stub stands in for that: it waits on the signal it was
+      // given, and fails the read at once when it was given none.
+      const controller = new AbortController();
+      const chain = oneReadChain();
+      const oneRead = vi.fn((_id: bigint, options?: ContextGraphLiveAuthorityReadOptions) => (
+        new Promise<never>((_resolve, reject) => {
+          const signal = options?.signal;
+          if (signal === undefined) {
+            reject(new Error('one-read issued without the caller signal'));
+            return;
+          }
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+        })
+      ));
+      (chain as { getContextGraphLiveAuthority?: unknown }).getContextGraphLiveAuthority = oneRead;
+
+      let settled = false;
+      const pending = resolvePublicFinalizedMaterializationAuthority({
+        chain,
+        onChainContextGraphId: '298',
+        kaId: 42n,
+        assertionVersion: '1',
+        merkleRoot: ROOT,
+        signal: controller.signal,
+      }).finally(() => { settled = true; });
+
+      expect(oneRead).toHaveBeenCalledOnce();
+      expect(oneRead.mock.calls[0]?.[1]?.signal).toBe(controller.signal);
+      // Still waiting on the read: nothing but the caller's abort ends it.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(settled).toBe(false);
+
+      controller.abort();
+      await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+      // An abort is not a deterministic failure, so no fallback reads follow.
+      expect(chain.isContextGraphActiveOnChain).not.toHaveBeenCalled();
+      expect(chain.getContextGraphAccessPolicy).not.toHaveBeenCalled();
+    });
+
+    it('hands the caller signal to the fallback point reads as well', async () => {
+      const controller = new AbortController();
+      const chain = noOneReadChain();
+
+      await expect(resolvePublicFinalizedMaterializationAuthority({
+        chain,
+        onChainContextGraphId: '298',
+        kaId: 42n,
+        assertionVersion: '1',
+        merkleRoot: ROOT,
+        signal: controller.signal,
+      })).resolves.toEqual({ kind: 'resolved', authorAddress: AUTHOR });
+
+      expect(chain.isContextGraphActiveOnChain)
+        .toHaveBeenCalledWith(298n, { signal: controller.signal });
+      expect(chain.getContextGraphAccessPolicy)
+        .toHaveBeenCalledWith(298n, { signal: controller.signal });
     });
   });
 });

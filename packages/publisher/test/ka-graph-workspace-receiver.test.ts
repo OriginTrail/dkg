@@ -12,6 +12,7 @@ import {
   GraphManager,
   LOCAL_TRUSTED_KA_CONTROLS_GRAPH,
   OxigraphStore,
+  readExactGraphPaged,
   readSwmMaterializationWitness,
   writeSwmMaterializationWitness,
 } from '@origintrail-official/dkg-storage';
@@ -21,7 +22,10 @@ import {
   readLocallyTrustedKnowledgeAssetControls,
   resolveKnowledgeAssetWorkspaceHead,
   storeKnowledgeAssetOperationPublicQuads,
+  storageAckLedgerEntryQuads,
+  workspacePublicQuadsDigest,
 } from '../src/index.js';
+import { workspaceOperationSubject } from '../src/workspace-metadata-subjects.js';
 import { SharedMemoryHandler } from '../src/workspace-handler.js';
 
 const CONTEXT_GRAPH = 'rootless-receiver';
@@ -174,6 +178,51 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       type: 'bindings',
       bindings: [{ section, name: '"Safety"' }],
     });
+  });
+
+  it.each([
+    ['head points at the signed copy', 'rootless-op-1'],
+    ['head preserves the queued share', 'storage-ack-signed-copy'],
+  ])('defers a newer share while %s and the copy is not yet in VM', async (_case, signedOperationId) => {
+    const store = new OxigraphStore();
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    expect((await handler.handle(v2Request(), PEER_ID)).applied).toBe(true);
+    // A local self-ACK keeps the queued head but records a different signed
+    // copy in the ledger; both shapes must retain the copy until promotion.
+    await store.insert(storageAckLedgerEntryQuads({
+      operationSubject: workspaceOperationSubject(CONTEXT_GRAPH, signedOperationId),
+      namespace: CONTEXT_GRAPH,
+      metaGraph: new GraphManager(store).sharedMemoryMetaUri(CONTEXT_GRAPH),
+      contextGraphId: '42',
+      kaUal: UAL,
+      assertionVersion: 1,
+      operation: 'publish',
+      signedAt: new Date(),
+    }));
+    const next = v2Request({
+      nquads: new TextEncoder().encode(nquad('urn:entity:2', 'two')),
+      shareOperationId: 'rootless-op-2',
+      assertionVersion: '2',
+    });
+
+    const deferred = await handler.handle(next, PEER_ID);
+
+    expect(deferred.applied).toBe(false);
+    if (deferred.applied) throw new Error('unreachable');
+    expect(deferred.retryable).toBe(true);
+    expect(deferred.reason).toContain('OWED_STORAGE_ACK_COPY');
+
+    // Once v1 is in VM the share applies.
+    await store.insert([
+      { subject: UAL, predicate: 'http://dkg.io/ontology/status', object: '"confirmed"', graph: `${DATA_GRAPH}/_meta` },
+      {
+        subject: UAL,
+        predicate: 'http://dkg.io/ontology/assertionVersion',
+        object: '"1"^^<http://www.w3.org/2001/XMLSchema#integer>',
+        graph: `${DATA_GRAPH}/_meta`,
+      },
+    ]);
+    expect((await handler.handle(next, PEER_ID)).applied).toBe(true);
   });
 
   it('replaces the whole KA graph without leaving prior subjects behind', async () => {
@@ -687,6 +736,43 @@ describe('SharedMemoryHandler graph-scoped KA receiver', () => {
       graph: metaGraph,
     }]);
     const replay = await handler.handle(inbound, PEER_ID);
+    expect(replay.applied).toBe(true);
+  });
+
+  it('records the fingerprint of the stored form for a copy with escaped text', async () => {
+    const store = new OxigraphStore();
+    const graphManager = new GraphManager(store);
+    const handler = new SharedMemoryHandler(store, new TypedEventBus());
+    const lines = [
+      `<urn:entity:1> <urn:predicate:value> "Women\\u2019s Europeans \\uD83D\\uDDD3 12 October" <${DATA_GRAPH}> .`,
+      `<urn:entity:1> <urn:predicate:text> "line one\\nline two\\tend" <${DATA_GRAPH}> .`,
+    ].join('\n');
+    const request = v2Request({
+      nquads: new TextEncoder().encode(lines),
+      publicTripleCount: 2,
+    });
+
+    const outcome = await handler.handle(request, PEER_ID);
+
+    expect(outcome.applied).toBe(true);
+    const swmGraph = knowledgeAssetLayerGraphUri(
+      CONTEXT_GRAPH,
+      MemoryLayer.SharedWorkingMemory,
+      createGraphKnowledgeAssetScope(UAL, 1),
+    );
+    const head = await resolveKnowledgeAssetWorkspaceHead({
+      store,
+      graphManager,
+      contextGraphId: CONTEXT_GRAPH,
+      kaUal: UAL,
+    });
+    const readBack = await readExactGraphPaged(store, swmGraph, {
+      expectedQuadCount: 2,
+      outputGraph: '',
+    });
+    expect(head?.publicQuadsDigest).toBe(workspacePublicQuadsDigest(readBack));
+    // Replaying the same escaped share matches the recorded head.
+    const replay = await handler.handle(request, PEER_ID);
     expect(replay.applied).toBe(true);
   });
 });

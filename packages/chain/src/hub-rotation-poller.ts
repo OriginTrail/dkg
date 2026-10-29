@@ -1,6 +1,9 @@
 import { Contract, ethers, type JsonRpcProvider } from 'ethers';
 import type { ChainEventLogHubRotationWindow } from './chain-event-log-binding.js';
+import { RPC_LOG_SCAN_TIMEOUT_MS } from './evm-adapter-constants.js';
+import { readAdaptiveEvmLogRange } from './evm-log-range.js';
 import type { ReadOpts } from './rpc-failover-client.js';
+import { withRpcRequestTimeout } from './rpc-request-transport.js';
 
 export type HubRotationReadProvider = <T>(
   label: string,
@@ -196,15 +199,31 @@ export class HubRotationPoller {
     );
     if (!this.started || generation !== this.generation) return;
     const fromBlock = this.scanFromBlock(previousLastScannedBlock, head);
+    // After a long gap (a suspended host) the window can exceed a provider's
+    // eth_getLogs span cap; fit it rather than failing every poll until restart.
+    // A fitted window is several requests, so the watchdog deadline bounds each
+    // physical request (a hung backend still fails over, or fails the poll, after
+    // RPC_LOG_SCAN_TIMEOUT_MS on a one-RPC node too) instead of the whole attempt:
+    // one 30s budget over a split window would abort a slow-but-healthy catch-up
+    // and replay it every interval.
     const logs = await this.readTip<ethers.Log[]>(
       'Hub rotation poll getLogs',
-      (provider) => provider.getLogs({
-        address: binding.hubAddress,
+      (provider) => readAdaptiveEvmLogRange({
+        provider,
         fromBlock,
         toBlock: head,
-        topics: [binding.topics],
+        read: (rangeFrom, rangeTo) => withRpcRequestTimeout(
+          RPC_LOG_SCAN_TIMEOUT_MS,
+          `Hub rotation poll getLogs [${rangeFrom}, ${rangeTo}]`,
+          () => provider.getLogs({
+            address: binding.hubAddress,
+            fromBlock: rangeFrom,
+            toBlock: rangeTo,
+            topics: [binding.topics],
+          }),
+        ),
       }),
-      { policy: 'watchdogWideLogScan' },
+      { policy: 'durablePagedLogScan' },
     );
     if (!this.started || generation !== this.generation) return;
 

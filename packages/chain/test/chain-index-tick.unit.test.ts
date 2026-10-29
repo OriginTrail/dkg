@@ -15,6 +15,7 @@ import {
   type ChainEventLogCoverage,
 } from '../src/chain-index/chain-event-log.js';
 import { resolveChainIndexAuthorityAnchor } from '../src/chain-index/chain-index-anchor.js';
+import { chainEventLogTombstoneGeneration } from '../src/chain-index/chain-event-log-tombstones.js';
 import { loadAbi } from '../src/evm-adapter-abi.js';
 import { MemoryChainEventLogStore } from './helpers/chain-event-log.js';
 
@@ -234,14 +235,19 @@ describe('ChainIndexTick — one log', () => {
 
     rig.blockHashes.set(settled, hash(0xfe));
     rig.head = { number: 120, hash: hash(0x78), timestampSeconds: 1_700_000_100 };
+    const generation = chainEventLogTombstoneGeneration(SCOPE);
     const first = await index.runOnce(new AbortController().signal);
     expect(first.outcome).toBe('fork-suspected');
     expect(store.tombstones).toBe(0);
+    expect(chainEventLogTombstoneGeneration(SCOPE)).toBe(generation);
 
     const second = await index.runOnce(new AbortController().signal);
     expect(second.outcome).toBe('tombstoned');
     expect(store.tombstones).toBe(1);
     expect(await store.load(SCOPE)).toBeUndefined();
+    // The in-process readers that keep folds across revisions (the KA ordinal
+    // cache) learn of the tombstone from this generation, not from the store.
+    expect(chainEventLogTombstoneGeneration(SCOPE)).toBe(generation + 1);
   });
 
   it('keeps the verified settled boundary when the next boundary hash is unavailable', async () => {

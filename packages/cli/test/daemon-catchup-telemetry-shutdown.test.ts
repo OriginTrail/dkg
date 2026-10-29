@@ -12,7 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { createServer, type Server } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import type { DKGAgent } from '@origintrail-official/dkg-agent';
+import type { DKGAgent, InspectedPrivateEmptyVmReadinessV1 } from '@origintrail-official/dkg-agent';
 import type { CatchupJobResult } from '../src/catchup-runner.js';
 import { requestAuthentication } from './_helpers/request-authentication.js';
 
@@ -273,6 +273,25 @@ async function createHarness(opts: HarnessOptions = {}) {
     reconcileRfc64CatalogResponsibilityV1: async () => undefined,
     hasConfirmedMetaState: async () => opts.hasConfirmedMeta ?? true,
     isPrivateContextGraph: async () => opts.isPrivate ?? false,
+    prepareContextGraphReadinessWithPrivateEmptyVmV1: async (
+      input: { contextGraphId: string; callerAgentAddress?: string },
+    ) => ({
+      inspectAndCommit: async (
+        _completionInput: { inspectMetadata: boolean },
+        commit: (completion: InspectedPrivateEmptyVmReadinessV1) => unknown,
+      ) => commit({ proven: false, inspection: subscriptions.get(input.contextGraphId)?.subscribed === true
+        ? {
+            kind: 'current',
+            metadata: opts.hasConfirmedMeta === false
+              ? { kind: 'absent' }
+              : { kind: 'confirmed', accessPolicy: opts.isPrivate ? 'private' : 'public' },
+            authority: await agent.resolveContextGraphSubscriptionBootstrapAuthority(),
+          }
+        : {
+            kind: 'invalidated',
+            authority: await agent.resolveContextGraphSubscriptionBootstrapAuthority(),
+          } }),
+    }),
     resolveAgentByToken: () => undefined,
     getDefaultAgentAddress: () =>
       opts.callerAddress ?? '0x0000000000000000000000000000000000000001',
@@ -572,6 +591,7 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
 
       const shutdownStarted = beginGracefulShutdown({
         state: daemonState,
+        stopCatchupTriggers: () => {},
         log: () => {},
         removeApiPort: async () => { enteredWindow(); await held; },
       });
@@ -598,6 +618,42 @@ describe('A24 — shutdown closes catch-up admission BEFORE its first await', ()
     // Nothing minted: a job created here would be queued against a runner whose
     // worker is about to be terminated.
     expect(metrics.jobs()).toHaveLength(0);
+  });
+
+  it('stops the triggers of later catch-up jobs after closing admission and ending the share waits, before that first await', async () => {
+    const order: string[] = [];
+    await beginGracefulShutdown({
+      state: daemonState,
+      endShareAdmissionWaits: () => {
+        order.push(`end share waits (accepting jobs: ${daemonState.catchupAcceptingJobs})`);
+      },
+      stopCatchupTriggers: () => {
+        order.push(`stop catch-up triggers (accepting jobs: ${daemonState.catchupAcceptingJobs})`);
+      },
+      log: (message) => order.push(`log: ${message}`),
+      removeApiPort: async () => { order.push('remove api.port'); },
+    });
+
+    expect(order).toEqual([
+      'end share waits (accepting jobs: false)',
+      'stop catch-up triggers (accepting jobs: false)',
+      'log: Shutting down...',
+      'remove api.port',
+    ]);
+  });
+
+  it('goes on when stopping the catch-up triggers throws', async () => {
+    const logs: string[] = [];
+    let removed = false;
+    await beginGracefulShutdown({
+      state: daemonState,
+      stopCatchupTriggers: () => { throw new Error('listener already detached'); },
+      log: (line) => logs.push(line),
+      removeApiPort: async () => { removed = true; },
+    });
+
+    expect(removed).toBe(true);
+    expect(logs).toEqual(['Catch-up trigger stop error: listener already detached', 'Shutting down...']);
   });
 
   it('…and that same subscribe SUCCEEDS when no shutdown is in flight', async () => {
@@ -995,6 +1051,7 @@ describe('A11 — instrumentation never breaks the route or the drain', () => {
  */
 const TEARDOWN_ORDER = [
   'closeServer',
+  'closeEntitySearch',
   'closeLocalLlm',
   'drainCatchupJobs',
   'flushTelemetry',
@@ -1030,6 +1087,7 @@ describe('A24 — producer-quiescent teardown order', () => {
     await runProducerQuiescentTeardown({
       ...steps,
       closeServer: async () => { events.push('closeServer'); },
+      closeEntitySearch: async () => { events.push('closeEntitySearch'); },
       closeLocalLlm: async () => { events.push('closeLocalLlm'); },
       drainCatchupJobs: async () => { await sleep(1); events.push('drainCatchupJobs'); },
       flushTelemetry: async () => { await sleep(1); events.push('flushTelemetry'); },
@@ -1170,6 +1228,7 @@ describe('A24 — a failing step never strands the steps after it', () => {
   it.each([
     'VmReconcileShutdownTimeout',
     'CG_MEMBERSHIP_PERSIST_SHUTDOWN_TIMEOUT',
+    'CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT',
   ])('quarantines backing stores when stopAgent fails with %s', async (code) => {
     const { steps } = recordingSteps();
     steps.stopAgent = async () => {
@@ -1206,6 +1265,36 @@ describe('A24 — a failing step never strands the steps after it', () => {
       closeDashboardDb,
       log: () => undefined,
     })).resolves.toBe(true);
+    expect(stopManagedOxigraph).toHaveBeenCalledOnce();
+    expect(closeDashboardDb).toHaveBeenCalledOnce();
+  });
+
+  it('retries agent stop while a subscription persistence drain keeps timing out, then closes the stores', async () => {
+    const outcome = {
+      failures: [{
+        step: 'stopAgent' as const,
+        error: Object.assign(new Error('write still in flight'), { code: 'CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT' }),
+      }],
+      dependencyQuarantined: true,
+    };
+    let attempts = 0;
+    const stopManagedOxigraph = vi.fn(async () => undefined);
+    const closeDashboardDb = vi.fn();
+    await closeDaemonBackingStoresAfterTeardown(outcome, {
+      retryAgentStop: async () => {
+        attempts += 1;
+        if (attempts < 3) {
+          // The stores must stay open while the drain is still timing out.
+          expect(stopManagedOxigraph).not.toHaveBeenCalled();
+          expect(closeDashboardDb).not.toHaveBeenCalled();
+          throw Object.assign(new Error('write still in flight'), { code: 'CG_SUBSCRIPTION_PERSIST_SHUTDOWN_TIMEOUT' });
+        }
+      },
+      stopManagedOxigraph,
+      closeDashboardDb,
+      log: () => undefined,
+    });
+    expect(attempts).toBe(3);
     expect(stopManagedOxigraph).toHaveBeenCalledOnce();
     expect(closeDashboardDb).toHaveBeenCalledOnce();
   });
@@ -1260,6 +1349,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
         closeHttpServer: async () => {
           calls.push('closeHttpServer');
         },
+        closeEntitySearch: async () => { calls.push('closeEntitySearch'); },
         closeLocalLlm: async () => {
           calls.push('closeLocalLlm');
         },
@@ -1321,6 +1411,7 @@ describe('A24 — teardown WIRING: every slot dispatches to the dep it names', (
     // the sequencer's per-step guard covers each of them individually.
     expect(dispatched).toEqual([
       ['closeServer', ['closeHttpServer']],
+      ['closeEntitySearch', ['closeEntitySearch']],
       ['closeLocalLlm', ['closeLocalLlm']],
       ['drainCatchupJobs', ['drainCatchupJobs']],
       ['flushTelemetry', ['flushTelemetry']],

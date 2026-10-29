@@ -9,6 +9,7 @@ import { computeNetworkId } from '../../core/src/genesis.js';
 import {
   loadNetworkConfig,
   loadConfig,
+  assertAuthorityIndexConfigPlacement,
   DkgHomeFiles,
   removePid,
   removeApiPort,
@@ -35,6 +36,7 @@ import {
   resolveAutoUpdateSource,
   resolveUpdatePreferences,
   resolveContextGraphSubscriptionRehydrationEnabled,
+  approvalPolicyMigrationWarning,
   resolveApprovalPolicy,
   resolveChainConfig,
   resolveReadyChainConfig,
@@ -44,6 +46,18 @@ import {
   resolveStorageAckTiming,
 } from '../src/config.js';
 import { rfc64PublicCatalogPolicy as policy } from './helpers/rfc64-public-catalog.js';
+
+describe('raw authority index placement', () => {
+  it.each([undefined, null, false, 3, 'core', []])('preserves non-mapping core behavior for %j', (core) => {
+    expect(() => assertAuthorityIndexConfigPlacement({ core })).not.toThrow();
+  });
+
+  it('rejects an own misplaced policy before config validation', () => {
+    expect(() => assertAuthorityIndexConfigPlacement({ core: { authorityIndex: {} } }))
+      .toThrow('core.authorityIndex is not supported');
+    expect(() => assertAuthorityIndexConfigPlacement({ core: {} })).not.toThrow();
+  });
+});
 
 describe('resolveContextGraphSubscriptionRehydrationEnabled', () => {
   it('defaults to enabled and preserves explicit config values', () => {
@@ -1067,6 +1081,19 @@ describe('localAgentIntegrations config round-trip', () => {
     expect(loaded.syncSystemContextGraphsOnConnect).toBe(true);
   });
 
+  it('round-trips the on-demand agents phonebook kill switch', async () => {
+    await saveConfig({
+      name: 'test-node',
+      apiPort: 9200,
+      listenPort: 0,
+      nodeRole: 'edge',
+      onDemandAgentsPhonebook: false,
+    });
+
+    const loaded = await loadConfig();
+    expect(loaded.onDemandAgentsPhonebook).toBe(false);
+  });
+
   it('round-trips sync snapshot limits and Context Graph priorities', async () => {
     await saveConfig({
       name: 'test-node',
@@ -1522,6 +1549,22 @@ describe('resolveChainConfig (field-level merge)', () => {
     }
   });
 
+  it('resolves bounded authority reads only from an explicit boolean, with operator precedence', () => {
+    expect(resolveChainConfig({}, { chain: fullNetworkChain })?.boundedAuthorityReads).toBeUndefined();
+    expect(resolveChainConfig({}, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(true);
+    expect(resolveChainConfig({ chain: { boundedAuthorityReads: false } }, {
+      chain: { ...fullNetworkChain, boundedAuthorityReads: true },
+    })?.boundedAuthorityReads).toBe(false);
+
+    for (const invalid of [null, 'true', 1, {}, []]) {
+      expect(() => resolveChainConfig({
+        chain: { boundedAuthorityReads: invalid as never },
+      }, { chain: fullNetworkChain })).toThrow(/chain\.boundedAuthorityReads must be a boolean/);
+    }
+  });
+
   it.each([
     'authorityReadTimeoutMs',
     'authorityColdResolutionTimeoutMs',
@@ -1565,7 +1608,7 @@ describe('resolveChainConfig (field-level merge)', () => {
     const overlays = [
       { name: 'mainnet-base', primary: 'https://mainnet.base.org', backups: ['https://base-rpc.publicnode.com', 'https://base.drpc.org'] },
       { name: 'mainnet-gnosis', primary: 'https://rpc.gnosischain.com', backups: ['https://gnosis-rpc.publicnode.com', 'https://gnosis.drpc.org'] },
-      { name: 'testnet', primary: 'https://sepolia.base.org', backups: ['https://base-sepolia-rpc.publicnode.com', 'https://base-sepolia.drpc.org'] },
+      { name: 'testnet', primary: 'https://sepolia.base.org', backups: ['https://base-sepolia-rpc.publicnode.com', 'https://base-testnet.api.pocket.network'] },
     ];
     for (const { name, primary, backups } of overlays) {
       _resetNetworkConfigCache();
@@ -2228,5 +2271,78 @@ describe('resolveApprovalPolicy (YAML/JSON config → runtime ApprovalPolicy)', 
         refillBelowFraction: Number.NaN,
       }),
     ).toThrow(/must be a finite number in \[0, 1\]/);
+  });
+
+  it('passes a valid targetAllowanceMultiple through', () => {
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 50 }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: undefined,
+      targetAllowanceMultiple: 50,
+      refillBelowFraction: undefined,
+    });
+    // 1 is the tightest legal multiple (ceiling == this publish's cost).
+    expect(
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: 1 })
+        ?.targetAllowanceMultiple,
+    ).toBe(1);
+  });
+
+  it('rejects an out-of-contract targetAllowanceMultiple loudly', () => {
+    // Fail fast rather than clamp: a multiple < 1 would put the ceiling under
+    // the publish floor on every call, so the adapter's floor clamp would fire
+    // every time and `replenishing` would silently behave as `per-publish` —
+    // the operator's chosen mode cancelled, visible only on the gas bill.
+    // Same convention as `finalityConfirmations` and the two sibling fields.
+    for (const bad of [0, -1, 2.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(
+        () => resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: bad }),
+        `expected multiple ${bad} to be rejected`,
+      ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+    }
+    expect(() =>
+      resolveApprovalPolicy({ mode: 'replenishing', targetAllowanceMultiple: '20' as any }),
+    ).toThrow(/targetAllowanceMultiple must be an integer >= 1/);
+  });
+
+  it('carries both sizing fields through when the operator set both (adapter applies precedence)', () => {
+    // Resolution does not silently drop either field — precedence (absolute
+    // `targetAllowance` wins) is `computeApprovalAction`'s job, so the config
+    // layer stays a pure translator and the operator's file round-trips.
+    expect(
+      resolveApprovalPolicy({
+        mode: 'replenishing',
+        targetAllowance: '1000000000000000000000',
+        targetAllowanceMultiple: 5,
+      }),
+    ).toEqual({
+      mode: 'replenishing',
+      targetAllowance: 10n ** 21n,
+      targetAllowanceMultiple: 5,
+      refillBelowFraction: undefined,
+    });
+  });
+
+  it('warns only when replenishing relies on the changed implicit ceiling', () => {
+    const warning = approvalPolicyMigrationWarning({ mode: 'replenishing' });
+    expect(warning).toContain('20x the triggering publish cost');
+    expect(warning).toContain('legacy flat 1000 TRAC ceiling');
+    expect(warning).toContain('targetAllowance explicitly to retain a flat ceiling');
+    expect(warning).toContain('targetAllowanceMultiple to keep relative sizing');
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      refillBelowFraction: 0.25,
+    })).toBe(warning);
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowance: '1000000000000000000000',
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({
+      mode: 'replenishing',
+      targetAllowanceMultiple: 20,
+    })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning({ mode: 'per-publish' })).toBeUndefined();
+    expect(approvalPolicyMigrationWarning(undefined)).toBeUndefined();
   });
 });

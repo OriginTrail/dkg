@@ -64,6 +64,7 @@ export interface FinalizedAuthorityColdResolutionOptions {
  */
 export class FinalizedAuthorityColdResolutionV1 {
   readonly #flights = new Map<string, ColdResolutionFlight>();
+  readonly #drains = new Set<Promise<unknown>>();
   readonly #coldTimeoutMs: () => number;
   readonly #now: () => number;
   #closed = false;
@@ -109,10 +110,23 @@ export class FinalizedAuthorityColdResolutionV1 {
     );
   }
 
-  /** Settle after every flight in progress has completed or been aborted. */
+  /**
+   * Retain this owner's physical start promises beyond their bounded waits.
+   * Shared reader activity belongs to the agent lifecycle, not to a flight.
+   */
+  retainDrain(drain: Promise<unknown>): void {
+    this.#drains.add(drain);
+    const retire = () => { this.#drains.delete(drain); };
+    drain.then(retire, retire);
+  }
+
+  /** Settle after every flight AND its retained physical work has drained. */
   async whenIdle(): Promise<void> {
     for (;;) {
-      const active = [...this.#flights.values()].map((flight) => flight.promise);
+      const active = [
+        ...[...this.#flights.values()].map((flight) => flight.promise),
+        ...this.#drains,
+      ];
       if (active.length === 0) return;
       await Promise.allSettled(active);
     }
@@ -140,7 +154,13 @@ export class FinalizedAuthorityColdResolutionV1 {
       options.coldTimeoutMs ?? this.#coldTimeoutMs(),
       options.requestTimeoutMs,
     );
-    const promise = runBoundedOperation(start, {
+    const promise = runBoundedOperation((signal) => {
+      // A bounded wait can retire before an adapter that ignores cancellation
+      // actually unwinds. Shutdown must also own that physical operation.
+      const physical = start(signal);
+      this.retainDrain(physical);
+      return physical;
+    }, {
       label: `${options.label} cold resolution`,
       timeoutMs: coldTimeoutMs,
       signal: controller.signal,

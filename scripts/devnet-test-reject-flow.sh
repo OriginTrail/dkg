@@ -107,6 +107,39 @@ for a in d.get('agents',[]):
   done
 }
 
+# See devnet-test-invite-flow.sh for the rationale; same helper.
+catchup_refusal() {
+  python3 -c "
+import sys, json
+try:
+    d = json.load(sys.stdin)
+except Exception as e:
+    print(f'<parse-error: {e}>'); sys.exit(0)
+status = d.get('status', '')
+r = d.get('result') or {}
+data, swm = r.get('dataSynced'), r.get('sharedMemorySynced')
+if status == 'denied' and data == 0 and swm == 0:
+    print(f'refused:{status}')
+else:
+    print(f'{status} (dataSynced={data}, sharedMemorySynced={swm})')
+"
+}
+
+# Keep transport failure distinct from the authorization result this scenario
+# is meant to prove. These fixtures run with the live flow on every sweep.
+assert_refusal_classifier_fixtures() {
+  local denied unreachable partial
+  denied=$(printf '%s' '{"status":"denied","result":{"dataSynced":0,"sharedMemorySynced":0}}' | catchup_refusal)
+  unreachable=$(printf '%s' '{"status":"unreachable","result":{"dataSynced":0,"sharedMemorySynced":0}}' | catchup_refusal)
+  partial=$(printf '%s' '{"status":"denied","result":{"dataSynced":1,"sharedMemorySynced":0}}' | catchup_refusal)
+  [ "$denied" = refused:denied ] || fail "explicit denied fixture was not classified as refusal"
+  case "$unreachable" in refused:*) fail "transport failure fixture was classified as refusal" ;; esac
+  case "$partial" in refused:*) fail "partial transfer fixture was classified as refusal" ;; esac
+}
+assert_refusal_classifier_fixtures
+
+# poll_catchup <node> <cg-id> <expect> [timeout]
+# <expect> is a terminal status, or `refused` (see catchup_refusal).
 poll_catchup() {
   local node="$1" cg_id="$2" expect="$3" timeout="${4:-90}"
   local start=$(date +%s) last_status=""
@@ -127,7 +160,19 @@ except: print('')
       note "  t=${elapsed}s status=$status"; last_status="$status"
     fi
     case "$status" in
-      done|denied|failed)
+      done|denied|failed|unreachable|deferred)
+        if [ "$expect" = "refused" ]; then
+          local verdict
+          verdict=$(echo "$resp" | catchup_refusal)
+          case "$verdict" in
+            refused:denied) ok "catch-up denied with zero data transferred (expected)"; return 0 ;;
+          esac
+          if [ "$status" = done ]; then
+            fail "catch-up completed before approval: $resp"
+          fi
+          note "catch-up=$verdict; retrying for explicit authorization refusal"
+          return 2
+        fi
         if [ "$status" = "$expect" ]; then ok "catch-up=$status (expected)"; return 0; fi
         fail "catch-up=$status (expected $expect)"; return 1
         ;;
@@ -149,16 +194,49 @@ print(json.dumps({
   'name': 'Reject flow test $CG_ID',
   'description': 'Test curator rejection notification path',
   'accessPolicy': 1,
+  'publishPolicy': 0,
   'allowedAgents': ['$N1_ADDR'],
+  'register': True,
 }))
 ")
 resp=$(api "$N1" POST /api/context-graph/create "$body")
 created=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('created',''))")
-[ "$created" = "$CG_ID" ] && ok "CG created on N1" || { fail "create failed: $resp"; exit 1; }
+registered=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('registered',''))")
+on_chain_id=$(echo "$resp" | python3 -c "import sys,json; print(json.load(sys.stdin).get('onChainId',''))")
+if [ "$created" = "$CG_ID" ] && [ "$registered" = True ] && [[ "$on_chain_id" =~ ^[1-9][0-9]*$ ]]; then
+  ok "CG created and registered on N1"
+else
+  fail "registered create failed or was partial: $resp"
+  exit 1
+fi
 
-hr "Step 2 — N2 attempts to subscribe (expect denied)"
-api "$N2" POST /api/subscribe "{\"contextGraphId\":\"$CG_ID\"}" > /dev/null
-poll_catchup "$N2" "$CG_ID" denied 90 || exit 1
+hr "Step 2 — N2 attempts to subscribe (expect refused)"
+refused=no
+for attempt in $(seq 1 30); do
+  sub_resp=$(api "$N2" POST /api/context-graph/subscribe "{\"contextGraphId\":\"$CG_ID\"}")
+  sub_code=$(echo "$sub_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("code", ""))')
+  if [ "$sub_code" = CONTEXT_GRAPH_AUTHORITY_UNAVAILABLE ]; then
+    note "registered authority pending (attempt $attempt/30)"
+    sleep 5
+    continue
+  fi
+  sub_error=$(echo "$sub_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("error", ""))')
+  case "$sub_error" in
+    *"not authorized"*|*"invite you first"*) refused=yes; break ;;
+  esac
+  sub_id=$(echo "$sub_resp" | python3 -c 'import sys,json; print(json.load(sys.stdin).get("subscribed", ""))')
+  if [ "$sub_id" = "$CG_ID" ]; then
+    if poll_catchup "$N2" "$CG_ID" refused 90; then
+      refused=yes
+      break
+    fi
+    sleep 5
+    continue
+  fi
+  fail "N2's pre-approval response was not an explicit refusal: $sub_resp"
+done
+[ "$refused" = yes ] || fail "N2 never received an explicit pre-approval refusal: $sub_resp"
+ok "N2 was refused before approval"
 
 hr "Step 3 — N2 signs and forwards a join request to N1"
 # PR #448: /sign-join is sign-only; forwarding lives in /request-join.

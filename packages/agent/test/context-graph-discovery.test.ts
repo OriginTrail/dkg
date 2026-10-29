@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, afterEach, beforeAll, afterAll, vi } from 'vitest';
 import { makeTestKaNumberAllocator } from "./_helpers/ka-allocator.js";
+import { MemoryWorkspaceSnapshotStore } from './_helpers/memory-workspace-snapshot-store.js';
 
 function recorder<A extends unknown[], R>(impl: (...a: A) => R) {
   const calls: A[] = [];
@@ -322,7 +323,7 @@ describe('implicit SWM context graph metadata', () => {
       'resolveContextGraphIdByNameHash',
     ).mockRejectedValue(new Error('registry RPC unavailable'));
     await expect(agent.resolveContextGraphRegistrationBinding(contextGraphId))
-      .resolves.toEqual({ kind: 'unregistered' });
+      .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
     expect(registryResolve).not.toHaveBeenCalled();
   }, 15000);
 
@@ -368,6 +369,9 @@ describe('implicit SWM context graph metadata', () => {
         listenPort: 0,
         listenHost: '127.0.0.1',
         dataDir,
+        // This test persists local-origin authority, not snapshot capacity.
+        // Keep an unrelated host disk reserve from blocking its tiny SWM write.
+        publicSnapshotStore: new MemoryWorkspaceSnapshotStore(),
         chainAdapter: createEVMAdapter(HARDHAT_KEYS.CORE_OP),
         rfc64CatalogActivation: { enabled: false },
         contextGraphMembershipStore: membershipStore,
@@ -417,7 +421,7 @@ describe('implicit SWM context graph metadata', () => {
       await restarted.start();
 
       await expect(restarted.resolveContextGraphRegistrationBinding(contextGraphId))
-        .resolves.toEqual({ kind: 'unregistered' });
+        .resolves.toEqual({ kind: 'unregistered', unregisteredEvidence: 'local-create' });
       await expect(restarted.getContextGraphOnChainPolicy(contextGraphId))
         .resolves.toEqual({});
       expect(registryResolve).not.toHaveBeenCalled();
@@ -573,9 +577,11 @@ describe('discoverContextGraphsFromStore', () => {
     releaseFirstQuery();
 
     await expect(Promise.all([first, second])).resolves.toEqual([1, 1]);
-    expect(discoveryQueries).toBe(3);
+    // One pass reads ontology definitions, `_meta` bindings, ontology bindings
+    // and `_meta` definitions.
+    expect(discoveryQueries).toBe(4);
     await expect(agent.discoverContextGraphsFromStore()).resolves.toBe(0);
-    expect(discoveryQueries).toBe(6);
+    expect(discoveryQueries).toBe(8);
   }, 15000);
 
   it('does not re-discover already known contextGraphs', async () => {
@@ -3746,9 +3752,12 @@ describe('runImmediatePostApprovalSync', () => {
       refreshOpts?: {
         trustedCuratorPeerId?: string;
         force?: boolean;
-        memberProof?: {
-          approvedAgentAddress: string;
-          expectedDelegateePeerId?: string;
+        approvedMember?: {
+          proof: {
+            approvedAgentAddress: string;
+            expectedDelegateePeerId?: string;
+          };
+          accessPolicy: 'public' | 'unproven';
         };
       },
     ) => {
@@ -3756,8 +3765,8 @@ describe('runImmediatePostApprovalSync', () => {
         cg,
         peer: refreshOpts?.trustedCuratorPeerId,
         force: refreshOpts?.force,
-        approvedAgentAddress: refreshOpts?.memberProof?.approvedAgentAddress,
-        expectedDelegateePeerId: refreshOpts?.memberProof?.expectedDelegateePeerId,
+        approvedAgentAddress: refreshOpts?.approvedMember?.proof.approvedAgentAddress,
+        expectedDelegateePeerId: refreshOpts?.approvedMember?.proof.expectedDelegateePeerId,
       });
       const outcome = opts.refreshMetaResults?.[calls.refreshMetaCalls.length - 1] ?? true;
       if (outcome instanceof Error) throw outcome;
@@ -3765,6 +3774,12 @@ describe('runImmediatePostApprovalSync', () => {
       return outcome;
     };
     (a as any).hasConfirmedMetaState = async () => metaConfirmed;
+    // A refresh that succeeded stored the member proof it required, which is
+    // what join completion confirms.
+    (a as any).hasConfirmedApprovedMemberMetaState = async () => metaConfirmed;
+    // The real acceptance resolver builds the member proof; only the
+    // transport read behind its policy is stubbed.
+    (a as any).resolveSwmTransportAuthority = async () => ({ kind: 'plaintext' });
     (a as any).refreshMetaSyncedFlags = async () => undefined;
     (a as any).runCatchupOverPeers = async (
       cg: string,

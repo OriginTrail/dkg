@@ -1,11 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mkdtemp, open, rm, stat } from 'node:fs/promises';
+import { mkdtemp, open, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { computeNetworkId } from '../../core/src/genesis.js';
 import { buildEvmDeploymentId } from '@origintrail-official/dkg-chain';
+import { SqliteContextGraphStorageDiscoveryStore } from '@origintrail-official/dkg-node-ui';
 import {
   DEFAULT_DAEMON_LOG_MAX_BYTES,
+  DEFAULT_DAEMON_LOG_TOTAL_BYTES,
 } from '../src/daemon/log-rotation.js';
 import { resolveShutdownPolicy } from '../src/daemon/shutdown-policy.js';
 
@@ -40,6 +42,33 @@ function closeDashboardDbFromAgentCreateArg(createArg: any): void {
     createArg?.chainEventCursorStore?.cursors?.db ??
     createArg?.contextGraphRegistryScanCursorStore?.cursors?.db;
   db?.close?.();
+}
+
+/**
+ * The ContextGraphStorage discovery checkpoint must reach the agent as a
+ * durable store scoped to this chain deployment. The agent silently falls back
+ * to an in-memory store when none is passed, so only this catches a dropped
+ * wiring (a re-enumeration from id 1 on every restart) or a dropped scope (a
+ * node home reused across deployments replaying another one's catalog).
+ */
+async function expectDeploymentScopedStorageDiscoveryStore(
+  createArg: any,
+  deploymentId: string,
+): Promise<void> {
+  const store = createArg.contextGraphStorageDiscoveryStore;
+  expect(store).toBeInstanceOf(SqliteContextGraphStorageDiscoveryStore);
+  expect(store.scope).toBe(deploymentId);
+  const checkpoint = { version: 1, nextId: '7', entries: [] };
+  await store.save(checkpoint);
+  const dashboard = { db: createArg.chainEventCursorStore.cursors.db } as any;
+  await expect(new SqliteContextGraphStorageDiscoveryStore(dashboard, { scope: deploymentId }).load())
+    .resolves.toEqual(checkpoint);
+  await expect(new SqliteContextGraphStorageDiscoveryStore(dashboard, {
+    scope: buildEvmDeploymentId({
+      chainId: 'evm:1',
+      hubAddress: '0x9999999999999999999999999999999999999999',
+    }),
+  }).load()).resolves.toBeUndefined();
 }
 
 async function readFileTail(path: string, maxBytes = 16 * 1024): Promise<string> {
@@ -186,6 +215,8 @@ describe('daemon startup network validation', () => {
     } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
 
     expect((await stat(daemonLog)).size).toBeLessThan(DEFAULT_DAEMON_LOG_MAX_BYTES);
+    // A restart moves the whole inherited log aside instead of trimming its head.
+    expect((await stat(`${daemonLog}.1`)).size).toBe(DEFAULT_DAEMON_LOG_MAX_BYTES + 1024);
     let tail = '';
     for (let attempt = 0; attempt < 20; attempt += 1) {
       tail = await readFileTail(daemonLog);
@@ -193,6 +224,47 @@ describe('daemon startup network validation', () => {
       await new Promise(resolve => setTimeout(resolve, 10));
     }
     expect(tail).toContain('Rotated daemon.log during startup');
+  });
+
+  it('keeps the newest lines of an inherited daemon log larger than the whole size limit', async () => {
+    tempHome = await mkdtemp(join(tmpdir(), 'dkg-log-rotation-oversized-'));
+    originalDkgHome = process.env.DKG_HOME;
+    process.env.DKG_HOME = tempHome;
+    stdoutWrite = process.stdout.write;
+    stderrWrite = process.stderr.write;
+    uncaughtExceptionListeners = process.listeners('uncaughtException') as NodeJS.UncaughtExceptionListener[];
+    unhandledRejectionListeners = process.listeners('unhandledRejection') as NodeJS.UnhandledRejectionListener[];
+
+    // A sparse log just past the whole limit, with its newest lines at the end.
+    const daemonLog = join(tempHome, 'daemon.log');
+    const newest = '\nnewest line before the restart\n';
+    const size = DEFAULT_DAEMON_LOG_TOTAL_BYTES + 1024;
+    const logHandle = await open(daemonLog, 'w');
+    await logHandle.truncate(size);
+    await logHandle.write(Buffer.from(newest), 0, newest.length, size - newest.length);
+    await logHandle.close();
+
+    mocks.loadNetworkConfig.mockResolvedValue(null);
+    vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    vi.spyOn(process, 'exit').mockImplementation(((code?: string | number | null) => {
+      throw new Error(`process.exit:${code}`);
+    }) as never);
+
+    await expect(runDaemonInner(true, {
+      name: 'startup-oversized-log-test',
+      networkConfig: 'missing-mainnet',
+      listenPort: 0,
+      nodeRole: 'edge',
+    } as any, Date.now(), resolveShutdownPolicy(undefined))).rejects.toThrow('process.exit:1');
+
+    expect(await readFile(`${daemonLog}.1`, 'utf-8')).toBe('newest line before the restart\n');
+    let tail = '';
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      tail = await readFileTail(daemonLog);
+      if (tail.includes('kept the last')) break;
+      await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    expect(tail).toContain('kept the last 0.0 MB of the newest rotated file within the size limit');
   });
 
   it('exits before agent creation when config.networkConfig does not resolve', async () => {
@@ -329,6 +401,10 @@ describe('daemon startup network validation', () => {
       chainId: 'gnosis:100',
       hubAddress: '0x1234567890123456789012345678901234567890',
     }));
+    await expectDeploymentScopedStorageDiscoveryStore(createArg, buildEvmDeploymentId({
+      chainId: 'gnosis:100',
+      hubAddress: '0x1234567890123456789012345678901234567890',
+    }));
     closeDashboardDbFromAgentCreateArg(createArg);
   });
 
@@ -367,6 +443,10 @@ describe('daemon startup network validation', () => {
     expect(mocks.agentCreate).toHaveBeenCalledTimes(1);
     const createArg = mocks.agentCreate.mock.calls[0]?.[0] as any;
     expect((createArg.chainEventCursorStore as any).scope).toBe(buildEvmDeploymentId({
+      chainId: 'evm:31337',
+      hubAddress: '0x2234567890123456789012345678901234567890',
+    }));
+    await expectDeploymentScopedStorageDiscoveryStore(createArg, buildEvmDeploymentId({
       chainId: 'evm:31337',
       hubAddress: '0x2234567890123456789012345678901234567890',
     }));
