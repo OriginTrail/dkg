@@ -87,6 +87,12 @@ const EXPLICIT_CONNECT_ADMISSION_POLICY: NetworkAdmissionAttemptPolicy = {
   probeRetrySuppression: 'bypass',
 };
 
+type AdmissionState =
+  | { kind: 'cached'; verdict: NetworkAdmissionVerdict }
+  | { kind: 'in-flight'; attempt: InFlightAdmissionAttempt }
+  | { kind: 'backed-off'; backoff: NetworkAdmissionProbeBackoff }
+  | { kind: 'probe' };
+
 /**
  * Most identity probes one admission caller keeps in flight: the ceiling of a
  * preflight round, and the bound the catch-up connected-peer filter
@@ -270,10 +276,7 @@ export class NetworkAdmissionCoordinator {
   isProbeBackedOff(peerId: string): boolean {
     if (!this.enabled) return false;
     const canonicalPeerId = tryCanonicalPeerIdString(peerId);
-    // The checks of ensureVerdictWithPolicy, in its order.
-    if (!canonicalPeerId || this.admission.cachedVerdict(canonicalPeerId) !== undefined) return false;
-    return !this.inFlight.has(canonicalPeerId)
-      && this.admission.getRetryableProbeBackoff(canonicalPeerId) !== undefined;
+    return canonicalPeerId !== null && this.admissionState(canonicalPeerId).kind === 'backed-off';
   }
 
   verifiedSameNetworkPeerIds(): ReadonlySet<string> {
@@ -395,14 +398,11 @@ export class NetworkAdmissionCoordinator {
     options.signal?.throwIfAborted();
     if (!this.enabled) return 'same-network';
     const remotePeerId = canonicalAdmissionPeerId(remotePeer);
-    const cached = this.admission.cachedVerdict(remotePeerId);
-    if (cached !== undefined) return cached;
-
-    const existing = this.inFlight.get(remotePeerId);
-    if (existing) return existing.wait(options);
-
-    if (policy.probeRetrySuppression === 'respect') {
-      this.assertProbeNotSuppressed(remotePeerId);
+    const state = this.admissionState(remotePeerId);
+    if (state.kind === 'cached') return state.verdict;
+    if (state.kind === 'in-flight') return state.attempt.wait(options);
+    if (state.kind === 'backed-off' && policy.probeRetrySuppression === 'respect') {
+      throw new NetworkAdmissionProbeBackoffError(remotePeerId, state.backoff);
     }
 
     const attempt = new InFlightAdmissionAttempt(
@@ -416,9 +416,18 @@ export class NetworkAdmissionCoordinator {
     return attempt.wait(options);
   }
 
-  private assertProbeNotSuppressed(remotePeerId: CanonicalPeerId): void {
+  /**
+   * Where an attempt for the peer starts, in this order: its cached verdict,
+   * the probe in flight, the backoff a failed probe opened, or a new probe.
+   * The attempt's policy decides whether the backoff holds.
+   */
+  private admissionState(remotePeerId: CanonicalPeerId): AdmissionState {
+    const verdict = this.admission.cachedVerdict(remotePeerId);
+    if (verdict !== undefined) return { kind: 'cached', verdict };
+    const attempt = this.inFlight.get(remotePeerId);
+    if (attempt) return { kind: 'in-flight', attempt };
     const backoff = this.admission.getRetryableProbeBackoff(remotePeerId);
-    if (backoff) throw new NetworkAdmissionProbeBackoffError(remotePeerId, backoff);
+    return backoff ? { kind: 'backed-off', backoff } : { kind: 'probe' };
   }
 
   /**
