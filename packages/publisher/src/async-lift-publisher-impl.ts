@@ -1,5 +1,5 @@
 import { atLiftValidationStage } from './lift-validation-error.js';
-import { isPublisherFundingFailure } from './async-lift-wallet-funding.js';
+import { isPublisherNativeGasFailure } from './async-lift-wallet-funding.js';
 import { createAsyncLiftClaimControl } from './async-lift-claim-gate.js';
 import type { WorkerLiftJobClaimSession } from './lift-job-transition-scope.js';
 import { AsyncLiftJournalCompletion, type JournalOperation, type JournalSection } from './async-lift-journal-completion.js';
@@ -3119,7 +3119,7 @@ export class TripleStoreAsyncLiftPublisher
     error: unknown,
     evidence?: ExecutionFailureEvidence,
   ): Promise<LiftJob> {
-    if (isPublisherFundingFailure(error) && current.claim?.walletId) this.walletEligibility?.defer(current.claim.walletId);
+    if (isPublisherNativeGasFailure(error) && current.claim?.walletId) this.walletEligibility?.defer(current.claim.walletId);
     const disposition = executionFailureDisposition({
       jobId: current.jobId,
       currentStatus: current.status,

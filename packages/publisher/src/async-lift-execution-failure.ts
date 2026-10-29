@@ -10,7 +10,7 @@ import { RFC64_LEGACY_SWM_BOUNDARY_RETIREMENT_IN_PROGRESS_CODE } from '@origintr
 import { isRpcPreconditionError } from './ack-errors.js';
 import type { ExecutionFailureEvidence } from './async-lift-publisher-types.js';
 import { isDefinitivePreAcceptanceSendFailure, isPermanentAuthorCapabilityFailure, mapPublishExceptionToLiftJobFailure, readPublishErrorFacts } from './async-lift-publish-result.js';
-import { isPublisherFundingFailure } from './async-lift-wallet-funding.js';
+import { isPublisherFundingFailure, isPublisherNativeGasFailure } from './async-lift-wallet-funding.js';
 import { buildLiftJobAcceptedReset, getLiftJobTransactionEvidence, isKnowledgeAssetVmPublishJobRequest } from './async-lift-publisher-utils.js';
 import {
   createLiftJobFailureMetadata,
@@ -221,7 +221,7 @@ export function executionFailureDisposition(
       errorPayloadRef: `urn:dkg:publisher:error:${current.jobId}`,
     }) };
   }
-  if (policy === 'proof-first' && isPublisherFundingFailure(input.error)
+  if (policy === 'proof-first' && isPublisherNativeGasFailure(input.error)
     && input.evidence?.neverDispatched === true && current.status === 'validated'
     && !getLiftJobTransactionEvidence(current)) {
     return { kind: 'reset', job: buildLiftJobAcceptedReset(current, {

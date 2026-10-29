@@ -28,7 +28,14 @@ export class PublisherGasFunding {
   async read(
     provider: ethers.Provider, address: string, floor?: ChainFeeFloor, cap?: bigint,
   ): Promise<PublisherGasFundingObservation> {
-    const observedAt = Date.now();
+    const observedAt = Date.now(), gasLimit = this.gasLimit;
+    const [feePerGasWei, balanceWei] = await Promise.all([
+      this.readFeePerGas(provider, floor, cap), provider.getBalance(address, 'pending'),
+    ]);
+    return gasObservation(observedAt, balanceWei, gasLimit, feePerGasWei);
+  }
+
+  private async readFeePerGas(provider: ethers.Provider, floor?: ChainFeeFloor, cap?: bigint): Promise<bigint> {
     const priced = await priceTransactionRequest(provider, {}, floor);
     let request = priced.transaction;
     if (request.maxFeePerGas == null) {
@@ -37,7 +44,7 @@ export class PublisherGasFunding {
       request = { gasPrice: feeData.gasPrice };
     }
     if (cap !== undefined) request = applyTransactionFeeCap(request, cap, priced.baseFeePerGas);
-    return { ...await this.observe(provider, address, this.gasLimit, BigInt(request.maxFeePerGas ?? request.gasPrice!)), observedAt };
+    return BigInt(request.maxFeePerGas ?? request.gasPrice!);
   }
 
   async assertPrepared(prepared: PreparedTransaction, provider = prepared.signer.provider): Promise<PreparedTransaction> {
@@ -46,18 +53,19 @@ export class PublisherGasFunding {
     if (!provider || transaction.gasLimit == null || price == null) {
       throw new Error('Prepared publisher transaction gas cost unavailable');
     }
-    this.gasLimit = BigInt(transaction.gasLimit);
-    const observation = await this.observe(
-      provider, signer.address, this.gasLimit, BigInt(price), BigInt(transaction.value ?? 0),
-    );
+    const gasLimit = BigInt(transaction.gasLimit);
+    this.gasLimit = gasLimit;
+    const observedAt = Date.now();
+    const balanceWei = await provider.getBalance(signer.address, 'pending');
+    const observation = gasObservation(observedAt, balanceWei, gasLimit, BigInt(price), BigInt(transaction.value ?? 0));
     if (observation.balanceWei < observation.requiredWei) throw new PublisherGasFundingError(observation);
     return prepared;
   }
+}
 
-  private async observe(
-    provider: ethers.Provider, address: string, gasLimit: bigint, feePerGasWei: bigint, value = 0n,
-  ): Promise<PublisherGasFundingObservation> {
-    const balanceWei = await provider.getBalance(address, 'pending');
-    return { observedAt: Date.now(), balanceWei, requiredWei: gasLimit * feePerGasWei + value, gasLimit, feePerGasWei };
-  }
+/** Pure cost calculation; observation age starts before any RPC acquisition. */
+function gasObservation(
+  observedAt: number, balanceWei: bigint, gasLimit: bigint, feePerGasWei: bigint, value = 0n,
+): PublisherGasFundingObservation {
+  return { observedAt, balanceWei, requiredWei: gasLimit * feePerGasWei + value, gasLimit, feePerGasWei };
 }

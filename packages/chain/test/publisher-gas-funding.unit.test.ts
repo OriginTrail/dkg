@@ -34,6 +34,25 @@ describe('publisher gas funding observations', () => {
     expect(f.getBalance.mock.calls).toEqual([['wallet', 'pending'], ['wallet', 'pending']]);
   });
 
+  it('starts fee and pending balance reads independently before either completes', async () => {
+    const f = fixture();
+    let releaseFee!: () => void, releaseBalance!: () => void;
+    const fee = new Promise<void>(resolve => { releaseFee = resolve; });
+    const balance = new Promise<void>(resolve => { releaseBalance = resolve; });
+    vi.mocked(f.provider.getBlock).mockImplementationOnce(async () => { await fee; return { baseFeePerGas: 100n } as ethers.Block; });
+    f.getBalance.mockImplementationOnce(async () => { await balance; return 10n ** 18n; });
+    const start = Date.now();
+    const reading = f.funding.read(f.provider, 'wallet');
+    try {
+      expect(f.provider.getBlock).toHaveBeenCalledOnce();
+      expect(f.getBalance).toHaveBeenCalledWith('wallet', 'pending');
+      releaseFee(); releaseBalance();
+      const observation = await reading;
+      expect(observation.observedAt).toBeGreaterThanOrEqual(start);
+      expect(observation.observedAt).toBeLessThanOrEqual(Date.now());
+    } finally { releaseFee(); releaseBalance(); await reading; }
+  });
+
   it('checks exact prepared maximum cost including value before the caller can sign', async () => {
     const f = fixture();
     const prepared = f.prepared();

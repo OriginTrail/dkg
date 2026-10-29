@@ -7,6 +7,13 @@ export function isPublisherFundingFailure(error: unknown): boolean {
     || isDefinitivePreAcceptanceSendFailure(error);
 }
 
+/** Only native-gas failures can become eligible through this wallet's native balance read. */
+export function isPublisherNativeGasFailure(error: unknown): boolean {
+  const { code, lowerMessage } = readPublishErrorFacts(error);
+  return code === 'PUBLISHER_GAS_FUNDING_UNAVAILABLE'
+    || (!lowerMessage.includes('revert') && (code === 'INSUFFICIENT_FUNDS' || /insufficient funds for gas\b/.test(lowerMessage)));
+}
+
 export interface AsyncLiftWalletEligibility {
   prepare(walletId: string): Promise<boolean>;
   /** Synchronous freshness check after waiting for the canonical claim lock. */

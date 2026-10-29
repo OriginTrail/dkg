@@ -1,11 +1,12 @@
 import { describe, expect, it, vi } from 'vitest';
-import { PublisherGasFundingError } from '@origintrail-official/dkg-chain';
+import { InsufficientPublisherFundsError, PublisherGasFundingError } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AsyncLiftRunner, AsyncLiftWalletFunding, LiftJobPendingChainProofError, TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
 import { kaVmPublishRequest, stageKnowledgeAssetShareSnapshot, KA_VM_EXECUTOR_TX_HASH, KA_VM_VALIDATION, KA_VM_KA_UAL } from '../../../scripts/testing/ka-vm-publish.js';
 import { seedLegacyRawLiftTestJob } from './_helpers/legacy-raw-lift.js';
 import { DEFAULT_CONTROL_GRAPH_URI, jobSubject, serializeJob } from '../src/async-lift-control-plane.js';
+import { completeResult, gate } from './_helpers/journal-completion.js';
 import { isHeldForChainProof } from '../src/async-lift-retry-disposition.js';
 
 function fundingFixture() {
@@ -120,7 +121,7 @@ describe('async publisher gas eligibility (#3591)', () => {
           walletEligibility: f.funding, fundingRecoveryPolicy: policy,
           knowledgeAssetVmPublishHandler: { execute: async ({ publishOptions }) => {
             if (recorded) await publishOptions.onBeforeBroadcast!({ txHash: KA_VM_EXECUTOR_TX_HASH, nonce: 8, operationKind: 'create' });
-            throw new Error('insufficient funds');
+            throw new Error('insufficient funds for gas * price + value');
           } },
         });
         const id = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
@@ -132,6 +133,57 @@ describe('async publisher gas eligibility (#3591)', () => {
       }
     },
   );
+  it('leaves a job-specific TRAC shortfall failed so a later affordable job completes', async () => {
+    const f = fundingFixture(), store = new OxigraphStore();
+    await stageKnowledgeAssetShareSnapshot({ store });
+    const publisher = new TripleStoreAsyncLiftPublisher(store, {
+      walletEligibility: f.funding, fundingRecoveryPolicy: 'proof-first', now: f.now,
+      knowledgeAssetVmPublishHandler: { execute: async ({ request, publishOptions }) => {
+        if (request.name === 'expensive') throw new InsufficientPublisherFundsError('No funded publisher wallet', [
+          { address: 'a', nativeWei: 10n ** 18n, tracWei: 5n },
+        ]);
+        await publishOptions.onBeforeBroadcast!({ txHash: KA_VM_EXECUTOR_TX_HASH, operationKind: 'create' });
+        return completeResult();
+      } },
+    });
+    try {
+      const expensive = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'expensive' }));
+      f.advance(1);
+      const affordable = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest({ name: 'affordable' }));
+      const failed = await publisher.processNext('a');
+      expect(failed?.jobId).toBe(expensive);
+      expect(failed?.status).toBe('failed');
+      expect(failed?.failure?.code).toBe('insufficient_funds');
+      expect(f.funding.isEligible('a')).toBe(true);
+      f.advance(30_001);
+      const completed = await publisher.processNext('a');
+      expect(completed?.jobId).toBe(affordable);
+      expect(completed?.status).toBe('finalized');
+      expect((await publisher.getStatus(expensive))?.status).toBe('failed');
+    } finally { await store.close(); }
+  });
+
+  it('does not persist claim ownership if funding expires during candidate selection', async () => {
+    const f = fundingFixture(), store = new OxigraphStore(), selection = gate();
+    const publisher = new TripleStoreAsyncLiftPublisher(store, { walletEligibility: f.funding, now: f.now });
+    const id = await publisher.enqueueKnowledgeAssetVmPublish(kaVmPublishRequest());
+    const query = store.query.bind(store);
+    let hold = true;
+    vi.spyOn(store, 'query').mockImplementation(async (sparql, options) => {
+      if (hold && options?.source === 'publisher.asyncLift.claimCandidates') { hold = false; await selection.wait(); }
+      return query(sparql, options);
+    });
+    const claiming = publisher.claimNext('a');
+    try {
+      await selection.reached; f.advance(5_001); selection.release();
+      expect(await claiming).toBeNull();
+      expect((await publisher.getStatus(id))?.status).toBe('accepted');
+      expect(await query('ASK WHERE { GRAPH <urn:dkg:publisher:wallet-locks> { ?s ?p ?o } }'))
+        .toEqual({ type: 'boolean', value: false });
+      expect((await publisher.claimNext('a'))?.jobId).toBe(id);
+    } finally { selection.release(); await claiming; await store.close(); }
+  });
+
   it('paces one/all underfunded wallets and observes replenishment', async () => {
     const f = fundingFixture();
     f.balances.set('a', 1n);
@@ -259,7 +311,7 @@ describe('async publisher gas eligibility (#3591)', () => {
       walletEligibility: f.funding, fundingRecoveryPolicy: 'proof-first',
       publishExecutor: async ({ publishOptions }) => {
         if (recorded) await publishOptions.onBeforeBroadcast!({ txHash: KA_VM_EXECUTOR_TX_HASH, nonce: 7, operationKind: 'create' });
-        throw new Error('insufficient funds');
+        throw new Error('insufficient funds for gas * price + value');
       },
     });
     const job = await publisher.processNext('a');
