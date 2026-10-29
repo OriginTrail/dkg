@@ -59,8 +59,17 @@ export class AsyncLiftRunner {
   private readonly walletWakePending = new Set<string>();
   /** At most one parked idle sleeper per wallet, resolvable by work/release pokes or stop(). */
   private readonly walletSleepers = new Map<string, () => void>();
+  /**
+   * #3591 — the order idle wallets are offered work in, least recently used first. A wallet moves
+   * to the back when one of its attempts returns a job. Wakes and polls used to run in configured
+   * order, so sparse work always went to the first free wallet while the others stayed idle.
+   */
+  private readonly walletsByLastUse: string[];
+  /** Polls tick on one shared cadence from this instant, so idle wallets poll in the order above. */
+  private pollEpochMs = 0;
 
   constructor(private readonly config: AsyncLiftRunnerConfig) {
+    this.walletsByLastUse = [...config.walletIds];
     this.pollIntervalMs = config.pollIntervalMs ?? 1000;
     this.errorBackoffMs = config.errorBackoffMs ?? 1000;
     this.recoveryIntervalMs = config.recoveryIntervalMs ?? 60_000;
@@ -126,6 +135,7 @@ export class AsyncLiftRunner {
     }
 
     this.started = true;
+    this.pollEpochMs = Date.now();
     // The usage line's worker-free pick-up needs the wallets that run workers.
     asyncAdmissionUsage.setLiftWallets(this.config.walletIds);
     // One atomic attachment for reconciliation demand, wallet release, and accepted work.
@@ -139,8 +149,10 @@ export class AsyncLiftRunner {
       ?.attachScheduler?.({
         onReconciliationDemand: () => this.demandTransactionReconciliation(),
         onWalletRelease: (walletId) => this.wakeWallet(walletId),
+        // Least recently used first: the woken loops reach the claim in this order, so the
+        // wallet that has waited longest gets the work and the others find what remains.
         onWorkAvailable: () => {
-          for (const walletId of this.config.walletIds) this.wakeWallet(walletId);
+          for (const walletId of [...this.walletsByLastUse]) this.wakeWallet(walletId);
         },
       });
     this.scheduleTransactionReconciliation();
@@ -176,6 +188,7 @@ export class AsyncLiftRunner {
         const gate = this.config.publisher.claimControl;
         if (gate && gate.state !== 'running') { await this.idleWalletWait(walletId); continue; }
         const processed = await this.config.publisher.processNext(walletId);
+        if (processed) this.markWalletUsed(walletId);
         if (!processed && !this.stopped) {
           // Interruptible idle wait: a wallet-release poke ends it early, and one that landed
           // during processNext is latched and skips it entirely. The error backoff below stays
@@ -213,6 +226,7 @@ export class AsyncLiftRunner {
     // Latch consumed on entry: a poke that landed during processNext means claimable work may
     // already exist, so skip the sleep entirely.
     if (this.walletWakePending.delete(walletId)) return;
+    const delayMs = this.pollDelayMs(walletId);
     let timer: ReturnType<typeof setTimeout> | undefined;
     let settled = false;
     let wake!: () => void;
@@ -237,12 +251,12 @@ export class AsyncLiftRunner {
         // (onError + backoff) still owns delay failures, exactly as the pre-wake awaited sleep
         // did (r4 3875113214). A rejection that loses the race to a wake is observed here and
         // deliberately dropped: the wait already ended.
-        this.config.sleep(this.pollIntervalMs).then(
+        this.config.sleep(delayMs).then(
           () => settle(),
           (error) => settle(error ?? new Error('injected sleep rejected')),
         );
       } else {
-        timer = setTimeout(() => settle(), this.pollIntervalMs);
+        timer = setTimeout(() => settle(), delayMs);
       }
     });
     this.walletSleepers.set(walletId, wake);
@@ -260,6 +274,23 @@ export class AsyncLiftRunner {
         this.walletSleepers.delete(walletId);
       }
     }
+  }
+
+  /**
+   * Until the next shared poll tick, plus one millisecond per place in the least-recently-used
+   * order: idle wallets poll in the same window, least recently used first, so work that no poke
+   * announced (a due retry, a job admitted by another process) is offered fairly as well.
+   */
+  private pollDelayMs(walletId: string): number {
+    const interval = this.pollIntervalMs;
+    const phase = interval > 0 ? Math.max(0, Date.now() - this.pollEpochMs) % interval : 0;
+    return interval - phase + Math.max(0, this.walletsByLastUse.indexOf(walletId));
+  }
+
+  private markWalletUsed(walletId: string): void {
+    const index = this.walletsByLastUse.indexOf(walletId);
+    if (index >= 0) this.walletsByLastUse.splice(index, 1);
+    this.walletsByLastUse.push(walletId);
   }
 
   /**

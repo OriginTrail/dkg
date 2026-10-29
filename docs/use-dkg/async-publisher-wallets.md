@@ -144,6 +144,10 @@ job and wallet ownership writes, and those writes share store capacity with
 other node work. Durable admission and resume wake parked wallet loops; repeated
 notifications coalesce, and ownership checks and error backoff still apply.
 The polling interval remains a fallback, rather than a required delay for new work.
+Idle wallets are offered new work least recently used first: a wake reaches
+them in that order, and their polls fall in one shared window in the same
+order, so sparse work rotates across the wallets instead of always going to the
+first one listed. A busy wallet is never waited for.
 Automatic retry selection uses the persisted retry deadline
 index, and recovery inventories exclude accepted and finalized history.
 Recovery still retains every failed job needed to preserve its proof backoff.
