@@ -3,9 +3,14 @@
 import { createHash } from 'node:crypto';
 import {
   OPEN_ENROLLMENT_MAX_AGENT_NAME_LENGTH,
+  createOperationContext,
   isBoundedOpenEnrollmentPolicy,
 } from '@origintrail-official/dkg-core';
 import type { SignedAgentDelegation } from './auth/agent-delegation.js';
+import {
+  JOIN_ADMISSION_LOG, JoinAdmissionDeferredError, checkJoinAdmissionEncryptionKey, releaseUnusedApprovalReservation,
+  type ContextGraphJoinAdmissionOptions, type JoinAdmissionKeyCheck,
+} from './context-graph-join-admission-key-read.js';
 import type { ContextGraphJoinAdmissionLockToken } from './context-graph-join-admission-lock.js';
 import type { PreparedContextGraphAgentInviteMutation } from './dkg-agent-context-graph.js';
 import { JOIN_DELEGATION_VALIDITY_MS } from './dkg-agent-constants.js';
@@ -225,7 +230,10 @@ function evaluateCapacitySnapshot(input: {
  * general-purpose JoinRequestMethods mixin.
  */
 export class ContextGraphJoinAdmission {
-  constructor(private readonly host: ContextGraphJoinAdmissionHost) {}
+  constructor(
+    private readonly host: ContextGraphJoinAdmissionHost,
+    private readonly options: ContextGraphJoinAdmissionOptions = {},
+  ) {}
 
   async process(input: IncomingJoinRequestInput): Promise<IncomingJoinRequestDecision> {
     this.assertAgentName(input.agentName);
@@ -510,6 +518,10 @@ export class ContextGraphJoinAdmission {
     eventType: JoinAdmissionPendingEventType = 'join_auto_decision',
   ): Promise<IncomingJoinRequestDecision> {
     const { contextGraphId, delegation, agentName, requestDigest } = request;
+    if (automaticEvaluationStarted) {
+      (this.options.log ?? JOIN_ADMISSION_LOG).warn(createOperationContext('system'),
+        `Automatic join admission for "${contextGraphId}" left ${delegation.agentAddress} pending: ${reason}`);
+    }
     if (this.host.policyStore && automaticEvaluationStarted) {
       await this.host.policyStore.appendAudit({
         timestamp: Date.now(),
@@ -589,11 +601,9 @@ export class ContextGraphJoinAdmission {
     }
     const { maxMembers, maxApprovalsPerHour } = capacityDecision.value;
 
-    try {
-      await this.host.assertActiveEncryptionKey(delegation.agentAddress);
-    } catch {
-      return leavePending('verified-active-encryption-key-required');
-    }
+    const key = await this.checkEncryptionKey(delegation.agentAddress);
+    if (key.kind === 'invalid') return leavePending('verified-active-encryption-key-required');
+    if (key.kind === 'store-unavailable') throw this.deferForUnreadableKey(request, key.error);
 
     let reservation: ContextGraphJoinPolicyRateReservation;
     try {
@@ -636,12 +646,20 @@ export class ContextGraphJoinAdmission {
     target: OpenEnrollmentAdmissionTarget,
     maxMembers: number,
     reservation: ContextGraphJoinPolicyRateReservation,
-    leavePending: (
+    leavePendingUnreserved: (
       reason: string,
       eventType?: JoinAdmissionPendingEventType,
     ) => Promise<IncomingJoinRequestDecision>,
   ): Promise<IncomingJoinRequestDecision> {
     const { contextGraphId, delegation, requestDigest, admissionLockToken } = request;
+    // A pending answer before the membership mutation gives the reservation back.
+    const releaseReservation = (reason: string) => releaseUnusedApprovalReservation(policyStore, {
+      contextGraphId, requestDigest, policyEpoch: policy.updatedAt, reason,
+    }, this.options.log ?? JOIN_ADMISSION_LOG);
+    const leavePending = async (reason: string, eventType?: JoinAdmissionPendingEventType) => {
+      await releaseReservation(reason);
+      return leavePendingUnreserved(reason, eventType);
+    };
     let membershipMutationStarted = false;
     try {
       if (this.host.isPolicyDisableRequested(contextGraphId)) {
@@ -684,10 +702,11 @@ export class ContextGraphJoinAdmission {
       if (!finalMembers.has(delegation.agentAddress.toLowerCase()) && finalMembers.size >= maxMembers) {
         return leavePending('member-cap-reached-before-commit', 'join_admission_throttled');
       }
-      try {
-        await this.host.assertActiveEncryptionKey(delegation.agentAddress);
-      } catch {
-        return leavePending('encryption-key-invalid-before-commit');
+      const key = await this.checkEncryptionKey(delegation.agentAddress);
+      if (key.kind === 'invalid') return leavePending('encryption-key-invalid-before-commit');
+      if (key.kind === 'store-unavailable') {
+        await releaseReservation('encryption-key-unreadable-before-commit');
+        throw this.deferForUnreadableKey(request, key.error);
       }
       const prepared = await this.host.prepareJoinRequestApproval({
         admissionLockToken,
@@ -739,6 +758,7 @@ export class ContextGraphJoinAdmission {
       this.host.clearRetryableAdmission(contextGraphId, delegation);
       return { status: 'approved', autoApproved: true };
     } catch (error) {
+      if (error instanceof JoinAdmissionDeferredError) throw error;
       if (membershipMutationStarted) {
         this.host.markRetryableAdmission(contextGraphId, delegation, policy.updatedAt);
         throw retryableJoinAdmissionError(error);
@@ -748,5 +768,20 @@ export class ContextGraphJoinAdmission {
         'join_admission_failed',
       );
     }
+  }
+
+  /** The key check of an automatic admission: a read the store did not serve is repeated briefly, never a verdict. */
+  private checkEncryptionKey(agentAddress: string): Promise<JoinAdmissionKeyCheck> {
+    return checkJoinAdmissionEncryptionKey(() => this.host.assertActiveEncryptionKey(agentAddress), this.options.keyReadTiming);
+  }
+
+  /**
+   * Defer an admission whose key the store could not read, with no pending
+   * audit or notice. The requester sends it again; no membership changed, so
+   * the retry mark carries no policy epoch.
+   */
+  private deferForUnreadableKey(request: VerifiedIncomingJoinRequest, cause: unknown): JoinAdmissionDeferredError {
+    this.host.markRetryableAdmission(request.contextGraphId, request.delegation);
+    return new JoinAdmissionDeferredError(request.contextGraphId, request.delegation.agentAddress, cause);
   }
 }

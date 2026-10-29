@@ -346,6 +346,7 @@ export default defineConfig({
           'test/vector-store-extra.test.ts',
           'test/memory-vector-tenant-isolation.test.ts',
           'test/snapshot-page-index-store.test.ts',
+          'test/join-policy-store.test.ts',
           // Release 2 — managed local Oxigraph server (opt-in). Pure logic
           // + injected fetch/spawn/fs; no network, no real binary.
           'test/oxigraph-binary.test.ts',

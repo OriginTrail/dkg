@@ -484,6 +484,8 @@ export default defineConfig({
       "test/messenger-substrate.test.ts",
       "test/messenger-outbox-budget.test.ts",
       "test/context-graph-join-policy.test.ts",
+      // #3366 — a busy store is no verdict on a joining agent's key.
+      "test/join-admission-store-busy.test.ts",
       "test/join-encryption-key-cache.test.ts",
       "test/bounded-operation.test.ts",
       "test/store-admission-retry.test.ts",
