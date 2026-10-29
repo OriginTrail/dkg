@@ -9,7 +9,7 @@ export class ChallengeTickError extends Error {
   }
 }
 
-type ChallengeOutcome = Exclude<TickOutcome, { kind: 'period-closed' | 'no-challenge' }>;
+export type ChallengeOutcome = Exclude<TickOutcome, { kind: 'period-closed' | 'no-challenge' }>;
 
 /** One boundary owns both successful and rejected work for a known challenge. */
 export async function withChallengePeriod(

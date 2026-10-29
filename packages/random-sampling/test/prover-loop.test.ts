@@ -350,6 +350,24 @@ describe('startProverLoop 24h health window', () => {
     await loop.stop();
   });
 
+  it('expires an older submitted period while retaining a newer unproved period', async () => {
+    const { loop, advance } = await startScripted([
+      { kind: 'submitted', txHash: '0xa', kaId: 1n, cgId: 2n, chunkId: 0n, period: PERIOD_A },
+      { kind: 'kc-not-synced', kaId: 3n, cgId: 2n, period: PERIOD_B },
+    ]);
+    const hour = 60 * 60 * 1000;
+    vi.setSystemTime(START + hour - INTERVAL_MS);
+    await advance(1);
+    expect(loop.getStatus()).toMatchObject({ challengesReceived24h: 2, proofsSubmitted24h: 1 });
+    vi.setSystemTime(START + DAY_MS);
+    expect(loop.getStatus()).toMatchObject({ challengesReceived24h: 1, proofsSubmitted24h: 0 });
+    vi.setSystemTime(START + hour + DAY_MS - 1);
+    expect(loop.getStatus()).toMatchObject({ challengesReceived24h: 1, proofsSubmitted24h: 0 });
+    vi.setSystemTime(START + hour + DAY_MS);
+    expect(loop.getStatus()).toMatchObject({ challengesReceived24h: 0, proofsSubmitted24h: 0 });
+    await loop.stop();
+  });
+
   it('drops a period 24 hours after it was first seen', async () => {
     const { loop, advance } = await startScripted([
       { kind: 'submitted', txHash: '0xa', kaId: 1n, cgId: 2n, chunkId: 0n, period: PERIOD_A },

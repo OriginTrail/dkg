@@ -1,4 +1,4 @@
-import { withChallengePeriod } from './prover-challenge-error.js';
+import { withChallengePeriod, type ChallengeOutcome } from './prover-challenge-error.js';
 /**
  * Random Sampling prover orchestrator.
  *
@@ -51,7 +51,7 @@ import {
 import { InMemoryProverWal } from './wal.js';
 import { SolvedPeriodSkip } from './solved-period-skip.js';
 
-import type { TickOutcome } from './prover-outcome.js';
+import type { TickOutcome, ChallengePeriod } from './prover-outcome.js';
 export type { TickOutcome, ChallengePeriod } from './prover-outcome.js';
 export type { TickFailureKind } from './prover-health.js';
 export interface RandomSamplingProverDeps {
@@ -435,9 +435,6 @@ export class RandomSamplingProver {
       );
     }
 
-    const getKAContextGraphId = this.chain.getKAContextGraphId.bind(this.chain);
-    const submitProof = this.chain.submitProof.bind(this.chain);
-
     // The collaborator owns the complete guarded sequence: reuse check, pair
     // and epoch capture, these live reads, head staleness, and observation.
     const solvedPeriodRead = await this.solvedPeriodSkip.read(async () => {
@@ -527,7 +524,7 @@ export class RandomSamplingProver {
     }
 
     let challenge: NodeChallenge;
-    let resolveContextGraphId: () => Promise<bigint>;
+    let suppliedContextGraphId: bigint | undefined;
     let observedDurationInBlocks: bigint | undefined;
     // Same wall-clock stale check as the solved branch above. Without
     // it, an unsolved challenge whose period has expired (but whose
@@ -548,7 +545,6 @@ export class RandomSamplingProver {
     if (currentExisting !== null && !currentExisting.solved && !unsolvedStale) {
       challenge = currentExisting;
       observedDurationInBlocks = status.proofingPeriodDurationInBlocks;
-      resolveContextGraphId = () => getKAContextGraphId(challenge.knowledgeAssetId);
     } else {
       try {
         const created = await this.chain.createChallenge();
@@ -557,7 +553,7 @@ export class RandomSamplingProver {
         // duration. Unlike an older challenge, it cannot carry a duration from
         // a previous epoch's schedule.
         observedDurationInBlocks = challenge.proofingPeriodDurationInBlocks;
-        resolveContextGraphId = async () => created.contextGraphId;
+        suppliedContextGraphId = created.contextGraphId;
       } catch (err) {
         if (err instanceof NoEligibleContextGraphError) {
           this.log.info('rs.tick.no-eligible-cg', {});
@@ -571,309 +567,321 @@ export class RandomSamplingProver {
       }
     }
 
-    return withChallengePeriod(challenge, async (period) => {
-      const cgId = await resolveContextGraphId();
-      const periodKey: PeriodKey = { ...period, identityId: this.identityId };
-      const kaId = challenge.knowledgeAssetId;
-      const chunkId = challenge.chunkId;
+    return withChallengePeriod(challenge, period => this.processChallenge({
+      challenge, suppliedContextGraphId, observedDurationInBlocks,
+      observationBindingId: solvedPeriodRead.observationBindingId, period,
+    }));
+  }
 
+  /** Process one acquired challenge, including existing-challenge CG resolution, inside its period boundary. */
+  private async processChallenge({ challenge, suppliedContextGraphId, observedDurationInBlocks, observationBindingId, period }: {
+    challenge: NodeChallenge;
+    suppliedContextGraphId?: bigint;
+    observedDurationInBlocks?: bigint;
+    observationBindingId?: string;
+    period: ChallengePeriod;
+  }): Promise<ChallengeOutcome> {
+    const cgId = suppliedContextGraphId ?? await this.chain.getKAContextGraphId!(challenge.knowledgeAssetId);
+    const periodKey: PeriodKey = { ...period, identityId: this.identityId };
+    const kaId = challenge.knowledgeAssetId;
+    const chunkId = challenge.chunkId;
+
+    await this.wal.append(
+      makeWalEntry(periodKey, 'challenge', {
+        kaId: kaId.toString(),
+        cgId: cgId.toString(),
+        chunkId: chunkId.toString(),
+      }),
+    );
+
+    if (cgId === 0n) {
+      this.log.warn('rs.tick.cg-not-found', { kaId: kaId.toString() });
       await this.wal.append(
-        makeWalEntry(periodKey, 'challenge', {
+        makeWalEntry(periodKey, 'failed', {
+          kaId: kaId.toString(),
+          error: { code: 'cg-not-found', message: 'getKAContextGraphId returned 0' },
+        }),
+      );
+      return { kind: 'cg-not-found', kaId };
+    }
+
+    const cooldownTicksRemaining = this.consumeDataCorruptionCooldown(kaId);
+    if (cooldownTicksRemaining > 0) {
+      this.log.warn('rs.tick.kc-not-synced', {
+        kaId: kaId.toString(),
+        cgId: cgId.toString(),
+        periodStart: periodKey.periodStartBlock.toString(),
+        err: 'DataCorruptionCooldown',
+        cooldownTicksRemaining,
+      });
+      await this.wal.append(
+        makeWalEntry(periodKey, 'failed', {
           kaId: kaId.toString(),
           cgId: cgId.toString(),
           chunkId: chunkId.toString(),
+          error: {
+            code: 'DataCorruptionCooldown',
+            message: `retry suppressed for ${cooldownTicksRemaining} tick(s) after data-corrupted outcome`,
+          },
         }),
       );
+      return { kind: 'kc-not-synced', kaId, cgId };
+    }
 
-      if (cgId === 0n) {
-        this.log.warn('rs.tick.cg-not-found', { kaId: kaId.toString() });
-        await this.wal.append(
-          makeWalEntry(periodKey, 'failed', {
+    // OT-RFC-49 / WS-B Trap 1 — curation branch + commitment are PINNED on
+    // the challenge at issuance. We MUST NOT re-read curation status via a
+    // live `getContextGraphAccessPolicy` probe, nor the root/count via live
+    // `getCatalogRoot`/`getLatestMerkleRoot`: a mid-period update would make
+    // an honest proof fail. `submitProof` verifies against these same pinned
+    // values, so the prover builds against them.
+    const isCurated = challenge.isCurated;
+    const expectedRoot = challenge.challengeRoot;
+    const expectedLeafCount = Number(challenge.challengeLeafCount);
+
+    // content-binding: the prover submits the N-Triple CONTENT bytes; the chain
+    // derives `leaf = keccak256(content)`. Public path is structured (private as a
+    // committed sibling); catalog path is a plain tree (no sibling).
+    let contents: Uint8Array[];
+    let privateRoots: Uint8Array[];
+    let proofKind: 'public' | 'catalog';
+    if (isCurated) {
+      // OT-RFC-49 / WS-C — curated CGs prove the PUBLIC `_catalog` Merkle
+      // root, NOT private ciphertext chunks. The catalog tree is a plain
+      // V10MerkleTree (each leaf `hashTripleV10(s,p,o)`), so the proof shape
+      // is identical to the public flat-KC path (`'flat-kc'`). On a sync
+      // gap (catalog not yet replicated to this core) the extractor throws
+      // `CatalogLeavesMissingError`, which we map to the same
+      // `kc-not-synced` skip the public path uses for missing data.
+      proofKind = 'catalog';
+      try {
+        const catalogTriples = await extractCatalogLeavesFromStore({
+          store: this.store,
+          contextGraphId: cgId,
+        });
+        // catalog is a plain public tree (no private sibling).
+        contents = catalogTriples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
+        privateRoots = [];
+      } catch (err) {
+        if (err instanceof CatalogLeavesMissingError) {
+          this.log.warn('rs.tick.kc-not-synced', {
             kaId: kaId.toString(),
-            error: { code: 'cg-not-found', message: 'getKAContextGraphId returned 0' },
-          }),
-        );
-        return { kind: 'cg-not-found', kaId };
+            cgId: cgId.toString(),
+            periodStart: periodKey.periodStartBlock.toString(),
+            err: err.name,
+          });
+          await this.wal.append(
+            makeWalEntry(periodKey, 'failed', {
+              kaId: kaId.toString(),
+              cgId: cgId.toString(),
+              chunkId: chunkId.toString(),
+              error: { code: err.name, message: err.message.slice(0, 200) },
+            }),
+          );
+          return { kind: 'kc-not-synced', kaId, cgId };
+        }
+        throw err;
       }
+    } else {
+      proofKind = 'public';
+      try {
+        const extracted = await this.extractPublicKnowledgeAssetWithRepair({
+          kaId,
+          cgId,
+          expectedRoot,
+          expectedLeafCount: challenge.challengeLeafCount,
+          periodStartBlock: periodKey.periodStartBlock,
+        });
+        // public structured path: contents = N-Triple bytes; private sub-roots -> sibling.
+        contents = [...extracted.contents];
+        privateRoots = [...extracted.privateRoots];
+      } catch (err) {
+        if (err instanceof KCNotFoundError || err instanceof KCDataMissingError) {
+          this.log.warn('rs.tick.kc-not-synced', {
+            kaId: kaId.toString(),
+            cgId: cgId.toString(),
+            periodStart: periodKey.periodStartBlock.toString(),
+            err: (err as Error).name,
+          });
+          await this.wal.append(
+            makeWalEntry(periodKey, 'failed', {
+              kaId: kaId.toString(),
+              cgId: cgId.toString(),
+              chunkId: chunkId.toString(),
+              error: {
+                code: (err as Error).name,
+                message: (err as Error).message.slice(0, 200),
+              },
+            }),
+          );
+          return { kind: 'kc-not-synced', kaId, cgId };
+        }
+        if (err instanceof KCRootEntitiesNotFoundError) {
+          this.log.error('rs.tick.meta-graph-bug', {
+            kaId: kaId.toString(),
+            cgId: cgId.toString(),
+            ual: err.ual,
+          });
+          await this.wal.append(
+            makeWalEntry(periodKey, 'failed', {
+              kaId: kaId.toString(),
+              cgId: cgId.toString(),
+              chunkId: chunkId.toString(),
+              error: { code: 'KCRootEntitiesNotFoundError', message: err.message.slice(0, 200) },
+            }),
+          );
+          this.markDataCorrupted(kaId);
+          return { kind: 'data-corrupted', kaId, cgId, reason: 'meta-graph-bug' };
+        }
+        throw err;
+      }
+    }
 
-      const cooldownTicksRemaining = this.consumeDataCorruptionCooldown(kaId);
-      if (cooldownTicksRemaining > 0) {
-        this.log.warn('rs.tick.kc-not-synced', {
+    await this.wal.append(
+      makeWalEntry(periodKey, 'extracted', {
+        kaId: kaId.toString(),
+        cgId: cgId.toString(),
+        chunkId: chunkId.toString(),
+      }),
+    );
+
+    const expected = { merkleRoot: expectedRoot, merkleLeafCount: expectedLeafCount };
+    const req: ProofBuilderRequest =
+      proofKind === 'public'
+        ? { kind: 'public', contents, privateRoots, chunkId: Number(chunkId), expected }
+        : { kind: 'catalog', contents, chunkId: Number(chunkId), expected };
+
+    let material;
+    try {
+      material = await this.builder.build(req);
+    } catch (err) {
+      const reason = mapBuilderError(err);
+      if (!reason) throw err;
+      // Content changed under us mid-period: an UPDATE to the sampled KA flips
+      // the live root, so a freshly-extracted proof no longer matches the
+      // challenge root. That root is PINNED on the challenge, so if we already
+      // built a proof that verified against it earlier this period, reuse it
+      // instead of missing an honest proof — this rescues the common
+      // submit-retry-after-update path. Otherwise the content genuinely does
+      // not match the pinned commitment: skip as before.
+      const pinned = this.pinnedMaterialFor(periodKey, kaId, chunkId, expectedRoot);
+      if (pinned) {
+        this.log.info('rs.tick.pinned-material-reused', {
           kaId: kaId.toString(),
           cgId: cgId.toString(),
           periodStart: periodKey.periodStartBlock.toString(),
-          err: 'DataCorruptionCooldown',
-          cooldownTicksRemaining,
+          reason,
+        });
+        material = pinned;
+      } else {
+        const e = err as any;
+        this.log.error('rs.tick.data-corrupted', {
+          kaId: kaId.toString(),
+          cgId: cgId.toString(),
+          periodStart: periodKey.periodStartBlock.toString(),
+          reason,
+          err: (err as Error).name,
+          ...(typeof e?.computedLeafCount === 'number' ? { computedLeafCount: e.computedLeafCount } : {}),
+          ...(typeof e?.expectedLeafCount === 'number' ? { expectedLeafCount: e.expectedLeafCount } : {}),
+          ...(typeof e?.chunkId === 'number' ? { chunkId: e.chunkId } : {}),
+          ...(typeof e?.leafCount === 'number' ? { leafCount: e.leafCount } : {}),
+          extractedLeafCount: contents.length,
+          chainExpectedLeafCount: Number(expectedLeafCount),
         });
         await this.wal.append(
           makeWalEntry(periodKey, 'failed', {
             kaId: kaId.toString(),
             cgId: cgId.toString(),
             chunkId: chunkId.toString(),
-            error: {
-              code: 'DataCorruptionCooldown',
-              message: `retry suppressed for ${cooldownTicksRemaining} tick(s) after data-corrupted outcome`,
-            },
+            error: { code: (err as Error).name, message: (err as Error).message.slice(0, 200) },
           }),
         );
-        return { kind: 'kc-not-synced', kaId, cgId };
+        this.markDataCorrupted(kaId);
+        return { kind: 'data-corrupted', kaId, cgId, reason };
       }
+    }
+    // Pin the verified material so a mid-period update (surfacing here on a
+    // submit retry) reuses it rather than re-extracting stale content.
+    this.pinProofMaterial(periodKey, kaId, chunkId, expectedRoot, material);
 
-      // OT-RFC-49 / WS-B Trap 1 — curation branch + commitment are PINNED on
-      // the challenge at issuance. We MUST NOT re-read curation status via a
-      // live `getContextGraphAccessPolicy` probe, nor the root/count via live
-      // `getCatalogRoot`/`getLatestMerkleRoot`: a mid-period update would make
-      // an honest proof fail. `submitProof` verifies against these same pinned
-      // values, so the prover builds against them.
-      const isCurated = challenge.isCurated;
-      const expectedRoot = challenge.challengeRoot;
-      const expectedLeafCount = Number(challenge.challengeLeafCount);
-
-      // content-binding: the prover submits the N-Triple CONTENT bytes; the chain
-      // derives `leaf = keccak256(content)`. Public path is structured (private as a
-      // committed sibling); catalog path is a plain tree (no sibling).
-      let contents: Uint8Array[];
-      let privateRoots: Uint8Array[];
-      let proofKind: 'public' | 'catalog';
-      if (isCurated) {
-        // OT-RFC-49 / WS-C — curated CGs prove the PUBLIC `_catalog` Merkle
-        // root, NOT private ciphertext chunks. The catalog tree is a plain
-        // V10MerkleTree (each leaf `hashTripleV10(s,p,o)`), so the proof shape
-        // is identical to the public flat-KC path (`'flat-kc'`). On a sync
-        // gap (catalog not yet replicated to this core) the extractor throws
-        // `CatalogLeavesMissingError`, which we map to the same
-        // `kc-not-synced` skip the public path uses for missing data.
-        proofKind = 'catalog';
-        try {
-          const catalogTriples = await extractCatalogLeavesFromStore({
-            store: this.store,
-            contextGraphId: cgId,
-          });
-          // catalog is a plain public tree (no private sibling).
-          contents = catalogTriples.map((t) => tripleContentV10(t.subject, t.predicate, t.object));
-          privateRoots = [];
-        } catch (err) {
-          if (err instanceof CatalogLeavesMissingError) {
-            this.log.warn('rs.tick.kc-not-synced', {
-              kaId: kaId.toString(),
-              cgId: cgId.toString(),
-              periodStart: periodKey.periodStartBlock.toString(),
-              err: err.name,
-            });
-            await this.wal.append(
-              makeWalEntry(periodKey, 'failed', {
-                kaId: kaId.toString(),
-                cgId: cgId.toString(),
-                chunkId: chunkId.toString(),
-                error: { code: err.name, message: err.message.slice(0, 200) },
-              }),
-            );
-            return { kind: 'kc-not-synced', kaId, cgId };
-          }
-          throw err;
-        }
-      } else {
-        proofKind = 'public';
-        try {
-          const extracted = await this.extractPublicKnowledgeAssetWithRepair({
-            kaId,
-            cgId,
-            expectedRoot,
-            expectedLeafCount: challenge.challengeLeafCount,
-            periodStartBlock: periodKey.periodStartBlock,
-          });
-          // public structured path: contents = N-Triple bytes; private sub-roots -> sibling.
-          contents = [...extracted.contents];
-          privateRoots = [...extracted.privateRoots];
-        } catch (err) {
-          if (err instanceof KCNotFoundError || err instanceof KCDataMissingError) {
-            this.log.warn('rs.tick.kc-not-synced', {
-              kaId: kaId.toString(),
-              cgId: cgId.toString(),
-              periodStart: periodKey.periodStartBlock.toString(),
-              err: (err as Error).name,
-            });
-            await this.wal.append(
-              makeWalEntry(periodKey, 'failed', {
-                kaId: kaId.toString(),
-                cgId: cgId.toString(),
-                chunkId: chunkId.toString(),
-                error: {
-                  code: (err as Error).name,
-                  message: (err as Error).message.slice(0, 200),
-                },
-              }),
-            );
-            return { kind: 'kc-not-synced', kaId, cgId };
-          }
-          if (err instanceof KCRootEntitiesNotFoundError) {
-            this.log.error('rs.tick.meta-graph-bug', {
-              kaId: kaId.toString(),
-              cgId: cgId.toString(),
-              ual: err.ual,
-            });
-            await this.wal.append(
-              makeWalEntry(periodKey, 'failed', {
-                kaId: kaId.toString(),
-                cgId: cgId.toString(),
-                chunkId: chunkId.toString(),
-                error: { code: 'KCRootEntitiesNotFoundError', message: err.message.slice(0, 200) },
-              }),
-            );
-            this.markDataCorrupted(kaId);
-            return { kind: 'data-corrupted', kaId, cgId, reason: 'meta-graph-bug' };
-          }
-          throw err;
-        }
-      }
-
-      await this.wal.append(
-        makeWalEntry(periodKey, 'extracted', {
-          kaId: kaId.toString(),
-          cgId: cgId.toString(),
-          chunkId: chunkId.toString(),
-        }),
-      );
-
-      const expected = { merkleRoot: expectedRoot, merkleLeafCount: expectedLeafCount };
-      const req: ProofBuilderRequest =
-        proofKind === 'public'
-          ? { kind: 'public', contents, privateRoots, chunkId: Number(chunkId), expected }
-          : { kind: 'catalog', contents, chunkId: Number(chunkId), expected };
-
-      let material;
-      try {
-        material = await this.builder.build(req);
-      } catch (err) {
-        const reason = mapBuilderError(err);
-        if (!reason) throw err;
-        // Content changed under us mid-period: an UPDATE to the sampled KA flips
-        // the live root, so a freshly-extracted proof no longer matches the
-        // challenge root. That root is PINNED on the challenge, so if we already
-        // built a proof that verified against it earlier this period, reuse it
-        // instead of missing an honest proof — this rescues the common
-        // submit-retry-after-update path. Otherwise the content genuinely does
-        // not match the pinned commitment: skip as before.
-        const pinned = this.pinnedMaterialFor(periodKey, kaId, chunkId, expectedRoot);
-        if (pinned) {
-          this.log.info('rs.tick.pinned-material-reused', {
-            kaId: kaId.toString(),
-            cgId: cgId.toString(),
-            periodStart: periodKey.periodStartBlock.toString(),
-            reason,
-          });
-          material = pinned;
-        } else {
-          const e = err as any;
-          this.log.error('rs.tick.data-corrupted', {
-            kaId: kaId.toString(),
-            cgId: cgId.toString(),
-            periodStart: periodKey.periodStartBlock.toString(),
-            reason,
-            err: (err as Error).name,
-            ...(typeof e?.computedLeafCount === 'number' ? { computedLeafCount: e.computedLeafCount } : {}),
-            ...(typeof e?.expectedLeafCount === 'number' ? { expectedLeafCount: e.expectedLeafCount } : {}),
-            ...(typeof e?.chunkId === 'number' ? { chunkId: e.chunkId } : {}),
-            ...(typeof e?.leafCount === 'number' ? { leafCount: e.leafCount } : {}),
-            extractedLeafCount: contents.length,
-            chainExpectedLeafCount: Number(expectedLeafCount),
-          });
-          await this.wal.append(
-            makeWalEntry(periodKey, 'failed', {
-              kaId: kaId.toString(),
-              cgId: cgId.toString(),
-              chunkId: chunkId.toString(),
-              error: { code: (err as Error).name, message: (err as Error).message.slice(0, 200) },
-            }),
-          );
-          this.markDataCorrupted(kaId);
-          return { kind: 'data-corrupted', kaId, cgId, reason };
-        }
-      }
-      // Pin the verified material so a mid-period update (surfacing here on a
-      // submit retry) reuses it rather than re-extracting stale content.
-      this.pinProofMaterial(periodKey, kaId, chunkId, expectedRoot, material);
-
-      await this.wal.append(
-        makeWalEntry(periodKey, 'built', {
-          kaId: kaId.toString(),
-          cgId: cgId.toString(),
-          chunkId: chunkId.toString(),
-        }),
-      );
-
-      let txResult;
-      try {
-        txResult = await submitProof(material.content, material.proof);
-      } catch (err) {
-        if (err instanceof ChallengeNoLongerActiveError) {
-          this.pinnedProofMaterial = undefined;
-          this.log.warn('rs.tick.submit-stale', {
-            kaId: kaId.toString(),
-            cgId: cgId.toString(),
-            periodStart: periodKey.periodStartBlock.toString(),
-          });
-          await this.wal.append(
-            makeWalEntry(periodKey, 'failed', {
-              kaId: kaId.toString(),
-              cgId: cgId.toString(),
-              chunkId: chunkId.toString(),
-              error: { code: 'ChallengeNoLongerActive', message: err.message.slice(0, 200) },
-            }),
-          );
-          return { kind: 'submit-stale' };
-        }
-        if (err instanceof MerkleRootMismatchError) {
-          // This material was deterministically rejected by the on-chain
-          // verifier. Never retain it for the exception-path retry fallback: a
-          // later live-content mismatch must not resubmit proof bytes the chain
-          // already proved invalid.
-          this.pinnedProofMaterial = undefined;
-          // The chain says the root we built does not match the on-chain
-          // commitment. We already verified it locally, so this is
-          // either (a) a race against an UPDATE that flipped the root,
-          // or (b) a bug. Drop the period; rebuild on the next.
-          this.log.error('rs.tick.chain-root-mismatch', {
-            kaId: kaId.toString(),
-            cgId: cgId.toString(),
-            periodStart: periodKey.periodStartBlock.toString(),
-          });
-          await this.wal.append(
-            makeWalEntry(periodKey, 'failed', {
-              kaId: kaId.toString(),
-              cgId: cgId.toString(),
-              chunkId: chunkId.toString(),
-              error: { code: 'MerkleRootMismatch', message: err.message.slice(0, 200) },
-            }),
-          );
-          this.markDataCorrupted(kaId);
-          return { kind: 'data-corrupted', kaId, cgId, reason: 'root-mismatch' };
-        }
-        throw err;
-      }
-
-      await this.wal.append(
-        makeWalEntry(periodKey, 'submitted', {
-          kaId: kaId.toString(),
-          cgId: cgId.toString(),
-          chunkId: chunkId.toString(),
-          txHash: txResult.hash,
-        }),
-      );
-      await this.solvedPeriodSkip.observeSubmittedProof({
-        observationBindingId: solvedPeriodRead.observationBindingId,
-        challenge,
-        durationInBlocks: observedDurationInBlocks,
-      });
-      this.log.info('rs.tick.submitted', {
+    await this.wal.append(
+      makeWalEntry(periodKey, 'built', {
         kaId: kaId.toString(),
         cgId: cgId.toString(),
         chunkId: chunkId.toString(),
-        periodStart: periodKey.periodStartBlock.toString(),
+      }),
+    );
+
+    let txResult;
+    try {
+      txResult = await this.chain.submitProof!(material.content, material.proof);
+    } catch (err) {
+      if (err instanceof ChallengeNoLongerActiveError) {
+        this.pinnedProofMaterial = undefined;
+        this.log.warn('rs.tick.submit-stale', {
+          kaId: kaId.toString(),
+          cgId: cgId.toString(),
+          periodStart: periodKey.periodStartBlock.toString(),
+        });
+        await this.wal.append(
+          makeWalEntry(periodKey, 'failed', {
+            kaId: kaId.toString(),
+            cgId: cgId.toString(),
+            chunkId: chunkId.toString(),
+            error: { code: 'ChallengeNoLongerActive', message: err.message.slice(0, 200) },
+          }),
+        );
+        return { kind: 'submit-stale' };
+      }
+      if (err instanceof MerkleRootMismatchError) {
+        // This material was deterministically rejected by the on-chain
+        // verifier. Never retain it for the exception-path retry fallback: a
+        // later live-content mismatch must not resubmit proof bytes the chain
+        // already proved invalid.
+        this.pinnedProofMaterial = undefined;
+        // The chain says the root we built does not match the on-chain
+        // commitment. We already verified it locally, so this is
+        // either (a) a race against an UPDATE that flipped the root,
+        // or (b) a bug. Drop the period; rebuild on the next.
+        this.log.error('rs.tick.chain-root-mismatch', {
+          kaId: kaId.toString(),
+          cgId: cgId.toString(),
+          periodStart: periodKey.periodStartBlock.toString(),
+        });
+        await this.wal.append(
+          makeWalEntry(periodKey, 'failed', {
+            kaId: kaId.toString(),
+            cgId: cgId.toString(),
+            chunkId: chunkId.toString(),
+            error: { code: 'MerkleRootMismatch', message: err.message.slice(0, 200) },
+          }),
+        );
+        this.markDataCorrupted(kaId);
+        return { kind: 'data-corrupted', kaId, cgId, reason: 'root-mismatch' };
+      }
+      throw err;
+    }
+
+    await this.wal.append(
+      makeWalEntry(periodKey, 'submitted', {
+        kaId: kaId.toString(),
+        cgId: cgId.toString(),
+        chunkId: chunkId.toString(),
         txHash: txResult.hash,
-      });
-      return { kind: 'submitted', txHash: txResult.hash, kaId, cgId, chunkId };
+      }),
+    );
+    await this.solvedPeriodSkip.observeSubmittedProof({
+      observationBindingId: observationBindingId,
+      challenge,
+      durationInBlocks: observedDurationInBlocks,
     });
+    this.log.info('rs.tick.submitted', {
+      kaId: kaId.toString(),
+      cgId: cgId.toString(),
+      chunkId: chunkId.toString(),
+      periodStart: periodKey.periodStartBlock.toString(),
+      txHash: txResult.hash,
+    });
+    return { kind: 'submitted', txHash: txResult.hash, kaId, cgId, chunkId };
   }
 }
 
