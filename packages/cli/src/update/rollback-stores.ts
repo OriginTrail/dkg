@@ -4,6 +4,7 @@ import {
   INVENTORY_SCHEMA_FIRST_RELEASES_V1,
   planRfc64InventoryRollbackV1,
   prepareRfc64InventoryForRollbackV1,
+  RFC64_CONFIRMED_CATALOG_PLACEMENT_FIRST_RELEASE_V1,
   RFC64_INVENTORY_ROLLBACK_FLOOR_USER_VERSION_V1,
   Rfc64InventoryRollbackRefusedErrorV1,
 } from '@origintrail-official/dkg-agent/rfc64/inventory-v1/rollback';
@@ -66,6 +67,20 @@ function inventoryUserVersionFor(targetVersion: string | null): number {
 
 function targetName(targetVersion: string | null): string {
   return targetVersion ?? 'the rollback target';
+}
+
+/** A release before 10.0.27, or one this build cannot read, reads only version 1 placement repairs. */
+export function readsOnlyLegacyPlacementRepairs(targetVersion: string | null): boolean {
+  if (targetVersion === null) return true;
+  const order = compareSemver(targetVersion, RFC64_CONFIRMED_CATALOG_PLACEMENT_FIRST_RELEASE_V1);
+  return Number.isNaN(order) || order < 0;
+}
+
+function removedPlacementsLine(ualsRemoved: readonly string[], target: string): string {
+  const shown = ualsRemoved.slice(0, 3).join(', ');
+  const more = ualsRemoved.length > 3 ? ` and ${ualsRemoved.length - 3} more` : '';
+  return `Removed ${ualsRemoved.length} confirmed catalog placement(s) that ${target} cannot read (${shown}${more}): `
+    + `these publications are confirmed on chain, and ${target} does not finish their catalog step.`;
 }
 
 function refusalLines(
@@ -133,7 +148,12 @@ export async function prepareRollbackStores(
 ): Promise<PreparedRollbackStores | null> {
   const target = targetName(targetVersion);
   try {
-    const prepared = await prepareRfc64InventoryForRollbackV1(dataDir, inventoryUserVersionFor(targetVersion));
+    const prepared = await prepareRfc64InventoryForRollbackV1(dataDir, inventoryUserVersionFor(targetVersion), {
+      removeConfirmedCatalogPlacements: readsOnlyLegacyPlacementRepairs(targetVersion),
+    });
+    if (prepared.removedConfirmedCatalogPlacements.length > 0) {
+      io.log(removedPlacementsLine(prepared.removedConfirmedCatalogPlacements, target));
+    }
     if (prepared.outcome === 'downgraded') {
       io.log(
         `Lowered the RFC-64 inventory database from schema v${prepared.fromVersion} to v${prepared.toVersion} `
