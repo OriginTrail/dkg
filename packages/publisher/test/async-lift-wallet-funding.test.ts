@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { PublisherGasFundingError } from '@origintrail-official/dkg-chain';
 import { OxigraphStore } from '@origintrail-official/dkg-storage';
 import { AsyncLiftRunner, AsyncLiftWalletFunding, LiftJobPendingChainProofError, TripleStoreAsyncLiftPublisher } from '../src/index.js';
 import { GRAPH_KA_CONTENT_SCOPE_VERSION } from '@origintrail-official/dkg-core';
@@ -188,11 +189,16 @@ describe('async publisher gas eligibility (#3591)', () => {
     expect(await publisher.claimNext('b')).toBeNull();
   });
 
-  it('requeues a proven pre-dispatch funding race without changing logical identity', async () => {
+  it.each([
+    ['RPC insufficient-funds error', () => new Error('insufficient funds for gas * price + value')],
+    ['native prepared-cost guard', () => new PublisherGasFundingError({
+      observedAt: Date.now(), balanceWei: 0n, requiredWei: 2n, gasLimit: 1n, feePerGasWei: 2n,
+    })],
+  ] as const)('requeues a proven pre-dispatch funding race without changing logical identity: %s', async (_, error) => {
     const f = fundingFixture();
     const store = new OxigraphStore();
     await stageKnowledgeAssetShareSnapshot({ store });
-    const execute = vi.fn(async () => { throw new Error('insufficient funds for gas * price + value'); });
+    const execute = vi.fn(async () => { throw error(); });
     const publisher = new TripleStoreAsyncLiftPublisher(store, {
       walletEligibility: f.funding, fundingRecoveryPolicy: 'proof-first', knowledgeAssetVmPublishHandler: { execute },
     });
@@ -203,6 +209,7 @@ describe('async publisher gas eligibility (#3591)', () => {
     expect(result?.jobId).toBe(id);
     expect(result?.request).toEqual(original?.request);
     expect(result?.timestamps.acceptedAt).toBe(original?.timestamps.acceptedAt);
+    expect(f.funding.snapshot().find(s => s.walletId === 'a')?.reason).toBe('funding-cooldown');
     expect(await publisher.processNext('a')).toBeNull();
     expect((await publisher.claimNext('b'))?.jobId).toBe(id);
     expect(execute).toHaveBeenCalledTimes(1);
