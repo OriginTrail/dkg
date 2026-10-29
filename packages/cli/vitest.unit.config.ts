@@ -122,6 +122,11 @@ export default defineConfig({
           // handlers plus one live daemon on the mock chain; no hardhat.
           'test/node-admin-scope-routes.test.ts',
           'test/daemon-operator-scope-live.test.ts',
+          // Operator-only CPU profile: route, recorder and command with a fake
+          // inspector session; one real profile recorded in a child process.
+          'test/cpu-profile.test.ts',
+          'test/cpu-profile-command.test.ts',
+          'test/cpu-profile-real.test.ts',
           'test/private-access-route.test.ts',
           // R8 — #1085 /register policy-matrix route tests, extracted from
           // daemon-http-behavior-extra so they run here (pure route handler,
